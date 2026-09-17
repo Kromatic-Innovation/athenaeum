@@ -79,7 +79,7 @@ import subprocess
 import sys
 import tempfile
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -90,7 +90,7 @@ from athenaeum.provider import response_text as provider_response_text
 from athenaeum.push_metrics import estimate_tokens
 from athenaeum.search import get_backend
 from tests.evals.containment import GridCell, build_grid
-from tests.evals.corpus import Corpus, Probe, build_corpus
+from tests.evals.corpus import Corpus, Observation, Probe, build_corpus
 from tests.evals.harness import EvalSession, build_live_client
 
 # ---------------------------------------------------------------------------
@@ -1376,6 +1376,139 @@ def run_native_grep(
         turn_count=parsed.turn_count,
         transcript=transcript,
     )
+
+
+# ---------------------------------------------------------------------------
+# Native WRITER — Phase 2 write-path arm (issue athenaeum#1726, design lock
+# docs/design/native-memory-baseline.md §5)
+#
+# Every arm above hands the model a FINISHED store and grades how it reads
+# it. This section is the write half: a sequence of `claude -p` sessions
+# with auto memory enabled, each fed one slice of a
+# `tests.evals.corpus.Observation` stream on stdin, writing whatever it
+# chooses to save into a FRESH `autoMemoryDirectory`. It reuses the
+# athenaeum#1725 native-arm machinery verbatim (`seed_native_claude_config`,
+# `build_native_settings`, `build_native_argv`, `parse_stream`,
+# `read_loaded_memory_files`) rather than a second implementation of any of
+# it -- this is the write-side counterpart to `_spawn_native`, not a
+# replacement for it.
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass(frozen=True)
+class NativeWriterSession:
+    """One `claude -p` session in the writer sequence -- the SAME
+    transcript-capture shape the read arms use (`tool_calls`/`turn_tokens`/
+    `transcript`, via :func:`parse_stream`), so what the model chose to save
+    (or not save) in THIS session is auditable exactly like a NATIVE_INDEX
+    or NATIVE_GREP rollout's is. ``observation_uid`` is the ground-truth
+    input this session was fed, so a session record can be joined back to
+    the observation stream's own ``page_uid``/``answer_tokens``."""
+
+    session_index: int
+    observation_uid: str
+    tool_calls: list[ToolCall]
+    turn_tokens: list[TurnTokenUsage]
+    turn_count: int
+    transcript: list[dict[str, Any]]
+
+
+@dataclasses.dataclass(frozen=True)
+class NativeWriterResult:
+    """What one full writer sequence produced: every session's transcript,
+    plus what ended up in the memory directory AFTERWARDS -- read directly
+    off disk (the model's own write), never re-derived from a transcript
+    parse. ``memory_files`` maps each file's path (relative to
+    ``memory_dir``) to its full text."""
+
+    sessions: list[NativeWriterSession]
+    memory_dir: Path
+    memory_files: dict[str, str]
+
+    @property
+    def total_tool_calls(self) -> int:
+        return sum(len(s.tool_calls) for s in self.sessions)
+
+
+#: The instruction every writer session is prompted with, ahead of the raw
+#: observation text. Deliberately spare -- this arm measures what the
+#: model's OWN auto-memory judgment chooses to keep from an ordinary note,
+#: not what it does when explicitly coached on HOW to file it (that would
+#: confound the write-path comparison with a prompt-engineering effect
+#: neither system's real usage gets).
+_WRITER_PROMPT_PREFIX = "Here is a note from today. Save anything worth remembering.\n\n"
+
+
+def run_native_writer(
+    observations: Sequence[Observation],
+    materialize_root: Path,
+    *,
+    claude_binary: str = "claude",
+    model: str = DEFAULT_ROLLOUT_MODEL,
+    timeout: float = 120.0,
+) -> NativeWriterResult:
+    """Drive one `claude -p` session per entry in *observations*, in order,
+    all sharing the SAME fresh auto-memory directory under
+    *materialize_root* -- so a later session can see (and choose to update)
+    what an earlier one wrote, exactly like a real multi-day memory store.
+
+    Isolated with `CLAUDE_CONFIG_DIR` the same way `_spawn_native` isolates
+    the read arms (`seed_native_claude_config`), and the same empty scoped
+    MCP config (`--strict-mcp-config` over ``{"mcpServers": {}}``) so the
+    athenaeum `recall` tool is absent here too -- this measures the model's
+    OWN write judgment, not anything athenaeum contributes. Each
+    observation's body goes on STDIN, never argv (issue athenaeum#543 L4,
+    the same discipline every other arm in this module follows).
+
+    Raises only on a genuine spawn failure (binary missing, timeout) --
+    mirrors :func:`run_pull`'s contract exactly (issue athenaeum#1726 AC3):
+    a session that chooses to write NOTHING is a recorded outcome (an empty
+    ``tool_calls`` list on that session's record), never an error.
+    """
+    if shutil.which(claude_binary) is None:
+        raise RuntimeError(f"{claude_binary!r} not found on PATH")
+
+    memory_dir = materialize_root / "memory"
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    config_dir = materialize_root / "claude-config"
+    seed_native_claude_config(config_dir)
+
+    settings_path = materialize_root / "native-writer-settings.json"
+    settings_path.write_text(json.dumps(build_native_settings(memory_dir)), encoding="utf-8")
+    mcp_config_path = materialize_root / "native-writer-mcp-config.json"
+    mcp_config_path.write_text(json.dumps({"mcpServers": {}}), encoding="utf-8")
+    argv = build_native_argv(claude_binary, settings_path, mcp_config_path, memory_dir, model)
+    env = {**os.environ, "CLAUDE_CONFIG_DIR": str(config_dir)}
+
+    sessions: list[NativeWriterSession] = []
+    for i, observation in enumerate(observations):
+        proc = subprocess.run(
+            argv,
+            input=f"{_WRITER_PROMPT_PREFIX}{observation.body}",
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+            check=False,
+        )
+        parsed = parse_stream((proc.stdout or "").splitlines(), tool_names=None)
+        sessions.append(
+            NativeWriterSession(
+                session_index=i,
+                observation_uid=observation.uid,
+                tool_calls=parsed.tool_calls,
+                turn_tokens=parsed.turn_tokens,
+                turn_count=parsed.turn_count,
+                transcript=parsed.transcript,
+            )
+        )
+
+    memory_files = {
+        str(path.relative_to(memory_dir)): path.read_text(encoding="utf-8")
+        for path in sorted(memory_dir.rglob("*"))
+        if path.is_file()
+    }
+    return NativeWriterResult(sessions=sessions, memory_dir=memory_dir, memory_files=memory_files)
 
 
 # ---------------------------------------------------------------------------

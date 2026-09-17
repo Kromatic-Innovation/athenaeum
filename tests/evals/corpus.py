@@ -59,6 +59,7 @@ from __future__ import annotations
 import hashlib
 import random
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -792,3 +793,274 @@ def build_corpus(scale: str = "core", seed: int = 20260908) -> Corpus:
         pages.extend(_generate_ballast(remaining, rng, templates))
 
     return Corpus(pages=pages, probes=probes, seed=seed, scale=scale)
+
+
+# --------------------------------------------------------------------------
+# Raw-observation generator (issue athenaeum#1726, design lock
+# docs/design/native-memory-baseline.md §5 "Phase 2")
+# --------------------------------------------------------------------------
+#
+# Phase 1 (issue athenaeum#1725) hands both systems the same COMPILED pages,
+# so it can only measure the READ path. Athenaeum's claimed invention is the
+# WRITE path (docs/why-athenaeum.md, "writes are harder than reads"), and a
+# read-only comparison cannot see it. This section inverts the hand-authored
+# ``core`` pages back into the dated raw observations that would compile
+# INTO them -- the same ``source_type``/``source_ref``/``created``/``updated``
+# fields ``load_core_pages`` already reads off every page (see
+# :class:`Page`) make this a generator change, never a corpus rewrite: no
+# file under ``data/corpus/core/`` is touched by anything below.
+#
+# The observations are emitted in the RAW-INTAKE shape
+# (``src/athenaeum/intake.py``'s ``RawFile``/``RAW_FILE_RE``: a bare-body
+# file named ``{timestamp}-{uuid8}.md`` under ``raw/<source>/``) rather than
+# a pre-structured wiki page. That choice is load-bearing: a pre-structured
+# raw (frontmatter carrying ``uid``/``type``/``name``) is eligible for
+# ``athenaeum.intake.tier0_passthrough``, which writes it to the wiki
+# byte-for-byte with NO LLM call at all -- exactly the write decision Phase 2
+# exists to measure would never run. See
+# ``tests/evals/test_raw_observation_roundtrip.py`` for the proof that this
+# shape reaches the ordinary Tier 1/2/3 chain.
+
+
+def _page_answer_tokens(page: "Page", probes: list["Probe"]) -> tuple[str, ...]:
+    """Every ``answer_tokens`` value any probe plants on *page*, in probe order.
+
+    A probe's ``answer_tokens`` is validated (:func:`validate_core`) to occur
+    in the body of at least one of its ``expected_uids`` pages -- but not
+    necessarily THIS one, for a ``multi_hop``/``disambiguation`` probe naming
+    several pages. Membership is decided the same way ``validate_core``
+    decides it: a literal substring check against *this* page's own body,
+    never against the probe's other expected pages.
+    """
+    tokens: list[str] = []
+    for probe in probes:
+        if page.uid not in probe.expected_uids:
+            continue
+        for token in probe.answer_tokens:
+            if token in page.body and token not in tokens:
+                tokens.append(token)
+    return tuple(tokens)
+
+
+def _observation_paragraphs(body: str) -> list[str]:
+    """Split a page body into observation-sized slices.
+
+    Every authored ``body:`` in ``data/corpus/core/*.yaml`` opens with a
+    markdown ``# <name>`` heading (:func:`Page.to_markdown` renders it
+    verbatim -- see ``tests/evals/rollout.py``'s ``_native_index_description``
+    for the same observation about this corpus's authoring convention), and a
+    bare heading carries no observable fact -- it is dropped here rather than
+    emitted as a content-free "observation". Splits on the blank line the
+    YAML ``body: |`` block literal already uses to separate paragraphs, so no
+    planted token is ever cut in half: a token is authored as a whole word
+    inside one paragraph, never spanning the blank-line boundary.
+
+    Falls back to the whole (heading-stripped) body as a single slice if
+    every paragraph turned out to be a heading -- a defensive floor, not a
+    case any committed core page hits today.
+    """
+    paragraphs = [p.strip() for p in body.strip().split("\n\n") if p.strip()]
+    kept = [p for p in paragraphs if not p.startswith("#")]
+    if kept:
+        return kept
+    whole = "\n\n".join(p for p in paragraphs if p) or body.strip()
+    return [whole] if whole else []
+
+
+@dataclass(frozen=True)
+class Observation:
+    """One raw-intake observation -- the write-path input the librarian's
+    Tier 1/2/3 chain (``athenaeum.intake``/``athenaeum.tiers``) actually
+    consumes, per issue athenaeum#1726 AC1/AC2.
+
+    ``page_uid`` and ``answer_tokens`` are GENERATOR GROUND TRUTH, carried as
+    DATA rather than left for a grader to re-derive later by string matching
+    (the issue's own requirement): which compiled page this observation is
+    ABOUT, and which of that page's planted :attr:`Probe.answer_tokens` this
+    specific slice carries (empty when this slice carries none -- most
+    slices of a page do not carry the one planted marker token).
+
+    ``body`` is the bare raw-intake text -- no frontmatter -- prefixed with
+    the subject page's own ``name`` (e.g. ``"PTO policy: The firm's PTO
+    allowance is 25 days..."``). That prefix is what lets
+    ``athenaeum.tiers.tier1_programmatic_match`` attribute a later
+    observation to the page deterministically once it exists in the wiki
+    index, the same way a real observation naturally names its subject --
+    without it, only the FIRST observation about a page (which mints it)
+    would ever land; every later slice would silently have no name or alias
+    for Tier 1 to match and would be dropped as "no actions needed" before
+    a single token could compile through.
+    """
+
+    uid: str
+    page_uid: str
+    source: str
+    timestamp: str
+    uuid8: str
+    body: str
+    answer_tokens: tuple[str, ...] = ()
+
+    @property
+    def filename(self) -> str:
+        """``{timestamp}-{uuid8}.md`` -- matches
+        ``athenaeum.intake.RAW_FILE_RE`` exactly, so a materialized
+        observation is discoverable by
+        :func:`athenaeum.intake.discover_raw_files` like any real raw file."""
+        return f"{self.timestamp}-{self.uuid8}.md"
+
+
+def generate_page_observations(
+    page: Page,
+    probes: list[Probe],
+    seed: int = 20260908,
+    scale: str = "core",
+) -> list[Observation]:
+    """Invert one core *page* into the dated observations that would compile
+    back into it (design doc §5, Phase 2).
+
+    Deterministic for ``(GENERATOR_VERSION, seed, page.uid)`` -- same
+    discipline as :func:`build_corpus`'s own generation: every derived value
+    comes from :func:`_stable_hash` seeding a ``random.Random``, never the
+    salted builtin ``hash()``. Two calls with identical inputs return
+    byte-identical output (see
+    ``tests/evals/test_eval_corpus_observation_generator.py``'s determinism
+    coverage).
+
+    *scale* is accepted and VALIDATED against :data:`SCALES` -- an unknown
+    value raises, exactly like :func:`build_corpus` -- but never consulted
+    for anything else. This is deliberate, and STRONGER than AC1's own
+    "deterministic for ``(GENERATOR_VERSION, seed, scale)``" requirement,
+    not a gap in it: only the hand-authored ``core`` tier carries the
+    ground truth (``page`` itself, and the ``answer_tokens`` planted on it)
+    a write-path measurement needs -- ``distractor``/``ballast`` pages carry
+    none (see :func:`generate_core_observations`'s own note). Output that
+    does not depend on *scale* at all is trivially deterministic for every
+    fixed value of it, including two different ones compared against each
+    other -- see ``test_generate_page_observations_is_invariant_across_scale``.
+
+    Each of *page*'s planted ``answer_tokens`` (:func:`_page_answer_tokens`)
+    is distributed onto whichever of its own generated observations actually
+    contains that token's text -- so a caller that drops an observation can
+    measure exactly which tokens went missing, rather than losing the fact
+    silently. Dated starting at ``page.created``, one day apart per
+    observation, in source order (the seeded RNG is reserved for the
+    corpus-wide interleave in :func:`generate_core_observations`; a single
+    page's own slices need no shuffling to be a faithful inversion).
+    """
+    if scale not in SCALES:
+        raise ValueError(f"unknown scale {scale!r}; known: {sorted(SCALES)}")
+    tokens = _page_answer_tokens(page, probes)
+    paragraphs = _observation_paragraphs(page.body)
+    # ``page.created`` is typed ``str`` (:class:`Page`), but PyYAML resolves
+    # an UNQUOTED ``created: 2026-05-14`` scalar (every core page's actual
+    # authoring style -- see ``data/corpus/core/*.yaml``) to a real
+    # ``datetime.date`` object, not a string; ``load_core_pages`` passes it
+    # through unconverted. Accept either representation rather than assuming
+    # the annotation matches the runtime value.
+    created = page.created if isinstance(page.created, date) else date.fromisoformat(page.created)
+    observations: list[Observation] = []
+    for i, paragraph in enumerate(paragraphs):
+        obs_tokens = tuple(t for t in tokens if t in paragraph)
+        obs_uid = f"obs-{page.uid}-{i:03d}"
+        obs_date = created + timedelta(days=i)
+        digest = hashlib.sha256(f"v{GENERATOR_VERSION}:{seed}:{obs_uid}".encode()).hexdigest()
+        observations.append(
+            Observation(
+                uid=obs_uid,
+                page_uid=page.uid,
+                source="sessions",
+                timestamp=obs_date.strftime("%Y%m%dT%H%M%SZ"),
+                uuid8=digest[:8],
+                body=f"{page.name}: {paragraph}",
+                answer_tokens=obs_tokens,
+            )
+        )
+    return observations
+
+
+@dataclass
+class ObservationStream:
+    """A materialized observation stream: the write-path counterpart to
+    :class:`Corpus` -- observations plus the seed and scale that produced
+    them.
+
+    ``scale`` mirrors :attr:`Corpus.scale` for symmetry and provenance
+    (a stored measurement should be able to name the scale a stream was
+    generated at, the same way :meth:`Corpus.fingerprint` lets one name a
+    corpus), but the stream's CONTENT is deliberately INVARIANT across it --
+    see :func:`generate_core_observations`'s docstring for why that is
+    strictly stronger than AC1's determinism requirement, not a gap in it.
+    """
+
+    observations: list[Observation] = field(default_factory=list)
+    seed: int = 0
+    scale: str = "core"
+
+    def materialize(self, root: Path) -> Path:
+        """Write every observation to ``root/raw/<source>/<filename>`` --
+        the raw-intake layout ``athenaeum.intake.discover_raw_files`` walks.
+        Writes only under *root*, mirroring :meth:`Corpus.materialize`'s own
+        discipline (enforced the same way, in
+        ``tests/test_eval_corpus_leakage.py``)."""
+        raw_root = root / "raw"
+        for obs in self.observations:
+            source_dir = raw_root / obs.source
+            source_dir.mkdir(parents=True, exist_ok=True)
+            (source_dir / obs.filename).write_text(obs.body, encoding="utf-8")
+        return raw_root
+
+    def answer_tokens(self) -> frozenset[str]:
+        """Every distinct planted token carried anywhere in the stream --
+        the denominator a "tokens retained" measurement (issue athenaeum#1726
+        AC4) is computed against."""
+        return frozenset(t for obs in self.observations for t in obs.answer_tokens)
+
+
+def generate_core_observations(
+    pages: list[Page] | None = None,
+    probes: list[Probe] | None = None,
+    seed: int = 20260908,
+    scale: str = "core",
+) -> ObservationStream:
+    """Invert every hand-authored core page into the interleaved observation
+    stream Phase 2 feeds identically to both systems (design doc §5).
+
+    Deterministic for ``(GENERATOR_VERSION, seed, scale)`` per AC1, like
+    :func:`build_corpus` -- ``scale`` is VALIDATED against :data:`SCALES`
+    (an unknown value raises the same ``ValueError`` shape
+    :func:`build_corpus` raises) but otherwise never consulted, and the
+    returned stream is INVARIANT across every valid scale. That is
+    deliberate and strictly STRONGER than the AC's own wording asks for, not
+    a gap in it: ``pages``/``probes`` default to
+    :func:`load_core_pages`/:func:`load_probes`, and only the hand-authored
+    ``core`` tier is ever inverted (see this section's module-level note) --
+    the generated ``distractor``/``ballast`` tiers :data:`Scale` controls
+    carry no ground truth (no ``answer_tokens``, no ``page_uid`` a probe
+    targets) for a write-path measurement to check, so there is nothing
+    about a larger scale for this generator to reflect. A caller that wants
+    read-side pressure alongside the observation stream still gets it from
+    :meth:`Corpus.materialize` at whatever scale it likes -- that tree and
+    this stream are generated, and validated, independently.
+    ``test_generate_core_observations_is_invariant_across_scale`` pins this
+    as a contract: the SAME seed at two different scales returns identical
+    observations (order included), and an unknown scale raises.
+
+    The per-page slices from :func:`generate_page_observations` are then
+    shuffled with a seeded ``random.Random`` -- deterministic for
+    ``(GENERATOR_VERSION, seed)``, but no longer grouped page-by-page. Real
+    observations about different entities arrive interleaved (a session
+    transcript mentions several people and policies in whatever order they
+    came up), not one entity fully narrated before the next begins; an
+    ungrouped stream is the honest shape for both a librarian compile run
+    and a sequence of native-writer sessions to consume.
+    """
+    if scale not in SCALES:
+        raise ValueError(f"unknown scale {scale!r}; known: {sorted(SCALES)}")
+    resolved_pages = pages if pages is not None else load_core_pages()
+    resolved_probes = probes if probes is not None else load_probes()
+    observations: list[Observation] = []
+    for page in resolved_pages:
+        observations.extend(generate_page_observations(page, resolved_probes, seed=seed))
+    rng = random.Random(_stable_hash(f"v{GENERATOR_VERSION}:{seed}:observation-interleave"))
+    rng.shuffle(observations)
+    return ObservationStream(observations=observations, seed=seed, scale=scale)

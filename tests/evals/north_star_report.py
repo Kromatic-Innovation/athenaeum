@@ -88,7 +88,7 @@ import dataclasses
 import json
 import re
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from athenaeum.push_metrics import estimate_tokens
@@ -106,7 +106,7 @@ from athenaeum.text_overlap import (
     ngrams,
 )
 from tests.evals.containment import GridCell, ResultStore
-from tests.evals.corpus import Corpus, Probe, build_corpus
+from tests.evals.corpus import Corpus, Observation, Probe, build_corpus
 from tests.evals.metrics import uids_from_recall_output
 from tests.evals.rollout import Arm, RolloutRecord
 
@@ -737,6 +737,107 @@ def crossover_scales(stats: Sequence[GroupStats]) -> dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
+# Write-path stats (issue athenaeum#1726 AC4, design lock
+# docs/design/native-memory-baseline.md §5 "Phase 2")
+#
+# Everything above grades a READ over an already-finished store. This
+# section grades the WRITE that produced one: given the SAME
+# ``tests.evals.corpus.Observation`` stream, whose resulting store (an
+# Athenaeum-compiled wiki, or a native auto-memory directory) still carries
+# the planted ``answer_tokens`` -- the first measurement of the observation
+# filter against a baseline other than itself (design doc §5).
+#
+# Deliberately NOT folded into ``GroupStats``/``compute_group_stats``: those
+# are keyed by (probe_class, corpus_scale, arm) because every dimension they
+# hold is a property of ANSWERING a probe. A write-path measurement has no
+# probe or arm at all -- it is a property of the COMPILE run itself, over
+# the whole observation stream at once -- so forcing it through the same
+# per-probe-class grouping would either fabricate a class it does not have
+# or silently pick one arbitrarily. It is reported per (system, corpus_scale)
+# instead, its own natural grain, and rendered as its own report section.
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass(frozen=True)
+class WritePathStats:
+    """Phase 2 write-path measurement for ONE system at one corpus scale.
+
+    Every count below is scoped to the observations that carry at least one
+    planted ``answer_tokens`` value -- an observation with no token plants
+    nothing this scanner can check, so it is excluded from the denominator
+    rather than silently counted as "retained". ``None`` (never a fabricated
+    ``0``) when *observations* carries no token-bearing entry at all --
+    "nothing was measurable" is a different fact from "everything was lost",
+    the same discipline :class:`GroupStats` already holds every other
+    optional field to.
+    """
+
+    system: str
+    corpus_scale: str
+    pages_targeted: int
+    pages_written: int | None
+    answer_tokens_total: int
+    answer_tokens_retained: int | None
+    observations_total: int
+    observations_measured: int
+    observations_dropped: int | None
+
+
+def compute_write_path_stats(
+    system: str,
+    corpus_scale: str,
+    observations: Sequence[Observation],
+    store_files: Mapping[str, str],
+) -> WritePathStats:
+    """Score one system's compiled store against the observation stream
+    that produced it.
+
+    *store_files* is whatever ended up in the system's store, as plain
+    ``{path: text}`` -- an Athenaeum wiki tree (one entry per compiled
+    page) or a native auto-memory directory
+    (:attr:`~tests.evals.rollout.NativeWriterResult.memory_files`). Both are
+    directories of markdown text, so a single substring scan over the
+    concatenation serves either one identically; this function never
+    inspects frontmatter or file naming, precisely because a native store's
+    filenames are the MODEL's own choice and carry no correspondence to
+    ``page_uid`` a grader could rely on.
+
+    A page counts as **written** if at least one of ITS OWN planted tokens
+    (from any of its token-bearing observations) is found anywhere in
+    *store_files* -- content-addressed, not by filename, for the same
+    reason. An observation counts as **dropped** if it carried at least one
+    token and not every one of its tokens survived.
+    """
+    corpus_text = "\n".join(store_files.values())
+    token_bearing = [obs for obs in observations if obs.answer_tokens]
+    all_tokens = sorted({token for obs in token_bearing for token in obs.answer_tokens})
+    retained_tokens = {token for token in all_tokens if token in corpus_text}
+
+    targeted_pages = sorted({obs.page_uid for obs in token_bearing})
+    written_pages = {
+        obs.page_uid
+        for obs in token_bearing
+        if any(token in corpus_text for token in obs.answer_tokens)
+    }
+    dropped = [
+        obs for obs in token_bearing if not all(token in corpus_text for token in obs.answer_tokens)
+    ]
+
+    has_measurable_data = bool(token_bearing)
+    return WritePathStats(
+        system=system,
+        corpus_scale=corpus_scale,
+        pages_targeted=len(targeted_pages),
+        pages_written=len(written_pages) if has_measurable_data else None,
+        answer_tokens_total=len(all_tokens),
+        answer_tokens_retained=len(retained_tokens) if all_tokens else None,
+        observations_total=len(observations),
+        observations_measured=len(token_bearing),
+        observations_dropped=len(dropped) if has_measurable_data else None,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Report assembly + rendering + writing
 # ---------------------------------------------------------------------------
 
@@ -753,15 +854,27 @@ class NorthStarReport:
     corpus_digests: dict[str, str]
     # issue athenaeum#1573: probe ids the NONE arm already answers correctly.
     weak_probes: tuple[str, ...]
+    # issue athenaeum#1726: Phase 2 write-path measurement, empty when this
+    # run carried none (every pre-athenaeum#1726 caller of build_report).
+    write_path_stats: tuple[WritePathStats, ...] = ()
 
 
 def build_report(
-    rows: Sequence[RolloutRow], *, aborted: bool = False, abort_reason: str = ""
+    rows: Sequence[RolloutRow],
+    *,
+    aborted: bool = False,
+    abort_reason: str = "",
+    write_path_stats: Sequence[WritePathStats] = (),
 ) -> NorthStarReport:
     """Assemble a :class:`NorthStarReport` from decoded result-store rows.
 
     Pure computation -- constructs no model client and makes no network
-    call (see the module docstring's "No LLM judge" note)."""
+    call (see the module docstring's "No LLM judge" note). *write_path_stats*
+    is an independent, pre-computed input (issue athenaeum#1726): unlike
+    *rows*, it cannot be derived from a :class:`ResultStore` here, since it
+    is scored against an :class:`~tests.evals.corpus.Observation` stream and
+    a system's raw store contents, neither of which a ``RolloutRow`` carries.
+    """
     scales = sorted({row.record.corpus_scale for row in rows})
     digests = {scale: _corpus_for_scale(scale).fingerprint() for scale in scales}
     return NorthStarReport(
@@ -774,6 +887,7 @@ def build_report(
         generated=now_iso(),
         corpus_digests=digests,
         weak_probes=weak_probes(rows),
+        write_path_stats=tuple(write_path_stats),
     )
 
 
@@ -1027,6 +1141,38 @@ def render_report(report: NorthStarReport) -> str:
         lines.append(
             f"| {s.probe_class} | {s.corpus_scale} | {s.n} | {_fmt(s.mean_index_coverage)} |"
         )
+    lines.append("")
+
+    lines.append("## Write path (Phase 2, athenaeum#1726)")
+    lines.append("")
+    lines.append(
+        "Given the SAME observation stream, whose resulting store still carries the planted "
+        "`answer_tokens` -- the write half of the comparison (design doc "
+        "`docs/design/native-memory-baseline.md` §5), and the first measurement of the "
+        "observation filter against a baseline other than itself. Scoped to observations "
+        "carrying at least one planted token (`observations_measured` of `observations_total`); "
+        "an observation with no token plants nothing this scanner can check. `n/a` means no "
+        "token-bearing observation was present for that system/scale, never a fabricated 0."
+    )
+    lines.append("")
+    if report.write_path_stats:
+        lines.append(
+            "| system | corpus_scale | pages_targeted | pages_written | answer_tokens_total | "
+            "answer_tokens_retained | observations_total | observations_measured | "
+            "observations_dropped |"
+        )
+        lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+        for w in report.write_path_stats:
+            lines.append(
+                f"| {w.system} | {w.corpus_scale} | {w.pages_targeted} | "
+                f"{w.pages_written if w.pages_written is not None else 'n/a'} | "
+                f"{w.answer_tokens_total} | "
+                f"{w.answer_tokens_retained if w.answer_tokens_retained is not None else 'n/a'} | "
+                f"{w.observations_total} | {w.observations_measured} | "
+                f"{w.observations_dropped if w.observations_dropped is not None else 'n/a'} |"
+            )
+    else:
+        lines.append("_no Phase 2 write-path data in this run_")
     lines.append("")
 
     lines.append("## Crossover scale (athenaeum#1725)")

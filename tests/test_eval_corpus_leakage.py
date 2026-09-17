@@ -53,7 +53,7 @@ import pytest
 import yaml
 
 from athenaeum.pii import scan_corpus_pii
-from tests.evals.corpus import CORPUS_ROOT, build_corpus
+from tests.evals.corpus import CORPUS_ROOT, build_corpus, generate_core_observations
 from tests.evals.harness import EVAL_DATA_ROOT, RECORDED_ROOT
 from tests.evals.rollout import materialize_native_memory
 
@@ -603,6 +603,36 @@ def test_materialized_eval_corpus_carries_no_contact_data(tmp_path: Path) -> Non
     findings = scan_corpus_pii(wiki_root)
     assert not findings, (
         "synthetic eval corpus carries contact-shaped tokens: "
+        f"{[str(f.path) for f in findings][:10]}"
+    )
+
+
+def test_materialized_raw_observation_stream_carries_no_contact_data(tmp_path: Path) -> None:
+    """Issue athenaeum#1726 AC1: the raw-observation generator
+    (:func:`tests.evals.corpus.generate_core_observations`) is a THIRD way
+    corpus content lands on disk, alongside ``Corpus.materialize`` and
+    ``materialize_native_memory`` above -- every observation body is built
+    from the SAME hand-authored core page text those two already scan, just
+    re-sliced and re-dated, so it must pass the identical guard: reuse the
+    production scanner, never a second one, and write nothing outside its
+    given root (:meth:`tests.evals.corpus.ObservationStream.materialize`'s
+    own "writes only under root" discipline).
+    """
+    stream = generate_core_observations()
+    root = tmp_path / "sandbox"
+    root.mkdir()
+
+    raw_root = stream.materialize(root)
+
+    for path in tmp_path.rglob("*"):
+        if path.is_file():
+            assert str(path).startswith(str(root)), (
+                f"observation materializer wrote outside its root: {path}"
+            )
+
+    findings = scan_corpus_pii(raw_root)
+    assert not findings, (
+        f"raw observation stream carries contact-shaped tokens: "
         f"{[str(f.path) for f in findings][:10]}"
     )
 
