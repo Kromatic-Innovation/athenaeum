@@ -637,7 +637,7 @@ def test_materialized_raw_observation_stream_carries_no_contact_data(tmp_path: P
     )
 
 
-@pytest.mark.parametrize("scale", ["medium", "large"])
+@pytest.mark.parametrize("scale", ["medium", "large", "xlarge"])
 def test_materialized_native_memory_store_writes_nothing_outside_tmp_path_and_is_clean(
     scale: str, tmp_path: Path
 ) -> None:
@@ -647,9 +647,17 @@ def test_materialized_native_memory_store_writes_nothing_outside_tmp_path_and_is
     pass the same two guarantees this module already holds the wiki
     materializer to: nothing written outside the given root, and no
     contact-shaped content (reusing :func:`scan_corpus_pii`, never a second
-    scanner). Checked at ``medium`` and ``large`` (``SCALES``,
-    ``tests/evals/corpus.py``) -- the two scales the design doc's native-
-    memory baseline actually exercises past the index cap.
+    scanner). Checked at ``medium``, ``large``, and ``xlarge`` (``SCALES``,
+    ``tests/evals/corpus.py``) -- the design doc's native-memory baseline
+    scales past the index cap, plus ``xlarge`` (issue athenaeum#1735), the
+    size a real single-operator deployment already runs at.
+
+    ``xlarge`` (25,000 pages) runs UNSAMPLED here -- ``materialize_native_
+    memory`` + ``scan_corpus_pii`` together measured ~4s locally (well under
+    this suite's per-test budget), so the sampling AC#1735 authorizes was not
+    needed. If a future scale point makes this too slow, sample the
+    materialized tree (e.g. every Nth page) rather than dropping the scale
+    entirely, and update this note.
     """
     corpus = build_corpus(scale=scale)
     root = tmp_path / "sandbox"

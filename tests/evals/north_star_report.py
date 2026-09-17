@@ -116,7 +116,7 @@ from tests.evals.rollout import Arm, RolloutRecord
 #: own docstring) and are deliberately NOT part of this ordering: crossover
 #: asks "at what SIZE does Athenaeum start winning", and folding a
 #: confusability point into the size axis would answer a different question.
-SIZE_SCALE_ORDER: tuple[str, ...] = ("core", "small", "medium", "large")
+SIZE_SCALE_ORDER: tuple[str, ...] = ("core", "small", "medium", "large", "xlarge")
 
 DEFAULT_MEASUREMENTS_DIR = Path("measurements")
 

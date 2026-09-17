@@ -60,8 +60,15 @@ tens of thousands of pages. So:
 The second question is the one that decides shelving, and it is genuinely
 open. The synthetic corpus already has the scales to straddle the cap:
 `core` (about 130 pages) and `small` (200) sit at or under it, `medium`
-(1,000) and `large` (10,000) are well past it (`tests/evals/corpus.py`,
-`SCALES`).
+(1,000), `large` (10,000), and `xlarge` (25,000) are well past it
+(`tests/evals/corpus.py`, `SCALES`). `xlarge` exists because a real
+single-operator deployment is already past 20,000 pages (issue
+athenaeum#1735) -- `large` alone cannot show whether the answer holds at the
+size the project actually runs at. It is opt-in at the grid-dispatch level
+(`tests/evals/north_star_cli.py`'s `DEFAULT_CORPUS_SCALES` excludes it, and
+the `evals.yml` workflow's `north_star_corpus_scales` dispatch input must
+name it explicitly) because a `NATIVE_GREP` cell over 25,000 files is the
+most expensive cell in the grid.
 
 It follows that there is almost certainly a corpus size **below which
 Athenaeum is not worth using**: while everything fits the native index, a

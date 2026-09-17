@@ -84,7 +84,16 @@ DEFAULT_PROBES: tuple[str, ...] = tuple(p.id for p in build_corpus("core").probe
 #: knob to run a subset.
 DEFAULT_ARMS: tuple[str, ...] = tuple(arm.value for arm in ALL_ARMS)
 
-DEFAULT_CORPUS_SCALES: tuple[str, ...] = tuple(sorted(SCALES))
+#: Scales a blank ``--corpus-scales`` must NOT silently pull in (issue
+#: athenaeum#1735). A ``NATIVE_GREP`` cell over ``xlarge`` (25,000 pages) is
+#: the most expensive cell in the grid, so the rollout treats it as opt-in --
+#: pass it explicitly via ``--corpus-scales xlarge`` (or the workflow's
+#: ``north_star_corpus_scales`` dispatch input) rather than by default.
+_OPT_IN_CORPUS_SCALES: frozenset[str] = frozenset({"xlarge"})
+
+DEFAULT_CORPUS_SCALES: tuple[str, ...] = tuple(
+    sorted(s for s in SCALES if s not in _OPT_IN_CORPUS_SCALES)
+)
 DEFAULT_REPLICATES: tuple[int, ...] = (0,)
 
 #: Mirrors ``containment_cli.DEFAULT_MAX_SPEND_USD`` -- the ``smoke`` scale
