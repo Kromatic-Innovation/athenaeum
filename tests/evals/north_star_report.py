@@ -88,7 +88,7 @@ import dataclasses
 import json
 import re
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 
 from athenaeum.push_metrics import estimate_tokens
@@ -838,6 +838,616 @@ def compute_write_path_stats(
 
 
 # ---------------------------------------------------------------------------
+# Cost per correct answer, the cost-ratio decision reading, and the three
+# go/no-go verdicts (issue athenaeum#1734, design lock
+# docs/design/native-memory-baseline.md §6/§7).
+#
+# Everything above measures ONE dimension at a time. This section reads
+# several of them together to answer the design doc's actual question: at
+# this scale, does Athenaeum win the relationship use case, not lose
+# anywhere else, and stay within budget -- and if so, starting at which
+# scale.
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass(frozen=True)
+class WriteCost:
+    """Phase 2 write-path SPEND for one system at one corpus scale -- an
+    independent, pre-computed input, exactly like ``write_path_stats`` on
+    :func:`build_report` (see that function's own docstring for why: it
+    cannot be derived from a :class:`~tests.evals.containment.ResultStore`
+    here, since it is scored against the compile run itself, not a probe
+    rollout).
+
+    Distinct from :class:`WritePathStats`: that measures retention accuracy
+    (which planted tokens survived compilation). This measures what the
+    compile run COST, in raw input+output tokens, for
+    :func:`compute_cost_per_correct` to amortise over the probe set at the
+    same scale (design doc §6 "Write cost, both systems"). ``system`` is
+    ``"athenaeum"`` (the librarian's compile spend) or ``"native"`` (the
+    writer sessions' memory-saving tool-call spend, summed across
+    ``NativeWriterResult.sessions[*].turn_tokens``).
+    """
+
+    system: str
+    corpus_scale: str
+    input_tokens: int
+    output_tokens: int
+
+    @property
+    def total_tokens(self) -> int:
+        return self.input_tokens + self.output_tokens
+
+
+def _system_for_arm(arm: str) -> str:
+    """``"native"`` for the two native arms, ``"athenaeum"`` for every
+    other arm (including ``none``/``oracle``, which still read whatever
+    store the librarian compiled)."""
+    return "native" if arm in _NATIVE_ARM_VALUES else "athenaeum"
+
+
+@dataclasses.dataclass(frozen=True)
+class CostPerCorrect:
+    """Cost per correct answer for one (probe_class, corpus_scale, arm)
+    group: total tokens for the cell divided by correct answers in the
+    cell (issue athenaeum#1734 AC1).
+
+    ``cost_per_correct`` is ``None`` -- never ``inf`` or ``0`` -- when
+    ``correct_n == 0``; ``undefined_reason`` names why. Phase 2 fields
+    (``write_tokens_amortized``/``write_tokens_raw``) are ``None`` when no
+    :class:`WriteCost` was supplied for this group's ``(system,
+    corpus_scale)``, which is the Phase-1-only case (AC3).
+    """
+
+    probe_class: str
+    corpus_scale: str
+    arm: str
+    n: int
+    correct_n: int
+    read_input_tokens: int
+    read_output_tokens: int
+    # Phase 2 only (issue athenaeum#1726 landed the generator; None means no
+    # WriteCost was supplied for this group's (system, corpus_scale)):
+    # write_tokens_amortized = write_cost.total_tokens / probe_count_at_scale
+    # * this-cell's row count -- design doc §6's "amortised over the full
+    # probe set at that scale". write_tokens_raw is the SAME WriteCost's
+    # total_tokens, unamortised, printed alongside per the design doc.
+    write_tokens_amortized: float | None
+    write_tokens_raw: int | None
+    cost_per_correct: float | None
+    undefined_reason: str | None
+
+
+def compute_cost_per_correct(
+    rows: Sequence[RolloutRow],
+    *,
+    write_costs: Sequence[WriteCost] = (),
+    probe_counts: Mapping[str, int] | None = None,
+) -> list[CostPerCorrect]:
+    """Cost per correct answer, per (probe_class, corpus_scale, arm) group.
+
+    ``cost_per_correct = (read_tokens + write_tokens_amortized) /
+    correct_n`` where ``read_tokens`` is the group's summed
+    ``turn_tokens`` (input + output, across every row and every turn in the
+    cell -- read cost only, Phase 1) and ``write_tokens_amortized`` is
+    ``0`` when no matching :class:`WriteCost` exists (Phase 1) or
+    ``write_cost.total_tokens / probe_count_at_scale * len(group)`` when
+    one does (Phase 2: the SAME per-probe amortised share this cell's rows
+    would draw from the whole probe set, design doc §6). ``None`` (never
+    ``inf``/``0``) when ``correct_n == 0`` -- a zero-correct cell has no
+    denominator to divide by, and that is a fact worth stating, not hiding
+    behind a fabricated number (issue athenaeum#1734 AC2).
+
+    *write_costs* maps a ``(system, corpus_scale)`` pair to its spend via
+    :func:`_system_for_arm` -- Athenaeum arms (everything but the two
+    native arms) draw on the ``"athenaeum"`` entry, ``native_index``/
+    ``native_grep`` draw on the ``"native"`` entry. *probe_counts*
+    overrides the probe-set size used for amortisation (keyed by
+    ``corpus_scale``) -- for unit tests that hand-build rows without
+    generating a real ``medium``/``large`` corpus; ``None`` (the default)
+    derives it from ``len(_corpus_for_scale(scale).probes)``, exact because
+    every rollout at a given scale was generated from the same corpus
+    (see :data:`_CORPUS_CACHE`'s own note).
+    """
+    write_by_key = {(w.system, w.corpus_scale): w for w in write_costs}
+    results: list[CostPerCorrect] = []
+    for (probe_class, corpus_scale, arm), group in sorted(_group_rows(rows).items()):
+        read_input = 0
+        read_output = 0
+        correct_n = 0
+        for row in group:
+            record = row.record
+            read_input += sum(t.input_tokens for t in record.turn_tokens)
+            read_output += sum(t.output_tokens for t in record.turn_tokens)
+            probe = _probe_for_row(row)
+            corpus = _corpus_for_scale(corpus_scale)
+            if grade_correctness(record, probe, corpus):
+                correct_n += 1
+
+        write_cost = write_by_key.get((_system_for_arm(arm), corpus_scale))
+        write_raw: int | None = None
+        write_amortized: float | None = None
+        if write_cost is not None:
+            if probe_counts is not None:
+                probe_count = probe_counts.get(corpus_scale, 0)
+            else:
+                probe_count = len(_corpus_for_scale(corpus_scale).probes)
+            write_raw = write_cost.total_tokens
+            if probe_count > 0:
+                write_amortized = (write_cost.total_tokens / probe_count) * len(group)
+
+        total_tokens = read_input + read_output + (write_amortized or 0.0)
+        if correct_n == 0:
+            cost_per_correct = None
+            undefined_reason = "zero correct answers in this cell"
+        else:
+            cost_per_correct = total_tokens / correct_n
+            undefined_reason = None
+
+        results.append(
+            CostPerCorrect(
+                probe_class=probe_class,
+                corpus_scale=corpus_scale,
+                arm=arm,
+                n=len(group),
+                correct_n=correct_n,
+                read_input_tokens=read_input,
+                read_output_tokens=read_output,
+                write_tokens_amortized=write_amortized,
+                write_tokens_raw=write_raw,
+                cost_per_correct=cost_per_correct,
+                undefined_reason=undefined_reason,
+            )
+        )
+    return results
+
+
+def _reading_for_ratio(ratio: float | None) -> str:
+    """Design doc §7's four-band reading: ``>2.0 fail``, ``<=2.0 limit``,
+    ``<=1.0 target``, ``<=0.5 aspirational``. ``"undefined"`` (never a
+    fabricated band) when *ratio* is ``None`` -- one side's cost per
+    correct was itself undefined (zero correct answers)."""
+    if ratio is None:
+        return "undefined"
+    if ratio <= 0.5:
+        return "aspirational"
+    if ratio <= 1.0:
+        return "target"
+    if ratio <= 2.0:
+        return "limit"
+    return "fail"
+
+
+@dataclasses.dataclass(frozen=True)
+class CostRatio:
+    """Athenaeum's cost per correct answer against the BETTER (cheaper) of
+    the two native arms, at one (probe_class, corpus_scale) -- "better" in a
+    cost sentence means lower cost, the harshest reading available for
+    Athenaeum (issue athenaeum#1734 AC2). ``ratio``/``reading`` are
+    ``None``/``"undefined"`` when either side's cost per correct could not
+    be computed (see ``detail``) -- an undefined ratio never counts as a
+    pass for anything that reads it.
+    """
+
+    probe_class: str
+    corpus_scale: str
+    athenaeum_cost: float | None
+    native_cost: float | None
+    ratio: float | None
+    reading: str
+    detail: str
+
+
+def compute_cost_ratios(costs: Sequence[CostPerCorrect]) -> list[CostRatio]:
+    """Group *costs* by (probe_class, corpus_scale) and compare the best
+    (cheapest, defined) Athenaeum delivery-arm cost per correct against the
+    best (cheapest, defined) native-arm cost per correct -- the same
+    "best of the delivery arms" idiom :func:`crossover_scales` already uses
+    for correctness, applied to cost instead."""
+    by_group: dict[tuple[str, str], list[CostPerCorrect]] = defaultdict(list)
+    for cost in costs:
+        by_group[(cost.probe_class, cost.corpus_scale)].append(cost)
+
+    results: list[CostRatio] = []
+    for (probe_class, corpus_scale), group in sorted(by_group.items()):
+        athenaeum_costs = [
+            c.cost_per_correct
+            for c in group
+            if c.arm in _ATHENAEUM_DELIVERY_ARM_VALUES and c.cost_per_correct is not None
+        ]
+        native_costs = [
+            c.cost_per_correct
+            for c in group
+            if c.arm in _NATIVE_ARM_VALUES and c.cost_per_correct is not None
+        ]
+        athenaeum_cost = min(athenaeum_costs) if athenaeum_costs else None
+        native_cost = min(native_costs) if native_costs else None
+        if athenaeum_cost is None or native_cost is None:
+            ratio = None
+            if athenaeum_cost is None and native_cost is None:
+                detail = "both sides' cost per correct are undefined at this class/scale"
+            elif athenaeum_cost is None:
+                detail = "athenaeum's cost per correct is undefined at this class/scale"
+            else:
+                detail = (
+                    "the better native arm's cost per correct is undefined at this class/scale"
+                )
+        else:
+            ratio = athenaeum_cost / native_cost
+            detail = ""
+        results.append(
+            CostRatio(
+                probe_class=probe_class,
+                corpus_scale=corpus_scale,
+                athenaeum_cost=athenaeum_cost,
+                native_cost=native_cost,
+                ratio=ratio,
+                reading=_reading_for_ratio(ratio),
+                detail=detail,
+            )
+        )
+    return results
+
+
+#: The relationship use case (design doc, use-cases §2.1): these four probe
+#: classes, filtered to the probes among them whose expected pages are
+#: person or company type. A probe class here can straddle both sides of
+#: the split -- e.g. ``multi_hop``'s ``ratecard_tooling_owner`` (a repo and
+#: a tool page, neither person/company) is NOT in the subset while
+#: ``spend_approver_named`` (a policy page plus a person page) IS -- so the
+#: filter is applied per PROBE, never per whole class.
+_RELATIONSHIP_PROBE_CLASSES = frozenset({"single_hop", "multi_hop", "disambiguation", "temporal"})
+_RELATIONSHIP_PAGE_TYPES = frozenset({"person", "company"})
+
+#: §7 gates the whole decision rule at "the `medium` scale and above" and is
+#: explicit that "winning only below the cap is not a pass" -- so the
+#: cutoff can never land on `core`/`small` even if one of them happens to
+#: pass every condition. Sliced from :data:`SIZE_SCALE_ORDER` (the SIZE axis
+#: only, same as :func:`crossover_scales`) starting at ``"medium"``.
+_CUTOFF_ELIGIBLE_SCALES: tuple[str, ...] = SIZE_SCALE_ORDER[SIZE_SCALE_ORDER.index("medium") :]
+
+
+def _relationship_probe_ids(scales: Iterable[str]) -> frozenset[str]:
+    """Derive the relationship-use-case probe id set from the real corpus
+    at each of *scales* -- the default *rows*-need-no-corpus escape hatch
+    in :func:`compute_verdicts` still reaches the corpus here, only when
+    the caller did not already supply an explicit set (unit tests do, so
+    they never need to build a real ``medium``/``large`` corpus)."""
+    ids: set[str] = set()
+    for scale in scales:
+        corpus = _corpus_for_scale(scale)
+        pages_by_uid = {page.uid: page for page in corpus.pages}
+        for probe in corpus.probes:
+            if probe.probe_class not in _RELATIONSHIP_PROBE_CLASSES:
+                continue
+            if any(
+                pages_by_uid[uid].type in _RELATIONSHIP_PAGE_TYPES
+                for uid in probe.expected_uids
+                if uid in pages_by_uid
+            ):
+                ids.add(probe.id)
+    return frozenset(ids)
+
+
+#: Rank used to pick the WORST reading among probe classes present at a
+#: scale for condition 3 (design doc §8: no aggregate score, but a single
+#: per-scale PASS/FAIL still needs one reading named -- the worst one, so
+#: a strong class can never paper over a failing one).
+_READING_RANK = {"aspirational": 0, "target": 1, "limit": 2, "fail": 3, "undefined": 4}
+
+
+@dataclasses.dataclass(frozen=True)
+class ScaleVerdict:
+    """The three design-doc §7 conditions, evaluated at one corpus scale.
+
+    Condition 1 (win the relationship use case) and condition 2 (don't lose
+    any other use case) are read off :func:`compute_group_stats`
+    correctness rates; condition 3 (cost within 2x/1x/0.5x) off
+    :func:`compute_cost_ratios`, taking the WORST reading among probe
+    classes present at the scale (never averaged -- design doc §8).
+    ``all_pass`` is what :func:`compute_cutoff_scale` walks.
+    """
+
+    corpus_scale: str
+    condition1_pass: bool
+    condition1_detail: str
+    condition2_pass: bool
+    condition2_detail: str
+    condition3_pass: bool
+    condition3_reading: str
+    condition3_detail: str
+
+    @property
+    def all_pass(self) -> bool:
+        return self.condition1_pass and self.condition2_pass and self.condition3_pass
+
+
+def compute_verdicts(
+    rows: Sequence[RolloutRow],
+    *,
+    relationship_probe_ids: frozenset[str] | None = None,
+    write_costs: Sequence[WriteCost] = (),
+    probe_counts: Mapping[str, int] | None = None,
+) -> list[ScaleVerdict]:
+    """Compute :class:`ScaleVerdict` for every corpus scale present in
+    *rows* (design doc §7).
+
+    *relationship_probe_ids* -- pass an explicit set (as every unit test in
+    ``tests/evals/test_north_star_verdicts.py`` does) to avoid building a
+    real corpus at all; ``None`` derives it via
+    :func:`_relationship_probe_ids` from the scales actually present in
+    *rows*.
+
+    - **Condition 1** ("win the relationship use case", design §7.1):
+      computed over the relationship-subset rows AS ONE POOLED GROUP --
+      not per probe class -- because the subset already spans four probe
+      classes by definition (`single_hop`/`multi_hop`/`disambiguation`/
+      `temporal`, filtered to person/company-targeting probes) and design
+      §2.1/§7 name it as ONE use case. This is not the aggregate §8
+      forbids; that prohibition is about collapsing DIFFERENT use cases or
+      scales into one number, not about the four classes that already
+      compose this one named use case. Passes when the best correctness
+      rate among Athenaeum's delivery arms strictly exceeds the best among
+      the two native arms (mirrors :func:`crossover_scales`'s own ``>``).
+    - **Condition 2** ("do not lose any other use case", design §7.2):
+      evaluated on the COMPLEMENT of the relationship subset (every row
+      whose probe id is not in *relationship_probe_ids*), grouped by probe
+      class -- abstention, distractor_robustness, redundancy, and any
+      single_hop/multi_hop/disambiguation/temporal probe that did NOT make
+      the relationship subset. Fails if Athenaeum's best correctness is
+      strictly worse than native's best in ANY such class present at the
+      scale; the detail names the first failing class. A class with no
+      gradable rows on one side is skipped (nothing to compare), not
+      treated as a failure.
+    - **Condition 3** ("cost within budget", design §7.3): the WORST
+      reading (per :data:`_READING_RANK`) among :func:`compute_cost_ratios`
+      entries at this scale, across whatever probe classes have cost data.
+      ``"undefined"`` and ``"fail"`` both fail the condition; ``"limit"``
+      (<=2.0x) passes, as does ``"target"``/``"aspirational"``. A scale
+      with no cost data at all fails condition 3 outright -- there is
+      nothing to certify a pass against.
+    """
+    if relationship_probe_ids is None:
+        relationship_probe_ids = _relationship_probe_ids(
+            {row.record.corpus_scale for row in rows}
+        )
+
+    relationship_rows = [r for r in rows if r.record.probe_id in relationship_probe_ids]
+    other_rows = [r for r in rows if r.record.probe_id not in relationship_probe_ids]
+
+    relationship_stats = compute_group_stats(relationship_rows)
+    other_stats = compute_group_stats(other_rows)
+    ratios = compute_cost_ratios(
+        compute_cost_per_correct(rows, write_costs=write_costs, probe_counts=probe_counts)
+    )
+
+    scales = sorted(
+        {s.corpus_scale for s in relationship_stats}
+        | {s.corpus_scale for s in other_stats}
+        | {r.corpus_scale for r in ratios}
+    )
+
+    verdicts: list[ScaleVerdict] = []
+    for scale in scales:
+        # Condition 1: relationship use case, pooled across its probe classes.
+        rel_at_scale = [s for s in relationship_stats if s.corpus_scale == scale]
+        athenaeum_rates = [
+            s.correctness_rate
+            for s in rel_at_scale
+            if s.arm in _ATHENAEUM_DELIVERY_ARM_VALUES and s.correctness_rate is not None
+        ]
+        native_rates = [
+            s.correctness_rate
+            for s in rel_at_scale
+            if s.arm in _NATIVE_ARM_VALUES and s.correctness_rate is not None
+        ]
+        if not athenaeum_rates or not native_rates:
+            condition1_pass = False
+            condition1_detail = (
+                "condition 1: no gradable relationship-use-case rows on one side at this scale"
+            )
+        elif max(athenaeum_rates) > max(native_rates):
+            condition1_pass = True
+            condition1_detail = (
+                f"condition 1: relationship use case won "
+                f"({max(athenaeum_rates):.3f} > {max(native_rates):.3f})"
+            )
+        else:
+            condition1_pass = False
+            condition1_detail = (
+                f"condition 1: relationship use case not won "
+                f"({max(athenaeum_rates):.3f} <= {max(native_rates):.3f})"
+            )
+
+        # Condition 2: every OTHER probe class present, Athenaeum not worse.
+        other_by_class: dict[str, list[GroupStats]] = defaultdict(list)
+        for s in other_stats:
+            if s.corpus_scale == scale:
+                other_by_class[s.probe_class].append(s)
+        condition2_pass = True
+        condition2_detail = "condition 2: not worse than native on any other use case"
+        for probe_class, class_group in sorted(other_by_class.items()):
+            athenaeum_class_rates = [
+                s.correctness_rate
+                for s in class_group
+                if s.arm in _ATHENAEUM_DELIVERY_ARM_VALUES and s.correctness_rate is not None
+            ]
+            native_class_rates = [
+                s.correctness_rate
+                for s in class_group
+                if s.arm in _NATIVE_ARM_VALUES and s.correctness_rate is not None
+            ]
+            if not athenaeum_class_rates or not native_class_rates:
+                continue
+            if max(athenaeum_class_rates) < max(native_class_rates):
+                condition2_pass = False
+                condition2_detail = (
+                    f"condition 2: worse than native on {probe_class!r} "
+                    f"({max(athenaeum_class_rates):.3f} < {max(native_class_rates):.3f})"
+                )
+                break
+
+        # Condition 3: worst cost-ratio reading among classes present.
+        ratios_at_scale = [r for r in ratios if r.corpus_scale == scale]
+        if not ratios_at_scale:
+            condition3_pass = False
+            condition3_reading = "undefined"
+            condition3_detail = "condition 3: no cost-per-correct data at this scale"
+        else:
+            worst = max(ratios_at_scale, key=lambda r: _READING_RANK[r.reading])
+            condition3_reading = worst.reading
+            condition3_pass = worst.reading in ("target", "aspirational", "limit")
+            if worst.reading == "undefined":
+                condition3_detail = (
+                    f"condition 3: cost per correct undefined for {worst.probe_class!r} "
+                    f"({worst.detail})"
+                )
+            else:
+                condition3_detail = (
+                    f"condition 3: worst reading is {worst.reading!r} for "
+                    f"{worst.probe_class!r} (ratio={worst.ratio:.3f})"
+                )
+
+        verdicts.append(
+            ScaleVerdict(
+                corpus_scale=scale,
+                condition1_pass=condition1_pass,
+                condition1_detail=condition1_detail,
+                condition2_pass=condition2_pass,
+                condition2_detail=condition2_detail,
+                condition3_pass=condition3_pass,
+                condition3_reading=condition3_reading,
+                condition3_detail=condition3_detail,
+            )
+        )
+    return verdicts
+
+
+def compute_cutoff_scale(verdicts: Sequence[ScaleVerdict]) -> str:
+    """The smallest scale, at or above ``"medium"``
+    (:data:`_CUTOFF_ELIGIBLE_SCALES`), where all three conditions pass --
+    design doc §7's "the number that goes into the README". ``"none"``
+    when no eligible scale passes every condition; the caller (
+    :func:`render_decision_block`) is what names the failing condition per
+    scale, not this function.
+    """
+    by_scale = {v.corpus_scale: v for v in verdicts}
+    for scale in _CUTOFF_ELIGIBLE_SCALES:
+        verdict = by_scale.get(scale)
+        if verdict is not None and verdict.all_pass:
+            return scale
+    return "none"
+
+
+def render_cost_per_correct_table(costs: Sequence[CostPerCorrect]) -> list[str]:
+    """Render *costs* as a markdown table. Phase 2 (write-cost) columns are
+    included only when at least one row carries write-cost data -- a
+    Phase-1-only store renders without them (issue athenaeum#1734 AC3)."""
+    lines = ["## Cost per correct answer (athenaeum#1734)", ""]
+    lines.append(
+        "`cost_per_correct = (read_input_tokens + read_output_tokens + "
+        "write_tokens_amortized) / correct_n` -- read cost only in Phase 1; Phase 2 adds "
+        "write cost amortised over the full probe set at that scale (design doc §6), with "
+        "the raw (unamortised) write spend printed alongside. `undefined` (never `inf`/`0`) "
+        "means zero correct answers in the cell -- there is no denominator."
+    )
+    lines.append("")
+    has_write = any(c.write_tokens_raw is not None for c in costs)
+    header = "| probe_class | corpus_scale | arm | n | correct_n | read_tokens |"
+    sep = "| --- | --- | --- | --- | --- | --- |"
+    if has_write:
+        header += " write_tokens_amortized | write_tokens_raw |"
+        sep += " --- | --- |"
+    header += " cost_per_correct |"
+    sep += " --- |"
+    lines.append(header)
+    lines.append(sep)
+    for c in sorted(costs, key=lambda c: (c.probe_class, c.corpus_scale, c.arm)):
+        read_tokens = c.read_input_tokens + c.read_output_tokens
+        row = (
+            f"| {c.probe_class} | {c.corpus_scale} | {c.arm} | {c.n} | {c.correct_n} | "
+            f"{read_tokens} |"
+        )
+        if has_write:
+            amortized = (
+                "n/a" if c.write_tokens_amortized is None else f"{c.write_tokens_amortized:.1f}"
+            )
+            raw = "n/a" if c.write_tokens_raw is None else str(c.write_tokens_raw)
+            row += f" {amortized} | {raw} |"
+        cost = "undefined" if c.cost_per_correct is None else f"{c.cost_per_correct:.1f}"
+        row += f" {cost} |"
+        lines.append(row)
+    lines.append("")
+    return lines
+
+
+def render_decision_block(
+    report: NorthStarReport, verdicts: Sequence[ScaleVerdict] | None = None
+) -> list[str]:
+    """The decision block (issue athenaeum#1734 AC5): rendered at the TOP
+    of the report, before any table -- the reader gets the go/no-go answer
+    first, the supporting dimension breakdowns after. *verdicts* lets a
+    caller (or a test) supply pre-computed verdicts; ``None`` computes them
+    from ``report.rows``/``report.write_costs``.
+    """
+    if verdicts is None:
+        verdicts = compute_verdicts(report.rows, write_costs=report.write_costs)
+    cutoff = compute_cutoff_scale(verdicts)
+
+    lines: list[str] = []
+    lines.append("## Decision (design doc §7, athenaeum#1734)")
+    lines.append("")
+    lines.append(
+        "Three conditions, evaluated per scale: **(1)** win the relationship use case "
+        "(single_hop/multi_hop/disambiguation/temporal probes targeting person/company "
+        "pages); **(2)** do not lose any other current use case; **(3)** cost per correct "
+        "answer within budget of the better native arm -- `>2.0x fail`, `<=2.0x limit`, "
+        "`<=1.0x target`, `<=0.5x aspirational`."
+    )
+    lines.append("")
+    if cutoff == "none":
+        lines.append(
+            "**Cutoff scale:** `none` -- no scale at or above `medium` passed all three "
+            "conditions. Failing condition per scale:"
+        )
+        lines.append("")
+        for verdict in verdicts:
+            if verdict.all_pass:
+                continue
+            failing = [
+                detail
+                for passed, detail in (
+                    (verdict.condition1_pass, verdict.condition1_detail),
+                    (verdict.condition2_pass, verdict.condition2_detail),
+                    (verdict.condition3_pass, verdict.condition3_detail),
+                )
+                if not passed
+            ]
+            lines.append(f"- `{verdict.corpus_scale}`: " + "; ".join(failing))
+        lines.append("")
+    else:
+        lines.append(
+            f"**Cutoff scale:** `{cutoff}` -- the smallest scale at or above `medium` where "
+            "all three conditions hold. Below it the recommendation is the agent's own memory."
+        )
+        lines.append("")
+
+    lines.append("| scale | condition 1 | condition 2 | condition 3 | reading | all pass |")
+    lines.append("| --- | --- | --- | --- | --- | --- |")
+    for verdict in verdicts:
+        lines.append(
+            f"| {verdict.corpus_scale} | "
+            f"{'pass' if verdict.condition1_pass else 'fail'} | "
+            f"{'pass' if verdict.condition2_pass else 'fail'} | "
+            f"{'pass' if verdict.condition3_pass else 'fail'} | "
+            f"{verdict.condition3_reading} | "
+            f"{'pass' if verdict.all_pass else 'fail'} |"
+        )
+    lines.append("")
+    return lines
+
+
+# ---------------------------------------------------------------------------
 # Report assembly + rendering + writing
 # ---------------------------------------------------------------------------
 
@@ -857,6 +1467,10 @@ class NorthStarReport:
     # issue athenaeum#1726: Phase 2 write-path measurement, empty when this
     # run carried none (every pre-athenaeum#1726 caller of build_report).
     write_path_stats: tuple[WritePathStats, ...] = ()
+    # issue athenaeum#1734: Phase 2 write SPEND (distinct from write_path_stats'
+    # retention accuracy), empty for a Phase-1-only run. Appended last so
+    # existing positional construction and sibling-lane merges stay safe.
+    write_costs: tuple[WriteCost, ...] = ()
 
 
 def build_report(
@@ -865,6 +1479,7 @@ def build_report(
     aborted: bool = False,
     abort_reason: str = "",
     write_path_stats: Sequence[WritePathStats] = (),
+    write_costs: Sequence[WriteCost] = (),
 ) -> NorthStarReport:
     """Assemble a :class:`NorthStarReport` from decoded result-store rows.
 
@@ -888,6 +1503,7 @@ def build_report(
         corpus_digests=digests,
         weak_probes=weak_probes(rows),
         write_path_stats=tuple(write_path_stats),
+        write_costs=tuple(write_costs),
     )
 
 
@@ -922,6 +1538,13 @@ def render_report(report: NorthStarReport) -> str:
         "a **measurement, not a regression gate**; nothing here should ever fail a build."
     )
     lines.append("")
+
+    lines.extend(render_decision_block(report))
+    lines.extend(
+        render_cost_per_correct_table(
+            compute_cost_per_correct(report.rows, write_costs=report.write_costs)
+        )
+    )
 
     lines.append("## Arms in this report (athenaeum#1574)")
     lines.append("")
