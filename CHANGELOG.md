@@ -30,6 +30,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `run_native_writer_api`, `"cli"` calls `run_native_writer` unchanged — the
   seam the Phase 2 CLI flags (athenaeum#1785) will dispatch through.
 
+  Quine review of the same PR found two must-fixes and two shoulds,
+  addressed on the same branch (issue athenaeum#1774): (1) the fidelity
+  caveat naming the two opposite-direction divergences between the
+  reconstructed prompt and Claude Code's real write-side prompt now lives
+  in the design doc itself (§5), not only the PR body/docstrings, and
+  `NativeWriterResult` gains `prompt_fidelity` (`"reconstructed"` for
+  api-mode, `None` for cli) so a report can label Phase 2 write-path
+  numbers as an approximation; (2) the writer's system prompt claimed
+  MEMORY.md index lines "are loaded in full at the start of every
+  session" — corrected to state the real 200-line/25KB cap (design doc
+  §2), pinned by a test; (3) a new contract test runs both
+  `run_native_writer` (stubbed `claude -p`) and `run_native_writer_api`
+  (stub client) on the same fixture stream and asserts the same fields
+  populate on both, differing only in `mode` and `prompt_fidelity`; (4)
+  the writer gets its own turn budget (`_WRITER_API_LOOP_MAX_TURNS = 12`,
+  distinct from the read arms' `_API_LOOP_MAX_TURNS = 6`, since one
+  observation can legitimately need `list`, a `read`/`grep` check, a
+  `write`/`edit`, and an index update), and `NativeWriterSession` gains
+  `turns_exhausted: bool` so a report can tell "the model finished
+  filing" from "the harness cut it off," pinned by tests on both sides.
+
 - **Offline retrieval-coverage test: every grep-reachable expected page
   must also surface in `recall` (issue athenaeum#1770).**
   `tests/evals/test_recall_covers_grep.py` materialises the `core` and
