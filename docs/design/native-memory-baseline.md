@@ -355,6 +355,11 @@ query path out of this module's scope) -- see the module's `_FTS5_XFAIL` /
 `_VECTOR_XFAIL` sets and the PR body that introduced them for the full list
 and a proposed follow-up issue.
 
+The first measurement report under this design is
+[`../measurements/native-memory-baseline-2026-09-17.md`](../measurements/native-memory-baseline-2026-09-17.md)
+(issue athenaeum#1724, workflow run 35272748886, Phase 1 only, cutoff scale
+`none`).
+
 ## 6. What is measured
 
 The dimensions already defined for the north-star report
