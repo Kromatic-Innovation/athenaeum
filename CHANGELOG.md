@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Token-free eval-receipt check for LLM-surface PRs (issue athenaeum#1731).**
+  A new advisory workflow, `.github/workflows/eval-receipt-check.yml`,
+  intersects a PR's changed paths against the LLM surface list
+  (`.github/llm-surface.txt`) and, when non-empty, requires either an
+  `Evals: <run-url>` receipt pointing at a matching `evals.yml`
+  `workflow_dispatch` run or an `Evals: not needed — <reason>` line in the
+  PR body — closing the gap where `evals.yml`'s `eval` job (manual-dispatch
+  only since athenaeum#1727) could be silently skipped on a change that
+  should have prompted one. Zero network beyond `gh` reads against the
+  default `GITHUB_TOKEN`; no Anthropic key; `evals.yml`'s own triggers are
+  untouched. The decision logic lives in
+  `scripts/check_llm_surface_receipt.py` (offline-testable via an injected
+  run-lookup); `tests/test_llm_surface.py` fails CI if a file importing
+  `LLMBackend` or registered in `prompt_registry.py`'s `PROMPTS` is missing
+  from the surface list. Documented in `tests/evals/README.md`.
 - **`follow_through` synthetic-corpus probe class (issue athenaeum#1737).** A
   new probe class whose complete answer requires opening the page a query
   surfaces and following a body `[[wikilink]]` to a second page the query's

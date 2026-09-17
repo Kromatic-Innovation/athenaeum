@@ -1,0 +1,90 @@
+name: Eval Receipt Check
+
+# athenaeum#1731: evals.yml's `eval` job runs on manual workflow_dispatch
+# only (operator decision 2026-09-16, docs/design/native-memory-baseline.md
+# §9) — nothing runs it automatically when a PR touches an LLM-facing
+# module. This workflow is the token-free half that closes the gap: it
+# notices when a PR touches the LLM surface (`.github/llm-surface.txt`,
+# the ONE list this workflow and `tests/test_llm_surface.py` both read)
+# and requires either a receipt pointing at a matching dispatched run, or
+# an explicit "not needed" line — see `scripts/check_llm_surface_receipt.py`
+# for the full decision logic and `tests/evals/README.md` for the receipt
+# line's documented format.
+#
+# Deliberately NOT path-filtered: an `on.pull_request.paths` block would be
+# a second copy of the surface list, and — worse — a path-filtered job that
+# does not run reports no status at all, which for an advisory check is
+# indistinguishable from "passed." Instead this job always runs and the
+# script decides: an empty intersection with the surface list is a
+# trivial pass (see AC3's docs-only-PR case).
+#
+# `types: [opened, synchronize, reopened, edited]` — `edited` matters here
+# specifically: adding the `Evals:` receipt line to an already-open PR is a
+# body edit, not a new commit, and without `edited` in this list the check
+# would never re-run to pick it up.
+#
+# Zero network beyond `gh` reads against the default `GITHUB_TOKEN` — no
+# Anthropic key, no push trigger, evals.yml's own triggers untouched.
+#
+# Status: ADVISORY, not a required status context — its own workflow file,
+# not folded into ci.yml's `ci-required` aggregate, matching
+# embedding-pr.yml's convention (athenaeum#1609).
+#
+# Third-party actions pinned to full commit SHAs for supply-chain hygiene,
+# matching ci.yml's convention.
+
+on:
+  pull_request:
+    branches: [develop]
+    types: [opened, synchronize, reopened, edited]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+# Least-privilege: read-only checkout plus a read of the PR body via `gh`.
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  eval-receipt:
+    name: LLM surface touched -> eval receipt required
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Fetch PR body
+        # Read via `gh` into a file rather than interpolating
+        # `${{ github.event.pull_request.body }}` into a `run:` block —
+        # this is a public repo, and arbitrary PR-body text landing in a
+        # shell string is a script-injection surface. `gh pr view` needs
+        # only the default GITHUB_TOKEN's `pull-requests: read` scope.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr view "${{ github.event.pull_request.number }}" \
+            --repo "${{ github.repository }}" \
+            --json body -q .body > pr-body.txt
+
+      - name: Check LLM surface + eval receipt
+        env:
+          # `scripts/check_llm_surface_receipt.py` shells out to `gh run
+          # view` when a receipt URL is present, to verify the dispatched
+          # run's headSha/event — same default-token read as the PR-body
+          # fetch above.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python scripts/check_llm_surface_receipt.py \
+            --surface-file .github/llm-surface.txt \
+            --base-sha "${{ github.event.pull_request.base.sha }}" \
+            --head-sha "${{ github.event.pull_request.head.sha }}" \
+            --pr-body-file pr-body.txt \
+            --repo "${{ github.repository }}"

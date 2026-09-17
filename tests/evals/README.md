@@ -13,6 +13,36 @@ sidecar could move a result; a docs or tooling change does not warrant a
 run. (The same workflow's token-free `embedding-suite` job still runs on
 push to `main`; see the workflow header.)
 
+### The `Evals:` receipt line (issue athenaeum#1731)
+
+Manual dispatch is easy to forget, so `.github/workflows/eval-receipt-check.yml`
+(token-free, no Anthropic key — see that workflow's header) checks every PR
+to `develop` for whether it touches the **LLM surface**, the list kept in
+`.github/llm-surface.txt`. When it does, the PR body must carry one of:
+
+- **`Evals: <run-url>`** — a link to an `evals.yml` `workflow_dispatch` run
+  (e.g. `https://github.com/Kromatic-Innovation/athenaeum/actions/runs/123456789`)
+  whose `headSha` matches this PR's head commit. Get the URL from
+  `gh run view <id> --json url -q .url` after dispatching, or copy it from
+  the Actions tab. A run from a stale head SHA, from a different event
+  (`push` instead of `workflow_dispatch`), or from a different repo does
+  not satisfy the check — re-dispatch after the last push.
+- **`Evals: not needed — <reason>`** — for a PR that touches a surface
+  file without moving anything an eval would catch (e.g. a comment-only
+  edit, or this very check's own CI-only plumbing). The reason after the
+  dash (`-`, `–`, or `—`) must be non-empty; a bare `Evals: not needed`
+  does not pass.
+
+The check runs on `opened`/`synchronize`/`reopened`/**and `edited`** — the
+last one specifically so that adding the receipt line to an already-open
+PR (a body edit, not a new commit) re-triggers the check without needing a
+fresh push. It is **advisory**: it fails loudly and names the touched
+files, but is not in `ci.yml`'s required-checks aggregate (matching
+`embedding-pr.yml`'s convention). The decision logic lives in
+`scripts/check_llm_surface_receipt.py`, exercised offline by
+`tests/test_llm_surface_receipt.py`; `.github/llm-surface.txt`'s own rot
+check is `tests/test_llm_surface.py`.
+
 Layers exercised end-to-end against a real Claude API call:
 
 | Layer     | Model                              | Golden set size | Floor  |

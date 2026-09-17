@@ -1,0 +1,71 @@
+# LLM surface list — athenaeum#1731
+#
+# One path per line, relative to the repo root. Blank lines and lines
+# starting with `#` are ignored. An entry ending in `/` matches any path
+# under that directory (prefix match); anything else must match a changed
+# path exactly.
+#
+# This is the ONE file both `scripts/check_llm_surface_receipt.py` (the
+# `.github/workflows/eval-receipt-check.yml` gate) and
+# `tests/test_llm_surface.py` (the rot check) read — see that test's
+# docstring for what "rot" means here.
+#
+# Two provenances, both legitimate:
+#
+#   MACHINE-ENFORCED — `tests/test_llm_surface.py` fails CI if either of
+#   these sets gains a member not listed below:
+#     - every `src/athenaeum/*.py` file that imports `LLMBackend`
+#       (`grep -l LLMBackend src/athenaeum/*.py`, the athenaeum#1731 AC1
+#       oracle)
+#     - every module registered in `src/athenaeum/prompt_registry.py`'s
+#       `PROMPT_META` (i.e. every module that owns a prompt indexed in
+#       `PROMPTS`)
+#
+#   HAND-CURATED — from the athenaeum#1731 architecture survey (2026-09-16),
+#   not derived by any test, but no less real a surface: the model-knob
+#   resolution seam and the sidecar delivery path. Nothing removes these
+#   automatically, so an intentional removal (e.g. `config.py` losing its
+#   model-knob functions) should drop the entry in the same PR.
+#
+# The rot check is a SUBSET check (machine-enforced sets subset-of this
+# file), not equality — hand-curated entries are always legal even though
+# no test requires them.
+
+# --- machine-enforced: LLMBackend importers (src/athenaeum/*.py) ---
+src/athenaeum/answers.py
+src/athenaeum/batch.py
+src/athenaeum/claim_kind.py
+src/athenaeum/cluster_comparator.py
+src/athenaeum/comparator.py
+src/athenaeum/comparator_instruments.py
+src/athenaeum/contradictions.py
+src/athenaeum/decay_sweep.py
+src/athenaeum/librarian.py
+src/athenaeum/merge.py
+src/athenaeum/models.py
+src/athenaeum/provider.py
+src/athenaeum/reasoning_screens.py
+src/athenaeum/recompare.py
+src/athenaeum/resolutions.py
+src/athenaeum/shadow_parity.py
+src/athenaeum/subject_population.py
+src/athenaeum/tiers.py
+src/athenaeum/wiki_dedupe.py
+
+# --- machine-enforced: modules registered in prompt_registry.py's PROMPTS ---
+src/athenaeum/audit.py
+src/athenaeum/page_description.py
+src/athenaeum/query_topics.py
+src/athenaeum/reasoning_tiers.py
+src/athenaeum/rule_proposals.py
+
+# --- hand-curated: the seam + prompt index itself ---
+src/athenaeum/config.py
+src/athenaeum/prompt_registry.py
+docs/design/prompts.md
+
+# --- hand-curated: the sidecar delivery path ---
+examples/claude-code/user-prompt-recall.sh
+src/athenaeum/context.py
+src/athenaeum/sidecar_blocks.py
+src/athenaeum/search.py
