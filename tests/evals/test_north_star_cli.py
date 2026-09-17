@@ -290,7 +290,13 @@ def test_mode_is_threaded_through_to_run_probe_all_arms(
         search_backend: str,
         claude_binary: str,
         replicate: int,
-        mode: str = "cli",
+        # Deliberately NEITHER "api" NOR "cli" (Quine review, issue
+        # athenaeum#1733 SHOULD item 5): if north_star_cli.py ever drops its
+        # own `mode=mode` kwarg at the call site, this stub's default is what
+        # `_run_cells` would silently fall back to -- and "sentinel-default"
+        # can never match either value the test explicitly requests below,
+        # so a dropped kwarg fails LOUDLY instead of coincidentally matching.
+        mode: str = "sentinel-default",
     ) -> dict[str, RolloutRecord]:
         seen_modes.append(mode)
         return _stub_records(probe_id, corpus_scale)

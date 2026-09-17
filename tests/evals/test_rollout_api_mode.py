@@ -115,14 +115,19 @@ def test_truncate_native_index_pins_the_200_line_25kb_cap_at_medium_scale(
 
     # The full index really does overflow both caps at this scale -- if it
     # did not, this test would be pinning a truncation that never engages.
+    # Counted by Python str length (Quine review, issue athenaeum#1733), NOT
+    # UTF-8 encoded bytes -- the actual cap truncate_native_index enforces;
+    # this corpus's index lines contain an em dash (3 UTF-8 bytes, 1 char),
+    # so a byte-encoded assertion here would test a DIFFERENT cap than the
+    # one the function actually applies.
     assert written.count("\n- ") + (1 if written.startswith("- ") else 0) > NATIVE_INDEX_MAX_LINES
-    assert len(written.encode("utf-8")) > NATIVE_INDEX_MAX_BYTES
+    assert len(written) > NATIVE_INDEX_MAX_BYTES
 
     truncated = truncate_native_index(written)
 
     bullet_lines = [line for line in truncated.splitlines() if line.startswith("- ")]
     assert len(bullet_lines) <= NATIVE_INDEX_MAX_LINES
-    assert len(truncated.encode("utf-8")) <= NATIVE_INDEX_MAX_BYTES
+    assert len(truncated) <= NATIVE_INDEX_MAX_BYTES
     # Never a partial line: every line in the truncated text is a COMPLETE
     # line that also appears, verbatim, in the untruncated index.
     written_lines = set(written.splitlines())
@@ -195,6 +200,11 @@ def test_native_grep_api_recorded_fixture_replay_end_to_end(tmp_path: Path) -> N
     round_tripped = RolloutRecord.from_payload(record.to_payload())
     assert round_tripped.mode == "api"
     assert round_tripped.answer == record.answer
+    # Quine review, issue athenaeum#1733 SHOULD item 3: the native arm's
+    # system prompt must mention the memory directory (never the single-shot
+    # arms' "answer using only the context supplied" prompt).
+    sent_system = client.calls[0]["system"]
+    assert str(tmp_path) in sent_system
 
 
 # ---------------------------------------------------------------------------
@@ -255,3 +265,9 @@ def test_pull_api_recorded_fixture_shows_recall_tool_call_with_query_captured(
 
     delivered = _pull_delivered_text(record)
     assert delivered, f"expected non-empty delivered text; transcript={record.transcript!r}"
+    # Quine review, issue athenaeum#1733 SHOULD item 3: the PULL-style system
+    # prompt must mention the recall tool (never the single-shot arms'
+    # "answer using only the context supplied" prompt, which actively
+    # discourages calling one).
+    sent_system = client.calls[0]["system"]
+    assert "recall" in sent_system

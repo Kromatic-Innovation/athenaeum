@@ -51,12 +51,18 @@ def _fake_completed_process(*args: Any, **kwargs: Any) -> subprocess.CompletedPr
 
 
 @pytest.fixture(autouse=True)
-def _fake_claude_binary(monkeypatch: pytest.MonkeyPatch) -> None:
+def _fake_claude_binary(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Every test in this module gets a fake ``claude`` on PATH (so the
-    ``shutil.which`` gate passes) and a fake ``subprocess.run`` (so no real
-    process is ever spawned)."""
+    ``shutil.which`` gate passes), a fake ``subprocess.run`` (so no real
+    process is ever spawned), and an isolated ``CLAUDE_CONFIG_DIR`` (Quine
+    review, issue athenaeum#1733 MUST item 1): the native CLI runners call
+    ``seed_native_claude_config``, which reads ``CLAUDE_CONFIG_DIR`` (falling
+    back to the OPERATOR's real ``~/.claude.json`` when unset) -- this
+    fixture's whole point is a fully offline test, so it must never touch
+    that real file, on this host or any other this suite ever runs on."""
     monkeypatch.setattr("tests.evals.rollout.shutil.which", lambda _name: "/usr/bin/fake-claude")
     monkeypatch.setattr("tests.evals.rollout.subprocess.run", _fake_completed_process)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config-isolated"))
 
 
 def _pto_probe():
@@ -116,27 +122,33 @@ def test_run_push_breadcrumb_pull_api_records_mode_api(tmp_path: Path) -> None:
     probe, corpus = _pto_probe()
     corpus.materialize(tmp_path)
     session = EvalSession()
+    client = _fake_llm_client()
     record = run_push_breadcrumb_pull_api(
         probe,
         tmp_path,
         tmp_path / "hook_home",
         tmp_path / "cache",
         "core",
-        client=_fake_llm_client(),
+        client=client,
         session=session,
         context_fn=lambda *a, **k: "",
         search_backend="keyword",
     )
     assert record.mode == "api"
+    # Quine review, issue athenaeum#1733 SHOULD item 3: PULL-style system
+    # prompt mentions the recall tool.
+    assert "recall" in client.calls[0]["system"]
 
 
 def test_run_native_index_api_records_mode_api(tmp_path: Path) -> None:
     probe, corpus = _pto_probe()
     session = EvalSession()
-    record = run_native_index_api(
-        probe, tmp_path, "core", client=_fake_llm_client(), session=session
-    )
+    client = _fake_llm_client()
+    record = run_native_index_api(probe, tmp_path, "core", client=client, session=session)
     assert record.mode == "api"
+    # Quine review, issue athenaeum#1733 SHOULD item 3: native system prompt
+    # mentions the memory directory.
+    assert str(tmp_path) in client.calls[0]["system"]
 
 
 def test_run_native_grep_api_records_mode_api(tmp_path: Path) -> None:

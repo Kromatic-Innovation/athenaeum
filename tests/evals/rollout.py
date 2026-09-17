@@ -72,6 +72,7 @@ so no ``tests/fixtures/layer_declarations.py`` entry is needed.
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import json
 import os
 import re
@@ -1508,10 +1509,29 @@ def _recall_tool_schema(wiki_root: Path) -> dict[str, Any]:
     -- issue athenaeum#1733 Quine review: a two-sentence paraphrase is not
     the same tool a real MCP connection would offer, and the model's
     tool-choice behavior can depend on that description's actual content.
+
+    ``inspect.cleandoc`` is applied to the docstring for the SAME reason
+    FastMCP itself applies it (matching ``inspect.getdoc``'s normalization)
+    before turning a function's docstring into a served tool description --
+    the raw triple-quoted string still carries the source file's function-
+    body indentation; without cleaning, this schema's description would
+    never byte-match what a real MCP client actually receives from the
+    live ``recall`` tool (pinned by
+    ``tests/test_recall_tool_schema_parity.py``).
     """
+    full_doc = inspect.cleandoc(recall_tool_docstring(_entity_classes_str_for(wiki_root)))
+    # FastMCP's own `.description` is only the SUMMARY portion of a
+    # docstring -- everything before the "Args:" section, which it instead
+    # decomposes into each parameter's own schema-level description (already
+    # mirrored, separately, in :data:`RECALL_TOOL_INPUT_SCHEMA`). Splitting
+    # here the same way is what makes this description byte-match the REAL
+    # served tool's, pinned by ``tests/test_recall_tool_schema_parity.py``,
+    # rather than sending the model a description with a redundant Args:
+    # section its own tool schema already encodes structurally.
+    summary = full_doc.split("\n\nArgs:")[0].strip()
     return {
         "name": RECALL_TOOL_NAME,
-        "description": recall_tool_docstring(_entity_classes_str_for(wiki_root)),
+        "description": summary,
         "input_schema": RECALL_TOOL_INPUT_SCHEMA,
     }
 
@@ -1545,32 +1565,79 @@ def _native_grep_system_prompt(memory_dir: Path) -> str:
     )
 
 
-#: The literal marker Claude Code's own truncated ``MEMORY.md`` load ends
-#: with (verified present in this container, design doc §4 / this module's
-#: own :func:`_native_index_coverage` docstring). Injected by
-#: :func:`_native_index_text_with_warning` ONLY when :func:`truncate_native_index`
-#: actually cut something, so api mode's model sees the SAME truncation
-#: signal a real Claude Code session would -- never invented for a file that
-#: fit under the cap.
-NATIVE_INDEX_TRUNCATION_WARNING = (
-    "\n> WARNING: This file was truncated to fit the auto-memory load budget "
-    "(200 lines / 25KB). Read topic files directly for anything past this "
-    "point.\n"
-)
+#: Max chars of the first cut-off line shown in the ``WARNING:`` marker's
+#: quoted preview -- long enough to be recognizable, short enough not to
+#: dominate the marker itself.
+_NATIVE_INDEX_WARNING_SNIPPET_MAX_CHARS = 40
+
+
+def _format_char_budget(n: int) -> str:
+    """*n* characters, formatted the way the real loader's own ``(limit:
+    25KB)`` clause renders a size -- one decimal place, ``KB`` suffix."""
+    return f"{n / 1024:.1f}KB"
+
+
+def _native_index_warning_snippet(line: str) -> str:
+    stripped = line.strip()
+    if len(stripped) > _NATIVE_INDEX_WARNING_SNIPPET_MAX_CHARS:
+        return stripped[:_NATIVE_INDEX_WARNING_SNIPPET_MAX_CHARS] + "..."
+    return stripped
 
 
 def _native_index_text_with_warning(written: str, truncated: str) -> tuple[str, bool]:
     """Returns ``(text_to_inject, was_truncated)``. *truncated* is
     :func:`truncate_native_index`'s pure output (never touched by this
-    function -- the cap arithmetic it pins stays exactly as tested); this
-    function only decides whether to APPEND the warning marker, based on
-    whether *truncated* actually differs from *written* (trailing-whitespace
-    normalized, matching :func:`_native_index_coverage`'s own comparison).
+    function -- the cap arithmetic it pins stays exactly as tested); when it
+    differs from *written*, this function APPENDS the ``WARNING:`` marker,
+    reproducing Claude Code 2.1.274's own truncation-notice template
+    (extracted from the binary, Quine review issue athenaeum#1733):
+
+        (blank line)
+        > WARNING: MEMORY.md is {N lines (limit: 200) | X (limit: 25KB) --
+        index entries are too long | both}. Only part of it was loaded: {M
+        of N lines were cut off, starting at line L ("...")}. Keep index
+        entries to one line under ~200 chars; move detail into topic files.
+
+    N/X/M/L are filled from THIS truncation (never hardcoded): N is the
+    total line count of *written*, X its total character length, M the
+    count of lines actually dropped, L the 1-indexed line number the drop
+    starts at, and the quoted preview is the first
+    :data:`_NATIVE_INDEX_WARNING_SNIPPET_MAX_CHARS` characters of that first
+    dropped line. The size clause names lines/chars/both based on which cap
+    *written* itself exceeds (a property of the file, independent of which
+    cap happened to bind the actual cut -- exactly what the real message
+    describes). The ``> WARNING:`` prefix is kept verbatim -- it is what
+    :func:`_native_index_coverage`'s own CLI-mode detector keys on.
     """
-    was_truncated = truncated.rstrip() != written.rstrip()
-    if was_truncated:
-        return truncated + NATIVE_INDEX_TRUNCATION_WARNING, True
-    return truncated, False
+    written_lines = written.splitlines(keepends=True)
+    truncated_lines = truncated.splitlines(keepends=True)
+    was_truncated = len(truncated_lines) < len(written_lines)
+    if not was_truncated:
+        return truncated, False
+
+    total_lines = len(written_lines)
+    total_chars = len(written)
+    cutoff = len(truncated_lines)
+    cut_count = total_lines - cutoff
+    start_line = cutoff + 1
+
+    exceeded_lines = total_lines > NATIVE_INDEX_MAX_LINES
+    exceeded_chars = total_chars > NATIVE_INDEX_MAX_BYTES
+    if exceeded_lines and exceeded_chars:
+        size_clause = "both"
+    elif exceeded_lines:
+        size_clause = f"{total_lines} lines (limit: 200)"
+    else:
+        size_clause = f"{_format_char_budget(total_chars)} (limit: 25KB) -- index entries are too long"
+
+    snippet = _native_index_warning_snippet(written_lines[cutoff]) if cutoff < total_lines else ""
+    warning = (
+        f"\n> WARNING: MEMORY.md is {size_clause}. Only part of it was loaded: "
+        f'{cut_count} of {total_lines} lines were cut off, starting at line '
+        f'{start_line} ("{snippet}"). Keep index entries to one line under '
+        f"~200 chars; move detail into topic files.\n"
+    )
+    return truncated + warning, True
 
 
 def _native_grep_tool_schema() -> dict[str, Any]:
@@ -1681,29 +1748,39 @@ def truncate_native_index(
     text: str,
     *,
     max_lines: int = NATIVE_INDEX_MAX_LINES,
-    max_bytes: int = NATIVE_INDEX_MAX_BYTES,
+    max_chars: int = NATIVE_INDEX_MAX_BYTES,
 ) -> str:
     """Apply Claude Code's documented auto-memory load cap to *text* --
-    the first *max_lines* lines OR *max_bytes* bytes, whichever comes first
-    (design doc §2/§4) -- so api-mode NATIVE_INDEX can inject the SAME
-    truncated index CLI mode receives from Claude Code's own loader, rather
-    than the full, untruncated ``MEMORY.md``.
+    the first *max_lines* lines, THEN (within that window) cut further by
+    cumulative STRING LENGTH once past *max_chars* (design doc §2/§4) -- so
+    api-mode NATIVE_INDEX can inject the SAME truncated index CLI mode
+    receives from Claude Code's own loader, rather than the full,
+    untruncated ``MEMORY.md``.
 
-    Counts whole lines only: a line that would push the cumulative byte
-    count past *max_bytes* is dropped in full, never split -- matching the
+    Counted by Python ``str`` length, NOT UTF-8 encoded bytes (Quine review,
+    issue athenaeum#1733) -- the real loader measures string length the way
+    its own runtime does, and this corpus's index lines contain multi-byte
+    characters (an em dash between name and description) that a byte count
+    would over-weight relative to the real cap. The line cap is applied
+    FIRST and the char cap only within what remains, matching the real
+    loader's own two-stage behavior, not two independent caps taken as a
+    minimum over the whole file.
+
+    Counts whole lines only: a line that would push the cumulative char
+    count past *max_chars* is dropped in full, never split -- matching the
     CLI path's own observation (`_native_index_coverage`'s docstring) that
     the real loader's truncation is a content boundary, not an arbitrary
-    byte cut. Never raises; an empty *text* returns ``""``.
+    character cut. Never raises; an empty *text* returns ``""``.
     """
     lines = text.splitlines(keepends=True)
     out: list[str] = []
-    total_bytes = 0
+    total_chars = 0
     for line in lines[:max_lines]:
-        line_bytes = len(line.encode("utf-8"))
-        if total_bytes + line_bytes > max_bytes:
+        line_chars = len(line)
+        if total_chars + line_chars > max_chars:
             break
         out.append(line)
-        total_bytes += line_bytes
+        total_chars += line_chars
     return "".join(out)
 
 
@@ -1733,16 +1810,25 @@ def _api_response_blocks(response: Any) -> list[dict[str, Any]]:
 def run_api_tool_loop(
     *,
     user_prompt: str,
+    system: str,
     tools: list[dict[str, Any]],
     tool_executor: Callable[[str, dict[str, Any]], str],
     client: Any,
     session: EvalSession,
     model: str,
-    system: str = _SYSTEM_PROMPT,
     max_turns: int = _API_LOOP_MAX_TURNS,
 ) -> tuple[str, list[ToolCall], list[TurnTokenUsage], int, list[dict[str, Any]]]:
     """Drive one Anthropic Messages API tool-use loop to completion (or
     *max_turns*), starting from a single user message.
+
+    *system* has NO default (Quine review, issue athenaeum#1733): every
+    caller must pass an arm-appropriate prompt explicitly -- there is no
+    safe generic fallback, and the single-shot arms' own ``_SYSTEM_PROMPT``
+    ("answer using ONLY the context supplied") is actively WRONG for a
+    tool-using loop, since it discourages the very tool call this loop
+    exists to observe. A missing *system* is a caller bug, not a case to
+    silently paper over with a default that would be wrong for every arm
+    that forgot to pass one.
 
     Returns ``(answer, tool_calls, turn_tokens, turn_count, transcript)`` --
     the exact tuple every api-mode arm function assembles its

@@ -728,6 +728,30 @@ def test_pull_arm_receives_the_knowledge_root_not_the_wiki_root(tmp_path: Path) 
             answer="stub breadcrumb-pull answer",
         )
 
+    # Stubbed too (Quine review, issue athenaeum#1733 SHOULD item 8): with no
+    # native_index_runner/native_grep_runner override, mode="cli" falls
+    # through to the REAL run_native_index/run_native_grep, which spawn a
+    # genuine `claude -p` and read the operator's own `~/.claude.json` on any
+    # host that happens to have the CLI installed -- exactly the network/home
+    # -reading escape this offline suite must never have.
+    def _stub_native_index_runner(probe, materialize_root, corpus_scale, **kwargs) -> RolloutRecord:
+        return RolloutRecord(
+            arm=Arm.NATIVE_INDEX,
+            probe_id=probe.id,
+            probe_class=probe.probe_class,
+            corpus_scale=corpus_scale,
+            answer="stub native index answer",
+        )
+
+    def _stub_native_grep_runner(probe, materialize_root, corpus_scale, **kwargs) -> RolloutRecord:
+        return RolloutRecord(
+            arm=Arm.NATIVE_GREP,
+            probe_id=probe.id,
+            probe_class=probe.probe_class,
+            corpus_scale=corpus_scale,
+            answer="stub native grep answer",
+        )
+
     run_probe_all_arms(
         "pto_allowance",
         "core",
@@ -739,6 +763,8 @@ def test_pull_arm_receives_the_knowledge_root_not_the_wiki_root(tmp_path: Path) 
         pull_runner=_capturing_pull_runner,
         breadcrumb_context_fn=_capturing_breadcrumb_context_fn,
         breadcrumb_pull_runner=_stub_breadcrumb_pull_runner,
+        native_index_runner=_stub_native_index_runner,
+        native_grep_runner=_stub_native_grep_runner,
     )
 
     # The knowledge root is the PARENT of the materialized wiki tree, and the

@@ -58,10 +58,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   own description/parameters via `athenaeum.mcp_server.recall_tool_docstring`
   / `RECALL_TOOL_INPUT_SCHEMA`; native arms are told their memory directory's
   path and that `MEMORY.md` is an index). `NATIVE_INDEX` applies the
-  documented 200-line/25KB truncation itself (`truncate_native_index`),
-  injects the same `WARNING:` marker text a real truncated load ends with,
-  and records `truncated_by_harness` separately from `truncated_by_claude_code`
-  (always false for api rows). Every emitted transcript matches the CLI
+  documented 200-line/25KB truncation itself (`truncate_native_index`, cut
+  by string length rather than UTF-8 bytes, matching the real loader),
+  injects a reproduction of Claude Code 2.1.274's own truncation-notice
+  template (extracted from the binary; filled from the actual truncation
+  performed, never hardcoded), and records `truncated_by_harness` separately
+  from `truncated_by_claude_code` (always false for api rows). Every
+  emitted transcript matches the CLI
   path's own stream-json-derived shape byte-for-byte, so
   `north_star_report.py` needs no mode branch to compute
   delivered-text/utilization metrics. `RolloutRecord.mode` (`"api"`/`"cli"`)

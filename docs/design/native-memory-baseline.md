@@ -100,12 +100,14 @@ the finding, not a confound. `NATIVE_GREP` isolates the no-index case so a
 result can say whether the index helped at all.
 
 In API mode the harness builds the index and applies the documented
-truncation itself (first 200 lines or 25KB, whichever comes first), pinned by
+truncation itself (first 200 lines, then a further cut by STRING LENGTH --
+not UTF-8 bytes -- within that window, matching the real loader), pinned by
 a test, and injects it as the first user turn to mirror Claude Code's load,
-appending the same `WARNING:` marker text a real truncated load ends with
-when the cap actually bound (recorded as `truncated_by_harness`, since a
-harness truncation is a distinct fact from `truncated_by_claude_code`). In
-CLI mode the auto-memory directory is supplied through `autoMemoryDirectory`
+appending a reproduction of Claude Code 2.1.274's own truncation-notice
+template when the cap actually bound (N/X/M/L filled from the actual
+truncation performed; recorded as `truncated_by_harness`, since a harness
+truncation is a distinct fact from `truncated_by_claude_code`). In CLI mode
+the auto-memory directory is supplied through `autoMemoryDirectory`
 in a settings file passed to the subprocess, so Claude Code performs its own
 load and truncation.
 

@@ -136,6 +136,7 @@ def test_run_api_tool_loop_survives_a_raising_tool_executor() -> None:
 
     answer, tool_calls, turn_tokens, turn_count, transcript = run_api_tool_loop(
         user_prompt="q",
+        system="test system prompt",
         tools=[],
         tool_executor=_raising_executor,
         client=client,
@@ -166,6 +167,7 @@ def test_tool_result_carries_tool_use_id_and_is_appended_to_messages() -> None:
 
     run_api_tool_loop(
         user_prompt="q",
+        system="test system prompt",
         tools=[],
         tool_executor=lambda name, ti: "grep result",
         client=client,
@@ -173,11 +175,26 @@ def test_tool_result_carries_tool_use_id_and_is_appended_to_messages() -> None:
         model="test-model",
     )
 
-    # The SECOND client.messages.create call must have received the
-    # tool_result message, carrying the same tool_use_id the model emitted.
+    # The SECOND client.messages.create call must have received the FULL
+    # role sequence in order: the original user prompt, the assistant's
+    # tool_use turn appended verbatim, THEN the tool_result -- not just the
+    # tail (Quine review, issue athenaeum#1733 SHOULD item 6: a mutant that
+    # dropped the assistant append, or appended tool_result before the
+    # assistant turn, would still pass a tail-only check).
     second_call_messages = client.calls[1]["messages"]
-    tool_result_message = second_call_messages[-1]
-    assert tool_result_message["role"] == "user"
+    assert [m["role"] for m in second_call_messages] == ["user", "assistant", "user"]
+
+    original_user_message = second_call_messages[0]
+    assert original_user_message["content"] == "q"
+
+    assistant_message = second_call_messages[1]
+    assistant_blocks = assistant_message["content"]
+    assert len(assistant_blocks) == 1
+    assert assistant_blocks[0]["type"] == "tool_use"
+    assert assistant_blocks[0]["id"] == "toolu_abc"
+    assert assistant_blocks[0]["name"] == "grep"
+
+    tool_result_message = second_call_messages[2]
     block = tool_result_message["content"][0]
     assert block["type"] == "tool_result"
     assert block["tool_use_id"] == "toolu_abc"
@@ -189,20 +206,24 @@ def test_tool_result_carries_tool_use_id_and_is_appended_to_messages() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_truncate_native_index_byte_cap_binds_before_line_cap_with_long_lines() -> None:
-    """Long lines can overflow the 25KB byte cap well before 200 lines
-    accumulate -- the byte cap must bind FIRST in that case, not merely be
-    checked second and never actually engage."""
-    long_line = "- " + ("x" * 300) + "\n"  # ~303 bytes/line
-    text = long_line * 100  # 100 lines (< 200-line cap), ~30300 bytes (> 25KB cap)
-    assert len(text.encode("utf-8")) > NATIVE_INDEX_MAX_BYTES
+def test_truncate_native_index_char_cap_binds_before_line_cap_with_long_lines() -> None:
+    """Long lines can overflow the 25KB CHARACTER cap well before 200 lines
+    accumulate -- the char cap must bind FIRST in that case, not merely be
+    checked second and never actually engage. Cut by Python ``str`` length,
+    not UTF-8 encoded bytes (Quine review, issue athenaeum#1733) -- ASCII-only
+    content here so char count and byte count coincide numerically, but the
+    assertions below are written against ``len(str)``, the actual cap this
+    module enforces, not a byte-encoding proxy for it."""
+    long_line = "- " + ("x" * 300) + "\n"  # ~303 chars/line
+    text = long_line * 100  # 100 lines (< 200-line cap), ~30300 chars (> 25KB char cap)
+    assert len(text) > NATIVE_INDEX_MAX_BYTES
     assert len(text.splitlines()) < NATIVE_INDEX_MAX_LINES
 
     truncated = truncate_native_index(text)
 
-    assert len(truncated.encode("utf-8")) <= NATIVE_INDEX_MAX_BYTES
+    assert len(truncated) <= NATIVE_INDEX_MAX_BYTES
     truncated_lines = truncated.splitlines()
-    assert len(truncated_lines) < 100  # the byte cap bound it, not the (uncrossed) line cap
+    assert len(truncated_lines) < 100  # the char cap bound it, not the (uncrossed) line cap
     for line in truncated_lines:
         assert line == long_line.rstrip("\n")  # never a partial line
 
@@ -230,8 +251,33 @@ def test_native_index_api_injects_the_truncated_text_as_the_first_user_turn(
     sent_first_message = client.calls[0]["messages"][0]["content"]
     injected_index_text = native_memory["loaded_index_text"]
     assert injected_index_text in sent_first_message
-    assert "WARNING:" in injected_index_text
-    assert "WARNING:" in sent_first_message
+    assert "> WARNING:" in injected_index_text
+    assert "> WARNING:" in sent_first_message
+
+
+def test_native_index_api_no_warning_when_the_index_fits_under_the_cap(
+    tmp_path: Path,
+) -> None:
+    """The `core` corpus's index is well under both caps -- truncation must
+    NOT engage, and neither must the WARNING marker (Quine review, issue
+    athenaeum#1733 SHOULD item 7)."""
+    probe, _ = _pto_probe()
+    turns = [_RecordedTurn(content=[_text_block("answer")], stop_reason="end_turn")]
+    client = _QueuedApiClient(turns)
+    session = EvalSession()
+
+    record = run_native_index_api(
+        probe, tmp_path, "core", client=client, session=session, model="test-model"
+    )
+
+    native_memory = record.transcript[0]["native_memory"]
+    assert native_memory["truncated_by_harness"] is False
+    assert native_memory["truncated_by_claude_code"] is False
+    assert native_memory["index_lines_loaded"] == native_memory["index_lines_written"]
+    assert "WARNING:" not in native_memory["loaded_index_text"]
+
+    sent_first_message = client.calls[0]["messages"][0]["content"]
+    assert "WARNING:" not in sent_first_message
 
 
 # ---------------------------------------------------------------------------
@@ -376,6 +422,7 @@ def test_run_api_tool_loop_accounts_tokens_for_every_turn_not_just_the_last() ->
 
     answer, tool_calls, turn_tokens, turn_count, transcript = run_api_tool_loop(
         user_prompt="q",
+        system="test system prompt",
         tools=[],
         tool_executor=lambda name, ti: "ok",
         client=client,
