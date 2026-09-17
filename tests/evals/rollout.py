@@ -233,12 +233,13 @@ READ_ENTITY_TOOL_NAME = "mcp__athenaeum__read_entity"
 REFERENCE_TAG_INSTRUCTION = (
     "When you have finished answering, end your reply with the internal "
     "reference tag of every page your answer is based on. Each page's tag is "
-    "the value on its `Internal reference tag:` line. Write one tag per such "
-    "page, each in the form [ref: TAG], on the final line of your reply. Cite "
-    "only pages whose content your answer actually draws on -- not every page "
-    "you opened, searched or skimmed along the way. If you are declining to "
-    "answer, write [ref: none] instead, even if you opened pages while "
-    "looking."
+    "the value on its `Internal reference tag:` line -- a single word, and "
+    "never the page's `uid`, its title, or its filename, even though those "
+    "also identify the page. Write one tag per such page, each in the form "
+    "[ref: TAG], on the final line of your reply. Cite only pages whose "
+    "content your answer actually draws on -- not every page you opened, "
+    "searched or skimmed along the way. If you are declining to answer, "
+    "write [ref: none] instead, even if you opened pages while looking."
 )
 
 _SYSTEM_PROMPT = (
