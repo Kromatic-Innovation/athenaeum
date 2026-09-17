@@ -273,6 +273,18 @@ athenaeum#1724, a void control means this run's verdict rows were not read;
 the grid is re-dispatched manually after athenaeum#1766 lands (§9 cadence,
 manual `workflow_dispatch` only).
 
+The `follow_through` class's actual semantic property -- that a complete
+answer requires the second page, not merely that the two are lexically
+disjoint -- is not something CI can check: `validate_core` can only pin the
+lexical-unreachability half (no content term, including a stemmed prefix,
+reaches the second page from the query). Whether the FIRST page alone is
+genuinely insufficient is a judgment call about what "a complete answer"
+means, and the only instrument that actually exercises it is the live
+grid's oracle row -- handed the ground-truth pages verbatim, oracle can only
+score below 1.0 on `follow_through` by citing an incomplete answer, so a
+below-1.0 oracle cell on this class is read as a probe-authoring regression,
+not a retrieval finding.
+
 Phase 2 needs the generator to emit observations whose compiled ground truth
 is known, which is a generator change, not a corpus rewrite: the hand-authored
 core pages already carry `source_ref`, so the generator inverts them into
