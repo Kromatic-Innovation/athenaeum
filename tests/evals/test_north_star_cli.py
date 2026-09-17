@@ -56,6 +56,7 @@ def _stub_run_probe_all_arms(
     claude_binary: str,
     replicate: int,
     mode: str = "cli",
+    should_stop: Any = None,
 ) -> dict[str, RolloutRecord]:
     return _stub_records(probe_id, corpus_scale)
 
@@ -325,6 +326,7 @@ def test_mode_is_threaded_through_to_run_probe_all_arms(
         # can never match either value the test explicitly requests below,
         # so a dropped kwarg fails LOUDLY instead of coincidentally matching.
         mode: str = "sentinel-default",
+        should_stop: Any = None,
     ) -> dict[str, RolloutRecord]:
         seen_modes.append(mode)
         return _stub_records(probe_id, corpus_scale)

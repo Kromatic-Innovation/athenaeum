@@ -522,6 +522,28 @@ class EvalSession:
         with self._lock:
             self._observe_counts(model, counts)
 
+    def observe_response_delta(self, model: str, response: Any) -> tuple[int, int]:
+        """Accumulate *response* and return the ``(input, output)`` IT added.
+
+        The delta a caller needs is exactly what was extracted from THIS
+        response, so it is returned directly rather than recovered by
+        subtracting a before-reading of the running totals from an after-
+        reading of them. That difference is not cosmetic once a grid runs
+        concurrently (issue athenaeum#1751): a before/after pair taken
+        around :meth:`observe_response` spans a window in which another
+        worker's response can land, and the subtraction then attributes the
+        other worker's tokens to this turn. The accumulator stays correct
+        either way -- it is lock-guarded -- but the per-turn figure does
+        not, and the report's cost and efficiency dimensions are computed
+        per turn. There is still exactly ONE extraction site
+        (``_cache_usage_from_response``), which is what the before/after
+        shape was reaching for.
+        """
+        counts = _cache_usage_from_response(response)
+        with self._lock:
+            self._observe_counts(model, counts)
+        return counts["input_tokens"], counts["output_tokens"]
+
     def _observe_counts(self, model: str, counts: dict[str, int]) -> None:
         self.input_tokens += counts["input_tokens"]
         self.output_tokens += counts["output_tokens"]

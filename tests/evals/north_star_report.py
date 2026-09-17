@@ -151,25 +151,48 @@ def append_rollout_row(store: ResultStore, cell: GridCell, record: RolloutRecord
 def load_rollout_rows(store: ResultStore) -> list[RolloutRow]:
     """Read every persisted row out of *store*, decoded back to
     ``(GridCell, RolloutRecord)`` pairs. Empty list if the store has no
-    file yet (a fresh, never-run store)."""
+    file yet (a fresh, never-run store).
+
+    Torn rows are skipped rather than fatal (see
+    :meth:`ResultStore.count_torn_rows`). Use
+    :func:`load_rollout_rows_and_torn` when the count matters -- a report
+    should say how many rows it could not read, not merely not crash.
+    """
+    rows, _ = load_rollout_rows_and_torn(store)
+    return rows
+
+
+def load_rollout_rows_and_torn(store: ResultStore) -> tuple[list[RolloutRow], int]:
+    """:func:`load_rollout_rows`, plus how many rows would not decode.
+
+    One pass, so the count costs nothing over the read the report already
+    does. A row that decodes as JSON but is missing a field this decoder
+    needs counts as torn too: a partial write can, rarely, leave something
+    that parses but is not a row.
+    """
     if not store.path.exists():
-        return []
+        return [], 0
     rows: list[RolloutRow] = []
+    torn = 0
     with store.path.open("r", encoding="utf-8") as handle:
         for line in handle:
             line = line.strip()
             if not line:
                 continue
-            raw = json.loads(line)
-            cell = GridCell(
-                probe=raw["probe_id"],
-                arm=raw["arm"],
-                corpus_scale=raw["corpus_scale"],
-                replicate=int(raw["replicate"]),
-            )
-            record = RolloutRecord.from_payload(raw)
+            try:
+                raw = json.loads(line)
+                cell = GridCell(
+                    probe=raw["probe_id"],
+                    arm=raw["arm"],
+                    corpus_scale=raw["corpus_scale"],
+                    replicate=int(raw["replicate"]),
+                )
+                record = RolloutRecord.from_payload(raw)
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+                torn += 1
+                continue
             rows.append(RolloutRow(cell=cell, record=record))
-    return rows
+    return rows, torn
 
 
 # ---------------------------------------------------------------------------
@@ -1532,14 +1555,26 @@ def _partial_banner_lines(report: NorthStarReport) -> list[str]:
     ever raised because the process was never given the chance.
     """
     planned = report.planned_cells
+    torn = report.torn_rows
     if planned is None or len(report.rows) >= planned:
+        # Complete (or unknowable). A torn row is still worth saying out
+        # loud even then -- it means a cell was paid for and its result is
+        # unreadable, which is not something to leave only in a log.
+        if torn:
+            return [f"> **{_torn_phrase(torn)} ignored** — unreadable store rows.", ""]
         return []
-    return [
+    banner = (
         f"> **partial: {len(report.rows)} of {planned} cells** — the grid did not "
         "finish, so every figure below is computed over the cells that did. Read "
-        "the verdicts as provisional.",
-        "",
-    ]
+        "the verdicts as provisional."
+    )
+    if torn:
+        banner += f" {_torn_phrase(torn).capitalize()} ignored (unreadable store rows)."
+    return [banner, ""]
+
+
+def _torn_phrase(torn: int) -> str:
+    return f"{torn} torn row" if torn == 1 else f"{torn} torn rows"
 
 
 def render_decision_block(
@@ -1700,6 +1735,11 @@ class NorthStarReport:
     # evidence of a partial run. Appended last, per the convention the
     # ``write_costs`` comment above states.
     planned_cells: int | None = None
+    # issue athenaeum#1751: store lines that would not decode -- a process
+    # killed mid-``write`` leaves a partial row, and a rollout row is
+    # hundreds of KB. Surfaced in the banner so a paid-for-but-unreadable
+    # cell is visible rather than merely survived.
+    torn_rows: int = 0
 
 
 def build_report(
@@ -1711,6 +1751,7 @@ def build_report(
     write_costs: Sequence[WriteCost] = (),
     verdict_arm: str = DEFAULT_VERDICT_ARM,
     planned_cells: int | None = None,
+    torn_rows: int = 0,
 ) -> NorthStarReport:
     """Assemble a :class:`NorthStarReport` from decoded result-store rows.
 
@@ -1737,6 +1778,7 @@ def build_report(
         write_costs=tuple(write_costs),
         verdict_arm=verdict_arm,
         planned_cells=planned_cells,
+        torn_rows=torn_rows,
     )
 
 

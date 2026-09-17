@@ -122,6 +122,7 @@ def test_four_workers_persist_the_same_row_set_as_one(
         claude_binary: str,
         replicate: int,
         mode: str = "cli",
+        should_stop: Any = None,
     ) -> dict[str, RolloutRecord]:
         return _stub_records(probe_id, corpus_scale)
 
@@ -134,8 +135,12 @@ def test_four_workers_persist_the_same_row_set_as_one(
     parallel = _cell_keys(tmp_path / "store-4.jsonl")
     assert parallel == serial
     assert len(serial) == SMALL_SCALE_GROUPS * len(ALL_ARMS)
-    # Every row is distinct: a lock that failed to serialise appends would
-    # show up here as a short or duplicated set, not just a reordered one.
+    # No duplicate or dropped rows. Note this does NOT exercise the store's
+    # append lock: ``_run_cells`` appends under its own ledger lock, so the
+    # store lock is belt-and-braces for that caller. It earns its keep for
+    # ``run_grid(workers>1)``, where appends really do come off several
+    # threads, and as the guarantee for any future caller that appends
+    # from a worker directly.
     parallel_lines = (tmp_path / "store-4.jsonl").read_text(encoding="utf-8").strip().splitlines()
     assert len(parallel_lines) == len(parallel)
 
@@ -166,6 +171,7 @@ def test_concurrent_groups_never_share_a_materialize_root(
         claude_binary: str,
         replicate: int,
         mode: str = "cli",
+        should_stop: Any = None,
     ) -> dict[str, RolloutRecord]:
         root = str(materialize_root)
         with guard:
@@ -214,6 +220,7 @@ def test_token_ceiling_stops_every_worker_mid_grid(
         claude_binary: str,
         replicate: int,
         mode: str = "cli",
+        should_stop: Any = None,
     ) -> dict[str, RolloutRecord]:
         with guard:
             calls.append(probe_id)
@@ -259,8 +266,14 @@ def test_dry_run_prints_projected_wall_clock_for_the_worker_count(
 ) -> None:
     monkeypatch.setattr(north_star_cli, "_default_store_path", lambda: tmp_path / "r.jsonl")
 
-    assert north_star_cli.main(["--dry-run", "--workers", "8"]) == 0
+    # `full` has far more groups than workers, so the requested count is the
+    # effective one -- `smoke` would clamp to its single group (see
+    # test_north_star_partial_safety.py's clamp test).
+    exit_code = north_star_cli.main(
+        ["--scale", "full", "--max-spend", GENEROUS_MAX_SPEND, "--dry-run", "--workers", "8"]
+    )
 
+    assert exit_code == 0
     out = capsys.readouterr().out
     assert "projected wall clock:" in out
     assert "at 8 workers" in out
@@ -363,6 +376,7 @@ def test_a_run_writes_the_planned_sidecar_before_any_cell_runs(
         claude_binary: str,
         replicate: int,
         mode: str = "cli",
+        should_stop: Any = None,
     ) -> dict[str, RolloutRecord]:
         seen.append(read_planned_cells(ResultStore(tmp_path / "store-1.jsonl")))
         return _stub_records(probe_id, corpus_scale)
@@ -406,9 +420,17 @@ def test_run_grid_workers_run_the_same_cell_set_as_serial(tmp_path: Path) -> Non
 
 
 def test_eval_session_token_counters_survive_concurrent_updates() -> None:
-    """The ledger's ``+=`` is several bytecodes; a lost update would
-    UNDERCOUNT tokens and silently loosen the ceiling that spends against
-    it. Exact equality is the whole assertion."""
+    """Pins that the counters are EXACT under concurrent load.
+
+    Honest about what it can and cannot do: the ledger's ``+=`` is several
+    bytecodes and a lost update would undercount tokens (silently loosening
+    the ceiling that spends against them), but under CPython's GIL an
+    unlocked version of this would only fail probabilistically. So this is
+    not a falsifying test for "the lock is necessary" -- it is a regression
+    pin on "the totals are exact", which is the property callers depend on
+    and which any future rewrite (a lock-free accumulator, a free-threaded
+    build) must keep.
+    """
     session = EvalSession()
     response = SimpleNamespace(usage=SimpleNamespace(input_tokens=3, output_tokens=5))
     threads = [

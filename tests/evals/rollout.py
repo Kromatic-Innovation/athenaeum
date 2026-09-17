@@ -92,7 +92,7 @@ from athenaeum.mcp_server import RECALL_TOOL_INPUT_SCHEMA, recall_search, recall
 from athenaeum.provider import response_text as provider_response_text
 from athenaeum.push_metrics import estimate_tokens
 from athenaeum.search import get_backend
-from tests.evals.containment import GridCell, build_grid
+from tests.evals.containment import GridCell, SpendCeilingExceededError, build_grid
 from tests.evals.corpus import Corpus, Observation, Probe, build_corpus
 from tests.evals.harness import EvalSession, build_live_client
 
@@ -326,21 +326,23 @@ class RolloutRecord:
 def _observe_turn(session: EvalSession, model: str, response: Any, turn: int) -> TurnTokenUsage:
     """Record *response* on *session* and return exactly the DELTA it added.
 
-    Reuses ``EvalSession.observe_response`` — the same extraction
+    Reuses ``EvalSession.observe_response_delta`` — the same extraction
     :mod:`tests.evals.harness` uses for every live call — rather than a
-    second copy of "where are the token counts on a response object".
-    Reading the before/after delta off the session's own running totals
-    (instead of reaching into the response a second time) is what makes
-    this correct even when *session* already has other turns accumulated
-    on it.
+    second copy of "where are the token counts on a response object", and
+    takes the delta the session itself extracted rather than subtracting a
+    before-reading of its running totals from an after-reading.
+
+    That last part is load-bearing once a grid runs concurrently (issue
+    athenaeum#1751). The before/after shape this replaced held no lock
+    across the pair, so a second worker's response landing in between made
+    the subtraction attribute that worker's tokens to this turn: the
+    session total stayed right, the per-turn row did not, and every cost
+    and efficiency figure in the report is computed per turn. Asking the
+    session what THIS response added has no such window and is exact by
+    construction, at one worker or at eight.
     """
-    before_in, before_out = session.input_tokens, session.output_tokens
-    session.observe_response(model, response)
-    return TurnTokenUsage(
-        turn=turn,
-        input_tokens=session.input_tokens - before_in,
-        output_tokens=session.output_tokens - before_out,
-    )
+    input_tokens, output_tokens = session.observe_response_delta(model, response)
+    return TurnTokenUsage(turn=turn, input_tokens=input_tokens, output_tokens=output_tokens)
 
 
 def _single_shot(
@@ -2435,6 +2437,7 @@ def run_probe_all_arms(
     breadcrumb_pull_runner: Callable[..., RolloutRecord] | None = None,
     native_index_runner: Callable[..., RolloutRecord] | None = None,
     native_grep_runner: Callable[..., RolloutRecord] | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> dict[str, RolloutRecord]:
     """Run ONE probe across all eight arms against a materialized corpus at
     *corpus_scale* (issue athenaeum#1522 AC2/AC3/AC4; issue athenaeum#1574
@@ -2513,6 +2516,28 @@ def run_probe_all_arms(
 
     records: dict[str, RolloutRecord] = {}
     for cell in cells:
+        if should_stop is not None and should_stop():
+            # Checked BETWEEN arms, not merely before the group (issue
+            # athenaeum#1751). A concurrent grid runner trips its spend
+            # ceiling on some other worker's cell; without this check the
+            # overshoot is a whole group per worker -- up to len(ALL_ARMS)
+            # cells each -- because this loop would run to completion.
+            # With it the overshoot is at most the one arm already in
+            # flight per worker.
+            #
+            # Raising, rather than returning the arms run so far, is what
+            # keeps the caller's store consistent: resume granularity is
+            # the whole group (every arm cell-key must be present), so a
+            # partially-populated dict could only be appended as rows that
+            # a resume would then append AGAIN, and ``ResultStore`` never
+            # de-duplicates. The arms already run in this group are lost
+            # spend either way -- a group that stops mid-way is re-run in
+            # full on resume.
+            raise SpendCeilingExceededError(
+                f"stopping probe {probe_id!r} at corpus scale {corpus_scale!r} "
+                f"after {len(records)} of {len(cells)} arms -- the run's spend "
+                "ceiling tripped while this group was in flight"
+            )
         arm = Arm(cell.arm)
         if arm is Arm.NONE:
             record = run_none(
