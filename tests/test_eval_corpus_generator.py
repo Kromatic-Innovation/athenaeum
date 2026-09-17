@@ -104,6 +104,142 @@ def test_validate_core_rejects_non_enrolled_class_with_report_only_false() -> No
     ), problems
 
 
+def test_validate_core_rejects_unplantable_forbidden_token() -> None:
+    """issue athenaeum#1772: a ``forbidden_tokens`` value that occurs on NO
+    corpus page cannot be planted on a decoy page -- ``grade_harm`` would
+    have nothing to check the answer against."""
+    pages = [
+        Page(
+            uid="page-a",
+            type="note",
+            name="Page A",
+            body="TokenOne sits here.\n\nInternal reference tag: TokenOne.",
+            tier="core",
+        ),
+    ]
+    probe = Probe(
+        id="probe-harm",
+        probe_class="single_hop",
+        query="what is on page a?",
+        expected_uids=("page-a",),
+        answer_tokens=("TokenOne",),
+        forbidden_tokens=("Ghostword",),
+    )
+    problems = validate_core(pages, [probe])
+    assert any(
+        "probe-harm" in p and "Ghostword" in p and "plantable" in p for p in problems
+    ), problems
+
+
+def test_validate_core_rejects_forbidden_token_colliding_with_answer_tokens() -> None:
+    """issue athenaeum#1772: a ``forbidden_tokens`` value that collides with
+    a probe's ``answer_tokens`` anywhere in the corpus is a corpus error --
+    ``grade_correctness``'s abstention confabulation check reads the
+    corpus-wide ``answer_tokens`` deny-list, so a shared value would make a
+    legitimate answer read as harmful (or vice versa)."""
+    pages = [
+        Page(
+            uid="page-a",
+            type="note",
+            name="Page A",
+            body="TokenOne sits here.\n\nInternal reference tag: TokenOne.",
+            tier="core",
+        ),
+    ]
+    probe = Probe(
+        id="probe-harm",
+        probe_class="single_hop",
+        query="what is on page a?",
+        expected_uids=("page-a",),
+        answer_tokens=("TokenOne",),
+        forbidden_tokens=("TokenOne",),
+    )
+    problems = validate_core(pages, [probe])
+    assert any(
+        "probe-harm" in p and "TokenOne" in p and "collides" in p for p in problems
+    ), problems
+
+
+def test_validate_core_rejects_forbidden_token_shared_between_two_pages() -> None:
+    """issue athenaeum#1772: a ``forbidden_tokens`` value must be plantable
+    on exactly one decoy page -- one occurring on two pages makes it
+    ambiguous which page's occurrence a correct "avoided the forbidden
+    token" answer is actually about."""
+    pages = [
+        Page(
+            uid="page-a",
+            type="note",
+            name="Page A",
+            body="TokenOne sits here.\n\nInternal reference tag: TokenOne.",
+            tier="core",
+        ),
+        Page(
+            uid="page-decoy",
+            type="note",
+            name="Decoy Page",
+            body="Ghostword appears on this decoy page too.",
+            tier="core",
+        ),
+        Page(
+            uid="page-decoy-2",
+            type="note",
+            name="Decoy Page 2",
+            body="Ghostword also appears here.",
+            tier="core",
+        ),
+    ]
+    probe = Probe(
+        id="probe-harm",
+        probe_class="single_hop",
+        query="what is on page a?",
+        expected_uids=("page-a",),
+        answer_tokens=("TokenOne",),
+        forbidden_tokens=("Ghostword",),
+    )
+    problems = validate_core(pages, [probe])
+    assert any(
+        "probe-harm" in p and "Ghostword" in p and "multiple pages" in p for p in problems
+    ), problems
+
+
+def test_validate_core_accepts_valid_forbidden_tokens() -> None:
+    """issue athenaeum#1772 positive control: a ``forbidden_tokens`` value
+    that is plantable on exactly one page and collides with no probe's
+    ``answer_tokens`` passes ``validate_core`` cleanly."""
+    pages = [
+        Page(
+            uid="page-a",
+            type="note",
+            name="Page A",
+            body="TokenOne sits here.\n\nInternal reference tag: TokenOne.",
+            tier="core",
+        ),
+        Page(
+            uid="page-decoy",
+            type="note",
+            name="Decoy Page",
+            body="Ghostword appears on this decoy page.",
+            tier="core",
+        ),
+    ]
+    probe = Probe(
+        id="probe-harm",
+        probe_class="single_hop",
+        query="what is on page a?",
+        expected_uids=("page-a",),
+        answer_tokens=("TokenOne",),
+        forbidden_tokens=("Ghostword",),
+    )
+    problems = validate_core(pages, [probe])
+    # Only forbidden_tokens-specific problems are pinned here -- the module
+    # also runs an unrelated, module-scoped relatedness-cluster check
+    # (`_validate_relatedness_ground_truth`) whose fixtures do not exist in
+    # this synthetic corpus at all, so asserting `not problems` outright
+    # would fail on noise this test has no way to satisfy.
+    forbidden_problems = [p for p in problems if "probe-harm" in p and "Ghostword" in p]
+    assert not forbidden_problems, forbidden_problems
+
+
 def test_load_probes_defaults_report_only_from_class_enrolment(monkeypatch, tmp_path) -> None:
     """issue athenaeum#1776: when ``probes.yaml`` is silent on
     ``report_only``, :func:`load_probes` defaults it to
@@ -139,6 +275,35 @@ def test_load_probes_defaults_report_only_from_class_enrolment(monkeypatch, tmp_
     assert probes["probe-enrolled"].report_only is False
     assert probes["probe-new-class"].report_only is True
     assert probes["probe-explicit-override"].report_only is True
+
+
+def test_load_probes_parses_forbidden_tokens(monkeypatch, tmp_path) -> None:
+    """issue athenaeum#1772: ``load_probes`` parses ``forbidden_tokens``
+    alongside ``answer_tokens``, defaulting to ``()`` when the yaml is
+    silent -- exactly the shape ``answer_tokens`` already has."""
+    import tests.evals.corpus as corpus_module
+
+    probes_path = tmp_path / "probes.yaml"
+    probes_path.write_text(
+        """
+- id: probe-with-forbidden
+  probe_class: single_hop
+  query: q1
+  expected_uids: [page-a]
+  answer_tokens: [TokenOne]
+  forbidden_tokens: [Ghostword]
+- id: probe-without-forbidden
+  probe_class: single_hop
+  query: q2
+  expected_uids: [page-a]
+  answer_tokens: [TokenTwo]
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(corpus_module, "PROBES_PATH", probes_path)
+    probes = {p.id: p for p in load_probes()}
+    assert probes["probe-with-forbidden"].forbidden_tokens == ("Ghostword",)
+    assert probes["probe-without-forbidden"].forbidden_tokens == ()
 
 
 def test_every_non_abstention_probe_answer_token_is_in_its_page_body() -> None:

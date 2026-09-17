@@ -460,6 +460,20 @@ class Probe:
     promotion into condition 2 is only ever a reviewable edit to the
     ``CONDITION_2_ENROLLED`` constant, never a ``probes.yaml`` field read
     by nobody.
+
+    ``forbidden_tokens`` (issue athenaeum#1772, athenaeum#1791 §3.1) is the
+    mirror image of ``answer_tokens``: a unique, invented token planted on a
+    DECOY page, used by ``tests.evals.north_star_report.grade_harm`` to
+    detect an answer that proposes the corpus's planted-wrong fact rather
+    than merely missing the right one (the ``unprompted_push``/
+    ``contradiction`` classes, items D/G -- this issue ships the mechanism
+    only, no probe class uses the field yet). Empty for every probe today.
+    :func:`validate_core` requires each value to be PLANTABLE (occur in the
+    body of some corpus page), to collide with no probe's ``answer_tokens``
+    value anywhere in the corpus (the same collision ``grade_correctness``'s
+    abstention confabulation check already guards ``answer_tokens`` against
+    -- a shared value would let a legitimate answer grade as harmful, or a
+    harmful one grade as safe), and to be shared between no two pages.
     """
 
     id: str
@@ -469,6 +483,7 @@ class Probe:
     must_not_rank: tuple[str, ...] = ()
     distractor_terms: tuple[str, ...] = ()
     answer_tokens: tuple[str, ...] = ()
+    forbidden_tokens: tuple[str, ...] = ()
     note: str = ""
     report_only: bool = False
 
@@ -610,6 +625,7 @@ def load_probes() -> list[Probe]:
             must_not_rank=tuple(raw.get("must_not_rank", ())),
             distractor_terms=tuple(raw.get("distractor_terms", ())),
             answer_tokens=tuple(raw.get("answer_tokens", ())),
+            forbidden_tokens=tuple(raw.get("forbidden_tokens", ())),
             note=raw.get("note", ""),
             report_only=bool(
                 raw.get("report_only", raw["probe_class"] not in CONDITION_2_ENROLLED)
@@ -867,6 +883,34 @@ def validate_core(pages: list[Page], probes: list[Probe]) -> list[str]:
     for value, owners in sorted(tag_owners.items()):
         if len(owners) > 1:
             problems.append(f"tag {value!r} is used on multiple pages: {sorted(owners)}")
+
+    # forbidden_tokens (issue athenaeum#1772): a forbidden token must be
+    # PLANTABLE (occur in the body of some corpus page -- otherwise
+    # `grade_harm` could never see it planted), must collide with no
+    # probe's `answer_tokens` value anywhere in the corpus (the same
+    # collision the tag-collision loop above guards `answer_tokens`
+    # against -- a shared value would let a legitimate answer grade as
+    # harmful, or a harmful one grade as safe), and must be shared between
+    # no two pages.
+    all_answer_tokens: set[str] = {token for p in probes for token in p.answer_tokens}
+    for probe in probes:
+        for token in probe.forbidden_tokens:
+            owner_uids = sorted({page.uid for page in pages if token in page.body})
+            if not owner_uids:
+                problems.append(
+                    f"probe {probe.id!r}: forbidden_tokens value {token!r} does not occur "
+                    "in the body of any corpus page -- it must be plantable"
+                )
+            elif len(owner_uids) > 1:
+                problems.append(
+                    f"probe {probe.id!r}: forbidden_tokens value {token!r} occurs on "
+                    f"multiple pages {owner_uids} -- must be shared between no two pages"
+                )
+            if token in all_answer_tokens:
+                problems.append(
+                    f"probe {probe.id!r}: forbidden_tokens value {token!r} collides with a "
+                    "probe's answer_tokens value somewhere in the corpus"
+                )
 
     problems.extend(_validate_relatedness_ground_truth(uids, {p.id for p in probes}))
     return problems
