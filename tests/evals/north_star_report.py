@@ -1008,13 +1008,21 @@ def _reading_for_ratio(ratio: float | None) -> str:
 
 @dataclasses.dataclass(frozen=True)
 class CostRatio:
-    """Athenaeum's cost per correct answer against the BETTER (cheaper) of
-    the two native arms, at one (probe_class, corpus_scale) -- "better" in a
-    cost sentence means lower cost, the harshest reading available for
-    Athenaeum (issue athenaeum#1734 AC2). ``ratio``/``reading`` are
-    ``None``/``"undefined"`` when either side's cost per correct could not
-    be computed (see ``detail``) -- an undefined ratio never counts as a
-    pass for anything that reads it.
+    """*verdict_arm*'s cost per correct answer against the BETTER (cheaper)
+    of the two native arms, at one (probe_class, corpus_scale) -- "better"
+    in a cost sentence means lower cost, the harshest reading available for
+    Athenaeum (issue athenaeum#1734 AC2). Orchestrator ruling R1: this is
+    ONE PINNED Athenaeum arm, never the cheapest of the delivery arms --
+    cherry-picking a different winning arm per condition is exactly what
+    the decision rule must not do.
+
+    ``ratio``/``reading`` are ``None``/``"undefined"`` when both sides'
+    cost per correct could not be computed, or when *verdict_arm* itself
+    scored zero correct answers (see ``detail``). ``reading ==
+    "native-zero"`` (ruling R3) is the one case where an undefined RATIO
+    still PASSES: the better native arm scored zero correct answers at
+    this class/scale while *verdict_arm* scored at least one -- there is
+    no ratio to compute, but the direction is unambiguous.
     """
 
     probe_class: str
@@ -1026,43 +1034,73 @@ class CostRatio:
     detail: str
 
 
-def compute_cost_ratios(costs: Sequence[CostPerCorrect]) -> list[CostRatio]:
-    """Group *costs* by (probe_class, corpus_scale) and compare the best
-    (cheapest, defined) Athenaeum delivery-arm cost per correct against the
-    best (cheapest, defined) native-arm cost per correct -- the same
-    "best of the delivery arms" idiom :func:`crossover_scales` already uses
-    for correctness, applied to cost instead."""
+def compute_cost_ratios(
+    costs: Sequence[CostPerCorrect], *, verdict_arm: str = "push_breadcrumb_pull"
+) -> list[CostRatio]:
+    """Group *costs* by (probe_class, corpus_scale) and compare *verdict_arm*'s
+    cost per correct against the best (cheapest, defined) native-arm cost
+    per correct.
+
+    Ruling R1: *verdict_arm* is the ONE Athenaeum arm every condition
+    reads -- never "the cheapest of the delivery arms" (that was the
+    cherry-picking Quine's review caught: a different arm can win each
+    condition, which is not a decision rule at all).
+
+    Ruling R3: when native ran in this group (at least one
+    ``native_index``/``native_grep`` :class:`CostPerCorrect` row exists)
+    but every native arm scored zero correct answers, *and* *verdict_arm*
+    scored at least one, this reads ``"native-zero"`` -- a PASS, stated in
+    words rather than as a fabricated ratio. If *verdict_arm* ALSO scored
+    zero, it is ``"undefined"`` (a fail): neither side has anything to
+    compare. When native did not run in this group AT ALL (no native rows,
+    as opposed to native rows that scored zero), this is an ordinary
+    ``"undefined"`` -- a genuine data gap, not evidence native lost.
+    """
     by_group: dict[tuple[str, str], list[CostPerCorrect]] = defaultdict(list)
     for cost in costs:
         by_group[(cost.probe_class, cost.corpus_scale)].append(cost)
 
     results: list[CostRatio] = []
     for (probe_class, corpus_scale), group in sorted(by_group.items()):
-        athenaeum_costs = [
-            c.cost_per_correct
-            for c in group
-            if c.arm in _ATHENAEUM_DELIVERY_ARM_VALUES and c.cost_per_correct is not None
+        verdict_entries = [c for c in group if c.arm == verdict_arm]
+        athenaeum_cost = (
+            verdict_entries[0].cost_per_correct
+            if verdict_entries and verdict_entries[0].cost_per_correct is not None
+            else None
+        )
+        athenaeum_correct_n = verdict_entries[0].correct_n if verdict_entries else 0
+
+        native_entries = [c for c in group if c.arm in _NATIVE_ARM_VALUES]
+        native_defined_costs = [
+            c.cost_per_correct for c in native_entries if c.cost_per_correct is not None
         ]
-        native_costs = [
-            c.cost_per_correct
-            for c in group
-            if c.arm in _NATIVE_ARM_VALUES and c.cost_per_correct is not None
-        ]
-        athenaeum_cost = min(athenaeum_costs) if athenaeum_costs else None
-        native_cost = min(native_costs) if native_costs else None
-        if athenaeum_cost is None or native_cost is None:
-            ratio = None
-            if athenaeum_cost is None and native_cost is None:
-                detail = "both sides' cost per correct are undefined at this class/scale"
-            elif athenaeum_cost is None:
-                detail = "athenaeum's cost per correct is undefined at this class/scale"
-            else:
-                detail = (
-                    "the better native arm's cost per correct is undefined at this class/scale"
-                )
-        else:
+        native_cost = min(native_defined_costs) if native_defined_costs else None
+        native_ran_but_scored_zero = bool(native_entries) and native_cost is None
+
+        if native_cost is not None and athenaeum_cost is not None:
             ratio = athenaeum_cost / native_cost
+            reading = _reading_for_ratio(ratio)
             detail = ""
+        elif native_ran_but_scored_zero and athenaeum_cost is not None:
+            ratio = None
+            reading = "native-zero"
+            detail = (
+                f"native bought zero correct answers at this class/scale; "
+                f"{verdict_arm!r} bought {athenaeum_correct_n}"
+            )
+        elif native_ran_but_scored_zero and athenaeum_cost is None:
+            ratio = None
+            reading = "undefined"
+            detail = "both sides bought zero correct answers at this class/scale"
+        elif athenaeum_cost is None and native_cost is not None:
+            ratio = None
+            reading = "undefined"
+            detail = f"{verdict_arm!r}'s cost per correct is undefined at this class/scale"
+        else:
+            ratio = None
+            reading = "undefined"
+            detail = "no native cost data at this class/scale"
+
         results.append(
             CostRatio(
                 probe_class=probe_class,
@@ -1070,7 +1108,7 @@ def compute_cost_ratios(costs: Sequence[CostPerCorrect]) -> list[CostRatio]:
                 athenaeum_cost=athenaeum_cost,
                 native_cost=native_cost,
                 ratio=ratio,
-                reading=_reading_for_ratio(ratio),
+                reading=reading,
                 detail=detail,
             )
         )
@@ -1093,6 +1131,37 @@ _RELATIONSHIP_PAGE_TYPES = frozenset({"person", "company"})
 #: pass every condition. Sliced from :data:`SIZE_SCALE_ORDER` (the SIZE axis
 #: only, same as :func:`crossover_scales`) starting at ``"medium"``.
 _CUTOFF_ELIGIBLE_SCALES: tuple[str, ...] = SIZE_SCALE_ORDER[SIZE_SCALE_ORDER.index("medium") :]
+
+#: Ruling R1 (Quine review of PR#1740): all three §7 conditions evaluate the
+#: SAME Athenaeum arm -- the shipped configuration (sidecar breadcrumbs plus
+#: the recall tool), never "whichever delivery arm wins this condition".
+#: Overridable per report via ``--verdict-arm`` (``north_star_cli.py``) /
+#: ``build_report(verdict_arm=...)`` -- other Athenaeum arms still appear in
+#: every per-dimension table above, just never in the verdicts.
+DEFAULT_VERDICT_ARM: str = Arm.PUSH_BREADCRUMB_PULL.value
+
+
+def _pooled_correctness(rows: Sequence[RolloutRow], arm: str) -> tuple[int, int]:
+    """``(correct, total)`` pooled across every gradable row in *rows* for
+    *arm* -- ruling R2: condition 1 is ONE correctness rate over the whole
+    relationship-probe set, never a max taken over per-probe-class rates.
+    A row whose probe carries no ground truth to grade (``grade_correctness``
+    returns ``None``) is excluded from both numerator and denominator, same
+    as every other correctness figure in this module."""
+    correct = 0
+    total = 0
+    for row in rows:
+        if row.record.arm.value != arm:
+            continue
+        probe = _probe_for_row(row)
+        corpus = _corpus_for_scale(row.record.corpus_scale)
+        graded = grade_correctness(row.record, probe, corpus)
+        if graded is None:
+            continue
+        total += 1
+        if graded:
+            correct += 1
+    return correct, total
 
 
 def _relationship_probe_ids(scales: Iterable[str]) -> frozenset[str]:
@@ -1120,23 +1189,33 @@ def _relationship_probe_ids(scales: Iterable[str]) -> frozenset[str]:
 #: Rank used to pick the WORST reading among probe classes present at a
 #: scale for condition 3 (design doc §8: no aggregate score, but a single
 #: per-scale PASS/FAIL still needs one reading named -- the worst one, so
-#: a strong class can never paper over a failing one).
-_READING_RANK = {"aspirational": 0, "target": 1, "limit": 2, "fail": 3, "undefined": 4}
+#: a strong class can never paper over a failing one). ``"native-zero"``
+#: (ruling R3) ranks alongside ``"limit"`` -- both are passing readings, so
+#: neither can demote a genuine ``"fail"``/``"undefined"`` elsewhere, and
+#: which of the two prints as "worst" among passing classes is immaterial
+#: to the pass/fail outcome.
+_READING_RANK = {
+    "aspirational": 0,
+    "target": 1,
+    "limit": 2,
+    "native-zero": 2,
+    "fail": 3,
+    "undefined": 4,
+}
+#: Readings that satisfy condition 3 -- ruling R3 adds ``"native-zero"`` to
+#: the original three (design doc §7's ``<=2.0x``/``<=1.0x``/``<=0.5x``).
+_CONDITION3_PASSING_READINGS = frozenset({"aspirational", "target", "limit", "native-zero"})
 
 
 @dataclasses.dataclass(frozen=True)
 class ScaleVerdict:
-    """The three design-doc §7 conditions, evaluated at one corpus scale.
-
-    Condition 1 (win the relationship use case) and condition 2 (don't lose
-    any other use case) are read off :func:`compute_group_stats`
-    correctness rates; condition 3 (cost within 2x/1x/0.5x) off
-    :func:`compute_cost_ratios`, taking the WORST reading among probe
-    classes present at the scale (never averaged -- design doc §8).
+    """The three design-doc §7 conditions, evaluated at one corpus scale,
+    all three against the SAME pinned ``verdict_arm`` (ruling R1).
     ``all_pass`` is what :func:`compute_cutoff_scale` walks.
     """
 
     corpus_scale: str
+    verdict_arm: str
     condition1_pass: bool
     condition1_detail: str
     condition2_pass: bool
@@ -1153,6 +1232,7 @@ class ScaleVerdict:
 def compute_verdicts(
     rows: Sequence[RolloutRow],
     *,
+    verdict_arm: str = DEFAULT_VERDICT_ARM,
     relationship_probe_ids: frozenset[str] | None = None,
     write_costs: Sequence[WriteCost] = (),
     probe_counts: Mapping[str, int] | None = None,
@@ -1160,40 +1240,49 @@ def compute_verdicts(
     """Compute :class:`ScaleVerdict` for every corpus scale present in
     *rows* (design doc §7).
 
+    Ruling R1 (Quine review of PR#1740): every condition below reads the
+    SAME *verdict_arm* on the Athenaeum side -- the shipped configuration,
+    ``push_breadcrumb_pull`` by default. Never a different, most-favourable
+    delivery arm per condition; that is the cherry-picking the review
+    caught (condition 1/2 picking the most-correct arm, condition 3 picking
+    the cheapest). Other Athenaeum arms still appear in every per-dimension
+    table elsewhere in the report -- just never in these verdicts.
+
     *relationship_probe_ids* -- pass an explicit set (as every unit test in
     ``tests/evals/test_north_star_verdicts.py`` does) to avoid building a
     real corpus at all; ``None`` derives it via
     :func:`_relationship_probe_ids` from the scales actually present in
     *rows*.
 
-    - **Condition 1** ("win the relationship use case", design §7.1):
-      computed over the relationship-subset rows AS ONE POOLED GROUP --
-      not per probe class -- because the subset already spans four probe
-      classes by definition (`single_hop`/`multi_hop`/`disambiguation`/
-      `temporal`, filtered to person/company-targeting probes) and design
-      §2.1/§7 name it as ONE use case. This is not the aggregate §8
-      forbids; that prohibition is about collapsing DIFFERENT use cases or
-      scales into one number, not about the four classes that already
-      compose this one named use case. Passes when the best correctness
-      rate among Athenaeum's delivery arms strictly exceeds the best among
-      the two native arms (mirrors :func:`crossover_scales`'s own ``>``).
-    - **Condition 2** ("do not lose any other use case", design §7.2):
-      evaluated on the COMPLEMENT of the relationship subset (every row
-      whose probe id is not in *relationship_probe_ids*), grouped by probe
-      class -- abstention, distractor_robustness, redundancy, and any
-      single_hop/multi_hop/disambiguation/temporal probe that did NOT make
-      the relationship subset. Fails if Athenaeum's best correctness is
-      strictly worse than native's best in ANY such class present at the
-      scale; the detail names the first failing class. A class with no
-      gradable rows on one side is skipped (nothing to compare), not
-      treated as a failure.
-    - **Condition 3** ("cost within budget", design §7.3): the WORST
-      reading (per :data:`_READING_RANK`) among :func:`compute_cost_ratios`
-      entries at this scale, across whatever probe classes have cost data.
-      ``"undefined"`` and ``"fail"`` both fail the condition; ``"limit"``
-      (<=2.0x) passes, as does ``"target"``/``"aspirational"``. A scale
-      with no cost data at all fails condition 3 outright -- there is
-      nothing to certify a pass against.
+    - **Condition 1** ("win the relationship use case", design §7.1,
+      ruling R2): ONE POOLED correctness rate (correct/total) for
+      *verdict_arm* over EVERY relationship-subset row at this scale,
+      regardless of probe class -- never a max taken over per-class rates.
+      Compared against the better of the two native arms' OWN pooled rate
+      over the identical row set. Passes when *verdict_arm*'s pooled rate
+      strictly exceeds it.
+    - **Condition 2** ("do not lose any other use case", design §7.2,
+      ruling R4): evaluated on the COMPLEMENT of the relationship subset
+      (every row whose probe id is not in *relationship_probe_ids*),
+      grouped by probe class -- abstention, distractor_robustness,
+      redundancy, and any single_hop/multi_hop/disambiguation/temporal
+      probe that did NOT make the relationship subset. For each such class
+      present at the scale, *verdict_arm*'s correctness rate is compared
+      against the better native arm's; a class where either side has no
+      gradable rows is SKIPPED (counted, never silently dropped) rather
+      than treated as either a pass or a failure. Fails if *verdict_arm* is
+      strictly worse than native in any compared class; the detail always
+      states how many classes were compared and how many were skipped
+      (and their names), never a bare "not worse than native" that hides a
+      skip.
+    - **Condition 3** ("cost within budget", design §7.3, ruling R3): the
+      WORST reading (per :data:`_READING_RANK`) among
+      :func:`compute_cost_ratios` entries at this scale (already computed
+      against the same *verdict_arm*), across whatever probe classes have
+      cost data. ``"undefined"`` and ``"fail"`` both fail the condition;
+      ``"limit"``/``"target"``/``"aspirational"``/``"native-zero"`` all
+      pass. A scale with no cost data at all fails condition 3 outright --
+      there is nothing to certify a pass against.
     """
     if relationship_probe_ids is None:
         relationship_probe_ids = _relationship_probe_ids(
@@ -1203,79 +1292,104 @@ def compute_verdicts(
     relationship_rows = [r for r in rows if r.record.probe_id in relationship_probe_ids]
     other_rows = [r for r in rows if r.record.probe_id not in relationship_probe_ids]
 
-    relationship_stats = compute_group_stats(relationship_rows)
     other_stats = compute_group_stats(other_rows)
     ratios = compute_cost_ratios(
-        compute_cost_per_correct(rows, write_costs=write_costs, probe_counts=probe_counts)
+        compute_cost_per_correct(rows, write_costs=write_costs, probe_counts=probe_counts),
+        verdict_arm=verdict_arm,
     )
 
     scales = sorted(
-        {s.corpus_scale for s in relationship_stats}
+        {r.record.corpus_scale for r in relationship_rows}
         | {s.corpus_scale for s in other_stats}
         | {r.corpus_scale for r in ratios}
     )
 
     verdicts: list[ScaleVerdict] = []
     for scale in scales:
-        # Condition 1: relationship use case, pooled across its probe classes.
-        rel_at_scale = [s for s in relationship_stats if s.corpus_scale == scale]
-        athenaeum_rates = [
-            s.correctness_rate
-            for s in rel_at_scale
-            if s.arm in _ATHENAEUM_DELIVERY_ARM_VALUES and s.correctness_rate is not None
+        # Condition 1 (R2): ONE pooled rate over the whole relationship
+        # subset at this scale, verdict_arm vs. the better native arm's OWN
+        # pooled rate over the identical rows -- never a max over classes.
+        scale_relationship_rows = [
+            r for r in relationship_rows if r.record.corpus_scale == scale
         ]
-        native_rates = [
-            s.correctness_rate
-            for s in rel_at_scale
-            if s.arm in _NATIVE_ARM_VALUES and s.correctness_rate is not None
-        ]
-        if not athenaeum_rates or not native_rates:
+        verdict_correct, verdict_total = _pooled_correctness(scale_relationship_rows, verdict_arm)
+        verdict_rate = verdict_correct / verdict_total if verdict_total else None
+
+        native_pooled: dict[str, float] = {}
+        for native_arm in sorted(_NATIVE_ARM_VALUES):
+            n_correct, n_total = _pooled_correctness(scale_relationship_rows, native_arm)
+            if n_total:
+                native_pooled[native_arm] = n_correct / n_total
+        best_native_arm = (
+            max(native_pooled, key=lambda arm: native_pooled[arm]) if native_pooled else None
+        )
+        best_native_rate = native_pooled.get(best_native_arm) if best_native_arm else None
+
+        if verdict_rate is None or best_native_rate is None:
             condition1_pass = False
             condition1_detail = (
-                "condition 1: no gradable relationship-use-case rows on one side at this scale"
+                f"condition 1: no gradable relationship-use-case rows for {verdict_arm!r} or "
+                "the native arms at this scale"
             )
-        elif max(athenaeum_rates) > max(native_rates):
+        elif verdict_rate > best_native_rate:
             condition1_pass = True
             condition1_detail = (
-                f"condition 1: relationship use case won "
-                f"({max(athenaeum_rates):.3f} > {max(native_rates):.3f})"
+                f"condition 1: relationship use case won -- {verdict_arm!r} "
+                f"{verdict_correct}/{verdict_total}={verdict_rate:.3f} > best native "
+                f"({best_native_arm!r}) {best_native_rate:.3f}"
             )
         else:
             condition1_pass = False
             condition1_detail = (
-                f"condition 1: relationship use case not won "
-                f"({max(athenaeum_rates):.3f} <= {max(native_rates):.3f})"
+                f"condition 1: relationship use case not won -- {verdict_arm!r} "
+                f"{verdict_correct}/{verdict_total}={verdict_rate:.3f} <= best native "
+                f"({best_native_arm!r}) {best_native_rate:.3f}"
             )
 
-        # Condition 2: every OTHER probe class present, Athenaeum not worse.
+        # Condition 2 (R4): every OTHER probe class present, verdict_arm not
+        # worse than the better native arm; skips are counted and named.
         other_by_class: dict[str, list[GroupStats]] = defaultdict(list)
         for s in other_stats:
             if s.corpus_scale == scale:
                 other_by_class[s.probe_class].append(s)
         condition2_pass = True
-        condition2_detail = "condition 2: not worse than native on any other use case"
+        first_failure: str | None = None
+        compared_classes: list[str] = []
+        skipped_classes: list[str] = []
         for probe_class, class_group in sorted(other_by_class.items()):
-            athenaeum_class_rates = [
+            verdict_class_rates = [
                 s.correctness_rate
                 for s in class_group
-                if s.arm in _ATHENAEUM_DELIVERY_ARM_VALUES and s.correctness_rate is not None
+                if s.arm == verdict_arm and s.correctness_rate is not None
             ]
             native_class_rates = [
                 s.correctness_rate
                 for s in class_group
                 if s.arm in _NATIVE_ARM_VALUES and s.correctness_rate is not None
             ]
-            if not athenaeum_class_rates or not native_class_rates:
+            if not verdict_class_rates or not native_class_rates:
+                skipped_classes.append(probe_class)
                 continue
-            if max(athenaeum_class_rates) < max(native_class_rates):
+            compared_classes.append(probe_class)
+            verdict_class_rate = verdict_class_rates[0]
+            best_native_class_rate = max(native_class_rates)
+            if verdict_class_rate < best_native_class_rate and first_failure is None:
                 condition2_pass = False
-                condition2_detail = (
-                    f"condition 2: worse than native on {probe_class!r} "
-                    f"({max(athenaeum_class_rates):.3f} < {max(native_class_rates):.3f})"
+                first_failure = (
+                    f"worse than native on {probe_class!r} "
+                    f"({verdict_class_rate:.3f} < {best_native_class_rate:.3f})"
                 )
-                break
 
-        # Condition 3: worst cost-ratio reading among classes present.
+        condition2_detail = (
+            f"condition 2: compared {len(compared_classes)} classes, "
+            f"skipped {len(skipped_classes)}"
+        )
+        if skipped_classes:
+            condition2_detail += f" ({', '.join(skipped_classes)})"
+        condition2_detail += "; " + (first_failure or "not worse than native on any compared class")
+
+        # Condition 3 (R3): worst cost-ratio reading among classes present,
+        # already computed against verdict_arm by compute_cost_ratios.
         ratios_at_scale = [r for r in ratios if r.corpus_scale == scale]
         if not ratios_at_scale:
             condition3_pass = False
@@ -1284,11 +1398,10 @@ def compute_verdicts(
         else:
             worst = max(ratios_at_scale, key=lambda r: _READING_RANK[r.reading])
             condition3_reading = worst.reading
-            condition3_pass = worst.reading in ("target", "aspirational", "limit")
-            if worst.reading == "undefined":
+            condition3_pass = worst.reading in _CONDITION3_PASSING_READINGS
+            if worst.reading in ("undefined", "native-zero"):
                 condition3_detail = (
-                    f"condition 3: cost per correct undefined for {worst.probe_class!r} "
-                    f"({worst.detail})"
+                    f"condition 3: {worst.reading} for {worst.probe_class!r} ({worst.detail})"
                 )
             else:
                 condition3_detail = (
@@ -1299,6 +1412,7 @@ def compute_verdicts(
         verdicts.append(
             ScaleVerdict(
                 corpus_scale=scale,
+                verdict_arm=verdict_arm,
                 condition1_pass=condition1_pass,
                 condition1_detail=condition1_detail,
                 condition2_pass=condition2_pass,
@@ -1370,35 +1484,61 @@ def render_cost_per_correct_table(costs: Sequence[CostPerCorrect]) -> list[str]:
 
 
 def render_decision_block(
-    report: NorthStarReport, verdicts: Sequence[ScaleVerdict] | None = None
+    report: NorthStarReport,
+    verdicts: Sequence[ScaleVerdict] | None = None,
+    *,
+    verdict_arm: str | None = None,
 ) -> list[str]:
     """The decision block (issue athenaeum#1734 AC5): rendered at the TOP
     of the report, before any table -- the reader gets the go/no-go answer
     first, the supporting dimension breakdowns after. *verdicts* lets a
     caller (or a test) supply pre-computed verdicts; ``None`` computes them
-    from ``report.rows``/``report.write_costs``.
+    from ``report.rows``/``report.write_costs``/``report.verdict_arm``
+    (or *verdict_arm*, if given -- it overrides ``report.verdict_arm`` for
+    this render only).
     """
+    resolved_verdict_arm = verdict_arm if verdict_arm is not None else report.verdict_arm
     if verdicts is None:
-        verdicts = compute_verdicts(report.rows, write_costs=report.write_costs)
+        verdicts = compute_verdicts(
+            report.rows, verdict_arm=resolved_verdict_arm, write_costs=report.write_costs
+        )
     cutoff = compute_cutoff_scale(verdicts)
 
     lines: list[str] = []
     lines.append("## Decision (design doc §7, athenaeum#1734)")
     lines.append("")
     lines.append(
-        "Three conditions, evaluated per scale: **(1)** win the relationship use case "
-        "(single_hop/multi_hop/disambiguation/temporal probes targeting person/company "
-        "pages); **(2)** do not lose any other current use case; **(3)** cost per correct "
-        "answer within budget of the better native arm -- `>2.0x fail`, `<=2.0x limit`, "
-        "`<=1.0x target`, `<=0.5x aspirational`."
+        f"**Verdict arm:** `{resolved_verdict_arm}` (ruling R1) -- the shipped configuration "
+        "is the ONE Athenaeum arm every condition below reads. Other Athenaeum arms still "
+        "appear in the per-dimension tables further down, but never in these verdicts -- no "
+        "picking the most-correct arm for conditions 1-2 and the cheapest for condition 3."
     )
     lines.append("")
-    if cutoff == "none":
+    lines.append(
+        "Three conditions, evaluated per scale, all against the verdict arm above: **(1)** "
+        "win the relationship use case (single_hop/multi_hop/disambiguation/temporal probes "
+        "targeting person/company pages), one POOLED correctness rate over the whole subset, "
+        "against the better native arm's own pooled rate on the same rows; **(2)** do not "
+        "lose any other current use case, class by class, skipping (and naming) any class "
+        "where either side has no gradable rows; **(3)** cost per correct answer within "
+        "budget of the better native arm -- `>2.0x fail`, `<=2.0x limit`, `<=1.0x target`, "
+        "`<=0.5x aspirational`, or `native-zero` (a pass) when the better native arm scored "
+        "zero correct answers while the verdict arm scored at least one."
+    )
+    lines.append("")
+
+    if report.write_costs:
         lines.append(
-            "**Cutoff scale:** `none` -- no scale at or above `medium` passed all three "
-            "conditions. Failing condition per scale:"
+            "Phase 2: write cost is amortised over the full probe set at each scale it "
+            "applies to --"
         )
+        for scale in sorted({wc.corpus_scale for wc in report.write_costs}):
+            probe_count = len(_corpus_for_scale(scale).probes)
+            lines.append(f"- write cost amortised over {probe_count} probes at `{scale}`.")
         lines.append("")
+
+    if cutoff == "none":
+        failing_lines = []
         for verdict in verdicts:
             if verdict.all_pass:
                 continue
@@ -1411,8 +1551,23 @@ def render_decision_block(
                 )
                 if not passed
             ]
-            lines.append(f"- `{verdict.corpus_scale}`: " + "; ".join(failing))
-        lines.append("")
+            failing_lines.append(f"- `{verdict.corpus_scale}`: " + "; ".join(failing))
+
+        if failing_lines:
+            lines.append(
+                "**Cutoff scale:** `none` -- no scale at or above `medium` passed all three "
+                "conditions. Failing condition per scale:"
+            )
+            lines.append("")
+            lines.extend(failing_lines)
+            lines.append("")
+        else:
+            lines.append(
+                "**Cutoff scale:** `none` -- no scale at or above `medium` was evaluated in "
+                "this run (see the eligibility column below), so there is nothing to certify "
+                "a cutoff against."
+            )
+            lines.append("")
     else:
         lines.append(
             f"**Cutoff scale:** `{cutoff}` -- the smallest scale at or above `medium` where "
@@ -1420,11 +1575,15 @@ def render_decision_block(
         )
         lines.append("")
 
-    lines.append("| scale | condition 1 | condition 2 | condition 3 | reading | all pass |")
-    lines.append("| --- | --- | --- | --- | --- | --- |")
+    lines.append(
+        "| scale | cutoff eligible | condition 1 | condition 2 | condition 3 | reading | "
+        "all pass |"
+    )
+    lines.append("| --- | --- | --- | --- | --- | --- | --- |")
     for verdict in verdicts:
+        eligible = "yes" if verdict.corpus_scale in _CUTOFF_ELIGIBLE_SCALES else "no"
         lines.append(
-            f"| {verdict.corpus_scale} | "
+            f"| {verdict.corpus_scale} | {eligible} | "
             f"{'pass' if verdict.condition1_pass else 'fail'} | "
             f"{'pass' if verdict.condition2_pass else 'fail'} | "
             f"{'pass' if verdict.condition3_pass else 'fail'} | "
@@ -1459,6 +1618,12 @@ class NorthStarReport:
     # retention accuracy), empty for a Phase-1-only run. Appended last so
     # existing positional construction and sibling-lane merges stay safe.
     write_costs: tuple[WriteCost, ...] = ()
+    # ruling R1 (Quine review of PR#1740): the ONE Athenaeum arm every §7
+    # verdict reads. Stored on the report (not just passed as a function
+    # arg) so render_report/render_decision_block always render the SAME
+    # arm the report was built with, without a caller having to thread it
+    # through separately.
+    verdict_arm: str = DEFAULT_VERDICT_ARM
 
 
 def build_report(
@@ -1468,6 +1633,7 @@ def build_report(
     abort_reason: str = "",
     write_path_stats: Sequence[WritePathStats] = (),
     write_costs: Sequence[WriteCost] = (),
+    verdict_arm: str = DEFAULT_VERDICT_ARM,
 ) -> NorthStarReport:
     """Assemble a :class:`NorthStarReport` from decoded result-store rows.
 
@@ -1492,6 +1658,7 @@ def build_report(
         weak_probes=weak_probes(rows),
         write_path_stats=tuple(write_path_stats),
         write_costs=tuple(write_costs),
+        verdict_arm=verdict_arm,
     )
 
 
@@ -1528,11 +1695,6 @@ def render_report(report: NorthStarReport) -> str:
     lines.append("")
 
     lines.extend(render_decision_block(report))
-    lines.extend(
-        render_cost_per_correct_table(
-            compute_cost_per_correct(report.rows, write_costs=report.write_costs)
-        )
-    )
 
     lines.append("## Arms in this report (athenaeum#1574)")
     lines.append("")
@@ -1597,6 +1759,12 @@ def render_report(report: NorthStarReport) -> str:
     for s in pull_stats:
         lines.append(f"| {s.probe_class} | {s.corpus_scale} | {s.n} | {_fmt(s.no_call_rate)} |")
     lines.append("")
+
+    lines.extend(
+        render_cost_per_correct_table(
+            compute_cost_per_correct(report.rows, write_costs=report.write_costs)
+        )
+    )
 
     lines.append("## Query quality")
     lines.append("")

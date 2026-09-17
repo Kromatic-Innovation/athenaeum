@@ -49,6 +49,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (the smallest scale at or above `medium` where all three hold, or
   `"none"` with the failing condition named per scale). `render_decision_block`
   renders the result at the top of the report, before any dimension table.
+  Post-review corrections (Quine review of PR#1740): all three conditions
+  now read the SAME pinned Athenaeum arm (`push_breadcrumb_pull` by
+  default, overridable via `--verdict-arm`) rather than a different,
+  most-favourable delivery arm per condition; condition 1 is a POOLED
+  correctness rate over the whole relationship-probe subset rather than a
+  max taken over per-class rates; condition 3 reads `native-zero` (a pass)
+  when the better native arm scored zero correct answers while the
+  verdict arm scored at least one, and `undefined` (a fail) only when both
+  sides scored zero; condition 2 skips (and names) any class where either
+  side has no gradable rows instead of silently treating it as a pass.
 - **`docs/use-cases.md`: the north star decomposed into the questions memory
   is actually asked, and a kill criterion.** "Surface the right information at
   the right time" is a quality bar with no customer attached, and nothing in
