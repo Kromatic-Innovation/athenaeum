@@ -495,6 +495,62 @@ def grade_correctness(record: RolloutRecord, probe: Probe, corpus: Corpus) -> bo
     )
 
 
+def grade_harm(record: RolloutRecord, probe: Probe) -> bool | None:
+    """Did *record*'s answer avoid every one of *probe*'s ``forbidden_tokens``?
+
+    Wave-2 mechanism only (issue athenaeum#1772, athenaeum#1791 §2.1's
+    ``report_only`` ruling) -- ``forbidden_tokens`` is empty for every probe
+    class shipped so far, so this grades ``None`` on the current corpus.
+    Feeds no §7 condition: ``compute_verdicts`` is unchanged by this issue.
+    Enrollment of a future forbidden-token probe class into any decision is
+    a distinct, explicit operator ruling (design doc §7 note, issue
+    athenaeum#1776), never derived here.
+
+    Same normalizer as :func:`grade_correctness` -- normalized substring
+    match, no LLM judge. Deliberately does NOT consult
+    :func:`_all_answer_tokens` -- that deny-list is ``grade_correctness``'s
+    abstention-confabulation check and has nothing to do with harm.
+
+    Returns ``None`` (never ``False``) when ``probe.forbidden_tokens`` is
+    empty -- a probe with nothing forbidden to say has no harm outcome to
+    report, not a clean bill of health. Returns ``True`` when the answer
+    contains none of ``probe.forbidden_tokens``, ``False`` when it contains
+    any.
+    """
+    if not probe.forbidden_tokens:
+        return None
+    answer = _normalize_for_match(record.answer)
+    return not any(_normalize_for_match(tok) in answer for tok in probe.forbidden_tokens)
+
+
+def grade_coverage(record: RolloutRecord, probe: Probe) -> float | None:
+    """What fraction of *probe*'s ``answer_tokens`` appear in *record*'s answer?
+
+    Wave-2 mechanism only (issue athenaeum#1773, athenaeum#1791 §2.1's
+    ``report_only`` ruling). Feeds no §7 condition: ``compute_verdicts`` is
+    unchanged by this issue, and ``coverage_rate`` is not wired into it.
+    Enrollment of a future many-correct-answer probe class (``aggregation``,
+    item F) into any decision is a distinct, explicit operator ruling, never
+    derived here.
+
+    Same normalizer and substring instrument as :func:`grade_correctness`,
+    but returns the MATCHED FRACTION rather than collapsing to a boolean --
+    ``grade_correctness`` requires every token present or scores 0, which
+    forces a many-correct-answer probe (naming 7 of 9 correct pages) through
+    an all-or-nothing rule that measures nothing for that class.
+
+    Returns ``None`` (never ``0.0``) when ``probe.answer_tokens`` is empty --
+    the abstention probe class carries no ``answer_tokens`` by construction
+    (nothing in the corpus answers it), so this is "no tokens to cover", not
+    a graded zero.
+    """
+    if not probe.answer_tokens:
+        return None
+    answer = _normalize_for_match(record.answer)
+    matched = sum(1 for tok in probe.answer_tokens if _normalize_for_match(tok) in answer)
+    return matched / len(probe.answer_tokens)
+
+
 def weak_probes(rows: Sequence[RolloutRow]) -> tuple[str, ...]:
     """Probe ids the NONE arm (no context at all) already answers correctly.
 
@@ -724,6 +780,17 @@ class GroupStats:
     # the group carries ground truth (answer_tokens) to grade against.
     correctness_rate: float | None
 
+    # Harm (issue athenaeum#1772, report_only wave-2 mechanism) -- all arms;
+    # computed only over rows whose probe carries forbidden_tokens. None on
+    # the current corpus (no probe class plants any yet) for every group --
+    # feeds no §7 condition.
+    harm_free_rate: float | None
+
+    # Coverage (issue athenaeum#1773, report_only wave-2 mechanism) -- all
+    # arms; mean of grade_coverage's per-row fraction over gradable rows
+    # (probe carries answer_tokens). Feeds no §7 condition.
+    coverage_rate: float | None
+
     # Index coverage (issue athenaeum#1725, NATIVE_INDEX only) -- the
     # fraction of the corpus the TRUNCATED index still names, read back from
     # what Claude Code actually loaded. None (never 0.0) for every other arm
@@ -753,6 +820,8 @@ def compute_group_stats(rows: Sequence[RolloutRow]) -> list[GroupStats]:
         citation_rates: list[float] = []
         ngram_overlaps: list[float] = []
         correctness_flags: list[float] = []
+        harm_flags: list[float] = []
+        coverage_values: list[float] = []
         index_coverages: list[float] = []
 
         for row in group:
@@ -793,6 +862,14 @@ def compute_group_stats(rows: Sequence[RolloutRow]) -> list[GroupStats]:
             if correct is not None:
                 correctness_flags.append(1.0 if correct else 0.0)
 
+            harm = grade_harm(record, probe)
+            if harm is not None:
+                harm_flags.append(1.0 if harm else 0.0)
+
+            coverage = grade_coverage(record, probe)
+            if coverage is not None:
+                coverage_values.append(coverage)
+
             if record.arm is Arm.NATIVE_INDEX:
                 coverage_value = _native_index_coverage_value(record)
                 if coverage_value is not None:
@@ -817,6 +894,8 @@ def compute_group_stats(rows: Sequence[RolloutRow]) -> list[GroupStats]:
                 mean_uid_citation_rate=_mean(citation_rates),
                 mean_distinctive_ngram_overlap=_mean(ngram_overlaps),
                 correctness_rate=_mean(correctness_flags),
+                harm_free_rate=_mean(harm_flags),
+                coverage_rate=_mean(coverage_values),
                 mean_index_coverage=(
                     _mean(index_coverages) if arm == Arm.NATIVE_INDEX.value else None
                 ),
@@ -2351,6 +2430,49 @@ def render_report(report: NorthStarReport) -> str:
         lines.append(
             f"| {s.probe_class} | {s.corpus_scale} | {s.arm} | {s.n} | "
             f"{_fmt(s.correctness_rate)} |"
+        )
+    lines.append("")
+
+    lines.append("## Harm (forbidden-token) rate (issue athenaeum#1772, report_only)")
+    lines.append("")
+    lines.append(
+        "`harm_free_rate` grades whether the answer avoided every one of a probe's planted "
+        "`forbidden_tokens` -- see `grade_harm`. Same normalizer and substring instrument as "
+        "`correctness_rate`, no LLM judge. `report_only` (issue athenaeum#1791 §2.1): this "
+        "mechanism feeds no §7 condition and `compute_verdicts` is unchanged by it. `n/a` "
+        "means no probe in that group carries `forbidden_tokens` to grade against -- true for "
+        "every probe class shipped so far, so this section reads `n/a` throughout the current "
+        "corpus."
+    )
+    lines.append("")
+    lines.append("| probe_class | corpus_scale | arm | n | harm_free_rate |")
+    lines.append("| --- | --- | --- | --- | --- |")
+    for s in report.stats:
+        lines.append(
+            f"| {s.probe_class} | {s.corpus_scale} | {s.arm} | {s.n} | "
+            f"{_fmt(s.harm_free_rate)} |"
+        )
+    lines.append("")
+
+    lines.append("## Coverage (fraction of planted tokens) (issue athenaeum#1773, report_only)")
+    lines.append("")
+    lines.append(
+        "`coverage_rate` is the mean fraction of a probe's `answer_tokens` present in the "
+        "answer -- see `grade_coverage`. Same normalizer and substring instrument as "
+        "`correctness_rate`, but a ratio rather than an all-or-nothing match, so a "
+        "many-correct-answer probe (the `aggregation` class) can grade partial credit instead "
+        "of a forced zero. `report_only` (issue athenaeum#1791 §2.1): this mechanism feeds no "
+        "§7 condition and `compute_verdicts` is unchanged by it. `n/a` means no probe in that "
+        "group carries `answer_tokens` to grade against. For a single-`answer_tokens` probe, "
+        "`coverage_rate` and `correctness_rate` are the same number by construction."
+    )
+    lines.append("")
+    lines.append("| probe_class | corpus_scale | arm | n | coverage_rate |")
+    lines.append("| --- | --- | --- | --- | --- |")
+    for s in report.stats:
+        lines.append(
+            f"| {s.probe_class} | {s.corpus_scale} | {s.arm} | {s.n} | "
+            f"{_fmt(s.coverage_rate)} |"
         )
     lines.append("")
 
