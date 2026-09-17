@@ -323,3 +323,134 @@ operator's, against athenaeum#1736, informed by which of the above the
 operator judges will or will not move with the open issues. It also feeds
 the wave 2 epic, athenaeum#1791, which sequences what happens next
 regardless of how athenaeum#1736 is decided.
+
+## Addendum: re-grade under the athenaeum#1793 ruling
+
+**Operator ruling (2026-09-18, athenaeum#1793, option 1):** a citation of a
+page uid now counts as correct when that uid is in the probe's
+`expected_uids` AND appears in the arm's own recall/read-entity (or, for
+`native_grep`, its own file-read) tool output for that cell — never merely
+because the uid is `expected_uids`. Tag citations (`[ref: TAG]`, the
+athenaeum#1753 contract) remain correct exactly as before; this rule is
+additive to it, not a replacement. `grade_correctness` implements this in
+`tests/evals/north_star_report.py`; see design doc §5 for the contract
+statement.
+
+This addendum is a **zero-call re-grade**: run 35272748886's own stored
+rows (`north-star-store.jsonl`, 1392 rows, unchanged) were re-graded
+offline with the updated `grade_correctness` — no model was called, no new
+rollout ran, and the stored answers/transcripts are byte-identical to the
+measurement report above. Only the deterministic grading function changed.
+
+**Decision block, re-graded (verbatim from the re-graded report):**
+
+**Cutoff scale: `none`** — unchanged. No scale at or above `medium` passes
+all three conditions, before or after this re-grade. Failing condition per
+scale:
+
+- `core`: condition 1: relationship use case not won -- `push_breadcrumb_pull`
+  7/9=0.778 <= best native (`native_grep`) 0.889; condition 2: worse than
+  native on `abstention` (0.000 < 0.667); condition 3: undefined for
+  `abstention`.
+- `large`: condition 1: relationship use case not won -- `push_breadcrumb_pull`
+  7/9=0.778 <= best native (`native_grep`) 0.778; condition 2: worse than
+  native on `disambiguation` (0.000 < 1.000); condition 3: worst reading is
+  `fail` for `multi_hop` (ratio=4.445).
+- `medium`: condition 1: **pass**; condition 2: worse than native on
+  `disambiguation` (0.000 < 1.000); condition 3: worst reading is `fail`
+  for `multi_hop` (ratio=2.523) — **previously `undefined` for `redundancy`
+  (§3's run 5 block), now defined and passing at 1.45x** (see below); the
+  worst reading is now `multi_hop`'s pre-existing fail, not a masked
+  `undefined`.
+- `medium_dense`: condition 1: **pass**; condition 2: worse than native on
+  `disambiguation` (0.000 < 1.000); condition 3: worst reading is `fail`
+  for `distractor_robustness` (ratio=4.381).
+- `medium_verydense`: condition 1: relationship use case not won --
+  `push_breadcrumb_pull` 4/9=0.444 <= best native (`native_index`) 0.778;
+  condition 2: worse than native on `distractor_robustness` (0.000 < 1.000);
+  condition 3: undefined for `distractor_robustness`.
+- `small`: condition 1: relationship use case not won -- `push_breadcrumb_pull`
+  7/9=0.778 <= best native (`native_grep`) 0.889; condition 2: worse than
+  native on `disambiguation` (0.000 < 1.000); condition 3: worst reading is
+  `fail` for `disambiguation` (ratio=3.650) — previously `undefined` for
+  `redundancy`, now defined and passing (see below).
+
+| scale | cutoff eligible | condition 1 | condition 2 | condition 3 | reading | all pass |
+| --- | --- | --- | --- | --- | --- | --- |
+| core | no | fail | fail | fail | undefined | fail |
+| large | yes | fail | fail | fail | fail | fail |
+| medium | yes | pass | fail | fail | fail | fail |
+| medium_dense | no | pass | fail | fail | fail | fail |
+| medium_verydense | no | fail | fail | fail | undefined | fail |
+| small | no | fail | fail | fail | fail | fail |
+
+The only column-level change from §3's run 5 table is the `reading` column
+at `medium` and `small` (`undefined` → `fail`); every `condition 1`/`2`/`3`
+cell and the `all pass` column are unchanged, and the cutoff scale is still
+`none`. The re-grade closes an open grading question, it does not change
+the go/no-go reading.
+
+**Medium correctness, verdict arm vs. native, re-graded (athenaeum#1793):**
+
+| probe_class | n | push_breadcrumb_pull | native_grep | native_index | oracle |
+| --- | --- | --- | --- | --- | --- |
+| single_hop | 4 | 1.000 | 1.000 | 0.750 | 1.000 |
+| multi_hop | 3 | 0.667 | 0.667 | 0.333 | 1.000 |
+| temporal | 6 | 0.833 | 0.833 | 0.833 | 1.000 |
+| disambiguation | 4 | 0.500 | 0.500 | 0.750 | 1.000 |
+| follow_through | 6 | 0.667 | 0.667 | 1.000 | 1.000 |
+| distractor_robustness | 2 | 1.000 | 0.500 | 1.000 | 1.000 |
+| redundancy | 1 | **1.000** | 1.000 | 1.000 | 1.000 |
+| abstention | 3 | 0.667 | 0.333 | 0.333 | 0.000 |
+
+Only `redundancy`'s `push_breadcrumb_pull` cell changed (0.000 → **1.000**,
+bold above); every other class/arm cell at `medium` is byte-identical to
+§4's table. `pull`'s `redundancy` cell also flipped 0.000 → 1.000 (not a
+§7 verdict-arm cell, so not in this table; see the row-level detail below).
+
+**Medium cost per correct, verdict arm vs. native, re-graded:**
+
+`cost_per_correct = read_tokens / correct_n`, undefined when a cell has
+zero correct answers. Ratio is `push_breadcrumb_pull / native_grep`.
+
+| probe_class | push_breadcrumb_pull | native_grep | native_index | ratio (vs native_grep) |
+| --- | --- | --- | --- | --- |
+| single_hop | 6565.0 | 5217.0 | 36739.3 | 1.26x |
+| multi_hop | 50078.0 | 19846.5 | 150577.0 | **2.52x (fail, >2.0x)** |
+| temporal | 6393.6 | 7572.4 | 28966.0 | 0.84x |
+| disambiguation | 17366.0 | 12748.5 | 49374.3 | 1.36x |
+| follow_through | 28328.8 | 20006.2 | 34590.8 | 1.42x |
+| distractor_robustness | 5186.0 | 13589.0 | 26057.0 | 0.38x |
+| redundancy | **5260.0** | 3621.0 | 27770.0 | **1.45x (limit, <=2.0x)** — was `undefined` |
+| abstention | 20467.0 | 36635.0 | 46987.0 | 0.56x |
+
+**Which cells changed grade, and why.** Re-grading all 1392 stored rows
+with the updated `grade_correctness` flips exactly 17 rows from wrong to
+correct, never the other direction (the uid-citation rule is additive to
+the tag rule, so it can only add correct answers, never remove one).
+Fifteen of the seventeen are the `redundancy` class's single probe,
+`keelbridge_programme_scope`, across five scales and the `pull`,
+`push_breadcrumb_pull` and `push_pages_upper_bound` arms — in every one of
+those rows the answer names the target page's literal uid
+(`project-keelbridge`), that uid is one of the probe's `expected_uids`, and
+it was actually present in that cell's own recall output, so the new rule's
+three conditions are all met. The other two flips are `disambiguation`'s
+`person_not_repo` probe on `push_pages_upper_bound` at `medium_dense` and
+`medium_verydense` (same shape: the delivered page's literal uid, cited and
+delivered). **`disambiguation`'s `repo_not_person` probe — the cell named
+in §5/§6 as the open uid-vs-tag question — does NOT flip anywhere**: its
+answers cite the bare string `rowanwrenfield` (the page's name/tag
+vocabulary, truncated into the 400-character recall snippet), never the
+page's actual uid `repo-rowanwrenfield`; the ruling requires the literal
+uid string, and `rowanwrenfield` is not a substring of `repo-rowanwrenfield`
+normalized. That cell's §5/§6 finding is superseded by this addendum: it is
+not a case the athenaeum#1793 ruling resolves, and remains a correctness
+loss under either grading rule. Three of the seventeen flips land in a
+`push_breadcrumb_pull` (verdict-arm) cell -- `redundancy` at `medium`,
+`medium_verydense` and `small` -- but only `medium` is a cutoff-eligible
+scale (§7's decision reads only `medium` and `large`; `medium_dense`/
+`medium_verydense` are density variants of the same size, not "above
+medium" in the scale progression the decision rule walks). That single
+cutoff-eligible flip is exactly the `medium` `redundancy` cell shown above,
+which is why the cutoff scale and every `all pass` reading are unchanged
+even though 17 individual rows regraded correct.

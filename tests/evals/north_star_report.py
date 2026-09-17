@@ -352,6 +352,111 @@ def _all_answer_tokens(corpus: Corpus) -> frozenset[str]:
     return frozenset(token for probe in corpus.probes for token in probe.answer_tokens)
 
 
+def _native_loaded_uids(record: RolloutRecord) -> tuple[str, ...]:
+    """Uids of memory files the NATIVE_GREP arm actually opened via its own
+    file tools (issue athenaeum#1793).
+
+    ``transcript[0]["native_memory"]["loaded_memory_files"]`` (see
+    :func:`tests.evals.rollout.run_native_grep`) is keyed by the path of
+    every memory file the arm's read tool actually returned content for --
+    ``materialize_native_memory`` names each topic file ``<uid>.md``,
+    matching :attr:`tests.evals.corpus.Page.filename` -- so the path stem
+    IS the delivered page's uid, the same tool-output basis PULL's uid
+    extraction reads from :func:`uids_from_recall_output`.
+
+    NATIVE_INDEX is deliberately NOT handled here and gets ``()`` from
+    :func:`_delivered_uids` below: its transcript only records the loaded
+    ``MEMORY.md`` INDEX text (:func:`_loaded_text_for_suffix` inside
+    ``run_native_index``, kept as ``loaded_index_text`` only), never which
+    individual topic files -- if any -- the model went on to read, so
+    there is no uid-bearing tool-output basis to extract a delivered set
+    from for that arm.
+    """
+    if not record.transcript:
+        return ()
+    entry = record.transcript[0]
+    if not isinstance(entry, dict):
+        return ()
+    native = entry.get("native_memory")
+    if not isinstance(native, dict):
+        return ()
+    loaded = native.get("loaded_memory_files")
+    if not isinstance(loaded, dict):
+        return ()
+    return tuple(Path(path_str).stem for path_str in loaded if Path(path_str).stem)
+
+
+def _delivered_uids(record: RolloutRecord, probe: Probe) -> tuple[str, ...]:
+    """Uids of the pages actually delivered to *record*'s arm for this cell.
+
+    Shared arm-dispatch behind both :func:`delivered_uids_for_utilization`
+    (waste/utilization accounting, keyed off a :class:`RolloutRow`) and
+    :func:`grade_correctness`'s uid-citation rule (issue athenaeum#1793,
+    keyed off the bare ``record``/``probe`` pair every existing caller and
+    test already has in hand -- no ``RolloutRow`` required). See
+    :func:`delivered_uids_for_utilization`'s own (prior) docstring for the
+    per-arm rendering-format rationale; behavior here is unchanged from
+    that function, just re-parameterized so ``grade_correctness`` can reuse
+    it directly. PUSH_BREADCRUMB and NATIVE_INDEX return ``()`` -- neither
+    arm's tool output carries a uid-bearing basis (see
+    :func:`_native_loaded_uids`'s docstring for NATIVE_INDEX's case).
+    """
+    if record.arm is Arm.PUSH_PAGES_UPPER_BOUND:
+        return tuple(uids_from_recall_output(_push_delivered_text(record)))
+    if record.arm is Arm.ORACLE:
+        return probe.expected_uids
+    if record.arm is Arm.PULL:
+        return tuple(uids_from_recall_output(_pull_delivered_text(record)))
+    if record.arm is Arm.PUSH_BREADCRUMB_PULL:
+        return tuple(uids_from_recall_output(_pull_delivered_text(record)))
+    if record.arm is Arm.NATIVE_GREP:
+        return _native_loaded_uids(record)
+    return ()
+
+
+def _answer_token_satisfied(
+    token: str,
+    probe: Probe,
+    corpus: Corpus,
+    answer: str,
+    delivered_uids: frozenset[str],
+) -> bool:
+    """True when *answer* (already normalized) satisfies *token*, either by
+    the athenaeum#1753 tag contract or the athenaeum#1793 uid-citation rule.
+
+    Tag path (unchanged): *token* IS the tag string planted on the
+    ``Internal reference tag:`` line of one of *probe*'s ``expected_uids``
+    pages, so a normalized substring match against *answer* is exactly
+    "the model wrote ``[ref: TAG]`` for that page".
+
+    Uid path (new, operator ruling on athenaeum#1793, option 1): a citation
+    of a page uid counts as satisfying *token* when (a) that page is one of
+    *probe*'s ``expected_uids``, (b) that page actually plants *token* (so a
+    ``follow_through`` probe's two tokens can each only be satisfied by
+    THEIR OWN page's uid, not either page's), (c) the uid string appears in
+    *answer*, AND (d) the uid is in *delivered_uids* -- the arm's own
+    recall/read-entity/file-read tool output for this cell, never merely
+    ``expected_uids`` (a guessed or leaked uid the arm was never shown must
+    still grade wrong; that is the athenaeum#1753 leak guard this rule is
+    scoped not to reopen).
+    """
+    normalized_token = _normalize_for_match(token)
+    if normalized_token in answer:
+        return True
+    if not delivered_uids:
+        return False
+    pages_by_uid = {page.uid: page for page in corpus.pages}
+    for uid in probe.expected_uids:
+        if uid not in delivered_uids:
+            continue
+        page = pages_by_uid.get(uid)
+        if page is None or normalized_token not in _normalize_for_match(page.body):
+            continue
+        if _normalize_for_match(uid) in answer:
+            return True
+    return False
+
+
 def grade_correctness(record: RolloutRecord, probe: Probe, corpus: Corpus) -> bool | None:
     """Did *record*'s answer get *probe*'s ground truth right?
 
@@ -363,9 +468,18 @@ def grade_correctness(record: RolloutRecord, probe: Probe, corpus: Corpus) -> bo
     gap that :func:`tests.evals.corpus.validate_core` already refuses to let
     ship, not a graded miss.
 
+    Each required token may ALSO be satisfied by a uid citation of the page
+    that plants it, when that uid was actually delivered to this arm for
+    this cell -- see :func:`_answer_token_satisfied` (issue athenaeum#1793,
+    operator ruling: option 1). A ``follow_through`` probe's two tokens each
+    independently take either path; the all-tokens requirement above is
+    otherwise unchanged.
+
     Abstention: correct only when the answer asserts none of the corpus's
     planted tokens AND uses recognizable declining language -- see the
-    section docstring above.
+    section docstring above. Unaffected by the uid-citation rule: an
+    abstention probe carries no ``expected_uids``, so there is nothing for a
+    uid citation to satisfy.
     """
     answer = _normalize_for_match(record.answer)
     if probe.probe_class == "abstention":
@@ -374,7 +488,11 @@ def grade_correctness(record: RolloutRecord, probe: Probe, corpus: Corpus) -> bo
         return any(phrase in answer for phrase in _NOT_FOUND_PHRASES)
     if not probe.answer_tokens:
         return None
-    return all(_normalize_for_match(tok) in answer for tok in probe.answer_tokens)
+    delivered_uids = frozenset(_delivered_uids(record, probe))
+    return all(
+        _answer_token_satisfied(tok, probe, corpus, answer, delivered_uids)
+        for tok in probe.answer_tokens
+    )
 
 
 def weak_probes(rows: Sequence[RolloutRow]) -> tuple[str, ...]:
