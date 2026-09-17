@@ -620,6 +620,14 @@ def test_condition3_verdict_level_native_zero_passes() -> None:
 
 
 def test_arm_pinning_ignores_a_winning_non_verdict_arm() -> None:
+    """A "pick the most-correct Athenaeum arm" mutant would use
+    push_pages_upper_bound's 1/1 (100%) against native's 0/1 (0%) and PASS
+    condition 1. The correct, arm-PINNED implementation reads only the
+    verdict arm (push_breadcrumb_pull), which also scored 0/1 -- 0.0 is not
+    strictly greater than native's own 0.0, so condition 1 must FAIL. The
+    two implementations diverge on this fixture, which is what makes it
+    detect the mutant (a same-scoring native, as in an earlier draft of
+    this test, does not: both implementations would fail it either way)."""
     rows = [
         # push_pages_upper_bound (NOT the verdict arm) wins big.
         _row(
@@ -639,22 +647,22 @@ def test_arm_pinning_ignores_a_winning_non_verdict_arm() -> None:
                 answer="I don't know",
             )
         ),
+        # native ALSO loses -- so a mutant reading push_pages_upper_bound's
+        # 1/1 against native's 0/1 would flip this fixture to a PASS.
         _row(
             _record(
                 arm=Arm.NATIVE_INDEX,
                 probe_id=RELATIONSHIP_PROBE_ID,
                 probe_class="single_hop",
-                answer=f"terms are {RELATIONSHIP_ANSWER_TOKEN}",
+                answer="I don't know",
             )
         ),
     ]
     verdicts = compute_verdicts(rows, relationship_probe_ids=frozenset({RELATIONSHIP_PROBE_ID}))
     assert len(verdicts) == 1
-    # push_pages_upper_bound scored 1/1 (100%), which would have beaten
-    # native's 1/1 (100%) in a tie-break, or at least not lost -- but the
-    # PINNED verdict arm (push_breadcrumb_pull) scored 0/1 and must lose.
     assert verdicts[0].condition1_pass is False
     assert "push_breadcrumb_pull" in verdicts[0].condition1_detail
+    assert "push_pages_upper_bound" not in verdicts[0].condition1_detail
 
 
 # ---------------------------------------------------------------------------
@@ -719,3 +727,378 @@ def test_render_decision_block_prints_the_verdict_arm() -> None:
         render_decision_block(_minimal_report(), verdict_arm="push_breadcrumb_pull")
     )
     assert "**Verdict arm:** `push_breadcrumb_pull`" in rendered
+
+
+# ---------------------------------------------------------------------------
+# Condition 2, restored: a genuine failure path (mutation target: deleting
+# `condition2_pass = False`), and arm-pinning on condition 2 itself.
+# ---------------------------------------------------------------------------
+
+
+def test_condition1_passes_and_condition2_fails_on_a_compared_class() -> None:
+    rows = [
+        # Relationship subset (bluewater_terms, company page): verdict arm wins.
+        _row(
+            _record(
+                arm=VERDICT_ARM,
+                probe_id=RELATIONSHIP_PROBE_ID,
+                probe_class="single_hop",
+                answer=f"terms are {RELATIONSHIP_ANSWER_TOKEN}",
+            )
+        ),
+        _row(
+            _record(
+                arm=Arm.NATIVE_INDEX,
+                probe_id=RELATIONSHIP_PROBE_ID,
+                probe_class="single_hop",
+                answer="I don't know",
+            )
+        ),
+        # Non-relationship (pto_allowance): verdict arm loses to native.
+        _row(
+            _record(
+                arm=VERDICT_ARM,
+                probe_id=OTHER_PROBE_ID,
+                probe_class="single_hop",
+                answer="no idea",
+            )
+        ),
+        _row(
+            _record(
+                arm=Arm.NATIVE_INDEX,
+                probe_id=OTHER_PROBE_ID,
+                probe_class="single_hop",
+                answer=f"25 days ({OTHER_ANSWER_TOKEN})",
+            )
+        ),
+    ]
+    verdicts = compute_verdicts(rows, relationship_probe_ids=frozenset({RELATIONSHIP_PROBE_ID}))
+    assert len(verdicts) == 1
+    verdict = verdicts[0]
+    assert verdict.condition1_pass is True
+    assert verdict.condition2_pass is False
+    assert "single_hop" in verdict.condition2_detail
+    assert verdict.all_pass is False
+
+
+def test_condition2_arm_pinning_ignores_a_rescuing_non_verdict_arm() -> None:
+    """A "pick the most-correct Athenaeum arm" mutant would let
+    push_pages_upper_bound's correct answer rescue this class. The pinned
+    verdict arm scored incorrectly and must still fail condition 2."""
+    rows = [
+        _row(
+            _record(
+                arm=Arm.PUSH_PAGES_UPPER_BOUND,
+                probe_id=OTHER_PROBE_ID_2,
+                probe_class="single_hop",
+                answer=f"policy is {OTHER_ANSWER_TOKEN_2}",
+            )
+        ),
+        _row(
+            _record(
+                arm=VERDICT_ARM,
+                probe_id=OTHER_PROBE_ID_2,
+                probe_class="single_hop",
+                answer="no idea",
+            )
+        ),
+        _row(
+            _record(
+                arm=Arm.NATIVE_INDEX,
+                probe_id=OTHER_PROBE_ID_2,
+                probe_class="single_hop",
+                answer=f"policy is {OTHER_ANSWER_TOKEN_2}",
+            )
+        ),
+    ]
+    verdicts = compute_verdicts(rows, relationship_probe_ids=frozenset())
+    assert len(verdicts) == 1
+    assert verdicts[0].condition2_pass is False
+    assert "single_hop" in verdicts[0].condition2_detail
+
+
+# ---------------------------------------------------------------------------
+# Verdict-arm wiring, end to end: build_report -> render_report.
+# ---------------------------------------------------------------------------
+
+
+def test_build_report_and_render_report_thread_a_non_default_verdict_arm() -> None:
+    rows = [
+        _row(
+            _record(
+                arm=Arm.PULL,
+                probe_id=RELATIONSHIP_PROBE_ID,
+                probe_class="single_hop",
+                answer="I don't know",  # wrong -- verdict arm loses
+            )
+        ),
+        _row(
+            _record(
+                arm=Arm.NATIVE_INDEX,
+                probe_id=RELATIONSHIP_PROBE_ID,
+                probe_class="single_hop",
+                answer=f"terms are {RELATIONSHIP_ANSWER_TOKEN}",  # native wins
+            )
+        ),
+    ]
+    report = build_report(rows, verdict_arm="pull")
+    rendered = render_report(report)
+    assert "**Verdict arm:** `pull`" in rendered
+    # The rendered failing-condition detail must name the ACTUAL verdict
+    # arm used ("pull"), proving build_report -> render_report ->
+    # render_decision_block -> compute_verdicts threads it through, not a
+    # hardcoded default surviving somewhere along that chain.
+    assert "'pull'" in rendered
+
+
+# ---------------------------------------------------------------------------
+# Condition 1: a tie must not pass (`>`, never `>=`).
+# ---------------------------------------------------------------------------
+
+
+def test_condition1_tie_does_not_pass() -> None:
+    rows = [
+        _row(
+            _record(
+                arm=VERDICT_ARM,
+                probe_id=RELATIONSHIP_PROBE_ID,
+                probe_class="single_hop",
+                answer=f"terms are {RELATIONSHIP_ANSWER_TOKEN}",
+            ),
+            replicate=0,
+        ),
+        _row(
+            _record(
+                arm=VERDICT_ARM,
+                probe_id=RELATIONSHIP_PROBE_ID,
+                probe_class="single_hop",
+                answer="I don't know",
+            ),
+            replicate=1,
+        ),
+        _row(
+            _record(
+                arm=Arm.NATIVE_INDEX,
+                probe_id=RELATIONSHIP_PROBE_ID,
+                probe_class="single_hop",
+                answer=f"terms are {RELATIONSHIP_ANSWER_TOKEN}",
+            ),
+            replicate=0,
+        ),
+        _row(
+            _record(
+                arm=Arm.NATIVE_INDEX,
+                probe_id=RELATIONSHIP_PROBE_ID,
+                probe_class="single_hop",
+                answer="I don't know",
+            ),
+            replicate=1,
+        ),
+    ]
+    verdicts = compute_verdicts(rows, relationship_probe_ids=frozenset({RELATIONSHIP_PROBE_ID}))
+    # Both sides pool to 1/2 = 0.5 -- an exact tie. `>=` would pass this;
+    # the design doc's rule ("beats", "exceeds") is strict `>`.
+    assert verdicts[0].condition1_pass is False
+
+
+# ---------------------------------------------------------------------------
+# Two native arms: condition 1 picks the HIGHER pooled rate (max, never
+# min); condition 3 picks the CHEAPER DEFINED cost (min, never max), and a
+# zero-scoring native arm is dropped rather than treated as free.
+# ---------------------------------------------------------------------------
+
+
+def test_condition1_picks_the_higher_pooled_native_rate() -> None:
+    rows = [
+        _row(
+            _record(
+                arm=VERDICT_ARM,
+                probe_id=RELATIONSHIP_PROBE_ID,
+                probe_class="single_hop",
+                answer=f"terms are {RELATIONSHIP_ANSWER_TOKEN}",
+            ),
+            replicate=0,
+        ),
+        _row(
+            _record(
+                arm=VERDICT_ARM,
+                probe_id=RELATIONSHIP_PROBE_ID,
+                probe_class="single_hop",
+                answer="I don't know",
+            ),
+            replicate=1,
+        ),
+        # native_index: 0/1 correct.
+        _row(
+            _record(
+                arm=Arm.NATIVE_INDEX,
+                probe_id=RELATIONSHIP_PROBE_ID,
+                probe_class="single_hop",
+                answer="I don't know",
+            )
+        ),
+        # native_grep: 1/1 correct -- the HIGHER pooled rate; a min-picking
+        # mutant would compare the verdict arm against native_index's 0.0
+        # instead and incorrectly PASS.
+        _row(
+            _record(
+                arm=Arm.NATIVE_GREP,
+                probe_id=RELATIONSHIP_PROBE_ID,
+                probe_class="single_hop",
+                answer=f"terms are {RELATIONSHIP_ANSWER_TOKEN}",
+            )
+        ),
+    ]
+    verdicts = compute_verdicts(rows, relationship_probe_ids=frozenset({RELATIONSHIP_PROBE_ID}))
+    assert verdicts[0].condition1_pass is False  # verdict 0.5 <= best native 1.0
+    assert "native_grep" in verdicts[0].condition1_detail
+    assert "native_index" not in verdicts[0].condition1_detail
+
+
+def test_compute_cost_ratios_picks_the_cheaper_defined_native_cost() -> None:
+    costs = [
+        _cost("cls", "core", "pull", 150.0),
+        _cost("cls", "core", "native_index", 300.0),
+        _cost("cls", "core", "native_grep", 100.0),  # the cheaper one
+    ]
+    ratio = compute_cost_ratios(costs, verdict_arm="pull")[0]
+    assert ratio.native_cost == 100.0
+    assert ratio.ratio == 1.5
+    assert ratio.reading == "limit"  # a max-picking mutant would read 0.5 ("aspirational")
+
+
+def test_compute_cost_ratios_drops_a_zero_scoring_native_arm() -> None:
+    costs = [
+        _cost("cls", "core", "pull", 150.0),
+        _cost("cls", "core", "native_index", None),  # zero correct answers -- must be dropped
+        _cost("cls", "core", "native_grep", 100.0),
+    ]
+    ratio = compute_cost_ratios(costs, verdict_arm="pull")[0]
+    assert ratio.native_cost == 100.0
+    assert ratio.reading == "limit"
+
+
+# ---------------------------------------------------------------------------
+# Condition 3: worst reading across classes (never the best), and ruling R5
+# (a class with no native rows at all is skipped, named, and does not fail
+# the scale on its own).
+# ---------------------------------------------------------------------------
+
+
+def test_condition3_reports_the_worst_reading_not_the_best() -> None:
+    rows = [
+        # class_a: verdict cost 300, native cost 150 -> ratio 2.0 ("limit").
+        _row(
+            _record(
+                arm=VERDICT_ARM,
+                probe_id=OTHER_PROBE_ID,
+                probe_class="class_a",
+                answer=f"25 days ({OTHER_ANSWER_TOKEN})",
+                input_tokens=250,
+                output_tokens=50,
+            )
+        ),
+        _row(
+            _record(
+                arm=Arm.NATIVE_INDEX,
+                probe_id=OTHER_PROBE_ID,
+                probe_class="class_a",
+                answer=f"25 days ({OTHER_ANSWER_TOKEN})",
+            )
+        ),
+        # class_b: verdict cost 500, native cost 150 -> ratio ~3.33 ("fail").
+        _row(
+            _record(
+                arm=VERDICT_ARM,
+                probe_id=OTHER_PROBE_ID_2,
+                probe_class="class_b",
+                answer=f"policy is {OTHER_ANSWER_TOKEN_2}",
+                input_tokens=450,
+                output_tokens=50,
+            )
+        ),
+        _row(
+            _record(
+                arm=Arm.NATIVE_INDEX,
+                probe_id=OTHER_PROBE_ID_2,
+                probe_class="class_b",
+                answer=f"policy is {OTHER_ANSWER_TOKEN_2}",
+            )
+        ),
+    ]
+    verdicts = compute_verdicts(rows, relationship_probe_ids=frozenset())
+    assert len(verdicts) == 1
+    # The worst (highest-ranked) reading across classes is "fail" -- a
+    # best-picking mutant would report "limit" (class_a) instead.
+    assert verdicts[0].condition3_reading == "fail"
+    assert verdicts[0].condition3_pass is False
+    assert "compared 2 classes, skipped 0" in verdicts[0].condition3_detail
+
+
+def test_condition3_skips_a_class_with_no_native_rows_at_all() -> None:
+    rows = [
+        # class_a: compared, verdict cost 300 vs native cost 150 -> "limit".
+        _row(
+            _record(
+                arm=VERDICT_ARM,
+                probe_id=OTHER_PROBE_ID,
+                probe_class="class_a",
+                answer=f"25 days ({OTHER_ANSWER_TOKEN})",
+                input_tokens=250,
+                output_tokens=50,
+            )
+        ),
+        _row(
+            _record(
+                arm=Arm.NATIVE_INDEX,
+                probe_id=OTHER_PROBE_ID,
+                probe_class="class_a",
+                answer=f"25 days ({OTHER_ANSWER_TOKEN})",
+            )
+        ),
+        # class_b: verdict arm only -- NO native row at all -- skipped.
+        _row(
+            _record(
+                arm=VERDICT_ARM,
+                probe_id=OTHER_PROBE_ID_2,
+                probe_class="class_b",
+                answer=f"policy is {OTHER_ANSWER_TOKEN_2}",
+            )
+        ),
+    ]
+    verdicts = compute_verdicts(rows, relationship_probe_ids=frozenset())
+    assert len(verdicts) == 1
+    verdict = verdicts[0]
+    # Only the compared class ("limit") counts -- the skip must not fail
+    # the scale on its own (ruling R5).
+    assert verdict.condition3_reading == "limit"
+    assert verdict.condition3_pass is True
+    assert "compared 1 classes, skipped 1" in verdict.condition3_detail
+    assert "class_b" in verdict.condition3_detail
+
+
+# ---------------------------------------------------------------------------
+# The amortisation-denominator sentence, pinned exactly.
+# ---------------------------------------------------------------------------
+
+
+def test_decision_block_states_the_amortisation_denominator_in_words() -> None:
+    rows = [
+        _row(
+            _record(
+                arm=Arm.PULL,
+                probe_id=OTHER_PROBE_ID,
+                probe_class="single_hop",
+                answer=f"25 days ({OTHER_ANSWER_TOKEN})",
+            )
+        ),
+    ]
+    write_costs = [
+        WriteCost(
+            system="athenaeum", corpus_scale=CORPUS_SCALE, input_tokens=1000, output_tokens=500
+        )
+    ]
+    report = build_report(rows, write_costs=write_costs)
+    rendered = render_report(report)
+    probe_count = len(_CORPUS.probes)
+    assert f"write cost amortised over {probe_count} probes at `{CORPUS_SCALE}`." in rendered

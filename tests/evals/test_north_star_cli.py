@@ -195,6 +195,32 @@ def test_smoke_run_writes_a_report(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     assert "North-star report" in text
 
 
+def test_verdict_arm_flag_threads_through_to_the_written_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--verdict-arm`` must reach ``build_report`` end to end -- this is
+    the one path that would silently regress if a future edit dropped the
+    kwarg anywhere along ``main`` -> ``build_report`` ->
+    ``render_decision_block`` -> ``compute_verdicts``."""
+    monkeypatch.setattr(north_star_cli, "run_probe_all_arms", _stub_run_probe_all_arms)
+    monkeypatch.setattr(north_star_cli, "_default_store_path", lambda: tmp_path / "r.jsonl")
+
+    exit_code = north_star_cli.main(
+        [
+            "--scale", "smoke",
+            "--materialize-root", str(tmp_path / "mat"),
+            "--out-dir", str(tmp_path / "measurements"),
+            "--verdict-arm", "pull",
+        ]
+    )
+
+    assert exit_code == 0
+    reports = list((tmp_path / "measurements").glob("north-star-*.md"))
+    assert len(reports) == 1
+    text = reports[0].read_text(encoding="utf-8")
+    assert "**Verdict arm:** `pull`" in text
+
+
 def test_store_rows_round_trip_through_the_report_loader(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

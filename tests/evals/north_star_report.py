@@ -1006,11 +1006,23 @@ def _reading_for_ratio(ratio: float | None) -> str:
     return "fail"
 
 
+#: Ruling R1 (Quine review of PR#1740): all three §7 conditions evaluate the
+#: SAME Athenaeum arm -- the shipped configuration (sidecar breadcrumbs plus
+#: the recall tool), never "whichever delivery arm wins this condition".
+#: Overridable per report via ``--verdict-arm`` (``north_star_cli.py``) /
+#: ``build_report(verdict_arm=...)`` -- other Athenaeum arms still appear in
+#: every per-dimension table above, just never in the verdicts. Defined
+#: here, immediately above :func:`compute_cost_ratios` (its first use),
+#: rather than a literal default repeated at each call site.
+DEFAULT_VERDICT_ARM: str = Arm.PUSH_BREADCRUMB_PULL.value
+
+
 @dataclasses.dataclass(frozen=True)
 class CostRatio:
-    """*verdict_arm*'s cost per correct answer against the BETTER (cheaper)
-    of the two native arms, at one (probe_class, corpus_scale) -- "better"
-    in a cost sentence means lower cost, the harshest reading available for
+    """*verdict_arm*'s cost per correct answer against the BETTER (cheaper
+    DEFINED cost) of the two native arms, at one (probe_class, corpus_scale)
+    -- "better" in a cost sentence means the lower cost among natives that
+    actually scored a correct answer, the harshest reading available for
     Athenaeum (issue athenaeum#1734 AC2). Orchestrator ruling R1: this is
     ONE PINNED Athenaeum arm, never the cheapest of the delivery arms --
     cherry-picking a different winning arm per condition is exactly what
@@ -1022,7 +1034,11 @@ class CostRatio:
     "native-zero"`` (ruling R3) is the one case where an undefined RATIO
     still PASSES: the better native arm scored zero correct answers at
     this class/scale while *verdict_arm* scored at least one -- there is
-    no ratio to compute, but the direction is unambiguous.
+    no ratio to compute, but the direction is unambiguous. ``native_present``
+    (ruling R5) is ``False`` only when NEITHER native arm has ANY row in
+    this group at all -- :func:`compute_verdicts` uses it to SKIP the class
+    for condition 3 (mirroring condition 2's R4 skip), rather than failing
+    the whole scale outright.
     """
 
     probe_class: str
@@ -1032,13 +1048,14 @@ class CostRatio:
     ratio: float | None
     reading: str
     detail: str
+    native_present: bool
 
 
 def compute_cost_ratios(
-    costs: Sequence[CostPerCorrect], *, verdict_arm: str = "push_breadcrumb_pull"
+    costs: Sequence[CostPerCorrect], *, verdict_arm: str = DEFAULT_VERDICT_ARM
 ) -> list[CostRatio]:
     """Group *costs* by (probe_class, corpus_scale) and compare *verdict_arm*'s
-    cost per correct against the best (cheapest, defined) native-arm cost
+    cost per correct against the best (cheapest, DEFINED) native-arm cost
     per correct.
 
     Ruling R1: *verdict_arm* is the ONE Athenaeum arm every condition
@@ -1052,9 +1069,14 @@ def compute_cost_ratios(
     scored at least one, this reads ``"native-zero"`` -- a PASS, stated in
     words rather than as a fabricated ratio. If *verdict_arm* ALSO scored
     zero, it is ``"undefined"`` (a fail): neither side has anything to
-    compare. When native did not run in this group AT ALL (no native rows,
-    as opposed to native rows that scored zero), this is an ordinary
-    ``"undefined"`` -- a genuine data gap, not evidence native lost.
+    compare.
+
+    Ruling R5: when native did not run in this group AT ALL (no
+    ``native_index``/``native_grep`` row at all, as opposed to native rows
+    that scored zero), ``native_present`` is ``False`` -- :func:`compute_verdicts`
+    treats this the same way condition 2 treats a class with no gradable
+    rows on one side (ruling R4): SKIPPED, named, never a scale-level fail
+    on its own.
     """
     by_group: dict[tuple[str, str], list[CostPerCorrect]] = defaultdict(list)
     for cost in costs:
@@ -1071,11 +1093,12 @@ def compute_cost_ratios(
         athenaeum_correct_n = verdict_entries[0].correct_n if verdict_entries else 0
 
         native_entries = [c for c in group if c.arm in _NATIVE_ARM_VALUES]
+        native_present = bool(native_entries)
         native_defined_costs = [
             c.cost_per_correct for c in native_entries if c.cost_per_correct is not None
         ]
         native_cost = min(native_defined_costs) if native_defined_costs else None
-        native_ran_but_scored_zero = bool(native_entries) and native_cost is None
+        native_ran_but_scored_zero = native_present and native_cost is None
 
         if native_cost is not None and athenaeum_cost is not None:
             ratio = athenaeum_cost / native_cost
@@ -1110,6 +1133,7 @@ def compute_cost_ratios(
                 ratio=ratio,
                 reading=reading,
                 detail=detail,
+                native_present=native_present,
             )
         )
     return results
@@ -1131,14 +1155,6 @@ _RELATIONSHIP_PAGE_TYPES = frozenset({"person", "company"})
 #: pass every condition. Sliced from :data:`SIZE_SCALE_ORDER` (the SIZE axis
 #: only, same as :func:`crossover_scales`) starting at ``"medium"``.
 _CUTOFF_ELIGIBLE_SCALES: tuple[str, ...] = SIZE_SCALE_ORDER[SIZE_SCALE_ORDER.index("medium") :]
-
-#: Ruling R1 (Quine review of PR#1740): all three §7 conditions evaluate the
-#: SAME Athenaeum arm -- the shipped configuration (sidecar breadcrumbs plus
-#: the recall tool), never "whichever delivery arm wins this condition".
-#: Overridable per report via ``--verdict-arm`` (``north_star_cli.py``) /
-#: ``build_report(verdict_arm=...)`` -- other Athenaeum arms still appear in
-#: every per-dimension table above, just never in the verdicts.
-DEFAULT_VERDICT_ARM: str = Arm.PUSH_BREADCRUMB_PULL.value
 
 
 def _pooled_correctness(rows: Sequence[RolloutRow], arm: str) -> tuple[int, int]:
@@ -1275,13 +1291,17 @@ def compute_verdicts(
       states how many classes were compared and how many were skipped
       (and their names), never a bare "not worse than native" that hides a
       skip.
-    - **Condition 3** ("cost within budget", design §7.3, ruling R3): the
-      WORST reading (per :data:`_READING_RANK`) among
+    - **Condition 3** ("cost within budget", design §7.3, rulings R3/R5):
+      the WORST reading (per :data:`_READING_RANK`) among
       :func:`compute_cost_ratios` entries at this scale (already computed
-      against the same *verdict_arm*), across whatever probe classes have
-      cost data. ``"undefined"`` and ``"fail"`` both fail the condition;
-      ``"limit"``/``"target"``/``"aspirational"``/``"native-zero"`` all
-      pass. A scale with no cost data at all fails condition 3 outright --
+      against the same *verdict_arm*) that have native cost data at all --
+      a probe class with NO native rows in it (``CostRatio.native_present``
+      is ``False``) is SKIPPED and named (ruling R5), exactly the treatment
+      condition 2 gives a one-sided class under R4, never a scale-level
+      fail on its own. ``"undefined"`` and ``"fail"`` both fail the
+      condition; ``"limit"``/``"target"``/``"aspirational"``/
+      ``"native-zero"`` all pass. The scale fails condition 3 outright only
+      when NO class at this scale has any native cost data to compare --
       there is nothing to certify a pass against.
     """
     if relationship_probe_ids is None:
@@ -1388,26 +1408,39 @@ def compute_verdicts(
             condition2_detail += f" ({', '.join(skipped_classes)})"
         condition2_detail += "; " + (first_failure or "not worse than native on any compared class")
 
-        # Condition 3 (R3): worst cost-ratio reading among classes present,
-        # already computed against verdict_arm by compute_cost_ratios.
+        # Condition 3 (R3 + R5): worst cost-ratio reading among CLASSES
+        # WITH NATIVE DATA, already computed against verdict_arm by
+        # compute_cost_ratios. Ruling R5: a class with no native rows at
+        # all (ratio.native_present is False) is SKIPPED and named -- the
+        # same treatment condition 2 gives a one-sided class under R4 --
+        # never a scale-level fail on its own. The scale fails "undefined"
+        # only when NO class at this scale had any native data to compare.
         ratios_at_scale = [r for r in ratios if r.corpus_scale == scale]
-        if not ratios_at_scale:
+        cost_compared = [r for r in ratios_at_scale if r.native_present]
+        cost_skipped = [r for r in ratios_at_scale if not r.native_present]
+        cost_summary = (
+            f"cost compared {len(cost_compared)} classes, skipped {len(cost_skipped)}"
+        )
+        if cost_skipped:
+            cost_summary += f" ({', '.join(r.probe_class for r in cost_skipped)})"
+        if not cost_compared:
             condition3_pass = False
             condition3_reading = "undefined"
-            condition3_detail = "condition 3: no cost-per-correct data at this scale"
+            condition3_detail = (
+                f"condition 3: {cost_summary}; no class at this scale has defined native cost"
+            )
         else:
-            worst = max(ratios_at_scale, key=lambda r: _READING_RANK[r.reading])
+            worst = max(cost_compared, key=lambda r: _READING_RANK[r.reading])
             condition3_reading = worst.reading
             condition3_pass = worst.reading in _CONDITION3_PASSING_READINGS
             if worst.reading in ("undefined", "native-zero"):
-                condition3_detail = (
-                    f"condition 3: {worst.reading} for {worst.probe_class!r} ({worst.detail})"
-                )
+                worst_detail = f"{worst.reading} for {worst.probe_class!r} ({worst.detail})"
             else:
-                condition3_detail = (
-                    f"condition 3: worst reading is {worst.reading!r} for "
-                    f"{worst.probe_class!r} (ratio={worst.ratio:.3f})"
+                worst_detail = (
+                    f"worst reading is {worst.reading!r} for {worst.probe_class!r} "
+                    f"(ratio={worst.ratio:.3f})"
                 )
+            condition3_detail = f"condition 3: {cost_summary}; {worst_detail}"
 
         verdicts.append(
             ScaleVerdict(
@@ -1521,9 +1554,18 @@ def render_decision_block(
         "against the better native arm's own pooled rate on the same rows; **(2)** do not "
         "lose any other current use case, class by class, skipping (and naming) any class "
         "where either side has no gradable rows; **(3)** cost per correct answer within "
-        "budget of the better native arm -- `>2.0x fail`, `<=2.0x limit`, `<=1.0x target`, "
+        "budget of the better native arm, per class, skipping (and naming) any class with no "
+        "native cost data at all (ruling R5) -- `>2.0x fail`, `<=2.0x limit`, `<=1.0x target`, "
         "`<=0.5x aspirational`, or `native-zero` (a pass) when the better native arm scored "
         "zero correct answers while the verdict arm scored at least one."
+    )
+    lines.append("")
+    lines.append(
+        "**\"Better native arm\"** means two different things across these conditions, both "
+        "the harshest reading available to Athenaeum: for condition 1, the native arm with "
+        "the HIGHER pooled correctness rate; for condition 3, the native arm with the CHEAPER "
+        "DEFINED cost per correct (a native arm that scored zero correct answers has no "
+        "defined cost and is never picked as \"cheaper\" by that alone -- see `native-zero`)."
     )
     lines.append("")
 
