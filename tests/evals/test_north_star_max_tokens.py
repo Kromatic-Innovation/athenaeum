@@ -248,6 +248,29 @@ def test_dry_run_refuses_when_the_projection_exceeds_the_ceiling(
     assert f"projected {projected} tokens" in captured.out
 
 
+def test_dry_run_derives_the_ceiling_from_max_spend_alone(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The configuration CI actually runs.
+
+    ``evals.yml`` always passes ``--max-spend`` and leaves ``--max-tokens``
+    blank by default, so the derived branch — not the flag — is the
+    production path. Every other ``main()`` test here names the ceiling
+    explicitly, which would leave that path proven only in unit tests of
+    :func:`resolve_token_ceiling`.
+    """
+    args = [
+        *_small_grid_args(tmp_path, tag="derived"),
+        "--dry-run",
+    ]
+    args[args.index("--max-spend") + 1] = "75"
+    assert north_star_cli.main(args) == 0
+    out = capsys.readouterr().out
+    assert "derived from --max-spend $75.00" in out
+    expected, _ = north_star_cli.resolve_token_ceiling(_parse(args))
+    assert f"token ceiling: {expected}" in out
+
+
 def test_dry_run_makes_no_paid_call_on_the_refusal_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -294,3 +317,9 @@ def test_evals_yml_wires_the_max_tokens_input_to_the_flag() -> None:
     # Blank input must leave the flag off entirely, so the CLI derives the
     # ceiling from --max-spend rather than the workflow pinning a second one.
     assert 'if [ -n "${NORTH_STAR_MAX_TOKENS:-}" ]; then' in evals_yml
+    # AC4: the new input must not have grown the job a push trigger. The
+    # north-star job stays dispatch-only and opt-in.
+    assert (
+        "github.event_name == 'workflow_dispatch' "
+        "&& github.event.inputs.north_star == 'true'"
+    ) in evals_yml
