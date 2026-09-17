@@ -2574,6 +2574,60 @@ def resolve_recall_relevance_floor(
     return None
 
 
+def resolve_recall_hybrid(config: dict[str, Any] | None) -> bool:
+    """Resolve ``recall.hybrid`` -- the vector-backend RRF fusion opt-out (athenaeum#1792).
+
+    DEFAULT ON. This is the opt-OUT knob for the reciprocal-rank-fusion
+    hybrid the vector dispatch path in the ``recall_search`` MCP tool
+    applies by construction: fetch a second ranked list from the FTS5
+    backend over the same index root, apply each backend's OWN relevance
+    floor (see ``resolve_recall_relevance_floor`` and the per-backend
+    direction ``meets_relevance_floor`` keeps intact) to its own list
+    BEFORE fusion, then combine via reciprocal rank fusion (``k=60``) and
+    truncate to ``top_k`` -- never applying a floor to the fused score
+    itself. See ``recall_search``'s hybrid block for the mechanics, and see
+    the athenaeum#1792 PR body for why RRF (rank-based, so it needs no
+    cross-backend score normalisation) was chosen over a proper-noun boost.
+
+    Only the ``vector`` dispatch path ever calls this. The ``fts5`` and
+    ``keyword`` paths do not consult it at all -- "default off for fts5" is
+    true by construction, not by a stored default here, which is what keeps
+    every fts5-only caller (including the offline recall-covers-grep eval's
+    fts5 half) byte-identical to before this issue.
+
+    SIDE EFFECT WORTH NAMING (issue athenaeum#1792 review): with this on
+    (the default), a ``vector``-backend call now ALSO resolves and applies
+    ``recall.relevance_floor.fts5`` (and its ``push.fts5`` sibling for the
+    unprompted path) to the FTS5 side list it fuses in, even though the
+    caller never selected ``fts5`` as its own backend. An operator who
+    configures an fts5 floor for the fts5 dispatch path only, without
+    realizing a vector call now reads it too, would see that floor start
+    influencing vector recall output the moment this knob is on (which it
+    is, by default). Setting ``recall.hybrid: false`` is the way to opt a
+    deployment back out of that coupling, in addition to opting out of
+    fusion itself.
+
+    Precedence: ``ATHENAEUM_RECALL_HYBRID`` env (``1``/``true``/``yes``/``on``,
+    case-insensitive, and their negations for false) > ``recall.hybrid`` yaml
+    (a plain ``bool``) > default ``True``. No seed in ``_DEFAULTS`` (issue
+    athenaeum#231).
+    """
+    env = os.environ.get("ATHENAEUM_RECALL_HYBRID")
+    if env is not None:
+        stripped = env.strip().lower()
+        if stripped in ("1", "true", "yes", "on"):
+            return True
+        if stripped in ("0", "false", "no", "off"):
+            return False
+    if isinstance(config, dict):
+        cfg = config.get("recall")
+        if isinstance(cfg, dict):
+            raw = cfg.get("hybrid")
+            if isinstance(raw, bool):
+                return raw
+    return True
+
+
 def resolve_spend_ledger_path(config: dict[str, Any] | None) -> Path | None:
     """Resolve an explicit spend-ledger path override (env > yaml > None) (athenaeum#378).
 

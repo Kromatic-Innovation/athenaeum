@@ -1255,6 +1255,26 @@ def _relationship_probe_ids(scales: Iterable[str]) -> frozenset[str]:
     return frozenset(ids)
 
 
+def _report_only_probe_classes(scales: Iterable[str]) -> frozenset[str]:
+    """Derive the set of probe classes carrying ``report_only: True`` at
+    any of *scales*, straight from the real corpus (issue athenaeum#1776,
+    athenaeum#1791 §2.1) -- the same "unit tests supply an explicit set,
+    real callers reach the corpus here" escape hatch as
+    :func:`_relationship_probe_ids`. :func:`compute_verdicts` excludes
+    these classes from condition 2 (and condition 3) entirely, as if their
+    rows were never in the store, so a new probe class can never move the
+    ratified §7 kill criterion until an operator ruling on athenaeum#1736's
+    thread promotes it (by editing ``tests.evals.corpus.CONDITION_2_ENROLLED``
+    -- see that constant's docstring)."""
+    classes: set[str] = set()
+    for scale in scales:
+        corpus = _corpus_for_scale(scale)
+        for probe in corpus.probes:
+            if probe.report_only:
+                classes.add(probe.probe_class)
+    return frozenset(classes)
+
+
 #: Rank used to pick the WORST reading among probe classes present at a
 #: scale for condition 3 (design doc §8: no aggregate score, but a single
 #: per-scale PASS/FAIL still needs one reading named -- the worst one, so
@@ -1303,6 +1323,7 @@ def compute_verdicts(
     *,
     verdict_arm: str = DEFAULT_VERDICT_ARM,
     relationship_probe_ids: frozenset[str] | None = None,
+    report_only_classes: frozenset[str] | None = None,
     write_costs: Sequence[WriteCost] = (),
     probe_counts: Mapping[str, int] | None = None,
 ) -> list[ScaleVerdict]:
@@ -1322,6 +1343,14 @@ def compute_verdicts(
     real corpus at all; ``None`` derives it via
     :func:`_relationship_probe_ids` from the scales actually present in
     *rows*.
+
+    *report_only_classes* (issue athenaeum#1776): probe classes to exclude
+    from conditions 2 and 3, as if their rows were never in *rows* at all --
+    condition 1's relationship subset is unaffected (derived from class plus
+    page type, never report-only status). Same escape hatch as
+    *relationship_probe_ids*: ``None`` derives it via
+    :func:`_report_only_probe_classes` from the real corpus; unit tests pass
+    an explicit set.
 
     - **Condition 1** ("win the relationship use case", design §7.1,
       ruling R2): ONE POOLED correctness rate (correct/total) for
@@ -1361,13 +1390,28 @@ def compute_verdicts(
         relationship_probe_ids = _relationship_probe_ids(
             {row.record.corpus_scale for row in rows}
         )
+    if report_only_classes is None:
+        report_only_classes = _report_only_probe_classes(
+            {row.record.corpus_scale for row in rows}
+        )
 
+    # Condition 1's relationship subset is drawn from the UNFILTERED rows --
+    # report_only status never touches it (it is derived from class plus
+    # page type, not report_only). Conditions 2 and 3 both exclude
+    # report_only classes from their row set entirely -- as if those rows
+    # were never in the store -- so a new probe class cannot move the
+    # ratified kill criterion (issue athenaeum#1776).
     relationship_rows = [r for r in rows if r.record.probe_id in relationship_probe_ids]
-    other_rows = [r for r in rows if r.record.probe_id not in relationship_probe_ids]
+    non_report_only_rows = [r for r in rows if r.record.probe_class not in report_only_classes]
+    other_rows = [
+        r for r in non_report_only_rows if r.record.probe_id not in relationship_probe_ids
+    ]
 
     other_stats = compute_group_stats(other_rows)
     ratios = compute_cost_ratios(
-        compute_cost_per_correct(rows, write_costs=write_costs, probe_counts=probe_counts),
+        compute_cost_per_correct(
+            non_report_only_rows, write_costs=write_costs, probe_counts=probe_counts
+        ),
         verdict_arm=verdict_arm,
     )
 
@@ -1663,6 +1707,17 @@ def render_decision_block(
         "native cost data at all (ruling R5) -- `>2.0x fail`, `<=2.0x limit`, `<=1.0x target`, "
         "`<=0.5x aspirational`, or `native-zero` (a pass) when the better native arm scored "
         "zero correct answers while the verdict arm scored at least one."
+    )
+    lines.append("")
+    report_only_classes = _report_only_probe_classes(
+        {row.record.corpus_scale for row in report.rows}
+    )
+    lines.append(
+        "report-only classes excluded: "
+        + (", ".join(sorted(report_only_classes)) if report_only_classes else "(none)")
+        + " -- excluded from conditions 2 and 3 entirely (issue athenaeum#1776); promotion is "
+        "an explicit operator ruling on athenaeum#1736's thread, recorded by editing "
+        "`tests.evals.corpus.CONDITION_2_ENROLLED`, never a side effect of this report."
     )
     lines.append("")
     lines.append(

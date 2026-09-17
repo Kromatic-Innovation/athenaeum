@@ -31,6 +31,103 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   control; cutoff scale is `none`, and the report documents where the
   remaining losses trace to open grading/retrieval issues versus genuine
   misses. No go/no-go call is made here.
+- **`run_native_writer_api` — API-mode native writer for the Phase 2 write
+  path (issue athenaeum#1774).** `run_native_writer` (the Phase 2 native
+  writer) spawns `claude -p`, which requires a logged-in CLI; the grid's
+  default is `--mode api`, so Phase 2 could not run under `workflow_dispatch`
+  at all. `run_native_writer_api` drives `run_api_tool_loop` once per
+  `Observation` in the stream, all sharing one memory directory, and serves
+  `read`/`grep`/`write`/`edit`/`list` tools over it — the same four-verb
+  write surface plus the existing read pair, every one confined by
+  `_resolve_under_memory_dir` so no write can escape the memory directory.
+  Its system prompt mirrors Claude Code's documented auto-memory writing
+  behaviour (design doc §2) rather than a literal quote of Claude Code's own
+  closed-source prompt — that gap stays the CLI-mode spot-check's job to
+  catch. Carries no `REFERENCE_TAG_INSTRUCTION` (these sessions produce
+  memory files, not a graded answer). Returns the existing
+  `NativeWriterResult` shape (now stamped with a `mode` field, `"cli"` or
+  `"api"`, the same pattern `RolloutRecord.mode` already uses), so
+  `compute_write_path_stats` needs no change. `run_native_writer_dispatch`
+  is the new `mode`-switched entry point — `"api"` (default) resolves to
+  `run_native_writer_api`, `"cli"` calls `run_native_writer` unchanged — the
+  seam the Phase 2 CLI flags (athenaeum#1785) will dispatch through.
+
+  Quine review of the same PR found two must-fixes and two shoulds,
+  addressed on the same branch (issue athenaeum#1774): (1) the fidelity
+  caveat naming the two opposite-direction divergences between the
+  reconstructed prompt and Claude Code's real write-side prompt now lives
+  in the design doc itself (§5), not only the PR body/docstrings, and
+  `NativeWriterResult` gains `prompt_fidelity` (`"reconstructed"` for
+  api-mode, `None` for cli) so a report can label Phase 2 write-path
+  numbers as an approximation; (2) the writer's system prompt claimed
+  MEMORY.md index lines "are loaded in full at the start of every
+  session" — corrected to state the real 200-line/25KB cap (design doc
+  §2), pinned by a test; (3) a new contract test runs both
+  `run_native_writer` (stubbed `claude -p`) and `run_native_writer_api`
+  (stub client) on the same fixture stream and asserts the same fields
+  populate on both, differing only in `mode` and `prompt_fidelity`; (4)
+  the writer gets its own turn budget (`_WRITER_API_LOOP_MAX_TURNS = 12`,
+  distinct from the read arms' `_API_LOOP_MAX_TURNS = 6`, since one
+  observation can legitimately need `list`, a `read`/`grep` check, a
+  `write`/`edit`, and an index update), and `NativeWriterSession` gains
+  `turns_exhausted: bool` so a report can tell "the model finished
+  filing" from "the harness cut it off," pinned by tests on both sides.
+
+- **Hybrid BM25+vector ranking for the vector search backend (issue
+  athenaeum#1792), cutting the offline recall-covers-grep xfail set from 49
+  to 17 of 52 (scale, probe) cases.** `recall_search`'s vector dispatch path
+  (`src/athenaeum/mcp_server.py`) now re-queries BOTH the vector backend
+  and the FTS5 backend at a widened candidate-pool width over the same
+  index root and fuses the two ranked lists via reciprocal rank fusion
+  (`k=60`, `athenaeum.search.reciprocal_rank_fusion`) before truncating to
+  `top_k` -- a proper-noun page the small `all-MiniLM-L6-v2` embedding
+  misses entirely from its native top-k (the mechanism athenaeum#1770/#1771
+  measured) now still surfaces when FTS5's exact match ranks it. Widening
+  only the FTS5 side (measured first) left the xfail set at 20: RRF sums
+  `1/(k+rank)` across every list a hit is in, so with the vector side
+  capped at its native `top_k`, at most `top_k` hits could ever be
+  "present in both lists" and the fused top-k became exactly that
+  intersection once that many overlapped -- no fts5-only hit could enter
+  regardless of its fts5 rank. Widening both sides raised that ceiling.
+  Each backend's own relevance floor (`resolve_recall_relevance_floor` /
+  `meets_relevance_floor`) is applied to its own input list BEFORE fusion,
+  never to the fused score, so athenaeum#1571/#1665's per-backend floor
+  direction is untouched -- note the hybrid path resolves the FTS5 floor
+  during a VECTOR call too, so `recall.relevance_floor.fts5` now also
+  affects vector recall output whenever hybrid is active. A missing FTS5
+  index (a vector-only deployment) degrades to vector-only ranking with a
+  logged warning (`athenaeum.search.fts5_index_available`) rather than
+  building one lazily on a read path or raising; the athenaeum#984
+  off-corpus federation is also skipped (with a logged warning) rather than
+  silently discarded when both off_corpus and hybrid are configured
+  together, since the widened vector requery does not carry it. New
+  opt-out config knob `recall.hybrid` / `ATHENAEUM_RECALL_HYBRID` (default
+  on for the vector dispatch path; the `fts5` and `keyword` paths never
+  consult it, so they stay byte-identical -- pinned by a new test). Note
+  the coupling this floor-resolution creates, documented on
+  `resolve_recall_hybrid`: with hybrid on (the default), a `vector` call
+  now also resolves and applies `recall.relevance_floor.fts5` to the fts5
+  side list, even though the caller never selected the fts5 backend --
+  `recall.hybrid: false` opts back out of that coupling too. Of the
+  17 remaining vector xfail entries, 6 overlap `_FTS5_XFAIL` outright
+  (FTS5 also misses these, tracked by athenaeum#1789); the other 11 are a
+  DIFFERENT failure mode -- FTS5's own top-5 (and the widened pool fed
+  into fusion) DOES contain the expected page, but RRF's scoring lets
+  several both-list hits collectively outscore and crowd out a page that
+  ranks well in only one list, dropping it below `top_k` even though
+  fusion "found" it -- tracked separately (athenaeum#1800), not a
+  BM25/query-construction question and not something widening the
+  candidate pool further fixes (measured: a wider pool regressed one
+  previously-passing case). The person/repo disambiguation win
+  (`person_not_repo`/`repo_not_person`'s `must_not_rank` page staying out
+  of the top 5) is now an asserted test on both backends, not just a
+  printed column. The shipped hook
+  (`examples/claude-code/user-prompt-recall.sh`) already implements its own
+  independent FTS5+vector hybrid merge in shell/Python (predates this
+  issue, a fixed FTS5-first-then-vector-fills concat rather than RRF, under
+  a `<50ms` FTS5-only latency contract this library-level change does not
+  share) and is intentionally left unchanged here; a follow-up
+  (athenaeum#1798) tracks unifying it.
 - **Offline retrieval-coverage test: every grep-reachable expected page
   must also surface in `recall` (issue athenaeum#1770).**
   `tests/evals/test_recall_covers_grep.py` materialises the `core` and
@@ -99,6 +196,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (error, refusal, graceful-partial) are exercised via a monkeypatched
   `librarian_run`. CLI flags / `evals.yml` wiring are out of scope
   (athenaeum#1785/#1786), as is the native-side writer (athenaeum#1774).
+
+- **`Probe.report_only` guards §7 condition 2 against a silent kill-criterion
+  change from a new probe class (issue athenaeum#1776, athenaeum#1791
+  §2.1).** `tests.evals.corpus.Probe` gains `report_only: bool`, parsed
+  from `probes.yaml` and defaulting to `probe_class not in
+  CONDITION_2_ENROLLED` when the yaml is silent. Two new module constants
+  in `corpus.py` -- `CONDITION_2_ENROLLED` (the eight classes enrolled
+  today: `single_hop`, `multi_hop`, `disambiguation`, `temporal`,
+  `abstention`, `distractor_robustness`, `redundancy`, `follow_through`)
+  and `WAVE_2_PROBE_CLASSES` (empty, populated by the wave-2 issues that
+  add classes) -- make enrolment a reviewable constant edit rather than a
+  `probes.yaml` field nobody reads twice. `validate_core` fails in both
+  directions: an enrolled class flagged `report_only: True`, or a
+  non-enrolled class left `False`. `north_star_report.compute_verdicts`
+  excludes `report_only` classes from §7 conditions 2 and 3 entirely (as
+  if their rows were never in the store); condition 1's relationship
+  subset is unaffected. `render_decision_block` names the excluded classes
+  ("report-only classes excluded: ...", empty today). No existing probe's
+  class or fixture body changed -- the corpus fingerprint is unaffected.
 
 - **Hardening for the north-star grid's relevance-floor input (issue
   athenaeum#1764), found by Quine review of PR athenaeum#1763.** Three

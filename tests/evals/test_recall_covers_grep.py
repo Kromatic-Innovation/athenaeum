@@ -434,9 +434,22 @@ def scale_fixture(
     fts5_cache_dir = root / "fts5-cache"
     get_backend("fts5").build_index(wiki_root, fts5_cache_dir)
 
+    # Issue athenaeum#1792: the vector index shares `fts5_cache_dir` as its
+    # cache root (FTS5's `wiki-index.db` and the vector backend's
+    # `wiki-vectors/` subdir coexist there with no collision) rather than a
+    # separate `vector-cache` directory. This matches production's actual
+    # layout -- ONE cache_dir (`resolve_cache_dir()`) backs both backends,
+    # exactly what `examples/claude-code/user-prompt-recall.sh` assumes
+    # (`DB_FILE`/`VECTOR_DIR` as siblings under one `CACHE_DIR`) -- and is
+    # required for the vector backend's hybrid dispatch
+    # (`athenaeum.search.fts5_index_available` / the RRF fusion block in
+    # `recall_search`) to find an FTS5 index to fuse against at all. Before
+    # this issue the two lived in separate roots purely for this module's
+    # own test isolation; that isolation was never a documented invariant
+    # and nothing else in this module depends on the two staying apart.
     vector_cache_dir: Path | None = None
     if _VECTOR_AVAILABLE:
-        vector_cache_dir = root / "vector-cache"
+        vector_cache_dir = fts5_cache_dir
         get_backend("vector").build_index(wiki_root, vector_cache_dir)
 
     hook_home = root / "hook-home"
@@ -488,64 +501,68 @@ _FTS5_XFAIL: frozenset[tuple[str, str]] = frozenset(
     }
 )
 
-#: vector backend -- 49 of 52 (scale, probe) cases, measured 2026-09-17
-#: against develop @ 5693c1c7 (post athenaeum#1768/#1769). Far larger than
-#: the fts5 set: a sentence-embedding model finds much less lexical/keyword
-#: recall than fts5 does for this corpus's proper-noun-heavy single/
-#: multi-hop probes (see the PR body's finding and the design-doc caveat).
-#: Kept as one explicit set, not a blanket "xfail everything for this
-#: backend", so a genuine per-case fix is visible one entry at a time.
+#: vector backend -- 17 of 52 (scale, probe) cases remain, measured
+#: 2026-09-17 against athenaeum#1792's reciprocal-rank-fusion hybrid (fuses
+#: a WIDENED vector list with a widened FTS5 list, both re-queried at
+#: `_HYBRID_CANDIDATE_POOL` width over the same index root, each with
+#: its own relevance floor applied before fusion -- see
+#: ``athenaeum.mcp_server.recall_search``'s hybrid block and
+#: ``athenaeum.search.reciprocal_rank_fusion``). Down from the 49 measured
+#: pre-fusion (issue athenaeum#1770's original finding, kept in git history
+#: / the athenaeum#1792 PR body, not here).
+#:
+#: Widening ONLY the fts5 side (an earlier version of this fix) left this
+#: set at 20, not zero: reciprocal rank fusion sums `1/(k+rank)` across
+#: every list a hit appears in, so with the vector side left at its native
+#: `top_k=5`, at most 5 hits could ever be "present in both lists" and the
+#: fused top-5 became exactly that intersection once 5 hits overlapped --
+#: no fts5-only hit could enter regardless of its fts5 rank. Widening BOTH
+#: sides (this version) raised that ceiling and rescued 3 more cases
+#: (core: portal_design_reviewer, person_not_repo; medium:
+#: thorncastle_first_contact).
+#:
+#: SIX of these seventeen are also in ``_FTS5_XFAIL`` above
+#: (confidentiality_rule and budget_threshold_current at both scales, plus
+#: medium's surname_is_ambiguous AND medium's former_client_not_current --
+#: the latter is easy to miscount because ``_FTS5_XFAIL`` has no *core*
+#: entry for it, only medium) -- fusion cannot surface a page neither
+#: input list ranks within its own widened window; tracked by athenaeum#1789
+#: (FTS5's own query-construction path), not this issue.
+#:
+#: The other ELEVEN are a DIFFERENT failure mode, tracked by athenaeum#1800:
+#: FTS5's OWN top-5 -- and therefore the widened top-15 pool fed into
+#: fusion -- genuinely contains the expected page (these cases are absent
+#: from ``_FTS5_XFAIL``, i.e. the fts5-only coverage test passes them), but
+#: the FUSED list still drops it below `top_k`. This is reciprocal rank
+#: fusion's own scoring, not a candidate-pool-width problem: a hit present
+#: in BOTH input lists scores roughly DOUBLE a hit present in only one
+#: (`1/(k+rank_a) + 1/(k+rank_b)` vs. a lone `1/(k+rank)`), so with `k=60`
+#: enough moderately-ranked both-list hits can collectively outscore and
+#: crowd out a page that ranks well in only one list -- even though that
+#: page is exactly the one a plain grep and FTS5 alone both reach. See
+#: athenaeum#1800 for the eleven cases and the weighting/interleaving
+#: options considered. Kept as one
+#: explicit set, not a blanket "xfail everything for this backend", so a
+#: genuine per-case fix is visible one entry at a time.
 _VECTOR_XFAIL: frozenset[tuple[str, str]] = frozenset(
     {
         ("core", "pto_allowance"),
         ("core", "confidentiality_rule"),
-        ("core", "bluewater_terms"),
-        ("core", "onboarding_length"),
-        ("core", "portal_design_reviewer"),
-        ("core", "ratecard_tooling_owner"),
-        ("core", "office_address_current"),
-        ("core", "standup_time_current"),
         ("core", "budget_threshold_current"),
-        ("core", "callum_drews_last_contact"),
-        ("core", "tamsin_ferro_role_change"),
-        ("core", "person_not_repo"),
-        ("core", "repo_not_person"),
         ("core", "surname_is_ambiguous"),
-        ("core", "given_name_is_ambiguous"),
-        ("core", "acme_billing_exception"),
         ("core", "former_client_not_current"),
-        ("core", "keelbridge_programme_scope"),
-        ("core", "fenwick_relationship_history"),
-        ("core", "corvale_holdings_history"),
-        ("core", "pinemarsh_goal_rationale"),
-        ("core", "gilcrest_vendor_decision"),
-        ("core", "anchorline_retirement_rationale"),
-        ("core", "subsidiary_onboarding_lesson"),
         ("medium", "pto_allowance"),
         ("medium", "confidentiality_rule"),
-        ("medium", "bluewater_terms"),
-        ("medium", "onboarding_length"),
         ("medium", "portal_design_reviewer"),
         ("medium", "ratecard_tooling_owner"),
-        ("medium", "office_address_current"),
         ("medium", "standup_time_current"),
         ("medium", "budget_threshold_current"),
-        ("medium", "callum_drews_last_contact"),
-        ("medium", "thorncastle_first_contact"),
         ("medium", "tamsin_ferro_role_change"),
         ("medium", "person_not_repo"),
-        ("medium", "repo_not_person"),
         ("medium", "surname_is_ambiguous"),
         ("medium", "given_name_is_ambiguous"),
-        ("medium", "acme_billing_exception"),
         ("medium", "former_client_not_current"),
         ("medium", "keelbridge_programme_scope"),
-        ("medium", "fenwick_relationship_history"),
-        ("medium", "corvale_holdings_history"),
-        ("medium", "pinemarsh_goal_rationale"),
-        ("medium", "gilcrest_vendor_decision"),
-        ("medium", "anchorline_retirement_rationale"),
-        ("medium", "subsidiary_onboarding_lesson"),
     }
 )
 
@@ -633,6 +650,64 @@ def test_recall_covers_grep_reachable_expected_pages_vector(
     _print_probe_table_row(measurement)
     missing = measurement.grep_reachable_expected - set(measurement.recall_ranked)
     assert not missing, _failure_message(measurement, missing)
+
+
+# ---------------------------------------------------------------------------
+# Disambiguation win, asserted (issue athenaeum#1792 AC2) -- person_not_repo /
+# repo_not_person. Previously this was only a PRINTED column
+# (`_ProbeMeasurement.must_not_rank_surfaced`); this asserts it directly for
+# both probes on both backends, so a regression in either ranker fails CI
+# instead of requiring a human to read the precision table.
+# ---------------------------------------------------------------------------
+
+_PERSON_REPO_PROBE_IDS: tuple[str, ...] = ("person_not_repo", "repo_not_person")
+
+
+@pytest.mark.parametrize("probe_id", _PERSON_REPO_PROBE_IDS)
+def test_person_repo_disambiguation_excludes_wrong_page_fts5(
+    scale_fixture: _ScaleFixture, probe_id: str
+) -> None:
+    """athenaeum#1792 AC2: the wrong page of the person/repo pair -- the
+    probe's own ``must_not_rank`` uid -- must stay out of recall's top
+    ``_TOP_K`` on the fts5 backend. A bare keyword search cannot tell
+    "Rowan Wrenfield the person" from "rowanwrenfield the repo" (both
+    probes' queries share every distractor term); this is the win a
+    smarter ranker is worth having over grep, per PR athenaeum#1771's
+    finding."""
+    fx = scale_fixture
+    probe = _probe_by_id(fx.corpus, probe_id)
+    assert len(probe.must_not_rank) == 1
+    wrong_uid = probe.must_not_rank[0]
+    ranked = _recall_ranked_uids(
+        fx.wiki_root, probe.query, search_backend="fts5", cache_dir=fx.fts5_cache_dir
+    )
+    assert wrong_uid not in ranked, (
+        f"probe={probe_id!r} scale={fx.corpus.scale!r} backend='fts5': "
+        f"{wrong_uid!r} (must_not_rank) surfaced in recall's top {_TOP_K}: {ranked!r}"
+    )
+
+
+@pytest.mark.skipif(not _VECTOR_AVAILABLE, reason=_VECTOR_SKIP_REASON or "chromadb not installed")
+@pytest.mark.parametrize("probe_id", _PERSON_REPO_PROBE_IDS)
+def test_person_repo_disambiguation_excludes_wrong_page_vector(
+    scale_fixture: _ScaleFixture, probe_id: str
+) -> None:
+    """Same assertion as the fts5 test above, against the vector backend --
+    the backend live hook traffic actually uses, and the one issue
+    athenaeum#1792's hybrid rank fusion must not regress: a hybrid that
+    fused in the wrong page just because fts5 might rank it (it does not,
+    for this probe pair) would silently undo this win."""
+    fx = scale_fixture
+    assert fx.vector_cache_dir is not None  # guaranteed by the skipif above
+    probe = _probe_by_id(fx.corpus, probe_id)
+    wrong_uid = probe.must_not_rank[0]
+    ranked = _recall_ranked_uids(
+        fx.wiki_root, probe.query, search_backend="vector", cache_dir=fx.vector_cache_dir
+    )
+    assert wrong_uid not in ranked, (
+        f"probe={probe_id!r} scale={fx.corpus.scale!r} backend='vector': "
+        f"{wrong_uid!r} (must_not_rank) surfaced in recall's top {_TOP_K}: {ranked!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
