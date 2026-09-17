@@ -852,6 +852,13 @@ SCALES: dict[str, Scale] = {
     "small": Scale("small", total_pages=200, distractors_per_probe=2),
     "medium": Scale("medium", total_pages=1_000, distractors_per_probe=2),
     "large": Scale("large", total_pages=10_000, distractors_per_probe=2),
+    # A real single-operator deployment is already past 20,000 pages
+    # (athenaeum#1735) -- `large` alone cannot show whether the answer holds
+    # at the size the project actually runs at. Opt-in at the grid-dispatch
+    # level (`tests/evals/north_star_cli.py`'s `DEFAULT_CORPUS_SCALES`
+    # deliberately excludes it) because a `NATIVE_GREP` cell over 25k files
+    # is the most expensive cell in the grid.
+    "xlarge": Scale("xlarge", total_pages=25_000, distractors_per_probe=2),
     # Confusability axis: page count held at `medium` while near-miss density
     # rises. If recall degrades here but not across small->large, the problem
     # is confusability, not scale.

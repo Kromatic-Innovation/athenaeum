@@ -116,7 +116,7 @@ from tests.evals.rollout import Arm, RolloutRecord
 #: own docstring) and are deliberately NOT part of this ordering: crossover
 #: asks "at what SIZE does Athenaeum start winning", and folding a
 #: confusability point into the size axis would answer a different question.
-SIZE_SCALE_ORDER: tuple[str, ...] = ("core", "small", "medium", "large")
+SIZE_SCALE_ORDER: tuple[str, ...] = ("core", "small", "medium", "large", "xlarge")
 
 DEFAULT_MEASUREMENTS_DIR = Path("measurements")
 
@@ -2028,7 +2028,8 @@ def render_report(report: NorthStarReport) -> str:
         "The smallest scale, per probe class, at which Athenaeum's correctness exceeds "
         "native's -- \"the number the decision turns on\" (design doc "
         "`docs/design/native-memory-baseline.md` §6/§7). Walks the SIZE axis only "
-        "(`core` < `small` < `medium` < `large`); the `medium_dense`/`medium_verydense` "
+        f"({' < '.join(f'`{s}`' for s in SIZE_SCALE_ORDER)}); the "
+        "`medium_dense`/`medium_verydense` "
         "confusability scales are a different axis and are never considered here. "
         "**Athenaeum's correctness** = the best `correctness_rate` among its DELIVERY arms "
         "only (`push_pages_upper_bound`, `push_breadcrumb`, `push_breadcrumb_pull`, `pull`) "
