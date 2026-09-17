@@ -1,13 +1,26 @@
 # follow_through probe pairs (issue athenaeum#1737). Invented; see
 # ../README.md for the content policy.
 #
-# Each pair below is a (surfaced page, second-hop page) linked by a
-# `links:`/`related:` edge. The surfaced page shares vocabulary with its
-# probe's query, same as any other class; the second-hop page deliberately
-# does NOT -- that is the property `validate_core`'s `follow_through` check
-# enforces, and it is what makes the class un-passable by a plain lexical
-# match on the query alone. Each pair plants one distinct answer token per
-# page, so a complete answer needs both.
+# Each pair below is a (surfaced page, second-hop page) linked by a BODY
+# `[[wikilink]]` (not just the `links:`/`related:` frontmatter shorthand,
+# which is also authored on every first-hop page below so the relatedness
+# ground truth still sees the edge, but is NOT what `validate_core`'s
+# `follow_through` check accepts as the qualifying edge -- see that check's
+# docstring). A live `recall` hit renders its `**Links:**` line from the
+# body wikilink only (`athenaeum.mcp_server._extract_outbound_links`), so a
+# frontmatter-only edge would be readable by a native arm's raw-file grep
+# and invisible to Athenaeum's own recall path -- exactly the asymmetry this
+# probe class exists to catch, not exhibit.
+#
+# The surfaced (first-hop) page shares vocabulary with its probe's query,
+# same as any other class; the second-hop page's body, uid, name, and tags
+# deliberately do NOT -- that is the property `validate_core`'s
+# `follow_through` check enforces (including a >=5-char stemmed-prefix check
+# over uid/name/tags, since a native arm's topic file is named `<uid>.md`
+# and greps on name/tags too), and it is what makes the class un-passable by
+# a plain lexical match on the query alone. Each pair plants one distinct
+# answer token per page, so a complete answer needs both, and the second-hop
+# page always carries its own token.
 
 # --- relationship (docs/use-cases.md §2.1) ----------------------------------
 
@@ -23,7 +36,8 @@
 
     Fenwick Systems is a retainer client onboarded in 2026. The account
     relationship is coordinated by the engagement lead, who tracks renewal
-    timing and scope changes.
+    timing and scope changes. See [[person-dara-holt]] for the engagement
+    lead's own notes.
 
     Internal reference code: Quillbrook.
 
@@ -47,16 +61,17 @@
   tags: [client, retainer]
   source_ref: "session-2026-04-10"
   created: 2026-04-10
-  links: [project-corvale-migration]
+  links: [project-platform-cutover-programme]
   body: |
     # Corvale Holdings
 
     Corvale Holdings has been a retainer client since 2023, with an active
-    platform migration underway this year.
+    platform migration underway this year. See
+    [[project-platform-cutover-programme]] for programme details.
 
     Internal reference code: Halvorwick.
 
-- uid: project-corvale-migration
+- uid: project-platform-cutover-programme
   type: project
   name: Platform Migration Programme
   tags: [project, migration]
@@ -78,17 +93,18 @@
   tags: [project, goal]
   source_ref: "session-2026-04-15"
   created: 2026-04-15
-  links: [decision-pinemarsh-budget-cap]
+  links: [decision-tooling-budget-cap]
   body: |
     # Pinemarsh Initiative
 
     The Pinemarsh initiative exists to consolidate three legacy scheduling
     tools into one, with the underlying goal of cutting cross-team handoff
-    delay.
+    delay. See [[decision-tooling-budget-cap]] for the spending decision it
+    forced.
 
     Internal reference code: Tanglewrought.
 
-- uid: decision-pinemarsh-budget-cap
+- uid: decision-tooling-budget-cap
   type: note
   name: Decision - spending cap for tooling consolidation
   tags: [decision, tooling]
@@ -117,7 +133,8 @@
 
     Gilcrest was chosen over two competitors because it was the only option
     offering per-seat pricing rather than per-ticket pricing, which matched
-    the team's usage pattern.
+    the team's usage pattern. See [[person-mireille-santos]] for who signed
+    the contract.
 
     Internal reference code: Oakenspire.
 
@@ -141,20 +158,21 @@
   tags: [decision, tooling]
   source_ref: "session-2026-05-06"
   created: 2026-05-06
-  links: [tool-anchorline-successor]
+  links: [system-ledgerfax-successor]
   body: |
     # Decision - retire the Anchorline reporting tool
 
     Anchorline was retired after its vendor stopped shipping security
     patches, and the team judged the migration risk lower than the risk of
-    running unpatched software another quarter.
+    running unpatched software another quarter. See
+    [[system-ledgerfax-successor]] for the replacement.
 
     Internal reference code: Verdantholt.
 
-- uid: tool-anchorline-successor
+- uid: system-ledgerfax-successor
   type: note
   name: Ledgerfax
-  tags: [tool]
+  tags: [export]
   source_ref: "session-2026-05-06"
   created: 2026-05-06
   body: |
@@ -174,17 +192,18 @@
   tags: [retro, delivery]
   source_ref: "session-2026-05-12"
   created: 2026-05-12
-  links: [policy-subsidiary-billing-split]
+  links: [policy-cost-center-billing-split]
   body: |
     # Subsidiary onboarding retro
 
     Onboarding a client with several subsidiaries went long because each
     subsidiary needed its own contact record, and that requirement was not
-    caught until week three.
+    caught until week three. See [[policy-cost-center-billing-split]] for
+    the billing policy it exposed a gap in.
 
     Internal reference code: Wrenholt.
 
-- uid: policy-subsidiary-billing-split
+- uid: policy-cost-center-billing-split
   type: policy
   name: Billing split policy
   tags: [policy, finance]

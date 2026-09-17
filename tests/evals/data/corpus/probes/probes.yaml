@@ -245,7 +245,7 @@
 - id: corvale_holdings_history
   probe_class: follow_through
   query: "what is our history with Corvale Holdings?"
-  expected_uids: [client-corvale-holdings, project-corvale-migration]
+  expected_uids: [client-corvale-holdings, project-platform-cutover-programme]
   distractor_terms: ["Corvale Holdings", "retainer client", "migration"]
   answer_tokens: ["Halvorwick", "Ossmarl"]
   note: >-
@@ -256,7 +256,7 @@
 - id: pinemarsh_goal_rationale
   probe_class: follow_through
   query: "what is the goal behind the Pinemarsh initiative?"
-  expected_uids: [project-pinemarsh-initiative, decision-pinemarsh-budget-cap]
+  expected_uids: [project-pinemarsh-initiative, decision-tooling-budget-cap]
   distractor_terms: ["Pinemarsh initiative", "goal", "tooling consolidation"]
   answer_tokens: ["Tanglewrought", "Fendrickal"]
   note: >-
@@ -278,7 +278,7 @@
 - id: anchorline_retirement_rationale
   probe_class: follow_through
   query: "why did we retire the Anchorline reporting tool?"
-  expected_uids: [decision-retire-anchorline, tool-anchorline-successor]
+  expected_uids: [decision-retire-anchorline, system-ledgerfax-successor]
   distractor_terms: ["Anchorline", "retire", "reporting tool"]
   answer_tokens: ["Verdantholt", "Sablecroft"]
   note: >-
@@ -289,7 +289,7 @@
 - id: subsidiary_onboarding_lesson
   probe_class: follow_through
   query: "what went wrong last time we onboarded a client with multiple subsidiaries?"
-  expected_uids: [note-subsidiary-onboarding-retro, policy-subsidiary-billing-split]
+  expected_uids: [note-subsidiary-onboarding-retro, policy-cost-center-billing-split]
   distractor_terms: ["subsidiaries", "onboarding", "retro"]
   answer_tokens: ["Wrenholt", "Copperfen"]
   note: >-

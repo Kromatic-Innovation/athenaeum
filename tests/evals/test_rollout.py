@@ -141,14 +141,22 @@ def test_parse_pull_stream_from_recorded_fixture() -> None:
 
 
 def test_parse_pull_stream_follow_through_fixture_shows_two_recalls_and_grades_correct() -> None:
-    """AC (issue athenaeum#1737): a recorded PULL transcript for one
+    """AC (issue athenaeum#1737): a PULL transcript for one
     ``follow_through`` probe — ``fenwick_relationship_history`` — shows TWO
     ``recall`` calls (the breadcrumb page, then the second-hop page reached
     by following its link), and the resulting answer grades correct only
     because it carries BOTH planted tokens (see
     ``test_follow_through_grading_requires_every_planted_token`` in
     ``tests/evals/test_north_star_report.py`` for the token-omission half of
-    this contract). Reuses the SAME offline recorded-fixture mechanism as
+    this contract).
+
+    Hand-authored (no live rollout was run to capture it), but modeled
+    byte-for-byte on ``mcp_server.recall``'s ACTUAL rendering shape —
+    ``{name} (score: N)`` / ``**Path:**`` / ``**Tags:**`` / ``**Uid:**`` /
+    ``**Type:**`` / ``**Links:**`` (from the page's body ``[[wikilink]]``,
+    never frontmatter) / blank line / snippet — not an invented shorthand,
+    so a reader cannot mistake this for a real recall response it is not.
+    Reuses the SAME offline stream-json replay mechanism as
     ``test_parse_pull_stream_from_recorded_fixture`` above (issue
     athenaeum#1725/#1729) — no new replay machinery."""
     lines = FOLLOW_THROUGH_FIXTURE_PATH.read_text(encoding="utf-8").splitlines()
