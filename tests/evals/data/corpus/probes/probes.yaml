@@ -224,10 +224,13 @@
 #
 # Issue athenaeum#1737. The class a plain grep cannot pass by accident: the
 # query surfaces one page, and the complete answer requires opening it and
-# following its `related`/`links` edge to a SECOND page the query's own terms
-# never reach. `validate_core` enforces both halves -- the tokens split
-# across the two pages, and the second-hop page's vocabulary disjoint from
-# `query` -- so a probe here cannot silently degrade into `multi_hop`.
+# following its body `[[wikilink]]` (not just the `related`/`links`
+# frontmatter authored alongside it) to a SECOND page the query's own terms
+# never reach. `validate_core` enforces every half -- the tokens split
+# across the two pages, the source page itself reachable from the query, the
+# qualifying edge being body-visible, and the second-hop page's body/uid/
+# name/tags disjoint from `query` -- so a probe here cannot silently degrade
+# into `multi_hop`, or into a shape grep can pass and Athenaeum cannot.
 # Spans the four use cases in `docs/use-cases.md` §2: relationship (2.1),
 # rationale (2.2), decision (2.3), lesson (2.4).
 

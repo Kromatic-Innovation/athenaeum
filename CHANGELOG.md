@@ -27,10 +27,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   four use cases in `docs/use-cases.md` §2 (relationship, rationale,
   decision, lesson); `grade_correctness` already required every planted
   token, so a one-token answer to a `follow_through` probe grades incorrect.
-  A hand-authored PULL-transcript fixture
-  (`tests/evals/data/rollout/follow_through_stream_spike.jsonl`), modeled
-  byte-for-byte on `mcp_server.recall`'s actual rendering shape, shows two
-  `recall` calls answering one such probe.
+  A PULL-transcript fixture
+  (`tests/evals/data/rollout/follow_through_stream_spike.jsonl`) shows two
+  `recall` calls answering one such probe; its two `tool_result` bodies are
+  the real, unedited output of `recall_search` run against the materialized
+  `core` corpus over a real `fts5` index, not a hand-typed approximation.
 - **`docs/use-cases.md`: the north star decomposed into the questions memory
   is actually asked, and a kill criterion.** "Surface the right information at
   the right time" is a quality bar with no customer attached, and nothing in

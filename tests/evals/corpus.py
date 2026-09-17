@@ -74,11 +74,14 @@ import yaml
 #:
 #: Lives here, not in ``tests.evals.north_star_report`` (issue athenaeum#1737),
 #: because ``validate_core``'s ``follow_through`` check needs the SAME content-
-#: term definition ``north_star_report.grade_correctness``'s Jaccard overlap
-#: uses, and ``north_star_report`` already imports from this module -- a
-#: definition living there would make the reverse import circular. Re-exported
-#: from ``north_star_report`` under its original names so no external caller
-#: needed to change.
+#: term definition ``north_star_report.lexical_overlap`` uses, and
+#: ``north_star_report`` already imports from this module -- a definition
+#: living there would make the reverse import circular. Only
+#: :func:`_content_terms` (the public surface built on this list and
+#: :data:`_WORD_RE` below) is re-imported into ``north_star_report`` under
+#: its original name, so no external caller of THAT function needed to
+#: change; ``_STOPWORDS``/``_WORD_RE`` themselves are not re-exported and
+#: have exactly one definition, here.
 _STOPWORDS = frozenset(
     {
         "the",

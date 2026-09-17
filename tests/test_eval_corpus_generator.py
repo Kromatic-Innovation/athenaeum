@@ -194,8 +194,8 @@ def test_follow_through_rejects_source_page_sharing_no_query_term() -> None:
 
 def test_follow_through_rejects_no_edge_between_expected_pages() -> None:
     """AC (issue athenaeum#1737): the second-hop page must be reachable from
-    another ``expected_uids`` page by a ``related``/``links`` edge; an edge
-    to some other page in the corpus does not satisfy the assertion."""
+    another ``expected_uids`` page by a body ``[[wikilink]]``; a wikilink to
+    some other page in the corpus does not satisfy the assertion."""
     pages, probe = _two_page_follow_through(
         second_hop_shares_query_term=False, edge_between_expected_pages=False
     )

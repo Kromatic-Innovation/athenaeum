@@ -150,13 +150,18 @@ def test_parse_pull_stream_follow_through_fixture_shows_two_recalls_and_grades_c
     ``tests/evals/test_north_star_report.py`` for the token-omission half of
     this contract).
 
-    Hand-authored (no live rollout was run to capture it), but modeled
-    byte-for-byte on ``mcp_server.recall``'s ACTUAL rendering shape —
-    ``{name} (score: N)`` / ``**Path:**`` / ``**Tags:**`` / ``**Uid:**`` /
-    ``**Type:**`` / ``**Links:**`` (from the page's body ``[[wikilink]]``,
-    never frontmatter) / blank line / snippet — not an invented shorthand,
-    so a reader cannot mistake this for a real recall response it is not.
-    Reuses the SAME offline stream-json replay mechanism as
+    No live rollout was run to capture this transcript (the surrounding
+    ``system``/``assistant``/``result`` events are hand-authored), but both
+    ``tool_result`` bodies are the ACTUAL, unedited return value of
+    ``athenaeum.mcp_server.recall_search`` called against the real ``core``
+    corpus materialized to a temp dir and indexed with the real ``fts5``
+    backend — not a hand-typed approximation of the rendering shape. Byte
+    for byte: ``Found N matching pages:`` / ``### 1. {name} (score: N)`` /
+    ``**Path:**`` / ``**Tags:**`` / ``**Uid:**`` / ``**Type:**`` /
+    ``**Source:** ... · **Updated:** ...`` / ``**Links:**`` (present only on
+    the first hit, whose body carries the ``[[wikilink]]``; absent from the
+    second, which has none) / the page's own H1 / its body. Reuses the SAME
+    offline stream-json replay mechanism as
     ``test_parse_pull_stream_from_recorded_fixture`` above (issue
     athenaeum#1725/#1729) — no new replay machinery."""
     lines = FOLLOW_THROUGH_FIXTURE_PATH.read_text(encoding="utf-8").splitlines()

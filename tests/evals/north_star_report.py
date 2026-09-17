@@ -189,8 +189,9 @@ def lexical_overlap(a: str, b: str) -> float:
 
     ``overlap(a, b) = |terms(a) & terms(b)| / |terms(a) | terms(b)|``
     -- ``terms()`` is lowercased alphanumeric tokens of length >= 3, minus
-    :data:`_STOPWORDS`. ``0.0`` when either side has no content terms
-    (never a division by zero, and never treated as "perfect overlap").
+    :data:`tests.evals.corpus._STOPWORDS`. ``0.0`` when either side has no
+    content terms (never a division by zero, and never treated as "perfect
+    overlap").
     """
     ta, tb = _content_terms(a), _content_terms(b)
     if not ta or not tb:
