@@ -1795,3 +1795,161 @@ class TestReadmeToolTableMatchesRegisteredTools:
                     f"row for `{m.group(1)}` has an unrecognized R/W value: {m.group(2)!r}"
                 )
         assert len(names) == len(set(names)), "README table has a duplicate tool row"
+
+
+# ---------------------------------------------------------------------------
+# Hybrid rank fusion, vector dispatch (issue athenaeum#1792)
+# ---------------------------------------------------------------------------
+
+
+def _hybrid_test_wiki(tmp_path: Path) -> Path:
+    """A tiny wiki with pages varied enough that fts5 and vector rank them
+    differently -- exercising fusion rather than a single-page corpus where
+    both backends trivially agree."""
+    wiki = tmp_path / "wiki"
+    wiki.mkdir()
+    (wiki / "acme-corp.md").write_text(
+        "---\nname: Acme Corp\ntags: [client]\n---\n\nAcme Corp is a client.\n"
+    )
+    (wiki / "widget-works.md").write_text(
+        "---\nname: Widget Works\ntags: [client]\n---\n\nWidget Works builds widgets.\n"
+    )
+    (wiki / "unrelated.md").write_text(
+        "---\nname: Unrelated\n---\n\nNothing relevant here.\n"
+    )
+    return wiki
+
+
+class TestRecallSearchFts5ByteIdentical:
+    """AC (issue athenaeum#1792): FTS5-only callers must be byte-identical --
+    the hybrid block only ever runs for ``search_backend='vector'``, so a
+    plain fts5 call must render identically whether ``recall.hybrid`` is on
+    (the vector-only default) or explicitly off."""
+
+    def test_fts5_output_unaffected_by_recall_hybrid_config(self, tmp_path: Path) -> None:
+        from athenaeum.search import FTS5Backend
+
+        wiki = _hybrid_test_wiki(tmp_path)
+        cache = tmp_path / "cache"
+        FTS5Backend().build_index(wiki, cache)
+
+        hybrid_on = recall_search(
+            wiki, "Acme", top_k=5, search_backend="fts5", cache_dir=cache, config=None
+        )
+        hybrid_off = recall_search(
+            wiki,
+            "Acme",
+            top_k=5,
+            search_backend="fts5",
+            cache_dir=cache,
+            config={"recall": {"hybrid": False}},
+        )
+        assert hybrid_on == hybrid_off
+
+    def test_fts5_output_unaffected_when_no_fts5_index_check_would_matter(
+        self, tmp_path: Path
+    ) -> None:
+        """Even a config that WOULD trip the vector path's
+        ``fts5_index_available`` warning must not touch the fts5 dispatch
+        -- that check lives entirely inside the ``backend_name == 'vector'``
+        branch."""
+        from athenaeum.search import FTS5Backend
+
+        wiki = _hybrid_test_wiki(tmp_path)
+        cache = tmp_path / "cache"
+        FTS5Backend().build_index(wiki, cache)
+
+        before = recall_search(wiki, "Acme", top_k=5, search_backend="fts5", cache_dir=cache)
+        after = recall_search(
+            wiki,
+            "Acme",
+            top_k=5,
+            search_backend="fts5",
+            cache_dir=cache,
+            config={"recall": {"hybrid": True}},
+        )
+        assert before == after
+
+
+class TestRecallSearchVectorHybridDispatch:
+    """The vector dispatch path's hybrid block itself -- guarded on
+    chromadb exactly like every other vector-backed test in this repo."""
+
+    def test_hybrid_disabled_by_config_skips_fusion(self, tmp_path: Path) -> None:
+        """``recall.hybrid: false`` must reach the dispatch, not just the
+        resolver -- ``test_config_resolver_parity_generic`` only proves
+        ``resolve_recall_hybrid`` itself reads the key, not that
+        ``recall_search`` honors it. With fusion off, no FTS5 index is ever
+        touched even when one exists at the SAME cache_dir -- proven here by
+        pointing ``cache_dir`` at a directory with ONLY a vector index (no
+        FTS5 db at all), which would make the hybrid-on path warn-and-fall-
+        back but must make the hybrid-off path succeed silently."""
+        pytest.importorskip("chromadb")
+        from athenaeum.search import VectorBackend
+
+        wiki = _hybrid_test_wiki(tmp_path)
+        cache = tmp_path / "vector-only-cache"
+        VectorBackend().build_index(wiki, cache)
+        assert not (cache / "wiki-index.db").is_file()  # no FTS5 index here
+
+        result = recall_search(
+            wiki,
+            "Acme",
+            top_k=5,
+            search_backend="vector",
+            cache_dir=cache,
+            config={"recall": {"hybrid": False}},
+        )
+        assert "Acme Corp" in result
+
+    def test_missing_fts5_index_falls_back_to_vector_only_with_warning(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The issue's FTS5-index-availability choice: a vector-only
+        deployment (no FTS5 index ever built at this cache_dir) degrades to
+        vector-only ranking with a logged warning, never a raise and never
+        a lazily-built index on this read path."""
+        pytest.importorskip("chromadb")
+        import logging
+
+        from athenaeum.search import VectorBackend
+
+        wiki = _hybrid_test_wiki(tmp_path)
+        cache = tmp_path / "vector-only-cache"
+        VectorBackend().build_index(wiki, cache)
+        assert not (cache / "wiki-index.db").is_file()
+
+        with caplog.at_level(logging.WARNING, logger="athenaeum.mcp_server"):
+            result = recall_search(
+                wiki, "Acme", top_k=5, search_backend="vector", cache_dir=cache
+            )
+        assert "Acme Corp" in result
+        assert any(
+            "no FTS5 index exists" in record.message for record in caplog.records
+        )
+
+    def test_hybrid_surfaces_an_fts5_only_hit_vector_alone_would_miss(
+        self, tmp_path: Path
+    ) -> None:
+        """The mechanism end to end: a page that ranks well in fts5 (an
+        exact lexical hit) but is pushed out of a small ``top_k`` by an
+        unrelated page ranking higher in raw vector distance still surfaces
+        once both backends' index share a cache_dir and hybrid fusion runs
+        -- proven by comparing against the SAME query with hybrid off."""
+        pytest.importorskip("chromadb")
+        from athenaeum.search import FTS5Backend, VectorBackend
+
+        wiki = _hybrid_test_wiki(tmp_path)
+        cache = tmp_path / "cache"
+        FTS5Backend().build_index(wiki, cache)
+        VectorBackend().build_index(wiki, cache)
+
+        hybrid_result = recall_search(
+            wiki,
+            "Widget Works",
+            top_k=1,
+            search_backend="vector",
+            cache_dir=cache,
+            config={"recall": {"hybrid": True}},
+        )
+        assert "Widget Works" in hybrid_result

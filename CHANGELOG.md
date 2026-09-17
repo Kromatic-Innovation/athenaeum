@@ -59,6 +59,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `turns_exhausted: bool` so a report can tell "the model finished
   filing" from "the harness cut it off," pinned by tests on both sides.
 
+- **Hybrid BM25+vector ranking for the vector search backend (issue
+  athenaeum#1792), cutting the offline recall-covers-grep xfail set from 49
+  to 17 of 52 (scale, probe) cases.** `recall_search`'s vector dispatch path
+  (`src/athenaeum/mcp_server.py`) now re-queries BOTH the vector backend
+  and the FTS5 backend at a widened candidate-pool width over the same
+  index root and fuses the two ranked lists via reciprocal rank fusion
+  (`k=60`, `athenaeum.search.reciprocal_rank_fusion`) before truncating to
+  `top_k` -- a proper-noun page the small `all-MiniLM-L6-v2` embedding
+  misses entirely from its native top-k (the mechanism athenaeum#1770/#1771
+  measured) now still surfaces when FTS5's exact match ranks it. Widening
+  only the FTS5 side (measured first) left the xfail set at 20: RRF sums
+  `1/(k+rank)` across every list a hit is in, so with the vector side
+  capped at its native `top_k`, at most `top_k` hits could ever be
+  "present in both lists" and the fused top-k became exactly that
+  intersection once that many overlapped -- no fts5-only hit could enter
+  regardless of its fts5 rank. Widening both sides raised that ceiling.
+  Each backend's own relevance floor (`resolve_recall_relevance_floor` /
+  `meets_relevance_floor`) is applied to its own input list BEFORE fusion,
+  never to the fused score, so athenaeum#1571/#1665's per-backend floor
+  direction is untouched -- note the hybrid path resolves the FTS5 floor
+  during a VECTOR call too, so `recall.relevance_floor.fts5` now also
+  affects vector recall output whenever hybrid is active. A missing FTS5
+  index (a vector-only deployment) degrades to vector-only ranking with a
+  logged warning (`athenaeum.search.fts5_index_available`) rather than
+  building one lazily on a read path or raising; the athenaeum#984
+  off-corpus federation is also skipped (with a logged warning) rather than
+  silently discarded when both off_corpus and hybrid are configured
+  together, since the widened vector requery does not carry it. New
+  opt-out config knob `recall.hybrid` / `ATHENAEUM_RECALL_HYBRID` (default
+  on for the vector dispatch path; the `fts5` and `keyword` paths never
+  consult it, so they stay byte-identical -- pinned by a new test). Of the
+  17 remaining vector xfail entries, 6 overlap `_FTS5_XFAIL` outright
+  (FTS5 also misses these, tracked by athenaeum#1789); the other 11 are a
+  DIFFERENT failure mode -- FTS5's own top-5 (and the widened pool fed
+  into fusion) DOES contain the expected page, but RRF's scoring lets
+  several both-list hits collectively outscore and crowd out a page that
+  ranks well in only one list, dropping it below `top_k` even though
+  fusion "found" it -- tracked separately (athenaeum#1800), not a
+  BM25/query-construction question and not something widening the
+  candidate pool further fixes (measured: a wider pool regressed one
+  previously-passing case). The person/repo disambiguation win
+  (`person_not_repo`/`repo_not_person`'s `must_not_rank` page staying out
+  of the top 5) is now an asserted test on both backends, not just a
+  printed column. The shipped hook
+  (`examples/claude-code/user-prompt-recall.sh`) already implements its own
+  independent FTS5+vector hybrid merge in shell/Python (predates this
+  issue, a fixed FTS5-first-then-vector-fills concat rather than RRF, under
+  a `<50ms` FTS5-only latency contract this library-level change does not
+  share) and is intentionally left unchanged here; a follow-up
+  (athenaeum#1798) tracks unifying it.
 - **Offline retrieval-coverage test: every grep-reachable expected page
   must also surface in `recall` (issue athenaeum#1770).**
   `tests/evals/test_recall_covers_grep.py` materialises the `core` and

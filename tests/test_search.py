@@ -2412,3 +2412,67 @@ class TestBlockListIndexRegression:
         # the aliases column is both filled AND indexed, not merely filled.
         results = FTS5Backend().query("Nightjar", cache)
         assert "acme-corp.md" in [r[0] for r in results]
+
+
+# ---------------------------------------------------------------------------
+# reciprocal_rank_fusion / fts5_index_available (issue athenaeum#1792)
+# ---------------------------------------------------------------------------
+
+
+class TestReciprocalRankFusion:
+    def test_surfaces_a_hit_present_in_only_one_list(self) -> None:
+        """The exact failure mode athenaeum#1792 fixes: a page vector's own
+        top-n misses entirely still surfaces via fusion because fts5 ranks
+        it -- and vice versa."""
+        from athenaeum.search import reciprocal_rank_fusion
+
+        vector_only = [("a.md", "A", 0.5), ("b.md", "B", 0.9)]
+        fts5_only = [("c.md", "C", -5.0), ("a.md", "A", -3.0)]
+        fused = reciprocal_rank_fusion(vector_only, fts5_only, n=5)
+        fused_files = [f for f, _n, _s in fused]
+        assert "c.md" in fused_files
+        assert "b.md" in fused_files
+
+    def test_hit_in_both_lists_outranks_a_hit_in_only_one(self) -> None:
+        from athenaeum.search import reciprocal_rank_fusion
+
+        primary = [("both.md", "Both", 0.1), ("only-primary.md", "OnlyP", 0.2)]
+        secondary = [("both.md", "Both", -1.0), ("only-secondary.md", "OnlyS", -2.0)]
+        fused = reciprocal_rank_fusion(primary, secondary, n=5)
+        assert fused[0][0] == "both.md"
+
+    def test_truncates_to_n(self) -> None:
+        from athenaeum.search import reciprocal_rank_fusion
+
+        primary = [(f"{i}.md", str(i), float(i)) for i in range(10)]
+        fused = reciprocal_rank_fusion(primary, [], n=3)
+        assert len(fused) == 3
+
+    def test_empty_secondary_preserves_primary_order(self) -> None:
+        """No fts5 hits at all (e.g. the index was missing) degrades to
+        exactly the primary list's own order, truncated to n -- the
+        vector-only fallback path this function must support cleanly."""
+        from athenaeum.search import reciprocal_rank_fusion
+
+        primary = [("a.md", "A", 0.1), ("b.md", "B", 0.2), ("c.md", "C", 0.3)]
+        fused = reciprocal_rank_fusion(primary, [], n=5)
+        assert [f for f, _n, _s in fused] == ["a.md", "b.md", "c.md"]
+
+    def test_k_parameter_is_the_standard_rrf_default(self) -> None:
+        from athenaeum.search import _DEFAULT_RRF_K
+
+        assert _DEFAULT_RRF_K == 60
+
+
+class TestFts5IndexAvailable:
+    def test_false_when_no_db_file(self, tmp_path: Path) -> None:
+        from athenaeum.search import fts5_index_available
+
+        assert fts5_index_available(tmp_path) is False
+
+    def test_true_after_fts5_build(self, tmp_path: Path, wiki_with_pages: Path) -> None:
+        from athenaeum.search import fts5_index_available
+
+        cache = tmp_path / "cache"
+        FTS5Backend().build_index(wiki_with_pages, cache)
+        assert fts5_index_available(cache) is True

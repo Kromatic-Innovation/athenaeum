@@ -167,6 +167,19 @@ athenaeum#1736 — a floor-on pass never rescues a fail: it is additional
 evidence, not a second chance for a configuration that lost on its own
 terms.
 
+**Vector-backend measurement caveat (athenaeum#1792).** Any grid pass that
+dispatches the vector backend as its own second measurement (a wave-2
+backend-fidelity comparison against the fts5-default grid) is meaningful
+only once athenaeum#1792's hybrid rank fusion has landed. Before that issue,
+the vector backend missed 49 of 52 (scale, probe) offline coverage cases
+outright (`tests/evals/test_recall_covers_grep.py`'s `_VECTOR_XFAIL`) —
+a vector-dispatch grid run against that state would not be measuring the
+live hook's real retrieval quality, only the unmitigated embedding-model gap
+that issue fixed. A vector-dispatch wave run against a pre-athenaeum#1792
+checkout should be treated the same way an unset relevance floor is treated
+above: read alongside a clear label of which side of the fix it predates,
+never as a like-for-like comparison with a post-fusion run.
+
 ## 5. Two phases, because the corpus is compiled pages
 
 The synthetic corpus is compiled wiki pages plus probes. It has no raw
