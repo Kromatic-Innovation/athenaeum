@@ -39,7 +39,7 @@
     timing and scope changes. See [[person-dara-holt]] for the engagement
     lead's own notes.
 
-    Internal reference code: Quillbrook.
+    Internal reference tag: Quillbrook.
 
 - uid: person-dara-holt
   type: person
@@ -53,7 +53,7 @@
     Dara reviews cost-escalation clauses each spring and flags any wording
     needing renegotiation before the March budget cycle.
 
-    Internal reference code: Marrowfen.
+    Internal reference tag: Marrowfen.
 
 - uid: client-corvale-holdings
   type: client
@@ -69,7 +69,7 @@
     platform migration underway this year. See
     [[project-platform-cutover-programme]] for programme details.
 
-    Internal reference code: Halvorwick.
+    Internal reference tag: Halvorwick.
 
 - uid: project-platform-cutover-programme
   type: project
@@ -83,7 +83,7 @@
     The programme's cutover window was moved to avoid a vendor's quarterly
     freeze, adding six weeks to the original schedule.
 
-    Internal reference code: Ossmarl.
+    Internal reference tag: Ossmarl.
 
 # --- rationale (docs/use-cases.md §2.2) -------------------------------------
 
@@ -102,7 +102,7 @@
     delay. See [[decision-tooling-budget-cap]] for the spending decision it
     forced.
 
-    Internal reference code: Tanglewrought.
+    Internal reference tag: Tanglewrought.
 
 - uid: decision-tooling-budget-cap
   type: note
@@ -117,7 +117,7 @@
     work, after a similar effort ran three times over its original estimate
     last year.
 
-    Internal reference code: Fendrickal.
+    Internal reference tag: Fendrickal.
 
 # --- decision (docs/use-cases.md §2.3) --------------------------------------
 
@@ -136,7 +136,7 @@
     the team's usage pattern. See [[person-mireille-santos]] for who signed
     the contract.
 
-    Internal reference code: Oakenspire.
+    Internal reference tag: Oakenspire.
 
 - uid: person-mireille-santos
   type: person
@@ -150,7 +150,7 @@
     Mireille signed off the final contract and negotiated a two-year price
     lock after the initial quote came in above the approved budget line.
 
-    Internal reference code: Brindlemoor.
+    Internal reference tag: Brindlemoor.
 
 - uid: decision-retire-anchorline
   type: note
@@ -167,7 +167,7 @@
     running unpatched software another quarter. See
     [[system-ledgerfax-successor]] for the replacement.
 
-    Internal reference code: Verdantholt.
+    Internal reference tag: Verdantholt.
 
 - uid: system-ledgerfax-successor
   type: note
@@ -182,7 +182,7 @@
     so any downstream consumer must poll for the finished file rather than
     call an API.
 
-    Internal reference code: Sablecroft.
+    Internal reference tag: Sablecroft.
 
 # --- lesson (docs/use-cases.md §2.4) ----------------------------------------
 
@@ -201,7 +201,7 @@
     caught until week three. See [[policy-cost-center-billing-split]] for
     the billing policy it exposed a gap in.
 
-    Internal reference code: Wrenholt.
+    Internal reference tag: Wrenholt.
 
 - uid: policy-cost-center-billing-split
   type: policy
@@ -216,4 +216,4 @@
     in writing by the finance contact; an unconfirmed split defaults to a
     single combined invoice.
 
-    Internal reference code: Copperfen.
+    Internal reference tag: Copperfen.

@@ -66,6 +66,14 @@ from typing import Any
 
 import yaml
 
+#: Matches a page body's plain ``Internal reference tag: <token>.`` line
+#: (issue athenaeum#1759), used by :meth:`Page.to_markdown` to render it as
+#: its own bold final line. Deliberately anchored on the literal prefix only
+#: -- the same prefix ``validate_core`` and ``REFERENCE_TAG_INSTRUCTION``
+#: both name -- so ``Page.body`` stays matchable in plain text while the
+#: rendered markdown a model actually reads gets the unmistakable form.
+_TAG_LINE_RE = re.compile(r"^Internal reference tag: (.+)$", re.MULTILINE)
+
 #: A short, deliberately conservative stopword list -- excluded so a
 #: lexical/n-gram overlap is not dominated by function words that would
 #: overlap between almost any two English passages regardless of topic.
@@ -263,6 +271,16 @@ class Page:
         ``TypeError`` inside ``recall_search`` on the FTS5 path, from a
         distractor carrying a ``9:00`` tag. Fixtures must emit unambiguous
         YAML so an eval measures retrieval rather than a parser accident.
+
+        The ``Internal reference tag:`` line is rendered BOLD and alone on
+        its own final line (issue athenaeum#1759) so it is the most
+        identifier-shaped string on the rendered page -- the frontmatter
+        ``uid:`` line was competing with it for that role, and 17 oracle
+        cells in the first live grid cited the uid instead. ``self.body``
+        itself is left untouched: ``validate_core`` and the corpus's own
+        ``answer_tokens`` checks match the plain, unbolded
+        ``Internal reference tag:`` prefix against ``Page.body``, not
+        against this rendered markdown.
         """
 
         def q(value: str) -> str:
@@ -294,7 +312,8 @@ class Page:
         if self.superseded_by:
             fm.append(f"superseded_by: {q(self.superseded_by)}")
         fm.append("---")
-        return "\n".join(fm) + "\n\n" + self.body.rstrip() + "\n"
+        body_md = _TAG_LINE_RE.sub(r"**Internal reference tag:** \1", self.body.rstrip())
+        return "\n".join(fm) + "\n\n" + body_md + "\n"
 
     @property
     def links(self) -> tuple[str, ...]:
@@ -565,6 +584,27 @@ def validate_core(pages: list[Page], probes: list[Probe]) -> list[str]:
                 problems.append(
                     f"probe {probe.id!r}: no answer_tokens value found in its answer page body"
                 )
+            # Issue athenaeum#1759: a token can occur in a page body without
+            # ever being ON the `Internal reference tag:` line the grading
+            # contract and REFERENCE_TAG_INSTRUCTION both name -- that is
+            # exactly how the follow_through fixture drifted to `Internal
+            # reference code:` and passed the check above while being
+            # unsatisfiable by a correct answer. Require each token to sit on
+            # a line beginning with the literal prefix in at least one
+            # expected_uids page.
+            tag_lines = [
+                line
+                for uid in probe.expected_uids
+                if uid in pages_by_uid
+                for line in pages_by_uid[uid].body.splitlines()
+                if line.strip().startswith("Internal reference tag:")
+            ]
+            for token in probe.answer_tokens:
+                if not any(token in line for line in tag_lines):
+                    problems.append(
+                        f"probe {probe.id!r}: answer_tokens value {token!r} does not occur on "
+                        "an 'Internal reference tag:' line of any expected_uids page"
+                    )
         if probe.probe_class == "follow_through":
             expected_pages = [
                 pages_by_uid[uid] for uid in probe.expected_uids if uid in pages_by_uid
