@@ -669,19 +669,37 @@ _FTS5_XFAIL: frozenset[tuple[str, str]] = frozenset(
 #: options considered. Kept as one
 #: explicit set, not a blanket "xfail everything for this backend", so a
 #: genuine per-case fix is visible one entry at a time.
+#: Six entries REMOVED by athenaeum#1789: ``confidentiality_rule``/
+#: ``budget_threshold_current`` (core+medium) and
+#: ``portal_design_reviewer``/``standup_time_current`` (medium) now genuinely
+#: pass on the vector backend too -- athenaeum#1789's FTS5 body-indexing fix
+#: reaches these through athenaeum#1792's ``reciprocal_rank_fusion`` (the
+#: fusion consumes FTS5's ranking, which changed once FTS5 could see body
+#: content). Measured XPASS(strict) on this branch, not asserted separately
+#: here since the parametrized test below already proves it.
+#:
+#: KNOWN REGRESSION, not yet reflected here (see athenaeum#1789 PR body):
+#: the same body-indexing change also pulled ``repo-rowanwrenfield`` into
+#: FTS5's ranking for the ``person_not_repo``/``ratecard_tooling_owner``/
+#: ``keelbridge_programme_scope`` queries at `core` scale, and
+#: ``person-callum-drews`` out of FTS5's ranking for
+#: ``callum_drews_last_contact`` at `medium` scale -- both previously clean
+#: on the vector backend post-athenaeum#1792, both now failing THROUGH the
+#: fusion. Deliberately NOT added to this xfail set: unlike every entry
+#: below (a measured athenaeum#1770 retrieval gap), these are a regression a
+#: strict xfail here would silently retire the sibling's own guard test
+#: (``test_person_repo_disambiguation_excludes_wrong_page_vector``) against.
+#: The fix belongs in the fusion's FTS5-arm weighting/cutoff (owned by the
+#: athenaeum#1792 lane), not in FTS5Backend itself -- out of this issue's
+#: scope by the dispatch brief ("do not touch VectorBackend or add
+#: fusion").
 _VECTOR_XFAIL: frozenset[tuple[str, str]] = frozenset(
     {
         ("core", "pto_allowance"),
-        ("core", "confidentiality_rule"),
-        ("core", "budget_threshold_current"),
         ("core", "surname_is_ambiguous"),
         ("core", "former_client_not_current"),
         ("medium", "pto_allowance"),
-        ("medium", "confidentiality_rule"),
-        ("medium", "portal_design_reviewer"),
         ("medium", "ratecard_tooling_owner"),
-        ("medium", "standup_time_current"),
-        ("medium", "budget_threshold_current"),
         ("medium", "tamsin_ferro_role_change"),
         ("medium", "person_not_repo"),
         ("medium", "surname_is_ambiguous"),

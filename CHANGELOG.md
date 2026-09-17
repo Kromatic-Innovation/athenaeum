@@ -40,6 +40,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `("medium", "former_client_not_current")` remain xfailed — purpose-built
   distractor pages sharing the probe's vocabulary in both name and body are
   not reliably separable from genuine answer pages by lexical signal alone.
+  **Known cross-lane regression, not fixed here:** rebasing onto develop
+  after issue athenaeum#1792's `reciprocal_rank_fusion` (PR #1799) merged
+  showed the vector backend's `_VECTOR_XFAIL` set gained six genuine passes
+  (this fix's body-indexing reaches them through the fusion) but the same
+  ranking shift pulls `repo-rowanwrenfield` into FTS5's ranking for
+  `person_not_repo`/`ratecard_tooling_owner`/`keelbridge_programme_scope`
+  at `core` scale, and drops `person-callum-drews` out of it for
+  `callum_drews_last_contact` at `medium` scale — both previously clean on
+  the vector backend, both now failing through the fusion. See
+  `tests/evals/test_recall_covers_grep.py`'s `_VECTOR_XFAIL` comment for
+  the full account; deliberately left un-xfailed rather than silently
+  retiring the sibling lane's own disambiguation guard test. The fix
+  belongs in the fusion's FTS5-arm weighting/cutoff, owned by the
+  athenaeum#1792 lane — out of this issue's scope.
   New unit tests in `tests/test_search.py` pin an explicit pre-quoted FTS5
   query string's result set unchanged, and the person/repo disambiguation
   guard as a standalone offline fixture. Out of scope, noted for a
