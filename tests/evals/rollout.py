@@ -194,10 +194,20 @@ RECALL_TOOL_NAME = "mcp__athenaeum__recall"
 #: perfectly correct answer grades wrong and even ``oracle`` scores 0 --
 #: the contract was literally unsatisfiable before this constant existed.
 #:
-#: Deliberately plural ("every page you relied on"): ``multi_hop`` and
-#: ``follow_through`` probes plant a token on EACH of two or more pages and
-#: grading requires ALL of them, so a singular wording would silently cap
-#: those classes at wrong.
+#: Deliberately plural ("every page your answer is based on"):
+#: ``follow_through`` probes plant a token on EACH of two pages and grading
+#: requires BOTH, so a singular wording would silently cap that class at
+#: wrong. (``multi_hop`` plants a single token -- its second hop is in the
+#: retrieval, not the ground truth -- so only ``follow_through`` actually
+#: needs the plural, but one constant serves every arm and every class.)
+#:
+#: Deliberately scoped to pages the answer USES rather than pages the model
+#: opened: a tool-using arm may grep or read several pages before finding
+#: the right one, and citing all of them would let a near-miss retrieval
+#: grade correct on the strength of a page the answer never drew on.
+#: ``[ref: none]`` is likewise pinned to DECLINING, not to having opened
+#: nothing -- an abstention probe's correct behavior is to search, find
+#: nothing relevant, and decline, which must still grade as abstention.
 #:
 #: Deliberately illustrated with the literal placeholder ``TAG`` and never
 #: with a real corpus token: an ``abstention`` probe grades incorrect the
@@ -206,10 +216,13 @@ RECALL_TOOL_NAME = "mcp__athenaeum__recall"
 #: must keep working.
 REFERENCE_TAG_INSTRUCTION = (
     "When you have finished answering, end your reply with the internal "
-    "reference tag of every page you relied on. Each page's tag is the value "
-    "on its `Internal reference tag:` line. Write one tag per page you used, "
-    "each in the form [ref: TAG], on the final line of your reply. If you "
-    "relied on no page at all, write [ref: none] instead."
+    "reference tag of every page your answer is based on. Each page's tag is "
+    "the value on its `Internal reference tag:` line. Write one tag per such "
+    "page, each in the form [ref: TAG], on the final line of your reply. Cite "
+    "only pages whose content your answer actually draws on -- not every page "
+    "you opened, searched or skimmed along the way. If you are declining to "
+    "answer, write [ref: none] instead, even if you opened pages while "
+    "looking."
 )
 
 _SYSTEM_PROMPT = (

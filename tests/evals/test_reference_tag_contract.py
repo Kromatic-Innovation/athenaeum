@@ -16,10 +16,13 @@ Token-free: no live rollout, no model client, no spend.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
-from tests.evals.corpus import build_corpus
+from tests.evals import rollout
+from tests.evals.corpus import Observation, build_corpus
 from tests.evals.north_star_report import grade_correctness
 from tests.evals.rollout import (
     _PULL_API_SYSTEM_PROMPT,
@@ -138,11 +141,10 @@ def test_cli_arms_append_rather_than_replace_the_system_prompt() -> None:
         assert argv[argv.index("--append-system-prompt") + 1] == REFERENCE_TAG_INSTRUCTION
 
 
-def test_native_writer_sessions_are_outside_the_contract() -> None:
-    """The write path produces memory files, not graded answers. Telling a
-    writer to append ``[ref: ...]`` would only risk polluting what it saves,
-    so :func:`build_native_argv` takes ``append_system_prompt=None`` there --
-    a deliberate exclusion, pinned so it reads as one."""
+def test_build_native_argv_can_omit_the_instruction_on_request() -> None:
+    """The opt-out :func:`run_native_writer` uses exists and works. This is
+    only the mechanism; the test below pins that the writer actually takes
+    it."""
     argv = build_native_argv(
         "claude",
         Path("/tmp/example/settings.json"),
@@ -153,6 +155,42 @@ def test_native_writer_sessions_are_outside_the_contract() -> None:
     )
     assert "--append-system-prompt" not in argv
     assert REFERENCE_TAG_INSTRUCTION not in argv
+
+
+def test_native_writer_spawns_without_the_instruction(tmp_path: Path, monkeypatch) -> None:
+    """The write path produces memory files, not graded answers, and telling
+    a writer to append ``[ref: ...]`` would risk polluting what it saves.
+
+    Pinned where the exclusion actually happens -- the argv
+    :func:`run_native_writer` really spawns, captured through a monkeypatched
+    ``subprocess.run`` -- not merely at the ``build_native_argv`` seam.
+    Asserting the seam alone would still pass if the writer's call site
+    dropped its ``append_system_prompt=None``, which is exactly the
+    regression this guards.
+    """
+    monkeypatch.setattr(rollout.shutil, "which", lambda _binary: "/usr/bin/claude")
+    spawned: list[list[str]] = []
+
+    def fake_run(argv: list[str], **_kwargs: Any) -> SimpleNamespace:
+        spawned.append(argv)
+        return SimpleNamespace(stdout="", stderr="")
+
+    monkeypatch.setattr(rollout.subprocess, "run", fake_run)
+
+    observation = Observation(
+        uid="obs-001",
+        page_uid="page-x",
+        source="sessions",
+        timestamp="20260101T000000Z",
+        uuid8="aaaaaa01",
+        body="a fact worth saving",
+    )
+    rollout.run_native_writer([observation], tmp_path)
+
+    assert spawned, "run_native_writer spawned no session"
+    for argv in spawned:
+        assert "--append-system-prompt" not in argv
+        assert REFERENCE_TAG_INSTRUCTION not in argv
 
 
 # ---------------------------------------------------------------------------
@@ -193,6 +231,53 @@ def test_the_same_oracle_answer_without_the_tag_grades_wrong() -> None:
         answer="The firm's PTO allowance is 25 days per year plus UK bank holidays.",
     )
     assert grade_correctness(untagged, probe, _CORPUS) is False
+
+
+def test_follow_through_requires_a_tag_from_every_page() -> None:
+    """Why the instruction is worded in the plural. A ``follow_through``
+    probe plants a token on EACH of two pages -- the breadcrumb page and the
+    one reachable only by a link from it -- and grading requires both. An
+    answer citing only the first page graded correct would make the class
+    unable to tell a followed link from an unfollowed one, which is the only
+    thing it measures."""
+    probe = _probe("fenwick_relationship_history")
+    first, second = probe.answer_tokens
+
+    body = "Fenwick Systems' relationship is coordinated as the pages describe."
+    one_tag = _record(
+        arm=Arm.PULL,
+        probe_id=probe.id,
+        probe_class=probe.probe_class,
+        answer=f"{body}\n\n[ref: {first}]",
+    )
+    assert grade_correctness(one_tag, probe, _CORPUS) is False
+
+    both_tags = _record(
+        arm=Arm.PULL,
+        probe_id=probe.id,
+        probe_class=probe.probe_class,
+        answer=f"{body}\n\n[ref: {first}]\n[ref: {second}]",
+    )
+    assert grade_correctness(both_tags, probe, _CORPUS) is True
+
+
+def test_multi_hop_plants_a_single_tag() -> None:
+    """The counterpart to the test above, pinned because the distinction is
+    easy to misremember: ``multi_hop``'s second hop lives in the RETRIEVAL,
+    not in the ground truth, so it plants ONE token and one cited tag
+    suffices. Only ``follow_through`` splits tokens across pages."""
+    probe = _probe("spend_approver_named")
+    assert len(probe.answer_tokens) == 1
+    record = _record(
+        arm=Arm.ORACLE,
+        probe_id=probe.id,
+        probe_class=probe.probe_class,
+        answer=(
+            "Amir Osei approves discretionary spend above 500 GBP.\n\n"
+            f"[ref: {probe.answer_tokens[0]}]"
+        ),
+    )
+    assert grade_correctness(record, probe, _CORPUS) is True
 
 
 @pytest.mark.parametrize(
