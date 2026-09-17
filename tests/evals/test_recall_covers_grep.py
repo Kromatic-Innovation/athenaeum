@@ -79,6 +79,25 @@ hook run, per issue athenaeum#1770 item 1.
 runs against a locally materialized corpus and a locally built FTS5/vector
 index. No network call, no ``ANTHROPIC_API_KEY``, no ``claude -p`` spawn,
 no model call of any kind.
+
+Hook subprocess caveat (issue athenaeum#1790): the hook is run here without
+``config.env`` -- ``build_breadcrumb_hook_env`` gives it only a scratch
+``HOME``/``knowledge_root`` pair, so this module measures the raw FTS5 or
+vector breadcrumb selection the shipped ``.sh`` scripts themselves resolve,
+never the optional LLM query-rewriting step a live deployment's
+``config.env`` may add on top. A live hook session's breadcrumbs can
+therefore differ from what this module prints for the same query.
+
+Precision/recall/contamination tables (issue athenaeum#1782): a second
+printed-only measurement, ``test_print_precision_contamination_tables_and_cap_signal``,
+reports recall/precision/contamination for every non-abstention probe at
+``core`` and ``medium``, for grep/recall@default/hook@3, across three
+backend variants (``fts5``, ``vector`` with RRF hybrid on, ``vector`` with
+hybrid off) -- see that function's own docstring and
+``tests/evals/relevance_metrics.py`` for the definitions. Run it directly
+with ``pytest tests/evals/test_recall_covers_grep.py -k precision_contamination -s``
+to see the tables (pytest swallows stdout on a passing test otherwise).
+That is the entry point issue athenaeum#1783's cap ruling reads.
 """
 
 from __future__ import annotations
@@ -88,6 +107,7 @@ import re
 import shutil
 import subprocess
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -96,6 +116,16 @@ import pytest
 from athenaeum.mcp_server import recall_search
 from athenaeum.search import get_backend
 from tests.evals.corpus import Corpus, Probe, _content_terms, build_corpus
+from tests.evals.relevance_metrics import (
+    CAP_SIGNAL_EPS,
+    ProbeRelevance,
+    build_name_to_uid,
+    cap_verdict,
+    fmt,
+    fmt_rpc,
+    grep_reachable_miss,
+    pool,
+)
 from tests.evals.rollout import (
     SESSION_START_HOOK,
     USER_PROMPT_HOOK,
@@ -170,12 +200,31 @@ def _grep_hits(corpus: Corpus, query: str) -> dict[str, set[str]]:
 
 
 def _recall_ranked_uids(
-    wiki_root: Path, query: str, *, search_backend: str, cache_dir: Path
+    wiki_root: Path,
+    query: str,
+    *,
+    search_backend: str,
+    cache_dir: Path,
+    config: dict[str, object] | None = None,
 ) -> list[str]:
     """Ranked uids parsed off a REAL ``recall_search`` call's own rendered
-    ``**Uid:**`` header -- never a reimplementation of its ranking."""
+    ``**Uid:**`` header -- never a reimplementation of its ranking.
+
+    *config* threads through to ``recall_search``'s own ``config`` param
+    (issue athenaeum#1782: the ``vector-hybrid-off`` table variant passes
+    ``{"recall": {"hybrid": False}}`` here -- this is the ONLY way to turn
+    hybrid off for this call. ``ATHENAEUM_RECALL_HYBRID`` env would win over
+    this dict per ``resolve_recall_hybrid``'s own precedence, so callers
+    that need a real hybrid-off measurement must also ensure that env var is
+    unset -- see the table test's ``monkeypatch.delenv`` call.)
+    """
     text = recall_search(
-        wiki_root, query, top_k=_TOP_K, search_backend=search_backend, cache_dir=cache_dir
+        wiki_root,
+        query,
+        top_k=_TOP_K,
+        search_backend=search_backend,
+        cache_dir=cache_dir,
+        config=config,
     )
     return _UID_LINE_RE.findall(text)
 
@@ -183,11 +232,14 @@ def _recall_ranked_uids(
 def _recall_scored_hits(
     wiki_root: Path, query: str, *, search_backend: str, cache_dir: Path
 ) -> list[tuple[str, float]]:
-    """Raw (uid, score) pairs from the SAME backend ``recall_search`` itself
-    dispatches through (``recall_search``'s own docstring: "All three
-    dispatch through athenaeum.search.get_backend") -- used only for the
-    failure message's "recall's top hits with scores" (issue athenaeum#1770 AC2)
-    and the precision table; the coverage assertion itself uses
+    """Raw (uid, score) pairs from the backend's OWN ``.query()`` call --
+    bypasses ``recall_search`` entirely, so it also bypasses its hybrid RRF
+    fusion block (``athenaeum.mcp_server``'s ``_recall_via_backend``). Used
+    ONLY for the coverage-failure message's "recall's top hits with scores"
+    (issue athenaeum#1770 AC2) -- never for the precision/recall/
+    contamination tables (issue athenaeum#1782), which need the REAL,
+    possibly-fused ranking and must go through :func:`_recall_ranked_uids`
+    instead. The coverage assertion itself also uses
     :func:`_recall_ranked_uids`, the real public entry point.
     """
     hits = get_backend(search_backend).query(query, cache_dir, n=_TOP_K, wiki_root=wiki_root)
@@ -421,6 +473,11 @@ class _ScaleFixture:
     hook_home: Path
     hook_ready: bool
     name_to_uid: dict[str, str] = field(default_factory=dict)
+    #: issue athenaeum#1790: names/pages excluded from name_to_uid because
+    #: more than one page shares the name (medium-scale ballast/distractor
+    #: templating). 0/0 at core, where every page name is unique.
+    name_collision_names: int = 0
+    name_collision_pages: int = 0
 
 
 @pytest.fixture(scope="module", params=_SCALES)
@@ -455,6 +512,14 @@ def scale_fixture(
     hook_home = root / "hook-home"
     hook_ready = _hook_session_ready(root, hook_home)
 
+    # Issue athenaeum#1790: `{page.name: page.uid for page in corpus.pages}`
+    # silently resolved a collided name to whichever page iterated last. At
+    # `medium` (generated ballast/distractor tiers repeat templated names)
+    # that produced wrong hook_reached/hook_irrelevant columns; `core` is
+    # unaffected (every name there is unique) but goes through the same
+    # path so the two scales share one code path.
+    name_result = build_name_to_uid(corpus.pages)
+
     return _ScaleFixture(
         corpus=corpus,
         wiki_root=wiki_root,
@@ -463,7 +528,9 @@ def scale_fixture(
         knowledge_root=root,
         hook_home=hook_home,
         hook_ready=hook_ready,
-        name_to_uid={page.name: page.uid for page in corpus.pages},
+        name_to_uid=name_result.mapping,
+        name_collision_names=name_result.colliding_names,
+        name_collision_pages=name_result.colliding_pages,
     )
 
 
@@ -740,6 +807,11 @@ def test_print_per_probe_class_summary(scale_fixture: _ScaleFixture) -> None:
         )
         by_class.setdefault(probe.probe_class, []).append(measurement)
 
+    print(
+        f"\nname_to_uid collisions (athenaeum#1790) -- scale={fx.corpus.scale}: "
+        f"{fx.name_collision_names} colliding names, {fx.name_collision_pages} pages "
+        "excluded from the hook_reached/hook_irrelevant columns below"
+    )
     print(f"\nPer-probe-class summary -- scale={fx.corpus.scale} backend=fts5")
     print(
         "| probe_class | probes | expected | grep_reached | recall_reached | "
@@ -760,3 +832,369 @@ def test_print_per_probe_class_summary(scale_fixture: _ScaleFixture) -> None:
             f"{recall_irrelevant} | {hook_irrelevant} |"
         )
     assert by_class  # sanity: the corpus must carry at least one probe class
+
+
+# ---------------------------------------------------------------------------
+# Precision/recall/contamination tables + cap signal (issue athenaeum#1782)
+# ---------------------------------------------------------------------------
+
+#: (variant label, real search_backend, recall_search config override).
+#: ``vector-hybrid-off`` is the ONLY way this module measures
+#: ``recall.hybrid: false`` (issue athenaeum#1792's opt-out) -- fts5 never
+#: consults the hybrid knob at all (``resolve_recall_hybrid``'s own
+#: docstring: "Only the vector dispatch path ever calls this").
+_BACKEND_VARIANTS: tuple[tuple[str, str, dict[str, object] | None], ...] = (
+    ("fts5", "fts5", None),
+    ("vector-hybrid-on", "vector", None),
+    ("vector-hybrid-off", "vector", {"recall": {"hybrid": False}}),
+)
+
+
+def _relevance_cache_dir(fx: _ScaleFixture, backend: str) -> Path:
+    return fx.fts5_cache_dir if backend == "fts5" else fx.vector_cache_dir  # type: ignore[return-value]
+
+
+def _build_probe_relevance(*, probe: Probe, retrieved: Sequence[str]) -> ProbeRelevance:
+    return ProbeRelevance(
+        expected=frozenset(probe.expected_uids),
+        must_not_rank=frozenset(probe.must_not_rank),
+        retrieved=tuple(retrieved),
+    )
+
+
+def test_print_precision_contamination_tables_and_cap_signal(
+    scale_fixture: _ScaleFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue athenaeum#1782: recall/precision/contamination for every
+    non-abstention probe at this scale, for grep / recall@default(top-5) /
+    hook@3, across three backend variants -- ``fts5``, ``vector`` with RRF
+    hybrid on (production default, issue athenaeum#1792), ``vector`` with
+    hybrid off (the opt-out the same issue added) -- printed per probe
+    class and pooled, plus the two cap-signal quantities
+    eval-wave-2-spec.md section5.3 asks issue athenaeum#1783's ruling to
+    read off this table.
+
+    **Printed only, never asserted on the metric values themselves** --
+    same convention as this module's other tables; deciding or
+    implementing the cap is issues J/K, out of this issue's scope. The one
+    thing this DOES assert is a wiring self-check: across every probe and
+    scale, ``vector-hybrid-on`` and ``vector-hybrid-off`` must differ
+    somewhere, or the ``config={"recall": {"hybrid": False}}`` override
+    documented on :func:`_recall_ranked_uids` is silently not landing (for
+    example because ``ATHENAEUM_RECALL_HYBRID`` is set in the environment
+    and outranks it -- see the ``monkeypatch.delenv`` below).
+    """
+    monkeypatch.delenv("ATHENAEUM_RECALL_HYBRID", raising=False)
+    fx = scale_fixture
+    probes = _non_abstention_probes()
+
+    # issue athenaeum#1790, Quine must-fix 3: this function is the
+    # documented entry point issue athenaeum#1783's ruling is told to run
+    # (see this function's own docstring / the module docstring) -- the
+    # name_to_uid collision exclusion count belongs here too, not only on
+    # test_print_per_probe_class_summary, so a reader who runs ONLY this
+    # table still sees it.
+    print(
+        f"\nname_to_uid collisions (athenaeum#1790) -- scale={fx.corpus.scale}: "
+        f"{fx.name_collision_names} colliding names, {fx.name_collision_pages} pages "
+        "excluded from the hook@3 columns below"
+    )
+
+    # grep and the hook are backend-independent (the hook always runs the
+    # SAME real subprocess, or the same fts5 n=3 fallback, regardless of
+    # which recall backend variant is under measurement here) -- computed
+    # once per probe and reused across all three variants rather than
+    # tripling ~1000-page grep scans and hook subprocess spawns for no new
+    # information.
+    grep_by_probe: dict[str, dict[str, set[str]]] = {}
+    hook_by_probe: dict[str, list[str]] = {}
+    hook_real_count = 0
+    hook_fallback_count = 0
+    for probe in probes:
+        grep_by_probe[probe.id] = _grep_hits(fx.corpus, probe.query)
+        hook_ranked, hook_is_real = _hook_ranked_uids(
+            knowledge_root=fx.knowledge_root,
+            hook_home=fx.hook_home,
+            query=probe.query,
+            hook_ready=fx.hook_ready,
+            name_to_uid=fx.name_to_uid,
+            wiki_root=fx.wiki_root,
+            fts5_cache_dir=fx.fts5_cache_dir,
+        )
+        hook_by_probe[probe.id] = hook_ranked
+        if hook_is_real:
+            hook_real_count += 1
+        else:
+            hook_fallback_count += 1
+
+    # Should-fix (Quine review): the hook column's own evidence -- how many
+    # of the per-probe hook@3 measurements above are the REAL
+    # user-prompt-recall.sh subprocess vs. the offline fts5 n=3 fallback
+    # (issue athenaeum#1770 item 1) -- was computed and then discarded here
+    # in the first draft.
+    print(
+        f"hook@3 evidence -- scale={fx.corpus.scale}: {hook_real_count} probes via the real "
+        f"hook subprocess, {hook_fallback_count} via the fts5 n=3 fallback"
+    )
+
+    vector_hybrid_on_ranked: dict[str, list[str]] = {}
+    vector_hybrid_off_ranked: dict[str, list[str]] = {}
+
+    for variant, backend, config in _BACKEND_VARIANTS:
+        if backend == "vector" and fx.vector_cache_dir is None:
+            print(
+                f"\nprecision/contamination table -- scale={fx.corpus.scale} "
+                f"variant={variant}: SKIPPED ({_VECTOR_SKIP_REASON or 'chromadb not installed'})"
+            )
+            continue
+        cache_dir = _relevance_cache_dir(fx, backend)
+
+        by_class: dict[str, dict[str, list[ProbeRelevance]]] = {}
+        miss_by_class: dict[str, dict[str, list[frozenset[str]]]] = {}
+        for probe in probes:
+            recall_ranked = _recall_ranked_uids(
+                fx.wiki_root,
+                probe.query,
+                search_backend=backend,
+                cache_dir=cache_dir,
+                config=config,
+            )
+            if variant == "vector-hybrid-on":
+                vector_hybrid_on_ranked[probe.id] = recall_ranked
+            elif variant == "vector-hybrid-off":
+                vector_hybrid_off_ranked[probe.id] = recall_ranked
+
+            grep_pr = _build_probe_relevance(
+                probe=probe, retrieved=tuple(grep_by_probe[probe.id].keys())
+            )
+            recall_pr = _build_probe_relevance(probe=probe, retrieved=recall_ranked)
+            hook_pr = _build_probe_relevance(probe=probe, retrieved=hook_by_probe[probe.id])
+
+            per_retriever = by_class.setdefault(
+                probe.probe_class, {"grep": [], "recall@5": [], "hook@3": []}
+            )
+            per_retriever["grep"].append(grep_pr)
+            per_retriever["recall@5"].append(recall_pr)
+            per_retriever["hook@3"].append(hook_pr)
+
+            miss_map = miss_by_class.setdefault(probe.probe_class, {"recall@5": [], "hook@3": []})
+            miss_map["recall@5"].append(grep_reachable_miss(grep_pr, recall_pr))
+            miss_map["hook@3"].append(grep_reachable_miss(grep_pr, hook_pr))
+
+        print(f"\nPrecision/recall/contamination -- scale={fx.corpus.scale} variant={variant}")
+        print(
+            "| probe_class | probes | expected | grep R/P/C | recall@5 R/P/C | "
+            "hook@3 R/P/C | grep-miss@5 | grep-miss@hook3 | mnr n/a |"
+        )
+        pooled_all: dict[str, list[ProbeRelevance]] = {"grep": [], "recall@5": [], "hook@3": []}
+        pooled_miss_all: dict[str, list[frozenset[str]]] = {"recall@5": [], "hook@3": []}
+        for probe_class in sorted(by_class):
+            per_retriever = by_class[probe_class]
+            miss_map = miss_by_class[probe_class]
+            for retriever, rows in per_retriever.items():
+                pooled_all[retriever].extend(rows)
+            for retriever, misses in miss_map.items():
+                pooled_miss_all[retriever].extend(misses)
+
+            grep_pool = pool(per_retriever["grep"])
+            recall_pool = pool(per_retriever["recall@5"], miss_map["recall@5"])
+            hook_pool = pool(per_retriever["hook@3"], miss_map["hook@3"])
+            print(
+                f"| {probe_class} | {len(per_retriever['grep'])} | {grep_pool.expected_total} | "
+                f"{fmt_rpc(grep_pool)} | {fmt_rpc(recall_pool)} | {fmt_rpc(hook_pool)} | "
+                f"{recall_pool.grep_reachable_miss_total} | "
+                f"{hook_pool.grep_reachable_miss_total} | {grep_pool.contamination_na_count} |"
+            )
+
+        grep_pool = pool(pooled_all["grep"])
+        recall_pool = pool(pooled_all["recall@5"], pooled_miss_all["recall@5"])
+        hook_pool = pool(pooled_all["hook@3"], pooled_miss_all["hook@3"])
+        print(
+            f"| ALL | {len(pooled_all['grep'])} | {grep_pool.expected_total} | "
+            f"{fmt_rpc(grep_pool)} | {fmt_rpc(recall_pool)} | {fmt_rpc(hook_pool)} | "
+            f"{recall_pool.grep_reachable_miss_total} | {hook_pool.grep_reachable_miss_total} | "
+            f"{grep_pool.contamination_na_count} |"
+        )
+
+        verdict = cap_verdict(
+            recall_hook3=hook_pool.recall,
+            recall_recall5=recall_pool.recall,
+            precision_hook3=hook_pool.precision,
+            precision_recall5=recall_pool.precision,
+        )
+        print(
+            f"cap signal -- scale={fx.corpus.scale} variant={variant} (eps={CAP_SIGNAL_EPS}): "
+            f"recall@hook3={fmt(hook_pool.recall)} recall@recall5={fmt(recall_pool.recall)}\n"
+            f"  precision@hook3={fmt(hook_pool.precision)} "
+            f"precision@recall5={fmt(recall_pool.precision)} -> {verdict!r}"
+        )
+
+    # Wiring self-check (see docstring): the hybrid knob must actually be
+    # landing, or vector-hybrid-off is measuring nothing new.
+    if vector_hybrid_on_ranked and vector_hybrid_off_ranked:
+        assert any(
+            vector_hybrid_on_ranked[pid] != vector_hybrid_off_ranked[pid]
+            for pid in vector_hybrid_on_ranked
+        ), (
+            f"scale={fx.corpus.scale!r}: vector-hybrid-on and vector-hybrid-off produced "
+            "IDENTICAL rankings for every probe -- the config={'recall': {'hybrid': False}} "
+            "override is not landing (check ATHENAEUM_RECALL_HYBRID and resolve_recall_hybrid's "
+            "precedence)"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Unit tests for tests.evals.relevance_metrics -- issue athenaeum#1782 AC
+# ("Unit test with a synthetic small corpus exercising all four
+# quantities"). No fixture, no corpus, no recall_search call: pure
+# set-arithmetic assertions against hand-built ProbeRelevance instances --
+# a tiny synthetic three-page "corpus" is exactly the two uids named below.
+# ---------------------------------------------------------------------------
+
+
+def test_relevance_metrics_recall_precision_contamination_grep_miss() -> None:
+    """Synthetic two-probe corpus exercising all four quantities issue
+    athenaeum#1782 asks for: recall, precision, contamination, and
+    grep-reachable miss -- both the normal case and both documented "n/a"
+    edge cases (empty retrieved set, empty must_not_rank set)."""
+    from tests.evals.relevance_metrics import (
+        ProbeRelevance,
+        grep_reachable_miss,
+        pool,
+    )
+
+    # probe "p1": expected {a, b}, must_not_rank {z}. grep reaches {a, b, z}
+    # (over-retrieves, as grep always does); recall@5 returns {a, z}
+    # (misses b, contaminates on z); hook@3 returns {} (nothing at all).
+    expected = frozenset({"a", "b"})
+    mnr = frozenset({"z"})
+    grep = ProbeRelevance(expected=expected, must_not_rank=mnr, retrieved=("a", "b", "z"))
+    recall5 = ProbeRelevance(expected=expected, must_not_rank=mnr, retrieved=("a", "z"))
+    hook3 = ProbeRelevance(expected=expected, must_not_rank=mnr, retrieved=())
+
+    assert grep.recall() == 1.0  # both expected pages reached
+    assert grep.precision() == pytest.approx(2 / 3)  # 2 of 3 retrieved are expected
+    assert grep.contamination() == 1.0  # the one must_not_rank uid, fully surfaced
+
+    assert recall5.recall() == pytest.approx(0.5)  # only "a" of {a, b}
+    assert recall5.precision() == pytest.approx(0.5)  # 1 of 2 retrieved is expected
+    assert recall5.contamination() == 1.0  # "z" surfaced
+
+    # precision "n/a": nothing retrieved at all -- never a silent 0.0.
+    assert hook3.recall() == 0.0
+    assert hook3.precision() is None
+    assert hook3.contamination() == 0.0  # must_not_rank present but not surfaced -- a real 0.0
+
+    # grep-reachable miss: "b" is grep-reachable but missed by recall@5 AND
+    # hook@3; "a" is grep-reachable and reached by recall@5 (not a miss).
+    assert grep_reachable_miss(grep, recall5) == frozenset({"b"})
+    assert grep_reachable_miss(grep, hook3) == frozenset({"a", "b"})
+
+    # contamination "n/a": a probe authored with no must_not_rank set at
+    # all (issue athenaeum#1777's finding) -- never a silent 1.0.
+    no_mnr = ProbeRelevance(expected=expected, must_not_rank=frozenset(), retrieved=("a", "b"))
+    assert no_mnr.contamination() is None
+
+    # recall() raises on an abstention-shaped probe (no expected_uids) --
+    # callers filter those out upstream via _non_abstention_probes; this
+    # pins that the method itself refuses to silently return a meaningless
+    # number rather than relying on callers to remember the filter.
+    abstention_shaped = ProbeRelevance(
+        expected=frozenset(), must_not_rank=frozenset(), retrieved=("a",)
+    )
+    with pytest.raises(ValueError, match="recall is undefined"):
+        abstention_shaped.recall()
+
+    # Pooling: micro-averaged over the two probes above (p1's recall5, and
+    # a second probe p2 that retrieves nothing at all so its precision is
+    # excluded from the pooled numerator/denominator by construction, not
+    # folded in as a 0/0).
+    p2_expected = frozenset({"c"})
+    p2 = ProbeRelevance(expected=p2_expected, must_not_rank=frozenset(), retrieved=())
+    pooled = pool([recall5, p2])
+    # hits: recall5 contributes 1 ("a"), p2 contributes 0 -- expected_total
+    # 2 + 1 = 3, so pooled recall = 1/3.
+    assert pooled.recall == pytest.approx(1 / 3)
+    # retrieved_total: recall5 contributes 2, p2 contributes 0 -- pooled
+    # precision = 1/2, unaffected by p2's empty retrieval.
+    assert pooled.precision == pytest.approx(0.5)
+    assert pooled.precision_na_count == 1  # p2
+    # must_not_rank_total: only recall5 carries one -- p2 excluded from the
+    # contamination denominator/numerator entirely (n/a, counted).
+    assert pooled.contamination == 1.0
+    assert pooled.contamination_na_count == 1  # p2
+
+    # PooledRelevance.contamination is None when EVERY pooled probe has no
+    # authored must_not_rank set -- never a vacuous 1.0/0.0 off an
+    # all-n/a group.
+    p3 = ProbeRelevance(expected=frozenset({"d"}), must_not_rank=frozenset(), retrieved=("d",))
+    all_na_pooled = pool([no_mnr, p3])
+    assert all_na_pooled.contamination is None
+    assert all_na_pooled.contamination_na_count == 2
+
+
+def test_relevance_metrics_cap_verdict() -> None:
+    """eval-wave-2-spec.md section5.3's trigger, all four branches."""
+    from tests.evals.relevance_metrics import cap_verdict
+
+    # recall drops materially at hook3 while precision does not improve --
+    # cap is discarding relevant pages for free.
+    assert (
+        cap_verdict(
+            recall_hook3=0.5, recall_recall5=0.8, precision_hook3=0.4, precision_recall5=0.5
+        )
+        == "fixed cap is cutting signal"
+    )
+    # recall drops materially AND precision rises at hook3 -- the cap
+    # trades recall for precision rather than buying precision for free
+    # (issue athenaeum#1782/athenaeum#1783 Quine review; this is this
+    # PR's own core/fts5 and medium/fts5 pooled shape).
+    assert (
+        cap_verdict(
+            recall_hook3=0.67, recall_recall5=0.74, precision_hook3=0.41, precision_recall5=0.31
+        )
+        == "mixed: cutting both"
+    )
+    # precision rises sharply at hook3 -- cap is buying real precision.
+    assert (
+        cap_verdict(
+            recall_hook3=0.6, recall_recall5=0.65, precision_hook3=0.7, precision_recall5=0.3
+        )
+        == "fixed cap is cutting noise"
+    )
+    # neither pattern -- inconclusive.
+    assert (
+        cap_verdict(
+            recall_hook3=0.6, recall_recall5=0.62, precision_hook3=0.4, precision_recall5=0.41
+        )
+        == "inconclusive"
+    )
+    # a None input (empty pooled group) is inconclusive by construction.
+    assert (
+        cap_verdict(
+            recall_hook3=None, recall_recall5=0.8, precision_hook3=0.4, precision_recall5=0.5
+        )
+        == "inconclusive"
+    )
+
+
+def test_build_name_to_uid_excludes_collisions() -> None:
+    """issue athenaeum#1790: a name shared by more than one page is
+    excluded from the mapping entirely, with the collision counted -- not
+    silently resolved to whichever page iterated last."""
+    from tests.evals.relevance_metrics import build_name_to_uid
+
+    @dataclass(frozen=True)
+    class _FakePage:
+        name: str
+        uid: str
+
+    pages = [
+        _FakePage(name="Unique Page", uid="uid-unique"),
+        _FakePage(name="Duplicate Page", uid="uid-dup-1"),
+        _FakePage(name="Duplicate Page", uid="uid-dup-2"),
+    ]
+    result = build_name_to_uid(pages)
+    assert result.mapping == {"Unique Page": "uid-unique"}
+    assert result.colliding_names == 1
+    assert result.colliding_pages == 2
