@@ -203,6 +203,15 @@ The report also states the **cutoff**: the smallest scale at which all three
 conditions hold. Below it the recommendation is the agent's own memory, and
 that number goes into the README.
 
+All three conditions read the SAME Athenaeum arm -- `push_breadcrumb_pull`,
+the shipped configuration -- never a different, most-favourable arm picked
+per condition; other Athenaeum arms still appear in the report's per-dimension
+tables, just never in these verdicts (`--verdict-arm` overrides the default).
+When the better native arm scored zero correct answers on a probe class while
+the verdict arm scored at least one, condition 3 reads `native-zero`, a pass
+stated in words rather than a fabricated ratio; if both sides scored zero, it
+is `undefined` and fails.
+
 The result lands as a dated report under `docs/measurements/`, following the
 convention `measurements/README.md` documents: the runner ships in-tree and
 needs no credential to test; the live run is a separate operator task,
