@@ -16,7 +16,6 @@ never silently skipped, on both a real run and ``--dry-run``.
 
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 import time
@@ -42,7 +41,7 @@ def _knowledge_root(tmp_path: Path) -> tuple[Path, Path, str]:
     member = scope / "project_repo_owned_skills_contract.md"
     member.write_text("---\nname: c\n---\nA contract fact.\n", encoding="utf-8")
     (scope / "MEMORY.md").write_text(
-        "# Memory Index\n" "- [Contract](project_repo_owned_skills_contract.md) — hook\n",
+        "# Memory Index\n- [Contract](project_repo_owned_skills_contract.md) — hook\n",
         encoding="utf-8",
     )
 

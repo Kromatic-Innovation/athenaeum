@@ -100,8 +100,7 @@ def record_session_end(
         path = marker_path(cache_dir, scope)
         atomic_write_text(
             path,
-            json.dumps({"session": session_id, "ts": now_iso()}, sort_keys=True)
-            + "\n",
+            json.dumps({"session": session_id, "ts": now_iso()}, sort_keys=True) + "\n",
         )
     except OSError:
         log.warning(

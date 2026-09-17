@@ -6715,14 +6715,10 @@ def _run_merge_only_phase(ctx: RunContext) -> int:
                 time.monotonic() - _retire_start,
                 {
                     "index_pruned": (
-                        len(_retire_report.index_pruned)
-                        if _retire_report is not None
-                        else 0
+                        len(_retire_report.index_pruned) if _retire_report is not None else 0
                     ),
                     "held_live_session": (
-                        len(_retire_report.held_live_session)
-                        if _retire_report is not None
-                        else 0
+                        len(_retire_report.held_live_session) if _retire_report is not None else 0
                     ),
                     "reason": "completed",  # issue athenaeum#1102 AC1
                 },
@@ -8766,14 +8762,10 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
                 # Issue athenaeum#1728: same treatment for live-session-guard holds.
                 {
                     "index_pruned": (
-                        len(_retire_report.index_pruned)
-                        if _retire_report is not None
-                        else 0
+                        len(_retire_report.index_pruned) if _retire_report is not None else 0
                     ),
                     "held_live_session": (
-                        len(_retire_report.held_live_session)
-                        if _retire_report is not None
-                        else 0
+                        len(_retire_report.held_live_session) if _retire_report is not None else 0
                     ),
                     "reason": "completed",  # issue athenaeum#1102 AC1
                 },
@@ -10898,10 +10890,9 @@ def session_end(
                 cache_dir=resolve_cache_dir(cache_dir),
                 projects_root=default_projects_root(),
             )
-        except Exception:  # noqa: BLE001 — must never break session_end
+        except Exception:  # must never break session_end
             log.warning(
-                "session-end: failed to record live-session-guard marker "
-                "for session %s",
+                "session-end: failed to record live-session-guard marker for session %s",
                 session,
                 exc_info=True,
             )

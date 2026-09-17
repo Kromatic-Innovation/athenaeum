@@ -534,9 +534,7 @@ def run_retire_pass(
         else resolve_live_session_guard_quiet_window_seconds(resolved_config)
     )
     guard_cache_dir = cache_dir if cache_dir is not None else resolve_cache_dir()
-    guard_projects_root = (
-        projects_root if projects_root is not None else default_projects_root()
-    )
+    guard_projects_root = projects_root if projects_root is not None else default_projects_root()
 
     # (entry, members_to_retire) — only the members whose fact actually landed
     # in the wiki body AND that live under knowledge_root are retire-eligible.
@@ -625,9 +623,7 @@ def run_retire_pass(
                     report.held.append(str(m))
                     report.held_live_session.append(str(m))
                     report.dispositions.append(
-                        FileDisposition(
-                            str(m), HOLD_LIVE_SESSION, entry.cluster_id, live_reason
-                        )
+                        FileDisposition(str(m), HOLD_LIVE_SESSION, entry.cluster_id, live_reason)
                     )
                     continue
 
