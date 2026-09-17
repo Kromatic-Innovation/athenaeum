@@ -21,11 +21,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and per-cell mix the pre-flight spend gate uses
   (`containment.tokens_for_spend`) — so one knob governs both. The constant
   remains only as the fallback when neither flag is given.
-- **`--dry-run` prints the token ceiling and refuses up front (issue
-  athenaeum#1754).** The ceiling, its provenance and the projected token
-  total now print beside the existing price and wall-clock lines, and a
-  projection above the ceiling is refused before the first cell runs, naming
-  both numbers — instead of the run discovering it 392 cells in.
+- **The pre-flight refuses a grid whose projection exceeds its own token
+  ceiling (issue athenaeum#1754).** `--dry-run` prints the ceiling, its
+  provenance and the projected token total beside the existing price and
+  wall-clock lines; the refusal itself applies to real runs too, so a grid
+  that would abort mid-way having paid for every cell up to that point is
+  stopped before the first paid call, naming both numbers.
+- **Deriving a ceiling for an unpriced model is refused, not guessed (issue
+  athenaeum#1754).** `tokens_for_spend` raises naming the model rather than
+  returning a figure computed from `athenaeum.models`' blended fallback rate.
+  `--max-tokens` still works on such a model — only the derivation is
+  refused. `--max-tokens` below 1 is rejected at parse time like `--workers`,
+  and `--max-spend 0` reports that provenance rather than claiming no spend
+  flag was given.
 
 ### Changed
 
