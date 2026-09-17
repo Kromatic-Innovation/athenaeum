@@ -5,9 +5,10 @@ pins, tool-leak/tool_result-shape mutants, path confinement, the grep byte
 bound, ``run_probe_all_arms(mode="api")`` end-to-end routing, and per-turn
 token accounting across every turn of a multi-turn loop.
 
-Offline, ``rollout``-marked, no network and no subprocess spawn -- same
-discipline as ``tests/evals/test_rollout_api_mode.py``, which this module
-supplements rather than duplicates.
+Offline and UNMARKED — no network, no subprocess spawn, no token spent, so
+it runs in ``ci.yml``'s default job (issue athenaeum#1742). Same discipline
+as ``tests/evals/test_rollout_api_mode.py``, which this module supplements
+rather than duplicates.
 """
 
 from __future__ import annotations
@@ -16,8 +17,6 @@ import dataclasses
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-
-import pytest
 
 from tests.conftest import FakeLLMClient, make_llm_response, make_llm_usage
 from tests.evals.corpus import build_corpus
@@ -38,8 +37,6 @@ from tests.evals.rollout import (
     run_pull_api,
     truncate_native_index,
 )
-
-pytestmark = pytest.mark.rollout
 
 
 def _text_block(text: str) -> SimpleNamespace:

@@ -251,9 +251,11 @@ for every test under `tests/evals/rollout.py` and its sibling modules: a
 test that renders a report from synthetic fixtures, round-trips a payload,
 or drives a stub CLI runs offline and carries no marker at all, even when
 it lives in the same file family as a live one. `test_north_star_report.py`,
-`test_rollout.py`, `test_north_star_cli.py`, `test_rollout_payload.py`, and
-`test_rollout_push_breadcrumb_spike.py` are all token-free and run in
-`ci.yml`'s default job; `test_rollout_pull_spike.py`,
+`test_rollout.py`, `test_north_star_cli.py`, `test_rollout_payload.py`,
+`test_rollout_push_breadcrumb_spike.py`, `test_rollout_api_mode.py`,
+`test_rollout_api_mode_hardening.py`, and `test_rollout_mode_labelling.py`
+are all token-free and run in `ci.yml`'s default job;
+`test_rollout_pull_spike.py`,
 `test_rollout_native_spike.py`, and `test_rollout_native_writer_spike.py`
 spawn the real `claude` binary and stay `rollout`-marked.
 `tests/evals/test_containment_ci_wiring.py::test_rollout_deselected_tests_are_actually_live`

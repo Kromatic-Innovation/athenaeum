@@ -255,8 +255,10 @@ testpaths = ["tests"]
 # binary, constructs no API client, and gates on no ANTHROPIC_API_KEY /
 # ATHENAEUM_LIVE_TESTS runs by default even if it lives beside live-marked
 # siblings in the same module family (see tests/evals/test_north_star_report.py,
-# test_rollout.py, test_north_star_cli.py, test_rollout_payload.py, and
-# test_rollout_push_breadcrumb_spike.py, none of which carry the marker).
+# test_rollout.py, test_north_star_cli.py, test_rollout_payload.py,
+# test_rollout_push_breadcrumb_spike.py, test_rollout_api_mode.py,
+# test_rollout_api_mode_hardening.py, and test_rollout_mode_labelling.py,
+# none of which carry the marker).
 # tests/evals/test_containment_ci_wiring.py::test_rollout_deselected_tests_are_actually_live
 # enforces the split mechanically so it cannot drift back together.
 addopts = "--ignore=tests/benchmarks -m 'not eval and not embedding and not rollout'"

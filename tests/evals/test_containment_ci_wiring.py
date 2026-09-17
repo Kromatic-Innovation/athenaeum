@@ -139,9 +139,16 @@ def test_rollout_deselected_tests_are_actually_live() -> None:
 
 def test_token_free_report_modules_carry_no_deselecting_marker() -> None:
     """Pins the athenaeum#1740 regression class directly: these modules render
-    reports, round-trip payloads, or drive a CLI from synthetic fixtures --
-    no LLM call, no `claude` spawn -- so they run in ci.yml's default job
-    and must never be silently deselected again."""
+    reports, round-trip payloads, or drive a CLI or an api-mode tool loop
+    from synthetic fixtures and stub clients -- no LLM call, no `claude`
+    spawn -- so they run in ci.yml's default job and must never be silently
+    deselected again.
+
+    The last three landed `rollout`-marked with athenaeum#1743 while this
+    issue was in flight, each one token-free by its own docstring's account:
+    the drift this issue exists to stop recurred within a single PR, which
+    is why they are pinned by name here and not merely unmarked.
+    """
     token_free_modules = [
         "test_north_star_report.py",
         "test_rollout.py",
@@ -149,6 +156,9 @@ def test_token_free_report_modules_carry_no_deselecting_marker() -> None:
         "test_rollout_payload.py",
         "test_rollout_push_breadcrumb_spike.py",
         "test_north_star_verdicts.py",
+        "test_rollout_api_mode.py",
+        "test_rollout_api_mode_hardening.py",
+        "test_rollout_mode_labelling.py",
     ]
     for name in token_free_modules:
         source = (_EVALS_DIR / name).read_text(encoding="utf-8")
