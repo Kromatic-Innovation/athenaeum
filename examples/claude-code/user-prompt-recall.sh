@@ -85,12 +85,11 @@
 # `resolve_recall_relevance_floor` at all; a hand-rolled recall
 # implementation, not a caller of the library path. A prior version of
 # this comment excused leaving FTS5 unfiltered on the premise that live
-# traffic was ~100% vector — WRONG: the durable push ledger
-# (`~/.cache/athenaeum/_push_records.jsonl`) shows 1215 FTS5-sourced vs
-# 1086 vector-sourced items all-time, 42% FTS5 in the most recent 300
-# records, and the FTS5 query runs, with an index, on EVERY turn
-# regardless of `SEARCH_BACKEND` (both backends' rows are merged before
-# `head -3`). The fix: on a turn where the vector half runs (`SEARCH_BACKEND
+# traffic was ~100% vector — WRONG: the FTS5 query runs, with an index, on
+# EVERY turn regardless of `SEARCH_BACKEND`, and its rows are merged with
+# the vector rows before `head -3`; a live push-ledger check found FTS5 is
+# not the minority path that premise assumed (see the PR that fixed this
+# for the measurement). The fix: on a turn where the vector half runs (`SEARCH_BACKEND
 # =vector` and a vector index exists), the FTS5 rows this hook already
 # queried via sqlite3 are passed into that SAME Python invocation and
 # filtered there too, alongside the vector hits — no second process, no
@@ -972,10 +971,31 @@ if [ "$SEARCH_BACKEND" = "vector" ] && [ -d "$VECTOR_DIR" ]; then
   #
   # The `athenaeum.config` / `meets_relevance_floor` imports are PLAIN
   # package imports, deliberately NOT routed through the `ATHENAEUM_SRC`
-  # dev-path override just below (that override exists only so tests can
-  # stub `query_vector_index` without a real chromadb/embedding backend)
-  # — the floor mechanism itself is exactly what this issue verifies, so
-  # it always runs the real installed library, never a test double.
+  # dev-path override just below. `ATHENAEUM_SRC` is not test-only — the
+  # live hook sets it every turn too, pointing at the deploy checkout
+  # (`session-start-recall.sh` caches it the same way), and that override
+  # is what lets `query_vector_index` load from a single known file by
+  # path without requiring a full package install. `athenaeum.config` has
+  # a much wider transitive import surface (`athenaeum.models` and
+  # others) that single-file dev-path loading does not provide for, so
+  # this import goes through normal Python package resolution instead —
+  # the same mechanism a real `pip install athenaeum` deployment already
+  # satisfies, and the one this issue's floor mechanism is meant to run
+  # through unmodified. A test that wants to exercise this path (rather
+  # than the fail-open default) has to put a real `athenaeum` package
+  # somewhere `sys.path` can find it — see `_vector_env`'s own comment in
+  # `tests/test_shell_hooks.py` for how.
+  #
+  # `_vector_rc` (issue athenaeum#1665): captures the Python process's real
+  # exit status via `|| _vector_rc=$?` -- NOT a bare `|| true`, which
+  # discarded it entirely and left the sentinel-split logic below with no
+  # way to distinguish "ran to completion" from "crashed but happened to
+  # print something sentinel-shaped first". `cmd || var=$?` is the
+  # standard errexit-safe idiom: under `set -e`, a command that is part of
+  # an `||` list is exempt from triggering the script-wide abort, so a
+  # Python failure here degrades gracefully into the three-way guard below
+  # instead of killing the whole hook.
+  _vector_rc=0
   VECTOR_RESULTS=$("$PYTHON" -c "
 import sys, os, importlib.util
 from pathlib import Path
@@ -1062,7 +1082,7 @@ for fname, name, score in query_vector_index(sys.argv[1], os.path.expanduser('~/
     if floor_vector is not None and meets_relevance_floor is not None and not meets_relevance_floor('vector', score, floor_vector):
         continue
     print(f'{fname}\t{name}\t{score}')
-" "$VECTOR_QUERY" "$SEEN_FILE" "$FTS_RESULTS" "$KNOWLEDGE_ROOT" 2>"$_vector_tmp" || true)
+" "$VECTOR_QUERY" "$SEEN_FILE" "$FTS_RESULTS" "$KNOWLEDGE_ROOT" 2>"$_vector_tmp") || _vector_rc=$?
   VECTOR_ERR=$(cat "$_vector_tmp" 2>/dev/null || echo "")
   rm -f "$_vector_tmp"
   if [ -n "$VECTOR_ERR" ] && [ "${ATHENAEUM_HOOK_DEBUG:-0}" = "1" ]; then
@@ -1070,14 +1090,32 @@ for fname, name, score in query_vector_index(sys.argv[1], os.path.expanduser('~/
   fi
 
   # Issue athenaeum#1665: split the combined stdout back into the
-  # (floor-filtered) FTS5 rows and the vector rows by the sentinel above.
-  # Guarded on the sentinel actually being PRESENT: if the Python process
-  # crashed before reaching it (e.g. a total interpreter/import failure,
-  # not just the floor-resolution try/except above, which already degrades
-  # to unfiltered on its own), $VECTOR_RESULTS falls through to its
-  # already-initialized empty default and $FTS_RESULTS is left exactly as
-  # the sqlite3 query above computed it, unfiltered -- fail open to the
-  # pre-existing behaviour, never to zero recall.
+  # (floor-filtered) FTS5 rows and the vector rows by the sentinel above --
+  # a THREE-WAY guard keyed on BOTH the captured Python exit status
+  # (`$_vector_rc`, set above via `|| _vector_rc=$?` instead of a bare
+  # `|| true`, which discarded it entirely) and the sentinel's presence in
+  # the captured text. Sentinel-presence alone is not enough: CPython
+  # flushes stdout on an unhandled exception even when piped (verified
+  # directly), so a crash AFTER the sentinel still leaves $VECTOR_RESULTS
+  # holding a REAL but INCOMPLETE vector section -- using it as-is would
+  # relabel a partial, truncated capture as "the vector rows" with nothing
+  # to mark it as an unfinished list.
+  #   1. sentinel present AND rc==0: the script ran to completion (nothing
+  #      else exits 0) -- split normally, both halves are valid data.
+  #   2. sentinel present AND rc!=0: the crash happened AFTER the
+  #      filter-and-print-sentinel pass, which is unconditional and
+  #      sequenced strictly before the vector loop -- the sentinel's mere
+  #      presence PROVES that pass finished, so the pre-sentinel FTS5
+  #      section is complete and trustworthy. Use it; force the vector
+  #      section to empty instead of whatever partial rows printed before
+  #      the crash.
+  #   3. sentinel absent (any rc): the crash happened before or during the
+  #      fts5-filter pass itself (e.g. the search.py import step, which
+  #      runs first) -- there is no complete filtered section to trust, so
+  #      fall back to the ORIGINAL raw/unfiltered fts5 rows the sqlite3
+  #      query above computed (left untouched by this whole block) and an
+  #      empty vector section. Fail open to the pre-existing behaviour,
+  #      never to zero recall.
   if printf '%s\n' "$VECTOR_RESULTS" | grep -qF '__ATHENAEUM_FTS5_FLOOR_END__'; then
     _combined="$VECTOR_RESULTS"
     FTS_RESULTS=$(printf '%s\n' "$_combined" | awk '
@@ -1085,11 +1123,17 @@ for fname, name, score in query_vector_index(sys.argv[1], os.path.expanduser('~/
       $0 == "__ATHENAEUM_FTS5_FLOOR_END__" { insent = 1; next }
       !insent { print }
     ')
-    VECTOR_RESULTS=$(printf '%s\n' "$_combined" | awk '
-      BEGIN { insent = 0 }
-      $0 == "__ATHENAEUM_FTS5_FLOOR_END__" { insent = 1; next }
-      insent { print }
-    ')
+    if [ "$_vector_rc" -eq 0 ]; then
+      VECTOR_RESULTS=$(printf '%s\n' "$_combined" | awk '
+        BEGIN { insent = 0 }
+        $0 == "__ATHENAEUM_FTS5_FLOOR_END__" { insent = 1; next }
+        insent { print }
+      ')
+    else
+      VECTOR_RESULTS=""
+    fi
+  else
+    VECTOR_RESULTS=""
   fi
 fi
 
