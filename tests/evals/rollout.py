@@ -88,7 +88,14 @@ from typing import Any
 
 from athenaeum.config import DEFAULT_CLASSIFY_MODEL
 from athenaeum.entity_schema import declared_entity_classes
-from athenaeum.mcp_server import RECALL_TOOL_INPUT_SCHEMA, recall_search, recall_tool_docstring
+from athenaeum.mcp_server import (
+    READ_ENTITY_TOOL_INPUT_SCHEMA,
+    RECALL_TOOL_INPUT_SCHEMA,
+    entity_read,
+    read_entity_tool_docstring,
+    recall_search,
+    recall_tool_docstring,
+)
 from athenaeum.provider import response_text as provider_response_text
 from athenaeum.push_metrics import estimate_tokens
 from athenaeum.search import get_backend
@@ -182,6 +189,15 @@ DEFAULT_ROLLOUT_MODEL = DEFAULT_CLASSIFY_MODEL
 #: recall tool as FastMCP names it, matching the athenaeum#1522 spike
 #: evidence's ``tools`` list entry verbatim.
 RECALL_TOOL_NAME = "mcp__athenaeum__recall"
+
+#: The MCP tool name of the server's ``read_entity`` tool, spelled the same
+#: way FastMCP namespaces :data:`RECALL_TOOL_NAME` (issue athenaeum#1756).
+#: The real server serves BOTH to a CLI-mode PULL arm; api mode served only
+#: ``recall`` until this issue, which made api and CLI PULL measure different
+#: tool surfaces -- and left api-mode PULL unable to cite the reference tag
+#: of any page whose tag falls outside ``recall``'s 400-character snippet
+#: window (``athenaeum.mcp_server._snippet``).
+READ_ENTITY_TOOL_NAME = "mcp__athenaeum__read_entity"
 
 #: The reference-tag contract (issue athenaeum#1753). Every arm's system
 #: prompt carries this VERBATIM and IDENTICALLY -- single-shot, tool-using
@@ -1514,6 +1530,12 @@ def run_native_grep(
 # Code's own built-ins would otherwise provide:
 #   * `recall` -- an in-process call to `athenaeum.mcp_server.recall_search`
 #     over the materialized wiki, for PULL / PUSH_BREADCRUMB_PULL.
+#   * `read_entity` -- an in-process call to
+#     `athenaeum.mcp_server.entity_read` over the same wiki, for the same two
+#     arms (issue athenaeum#1756). The real MCP server serves it alongside
+#     `recall`, so a CLI-mode PULL arm already had it; serving it here is what
+#     makes api-mode PULL measure the SAME tool surface rather than a
+#     recall-only subset. Nothing else is offered.
 #   * `grep` / `read` -- bounded, harness-served file search and read over
 #     the materialized native-memory directory, for NATIVE_INDEX /
 #     NATIVE_GREP. Confined to that directory (`_resolve_under_memory_dir`
@@ -1563,11 +1585,21 @@ _API_LOOP_MAX_TURNS = 6
 #: `recall` tool exists and when to reach for it, mirroring what a real MCP
 #: connection's tool description implicitly conveys plus the explicit
 #: guidance a system prompt gives a model deciding whether to call it.
+#:
+#: Issue athenaeum#1756: it names BOTH tools the real MCP server serves --
+#: ``recall``, which returns ranked pages as truncated snippets, and
+#: ``read_entity``, which returns one whole page by uid -- because a snippet
+#: can omit the very line an answer needs (every ``recall`` hit's body is
+#: windowed to 400 characters by ``athenaeum.mcp_server._snippet``).
 _PULL_API_SYSTEM_PROMPT = (
     "You are answering questions about a private knowledge base. You have a "
     "`recall` tool that searches that knowledge base for pages relevant to a "
-    "query. Use it whenever the question may depend on information stored "
-    "in the knowledge base -- do not rely on outside knowledge or guess. "
+    "query, and a `read_entity` tool that returns one whole page given the "
+    "`uid` and `type` a `recall` result reports for it. Use `recall` whenever "
+    "the question may depend on information stored in the knowledge base -- "
+    "do not rely on outside knowledge or guess. A `recall` result shows each "
+    "page only as a truncated snippet, so use `read_entity` on a hit whenever "
+    "you need the rest of that page. "
     "Only say you do not know once you have searched and found nothing "
     "relevant to the question.\n\n" + REFERENCE_TAG_INSTRUCTION
 )
@@ -1616,6 +1648,62 @@ def _recall_tool_schema(wiki_root: Path) -> dict[str, Any]:
         "description": summary,
         "input_schema": RECALL_TOOL_INPUT_SCHEMA,
     }
+
+
+def _read_entity_tool_schema() -> dict[str, Any]:
+    """The api-mode ``read_entity`` tool (issue athenaeum#1756), built the
+    same way :func:`_recall_tool_schema` is: the MCP server's OWN description
+    text (:func:`athenaeum.mcp_server.read_entity_tool_docstring`) and its own
+    input parameters (:data:`athenaeum.mcp_server.READ_ENTITY_TOOL_INPUT_SCHEMA`),
+    ``inspect.cleandoc``-normalized and split at ``Args:`` exactly as FastMCP
+    does, so what an api-mode PULL arm is offered byte-matches what a CLI-mode
+    PULL arm's real MCP connection receives (pinned by
+    ``tests/test_recall_tool_schema_parity.py``).
+
+    Takes no *wiki_root*, unlike :func:`_recall_tool_schema`: nothing in this
+    tool's description is computed from the deployment's declared entity
+    classes, so there is nothing for a corpus path to parameterize.
+    """
+    full_doc = inspect.cleandoc(read_entity_tool_docstring())
+    summary = full_doc.split("\n\nArgs:")[0].strip()
+    return {
+        "name": READ_ENTITY_TOOL_NAME,
+        "description": summary,
+        "input_schema": READ_ENTITY_TOOL_INPUT_SCHEMA,
+    }
+
+
+def _serve_read_entity(wiki_root: Path, tool_input: dict[str, Any]) -> str:
+    """In-process ``read_entity``, over the materialized corpus (issue
+    athenaeum#1756) -- a direct call to
+    :func:`athenaeum.mcp_server.entity_read`, exactly the function the shipped
+    server's own ``read_entity`` closure calls, with uids resolved the same
+    way (``entity_read`` rebuilds ``knowledge_root / "wiki"`` internally and
+    resolves the uid through ``EntityIndex``, so *wiki_root*'s PARENT is what
+    it must be handed -- the same ``wiki_root.parent`` the server passes.
+    :meth:`tests.evals.corpus.Corpus.materialize` guarantees that layout).
+
+    ``caller_audience``/``config`` are the real server's OTHER ``entity_read``
+    kwargs and are intentionally absent for the same reason
+    :func:`run_pull_api`'s recall executor omits its own: this materialized
+    eval corpus has no scope-aware audience and no per-deployment config to
+    pass, so api mode measures the SAME read with those inputs at their
+    defaults, not a degraded one.
+
+    Never raises: a missing/unknown uid already returns ``entity_read``'s own
+    JSON not-found message, and a non-string argument is coerced here rather
+    than allowed to reach it -- choosing a bad tool input is the model's
+    mistake to observe, not the harness's to crash on
+    (:func:`run_api_tool_loop`'s contract).
+    """
+    usage_classes = tool_input.get("usage_classes")
+    return entity_read(
+        wiki_root.parent,
+        str(tool_input.get("uid", "")),
+        page_class=str(tool_input.get("entity_class", "")),
+        include_excluded=bool(tool_input.get("include_excluded", False)),
+        usage_classes=list(usage_classes) if isinstance(usage_classes, list) else None,
+    )
 
 
 def _native_index_system_prompt(memory_dir: Path) -> str:
@@ -2067,17 +2155,22 @@ def run_pull_api(
     model: str = DEFAULT_ROLLOUT_MODEL,
     search_backend: str = "fts5",
 ) -> RolloutRecord:
-    """API-mode PULL arm: the ``recall`` tool is served in-process (a direct
-    call to :func:`athenaeum.mcp_server.recall_search` over *wiki_root* --
-    exactly the function the shipped MCP server itself calls, same as
+    """API-mode PULL arm: the ``recall`` and ``read_entity`` tools are served
+    in-process (direct calls to :func:`athenaeum.mcp_server.recall_search` and
+    :func:`athenaeum.mcp_server.entity_read` over *wiki_root* -- exactly the
+    functions the shipped MCP server itself calls, same as
     :func:`run_push_pages_upper_bound`'s reuse), rather than spawned via a
-    scoped ``claude -p --mcp-config``. Takes *wiki_root* directly (unlike
+    scoped ``claude -p --mcp-config``. Those two, and nothing else, are what
+    the real server serves a PULL arm (issue athenaeum#1756). Takes
+    *wiki_root* directly (unlike
     :func:`run_pull`, which takes the knowledge root and lets ``athenaeum
     serve`` derive the wiki root itself) because there is no subprocess
     here to do that derivation.
     """
 
     def _executor(name: str, tool_input: dict[str, Any]) -> str:
+        if name == READ_ENTITY_TOOL_NAME:
+            return _serve_read_entity(wiki_root, tool_input)
         if name != RECALL_TOOL_NAME:
             return f"error: unknown tool {name!r}"
         # *search_backend* is the SAME parameter ``run_probe_all_arms``
@@ -2105,7 +2198,7 @@ def run_pull_api(
 
     answer, tool_calls, turn_tokens, turn_count, transcript = run_api_tool_loop(
         user_prompt=probe.query,
-        tools=[_recall_tool_schema(wiki_root)],
+        tools=[_recall_tool_schema(wiki_root), _read_entity_tool_schema()],
         tool_executor=_executor,
         client=client,
         session=session,
@@ -2156,6 +2249,8 @@ def run_push_breadcrumb_pull_api(
     prompt_text = f"{breadcrumb}\n\n{probe.query}" if breadcrumb else probe.query
 
     def _executor(name: str, tool_input: dict[str, Any]) -> str:
+        if name == READ_ENTITY_TOOL_NAME:
+            return _serve_read_entity(resolved_wiki_root, tool_input)
         if name != RECALL_TOOL_NAME:
             return f"error: unknown tool {name!r}"
         # Same *search_backend* parity note as :func:`run_pull_api`'s own
@@ -2174,7 +2269,7 @@ def run_push_breadcrumb_pull_api(
 
     answer, tool_calls, turn_tokens, turn_count, loop_transcript = run_api_tool_loop(
         user_prompt=prompt_text,
-        tools=[_recall_tool_schema(resolved_wiki_root)],
+        tools=[_recall_tool_schema(resolved_wiki_root), _read_entity_tool_schema()],
         tool_executor=_executor,
         client=client,
         session=session,

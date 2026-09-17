@@ -24,6 +24,7 @@ from tests.evals.harness import EvalSession
 from tests.evals.rollout import (
     NATIVE_INDEX_MAX_CHARS,
     NATIVE_INDEX_MAX_LINES,
+    READ_ENTITY_TOOL_NAME,
     RECALL_TOOL_NAME,
     RolloutRecord,
     _native_index_text_with_warning,
@@ -35,6 +36,7 @@ from tests.evals.rollout import (
     run_native_index_api,
     run_probe_all_arms,
     run_pull_api,
+    run_push_breadcrumb_pull_api,
     truncate_native_index,
 )
 
@@ -384,7 +386,11 @@ def test_native_index_api_no_warning_when_the_index_fits_under_the_cap(
 # ---------------------------------------------------------------------------
 
 
-def test_pull_api_offers_only_the_recall_tool(tmp_path: Path) -> None:
+def test_pull_api_offers_exactly_recall_and_read_entity(tmp_path: Path) -> None:
+    """Issue athenaeum#1756: EXACTLY the two tools the real MCP server serves
+    a PULL arm -- no third tool leaking in, and ``read_entity`` no longer
+    missing (which is what made api-mode PULL measure a different surface
+    from CLI-mode PULL)."""
     probe, corpus = _pto_probe()
     wiki_root = corpus.materialize(tmp_path)
 
@@ -403,7 +409,38 @@ def test_pull_api_offers_only_the_recall_tool(tmp_path: Path) -> None:
     )
 
     offered_tool_names = {t["name"] for t in client.calls[0]["tools"]}
-    assert offered_tool_names == {RECALL_TOOL_NAME}
+    assert offered_tool_names == {RECALL_TOOL_NAME, READ_ENTITY_TOOL_NAME}
+
+
+def test_push_breadcrumb_pull_api_offers_exactly_recall_and_read_entity(tmp_path: Path) -> None:
+    """The SECOND api-mode PULL arm offers the same two tools -- pinned
+    separately, because it builds its own ``tools=`` list (issue
+    athenaeum#1756)."""
+    probe, corpus = _pto_probe()
+    knowledge_root = tmp_path / "knowledge"
+    corpus.materialize(knowledge_root)
+
+    turns = [_RecordedTurn(content=[_text_block("answer")], stop_reason="end_turn")]
+    client = _QueuedApiClient(turns)
+    session = EvalSession()
+
+    run_push_breadcrumb_pull_api(
+        probe,
+        knowledge_root,
+        tmp_path / "hook-home",
+        tmp_path / "cache",
+        "core",
+        client=client,
+        session=session,
+        search_backend="keyword",
+        # The breadcrumb assembly itself is run_push_breadcrumb_pull's own
+        # contract (and its own tests') -- stubbed here so this test pins only
+        # the offered tool surface.
+        context_fn=lambda *_args: "",
+    )
+
+    offered_tool_names = {t["name"] for t in client.calls[0]["tools"]}
+    assert offered_tool_names == {RECALL_TOOL_NAME, READ_ENTITY_TOOL_NAME}
 
 
 def test_native_grep_api_offers_only_grep_and_read_no_recall_leak(tmp_path: Path) -> None:
@@ -417,6 +454,7 @@ def test_native_grep_api_offers_only_grep_and_read_no_recall_leak(tmp_path: Path
     offered_tool_names = {t["name"] for t in client.calls[0]["tools"]}
     assert offered_tool_names == {"grep", "read"}
     assert RECALL_TOOL_NAME not in offered_tool_names
+    assert READ_ENTITY_TOOL_NAME not in offered_tool_names
 
 
 def test_from_payload_defaults_mode_to_cli_when_key_absent() -> None:

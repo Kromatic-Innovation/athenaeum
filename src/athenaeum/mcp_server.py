@@ -2027,6 +2027,113 @@ RECALL_TOOL_INPUT_SCHEMA: dict[str, Any] = {
 }
 
 
+def read_entity_tool_docstring() -> str:
+    """The ``read_entity`` MCP tool's real description text, as a module-level,
+    importable function (issue athenaeum#1756) -- extracted VERBATIM from what
+    ``create_server`` assigns to ``read_entity.__doc__`` below, exactly as
+    issue athenaeum#1733 did for :func:`recall_tool_docstring`. Unlike
+    ``recall``'s, this text is fully static (nothing in it is computed from
+    the deployment's declared entity classes), so it takes no argument.
+
+    This is what lets ``tests/evals/rollout.py``'s api-mode PULL arms serve
+    ``read_entity`` with the REAL tool description FastMCP would otherwise
+    only generate for the stdio MCP path, rather than a paraphrase that could
+    drift from it.
+    """
+    return """One-call entity read by uid, for ANY entity class (issue athenaeum#886).
+
+        The generic form of the former ``read_person`` tool (removed in
+        athenaeum#888) and the sanctioned way to read an
+        entity's EXCLUDED fields when you already have its uid — do not open an
+        excluded surface directly (``docs/design/one-way-in-one-way-out.md`` §3). Use
+        ``recall(with_pii=True)`` instead when you are searching rather than
+        resolving a uid you already hold; both reach the same read.
+
+        Returns the entity's wiki page; with ``include_excluded`` left at its
+        default ``False``, each withheld field is reported as a redaction
+        marker (naming the field and that a value exists, never the value)
+        rather than silently omitted — so an entity with a withheld field and
+        an entity with no such field at all stay distinguishable. With
+        ``include_excluded=True``, the actual values are included, read from
+        whichever surface the class resolves to; this tool never constructs
+        that path itself.
+
+        Same fail-closed audience scoping as ``recall`` (issues
+        athenaeum#312/#538): a restricted caller never receives page content, or
+        any excluded value, for a page it is not authorized to read.
+
+        Every returned value carries its usage classification (issue
+        athenaeum#866) in the result's ``classifications``, co-indexed with the
+        values: ``observed`` (seen in prior communication), ``provider``
+        (supplied by a data vendor) or ``unclassified`` (obtained before the
+        marker existed — provenance unknown). Storing and syncing a contact
+        value is permitted for every class; using one to INITIATE contact is
+        permitted only for ``observed``. ``unclassified`` is never usable.
+
+        Args:
+            uid: The entity's durable uid.
+            entity_class: The page's ``type:`` — ``person``, ``vendor``, … It
+                selects which excluded SURFACE is read (a ``person`` page's
+                record lives on the ``pii`` surface); the page itself is
+                resolved by uid whatever its type.
+            include_excluded: Set ``True`` to receive the actual values
+                instead of redaction markers. Default ``False``.
+            usage_classes: Return only values of these usage classes, e.g.
+                ``["observed"]`` for a caller that must not receive a
+                provider-sourced address by accident (issue athenaeum#866).
+                Default ``None`` — every value, each carrying its class.
+
+        Returns:
+            A JSON string (``pii.EntityRead.to_dict()`` shape) — or a
+            fail-closed refusal / not-found message, each JSON-encoded the
+            same way.
+        """
+
+
+#: The ``read_entity`` MCP tool's JSON input schema, hand-written to mirror
+#: what FastMCP generates from the real ``read_entity(...)`` function
+#: signature inside ``create_server`` (issue athenaeum#1756) -- the same
+#: arrangement, and the same reason, as :data:`RECALL_TOOL_INPUT_SCHEMA`: the
+#: real function lives in a closure over ``wiki_root`` and is never
+#: constructed without one, so a schema needed at import time by a caller
+#: with no wiki has to be independent of it. Pinned against the live served
+#: tool by ``tests/test_recall_tool_schema_parity.py``.
+READ_ENTITY_TOOL_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "uid": {
+            "type": "string",
+            "description": "The entity's durable uid.",
+        },
+        "entity_class": {
+            "type": "string",
+            "description": (
+                "The page's `type:` — `person`, `vendor`, … It selects which excluded "
+                "SURFACE is read; the page itself is resolved by uid whatever its type."
+            ),
+        },
+        "include_excluded": {
+            "type": "boolean",
+            "description": (
+                "Set true to receive the actual excluded values instead of redaction "
+                "markers. Default false."
+            ),
+            "default": False,
+        },
+        "usage_classes": {
+            "type": ["array", "null"],
+            "items": {"type": "string"},
+            "description": (
+                "Return only values of these usage classes, e.g. `[\"observed\"]`. "
+                "Default null — every value, each carrying its class."
+            ),
+            "default": None,
+        },
+    },
+    "required": ["uid", "entity_class"],
+}
+
+
 def create_server(
     raw_root: Path,
     wiki_root: Path,
@@ -2880,61 +2987,23 @@ def create_server(
             limit=limit,
         )
 
-    @mcp.tool()
     def read_entity(
         uid: str,
         entity_class: str,
         include_excluded: bool = False,
         usage_classes: list[str] | None = None,
     ) -> str:
-        """One-call entity read by uid, for ANY entity class (issue athenaeum#886).
-
-        The generic form of the former ``read_person`` tool (removed in
-        athenaeum#888) and the sanctioned way to read an
-        entity's EXCLUDED fields when you already have its uid — do not open an
-        excluded surface directly (``docs/design/one-way-in-one-way-out.md`` §3). Use
-        ``recall(with_pii=True)`` instead when you are searching rather than
-        resolving a uid you already hold; both reach the same read.
-
-        Returns the entity's wiki page; with ``include_excluded`` left at its
-        default ``False``, each withheld field is reported as a redaction
-        marker (naming the field and that a value exists, never the value)
-        rather than silently omitted — so an entity with a withheld field and
-        an entity with no such field at all stay distinguishable. With
-        ``include_excluded=True``, the actual values are included, read from
-        whichever surface the class resolves to; this tool never constructs
-        that path itself.
-
-        Same fail-closed audience scoping as ``recall`` (issues
-        athenaeum#312/#538): a restricted caller never receives page content, or
-        any excluded value, for a page it is not authorized to read.
-
-        Every returned value carries its usage classification (issue
-        athenaeum#866) in the result's ``classifications``, co-indexed with the
-        values: ``observed`` (seen in prior communication), ``provider``
-        (supplied by a data vendor) or ``unclassified`` (obtained before the
-        marker existed — provenance unknown). Storing and syncing a contact
-        value is permitted for every class; using one to INITIATE contact is
-        permitted only for ``observed``. ``unclassified`` is never usable.
-
-        Args:
-            uid: The entity's durable uid.
-            entity_class: The page's ``type:`` — ``person``, ``vendor``, … It
-                selects which excluded SURFACE is read (a ``person`` page's
-                record lives on the ``pii`` surface); the page itself is
-                resolved by uid whatever its type.
-            include_excluded: Set ``True`` to receive the actual values
-                instead of redaction markers. Default ``False``.
-            usage_classes: Return only values of these usage classes, e.g.
-                ``["observed"]`` for a caller that must not receive a
-                provider-sourced address by accident (issue athenaeum#866).
-                Default ``None`` — every value, each carrying its class.
-
-        Returns:
-            A JSON string (``pii.EntityRead.to_dict()`` shape) — or a
-            fail-closed refusal / not-found message, each JSON-encoded the
-            same way.
-        """
+        # Issue athenaeum#1756: this tool's description text now lives in the
+        # module-level :func:`read_entity_tool_docstring` so a second caller --
+        # ``tests/evals/rollout.py``'s api-mode PULL arms -- can serve the SAME
+        # real description rather than a paraphrase that could drift from it.
+        # Assigned to ``__doc__`` and registered via an explicit
+        # ``mcp.tool()(read_entity)`` call below (not the ``@mcp.tool()``
+        # decorator syntax) so the registration happens AFTER the docstring is
+        # attached -- the same arrangement ``recall`` above already uses, and
+        # behaviour-neutral: what ``create_server().list_tools()`` serves is
+        # byte-identical to before (pinned by
+        # ``tests/test_recall_tool_schema_parity.py``).
         return entity_read(
             wiki_root.parent,
             uid,
@@ -2944,6 +3013,9 @@ def create_server(
             caller_audience=caller_audience,
             config=config,
         )
+
+    read_entity.__doc__ = read_entity_tool_docstring()
+    mcp.tool()(read_entity)
 
     @mcp.tool()
     def list_axiom_audit() -> list[dict]:

@@ -48,6 +48,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **API-mode PULL arms now serve `read_entity` alongside `recall`, matching the
+  tool surface the real MCP server gives a PULL session (issue
+  athenaeum#1756).** The shipped server serves both; the eval harness's
+  API-mode `PULL` and `PUSH_BREADCRUMB_PULL` arms served only `recall`, so the
+  two modes measured different things. It mattered under the reference-tag
+  grading contract (athenaeum#1753): every `recall` hit's body is windowed to
+  400 characters (`athenaeum.mcp_server._snippet`) and the corpus's planted
+  `Internal reference tag:` is always a page's last line, so on three core
+  probes — `person_not_repo`, `repo_not_person`, `keelbridge_programme_scope`,
+  two of them `disambiguation` probes the decision rule's condition 1 is
+  computed over — the tag fell outside the window and API-mode PULL could not
+  cite it however good its retrieval was. A further nine probes miss their tag
+  for a different reason — the tag-bearing page does not rank into `top_k=5`
+  at all, those pages being far shorter than the window — which `read_entity`
+  also rescues, by uid from a first-hop page rather than by widening a
+  snippet. Both counts are measured, not asserted, by
+  `tests/evals/test_reference_tag_contract.py`. `read_entity` is served with the
+  server's own description and input schema, now extracted to the module-level
+  `read_entity_tool_docstring()` / `READ_ENTITY_TOOL_INPUT_SCHEMA` exactly as
+  athenaeum#1733 did for `recall` — behaviour-neutral, with
+  `create_server().list_tools()` byte-identical before and after — and backed
+  in-process by `entity_read`, the same function the server's own tool calls,
+  resolving uids the same way. Nothing else is offered: the tool-leak test now
+  pins both PULL arms at exactly `recall` and `read_entity`, and the native
+  arms at neither. `tests/test_recall_tool_schema_parity.py` gained the same
+  description-and-schema parity pins for `read_entity`. CLI mode is untouched.
+
 - **Every eval arm is now told to cite the page's reference tag, making the
   grading contract satisfiable (issue athenaeum#1753).** Correctness is a
   deterministic substring match against each probe's planted `answer_tokens`
