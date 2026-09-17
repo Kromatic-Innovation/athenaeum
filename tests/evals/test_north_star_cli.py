@@ -249,3 +249,62 @@ def test_store_rows_round_trip_through_the_report_loader(
     rows = load_rollout_rows(ResultStore(tmp_path / "r.jsonl"))
     assert len(rows) == len(ALL_ARMS)
     assert {row.record.arm for row in rows} == set(ALL_ARMS)
+
+
+# ---------------------------------------------------------------------------
+# --mode parsing + ATHENAEUM_EVAL_MODE fallback (Quine review, issue athenaeum#1733,
+# SHOULD item 5)
+# ---------------------------------------------------------------------------
+
+
+def test_mode_flag_defaults_to_api_with_no_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ATHENAEUM_EVAL_MODE", raising=False)
+    args = north_star_cli.build_arg_parser().parse_args([])
+    assert args.mode == "api"
+
+
+def test_mode_flag_falls_back_to_the_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ATHENAEUM_EVAL_MODE", "cli")
+    args = north_star_cli.build_arg_parser().parse_args([])
+    assert args.mode == "cli"
+
+
+def test_mode_flag_explicit_wins_over_the_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ATHENAEUM_EVAL_MODE", "cli")
+    args = north_star_cli.build_arg_parser().parse_args(["--mode", "api"])
+    assert args.mode == "api"
+
+
+def test_mode_is_threaded_through_to_run_probe_all_arms(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen_modes: list[str] = []
+
+    def _capturing_run_probe_all_arms(
+        probe_id: str,
+        corpus_scale: str,
+        *,
+        session: Any,
+        materialize_root: Any,
+        model: str,
+        search_backend: str,
+        claude_binary: str,
+        replicate: int,
+        mode: str = "cli",
+    ) -> dict[str, RolloutRecord]:
+        seen_modes.append(mode)
+        return _stub_records(probe_id, corpus_scale)
+
+    monkeypatch.setattr(north_star_cli, "run_probe_all_arms", _capturing_run_probe_all_arms)
+    monkeypatch.setattr(north_star_cli, "_default_store_path", lambda: tmp_path / "r.jsonl")
+
+    north_star_cli.main(
+        [
+            "--scale", "smoke",
+            "--mode", "cli",
+            "--materialize-root", str(tmp_path / "mat"),
+            "--out-dir", str(tmp_path / "measurements"),
+        ]
+    )
+
+    assert seen_modes == ["cli"]

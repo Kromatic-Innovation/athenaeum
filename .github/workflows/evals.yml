@@ -190,6 +190,7 @@ jobs:
     # `push` branch on this job's `if:` at all, matching `eval`'s own gate).
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.north_star == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
@@ -221,21 +222,29 @@ jobs:
 
       - name: Run north-star grid
         env:
+          # Routed through env:, never interpolated into run: (Quine review,
+          # issue athenaeum#1733, SHOULD item 6) -- an untrusted/unexpected
+          # dispatch input value lands in a shell variable, not spliced
+          # directly into the script text, so it cannot break out of its
+          # argument position.
           ATHENAEUM_EVAL_MODE: api
+          NORTH_STAR_SCALE: ${{ github.event.inputs.north_star_scale }}
+          NORTH_STAR_CORPUS_SCALES: ${{ github.event.inputs.north_star_corpus_scales }}
+          NORTH_STAR_MAX_SPEND: ${{ github.event.inputs.north_star_max_spend }}
         run: |
           if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
             echo "::warning::ANTHROPIC_API_KEY not set (op item not provisioned) — north-star run will fail to construct a client"
           fi
-          CORPUS_SCALES_FLAG=""
-          if [ -n "${{ github.event.inputs.north_star_corpus_scales }}" ]; then
-            CORPUS_SCALES_FLAG="--corpus-scales ${{ github.event.inputs.north_star_corpus_scales }}"
+          CORPUS_SCALES_FLAG=()
+          if [ -n "${NORTH_STAR_CORPUS_SCALES:-}" ]; then
+            CORPUS_SCALES_FLAG=(--corpus-scales "$NORTH_STAR_CORPUS_SCALES")
           fi
           python -m tests.evals.north_star_cli \
             --mode api \
-            --scale "${{ github.event.inputs.north_star_scale }}" \
-            --max-spend "${{ github.event.inputs.north_star_max_spend }}" \
+            --scale "$NORTH_STAR_SCALE" \
+            --max-spend "$NORTH_STAR_MAX_SPEND" \
             --out-dir measurements \
-            $CORPUS_SCALES_FLAG
+            "${CORPUS_SCALES_FLAG[@]}"
 
       - name: Upload north-star report
         if: always()
