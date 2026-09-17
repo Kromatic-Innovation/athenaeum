@@ -72,10 +72,17 @@ corpus is told plainly to use their agent's own memory.
 
 ## 4. The arms
 
-Two native arms join the existing grid. Both are tool-use loops, run the way
-the PULL arm already runs (`claude -p` with a scoped configuration and
-`--output-format stream-json`, so every tool call is visible in the
-transcript).
+Two native arms join the existing grid. Both are genuine tool-use loops. The
+**primary implementation is API-backed**: the Anthropic Messages API with a
+`recall` tool for the PULL-style arms and a `grep`/`read` tool pair served by
+the harness over the materialised directory for the native arms. That lets
+the whole grid run from the evals workflow's manual dispatch with the key it
+already loads, and keeps the live run off the operator's plate (operator
+preference, 2026-09-16). The existing `claude -p` path stays as an optional
+fidelity spot-check: it is the only way to observe Claude Code's own index
+load and its own tools, so it is worth one run to confirm the API-mode
+numbers, not the path the decision rests on. The report states which mode
+produced each cell.
 
 | Arm | Store | Index | Model's read path |
 |---|---|---|---|
@@ -87,9 +94,17 @@ memory becomes at that scale, so it runs at every scale; the truncation is
 the finding, not a confound. `NATIVE_GREP` isolates the no-index case so a
 result can say whether the index helped at all.
 
-The auto-memory directory is supplied through `autoMemoryDirectory` in a
-settings file passed to the subprocess, so Claude Code performs its own
-load and its own truncation; the runner never re-implements either.
+In API mode the harness builds the index and applies the documented
+truncation itself (first 200 lines or 25KB, whichever comes first), pinned by
+a test, and injects it as the first user turn to mirror Claude Code's load.
+In CLI mode the auto-memory directory is supplied through
+`autoMemoryDirectory` in a settings file passed to the subprocess, so Claude
+Code performs its own load and truncation.
+
+The recall relevance floor ships inactive and the shell hook does not apply
+it even when set (athenaeum#1665). The first run uses the floor **as
+shipped**, because that is what the deployment delivers today; a second pass
+with the floor active is reported alongside once the hook honours it.
 
 ## 5. Two phases, because the corpus is compiled pages
 
