@@ -32,7 +32,7 @@
     must_not_rank (athenaeum#1777): the superseded temporal note shares almost
     all of "PTO allowance" vocabulary and titles itself with the current
     figure's own former value -- a stale answer a keyword search plausibly
-    surfaces.
+    surfaces. grep-reachable via: pto, allowance.
 
 - id: confidentiality_rule
   probe_class: single_hop
@@ -42,10 +42,11 @@
   distractor_terms: ["confidentiality", "client disclosure"]
   answer_tokens: ["Harrowvex"]
   note: >-
-    must_not_rank (athenaeum#1777): Northgate's own page states it "carries
-    additional confidentiality terms", a strong lexical match for
-    "confidentiality" that never states the firm-wide cross-client rule the
-    query asks for.
+    must_not_rank (athenaeum#1777): Northgate's own page shares "client" and
+    "engagement" with the query and states it "carries additional
+    confidentiality terms beyond the firm's standard" -- a plausible near
+    match that never states the firm-wide cross-client disclosure rule the
+    query asks for. grep-reachable via: engagement.
 
 - id: bluewater_terms
   probe_class: single_hop
@@ -59,7 +60,8 @@
     instruction "quote ... verbatim". A purely lexical extractor drops it.
     must_not_rank (athenaeum#1777): the utilisation observation shares
     "Bluewater" and "retainer" vocabulary but carries a usage statistic, not
-    the verbatim retainer terms the query asks to be quoted.
+    the verbatim retainer terms the query asks to be quoted. grep-reachable
+    via: bluewater, retainer.
 
 - id: onboarding_length
   probe_class: single_hop
@@ -72,7 +74,7 @@
     must_not_rank (athenaeum#1777): the Atlas onboarding review shares
     "onboarding" vocabulary heavily and reads like a plausible answer, but it
     is the case study that prompted the policy change, not the duration
-    itself.
+    itself. grep-reachable via: onboarding, client.
 
 # --- multi hop --------------------------------------------------------------
 
@@ -94,7 +96,7 @@
     must_not_rank (athenaeum#1777): the temporal "current threshold" note
     restates the same 500 GBP ceiling with heavy vocabulary overlap but never
     names who personally signs off -- half an answer to a probe that requires
-    the name.
+    the name. grep-reachable via: 500, gbp.
 
 - id: portal_design_reviewer
   probe_class: multi_hop
@@ -112,7 +114,8 @@
     shipped screen a month afterward to confirm it still meets her bar.
     must_not_rank (athenaeum#1777): the hosting-migration workstream shares
     "portal" vocabulary strongly but is about infrastructure, not the
-    client-facing design review the query asks about.
+    client-facing design review the query asks about. grep-reachable via:
+    portal.
 
 - id: ratecard_tooling_owner
   probe_class: multi_hop
@@ -133,7 +136,8 @@
     must_not_rank (athenaeum#1777): Gridbook's own page names both "rate
     card" and the rowanwrenfield tooling, an almost-complete vocabulary
     match, but Gridbook is the spreadsheet the rate card is generated INTO,
-    not the repository that generates it or its build owner.
+    not the repository that generates it or its build owner. grep-reachable
+    via: rate, card.
 
 # --- temporal / knowledge update --------------------------------------------
 
@@ -144,6 +148,10 @@
   must_not_rank: [office-address-superseded]
   distractor_terms: ["office address", "Thornlea Wharf", "Alderway Row"]
   answer_tokens: ["Driftwick"]
+  note: >-
+    must_not_rank (athenaeum#1777): the former-address note shares the
+    "office" term and gives a stale street address instead of the current
+    one. grep-reachable via: office.
 
 - id: standup_time_current
   probe_class: temporal
@@ -152,6 +160,10 @@
   must_not_rank: [standup-time-superseded]
   distractor_terms: ["standup", "9:00", "9:30"]
   answer_tokens: ["Emberlyn"]
+  note: >-
+    must_not_rank (athenaeum#1777): the former-time note shares "standup" and
+    "time" vocabulary and gives the stale 9:00 slot instead of the current
+    one. grep-reachable via: standup, time.
 
 - id: budget_threshold_current
   probe_class: temporal
@@ -160,6 +172,10 @@
   must_not_rank: [budget-threshold-superseded]
   distractor_terms: ["approval ceiling", "250 GBP", "500 GBP"]
   answer_tokens: ["Quorlinth"]
+  note: >-
+    must_not_rank (athenaeum#1777): the former-threshold note shares
+    "approval" and "ceiling" vocabulary and gives the stale 250 GBP figure
+    instead of the current one. grep-reachable via: approval, ceiling.
 
 # --- temporal, person/company (issue athenaeum#1744) -------------------------
 # The three pairs above all target `note` pages, so none qualifies for the
@@ -176,6 +192,11 @@
   must_not_rank: [contact-callum-drews-superseded]
   distractor_terms: ["Callum Drews", "last contact", "last spoke", "2 May 2026"]
   answer_tokens: ["Fenmoor"]
+  note: >-
+    must_not_rank (athenaeum#1777): the superseded contact log shares
+    "Callum", "Drews", and "last" vocabulary and logs the stale 2 May 2026
+    contact date instead of the current one. grep-reachable via: callum,
+    drews.
 
 - id: thorncastle_first_contact
   probe_class: temporal
@@ -184,6 +205,11 @@
   must_not_rank: [contact-thorncastle-superseded]
   distractor_terms: ["Thorncastle", "first contact", "became a client", "November 2025"]
   answer_tokens: ["Quenfrost"]
+  note: >-
+    must_not_rank (athenaeum#1777): the superseded first-contact log shares
+    "Thorncastle" and "first" vocabulary and gives the stale November 2025
+    estimate instead of the corrected date. grep-reachable via: thorncastle,
+    first.
 
 - id: tamsin_ferro_role_change
   probe_class: temporal
@@ -192,6 +218,10 @@
   must_not_rank: [role-tamsin-ferro-superseded]
   distractor_terms: ["Tamsin Ferro", "promoted", "engagement partner", "associate"]
   answer_tokens: ["Cindervane"]
+  note: >-
+    must_not_rank (athenaeum#1777): the superseded role note shares "Tamsin",
+    "Ferro", and "role" vocabulary and gives the stale associate title
+    instead of the current one. grep-reachable via: tamsin, ferro, role.
 
 # --- disambiguation ---------------------------------------------------------
 # The class this corpus exists for. Each of these guards a person-vs-artifact
@@ -207,6 +237,7 @@
   note: >-
     A decision is made by a PERSON. The eponymous repository shares almost all
     of the query's vocabulary and must not outrank the person page.
+    grep-reachable via: rowan, wrenfield.
 
 - id: repo_not_person
   probe_class: disambiguation
@@ -215,7 +246,9 @@
   must_not_rank: [person-rowan-wrenfield]
   distractor_terms: ["rowanwrenfield", "maintainers", "repository"]
   answer_tokens: ["Brindlewake"]
-  note: The inverse direction -- the guard must not simply always prefer people.
+  note: >-
+    The inverse direction -- the guard must not simply always prefer people.
+    grep-reachable via: rowanwrenfield.
 
 - id: surname_is_ambiguous
   probe_class: disambiguation
@@ -230,7 +263,8 @@
     confidently about one Wrenfield. Scored on distinct-page count, not a single hit.
     must_not_rank (athenaeum#1777): the partnership entity is a literal-text
     "Wrenfield" match but is a company, not one of the ambiguous people the
-    query is genuinely asking to disambiguate among.
+    query is genuinely asking to disambiguate among. grep-reachable via:
+    wrenfield.
 
 - id: given_name_is_ambiguous
   probe_class: disambiguation
@@ -243,7 +277,7 @@
     must_not_rank (athenaeum#1777): the pricing review's body names "Rowan
     Wrenfield" twice, so a keyword search on "Rowan" plausibly surfaces it --
     but it is a project page describing an outcome, not a page that answers
-    who Rowan is.
+    who Rowan is. grep-reachable via: rowan.
 
 # --- abstention -------------------------------------------------------------
 # Nothing in the corpus answers these. Returning a confident wrong page is the
@@ -280,7 +314,7 @@
   answer_tokens: ["Kestrelgate"]
   note: >-
     The general cadence policy is a strong lexical match and the WRONG answer:
-    Acme is a documented exception to it.
+    Acme is a documented exception to it. grep-reachable via: acme.
 
 - id: former_client_not_current
   probe_class: distractor_robustness
@@ -289,7 +323,10 @@
   must_not_rank: [client-verity, client-solent]
   distractor_terms: ["retainer", "client"]
   answer_tokens: ["Trevanquil"]
-  note: Verity is a former client and Solent only a prospect.
+  note: >-
+    Verity is a former client and Solent only a prospect. grep-reachable via:
+    client-verity: retainer; client-solent: client (stemmed, "clients" vs
+    "client").
 
 # --- redundancy -------------------------------------------------------------
 #
@@ -316,7 +353,7 @@
     twice; retrieving only one is the measurable cost of the entity split,
     and `tests/test_eval_corpus_relatedness.py` pins that asymmetry as the
     corpus's current (wrong) state so a consolidation change has something to
-    move.
+    move. grep-reachable via: keelbridge, programme.
 
 # --- follow-through ----------------------------------------------------------
 #
@@ -358,7 +395,6 @@
     what is our history with Corvale Holdings, and how has any current work
     with them gone against plan?
   expected_uids: [client-corvale-holdings, project-platform-cutover-programme]
-  must_not_rank: [project-portal-hosting]
   distractor_terms: ["Corvale Holdings", "retainer client", "migration"]
   answer_tokens: ["Halvorwick", "Ossmarl"]
   note: >-
@@ -366,10 +402,14 @@
     migration programme but says nothing about it slipping; only the
     programme's own page (athenaeum#1766) carries the six-week cutover delay
     from the vendor's quarterly freeze.
-    must_not_rank (athenaeum#1777): the portal hosting workstream is aliased
-    "hosting migration" -- a keyword search on "migration" plausibly
-    surfaces it -- but it is unrelated infrastructure work, not Corvale
-    Holdings' platform cutover.
+    precision: n/a (athenaeum#1777) -- the query (see above) never contains
+    "migration" after the athenaeum#1768 reword, so the previously-authored
+    `project-portal-hosting` must_not_rank had zero exact or stemmed
+    content-term overlap with it (`_content_terms`/`_shares_stemmed_term`
+    checked directly; Quine review of PR athenaeum#1801 caught this) and was
+    a fabricated negative. No other core page shares more than a single
+    generic word ("client"/"current") with this query, which is not enough
+    to be a plausible grep false positive without inventing one.
 
 - id: pinemarsh_goal_rationale
   probe_class: follow_through
@@ -407,7 +447,7 @@
     must_not_rank (athenaeum#1777): the only other "Decision - ... vendor"
     shaped page in the corpus, sharing the generic "vendor" term and the
     "Decision -" title pattern, but it is about Anchorline's retirement, not
-    Gilcrest's selection or its price-lock terms.
+    Gilcrest's selection or its price-lock terms. grep-reachable via: vendor.
 
 - id: anchorline_retirement_rationale
   probe_class: follow_through
@@ -427,7 +467,7 @@
     must_not_rank (athenaeum#1777): "Client reporting rhythm" shares
     "reporting" vocabulary with the query's "reporting tool" but describes
     fortnightly client updates, not the Anchorline tool or its replacement's
-    poll-vs-push behaviour.
+    poll-vs-push behaviour. grep-reachable via: reporting.
 
 - id: subsidiary_onboarding_lesson
   probe_class: follow_through
@@ -448,4 +488,5 @@
     different client's onboarding retrospective, sharing "onboarding" and
     review-of-a-past-engagement framing, but its lesson (late finance
     contact) and gap (no kickoff call) are unrelated to subsidiaries or
-    payment-paperwork splitting.
+    payment-paperwork splitting. grep-reachable via: client, onboarding
+    (stemmed, "onboarded" vs "onboarding").
