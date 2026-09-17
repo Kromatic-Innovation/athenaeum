@@ -23,6 +23,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tests/test_eval_corpus_generator.py` now asserts the relationship subset
   at `core` contains at least one probe of each of the four classes, so the
   class list cannot become an equivalent mutant again.
+- **Live-session guard on the move-then-retire pass (issue athenaeum#1728).** A
+  raw auto-memory file is now retire-eligible only when the Claude Code
+  session that owns its scope is provably closed: first a session-end marker
+  for the scope newer than the file (stamped by `athenaeum session-end` /
+  `athenaeum.librarian.session_end` on every non-dry-run invocation, and
+  releasing the hold regardless of transcript age), failing that no
+  `<projects_root>/<scope>/*.jsonl` transcript modified within a configurable
+  quiet window (default 30 minutes). Held files are counted and reported as
+  `held_live_session=N` in the run summary and `--dry-run` report, never
+  silently skipped. On by default; `librarian.live_session_guard: false` /
+  `athenaeum run --no-live-session-guard` opts out, and
+  `librarian.live_session_guard_quiet_window_seconds` overrides the window.
+  New module `athenaeum.live_session_guard`; wired into
+  `athenaeum.retire.run_retire_pass`. See `docs/modules/retention.md`.
 - **Token-free eval-receipt check for LLM-surface PRs (issue athenaeum#1731).**
   A new advisory workflow, `.github/workflows/eval-receipt-check.yml`,
   intersects a PR's changed paths against the LLM surface list

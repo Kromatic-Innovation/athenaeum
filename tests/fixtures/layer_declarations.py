@@ -91,6 +91,7 @@ MODULE_LAYER: dict[str, int] = {
     "dimensions": 2,       # "L1/L2" -> upper bound
     "field_constraints": 2,
     "intake": 2,
+    "live_session_guard": 2,
     "measurement_docs": 2,
     "memory_class_backfill": 2,
     "never_ingest": 2,

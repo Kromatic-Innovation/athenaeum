@@ -1368,12 +1368,22 @@ class TestCrossAgentRecall:
         tmp_path: Path,
         mock_anthropic: MagicMock,
         capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        from athenaeum import transcript_verify
         from athenaeum.librarian import session_end
         from athenaeum.mcp_server import remember_write
 
         root = _seed_knowledge_root(tmp_path)
         cache = tmp_path / "cache"
+        # Issue athenaeum#1728 Quine follow-up: session_end()'s best-effort
+        # live-session-guard marker write resolves projects_root via
+        # transcript_verify.default_projects_root() when the caller doesn't
+        # thread one -- without this, that call scans the REAL
+        # ~/.claude/projects on whatever machine runs this test.
+        monkeypatch.setattr(
+            transcript_verify, "default_projects_root", lambda: tmp_path / "projects"
+        )
 
         # --- Session A: an agent remembers a structured (tier0) fact. It lands
         #     in raw/<session>/ only — recall reads wiki/, so it is invisible.
@@ -1452,11 +1462,18 @@ class TestSessionEndReferenceDetermination:
     def test_calls_reference_determination_when_session_given(
         self, tmp_path: Path, mock_anthropic: MagicMock, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from athenaeum import push_metrics
+        from athenaeum import push_metrics, transcript_verify
         from athenaeum.librarian import session_end
 
         root = _seed_knowledge_root(tmp_path)
         cache = tmp_path / "cache"
+        # Issue athenaeum#1728 Quine follow-up: keep the live-session-guard
+        # marker write (session given, not dry-run -- the same gate this
+        # test's own reference-determination call sits behind) off the REAL
+        # ~/.claude/projects.
+        monkeypatch.setattr(
+            transcript_verify, "default_projects_root", lambda: tmp_path / "projects"
+        )
 
         calls: list[tuple[str, Path | None]] = []
 
@@ -1537,17 +1554,25 @@ class TestSessionEndReferenceDetermination:
         assert calls == []
 
     def test_real_reference_determination_never_breaks_session_end(
-        self, tmp_path: Path, mock_anthropic: MagicMock
+        self, tmp_path: Path, mock_anthropic: MagicMock, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """End-to-end with the REAL (unmocked) push_metrics function: no push
         records and no transcript exist for this session id, so
         ``determine_references`` returns ``None`` internally — but
         ``session_end`` must still complete normally either way.
         """
+        from athenaeum import transcript_verify
         from athenaeum.librarian import session_end
 
         root = _seed_knowledge_root(tmp_path)
         cache = tmp_path / "cache"
+        # Issue athenaeum#1728 Quine follow-up: same isolation as the sibling
+        # test above -- this call is also session-given/not-dry-run, so the
+        # live-session-guard marker write would otherwise scan the REAL
+        # ~/.claude/projects too.
+        monkeypatch.setattr(
+            transcript_verify, "default_projects_root", lambda: tmp_path / "projects"
+        )
 
         result = session_end(
             raw_root=root / "raw",
@@ -1560,6 +1585,117 @@ class TestSessionEndReferenceDetermination:
 
         assert result.exit_code == 0
         assert result.session == "sess-no-transcript"
+
+
+class TestSessionEndRecordsLiveSessionMarker:
+    """``session_end`` stamps the live-session-guard marker (issue athenaeum#1728).
+
+    Read by the move-then-retire pass (``athenaeum.retire`` via
+    ``athenaeum.live_session_guard.is_live``) so a memory file's scope is
+    treated as closed once its owning session's SessionEnd hook has run —
+    regardless of transcript age.
+    """
+
+    def test_marker_written_for_sessions_own_scope(
+        self, tmp_path: Path, mock_anthropic: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from athenaeum import transcript_verify
+        from athenaeum.librarian import session_end
+        from athenaeum.live_session_guard import marker_path
+
+        root = _seed_knowledge_root(tmp_path)
+        cache = tmp_path / "cache"
+        projects_root = tmp_path / "projects"
+        scope = projects_root / "-Users-x-Code"
+        scope.mkdir(parents=True)
+        (scope / "sess-marker-1.jsonl").write_text("{}", encoding="utf-8")
+        monkeypatch.setattr(transcript_verify, "default_projects_root", lambda: projects_root)
+
+        session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            session="sess-marker-1",
+            cache_dir=cache,
+            backend="fts5",
+        )
+
+        assert marker_path(cache, "-Users-x-Code").is_file()
+
+    def test_no_marker_written_without_a_matching_transcript(
+        self, tmp_path: Path, mock_anthropic: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from athenaeum import transcript_verify
+        from athenaeum.librarian import session_end
+        from athenaeum.live_session_guard import MARKER_DIRNAME
+
+        root = _seed_knowledge_root(tmp_path)
+        cache = tmp_path / "cache"
+        projects_root = tmp_path / "projects"  # no scope dirs at all
+        monkeypatch.setattr(transcript_verify, "default_projects_root", lambda: projects_root)
+
+        session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            session="sess-no-transcript-marker",
+            cache_dir=cache,
+            backend="fts5",
+        )
+
+        assert not (cache / MARKER_DIRNAME).exists()
+
+    def test_skipped_on_dry_run(
+        self, tmp_path: Path, mock_anthropic: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from athenaeum import transcript_verify
+        from athenaeum.librarian import session_end
+        from athenaeum.live_session_guard import MARKER_DIRNAME
+
+        root = _seed_knowledge_root(tmp_path)
+        cache = tmp_path / "cache"
+        projects_root = tmp_path / "projects"
+        scope = projects_root / "-Users-x-Code"
+        scope.mkdir(parents=True)
+        (scope / "sess-marker-dry.jsonl").write_text("{}", encoding="utf-8")
+        monkeypatch.setattr(transcript_verify, "default_projects_root", lambda: projects_root)
+
+        session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            session="sess-marker-dry",
+            cache_dir=cache,
+            backend="fts5",
+            dry_run=True,
+        )
+
+        assert not (cache / MARKER_DIRNAME).exists()
+
+    def test_marker_write_failure_never_breaks_session_end(
+        self, tmp_path: Path, mock_anthropic: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from athenaeum import live_session_guard
+        from athenaeum.librarian import session_end
+
+        root = _seed_knowledge_root(tmp_path)
+        cache = tmp_path / "cache"
+
+        def _boom(*_a: object, **_kw: object) -> None:
+            raise RuntimeError("synthetic failure")
+
+        monkeypatch.setattr(live_session_guard, "record_session_end", _boom)
+
+        result = session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            session="sess-marker-boom",
+            cache_dir=cache,
+            backend="fts5",
+        )
+
+        assert result.exit_code == 0
 
 
 class TestSessionEndReferencesOnly:

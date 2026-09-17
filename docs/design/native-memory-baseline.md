@@ -163,6 +163,10 @@ native writer sessions' spend on memory-saving tool calls, not against zero.
 In Phase 1 neither side pays a write cost, because both are handed finished
 pages, and the cost comparison there is per-turn read cost only.
 
+Both phases stay a synthetic-corpus, synthetic-probe comparison; no live
+head-to-head against an operator's real Claude Code sessions and real native
+memory is planned (issue athenaeum#1728).
+
 **Probes must include follow-through.** A single-shot probe whose answer sits
 in the surfaced page's first lines cannot tell breadcrumb delivery from
 full-page delivery, and cannot tell either from a good grep. The realistic
