@@ -35,6 +35,15 @@ once it stops being current:
   the moved artifact as provenance. The file is not merely skipped by
   discovery — moving it makes it *not discoverable*, since
   `intake.discover_raw_files` only ever walks `raw/`.
+- **Move-then-retire** (`athenaeum run`'s librarian pipeline,
+  `athenaeum.retire`) — the *other direction* from the three above: once a
+  raw `auto-memory` file's fact has been compiled into a `wiki/auto-*.md`
+  page with no contradiction detected, this pass moves the fact permanently
+  (a verified footnote + a `retired: true` marker on the wiki page) and
+  `git rm`s the now-redundant raw copy so it stops re-entering every future
+  nightly loop. See [librarian](librarian.md) and `src/athenaeum/retire.py`'s
+  module docstring for the full move-vs-hold contract; this page covers only
+  the **live-session guard** in front of it below.
 
 Retention-pack classification (`athenaeum.erasure`) sits above all three as an
 optional authority: when a page's frontmatter carries both `memory_class` and
@@ -93,6 +102,10 @@ corpus is not in this repository.
 - **The `preserve` disposition** reads `librarian.preserved_log_dir` and
   `librarian.preserved_log_adapter` (see "Config keys" below), plus whatever
   shape rule matched the raw file and its optional `correction:` block.
+- **Move-then-retire's live-session guard** reads `librarian.live_session_guard`
+  / `librarian.live_session_guard_quiet_window_seconds`, each candidate raw
+  file's mtime, its session-end marker (`<cache_dir>/live-session-markers/
+  <scope>.json`), and `<projects_root>/<scope>/*.jsonl` transcript mtimes.
 
 ### Config keys: `preserved_log_dir` and `preserved_log_adapter`
 
@@ -159,6 +172,52 @@ and copying it back into `wiki/` is a manual, separate step — removing the
 retired-name record only re-opens the name for a *new* page, it does not
 restore the old one automatically.
 
+### Move-then-retire's live-session guard
+
+The move-then-retire pass deletes raw intake — recoverable from git history,
+but a delete all the same. Retiring a memory file while the Claude Code
+session that owns its scope is still open races that session: an agent could
+still be amending, correcting, or contradicting the very fact this pass is
+about to move into the wiki and `git rm` from `raw/`. The guard closes that
+race by holding a file until its scope's owning session is provably closed.
+
+**Signal order** (`athenaeum.live_session_guard`), first hit wins:
+
+1. **Session-end marker.** `athenaeum session-end` (`athenaeum.librarian.session_end`)
+   stamps a small marker for its session's scope on every non-dry-run
+   invocation. A marker newer than the candidate file's mtime releases the
+   hold regardless of transcript age — the owning session has positively
+   closed.
+2. **Quiet window.** Failing that, the guard checks
+   `<projects_root>/<scope>/*.jsonl` (the same scope-directory join key
+   `athenaeum.transcript_verify` and `athenaeum.session_recovery` already
+   use) for a transcript modified within the configurable quiet window.
+   Nothing modified within the window — including no transcripts at all —
+   releases the hold.
+
+A held file is **never** silently skipped: it is counted
+(`RetireReport.held_live_session`) and named — with its hold reason — in
+every dry-run report and the librarian's run summary
+(`retire ... held_live_session=N ...`).
+
+**Config keys**, under the existing `librarian:` section:
+
+```yaml
+librarian:
+  live_session_guard: true                       # default: on
+  live_session_guard_quiet_window_seconds: 1800   # default: 30 minutes
+```
+
+- **`live_session_guard`** — set to `false` to disable the guard entirely
+  (retire behaves exactly as it did before this guard existed). The
+  `athenaeum run --no-live-session-guard` CLI flag overrides this to off at
+  the call site regardless of yaml.
+- **`live_session_guard_quiet_window_seconds`** — how long, past a scope's
+  most recent transcript activity, the guard waits before treating that
+  scope's owning session as closed (fallback rung only; the session-end
+  marker rung ignores this window entirely). Non-positive or non-integer
+  values fall through to the default.
+
 ## What it writes
 
 - **Decay sweep**, on `--apply`: a durable, append-only sweep ledger
@@ -173,6 +232,10 @@ restore the old one automatically.
   rather than clobbering it), and, if the rule also carries a `correction:`
   block, compiles one fact whose `source.ref` points at the moved artifact
   (`preserved-log:<path>#<locator>`).
+- **`athenaeum session-end`**, on every non-dry-run invocation with a known
+  session id: a session-end marker (`<cache_dir>/live-session-markers/
+  <scope>.json`) for that session's resolved scope — the signal the
+  move-then-retire live-session guard's first rung reads.
 
 ## What it refuses
 
@@ -190,6 +253,7 @@ restore the old one automatically.
 | `preserve` tallies `preserve-failed`, raw file left in place | The move (local or adapter-routed) fails — an adapter-routed move writes the destination first and only removes the source once that write succeeds, so a cross-device failure never strands a half-moved log. |
 | `preserve` tallies `transform-error`, raw file untouched | The optional `correction:` block fails to resolve — the correction is built *before* the move, so a bad transform never strands a half-moved log. |
 | Decay sweep's off-corpus routing does not fire | No off-corpus surface is configured, or the page carries no explicit `data_class` — no shipped write path stamps `data_class` today, so this gate is dormant on any corpus produced by shipped code regardless of whether a retention pack is active. |
+| Move-then-retire holds a file, tallied `held_live_session` | The live-session guard finds no session-end marker for its scope newer than the file AND a scope transcript modified within the quiet window (default 30 min) — the owning session is not provably closed. Reported by name in the run summary and `--dry-run`, never silently skipped. |
 
 ## See also
 

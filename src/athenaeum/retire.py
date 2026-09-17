@@ -64,7 +64,14 @@ from pathlib import Path
 from typing import Callable
 
 from athenaeum.atomic_io import atomic_write_text
-from athenaeum.config import load_config, resolve_extra_intake_roots
+from athenaeum.config import (
+    load_config,
+    resolve_cache_dir,
+    resolve_extra_intake_roots,
+    resolve_live_session_guard_enabled,
+    resolve_live_session_guard_quiet_window_seconds,
+)
+from athenaeum.live_session_guard import is_live
 from athenaeum.memory_index import INDEX_FILENAME, rewrite_index
 from athenaeum.merge import (
     MergedWikiEntry,
@@ -73,7 +80,7 @@ from athenaeum.merge import (
 )
 from athenaeum.models import DEFAULT_SOURCE_TYPE, parse_frontmatter
 from athenaeum.store import FilesystemStore, Store
-from athenaeum.transcript_verify import verify_user_stated
+from athenaeum.transcript_verify import default_projects_root, verify_user_stated
 
 log = logging.getLogger(__name__)
 
@@ -81,6 +88,13 @@ log = logging.getLogger(__name__)
 MOVE = "move"
 HOLD = "hold"
 SKIP = "skip"
+# Issue athenaeum#1728: a distinct disposition from the ordinary contradiction/
+# pending HOLD -- this file WOULD otherwise be move-eligible, but the
+# live-session guard held it because the Claude Code session that owns its
+# scope has not (yet, provably) closed. Kept distinct so a dry-run consumer
+# can tell "blocked on a human contradiction call" from "blocked on session
+# timing, retry next run" at a glance.
+HOLD_LIVE_SESSION = "hold_live_session"
 
 # Issue athenaeum#261 / Quine M1: ``detect_contradictions`` returns ``detected=False``
 # both for a genuine clean verdict AND when it degraded (offline, API error,
@@ -123,6 +137,13 @@ class RetireReport:
     # Issue athenaeum#388: ``<scope>/<file>.md`` pointers dropped from each affected
     # scope's sibling ``MEMORY.md`` index because this pass retired the member.
     index_pruned: list[str] = field(default_factory=list)
+    # Issue athenaeum#1728: members that WOULD have moved this pass but were held
+    # by the live-session guard because their scope's owning Claude Code
+    # session has not (yet, provably) closed. A subset of ``held`` -- kept
+    # separately so the run summary / dry-run report can name this reason
+    # explicitly (``N held: live session``) rather than folding it into the
+    # undifferentiated contradiction/pending-confirmation count.
+    held_live_session: list[str] = field(default_factory=list)
 
 
 def _git(
@@ -446,6 +467,9 @@ def run_retire_pass(
     dry_run: bool = False,
     projects_root: Path | None = None,
     store: Store | None = None,
+    live_session_guard: bool | None = None,
+    live_session_guard_quiet_window_seconds: int | None = None,
+    cache_dir: Path | None = None,
 ) -> RetireReport:
     """Move non-contradictory raw into the wiki, hold contradictory, git rm moved.
 
@@ -469,6 +493,21 @@ def run_retire_pass(
             to a :class:`~athenaeum.store.FilesystemStore` over
             *knowledge_root* — same effective check as the ad-hoc
             ``(knowledge_root / ".git").exists()`` this replaces.
+        live_session_guard: Issue athenaeum#1728 opt-out for the live-session guard
+            (see :mod:`athenaeum.live_session_guard`). ``None`` resolves via
+            yaml ``librarian.live_session_guard`` (default on); an explicit
+            ``True``/``False`` (e.g. the CLI ``--no-live-session-guard`` flag)
+            wins. When on, a member is held (never moved this pass) while
+            its scope's owning Claude Code session is not provably closed —
+            a delete must never race a session that might still amend the
+            fact it is about to move into the wiki.
+        live_session_guard_quiet_window_seconds: Issue athenaeum#1728 override for
+            the guard's fallback quiet window. ``None`` resolves via yaml
+            ``librarian.live_session_guard_quiet_window_seconds`` (default
+            1800s / 30 minutes).
+        cache_dir: Root holding the live-session guard's session-end markers
+            (``<cache_dir>/live-session-markers/<scope>.json``), injectable
+            for tests. Defaults to :func:`athenaeum.config.resolve_cache_dir`.
 
     Returns:
         A :class:`RetireReport` describing what was (or, on dry-run, would be)
@@ -480,6 +519,24 @@ def run_retire_pass(
     wiki_root = knowledge_root / "wiki"
     kr = knowledge_root.resolve()
     pending_text = _open_pending_text(wiki_root)
+
+    # Issue athenaeum#1728: resolve the live-session guard (explicit arg > yaml
+    # `librarian.live_session_guard` > default ON) once, up front, so every
+    # member evaluated below uses the same run-wide guard config.
+    guard_enabled = (
+        live_session_guard
+        if live_session_guard is not None
+        else resolve_live_session_guard_enabled(resolved_config)
+    )
+    guard_quiet_window = (
+        live_session_guard_quiet_window_seconds
+        if live_session_guard_quiet_window_seconds is not None
+        else resolve_live_session_guard_quiet_window_seconds(resolved_config)
+    )
+    guard_cache_dir = cache_dir if cache_dir is not None else resolve_cache_dir()
+    guard_projects_root = (
+        projects_root if projects_root is not None else default_projects_root()
+    )
 
     # (entry, members_to_retire) — only the members whose fact actually landed
     # in the wiki body AND that live under knowledge_root are retire-eligible.
@@ -546,6 +603,34 @@ def run_retire_pass(
                     )
                 )
                 continue
+
+            # Issue athenaeum#1728: a delete must never race a live session either —
+            # the same "if in doubt, keep it" rule the contradiction/pending
+            # holds above already enforce, extended to session timing. Only
+            # evaluated for members that already cleared every other
+            # eligibility check, so a disabled guard costs nothing extra.
+            if guard_enabled:
+                try:
+                    m_mtime = m.stat().st_mtime
+                except OSError:
+                    m_mtime = 0.0
+                held_live, live_reason = is_live(
+                    m.parent.name,
+                    m_mtime,
+                    cache_dir=guard_cache_dir,
+                    projects_root=guard_projects_root,
+                    quiet_window_seconds=guard_quiet_window,
+                )
+                if held_live:
+                    report.held.append(str(m))
+                    report.held_live_session.append(str(m))
+                    report.dispositions.append(
+                        FileDisposition(
+                            str(m), HOLD_LIVE_SESSION, entry.cluster_id, live_reason
+                        )
+                    )
+                    continue
+
             retire_members.append(m)
             report.moved.append(str(m))
             report.dispositions.append(
@@ -689,11 +774,12 @@ def run_retire_pass(
 def _log_report(report: RetireReport) -> None:
     prefix = "[DRY RUN] " if report.dry_run else ""
     log.info(
-        "%sretire plan: %d to move, %d held, %d wiki entr(y/ies) updated, "
-        "%d index pointer(s) pruned",
+        "%sretire plan: %d to move, %d held (%d held: live session), "
+        "%d wiki entr(y/ies) updated, %d index pointer(s) pruned",
         prefix,
         len(report.moved),
         len(report.held),
+        len(report.held_live_session),
         len(report.wiki_updated),
         len(report.index_pruned),
     )

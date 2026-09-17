@@ -411,6 +411,58 @@ def resolve_retire(config: dict[str, Any] | None) -> bool:
     return True
 
 
+#: Default quiet window (seconds) the live-session guard waits, past a
+#: scope's most recent transcript activity, before treating that scope's
+#: owning session as closed (issue athenaeum#1728). 30 minutes.
+DEFAULT_LIVE_SESSION_GUARD_QUIET_WINDOW_SECONDS = 1800
+
+
+def resolve_live_session_guard_enabled(config: dict[str, Any] | None) -> bool:
+    """Resolve the move-then-retire live-session guard opt-out (issue athenaeum#1728).
+
+    The move-then-retire pass (issue athenaeum#261) must not retire a memory
+    file while the Claude Code session that owns its scope is still live --
+    doing so races a session that might still amend or contradict the fact
+    on disk. This guard is DEFAULT-ON: only ``librarian.live_session_guard:
+    false`` in ``athenaeum.yaml`` turns it off, and the ``athenaeum run
+    --no-live-session-guard`` CLI flag overrides to off at the call site.
+    No seed in ``_DEFAULTS`` (issue athenaeum#231) -- the default lives here in
+    code so it stays reachable. Non-bool yaml values fall through to the
+    default (on).
+    """
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("live_session_guard")
+            if isinstance(raw, bool):
+                return raw
+    return True
+
+
+def resolve_live_session_guard_quiet_window_seconds(
+    config: dict[str, Any] | None,
+) -> int:
+    """Resolve the live-session guard's quiet window in seconds (issue athenaeum#1728)
+    from ``librarian.live_session_guard_quiet_window_seconds``.
+
+    A scope is treated as still live when one of its Claude Code transcripts
+    (``<projects_root>/<scope>/*.jsonl``) was modified within this many
+    seconds of "now" -- the fallback signal used when no session-end marker
+    for the scope is newer than the candidate file (see
+    :mod:`athenaeum.live_session_guard`). Defaults to
+    :data:`DEFAULT_LIVE_SESSION_GUARD_QUIET_WINDOW_SECONDS` (30 minutes).
+    ``bool`` (an ``int`` subclass) and non-positive/non-int yaml values fall
+    through to the default. No seed in ``_DEFAULTS`` (issue athenaeum#231).
+    """
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("live_session_guard_quiet_window_seconds")
+            if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
+                return raw
+    return DEFAULT_LIVE_SESSION_GUARD_QUIET_WINDOW_SECONDS
+
+
 def resolve_push_after_run(config: dict[str, Any] | None) -> bool:
     """Resolve the post-run ``git push`` opt-in (issue athenaeum#284).
 
@@ -3550,6 +3602,8 @@ search_backend: fts5
 #     classify: false
 #     write: false
 #   retire: true
+#   live_session_guard: true
+#   live_session_guard_quiet_window_seconds: 1800
 #   ephemeral_scopes:
 #     - "*hestia-routine*"
 #     - "*var-folders*"

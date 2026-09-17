@@ -15,6 +15,37 @@ from pathlib import Path
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def _isolated_live_session_guard_projects_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue athenaeum#1728: keep this suite's retire tests off the REAL ``~/.claude/projects``.
+
+    This file's fixtures (``retire_root``, ``_build_two_member_root``) reuse
+    the test author's own machine scope names (``-Users-tristankromer-Code*``)
+    — which, run on that same machine, collide with real transcript
+    directories the live-session guard added in athenaeum#1728 now actively
+    checks for recent activity. Without this, a run_retire_pass() call in
+    this file observes the OPERATOR'S actual live session and wrongly holds
+    a file these tests expect moved. Point the guard's ``projects_root``
+    default at an empty synthetic dir for every test in this module instead;
+    ``tests/test_retire_live_session_guard.py`` exercises the guard itself
+    with a scope name that cannot collide.
+    """
+    monkeypatch.setattr(
+        "athenaeum.retire.default_projects_root",
+        lambda: tmp_path / "_no_such_projects_root",
+    )
+    # Same isolation for the guard's session-end-marker cache dir -- a real
+    # ``~/.cache/athenaeum`` marker for one of these scope names would be an
+    # equally real (if less likely) hermeticity leak in the other direction.
+    monkeypatch.setattr(
+        "athenaeum.retire.resolve_cache_dir",
+        lambda *a, **k: tmp_path / "_no_such_cache_dir",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Synthetic tree fixture
 # ---------------------------------------------------------------------------
@@ -1223,7 +1254,17 @@ class TestRetireOriginTracing:
         )
 
         entries = merge_clusters_to_wiki(knowledge_root)
-        run_retire_pass(entries, knowledge_root, projects_root=projects_root)
+        # Issue athenaeum#1728: this test's synthetic transcript is deliberately
+        # FRESH (it exists purely to be matched for citation-verification
+        # text) — the live-session guard would otherwise hold the member on
+        # that same freshness before origin tracing ever runs. Disable the
+        # guard here; it is unrelated to what this test exercises.
+        run_retire_pass(
+            entries,
+            knowledge_root,
+            projects_root=projects_root,
+            live_session_guard=False,
+        )
 
         wiki = knowledge_root / "wiki"
         entry_file = next(wiki.glob(f"{AUTO_WIKI_PREFIX}*.md"))

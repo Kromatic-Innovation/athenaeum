@@ -127,6 +127,26 @@ empty list when unset -- a fresh install dedups on the generic
 ``google_contact`` key only, with no personal namespace literal in source.
 No seed in ``_DEFAULTS``.
 
+### `resolve_live_session_guard_enabled`
+
+- **YAML path:** `athenaeum.yaml`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `True`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve the move-then-retire live-session guard opt-out.
+
+The move-then-retire pass must not retire a memory
+file while the Claude Code session that owns its scope is still live --
+doing so races a session that might still amend or contradict the fact
+on disk. This guard is DEFAULT-ON: only ``librarian.live_session_guard:
+false`` in ``athenaeum.yaml`` turns it off, and the ``athenaeum run
+--no-live-session-guard`` CLI flag overrides to off at the call site.
+No seed in ``_DEFAULTS`` -- the default lives here in
+code so it stays reachable. Non-bool yaml values fall through to the
+default (on).
+
 ### `resolve_min_merge_confidence`
 
 - **YAML path:** `athenaeum.yaml`
@@ -1159,6 +1179,26 @@ key.
 
 Env ``ATHENAEUM_INTAKE_RUNTIME_FLOOR`` > yaml
 ``librarian.intake_runtime_floor`` > this default (``0.0``).
+
+### `resolve_live_session_guard_quiet_window_seconds`
+
+- **YAML path:** `librarian.live_session_guard_quiet_window_seconds`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `1800`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve the live-session guard's quiet window in seconds
+from ``librarian.live_session_guard_quiet_window_seconds``.
+
+A scope is treated as still live when one of its Claude Code transcripts
+(``<projects_root>/<scope>/*.jsonl``) was modified within this many
+seconds of "now" -- the fallback signal used when no session-end marker
+for the scope is newer than the candidate file (see
+`athenaeum.live_session_guard`). Defaults to
+`DEFAULT_LIVE_SESSION_GUARD_QUIET_WINDOW_SECONDS` (30 minutes).
+``bool`` (an ``int`` subclass) and non-positive/non-int yaml values fall
+through to the default. No seed in ``_DEFAULTS``.
 
 ### `resolve_lock_break_stale_after`
 

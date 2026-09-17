@@ -2936,6 +2936,7 @@ def _run_retire(
     config: dict[str, object] | None,
     dry_run: bool,
     projects_root: Path | None,
+    live_session_guard: bool | None = None,
 ):
     """Run the move-then-retire pass (issue athenaeum#261) over the merged entries.
 
@@ -2947,6 +2948,11 @@ def _run_retire(
     (Quine C1) so a persistently-failing retire is visible to monitoring rather
     than buried in a WARNING. Returns the :class:`RetireReport` on success, or
     ``None`` when the pass raised.
+
+    ``live_session_guard`` (issue athenaeum#1728) is the CLI ``--no-live-session-guard``
+    / yaml ``librarian.live_session_guard`` override, threaded straight
+    through to :func:`~athenaeum.retire.run_retire_pass` -- ``None`` resolves
+    there via config (default on).
     """
     from athenaeum.retire import run_retire_pass
 
@@ -2957,6 +2963,7 @@ def _run_retire(
             config=config,
             dry_run=dry_run,
             projects_root=projects_root,
+            live_session_guard=live_session_guard,
         )
     except Exception:
         log.exception(
@@ -4422,6 +4429,15 @@ class RunContext:
     #: ``librarian.verdict_ledger_enabled`` is also on — with either
     #: condition unmet, the run is byte-identical to before athenaeum#712.
     lock: Any = None
+    #: Issue athenaeum#1728: move-then-retire live-session-guard opt-out. ``None``
+    #: resolves via yaml ``librarian.live_session_guard`` (default on) inside
+    #: :func:`athenaeum.retire.run_retire_pass` itself; an explicit
+    #: ``True``/``False`` (the CLI ``--no-live-session-guard`` flag) wins.
+    #: Given a default here (unlike ``retire`` above, which stays in the
+    #: verbatim block) so existing ``RunContext(...)`` call sites across the
+    #: test suite -- constructed before this field existed -- keep working
+    #: without every one of them threading it explicitly.
+    live_session_guard: bool | None = None
     api_key: str | None = None
     config: dict[str, Any] | None = None
     provider: str = "api"
@@ -6688,8 +6704,11 @@ def _run_merge_only_phase(ctx: RunContext) -> int:
             config=ctx.config,
             dry_run=ctx.dry_run,
             projects_root=ctx.projects_root,
+            live_session_guard=ctx.live_session_guard,
         )
         # Issue athenaeum#682: surface MEMORY.md pointer pruning in the run-summary.
+        # Issue athenaeum#1728: also surface how many holds were live-session-guard
+        # holds specifically, distinct from the undifferentiated ``held`` count.
         ctx.run_profile.append(
             (
                 "retire",
@@ -6697,6 +6716,11 @@ def _run_merge_only_phase(ctx: RunContext) -> int:
                 {
                     "index_pruned": (
                         len(_retire_report.index_pruned)
+                        if _retire_report is not None
+                        else 0
+                    ),
+                    "held_live_session": (
+                        len(_retire_report.held_live_session)
                         if _retire_report is not None
                         else 0
                     ),
@@ -8730,6 +8754,7 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
             config=ctx.config,
             dry_run=ctx.dry_run,
             projects_root=ctx.projects_root,
+            live_session_guard=ctx.live_session_guard,
         )
         ctx.run_profile.append(
             (
@@ -8738,9 +8763,15 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
                 # Issue athenaeum#682: surface MEMORY.md pointer pruning in the
                 # run-summary so a pruning event is visible in the same
                 # greppable line as every other phase result.
+                # Issue athenaeum#1728: same treatment for live-session-guard holds.
                 {
                     "index_pruned": (
                         len(_retire_report.index_pruned)
+                        if _retire_report is not None
+                        else 0
+                    ),
+                    "held_live_session": (
+                        len(_retire_report.held_live_session)
                         if _retire_report is not None
                         else 0
                     ),
@@ -9319,6 +9350,7 @@ def run(
     strict_budget: bool = False,
     batch_mode: bool | None = None,
     retire: bool | None = None,
+    live_session_guard: bool | None = None,
     push_after_run: bool | None = None,
     pull_before_run: bool | None = None,
     projects_root: Path | None = None,
@@ -9524,6 +9556,7 @@ def run(
         strict_budget=strict_budget,
         batch_mode=batch_mode,
         retire=retire,
+        live_session_guard=live_session_guard,
         push_after_run=push_after_run,
         pull_before_run=pull_before_run,
         projects_root=projects_root,
@@ -10845,6 +10878,33 @@ def session_end(
         push_metrics.run_reference_determination(
             session, cache_dir=cache_dir, config=config, wiki_root=wiki_root
         )
+
+    # Issue athenaeum#1728: stamp the live-session-guard marker for this session's
+    # scope. Read by the move-then-retire pass (`athenaeum.retire`) via
+    # `athenaeum.live_session_guard.is_live`: a marker newer than a candidate
+    # memory file releases the retire hold regardless of transcript age,
+    # because the session that owned it has now positively closed. Same
+    # best-effort contract as reference determination above -- scoped to
+    # `session`, skipped on a dry-run (no durable writes on a preview), and
+    # never allowed to break session_end.
+    if session and not dry_run:
+        from athenaeum.config import resolve_cache_dir
+        from athenaeum.live_session_guard import record_session_end
+        from athenaeum.transcript_verify import default_projects_root
+
+        try:
+            record_session_end(
+                session,
+                cache_dir=resolve_cache_dir(cache_dir),
+                projects_root=default_projects_root(),
+            )
+        except Exception:  # noqa: BLE001 — must never break session_end
+            log.warning(
+                "session-end: failed to record live-session-guard marker "
+                "for session %s",
+                session,
+                exc_info=True,
+            )
 
     # Issue athenaeum#1422: post-merge sidecar-liveness assertion. Read-only
     # (never mutates the ledger, never raises), so unlike the reference

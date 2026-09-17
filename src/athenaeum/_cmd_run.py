@@ -129,6 +129,18 @@ def add_run_subparser(subparsers: argparse._SubParsersAction) -> None:
         "README 'Data lifecycle & upgrade impact' section.",
     )
     run_parser.add_argument(
+        "--no-live-session-guard",
+        dest="live_session_guard",
+        action="store_false",
+        default=None,
+        help="Disable the move-then-retire live-session guard (issue athenaeum#1728): "
+        "a memory file whose scope's owning Claude Code session is not "
+        "provably closed is normally held rather than retired. Overrides "
+        "the athenaeum.yaml librarian.live_session_guard toggle (default "
+        "on). Held files are always counted and named in the run summary "
+        "and --dry-run report, never silently skipped.",
+    )
+    run_parser.add_argument(
         "--push",
         dest="push_after_run",
         action="store_true",
@@ -240,6 +252,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             allow_degraded=args.allow_degraded,
             batch_mode=args.batch_mode,
             retire=getattr(args, "retire", None),
+            live_session_guard=getattr(args, "live_session_guard", None),
             push_after_run=getattr(args, "push_after_run", None),
             pull_before_run=getattr(args, "pull_before_run", None),
             full_compile=getattr(args, "full_compile", False),
@@ -269,6 +282,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             allow_degraded=args.allow_degraded,
             batch_mode=args.batch_mode,
             retire=getattr(args, "retire", None),
+            live_session_guard=getattr(args, "live_session_guard", None),
             push_after_run=getattr(args, "push_after_run", None),
             pull_before_run=getattr(args, "pull_before_run", None),
             install_signal_handlers=True,

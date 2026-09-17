@@ -1562,6 +1562,117 @@ class TestSessionEndReferenceDetermination:
         assert result.session == "sess-no-transcript"
 
 
+class TestSessionEndRecordsLiveSessionMarker:
+    """``session_end`` stamps the live-session-guard marker (issue athenaeum#1728).
+
+    Read by the move-then-retire pass (``athenaeum.retire`` via
+    ``athenaeum.live_session_guard.is_live``) so a memory file's scope is
+    treated as closed once its owning session's SessionEnd hook has run —
+    regardless of transcript age.
+    """
+
+    def test_marker_written_for_sessions_own_scope(
+        self, tmp_path: Path, mock_anthropic: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from athenaeum import transcript_verify
+        from athenaeum.librarian import session_end
+        from athenaeum.live_session_guard import marker_path
+
+        root = _seed_knowledge_root(tmp_path)
+        cache = tmp_path / "cache"
+        projects_root = tmp_path / "projects"
+        scope = projects_root / "-Users-x-Code"
+        scope.mkdir(parents=True)
+        (scope / "sess-marker-1.jsonl").write_text("{}", encoding="utf-8")
+        monkeypatch.setattr(transcript_verify, "default_projects_root", lambda: projects_root)
+
+        session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            session="sess-marker-1",
+            cache_dir=cache,
+            backend="fts5",
+        )
+
+        assert marker_path(cache, "-Users-x-Code").is_file()
+
+    def test_no_marker_written_without_a_matching_transcript(
+        self, tmp_path: Path, mock_anthropic: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from athenaeum import transcript_verify
+        from athenaeum.librarian import session_end
+        from athenaeum.live_session_guard import MARKER_DIRNAME
+
+        root = _seed_knowledge_root(tmp_path)
+        cache = tmp_path / "cache"
+        projects_root = tmp_path / "projects"  # no scope dirs at all
+        monkeypatch.setattr(transcript_verify, "default_projects_root", lambda: projects_root)
+
+        session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            session="sess-no-transcript-marker",
+            cache_dir=cache,
+            backend="fts5",
+        )
+
+        assert not (cache / MARKER_DIRNAME).exists()
+
+    def test_skipped_on_dry_run(
+        self, tmp_path: Path, mock_anthropic: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from athenaeum import transcript_verify
+        from athenaeum.librarian import session_end
+        from athenaeum.live_session_guard import MARKER_DIRNAME
+
+        root = _seed_knowledge_root(tmp_path)
+        cache = tmp_path / "cache"
+        projects_root = tmp_path / "projects"
+        scope = projects_root / "-Users-x-Code"
+        scope.mkdir(parents=True)
+        (scope / "sess-marker-dry.jsonl").write_text("{}", encoding="utf-8")
+        monkeypatch.setattr(transcript_verify, "default_projects_root", lambda: projects_root)
+
+        session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            session="sess-marker-dry",
+            cache_dir=cache,
+            backend="fts5",
+            dry_run=True,
+        )
+
+        assert not (cache / MARKER_DIRNAME).exists()
+
+    def test_marker_write_failure_never_breaks_session_end(
+        self, tmp_path: Path, mock_anthropic: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from athenaeum import live_session_guard
+        from athenaeum.librarian import session_end
+
+        root = _seed_knowledge_root(tmp_path)
+        cache = tmp_path / "cache"
+
+        def _boom(*_a: object, **_kw: object) -> None:
+            raise RuntimeError("synthetic failure")
+
+        monkeypatch.setattr(live_session_guard, "record_session_end", _boom)
+
+        result = session_end(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            session="sess-marker-boom",
+            cache_dir=cache,
+            backend="fts5",
+        )
+
+        assert result.exit_code == 0
+
+
 class TestSessionEndReferencesOnly:
     """`session-end --references-only` — determination without the corpus gate.
 
