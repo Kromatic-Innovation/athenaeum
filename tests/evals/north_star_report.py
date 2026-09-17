@@ -971,6 +971,32 @@ def render_report(report: NorthStarReport) -> str:
     )
     lines.append("")
 
+    lines.append("## Mode per cell (athenaeum#1733)")
+    lines.append("")
+    lines.append(
+        "Which execution path produced each rollout cell -- `api` (Anthropic Messages API "
+        "tool-use loop, the primary path per `docs/design/native-memory-baseline.md` §4) or "
+        "`cli` (`claude -p`, the fidelity spot-check). A direct render over `report.rows` "
+        "itself, never folded into `GroupStats`/`compute_group_stats`."
+    )
+    lines.append("")
+    lines.append("| probe_id | arm | corpus_scale | replicate | mode |")
+    lines.append("| --- | --- | --- | --- | --- |")
+    for row in sorted(
+        report.rows,
+        key=lambda r: (
+            r.record.probe_id,
+            r.record.arm.value,
+            r.record.corpus_scale,
+            r.cell.replicate,
+        ),
+    ):
+        lines.append(
+            f"| {row.record.probe_id} | {row.record.arm.value} | {row.record.corpus_scale} | "
+            f"{row.cell.replicate} | {row.record.mode} |"
+        )
+    lines.append("")
+
     pull_stats = [s for s in report.stats if s.arm == Arm.PULL.value]
 
     lines.append("## PULL no-call rate (first-class result)")

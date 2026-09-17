@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`tests/evals/rollout.py`: API-backed tool-use mode for the four
+  tool-using rollout arms (athenaeum#1733), selectable via `run_probe_all_arms(mode=...)`
+  or `tests/evals/north_star_cli.py --mode` (env `ATHENAEUM_EVAL_MODE`,
+  default `api`).** `run_pull_api` / `run_push_breadcrumb_pull_api` /
+  `run_native_index_api` / `run_native_grep_api` drive a genuine Anthropic
+  Messages API tool-use loop (`run_api_tool_loop`) with the harness itself
+  serving `recall` (in-process `recall_search`, for the PULL-style arms) or
+  `grep`/`read` (bounded, confined to the materialized native-memory
+  directory, for the native arms) — no logged-in `claude` CLI needed, so the
+  grid can run from a GitHub Actions runner with just the Anthropic key
+  `evals.yml` already loads. `NATIVE_INDEX` applies the documented 200-line/
+  25KB truncation itself (`truncate_native_index`) and injects the result as
+  the first user turn. Every emitted transcript matches the CLI path's own
+  stream-json-derived shape byte-for-byte, so `north_star_report.py` needs no
+  mode branch to compute delivered-text/utilization metrics. The existing
+  `claude -p` path (`mode="cli"`) is untouched and remains the default for
+  direct `run_probe_all_arms` callers — only `north_star_cli.py`'s own
+  default flips to `api`. `RolloutRecord.mode` (`"api"`/`"cli"`) is persisted
+  on every row and rendered per-cell in `north_star_report.py`'s new "Mode
+  per cell" section. `evals.yml` gained a `north_star` workflow_dispatch
+  input that runs `north_star_cli.py` in API mode and uploads the report —
+  still workflow_dispatch-gated only, never on push.
 - **`docs/use-cases.md`: the north star decomposed into the questions memory
   is actually asked, and a kill criterion.** "Surface the right information at
   the right time" is a quality bar with no customer attached, and nothing in

@@ -84,6 +84,11 @@ load and its own tools, so it is worth one run to confirm the API-mode
 numbers, not the path the decision rests on. The report states which mode
 produced each cell.
 
+Selected via `run_probe_all_arms(mode=...)` or `tests/evals/north_star_cli.py
+--mode` (falls back to the `ATHENAEUM_EVAL_MODE` env var, default `api`) —
+`"api"` or `"cli"`, the same two values named wherever mode appears
+(issue athenaeum#1733).
+
 | Arm | Store | Index | Model's read path |
 |---|---|---|---|
 | `NATIVE_INDEX` | corpus pages materialised as topic files in an auto-memory directory | `MEMORY.md` built as one `name — description` line per page, then truncated exactly as Claude Code truncates it | index in context; topic files on demand |
