@@ -392,6 +392,21 @@ class Probe:
     lexical match), which defeats the two-hop shape the class exists to
     measure -- the answer no longer has to come FROM the second page, just
     happens to be gradable there.
+
+    This check's scope is ``expected_uids`` only: it does not scan the rest
+    of the core corpus for some OTHER page that also names the answer
+    identity while sharing a query term (Quine review of the
+    athenaeum#1768 PR found exactly this on `person-tomas-briell`, which
+    named `ratecard_tooling_owner`'s answer person and shared "rate",
+    "card", and "repository" with its query while sitting outside
+    `expected_uids`, so the check above never looked at it). A probe author
+    must keep the answer identity itself off every OTHER lexically
+    reachable core page, not only off pages outside ``expected_uids`` that
+    happen to share vocabulary -- CI cannot derive "the answer identity" as
+    a general string to search for, so this is an authoring discipline the
+    check does not enforce, the same shape as the ``follow_through``
+    completeness judgment call documented in
+    ``docs/design/native-memory-baseline.md`` §5.
     """
 
     id: str

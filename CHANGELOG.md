@@ -178,7 +178,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the `multi_hop` counterpart of the `follow_through` lexical-unreachability
   check: for every `multi_hop` probe, the `expected_uids` page carrying the
   planted token must share no content term — exact, or a stemmed
-  uid/name/tags prefix — with the query. See
+  uid/name/tags prefix — with the query. Scoped to `expected_uids` only, per
+  Quine review: `person-tomas-briell`, outside `ratecard_tooling_owner`'s
+  `expected_uids`, independently named the answer person (Tomas Briell)
+  while sharing the query's own "rate", "card", and "repository" terms, so
+  its bio was reworded to drop the rate-card mention, and the `Probe`
+  docstring now states this scope limit as an authoring discipline the
+  check cannot derive on its own. See
   `docs/design/native-memory-baseline.md` §5 for the run record; the grid
   is re-dispatched manually after this lands, per athenaeum#1768 AC4.
 

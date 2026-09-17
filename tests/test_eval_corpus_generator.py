@@ -482,6 +482,85 @@ def test_multi_hop_token_pages_are_lexically_unreachable() -> None:
             assert not _shares_stemmed_term(page_meta_terms, query_terms), (probe.id, page.uid)
 
 
+def test_validate_core_rejects_multi_hop_token_page_reachable_via_stemmed_meta() -> None:
+    """athenaeum#1768 AC2, the stemmed uid/name/tags branch -- the sibling
+    of ``test_validate_core_rejects_multi_hop_token_page_that_is_lexically_reachable``,
+    which only exercises the exact-body-overlap branch. Here the BODY shares
+    no content term with the query at all, but the page's own uid/tags leak
+    the query's vocabulary through a >=5-character stemmed prefix (mirroring
+    the ``follow_through`` stemmed-meta check's own synthetic coverage
+    style), so a native arm's grep over its topic file's own name would
+    still reach it without the second hop.
+    """
+    pages = [
+        Page(
+            uid="page-a",
+            type="note",
+            name="Page A",
+            body="Page A talks about something else entirely.",
+            tier="core",
+        ),
+        Page(
+            uid="tooling-widgetworks",
+            type="note",
+            name="widgetworks",
+            body="TokenThree sits here.\n\nInternal reference tag: TokenThree.",
+            tier="core",
+            tags=("tooling",),
+        ),
+    ]
+    probe = Probe(
+        id="probe-stemmed-reachable",
+        probe_class="multi_hop",
+        query="what page a's tooling does the widget work rely on?",
+        expected_uids=("page-a", "tooling-widgetworks"),
+        answer_tokens=("TokenThree",),
+    )
+    problems = validate_core(pages, [probe])
+    assert any(
+        "probe-stemmed-reachable" in p and "tooling-widgetworks" in p and "stemmed term" in p
+        for p in problems
+    ), problems
+
+
+def test_ratecard_tooling_owner_answer_person_is_not_named_off_expected_uids() -> None:
+    """athenaeum#1768 Quine review: ``validate_core``'s multi_hop check only
+    scans ``expected_uids`` pages (see the ``Probe`` docstring's scope
+    note), so it would not catch a DIFFERENT core page that shares
+    ``ratecard_tooling_owner``'s query vocabulary while naming its answer
+    person outright. Before this issue, ``person-tomas-briell`` did exactly
+    that: it named Tomas Briell and said he is "one of four maintainers on
+    the rate-card repository," sharing "rate", "card", and "repository"
+    with the query and reaching the answer without the hop. Restated here
+    directly, independent of ``validate_core``'s control flow, since the
+    corpus check cannot derive "the answer identity" as a general string to
+    search for and so cannot enforce this itself (an authoring discipline,
+    not a checked contract).
+    """
+    pages_by_uid = {page.uid: page for page in load_core_pages()}
+    probe = next(p for p in load_probes() if p.id == "ratecard_tooling_owner")
+    query_terms = _content_terms(probe.query)
+    # The answer to "who maintains buildpipe" is Tomas Briell (tool-buildpipe's
+    # body says "Maintained by Tomas Briell"); neither of ratecard_tooling_owner's
+    # own expected_uids pages is a person page, so his name is not derivable
+    # from the probe's own fields the way it would be for a probe whose
+    # expected_uids includes a person page directly.
+    answer_person = "Tomas Briell"
+    assert any(
+        answer_person in pages_by_uid[uid].body for uid in probe.expected_uids
+    ), "fixture drifted: the answer person is no longer named in an expected_uids page"
+    for page in pages_by_uid.values():
+        if page.uid in probe.expected_uids:
+            continue
+        if answer_person not in page.body:
+            continue
+        assert not (_content_terms(page.body) & query_terms), (
+            probe.id,
+            page.uid,
+            "names the answer person while sharing a query content term",
+        )
+
+
 def test_follow_through_second_pages_are_lexically_unreachable_and_tokened() -> None:
     """athenaeum#1766 AC3: pins, for every real ``follow_through`` probe,
     that exactly one of its ``expected_uids`` pages is lexically unreachable
@@ -591,8 +670,11 @@ def test_xlarge_scale_is_pinned() -> None:
     # match (planted distractor pages are built from distractor_terms --
     # see `_generate_distractors` -- so stale terms would plant decoys that
     # no longer compete with the reworded query) -- same class of expected
-    # fingerprint shift.
-    assert corpus.fingerprint() == "344a1b095e3ff255"
+    # fingerprint shift. Quine review then found person-tomas-briell (outside
+    # ratecard_tooling_owner's expected_uids) independently named the answer
+    # person while sharing the query's own "rate"/"card"/"repository" terms,
+    # so its bio was reworded too, shifting the fingerprint once more.
+    assert corpus.fingerprint() == "92e09694ecf0ede4"
 
 
 def test_core_scale_generates_nothing() -> None:
