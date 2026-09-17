@@ -1368,12 +1368,22 @@ class TestCrossAgentRecall:
         tmp_path: Path,
         mock_anthropic: MagicMock,
         capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        from athenaeum import transcript_verify
         from athenaeum.librarian import session_end
         from athenaeum.mcp_server import remember_write
 
         root = _seed_knowledge_root(tmp_path)
         cache = tmp_path / "cache"
+        # Issue athenaeum#1728 Quine follow-up: session_end()'s best-effort
+        # live-session-guard marker write resolves projects_root via
+        # transcript_verify.default_projects_root() when the caller doesn't
+        # thread one -- without this, that call scans the REAL
+        # ~/.claude/projects on whatever machine runs this test.
+        monkeypatch.setattr(
+            transcript_verify, "default_projects_root", lambda: tmp_path / "projects"
+        )
 
         # --- Session A: an agent remembers a structured (tier0) fact. It lands
         #     in raw/<session>/ only — recall reads wiki/, so it is invisible.
@@ -1452,11 +1462,18 @@ class TestSessionEndReferenceDetermination:
     def test_calls_reference_determination_when_session_given(
         self, tmp_path: Path, mock_anthropic: MagicMock, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from athenaeum import push_metrics
+        from athenaeum import push_metrics, transcript_verify
         from athenaeum.librarian import session_end
 
         root = _seed_knowledge_root(tmp_path)
         cache = tmp_path / "cache"
+        # Issue athenaeum#1728 Quine follow-up: keep the live-session-guard
+        # marker write (session given, not dry-run -- the same gate this
+        # test's own reference-determination call sits behind) off the REAL
+        # ~/.claude/projects.
+        monkeypatch.setattr(
+            transcript_verify, "default_projects_root", lambda: tmp_path / "projects"
+        )
 
         calls: list[tuple[str, Path | None]] = []
 
@@ -1537,17 +1554,25 @@ class TestSessionEndReferenceDetermination:
         assert calls == []
 
     def test_real_reference_determination_never_breaks_session_end(
-        self, tmp_path: Path, mock_anthropic: MagicMock
+        self, tmp_path: Path, mock_anthropic: MagicMock, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """End-to-end with the REAL (unmocked) push_metrics function: no push
         records and no transcript exist for this session id, so
         ``determine_references`` returns ``None`` internally — but
         ``session_end`` must still complete normally either way.
         """
+        from athenaeum import transcript_verify
         from athenaeum.librarian import session_end
 
         root = _seed_knowledge_root(tmp_path)
         cache = tmp_path / "cache"
+        # Issue athenaeum#1728 Quine follow-up: same isolation as the sibling
+        # test above -- this call is also session-given/not-dry-run, so the
+        # live-session-guard marker write would otherwise scan the REAL
+        # ~/.claude/projects too.
+        monkeypatch.setattr(
+            transcript_verify, "default_projects_root", lambda: tmp_path / "projects"
+        )
 
         result = session_end(
             raw_root=root / "raw",

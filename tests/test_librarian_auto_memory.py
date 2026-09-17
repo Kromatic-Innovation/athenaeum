@@ -46,6 +46,30 @@ def _isolated_live_session_guard_projects_root(
     )
 
 
+@pytest.fixture
+def mock_anthropic(monkeypatch: pytest.MonkeyPatch):
+    """Patch anthropic.Anthropic + a fake key so run()'s startup gate passes.
+
+    Mirrors tests/test_session_end.py's own fixture of the same name --
+    needed here (issue athenaeum#1728 Quine follow-up) for the non-``merge_only``
+    ``run()`` tests, which go through the same ``ANTHROPIC_API_KEY``-required
+    startup gate a ``merge_only``/``dry_run`` call never reaches.
+    """
+    from unittest.mock import MagicMock
+
+    import anthropic as anthropic_mod
+
+    client = MagicMock()
+    # A real (if minimal) JSON-object response text -- several phases (e.g.
+    # claim-kind classification) parse `.content[0].text` as JSON via
+    # `athenaeum.json_utils.extract_json_object`, which requires an actual
+    # string; a bare MagicMock reaches a regex call and raises TypeError.
+    client.messages.create.return_value = MagicMock(content=[MagicMock(text="{}")])
+    monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kw: client)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-key-not-real")
+    return client
+
+
 # ---------------------------------------------------------------------------
 # Synthetic tree fixture
 # ---------------------------------------------------------------------------
@@ -1358,6 +1382,59 @@ class TestRetireIntegrationViaRun:
         entry_file = next(wiki.glob(f"{AUTO_WIKI_PREFIX}*.md"))
         meta, _ = parse_frontmatter(entry_file.read_text(encoding="utf-8"))
         assert meta["retired"] is True
+
+    def test_run_default_full_pipeline_retires_by_default(
+        self, retire_root: Path, mock_anthropic
+    ) -> None:
+        # Issue athenaeum#1728 Quine follow-up: the merge_only=True tests above
+        # exercise only ONE of the two `_run_retire(...)` call sites in
+        # librarian.py (the merge_only-specific one) -- the DEFAULT full
+        # pipeline (merge_only=False, cluster_only=False) calls a SEPARATE
+        # one (librarian.py ~8753). Threading `live_session_guard=None`
+        # correctly there is untested by every other test in this class.
+        # No client is passed (offline): the fixture's single-member cluster
+        # gets rationale "singleton" from C4 (no LLM call needed for a
+        # cluster with nothing to compare), so it stays move-eligible even
+        # offline, exactly like the merge_only path above.
+        from athenaeum.librarian import run
+        from athenaeum.merge import AUTO_WIKI_PREFIX
+        from athenaeum.models import parse_frontmatter
+
+        rc = run(
+            raw_root=retire_root / "raw",
+            wiki_root=retire_root / "wiki",
+            knowledge_root=retire_root,
+        )
+        assert rc == 0
+        assert not _raw_file(retire_root).exists()
+        wiki = retire_root / "wiki"
+        entry_file = next(wiki.glob(f"{AUTO_WIKI_PREFIX}*.md"))
+        meta, _ = parse_frontmatter(entry_file.read_text(encoding="utf-8"))
+        assert meta["retired"] is True
+
+    def test_run_default_full_pipeline_no_live_session_guard_flag_moves_despite_live_transcript(
+        self, retire_root: Path, mock_anthropic
+    ) -> None:
+        # Same non-merge_only call site, proving `live_session_guard=False`
+        # reaches IT too (not just the merge_only-specific call site the
+        # earlier `test_run_level_no_live_session_guard_flag_moves_despite_live_transcript`
+        # covers).
+        from athenaeum.librarian import run
+
+        projects_root = retire_root.parent / "projects"
+        scope_dir = projects_root / "-Users-tristankromer-Code-home"
+        scope_dir.mkdir(parents=True)
+        (scope_dir / "sess-live.jsonl").write_text("{}", encoding="utf-8")
+
+        rc = run(
+            raw_root=retire_root / "raw",
+            wiki_root=retire_root / "wiki",
+            knowledge_root=retire_root,
+            projects_root=projects_root,
+            live_session_guard=False,
+        )
+        assert rc == 0
+        assert not _raw_file(retire_root).exists()
 
     def test_no_retire_flag_skips_retire(self, retire_root: Path) -> None:
         # Issue athenaeum#259 opt-out: run(retire=False) skips the retire pass entirely

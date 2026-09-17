@@ -164,10 +164,9 @@ def resolve_owning_session_id(
 ) -> str | None:
     """The Claude Code session that OWNS *member*, or ``None`` if undetermined.
 
-    Mirrors :func:`athenaeum.intake.discover_auto_memory_files`'s own
-    resolution order (``src/athenaeum/intake.py`` ~498-543) exactly, so the
-    guard's notion of "owner" never disagrees with the provenance the
-    compiled wiki page already carries for the same file:
+    Reuses :func:`athenaeum.intake.discover_auto_memory_files`'s own
+    resolution ladder (``src/athenaeum/intake.py`` ~498-543), but is NOT an
+    exact mirror of its gating:
 
     1. The file's own ``originSessionId`` frontmatter, when it declares one
        -- the file's own claim always outranks an inferred one.
@@ -176,6 +175,18 @@ def resolve_owning_session_id(
        recoverer :func:`athenaeum.intake.discover_auto_memory_files` uses,
        passed in here so a caller iterating many members in one scope scans
        that scope's transcripts once, not once per member).
+
+    The divergence: ``discover_auto_memory_files`` only invokes the
+    recoverer when the file ALSO carries no ``sources[]`` (its gate is
+    ``origin_session_id is None and not sources`` -- a file citing sources
+    without a bare ``originSessionId`` is left unrecovered there, since an
+    existing ``sources[]`` already gives ``merge._am_as_implicit_source``
+    something to work with). This function has no such second condition --
+    it falls through to the recoverer whenever ``originSessionId`` alone is
+    absent, because the guard's question ("who owns this file, for a
+    session-end marker to match against") is narrower than intake's
+    ("does this file need synthesized provenance") and has no reason to
+    withhold an available recovery just because the file also cites sources.
 
     Returns ``None`` when neither resolves -- an honest "cannot determine",
     never a guess. Unreadable file content degrades the same way.

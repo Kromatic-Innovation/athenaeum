@@ -21,9 +21,11 @@ run and ``--dry-run``.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from athenaeum.contradictions import ContradictionResult
@@ -90,6 +92,28 @@ def _landed_entry(scope_name: str) -> MergedWikiEntry:
 
 def _config() -> dict:
     return {"recall": {"extra_intake_roots": ["raw/auto-memory"]}}
+
+
+def _iso(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _write_windowed_transcript(path: Path, start: datetime, end: datetime) -> None:
+    """A synthetic transcript establishing a ``SessionRecoverer`` time window.
+
+    Two records, timestamped *start* and *end*, with plain (non-tool-use)
+    content -- no ``/memory/`` mention, so this contributes to the
+    ``time-window`` recovery rung only, never the ``write-cited`` one. See
+    :func:`athenaeum.session_recovery._scan_transcript`: the window's
+    ``first``/``last`` come from the first readable timestamp among the
+    head/tail lines respectively, so two lines are enough to bound a range
+    (a single line would only ever produce a zero-width window).
+    """
+    lines = [
+        json.dumps({"type": "user", "timestamp": _iso(start), "message": {"content": "start"}}),
+        json.dumps({"type": "user", "timestamp": _iso(end), "message": {"content": "end"}}),
+    ]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 class TestLiveTranscriptHolds:
@@ -355,6 +379,103 @@ class TestUnknownOwnerFallsBackToQuietWindow:
         # Unknown owner never short-circuits to a release: the marker rung
         # has nothing to match against, so the quiet window decides, and a
         # fresh transcript in the scope holds.
+        assert report.committed is False
+        assert report.held_live_session == [str(member)]
+        assert member.exists()
+
+
+class TestRecoveredOwnerMarker:
+    """The recoverer fallback (no ``originSessionId``) resolves an owner too.
+
+    Mirrors the frontmatter-owner tests above but for a member that
+    declares NO ``originSessionId`` at all -- owner resolution must fall
+    through :func:`athenaeum.live_session_guard.resolve_owning_session_id`'s
+    second rung, :class:`athenaeum.session_recovery.SessionRecoverer`'s
+    time-window ladder, exactly as ``athenaeum.intake.discover_auto_memory_files``
+    already does for a natively-written memory. Deleting that fallback
+    (the ``recoverer.recover(...)`` call) collapses owner resolution to
+    "frontmatter or nothing," which fails
+    ``test_recovered_owners_marker_releases_hold`` below: with no
+    recovery, the owner is unconditionally ``None`` and the marker rung
+    never applies, so the fresh transcripts' quiet window holds the file
+    instead of the marker releasing it.
+    """
+
+    def _seed_two_session_scope(self, tmp_path: Path) -> tuple[Path, Path, str, Path]:
+        """One member (no ``originSessionId``) whose write time falls inside
+        session A's transcript time-window and outside session B's --
+        ``SessionRecoverer`` must resolve the owner to A, not B, not neither.
+        """
+        kr, member, scope_name = _knowledge_root(tmp_path)  # no origin_session_id
+        projects_root = tmp_path / "projects"
+        scope_dir = projects_root / scope_name
+        scope_dir.mkdir(parents=True)
+
+        now = datetime.now(timezone.utc)
+        # Session A's transcript window covers the member's write time.
+        _write_windowed_transcript(
+            scope_dir / "sess-A.jsonl", now - timedelta(hours=1), now - timedelta(minutes=30)
+        )
+        # Session B's window is entirely earlier -- does NOT cover it.
+        _write_windowed_transcript(
+            scope_dir / "sess-B.jsonl",
+            now - timedelta(hours=2),
+            now - timedelta(hours=1, minutes=30),
+        )
+        # The member's mtime sits inside A's window (45 minutes ago) and
+        # outside B's. Both transcript FILES keep their just-written (fresh)
+        # disk mtime regardless -- deliberately, so the quiet-window rung
+        # alone would hold this file, and only the marker rung's owner match
+        # can release it.
+        write_time = now - timedelta(minutes=45)
+        os.utime(member, (write_time.timestamp(), write_time.timestamp()))
+        return kr, member, scope_name, projects_root
+
+    def test_recovered_owners_marker_releases_hold(self, tmp_path: Path) -> None:
+        kr, member, scope_name, projects_root = self._seed_two_session_scope(tmp_path)
+        entry = _landed_entry(scope_name)
+        cache_dir = tmp_path / "cache"
+
+        from athenaeum.live_session_guard import resolve_owning_session_id
+        from athenaeum.session_recovery import SessionRecoverer
+
+        # Sanity: the recoverer resolves A, confirming the scenario is set
+        # up the way the docstring above claims before testing the guard.
+        owner = resolve_owning_session_id(member, scope_name, SessionRecoverer(projects_root))
+        assert owner == "sess-A"
+
+        record_session_end("sess-A", cache_dir=cache_dir, projects_root=projects_root)
+
+        report = run_retire_pass(
+            [entry],
+            kr,
+            config=_config(),
+            projects_root=projects_root,
+            cache_dir=cache_dir,
+        )
+
+        assert report.committed is True
+        assert report.moved == [str(member)]
+        assert report.held_live_session == []
+
+    def test_marker_for_the_other_recovered_session_does_not_release(self, tmp_path: Path) -> None:
+        kr, member, scope_name, projects_root = self._seed_two_session_scope(tmp_path)
+        entry = _landed_entry(scope_name)
+        cache_dir = tmp_path / "cache"
+
+        # B's own marker -- B is NOT this file's recovered owner (A is) --
+        # must not release it. Falls through to the quiet window, where
+        # both transcripts' fresh file mtime holds.
+        record_session_end("sess-B", cache_dir=cache_dir, projects_root=projects_root)
+
+        report = run_retire_pass(
+            [entry],
+            kr,
+            config=_config(),
+            projects_root=projects_root,
+            cache_dir=cache_dir,
+        )
+
         assert report.committed is False
         assert report.held_live_session == [str(member)]
         assert member.exists()
