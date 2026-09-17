@@ -57,6 +57,7 @@ DISTRIBUTION PARAMETERS are taken from one, via
 from __future__ import annotations
 
 import hashlib
+import inspect
 import random
 import re
 from dataclasses import dataclass, field
@@ -471,6 +472,16 @@ class Probe:
     answer_tokens: tuple[str, ...] = ()
     note: str = ""
     report_only: bool = False
+    #: Filtering metadata only (issue athenaeum#1779) -- parsed from
+    #: ``probes.yaml``, defaults to ``"core"``, and read by nobody in the
+    #: grid dispatch or ``compute_verdicts``. Lets an operator isolate the
+    #: long-page slice (``tier: long``) without touching ``probe_class``,
+    #: the same reasoning as ``Page.tier`` but kept independent of it --
+    #: a probe's tier is about which probes to filter, a page's tier is
+    #: about corpus provenance, and the two do not have to agree (a
+    #: ``core``-tier probe's ``expected_uids`` could in principle span
+    #: pages of different tiers).
+    tier: str = "core"
 
 
 @dataclass
@@ -584,7 +595,13 @@ def load_core_pages() -> list[Page]:
                     type=raw["type"],
                     name=raw["name"],
                     body=raw["body"],
-                    tier="core",
+                    # Issue athenaeum#1779: every core page defaulted to
+                    # tier "core" until the long-page tier needed a real
+                    # per-page value -- `raw.get("tier", "core")` keeps that
+                    # default for every existing core/*.yaml file (none of
+                    # them carry a `tier:` key) while letting
+                    # 12-long-pages.yaml declare `tier: long`.
+                    tier=raw.get("tier", "core"),
                     aliases=tuple(raw.get("aliases", ())),
                     tags=tuple(raw.get("tags", ())),
                     access=raw.get("access", "public"),
@@ -614,6 +631,7 @@ def load_probes() -> list[Probe]:
             report_only=bool(
                 raw.get("report_only", raw["probe_class"] not in CONDITION_2_ENROLLED)
             ),
+            tier=raw.get("tier", "core"),
         )
         for raw in _load_yaml(PROBES_PATH)
     ]
@@ -867,6 +885,49 @@ def validate_core(pages: list[Page], probes: list[Probe]) -> list[str]:
     for value, owners in sorted(tag_owners.items()):
         if len(owners) > 1:
             problems.append(f"tag {value!r} is used on multiple pages: {sorted(owners)}")
+
+    # Issue athenaeum#1779: the long-page tier's deterministic honesty check.
+    # `recall`'s snippet is windowed to `_snippet`'s `max_chars` default
+    # (`src/athenaeum/mcp_server.py`) -- read via `inspect` rather than a
+    # second hardcoded `400` so this check cannot silently drift from what
+    # `recall` actually shows if that default ever changes. A page in tier
+    # `long` must (a) exceed a floor long enough that the tag cannot simply
+    # be inside whatever `recall` windows regardless of match position, and
+    # (b) place its `Internal reference tag:` line past that offset, so a
+    # correct answer is only reachable by `read_entity`, never by `recall`
+    # alone. Imported locally, matching this module's existing pattern of
+    # local ``athenaeum.mcp_server`` imports confined to the call site that
+    # needs them, rather than adding a module-level dependency to a fixture
+    # generator that otherwise has none.
+    from athenaeum.mcp_server import _snippet as _mcp_snippet
+
+    long_page_tag_offset_floor = inspect.signature(_mcp_snippet).parameters["max_chars"].default
+    long_page_min_body_chars = 1500
+    long_tier_page_uids = {
+        probe_uid
+        for probe in probes
+        for probe_uid in probe.expected_uids
+        if probe_uid in pages_by_uid and pages_by_uid[probe_uid].tier == "long"
+    }
+    for page_uid in sorted(long_tier_page_uids):
+        page = pages_by_uid[page_uid]
+        if len(page.body) < long_page_min_body_chars:
+            problems.append(
+                f"page {page_uid!r}: tier 'long' but body is {len(page.body)} characters, "
+                f"below the {long_page_min_body_chars}-character floor"
+            )
+        tag_match = _TAG_LINE_RE.search(page.body)
+        if tag_match is None:
+            # Already reported by the missing-tag-line check above; nothing
+            # further to say about offset for a page with no tag line at all.
+            continue
+        if tag_match.start() <= long_page_tag_offset_floor:
+            problems.append(
+                f"page {page_uid!r}: tier 'long' but 'Internal reference tag:' line begins "
+                f"at character offset {tag_match.start()}, not past "
+                f"{long_page_tag_offset_floor} (_snippet's max_chars default) -- recall's "
+                "own snippet could show the tag without read_entity"
+            )
 
     problems.extend(_validate_relatedness_ground_truth(uids, {p.id for p in probes}))
     return problems

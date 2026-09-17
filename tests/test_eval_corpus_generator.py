@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -830,12 +831,56 @@ def test_xlarge_scale_is_pinned() -> None:
     # ratecard_tooling_owner's expected_uids) independently named the answer
     # person while sharing the query's own "rate"/"card"/"repository" terms,
     # so its bio was reworded too, shifting the fingerprint once more.
-    assert corpus.fingerprint() == "92e09694ecf0ede4"
+    # athenaeum#1779: 12-long-pages.yaml added four new core pages (tier
+    # `long`) and four new single_hop probes -- new pages in `core/*.yaml`
+    # always shift `Corpus.fingerprint()` since it hashes every page's
+    # rendered markdown, same class of expected change as the entries above.
+    assert corpus.fingerprint() == "023d72e4ea0981b9"
+
+
+def test_long_tier_tag_is_outside_the_recall_snippet() -> None:
+    """Behavioral companion to `validate_core`'s offset check (athenaeum#1779).
+
+    The offset check pins a number (`tag offset > _snippet's max_chars
+    default`); it does not by itself prove `recall`'s snippet -- which is
+    windowed around the QUERY'S FIRST MATCH, not from character 0 -- cannot
+    reach the tag anyway if that match sits deep in the page. This test
+    calls the real `_snippet` with each long-page probe's own tokenized
+    query and asserts the tag word is absent from what it returns, which is
+    the actual claim ("read_entity was required"), not merely a proxy for
+    it. No model call.
+    """
+    from athenaeum.mcp_server import _snippet, tokenize_keyword_query
+
+    pages_by_uid = {page.uid: page for page in load_core_pages()}
+    long_probes = [probe for probe in load_probes() if probe.tier == "long"]
+    assert long_probes, "no long-tier probes found -- fixture or loader regressed"
+    for probe in long_probes:
+        for uid in probe.expected_uids:
+            page = pages_by_uid[uid]
+            if page.tier != "long":
+                continue
+            snippet = _snippet(page.body, tokenize_keyword_query(probe.query))
+            for token in probe.answer_tokens:
+                assert token not in snippet, (
+                    f"probe {probe.id!r}: answer token {token!r} appears in the "
+                    "recall snippet for its own query -- the long-page tier claim "
+                    "(that read_entity is required) does not hold for this page"
+                )
 
 
 def test_core_scale_generates_nothing() -> None:
+    """``core`` scale must not add distractor/ballast padding.
+
+    Compared against a `Counter` over `load_core_pages()`'s own tiers rather
+    than a hardcoded ``{"core": N}`` (issue athenaeum#1779 added a second
+    tier, ``long``, among the hand-authored core pages) -- a literal count
+    here would need to move every time a core fixture's tier composition
+    changes, which is not what this test exists to catch. What it exists to
+    catch is any generated (distractor/ballast) tier appearing at all.
+    """
     corpus = build_corpus(scale="core")
-    assert corpus.tier_counts() == {"core": len(load_core_pages())}
+    assert corpus.tier_counts() == Counter(page.tier for page in load_core_pages())
 
 
 @pytest.mark.parametrize("scale", ["small", "medium", "medium_verydense"])
