@@ -254,6 +254,25 @@ a void control means every verdict row from this run is unread; the grid must
 be re-dispatched after the fix lands (§9 cadence, manual `workflow_dispatch`
 only).
 
+**The 2026-09-17 (run 35260484135, develop `0b804c64`, 1392 rows, API mode)
+run cleared the oracle positive control on `single_hop`, `temporal`, and
+`disambiguation` at every scale, and its decision block is void anyway**
+(athenaeum#1766): `follow_through` scored 0/36 and `multi_hop` scored 24/36.
+Both are fixture defects, not grader or prompt defects, and distinct from
+athenaeum#1759's. `follow_through`: every one of the six queries in
+`tests/evals/data/corpus/core/10-follow-through.yaml` was answerable from its
+first expected page alone, so a correct, complete answer cited only that
+page's tag while `grade_correctness` required both -- the class could not
+score above zero regardless of the arm. `multi_hop`: six pages named in some
+probe's `expected_uids` (`client-atlas`, `person-ilva-wrenfield`,
+`policy-budget-approval`, `project-keelbridge-rollout`,
+`project-portal-refresh`, `project-pricing-review`) carried no `Internal
+reference tag:` line at all, so a model correctly citing one of them fell
+back to its `uid` and failed the reference-tag contract. Per the ruling on
+athenaeum#1724, a void control means this run's verdict rows were not read;
+the grid is re-dispatched manually after athenaeum#1766 lands (§9 cadence,
+manual `workflow_dispatch` only).
+
 Phase 2 needs the generator to emit observations whose compiled ground truth
 is known, which is a generator change, not a corpus rewrite: the hand-authored
 core pages already carry `source_ref`, so the generator inverts them into

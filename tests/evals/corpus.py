@@ -666,6 +666,43 @@ def validate_core(pages: list[Page], probes: list[Probe]) -> list[str]:
         for edge in page.related:
             if edge.uid not in uids:
                 problems.append(f"page {page.uid!r}: related edge names unknown page {edge.uid!r}")
+
+    # Issue athenaeum#1766 defect 2: a page named in some probe's
+    # `expected_uids` but carrying no `Internal reference tag:` line has
+    # nothing a model can cite for it, so a correct answer that draws on the
+    # page falls back to citing its `uid` -- exactly the failure
+    # `REFERENCE_TAG_INSTRUCTION` forbids and the grader cannot credit. The
+    # athenaeum#1759 check above only requires a probe's OWN `answer_tokens`
+    # to sit on a tag line; it says nothing about the other `expected_uids`
+    # pages a multi_hop/follow_through answer also cites.
+    expected_page_uids = {uid for probe in probes for uid in probe.expected_uids if uid in uids}
+    for page_uid in sorted(expected_page_uids):
+        tag_lines = _TAG_LINE_RE.findall(pages_by_uid[page_uid].body)
+        if not tag_lines:
+            problems.append(
+                f"page {page_uid!r}: named in a probe's expected_uids but carries no "
+                "'Internal reference tag:' line"
+            )
+        elif len(tag_lines) > 1:
+            problems.append(
+                f"page {page_uid!r}: carries {len(tag_lines)} 'Internal reference tag:' "
+                "lines, expected exactly one"
+            )
+
+    # No two pages may share a token: `grade_correctness`'s abstention
+    # confabulation check reads every planted token across the WHOLE corpus
+    # (issue athenaeum#1759's docstring), so a collision would let an answer
+    # that legitimately drew on one page's fact grade as confabulation
+    # against an unrelated page's abstention probe, or let a correct answer
+    # to one probe accidentally satisfy a different probe's token check.
+    tag_owners: dict[str, list[str]] = {}
+    for page in pages:
+        for value in _TAG_LINE_RE.findall(page.body):
+            tag_owners.setdefault(value.strip().rstrip("."), []).append(page.uid)
+    for value, owners in sorted(tag_owners.items()):
+        if len(owners) > 1:
+            problems.append(f"tag {value!r} is used on multiple pages: {sorted(owners)}")
+
     problems.extend(_validate_relatedness_ground_truth(uids, {p.id for p in probes}))
     return problems
 

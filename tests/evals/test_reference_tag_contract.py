@@ -416,15 +416,16 @@ def test_the_instruction_names_the_same_line_prefix_every_fixture_carries() -> N
         )
 
 
-def test_every_token_bearing_core_page_renders_exactly_one_tag_line() -> None:
-    """AC3 for athenaeum#1759, the rendering half: a page whose body plants
-    a token must render EXACTLY ONE ``Internal reference tag:`` line (bolded
-    by ``Page.to_markdown``, issue athenaeum#1759's uid-competition fix), and
-    its value must be one of the tokens the corpus actually planted -- not a
-    stray second identifier line, and not a value that drifted from the
-    corpus's own bookkeeping.
+def test_every_tagged_core_page_renders_exactly_one_tag_line() -> None:
+    """AC3 for athenaeum#1759, the rendering half: ANY page carrying an
+    ``Internal reference tag:`` line -- whether or not that tag is itself a
+    planted ``answer_tokens`` value -- must render EXACTLY ONE such line
+    (bolded by ``Page.to_markdown``, issue athenaeum#1759's uid-competition
+    fix), not a stray second identifier line. Scoped to every tagged page,
+    not only token-bearing ones, since athenaeum#1766 defect 2 gave several
+    ``expected_uids`` pages a citable tag with no answer token of their own
+    (`validate_core` requires this of every page a probe names).
     """
-    every_token = {tok for probe in _CORPUS.probes for tok in probe.answer_tokens}
     checked = 0
     for page in _CORPUS.pages:
         body_matches = _TAG_LINE_RE.findall(page.body)
@@ -432,15 +433,36 @@ def test_every_token_bearing_core_page_renders_exactly_one_tag_line() -> None:
             continue
         checked += 1
         assert len(body_matches) == 1, f"page {page.uid!r} has {len(body_matches)} tag lines"
-        value = body_matches[0].rstrip(".")
-        assert value in every_token, f"page {page.uid!r} tag {value!r} is not a planted token"
 
         rendered = page.to_markdown()
         rendered_matches = re.findall(r"\*\*Internal reference tag:\*\* (.+)", rendered)
-        assert len(rendered_matches) == 1, (
-            f"page {page.uid!r} rendered {len(rendered_matches)} bold tag lines"
-        )
+        assert (
+            len(rendered_matches) == 1
+        ), f"page {page.uid!r} rendered {len(rendered_matches)} bold tag lines"
         assert rendered_matches[0] == body_matches[0]
+    assert checked, "no tagged core pages were found to check"
+
+
+def test_every_token_bearing_core_page_tag_is_a_planted_token() -> None:
+    """AC3 for athenaeum#1759, the token-fidelity half: a page whose BODY
+    plants an ``answer_tokens`` value must carry that value on its own
+    ``Internal reference tag:`` line -- not a stray second identifier line,
+    and not a value that drifted from the corpus's own bookkeeping. Scoped
+    to token-bearing pages only (see the test above for the broader
+    every-tagged-page rendering invariant): a page tagged for citation
+    purposes alone (athenaeum#1766 defect 2) has no answer token to check
+    here.
+    """
+    every_token = {tok for probe in _CORPUS.probes for tok in probe.answer_tokens}
+    checked = 0
+    for page in _CORPUS.pages:
+        if not any(token in page.body for token in every_token):
+            continue
+        checked += 1
+        body_matches = _TAG_LINE_RE.findall(page.body)
+        assert len(body_matches) == 1, f"page {page.uid!r} has {len(body_matches)} tag lines"
+        value = body_matches[0].rstrip(".")
+        assert value in every_token, f"page {page.uid!r} tag {value!r} is not a planted token"
     assert checked, "no token-bearing core pages were found to check"
 
 
