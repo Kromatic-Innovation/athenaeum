@@ -43,6 +43,7 @@ any change to ``athenaeum.intake``/``athenaeum.tiers`` themselves.
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import subprocess
 from pathlib import Path
@@ -51,27 +52,72 @@ from unittest.mock import patch
 
 import yaml
 
+from athenaeum.librarian import EXIT_GRACEFUL_PARTIAL, EXIT_LIBRARIAN_REFUSAL
 from athenaeum.librarian import run as librarian_run
 from tests.evals.corpus import ObservationStream
 from tests.evals.harness import EvalSession
 from tests.evals.north_star_report import WriteCost
 
-__all__ = ["compile_observation_stream"]
+__all__ = ["CompileOutcome", "LibrarianCompileError", "compile_observation_stream"]
 
 
-def _usage_of(response: Any) -> tuple[int, int]:
-    """Extract ``(input_tokens, output_tokens)`` from an anthropic-shaped
-    response, tolerating a missing/partial ``.usage`` (mirrors
-    ``tests.evals.harness._cache_usage_from_response``'s defensive shape,
-    kept local here rather than imported so this module never reaches into
-    that module's private helpers)."""
+class LibrarianCompileError(RuntimeError):
+    """Raised when :func:`athenaeum.librarian.run` returns a
+    non-recoverable exit code during :func:`compile_observation_stream`
+    (issue athenaeum#1775 Quine review, must-fix 1): ``1`` (error) or
+    :data:`~athenaeum.librarian.EXIT_LIBRARIAN_REFUSAL` (``3`` — a
+    zero-progress DEGRADED refusal, docs/reference/exit-codes.md). Deliberately
+    NOT raised for :data:`~athenaeum.librarian.EXIT_GRACEFUL_PARTIAL` (``75``
+    — a deadline trip): that run made real, partial progress and the
+    resulting store is still valid to measure; see
+    :class:`CompileOutcome.partial`."""
+
+
+@dataclasses.dataclass(frozen=True)
+class CompileOutcome:
+    """The librarian compile run's own outcome (issue athenaeum#1775 Quine
+    review, must-fix 1), returned alongside :class:`WriteCost` rather than
+    folded onto it: :class:`~tests.evals.north_star_report.WriteCost` is a
+    frozen dataclass owned by a sibling lane (issue athenaeum#1776/S3) and
+    this issue is explicitly out of scope to edit it (see this module's
+    docstring's "Out of scope" note) — a small wrapper carries the same
+    information without an adapter, since neither
+    ``compute_write_path_stats`` nor ``build_report`` needs to see it.
+
+    ``exit_code`` is :func:`athenaeum.librarian.run`'s own return value
+    (0 success, 1 error, 75 :data:`~athenaeum.librarian.EXIT_GRACEFUL_PARTIAL`,
+    3 :data:`~athenaeum.librarian.EXIT_LIBRARIAN_REFUSAL`) — 1 and 3 are
+    raised as :class:`LibrarianCompileError` instead of reaching here.
+    ``partial`` is ``True`` only for a 75 (deadline-tripped) run: the
+    compile committed real progress but did not finish everything it was
+    given, so a caller comparing write costs across systems may want to
+    flag or exclude a partial cell rather than average it in silently."""
+
+    exit_code: int
+    partial: bool
+
+
+def _usage_of(response: Any) -> dict[str, int]:
+    """Extract the four token counters athenaeum's spend ledger reads,
+    replicating ``tests.evals.harness._cache_usage_from_response``'s exact
+    field set (kept local here rather than imported so this module never
+    reaches into that module's private helper) — so :class:`WriteCost`'s
+    input/output totals and an :class:`~tests.evals.harness.EvalSession`'s
+    four-counter totals are computed from the SAME fields on the SAME
+    response and stay in agreement even when that response also carries
+    cache tokens (issue athenaeum#1775 Quine review, should-fix 1)."""
     usage = getattr(response, "usage", None)
 
     def _get(name: str) -> int:
         value = getattr(usage, name, 0)
         return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
-    return _get("input_tokens"), _get("output_tokens")
+    return {
+        "input_tokens": _get("input_tokens"),
+        "output_tokens": _get("output_tokens"),
+        "cache_creation_input_tokens": _get("cache_creation_input_tokens"),
+        "cache_read_input_tokens": _get("cache_read_input_tokens"),
+    }
 
 
 class _SpendTrackingClient:
@@ -89,13 +135,17 @@ class _SpendTrackingClient:
         self.calls = 0
         self.input_tokens = 0
         self.output_tokens = 0
+        self.cache_creation_input_tokens = 0
+        self.cache_read_input_tokens = 0
 
     def create(self, **kwargs: Any) -> Any:
         response = self._inner.messages.create(**kwargs)
         self.calls += 1
-        in_tok, out_tok = _usage_of(response)
-        self.input_tokens += in_tok
-        self.output_tokens += out_tok
+        usage = _usage_of(response)
+        self.input_tokens += usage["input_tokens"]
+        self.output_tokens += usage["output_tokens"]
+        self.cache_creation_input_tokens += usage["cache_creation_input_tokens"]
+        self.cache_read_input_tokens += usage["cache_read_input_tokens"]
         if self._session is not None:
             self._session.observe_response(str(kwargs.get("model") or self._model), response)
         return response
@@ -153,15 +203,45 @@ def _ensure_git_repo(knowledge_root: Path) -> None:
     _run("commit", "-q", "-m", "seed: knowledge root schema (eval write path)")
 
 
+# Every model knob athenaeum's ``models.<knob>`` yaml block resolves through
+# :func:`athenaeum.config.resolve_model` (or, for ``resolve``, the legacy-key
+# variant :func:`athenaeum.resolutions._get_model` layers on top of the same
+# helper) that a full :func:`athenaeum.librarian.run` compile can reach:
+# ``write`` (:mod:`athenaeum.tiers` tier3 create/merge — also the write-tier-
+# compare precedent's own knob), ``classify`` (:mod:`athenaeum.tiers` tier2,
+# and :mod:`athenaeum.contradictions`, which deliberately reuses the classify
+# knob), ``resolve`` (:mod:`athenaeum.resolutions`), ``topic``
+# (:mod:`athenaeum.query_topics`), and ``rule_proposals``
+# (:mod:`athenaeum.rule_proposals`). Pinning all five to the SAME *model* is
+# what makes a compile run's spend attributable to one model, matching
+# ``tests/evals/tier_compare.py``'s single-model-per-run discipline (issue
+# athenaeum#1775 Quine review, should-fix 2). ``athenaeum.wiki_dedupe``/
+# ``athenaeum.merge`` call no model of their own (pure similarity/embedding),
+# so they need no knob here.
+_MODEL_KNOBS: tuple[str, ...] = ("write", "classify", "resolve", "topic", "rule_proposals")
+
+
 def _write_athenaeum_yaml(knowledge_root: Path, model: str) -> Path:
-    """Write a real ``athenaeum.yaml`` pinning the ``write``/``classify``
-    model knobs to *model* via ``models.<knob>`` — the SAME yaml precedence
-    layer :func:`athenaeum.config.resolve_model` reads in production (env >
-    yaml > default), not a ``config={...}`` dict shortcut threaded past
-    ``run()`` (which accepts no such parameter). Overwritten on every call so
-    a re-run always reflects the *model* the caller asked for."""
+    """Write a real ``athenaeum.yaml`` pinning every model knob
+    (:data:`_MODEL_KNOBS`) a full compile can reach to *model*, via
+    ``models.<knob>`` — the SAME yaml precedence layer
+    :func:`athenaeum.config.resolve_model` reads in production (env > yaml >
+    default), not a ``config={...}`` dict shortcut threaded past ``run()``
+    (which accepts no such parameter). Also pins ``llm.provider: api``
+    (:func:`athenaeum.provider.resolve_provider`'s own yaml key) so an
+    ambient ``ATHENAEUM_LLM_PROVIDER=claude-cli`` override cannot route a
+    call site through :func:`athenaeum.provider.build_llm_client`'s
+    subscription/CLI backend instead of ``anthropic.Anthropic`` — the only
+    constructor :func:`compile_observation_stream` patches, so any other
+    backend would silently escape the caller-supplied *client* entirely
+    (issue athenaeum#1775 Quine review, should-fix 2). Overwritten on every
+    call so a re-run always reflects the *model* the caller asked for."""
     path = knowledge_root / "athenaeum.yaml"
-    path.write_text(yaml.safe_dump({"models": {"write": model, "classify": model}}, sort_keys=True))
+    config: dict[str, Any] = {
+        "models": dict.fromkeys(_MODEL_KNOBS, model),
+        "llm": {"provider": "api"},
+    }
+    path.write_text(yaml.safe_dump(config, sort_keys=True))
     return path
 
 
@@ -193,9 +273,10 @@ def compile_observation_stream(
     model: str,
     session: EvalSession | None = None,
     run_kwargs: dict[str, Any] | None = None,
-) -> tuple[dict[str, str], WriteCost]:
+) -> tuple[dict[str, str], WriteCost, CompileOutcome]:
     """Compile *stream* through the real librarian pipeline and return the
-    resulting wiki store plus its :class:`~tests.evals.north_star_report.WriteCost`
+    resulting wiki store, its :class:`~tests.evals.north_star_report.WriteCost`,
+    and the compile's own :class:`CompileOutcome`
     (issue athenaeum#1775, eval-wave-2-spec.md §6.2).
 
     This is the Athenaeum half of the Phase 2 write-path comparison
@@ -214,14 +295,24 @@ def compile_observation_stream(
     caller may pass either a real ``anthropic.Anthropic`` instance (a live
     Phase 2 grid run) or an offline stub/fake (this module's own
     ``--dry-run``-style contract test) with no other code path changing
-    between the two.
+    between the two. ``run_kwargs`` is forwarded verbatim to ``run()``; note
+    that ``batch_mode=True`` is UNSUPPORTED here — :class:`_SpendTrackingClient`
+    only wraps ``client.messages.create``, not the Anthropic Message Batches
+    API a batch-mode compile would use instead, so a batched run's spend
+    would silently go untracked.
 
-    Returns ``(store_files, write_cost)``: *store_files* is ``{relpath:
-    text}`` over the compiled wiki (excluding ``_schema``), directly
-    consumable by ``compute_write_path_stats(store_files=...)``; *write_cost*
-    is a :class:`WriteCost` with ``system="athenaeum"``,
+    Returns ``(store_files, write_cost, outcome)``: *store_files* is
+    ``{relpath: text}`` over the compiled wiki (excluding ``_schema``),
+    directly consumable by ``compute_write_path_stats(store_files=...)``;
+    *write_cost* is a :class:`WriteCost` with ``system="athenaeum"``,
     ``corpus_scale=stream.scale``, and the input/output token totals the
-    compile spent, directly consumable by ``build_report(write_costs=...)``.
+    compile spent, directly consumable by ``build_report(write_costs=...)``;
+    *outcome* is the compile's own :class:`CompileOutcome` (exit code +
+    whether it was a partial/deadline-tripped run). Raises
+    :class:`LibrarianCompileError` if the compile exits ``1`` (error) or
+    :data:`~athenaeum.librarian.EXIT_LIBRARIAN_REFUSAL` (``3``, a
+    zero-progress refusal) — see :class:`CompileOutcome`'s docstring for the
+    full exit-code contract.
     """
     knowledge_root = Path(knowledge_root)
     _seed_knowledge_root(knowledge_root)
@@ -248,7 +339,7 @@ def compile_observation_stream(
 
     try:
         with patch("anthropic.Anthropic", lambda **kwargs: tracking):
-            librarian_run(
+            exit_code = librarian_run(
                 raw_root=knowledge_root / "raw",
                 wiki_root=knowledge_root / "wiki",
                 knowledge_root=knowledge_root,
@@ -258,6 +349,14 @@ def compile_observation_stream(
         if not had_key:
             os.environ.pop("ANTHROPIC_API_KEY", None)
 
+    if exit_code in (1, EXIT_LIBRARIAN_REFUSAL):
+        raise LibrarianCompileError(
+            f"athenaeum.librarian.run exited {exit_code} during "
+            "compile_observation_stream (1=error, "
+            f"{EXIT_LIBRARIAN_REFUSAL}=EXIT_LIBRARIAN_REFUSAL, a "
+            "zero-progress refusal) — see docs/reference/exit-codes.md"
+        )
+
     store_files = _read_wiki_store(knowledge_root / "wiki")
     write_cost = WriteCost(
         system="athenaeum",
@@ -265,4 +364,5 @@ def compile_observation_stream(
         input_tokens=tracking.input_tokens,
         output_tokens=tracking.output_tokens,
     )
-    return store_files, write_cost
+    outcome = CompileOutcome(exit_code=exit_code, partial=exit_code == EXIT_GRACEFUL_PARTIAL)
+    return store_files, write_cost, outcome

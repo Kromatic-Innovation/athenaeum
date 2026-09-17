@@ -44,21 +44,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   model, session=None, run_kwargs=None)` materialises the stream into
   `knowledge_root/raw/<source>/`, seeds the minimal `wiki/_schema` tree and
   git repo `athenaeum.librarian.run` requires, writes a real
-  `athenaeum.yaml` pinning the `write`/`classify` model knobs, and runs the
+  `athenaeum.yaml` pinning every model knob a compile can reach
+  (`write`/`classify`/`resolve`/`topic`/`rule_proposals`) plus
+  `llm.provider: api` (so an ambient `ATHENAEUM_LLM_PROVIDER=claude-cli`
+  cannot route a call site around the patched client), and runs the
   production `athenaeum.librarian.run` entrypoint (not a reimplementation
   of Tier 1/2/3) with the caller's client installed via
   `unittest.mock.patch("anthropic.Anthropic", ...)` — the same seam
   `tests/test_librarian.py`'s `TestRunIntegration` already uses. Returns
-  `({relpath: text}, WriteCost)`, both directly consumable by
-  `compute_write_path_stats`/`build_report` with zero change to either.
-  Every `messages.create` response is tallied into the returned
-  `WriteCost` and, when an `EvalSession` is supplied, folded into its
-  running per-model totals too. `tests/evals/test_write_path.py` is the
-  offline contract test: a two-page fixture `ObservationStream` compiled
-  against a stub `FakeLLMClient` asserts raw files materialise, a wiki page
-  compiles per token-bearing page, the planted `answer_tokens` are found by
-  `compute_write_path_stats`, and spend lands on both the `WriteCost` and
-  an `EvalSession`. CLI flags / `evals.yml` wiring are out of scope
+  `({relpath: text}, WriteCost, CompileOutcome)` — the first two directly
+  consumable by `compute_write_path_stats`/`build_report` with zero change
+  to either; `CompileOutcome` (`exit_code`, `partial`) names `run()`'s own
+  exit code, since `WriteCost` is a frozen dataclass owned by a sibling
+  lane and out of this issue's scope to extend. Exit `1` (error) or `3`
+  (`EXIT_LIBRARIAN_REFUSAL`, zero-progress) raise a typed
+  `LibrarianCompileError`; exit `75` (`EXIT_GRACEFUL_PARTIAL`, a deadline
+  trip) returns normally with `partial=True`. Every `messages.create`
+  response (all four token counters, including cache) is tallied into the
+  returned `WriteCost` and, when an `EvalSession` is supplied, folded into
+  its running per-model totals too, so the two stay in agreement even on a
+  cached response. `tests/evals/test_write_path.py` is the offline
+  contract test: a two-page fixture `ObservationStream` compiled against a
+  stub `FakeLLMClient` asserts raw files materialise, a wiki page compiles
+  per token-bearing page via a provably correct classify-then-create call
+  sequence (the stub's two hops are shape-distinguishable — the create hop
+  is a bare markdown page, the classify hop is JSON that never carries the
+  planted token — so a misroute fails loudly instead of passing a "token
+  found somewhere" assertion by accident), the planted `answer_tokens` are
+  found by `compute_write_path_stats`, spend (including cache tokens)
+  lands on both the `WriteCost` and an `EvalSession`, the yaml pins every
+  model knob and the provider, and all three `run()` exit-code paths
+  (error, refusal, graceful-partial) are exercised via a monkeypatched
+  `librarian_run`. CLI flags / `evals.yml` wiring are out of scope
   (athenaeum#1785/#1786), as is the native-side writer (athenaeum#1774).
 
 - **Hardening for the north-star grid's relevance-floor input (issue
