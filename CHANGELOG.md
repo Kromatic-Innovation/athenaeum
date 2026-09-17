@@ -47,6 +47,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tests/test_eval_corpus_leakage.py`'s native-memory materializer check
   now include it. `docs/design/native-memory-baseline.md` §3 names the new
   scale.
+- **Bounded concurrency for the north-star grid, plus a job window that can
+  hold it (issue athenaeum#1751).** `tests/evals/north_star_cli.py` gained
+  `--workers` (default 4) and `evals.yml`'s `north-star` job a matching
+  `north_star_workers` dispatch input; the job's `timeout-minutes` rose from
+  60 to 300. A `--scale full` dispatch plans 1392 cells, which no serial run
+  could finish inside the old window — it would have been killed mid-grid
+  after paying for the cells it completed. The (probe, corpus_scale,
+  replicate) group is the unit of concurrency: each worker gets its own
+  materialized corpus tree (shared trees would be a write-write race on the
+  wiki pages and the search index), `ResultStore.append` serialises on a
+  lock so two workers cannot interleave a partial JSONL line, and
+  `EvalSession`'s token counters are lock-guarded so a lost update cannot
+  silently loosen the ceiling that spends against them. When the rollout
+  token ceiling trips mid-grid it stops *every* worker, not only the one
+  that noticed. `--dry-run` now prints the projected wall clock at the
+  chosen worker count alongside the price — including on the over-budget
+  refusal path, which is the path an operator sizing a full dispatch is
+  actually on. Partial-run safety: the run records its planned cell count in
+  a sidecar beside the store before the first cell runs, the workflow keeps
+  the store under `measurements/` and uploads it `if: always()` (a timeout
+  kill writes no markdown report at all, so the JSONL is the only artifact —
+  and re-running with the same `--store` resumes from it), and the report
+  renders a `partial: N of M cells` banner at the top of the decision block
+  when the store holds fewer rows than planned. A store line that will not
+  decode — what a process killed mid-`write` leaves, and a rollout row is
+  hundreds of KB — is skipped, counted and named in that banner rather than
+  being fatal; it reads as not-completed, so a resume re-runs that cell. The
+  tolerance deliberately is not narrowed to "the last line only", because a
+  resume appends after the torn tail and puts it mid-file. `ResultStore.append`
+  now closes off an unterminated final line before appending after it: a kill
+  mid-`write` leaves a fragment with no trailing newline, and appending onto
+  it fused the next row's JSON to the fragment, destroying a cell that had
+  just run and been paid for — and destroying it again on every later resume,
+  since each resume re-ran that cell and re-glued it to the same tail, so it
+  could never persist at all. The report's reader also collapses duplicate
+  cell keys (last row wins) and the partial banner counts DISTINCT cells:
+  resume granularity is the whole group, so a group re-run after a partial
+  stop legitimately appends rows it had already written, and counting rows
+  rather than cells could exceed the planned total and hide a partial run
+  behind an apparently-complete one. `Ctrl-C` now
+  produces a PARTIAL report too (it is a `BaseException`, so the previous
+  handler let it past and the operator got nothing over the cells already
+  paid for) and cancels every group that had not started. When the token
+  ceiling trips, a group already in flight stops at its next arm boundary,
+  so the overshoot is one cell per worker rather than up to eight. Both new
+  test modules (`tests/evals/test_north_star_concurrency.py`,
+  `tests/evals/test_north_star_partial_safety.py`) are token-free and carry
+  NO deselecting marker, per athenaeum#1742's rule that `rollout` means
+  token cost rather than file family — they import `tests.evals.rollout`,
+  which is exactly the shape that invited the old blanket marking, so both
+  are pinned by name in
+  `test_containment_ci_wiring.py::test_token_free_report_modules_carry_no_deselecting_marker`.
+  No prompt, model or arm changed.
 - **`temporal` probes with person/company expected pages (issue
   athenaeum#1744).** The go/no-go rule's condition 1 relationship subset
   (`_relationship_probe_ids` in `tests/evals/north_star_report.py`) is

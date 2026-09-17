@@ -27,6 +27,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -496,6 +497,16 @@ class EvalSession:
     """
 
     def __init__(self) -> None:
+        # issue athenaeum#1751: a north-star grid run drives ONE session
+        # from a bounded thread pool, so both accumulators below are
+        # updated concurrently. ``+=`` on an int and ``dict.setdefault`` are
+        # each several bytecodes, so two workers finishing together could
+        # lose an update and UNDERCOUNT tokens -- which would silently
+        # loosen the spend ceiling those counters exist to enforce. One
+        # re-entrant lock covers every mutator; readers (``layer_score``,
+        # ``emit_summary``, the ceiling assertion) run on the main thread
+        # after the pool has drained.
+        self._lock = threading.RLock()
         self.results: list[CaseResult] = []
         # Token counters are updated by the harness's response wrappers
         # (see :meth:`observe_response`) so every live call — from any
@@ -508,6 +519,32 @@ class EvalSession:
 
     def observe_response(self, model: str, response: Any) -> None:
         counts = _cache_usage_from_response(response)
+        with self._lock:
+            self._observe_counts(model, counts)
+
+    def observe_response_delta(self, model: str, response: Any) -> tuple[int, int]:
+        """Accumulate *response* and return the ``(input, output)`` IT added.
+
+        The delta a caller needs is exactly what was extracted from THIS
+        response, so it is returned directly rather than recovered by
+        subtracting a before-reading of the running totals from an after-
+        reading of them. That difference is not cosmetic once a grid runs
+        concurrently (issue athenaeum#1751): a before/after pair taken
+        around :meth:`observe_response` spans a window in which another
+        worker's response can land, and the subtraction then attributes the
+        other worker's tokens to this turn. The accumulator stays correct
+        either way -- it is lock-guarded -- but the per-turn figure does
+        not, and the report's cost and efficiency dimensions are computed
+        per turn. There is still exactly ONE extraction site
+        (``_cache_usage_from_response``), which is what the before/after
+        shape was reaching for.
+        """
+        counts = _cache_usage_from_response(response)
+        with self._lock:
+            self._observe_counts(model, counts)
+        return counts["input_tokens"], counts["output_tokens"]
+
+    def _observe_counts(self, model: str, counts: dict[str, int]) -> None:
         self.input_tokens += counts["input_tokens"]
         self.output_tokens += counts["output_tokens"]
         self.cache_creation_input_tokens += counts["cache_creation_input_tokens"]
@@ -534,16 +571,17 @@ class EvalSession:
         passed: bool,
         detail: str = "",
     ) -> None:
-        self.results.append(
-            CaseResult(
-                layer=layer,
-                case_id=case_id,
-                expected=expected,
-                observed=observed,
-                passed=passed,
-                detail=detail,
+        with self._lock:
+            self.results.append(
+                CaseResult(
+                    layer=layer,
+                    case_id=case_id,
+                    expected=expected,
+                    observed=observed,
+                    passed=passed,
+                    detail=detail,
+                )
             )
-        )
 
     def layer_score(self, layer: str) -> tuple[int, int]:
         cases = [r for r in self.results if r.layer == layer]

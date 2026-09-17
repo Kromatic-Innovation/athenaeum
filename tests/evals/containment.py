@@ -39,7 +39,9 @@ from __future__ import annotations
 import itertools
 import json
 import os
-from collections.abc import Callable, Iterable, Sequence
+import threading
+from collections.abc import Callable, Iterable, Iterator, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -198,6 +200,47 @@ class CellTokenEstimate:
 #: estimate, not a measurement.
 DEFAULT_CELL_TOKEN_ESTIMATE = CellTokenEstimate(input_tokens=20_000, output_tokens=4_000)
 
+#: Declared (not measured) per-cell wall-clock estimate, the TIME sibling of
+#: :data:`DEFAULT_CELL_TOKEN_ESTIMATE`'s token estimate (issue athenaeum#1751).
+#: A tool-using cell is a multi-turn Messages API loop, so tens of seconds is
+#: the right order of magnitude; like the token estimate this is deliberately
+#: a round, clearly-a-guess number a first live batch should replace, not a
+#: false-precision figure. It exists so ``--dry-run`` can answer "does a
+#: dispatch at N workers fit the job's ``timeout-minutes`` window?" BEFORE the
+#: operator clicks, which is the only question a pre-flight can usefully
+#: answer about time.
+DEFAULT_CELL_SECONDS = 45.0
+
+
+def project_wall_clock_seconds(
+    cell_count: int,
+    *,
+    workers: int,
+    seconds_per_cell: float = DEFAULT_CELL_SECONDS,
+) -> float:
+    """Projected wall-clock seconds for *cell_count* cells at *workers* workers.
+
+    Flat ``cells * seconds / workers``. This is only honest because the
+    north-star driver's unit of concurrency is a (probe, corpus_scale,
+    replicate) GROUP of exactly ``len(ALL_ARMS)`` cells whose arms run
+    serially inside the group -- so cells-per-unit-time really does scale
+    with the worker count. A future partial-arm group (one that runs fewer
+    arms per call) would break that equality and make this number optimistic
+    by the ratio of the group sizes; anyone adding one must revisit this.
+    """
+    if workers < 1:
+        raise ValueError(f"workers must be >= 1, got {workers}")
+    return cell_count * seconds_per_cell / workers
+
+
+def format_duration(seconds: float) -> str:
+    """``h:mm:ss`` -- the shape an operator compares against a job's
+    ``timeout-minutes`` without doing arithmetic in their head."""
+    total = int(round(seconds))
+    hours, rest = divmod(total, 3600)
+    minutes, secs = divmod(rest, 60)
+    return f"{hours}:{minutes:02d}:{secs:02d}"
+
 
 class SpendCeilingExceededError(Exception):
     """Raised by :func:`price_grid` when the priced grid exceeds ``--max-spend``.
@@ -269,6 +312,30 @@ def price_grid(
 # ---------------------------------------------------------------------------
 
 
+def _terminate_torn_tail(handle: Any) -> None:
+    """Close off an unterminated final line before appending after it.
+
+    A process killed mid-``write`` leaves a partial row with NO trailing
+    newline. Appending straight onto that fragment glues the next row's
+    JSON to it, and the result is a single line that decodes as neither:
+    the fragment is expected (a torn row is counted and tolerated), but the
+    NEW row -- a cell that just ran and was just paid for -- is destroyed
+    with it. Worse, it is destroyed the same way on every subsequent
+    resume, because each resume re-runs that cell and re-glues it to the
+    same unterminated tail, so the cell can never persist at all.
+
+    Writing the missing newline first keeps the fragment torn (it stays
+    counted, and its cell still reads as not-completed, so the resume
+    re-runs it) while letting every row appended after it decode normally.
+    """
+    handle.seek(0, os.SEEK_END)
+    if handle.tell() == 0:
+        return
+    handle.seek(-1, os.SEEK_END)
+    if handle.read(1) != b"\n":
+        handle.write(b"\n")
+
+
 class ResultStore:
     """Append-only JSONL store of completed grid-cell results.
 
@@ -280,6 +347,16 @@ class ResultStore:
 
     def __init__(self, path: Path) -> None:
         self.path = path
+        # issue athenaeum#1751: the grid now runs cells on a bounded thread
+        # pool, so two workers can finish at the same moment. Without this
+        # lock their two ``write()`` calls could interleave mid-line and
+        # produce a corrupt JSONL row that ``load_rollout_rows`` would then
+        # fail to decode -- losing not just the in-flight cell but every row
+        # after it in the file. One lock per store INSTANCE is the right
+        # grain because a run shares exactly one instance (see
+        # ``north_star_cli._run_cells``); two instances over the same path
+        # would still race, which is why callers must not construct a second.
+        self._append_lock = threading.Lock()
 
     def completed_keys(self) -> set[str]:
         """Return every cell key already persisted, read once up front.
@@ -288,49 +365,212 @@ class ResultStore:
         per-cell mid-run — the file only grows monotonically during a run
         of :func:`run_grid`, so a snapshot taken at the start is exactly
         "what a resume must not repay for".
+
+        A row that will not decode is SKIPPED, not fatal — see
+        :func:`count_torn_rows` for why one can exist and why the tolerance
+        cannot be narrowed to "the last line only". Skipping is the safe
+        direction here: an unreadable row is treated as not-yet-completed,
+        so its cell is re-run and re-appended rather than silently
+        considered paid for.
         """
-        if not self.path.exists():
-            return set()
         keys: set[str] = set()
+        for row in self._iter_rows():
+            key = row.get("cell_key")
+            if isinstance(key, str):
+                keys.add(key)
+        return keys
+
+    def _iter_rows(self) -> Iterator[dict[str, Any]]:
+        """Yield every decodable row, skipping blank and torn ones."""
+        if not self.path.exists():
+            return
         with self.path.open("r", encoding="utf-8") as handle:
             for line in handle:
                 line = line.strip()
                 if not line:
                     continue
-                keys.add(json.loads(line)["cell_key"])
-        return keys
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(row, dict):
+                    yield row
+
+    def count_torn_rows(self) -> int:
+        """How many lines in the store will not decode as a JSON object.
+
+        A store is written append-only with an ``fsync`` per row, so within
+        ONE run only the final line can be torn — a process killed at its
+        job ``timeout-minutes`` mid-``write`` leaves a partial line, and a
+        rollout row is hundreds of KB, so that window is real rather than
+        theoretical.
+
+        The tolerance deliberately is NOT narrowed to "the last line only",
+        because this issue's own workflow change makes a resumed run the
+        expected recovery path: a resume appends AFTER the torn tail, which
+        puts the torn line in the MIDDLE of the file. A strict
+        last-line-only rule would start raising on exactly the store it was
+        written to rescue. Counting instead of raising keeps the audit
+        trail — the count reaches the report's partial banner, so a torn
+        row is visible rather than merely survived.
+        """
+        if not self.path.exists():
+            return 0
+        torn = 0
+        with self.path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    torn += 1
+                    continue
+                if not isinstance(row, dict):
+                    torn += 1
+        return torn
 
     def append(self, cell_key: str, payload: dict[str, Any]) -> None:
-        """Append one completed cell's result, flushed and fsync'd."""
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        """Append one completed cell's result, flushed and fsync'd.
+
+        Serialised on :attr:`_append_lock` so concurrent workers never
+        interleave a partial line (issue athenaeum#1751). The JSON is
+        rendered BEFORE the lock is taken -- the critical section covers
+        only the file work, so a slow ``json.dumps`` on a big payload does
+        not stall every other worker.
+        """
         row = {"cell_key": cell_key, **payload}
-        with self.path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(row, sort_keys=True) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
+        line = (json.dumps(row, sort_keys=True) + "\n").encode("utf-8")
+        with self._append_lock:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            # "a+b", not "ab": the tail check below has to READ the last
+            # byte, and append-only mode is write-only. Writes still always
+            # land at the end regardless of where the read left the cursor.
+            with self.path.open("a+b") as handle:
+                _terminate_torn_tail(handle)
+                handle.write(line)
+                handle.flush()
+                os.fsync(handle.fileno())
 
 
 def run_grid(
     cells: Iterable[GridCell],
     cell_runner: Callable[[GridCell], dict[str, Any]],
     store: ResultStore,
+    *,
+    workers: int = 1,
 ) -> list[dict[str, Any]]:
-    """Run every cell in *cells* not already present in *store*, in order.
+    """Run every cell in *cells* not already present in *store*.
 
-    ``store.completed_keys()`` is read exactly ONCE, before the loop starts
+    ``store.completed_keys()`` is read exactly ONCE, before any cell runs
     — this is what makes a resume after a mid-grid kill cheap and correct:
     every cell already persisted (from before the kill) is skipped without
     calling *cell_runner* at all, and every remaining cell is executed and
     appended exactly once. Returns the payloads for cells executed on THIS
     call only (not the ones skipped as already-complete).
+
+    *workers* (issue athenaeum#1751) bounds how many cells run at a time.
+    ``1`` — the default, so no existing caller changes behaviour — keeps
+    the original strictly-serial loop, and both the store rows and the
+    returned list stay in *cells* order. Above ``1`` the cells are
+    independent units dispatched to a :class:`ThreadPoolExecutor`, and
+    **order is no longer defined**: rows land in completion order and the
+    returned list matches. The SET of executed cells is identical either
+    way, which is the property callers may rely on — anything needing a
+    stable ordering must sort by cell identity itself.
+
+    A failing cell does not cost the others their results: every cell that
+    completed is appended, and the first exception is re-raised only once
+    the pool has drained.
     """
+    if workers < 1:
+        raise ValueError(f"workers must be >= 1, got {workers}")
     already_done = store.completed_keys()
+    pending = [cell for cell in cells if cell.cell_key() not in already_done]
     results: list[dict[str, Any]] = []
-    for cell in cells:
-        key = cell.cell_key()
-        if key in already_done:
-            continue
-        payload = cell_runner(cell)
-        store.append(key, payload)
-        results.append(payload)
+    if workers == 1:
+        for cell in pending:
+            payload = cell_runner(cell)
+            store.append(cell.cell_key(), payload)
+            results.append(payload)
+        return results
+    first_failure: BaseException | None = None
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(cell_runner, cell): cell for cell in pending}
+        for future in as_completed(futures):
+            cell = futures[future]
+            try:
+                payload = future.result()
+            except Exception as exc:  # noqa: BLE001 -- see below
+                # Drain, do not bail. Raising straight out of this loop
+                # would abandon every future that had ALREADY completed but
+                # was not yet pulled off ``as_completed`` -- their cells ran
+                # and were paid for, and their results would never reach the
+                # store. That is exactly the silent loss the append-only
+                # store exists to prevent, and it would also break resume:
+                # the next run would re-pay for work that had succeeded.
+                # So every completed cell is persisted, and the FIRST
+                # failure is re-raised below, once there is nothing left to
+                # lose by raising it.
+                if first_failure is None:
+                    first_failure = exc
+                continue
+            store.append(cell.cell_key(), payload)
+            results.append(payload)
+    if first_failure is not None:
+        raise first_failure
     return results
+
+
+# ---------------------------------------------------------------------------
+# Planned-cell-count sidecar (partial-run detection)
+# ---------------------------------------------------------------------------
+
+#: Suffix appended to a store's own filename for its planned-count sidecar.
+PLANNED_SIDECAR_SUFFIX = ".planned.json"
+
+
+def planned_sidecar_path(store: ResultStore) -> Path:
+    """Where *store*'s planned-cell-count sidecar lives.
+
+    A SIDECAR rather than a header line inside the JSONL (issue
+    athenaeum#1751): ``ResultStore`` is strictly append-only and every
+    reader — ``completed_keys``, ``load_rollout_rows`` — assumes every line
+    is a cell row. A header would have to be special-cased in both, and a
+    resumed run would have to decide whether to rewrite it. A separate file
+    written once at run start costs neither.
+    """
+    return store.path.with_name(store.path.name + PLANNED_SIDECAR_SUFFIX)
+
+
+def write_planned_cells(store: ResultStore, planned: int) -> None:
+    """Record how many cells the run that is STARTING intends to complete.
+
+    Written before the first cell runs, so a run killed mid-grid (the
+    60-minute job timeout this issue exists for) still leaves behind enough
+    to tell "all 1392 cells, complete" from "the 300 that fit". Rewritten on
+    a resume with the same planned total, which is by construction the full
+    grid's size, not the remaining count.
+    """
+    path = planned_sidecar_path(store)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"planned_cells": planned}) + "\n", encoding="utf-8")
+
+
+def read_planned_cells(store: ResultStore) -> int | None:
+    """The planned cell count for *store*, or ``None`` when unknowable.
+
+    ``None`` — a missing, empty or unparseable sidecar — means "cannot tell
+    whether this store is partial", which renders WITHOUT a partial banner.
+    That is deliberate: a store from before this issue, or one whose sidecar
+    was lost, must not be libelled as partial on no evidence.
+    """
+    path = planned_sidecar_path(store)
+    if not path.exists():
+        return None
+    try:
+        planned = json.loads(path.read_text(encoding="utf-8"))["planned_cells"]
+    except (json.JSONDecodeError, KeyError, OSError):
+        return None
+    return int(planned) if isinstance(planned, int) else None
