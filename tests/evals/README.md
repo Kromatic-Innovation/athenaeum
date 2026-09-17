@@ -259,10 +259,11 @@ are all token-free and run in `ci.yml`'s default job;
 `test_rollout_native_spike.py`, and `test_rollout_native_writer_spike.py`
 spawn the real `claude` binary and stay `rollout`-marked.
 `tests/evals/test_containment_ci_wiring.py::test_rollout_deselected_tests_are_actually_live`
-enforces this mechanically: every test deselected by default under
-`tests/evals/` must reference a live client, the `claude` binary, or a
-live-test env gate in its source, or be individually allow-listed with a
-named reason.
+enforces this mechanically for `rollout`: every module still carrying
+`pytest.mark.rollout` must reference a live client, the `claude` binary, or
+a live-test env gate in its own source. `eval`- and `embedding`-marked
+modules are out of that check's scope — their own `pyproject.toml` marker
+reason strings already document the live cost they mean.
 
 Try it locally: `python -m tests.evals.containment_cli` (defaults to
 `--scale smoke`, zero cost, zero flags needed). Offline, machine-checked in
