@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`--max-tokens` on the north-star grid, and a token ceiling derived from
+  `--max-spend` (issue athenaeum#1754).** `ROLLOUT_TOKEN_CEILING = 2_000_000`
+  was a compiled-in constant no operator flag could raise: run 35200779015,
+  dispatched with `--max-spend 75`, aborted at 392 of 1392 cells on
+  `rollout run exceeded token ceiling (2018960 > 2000000)` with about $73 of
+  the authorized budget unspent. `tests/evals/north_star_cli.py` now takes
+  `--max-tokens` (wired to a `north_star_max_tokens` dispatch input on
+  `evals.yml`'s manual-only north-star job), and when it is omitted derives
+  the ceiling from `--max-spend` at `--model`'s rate via the same price table
+  and per-cell mix the pre-flight spend gate uses
+  (`containment.tokens_for_spend`) — so one knob governs both. The constant
+  remains only as the fallback when neither flag is given.
+- **`--dry-run` prints the token ceiling and refuses up front (issue
+  athenaeum#1754).** The ceiling, its provenance and the projected token
+  total now print beside the existing price and wall-clock lines, and a
+  projection above the ceiling is refused before the first cell runs, naming
+  both numbers — instead of the run discovering it 392 cells in.
+
+### Changed
+
+- **The north-star projection's per-cell token estimate is now measured
+  (issue athenaeum#1754).** `NORTH_STAR_CELL_TOKEN_ESTIMATE` (5,150 tokens
+  per cell) replaces the declared 24,000-token guess for this driver, from
+  run 35200779015's 2,018,960 tokens over 392 completed cells; the shared
+  `DEFAULT_CELL_TOKEN_ESTIMATE` that `containment_cli.py` prices a different
+  driver's cells with is unchanged. `--scale full`'s dry-run price and
+  wall-clock lines are now within a factor of two of observed reality rather
+  than 4.7x over.
+
 ### Fixed
 
 - **The north-star report tests now run in `ci.yml`'s default job (issue

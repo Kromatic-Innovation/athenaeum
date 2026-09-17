@@ -250,6 +250,15 @@ provides the containment the real comparison will need:
   pytest fixture (`rollout_session`, `tests/evals/conftest.py`) and its own
   marker (`rollout`, deselected by default alongside `eval`/`embedding`) are
   registered now so the future rollout-eval work needs no wiring changes.
+- **`--max-tokens`, and the ceiling derived from `--max-spend`** (issue
+  athenaeum#1754) — the constant above is now only the fallback for a run
+  that names neither. `north_star_cli.py --max-tokens N` sets the run's
+  ceiling outright; omitted, it is derived from `--max-spend` at `--model`'s
+  rate and `NORTH_STAR_CELL_TOKEN_ESTIMATE`'s input/output mix
+  (`containment.tokens_for_spend`), so the dollar knob an operator already
+  sets governs the token guard too. Run 35200779015 is why: dispatched at
+  `--max-spend 75`, it died at 392 of 1392 cells on the 2,000,000-token
+  constant with about $73 still authorized.
 
 ### What `rollout` means (issue athenaeum#1742)
 
