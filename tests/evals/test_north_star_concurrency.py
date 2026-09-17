@@ -227,15 +227,22 @@ def test_token_ceiling_stops_every_worker_mid_grid(
             calls.append(probe_id)
         session.observe_response(
             model,
-            SimpleNamespace(usage=SimpleNamespace(input_tokens=1000, output_tokens=1000)),
+            SimpleNamespace(usage=SimpleNamespace(input_tokens=100_000, output_tokens=100_000)),
         )
         return _stub_records(probe_id, corpus_scale)
 
     monkeypatch.setattr(north_star_cli, "run_probe_all_arms", _burning_stub)
-    # One group's worth of usage (2000 tokens) already exceeds this.
-    monkeypatch.setattr(north_star_cli, "ROLLOUT_TOKEN_CEILING", 100)
 
-    exit_code = north_star_cli.main(_small_grid_args(tmp_path, workers=2))
+    # One group's worth of usage (200,000 tokens) already exceeds this
+    # ceiling, while the ceiling still clears the grid's 123,600-token
+    # PROJECTION -- otherwise main's pre-flight would refuse before any
+    # group ran and this test would prove nothing about the mid-grid stop.
+    # Set through --max-tokens rather than by monkeypatching the constant
+    # (issue athenaeum#1754): the flag is now what a run's ceiling comes
+    # from, so the flag is what this property must be proven against.
+    exit_code = north_star_cli.main(
+        [*_small_grid_args(tmp_path, workers=2), "--max-tokens", "150000"]
+    )
 
     assert exit_code == 1
     assert 0 < len(calls) < SMALL_SCALE_GROUPS

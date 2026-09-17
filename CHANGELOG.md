@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`--max-tokens` on the north-star grid, and a token ceiling derived from
+  `--max-spend` (issue athenaeum#1754).** `ROLLOUT_TOKEN_CEILING = 2_000_000`
+  was a compiled-in constant no operator flag could raise: run 35200779015,
+  dispatched with `--max-spend 75`, aborted at 392 of 1392 cells on
+  `rollout run exceeded token ceiling (2018960 > 2000000)` with about $73 of
+  the authorized budget unspent. `tests/evals/north_star_cli.py` now takes
+  `--max-tokens` (wired to a `north_star_max_tokens` dispatch input on
+  `evals.yml`'s manual-only north-star job), and when it is omitted derives
+  the ceiling from `--max-spend` at `--model`'s rate via the same price table
+  and per-cell mix the pre-flight spend gate uses
+  (`containment.tokens_for_spend`) — so one knob governs both. The constant
+  remains only as the fallback when neither flag is given.
+- **The pre-flight refuses a grid whose projection exceeds its own token
+  ceiling (issue athenaeum#1754).** `--dry-run` prints the ceiling, its
+  provenance and the projected token total beside the existing price and
+  wall-clock lines; the refusal itself applies to real runs too, so a grid
+  that would abort mid-way having paid for every cell up to that point is
+  stopped before the first paid call, naming both numbers.
+- **Deriving a ceiling for an unpriced model is refused, not guessed (issue
+  athenaeum#1754).** `tokens_for_spend` raises naming the model rather than
+  returning a figure computed from `athenaeum.models`' blended fallback rate.
+  `--max-tokens` still works on such a model — only the derivation is
+  refused. `--max-tokens` below 1 is rejected at parse time like `--workers`,
+  and `--max-spend 0` reports that provenance rather than claiming no spend
+  flag was given.
+
+### Changed
+
+- **The north-star projection's per-cell token estimate is now measured
+  (issue athenaeum#1754).** `NORTH_STAR_CELL_TOKEN_ESTIMATE` (5,150 tokens
+  per cell) replaces the declared 24,000-token guess for this driver, from
+  run 35200779015's 2,018,960 tokens over 392 completed cells; the shared
+  `DEFAULT_CELL_TOKEN_ESTIMATE` that `containment_cli.py` prices a different
+  driver's cells with is unchanged. `--scale full`'s dry-run price and
+  wall-clock lines are now within a factor of two of observed reality rather
+  than 4.7x over.
+
 ### Fixed
 
 - **Every eval arm is now told to cite the page's reference tag, making the

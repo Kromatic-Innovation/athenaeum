@@ -678,15 +678,22 @@ def test_main_passes_a_should_stop_that_flips_when_the_ceiling_trips(
             seen.append(should_stop)
         session.observe_response(
             model,
-            make_llm_response("x", usage=make_llm_usage(input_tokens=1000, output_tokens=1000)),
+            make_llm_response(
+                "x", usage=make_llm_usage(input_tokens=100_000, output_tokens=100_000)
+            ),
         )
         return _stub_records(probe_id, corpus_scale)
 
     monkeypatch.setattr(north_star_cli, "run_probe_all_arms", _capturing_stub)
-    # One group's usage already exceeds this.
-    monkeypatch.setattr(north_star_cli, "ROLLOUT_TOKEN_CEILING", 100)
 
-    assert north_star_cli.main(_small_grid_args(tmp_path, workers=1)) == 1
+    # One group's usage (200,000 tokens) already exceeds this ceiling, while
+    # the ceiling still clears the grid's 123,600-token projection so main's
+    # pre-flight lets the run start at all (issue athenaeum#1754: set via
+    # --max-tokens, the flag that now carries the ceiling).
+    assert (
+        north_star_cli.main([*_small_grid_args(tmp_path, workers=1), "--max-tokens", "150000"])
+        == 1
+    )
 
     assert seen, "no group ever ran"
     assert all(callable(cb) for cb in seen), (
