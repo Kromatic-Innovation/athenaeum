@@ -1628,7 +1628,11 @@ def _native_index_text_with_warning(written: str, truncated: str) -> tuple[str, 
     elif exceeded_lines:
         size_clause = f"{total_lines} lines (limit: 200)"
     else:
-        size_clause = f"{_format_char_budget(total_chars)} (limit: 25KB) -- index entries are too long"
+        # Em dash, matching the real template exactly (Quine review, issue
+        # athenaeum#1733) -- no lint in this repo forbids it (it already
+        # appears throughout this module's own docstrings).
+        char_budget = _format_char_budget(total_chars)
+        size_clause = f"{char_budget} (limit: 25KB) — index entries are too long"
 
     snippet = _native_index_warning_snippet(written_lines[cutoff]) if cutoff < total_lines else ""
     warning = (
