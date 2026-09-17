@@ -208,6 +208,18 @@ def _build_cells(args: argparse.Namespace) -> list[GridCell]:
     corpus_scales = (
         args.corpus_scales.split(",") if args.corpus_scales else list(DEFAULT_CORPUS_SCALES)
     )
+    # Validated HERE, at parse time, rather than left to fail deep inside a
+    # rollout once a cell for an unknown scale reaches build_corpus() --
+    # issue athenaeum#1735's AC3 ("evals.yml's grid dispatch input accepts
+    # xlarge") is only real if a typo'd scale is caught before any spend,
+    # not after. `--corpus-scales` (and the workflow's free-text
+    # `north_star_corpus_scales` input) accept an arbitrary string, so
+    # nothing upstream of this call validates membership in SCALES.
+    unknown = [s for s in corpus_scales if s not in SCALES]
+    if unknown:
+        raise ValueError(
+            f"unknown corpus scale(s) {unknown!r} in --corpus-scales; known: {sorted(SCALES)}"
+        )
     replicates = [int(r) for r in args.replicates.split(",")]
     placeholder_cells = build_grid(
         args.scale,

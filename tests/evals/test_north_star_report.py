@@ -22,6 +22,7 @@ import pytest
 from tests.evals.containment import GridCell, ResultStore
 from tests.evals.corpus import build_corpus
 from tests.evals.north_star_report import (
+    SIZE_SCALE_ORDER,
     GroupStats,
     NorthStarReport,
     RolloutRow,
@@ -1122,3 +1123,14 @@ def test_render_report_mode_per_cell_reflects_each_row_own_mode() -> None:
     mode_section = text[text.index("## Mode per cell") :]
     assert f"| {PROBE_ID} | pull | {CORPUS_SCALE} | 0 | api |" in mode_section
     assert f"| {PROBE_ID} | native_grep | {CORPUS_SCALE} | 0 | cli |" in mode_section
+
+
+def test_crossover_scale_prose_names_every_size_scale_including_xlarge() -> None:
+    """The "walks the SIZE axis" sentence is DERIVED from
+    :data:`SIZE_SCALE_ORDER`, not a second hand-typed literal -- a Sentry
+    review on PR athenaeum#1750 caught the prose still reading
+    ``core < small < medium < large`` after xlarge (athenaeum#1735) was
+    added to :data:`SIZE_SCALE_ORDER` but not to this sentence. Pinning the
+    text as a derived join makes that drift impossible to reintroduce."""
+    text = render_report(build_report([]))
+    assert " < ".join(f"`{s}`" for s in SIZE_SCALE_ORDER) in text

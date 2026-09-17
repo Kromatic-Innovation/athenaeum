@@ -658,6 +658,17 @@ def test_materialized_native_memory_store_writes_nothing_outside_tmp_path_and_is
     needed. If a future scale point makes this too slow, sample the
     materialized tree (e.g. every Nth page) rather than dropping the scale
     entirely, and update this note.
+
+    **Honesty note on athenaeum#1735 AC2** ("this module's five checks run
+    at xlarge"): only THIS check, the native-memory materializer, actually
+    builds and scans a generated corpus at a variable scale. The other four
+    checks in this module (multi-word name denylist, structural-name check,
+    exhaustive name-space check, brand list -- see
+    ``tests/evals/data/corpus/README.md``'s table) scan committed,
+    hand-authored fixture content and ``build_corpus(scale="small")``/
+    ``scale="core"`` -- ballast/distractor pages are templated and their
+    LEAKAGE SURFACE does not change with page count, so there is nothing
+    scale-specific for them to catch at xlarge that small/core would miss.
     """
     corpus = build_corpus(scale=scale)
     root = tmp_path / "sandbox"

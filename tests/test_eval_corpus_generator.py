@@ -378,6 +378,25 @@ def test_different_seeds_yield_different_corpora() -> None:
     )
 
 
+def test_xlarge_scale_is_pinned() -> None:
+    """Issue athenaeum#1735: page count, ``distractors_per_probe``, and the
+    default-seed fingerprint for ``xlarge`` are pinned so a change to
+    ``SCALES["xlarge"]`` or to the generator that silently shifts its
+    output is caught here rather than only in CI's timing/leakage checks.
+
+    The fingerprint literal is DELIBERATELY brittle to a ``GENERATOR_VERSION``
+    bump (:data:`tests.evals.corpus.GENERATOR_VERSION`) -- any version bump
+    is expected to change every stored fingerprint across the whole corpus
+    module, not just this one, and this test failing is the intended signal
+    to re-derive and update the pinned value, not a bug in the pin itself.
+    """
+    assert SCALES["xlarge"].total_pages >= 25_000
+    assert SCALES["xlarge"].distractors_per_probe == 2
+    corpus = build_corpus(scale="xlarge")
+    assert len(corpus.pages) >= 25_000
+    assert corpus.fingerprint() == "9b1de9056154b6c1"
+
+
 def test_core_scale_generates_nothing() -> None:
     corpus = build_corpus(scale="core")
     assert corpus.tier_counts() == {"core": len(load_core_pages())}
