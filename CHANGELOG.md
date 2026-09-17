@@ -17,6 +17,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   control; cutoff scale is `none`, and the report documents where the
   remaining losses trace to open grading/retrieval issues versus genuine
   misses. No go/no-go call is made here.
+- **`run_native_writer_api` — API-mode native writer for the Phase 2 write
+  path (issue athenaeum#1774).** `run_native_writer` (the Phase 2 native
+  writer) spawns `claude -p`, which requires a logged-in CLI; the grid's
+  default is `--mode api`, so Phase 2 could not run under `workflow_dispatch`
+  at all. `run_native_writer_api` drives `run_api_tool_loop` once per
+  `Observation` in the stream, all sharing one memory directory, and serves
+  `read`/`grep`/`write`/`edit`/`list` tools over it — the same four-verb
+  write surface plus the existing read pair, every one confined by
+  `_resolve_under_memory_dir` so no write can escape the memory directory.
+  Its system prompt mirrors Claude Code's documented auto-memory writing
+  behaviour (design doc §2) rather than a literal quote of Claude Code's own
+  closed-source prompt — that gap stays the CLI-mode spot-check's job to
+  catch. Carries no `REFERENCE_TAG_INSTRUCTION` (these sessions produce
+  memory files, not a graded answer). Returns the existing
+  `NativeWriterResult` shape (now stamped with a `mode` field, `"cli"` or
+  `"api"`, the same pattern `RolloutRecord.mode` already uses), so
+  `compute_write_path_stats` needs no change. `run_native_writer_dispatch`
+  is the new `mode`-switched entry point — `"api"` (default) resolves to
+  `run_native_writer_api`, `"cli"` calls `run_native_writer` unchanged — the
+  seam the Phase 2 CLI flags (athenaeum#1785) will dispatch through.
+
+  Quine review of the same PR found two must-fixes and two shoulds,
+  addressed on the same branch (issue athenaeum#1774): (1) the fidelity
+  caveat naming the two opposite-direction divergences between the
+  reconstructed prompt and Claude Code's real write-side prompt now lives
+  in the design doc itself (§5), not only the PR body/docstrings, and
+  `NativeWriterResult` gains `prompt_fidelity` (`"reconstructed"` for
+  api-mode, `None` for cli) so a report can label Phase 2 write-path
+  numbers as an approximation; (2) the writer's system prompt claimed
+  MEMORY.md index lines "are loaded in full at the start of every
+  session" — corrected to state the real 200-line/25KB cap (design doc
+  §2), pinned by a test; (3) a new contract test runs both
+  `run_native_writer` (stubbed `claude -p`) and `run_native_writer_api`
+  (stub client) on the same fixture stream and asserts the same fields
+  populate on both, differing only in `mode` and `prompt_fidelity`; (4)
+  the writer gets its own turn budget (`_WRITER_API_LOOP_MAX_TURNS = 12`,
+  distinct from the read arms' `_API_LOOP_MAX_TURNS = 6`, since one
+  observation can legitimately need `list`, a `read`/`grep` check, a
+  `write`/`edit`, and an index update), and `NativeWriterSession` gains
+  `turns_exhausted: bool` so a report can tell "the model finished
+  filing" from "the harness cut it off," pinned by tests on both sides.
+
 - **Offline retrieval-coverage test: every grep-reachable expected page
   must also surface in `recall` (issue athenaeum#1770).**
   `tests/evals/test_recall_covers_grep.py` materialises the `core` and
