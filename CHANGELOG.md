@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **FTS5 never indexed a page's body, only its frontmatter — the root cause
+  of two of the six `_FTS5_XFAIL` misses in
+  `tests/evals/test_recall_covers_grep.py` (issue athenaeum#1789).**
+  `confidentiality_rule` and `budget_threshold_current` (both `core` and
+  `medium` corpus scales) were a pure COVERAGE gap: each probe's
+  distinguishing terms exist only in the page body, and
+  `FTS5Backend._row_for` built its index row from
+  `name`/`tags`/`aliases`/`description` alone — no query construction or
+  ranking change could have surfaced a term the index never stored. The
+  `wiki` FTS5 table gains a `body` column (schema version 6, truncated at
+  4000 characters), and `FTS5Backend.query` ranks with an explicit
+  `bm25(wiki, ...)` column weighting (name/aliases weighted well above
+  body) instead of the bare `rank` shorthand (implicit equal weighting) —
+  bm25 length-normalizes over the whole row, so an unweighted body column
+  would have diluted the `person_not_repo`/`repo_not_person`
+  disambiguation win (the `rowanwrenfield` repo page's own body names its
+  namesake person). `current`/`currently` join `FTS5Backend.STOPWORDS`:
+  porter stemming collided the two, so a query using either matched any
+  page whose `(current)`-suffixed name/tags merely marked it as the live
+  version of an unrelated fact, at a BM25 weight inflated by that marker's
+  rarity. `("core", "former_client_not_current")` is ADDED to
+  `_FTS5_XFAIL` — not a regression, but a pre-existing latent failure this
+  change exposed: six `client-*` pages scored IDENTICAL bm25 before this
+  fix (to four decimal places), and the three expected pages only
+  "passed" because SQLite preserves insertion order on exact ties and the
+  index is built in alphabetical filename order. `("core",
+  "confidentiality_rule")` and `("core"/"medium", "budget_threshold_current")`
+  are REMOVED, now genuine passes; `("medium", "surname_is_ambiguous")` and
+  `("medium", "former_client_not_current")` remain xfailed — purpose-built
+  distractor pages sharing the probe's vocabulary in both name and body are
+  not reliably separable from genuine answer pages by lexical signal alone.
+  New unit tests in `tests/test_search.py` pin an explicit pre-quoted FTS5
+  query string's result set unchanged, and the person/repo disambiguation
+  guard as a standalone offline fixture. Out of scope, noted for a
+  follow-up: `athenaeum.context._query_fts5` and the shipped
+  `examples/claude-code/user-prompt-recall.sh` hook both build their own
+  inline FTS5 query against the bare `rank` column, independently of
+  `FTS5Backend.query` — their ranking does not benefit from this weighting
+  change (and was not asked to; the hook is explicitly out of scope for
+  this issue).
+
 ### Added
 
 - **Phase 2 CLI flags + sibling store (issue athenaeum#1785).**

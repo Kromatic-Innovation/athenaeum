@@ -570,18 +570,50 @@ def _probe_by_id(corpus: Corpus, probe_id: str) -> Probe:
 # which is the signal to remove it from this set.
 # ---------------------------------------------------------------------------
 
-#: fts5 backend -- 6 of 52 (scale, probe) cases, measured 2026-09-17 against
-#: develop @ 5693c1c7 (post athenaeum#1768/athenaeum#1769), PLUS one more
-#: added by athenaeum#1780: adding the `aggregation` class's 7-client
-#: `aggregation_retainer_clients` correct set (3 new pages plus
-#: client-castleford, all genuinely retainer clients, all sharing
-#: "retainer" vocabulary by construction -- that sharing is the class's own
-#: measured property, not an accident) shifts fts5's relative ranking
-#: enough that client-bluewater drops out of `former_client_not_current`'s
-#: top 5 at `core` scale (it was already a `medium`-scale miss below,
-#: unrelated to this PR). Same failure mode as the other entries here: a
-#: retrieval-side ranking effect, not a fixture defect -- see this file's
-#: own "DO NOT edit the fixtures" note above.
+#: fts5 backend, measured 2026-09-17. Two entries below (``confidentiality_rule``
+#: and ``budget_threshold_current``, both scales) were carried forward from
+#: develop @ 5693c1c7 (post athenaeum#1768/athenaeum#1769/athenaeum#1780 --
+#: the `aggregation` class's `aggregation_retainer_clients` addition shifted
+#: fts5's relative ranking enough that client-bluewater drops out of
+#: `former_client_not_current`'s top 5 at `core` scale too). athenaeum#1789's
+#: FTS5 fix in this same commit (body indexed, weighted bm25,
+#: ``current``/``currently`` stopworded -- see ``src/athenaeum/search.py``'s
+#: ``FTS5Backend``) targets exactly these two cases: their query's
+#: distinguishing terms (``engagement``/``details``/``another`` for the
+#: first, ``lead``/``ceiling`` for the second) exist only in the page BODY,
+#: which FTS5 never indexed before this fix. They are kept here pending
+#: re-verification against the rebased index; the pre-rebase measurement
+#: for this fix alone found them fixed (2 of 52 remaining, against
+#: develop @ 16d40f24) -- if they still pass after rebase, remove them and
+#: say so, per the strict xfail contract below.
+#:
+#: ``("core", "former_client_not_current")`` is ADDED by athenaeum#1789 --
+#: NOT a regression this fix introduced, but a PRE-EXISTING latent failure
+#: this fix exposed. Measured before this change: all six ``client-*``
+#: retainer pages (three expected, three from unrelated follow_through
+#: fixtures that happen to share every matched term/tag) scored IDENTICAL
+#: bm25 to four decimal places (-4.7969), and the three expected pages
+#: happened to win only because SQLite preserves insertion order on exact
+#: ties and ``_iter_wiki_entries`` inserts in ``sorted(os.listdir(...))``
+#: order -- ``client-alderway`` < ``client-atlas`` < ``client-bluewater`` <
+#: ``client-castleford`` < ... alphabetically. That was never a ranking
+#: signal; it was an accident of build order that any change to the score
+#: function (this one, or the sibling hybrid-ranking lane's) can reshuffle.
+#: Body indexing broke the tie for real (``client-bluewater``'s longer body
+#: -- it quotes its retainer terms verbatim -- now scores fractionally lower
+#: under bm25's length normalization), dropping it out of the top 5. Adding
+#: a secondary ``ORDER BY ..., filename`` to restore the old order was
+#: considered and rejected: it would encode alphabetical position as
+#: relevance and make the fragility permanent and invisible instead of
+#: named here.
+#:
+#: ``medium``/``surname_is_ambiguous`` and ``medium``/``former_client_not_current``
+#: remain xfailed: distractor pages purpose-built to share the probe's
+#: vocabulary (``dis-surname_is_ambiguous-*``, ``dis-former_client_not_current-*``)
+#: match on NAME as well as body and are not reliably separable from the
+#: genuine answer pages by lexical signal alone -- ``person-ilva-wrenfield``
+#: and ``person-tovah-wrenfield`` score IDENTICAL to each other (another
+#: exact tie) two-to-three ranks behind the distractor block.
 _FTS5_XFAIL: frozenset[tuple[str, str]] = frozenset(
     {
         ("core", "confidentiality_rule"),

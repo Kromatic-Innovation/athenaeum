@@ -278,6 +278,16 @@ class SearchBackend(Protocol):
 # Exposed as the single source of truth so shell hooks and downstream
 # callers don't re-hardcode their own copy. See `athenaeum stopwords`
 # CLI subcommand and examples/claude-code/user-prompt-recall.sh.
+#
+# ``current``/``currently`` (issue athenaeum#1789): porter stemming folds
+# both to the same stem, so a query using either collides with any page
+# whose NAME/tags simply mark it as the live version of a fact (e.g. a
+# ``(current)``-suffixed page's ``tags: [..., current]``) — a purely
+# structural marker, not a topical match. On a small corpus that marker
+# tag is rare enough to carry an outsized BM25 IDF, letting a handful of
+# unrelated "current" pages outrank the real answer (measured on the
+# ``former_client_not_current`` probe). Filtered the same way the
+# existing temporal fillers (``now``, ``old``, ``new``) already are.
 STOPWORDS: tuple[str, ...] = tuple(
     sorted(
         set(
@@ -293,7 +303,7 @@ STOPWORDS: tuple[str, ...] = tuple(
             "there these thing think three through under until which while world would "
             "years your into just like made over said some than them then time very "
             "want what when will with year does really right going being looking "
-            "trying running check please sure okay yeah thanks".split()
+            "trying running check please sure okay yeah thanks current currently".split()
         )
     )
 )
@@ -1110,19 +1120,55 @@ class FTS5Backend:
     # while this build path inserts seven values, and every incremental
     # build would raise straight into an empty recall. The stamp mismatch
     # force-rebuilds instead, which is safe here because the index is a
-    # derived cache — no corpus content is lost by rebuilding it.
-    _SCHEMA_VERSION = 5
+    # derived cache — no corpus content is lost by rebuilding it. Version 6
+    # (issue athenaeum#1789) adds the ``body`` column: before this, FTS5 only
+    # ever indexed frontmatter (name/tags/aliases/description) — a fact
+    # stated only in a page's prose body was invisible to FTS5 MATCH no
+    # matter how the query or ranking was tuned, which is the root cause of
+    # the ``confidentiality_rule``/``budget_threshold_current`` coverage
+    # misses (see ``tests/evals/test_recall_covers_grep.py``'s
+    # ``_FTS5_XFAIL``): the grep baseline reads the rendered body, FTS5's
+    # index never did. Column-set change, so this needs the same bump every
+    # prior shape change did.
+    _SCHEMA_VERSION = 6
+
+    #: Cap on how much of a page's body is indexed (characters), mirroring
+    #: ``VectorBackend._DOC_LIMIT``'s precedent for bounding a per-page
+    #: index footprint. Generous relative to the hand-authored eval corpus's
+    #: page bodies (a few hundred chars) so no probe fixture is truncated;
+    #: bounds the cost of a pathologically large real page without needing
+    #: a second knob.
+    _BODY_LIMIT = 4000
+
+    # BM25 column weights (issue athenaeum#1789): ``name``/``aliases`` carry
+    # a page's identity and are weighted well above ``body`` so a page that
+    # matches by title/alias (the disambiguation win the
+    # ``person_not_repo``/``repo_not_person`` probes pin) is not diluted by
+    # adding the (much longer) body column to the row — FTS5's bm25 length-
+    # normalizes over the WHOLE row, so a naive equal-weight body column
+    # would systematically depress every other column's contribution.
+    # Order matches the indexed (non-UNINDEXED) columns in ``_CREATE_SQL``:
+    # filename, name, tags, aliases, description, body.
+    # Values measured empirically against ``tests/evals/test_recall_covers_grep.py``'s
+    # xfail set (issue athenaeum#1789): high enough on name/aliases to keep the
+    # ``person_not_repo``/``repo_not_person`` disambiguation win (the eponymous
+    # repo page's body names its namesake person, so an unweighted body column
+    # pulls it inside the top 5), low enough on body that a coverage-only match
+    # (a fact that exists ONLY in body — see the schema-bump comment above)
+    # still surfaces without every ballast/distractor page that merely shares a
+    # body word crowding out the real answer.
+    _BM25_WEIGHTS: tuple[float, ...] = (1.0, 8.0, 4.0, 8.0, 3.0, 0.4)
 
     # SQL fragments shared by the full and incremental build paths. ``type``
     # is UNINDEXED (out of the BM25 term space, exact-matched via WHERE) —
     # same storage shape ``audience`` established (issue athenaeum#312).
     _CREATE_SQL = (
         "CREATE VIRTUAL TABLE IF NOT EXISTS wiki USING fts5"
-        "(filename, name, tags, aliases, description, audience UNINDEXED, "
+        "(filename, name, tags, aliases, description, body, audience UNINDEXED, "
         "type UNINDEXED, "
         'tokenize="porter unicode61")'
     )
-    _INSERT_SQL = "INSERT INTO wiki VALUES (?,?,?,?,?,?,?)"
+    _INSERT_SQL = "INSERT INTO wiki VALUES (?,?,?,?,?,?,?,?)"
 
     def incremental_reuse_blocker(
         self, cache_dir: Path, stored: dict[str, Any] | None
@@ -1189,13 +1235,24 @@ class FTS5Backend:
         meta: dict[str, Any],
         *,
         config: dict[str, Any] | None = None,
-    ) -> tuple[str, str, str, str, str, str, str]:
+    ) -> tuple[str, str, str, str, str, str, str, str]:
         """Build the FTS5 row tuple for one page."""
         name, tags, aliases, description = _extract_frontmatter_fields(text)
         if not name:
             # For extra-root entries use the leaf stem (not the prefixed
             # indexed_name) so recall results show a clean title.
             name = path.stem
+        # Issue athenaeum#1789: the body — everything after the frontmatter
+        # close fence — is what a grep baseline over the rendered page
+        # actually reads (``tests/evals/test_recall_covers_grep.py``'s
+        # ``_grep_hits``), and prior to this it was never part of the FTS5
+        # index at all (only name/tags/aliases/description were). Reuses the
+        # SAME ``parse_frontmatter`` split ``KeywordBackend.query`` already
+        # relies on (``fm, body = parse_frontmatter(text)``) rather than a
+        # second frontmatter-boundary scanner. Truncated to ``_BODY_LIMIT``
+        # so one oversized page can't blow up the index footprint.
+        _fm, body = parse_frontmatter(text)
+        body = body[: FTS5Backend._BODY_LIMIT]
         # Issue athenaeum#312: store each page's effective audience (delimited,
         # anchored) so Layer B can filter inside the query.
         audience = audience_index_string(meta)
@@ -1218,6 +1275,7 @@ class FTS5Backend:
             tags,
             aliases,
             description,
+            body,
             audience,
             page_type,
         )
@@ -1477,12 +1535,23 @@ class FTS5Backend:
             type_clause = f" AND type IN ({placeholders})"
             type_params = list(normalized_types)
 
+        # Issue athenaeum#1789: rank by an explicitly WEIGHTED bm25() rather
+        # than the bare ``rank`` column (SQLite FTS5's shorthand for
+        # ``bm25(wiki)`` — every indexed column weighted 1.0). bm25's length
+        # normalization is computed over the WHOLE row, so once ``body`` (a
+        # column that dwarfs the others) entered the index unweighted, it
+        # would systematically dilute every other column's contribution and
+        # was the likeliest way to lose the ``person_not_repo``/
+        # ``repo_not_person`` name-match win. Weight args are our own fixed
+        # class constant (never user input), so inlining them is safe;
+        # bm25()'s weight arguments are not bindable via ``?`` parameters.
+        bm25_expr = "bm25(wiki, " + ", ".join(str(w) for w in self._BM25_WEIGHTS) + ")"
         conn = sqlite3.connect(str(db_path))
         try:
             cursor = conn.execute(
-                f"SELECT filename, name, rank FROM wiki "
+                f"SELECT filename, name, {bm25_expr} AS score FROM wiki "
                 f"WHERE wiki MATCH ? {exclude_clause}{audience_clause}{type_clause} "
-                f"ORDER BY rank LIMIT ?",
+                f"ORDER BY score LIMIT ?",
                 [fts_query, *params, *audience_params, *type_params, n],
             )
             return [(row[0], row[1], row[2]) for row in cursor.fetchall()]

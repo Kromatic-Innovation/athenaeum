@@ -774,6 +774,29 @@ class TestConvenienceFunctions:
         results = query_fts5_index("acme", str(cache))
         assert len(results) > 0
 
+    def test_explicit_fts5_query_string_caller_unchanged(
+        self, wiki_with_pages: Path, tmp_path: Path
+    ) -> None:
+        """Issue athenaeum#1789 AC4: a caller that builds its OWN pre-quoted
+        FTS5-shaped OR expression -- the same shape
+        ``athenaeum.context.build_fts_query`` and the shell hook's own
+        ``FTS_QUERY`` construction both produce (``'"term1" OR "term2"'``) --
+        gets the same result set after this issue's body-indexing/bm25-
+        weight/stopword changes as before them. ``FTS5Backend.query`` always
+        re-tokenizes its ``query`` argument (never treats it as a literal
+        MATCH expression -- see its docstring), so an explicit caller's
+        already-quoted string round-trips through the exact same term
+        extraction an ordinary natural-language query does; this pins that
+        callers of this shape are not a special case this issue could have
+        silently broken.
+        """
+        cache = tmp_path / "cache"
+        build_fts5_index(wiki_with_pages, cache)
+        explicit_query = '"acme" OR "fintech"'
+        results = query_fts5_index(explicit_query, cache)
+        filenames = [r[0] for r in results]
+        assert "acme-corp.md" in filenames
+
 
 class TestHybridRescueClasses:
     """Each backend rescues a failure class the other has.
@@ -1056,6 +1079,95 @@ def _write_page(
     (wiki / fname).write_text(f"---\n{fm}---\n\n{body}\n")
 
 
+class TestFTS5PersonRepoDisambiguation:
+    """Issue athenaeum#1789 AC3: with ``body`` now indexed, an eponymous
+    "named after" page (a repo's body naming the person it's named after)
+    is exactly the shape that can leak into the person's own results if
+    body content is weighted too close to name/aliases. Pins the
+    ``person_not_repo``/``repo_not_person`` disambiguation win from
+    ``tests/evals/data/corpus/core/04-identity-collision.yaml`` (measured
+    live via ``tests/evals/test_recall_covers_grep.py``'s ``must_not_rank``
+    reporting) as a standalone, offline unit test.
+    """
+
+    @pytest.fixture
+    def person_repo_wiki(self, tmp_path: Path) -> Path:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        (wiki / "person-rowan-wrenfield.md").write_text(
+            "---\n"
+            'name: "Rowan Wrenfield"\n'
+            "aliases:\n"
+            '  - "Rowan"\n'
+            '  - "R. Wrenfield"\n'
+            "tags: [person, partner]\n"
+            "---\n\n"
+            "Rowan Wrenfield is a founding partner and chaired the 2026 "
+            "pricing review. Rowan's decision on pricing was to hold the "
+            "day rate flat through the financial year.\n"
+        )
+        (wiki / "repo-rowanwrenfield.md").write_text(
+            "---\n"
+            'name: "rowanwrenfield"\n'
+            "aliases:\n"
+            '  - "rowanwrenfield repo"\n'
+            "tags: [repository, software]\n"
+            "---\n\n"
+            "rowanwrenfield is an internal code repository. It is named "
+            "after Rowan Wrenfield, who wrote the first version, but the "
+            "repository has no opinions, decisions, or pricing authority "
+            "of its own. A question about what Rowan Wrenfield decided is "
+            "a question about the PERSON, not about this repository. The "
+            "repository has 4 maintainers.\n"
+        )
+        return wiki
+
+    def test_person_query_ranks_person_above_eponymous_repo(
+        self, person_repo_wiki: Path, tmp_path: Path
+    ) -> None:
+        """Only two pages exist in this fixture, so both inevitably match
+        (a toy fixture has no distractor mass to push a loser out of a
+        top-k window the way the live eval corpus does) -- the invariant a
+        minimal fixture CAN pin is relative order: the person must rank
+        strictly ahead of the repo that merely names her, matching the
+        live corpus's actual mechanism (competing pages outrank the repo,
+        not a hard exclusion).
+        """
+        cache = tmp_path / "cache"
+        FTS5Backend().build_index(person_repo_wiki, cache)
+        results = FTS5Backend().query(
+            "what did Rowan Wrenfield decide about pricing?", cache, n=5
+        )
+        filenames = [r[0] for r in results]
+        assert filenames.index("person-rowan-wrenfield.md") < filenames.index(
+            "repo-rowanwrenfield.md"
+        ), (
+            "the repo's own body naming its namesake must not outrank the "
+            "person on a question about the person"
+        )
+
+    def test_repo_query_ranks_repo_above_namesake_person(
+        self, person_repo_wiki: Path, tmp_path: Path
+    ) -> None:
+        cache = tmp_path / "cache"
+        FTS5Backend().build_index(person_repo_wiki, cache)
+        results = FTS5Backend().query(
+            "how many maintainers does the rowanwrenfield repository have?",
+            cache,
+            n=5,
+        )
+        filenames = [r[0] for r in results]
+        assert "repo-rowanwrenfield.md" in filenames
+        # The person page may not match this query's vocabulary at all
+        # (it names none of "maintainers"/"rowanwrenfield"/"repository") --
+        # the guard only needs to not always prefer the person, which a
+        # missing-or-ranked-after person page both satisfy.
+        if "person-rowan-wrenfield.md" in filenames:
+            assert filenames.index("repo-rowanwrenfield.md") < filenames.index(
+                "person-rowan-wrenfield.md"
+            ), "the guard must not simply always prefer the person page"
+
+
 class TestFTS5Incremental:
     """Hash-diff coverage for the FTS5 backend: add/update/delete/no-op."""
 
@@ -1120,14 +1232,19 @@ class TestFTS5Incremental:
         )
         count = FTS5Backend().build_index(wiki, cache)
         # A whole-file hash change re-indexes even when the change is in the
-        # body (FTS5 indexes frontmatter only, so the query surface is
-        # unchanged here — the point is the differ never MISSES the edit).
+        # body — the differ never MISSES the edit regardless of whether the
+        # body itself is part of the query surface.
         assert delta_spy["changed"] == ["acme-corp.md"]
         assert delta_spy["added"] == []
         assert delta_spy["removed"] == []
         assert count == 3  # replace, not accrete
         # The page is still present and findable via its frontmatter.
         results = FTS5Backend().query("acme fintech", cache)
+        assert "acme-corp.md" in [r[0] for r in results]
+        # Issue athenaeum#1789: FTS5 now indexes ``body`` too (previously
+        # frontmatter-only), so the edited body's own vocabulary is
+        # searchable — the re-index actually changed the query surface.
+        results = FTS5Backend().query("quantum cryptography", cache)
         assert "acme-corp.md" in [r[0] for r in results]
 
     def test_update_frontmatter_only(
