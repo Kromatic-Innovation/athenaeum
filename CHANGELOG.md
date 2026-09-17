@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`temporal` probes with person/company expected pages (issue
+  athenaeum#1744).** The go/no-go rule's condition 1 relationship subset
+  (`_relationship_probe_ids` in `tests/evals/north_star_report.py`) is
+  `single_hop`/`multi_hop`/`disambiguation`/`temporal` probes whose
+  `expected_uids` resolve to a `person` or `company` page. Every existing
+  `temporal` probe targeted a `note` page, so the subset carried zero
+  `temporal` probes — Quine's mutation review of PR athenaeum#1740 found that
+  dropping `temporal` from that class list was an equivalent mutant. Three
+  new `temporal` probes plant a last-contact date, a first-contact date,
+  and a changed-role date directly on a person/company page (each with its
+  own current/superseded pair and a distinct planted answer token), and
+  `tests/test_eval_corpus_generator.py` now asserts the relationship subset
+  at `core` contains at least one probe of each of the four classes, so the
+  class list cannot become an equivalent mutant again.
 - **Token-free eval-receipt check for LLM-surface PRs (issue athenaeum#1731).**
   A new advisory workflow, `.github/workflows/eval-receipt-check.yml`,
   intersects a PR's changed paths against the LLM surface list
