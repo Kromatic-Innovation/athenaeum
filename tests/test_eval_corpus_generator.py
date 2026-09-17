@@ -507,11 +507,12 @@ def test_xlarge_scale_is_pinned() -> None:
     corpus = build_corpus(scale="xlarge")
     assert len(corpus.pages) >= 25_000
     # athenaeum#1766: six core pages gained a new `Internal reference tag:`
-    # line and the follow_through probe queries were reworded, which shifts
-    # every stored fingerprint that hashes rendered markdown -- same class
-    # of expected change as a GENERATOR_VERSION bump, per this test's own
-    # docstring.
-    assert corpus.fingerprint() == "5a782f03ee458275"
+    # line, the follow_through probe queries were reworded, and
+    # client-fenwick-systems's body was trimmed to remove a cadence leak
+    # (Quine review) -- each shifts every stored fingerprint that hashes
+    # rendered markdown, same class of expected change as a
+    # GENERATOR_VERSION bump, per this test's own docstring.
+    assert corpus.fingerprint() == "4ce62c1b2be87e13"
 
 
 def test_core_scale_generates_nothing() -> None:
