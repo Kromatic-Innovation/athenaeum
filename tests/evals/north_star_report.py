@@ -2070,7 +2070,12 @@ def render_report(report: NorthStarReport) -> str:
         "what makes NONE (floor) and ORACLE (ceiling) readable as numbers for the first time — "
         "every other dimension above describes retrieval or cost, never whether the final "
         "answer was actually right. `n/a` means no probe in that group carries ground truth "
-        "tokens to grade against."
+        "tokens to grade against. Those tokens are the corpus pages' own internal "
+        "reference tags, so every arm's system prompt carries one identical instruction "
+        "(issue athenaeum#1753) to end the answer with `[ref: TAG]` for each page relied on, "
+        "or `[ref: none]` for none — correctness therefore reads as “did the arm reach the "
+        "right page and say so”. Rows recorded before that contract landed carry no tags "
+        "and grade at or near 0 for every arm, including ORACLE."
     )
     lines.append("")
     lines.append("| probe_class | corpus_scale | arm | n | correctness_rate |")

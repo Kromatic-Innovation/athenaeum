@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Every eval arm is now told to cite the page's reference tag, making the
+  grading contract satisfiable (issue athenaeum#1753).** Correctness is a
+  deterministic substring match against each probe's planted `answer_tokens`
+  (`tests/evals/north_star_report.py::grade_correctness`), and those tokens
+  are the invented words the corpus pages carry on their `Internal reference
+  tag:` line. No model repeats an unasked-for tag, so a factually correct
+  answer graded wrong: the first live grid (athenaeum#1724) scored even
+  `oracle` — handed the ground-truth page verbatim — at 0/18 on `single_hop`,
+  0/6 on `multi_hop` and 0/7 on `temporal`. Grading is unchanged (design §8
+  still forbids an LLM judge); instead every arm's system prompt now carries
+  one identical instruction, `tests.evals.rollout.REFERENCE_TAG_INSTRUCTION`,
+  to end the answer with `[ref: TAG]` for each page the answer is based on —
+  only pages it actually draws on, not every page opened along the way — or
+  `[ref: none]` when declining to answer. It is composed into `_SYSTEM_PROMPT`, `_PULL_API_SYSTEM_PROMPT`
+  and both native api-mode prompts, and appended to both `claude -p` CLI paths
+  via `--append-system-prompt` (append, never `--system-prompt`, which would
+  discard the auto-memory instructions the native arms exist to measure).
+  Because the text is byte-identical across arms it cannot bias the
+  comparison. The Phase 2 native WRITER sessions are deliberately excluded —
+  they produce memory files, not graded answers. Abstention grading is
+  untouched: `[ref: none]` carries no planted token. New
+  `tests/evals/test_reference_tag_contract.py` derives each arm's prompt from
+  its real producer (so dropping the instruction from any one arm fails the
+  test), pins the `oracle` fixture pair — the same answer grades correct with
+  the tag and wrong without it — and pins both abstention directions. The
+  report gains a sentence naming the contract, and
+  `docs/design/native-memory-baseline.md` §5 a paragraph. Re-grading the
+  existing 392-row store is NOT expected to change; those answers carry no
+  tags.
+
 - **The north-star report tests now run in `ci.yml`'s default job (issue
   athenaeum#1742).** `tests/evals/test_north_star_report.py`,
   `test_rollout.py`, `test_north_star_cli.py`, `test_rollout_payload.py`,
