@@ -21,9 +21,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   probe with no authored `must_not_rank` set, and the epic's
   `eval-wave-2-spec.md` §5.3 cap-trigger verdict) lives in a new module,
   `tests/evals/relevance_metrics.py`, with its own unit tests against a
-  synthetic corpus. All six scale/variant cap-signal verdicts read "fixed
-  cap is cutting noise" — see `docs/design/native-memory-baseline.md` §5
-  for the full tables, computed against `develop` @ `b9583362`. This is
+  synthetic corpus. Contamination is declared explicitly as
+  `|retrieved ∩ must_not_rank| / |must_not_rank|`, a deliberate departure
+  from issue athenaeum#1782's own AC table (`/ |retrieved|`) — see the
+  module docstring for why the AC formula is vacuous. `cap_verdict` reports
+  four outcomes, not two: a material recall drop that precision does NOT
+  offset is `"fixed cap is cutting signal"`; one that precision DOES offset
+  is `"mixed: cutting both"`, distinct from `"fixed cap is cutting noise"`
+  (recall holds, precision rises) — the two `fts5` rows, the only rows that
+  hold the ranker fixed (the hook runs fts5-backed with no `config.env`;
+  the four `vector-hybrid-*` rows compare an fts5-backed hook against a
+  vector-backed recall@5 and do not isolate the cap), read "mixed: cutting
+  both"; the four vector-hybrid rows read "fixed cap is cutting noise" —
+  see `docs/design/native-memory-baseline.md` §5 for the full tables and
+  the same-ranker caveat, computed against `develop` @ `b9583362`. This is
   issue athenaeum#1783's cap-ruling input; it does not decide or implement
   the cap.
 - **Hook-breadcrumb `name_to_uid` collision fix at `medium` scale (issue

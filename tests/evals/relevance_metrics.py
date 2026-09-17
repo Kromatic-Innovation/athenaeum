@@ -14,6 +14,29 @@ precision/contamination/cap-signal arithmetic plus its own unit tests made
 that module too large to read as one piece. This module carries no test
 collection of its own (not ``test_*.py``); its unit tests live in
 ``test_recall_covers_grep.py``.
+
+**Contamination's denominator is a declared choice, not the issue's own AC
+table wording (athenaeum#1782/athenaeum#1783 Quine review).** Issue
+athenaeum#1782's acceptance-criteria table wrote
+``contamination@R = |retrieved ∩ must_not_rank| / |retrieved|``. This
+module instead computes ``|retrieved ∩ must_not_rank| / |must_not_rank|``
+(:meth:`ProbeRelevance.contamination`) -- dividing by the SIZE OF THE
+NEGATIVE SET, not by how much the retriever returned. The AC's own
+formula, read literally, is undefined (division by zero) whenever a
+retriever returns nothing, and -- worse -- goes vacuously to ``0.0`` for a
+retriever that returns plenty but happens to avoid every ``must_not_rank``
+uid, which reads as "no contamination measured" identically to "no
+contamination present", collapsing two different findings into one number.
+Dividing by ``|must_not_rank|`` instead answers "what fraction of the
+known negative controls did this retriever surface", is well-defined for
+any non-empty ``must_not_rank`` set regardless of how much was retrieved,
+and only needs the SEPARATE, already-documented ``n/a`` guard for probes
+with no authored ``must_not_rank`` set at all (issue athenaeum#1777's
+finding) -- never a silent 1.0 off an EMPTY negative set, which is the one
+vacuous case the AC text was actually trying to rule out. Named here the
+same way :data:`CAP_SIGNAL_EPS` is named: this module's own choice,
+declared so athenaeum#1783's ruling reads the real formula rather than the
+AC table's.
 """
 
 from __future__ import annotations
@@ -72,10 +95,14 @@ class ProbeRelevance:
         return len(self.hits) / len(self.retrieved_set)
 
     def contamination(self) -> float | None:
-        """``|retrieved ∩ must_not_rank| / |must_not_rank|``. ``None``
-        ("n/a") when the probe carries no authored ``must_not_rank`` set --
-        issue athenaeum#1782's own acceptance criterion: never a silent
-        ``1.0`` (vacuously "0 surfaced of 0") off an empty negative set."""
+        """``|retrieved ∩ must_not_rank| / |must_not_rank|`` -- fraction of
+        the KNOWN NEGATIVE CONTROLS this retriever surfaced. This is a
+        deliberate departure from issue athenaeum#1782's own AC table,
+        which wrote ``/ |retrieved|``; see the module docstring for why.
+        ``None`` ("n/a") when the probe carries no authored
+        ``must_not_rank`` set -- issue athenaeum#1782's own acceptance
+        criterion: never a silent ``1.0`` (vacuously "0 surfaced of 0") off
+        an empty negative set."""
         if not self.must_not_rank:
             return None
         return len(self.contaminants) / len(self.must_not_rank)
@@ -187,14 +214,28 @@ def cap_verdict(
     * ``"fixed cap is cutting signal"`` -- recall@hook@3 materially below
       recall@recall-default WHILE precision@recall-default stays at or
       above precision@hook@3 (a literal ``>=``, no epsilon -- the epic's own
-      wording is "stays at or above", not "stays materially at or above").
-    * ``"fixed cap is cutting noise"`` -- the converse: precision@hook@3
-      sharply above precision@recall-default (truncating to three is
-      buying real precision).
-    * ``"inconclusive"`` otherwise, including the case where both
-      conditions would technically fire (the trigger pattern does not
-      distinguish that combination, so it is not this function's place to
-      pick one).
+      wording is "stays at or above", not "stays materially at or above"):
+      the cap discards relevant pages and buys nothing for it.
+    * ``"mixed: cutting both"`` (issue athenaeum#1782/athenaeum#1783 Quine
+      review) -- recall@hook@3 is materially below recall@recall-default
+      (the SAME condition as "cutting signal" above) but precision@hook@3
+      is HIGHER, not lower-or-equal: the cap is discarding relevant pages
+      AND buying real precision at the same time, so calling that "cutting
+      signal" alone -- as the first release of this function did -- reads
+      the recall cost as free when it measurably was not. This is the
+      common case on this issue's own fts5 rows: hook@3 costs recall
+      relative to recall@5 while precision rises.
+    * ``"fixed cap is cutting noise"`` -- recall HOLDS (no material drop)
+      while precision@hook@3 is sharply above precision@recall-default:
+      truncating to three buys precision at no material recall cost.
+    * ``"inconclusive"`` otherwise -- recall holds and precision does not
+      rise sharply either; nothing here supports a policy call.
+
+    These four branches are mutually exclusive by construction (each
+    checks ``recall`` first, then ``precision``, in a single if/elif
+    chain), so -- unlike a first draft of this function, which flagged a
+    same-turn "both conditions fire" case as a fifth, unreachable
+    "inconclusive" path -- there is no dead branch to special-case here.
 
     Any ``None`` input (an empty pooled group -- no probes contributed a
     defined recall/precision for one of the two retrievers) is
@@ -206,15 +247,13 @@ def cap_verdict(
     assert recall_recall5 is not None
     assert precision_hook3 is not None
     assert precision_recall5 is not None
-    cutting_signal = (
-        recall_hook3 < recall_recall5 - CAP_SIGNAL_EPS and precision_recall5 >= precision_hook3
-    )
-    cutting_noise = precision_hook3 - precision_recall5 > CAP_SIGNAL_EPS
-    if cutting_signal and cutting_noise:
-        return "inconclusive"
-    if cutting_signal:
+    material_recall_drop = recall_hook3 < recall_recall5 - CAP_SIGNAL_EPS
+    material_precision_gain = precision_hook3 - precision_recall5 > CAP_SIGNAL_EPS
+    if material_recall_drop and precision_recall5 >= precision_hook3:
         return "fixed cap is cutting signal"
-    if cutting_noise:
+    if material_recall_drop:
+        return "mixed: cutting both"
+    if material_precision_gain:
         return "fixed cap is cutting noise"
     return "inconclusive"
 

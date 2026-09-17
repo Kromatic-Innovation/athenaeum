@@ -888,6 +888,18 @@ def test_print_precision_contamination_tables_and_cap_signal(
     fx = scale_fixture
     probes = _non_abstention_probes()
 
+    # issue athenaeum#1790, Quine must-fix 3: this function is the
+    # documented entry point issue athenaeum#1783's ruling is told to run
+    # (see this function's own docstring / the module docstring) -- the
+    # name_to_uid collision exclusion count belongs here too, not only on
+    # test_print_per_probe_class_summary, so a reader who runs ONLY this
+    # table still sees it.
+    print(
+        f"\nname_to_uid collisions (athenaeum#1790) -- scale={fx.corpus.scale}: "
+        f"{fx.name_collision_names} colliding names, {fx.name_collision_pages} pages "
+        "excluded from the hook@3 columns below"
+    )
+
     # grep and the hook are backend-independent (the hook always runs the
     # SAME real subprocess, or the same fts5 n=3 fallback, regardless of
     # which recall backend variant is under measurement here) -- computed
@@ -896,9 +908,11 @@ def test_print_precision_contamination_tables_and_cap_signal(
     # information.
     grep_by_probe: dict[str, dict[str, set[str]]] = {}
     hook_by_probe: dict[str, list[str]] = {}
+    hook_real_count = 0
+    hook_fallback_count = 0
     for probe in probes:
         grep_by_probe[probe.id] = _grep_hits(fx.corpus, probe.query)
-        hook_ranked, _is_real = _hook_ranked_uids(
+        hook_ranked, hook_is_real = _hook_ranked_uids(
             knowledge_root=fx.knowledge_root,
             hook_home=fx.hook_home,
             query=probe.query,
@@ -908,6 +922,20 @@ def test_print_precision_contamination_tables_and_cap_signal(
             fts5_cache_dir=fx.fts5_cache_dir,
         )
         hook_by_probe[probe.id] = hook_ranked
+        if hook_is_real:
+            hook_real_count += 1
+        else:
+            hook_fallback_count += 1
+
+    # Should-fix (Quine review): the hook column's own evidence -- how many
+    # of the per-probe hook@3 measurements above are the REAL
+    # user-prompt-recall.sh subprocess vs. the offline fts5 n=3 fallback
+    # (issue athenaeum#1770 item 1) -- was computed and then discarded here
+    # in the first draft.
+    print(
+        f"hook@3 evidence -- scale={fx.corpus.scale}: {hook_real_count} probes via the real "
+        f"hook subprocess, {hook_fallback_count} via the fts5 n=3 fallback"
+    )
 
     vector_hybrid_on_ranked: dict[str, list[str]] = {}
     vector_hybrid_off_ranked: dict[str, list[str]] = {}
@@ -1067,6 +1095,16 @@ def test_relevance_metrics_recall_precision_contamination_grep_miss() -> None:
     no_mnr = ProbeRelevance(expected=expected, must_not_rank=frozenset(), retrieved=("a", "b"))
     assert no_mnr.contamination() is None
 
+    # recall() raises on an abstention-shaped probe (no expected_uids) --
+    # callers filter those out upstream via _non_abstention_probes; this
+    # pins that the method itself refuses to silently return a meaningless
+    # number rather than relying on callers to remember the filter.
+    abstention_shaped = ProbeRelevance(
+        expected=frozenset(), must_not_rank=frozenset(), retrieved=("a",)
+    )
+    with pytest.raises(ValueError, match="recall is undefined"):
+        abstention_shaped.recall()
+
     # Pooling: micro-averaged over the two probes above (p1's recall5, and
     # a second probe p2 that retrieves nothing at all so its precision is
     # excluded from the pooled numerator/denominator by construction, not
@@ -1086,10 +1124,17 @@ def test_relevance_metrics_recall_precision_contamination_grep_miss() -> None:
     assert pooled.contamination == 1.0
     assert pooled.contamination_na_count == 1  # p2
 
+    # PooledRelevance.contamination is None when EVERY pooled probe has no
+    # authored must_not_rank set -- never a vacuous 1.0/0.0 off an
+    # all-n/a group.
+    p3 = ProbeRelevance(expected=frozenset({"d"}), must_not_rank=frozenset(), retrieved=("d",))
+    all_na_pooled = pool([no_mnr, p3])
+    assert all_na_pooled.contamination is None
+    assert all_na_pooled.contamination_na_count == 2
+
 
 def test_relevance_metrics_cap_verdict() -> None:
-    """eval-wave-2-spec.md section5.3's trigger, both branches and the
-    inconclusive default."""
+    """eval-wave-2-spec.md section5.3's trigger, all four branches."""
     from tests.evals.relevance_metrics import cap_verdict
 
     # recall drops materially at hook3 while precision does not improve --
@@ -1099,6 +1144,16 @@ def test_relevance_metrics_cap_verdict() -> None:
             recall_hook3=0.5, recall_recall5=0.8, precision_hook3=0.4, precision_recall5=0.5
         )
         == "fixed cap is cutting signal"
+    )
+    # recall drops materially AND precision rises at hook3 -- the cap
+    # trades recall for precision rather than buying precision for free
+    # (issue athenaeum#1782/athenaeum#1783 Quine review; this is this
+    # PR's own core/fts5 and medium/fts5 pooled shape).
+    assert (
+        cap_verdict(
+            recall_hook3=0.67, recall_recall5=0.74, precision_hook3=0.41, precision_recall5=0.31
+        )
+        == "mixed: cutting both"
     )
     # precision rises sharply at hook3 -- cap is buying real precision.
     assert (

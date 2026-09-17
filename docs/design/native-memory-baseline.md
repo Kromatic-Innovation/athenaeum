@@ -444,10 +444,25 @@ variants: `fts5`, `vector` with the RRF hybrid fusion on (production
 default, issue athenaeum#1792), `vector` with the hybrid opt-out
 (`recall.hybrid: false`) on. `recall`/`precision`/`contamination` are
 micro-averaged (sum hits and denominators across probes, then divide once)
-per `R/P/C`; contamination excludes the 3 `follow_through` probes with no
-authored `must_not_rank` set (issue athenaeum#1777's own finding -- "n/a",
-never a silent 1.0) from its denominator at every row. Full per-probe-class
-breakdown: `pytest tests/evals/test_recall_covers_grep.py -k
+per `R/P/C`.
+
+**Contamination's definition is a declared choice, not issue athenaeum#1782's
+own AC table wording.** The AC table wrote
+`contamination@R = |retrieved ∩ must_not_rank| / |retrieved|`; this
+measurement instead computes `|retrieved ∩ must_not_rank| / |must_not_rank|`
+-- the fraction of the KNOWN NEGATIVE CONTROLS surfaced, not a fraction of
+what was returned. The AC formula is undefined when a retriever returns
+nothing and goes vacuously to `0.0` whenever a retriever returns plenty but
+avoids every `must_not_rank` uid, collapsing "not measured" and "measured
+zero" into the same number. This measurement's own denominator is
+well-defined for any non-empty `must_not_rank` set regardless of retrieval
+volume, and separately excludes the 3 `follow_through` probes with no
+authored `must_not_rank` set at all (issue athenaeum#1777's own finding)
+from its denominator at every row, rendering `n/a` rather than a silent
+1.0 -- see `tests/evals/relevance_metrics.py`'s module docstring for the
+full argument. Full per-probe-class breakdown, including the
+`name_to_uid` collision-exclusion count and the hook real-subprocess-vs-fallback
+evidence: `pytest tests/evals/test_recall_covers_grep.py -k
 precision_contamination -s`.
 
 | scale | variant | grep R/P/C | recall@5 R/P/C | hook@3 R/P/C | grep-miss@5 | grep-miss@hook3 |
@@ -468,30 +483,56 @@ example core recall@5 precision 0.20 -> 0.03) is the wiring self-check this
 module's own test asserts on: the hybrid knob measurably changes vector
 ranking, so the two vector rows are not the same measurement twice.
 
+**Backend confound: `hook@3` is fts5-backed in every row.** The hook
+subprocess runs with no `config.env` (this module's own docstring caveat),
+and the shipped `user-prompt-recall.sh` defaults `SEARCH_BACKEND` to `fts5`
+in that configuration -- confirmed by this measurement's own evidence
+(`pytest ... -k precision_contamination -s` prints "26 probes via the real
+hook subprocess, 0 via the fts5 n=3 fallback" at both scales, i.e. every
+`hook@3` number above is a REAL run, not the offline fallback, and that
+real run is fts5). This means only the two `fts5` rows compare the cap
+against the wider window ON THE SAME RANKER; the four `vector-hybrid-*`
+rows compare an fts5-backed `hook@3` against a vector-backed `recall@5` --
+a genuine second variable, not a clean read of "what does truncating THIS
+ranker's own list to 3 cost or buy."
+
 **Cap signal (eval-wave-2-spec.md §5.3), evaluated literally off the pooled
 row above (`CAP_SIGNAL_EPS = 0.05`, this issue's own choice -- the epic
-fixes no numeric value):**
+fixes no numeric value). Four possible verdicts, not two: `cap_verdict` now
+distinguishes a material recall drop that precision does NOT offset
+("cutting signal") from a material recall drop that precision DOES offset
+("mixed: cutting both") -- see `tests/evals/relevance_metrics.py::cap_verdict`
+for the exact branch order:**
 
 | scale | variant | recall@hook3 | recall@recall5 | precision@hook3 | precision@recall5 | verdict |
 |---|---|---|---|---|---|---|
-| core | fts5 | 0.67 | 0.74 | 0.41 | 0.31 | fixed cap is cutting noise |
+| core | fts5 | 0.67 | 0.74 | 0.41 | 0.31 | mixed: cutting both |
 | core | vector-hybrid-on | 0.67 | 0.62 | 0.41 | 0.20 | fixed cap is cutting noise |
 | core | vector-hybrid-off | 0.67 | 0.10 | 0.41 | 0.03 | fixed cap is cutting noise |
-| medium | fts5 | 0.50 | 0.64 | 0.32 | 0.21 | fixed cap is cutting noise |
+| medium | fts5 | 0.50 | 0.64 | 0.32 | 0.21 | mixed: cutting both |
 | medium | vector-hybrid-on | 0.50 | 0.40 | 0.32 | 0.13 | fixed cap is cutting noise |
 | medium | vector-hybrid-off | 0.50 | 0.02 | 0.32 | 0.01 | fixed cap is cutting noise |
 
-All six cells land on the same verdict: precision@hook3 is sharply above
-precision@recall5 at every scale/backend/hybrid combination measured
-(`precision@hook3 - precision@recall5 > 0.05` in every row), which is the
-epic's own "converse" pattern -- truncating to the hook's top-3 is buying
-real precision over the wider recall@5 window, not discarding relevant
-pages for free. This holds even on the `core`/`fts5` row where recall@hook3
-< recall@recall5 (0.67 < 0.74): the "cutting signal" branch also requires
-`precision@recall5 >= precision@hook3`, which does not hold here
-(0.31 < 0.41), so cutting-signal never fires. athenaeum#1783's ruling
-reads this table; it is not this issue's place to draw a policy conclusion
-beyond the verdict the trigger condition itself produces.
+**Reading this, same-ranker rows first.** On the ONLY two rows that hold
+the ranker fixed (`fts5`, where `hook@3` and `recall@5` are both fts5-backed
+-- see the backend-confound note above), the cap costs real recall: 0.74 ->
+0.67 at `core` (a 7-point drop) and 0.64 -> 0.50 at `medium` (a 14-point
+drop), while precision rises (0.31 -> 0.41 at `core`, 0.21 -> 0.32 at
+`medium`). That is a genuine trade, not a free lunch -- "mixed: cutting
+both" is the correct label, not "cutting noise": the earlier draft of this
+document read the fts5 rows' precision gain as costless, which the recall
+numbers on the same two rows directly contradict.
+
+The four `vector-hybrid-*` rows all read "cutting noise" (recall@hook3 is
+NOT materially below recall@recall5 -- in three of the four it is
+*higher*, because `recall@5`'s vector ranking is the weaker list there,
+not because the cap is free), but per the backend confound above, these
+four rows do not isolate the cap's own effect: they compare an fts5-backed
+`hook@3` against a vector-backed `recall@5`, so a reader cannot cleanly
+attribute the difference to "3 vs. 5" the way the `fts5` rows allow.
+athenaeum#1783's ruling reads this table; it is not this issue's place to
+draw a policy conclusion beyond what the trigger condition and the
+same-ranker caveat above actually support.
 
 The first measurement report under this design is
 [`../measurements/native-memory-baseline-2026-09-17.md`](../measurements/native-memory-baseline-2026-09-17.md)
