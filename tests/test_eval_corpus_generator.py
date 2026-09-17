@@ -22,6 +22,7 @@ from tests.evals.corpus import (
     Probe,
     RelatedEdge,
     _content_terms,
+    _shares_stemmed_term,
     build_corpus,
     load_core_pages,
     load_probes,
@@ -339,6 +340,112 @@ def test_follow_through_passes_when_both_halves_hold() -> None:
     assert own_problems == [], own_problems
 
 
+def test_validate_core_rejects_expected_uid_page_with_no_tag_line() -> None:
+    """athenaeum#1766 defect 2: a page named in some probe's
+    ``expected_uids`` but carrying no ``Internal reference tag:`` line has
+    nothing a model can cite for it, so a correct answer that draws on the
+    page falls back to citing its ``uid`` -- exactly the
+    ``spend_approver_named`` failure mode the issue describes
+    (``policy-budget-approval`` had no tag line before this issue). Verified
+    against the real fixtures too: reverting the ``policy-budget-approval``
+    tag line added by this PR reproduces this failure on
+    ``test_core_corpus_is_internally_consistent``.
+    """
+    pages = [
+        Page(
+            uid="page-a",
+            type="note",
+            name="Page A",
+            body="TokenOne sits here.\n\nInternal reference tag: TokenOne.",
+            tier="core",
+        ),
+        Page(uid="page-b", type="note", name="Page B", body="No tag line here.", tier="core"),
+    ]
+    probe = Probe(
+        id="probe-untagged",
+        probe_class="multi_hop",
+        query="what about page a and page b?",
+        expected_uids=("page-a", "page-b"),
+        answer_tokens=("TokenOne",),
+    )
+    problems = validate_core(pages, [probe])
+    assert any(
+        "page-b" in p and "carries no" in p and "Internal reference tag" in p for p in problems
+    ), problems
+
+
+def test_validate_core_rejects_two_pages_sharing_a_tag() -> None:
+    """athenaeum#1766 AC2, the collision half: two pages carrying the same
+    invented token would let ``grade_correctness``'s whole-corpus token scan
+    credit an answer that drew on one page's fact against a different page's
+    probe. Verified against the real fixtures too: giving
+    ``project-keelbridge-rollout``'s tag (added by this PR) the same value
+    as an existing token reproduces this failure on
+    ``test_core_corpus_is_internally_consistent``.
+    """
+    pages = [
+        Page(
+            uid="page-a",
+            type="note",
+            name="Page A",
+            body="TagOne sits here.\n\nInternal reference tag: TagOne.",
+            tier="core",
+        ),
+        Page(
+            uid="page-b",
+            type="note",
+            name="Page B",
+            body="Something else entirely.\n\nInternal reference tag: TagOne.",
+            tier="core",
+        ),
+    ]
+    probe = Probe(
+        id="probe-collision",
+        probe_class="multi_hop",
+        query="what about page a and page b?",
+        expected_uids=("page-a", "page-b"),
+        answer_tokens=("TagOne",),
+    )
+    problems = validate_core(pages, [probe])
+    assert any("TagOne" in p and "multiple pages" in p for p in problems), problems
+
+
+def test_follow_through_second_pages_are_lexically_unreachable_and_tokened() -> None:
+    """athenaeum#1766 AC3: pins, for every real ``follow_through`` probe,
+    that exactly one of its ``expected_uids`` pages is lexically unreachable
+    from the query -- no content term, including a stemmed prefix, shared
+    with the query via body OR uid/name/aliases/tags -- and that this
+    second-hop page carries one of the probe's ``answer_tokens``.
+
+    ``validate_core``'s own ``follow_through`` check already enforces this
+    structurally (see the ``Probe`` docstring); this test restates it
+    directly against the live fixtures, independent of that check's control
+    flow, so a regression in either the fixture or the check is caught from
+    both ends.
+    """
+    pages_by_uid = {page.uid: page for page in load_core_pages()}
+    follow_through_probes = [p for p in load_probes() if p.probe_class == "follow_through"]
+    assert follow_through_probes, "expected at least one follow_through probe"
+    for probe in follow_through_probes:
+        query_terms = _content_terms(probe.query)
+        expected_pages = [pages_by_uid[uid] for uid in probe.expected_uids]
+        second_pages = [
+            page
+            for page in expected_pages
+            if not (_content_terms(page.body) & query_terms)
+            and not _shares_stemmed_term(
+                _content_terms(
+                    f"{page.uid.replace('-', ' ')} {page.name} "
+                    f"{' '.join(page.aliases)} {' '.join(page.tags)}"
+                ),
+                query_terms,
+            )
+        ]
+        assert len(second_pages) == 1, (probe.id, [p.uid for p in expected_pages])
+        second_page = second_pages[0]
+        assert any(token in second_page.body for token in probe.answer_tokens), probe.id
+
+
 def test_generation_is_deterministic_within_a_process() -> None:
     first = build_corpus(scale="small", seed=4242)
     second = build_corpus(scale="small", seed=4242)
@@ -399,11 +506,12 @@ def test_xlarge_scale_is_pinned() -> None:
     assert SCALES["xlarge"].distractors_per_probe == 2
     corpus = build_corpus(scale="xlarge")
     assert len(corpus.pages) >= 25_000
-    # athenaeum#1759: Page.to_markdown() now bolds the `Internal reference
-    # tag:` line, which shifts every stored fingerprint that hashes rendered
-    # markdown -- same class of expected change as a GENERATOR_VERSION bump,
-    # per this test's own docstring.
-    assert corpus.fingerprint() == "8b6c1c37c967e324"
+    # athenaeum#1766: six core pages gained a new `Internal reference tag:`
+    # line and the follow_through probe queries were reworded, which shifts
+    # every stored fingerprint that hashes rendered markdown -- same class
+    # of expected change as a GENERATOR_VERSION bump, per this test's own
+    # docstring.
+    assert corpus.fingerprint() == "5a782f03ee458275"
 
 
 def test_core_scale_generates_nothing() -> None:
