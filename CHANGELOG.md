@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **North-star measurement report for the native-memory baseline (issue
+  athenaeum#1724).** `docs/measurements/native-memory-baseline-2026-09-17.md`
+  reports the read-path (Phase 1) comparison against Claude Code auto memory,
+  from the fifth full-grid dispatch (workflow run 35272748886) after four
+  earlier dispatches were void on a failed or partial oracle positive
+  control; cutoff scale is `none`, and the report documents where the
+  remaining losses trace to open grading/retrieval issues versus genuine
+  misses. No go/no-go call is made here.
 - **Offline retrieval-coverage test: every grep-reachable expected page
   must also surface in `recall` (issue athenaeum#1770).**
   `tests/evals/test_recall_covers_grep.py` materialises the `core` and
