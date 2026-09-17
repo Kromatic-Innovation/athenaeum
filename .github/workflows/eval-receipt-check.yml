@@ -6,10 +6,11 @@ name: Eval Receipt Check
 # module. This workflow is the token-free half that closes the gap: it
 # notices when a PR touches the LLM surface (`.github/llm-surface.txt`,
 # the ONE list this workflow and `tests/test_llm_surface.py` both read)
-# and requires either a receipt pointing at a matching dispatched run, or
-# an explicit "not needed" line — see `scripts/check_llm_surface_receipt.py`
-# for the full decision logic and `tests/evals/README.md` for the receipt
-# line's documented format.
+# and requires either a receipt pointing at a matching dispatched run of
+# the `Evals` workflow (evals.yml) that concluded `success`, or an explicit
+# "not needed" line — see `scripts/check_llm_surface_receipt.py` for the
+# full decision logic and `tests/evals/README.md` for the receipt line's
+# documented format.
 #
 # Deliberately NOT path-filtered: an `on.pull_request.paths` block would be
 # a second copy of the surface list, and — worse — a path-filtered job that
@@ -55,6 +56,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
+          # Nothing in this job pushes or needs an authenticated git remote
+          # (the `gh` calls below use GH_TOKEN directly, not the checkout's
+          # credential helper) — least-privilege per Quine PR #1745 review.
+          persist-credentials: false
 
       - name: Set up Python 3.13
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0

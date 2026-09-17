@@ -22,11 +22,18 @@ to `develop` for whether it touches the **LLM surface**, the list kept in
 
 - **`Evals: <run-url>`** — a link to an `evals.yml` `workflow_dispatch` run
   (e.g. `https://github.com/Kromatic-Innovation/athenaeum/actions/runs/123456789`)
-  whose `headSha` matches this PR's head commit. Get the URL from
-  `gh run view <id> --json url -q .url` after dispatching, or copy it from
-  the Actions tab. A run from a stale head SHA, from a different event
-  (`push` instead of `workflow_dispatch`), or from a different repo does
-  not satisfy the check — re-dispatch after the last push.
+  whose `headSha` matches this PR's head commit, whose workflow is `Evals`
+  (evals.yml's own `name:`), and whose `conclusion` is `success`. Get the
+  URL from `gh run view <id> --json url -q .url` after dispatching, or copy
+  it from the Actions tab — the **run** URL
+  (`.../actions/runs/<id>`), not a **job** URL
+  (`.../actions/runs/<id>/job/<job-id>`): the job-scoped form is rejected,
+  since a job id isn't a run id `gh run view` can look up. A run from a
+  stale head SHA, from a different event (`push` instead of
+  `workflow_dispatch`), from a different workflow (e.g. a `ci.yml`
+  dispatch), from a different repo, or that didn't conclude `success`
+  (failed or cancelled) does not satisfy the check — re-dispatch after the
+  last push.
 - **`Evals: not needed — <reason>`** — for a PR that touches a surface
   file without moving anything an eval would catch (e.g. a comment-only
   edit, or this very check's own CI-only plumbing). The reason after the

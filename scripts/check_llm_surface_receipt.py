@@ -5,15 +5,24 @@
 Computes a PR's changed paths against the LLM surface list
 (``.github/llm-surface.txt``); if the intersection is non-empty, requires
 either an ``Evals: <run-url>`` receipt in the PR body pointing at a matching
-``evals.yml`` ``workflow_dispatch`` run, or an explicit
-``Evals: not needed — <reason>`` line.
+``evals.yml`` ``workflow_dispatch`` run that actually SUCCEEDED, or an
+explicit ``Evals: not needed — <reason>`` line.
 
 Every network/`gh` call is isolated behind the ``run_lookup`` callable so
 ``tests/test_llm_surface_receipt.py`` can drive the whole decision offline —
 see that module for the injected-stub pattern. The default lookup
-(``gh_run_lookup``) shells out to ``gh run view --json headSha,event``,
-which is a local read against the default ``GITHUB_TOKEN`` — no Anthropic
-key, no push trigger, matching the athenaeum#1731 AC2 constraint.
+(``gh_run_lookup``) shells out to
+``gh run view --json headSha,event,workflowName,conclusion``, which is a
+local read against the default ``GITHUB_TOKEN`` — no Anthropic key, no push
+trigger, matching the athenaeum#1731 AC2 constraint.
+
+Four independent checks gate a receipt URL, each with its own failure
+message (Quine PR #1745 review round): the run must be a
+``workflow_dispatch`` of the ``Evals`` workflow (``workflowName`` —
+otherwise a dispatch of e.g. ``ci.yml`` at the right SHA would satisfy the
+gate), its ``headSha`` must match the PR head, and its ``conclusion`` must
+be ``success`` (a failed or cancelled eval run is not a receipt that
+anything actually passed).
 
 CLI entry point is only used by the workflow; the importable functions are
 the unit under test.
@@ -28,12 +37,20 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-DISPATCH_HINT = "gh workflow run evals.yml --repo Kromatic-Innovation/athenaeum"
+#: The workflow this gate's receipt must point at (evals.yml's `name:`).
+EVALS_WORKFLOW_NAME = "Evals"
+
+
+def _dispatch_hint(repo: str) -> str:
+    """Build the dispatch instructions from the caller's own `--repo`, not a hardcoded slug."""
+    return f"gh workflow run evals.yml --repo {repo}"
+
 
 #: Matches an `Evals: <run-url>` receipt line. Anchored to line start
 #: (tolerating leading whitespace) so it cannot be satisfied by a mention
-#: buried mid-sentence.
-_RECEIPT_URL_RE = re.compile(r"^\s*Evals:\s*(https?://\S+)\s*$", re.MULTILINE)
+#: buried mid-sentence. Case-insensitive like the not-needed form below, so
+#: `evals:`/`EVALS:` are honored the same as `Evals:`.
+_RECEIPT_URL_RE = re.compile(r"^\s*Evals:\s*(https?://\S+)\s*$", re.MULTILINE | re.IGNORECASE)
 
 #: Matches an `Evals: not needed — <reason>` line. Accepts an em-dash, an
 #: en-dash, or one/two hyphens as the separator, and requires a non-empty
@@ -90,13 +107,16 @@ def intersect_surface(changed_files: list[str], surface: list[str]) -> list[str]
 
 
 def gh_run_lookup(repo: str, run_id: str) -> dict[str, str]:
-    """Default `run_lookup`: `gh run view --json headSha,event` against `repo`.
+    """Default `run_lookup`: `gh run view --json headSha,event,workflowName,conclusion`.
 
     Local `gh` read against the default `GITHUB_TOKEN` — no Anthropic key,
     no network beyond the GitHub API `gh` already talks to.
     """
     result = subprocess.run(
-        ["gh", "run", "view", run_id, "--repo", repo, "--json", "headSha,event"],
+        [
+            "gh", "run", "view", run_id, "--repo", repo,
+            "--json", "headSha,event,workflowName,conclusion",
+        ],
         capture_output=True,
         text=True,
         check=False,
@@ -106,7 +126,12 @@ def gh_run_lookup(repo: str, run_id: str) -> dict[str, str]:
     import json
 
     data = json.loads(result.stdout)
-    return {"headSha": data["headSha"], "event": data["event"]}
+    return {
+        "headSha": data["headSha"],
+        "event": data["event"],
+        "workflowName": data["workflowName"],
+        "conclusion": data["conclusion"],
+    }
 
 
 def check_receipt(
@@ -147,6 +172,12 @@ def check_receipt(
     except Exception as exc:  # noqa: BLE001 - surfaced verbatim to the operator
         return ReceiptCheck(False, f"could not look up run {run_id}: {exc}")
 
+    if run.get("workflowName") != EVALS_WORKFLOW_NAME:
+        return ReceiptCheck(
+            False,
+            f"run {run_id} belongs to workflow {run.get('workflowName')!r}, not "
+            f"{EVALS_WORKFLOW_NAME!r} — the receipt must point at an evals.yml run.",
+        )
     if run.get("event") != "workflow_dispatch":
         return ReceiptCheck(
             False,
@@ -159,7 +190,17 @@ def check_receipt(
             f"run {run_id}'s headSha ({run.get('headSha')!r}) does not match "
             f"this PR's head ({head_sha!r}) — the dispatch is stale, re-run it.",
         )
-    return ReceiptCheck(True, f"valid eval receipt: run {run_id} at head {head_sha}")
+    if run.get("conclusion") != "success":
+        return ReceiptCheck(
+            False,
+            f"run {run_id} concluded {run.get('conclusion')!r}, not `success` "
+            "— a failed or cancelled eval run is not a receipt.",
+        )
+    return ReceiptCheck(
+        True,
+        f"valid eval receipt: run {run_id} at head {head_sha} "
+        f"(conclusion: {run.get('conclusion')})",
+    )
 
 
 def evaluate(
@@ -186,7 +227,7 @@ def evaluate(
         f"{result.message}\n\n"
         "Dispatch the eval suite, then add `Evals: <run-url>` to the PR "
         "body, or add `Evals: not needed — <reason>` if this change cannot "
-        f"move a result:\n\n  {DISPATCH_HINT}",
+        f"move a result:\n\n  {_dispatch_hint(this_repo)}",
     )
 
 

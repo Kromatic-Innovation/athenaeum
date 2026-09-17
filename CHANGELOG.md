@@ -19,11 +19,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only since athenaeum#1727) could be silently skipped on a change that
   should have prompted one. Zero network beyond `gh` reads against the
   default `GITHUB_TOKEN`; no Anthropic key; `evals.yml`'s own triggers are
-  untouched. The decision logic lives in
-  `scripts/check_llm_surface_receipt.py` (offline-testable via an injected
-  run-lookup); `tests/test_llm_surface.py` fails CI if a file importing
-  `LLMBackend` or registered in `prompt_registry.py`'s `PROMPTS` is missing
-  from the surface list. Documented in `tests/evals/README.md`.
+  untouched. The receipt's run must belong to the `Evals` workflow and
+  conclude `success` — a dispatch of a different workflow (e.g. `ci.yml`)
+  at the right SHA, or a failed/cancelled `Evals` run, does not satisfy the
+  gate. The decision logic lives in `scripts/check_llm_surface_receipt.py`
+  (offline-testable via an injected run-lookup); `tests/test_llm_surface.py`
+  fails CI if a file importing `LLMBackend`, a module registered in
+  `prompt_registry.py`'s `PROMPTS`, or a `.md` file under
+  `src/athenaeum/prompts/` is missing from the surface list. Documented in
+  `tests/evals/README.md`.
 - **`follow_through` synthetic-corpus probe class (issue athenaeum#1737).** A
   new probe class whose complete answer requires opening the page a query
   surfaces and following a body `[[wikilink]]` to a second page the query's

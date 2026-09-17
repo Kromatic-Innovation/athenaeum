@@ -64,6 +64,11 @@ src/athenaeum/config.py
 src/athenaeum/prompt_registry.py
 docs/design/prompts.md
 
+# --- machine-enforced: on-disk .md prompt files loaded as live system
+# prompts (tiers.py's name_resolution_confirm.md /
+# create_name_variant_decision.md, via importlib.resources.files) ---
+src/athenaeum/prompts/
+
 # --- hand-curated: the sidecar delivery path ---
 examples/claude-code/user-prompt-recall.sh
 src/athenaeum/context.py

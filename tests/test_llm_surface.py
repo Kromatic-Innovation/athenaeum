@@ -8,7 +8,7 @@ own header) — it asserts a SUBSET: every file the codebase itself marks as
 LLM-facing must appear in the list, so the list cannot rot silently as new
 LLM-facing modules are added.
 
-Two independently-derived "must appear" sets, mirroring athenaeum#1731 AC1:
+Three independently-derived "must appear" sets, mirroring athenaeum#1731 AC1:
 
 1. Every `src/athenaeum/*.py` file whose source contains the literal
    ``LLMBackend`` (the same `grep -l LLMBackend src/athenaeum/*.py`
@@ -17,6 +17,14 @@ Two independently-derived "must appear" sets, mirroring athenaeum#1731 AC1:
 2. Every module registered in `athenaeum.prompt_registry.PROMPT_META` (a
    prompt constant's home module), derived via `prompt_registry`'s own
    `_display_path`-equivalent mapping rather than re-implemented here.
+3. Every `.md` file under `src/athenaeum/prompts/` — `tiers.py` loads these
+   as live system prompts via `importlib.resources.files("athenaeum.prompts")`
+   (``name_resolution_confirm.md``, ``create_name_variant_decision.md``), so
+   a new file dropped in that directory is exactly as much a prompt edit as
+   a `PROMPT_META` row and must be just as visible to this gate. Checked
+   with the same directory-prefix semantics the check script uses
+   (`check_llm_surface_receipt._matches`), imported directly rather than
+   re-implemented, so the two cannot drift apart.
 
 Offline, zero network, no `eval`/`embedding` marker — runs in the default
 suite.
@@ -24,6 +32,8 @@ suite.
 
 from __future__ import annotations
 
+import importlib.util
+import sys
 from pathlib import Path
 
 from athenaeum import prompt_registry
@@ -31,6 +41,15 @@ from athenaeum import prompt_registry
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SURFACE_FILE = REPO_ROOT / ".github" / "llm-surface.txt"
 SRC_ATHENAEUM = REPO_ROOT / "src" / "athenaeum"
+PROMPTS_DIR = SRC_ATHENAEUM / "prompts"
+
+_SCRIPT_PATH = REPO_ROOT / "scripts" / "check_llm_surface_receipt.py"
+_spec = importlib.util.spec_from_file_location("check_llm_surface_receipt", _SCRIPT_PATH)
+assert _spec and _spec.loader
+_check_script = importlib.util.module_from_spec(_spec)
+sys.modules[_spec.name] = _check_script
+_spec.loader.exec_module(_check_script)
+_matches = _check_script._matches
 
 
 def _load_surface() -> set[str]:
@@ -82,4 +101,18 @@ def test_prompt_registry_modules_are_on_the_surface() -> None:
         "the following modules are registered in prompt_registry.py's "
         f"PROMPT_META but missing from {SURFACE_FILE}: {sorted(missing)} — "
         "add them to that file."
+    )
+
+
+def test_prompt_md_files_are_covered_by_the_surface() -> None:
+    surface = _load_surface()
+    md_files = sorted(
+        f"src/athenaeum/prompts/{p.name}" for p in PROMPTS_DIR.glob("*.md")
+    )
+    assert md_files, f"expected at least one .md prompt file under {PROMPTS_DIR}"
+    uncovered = [f for f in md_files if not any(_matches(f, entry) for entry in surface)]
+    assert not uncovered, (
+        "the following .md files under src/athenaeum/prompts/ are not "
+        f"covered by any entry in {SURFACE_FILE}: {uncovered} — add "
+        "`src/athenaeum/prompts/` (or the specific file) to that file."
     )
