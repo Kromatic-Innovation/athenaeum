@@ -379,6 +379,34 @@ class Probe:
       with ``query`` -- otherwise a plain BM25/lexical match, or a native
       arm's grep over its topic file's own name, would reach it directly
       without ever following the edge.
+
+    ``multi_hop`` (issue athenaeum#1768) is looser than ``follow_through``:
+    its two ``expected_uids`` pages are independently retrievable and no
+    wikilink or breadcrumb-source overlap is required. But the page that
+    actually carries the planted ``answer_tokens`` value must still not be
+    reachable by the query's own vocabulary alone -- its body, ``uid``,
+    ``name``, and ``tags`` must share no content term (exact, or the same
+    ``_shares_stemmed_term`` stemmed prefix) with ``query``, checked by
+    :func:`validate_core`. Without this, a query can be "complete" only with
+    that page's fact and still land on it directly (by grep or by a plain
+    lexical match), which defeats the two-hop shape the class exists to
+    measure -- the answer no longer has to come FROM the second page, just
+    happens to be gradable there.
+
+    This check's scope is ``expected_uids`` only: it does not scan the rest
+    of the core corpus for some OTHER page that also names the answer
+    identity while sharing a query term (Quine review of the
+    athenaeum#1768 PR found exactly this on `person-tomas-briell`, which
+    named `ratecard_tooling_owner`'s answer person and shared "rate",
+    "card", and "repository" with its query while sitting outside
+    `expected_uids`, so the check above never looked at it). A probe author
+    must keep the answer identity itself off every OTHER lexically
+    reachable core page, not only off pages outside ``expected_uids`` that
+    happen to share vocabulary -- CI cannot derive "the answer identity" as
+    a general string to search for, so this is an authoring discipline the
+    check does not enforce, the same shape as the ``follow_through``
+    completeness judgment call documented in
+    ``docs/design/native-memory-baseline.md`` §5.
     """
 
     id: str
@@ -557,6 +585,12 @@ def validate_core(pages: list[Page], probes: list[Probe]) -> list[str]:
     authored where NOTHING in ``expected_uids`` is lexically reachable from
     the query at all -- passing the no-overlap check on a technicality
     rather than because a real breadcrumb was followed.
+
+    ``multi_hop`` probes (issue athenaeum#1768) get the lexical-unreachability
+    half of that same check applied to just the page carrying the planted
+    token (see the ``Probe`` docstring): unlike ``follow_through`` no
+    breadcrumb/wikilink structure is required, since ``multi_hop``'s two
+    pages are independently retrievable by design.
     """
     uids = {p.uid for p in pages}
     pages_by_uid = {p.uid: p for p in pages}
@@ -662,6 +696,46 @@ def validate_core(pages: list[Page], probes: list[Probe]) -> list[str]:
                     "uid, name, and tags share no content term (including a stemmed prefix) "
                     "with the query"
                 )
+        if probe.probe_class == "multi_hop":
+            # Issue athenaeum#1768: the multi_hop counterpart of the
+            # follow_through lexical-unreachability check above, scoped to
+            # the page that actually carries the planted token (not every
+            # expected_uids page -- multi_hop's other page is allowed, even
+            # expected, to share the query's vocabulary; that is how a plain
+            # lexical match surfaces it as the breadcrumb in the first
+            # place). Without this, a query can be "complete" only with the
+            # token page's fact yet still share enough vocabulary with that
+            # page that a native arm's grep -- or a model that never visits
+            # the token page at all -- lands on it directly, which is
+            # exactly the `spend_approver_named` / `portal_design_reviewer`
+            # defect the issue reports: the token page's own body restated
+            # the query's terms, so nothing forced a real second hop.
+            expected_pages = [
+                pages_by_uid[uid] for uid in probe.expected_uids if uid in pages_by_uid
+            ]
+            query_terms = _content_terms(probe.query)
+            token_pages = [
+                page
+                for page in expected_pages
+                if any(token in page.body for token in probe.answer_tokens)
+            ]
+            for page in token_pages:
+                if _content_terms(page.body) & query_terms:
+                    problems.append(
+                        f"probe {probe.id!r}: multi_hop token page {page.uid!r} shares a "
+                        "content term with the query, so it is reachable by the query's own "
+                        "vocabulary without following the hop"
+                    )
+                    continue
+                page_meta_terms = _content_terms(
+                    f"{page.uid.replace('-', ' ')} {page.name} {' '.join(page.tags)}"
+                )
+                if _shares_stemmed_term(page_meta_terms, query_terms):
+                    problems.append(
+                        f"probe {probe.id!r}: multi_hop token page {page.uid!r}'s uid, name, "
+                        "or tags share a stemmed term with the query, so a native arm's grep "
+                        "over its topic file's own name would reach it without the hop"
+                    )
     for page in pages:
         for edge in page.related:
             if edge.uid not in uids:
