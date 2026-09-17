@@ -4,7 +4,7 @@
 [![Python versions](https://img.shields.io/pypi/pyversions/athenaeum.svg)](https://pypi.org/project/athenaeum/)
 [![License](https://img.shields.io/pypi/l/athenaeum.svg)](https://github.com/Kromatic-Innovation/athenaeum/blob/main/LICENSE)
 
-**Production-tested agentic memory for teams deploying multiple AI agents.**
+**Compiled, provenance-carrying memory for AI agents whose knowledge has outgrown a flat memory file.**
 
 <p align="center">
   <img src="https://github.com/Kromatic-Innovation/athenaeum/raw/main/docs/assets/athena.png" alt="Athena with her owl companion, holding an open book showing a knowledge graph" width="360">
@@ -26,10 +26,24 @@ the relevant slice of that wiki back into context automatically, on every turn.
 The result is memory that survives across sessions, across agents, and across a team — not
 just across turns of one conversation.
 
-> **Is this for me?** If you're running more than one agent on shared knowledge — or you
-> want agents and humans reading and writing the same institutional memory — yes. If you're
-> building a single-user chatbot, [mem0](https://github.com/mem0ai/mem0) or
-> [Letta](https://github.com/letta-ai/letta) may be a better fit.
+> **Is this for me?** Three cases, in order of how well they are established:
+>
+> - **Your corpus no longer fits your agent's native memory.** Claude Code's auto memory
+>   loads the first 200 lines or 25KB of its index and nothing more; past a few hundred
+>   pages the agent is grepping a directory. If you have thousands of pages of people,
+>   projects, decisions and retros, you are already past that line. This is the case
+>   Athenaeum is being measured against, head to head, and the result decides whether the
+>   project continues — see [use cases](docs/use-cases.md) §1.
+> - **You need to know where a fact came from before you act on it.** Relationship and
+>   client memory where a stale scraped value must never overwrite what a person told
+>   you, and where contact data has to stay off the searchable corpus.
+> - **Several agents, or agents and humans, write the same knowledge.** This is what the
+>   write path is built for. It is the design goal, not yet a validated market: we run it
+>   this way ourselves, but we have not confirmed that teams want it.
+>
+> If you are building a single-user chatbot that needs conversational continuity and
+> your memory fits in a file, [mem0](https://github.com/mem0ai/mem0),
+> [Letta](https://github.com/letta-ai/letta), or the agent's own memory is a better fit.
 
 The full argument, including how this differs from Claude's built-in memory, Anthropic's
 memory tool, RAG, and the existing agent-memory libraries, is in

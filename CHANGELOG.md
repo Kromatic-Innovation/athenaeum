@@ -58,6 +58,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **README positioning now states three use cases in order of how well each is
+  established, instead of asserting a team market.** The former tagline
+  ("production-tested agentic memory for teams deploying multiple AI agents")
+  and its "is this for me?" gate claimed a validated team wedge that the
+  2026-09-16 purpose review found was never validated, and turned away the one
+  case that can be established a priori: an individual or small team whose
+  corpus has outgrown the host agent's native memory index. The README now
+  leads with that case, names provenance-carrying relationship memory second,
+  and states plainly that multi-writer team memory is the design goal, not a
+  confirmed market. Links to `docs/use-cases.md` for the kill criterion.
 - **Token-spending evals no longer run on push to `main`; `workflow_dispatch`
   is the only trigger for `evals.yml`'s `eval` job.** Operator decision
   2026-09-16: live-API evals run manually, when a change to a prompt, a model
