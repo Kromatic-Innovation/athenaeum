@@ -36,6 +36,7 @@ from tests.evals.rollout import (
     materialize_native_memory,
     run_native_grep_api,
     run_pull_api,
+    run_push_breadcrumb_pull_api,
     truncate_native_index,
 )
 
@@ -268,6 +269,10 @@ def test_pull_api_recorded_fixture_shows_recall_tool_call_with_query_captured(
     # discourages calling one).
     sent_system = client.calls[0]["system"]
     assert "recall" in sent_system
+    # Issue athenaeum#1756: and the SECOND tool the arm now serves. A prompt
+    # that offers `read_entity` in `tools=` but never mentions it is how a
+    # model ends up never reaching for it.
+    assert "read_entity" in sent_system
 
 
 # ---------------------------------------------------------------------------
@@ -374,3 +379,74 @@ def test_pull_api_reaches_a_reference_tag_recall_alone_cannot_show(tmp_path: Pat
     assert tag in read_entity_result
 
     assert grade_correctness(record, probe, corpus) is True
+
+
+# ---------------------------------------------------------------------------
+# 5. The SECOND api-mode PULL arm serves read_entity too (issue athenaeum#1756)
+# ---------------------------------------------------------------------------
+
+
+def test_push_breadcrumb_pull_api_serves_read_entity_in_process(tmp_path: Path) -> None:
+    """``run_push_breadcrumb_pull_api`` builds its OWN executor and ``tools=``
+    list, so serving ``read_entity`` there is a separate fact from serving it
+    in :func:`run_pull_api` -- pinned here END TO END rather than only at the
+    offered-tool-surface seam: the tool_result this arm delivers must be the
+    real page ``entity_read`` returns.
+
+    Drop the ``READ_ENTITY_TOOL_NAME`` branch from that arm's executor and the
+    call falls through to its ``unknown tool`` string, which carries none of
+    the page -- this test fails.
+    """
+    corpus = build_corpus("core")
+    probe = next(p for p in corpus.probes if p.id == "person_not_repo")
+    tag = probe.answer_tokens[0]
+
+    knowledge_root = tmp_path / "knowledge"
+    corpus.materialize(knowledge_root)
+
+    turns = [
+        _RecordedTurn(
+            content=[
+                _tool_use_block(
+                    id="toolu_read_1",
+                    name=READ_ENTITY_TOOL_NAME,
+                    input={"uid": "person-rowan-wrenfield", "entity_class": "person"},
+                )
+            ],
+            stop_reason="tool_use",
+        ),
+        _RecordedTurn(
+            content=[_text_block(f"Rowan held the day rate flat.\n\n[ref: {tag}]")],
+            stop_reason="end_turn",
+        ),
+    ]
+    client = _QueuedApiClient(turns)
+
+    record = run_push_breadcrumb_pull_api(
+        probe,
+        knowledge_root,
+        tmp_path / "hook-home",
+        tmp_path / "cache",
+        "core",
+        client=client,
+        session=EvalSession(),
+        model="test-model",
+        search_backend="keyword",
+        # The breadcrumb assembly is run_push_breadcrumb_pull's own contract
+        # (and its own tests') -- stubbed so this test pins only the tool.
+        context_fn=lambda *_args: "",
+    )
+
+    assert [c.name for c in record.tool_calls] == [READ_ENTITY_TOOL_NAME]
+    # This arm prepends its breadcrumb event, which carries no "type" key --
+    # asserted rather than assumed, since it is the only reason the
+    # transcript walk below skips it instead of raising.
+    assert "type" not in record.transcript[0]
+    assert "pushed_context" in record.transcript[0]
+    delivered = _tool_result_texts(record, "toolu_read_1")
+    # The real `entity_read` rendering of the real page: its uid, its body,
+    # and the tag that lives on its last line.
+    assert "person-rowan-wrenfield" in delivered
+    assert "Wrenfield Associates" in delivered
+    assert tag in delivered
+    assert "unknown tool" not in delivered

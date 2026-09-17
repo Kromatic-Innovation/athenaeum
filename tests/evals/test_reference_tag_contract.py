@@ -315,3 +315,74 @@ def test_abstention_citing_a_real_tag_still_grades_wrong() -> None:
         ),
     )
     assert grade_correctness(confabulated, probe, _CORPUS) is False
+
+
+# ---------------------------------------------------------------------------
+# Why the PULL arms need `read_entity`: the two DISTINCT ways a planted tag is
+# unreachable from `recall`'s rendering alone (issue athenaeum#1756)
+# ---------------------------------------------------------------------------
+
+
+def test_the_tags_recall_alone_cannot_deliver_split_into_two_mechanisms(tmp_path: Path) -> None:
+    """Measured, not asserted from memory, because the two mechanisms are easy
+    to conflate and the count differs between them.
+
+    A tag can be missing from a ``recall`` response for either of two reasons,
+    and only the FIRST is a snippet-window truncation:
+
+    1. The tag-bearing page IS returned, and the tag still does not appear --
+       the page is longer than the 400-character window
+       ``athenaeum.mcp_server._snippet`` gives every hit, and the corpus puts
+       the tag on the page's last line. Exactly three probes, on pages of
+       587/566/434 characters.
+    2. The tag-bearing page is not returned at all at ``top_k=5``. Those pages
+       are SHORT -- ``portal_design_reviewer``'s is 164 characters, so no
+       window could have cut it. This is a ranking outcome, not truncation.
+
+    ``read_entity`` rescues both, by different routes: it returns the whole
+    page for (1), and it is reachable by uid from a first-hop page for (2).
+    Writing "four tags fall outside the snippet window" would merge one
+    instance of (2) into (1) and state something this test disproves.
+    """
+    from athenaeum.mcp_server import recall_search
+    from athenaeum.search import get_backend
+
+    wiki_root = _CORPUS.materialize(tmp_path)
+    cache_dir = tmp_path / "cache"
+    get_backend("fts5").build_index(wiki_root, cache_dir)
+
+    truncated: dict[str, int] = {}
+    unretrieved: dict[str, int] = {}
+    for probe in _CORPUS.probes:
+        if not probe.answer_tokens:
+            continue
+        response = recall_search(
+            wiki_root,
+            probe.query,
+            top_k=5,
+            search_backend="fts5",
+            cache_dir=cache_dir,
+        )
+        for token in probe.answer_tokens:
+            if token in response:
+                continue
+            for page in _CORPUS.pages:
+                if token not in page.body:
+                    continue
+                bucket = truncated if f"**Uid:** {page.uid}" in response else unretrieved
+                bucket[probe.id] = len(page.body)
+
+    assert sorted(truncated) == [
+        "keelbridge_programme_scope",
+        "person_not_repo",
+        "repo_not_person",
+    ]
+    # Every one of them is longer than the window -- which is what makes
+    # "outside the snippet window" the right description of this bucket.
+    assert all(length > 400 for length in truncated.values())
+
+    # The other bucket is real and larger, and `read_entity` helps there too --
+    # but never by widening a snippet.
+    assert "portal_design_reviewer" in unretrieved
+    assert all(length < 400 for length in unretrieved.values())
+    assert not set(truncated) & set(unretrieved)
