@@ -45,8 +45,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   kill writes no markdown report at all, so the JSONL is the only artifact —
   and re-running with the same `--store` resumes from it), and the report
   renders a `partial: N of M cells` banner at the top of the decision block
-  when the store holds fewer rows than planned. No prompt, model or arm
-  changed.
+  when the store holds fewer rows than planned. A store line that will not
+  decode — what a process killed mid-`write` leaves, and a rollout row is
+  hundreds of KB — is skipped, counted and named in that banner rather than
+  being fatal; it reads as not-completed, so a resume re-runs that cell. The
+  tolerance deliberately is not narrowed to "the last line only", because a
+  resume appends after the torn tail and puts it mid-file. `Ctrl-C` now
+  produces a PARTIAL report too (it is a `BaseException`, so the previous
+  handler let it past and the operator got nothing over the cells already
+  paid for) and cancels every group that had not started. When the token
+  ceiling trips, a group already in flight stops at its next arm boundary,
+  so the overshoot is one cell per worker rather than up to eight. No
+  prompt, model or arm changed.
 - **`temporal` probes with person/company expected pages (issue
   athenaeum#1744).** The go/no-go rule's condition 1 relationship subset
   (`_relationship_probe_ids` in `tests/evals/north_star_report.py`) is
