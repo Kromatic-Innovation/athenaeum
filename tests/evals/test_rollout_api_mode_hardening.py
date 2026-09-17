@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Hardening tests from the Quine review of PR #1743 (issue athenaeum#1733):
+"""Hardening tests from the Quine review of issue athenaeum#1733:
 symlink-safety, the never-raise tool-executor contract, truncation-wiring
 pins, tool-leak/tool_result-shape mutants, path confinement, the grep byte
 bound, ``run_probe_all_arms(mode="api")`` end-to-end routing, and per-turn
