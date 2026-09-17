@@ -420,15 +420,16 @@ DEFAULT_LIVE_SESSION_GUARD_QUIET_WINDOW_SECONDS = 1800
 def resolve_live_session_guard_enabled(config: dict[str, Any] | None) -> bool:
     """Resolve the move-then-retire live-session guard opt-out (issue athenaeum#1728).
 
+    Resolved from ``librarian.live_session_guard`` in ``athenaeum.yaml``.
+
     The move-then-retire pass (issue athenaeum#261) must not retire a memory
     file while the Claude Code session that owns its scope is still live --
     doing so races a session that might still amend or contradict the fact
     on disk. This guard is DEFAULT-ON: only ``librarian.live_session_guard:
-    false`` in ``athenaeum.yaml`` turns it off, and the ``athenaeum run
-    --no-live-session-guard`` CLI flag overrides to off at the call site.
-    No seed in ``_DEFAULTS`` (issue athenaeum#231) -- the default lives here in
-    code so it stays reachable. Non-bool yaml values fall through to the
-    default (on).
+    false`` turns it off, and the ``athenaeum run --no-live-session-guard``
+    CLI flag overrides to off at the call site. No seed in ``_DEFAULTS``
+    (issue athenaeum#231) -- the default lives here in code so it stays
+    reachable. Non-bool yaml values fall through to the default (on).
     """
     if isinstance(config, dict):
         cfg = config.get("librarian")

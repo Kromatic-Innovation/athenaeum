@@ -127,26 +127,6 @@ empty list when unset -- a fresh install dedups on the generic
 ``google_contact`` key only, with no personal namespace literal in source.
 No seed in ``_DEFAULTS``.
 
-### `resolve_live_session_guard_enabled`
-
-- **YAML path:** `athenaeum.yaml`
-- **Environment variable:** —
-- **CLI flag:** —
-- **Default:** `True`
-- **Precedence:** `athenaeum.yaml` > code default
-
-Resolve the move-then-retire live-session guard opt-out.
-
-The move-then-retire pass must not retire a memory
-file while the Claude Code session that owns its scope is still live --
-doing so races a session that might still amend or contradict the fact
-on disk. This guard is DEFAULT-ON: only ``librarian.live_session_guard:
-false`` in ``athenaeum.yaml`` turns it off, and the ``athenaeum run
---no-live-session-guard`` CLI flag overrides to off at the call site.
-No seed in ``_DEFAULTS`` -- the default lives here in
-code so it stays reachable. Non-bool yaml values fall through to the
-default (on).
-
 ### `resolve_min_merge_confidence`
 
 - **YAML path:** `athenaeum.yaml`
@@ -1179,6 +1159,27 @@ key.
 
 Env ``ATHENAEUM_INTAKE_RUNTIME_FLOOR`` > yaml
 ``librarian.intake_runtime_floor`` > this default (``0.0``).
+
+### `resolve_live_session_guard_enabled`
+
+- **YAML path:** `librarian.live_session_guard`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `True`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve the move-then-retire live-session guard opt-out.
+
+Resolved from ``librarian.live_session_guard`` in ``athenaeum.yaml``.
+
+The move-then-retire pass must not retire a memory
+file while the Claude Code session that owns its scope is still live --
+doing so races a session that might still amend or contradict the fact
+on disk. This guard is DEFAULT-ON: only ``librarian.live_session_guard:
+false`` turns it off, and the ``athenaeum run --no-live-session-guard``
+CLI flag overrides to off at the call site. No seed in ``_DEFAULTS``
+ -- the default lives here in code so it stays
+reachable. Non-bool yaml values fall through to the default (on).
 
 ### `resolve_live_session_guard_quiet_window_seconds`
 

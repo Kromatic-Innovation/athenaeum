@@ -9,20 +9,35 @@ about to move into the wiki and ``git rm`` from ``raw/``.
 
 Two signals, checked in order, first hit wins:
 
-1. **Session-end marker.** :func:`record_session_end` is called from
+1. **Session-end marker, scoped to the file's OWNING session.**
+   :func:`record_session_end` is called from
    :func:`athenaeum.librarian.session_end` after a session's SessionEnd hook
    completes, and stamps a small JSON marker under
-   ``<cache_dir>/live-session-markers/<scope>.json`` naming the scope and the
-   timestamp. A marker newer than the candidate file's mtime releases the
-   hold REGARDLESS of transcript age -- the session that owned this memory
-   has positively closed, so there is nothing left to race.
-2. **Quiet window.** Failing that (no marker, or the marker is older than the
-   file), the guard falls back to transcript liveness: any
-   ``<projects_root>/<scope>/*.jsonl`` transcript modified within the
-   configurable quiet window (default
+   ``<cache_dir>/live-session-markers/<scope>.json`` naming the scope, the
+   ENDING session id, and the timestamp. That marker releases a candidate
+   file's hold only when the marker's session id equals the file's OWNING
+   session id (:func:`resolve_owning_session_id` -- ``originSessionId``
+   frontmatter first, else the same :class:`~athenaeum.session_recovery.SessionRecoverer`
+   join :func:`athenaeum.intake.discover_auto_memory_files` uses) AND the
+   marker is newer than the file's mtime. A scope can hold more than one
+   live session concurrently (two agents, two terminals, one project) --
+   a marker recorded for session A saying "A has ended" must never be read
+   as "this scope is quiet" for a file that session B, still live, owns.
+   Regression: Quine's ``scenario_multi_session.py`` demonstrated the pass
+   moving a file B owned, and its ``MEMORY.md`` pointer with it, off a
+   session-A-only marker while B was still writing.
+2. **Quiet window, over EVERY transcript in the scope.** Consulted whenever
+   rung 1 does not release the hold -- no marker, a marker for a different
+   session, a marker older than the file, OR the file's owning session could
+   not be determined at all (an unresolved owner never reads as "known
+   closed"; it falls through here instead of skipping straight to a bare
+   release). Any ``<projects_root>/<scope>/*.jsonl`` transcript -- of ANY
+   session sharing the scope, not just the (perhaps unknown) owner's -- has
+   modified within the configurable quiet window (default
    :data:`athenaeum.config.DEFAULT_LIVE_SESSION_GUARD_QUIET_WINDOW_SECONDS`,
    30 minutes) of "now" holds the file. No transcript activity within the
-   window -- including no transcripts at all -- releases the hold.
+   window across the WHOLE scope -- including no transcripts at all --
+   releases the hold.
 
 Scope naming mirrors :mod:`athenaeum.transcript_verify` and
 :mod:`athenaeum.session_recovery` exactly: the raw auto-memory scope
@@ -36,10 +51,12 @@ silently dropped -- :mod:`athenaeum.retire` counts and reports every hold
 this guard produces (``RetireReport.held_live_session``), in both a real run
 and ``--dry-run``.
 
-Layering: L2 leaf. Imports only :mod:`athenaeum.atomic_io` and
-:mod:`athenaeum.store` (both L0) -- no config, no LLM client. Callers
-(:mod:`athenaeum.retire`) resolve config-driven defaults themselves and pass
-plain values in.
+Layering: L2 leaf. Imports :mod:`athenaeum.atomic_io` and
+:mod:`athenaeum.store` (both L0), plus :mod:`athenaeum.models` (L1 hub, for
+``parse_frontmatter``) and :mod:`athenaeum.session_recovery` (L0/L1-boundary
+primitive, for the owner-recovery fallback) -- no config, no LLM client.
+Callers (:mod:`athenaeum.retire`) resolve config-driven defaults themselves
+and pass plain values in.
 """
 
 from __future__ import annotations
@@ -51,6 +68,8 @@ from datetime import datetime
 from pathlib import Path
 
 from athenaeum.atomic_io import atomic_write_text
+from athenaeum.models import parse_frontmatter
+from athenaeum.session_recovery import SessionRecoverer, written_at_from_frontmatter
 from athenaeum.store import now_iso
 
 log = logging.getLogger(__name__)
@@ -121,8 +140,8 @@ def _parse_ts(raw: str) -> float | None:
         return None
 
 
-def _marker_ts(cache_dir: Path, scope: str) -> float | None:
-    """Read *scope*'s marker timestamp as a POSIX float, or ``None``.
+def _read_marker(cache_dir: Path, scope: str) -> dict[str, object] | None:
+    """Read *scope*'s marker as a ``{"session": ..., "ts": ...}`` dict, or ``None``.
 
     Fail-open: a missing, corrupt, or unreadable marker is exactly
     "no signal from this rung" -- it never raises and never blocks the
@@ -135,10 +154,42 @@ def _marker_ts(cache_dir: Path, scope: str) -> float | None:
         return None
     if not isinstance(data, dict):
         return None
-    ts = data.get("ts")
-    if not isinstance(ts, str):
+    return data
+
+
+def resolve_owning_session_id(
+    member: Path,
+    scope: str,
+    recoverer: SessionRecoverer,
+) -> str | None:
+    """The Claude Code session that OWNS *member*, or ``None`` if undetermined.
+
+    Mirrors :func:`athenaeum.intake.discover_auto_memory_files`'s own
+    resolution order (``src/athenaeum/intake.py`` ~498-543) exactly, so the
+    guard's notion of "owner" never disagrees with the provenance the
+    compiled wiki page already carries for the same file:
+
+    1. The file's own ``originSessionId`` frontmatter, when it declares one
+       -- the file's own claim always outranks an inferred one.
+    2. Failing that, :class:`~athenaeum.session_recovery.SessionRecoverer`'s
+       write-cited / time-window ladder over *scope*'s transcripts (the same
+       recoverer :func:`athenaeum.intake.discover_auto_memory_files` uses,
+       passed in here so a caller iterating many members in one scope scans
+       that scope's transcripts once, not once per member).
+
+    Returns ``None`` when neither resolves -- an honest "cannot determine",
+    never a guess. Unreadable file content degrades the same way.
+    """
+    try:
+        text = member.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
         return None
-    return _parse_ts(ts)
+    meta, _body = parse_frontmatter(text)
+    origin_session_id = meta.get("originSessionId") if meta else None
+    if origin_session_id is not None:
+        return str(origin_session_id)
+    recovered = recoverer.recover(member, scope, written_at=written_at_from_frontmatter(meta))
+    return recovered.session_id if recovered is not None else None
 
 
 def is_live(
@@ -148,6 +199,7 @@ def is_live(
     cache_dir: Path,
     projects_root: Path,
     quiet_window_seconds: int,
+    owner_session_id: str | None,
     now: float | None = None,
 ) -> tuple[bool, str]:
     """Decide whether *scope*'s owning session is still live.
@@ -163,6 +215,12 @@ def is_live(
         projects_root: Claude Code transcript home
             (``<projects_root>/<scope>/*.jsonl``).
         quiet_window_seconds: Fallback quiet window in seconds.
+        owner_session_id: The candidate file's OWNING session id, from
+            :func:`resolve_owning_session_id` -- ``None`` when it could not
+            be determined. The marker rung is consulted only when this is
+            not ``None`` AND the scope's marker was recorded for this exact
+            session; an unresolved owner (or a marker for some OTHER session
+            sharing the scope) skips straight to the quiet-window rung.
         now: Injectable current time (POSIX seconds); defaults to
             :func:`time.time`.
 
@@ -173,18 +231,26 @@ def is_live(
     """
     resolved_now = now if now is not None else time.time()
 
-    marker_ts = _marker_ts(cache_dir, scope)
-    if marker_ts is not None and marker_ts >= int(file_mtime):
-        # The session that owned this scope has positively closed AFTER this
-        # file was last written -- released regardless of transcript age.
-        # ``int(file_mtime)`` floors to whole seconds to match the marker's
-        # own second-precision timestamp (`athenaeum.store.now_iso`, issue
-        # athenaeum#1348): without this, a marker and file written in the SAME
-        # wall-clock second could compare unequal purely from the marker's
-        # coarser precision, wrongly failing to release a hold that should
-        # release.
-        return False, ""
+    if owner_session_id is not None:
+        marker = _read_marker(cache_dir, scope)
+        if marker is not None and marker.get("session") == owner_session_id:
+            ts = marker.get("ts")
+            marker_ts = _parse_ts(ts) if isinstance(ts, str) else None
+            if marker_ts is not None and marker_ts >= int(file_mtime):
+                # The file's OWNING session has positively closed AFTER this
+                # file was last written -- released regardless of transcript
+                # age, and regardless of any OTHER session still live in the
+                # same scope. ``int(file_mtime)`` floors to whole seconds to
+                # match the marker's own second-precision timestamp
+                # (`athenaeum.store.now_iso`, issue athenaeum#1348): without this, a
+                # marker and file written in the SAME wall-clock second could
+                # compare unequal purely from the marker's coarser precision.
+                return False, ""
 
+    # Quiet window: no marker released the hold above (none exists, it names
+    # a different session than this file's owner, it predates the file, or
+    # the owner itself is unknown) -- fall back to whether ANY transcript in
+    # the scope is still active, regardless of which session it belongs to.
     scope_dir = projects_root / scope
     if not scope_dir.is_dir():
         return False, ""

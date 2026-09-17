@@ -23,15 +23,15 @@ def _isolated_live_session_guard_projects_root(
     """Issue athenaeum#1728: keep this suite's retire tests off the REAL ``~/.claude/projects``.
 
     This file's fixtures (``retire_root``, ``_build_two_member_root``) reuse
-    the test author's own machine scope names (``-Users-tristankromer-Code*``)
-    — which, run on that same machine, collide with real transcript
-    directories the live-session guard added in athenaeum#1728 now actively
-    checks for recent activity. Without this, a run_retire_pass() call in
-    this file observes the OPERATOR'S actual live session and wrongly holds
-    a file these tests expect moved. Point the guard's ``projects_root``
-    default at an empty synthetic dir for every test in this module instead;
-    ``tests/test_retire_live_session_guard.py`` exercises the guard itself
-    with a scope name that cannot collide.
+    a scope name shaped like a real Claude Code project's path-hash
+    directory — which, run on the machine that scope name actually names,
+    collides with a real transcript directory the live-session guard added
+    in athenaeum#1728 now actively checks for recent activity. Without this,
+    a run_retire_pass() call in this file observes that OPERATOR'S actual
+    live session and wrongly holds a file these tests expect moved. Point
+    the guard's ``projects_root`` default at an empty synthetic dir for
+    every test in this module instead; ``tests/test_retire_live_session_guard.py``
+    exercises the guard itself with a scope name that cannot collide.
     """
     monkeypatch.setattr(
         "athenaeum.retire.default_projects_root",
@@ -1405,6 +1405,116 @@ class TestRetireIntegrationViaRun:
         assert rc == 0
         # No move, no git rm — the toggle held.
         assert _raw_file(retire_root).exists()
+
+    def test_run_level_live_session_guard_holds_by_default(
+        self, retire_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Issue athenaeum#1728: a live transcript under the injected projects_root
+        # holds the raw file at the full run() level (not just the
+        # run_retire_pass() unit level) -- proving the flag actually reaches
+        # the retire pass through run()'s own plumbing.
+        from athenaeum.librarian import run
+
+        projects_root = retire_root.parent / "projects"
+        scope_dir = projects_root / "-Users-tristankromer-Code-home"
+        scope_dir.mkdir(parents=True)
+        (scope_dir / "sess-live.jsonl").write_text("{}", encoding="utf-8")
+
+        rc = run(
+            raw_root=retire_root / "raw",
+            wiki_root=retire_root / "wiki",
+            knowledge_root=retire_root,
+            merge_only=True,
+            projects_root=projects_root,
+        )
+        assert rc == 0
+        # Held by the live-session guard -- neither moved nor git-removed.
+        assert _raw_file(retire_root).exists()
+
+    def test_run_level_no_live_session_guard_flag_moves_despite_live_transcript(
+        self, retire_root: Path
+    ) -> None:
+        # The CLI --no-live-session-guard override, threaded as
+        # run(live_session_guard=False), bypasses the guard entirely even
+        # with the same live transcript that the previous test proved holds.
+        from athenaeum.librarian import run
+
+        projects_root = retire_root.parent / "projects"
+        scope_dir = projects_root / "-Users-tristankromer-Code-home"
+        scope_dir.mkdir(parents=True)
+        (scope_dir / "sess-live.jsonl").write_text("{}", encoding="utf-8")
+
+        rc = run(
+            raw_root=retire_root / "raw",
+            wiki_root=retire_root / "wiki",
+            knowledge_root=retire_root,
+            merge_only=True,
+            projects_root=projects_root,
+            live_session_guard=False,
+        )
+        assert rc == 0
+        assert not _raw_file(retire_root).exists()
+
+    def test_run_level_yaml_live_session_guard_false_moves_despite_live_transcript(
+        self, retire_root: Path
+    ) -> None:
+        # Same bypass, via librarian.yaml.live_session_guard: false instead
+        # of the explicit run() kwarg -- proves the yaml resolution path
+        # also reaches the retire pass through run()'s plumbing.
+        from athenaeum.librarian import run
+
+        (retire_root / "athenaeum.yaml").write_text(
+            "recall:\n"
+            "  extra_intake_roots:\n"
+            "    - raw/auto-memory\n"
+            "librarian:\n"
+            "  live_session_guard: false\n",
+            encoding="utf-8",
+        )
+        projects_root = retire_root.parent / "projects"
+        scope_dir = projects_root / "-Users-tristankromer-Code-home"
+        scope_dir.mkdir(parents=True)
+        (scope_dir / "sess-live.jsonl").write_text("{}", encoding="utf-8")
+
+        rc = run(
+            raw_root=retire_root / "raw",
+            wiki_root=retire_root / "wiki",
+            knowledge_root=retire_root,
+            merge_only=True,
+            projects_root=projects_root,
+        )
+        assert rc == 0
+        assert not _raw_file(retire_root).exists()
+
+    def test_run_level_held_live_session_count_rides_the_real_run_summary(
+        self, retire_root: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # Issue athenaeum#1728 Quine follow-up: pin `held_live_session=N` through
+        # the REAL run-summary render call (`RunContext.emit_run_summary` ->
+        # `log.info("%s", _render_run_summary(...))`) rather than hand-
+        # feeding `_render_run_summary` a synthetic profile tuple, which
+        # would go on passing even if the retire phase stopped actually
+        # populating that field.
+        import logging
+
+        from athenaeum.librarian import run
+
+        projects_root = retire_root.parent / "projects"
+        scope_dir = projects_root / "-Users-tristankromer-Code-home"
+        scope_dir.mkdir(parents=True)
+        (scope_dir / "sess-live.jsonl").write_text("{}", encoding="utf-8")
+
+        with caplog.at_level(logging.INFO, logger="athenaeum.librarian"):
+            rc = run(
+                raw_root=retire_root / "raw",
+                wiki_root=retire_root / "wiki",
+                knowledge_root=retire_root,
+                merge_only=True,
+                projects_root=projects_root,
+            )
+        assert rc == 0
+        assert _raw_file(retire_root).exists()  # held, per the earlier test
+        assert "held_live_session=1" in caplog.text
 
 
 def _build_two_member_root(

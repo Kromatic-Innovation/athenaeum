@@ -104,8 +104,10 @@ corpus is not in this repository.
   shape rule matched the raw file and its optional `correction:` block.
 - **Move-then-retire's live-session guard** reads `librarian.live_session_guard`
   / `librarian.live_session_guard_quiet_window_seconds`, each candidate raw
-  file's mtime, its session-end marker (`<cache_dir>/live-session-markers/
-  <scope>.json`), and `<projects_root>/<scope>/*.jsonl` transcript mtimes.
+  file's mtime and `originSessionId` frontmatter (falling back to the
+  session-recovery join over its scope's transcripts when absent), the
+  scope's session-end marker (`<cache_dir>/live-session-markers/<scope>.json`),
+  and `<projects_root>/<scope>/*.jsonl` transcript mtimes.
 
 ### Config keys: `preserved_log_dir` and `preserved_log_adapter`
 
@@ -176,29 +178,45 @@ restore the old one automatically.
 
 The move-then-retire pass deletes raw intake — recoverable from git history,
 but a delete all the same. Retiring a memory file while the Claude Code
-session that owns its scope is still open races that session: an agent could
-still be amending, correcting, or contradicting the very fact this pass is
-about to move into the wiki and `git rm` from `raw/`. The guard closes that
-race by holding a file until its scope's owning session is provably closed.
+session that owns it is still open races that session: an agent could still
+be amending, correcting, or contradicting the very fact this pass is about
+to move into the wiki and `git rm` from `raw/`. The guard closes that race by
+holding a file until its OWNING session is provably closed — and a scope can
+hold more than one live session at once (two agents, two terminals, one
+project), so "the scope looks quiet" is never treated as "this file's owner
+is closed" on its own.
 
 **Signal order** (`athenaeum.live_session_guard`), first hit wins:
 
-1. **Session-end marker.** `athenaeum session-end` (`athenaeum.librarian.session_end`)
-   stamps a small marker for its session's scope on every non-dry-run
-   invocation. A marker newer than the candidate file's mtime releases the
-   hold regardless of transcript age — the owning session has positively
-   closed.
-2. **Quiet window.** Failing that, the guard checks
+1. **Session-end marker, matched to the file's owning session.**
+   `athenaeum session-end` (`athenaeum.librarian.session_end`) stamps a
+   small marker naming its own session id, for that session's scope, on
+   every non-dry-run invocation. The marker releases a candidate file's hold
+   only when its session id matches the file's OWNING session (its
+   `originSessionId` frontmatter, or — failing that — the same session-
+   recovery join `athenaeum.intake.discover_auto_memory_files` already uses)
+   AND the marker is newer than the file's mtime. A marker recorded for one
+   session ending is never read as license to retire a file a DIFFERENT,
+   still-live session owns.
+2. **Quiet window, over every transcript in the scope.** Consulted whenever
+   the marker rung does not release the hold — no marker, a marker for a
+   different session, a marker older than the file, or the file's owning
+   session could not be determined at all. The guard checks
    `<projects_root>/<scope>/*.jsonl` (the same scope-directory join key
    `athenaeum.transcript_verify` and `athenaeum.session_recovery` already
-   use) for a transcript modified within the configurable quiet window.
-   Nothing modified within the window — including no transcripts at all —
-   releases the hold.
+   use) for ANY transcript in the scope modified within the configurable
+   quiet window, regardless of which session it belongs to. Nothing modified
+   within the window across the whole scope — including no transcripts at
+   all — releases the hold.
 
-A held file is **never** silently skipped: it is counted
-(`RetireReport.held_live_session`) and named — with its hold reason — in
-every dry-run report and the librarian's run summary
-(`retire ... held_live_session=N ...`).
+An unresolved owner never short-circuits to a bare release: it simply means
+rung 1 has nothing to match against, so rung 2 decides — the conservative
+default this pass uses everywhere else ("if in doubt, keep it").
+
+A held file is **never** silently skipped: the librarian's run summary
+carries the COUNT (`retire ... held_live_session=N ...`), and the file is
+named — with its hold reason — in `RetireReport.dispositions` (and the
+`--dry-run` report, which surfaces those same dispositions).
 
 **Config keys**, under the existing `librarian:` section:
 
@@ -253,7 +271,7 @@ librarian:
 | `preserve` tallies `preserve-failed`, raw file left in place | The move (local or adapter-routed) fails — an adapter-routed move writes the destination first and only removes the source once that write succeeds, so a cross-device failure never strands a half-moved log. |
 | `preserve` tallies `transform-error`, raw file untouched | The optional `correction:` block fails to resolve — the correction is built *before* the move, so a bad transform never strands a half-moved log. |
 | Decay sweep's off-corpus routing does not fire | No off-corpus surface is configured, or the page carries no explicit `data_class` — no shipped write path stamps `data_class` today, so this gate is dormant on any corpus produced by shipped code regardless of whether a retention pack is active. |
-| Move-then-retire holds a file, tallied `held_live_session` | The live-session guard finds no session-end marker for its scope newer than the file AND a scope transcript modified within the quiet window (default 30 min) — the owning session is not provably closed. Reported by name in the run summary and `--dry-run`, never silently skipped. |
+| Move-then-retire holds a file, tallied `held_live_session` | The live-session guard finds no session-end marker for the file's OWNING session newer than the file AND some transcript in its scope modified within the quiet window (default 30 min) — the owning session is not provably closed, and a different session sharing the scope may still be live. Counted in the run summary, named (with its hold reason) in `RetireReport.dispositions` and `--dry-run`, never silently skipped. |
 
 ## See also
 

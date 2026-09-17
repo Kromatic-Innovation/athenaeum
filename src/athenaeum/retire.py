@@ -71,7 +71,7 @@ from athenaeum.config import (
     resolve_live_session_guard_enabled,
     resolve_live_session_guard_quiet_window_seconds,
 )
-from athenaeum.live_session_guard import is_live
+from athenaeum.live_session_guard import is_live, resolve_owning_session_id
 from athenaeum.memory_index import INDEX_FILENAME, rewrite_index
 from athenaeum.merge import (
     MergedWikiEntry,
@@ -79,6 +79,7 @@ from athenaeum.merge import (
     resolve_member_path,
 )
 from athenaeum.models import DEFAULT_SOURCE_TYPE, parse_frontmatter
+from athenaeum.session_recovery import SessionRecoverer
 from athenaeum.store import FilesystemStore, Store
 from athenaeum.transcript_verify import default_projects_root, verify_user_stated
 
@@ -535,6 +536,21 @@ def run_retire_pass(
     )
     guard_cache_dir = cache_dir if cache_dir is not None else resolve_cache_dir()
     guard_projects_root = projects_root if projects_root is not None else default_projects_root()
+    if guard_enabled and not guard_projects_root.is_dir():
+        # Issue athenaeum#1728 Quine review: a wrong/relocated ``CLAUDE_CONFIG_DIR``
+        # (or an injected test root that doesn't exist) makes every scope
+        # read as "no transcripts" -- the guard then releases EVERY hold
+        # silently, which is exactly the silent-degrade class this repo
+        # tries to kill elsewhere (e.g. the degraded-verdict HOLD above).
+        # One WARNING per run names the path so the operator can tell
+        # "genuinely quiet" from "guard is blind".
+        log.warning(
+            "retire: live-session-guard projects_root %s does not exist -- "
+            "every scope will read as having no live session; if this is "
+            "unexpected, check CLAUDE_CONFIG_DIR",
+            guard_projects_root,
+        )
+    guard_recoverer = SessionRecoverer(guard_projects_root)
 
     # (entry, members_to_retire) — only the members whose fact actually landed
     # in the wiki body AND that live under knowledge_root are retire-eligible.
@@ -612,12 +628,14 @@ def run_retire_pass(
                     m_mtime = m.stat().st_mtime
                 except OSError:
                     m_mtime = 0.0
+                owner_session_id = resolve_owning_session_id(m, m.parent.name, guard_recoverer)
                 held_live, live_reason = is_live(
                     m.parent.name,
                     m_mtime,
                     cache_dir=guard_cache_dir,
                     projects_root=guard_projects_root,
                     quiet_window_seconds=guard_quiet_window,
+                    owner_session_id=owner_session_id,
                 )
                 if held_live:
                     report.held.append(str(m))
