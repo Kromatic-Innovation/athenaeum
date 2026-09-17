@@ -1679,6 +1679,91 @@ conn.close()
         context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
         assert "Boundary Page" in context, f"got: {context!r}"
 
+    # -- issue athenaeum#1761: the CLI's relevance-floor writer ----------------
+    #
+    # `tests.evals.north_star_cli.write_relevance_floor_config` is the CLI-side
+    # writer a floor-on north-star dispatch uses to put `athenaeum.yaml` into
+    # a materialized knowledge root. These two tests pin that the SHIPPED
+    # breadcrumb hook actually honours a file written that way -- reusing
+    # this class's own `_vector_env`/`_set_stub_hits` fixture pattern
+    # (athenaeum#1665) rather than hand-writing yaml text, so a drift between
+    # the writer's shape and what the hook actually reads is caught here.
+
+    def test_breadcrumb_hook_honours_a_vector_floor_written_by_the_cli(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """AC (issue athenaeum#1761): the shipped hook applies a vector floor
+        set via `write_relevance_floor_config`, exactly as it would one
+        hand-authored into `athenaeum.yaml` directly (the tests above this
+        one already pin that mechanism). The writer also stamps
+        `search_backend: vector` -- required for the hook's vector half to
+        run at all (`SEARCH_BACKEND` is cached from that SAME key by
+        `session-start-recall.sh`) -- so this test is also the one place
+        that stamp is pinned.
+        """
+        from tests.evals.north_star_cli import write_relevance_floor_config
+
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+        _require_hook_python(hook_env, "athenaeum.config")
+
+        knowledge = Path(hook_env["KNOWLEDGE_ROOT"])
+        write_relevance_floor_config(
+            knowledge,
+            relevance_floor_vector=0.5,
+            relevance_floor_fts5=None,
+            search_backend="vector",
+        )
+
+        vector_env, fake_pkg = self._vector_env(hook_env, tmp_path)
+        self._set_stub_hits(
+            fake_pkg,
+            [
+                ("above-floor.md", "Above Floor Page", 0.1),
+                ("below-floor.md", "Below Floor Page", 0.9),
+            ],
+        )
+
+        result = subprocess.run(
+            ["bash", str(USER_PROMPT)],
+            input=json.dumps(
+                {
+                    "prompt": "zzznonmatchingzzz term completely unrelated content",
+                    "session_id": f"test-{uuid.uuid4().hex}",
+                }
+            ),
+            env=vector_env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert result.stdout, "the above-floor hit must still surface"
+        context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+        assert "Above Floor Page" in context, f"got: {context!r}"
+        assert "Below Floor Page" not in context, (
+            f"a below-floor vector hit written via write_relevance_floor_config "
+            f"was not filtered: {context!r}"
+        )
+
+    def test_relevance_floor_config_writer_is_a_noop_with_no_floors(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """AC (issue athenaeum#1761): the acceptance criterion for the
+        writer itself -- with both floors ``None`` (no ``--relevance-floor-*``
+        flag given), it writes nothing at all, so a default north-star
+        dispatch stays byte-identical to today's behaviour.
+        """
+        from tests.evals.north_star_cli import write_relevance_floor_config
+
+        knowledge = tmp_path / "unwritten-knowledge-root"
+        write_relevance_floor_config(
+            knowledge, relevance_floor_vector=None, relevance_floor_fts5=None, search_backend="fts5"
+        )
+        assert not knowledge.exists()
+
     def test_fts5_survives_unfiltered_when_search_py_import_raises(
         self, hook_env: dict[str, str], tmp_path: Path
     ) -> None:

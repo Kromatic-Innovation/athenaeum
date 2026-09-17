@@ -64,6 +64,8 @@ from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+import yaml
+
 from tests.evals.containment import (
     DEFAULT_CELL_SECONDS,
     NORTH_STAR_CELL_TOKEN_ESTIMATE,
@@ -128,6 +130,116 @@ DEFAULT_MAX_SPEND_USD = 1.0
 #: worker is real even though the CPU is idle. Four is the number the
 #: workflow's own dispatch input defaults to; raise both together.
 DEFAULT_WORKERS = 4
+
+
+def write_relevance_floor_config(
+    knowledge_root: Path,
+    *,
+    relevance_floor_vector: float | None,
+    relevance_floor_fts5: float | None,
+    search_backend: str,
+) -> None:
+    """Write ``athenaeum.yaml`` into *knowledge_root* setting
+    ``recall.relevance_floor`` for whichever backend(s) an operator passed
+    (issue athenaeum#1761).
+
+    A no-op -- writes nothing, touches no directory -- when both floors are
+    ``None`` (neither ``--relevance-floor-vector`` nor
+    ``--relevance-floor-fts5`` was given): that is this issue's own
+    acceptance criterion, the default dispatch stays byte-identical to
+    today's behaviour.
+
+    Both the PLAIN key (``recall.relevance_floor.<backend>``, read by an
+    explicit ``recall`` call -- the API-mode PULL/PUSH_BREADCRUMB_PULL tool
+    executors in ``tests.evals.rollout``) and the PUSH-scoped key
+    (``recall.relevance_floor.push.<backend>``, read first by the shipped
+    breadcrumb hook, which IS the unprompted push path) are set to the SAME
+    value, so one flag governs both delivery paths this issue names rather
+    than requiring two.
+
+    Also stamps a top-level ``search_backend: <search_backend>`` key. This
+    matters specifically for the breadcrumb hook: ``examples/claude-code/
+    user-prompt-recall.sh`` only runs its vector half (and therefore only
+    ever applies a ``vector`` floor) on a turn where its own
+    ``SEARCH_BACKEND`` resolves to ``"vector"`` -- which
+    ``session-start-recall.sh`` caches from this SAME ``athenaeum.yaml`` key,
+    not from this CLI's own ``--search-backend`` flag. Without this line, a
+    dispatch that built its index with ``--search-backend vector`` and set
+    ``--relevance-floor-vector`` would still see the hook run FTS5-only and
+    silently never exercise the vector floor at all. Written unconditionally
+    whenever a floor is active (not only for a vector floor) so the hook's
+    resolved backend always matches the one this run's index was built
+    with.
+
+    Called once per materialized knowledge root, before
+    :func:`tests.evals.rollout.run_probe_all_arms` runs against it -- never
+    inside :meth:`tests.evals.corpus.Corpus.materialize`, which this issue's
+    proposal explicitly keeps config-free.
+    """
+    if relevance_floor_vector is None and relevance_floor_fts5 is None:
+        return
+    backend_floor: dict[str, float] = {}
+    if relevance_floor_vector is not None:
+        backend_floor["vector"] = relevance_floor_vector
+    if relevance_floor_fts5 is not None:
+        backend_floor["fts5"] = relevance_floor_fts5
+    config = {
+        "search_backend": search_backend,
+        "recall": {
+            "relevance_floor": {
+                **backend_floor,
+                "push": dict(backend_floor),
+            }
+        },
+    }
+    knowledge_root.mkdir(parents=True, exist_ok=True)
+    (knowledge_root / "athenaeum.yaml").write_text(
+        yaml.safe_dump(config, sort_keys=False), encoding="utf-8"
+    )
+
+
+def floor_scan_summary(rows: Sequence[object]) -> str:
+    """Summarise the retrieval-hit scores carried by *rows* (issue
+    athenaeum#1761 item 4), so an operator can pick a
+    ``--relevance-floor-vector``/``--relevance-floor-fts5`` value before
+    dispatching a floor-on grid.
+
+    *rows* is ``Sequence[tests.evals.north_star_report.RolloutRow]`` (typed
+    loosely here to avoid a report-module import cycle at CLI-module load
+    time); each row's ``.record.retrieval_hit_scores`` is the field
+    :func:`tests.evals.rollout.run_probe_all_arms` populates -- a
+    same-backend/same-index approximation of what the shipped breadcrumb
+    hook saw for that probe's query, NOT the hook's own internal ranking
+    (see that field's docstring for the exact caveat). A store written
+    before that field existed carries ``None`` on every row; this function
+    says so explicitly rather than printing a misleadingly-empty summary.
+    """
+    scores: list[float] = []
+    carrying = 0
+    for row in rows:
+        record_scores = row.record.retrieval_hit_scores  # type: ignore[attr-defined]
+        if record_scores:
+            carrying += 1
+            scores.extend(record_scores)
+    lines = [
+        f"{carrying} of {len(rows)} rows carry retrieval_hit_scores "
+        "(rows persisted before issue athenaeum#1761 carry none)."
+    ]
+    if not scores:
+        lines.append("no scores to summarise.")
+        return "\n".join(lines)
+    scores.sort()
+    n = len(scores)
+
+    def _pct(p: float) -> float:
+        idx = min(n - 1, max(0, round(p * (n - 1))))
+        return scores[idx]
+
+    lines.append(
+        f"n={n} min={scores[0]:.4f} p25={_pct(0.25):.4f} median={_pct(0.5):.4f} "
+        f"p75={_pct(0.75):.4f} max={scores[-1]:.4f}"
+    )
+    return "\n".join(lines)
 
 
 def resolve_max_spend(args: argparse.Namespace) -> float:
@@ -289,6 +401,39 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "appear in the report's per-dimension tables, never in the verdicts."
         ),
     )
+    parser.add_argument(
+        "--relevance-floor-vector",
+        type=float,
+        default=None,
+        help=(
+            "issue athenaeum#1761: write recall.relevance_floor.vector (plain and "
+            "push-scoped) into athenaeum.yaml under every materialized knowledge root, so "
+            "the breadcrumb hook and the API-mode recall tool apply this floor. Omitted "
+            "(default): no floor, today's behaviour. A floor-on run should use its own "
+            "--store path -- cell keys carry no floor value, so resuming a floor-off store "
+            "with a floor turned on treats its cells as already done."
+        ),
+    )
+    parser.add_argument(
+        "--relevance-floor-fts5",
+        type=float,
+        default=None,
+        help=(
+            "issue athenaeum#1761: same mechanism as --relevance-floor-vector, for the "
+            "fts5 backend. Omitted (default): no floor."
+        ),
+    )
+    parser.add_argument(
+        "--floor-scan",
+        type=Path,
+        default=None,
+        help=(
+            "issue athenaeum#1761: read an existing --store JSONL and print a summary of "
+            "the retrieval_hit_scores its rows carry, then exit 0 -- makes zero paid calls "
+            "and runs no cells, so an operator can choose a --relevance-floor-vector/"
+            "--relevance-floor-fts5 value before dispatching a floor-on grid."
+        ),
+    )
     return parser
 
 
@@ -360,6 +505,8 @@ def _run_cells(
     mode: str,
     workers: int = 1,
     token_ceiling: int | None = None,
+    relevance_floor_vector: float | None = None,
+    relevance_floor_fts5: float | None = None,
 ) -> None:
     """Group *cells* by (probe, corpus_scale, replicate) and run each
     not-yet-complete group through :func:`run_probe_all_arms` exactly once
@@ -433,14 +580,24 @@ def _run_cells(
             return
         probe_id, corpus_scale, replicate = group_key
         slot = slots.get()
+        group_root = materialize_root / f"w{slot}" / f"{corpus_scale}-{replicate}"
         try:
+            # Issue athenaeum#1761: written BEFORE run_probe_all_arms so it
+            # exists under this group's knowledge root the moment
+            # Corpus.materialize creates that root -- the CLI's own
+            # concern per the issue's proposal (Corpus.materialize itself
+            # stays config-free). A no-op when both floors are None.
+            write_relevance_floor_config(
+                group_root,
+                relevance_floor_vector=relevance_floor_vector,
+                relevance_floor_fts5=relevance_floor_fts5,
+                search_backend=search_backend,
+            )
             records = run_probe_all_arms(
                 probe_id,
                 corpus_scale,
                 session=session,
-                materialize_root=(
-                    materialize_root / f"w{slot}" / f"{corpus_scale}-{replicate}"
-                ),
+                materialize_root=group_root,
                 model=model,
                 search_backend=search_backend,
                 claude_binary=claude_binary,
@@ -450,6 +607,9 @@ def _run_cells(
             )
         finally:
             slots.put(slot)
+        for record in records.values():
+            record.relevance_floor_vector = relevance_floor_vector
+            record.relevance_floor_fts5 = relevance_floor_fts5
         with ledger_lock:
             for cell in group_cells:
                 append_rollout_row(store, cell, records[cell.arm])
@@ -517,6 +677,14 @@ def _run_cells(
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
+    # Issue athenaeum#1761 item 4: a pure read of an existing store, zero
+    # paid calls, zero cells run -- checked first, before any grid-sizing
+    # or spend validation below, none of which applies to a scan.
+    if args.floor_scan is not None:
+        store = ResultStore(args.floor_scan)
+        diagnostics = load_rollout_rows_and_diagnostics(store)
+        print(floor_scan_summary(list(diagnostics.rows)))
+        return 0
     if args.workers < 1:
         print(f"--workers must be >= 1, got {args.workers}", file=sys.stderr)
         return 1
@@ -621,6 +789,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             mode=args.mode,
             workers=args.workers,
             token_ceiling=token_ceiling,
+            relevance_floor_vector=args.relevance_floor_vector,
+            relevance_floor_fts5=args.relevance_floor_fts5,
         )
         assert_rollout_ceiling(session, ceiling=token_ceiling)
     except (Exception, KeyboardInterrupt) as exc:  # noqa: BLE001 -- see below

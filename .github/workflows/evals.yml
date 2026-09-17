@@ -83,6 +83,14 @@ on:
         description: "north_star_cli.py --workers (cells run concurrently; 1 = serial)"
         required: false
         default: "4"
+      north_star_relevance_floor_vector:
+        description: "north_star_cli.py --relevance-floor-vector (issue athenaeum#1761; blank = off, the default)"
+        required: false
+        default: ""
+      north_star_relevance_floor_fts5:
+        description: "north_star_cli.py --relevance-floor-fts5 (issue athenaeum#1761; blank = off, the default)"
+        required: false
+        default: ""
   push:
     branches: [main]
 
@@ -249,6 +257,8 @@ jobs:
           NORTH_STAR_MAX_SPEND: ${{ github.event.inputs.north_star_max_spend }}
           NORTH_STAR_MAX_TOKENS: ${{ github.event.inputs.north_star_max_tokens }}
           NORTH_STAR_WORKERS: ${{ github.event.inputs.north_star_workers }}
+          NORTH_STAR_RELEVANCE_FLOOR_VECTOR: ${{ github.event.inputs.north_star_relevance_floor_vector }}
+          NORTH_STAR_RELEVANCE_FLOOR_FTS5: ${{ github.event.inputs.north_star_relevance_floor_fts5 }}
         run: |
           if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
             echo "::warning::ANTHROPIC_API_KEY not set (op item not provisioned) — north-star run will fail to construct a client"
@@ -265,6 +275,18 @@ jobs:
           if [ -n "${NORTH_STAR_MAX_TOKENS:-}" ]; then
             MAX_TOKENS_FLAG=(--max-tokens "$NORTH_STAR_MAX_TOKENS")
           fi
+          # Issue athenaeum#1761: left off entirely when blank, same as
+          # every other optional flag above -- the CLI's own default (no
+          # floor) applies, byte-identical to a dispatch that predates
+          # this input.
+          RELEVANCE_FLOOR_VECTOR_FLAG=()
+          if [ -n "${NORTH_STAR_RELEVANCE_FLOOR_VECTOR:-}" ]; then
+            RELEVANCE_FLOOR_VECTOR_FLAG=(--relevance-floor-vector "$NORTH_STAR_RELEVANCE_FLOOR_VECTOR")
+          fi
+          RELEVANCE_FLOOR_FTS5_FLAG=()
+          if [ -n "${NORTH_STAR_RELEVANCE_FLOOR_FTS5:-}" ]; then
+            RELEVANCE_FLOOR_FTS5_FLAG=(--relevance-floor-fts5 "$NORTH_STAR_RELEVANCE_FLOOR_FTS5")
+          fi
           # --store lands under measurements/ (not the system temp dir the
           # CLI defaults to) so a run killed at timeout-minutes still leaves
           # its completed cells somewhere the upload step below can reach --
@@ -280,7 +302,9 @@ jobs:
             --store measurements/north-star-store.jsonl \
             --out-dir measurements \
             "${CORPUS_SCALES_FLAG[@]}" \
-            "${MAX_TOKENS_FLAG[@]}"
+            "${MAX_TOKENS_FLAG[@]}" \
+            "${RELEVANCE_FLOOR_VECTOR_FLAG[@]}" \
+            "${RELEVANCE_FLOOR_FTS5_FLAG[@]}"
 
       - name: Upload north-star report
         # `always()` so a failed, refused or TIMED-OUT run still ships what

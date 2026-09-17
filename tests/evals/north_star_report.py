@@ -1789,6 +1789,44 @@ class NorthStarReport:
     # count so a reader can tell "this store was resumed" from "this store
     # is damaged".
     duplicate_rows: int = 0
+    # issue athenaeum#1761: the ONE relevance-floor value active across every
+    # row in this report, or ``None`` when no row carries a floor (a
+    # floor-off run, or a store written before this field existed -- both
+    # decode as ``None`` on ``RolloutRecord.relevance_floor_vector``/
+    # ``.relevance_floor_fts5``, indistinguishable and correctly so: both
+    # ARE "no floor was active"). :func:`build_report` refuses to construct
+    # a report at all when *rows* carry more than one distinct value --
+    # see that function's own docstring.
+    relevance_floor_vector: float | None = None
+    relevance_floor_fts5: float | None = None
+
+
+def _pooled_floor_value(rows: Sequence[RolloutRow], attr: str) -> float | None:
+    """The ONE value *attr* (``"relevance_floor_vector"`` or
+    ``"relevance_floor_fts5"``) takes across every row's
+    :class:`~tests.evals.rollout.RolloutRecord`, or raise (issue
+    athenaeum#1761).
+
+    A report is one decision block over one comparable run. Pooling rows
+    from a floor-off pass with rows from a floor-on pass (or two
+    differently-configured floor-on passes) into the same correctness/cost
+    figures would silently misattribute one pass's numbers to the other's
+    configuration -- there is no safe default reading here, so this raises
+    rather than picking a value or dropping rows.
+    """
+    values = {getattr(row.record, attr) for row in rows}
+    if len(values) > 1:
+        distinct = sorted(
+            values, key=lambda v: (v is None, v if v is not None else 0.0)
+        )
+        raise ValueError(
+            f"north_star_report.build_report: rows carry differing {attr} values "
+            f"{distinct!r} -- refusing to pool a floor-on run together with a "
+            "floor-off run (or two differently-configured floor-on runs) into one "
+            "decision block (issue athenaeum#1761). Dispatch a floor-on grid to its "
+            "own --store path and build a report from that store alone."
+        )
+    return next(iter(values), None)
 
 
 def build_report(
@@ -1811,7 +1849,15 @@ def build_report(
     *rows*, it cannot be derived from a :class:`ResultStore` here, since it
     is scored against an :class:`~tests.evals.corpus.Observation` stream and
     a system's raw store contents, neither of which a ``RolloutRow`` carries.
+
+    Raises :class:`ValueError` (issue athenaeum#1761) when *rows* carry more
+    than one distinct ``relevance_floor_vector`` or ``relevance_floor_fts5``
+    value -- see :func:`_pooled_floor_value`. A store with every row at
+    ``None`` (no operator ever set a floor) is the pre-athenaeum#1761
+    behaviour and passes through unchanged.
     """
+    relevance_floor_vector = _pooled_floor_value(rows, "relevance_floor_vector")
+    relevance_floor_fts5 = _pooled_floor_value(rows, "relevance_floor_fts5")
     scales = sorted({row.record.corpus_scale for row in rows})
     digests = {scale: _corpus_for_scale(scale).fingerprint() for scale in scales}
     return NorthStarReport(
@@ -1830,6 +1876,8 @@ def build_report(
         planned_cells=planned_cells,
         torn_rows=torn_rows,
         duplicate_rows=duplicate_rows,
+        relevance_floor_vector=relevance_floor_vector,
+        relevance_floor_fts5=relevance_floor_fts5,
     )
 
 
@@ -1854,6 +1902,17 @@ def render_report(report: NorthStarReport) -> str:
     lines.append(f"- generated: {report.generated}")
     lines.append(f"- athenaeum_version: {report.athenaeum_version}")
     lines.append(f"- git_sha: {report.git_sha}")
+    # issue athenaeum#1761: printed unconditionally, "off" when no operator
+    # ever set a floor -- so a reader never has to infer floor status from
+    # absence.
+    floor_vector_display = (
+        "off" if report.relevance_floor_vector is None else str(report.relevance_floor_vector)
+    )
+    floor_fts5_display = (
+        "off" if report.relevance_floor_fts5 is None else str(report.relevance_floor_fts5)
+    )
+    lines.append(f"- relevance_floor_vector: {floor_vector_display}")
+    lines.append(f"- relevance_floor_fts5: {floor_fts5_display}")
     for scale in sorted(report.corpus_digests):
         lines.append(f"- corpus_digest[{scale}]: {report.corpus_digests[scale]}")
     lines.append(f"- total rollout rows: {len(report.rows)}")
