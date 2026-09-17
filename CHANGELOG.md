@@ -150,6 +150,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the grid is re-dispatched manually after this lands, per athenaeum#1766
   AC5.
 
+- **The fourth live north-star grid's condition-1 loss at `medium` was
+  entirely a third fixture defect in `multi_hop`, the follow_through sibling
+  athenaeum#1766 left standing (issue athenaeum#1768).** Run 35266416405
+  (develop `b28392ef`, 1392 rows) cleared the oracle positive control on
+  every graded class, but the verdict arm scored 6/9 on the relationship
+  subset against `native_grep`'s 7/9, and the three misses were the three
+  `multi_hop` probes. Two of the three had the same authoring defect
+  athenaeum#1766 fixed for `follow_through`: the token-bearing second page
+  restated enough of the query's own vocabulary that a correct answer could
+  be given, and correctly cited, from the FIRST page alone —
+  `spend_approver_named`'s `person-amir-osei` page repeated "discretionary
+  spend above 500 GBP" from the policy page, and `portal_design_reviewer`'s
+  `person-hana-lindqvist` page repeated "client-facing surfaces" from the
+  project page. Both queries (`tests/evals/data/corpus/probes/probes.yaml`)
+  now carry a second clause answerable only from a fact unique to the token
+  page — whether Amir Osei will act on a written request alone, and whether
+  Hana Lindqvist's review is a one-time launch gate or a recurring
+  monthly recheck — and both token pages were reworded to drop the
+  overlapping phrasing. `ratecard_tooling_owner`'s query also shared the
+  literal words "rate", "card", and "build" with its own token page
+  (`tool-buildpipe`) and was reworded alongside it, dropping the token
+  page's now-redundant "rate-card tooling" mention. All three probes'
+  `distractor_terms` were updated to match the reworded queries (planted
+  distractor pages are built from this field, so a stale term would plant a
+  decoy that no longer competes with the query). `validate_core` gains
+  the `multi_hop` counterpart of the `follow_through` lexical-unreachability
+  check: for every `multi_hop` probe, the `expected_uids` page carrying the
+  planted token must share no content term — exact, or a stemmed
+  uid/name/tags prefix — with the query. See
+  `docs/design/native-memory-baseline.md` §5 for the run record; the grid
+  is re-dispatched manually after this lands, per athenaeum#1768 AC4.
+
 - **API-mode PULL arms now serve `read_entity` alongside `recall`, matching the
   tool surface the real MCP server gives a PULL session (issue
   athenaeum#1756).** The shipped server serves both; the eval harness's

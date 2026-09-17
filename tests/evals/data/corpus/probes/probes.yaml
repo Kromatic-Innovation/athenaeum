@@ -56,28 +56,48 @@
 
 - id: spend_approver_named
   probe_class: multi_hop
-  query: "who personally signs off discretionary spend over 500 GBP?"
+  query: >-
+    who signs off discretionary spend over 500 GBP, and will he clear it by
+    email alone or does he insist on a direct conversation first?
   expected_uids: [policy-budget-approval, person-amir-osei]
-  distractor_terms: ["discretionary spend", "approval threshold", "500 GBP"]
+  distractor_terms: ["discretionary spend", "500 GBP", "direct conversation"]
   answer_tokens: ["Voltmere"]
   note: >-
-    The threshold lives on the policy page and the identity of the finance
-    partner on the person page. Retrieving either alone yields a confidently
-    incomplete answer, which is why both uids are required.
+    The threshold and the finance partner's name (athenaeum#1768) live on the
+    policy page; only his own page says he refuses to act on a written note
+    alone and insists on hearing the request in person before agreeing.
+    Retrieving either page alone yields a confidently incomplete answer,
+    which is why both uids are required.
 
 - id: portal_design_reviewer
   probe_class: multi_hop
-  query: "who reviews client-facing surfaces on the portal project?"
+  query: >-
+    who reviews client-facing surfaces on the portal project, and does that
+    review happen only once before launch, or does the reviewer check back
+    again after it ships?
   expected_uids: [project-portal-refresh, person-hana-lindqvist]
-  distractor_terms: ["portal", "design review"]
+  distractor_terms: ["portal", "launch"]
   answer_tokens: ["Greywisp"]
+  note: >-
+    The project page names the design lead (athenaeum#1768); only her own
+    page says the review is not a one-time launch gate -- she revisits every
+    shipped screen a month afterward to confirm it still meets her bar.
 
 - id: ratecard_tooling_owner
   probe_class: multi_hop
-  query: "which repository generates the rate card, and who maintains its build?"
+  query: >-
+    which repository generates the rate card, and who would need to be
+    looped in if the system behind it stopped working?
   expected_uids: [repo-rowanwrenfield, tool-buildpipe]
-  distractor_terms: ["rate card", "build pipeline"]
+  distractor_terms: ["rate card", "stopped working"]
   answer_tokens: ["Fennorack"]
+  note: >-
+    The repository page identifies which repo produces the rate card
+    (athenaeum#1768); who to loop in if its build tooling breaks is only on
+    the buildpipe page (Tomas Briell). Reworded from the original wording,
+    which shared the literal words "rate", "card", and "build" with the
+    buildpipe page and so was reachable by the query's own vocabulary
+    without following the hop.
 
 # --- temporal / knowledge update --------------------------------------------
 

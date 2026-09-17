@@ -285,6 +285,25 @@ score below 1.0 on `follow_through` by citing an incomplete answer, so a
 below-1.0 oracle cell on this class is read as a probe-authoring regression,
 not a retrieval finding.
 
+**The 2026-09-17 run 35266416405 (develop `b28392ef`, 1392 rows) cleared the
+oracle positive control on every graded class -- the first of the four
+north-star runs to do so -- and its decision block still failed every
+scale** (athenaeum#1768). At `medium`, the entire condition-1 loss on the
+relationship subset was the three `multi_hop` probes (0/3 against
+`native_grep`'s 7/9 pooled with the rest of the subset); every other
+relationship row was correct. Two of the three multi_hop probes carried the
+same defect athenaeum#1766 fixed for `follow_through`, one class over: the
+token-bearing second page restated enough of the query's own vocabulary
+(`person-amir-osei` repeated "discretionary spend above 500 GBP" from
+`policy-budget-approval`; `person-hana-lindqvist` repeated "client-facing
+surfaces" from `project-portal-refresh`) that a correct, complete answer
+could be given and cited from the FIRST page alone, so `grade_correctness`
+wanting the second page's token made the class ungradable regardless of the
+arm. `ratecard_tooling_owner` had no completeness defect but shared literal
+vocabulary ("rate", "card", "build") with its own token page anyway. A fifth
+run, dispatched after athenaeum#1768 lands, supersedes this one for the
+athenaeum#1724 measurement.
+
 Phase 2 needs the generator to emit observations whose compiled ground truth
 is known, which is a generator change, not a corpus rewrite: the hand-authored
 core pages already carry `source_ref`, so the generator inverts them into
