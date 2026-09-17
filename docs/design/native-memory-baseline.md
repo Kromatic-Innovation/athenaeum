@@ -185,7 +185,9 @@ model's own search over the same content?
 **Phase 2 — write path.** A raw-observation generator emits the same stream
 of observations to both systems. Native: a sequence of Claude Code sessions
 with auto memory enabled, fed the observations, writing whatever the model
-chooses to write. Athenaeum: the librarian compiles the same stream. Then
+chooses to write. Athenaeum: the librarian compiles the same stream, via
+`tests.evals.write_path.compile_observation_stream` (issue athenaeum#1775),
+the Athenaeum-side Phase 2 driver. Then
 Phase 1's probes run against each system's own store. Answers: given the
 same inputs, whose memory ends up answering the questions? Phase 2 also
 produces the first measurement of the observation filter against a
