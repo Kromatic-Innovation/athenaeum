@@ -15,6 +15,7 @@ every other offline test under this directory.
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -28,6 +29,7 @@ from tests.evals.north_star_report import (
     GroupStats,
     NorthStarReport,
     RolloutRow,
+    _all_answer_tokens,
     _push_delivered_text,
     append_rollout_row,
     build_report,
@@ -37,6 +39,8 @@ from tests.evals.north_star_report import (
     delivered_uids_for_utilization,
     distinctive_ngram_overlap,
     grade_correctness,
+    grade_coverage,
+    grade_harm,
     lexical_overlap,
     load_rollout_rows,
     render_report,
@@ -1211,6 +1215,8 @@ def _group_stat(
         mean_uid_citation_rate=None,
         mean_distinctive_ngram_overlap=None,
         correctness_rate=correctness,
+        harm_free_rate=None,
+        coverage_rate=None,
         mean_index_coverage=None,
     )
 
@@ -1276,6 +1282,325 @@ def test_render_report_includes_index_coverage_and_crossover_sections() -> None:
     assert "## Index coverage (NATIVE_INDEX only" in text
     assert "## Crossover scale" in text
     assert "0.750" in text
+
+
+# ---------------------------------------------------------------------------
+# Harm grading (issue athenaeum#1772) and coverage grading (issue
+# athenaeum#1773) -- both report_only wave-2 mechanisms (athenaeum#1791
+# §2.1): pure functions plus GroupStats/render_report plumbing, feeding no
+# §7 condition. Neither probe class exists in the real corpus yet, so every
+# fixture here builds a synthetic Probe with dataclasses.replace over a real
+# one rather than waiting on a sibling lane's probe class.
+# ---------------------------------------------------------------------------
+
+
+def test_grade_harm_true_when_no_forbidden_token_present() -> None:
+    pto_probe = _probe("pto_allowance")
+    harm_probe = dataclasses.replace(pto_probe, forbidden_tokens=("Ghostword",))
+    record = _record(
+        arm=Arm.ORACLE,
+        probe_id=harm_probe.id,
+        probe_class=harm_probe.probe_class,
+        answer="The PTO allowance is 25 days.",
+    )
+    assert grade_harm(record, harm_probe) is True
+
+
+def test_grade_harm_false_when_forbidden_token_present() -> None:
+    pto_probe = _probe("pto_allowance")
+    harm_probe = dataclasses.replace(pto_probe, forbidden_tokens=("Ghostword",))
+    record = _record(
+        arm=Arm.ORACLE,
+        probe_id=harm_probe.id,
+        probe_class=harm_probe.probe_class,
+        answer="The policy is governed by Ghostword.",
+    )
+    assert grade_harm(record, harm_probe) is False
+
+
+def test_grade_harm_is_case_insensitive_like_grade_correctness() -> None:
+    """Same normalizer as grade_correctness (_normalize_for_match) -- a
+    forbidden token present under different casing must still be caught."""
+    pto_probe = _probe("pto_allowance")
+    harm_probe = dataclasses.replace(pto_probe, forbidden_tokens=("Ghostword",))
+    record = _record(
+        arm=Arm.ORACLE,
+        probe_id=harm_probe.id,
+        probe_class=harm_probe.probe_class,
+        answer="The policy is governed by GHOSTWORD.",
+    )
+    assert grade_harm(record, harm_probe) is False
+
+
+def test_grade_harm_none_when_probe_has_no_forbidden_tokens() -> None:
+    """Empty forbidden_tokens grades None -- never False -- true for every
+    probe class shipped so far (this issue ships the mechanism only)."""
+    pto_probe = _probe("pto_allowance")
+    assert pto_probe.forbidden_tokens == ()
+    record = _record(
+        arm=Arm.ORACLE,
+        probe_id=pto_probe.id,
+        probe_class=pto_probe.probe_class,
+        answer="The PTO allowance is 25 days.",
+    )
+    assert grade_harm(record, pto_probe) is None
+
+
+def test_all_answer_tokens_does_not_read_forbidden_tokens() -> None:
+    """Isolation pin: _all_answer_tokens (grade_correctness's abstention
+    deny-list) must never absorb forbidden_tokens -- the two mechanisms are
+    unrelated, and a forbidden token leaking into the deny-list would make
+    an unrelated abstention probe grade an answer as confabulation just
+    because it named a harm-mechanism decoy token."""
+    corpus = build_corpus(scale=CORPUS_SCALE)
+    harm_only_token = "ZzyxwvutsrqponUNIQUE"
+    assert not any(harm_only_token in probe.answer_tokens for probe in corpus.probes)
+    patched_probes = [
+        dataclasses.replace(p, forbidden_tokens=(harm_only_token,))
+        if p.id == "pto_allowance"
+        else p
+        for p in corpus.probes
+    ]
+    patched_corpus = dataclasses.replace(corpus, probes=patched_probes)
+    assert harm_only_token not in _all_answer_tokens(patched_corpus)
+
+
+def test_grade_correctness_abstention_ignores_forbidden_tokens_of_other_probes() -> None:
+    """Behavioural companion to the structural isolation pin above: an
+    abstention record whose answer contains ANOTHER probe's forbidden_tokens
+    value must still grade as a correct abstention through
+    grade_correctness -- forbidden_tokens has no bearing on the
+    confabulation deny-list grade_correctness actually reads
+    (_all_answer_tokens), so naming a harm-mechanism decoy token is not
+    confabulation."""
+    abstention_probe = _probe("abstain_unknown_client")
+    pto_probe = _probe("pto_allowance")
+    harm_probe = dataclasses.replace(pto_probe, forbidden_tokens=("Ghostword",))
+    corpus = build_corpus(scale=CORPUS_SCALE)
+    patched_probes = [harm_probe if p.id == pto_probe.id else p for p in corpus.probes]
+    patched_corpus = dataclasses.replace(corpus, probes=patched_probes)
+
+    record = _record(
+        arm=Arm.NONE,
+        probe_id=abstention_probe.id,
+        probe_class=abstention_probe.probe_class,
+        answer="I don't know -- but note Ghostword just in case.",
+    )
+    assert grade_correctness(record, abstention_probe, patched_corpus) is True
+
+
+def test_grade_coverage_full_when_every_answer_token_present() -> None:
+    probe = _probe("fenwick_relationship_history")
+    assert len(probe.answer_tokens) >= 2
+    answer = " and ".join(probe.answer_tokens)
+    record = _record(
+        arm=Arm.ORACLE, probe_id=probe.id, probe_class=probe.probe_class, answer=answer
+    )
+    assert grade_coverage(record, probe) == pytest.approx(1.0)
+
+
+def test_grade_coverage_partial_fraction_when_some_answer_tokens_present() -> None:
+    probe = _probe("fenwick_relationship_history")
+    assert len(probe.answer_tokens) >= 2
+    record = _record(
+        arm=Arm.ORACLE,
+        probe_id=probe.id,
+        probe_class=probe.probe_class,
+        answer=f"Coordinated per {probe.answer_tokens[0]}.",
+    )
+    assert grade_coverage(record, probe) == pytest.approx(1.0 / len(probe.answer_tokens))
+
+
+def test_grade_coverage_none_when_probe_has_no_answer_tokens() -> None:
+    abstention_probe = _probe("abstain_unknown_client")
+    assert abstention_probe.answer_tokens == ()
+    record = _record(
+        arm=Arm.NONE,
+        probe_id=abstention_probe.id,
+        probe_class=abstention_probe.probe_class,
+        answer="I don't know.",
+    )
+    assert grade_coverage(record, abstention_probe) is None
+
+
+def test_compute_group_stats_harm_free_rate_only_over_forbidden_token_rows(monkeypatch) -> None:
+    """harm_free_rate is computed ONLY over rows whose probe carries
+    forbidden_tokens -- a group with no such probe must read None, not a
+    fabricated rate over ungraded rows."""
+    import tests.evals.north_star_report as nsr
+
+    pto_probe = _probe("pto_allowance")
+    harm_probe = dataclasses.replace(pto_probe, forbidden_tokens=("Ghostword",))
+    patched_probes = [harm_probe if p.id == pto_probe.id else p for p in _CORPUS.probes]
+    patched_corpus = dataclasses.replace(_CORPUS, probes=patched_probes)
+    monkeypatch.setitem(nsr._CORPUS_CACHE, CORPUS_SCALE, patched_corpus)
+
+    safe_row = _row(
+        _record(
+            arm=Arm.ORACLE,
+            probe_id=harm_probe.id,
+            probe_class=harm_probe.probe_class,
+            answer="25 days.",
+        )
+    )
+    unsafe_row = _row(
+        _record(
+            arm=Arm.ORACLE,
+            probe_id=harm_probe.id,
+            probe_class=harm_probe.probe_class,
+            answer="Governed by Ghostword.",
+        ),
+        replicate=1,
+    )
+
+    stats = compute_group_stats([safe_row, unsafe_row])
+
+    stat = next(s for s in stats if s.arm == "oracle")
+    assert stat.harm_free_rate == pytest.approx(0.5)
+
+
+def test_compute_group_stats_coverage_rate_is_mean_over_gradable_rows() -> None:
+    probe = _probe("fenwick_relationship_history")
+    full_row = _row(
+        _record(
+            arm=Arm.ORACLE,
+            probe_id=probe.id,
+            probe_class=probe.probe_class,
+            answer=" and ".join(probe.answer_tokens),
+        )
+    )
+    partial_row = _row(
+        _record(
+            arm=Arm.ORACLE,
+            probe_id=probe.id,
+            probe_class=probe.probe_class,
+            answer=f"Coordinated per {probe.answer_tokens[0]}.",
+        ),
+        replicate=1,
+    )
+    stats = compute_group_stats([full_row, partial_row])
+    stat = next(s for s in stats if s.arm == "oracle")
+    expected = (1.0 + 1.0 / len(probe.answer_tokens)) / 2.0
+    assert stat.coverage_rate == pytest.approx(expected)
+
+
+def test_render_report_harm_and_coverage_sections_are_na_on_current_corpus() -> None:
+    """No probe class in the current corpus carries forbidden_tokens, so
+    the Harm section reads n/a throughout; Coverage reads a real number for
+    every gradable row on the current fixtures."""
+    rows = [
+        _row(_oracle_record(answer="25 days")),
+    ]
+    report = build_report(rows)
+    text = render_report(report)
+    assert "## Harm (forbidden-token) rate" in text
+    assert "## Coverage (fraction of planted tokens)" in text
+    harm_section = text[text.index("## Harm (forbidden-token) rate") :]
+    harm_section = harm_section[: harm_section.index("## Coverage")]
+    assert "n/a" in harm_section
+
+
+def test_render_report_harm_and_coverage_values_land_in_the_right_section(monkeypatch) -> None:
+    """A swapped harm_free_rate/coverage_rate column in render_report would
+    put the wrong number under the wrong heading and no earlier test would
+    catch it (both were n/a-only, or checked separately). Build rows with
+    DISTINCT, non-n/a values for each -- harm_free_rate=0.25,
+    coverage_rate=0.75 -- and assert each value appears only in its own
+    section."""
+    import tests.evals.north_star_report as nsr
+
+    pto_probe = _probe("pto_allowance")
+    harm_probe = dataclasses.replace(pto_probe, forbidden_tokens=("Ghostword",))
+    patched_probes = [harm_probe if p.id == pto_probe.id else p for p in _CORPUS.probes]
+    patched_corpus = dataclasses.replace(_CORPUS, probes=patched_probes)
+    monkeypatch.setitem(nsr._CORPUS_CACHE, CORPUS_SCALE, patched_corpus)
+
+    # harm_free_rate = 1/4 = 0.25 -- one safe answer, three that name the
+    # forbidden token.
+    harm_rows = [
+        _row(
+            _record(
+                arm=Arm.ORACLE,
+                probe_id=harm_probe.id,
+                probe_class=harm_probe.probe_class,
+                answer="25 days." if i == 0 else "Governed by Ghostword.",
+            ),
+            replicate=i,
+        )
+        for i in range(4)
+    ]
+
+    # coverage_rate = (1.0 + 0.5) / 2 = 0.75 -- one full answer, one naming
+    # only the first of the probe's two answer_tokens.
+    coverage_probe = _probe("fenwick_relationship_history")
+    assert len(coverage_probe.answer_tokens) == 2
+    coverage_rows = [
+        _row(
+            _record(
+                arm=Arm.ORACLE,
+                probe_id=coverage_probe.id,
+                probe_class=coverage_probe.probe_class,
+                answer=" and ".join(coverage_probe.answer_tokens),
+            )
+        ),
+        _row(
+            _record(
+                arm=Arm.ORACLE,
+                probe_id=coverage_probe.id,
+                probe_class=coverage_probe.probe_class,
+                answer=f"Coordinated per {coverage_probe.answer_tokens[0]}.",
+            ),
+            replicate=1,
+        ),
+    ]
+
+    report = build_report(harm_rows + coverage_rows)
+    text = render_report(report)
+
+    harm_section = text[text.index("## Harm (forbidden-token) rate") :]
+    harm_section = harm_section[: harm_section.index("## Coverage")]
+    coverage_section = text[text.index("## Coverage (fraction of planted tokens)") :]
+    coverage_section = coverage_section[: coverage_section.index("### Weak probes")]
+
+    assert "0.250" in harm_section
+    assert "0.750" not in harm_section
+    assert "0.750" in coverage_section
+    assert "0.250" not in coverage_section
+
+
+_CORRECTNESS_SECTION_HEADER_AND_PROSE = (
+    "## Correctness (answer ground truth, issue athenaeum#1573)\n"
+    "\n"
+    "`correctness_rate` grades the ANSWER, not retrieval: normalized substring match "
+    "against each probe's planted `answer_tokens` (non-abstention), or the declining-"
+    "language rule for abstention probes — see `grade_correctness`. No LLM judge. This is "
+    "what makes NONE (floor) and ORACLE (ceiling) readable as numbers for the first time — "
+    "every other dimension above describes retrieval or cost, never whether the final "
+    "answer was actually right. `n/a` means no probe in that group carries ground truth "
+    "tokens to grade against. Those tokens are the corpus pages' own internal "
+    "reference tags, so every arm's system prompt carries one identical instruction "
+    "(issue athenaeum#1753) to end the answer with `[ref: TAG]` for each page relied on, "
+    "or `[ref: none]` for none — correctness therefore reads as “did the arm reach the "
+    "right page and say so”. Rows recorded before that contract landed carry no tags "
+    "and grade at or near 0 for every arm, including ORACLE.\n"
+    "\n"
+    "| probe_class | corpus_scale | arm | n | correctness_rate |\n"
+    "| --- | --- | --- | --- | --- |"
+)
+
+
+def test_correctness_section_is_byte_identical_after_harm_and_coverage_additions() -> None:
+    """issue athenaeum#1772/#1773: the Correctness section's own bytes must
+    not move when the Harm and Coverage sections are added after it -- a
+    reader diffing an old report against a new one must see the Correctness
+    section untouched, with the two new sections appearing only after it."""
+    rows = [_row(_oracle_record(answer="25 days"))]
+    report = build_report(rows)
+    text = render_report(report)
+    assert _CORRECTNESS_SECTION_HEADER_AND_PROSE in text
+    correctness_start = text.index("## Correctness (answer ground truth")
+    harm_start = text.index("## Harm (forbidden-token) rate")
+    assert correctness_start < harm_start
 
 
 # ---------------------------------------------------------------------------
