@@ -110,6 +110,14 @@ from tests.evals.corpus import Corpus, Probe, build_corpus
 from tests.evals.metrics import uids_from_recall_output
 from tests.evals.rollout import Arm, RolloutRecord
 
+#: The SIZE axis only (issue athenaeum#1725's crossover-scale dimension).
+#: ``medium_dense``/``medium_verydense`` are the CONFUSABILITY axis (fixed
+#: page count, rising near-miss density -- see ``tests.evals.corpus.Scale``'s
+#: own docstring) and are deliberately NOT part of this ordering: crossover
+#: asks "at what SIZE does Athenaeum start winning", and folding a
+#: confusability point into the size axis would answer a different question.
+SIZE_SCALE_ORDER: tuple[str, ...] = ("core", "small", "medium", "large")
+
 DEFAULT_MEASUREMENTS_DIR = Path("measurements")
 
 # ---------------------------------------------------------------------------
@@ -466,6 +474,27 @@ def delivered_uids_for_utilization(row: RolloutRow) -> tuple[str, ...]:
     return ()
 
 
+def _native_index_coverage_value(record: RolloutRecord) -> float | None:
+    """Read ``transcript[0]["native_memory"]["coverage"]`` back out of a
+    NATIVE_INDEX row -- the SAME leading-dict idiom
+    ``run_push_breadcrumb_pull`` already uses for its own arm metadata (see
+    ``tests.evals.rollout.run_native_index``). Never raises on a malformed
+    or missing shape; returns ``None`` rather than fabricating a number.
+    """
+    if not record.transcript:
+        return None
+    entry = record.transcript[0]
+    if not isinstance(entry, dict):
+        return None
+    native = entry.get("native_memory")
+    if not isinstance(native, dict):
+        return None
+    coverage = native.get("coverage")
+    if isinstance(coverage, bool) or not isinstance(coverage, (int, float)):
+        return None
+    return float(coverage)
+
+
 def uid_citation_rate(record: RolloutRecord, delivered_uids: Sequence[str]) -> float | None:
     """Fraction of *delivered_uids* whose literal uid string appears in
     *record*'s answer. ``None`` (not ``0.0``) when nothing was delivered --
@@ -536,6 +565,12 @@ class GroupStats:
     # the group carries ground truth (answer_tokens) to grade against.
     correctness_rate: float | None
 
+    # Index coverage (issue athenaeum#1725, NATIVE_INDEX only) -- the
+    # fraction of the corpus the TRUNCATED index still names, read back from
+    # what Claude Code actually loaded. None (never 0.0) for every other arm
+    # -- "no index to speak of" is a different fact from "0% coverage".
+    mean_index_coverage: float | None
+
 
 def _mean(values: list[float]) -> float | None:
     return sum(values) / len(values) if values else None
@@ -559,6 +594,7 @@ def compute_group_stats(rows: Sequence[RolloutRow]) -> list[GroupStats]:
         citation_rates: list[float] = []
         ngram_overlaps: list[float] = []
         correctness_flags: list[float] = []
+        index_coverages: list[float] = []
 
         for row in group:
             record = row.record
@@ -598,6 +634,11 @@ def compute_group_stats(rows: Sequence[RolloutRow]) -> list[GroupStats]:
             if correct is not None:
                 correctness_flags.append(1.0 if correct else 0.0)
 
+            if record.arm is Arm.NATIVE_INDEX:
+                coverage_value = _native_index_coverage_value(record)
+                if coverage_value is not None:
+                    index_coverages.append(coverage_value)
+
         stats.append(
             GroupStats(
                 probe_class=probe_class,
@@ -617,9 +658,82 @@ def compute_group_stats(rows: Sequence[RolloutRow]) -> list[GroupStats]:
                 mean_uid_citation_rate=_mean(citation_rates),
                 mean_distinctive_ngram_overlap=_mean(ngram_overlaps),
                 correctness_rate=_mean(correctness_flags),
+                mean_index_coverage=(
+                    _mean(index_coverages) if arm == Arm.NATIVE_INDEX.value else None
+                ),
             )
         )
     return stats
+
+
+# ---------------------------------------------------------------------------
+# Crossover scale (issue athenaeum#1725) -- the number the decision turns on
+# ---------------------------------------------------------------------------
+
+#: Athenaeum arms counted toward "Athenaeum's correctness" in the crossover
+#: definition -- the DELIVERY arms only. ``none`` (the floor) and ``oracle``
+#: (the ceiling) are excluded deliberately: neither is a shippable
+#: configuration, so neither should be able to make Athenaeum look like it
+#: has "crossed over" native memory.
+_ATHENAEUM_DELIVERY_ARM_VALUES = frozenset(
+    {
+        Arm.PUSH_PAGES_UPPER_BOUND.value,
+        Arm.PUSH_BREADCRUMB.value,
+        Arm.PUSH_BREADCRUMB_PULL.value,
+        Arm.PULL.value,
+    }
+)
+
+#: The two native arms -- "native's correctness" is the best of these two.
+_NATIVE_ARM_VALUES = frozenset({Arm.NATIVE_INDEX.value, Arm.NATIVE_GREP.value})
+
+
+def crossover_scales(stats: Sequence[GroupStats]) -> dict[str, str]:
+    """The smallest scale, per probe class, at which Athenaeum's correctness
+    exceeds native's (design doc §6/§7: "the number the decision turns on").
+
+    **Definition:** "Athenaeum's correctness" = the best ``correctness_rate``
+    among the Athenaeum DELIVERY arms (:data:`_ATHENAEUM_DELIVERY_ARM_VALUES`)
+    -- explicitly excluding ``none`` (the floor) and ``oracle`` (the ceiling),
+    because neither is a shippable configuration. "Native's correctness" =
+    the best ``correctness_rate`` among ``native_index``/``native_grep``
+    (:data:`_NATIVE_ARM_VALUES`). Only the SIZE axis
+    (:data:`SIZE_SCALE_ORDER`) is walked, smallest first; the
+    confusability scales (``medium_dense``/``medium_verydense``) are a
+    different axis entirely and never considered here.
+
+    A probe class absent from the returned mapping had insufficient data
+    (no correctness figure on one side, at every size scale) to establish a
+    crossover -- render ``"n/a"`` for it, never a fabricated scale. Pure
+    function: no I/O, no corpus rebuild, operates only on already-computed
+    :class:`GroupStats`.
+    """
+    by_probe_class: dict[str, dict[str, list[GroupStats]]] = defaultdict(lambda: defaultdict(list))
+    for stat in stats:
+        by_probe_class[stat.probe_class][stat.corpus_scale].append(stat)
+
+    result: dict[str, str] = {}
+    for probe_class, by_scale in by_probe_class.items():
+        for scale in SIZE_SCALE_ORDER:
+            group = by_scale.get(scale)
+            if not group:
+                continue
+            athenaeum_rates = [
+                s.correctness_rate
+                for s in group
+                if s.arm in _ATHENAEUM_DELIVERY_ARM_VALUES and s.correctness_rate is not None
+            ]
+            native_rates = [
+                s.correctness_rate
+                for s in group
+                if s.arm in _NATIVE_ARM_VALUES and s.correctness_rate is not None
+            ]
+            if not athenaeum_rates or not native_rates:
+                continue
+            if max(athenaeum_rates) > max(native_rates):
+                result[probe_class] = scale
+                break
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -723,6 +837,24 @@ def render_report(report: NorthStarReport) -> str:
     )
     lines.append("| `oracle` | ground-truth pages verbatim | ceiling |")
     lines.append("| `pull` | nothing injected, `recall` tool available | agent-initiated only |")
+    lines.append(
+        "| `native_index` | Claude Code auto-memory: topic files + a full `MEMORY.md` index, "
+        "loaded and truncated by Claude Code itself | native memory, WITH an index (honest "
+        "past the documented cap) |"
+    )
+    lines.append(
+        "| `native_grep` | Claude Code auto-memory: topic files, no index at all | native "
+        "memory, file search only |"
+    )
+    lines.append("")
+    lines.append(
+        "**Issue athenaeum#1725:** `native_index`/`native_grep` read a Claude Code auto-memory "
+        "store instead of an Athenaeum-compiled corpus (design lock: "
+        "`docs/design/native-memory-baseline.md`) -- the read-path comparison the project's "
+        "continuation decision turns on. Neither is scored against a `pushed_context`/pulled-"
+        "recall basis the way the other arms are: there is no Athenaeum retrieval step to "
+        "attribute utilization to."
+    )
     lines.append("")
 
     pull_stats = [s for s in report.stats if s.arm == Arm.PULL.value]
@@ -874,6 +1006,51 @@ def render_report(report: NorthStarReport) -> str:
             lines.append(f"- {probe_id}")
     else:
         lines.append("_none observed in this run_")
+    lines.append("")
+
+    lines.append("## Index coverage (NATIVE_INDEX only, athenaeum#1725)")
+    lines.append("")
+    lines.append(
+        "`index_coverage = index_lines_loaded / pages` -- the fraction of the corpus the "
+        "TRUNCATED index still names. `index_lines_loaded` is read back from what Claude "
+        "Code actually loaded into the session (the `attachment` event in the session "
+        "transcript), never recomputed from the 200-line/25KB cap: Claude Code performs the "
+        "truncation, this report only observes its result. `n/a` means no NATIVE_INDEX row "
+        "in that group carried a readable coverage figure (e.g. auto memory did not activate)."
+    )
+    lines.append("")
+    lines.append("| probe_class | corpus_scale | n | index_coverage |")
+    lines.append("| --- | --- | --- | --- |")
+    for s in report.stats:
+        if s.arm != Arm.NATIVE_INDEX.value:
+            continue
+        lines.append(
+            f"| {s.probe_class} | {s.corpus_scale} | {s.n} | {_fmt(s.mean_index_coverage)} |"
+        )
+    lines.append("")
+
+    lines.append("## Crossover scale (athenaeum#1725)")
+    lines.append("")
+    lines.append(
+        "The smallest scale, per probe class, at which Athenaeum's correctness exceeds "
+        "native's -- \"the number the decision turns on\" (design doc "
+        "`docs/design/native-memory-baseline.md` §6/§7). Walks the SIZE axis only "
+        "(`core` < `small` < `medium` < `large`); the `medium_dense`/`medium_verydense` "
+        "confusability scales are a different axis and are never considered here. "
+        "**Athenaeum's correctness** = the best `correctness_rate` among its DELIVERY arms "
+        "only (`push_pages_upper_bound`, `push_breadcrumb`, `push_breadcrumb_pull`, `pull`) "
+        "-- `none` (the floor) and `oracle` (the ceiling) are explicitly excluded, because "
+        "neither is a shippable configuration. **Native's correctness** = the best "
+        "`correctness_rate` among `native_index`/`native_grep`. `n/a` means insufficient "
+        "data at every scale for that probe class to establish a crossover -- never a "
+        "fabricated scale."
+    )
+    lines.append("")
+    lines.append("| probe_class | crossover_scale |")
+    lines.append("| --- | --- |")
+    crossovers = crossover_scales(list(report.stats))
+    for probe_class in sorted({s.probe_class for s in report.stats}):
+        lines.append(f"| {probe_class} | {crossovers.get(probe_class, 'n/a')} |")
     lines.append("")
 
     lines.append("## Frontier (cost vs. quality — never a single composite)")

@@ -114,6 +114,17 @@ class Arm(str, Enum):
     deleted. :attr:`PUSH_BREADCRUMB` and :attr:`PUSH_BREADCRUMB_PULL` are
     the two new arms that actually match what the shipped hook
     (``examples/claude-code/user-prompt-recall.sh``) delivers.
+
+    Issue athenaeum#1725 adds :attr:`NATIVE_INDEX` and :attr:`NATIVE_GREP` —
+    the two arms that read a Claude Code auto-memory store instead of an
+    Athenaeum-compiled corpus (design lock:
+    ``docs/design/native-memory-baseline.md`` §2-§4). Both are real
+    ``claude -p`` tool-use loops, run the way PULL already runs, but with the
+    ``recall`` MCP tool absent (``--strict-mcp-config`` over an empty
+    ``mcpServers``) and Claude Code's own auto-memory load in its place: for
+    :attr:`NATIVE_INDEX` a materialized ``MEMORY.md`` index that Claude Code
+    loads and truncates itself; for :attr:`NATIVE_GREP`, no index at all, so
+    the model must find pages with its own file-search tools.
     """
 
     NONE = "none"
@@ -122,6 +133,8 @@ class Arm(str, Enum):
     PUSH_BREADCRUMB_PULL = "push_breadcrumb_pull"
     ORACLE = "oracle"
     PULL = "pull"
+    NATIVE_INDEX = "native_index"
+    NATIVE_GREP = "native_grep"
 
     @classmethod
     def _missing_(cls, value: object) -> Arm | None:
@@ -150,6 +163,10 @@ ALL_ARMS: tuple[Arm, ...] = (
     Arm.PUSH_BREADCRUMB_PULL,
     Arm.ORACLE,
     Arm.PULL,
+    # Issue athenaeum#1725: appended, not interleaved, so the grid/row order
+    # every existing stored measurement and test relies on is unchanged.
+    Arm.NATIVE_INDEX,
+    Arm.NATIVE_GREP,
 )
 
 #: Model used for both the single-shot arms and PULL's ``claude -p`` spawn
@@ -686,16 +703,23 @@ class ParsedPullStream:
     transcript: list[dict[str, Any]]
 
 
-def parse_pull_stream(lines: Iterable[str]) -> ParsedPullStream:
+def parse_stream(
+    lines: Iterable[str], *, tool_names: frozenset[str] | None = None
+) -> ParsedPullStream:
     """Parse a ``claude -p --output-format stream-json`` transcript.
 
-    Offline and dependency-free — this is the function
-    ``tests/evals/test_rollout.py``'s recorded-fixture tests exercise
-    without ever spawning a subprocess. Never raises on a transcript with
-    no tool calls: an agent that legitimately chose not to call recall
-    parses to ``recall_called=False``, the same as any other transcript —
-    issue athenaeum#1522's "not calling recall is a recorded outcome, never
-    an error" acceptance criterion.
+    Offline and dependency-free. *tool_names* selects which ``tool_use``
+    blocks are captured into ``tool_calls``: ``None`` (the default) records
+    EVERY ``tool_use`` block regardless of name — what the native arms need,
+    since they use Claude Code's built-in tools (Read/Grep/Glob/...), not a
+    single named MCP tool. Passing a concrete set (as :func:`parse_pull_stream`
+    does, with exactly ``{RECALL_TOOL_NAME}``) restricts capture to those
+    names only, reproducing the original PULL-only behaviour exactly.
+
+    Never raises on a transcript with no matching tool calls: an agent that
+    legitimately chose not to call a tool parses to ``recall_called=False``,
+    the same as any other transcript — issue athenaeum#1522's "not calling
+    recall is a recorded outcome, never an error" acceptance criterion.
     """
     events: list[dict[str, Any]] = []
     mcp_connected = False
@@ -738,13 +762,16 @@ def parse_pull_stream(lines: Iterable[str]) -> ParsedPullStream:
             for block in message.get("content") or []:
                 if not isinstance(block, dict):
                     continue
-                if block.get("type") == "tool_use" and block.get("name") == RECALL_TOOL_NAME:
+                block_name = block.get("name")
+                if block.get("type") == "tool_use" and (
+                    tool_names is None or block_name in tool_names
+                ):
                     tool_input = block.get("input")
                     if isinstance(tool_input, dict):
                         query = str(tool_input.get("query", tool_input))
                     else:
                         query = str(tool_input)
-                    tool_calls.append(ToolCall(name=RECALL_TOOL_NAME, query=query))
+                    tool_calls.append(ToolCall(name=str(block_name or ""), query=query))
                 elif block.get("type") == "text" and block.get("text"):
                     answer = str(block["text"])
 
@@ -761,6 +788,17 @@ def parse_pull_stream(lines: Iterable[str]) -> ParsedPullStream:
         turn_count=turn,
         transcript=events,
     )
+
+
+def parse_pull_stream(lines: Iterable[str]) -> ParsedPullStream:
+    """Parse a PULL/PUSH_BREADCRUMB_PULL transcript, capturing ONLY
+    :data:`RECALL_TOOL_NAME` tool calls.
+
+    A thin delegation to :func:`parse_stream` with ``tool_names={RECALL_TOOL_NAME}``
+    — byte-identical behaviour to this function's pre-athenaeum#1725 body, pinned
+    by the existing fixture tests in ``tests/evals/test_rollout.py``.
+    """
+    return parse_stream(lines, tool_names=frozenset({RECALL_TOOL_NAME}))
 
 
 def run_pull(
@@ -887,7 +925,461 @@ def run_push_breadcrumb_pull(
 
 
 # ---------------------------------------------------------------------------
-# Runner entrypoint — one probe, all six arms
+# NATIVE_INDEX / NATIVE_GREP — Claude Code auto-memory arms (athenaeum#1725)
+#
+# Design lock: docs/design/native-memory-baseline.md §2-§4, §6, §9. Both are
+# real `claude -p` tool-use loops, run the way PULL already runs (scoped
+# config, `--output-format stream-json`, transcript captured), but the
+# `recall` MCP server is ABSENT (`--strict-mcp-config` over an empty
+# `mcpServers`, mirroring build_pull_mcp_config's exclusivity but with
+# nothing scoped in) and Claude Code's OWN auto-memory mechanism is used
+# instead. The runner never re-implements the load or the 200-line/25KB
+# truncation Claude Code performs on `MEMORY.md` -- see
+# `read_loaded_memory_files`, which reads back what was ACTUALLY loaded from
+# the session transcript rather than recomputing the cap.
+# ---------------------------------------------------------------------------
+
+#: Claude Code's documented auto-memory load cap (200 lines OR 25KB,
+#: whichever comes first — https://code.claude.com/docs/en/memory, verified
+#: against live Claude Code 2.1.273 on 2026-09-16, see the design doc's §2).
+#: Used ONLY for reporting/assertions below and NEVER to pre-truncate
+#: anything the runner writes: :func:`materialize_native_memory` always
+#: writes the FULL index, and Claude Code performs the actual truncation —
+#: these constants exist purely to interpret what came back afterward.
+NATIVE_INDEX_MAX_LINES = 200
+NATIVE_INDEX_MAX_BYTES = 25 * 1024
+
+#: Per-page index-line description length. A "sane length" clip (issue
+#: athenaeum#1725's own phrasing) so one wildly long page body cannot blow up
+#: a single index line — kept well under the 200-char clamp the shipped
+#: breadcrumb hook already uses elsewhere in this module, since this index is
+#: a DIFFERENT artifact (a full, honest MEMORY.md, not a delivered breadcrumb).
+_NATIVE_INDEX_DESCRIPTION_MAX_CHARS = 160
+
+
+def _native_index_description(body: str) -> str:
+    """First non-empty, non-heading line of *body*, clipped to a sane length.
+
+    Every corpus page body opens with a markdown ``# <name>`` heading
+    (``Page.to_markdown()`` renders the authored ``body:`` field verbatim,
+    and every authored body follows that convention) — skipping heading
+    lines is what keeps the description from being a redundant echo of the
+    ``name`` already on the same index line.
+    """
+    for line in body.splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            return stripped[:_NATIVE_INDEX_DESCRIPTION_MAX_CHARS]
+    return ""
+
+
+def materialize_native_memory(corpus: Corpus, root: Path, *, write_index: bool) -> Path:
+    """Materialize *corpus* as a Claude Code auto-memory directory under
+    *root*: one topic file per page (``<uid>.md``, the FULL
+    ``Page.to_markdown()`` text — topic files are never truncated, only
+    ``MEMORY.md`` is, and only by Claude Code itself), plus, when
+    *write_index*, a ``MEMORY.md`` of one ``- <name> — <description>`` line
+    per page, in corpus order.
+
+    The index is always written IN FULL here, even past the documented cap —
+    "the truncation is the finding, not a confound" (design doc §4). This
+    function never pre-truncates; :func:`read_loaded_memory_files` is how a
+    caller observes what Claude Code actually loaded.
+
+    Writes nothing outside *root*. Returns the memory directory.
+    """
+    memory_dir = root / "memory"
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    index_lines: list[str] = []
+    for page in corpus.pages:
+        (memory_dir / page.filename).write_text(page.to_markdown(), encoding="utf-8")
+        if write_index:
+            description = _native_index_description(page.body)
+            index_lines.append(f"- {page.name} — {description}")
+    if write_index:
+        (memory_dir / "MEMORY.md").write_text("\n".join(index_lines) + "\n", encoding="utf-8")
+    return memory_dir
+
+
+def _ambient_claude_config_path() -> Path:
+    """Where the OPERATOR's real Claude Code config lives, resolved at
+    runtime rather than hardcoded — honours ``CLAUDE_CONFIG_DIR`` if the
+    calling process already has one set, else the default
+    ``~/.claude.json``. Never a literal path: a literal home-directory path
+    baked into this module would itself be exactly the kind of local-machine
+    literal ``public-safe-lint.sh`` exists to reject.
+    """
+    override = os.environ.get("CLAUDE_CONFIG_DIR")
+    if override:
+        return Path(override) / ".claude.json"
+    return Path.home() / ".claude.json"
+
+
+def seed_native_claude_config(config_dir: Path) -> Path:
+    """Seed an isolated ``CLAUDE_CONFIG_DIR`` so auto memory actually
+    activates for the subprocess.
+
+    Auto memory is gated behind a CACHED feature flag
+    (``cachedGrowthBookFeatures``). A freshly isolated config dir keeps the
+    ``system``/``init`` stream event reporting ``memory_paths`` (that part
+    needs no credential and no flag), but with an empty flag cache nothing is
+    actually LOADED — verified in this container against live Claude Code
+    2.1.267. Copying ONLY the ``cachedGrowthBookFeatures`` object from the
+    ambient config (:func:`_ambient_claude_config_path`) is sufficient to
+    activate the gate. That object is feature flags only: it carries no
+    ``oauthAccount``, ``userID``, or ``projects`` key, and this function never
+    copies any OTHER key, so no identity or credential material crosses into
+    the isolated config.
+
+    Tolerates an absent or unreadable ambient config — writes ``{}`` rather
+    than raising, so a container with no prior Claude Code state still runs
+    the spawn (auto memory simply will not activate there; a caller that
+    needs to know whether it did should check the observed result, e.g. via
+    :func:`read_loaded_memory_files`, not assume this function's success).
+    """
+    config_dir.mkdir(parents=True, exist_ok=True)
+    seeded: dict[str, Any] = {}
+    ambient_path = _ambient_claude_config_path()
+    try:
+        ambient = json.loads(ambient_path.read_text(encoding="utf-8"))
+        if isinstance(ambient, dict) and "cachedGrowthBookFeatures" in ambient:
+            seeded["cachedGrowthBookFeatures"] = ambient["cachedGrowthBookFeatures"]
+    except (OSError, json.JSONDecodeError):
+        pass
+    out_path = config_dir / ".claude.json"
+    out_path.write_text(json.dumps(seeded), encoding="utf-8")
+    return out_path
+
+
+def build_native_settings(memory_dir: Path) -> dict[str, Any]:
+    """The ``--settings`` payload that turns on auto memory at *memory_dir*."""
+    return {"autoMemoryDirectory": str(memory_dir)}
+
+
+def build_native_argv(
+    claude_binary: str,
+    settings_path: Path,
+    mcp_config_path: Path,
+    memory_dir: Path,
+    model: str,
+) -> list[str]:
+    """The native-arm argv: scoped settings (auto memory), an EMPTY scoped
+    MCP config (so ``--strict-mcp-config`` guarantees the athenaeum ``recall``
+    tool is ABSENT — the whole point of a native-memory arm), and
+    ``--add-dir`` so the model's file tools may read *memory_dir* (needed for
+    NATIVE_GREP, harmless for NATIVE_INDEX). Prompt goes on stdin, never
+    argv — the same athenaeum#543 (L4) discipline every other arm here
+    follows.
+    """
+    return [
+        claude_binary,
+        "-p",
+        "--settings",
+        str(settings_path),
+        "--mcp-config",
+        str(mcp_config_path),
+        "--strict-mcp-config",
+        "--add-dir",
+        str(memory_dir),
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--model",
+        model,
+    ]
+
+
+def _session_id_from_transcript(transcript: Iterable[dict[str, Any]]) -> str | None:
+    for event in transcript:
+        if isinstance(event, dict) and event.get("session_id"):
+            return str(event["session_id"])
+    return None
+
+
+def read_loaded_memory_files(config_dir: Path, session_id: str) -> dict[str, str]:
+    """What Claude Code actually loaded into context for *session_id*, read
+    back from the session transcript under *config_dir*.
+
+    The transcript (``<config_dir>/projects/*/<session_id>.jsonl``) carries
+    an ``attachment`` event with ``attachment.files[]``, one entry per loaded
+    file, each ``{"path": ..., "content": ...}`` — verified in this container
+    against live Claude Code 2.1.267 (a 1002-line/126KB ``MEMORY.md`` loaded
+    as 25066 bytes, ending mid-corpus with a literal ``WARNING:`` marker).
+    This is how truncation is OBSERVED; this function never recomputes the
+    200-line/25KB cap itself.
+
+    Never raises: a missing config dir, no matching transcript file, or a
+    transcript that does not carry the expected shape all return ``{}``.
+    """
+    result: dict[str, str] = {}
+    projects_dir = Path(config_dir) / "projects"
+    if not projects_dir.is_dir():
+        return result
+    matches = sorted(projects_dir.glob(f"*/{session_id}.jsonl"))
+    if not matches:
+        return result
+    try:
+        lines = matches[0].read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return result
+    for raw_line in lines:
+        raw_line = raw_line.strip()
+        if not raw_line:
+            continue
+        try:
+            event = json.loads(raw_line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict) or event.get("type") != "attachment":
+            continue
+        attachment = event.get("attachment")
+        if not isinstance(attachment, dict):
+            continue
+        for entry in attachment.get("files") or []:
+            if isinstance(entry, dict) and "path" in entry:
+                result[str(entry["path"])] = str(entry.get("content", ""))
+    return result
+
+
+def _count_index_bullet_lines(text: str) -> int:
+    """Number of ``- `` bullet lines in an index text — a written or loaded
+    ``MEMORY.md`` carries exactly one such line per page it names, and
+    nothing else does (a truncation ``WARNING:`` marker is a blockquote line,
+    not a bullet), so this partitions cleanly."""
+    return sum(1 for line in text.splitlines() if line.startswith("- "))
+
+
+@dataclasses.dataclass(frozen=True)
+class NativeIndexCoverage:
+    """What the NATIVE_INDEX arm's index looked like, written vs. loaded.
+
+    ``truncated_by_claude_code`` is derived from what actually came back
+    (loaded content strictly shorter than written, and/or the documented
+    ``WARNING:`` marker present in the loaded text) — NEVER from re-running
+    the 200-line/25KB cap arithmetic, per the design doc's "never
+    re-implement the truncation" instruction. ``False`` when nothing was
+    loaded at all (auto memory did not activate) — that is a DIFFERENT fact
+    from truncation and must not be conflated with it.
+    """
+
+    pages: int
+    index_lines_written: int
+    index_bytes_written: int
+    index_lines_loaded: int
+    index_bytes_loaded: int
+    coverage: float
+    truncated_by_claude_code: bool
+
+
+def _native_index_coverage(
+    corpus: Corpus, written_index_text: str, loaded_index_text: str
+) -> NativeIndexCoverage:
+    pages = len(corpus.pages)
+    index_lines_written = _count_index_bullet_lines(written_index_text)
+    index_bytes_written = len(written_index_text.encode("utf-8"))
+    index_lines_loaded = _count_index_bullet_lines(loaded_index_text)
+    index_bytes_loaded = len(loaded_index_text.encode("utf-8"))
+    coverage = (index_lines_loaded / pages) if pages else 0.0
+    # Trailing-whitespace-normalized comparison, not a raw byte-length
+    # inequality: a file UNDER the cap round-trips through Claude Code's own
+    # load with a one-byte trailing-newline difference (verified in this
+    # container at `core` scale — 9535 written vs. 9534 loaded, content
+    # otherwise identical), which a bare length check would misreport as
+    # truncation. The documented ``WARNING:`` marker (verified present at
+    # `medium` scale, where the load really does stop mid-corpus) is the
+    # primary, unambiguous signal; the stripped-length fallback only fires
+    # when content is genuinely shorter, not merely missing a final newline.
+    truncated = bool(loaded_index_text) and (
+        "WARNING:" in loaded_index_text
+        or len(loaded_index_text.rstrip()) < len(written_index_text.rstrip())
+    )
+    return NativeIndexCoverage(
+        pages=pages,
+        index_lines_written=index_lines_written,
+        index_bytes_written=index_bytes_written,
+        index_lines_loaded=index_lines_loaded,
+        index_bytes_loaded=index_bytes_loaded,
+        coverage=coverage,
+        truncated_by_claude_code=truncated,
+    )
+
+
+def _loaded_text_for_suffix(loaded_files: dict[str, str], suffix: str) -> str:
+    for path_str, content in loaded_files.items():
+        if path_str.endswith(suffix):
+            return content
+    return ""
+
+
+def _spawn_native(
+    *,
+    claude_binary: str,
+    memory_dir: Path,
+    config_dir: Path,
+    materialize_root: Path,
+    prompt: str,
+    model: str,
+    timeout: float,
+) -> tuple[ParsedPullStream, dict[str, str]]:
+    """Shared spawn+parse+read-back plumbing for both native arms.
+
+    Raises only on a genuine spawn failure (binary missing, timeout) — the
+    caller checked ``shutil.which`` already; ``subprocess.run`` itself raises
+    on a timeout, which is allowed to propagate exactly like :func:`run_pull`.
+    """
+    seed_native_claude_config(config_dir)
+    settings_path = materialize_root / "native-settings.json"
+    settings_path.write_text(json.dumps(build_native_settings(memory_dir)), encoding="utf-8")
+    mcp_config_path = materialize_root / "native-mcp-config.json"
+    mcp_config_path.write_text(json.dumps({"mcpServers": {}}), encoding="utf-8")
+    argv = build_native_argv(claude_binary, settings_path, mcp_config_path, memory_dir, model)
+
+    env = {**os.environ, "CLAUDE_CONFIG_DIR": str(config_dir)}
+    proc = subprocess.run(
+        argv,
+        input=prompt,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        env=env,
+        check=False,
+    )
+    parsed = parse_stream((proc.stdout or "").splitlines(), tool_names=None)
+    session_id = _session_id_from_transcript(parsed.transcript)
+    loaded_files = read_loaded_memory_files(config_dir, session_id) if session_id else {}
+    return parsed, loaded_files
+
+
+def run_native_index(
+    probe: Probe,
+    materialize_root: Path,
+    corpus_scale: str,
+    *,
+    claude_binary: str = "claude",
+    model: str = DEFAULT_ROLLOUT_MODEL,
+    timeout: float = 120.0,
+) -> RolloutRecord:
+    """NATIVE_INDEX arm: materialize the corpus as Claude Code auto-memory
+    topic files plus a full ``MEMORY.md`` index, let Claude Code load and
+    truncate that index itself, and record what actually came back.
+
+    Runs at every scale, including past the documented cap — "the
+    truncation is the finding, not a confound" (design doc §4). Raises only
+    on a genuine spawn failure (binary missing, timeout), exactly like
+    :func:`run_pull`; a model that chose not to read a topic file is a
+    recorded outcome, never an error.
+    """
+    if shutil.which(claude_binary) is None:
+        raise RuntimeError(f"{claude_binary!r} not found on PATH")
+
+    corpus = build_corpus(corpus_scale)
+    memory_dir = materialize_native_memory(corpus, materialize_root, write_index=True)
+    index_path = memory_dir / "MEMORY.md"
+    written_index_text = index_path.read_text(encoding="utf-8") if index_path.exists() else ""
+    config_dir = materialize_root / "claude-config"
+
+    parsed, loaded_files = _spawn_native(
+        claude_binary=claude_binary,
+        memory_dir=memory_dir,
+        config_dir=config_dir,
+        materialize_root=materialize_root,
+        prompt=probe.query,
+        model=model,
+        timeout=timeout,
+    )
+
+    loaded_index_text = _loaded_text_for_suffix(loaded_files, "MEMORY.md")
+    coverage = _native_index_coverage(corpus, written_index_text, loaded_index_text)
+    transcript = [
+        {
+            "native_memory": {
+                **dataclasses.asdict(coverage),
+                "loaded_index_text": loaded_index_text,
+            }
+        },
+        *parsed.transcript,
+    ]
+    return RolloutRecord(
+        arm=Arm.NATIVE_INDEX,
+        probe_id=probe.id,
+        probe_class=probe.probe_class,
+        corpus_scale=corpus_scale,
+        answer=parsed.answer,
+        turn_tokens=parsed.turn_tokens,
+        tool_calls=parsed.tool_calls,
+        recall_called=parsed.recall_called,
+        injected_context_tokens=None,
+        turn_count=parsed.turn_count,
+        transcript=transcript,
+    )
+
+
+def run_native_grep(
+    probe: Probe,
+    materialize_root: Path,
+    corpus_scale: str,
+    *,
+    claude_binary: str = "claude",
+    model: str = DEFAULT_ROLLOUT_MODEL,
+    timeout: float = 120.0,
+) -> RolloutRecord:
+    """NATIVE_GREP arm: the same topic files as NATIVE_INDEX, but NO
+    ``MEMORY.md`` — the model must find pages with its own file-search
+    tools. The prompt tells the model the memory directory's path (unlike
+    every other arm's bare-query prompt) because there is no index to point
+    it there instead.
+
+    Raises only on a genuine spawn failure, exactly like :func:`run_pull` /
+    :func:`run_native_index`.
+    """
+    if shutil.which(claude_binary) is None:
+        raise RuntimeError(f"{claude_binary!r} not found on PATH")
+
+    corpus = build_corpus(corpus_scale)
+    memory_dir = materialize_native_memory(corpus, materialize_root, write_index=False)
+    config_dir = materialize_root / "claude-config"
+    prompt = (
+        f"The knowledge base is a directory of markdown files at {memory_dir}. "
+        f"Use your file search and read tools to find the answer.\n\n"
+        f"Question: {probe.query}"
+    )
+
+    parsed, loaded_files = _spawn_native(
+        claude_binary=claude_binary,
+        memory_dir=memory_dir,
+        config_dir=config_dir,
+        materialize_root=materialize_root,
+        prompt=prompt,
+        model=model,
+        timeout=timeout,
+    )
+
+    transcript = [
+        {
+            "native_memory": {
+                "memory_dir": str(memory_dir),
+                "loaded_memory_files": loaded_files,
+            }
+        },
+        *parsed.transcript,
+    ]
+    return RolloutRecord(
+        arm=Arm.NATIVE_GREP,
+        probe_id=probe.id,
+        probe_class=probe.probe_class,
+        corpus_scale=corpus_scale,
+        answer=parsed.answer,
+        turn_tokens=parsed.turn_tokens,
+        tool_calls=parsed.tool_calls,
+        recall_called=parsed.recall_called,
+        injected_context_tokens=None,
+        turn_count=parsed.turn_count,
+        transcript=transcript,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Runner entrypoint — one probe, all eight arms
 # ---------------------------------------------------------------------------
 
 
@@ -912,14 +1404,17 @@ def run_probe_all_arms(
     pull_runner: Callable[..., RolloutRecord] | None = None,
     breadcrumb_context_fn: Callable[..., str] | None = None,
     breadcrumb_pull_runner: Callable[..., RolloutRecord] | None = None,
+    native_index_runner: Callable[..., RolloutRecord] | None = None,
+    native_grep_runner: Callable[..., RolloutRecord] | None = None,
 ) -> dict[str, RolloutRecord]:
-    """Run ONE probe across all six arms against a materialized corpus at
+    """Run ONE probe across all eight arms against a materialized corpus at
     *corpus_scale* (issue athenaeum#1522 AC2/AC3/AC4; issue athenaeum#1574
-    added the two breadcrumb arms).
+    added the two breadcrumb arms; issue athenaeum#1725 added the two
+    native-memory arms).
 
     Builds exactly one :class:`~tests.evals.containment.GridCell` per arm via
     ``containment.build_grid("full", ...)`` — "full" is uncapped on the arms
-    axis, so passing all six ``Arm`` values with a single-element probe/
+    axis, so passing all eight ``Arm`` values with a single-element probe/
     corpus-scale/replicate list yields exactly ``len(ALL_ARMS)`` cells,
     reusing the SAME grid machinery a future multi-probe sweep would use
     rather than a bespoke loop.
@@ -928,9 +1423,12 @@ def run_probe_all_arms(
     client / :func:`run_pull`); *breadcrumb_context_fn* and
     *breadcrumb_pull_runner* are the SAME kind of seam for the two
     breadcrumb arms (default to :func:`build_push_breadcrumb_context` /
-    :func:`run_push_breadcrumb_pull`) — so a caller, including the offline
-    test suite, can supply stubs and exercise the arm-dispatch wiring
-    without a network call or a subprocess spawn.
+    :func:`run_push_breadcrumb_pull`); *native_index_runner* and
+    *native_grep_runner* are the same kind of seam again, for the two native
+    arms (default to :func:`run_native_index` / :func:`run_native_grep`) —
+    so a caller, including the offline test suite, can supply stubs and
+    exercise the arm-dispatch wiring without a network call or a subprocess
+    spawn.
     """
     corpus = build_corpus(corpus_scale)
     probe = _find_probe(corpus, probe_id)
@@ -951,6 +1449,8 @@ def run_probe_all_arms(
     resolved_client = client if client is not None else build_live_client()
     resolved_pull_runner = pull_runner if pull_runner is not None else run_pull
     resolved_breadcrumb_pull_runner = breadcrumb_pull_runner or run_push_breadcrumb_pull
+    resolved_native_index_runner = native_index_runner or run_native_index
+    resolved_native_grep_runner = native_grep_runner or run_native_grep
 
     records: dict[str, RolloutRecord] = {}
     for cell in cells:
@@ -999,6 +1499,28 @@ def run_probe_all_arms(
                 model=model,
                 context_fn=breadcrumb_context_fn,
             )
+        elif arm is Arm.NATIVE_INDEX:
+            # A dedicated subdirectory, NOT ``materialize_root`` itself:
+            # NATIVE_INDEX and NATIVE_GREP each write their own
+            # ``memory/``, ``claude-config/``, settings and mcp-config
+            # files, and both run in the same ``run_probe_all_arms`` call —
+            # sharing ``materialize_root`` between them would let one
+            # arm's config/settings files clobber the other's.
+            record = resolved_native_index_runner(
+                probe,
+                materialize_root / "native_index",
+                corpus_scale,
+                claude_binary=claude_binary,
+                model=model,
+            )
+        elif arm is Arm.NATIVE_GREP:
+            record = resolved_native_grep_runner(
+                probe,
+                materialize_root / "native_grep",
+                corpus_scale,
+                claude_binary=claude_binary,
+                model=model,
+            )
         else:
             # PULL gets ``materialize_root``, NOT ``wiki_root``, and the two
             # arms differing here is deliberate rather than a slip:
@@ -1011,6 +1533,9 @@ def run_probe_all_arms(
             # ``<materialize_root>/wiki/wiki`` and serve an empty corpus.
             # Pinned by
             # ``test_rollout.py::test_pull_arm_receives_the_knowledge_root_not_the_wiki_root``.
+            # This is the last remaining arm (PULL) by elimination — every
+            # other member of ``ALL_ARMS`` is handled by an explicit branch
+            # above.
             record = resolved_pull_runner(
                 probe,
                 materialize_root,
