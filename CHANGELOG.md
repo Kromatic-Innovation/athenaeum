@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Uid-citation correctness grading (issue athenaeum#1793, operator ruling
+  option 1).** `grade_correctness` (`tests/evals/north_star_report.py`) now
+  also accepts a citation of a page's literal uid, per planted token, when
+  that uid is one of the probe's `expected_uids` AND was actually delivered
+  in the cell's own recall/read-entity (or, for `native_grep`, file-read)
+  tool output — never merely because the uid sits in `expected_uids`.
+  Additive to the existing `[ref: TAG]` contract (athenaeum#1753), never a
+  replacement; a breadcrumb-only arm still cannot satisfy it, and a uid the
+  arm was never shown still grades wrong. A zero-call re-grade of run
+  35272748886's stored rows (docs/measurements/native-memory-baseline-2026-09-17.md,
+  addendum) flips 17 of 1392 rows from wrong to correct, closing one of the
+  two open medium-scale uid-vs-tag losses without changing the report's
+  cutoff scale (still `none`).
 - **North-star measurement report for the native-memory baseline (issue
   athenaeum#1724).** `docs/measurements/native-memory-baseline-2026-09-17.md`
   reports the read-path (Phase 1) comparison against Claude Code auto memory,
