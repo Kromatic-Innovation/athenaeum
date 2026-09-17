@@ -33,6 +33,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or the query path is tracked separately; see
   `docs/design/native-memory-baseline.md` §5 for the breadcrumb-cap
   measurement this module also produced.
+
+- **`tests/evals/write_path.py:compile_observation_stream` — the
+  Athenaeum-side Phase 2 write-path driver (issue athenaeum#1775,
+  eval-wave-2-spec.md §6.2).** There was no compile driver feeding a
+  `tests.evals.corpus.ObservationStream` through the real librarian
+  pipeline — only the native side (`NativeWriterResult`) had a producer for
+  `compute_write_path_stats`/`build_report`'s `store_files`/`write_costs`
+  inputs. `compile_observation_stream(stream, knowledge_root, *, client,
+  model, session=None, run_kwargs=None)` materialises the stream into
+  `knowledge_root/raw/<source>/`, seeds the minimal `wiki/_schema` tree and
+  git repo `athenaeum.librarian.run` requires, writes a real
+  `athenaeum.yaml` pinning the `write`/`classify` model knobs, and runs the
+  production `athenaeum.librarian.run` entrypoint (not a reimplementation
+  of Tier 1/2/3) with the caller's client installed via
+  `unittest.mock.patch("anthropic.Anthropic", ...)` — the same seam
+  `tests/test_librarian.py`'s `TestRunIntegration` already uses. Returns
+  `({relpath: text}, WriteCost)`, both directly consumable by
+  `compute_write_path_stats`/`build_report` with zero change to either.
+  Every `messages.create` response is tallied into the returned
+  `WriteCost` and, when an `EvalSession` is supplied, folded into its
+  running per-model totals too. `tests/evals/test_write_path.py` is the
+  offline contract test: a two-page fixture `ObservationStream` compiled
+  against a stub `FakeLLMClient` asserts raw files materialise, a wiki page
+  compiles per token-bearing page, the planted `answer_tokens` are found by
+  `compute_write_path_stats`, and spend lands on both the `WriteCost` and
+  an `EvalSession`. CLI flags / `evals.yml` wiring are out of scope
+  (athenaeum#1785/#1786), as is the native-side writer (athenaeum#1774).
+
 - **Hardening for the north-star grid's relevance-floor input (issue
   athenaeum#1764), found by Quine review of PR athenaeum#1763.** Three
   fixes: (1) a mixed-floor store's `north_star_report.build_report`
