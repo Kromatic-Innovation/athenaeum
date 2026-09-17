@@ -186,6 +186,26 @@ surfaced page — run as a genuine multi-turn tool-use loop in every arm that
 has tools. The existing `multi_hop` class is the starting point; the new
 requirement is that the second hop is a link, not a second query term.
 
+**Every arm is told to cite the page's reference tag.** Correctness is a
+deterministic substring match against each probe's planted `answer_tokens`
+(§8 forbids an LLM judge), and those tokens are the invented words the corpus
+pages carry on their `Internal reference tag:` line. No model repeats an
+unasked-for tag, so as first authored the contract was unsatisfiable by a
+correct answer: the first live grid graded even `oracle` — handed the
+ground-truth page verbatim — at 0 on every class (athenaeum#1753). The fix is
+not to weaken grading but to make the contract reachable: every arm's system
+prompt, single-shot and tool-using, API mode and `claude -p` CLI mode, carries
+one identical instruction (`tests.evals.rollout.REFERENCE_TAG_INSTRUCTION`,
+appended via `--append-system-prompt` on the CLI paths) to end the answer with
+`[ref: TAG]` for every page relied on, or `[ref: none]` when none was.
+Because the text is byte-identical across arms it cannot bias the comparison;
+it turns “did you reach the page” into something a substring match can read,
+and it makes `oracle` a positive control that must score at or near 1.0 on
+every non-abstention class. Abstention grading is unaffected: `[ref: none]`
+carries no planted token, and the declining-language rule still applies. The
+write-path sessions of Phase 2 are outside this contract — they produce memory
+files, not graded answers.
+
 Phase 2 needs the generator to emit observations whose compiled ground truth
 is known, which is a generator change, not a corpus rewrite: the hand-authored
 core pages already carry `source_ref`, so the generator inverts them into
