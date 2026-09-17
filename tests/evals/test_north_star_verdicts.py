@@ -1262,3 +1262,115 @@ def test_condition1_fails_when_there_are_no_relationship_rows() -> None:
     verdicts = compute_verdicts(rows, relationship_probe_ids=frozenset())
     assert len(verdicts) == 1
     assert verdicts[0].condition1_pass is False
+
+
+# ---------------------------------------------------------------------------
+# report_only (issue athenaeum#1776): a report_only class is excluded from
+# conditions 2 and 3 as if its rows were never in the store; condition 1's
+# relationship subset is unaffected; render_decision_block names the
+# excluded classes.
+# ---------------------------------------------------------------------------
+
+
+def test_condition2_and_3_report_only_class_excluded_matches_rows_removed() -> None:
+    """A report_only class where the verdict arm LOSES to native would flip
+    condition 2 to fail if compared -- excluding it must produce verdicts
+    IDENTICAL to the same rows with that class's rows removed entirely, not
+    merely an extra 'skipped' entry (skips still fail nothing, but they are
+    counted; report_only rows must not even be counted)."""
+    base_rows = [
+        _row(
+            _record(
+                arm=VERDICT_ARM,
+                probe_id=OTHER_PROBE_ID_2,
+                probe_class="single_hop",
+                answer=f"policy is {OTHER_ANSWER_TOKEN_2}",
+            )
+        ),
+        _row(
+            _record(
+                arm=Arm.NATIVE_INDEX,
+                probe_id=OTHER_PROBE_ID_2,
+                probe_class="single_hop",
+                answer=f"policy is {OTHER_ANSWER_TOKEN_2}",
+            )
+        ),
+    ]
+    report_only_rows = [
+        _row(
+            _record(
+                arm=VERDICT_ARM,
+                probe_id=OTHER_PROBE_ID,
+                probe_class="unprompted_push",
+                answer="no idea",
+            )
+        ),
+        _row(
+            _record(
+                arm=Arm.NATIVE_INDEX,
+                probe_id=OTHER_PROBE_ID,
+                probe_class="unprompted_push",
+                answer=f"25 days ({OTHER_ANSWER_TOKEN})",
+            )
+        ),
+    ]
+
+    verdicts_with = compute_verdicts(
+        base_rows + report_only_rows,
+        relationship_probe_ids=frozenset(),
+        report_only_classes=frozenset({"unprompted_push"}),
+    )
+    verdicts_without = compute_verdicts(
+        base_rows,
+        relationship_probe_ids=frozenset(),
+        report_only_classes=frozenset(),
+    )
+    assert verdicts_with == verdicts_without
+    assert verdicts_with[0].condition2_pass is True
+    assert "compared 1 classes, skipped 0" in verdicts_with[0].condition2_detail
+    assert "unprompted_push" not in verdicts_with[0].condition2_detail
+    assert "unprompted_push" not in verdicts_with[0].condition3_detail
+
+
+def test_render_decision_block_prints_report_only_classes_excluded_line_empty_today() -> None:
+    """issue athenaeum#1776: the decision block always names the excluded
+    report_only classes -- 'empty today' because every currently-shipped
+    probe class is enrolled (CONDITION_2_ENROLLED)."""
+    rendered = "\n".join(render_decision_block(_minimal_report(), verdicts=[]))
+    assert "report-only classes excluded: (none)" in rendered
+
+
+def test_render_report_decision_block_pinned_with_report_only_line_added() -> None:
+    """Pins the existing run-4-style decision block (real core corpus,
+    single_hop probes, condition 1 + condition 2 paths both exercised) --
+    every pre-existing assertion from
+    ``test_build_report_and_render_report_thread_a_non_default_verdict_arm``
+    still holds, plus the new report-only line, so athenaeum#1776 adds
+    exactly one line to this report and changes nothing else."""
+    rows = [
+        _row(
+            _record(
+                arm=Arm.PULL,
+                probe_id=RELATIONSHIP_PROBE_ID,
+                probe_class="single_hop",
+                answer="I don't know",
+            )
+        ),
+        _row(
+            _record(
+                arm=Arm.NATIVE_INDEX,
+                probe_id=RELATIONSHIP_PROBE_ID,
+                probe_class="single_hop",
+                answer=f"terms are {RELATIONSHIP_ANSWER_TOKEN}",
+            )
+        ),
+    ]
+    report = build_report(rows, verdict_arm="pull")
+    rendered = render_report(report)
+    assert "**Verdict arm:** `pull`" in rendered
+    assert "'pull'" in rendered
+    assert "report-only classes excluded: (none)" in rendered
+    decision_idx = rendered.index("## Decision")
+    report_only_idx = rendered.index("report-only classes excluded:")
+    arms_idx = rendered.index("## Arms in this report")
+    assert decision_idx < report_only_idx < arms_idx
