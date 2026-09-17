@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Precision/recall/contamination tables for the retrieval evals, and a
+  cap-signal reading (issue athenaeum#1782).**
+  `tests/evals/test_recall_covers_grep.py` gains a second printed-only
+  measurement, `test_print_precision_contamination_tables_and_cap_signal`,
+  reporting recall/precision/contamination for every non-abstention probe
+  at `core` and `medium`, for grep / `recall_search` top-5 / the hook's
+  top-3, across three backend variants (`fts5`, `vector` with RRF hybrid on
+  — issue athenaeum#1792's production default, `vector` with hybrid off).
+  The metric arithmetic (micro-averaged pooling, the `n/a` handling for a
+  probe with no authored `must_not_rank` set, and the epic's
+  `eval-wave-2-spec.md` §5.3 cap-trigger verdict) lives in a new module,
+  `tests/evals/relevance_metrics.py`, with its own unit tests against a
+  synthetic corpus. All six scale/variant cap-signal verdicts read "fixed
+  cap is cutting noise" — see `docs/design/native-memory-baseline.md` §5
+  for the full tables, computed against `develop` @ `b9583362`. This is
+  issue athenaeum#1783's cap-ruling input; it does not decide or implement
+  the cap.
+- **Hook-breadcrumb `name_to_uid` collision fix at `medium` scale (issue
+  athenaeum#1790).** The plain `{page.name: page.uid}` dict comprehension
+  in `test_recall_covers_grep.py`'s scale fixture silently resolved a
+  collided page name to whichever page iterated last; `medium`'s
+  generated ballast/distractor tiers repeat 81 templated names across 827
+  pages. `tests/evals/relevance_metrics.build_name_to_uid` now detects
+  collisions and excludes them from the mapping (this corpus's `Page` has
+  no `description` field to disambiguate by, so exclusion — not
+  resolution — is the sound fix here), with the exclusion count printed
+  and added to `docs/design/native-memory-baseline.md` §5's `medium`
+  table. The module docstring also gains the pre-existing no-`config.env`
+  hook caveat (this issue's third acceptance criterion).
 - **`must_not_rank` authoring audit across the eval corpus (issue
   athenaeum#1777).** Every non-abstention probe in
   `tests/evals/data/corpus/probes/probes.yaml` now carries a `must_not_rank`

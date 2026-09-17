@@ -380,28 +380,47 @@ offline and deterministically -- every expected page a simple grep baseline
 reaches must appear in a plain `recall_search` call's own top-5, at both the
 `fts5` and `vector` backends -- and separately measures, without asserting
 on it, how many of those grep-reachable expected pages fall outside the
-shipped hook's top-3 breadcrumbs. Measured 2026-09-17 against `core` and
-`medium`, fts5 backend (the grid's own default):
+shipped hook's top-3 breadcrumbs. Measured 2026-09-17 against `develop`
+@ `b9583362` (issues athenaeum#1782/#1790), `core` and `medium`, fts5
+backend (the grid's own default). The `hook_reached`/`hook_irrelevant`
+columns are resolved through a name→uid mapping that excludes any page
+name shared by more than one page (issue athenaeum#1790 -- `medium`'s
+generated ballast/distractor tiers repeat templated names; 81 colliding
+names / 827 pages excluded there, 0/0 at `core`, matching the athenaeum#1771
+review's count exactly):
 
-| probe_class | probes | expected pages | reached by grep | reached by recall top-5 | reached by hook top-3 | irrelevant pages: grep / recall / hook |
-|---|---|---|---|---|---|---|
-| single_hop | 4 | 4 | 4 | 3 | 2 | 148 / 17 / 10 |
-| multi_hop | 3 | 6 | 3 | 3 | 3 | 114 / 10 / 5 |
-| temporal | 6 | 6 | 6 | 5 | 5 | 88 / 18 / 12 |
-| disambiguation | 4 | 8 | 8 | 8 | 7 | 30 / 4 / 2 |
-| distractor_robustness | 2 | 4 | 4 | 4 | 3 | 17 / 4 / 3 |
-| redundancy | 1 | 2 | 2 | 2 | 2 | 4 / 2 / 1 |
-| follow_through | 6 | 12 | 6 | 6 | 6 | 122 / 14 / 7 |
+**`core`:**
 
-(`core` scale; `medium` shows the same shape at larger irrelevant-page
-counts -- see the PR that added this module for the full table at both
-scales.) Reading the columns: "reached by hook top-3" is always ≤ "reached
-by recall top-5" by construction (the hook is recall's own top-3 subset in
-the common case), so every probe class loses SOME grep-reachable expected
+| probe_class | probes | expected | grep_reached | recall_reached | hook_reached | grep_irrelevant | recall_irrelevant | hook_irrelevant |
+|---|---|---|---|---|---|---|---|---|
+| disambiguation | 4 | 8 | 8 | 8 | 7 | 30 | 4 | 2 |
+| distractor_robustness | 2 | 4 | 4 | 4 | 3 | 17 | 4 | 3 |
+| follow_through | 6 | 12 | 6 | 6 | 6 | 122 | 14 | 7 |
+| multi_hop | 3 | 6 | 3 | 3 | 3 | 114 | 10 | 5 |
+| redundancy | 1 | 2 | 2 | 2 | 2 | 4 | 2 | 1 |
+| single_hop | 4 | 4 | 4 | 3 | 2 | 148 | 17 | 10 |
+| temporal | 6 | 6 | 6 | 5 | 5 | 88 | 18 | 12 |
+
+**`medium`:**
+
+| probe_class | probes | expected | grep_reached | recall_reached | hook_reached | grep_irrelevant | recall_irrelevant | hook_irrelevant |
+|---|---|---|---|---|---|---|---|---|
+| disambiguation | 4 | 8 | 8 | 6 | 6 | 153 | 13 | 5 |
+| distractor_robustness | 2 | 4 | 4 | 2 | 1 | 25 | 8 | 2 |
+| follow_through | 6 | 12 | 6 | 6 | 5 | 827 | 22 | 9 |
+| multi_hop | 3 | 6 | 3 | 3 | 2 | 730 | 12 | 5 |
+| redundancy | 1 | 2 | 2 | 2 | 1 | 74 | 3 | 2 |
+| single_hop | 4 | 4 | 4 | 3 | 2 | 189 | 17 | 7 |
+| temporal | 6 | 6 | 6 | 5 | 4 | 669 | 24 | 14 |
+
+Reading the columns: "reached by hook top-3" is always ≤ "reached by recall
+top-5" by construction (the hook is recall's own top-3 subset in the
+common case), so every probe class loses SOME grep-reachable expected
 pages to the 3-breadcrumb cap even where the full recall call would have
 surfaced them -- this is the operator's own §7 decision-rule condition 3
 cost/coverage tradeoff made concrete, not a new finding about `recall`
-itself. `single_hop` and `multi_hop` lose the largest share proportionally.
+itself. `single_hop` and `multi_hop` lose the largest share proportionally
+at both scales.
 
 The SAME module also confirms the disambiguation win recall has over a bare
 grep: for probe `person_not_repo`, the `repo-rowanwrenfield` page is
@@ -417,6 +436,62 @@ athenaeum#1770 explicitly keeps a fix for `src/athenaeum/search.py` or the
 query path out of this module's scope) -- see the module's `_FTS5_XFAIL` /
 `_VECTOR_XFAIL` sets and the PR body that introduced them for the full list
 and a proposed follow-up issue.
+
+**Precision/recall/contamination tables (issue athenaeum#1782), pooled
+("ALL") over every non-abstention probe -- the table athenaeum#1783's cap
+ruling reads.** Same module, same measurement date/SHA, three backend
+variants: `fts5`, `vector` with the RRF hybrid fusion on (production
+default, issue athenaeum#1792), `vector` with the hybrid opt-out
+(`recall.hybrid: false`) on. `recall`/`precision`/`contamination` are
+micro-averaged (sum hits and denominators across probes, then divide once)
+per `R/P/C`; contamination excludes the 3 `follow_through` probes with no
+authored `must_not_rank` set (issue athenaeum#1777's own finding -- "n/a",
+never a silent 1.0) from its denominator at every row. Full per-probe-class
+breakdown: `pytest tests/evals/test_recall_covers_grep.py -k
+precision_contamination -s`.
+
+| scale | variant | grep R/P/C | recall@5 R/P/C | hook@3 R/P/C | grep-miss@5 | grep-miss@hook3 |
+|---|---|---|---|---|---|---|
+| core | fts5 | 0.79/0.06/0.96 | 0.74/0.31/0.54 | 0.67/0.41/0.46 | 2 | 5 |
+| core | vector-hybrid-on | 0.79/0.06/0.96 | 0.62/0.20/0.33 | 0.67/0.41/0.46 | 7 | 5 |
+| core | vector-hybrid-off | 0.79/0.06/0.96 | 0.10/0.03/0.17 | 0.67/0.41/0.46 | 30 | 5 |
+| medium | fts5 | 0.79/0.01/0.96 | 0.64/0.21/0.38 | 0.50/0.32/0.25 | 6 | 12 |
+| medium | vector-hybrid-on | 0.79/0.01/0.96 | 0.40/0.13/0.17 | 0.50/0.32/0.25 | 16 | 12 |
+| medium | vector-hybrid-off | 0.79/0.01/0.96 | 0.02/0.01/0.08 | 0.50/0.32/0.25 | 32 | 12 |
+
+Reading this: `hook@3`'s R/P/C is identical across all three variants on
+each row on purpose -- the hook subprocess resolves its own backend and is
+queried once per probe, independent of which `recall_search` backend
+variant this table is measuring (see the module docstring's `config.env`
+caveat). `vector-hybrid-off`'s collapse relative to `vector-hybrid-on` (for
+example core recall@5 precision 0.20 -> 0.03) is the wiring self-check this
+module's own test asserts on: the hybrid knob measurably changes vector
+ranking, so the two vector rows are not the same measurement twice.
+
+**Cap signal (eval-wave-2-spec.md §5.3), evaluated literally off the pooled
+row above (`CAP_SIGNAL_EPS = 0.05`, this issue's own choice -- the epic
+fixes no numeric value):**
+
+| scale | variant | recall@hook3 | recall@recall5 | precision@hook3 | precision@recall5 | verdict |
+|---|---|---|---|---|---|---|
+| core | fts5 | 0.67 | 0.74 | 0.41 | 0.31 | fixed cap is cutting noise |
+| core | vector-hybrid-on | 0.67 | 0.62 | 0.41 | 0.20 | fixed cap is cutting noise |
+| core | vector-hybrid-off | 0.67 | 0.10 | 0.41 | 0.03 | fixed cap is cutting noise |
+| medium | fts5 | 0.50 | 0.64 | 0.32 | 0.21 | fixed cap is cutting noise |
+| medium | vector-hybrid-on | 0.50 | 0.40 | 0.32 | 0.13 | fixed cap is cutting noise |
+| medium | vector-hybrid-off | 0.50 | 0.02 | 0.32 | 0.01 | fixed cap is cutting noise |
+
+All six cells land on the same verdict: precision@hook3 is sharply above
+precision@recall5 at every scale/backend/hybrid combination measured
+(`precision@hook3 - precision@recall5 > 0.05` in every row), which is the
+epic's own "converse" pattern -- truncating to the hook's top-3 is buying
+real precision over the wider recall@5 window, not discarding relevant
+pages for free. This holds even on the `core`/`fts5` row where recall@hook3
+< recall@recall5 (0.67 < 0.74): the "cutting signal" branch also requires
+`precision@recall5 >= precision@hook3`, which does not hold here
+(0.31 < 0.41), so cutting-signal never fires. athenaeum#1783's ruling
+reads this table; it is not this issue's place to draw a policy conclusion
+beyond the verdict the trigger condition itself produces.
 
 The first measurement report under this design is
 [`../measurements/native-memory-baseline-2026-09-17.md`](../measurements/native-memory-baseline-2026-09-17.md)
