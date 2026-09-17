@@ -86,7 +86,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from athenaeum.config import DEFAULT_CLASSIFY_MODEL
+from athenaeum.config import DEFAULT_CLASSIFY_MODEL, load_config
 from athenaeum.entity_schema import declared_entity_classes
 from athenaeum.mcp_server import (
     READ_ENTITY_TOOL_INPUT_SCHEMA,
@@ -316,6 +316,34 @@ class RolloutRecord:
     #: (those rows were all produced by the ``claude -p`` path, since that
     #: was the only path that existed then).
     mode: str = "cli"
+    #: Issue athenaeum#1761: the ``recall.relevance_floor.vector`` /
+    #: ``.fts5`` value that was ACTIVE in the ``athenaeum.yaml`` written into
+    #: this row's materialized knowledge root, or ``None`` when no floor was
+    #: configured for that backend (the default -- today's behaviour,
+    #: unchanged). Stamped onto every record of a group by the CLI/grid
+    #: wiring (``tests.evals.north_star_cli``), never resolved inside this
+    #: module -- ``run_probe_all_arms`` has no opinion on what floor an
+    #: operator dispatched with, only on running the arms. Used by
+    #: ``north_star_report.build_report`` to refuse pooling a floor-on and
+    #: a floor-off (or two differently-configured floor-on) store into one
+    #: decision block.
+    relevance_floor_vector: float | None = None
+    relevance_floor_fts5: float | None = None
+    #: Issue athenaeum#1761 item 4: the raw backend scores
+    #: (``get_backend(search_backend).query(...)``'s own ``score`` element,
+    #: same units :func:`athenaeum.search.meets_relevance_floor` compares a
+    #: floor against) for this probe's query, against the SAME index this
+    #: group already built. Populated once per (probe, corpus_scale) group
+    #: by :func:`run_probe_all_arms` and copied onto every arm's record --
+    #: these are NOT the shipped breadcrumb hook's own internal ranking
+    #: (the hook does its own term extraction via its offline regex
+    #: fallback and prints no scores at all; see this module's
+    #: ``build_push_breadcrumb_context``), only a same-backend/same-index
+    #: approximation of what it saw for the same query. ``None`` for any
+    #: row persisted before this field existed, and for a query whose
+    #: backend query itself raised. See ``north_star_cli.py``'s
+    #: ``--floor-scan`` for the reader.
+    retrieval_hit_scores: list[float] | None = None
 
     @property
     def total_input_tokens(self) -> int:
@@ -353,6 +381,9 @@ class RolloutRecord:
             "turn_count": self.turn_count,
             "transcript": self.transcript,
             "mode": self.mode,
+            "relevance_floor_vector": self.relevance_floor_vector,
+            "relevance_floor_fts5": self.relevance_floor_fts5,
+            "retrieval_hit_scores": self.retrieval_hit_scores,
         }
 
     @classmethod
@@ -379,6 +410,13 @@ class RolloutRecord:
             # default of "api" -- the same discipline Arm._missing_ uses for
             # the pre-athenaeum#1574 "push" alias.
             mode=payload.get("mode", "cli"),
+            # Issue athenaeum#1761: absent on every row persisted before
+            # this field existed -- ``None`` decodes as "no floor was
+            # configured for this row", the same meaning it carries for a
+            # freshly-constructed record.
+            relevance_floor_vector=payload.get("relevance_floor_vector"),
+            relevance_floor_fts5=payload.get("relevance_floor_fts5"),
+            retrieval_hit_scores=payload.get("retrieval_hit_scores"),
         )
 
 
@@ -2168,6 +2206,14 @@ def run_pull_api(
     serve`` derive the wiki root itself) because there is no subprocess
     here to do that derivation.
     """
+    # Issue athenaeum#1761: ``wiki_root.parent`` is the knowledge root by
+    # ``tests.evals.corpus.Corpus.materialize``'s own layout (``wiki =
+    # root / "wiki"``) -- the SAME invariant ``_serve_read_entity`` already
+    # relies on for this exact parameter. Loaded ONCE here, not per tool
+    # call: an operator opting into a relevance floor writes
+    # ``athenaeum.yaml`` into that knowledge root before this arm ever runs
+    # (never during it), so the file is stable for the whole rollout.
+    config = load_config(wiki_root.parent)
 
     def _executor(name: str, tool_input: dict[str, Any]) -> str:
         if name == READ_ENTITY_TOOL_NAME:
@@ -2178,14 +2224,17 @@ def run_pull_api(
         # threads to every other arm (CLI PULL's own ``--search-backend``
         # included) -- never a second, independently-defaulted value that
         # could silently diverge between modes (Quine review, item 9).
-        # ``extra_roots``/``caller_audience``/``config``/``tool_use_id``/
+        # ``extra_roots``/``caller_audience``/``tool_use_id``/
         # ``session_resolver`` are the real server's OTHER ``recall_search``
         # kwargs (see ``athenaeum.mcp_server.create_server``'s own ``recall``
         # closure) and are intentionally absent here: this materialized eval
-        # corpus has no scope-aware audience or per-deployment config to
-        # pass, and there is no MCP tool-use session for the resolver to key
-        # on -- api mode measures the SAME retrieval call with those inputs
-        # at their defaults, not a degraded one.
+        # corpus has no scope-aware audience to pass, and there is no MCP
+        # tool-use session for the resolver to key on -- api mode measures
+        # the SAME retrieval call with those inputs at their defaults, not a
+        # degraded one. ``config`` IS threaded (issue athenaeum#1761): an
+        # operator-written relevance floor must actually apply to this tool
+        # call for it to mean anything, exactly like the real server's
+        # ``recall`` closure threading its own resolved config.
         return recall_search(
             wiki_root,
             str(tool_input.get("query", "")),
@@ -2195,6 +2244,7 @@ def run_pull_api(
             with_pii=bool(tool_input.get("with_pii", False)),
             history=bool(tool_input.get("history", False)),
             type_filter=tool_input.get("type"),
+            config=config,
         )
 
     answer, tool_calls, turn_tokens, turn_count, transcript = run_api_tool_loop(
@@ -2248,6 +2298,11 @@ def run_push_breadcrumb_pull_api(
     breadcrumb = assemble(knowledge_root, hook_home, probe.query)
     resolved_wiki_root = wiki_root if wiki_root is not None else knowledge_root / "wiki"
     prompt_text = f"{breadcrumb}\n\n{probe.query}" if breadcrumb else probe.query
+    # Issue athenaeum#1761: *knowledge_root* is already the exact root
+    # ``assemble`` (the shipped hook) just read ``athenaeum.yaml`` from via
+    # ``KNOWLEDGE_ROOT`` -- loading it again here, once, keeps the ``recall``
+    # tool call below applying the SAME operator-configured floor.
+    config = load_config(knowledge_root)
 
     def _executor(name: str, tool_input: dict[str, Any]) -> str:
         if name == READ_ENTITY_TOOL_NAME:
@@ -2256,7 +2311,8 @@ def run_push_breadcrumb_pull_api(
             return f"error: unknown tool {name!r}"
         # Same *search_backend* parity note as :func:`run_pull_api`'s own
         # executor -- see that docstring comment for which real server
-        # kwargs are intentionally absent here.
+        # kwargs are intentionally absent here. ``config`` IS threaded, same
+        # reasoning as that function.
         return recall_search(
             resolved_wiki_root,
             str(tool_input.get("query", "")),
@@ -2266,6 +2322,7 @@ def run_push_breadcrumb_pull_api(
             with_pii=bool(tool_input.get("with_pii", False)),
             history=bool(tool_input.get("history", False)),
             type_filter=tool_input.get("type"),
+            config=config,
         )
 
     answer, tool_calls, turn_tokens, turn_count, loop_transcript = run_api_tool_loop(
@@ -2679,6 +2736,26 @@ def run_probe_all_arms(
     if search_backend != "keyword":
         get_backend(search_backend).build_index(wiki_root, cache_dir)
 
+    # Issue athenaeum#1761 item 4: the raw backend scores for THIS probe's
+    # query, against the SAME index just built above -- a same-backend/
+    # same-index approximation of what the shipped breadcrumb hook saw for
+    # the same query, not its own internal ranking (the hook prints no
+    # scores at all; see ``RolloutRecord.retrieval_hit_scores``'s
+    # docstring). Computed once per probe, not once per arm: the score
+    # landscape does not depend on which arm is about to run. Never raises
+    # -- a backend query failure degrades to ``None`` (no scores recorded),
+    # same fail-open shape the rest of this module already uses for a
+    # missing binary or an empty index.
+    try:
+        retrieval_hit_scores: list[float] | None = [
+            score
+            for (_filename, _name, score) in get_backend(search_backend).query(
+                probe.query, cache_dir, n=5, wiki_root=wiki_root
+            )
+        ]
+    except Exception:  # noqa: BLE001 -- diagnostic-only, never fatal to a rollout
+        retrieval_hit_scores = None
+
     cells: list[GridCell] = build_grid(
         "full",
         probes=[probe_id],
@@ -2862,5 +2939,6 @@ def run_probe_all_arms(
                     claude_binary=claude_binary,
                     model=model,
                 )
+        record.retrieval_hit_scores = retrieval_hit_scores
         records[arm.value] = record
     return records
