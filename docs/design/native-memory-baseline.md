@@ -81,7 +81,8 @@ corpus is told plainly to use their agent's own memory.
 
 Two native arms join the existing grid. Both are genuine tool-use loops. The
 **primary implementation is API-backed**: the Anthropic Messages API with a
-`recall` tool for the PULL-style arms and a `grep`/`read` tool pair served by
+`recall`/`read_entity` tool pair for the PULL-style arms and a `grep`/`read`
+tool pair served by
 the harness over the materialised directory for the native arms. That lets
 the whole grid run from the evals workflow's manual dispatch with the key it
 already loads, and keeps the live run off the operator's plate (operator
@@ -125,10 +126,18 @@ load and truncation.
 
 Each API-mode arm's system prompt mirrors what its real counterpart actually
 gives the model: the `PULL`-style arms are told a `recall` tool exists over
-the knowledge base and to use it before concluding it does not know, using
-the MCP server's own `recall` tool description and parameters
-(`query`/`top_k`/`with_pii`/`history`/`type`) rather than a paraphrase; the
-native arms are told their memory directory's path and that `MEMORY.md` (when
+the knowledge base and to use it before concluding it does not know, and that
+a `read_entity` tool returns one whole page given the `uid` and `type` a
+`recall` hit reports — both served in-process by the same functions the
+shipped MCP server calls (`recall_search`, `entity_read`), using the MCP
+server's own tool descriptions and parameters
+(`query`/`top_k`/`with_pii`/`history`/`type`, and
+`uid`/`entity_class`/`include_excluded`/`usage_classes`) rather than a
+paraphrase. Those two, and nothing else, are what the real server serves a
+PULL arm, so API-mode and CLI-mode PULL measure the same tool surface —
+which matters because every `recall` hit's body is windowed to 400 characters
+and three of the core corpus's planted reference tags fall outside that window
+(athenaeum#1756). The native arms are told their memory directory's path and that `MEMORY.md` (when
 present) is an index whose topic files are opened on demand with `grep`/
 `read`, mirroring Claude Code's own auto-memory instructions rather than the
 single-shot arms' "answer using only the context supplied" prompt.
