@@ -1900,6 +1900,133 @@ def _inject_provenance_frontmatter(
 # ---------------------------------------------------------------------------
 
 
+def recall_tool_docstring(entity_classes_str: str) -> str:
+    """The ``recall`` MCP tool's real description text, as a module-level,
+    importable function (issue athenaeum#1733, Quine review) -- extracted
+    VERBATIM from what ``create_server`` assigns to ``recall.__doc__`` below
+    (the ONE change here is parameterizing ``_entity_classes_str``, which
+    ``create_server`` still computes locally at construction time and passes
+    through unchanged). This is what lets ``tests/evals/rollout.py``'s
+    api-mode ``recall`` tool schema share the REAL tool description FastMCP
+    would otherwise only generate for the stdio MCP path, rather than a
+    paraphrase that could drift from it.
+    """
+    return f"""Search the knowledge wiki for pages relevant to a query.
+
+        Dispatches to the configured search backend:
+
+        - ``keyword`` (default fallback): in-memory scoring over frontmatter
+          and body; integer-ish relevance scores, higher is better.
+        - ``fts5``: SQLite FTS5 over a pre-built index; BM25 scores,
+          higher is better.
+        - ``vector``: chromadb embeddings over a pre-built index; distance
+          scores, lower is better.
+
+        A handle-shaped query (an address, or a registry handle framed as a
+        question — "who is this address?", "is this address still current?")
+        answers by exact reverse lookup instead (issue athenaeum#907): a JSON
+        document with the person's ``uid``, display name, entity class, and
+        per-value fact fields (usage/provenance classification, bounce
+        history, validity dates) — facts only, never an eligibility or action
+        predicate. An ordinary query is unaffected; detection is deliberately
+        conservative.
+
+        Args:
+            query: Search query string (keywords, names, topics — or natural
+                language for semantic recall under the vector backend).
+            top_k: Maximum number of results to return (default 5).
+            with_pii: Also resolve each matching entity's EXCLUDED fields —
+                contact data for a person, and whatever the operator routes
+                off-corpus for any other entity class (issue athenaeum#885). This is
+                the sanctioned way to read excluded data for a hit you found
+                here; do not open an excluded surface directly
+                (``docs/design/one-way-in-one-way-out.md`` section 3). Default ``False``, and
+                free when unset: no excluded surface is scanned at all.
+
+                It cannot widen what you can see. Excluded values are never
+                indexed and are not searchable — the flag attaches a record to
+                a hit the corpus already produced and already authorized, after
+                every audience and policy filter. A field you do not receive
+                comes back as a redaction marker naming the field and how many
+                values exist, never as silence.
+            history: Opt into a HISTORY query (issue athenaeum#904) — set this when
+                you are explicitly asking about the past ("what did the
+                daily status say last week?") rather than the current state.
+                By default an expired ``daily``-bucket page ranks below a
+                current one; ``history=True`` disables that reorder for this
+                call and returns results in plain relevance order.
+            type: Narrow the search to one entity class (a page's ``type:``) —
+                issue athenaeum#964. Omitting this (the default, ``None``) searches
+                EVERY class, exactly as before this parameter existed. This
+                deployment's DECLARED entity classes: {entity_classes_str}.
+                That list is not exhaustive — a class observed live in the
+                corpus but not yet declared is equally valid here. Call the
+                `entity_schema` tool for the complete live list, each class's
+                page count, and whether it is declared / observed / both
+                (issue athenaeum#1194: only the declared half is cheap enough to
+                compute while the server is starting up). A value matching no
+                class at all still runs — it returns no matches together with
+                this deployment's full class list in the response, never a
+                silent "nothing matched" and never an error, so a typo is
+                always diagnosable from the response alone.
+
+        Returns:
+            Matching wiki pages with relevance scores and content snippets.
+        """
+
+
+#: The ``recall`` MCP tool's JSON input schema, hand-written to mirror what
+#: FastMCP generates from the real ``recall(...)`` function signature above
+#: (issue athenaeum#1733) -- so ``tests/evals/rollout.py``'s api-mode tool
+#: definition exposes the SAME parameters (``query``, ``top_k``, ``with_pii``,
+#: ``history``, ``type``), not a two-parameter paraphrase. Kept as a plain
+#: module constant (not derived from the live signature via introspection)
+#: because the real function lives inside ``create_server``'s closure and
+#: is never constructed without a ``wiki_root`` -- a schema needed at import
+#: time by a caller with no wiki has to be independent of that.
+RECALL_TOOL_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "query": {
+            "type": "string",
+            "description": (
+                "Search query string (keywords, names, topics — or natural language for "
+                "semantic recall under the vector backend)."
+            ),
+        },
+        "top_k": {
+            "type": "integer",
+            "description": "Maximum number of results to return (default 5).",
+            "default": 5,
+        },
+        "with_pii": {
+            "type": "boolean",
+            "description": (
+                "Also resolve each matching entity's excluded fields (contact data for a "
+                "person, and whatever else is routed off-corpus). Default false."
+            ),
+            "default": False,
+        },
+        "history": {
+            "type": "boolean",
+            "description": (
+                "Opt into a HISTORY query when explicitly asking about the past, rather "
+                "than the current state. Default false."
+            ),
+            "default": False,
+        },
+        "type": {
+            "type": ["string", "null"],
+            "description": (
+                "Narrow the search to one entity class (a page's `type:`). Omitting this "
+                "searches every class."
+            ),
+        },
+    },
+    "required": ["query"],
+}
+
+
 def create_server(
     raw_root: Path,
     wiki_root: Path,
@@ -2088,68 +2215,15 @@ def create_server(
     # registered via an explicit ``mcp.tool()(recall)`` call (not the
     # ``@mcp.tool()`` decorator syntax every other tool below uses) so the
     # registration happens AFTER the dynamic docstring is attached.
-    recall.__doc__ = f"""Search the knowledge wiki for pages relevant to a query.
-
-        Dispatches to the configured search backend:
-
-        - ``keyword`` (default fallback): in-memory scoring over frontmatter
-          and body; integer-ish relevance scores, higher is better.
-        - ``fts5``: SQLite FTS5 over a pre-built index; BM25 scores,
-          higher is better.
-        - ``vector``: chromadb embeddings over a pre-built index; distance
-          scores, lower is better.
-
-        A handle-shaped query (an address, or a registry handle framed as a
-        question — "who is this address?", "is this address still current?")
-        answers by exact reverse lookup instead (issue athenaeum#907): a JSON
-        document with the person's ``uid``, display name, entity class, and
-        per-value fact fields (usage/provenance classification, bounce
-        history, validity dates) — facts only, never an eligibility or action
-        predicate. An ordinary query is unaffected; detection is deliberately
-        conservative.
-
-        Args:
-            query: Search query string (keywords, names, topics — or natural
-                language for semantic recall under the vector backend).
-            top_k: Maximum number of results to return (default 5).
-            with_pii: Also resolve each matching entity's EXCLUDED fields —
-                contact data for a person, and whatever the operator routes
-                off-corpus for any other entity class (issue athenaeum#885). This is
-                the sanctioned way to read excluded data for a hit you found
-                here; do not open an excluded surface directly
-                (``docs/design/one-way-in-one-way-out.md`` section 3). Default ``False``, and
-                free when unset: no excluded surface is scanned at all.
-
-                It cannot widen what you can see. Excluded values are never
-                indexed and are not searchable — the flag attaches a record to
-                a hit the corpus already produced and already authorized, after
-                every audience and policy filter. A field you do not receive
-                comes back as a redaction marker naming the field and how many
-                values exist, never as silence.
-            history: Opt into a HISTORY query (issue athenaeum#904) — set this when
-                you are explicitly asking about the past ("what did the
-                daily status say last week?") rather than the current state.
-                By default an expired ``daily``-bucket page ranks below a
-                current one; ``history=True`` disables that reorder for this
-                call and returns results in plain relevance order.
-            type: Narrow the search to one entity class (a page's ``type:``) —
-                issue athenaeum#964. Omitting this (the default, ``None``) searches
-                EVERY class, exactly as before this parameter existed. This
-                deployment's DECLARED entity classes: {_entity_classes_str}.
-                That list is not exhaustive — a class observed live in the
-                corpus but not yet declared is equally valid here. Call the
-                `entity_schema` tool for the complete live list, each class's
-                page count, and whether it is declared / observed / both
-                (issue athenaeum#1194: only the declared half is cheap enough to
-                compute while the server is starting up). A value matching no
-                class at all still runs — it returns no matches together with
-                this deployment's full class list in the response, never a
-                silent "nothing matched" and never an error, so a typo is
-                always diagnosable from the response alone.
-
-        Returns:
-            Matching wiki pages with relevance scores and content snippets.
-        """
+    #
+    # Issue athenaeum#1733: the text itself now lives in the module-level
+    # :func:`recall_tool_docstring` (parameterized on ``_entity_classes_str``
+    # exactly as this inline body used to be) so a second caller --
+    # ``tests/evals/rollout.py``'s api-mode recall tool -- can share the
+    # SAME real description rather than a paraphrase that could drift from
+    # it. This call site is unchanged in behavior, only in where the text
+    # lives.
+    recall.__doc__ = recall_tool_docstring(_entity_classes_str)
     mcp.tool()(recall)
 
     @mcp.tool()

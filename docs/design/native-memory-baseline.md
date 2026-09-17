@@ -101,10 +101,23 @@ result can say whether the index helped at all.
 
 In API mode the harness builds the index and applies the documented
 truncation itself (first 200 lines or 25KB, whichever comes first), pinned by
-a test, and injects it as the first user turn to mirror Claude Code's load.
-In CLI mode the auto-memory directory is supplied through
-`autoMemoryDirectory` in a settings file passed to the subprocess, so Claude
-Code performs its own load and truncation.
+a test, and injects it as the first user turn to mirror Claude Code's load,
+appending the same `WARNING:` marker text a real truncated load ends with
+when the cap actually bound (recorded as `truncated_by_harness`, since a
+harness truncation is a distinct fact from `truncated_by_claude_code`). In
+CLI mode the auto-memory directory is supplied through `autoMemoryDirectory`
+in a settings file passed to the subprocess, so Claude Code performs its own
+load and truncation.
+
+Each API-mode arm's system prompt mirrors what its real counterpart actually
+gives the model: the `PULL`-style arms are told a `recall` tool exists over
+the knowledge base and to use it before concluding it does not know, using
+the MCP server's own `recall` tool description and parameters
+(`query`/`top_k`/`with_pii`/`history`/`type`) rather than a paraphrase; the
+native arms are told their memory directory's path and that `MEMORY.md` (when
+present) is an index whose topic files are opened on demand with `grep`/
+`read`, mirroring Claude Code's own auto-memory instructions rather than the
+single-shot arms' "answer using only the context supplied" prompt.
 
 The recall relevance floor ships inactive and the shell hook does not apply
 it even when set (athenaeum#1665). The first run uses the floor **as
