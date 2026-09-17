@@ -55,6 +55,7 @@ import yaml
 from athenaeum.pii import scan_corpus_pii
 from tests.evals.corpus import CORPUS_ROOT, build_corpus
 from tests.evals.harness import EVAL_DATA_ROOT, RECORDED_ROOT
+from tests.evals.rollout import materialize_native_memory
 
 # What counts as an identity worth guarding.
 #
@@ -602,5 +603,38 @@ def test_materialized_eval_corpus_carries_no_contact_data(tmp_path: Path) -> Non
     findings = scan_corpus_pii(wiki_root)
     assert not findings, (
         "synthetic eval corpus carries contact-shaped tokens: "
+        f"{[str(f.path) for f in findings][:10]}"
+    )
+
+
+@pytest.mark.parametrize("scale", ["medium", "large"])
+def test_materialized_native_memory_store_writes_nothing_outside_tmp_path_and_is_clean(
+    scale: str, tmp_path: Path
+) -> None:
+    """Issue athenaeum#1725's native-memory materializer
+    (:func:`tests.evals.rollout.materialize_native_memory`) is a SECOND way
+    the corpus lands on disk, alongside ``Corpus.materialize`` -- it must
+    pass the same two guarantees this module already holds the wiki
+    materializer to: nothing written outside the given root, and no
+    contact-shaped content (reusing :func:`scan_corpus_pii`, never a second
+    scanner). Checked at ``medium`` and ``large`` (``SCALES``,
+    ``tests/evals/corpus.py``) -- the two scales the design doc's native-
+    memory baseline actually exercises past the index cap.
+    """
+    corpus = build_corpus(scale=scale)
+    root = tmp_path / "sandbox"
+    root.mkdir()
+
+    memory_dir = materialize_native_memory(corpus, root, write_index=True)
+
+    for path in tmp_path.rglob("*"):
+        if path.is_file():
+            assert str(path).startswith(str(root)), (
+                f"native memory materializer wrote outside its root: {path}"
+            )
+
+    findings = scan_corpus_pii(memory_dir)
+    assert not findings, (
+        f"native memory store ({scale}) carries contact-shaped tokens: "
         f"{[str(f.path) for f in findings][:10]}"
     )

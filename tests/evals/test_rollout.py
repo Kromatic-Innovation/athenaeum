@@ -35,6 +35,7 @@ from tests.evals.rollout import (
     ToolCall,
     build_pull_argv,
     build_pull_mcp_config,
+    materialize_native_memory,
     parse_pull_stream,
     run_none,
     run_oracle,
@@ -62,7 +63,7 @@ def _probe(probe_id: str):
 # ---------------------------------------------------------------------------
 
 
-def test_arm_enumeration_has_exactly_six_arms() -> None:
+def test_arm_enumeration_has_exactly_eight_arms() -> None:
     assert set(ALL_ARMS) == {
         Arm.NONE,
         Arm.PUSH_PAGES_UPPER_BOUND,
@@ -70,11 +71,31 @@ def test_arm_enumeration_has_exactly_six_arms() -> None:
         Arm.PUSH_BREADCRUMB_PULL,
         Arm.ORACLE,
         Arm.PULL,
+        Arm.NATIVE_INDEX,
+        Arm.NATIVE_GREP,
     }
-    assert len(ALL_ARMS) == 6
+    assert len(ALL_ARMS) == 8
     # str-subclass so an arm round-trips through GridCell.arm (a plain str).
     assert Arm("push_pages_upper_bound") is Arm.PUSH_PAGES_UPPER_BOUND
     assert Arm.PULL.value == "pull"
+    # Appended, not interleaved -- the pre-athenaeum#1725 six-arm order is a
+    # prefix of the current eight-arm order.
+    assert ALL_ARMS[:6] == (
+        Arm.NONE,
+        Arm.PUSH_PAGES_UPPER_BOUND,
+        Arm.PUSH_BREADCRUMB,
+        Arm.PUSH_BREADCRUMB_PULL,
+        Arm.ORACLE,
+        Arm.PULL,
+    )
+    assert ALL_ARMS[6:] == (Arm.NATIVE_INDEX, Arm.NATIVE_GREP)
+
+
+def test_native_arms_round_trip_through_arm_value() -> None:
+    assert Arm("native_index") is Arm.NATIVE_INDEX
+    assert Arm("native_grep") is Arm.NATIVE_GREP
+    assert Arm.NATIVE_INDEX.value == "native_index"
+    assert Arm.NATIVE_GREP.value == "native_grep"
 
 
 def test_arm_legacy_push_value_resolves_to_the_renamed_upper_bound_arm() -> None:
@@ -379,11 +400,63 @@ def test_run_oracle_abstention_probe_gets_zero_injected_tokens() -> None:
 
 
 # ---------------------------------------------------------------------------
+# materialize_native_memory (issue athenaeum#1725) — offline, no subprocess
+# ---------------------------------------------------------------------------
+
+
+def test_materialize_native_memory_writes_one_topic_file_per_page(tmp_path: Path) -> None:
+    corpus = build_corpus("core")
+
+    memory_dir = materialize_native_memory(corpus, tmp_path, write_index=True)
+
+    assert memory_dir == tmp_path / "memory"
+    topic_files = {p.name for p in memory_dir.glob("*.md")} - {"MEMORY.md"}
+    assert topic_files == {page.filename for page in corpus.pages}
+    # Each topic file is the FULL page markdown, not a summary.
+    sample = corpus.pages[0]
+    assert (memory_dir / sample.filename).read_text(encoding="utf-8") == sample.to_markdown()
+
+
+def test_materialize_native_memory_without_index_writes_no_memory_md(tmp_path: Path) -> None:
+    corpus = build_corpus("core")
+
+    memory_dir = materialize_native_memory(corpus, tmp_path, write_index=False)
+
+    assert not (memory_dir / "MEMORY.md").exists()
+    # Topic files are still written -- only the index is skipped.
+    assert any(memory_dir.glob("*.md"))
+
+
+def test_materialize_native_memory_index_has_one_line_per_page(tmp_path: Path) -> None:
+    corpus = build_corpus("core")
+
+    memory_dir = materialize_native_memory(corpus, tmp_path, write_index=True)
+
+    index_text = (memory_dir / "MEMORY.md").read_text(encoding="utf-8")
+    bullet_lines = [line for line in index_text.splitlines() if line.startswith("- ")]
+    assert len(bullet_lines) == len(corpus.pages)
+    for page in corpus.pages:
+        assert any(line.startswith(f"- {page.name} —") for line in bullet_lines), page.name
+
+
+def test_materialize_native_memory_writes_nothing_outside_root(tmp_path: Path) -> None:
+    corpus = build_corpus("small")
+    root = tmp_path / "sandbox"
+    root.mkdir()
+
+    materialize_native_memory(corpus, root, write_index=True)
+
+    for path in tmp_path.rglob("*"):
+        if path.is_file():
+            assert str(path).startswith(str(root)), path
+
+
+# ---------------------------------------------------------------------------
 # Runner entrypoint wiring — offline via injected stub client + pull_runner
 # ---------------------------------------------------------------------------
 
 
-def test_run_probe_all_arms_dispatches_all_six_arms_offline(tmp_path: Path) -> None:
+def test_run_probe_all_arms_dispatches_all_eight_arms_offline(tmp_path: Path) -> None:
     session = EvalSession()
     client = FakeLLMClient(
         response=make_llm_response(
@@ -418,6 +491,24 @@ def test_run_probe_all_arms_dispatches_all_six_arms_offline(tmp_path: Path) -> N
             recall_called=False,
         )
 
+    def _stub_native_index_runner(probe, materialize_root, corpus_scale, **kwargs) -> RolloutRecord:
+        return RolloutRecord(
+            arm=Arm.NATIVE_INDEX,
+            probe_id=probe.id,
+            probe_class=probe.probe_class,
+            corpus_scale=corpus_scale,
+            answer="stub native index answer",
+        )
+
+    def _stub_native_grep_runner(probe, materialize_root, corpus_scale, **kwargs) -> RolloutRecord:
+        return RolloutRecord(
+            arm=Arm.NATIVE_GREP,
+            probe_id=probe.id,
+            probe_class=probe.probe_class,
+            corpus_scale=corpus_scale,
+            answer="stub native grep answer",
+        )
+
     records = run_probe_all_arms(
         "pto_allowance",
         "core",
@@ -428,6 +519,8 @@ def test_run_probe_all_arms_dispatches_all_six_arms_offline(tmp_path: Path) -> N
         pull_runner=_stub_pull_runner,
         breadcrumb_context_fn=_stub_breadcrumb_context_fn,
         breadcrumb_pull_runner=_stub_breadcrumb_pull_runner,
+        native_index_runner=_stub_native_index_runner,
+        native_grep_runner=_stub_native_grep_runner,
     )
 
     assert set(records) == {
@@ -437,6 +530,8 @@ def test_run_probe_all_arms_dispatches_all_six_arms_offline(tmp_path: Path) -> N
         "push_breadcrumb_pull",
         "oracle",
         "pull",
+        "native_index",
+        "native_grep",
     }
     for arm_value, record in records.items():
         assert record.arm.value == arm_value
@@ -445,6 +540,83 @@ def test_run_probe_all_arms_dispatches_all_six_arms_offline(tmp_path: Path) -> N
     assert records["pull"].answer == "stub pull answer"
     assert records["pull"].recall_called is False  # a legitimate, recorded choice
     assert records["push_breadcrumb_pull"].answer == "stub breadcrumb-pull answer"
+    assert records["native_index"].answer == "stub native index answer"
+    assert records["native_grep"].answer == "stub native grep answer"
+    # No live subprocess was ever spawned -- the stubs stood in entirely.
+    # No network call either: pull/breadcrumb/native runners are the only
+    # arms that would spawn a subprocess, all three stubbed.
+
+
+def test_run_probe_all_arms_native_arms_get_dedicated_subdirectories(tmp_path: Path) -> None:
+    """NATIVE_INDEX and NATIVE_GREP must not share a materialize root — each
+    writes its own ``memory/``, ``claude-config/`` and settings/mcp-config
+    files, and both run within the SAME ``run_probe_all_arms`` call, so
+    sharing a root would let one clobber the other's config."""
+    session = EvalSession()
+    client = FakeLLMClient(
+        response=make_llm_response(
+            "stub answer", usage=make_llm_usage(input_tokens=10, output_tokens=5)
+        )
+    )
+    seen_roots: dict[str, Path] = {}
+
+    def _capturing_native_index_runner(probe, materialize_root, corpus_scale, **kwargs):
+        seen_roots["native_index"] = materialize_root
+        return RolloutRecord(
+            arm=Arm.NATIVE_INDEX,
+            probe_id=probe.id,
+            probe_class=probe.probe_class,
+            corpus_scale=corpus_scale,
+            answer="a",
+        )
+
+    def _capturing_native_grep_runner(probe, materialize_root, corpus_scale, **kwargs):
+        seen_roots["native_grep"] = materialize_root
+        return RolloutRecord(
+            arm=Arm.NATIVE_GREP,
+            probe_id=probe.id,
+            probe_class=probe.probe_class,
+            corpus_scale=corpus_scale,
+            answer="b",
+        )
+
+    def _stub_pull_runner(probe, knowledge_root, cache_dir, corpus_scale, **kwargs):
+        return RolloutRecord(
+            arm=Arm.PULL,
+            probe_id=probe.id,
+            probe_class=probe.probe_class,
+            corpus_scale=corpus_scale,
+            answer="c",
+        )
+
+    def _stub_breadcrumb_pull_runner(
+        probe, knowledge_root, hook_home, cache_dir, corpus_scale, **kwargs
+    ):
+        return RolloutRecord(
+            arm=Arm.PUSH_BREADCRUMB_PULL,
+            probe_id=probe.id,
+            probe_class=probe.probe_class,
+            corpus_scale=corpus_scale,
+            answer="d",
+        )
+
+    run_probe_all_arms(
+        "pto_allowance",
+        "core",
+        session=session,
+        materialize_root=tmp_path,
+        search_backend="keyword",
+        client=client,
+        pull_runner=_stub_pull_runner,
+        breadcrumb_context_fn=lambda *a, **k: "",
+        breadcrumb_pull_runner=_stub_breadcrumb_pull_runner,
+        native_index_runner=_capturing_native_index_runner,
+        native_grep_runner=_capturing_native_grep_runner,
+    )
+
+    assert seen_roots["native_index"] == tmp_path / "native_index"
+    assert seen_roots["native_grep"] == tmp_path / "native_grep"
+    assert seen_roots["native_index"] != seen_roots["native_grep"]
 
 
 def test_pull_arm_receives_the_knowledge_root_not_the_wiki_root(tmp_path: Path) -> None:

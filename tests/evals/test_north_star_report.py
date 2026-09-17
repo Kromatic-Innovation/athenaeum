@@ -25,9 +25,11 @@ from tests.evals.north_star_report import (
     GroupStats,
     NorthStarReport,
     RolloutRow,
+    _push_delivered_text,
     append_rollout_row,
     build_report,
     compute_group_stats,
+    crossover_scales,
     delivered_text_for_utilization,
     delivered_uids_for_utilization,
     distinctive_ngram_overlap,
@@ -912,3 +914,148 @@ def test_no_model_client_constructed_on_report_path(
     assert any(s.correctness_rate is not None for s in report.stats)
     assert pto_probe.id in report.weak_probes
     assert "## Correctness" in text
+
+
+# ---------------------------------------------------------------------------
+# Native arms (issue athenaeum#1725) -- offline, no subprocess
+# ---------------------------------------------------------------------------
+
+
+def _native_index_record(
+    *, answer: str = "25 days", coverage: float = 1.0, transcript_zero: dict | None = None
+) -> RolloutRecord:
+    """A NATIVE_INDEX row shaped exactly like
+    ``tests.evals.rollout.run_native_index`` produces: ``transcript[0]`` is a
+    leading ``{"native_memory": {...}}`` dict (the SAME idiom
+    ``run_push_breadcrumb_pull`` uses for its own arm metadata), never a
+    ``pushed_context`` key."""
+    entry = transcript_zero or {
+        "native_memory": {
+            "pages": 99,
+            "index_lines_written": 99,
+            "index_bytes_written": 9000,
+            "index_lines_loaded": 99,
+            "index_bytes_loaded": 9000,
+            "coverage": coverage,
+            "truncated_by_claude_code": False,
+        }
+    }
+    return RolloutRecord(
+        arm=Arm.NATIVE_INDEX,
+        probe_id=PROBE_ID,
+        probe_class="single_hop",
+        corpus_scale=CORPUS_SCALE,
+        answer=answer,
+        turn_tokens=[TurnTokenUsage(turn=1, input_tokens=100, output_tokens=20)],
+        turn_count=1,
+        transcript=[entry],
+    )
+
+
+def test_push_delivered_text_is_empty_for_a_native_transcript() -> None:
+    """``_push_delivered_text`` reads ``transcript[0].get("pushed_context")``
+    -- a native arm's leading dict carries no such key at all (it carries
+    ``native_memory`` instead), so this must return ``""``, never raise and
+    never accidentally pick up unrelated content."""
+    record = _native_index_record()
+    assert _push_delivered_text(record) == ""
+
+
+def test_group_stats_mean_index_coverage_populated_only_for_native_index() -> None:
+    rows = [
+        _row(_native_index_record(coverage=0.4)),
+        _row(_pull_record(called=False)),
+    ]
+    stats = compute_group_stats(rows)
+    native_stat = next(s for s in stats if s.arm == "native_index")
+    pull_stat = next(s for s in stats if s.arm == "pull")
+    assert native_stat.mean_index_coverage == pytest.approx(0.4)
+    assert pull_stat.mean_index_coverage is None
+
+
+def _group_stat(
+    *, probe_class: str, corpus_scale: str, arm: str, correctness: float | None
+) -> GroupStats:
+    return GroupStats(
+        probe_class=probe_class,
+        corpus_scale=corpus_scale,
+        arm=arm,
+        n=1,
+        no_call_rate=None,
+        mean_self_query_overlap=None,
+        mean_topic_query_overlap=None,
+        mean_input_tokens_per_turn=None,
+        mean_output_tokens_per_turn=None,
+        mean_injected_context_tokens=None,
+        mean_turn_count=1.0,
+        mean_tool_call_count=0.0,
+        mean_wasted_page_fraction=None,
+        mean_wasted_tokens_estimate=None,
+        mean_uid_citation_rate=None,
+        mean_distinctive_ngram_overlap=None,
+        correctness_rate=correctness,
+        mean_index_coverage=None,
+    )
+
+
+def test_crossover_scales_finds_the_smallest_crossing_scale() -> None:
+    """Athenaeum starts BEHIND native at ``core`` and overtakes it at
+    ``small`` -- the crossover must name ``small``, not ``core`` (where
+    native still wins) and not some later scale (the smallest one that
+    crosses is what the design doc's decision rule needs)."""
+    stats = [
+        _group_stat(probe_class="single_hop", corpus_scale="core", arm="pull", correctness=0.5),
+        _group_stat(
+            probe_class="single_hop", corpus_scale="core", arm="native_index", correctness=0.6
+        ),
+        _group_stat(probe_class="single_hop", corpus_scale="small", arm="pull", correctness=0.7),
+        _group_stat(
+            probe_class="single_hop", corpus_scale="small", arm="native_index", correctness=0.5
+        ),
+    ]
+    assert crossover_scales(stats) == {"single_hop": "small"}
+
+
+def test_crossover_scales_never_crosses_is_absent_not_fabricated() -> None:
+    """A probe class where native always wins gets NO entry -- the caller
+    renders ``n/a``, never a fabricated scale."""
+    stats = [
+        _group_stat(probe_class="multi_hop", corpus_scale="core", arm="pull", correctness=0.2),
+        _group_stat(
+            probe_class="multi_hop", corpus_scale="core", arm="native_index", correctness=0.9
+        ),
+        _group_stat(probe_class="multi_hop", corpus_scale="medium", arm="pull", correctness=0.3),
+        _group_stat(
+            probe_class="multi_hop", corpus_scale="medium", arm="native_grep", correctness=0.95
+        ),
+    ]
+    assert crossover_scales(stats) == {}
+
+
+def test_crossover_scales_excludes_floor_and_ceiling_arms() -> None:
+    """``none`` (floor) and ``oracle`` (ceiling) must NEVER count as
+    "Athenaeum's correctness" -- both massively outscore native here, but
+    the only DELIVERY arm (``pull``) does not, so there must be NO crossover
+    at ``core`` even though a naive scan including floor/ceiling would find
+    one immediately."""
+    stats = [
+        _group_stat(probe_class="single_hop", corpus_scale="core", arm="none", correctness=0.95),
+        _group_stat(probe_class="single_hop", corpus_scale="core", arm="oracle", correctness=1.0),
+        _group_stat(probe_class="single_hop", corpus_scale="core", arm="pull", correctness=0.1),
+        _group_stat(
+            probe_class="single_hop", corpus_scale="core", arm="native_index", correctness=0.6
+        ),
+    ]
+    assert crossover_scales(stats) == {}
+
+
+def test_render_report_includes_index_coverage_and_crossover_sections() -> None:
+    rows = [
+        _row(_pull_record(called=True, answer=f"25 days ({TARGET_UID})")),
+        _row(_native_index_record(answer="25 days", coverage=0.75)),
+    ]
+    report = build_report(rows)
+    text = render_report(report)
+    assert "## Index coverage (NATIVE_INDEX only" in text
+    assert "## Crossover scale" in text
+    assert "0.750" in text
