@@ -334,8 +334,11 @@ def test_the_tags_recall_alone_cannot_deliver_split_into_two_mechanisms(tmp_path
     1. The tag-bearing page IS returned, and the tag still does not appear --
        the page is longer than the 400-character window
        ``athenaeum.mcp_server._snippet`` gives every hit, and the corpus puts
-       the tag on the page's last line. Exactly three probes, on pages of
-       587/566/434 characters.
+       the tag on the page's last line. Three probes on pages of
+       587/566/434 characters, plus (issue athenaeum#1779) four more on the
+       long-page tier's 1,500-3,000-character pages, authored specifically
+       to land in this bucket -- see
+       ``tests/evals/data/corpus/core/12-long-pages.yaml``.
     2. The tag-bearing page is not returned at all at ``top_k=5``. Those pages
        are SHORT -- ``portal_design_reviewer``'s is 164 characters, so no
        window could have cut it. This is a ranking outcome, not truncation.
@@ -374,9 +377,13 @@ def test_the_tags_recall_alone_cannot_deliver_split_into_two_mechanisms(tmp_path
                 bucket[probe.id] = len(page.body)
 
     assert sorted(truncated) == [
+        "bramfield_retainer_renewal",
         "keelbridge_programme_scope",
+        "lighthouse_migration_rollback",
         "person_not_repo",
+        "remote_equipment_stipend_cap",
         "repo_not_person",
+        "triform_vendor_consolidation",
     ]
     # Every one of them is longer than the window -- which is what makes
     # "outside the snippet window" the right description of this bucket.

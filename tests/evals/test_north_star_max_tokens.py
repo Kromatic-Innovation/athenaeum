@@ -433,14 +433,45 @@ def test_the_per_cell_estimate_is_the_measured_one() -> None:
     assert 0.5 < NORTH_STAR_CELL_TOKEN_ESTIMATE.total_tokens / measured_per_cell < 2.0
 
 
+def expected_full_grid_cells(probe_count: int) -> int:
+    """Cells a full-scale dry run produces for *probe_count* probes.
+
+    Mirrors ``north_star_cli._build_cells``'s multiplication (probes *
+    corpus_scales * arms, with the ``--replicates`` default being a single
+    replicate so it drops out of the product) without invoking the CLI, so
+    the ``cells=`` literal pinned below can be DERIVED from the current
+    probe count instead of hand-typed after every probe-count change --
+    Quine review of PR athenaeum#1808 (athenaeum#1779). The hand-typed
+    literal assertion stays alongside this as a second, independent pin: a
+    change to ``DEFAULT_CORPUS_SCALES``/``DEFAULT_ARMS`` (not just probe
+    count) would move this helper's output without anyone noticing unless
+    the literal below still has to be updated to match.
+    """
+    return (
+        probe_count
+        * len(north_star_cli.DEFAULT_CORPUS_SCALES)
+        * len(north_star_cli.DEFAULT_ARMS)
+    )
+
+
 def test_the_full_grid_dry_run_prices_at_the_measured_mix(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Pins ``main``'s ``price_grid(per_cell=...)`` argument, which no other
-    test reaches: 1392 cells at 4,300 in / 850 out on Haiku 4.5 ($1/$5 per
-    MTok) is 1392 * $0.00855 = $11.90. Reverting to the shared
-    ``DEFAULT_CELL_TOKEN_ESTIMATE`` mix would price the same grid at $55.68
-    and fail this band (Quine review of PR athenaeum#1757)."""
+    test reaches: 1584 cells at 4,300 in / 850 out on Haiku 4.5 ($1/$5 per
+    MTok) is 1584 * $0.00855 = $13.54. Reverting to the shared
+    ``DEFAULT_CELL_TOKEN_ESTIMATE`` mix would price the same grid at a much
+    higher figure and fail this band (Quine review of PR athenaeum#1757).
+    Repinned from 1392 to 1584 cells by athenaeum#1779's four new
+    single_hop probes on the long-page tier -- the full grid's cell count
+    is `probes * scales * arms`, so a probe-count change always shifts it,
+    same class of expected repin as `Corpus.fingerprint()`. The expected
+    count is now cross-checked against :func:`expected_full_grid_cells`,
+    derived from the live probe count, rather than trusted on the literal
+    alone."""
+    assert (
+        expected_full_grid_cells(len(north_star_cli.DEFAULT_PROBES)) == 1584
+    ), "expected_full_grid_cells drifted from the pinned literal below -- update both together"
     assert (
         north_star_cli.main(
             [
@@ -460,9 +491,9 @@ def test_the_full_grid_dry_run_prices_at_the_measured_mix(
         == 0
     )
     out = capsys.readouterr().out
-    assert "cells=1392" in out
+    assert "cells=1584" in out
     priced = float(out.split("estimated=$")[1].split()[0])
-    assert 11.85 < priced < 11.95, out
+    assert 13.50 < priced < 13.60, out
 
 
 def test_the_estimate_names_its_source_run() -> None:

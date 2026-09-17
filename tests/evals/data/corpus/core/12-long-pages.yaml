@@ -1,0 +1,195 @@
+# Long-page tier (issue athenaeum#1779). Invented; see ../README.md for the
+# content policy.
+#
+# Design-doc §3.5 (eval-wave-2-spec.md): nothing in the corpus before this
+# file exercised the "not loading very large documents" progressive-discovery
+# cost claim -- every core page rendered under ~600 characters, well inside
+# `mcp_server._snippet`'s 400-character window (`max_chars: int = 400`), so a
+# probe could always be answered from the `recall` snippet alone. Each page
+# below carries tier `long` and plants its `Internal reference tag:` line
+# past character offset 400 of `Page.body`, checked by `validate_core`
+# (mirroring `_snippet`'s own default rather than a second hardcoded 400, so
+# the check cannot drift from what `recall` actually windows). A probe whose
+# query vocabulary sits in the page's own title/opening sentence -- as every
+# probe here is authored -- puts `_snippet`'s match window (`best_pos - 80`
+# to `best_pos + max_chars`) entirely before the tag line, so a correct
+# answer proves the model followed up with `read_entity` rather than
+# answering from the truncated `recall` hit.
+#
+# `tier: long` is read by `Page` from this field via `load_core_pages` (it is
+# NOT inferred from the directory, unlike the historical "every core/*.yaml
+# page is tier core" default) -- so this is the one core fixture file whose
+# pages do not carry the implicit `core` tier.
+
+- uid: client-bramfield-crestwood
+  type: client
+  name: "Bramfield Crestwood"
+  tier: long
+  tags: [client, retainer]
+  source_ref: "session-2026-03-11"
+  created: 2026-03-11
+  body: |
+    # Bramfield Crestwood Retainer Renewal Timeline
+
+    Bramfield Crestwood has been a retainer client since the
+    account moved off a project-basis engagement in early 2025. The
+    retainer covers quarterly advisory sessions, a standing seat on their
+    internal planning calls, and an annual scope review each January.
+    Renewal decisions run on a rolling eighteen-month cycle rather than a
+    calendar year, which has occasionally confused finance during budget
+    season because the retainer's fiscal boundary does not line up with the
+    client's own.
+
+    The account has gone through two prior renewal cycles without incident.
+    The first, in 2023, extended the original scope to include a second
+    business unit after Bramfield Crestwood's holding company folded a
+    smaller subsidiary into the primary entity. The second, in 2024, was
+    mostly administrative -- new signatories on both sides after a
+    leadership change on the client's finance team, with no change to
+    deliverables or billing structure.
+
+    This cycle is different. The client's new VP of operations has asked
+    for a review of the advisory cadence, floating the idea of moving from
+    quarterly sessions to a monthly touchpoint. That would mean
+    renegotiating the retainer's fee structure, since the current rate
+    assumes the lower quarterly frequency. No commitment has been made on
+    either side yet -- the request came up informally on a call and has not
+    been put in writing.
+
+    Billing runs net-30 against a fixed quarterly invoice, with overage
+    hours billed separately at the standard advisory rate. There have been
+    no overages in the last four quarters. The account has one open item
+    carried over from the prior review: a request to formalize the
+    escalation path for urgent items outside the standing call cadence,
+    which was deferred pending the renewal conversation above rather than
+    handled separately.
+
+    Internal reference tag: Glimmerhollow.
+
+- uid: policy-remote-equipment-stipend
+  type: policy
+  name: "Remote Equipment Stipend Policy"
+  tier: long
+  tags: [policy, remote, finance]
+  source_ref: "session-2026-03-18"
+  created: 2026-03-18
+  body: |
+    # Remote Equipment Stipend Policy
+
+    The remote equipment stipend policy sets out what the firm reimburses
+    for home-office hardware and how often an employee can draw on it. Every
+    fully remote employee is eligible from their first day; hybrid employees
+    become eligible after completing their ninety-day onboarding period,
+    on the theory that a hybrid employee's home setup is a convenience
+    rather than their sole working environment during that window.
+
+    The stipend covers a desk, a chair, a monitor, and peripherals, up to a
+    combined cap per rolling two-year period. Anything above the cap is the
+    employee's own cost unless a manager pre-approves an exception, which
+    has historically been granted for accessibility accommodations and for
+    roles that require a second monitor for compliance reasons, such as
+    dual-screen transcript review.
+
+    Reimbursement requires a receipt submitted within thirty days of
+    purchase; late submissions are reviewed case by case rather than
+    automatically rejected, though the finance team has flagged that this
+    discretion has been inconsistently applied across teams and is under
+    review. A laptop itself is excluded from the stipend because it is
+    issued directly by IT as standard equipment, not purchased by the
+    employee.
+
+    The policy was last revised after an internal audit found that a
+    handful of employees had drawn the full cap twice within one calendar
+    year by submitting purchases just before and just after a fiscal
+    year-end, which was not what the two-year rolling window was meant to
+    allow. The audit's finding prompted finance to add a running total
+    visible to each employee in the expense system, rather than relying on
+    manual reconciliation to catch a repeat draw.
+
+    Internal reference tag: Pallowrift.
+
+- uid: project-lighthouse-migration
+  type: project
+  name: "Lighthouse Platform Migration"
+  tier: long
+  tags: [project, migration]
+  source_ref: "session-2026-03-22"
+  created: 2026-03-22
+  body: |
+    # Lighthouse Platform Migration Rollback Plan
+
+    The Lighthouse platform migration moves the client's reporting stack
+    off its legacy vendor onto the firm's recommended replacement, and the
+    rollback plan exists because the client's compliance team required a
+    documented reversal path before approving the cutover window at all.
+
+    The migration runs in three phases: a shadow-write phase where both
+    systems receive the same data and only the legacy system is read from,
+    a cutover phase where reads move to the new system while shadow-writes
+    continue, and a decommission phase where the legacy system is finally
+    retired. Rollback is only guaranteed to be clean during the first two
+    phases, because the shadow-write step keeps the legacy system's data
+    current enough to fail back to without loss.
+
+    If a rollback is triggered during the cutover phase, reads move back to
+    the legacy system immediately and the new system is treated as the one
+    under investigation rather than the source of truth. The team has a
+    four-hour window from trigger to full fail-back, based on the time it
+    took during the migration's dry run, though the dry run did not include
+    production data volumes, so that number is treated as optimistic rather
+    than guaranteed. No rollback has ever been exercised for real on the
+    Lighthouse project; the dry run is the only rehearsal on record.
+
+    Once the decommission phase begins, rollback is no longer possible in
+    the ordinary sense -- restoring the legacy system would require
+    rebuilding it from the last full backup taken before decommission, a
+    multi-day exercise rather than the four-hour fail-back available
+    earlier. For that reason, the decommission phase does not begin until
+    the new system has run as the sole source of truth for a minimum
+    stabilization period with no unresolved data-integrity tickets open
+    against it.
+
+    Internal reference tag: Ambervost.
+
+- uid: decision-vendor-consolidation-triform
+  type: note
+  name: "Decision - Consolidate Vendors Under the Triform Master Agreement"
+  tier: long
+  tags: [decision, vendor, finance]
+  source_ref: "session-2026-03-27"
+  created: 2026-03-27
+  body: |
+    # Decision - Consolidate Vendors Under the Triform Master Agreement
+
+    The firm consolidated four separate vendor contracts for background
+    screening, e-signature, expense management, and travel booking under a
+    single Triform master agreement after an internal audit found the
+    separate contracts carried overlapping per-seat fees that nobody had
+    reconciled against actual usage in over two years.
+
+    The audit's headline finding was that the firm was paying for e-signature
+    seats assigned to contractors who had left more than a year earlier, and
+    that the expense-management contract had auto-renewed twice at a higher
+    tier than the firm's actual transaction volume required. Neither issue
+    was anyone's fault in particular -- each contract had a different
+    internal owner, and none of them had a standing review cadence, so
+    nobody was positioned to notice the drift.
+
+    Consolidating under one master agreement was chosen over simply
+    renegotiating each contract individually because Triform offered a
+    bundled discount only available when all four services moved together,
+    and because a single vendor relationship meant a single renewal date and
+    a single internal owner going forward, closing the exact gap the audit
+    identified. The transition took five months, mostly due to data
+    migration out of the expense-management tool, which did not support a
+    clean bulk export and required a manual reconciliation pass against the
+    prior twelve months of transactions before cutover.
+
+    The new agreement includes a quarterly usage review clause that the
+    prior contracts lacked, specifically to prevent the kind of unnoticed
+    drift the audit found. The first quarterly review under the new
+    agreement is scheduled for next quarter and will be the first real test
+    of whether that clause changes anything in practice, rather than being
+    a paper commitment nobody follows up on.
+
+    Internal reference tag: Thistlemere.
