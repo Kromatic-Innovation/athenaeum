@@ -22,7 +22,7 @@ import pytest
 
 from tests.evals import north_star_cli
 from tests.evals.containment import DEFAULT_CELL_TOKEN_ESTIMATE, price_grid
-from tests.evals.north_star_report import load_rollout_rows
+from tests.evals.north_star_report import DEFAULT_VERDICT_ARM, load_rollout_rows
 from tests.evals.rollout import ALL_ARMS, RolloutRecord, TurnTokenUsage
 
 pytestmark = pytest.mark.rollout
@@ -61,6 +61,14 @@ def _stub_run_probe_all_arms(
 # ---------------------------------------------------------------------------
 # Default --max-spend arithmetic proof
 # ---------------------------------------------------------------------------
+
+
+def test_verdict_arm_flag_defaults_to_the_report_module_constant() -> None:
+    """The CLI's own default must track ``DEFAULT_VERDICT_ARM`` (imported
+    from ``north_star_report``), never a second, independently-drifting
+    literal."""
+    args = north_star_cli.build_arg_parser().parse_args([])
+    assert args.verdict_arm == DEFAULT_VERDICT_ARM
 
 
 def test_default_max_spend_covers_smoke_scale() -> None:
@@ -193,6 +201,32 @@ def test_smoke_run_writes_a_report(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     assert len(reports) == 1
     text = reports[0].read_text(encoding="utf-8")
     assert "North-star report" in text
+
+
+def test_verdict_arm_flag_threads_through_to_the_written_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--verdict-arm`` must reach ``build_report`` end to end -- this is
+    the one path that would silently regress if a future edit dropped the
+    kwarg anywhere along ``main`` -> ``build_report`` ->
+    ``render_decision_block`` -> ``compute_verdicts``."""
+    monkeypatch.setattr(north_star_cli, "run_probe_all_arms", _stub_run_probe_all_arms)
+    monkeypatch.setattr(north_star_cli, "_default_store_path", lambda: tmp_path / "r.jsonl")
+
+    exit_code = north_star_cli.main(
+        [
+            "--scale", "smoke",
+            "--materialize-root", str(tmp_path / "mat"),
+            "--out-dir", str(tmp_path / "measurements"),
+            "--verdict-arm", "pull",
+        ]
+    )
+
+    assert exit_code == 0
+    reports = list((tmp_path / "measurements").glob("north-star-*.md"))
+    assert len(reports) == 1
+    text = reports[0].read_text(encoding="utf-8")
+    assert "**Verdict arm:** `pull`" in text
 
 
 def test_store_rows_round_trip_through_the_report_loader(
