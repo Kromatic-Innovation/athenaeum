@@ -20,8 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   0/6 on `multi_hop` and 0/7 on `temporal`. Grading is unchanged (design §8
   still forbids an LLM judge); instead every arm's system prompt now carries
   one identical instruction, `tests.evals.rollout.REFERENCE_TAG_INSTRUCTION`,
-  to end the answer with `[ref: TAG]` for each page relied on or `[ref: none]`
-  for none. It is composed into `_SYSTEM_PROMPT`, `_PULL_API_SYSTEM_PROMPT`
+  to end the answer with `[ref: TAG]` for each page the answer is based on —
+  only pages it actually draws on, not every page opened along the way — or
+  `[ref: none]` when declining to answer. It is composed into `_SYSTEM_PROMPT`, `_PULL_API_SYSTEM_PROMPT`
   and both native api-mode prompts, and appended to both `claude -p` CLI paths
   via `--append-system-prompt` (append, never `--system-prompt`, which would
   discard the auto-memory instructions the native arms exist to measure).

@@ -197,7 +197,9 @@ not to weaken grading but to make the contract reachable: every arm's system
 prompt, single-shot and tool-using, API mode and `claude -p` CLI mode, carries
 one identical instruction (`tests.evals.rollout.REFERENCE_TAG_INSTRUCTION`,
 appended via `--append-system-prompt` on the CLI paths) to end the answer with
-`[ref: TAG]` for every page relied on, or `[ref: none]` when none was.
+`[ref: TAG]` for every page the answer is based on — only pages it actually
+draws on, not every page opened while searching — or `[ref: none]` when
+declining to answer.
 Because the text is byte-identical across arms it cannot bias the comparison;
 it turns “did you reach the page” into something a substring match can read,
 and it makes `oracle` a positive control that must score at or near 1.0 on
