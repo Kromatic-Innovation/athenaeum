@@ -125,6 +125,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `docs/design/native-memory-baseline.md` §5 for the void-run record; the
   grid is re-dispatched manually after this lands, per athenaeum#1759 AC5.
 
+- **Two more fixture defects that capped `follow_through` and `multi_hop` at
+  oracle in the third live north-star grid (issue athenaeum#1766).** Run
+  35260484135 (2026-09-17, develop `0b804c64`, 1392 rows, API mode) cleared
+  the oracle control on `single_hop`, `temporal`, and `disambiguation`, but
+  scored 0/36 on `follow_through` and 24/36 on `multi_hop`, so the decision
+  block stayed void. `follow_through`: all six queries in
+  `tests/evals/data/corpus/core/10-follow-through.yaml` were answerable from
+  their first expected page alone, so a correct, complete answer cited only
+  that page's tag while grading required both — reworded each query
+  (`tests/evals/data/corpus/probes/probes.yaml`) so the complete answer needs
+  a fact that exists only on the second, link-only page, while the query's
+  content terms still do not reach that page (`validate_core`'s
+  `follow_through` term-leak check, unchanged, still holds). `multi_hop`: six
+  pages named in some probe's `expected_uids` (`client-atlas`,
+  `person-ilva-wrenfield`, `policy-budget-approval`,
+  `project-keelbridge-rollout`, `project-portal-refresh`,
+  `project-pricing-review`) carried no `Internal reference tag:` line, so a
+  model correctly citing one of them had nothing to cite but its `uid` and
+  failed the reference-tag contract — each now carries a unique invented
+  tag. `validate_core` now also fails when any `expected_uids` page lacks a
+  tag line, or carries more than one, and when two pages share a tag value.
+  See `docs/design/native-memory-baseline.md` §5 for the void-run record;
+  the grid is re-dispatched manually after this lands, per athenaeum#1766
+  AC5.
+
 - **API-mode PULL arms now serve `read_entity` alongside `recall`, matching the
   tool surface the real MCP server gives a PULL session (issue
   athenaeum#1756).** The shipped server serves both; the eval harness's

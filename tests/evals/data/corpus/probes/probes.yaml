@@ -268,66 +268,87 @@
 
 - id: fenwick_relationship_history
   probe_class: follow_through
-  query: "what is our relationship with Fenwick Systems?"
+  query: >-
+    what is our relationship with Fenwick Systems, and is there a recurring
+    checkpoint on the account that could change its terms?
   expected_uids: [client-fenwick-systems, person-dara-holt]
   distractor_terms: ["Fenwick Systems", "retainer client", "relationship"]
   answer_tokens: ["Quillbrook", "Marrowfen"]
   note: >-
     Relationship use case (docs/use-cases.md §2.1). The client page names the
-    engagement lead; the renegotiation detail lives only on her own page,
-    reached by following the client page's link.
+    engagement lead but says nothing about a recurring checkpoint; only her
+    own page (athenaeum#1766) says she reviews cost-escalation clauses each
+    spring and flags renegotiation before the March budget cycle, reached by
+    following the client page's link.
 
 - id: corvale_holdings_history
   probe_class: follow_through
-  query: "what is our history with Corvale Holdings?"
+  query: >-
+    what is our history with Corvale Holdings, and how has any current work
+    with them gone against plan?
   expected_uids: [client-corvale-holdings, project-platform-cutover-programme]
   distractor_terms: ["Corvale Holdings", "retainer client", "migration"]
   answer_tokens: ["Halvorwick", "Ossmarl"]
   note: >-
     Relationship use case (docs/use-cases.md §2.1). The client page names the
-    migration programme; the cutover-delay detail lives only on the
-    programme's own page.
+    migration programme but says nothing about it slipping; only the
+    programme's own page (athenaeum#1766) carries the six-week cutover delay
+    from the vendor's quarterly freeze.
 
 - id: pinemarsh_goal_rationale
   probe_class: follow_through
-  query: "what is the goal behind the Pinemarsh initiative?"
+  query: >-
+    what is the goal behind the Pinemarsh initiative, and was any constraint
+    imposed on it because of a past track record?
   expected_uids: [project-pinemarsh-initiative, decision-tooling-budget-cap]
   distractor_terms: ["Pinemarsh initiative", "goal", "tooling consolidation"]
   answer_tokens: ["Tanglewrought", "Fendrickal"]
   note: >-
     Rationale use case (docs/use-cases.md §2.2). The initiative page states
-    the goal and links to the budget decision it forced; the cap figure
-    lives only on the decision page.
+    the goal but not the constraint; only the decision page (athenaeum#1766)
+    carries the forty-engineer-day cap set after a prior consolidation effort
+    ran three times over its original estimate.
 
 - id: gilcrest_vendor_decision
   probe_class: follow_through
-  query: "why did we choose Gilcrest as the ticketing vendor?"
+  query: >-
+    why did we choose Gilcrest as the ticketing vendor, and did the
+    arrangement guard against cost changes down the road?
   expected_uids: [decision-ticketing-vendor-gilcrest, person-mireille-santos]
   distractor_terms: ["Gilcrest", "ticketing vendor", "pricing"]
   answer_tokens: ["Oakenspire", "Brindlemoor"]
   note: >-
     Decision use case (docs/use-cases.md §2.3, "who made this call?"). The
-    decision page gives the pricing rationale and links to who signed the
-    contract; the price-lock detail lives only on her own page.
+    decision page gives the pricing rationale but not the contract terms;
+    only her own page (athenaeum#1766) carries the two-year price lock
+    negotiated after the initial quote came in above budget.
 
 - id: anchorline_retirement_rationale
   probe_class: follow_through
-  query: "why did we retire the Anchorline reporting tool?"
+  query: >-
+    why did we retire the Anchorline reporting tool, and does the
+    replacement expect anyone querying it to check back regularly instead
+    of getting pushed updates?
   expected_uids: [decision-retire-anchorline, system-ledgerfax-successor]
   distractor_terms: ["Anchorline", "retire", "reporting tool"]
   answer_tokens: ["Verdantholt", "Sablecroft"]
   note: >-
     Decision use case (docs/use-cases.md §2.3). The decision page gives the
-    security rationale and links to the replacement tool; its export-cadence
-    detail lives only on the replacement's own page.
+    security rationale but not how the replacement is consumed; only the
+    replacement's own page (athenaeum#1766) says it exports flat files on a
+    nightly cadence for downstream polling rather than pushing updates.
 
 - id: subsidiary_onboarding_lesson
   probe_class: follow_through
-  query: "what went wrong last time we onboarded a client with multiple subsidiaries?"
+  query: >-
+    what went wrong last time we onboarded a client with multiple
+    subsidiaries, and did it expose any gap in how we handle payment
+    paperwork for them?
   expected_uids: [note-subsidiary-onboarding-retro, policy-cost-center-billing-split]
   distractor_terms: ["subsidiaries", "onboarding", "retro"]
   answer_tokens: ["Wrenholt", "Copperfen"]
   note: >-
     Lesson use case (docs/use-cases.md §2.4). The retro names the missed
-    contact-record requirement and links to the billing policy it exposed a
-    gap in; the confirmation rule lives only on the policy page.
+    contact-record requirement but not the billing rule; only the policy
+    page (athenaeum#1766) says an unconfirmed cost-center split defaults to a
+    single combined invoice unless confirmed in writing by finance.
