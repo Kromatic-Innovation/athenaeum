@@ -63,6 +63,13 @@ open. The synthetic corpus already has the scales to straddle the cap:
 (1,000) and `large` (10,000) are well past it (`tests/evals/corpus.py`,
 `SCALES`).
 
+It follows that there is almost certainly a corpus size **below which
+Athenaeum is not worth using**: while everything fits the native index, a
+compiler and a search stack are overhead. Finding that cutoff is an explicit
+output of the comparison (§6, crossover scale), and once measured it belongs
+in the README's "is this for me" gate as a number, so a reader with a small
+corpus is told plainly to use their agent's own memory.
+
 ## 4. The arms
 
 Two native arms join the existing grid. Both are tool-use loops, run the way
@@ -108,6 +115,26 @@ same inputs, whose memory ends up answering the questions? Phase 2 also
 produces the first measurement of the observation filter against a
 baseline other than itself.
 
+Phase 2 is also where write cost becomes comparable. Native memory is not
+free to build: the model spends tokens deciding what to save and writing
+the files, inside the sessions that see the observations. That is its
+compile step, paid inline. So the librarian's spend is compared against the
+native writer sessions' spend on memory-saving tool calls, not against zero.
+In Phase 1 neither side pays a write cost, because both are handed finished
+pages, and the cost comparison there is per-turn read cost only.
+
+**Probes must include follow-through.** A single-shot probe whose answer sits
+in the surfaced page's first lines cannot tell breadcrumb delivery from
+full-page delivery, and cannot tell either from a good grep. The realistic
+case is a question whose complete answer needs the agent to notice a
+breadcrumb, open the page behind it, and follow a link from that page to a
+technical detail on a second page that the query never named. The
+comparison therefore needs a probe class of that shape — answer tokens
+split across two or more pages, at least one reachable only by link from a
+surfaced page — run as a genuine multi-turn tool-use loop in every arm that
+has tools. The existing `multi_hop` class is the starting point; the new
+requirement is that the second hop is a link, not a second query term.
+
 Phase 2 needs the generator to emit observations whose compiled ground truth
 is known, which is a generator change, not a corpus rewrite: the hand-authored
 core pages already carry `source_ref`, so the generator inverts them into
@@ -122,7 +149,8 @@ The dimensions already defined for the north-star report
 |---|---|
 | Correctness (`answer_tokens` match) | the only dimension that can say "worse" |
 | Abstention correctness | native memory has no abstention behaviour; a confident wrong answer on an `abstention` probe is a failure direction the north star names |
-| Cost per turn, both arms | native pays for the index on every turn; Athenaeum pays for breadcrumbs on every turn and for compilation once. Compilation cost is amortised over the probe set and reported separately so the reader can re-amortise |
+| Read cost per turn, both arms | native pays for the index (up to 25KB) on every turn plus its grep and read calls; Athenaeum pays for breadcrumbs on every turn plus its recall calls. Phase 1 compares this alone |
+| Write cost, both systems (Phase 2) | the librarian's spend versus the native writer sessions' spend on memory-saving tool calls, for the same observation stream. Amortised over the full probe set at that scale (one compile serves one day's questions) and also reported raw, so a reader can re-amortise for their own turn volume |
 | Turns and tool calls to answer | grep over 10,000 files is not free in wall-clock or tokens |
 | **Crossover scale** | the smallest scale at which Athenaeum's correctness exceeds native's, per probe class. This is the number the decision turns on |
 | **Index coverage** (`NATIVE_INDEX` only) | fraction of the corpus the truncated index still names, so a reader can see the cap bite |
@@ -139,12 +167,24 @@ Athenaeum continues if, at the `medium` scale and above:
    (use-cases §2.1: `single_hop`, `multi_hop`, `disambiguation`, `temporal`
    probes that target person and company pages), and
 2. it is not worse than the better native arm on any other current use case, and
-3. its cost per turn, with compilation amortised, is within a factor the
-   operator sets before the run and records in the report.
+3. its total cost per correct answer — read cost per turn, plus write cost
+   amortised over the full probe set at that scale (Phase 2 only) — is
+   within **2×** the better native arm's.
+
+The cost factor was set by the operator on 2026-09-16, before any run, and
+has three readings: **2× is the limit** (above it, condition 3 fails);
+**1× is the target** (parity: provenance, the decision queue and passive
+delivery come at no premium); **0.5× would be the outcome that changes the
+positioning** (cheaper *and* better, which is a claim the README could then
+make). The report states which reading was reached, per scale.
 
 Winning only below the cap is not a pass: a system that is only better while
 the corpus is small enough not to need it has not earned its complexity.
 Losing on the relationship use case is a fail regardless of the others.
+
+The report also states the **cutoff**: the smallest scale at which all three
+conditions hold. Below it the recommendation is the agent's own memory, and
+that number goes into the README.
 
 The result lands as a dated report under `docs/measurements/`, following the
 convention `measurements/README.md` documents: the runner ships in-tree and

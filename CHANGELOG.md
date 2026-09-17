@@ -34,8 +34,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the `medium` scale and above. Two phases, because the synthetic corpus is
   compiled pages with no raw observations: read path first (reuses every
   existing arm, probe and scale), write path second (a raw-observation
-  generator feeding both systems). Decision rule, dimensions (adds crossover
-  scale and index coverage), and the manual-dispatch cadence are all stated.
+  generator feeding both systems). Decision rule with the cost factor set
+  before any run (2× limit, 1× target, 0.5× the positioning-changing
+  outcome), write cost compared against the native writer's inline
+  memory-saving spend rather than against zero, a required follow-through
+  probe class (answer two link-hops from the surfaced page), the corpus-size
+  cutoff below which the recommendation is the agent's own memory, dimensions
+  (adds crossover scale and index coverage), and the manual-dispatch cadence
+  are all stated.
 
 - **Stale-server detection: a running `athenaeum serve` reports when its own
   code is older than what is currently installed on disk.** The

@@ -89,6 +89,11 @@ directions.
 - **Passive delivery.** The right page reaches the agent without the agent
   deciding to look (why-athenaeum §3). Measured as the no-call rate in the
   PULL arm of the north-star comparison (`tests/evals/rollout.py`).
+- **Follow-through.** A breadcrumb is only useful if the agent opens the page
+  behind it and follows its links. The realistic question is one whose full
+  answer needs a technical detail two pages away from what was surfaced, so
+  the comparison must include multi-turn probes of that shape
+  (`design/native-memory-baseline.md` §5). No such probe class exists yet.
 - **Currency.** Something reported today is recallable today, not after the
   next nightly run (north star §1, "too late"). No eval covers this yet; it is
   named here so its absence is visible.
