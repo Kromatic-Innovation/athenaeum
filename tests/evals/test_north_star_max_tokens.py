@@ -433,6 +433,27 @@ def test_the_per_cell_estimate_is_the_measured_one() -> None:
     assert 0.5 < NORTH_STAR_CELL_TOKEN_ESTIMATE.total_tokens / measured_per_cell < 2.0
 
 
+def expected_full_grid_cells(probe_count: int) -> int:
+    """Cells a full-scale dry run produces for *probe_count* probes.
+
+    Mirrors ``north_star_cli._build_cells``'s multiplication (probes *
+    corpus_scales * arms, with the ``--replicates`` default being a single
+    replicate so it drops out of the product) without invoking the CLI, so
+    the ``cells=`` literal pinned below can be DERIVED from the current
+    probe count instead of hand-typed after every probe-count change --
+    Quine review of PR athenaeum#1808 (athenaeum#1779). The hand-typed
+    literal assertion stays alongside this as a second, independent pin: a
+    change to ``DEFAULT_CORPUS_SCALES``/``DEFAULT_ARMS`` (not just probe
+    count) would move this helper's output without anyone noticing unless
+    the literal below still has to be updated to match.
+    """
+    return (
+        probe_count
+        * len(north_star_cli.DEFAULT_CORPUS_SCALES)
+        * len(north_star_cli.DEFAULT_ARMS)
+    )
+
+
 def test_the_full_grid_dry_run_prices_at_the_measured_mix(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -444,7 +465,13 @@ def test_the_full_grid_dry_run_prices_at_the_measured_mix(
     Repinned from 1392 to 1584 cells by athenaeum#1779's four new
     single_hop probes on the long-page tier -- the full grid's cell count
     is `probes * scales * arms`, so a probe-count change always shifts it,
-    same class of expected repin as `Corpus.fingerprint()`."""
+    same class of expected repin as `Corpus.fingerprint()`. The expected
+    count is now cross-checked against :func:`expected_full_grid_cells`,
+    derived from the live probe count, rather than trusted on the literal
+    alone."""
+    assert (
+        expected_full_grid_cells(len(north_star_cli.DEFAULT_PROBES)) == 1584
+    ), "expected_full_grid_cells drifted from the pinned literal below -- update both together"
     assert (
         north_star_cli.main(
             [

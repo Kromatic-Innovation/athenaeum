@@ -377,9 +377,9 @@ def test_the_tags_recall_alone_cannot_deliver_split_into_two_mechanisms(tmp_path
                 bucket[probe.id] = len(page.body)
 
     assert sorted(truncated) == [
+        "bramfield_retainer_renewal",
         "keelbridge_programme_scope",
         "lighthouse_migration_rollback",
-        "northgate_retainer_renewal",
         "person_not_repo",
         "remote_equipment_stipend_cap",
         "repo_not_person",
