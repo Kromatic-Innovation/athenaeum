@@ -86,6 +86,7 @@ from tests.evals.harness import EvalSession
 from tests.evals.north_star_report import (
     DEFAULT_MEASUREMENTS_DIR,
     DEFAULT_VERDICT_ARM,
+    MixedFloorError,
     append_rollout_row,
     build_report,
     load_rollout_rows_and_diagnostics,
@@ -198,22 +199,9 @@ def write_relevance_floor_config(
     )
 
 
-def floor_scan_summary(rows: Sequence[object]) -> str:
-    """Summarise the retrieval-hit scores carried by *rows* (issue
-    athenaeum#1761 item 4), so an operator can pick a
-    ``--relevance-floor-vector``/``--relevance-floor-fts5`` value before
-    dispatching a floor-on grid.
-
-    *rows* is ``Sequence[tests.evals.north_star_report.RolloutRow]`` (typed
-    loosely here to avoid a report-module import cycle at CLI-module load
-    time); each row's ``.record.retrieval_hit_scores`` is the field
-    :func:`tests.evals.rollout.run_probe_all_arms` populates -- a
-    same-backend/same-index approximation of what the shipped breadcrumb
-    hook saw for that probe's query, NOT the hook's own internal ranking
-    (see that field's docstring for the exact caveat). A store written
-    before that field existed carries ``None`` on every row; this function
-    says so explicitly rather than printing a misleadingly-empty summary.
-    """
+def _floor_scan_summary_one_backend(backend_label: str, rows: Sequence[object]) -> str:
+    """One backend's block of :func:`floor_scan_summary` -- see that
+    function's docstring for why this is grouped rather than pooled."""
     scores: list[float] = []
     carrying = 0
     for row in rows:
@@ -222,8 +210,9 @@ def floor_scan_summary(rows: Sequence[object]) -> str:
             carrying += 1
             scores.extend(record_scores)
     lines = [
+        f"backend={backend_label} (lower is better)",
         f"{carrying} of {len(rows)} rows carry retrieval_hit_scores "
-        "(rows persisted before issue athenaeum#1761 carry none)."
+        "(rows persisted before issue athenaeum#1761 carry none).",
     ]
     if not scores:
         lines.append("no scores to summarise.")
@@ -240,6 +229,50 @@ def floor_scan_summary(rows: Sequence[object]) -> str:
         f"p75={_pct(0.75):.4f} max={scores[-1]:.4f}"
     )
     return "\n".join(lines)
+
+
+def floor_scan_summary(rows: Sequence[object]) -> str:
+    """Summarise the retrieval-hit scores carried by *rows* (issue
+    athenaeum#1761 item 4), so an operator can pick a
+    ``--relevance-floor-vector``/``--relevance-floor-fts5`` value before
+    dispatching a floor-on grid.
+
+    *rows* is ``Sequence[tests.evals.north_star_report.RolloutRow]`` (typed
+    loosely here to avoid a report-module import cycle at CLI-module load
+    time); each row's ``.record.retrieval_hit_scores`` is the field
+    :func:`tests.evals.rollout.run_probe_all_arms` populates -- a
+    same-backend/same-index approximation of what the shipped breadcrumb
+    hook saw for that probe's query, NOT the hook's own internal ranking
+    (see that field's docstring for the exact caveat). A store written
+    before that field existed carries ``None`` on every row; this function
+    says so explicitly rather than printing a misleadingly-empty summary.
+
+    Issue athenaeum#1764: grouped by ``.record.search_backend`` and printed
+    as one block per backend, each carrying a "lower is better" note and
+    the backend's own name. FTS5 bm25 scores (large negative) and vector
+    distances (0 to 2) are not comparable numbers -- pooling them into one
+    blended percentile summary, which this function used to do, produces a
+    threshold that means nothing for either backend. A store mixing
+    backends therefore prints one block per backend, never one blended
+    block; a store written before ``search_backend`` existed groups its
+    rows under ``"unknown"`` rather than silently dropping them.
+    """
+    if not rows:
+        return "0 rows in store."
+    groups: dict[str | None, list[object]] = {}
+    for row in rows:
+        backend = row.record.search_backend  # type: ignore[attr-defined]
+        groups.setdefault(backend, []).append(row)
+    blocks = [
+        _floor_scan_summary_one_backend(
+            backend if backend is not None else "unknown (pre-athenaeum#1764 store)",
+            group_rows,
+        )
+        for backend, group_rows in sorted(
+            groups.items(), key=lambda item: (item[0] is None, item[0] or "")
+        )
+    ]
+    return "\n\n".join(blocks)
 
 
 def resolve_max_spend(args: argparse.Namespace) -> float:
@@ -301,6 +334,71 @@ def _default_store_path() -> Path:
     """System temp dir, never the repo tree -- a separate function (not a
     module constant) so tests can monkeypatch it for isolation."""
     return Path(tempfile.gettempdir()) / "athenaeum-north-star" / "results.jsonl"
+
+
+def _resolve_store_path(args: argparse.Namespace) -> Path:
+    """``--store``, or :func:`_default_store_path` when the flag was
+    omitted -- the one place this resolution happens, so the pre-flight
+    floor-mismatch check (issue athenaeum#1764) and the store ``main``
+    actually runs cells against always agree on which file they mean."""
+    return args.store if args.store is not None else _default_store_path()
+
+
+def check_floor_mismatch(
+    rows: Sequence[object],
+    *,
+    relevance_floor_vector: float | None,
+    relevance_floor_fts5: float | None,
+) -> str | None:
+    """Compare the floors THIS dispatch is about to write against the floor
+    values already recorded on *rows* read from ``--store`` (issue
+    athenaeum#1764 item 3). Returns a human-readable mismatch description,
+    or ``None`` when it is safe to proceed.
+
+    *rows* is ``Sequence[tests.evals.north_star_report.RolloutRow]`` (typed
+    loosely, as :func:`floor_scan_summary` above already is, to avoid a
+    report-module import cycle at CLI-module load time).
+
+    Passes (returns ``None``) for an empty store (no rows recorded at all --
+    nothing to conflict with) and for a store whose rows all carry ``None``
+    for a backend when this dispatch ALSO requests ``None`` for that
+    backend -- the ordinary "no floor, never has been" case every pre-
+    athenaeum#1761 store is in. Refuses on any other disagreement: resuming
+    a floor-off store with a floor now requested, a floor-on store with a
+    DIFFERENT value now requested, or (should a store somehow already carry
+    more than one distinct value for a backend) a store that isn't uniform
+    to begin with.
+
+    The reason this matters BEFORE any cell runs, not merely at report time
+    (``north_star_report.build_report`` already refuses to pool differing
+    values, issue athenaeum#1761): ``_run_cells``' resume contract keys a
+    group as done purely on its ``(probe, corpus_scale, replicate, arm)``
+    cell keys, which carry no floor value at all -- see this module's own
+    ``--relevance-floor-vector`` help text. Resuming a floor-off store with
+    a floor now requested would silently skip every already-done group
+    (spending nothing, producing nothing new) and then fail to render a
+    report until the mixed-floor ValueError surfaced downstream, long after
+    an operator would have wanted to know. Catching it here, before pricing
+    or a single cell, is strictly cheaper.
+    """
+    mismatches: list[str] = []
+    for attr, requested, flag in (
+        ("relevance_floor_vector", relevance_floor_vector, "--relevance-floor-vector"),
+        ("relevance_floor_fts5", relevance_floor_fts5, "--relevance-floor-fts5"),
+    ):
+        recorded = {getattr(row.record, attr) for row in rows}  # type: ignore[attr-defined]
+        if not recorded:
+            continue
+        if recorded == {requested}:
+            continue
+        distinct = sorted(recorded, key=lambda v: (v is None, v if v is not None else 0.0))
+        mismatches.append(
+            f"{attr}: --store already has {distinct!r}, this dispatch requests "
+            f"{requested!r} ({flag}) -- resuming would silently mix them"
+        )
+    if not mismatches:
+        return None
+    return "; ".join(mismatches)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -421,6 +519,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help=(
             "issue athenaeum#1761: same mechanism as --relevance-floor-vector, for the "
             "fts5 backend. Omitted (default): no floor."
+        ),
+    )
+    parser.add_argument(
+        "--allow-floor-mismatch",
+        action="store_true",
+        help=(
+            "issue athenaeum#1764: proceed even when --relevance-floor-vector/"
+            "--relevance-floor-fts5 disagree with the floor values already recorded "
+            "in --store rows. Omitted (default): the CLI refuses before running any "
+            "cell rather than silently mixing floor configurations into one store."
         ),
     )
     parser.add_argument(
@@ -695,6 +803,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.max_tokens is not None and args.max_tokens < 1:
         print(f"--max-tokens must be >= 1, got {args.max_tokens}", file=sys.stderr)
         return 1
+    # Issue athenaeum#1764 item 3: checked before grid-sizing/pricing below,
+    # and BEFORE a single cell runs -- see check_floor_mismatch's own
+    # docstring for why this must happen this early rather than merely at
+    # report time.
+    if not args.allow_floor_mismatch:
+        existing_rows = load_rollout_rows_and_diagnostics(
+            ResultStore(_resolve_store_path(args))
+        ).rows
+        mismatch = check_floor_mismatch(
+            list(existing_rows),
+            relevance_floor_vector=args.relevance_floor_vector,
+            relevance_floor_fts5=args.relevance_floor_fts5,
+        )
+        if mismatch is not None:
+            print(
+                f"floor mismatch against --store {_resolve_store_path(args)}: {mismatch} "
+                "-- refusing to start. Pass --allow-floor-mismatch to override.",
+                file=sys.stderr,
+            )
+            return 1
     cells = _build_cells(args)
     max_spend = resolve_max_spend(args)
     token_ceiling, ceiling_source = resolve_token_ceiling(args)
@@ -765,7 +893,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("dry run: zero cells executed, zero paid calls made")
         return 0
 
-    store = ResultStore(args.store if args.store is not None else _default_store_path())
+    store = ResultStore(_resolve_store_path(args))
     # Recorded BEFORE the first cell runs, so a run killed mid-grid by the
     # job timeout still leaves the denominator the report's partial banner
     # needs (issue athenaeum#1751).
@@ -811,15 +939,46 @@ def main(argv: Sequence[str] | None = None) -> int:
         abort_reason = str(exc) or type(exc).__name__
 
     diagnostics = load_rollout_rows_and_diagnostics(store)
-    report = build_report(
-        list(diagnostics.rows),
-        aborted=aborted,
-        abort_reason=abort_reason,
-        verdict_arm=args.verdict_arm,
-        planned_cells=read_planned_cells(store),
-        torn_rows=diagnostics.torn,
-        duplicate_rows=diagnostics.duplicates,
-    )
+    try:
+        report = build_report(
+            list(diagnostics.rows),
+            aborted=aborted,
+            abort_reason=abort_reason,
+            verdict_arm=args.verdict_arm,
+            planned_cells=read_planned_cells(store),
+            torn_rows=diagnostics.torn,
+            duplicate_rows=diagnostics.duplicates,
+        )
+    except MixedFloorError as exc:
+        # Issue athenaeum#1764 item 1: a mixed-floor store (rows carrying
+        # differing relevance_floor_vector/relevance_floor_fts5 values --
+        # see north_star_report._pooled_floor_value) raises HERE, separately
+        # from whatever _run_cells did or did not do above. Left uncaught
+        # this crashed main() with a bare traceback and wrote no report at
+        # all, even though the store itself (fsync'd per row) survived
+        # intact. Recover by marking the run aborted, naming the exact
+        # mismatched values found (str(exc) already does -- see that
+        # function's own message), and rebuilding the SAME report with
+        # pooling skipped so a PARTIAL .md still gets written rather than
+        # losing the report entirely. Deliberate consequence: the rendered
+        # header's own relevance_floor_vector/relevance_floor_fts5 lines
+        # read "off" (pool_floor_values=False reports both as None) even
+        # though the store demonstrably carries a real floor -- this is
+        # fine precisely because the PARTIAL banner directly above it
+        # already carries abort_reason naming the actual values found; the
+        # header fields are not asked to double as that explanation.
+        aborted = True
+        abort_reason = (f"{abort_reason}; {exc}" if abort_reason else str(exc))
+        report = build_report(
+            list(diagnostics.rows),
+            aborted=True,
+            abort_reason=abort_reason,
+            verdict_arm=args.verdict_arm,
+            planned_cells=read_planned_cells(store),
+            torn_rows=diagnostics.torn,
+            duplicate_rows=diagnostics.duplicates,
+            pool_floor_values=False,
+        )
     path = write_report(report, out_dir=args.out_dir)
     print(f"report written: {path}")
     return 0 if not aborted else 1

@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Hardening for the north-star grid's relevance-floor input (issue
+  athenaeum#1764), found by Quine review of PR athenaeum#1763.** Three
+  fixes: (1) a mixed-floor store's `north_star_report.build_report`
+  `ValueError` used to escape `north_star_cli.main`'s
+  `try`/`except (Exception, KeyboardInterrupt)` block entirely -- it wraps
+  only `_run_cells`, not `build_report` -- and crashed with a bare
+  traceback instead of the `aborted=True` PARTIAL report every other
+  failure mode produces; `main` now catches that `ValueError` separately
+  and rebuilds the same report with pooling skipped, naming the mismatched
+  values in `abort_reason`. (2) `floor_scan_summary` (`--floor-scan`) used
+  to pool every row's `retrieval_hit_scores` into one percentile summary
+  regardless of backend, blending FTS5 bm25 scores (large negative, lower
+  is better) with vector distances (0 to 2, lower is better) into a
+  meaningless threshold; `RolloutRecord` gains `search_backend` (stamped by
+  `run_probe_all_arms` alongside `retrieval_hit_scores`, `None` for rows
+  persisted before this field existed), and `floor_scan_summary` now prints
+  one block per backend, each carrying a "lower is better" note and the
+  backend's own name. (3) resuming a `--store` written under one floor
+  configuration with a different `--relevance-floor-vector`/
+  `--relevance-floor-fts5` used to silently skip already-done groups (the
+  resume contract's cell keys carry no floor value) and only surface the
+  mismatch downstream, after spend, via item 1's crash; `main` now compares
+  the requested floors against the floor values already recorded in
+  `--store` rows before running any cell and refuses (non-zero exit, zero
+  spend) on a disagreement, unless the new `--allow-floor-mismatch` flag is
+  passed. An empty store, or a store whose rows are all-`None` matched by
+  no floor flags, passes unchanged.
 - **A relevance-floor input for the north-star grid's floor-active pass
   (issue athenaeum#1761).** `docs/design/native-memory-baseline.md` §4
   commits to reporting a floor-active pass alongside the as-shipped pass,
