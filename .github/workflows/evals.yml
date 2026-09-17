@@ -68,7 +68,7 @@ on:
           - "small"
           - "full"
       north_star_corpus_scales:
-        description: "north_star_cli.py --corpus-scales (comma-separated; blank = every scale)"
+        description: "north_star_cli.py --corpus-scales (comma-separated; blank = the default scales; xlarge is opt-in)"
         required: false
         default: ""
       north_star_max_spend:
