@@ -356,19 +356,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- `examples/claude-code/user-prompt-recall.sh`'s vector half printed every
-  hit `query_vector_index` returned, unfiltered — the configured
-  `recall.relevance_floor.vector` (athenaeum#1571) had no effect on this
-  hook even when set, because the hook never called `meets_relevance_floor`
-  / `resolve_recall_relevance_floor` at all; it is a separate, hand-rolled
-  implementation of recall, not a caller of the library path. The vector
-  half now applies the floor inside the one Python invocation it already
-  pays for, through the same library functions `mcp_server.py`'s own floor
-  block uses, same lower-is-better direction, no reimplementation of the
-  comparison in shell/SQL. An unset floor is unchanged behaviour. The FTS5
-  half is untouched: it is a raw `sqlite3` call with no Python invocation to
-  filter inside, and this file's own header documents a `<50ms` FTS5-only
-  latency contract that adding one solely for this would break.
+- `examples/claude-code/user-prompt-recall.sh` printed every hit from both
+  backends unfiltered — the configured `recall.relevance_floor.{fts5,vector}`
+  (athenaeum#1492/#1571) had no effect on this hook, because it never called
+  `meets_relevance_floor` / `resolve_recall_relevance_floor` at all; it is a
+  separate, hand-rolled implementation of recall, not a caller of the
+  library path. On a turn where the vector backend runs (Python already
+  paid for), BOTH backends' rows are now filtered inside that one
+  invocation, through the same library functions `mcp_server.py`'s own
+  floor block uses, same lower-is-better direction, no reimplementation of
+  the comparison in shell/SQL; the push-scoped
+  `recall.relevance_floor.push.<backend>` knob is resolved first (this hook
+  is itself the unprompted push path), falling back to the plain
+  `recall.relevance_floor.<backend>` when the push-scoped key is unset. An
+  unset floor is unchanged behaviour, and any failure resolving the floor
+  degrades to unfiltered while logging one line under
+  `ATHENAEUM_HOOK_DEBUG=1` rather than failing silently. FTS5 is filtered
+  here rather than left out: a durable push-ledger check (1215 FTS5-sourced
+  vs 1086 vector-sourced items all-time, 42% FTS5 in the most recent 300
+  records) showed FTS5 is not the minority path an earlier version of this
+  fix assumed it was. The one case still deliberately unfiltered is a
+  vector-less/FTS5-only turn, where there is no Python invocation already
+  running to filter inside without breaking this file's documented `<50ms`
+  FTS5-only latency contract.
   ([#1665](https://github.com/Kromatic-Innovation/athenaeum/issues/1665))
 
 - Rejecting a merge proposal recorded the rejection as a **fabricated

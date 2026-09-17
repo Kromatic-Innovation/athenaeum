@@ -2,20 +2,21 @@
 # UserPromptSubmit hook: surface wiki pages relevant to the user's message.
 #
 # Runs a hybrid FTS5 + (optional) vector search against the athenaeum index
-# built by session-start-recall.sh. Typical runtime: <50ms (FTS5 only),
-# ~400ms (vector), ~1.5s when the LLM topic extractor is enabled. The
-# <50ms FTS5-only contract still holds under issue athenaeum#1120's
-# hot-tier filter and push-token budget: tier filtering costs one
-# UNINDEXED column read inside the SQL already being run (no new query,
-# no new process), and budget enforcement costs one extra `awk` pass over
-# an at-most-3-row stream already in memory — no Python startup, which
-# measured 360-450ms warm/~1090ms cold on this box (see athenaeum#1120's
-# seam-decision comment below) and is exactly what this shell-native
-# design avoids paying on every turn. The hot-tier filter applies to BOTH
-# backends, not just FTS5: the vector branch already pays the ~400ms
-# Python interpreter start noted above, so the one bounded (<=3-row)
-# sqlite3 lookup its own tier post-filter adds (~1-3ms, see that section)
-# is immaterial against a cost already being paid on that path.
+# built by session-start-recall.sh. Typical runtime: <50ms (FTS5 only, no
+# vector index active this turn), ~400ms (a turn where the vector backend
+# runs), ~1.5s when the LLM topic extractor is enabled. The <50ms contract
+# applies ONLY to a turn where the vector half does not run at all (no
+# vector index, or `SEARCH_BACKEND=fts5`) — see athenaeum#1120's
+# seam-decision comment below for why tier filtering and the push-token
+# budget stayed inside that contract. It is NOT "FTS5 rows are always
+# cheap to post-process": issue athenaeum#1665 corrected an earlier
+# version of this file that assumed live traffic was ~100% vector (it
+# is not — see that issue's relevance-floor comment below) and reasoned
+# from that wrong premise that the FTS5 half never needed the same
+# treatment the vector half gets. On a turn where the vector half DOES
+# run, the Python interpreter start is already being paid, and the FTS5
+# rows this hook already queried are passed into that SAME invocation for
+# relevance-floor filtering — no second process, no new query.
 #
 # Why hybrid. FTS5 phrase match rescues short proper-noun queries that
 # collide in vector space ("Return Path" embeds closer to any page
@@ -77,6 +78,50 @@
 # seam is safe rather than a silent behavioural drift from the Python
 # path.
 #
+# Relevance floor (issue athenaeum#1665, gates opened by athenaeum#1492 /
+# athenaeum#1571). This hook used to print every FTS5 and vector hit
+# unfiltered — `recall.relevance_floor.{fts5,vector}` had no effect on it
+# even when configured, because it never called `meets_relevance_floor` /
+# `resolve_recall_relevance_floor` at all; a hand-rolled recall
+# implementation, not a caller of the library path. A prior version of
+# this comment excused leaving FTS5 unfiltered on the premise that live
+# traffic was ~100% vector — WRONG: the durable push ledger
+# (`~/.cache/athenaeum/_push_records.jsonl`) shows 1215 FTS5-sourced vs
+# 1086 vector-sourced items all-time, 42% FTS5 in the most recent 300
+# records, and the FTS5 query runs, with an index, on EVERY turn
+# regardless of `SEARCH_BACKEND` (both backends' rows are merged before
+# `head -3`). The fix: on a turn where the vector half runs (`SEARCH_BACKEND
+# =vector` and a vector index exists), the FTS5 rows this hook already
+# queried via sqlite3 are passed into that SAME Python invocation and
+# filtered there too, alongside the vector hits — no second process, no
+# SQL-side reimplementation of the direction rule. See the FTS5 query and
+# vector-invocation comments below for the mechanics. On a turn where the
+# vector half does NOT run (FTS5-only deployment, or no vector index),
+# the FTS5 half stays genuinely unfiltered — for THAT case, and only that
+# case, adding a Python process purely to filter would break the <50ms
+# FTS5-only contract this file otherwise holds to.
+#
+# Push-scoped vs. plain floor (issue athenaeum#1665, per
+# `resolve_recall_relevance_floor`'s own `unprompted` parameter): this hook
+# IS the unprompted push path (`UserPromptSubmit`), so for each backend it
+# resolves `recall.relevance_floor.push.<backend>` FIRST (`unprompted=True`)
+# and falls back to the plain `recall.relevance_floor.<backend>` only if
+# the push-scoped key is unset — never the reverse. `resolve_recall_
+# relevance_floor` itself only reads ONE of those two levels per call (its
+# `unprompted` argument selects which); the fallback order across both
+# calls is composed inside this hook's own Python invocation, not inside
+# that library function.
+#
+# Failure mode: any problem resolving the floor (missing library, bad
+# config, anything) degrades to `floor=None` on that backend — i.e.
+# unfiltered, today's-behaviour-shaped — and prints one line to stderr
+# (`athenaeum recall: relevance floor inactive: ...`), visible only under
+# `ATHENAEUM_HOOK_DEBUG=1` via the same `$_vector_tmp` capture the vector
+# backend's own failure diagnostic already uses. Silence-on-failure would
+# make a floor regression indistinguishable from "no floor configured";
+# this hook must never turn a floor problem into either a hard recall
+# outage or an invisible one.
+#
 # Optional LLM query-rewriting. If `athenaeum query-topics` is available,
 # the raw prompt is first run through the configured LLM provider (Haiku
 # via the Messages API, or Claude Code's own CLI under `llm.provider:
@@ -130,6 +175,16 @@ DB_FILE="${CACHE_DIR}/wiki-index.db"
 VECTOR_DIR="${CACHE_DIR}/wiki-vectors"
 ATHENAEUM_CLI="${ATHENAEUM_CLI:-athenaeum}"
 PYTHON="${ATHENAEUM_PYTHON:-python3}"
+# Issue athenaeum#1665: same env-override/default shape
+# `session-start-recall.sh` already uses for the SAME variable — an
+# operator-set `KNOWLEDGE_ROOT` names where `athenaeum.yaml` (and the wiki
+# it configures) actually live; falling through to `load_config()`'s own
+# default (`Path.home() / "knowledge"`) instead would silently ignore that
+# override wherever it differs from `$HOME/knowledge`. Used only by the
+# relevance-floor config load in the vector invocation below — this
+# variable is unrelated to `CACHE_DIR`/`DB_FILE`/`VECTOR_DIR` above, which
+# resolve from `HOME` alone and do not vary with `KNOWLEDGE_ROOT`.
+KNOWLEDGE_ROOT="${KNOWLEDGE_ROOT:-$HOME/knowledge}"
 
 # ── Source config ──────────────────────────────────────────────────────
 # `set -a` auto-exports sourced variables so child processes (notably
@@ -864,21 +919,20 @@ if [ -f "$DB_FILE" ]; then
   # retiring the vocabulary retired the column (schema v5), so there is
   # no longer anything to select or to record.
   #
-  # Issue athenaeum#1665: this half is deliberately NOT given the same
-  # relevance-floor treatment the vector half now gets below.
-  # `meets_relevance_floor` DOES cover `"fts5"` in the same call shape (bm25
-  # rank, lower is better, same as vector's cosine distance) -- the gap is
-  # not a library limitation. It is that this half is a raw `sqlite3` call
-  # with NO Python invocation to apply the floor inside: this file's own
-  # header documents a `<50ms` FTS5-only latency contract precisely because
-  # this path spends no Python interpreter start (~360-450ms warm here,
-  # measured), and adding one just to filter by floor would break that
-  # contract on every turn that resolves to FTS5 rather than fix the gap
-  # this issue is about. If FTS5 ever needs a floor, it should get its own
-  # shell/SQL-native comparison against `resolve_recall_relevance_floor`'s
-  # RESOLVED number (still no duplicated DIRECTION logic, since fts5's
-  # lower-is-better is a `<=` in SQL either way) -- not a second Python
-  # process.
+  # Issue athenaeum#1665: this raw query is UNFILTERED by design (relevance
+  # selection is `ORDER BY rank` / `LIMIT 3` alone, same as always) -- the
+  # relevance-floor filter for these rows, when it applies at all, runs
+  # LATER, inside the vector half's Python invocation below, not here. It
+  # does NOT apply here unconditionally: on a turn where the vector half
+  # does not run at all (no vector index, or `SEARCH_BACKEND=fts5`), these
+  # rows flow straight through unfiltered, because there is no live Python
+  # invocation to filter them in without spending a fresh interpreter start
+  # purely for that -- which would break the `<50ms` FTS5-only latency
+  # contract this file's header documents and repeatedly relies on. See
+  # that header's "Relevance floor" section for the full picture and the
+  # push-ledger evidence for why FTS5 needed this at all (a prior version
+  # of this comment wrongly assumed FTS5 was a cold path not worth the
+  # trouble).
   FTS_RESULTS=$(sqlite3 -separator $'\t' "$DB_FILE" "
     SELECT filename, name, rank, audience, 'fts5', ${DESC_COL}
     FROM wiki
@@ -897,44 +951,35 @@ if [ "$SEARCH_BACKEND" = "vector" ] && [ -d "$VECTOR_DIR" ]; then
   # surface the reason. Most common cause: chromadb import missing in
   # the python3 on PATH (see `pip install athenaeum[vector]`).
   _vector_tmp=$(mktemp -t athenaeum-vec-XXXXXX)
-  # Issue athenaeum#1665: the vector half used to print every hit
-  # `query_vector_index` returned, unfiltered — the configured
-  # `recall.relevance_floor.vector` (athenaeum#1571) had no effect on this
-  # hook even when set, because this hook never called
-  # `meets_relevance_floor` / `resolve_recall_relevance_floor` at all. This
-  # is the ONE Python invocation the vector half already pays for, so the
-  # floor is applied HERE, through the same library functions
-  # `mcp_server.py`'s own floor block uses, rather than reimplementing the
-  # bm25/cosine-distance "lower is better" direction rule a second time in
-  # shell/SQL (the FTS5 half stays untouched — see the header comment
-  # above the FTS5 query below for why).
+  # Issue athenaeum#1665: this Python invocation used to print every vector
+  # hit `query_vector_index` returned, unfiltered, and never touched the
+  # FTS5 rows already computed above at all. Both are now filtered here,
+  # through the SAME library functions `mcp_server.py`'s own floor block
+  # uses (`meets_relevance_floor` / `resolve_recall_relevance_floor`),
+  # rather than reimplementing either backend's direction rule in
+  # shell/SQL. See this file's header "Relevance floor" section for the
+  # full design (why FTS5 needed this too, the push-scoped-first
+  # resolution order, and the fail-open/stderr-diagnostic contract) — kept
+  # there rather than repeated here so there is one place describing it.
   #
-  # `resolve_recall_relevance_floor(..., 'vector')` (unprompted defaults to
-  # False) resolves the TOP-LEVEL `recall.relevance_floor.vector` key, not
-  # `recall.relevance_floor.push.vector` — deliberately: `"vector"` has no
-  # env-var entry in `_RECALL_FLOOR_ENV` regardless of `unprompted`, so the
-  # push-scoped key would only ever be reachable via yaml too, and the
-  # issue's own wording names the plain key. A deployment that wants this
-  # hook's push path tuned separately from an explicit `recall_search` call
-  # can still do so with a follow-up, but this issue does not introduce a
-  # second knob.
+  # `$FTS_RESULTS` (this turn's already-queried, still-unfiltered FTS5
+  # rows) and `$KNOWLEDGE_ROOT` are passed in as extra argv, not env: an
+  # argv element preserves embedded newlines/tabs exactly (unlike a
+  # multi-line `awk -v` value, which BWK awk rejects outright — see the
+  # `VECTOR_META` join's own comment above for that hazard), and passing
+  # `KNOWLEDGE_ROOT` explicitly means the config load below does not
+  # depend on whether the value happened to be exported.
   #
-  # `load_config()` (no explicit `knowledge_root`) resolves the config the
-  # SAME way its own default does — `Path.home() / "knowledge" /
-  # "athenaeum.yaml"` — matching every other call site's convention of
-  # deriving the knowledge root from the process's `HOME`; this hook has no
-  # other resolved knowledge/wiki root to pass it.
-  #
-  # This is a PLAIN package import, deliberately NOT routed through the
-  # `ATHENAEUM_SRC` override two lines below (that override exists only so
-  # tests can stub `query_vector_index` without a real chromadb/embedding
-  # backend) — the floor mechanism itself is exactly what this issue
-  # verifies, so it always runs the real installed library, never a test
-  # double. Any failure to import or resolve it degrades to `floor=None`
-  # (unfiltered — today's behaviour), matching this hook's fail-open
-  # contract: a floor problem must never turn into a hard recall outage.
+  # The `athenaeum.config` / `meets_relevance_floor` imports are PLAIN
+  # package imports, deliberately NOT routed through the `ATHENAEUM_SRC`
+  # dev-path override just below (that override exists only so tests can
+  # stub `query_vector_index` without a real chromadb/embedding backend)
+  # — the floor mechanism itself is exactly what this issue verifies, so
+  # it always runs the real installed library, never a test double.
   VECTOR_RESULTS=$("$PYTHON" -c "
 import sys, os, importlib.util
+from pathlib import Path
+
 src = os.environ.get('ATHENAEUM_SRC', '')
 path = os.path.join(src, 'src/athenaeum/search.py') if src else ''
 if path and os.path.isfile(path):
@@ -945,15 +990,68 @@ if path and os.path.isfile(path):
 else:
     from athenaeum.search import query_vector_index
 
-floor = None
+
+def _resolve_floor(cfg, resolve_recall_relevance_floor, backend_name):
+    # Issue athenaeum#1665: this hook IS the unprompted push path
+    # (UserPromptSubmit) -- resolve the push-scoped knob FIRST
+    # (unprompted=True) and fall back to the plain knob only if that one
+    # is unset, never the reverse. resolve_recall_relevance_floor itself
+    # only ever reads ONE of the two levels per call; this ordering is
+    # composed here across two calls, not inside that library function.
+    floor = resolve_recall_relevance_floor(cfg, backend_name, unprompted=True)
+    if floor is None:
+        floor = resolve_recall_relevance_floor(cfg, backend_name, unprompted=False)
+    return floor
+
+
+floor_vector = None
+floor_fts5 = None
 meets_relevance_floor = None
 try:
     from athenaeum.config import load_config, resolve_recall_relevance_floor
     from athenaeum.search import meets_relevance_floor as _meets_relevance_floor
     meets_relevance_floor = _meets_relevance_floor
-    floor = resolve_recall_relevance_floor(load_config(), 'vector')
-except Exception:
-    floor = None
+    knowledge_root_arg = sys.argv[4] if len(sys.argv) > 4 and sys.argv[4] else ''
+    cfg = load_config(Path(knowledge_root_arg) if knowledge_root_arg else None)
+    floor_vector = _resolve_floor(cfg, resolve_recall_relevance_floor, 'vector')
+    floor_fts5 = _resolve_floor(cfg, resolve_recall_relevance_floor, 'fts5')
+except Exception as e:
+    floor_vector = None
+    floor_fts5 = None
+    meets_relevance_floor = None
+    # Issue athenaeum#1665: a silent except swallowed this entirely before
+    # -- indistinguishable from 'no floor configured'. One line to stderr,
+    # captured into \$_vector_tmp below exactly like the vector backend's
+    # own failure diagnostic, surfaced only under ATHENAEUM_HOOK_DEBUG=1.
+    print(f'athenaeum recall: relevance floor inactive: {e!r}', file=sys.stderr)
+
+# Issue athenaeum#1665: filter the FTS5 rows this hook already queried via
+# sqlite3 (sys.argv[3]), one already-tab-separated row per line -- each
+# KEPT row is re-printed VERBATIM (never reconstructed), so this can never
+# drift from what the SQL emitted. A row whose rank does not parse as a
+# float is kept (fail open on a malformed row, never silently dropped).
+fts_raw = sys.argv[3] if len(sys.argv) > 3 else ''
+for line in fts_raw.split('\n'):
+    if not line:
+        continue
+    fields = line.split('\t')
+    rank_str = fields[2] if len(fields) > 2 else ''
+    keep = True
+    if floor_fts5 is not None and meets_relevance_floor is not None:
+        try:
+            rank = float(rank_str)
+        except ValueError:
+            rank = None
+        if rank is not None and not meets_relevance_floor('fts5', rank, floor_fts5):
+            keep = False
+    if keep:
+        print(line)
+
+# Sentinel, not a delimiter guess: separates the (possibly floor-filtered)
+# FTS5 rows above from the vector rows below in this one combined stdout
+# stream, so the bash caller can split them back into \$FTS_RESULTS /
+# \$VECTOR_RESULTS without a second process.
+print('__ATHENAEUM_FTS5_FLOOR_END__')
 
 seen = set()
 seen_file = sys.argv[2]
@@ -961,14 +1059,37 @@ if os.path.isfile(seen_file):
     with open(seen_file) as f:
         seen = set(l.strip() for l in f)
 for fname, name, score in query_vector_index(sys.argv[1], os.path.expanduser('~/.cache/athenaeum'), n=3, exclude=seen):
-    if floor is not None and meets_relevance_floor is not None and not meets_relevance_floor('vector', score, floor):
+    if floor_vector is not None and meets_relevance_floor is not None and not meets_relevance_floor('vector', score, floor_vector):
         continue
     print(f'{fname}\t{name}\t{score}')
-" "$VECTOR_QUERY" "$SEEN_FILE" 2>"$_vector_tmp" || true)
+" "$VECTOR_QUERY" "$SEEN_FILE" "$FTS_RESULTS" "$KNOWLEDGE_ROOT" 2>"$_vector_tmp" || true)
   VECTOR_ERR=$(cat "$_vector_tmp" 2>/dev/null || echo "")
   rm -f "$_vector_tmp"
   if [ -n "$VECTOR_ERR" ] && [ "${ATHENAEUM_HOOK_DEBUG:-0}" = "1" ]; then
     echo "athenaeum recall: vector backend failed: ${VECTOR_ERR}" >&2
+  fi
+
+  # Issue athenaeum#1665: split the combined stdout back into the
+  # (floor-filtered) FTS5 rows and the vector rows by the sentinel above.
+  # Guarded on the sentinel actually being PRESENT: if the Python process
+  # crashed before reaching it (e.g. a total interpreter/import failure,
+  # not just the floor-resolution try/except above, which already degrades
+  # to unfiltered on its own), $VECTOR_RESULTS falls through to its
+  # already-initialized empty default and $FTS_RESULTS is left exactly as
+  # the sqlite3 query above computed it, unfiltered -- fail open to the
+  # pre-existing behaviour, never to zero recall.
+  if printf '%s\n' "$VECTOR_RESULTS" | grep -qF '__ATHENAEUM_FTS5_FLOOR_END__'; then
+    _combined="$VECTOR_RESULTS"
+    FTS_RESULTS=$(printf '%s\n' "$_combined" | awk '
+      BEGIN { insent = 0 }
+      $0 == "__ATHENAEUM_FTS5_FLOOR_END__" { insent = 1; next }
+      !insent { print }
+    ')
+    VECTOR_RESULTS=$(printf '%s\n' "$_combined" | awk '
+      BEGIN { insent = 0 }
+      $0 == "__ATHENAEUM_FTS5_FLOOR_END__" { insent = 1; next }
+      insent { print }
+    ')
   fi
 fi
 
