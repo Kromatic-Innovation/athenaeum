@@ -667,6 +667,18 @@ def validate_core(pages: list[Page], probes: list[Probe]) -> list[str]:
         for uid in probe.must_not_rank:
             if uid not in uids:
                 problems.append(f"probe {probe.id!r}: must_not_rank names unknown page {uid!r}")
+        # Issue athenaeum#1777: `must_not_rank` names the failure a correct
+        # system guards against -- a page that must NOT rank alongside the
+        # correct answer. A uid appearing in BOTH `must_not_rank` and
+        # `expected_uids` would grade retrieving it as simultaneously
+        # correct and a contamination hit, which is not a precision
+        # assertion at all, just a contradictory one.
+        overlap = set(probe.must_not_rank) & set(probe.expected_uids)
+        if overlap:
+            problems.append(
+                f"probe {probe.id!r}: must_not_rank and expected_uids both name "
+                f"{sorted(overlap)}"
+            )
         if probe.probe_class == "abstention" and probe.expected_uids:
             problems.append(f"probe {probe.id!r}: abstention probes must have no expected_uids")
         if probe.probe_class != "abstention" and not probe.expected_uids:

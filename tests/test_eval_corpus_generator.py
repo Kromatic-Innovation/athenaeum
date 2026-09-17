@@ -473,6 +473,63 @@ def test_validate_core_rejects_expected_uid_page_with_no_tag_line() -> None:
     ), problems
 
 
+def test_validate_core_rejects_must_not_rank_overlapping_expected_uids() -> None:
+    """athenaeum#1777: a uid named in BOTH a probe's ``must_not_rank`` and
+    its ``expected_uids`` would grade retrieving that page as simultaneously
+    correct (a retrieval hit) and a contamination hit (a precision failure)
+    -- not a coherent ground-truth assertion, and silently misleading for
+    any precision/contamination report that reads ``must_not_rank`` (the
+    first real consumer is issue athenaeum#1782). Verified against the real
+    fixtures too: ``test_core_corpus_is_internally_consistent`` passes with
+    zero problems, so this check is not merely reachable in principle.
+    """
+    pages = [
+        Page(
+            uid="page-a",
+            type="note",
+            name="Page A",
+            body="TokenOne sits here.\n\nInternal reference tag: TokenOne.",
+            tier="core",
+        ),
+        Page(uid="page-b", type="note", name="Page B", body="Unrelated body text.", tier="core"),
+    ]
+    probe = Probe(
+        id="probe-contradictory",
+        probe_class="single_hop",
+        query="what about page a?",
+        expected_uids=("page-a",),
+        must_not_rank=("page-a", "page-b"),
+        answer_tokens=("TokenOne",),
+    )
+    problems = validate_core(pages, [probe])
+    assert any(
+        "probe-contradictory" in p and "must_not_rank and expected_uids both name" in p
+        for p in problems
+    ), problems
+
+
+def test_every_non_abstention_probe_has_must_not_rank_or_a_documented_na() -> None:
+    """athenaeum#1777 acceptance criterion: every non-abstention probe either
+    carries a ``must_not_rank`` set or is explicitly excluded with a
+    documented reason, so a precision/contamination report (issue
+    athenaeum#1782) never has to default a probe's precision to a silent 1.0
+    off an empty negative set. The documented-reason convention is a
+    ``note`` beginning with the literal marker ``precision: n/a`` -- see
+    ``data/corpus/probes/probes.yaml``'s two current uses.
+    """
+    probes = load_probes()
+    non_abstention = [p for p in probes if p.probe_class != "abstention"]
+    assert non_abstention, "expected at least one non-abstention probe"
+    unexplained = [
+        p.id
+        for p in non_abstention
+        if not p.must_not_rank and "precision: n/a" not in p.note
+    ]
+    assert unexplained == [], (
+        "probes with neither must_not_rank nor a 'precision: n/a' note: " + str(unexplained)
+    )
+
+
 def test_validate_core_rejects_two_pages_sharing_a_tag() -> None:
     """athenaeum#1766 AC2, the collision half: two pages carrying the same
     invented token would let ``grade_correctness``'s whole-corpus token scan

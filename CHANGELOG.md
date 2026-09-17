@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`must_not_rank` authoring audit across the eval corpus (issue
+  athenaeum#1777).** Every non-abstention probe in
+  `tests/evals/data/corpus/probes/probes.yaml` now carries a `must_not_rank`
+  set naming an existing page that a keyword search on the probe's query
+  plausibly reaches but which is not a correct answer, or is explicitly
+  marked `precision: n/a` in its `note` with a one-line reason where no
+  plausible false positive exists in the corpus (13 probes gained a set;
+  2 follow_through probes, whose proper nouns are unique to the corpus,
+  were marked n/a). `tests/evals/corpus.py`'s `validate_core` gains a check
+  rejecting a uid named in both a probe's `must_not_rank` and its
+  `expected_uids`. `must_not_rank` was authored ground truth with no
+  consumer until now; the precision/contamination report (item I, issue
+  athenaeum#1782) is its first reader.
+
 - **North-star measurement report for the native-memory baseline (issue
   athenaeum#1724).** `docs/measurements/native-memory-baseline-2026-09-17.md`
   reports the read-path (Phase 1) comparison against Claude Code auto memory,
