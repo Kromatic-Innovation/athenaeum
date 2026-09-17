@@ -15,6 +15,7 @@ Token-free: no live rollout, no model client, no spend.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -22,7 +23,7 @@ from typing import Any
 import pytest
 
 from tests.evals import rollout
-from tests.evals.corpus import Observation, build_corpus
+from tests.evals.corpus import _TAG_LINE_RE, Observation, build_corpus
 from tests.evals.north_star_report import grade_correctness
 from tests.evals.rollout import (
     _PULL_API_SYSTEM_PROMPT,
@@ -386,3 +387,72 @@ def test_the_tags_recall_alone_cannot_deliver_split_into_two_mechanisms(tmp_path
     assert "portal_design_reviewer" in unretrieved
     assert all(length < 400 for length in unretrieved.values())
     assert not set(truncated) & set(unretrieved)
+
+
+# ---------------------------------------------------------------------------
+# The two athenaeum#1759 defects: a fixture wording drift, and the uid
+# competing with the tag as a citation target.
+# ---------------------------------------------------------------------------
+
+
+def test_the_instruction_names_the_same_line_prefix_every_fixture_carries() -> None:
+    """AC1 for athenaeum#1759. The instruction tells the model the tag is
+    the value on the page's ``Internal reference tag:`` line; every
+    token-bearing core page must carry that EXACT prefix on some line of its
+    body, not a synonym like ``Internal reference code:``. This is the fixed
+    counterpart of the drift that capped ``follow_through`` at zero: the
+    fixture used a different word than the instruction named, so the
+    contract's own wording was unsatisfiable even though the token still
+    occurred somewhere in the page body.
+    """
+    assert "Internal reference tag:" in rollout.REFERENCE_TAG_INSTRUCTION
+    for page in _CORPUS.pages:
+        every_token = {tok for probe in _CORPUS.probes for tok in probe.answer_tokens}
+        if not any(token in page.body for token in every_token):
+            continue
+        assert _TAG_LINE_RE.search(page.body), (
+            f"page {page.uid!r} carries a planted token but no line beginning "
+            "'Internal reference tag:'"
+        )
+
+
+def test_every_token_bearing_core_page_renders_exactly_one_tag_line() -> None:
+    """AC3 for athenaeum#1759, the rendering half: a page whose body plants
+    a token must render EXACTLY ONE ``Internal reference tag:`` line (bolded
+    by ``Page.to_markdown``, issue athenaeum#1759's uid-competition fix), and
+    its value must be one of the tokens the corpus actually planted -- not a
+    stray second identifier line, and not a value that drifted from the
+    corpus's own bookkeeping.
+    """
+    every_token = {tok for probe in _CORPUS.probes for tok in probe.answer_tokens}
+    checked = 0
+    for page in _CORPUS.pages:
+        body_matches = _TAG_LINE_RE.findall(page.body)
+        if not body_matches:
+            continue
+        checked += 1
+        assert len(body_matches) == 1, f"page {page.uid!r} has {len(body_matches)} tag lines"
+        value = body_matches[0].rstrip(".")
+        assert value in every_token, f"page {page.uid!r} tag {value!r} is not a planted token"
+
+        rendered = page.to_markdown()
+        rendered_matches = re.findall(r"\*\*Internal reference tag:\*\* (.+)", rendered)
+        assert len(rendered_matches) == 1, (
+            f"page {page.uid!r} rendered {len(rendered_matches)} bold tag lines"
+        )
+        assert rendered_matches[0] == body_matches[0]
+    assert checked, "no token-bearing core pages were found to check"
+
+
+def test_the_instruction_excludes_the_uid_as_a_citation_target() -> None:
+    """AC2 for athenaeum#1759: 17 oracle cells in the first live grid cited
+    the page's frontmatter ``uid:`` instead of its tag. The instruction must
+    say, in words, that the tag is never the uid (nor the title or
+    filename), so the model has an explicit reason to prefer the tag line
+    over the other identifier-shaped strings on the page.
+    """
+    lowered = rollout.REFERENCE_TAG_INSTRUCTION.lower()
+    assert "uid" in lowered
+    assert "never" in lowered
+    assert "title" in lowered
+    assert "filename" in lowered

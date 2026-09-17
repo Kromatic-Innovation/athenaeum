@@ -223,6 +223,23 @@ carries no planted token, and the declining-language rule still applies. The
 write-path sessions of Phase 2 are outside this contract — they produce memory
 files, not graded answers.
 
+**The 2026-09-17 15:43Z run (workflow run 35239792240, develop `af0596bb`,
+1392 rows, API mode) failed the oracle positive control, and its decision
+block is void** (athenaeum#1759). Two deterministic, distinct defects, both
+fixed by that issue: (1) `tests/evals/data/corpus/core/10-follow-through.yaml`
+wrote `Internal reference code:` on all 12 of its token lines instead of
+`Internal reference tag:`, the exact line `REFERENCE_TAG_INSTRUCTION` names —
+so `follow_through` had no line matching the instruction to cite and graded
+0.000–0.167 at oracle across every scale; (2) in 17 oracle cells outside
+`follow_through` the model cited the page's frontmatter `uid:` instead of its
+tag (for example `[ref: client-bluewater]` where the grader wanted
+`Thornmere`), because the `uid:` line — first in the rendered frontmatter —
+was the most identifier-shaped string on the page, which capped
+`multi_hop` near 0.333–0.667 even at oracle. Per the ruling on athenaeum#1724,
+a void control means every verdict row from this run is unread; the grid must
+be re-dispatched after the fix lands (§9 cadence, manual `workflow_dispatch`
+only).
+
 Phase 2 needs the generator to emit observations whose compiled ground truth
 is known, which is a generator change, not a corpus rewrite: the hand-authored
 core pages already carry `source_ref`, so the generator inverts them into
