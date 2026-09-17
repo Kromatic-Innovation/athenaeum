@@ -2794,9 +2794,132 @@ is, by default). Setting ``recall.hybrid: false`` is the way to opt a
 deployment back out of that coupling, in addition to opting out of
 fusion itself.
 
+``recall.hybrid`` accepts TWO yaml shapes, both read here: a plain
+``bool`` (the original shape), or a dict whose own ``enabled`` key is
+the bool (the shape `resolve_recall_hybrid_fts5_weight`'s
+``fts5_weight`` sibling key lives under) -- a dict with no ``enabled``
+key present is treated as opted-in (``True``), so adding
+``fts5_weight:`` alone, without also repeating ``enabled: true``, does
+not silently turn hybrid off.
+
 Precedence: ``ATHENAEUM_RECALL_HYBRID`` env (``1``/``true``/``yes``/``on``,
-case-insensitive, and their negations for false) > ``recall.hybrid`` yaml
-(a plain ``bool``) > default ``True``. No seed in ``_DEFAULTS``.
+case-insensitive, and their negations for false) > ``recall.hybrid``
+yaml (``bool``, or ``dict`` with an ``enabled`` key) > default ``True``.
+No seed in ``_DEFAULTS``.
+
+### `resolve_recall_hybrid_fts5_weight`
+
+- **YAML path:** `recall.hybrid.fts5_weight`
+- **Environment variable:** `ATHENAEUM_RECALL_HYBRID_FTS5_WEIGHT`
+- **CLI flag:** —
+- **Default:** `1.0`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve ``recall.hybrid.fts5_weight`` (/).
+
+The FTS5 (``secondary``) list's weight in
+`athenaeum.search.reciprocal_rank_fusion`'s hybrid dispatch --
+an independent lever investigated for the cross-lane regression
+'s FTS5 body-indexing PR exposed, and MEASURED NOT TO FIX
+IT without breaking far more than it fixed (see that function's own
+docstring and `athenaeum.search._DEFAULT_HYBRID_FTS5_WEIGHT`'s
+own comment for the swept values). Only meaningful when
+`resolve_recall_hybrid` is on -- resolved and read from the SAME
+nesting.
+
+Default `athenaeum.search._DEFAULT_HYBRID_FTS5_WEIGHT` (``1.0``,
+a no-op) -- see that constant's own comment for the sweep: any value
+below ``1.0`` in a ``{0.9, 0.8, 0.7, 0.6, 0.5, 0.4}`` sweep produced the
+IDENTICAL 32-failure set (28 new regressions beyond the four this issue
+targets, none of the four actually fixed) -- a uniform down-weight
+breaks the many cases that rely on a full-weight secondary-only rescue
+(the mechanism this whole feature exists for) long before
+it weakens the specific moderately-ranked-both-list hits causing the
+four regressions.
+
+Precedence: ``ATHENAEUM_RECALL_HYBRID_FTS5_WEIGHT`` env (any float) >
+``recall.hybrid.fts5_weight`` yaml (only read when ``recall.hybrid`` is
+the dict shape -- the plain-``bool`` shape has no sibling key to read
+from) > the search-module default. A malformed env value WARNs and
+falls through (see `_env_number`); a non-numeric or out-of-range
+(``< 0`` or ``> 1``) yaml value is ignored the same way -- a weight
+outside ``[0, 1]`` would either invert the intended "at most as strong
+as primary" relationship or make the secondary list actively
+subtractive, neither of which this knob is meant to express.
+
+### `resolve_recall_hybrid_guard_rank`
+
+- **YAML path:** `recall.hybrid.guard_rank`
+- **Environment variable:** `ATHENAEUM_RECALL_HYBRID_GUARD_RANK`
+- **CLI flag:** —
+- **Default:** `0`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve ``recall.hybrid.guard_rank`` (/).
+
+The rank-guard threshold `athenaeum.search.reciprocal_rank_fusion`'s
+hybrid dispatch passes as ``guard_rank`` -- an independent lever
+investigated for the cross-lane regression 's FTS5
+body-indexing PR exposed, and MEASURED NOT TO FIX IT (see that
+function's own docstring, and `athenaeum.search._DEFAULT_HYBRID_GUARD_RANK`'s
+own comment, for the swept values and why). A hit present in only ONE
+of the vector/fts5 lists, ranked at or better than this threshold
+WITHIN that list, cannot be crowded out of the fused result by a hit
+both lists agree on only moderately.
+
+Default `athenaeum.search._DEFAULT_HYBRID_GUARD_RANK` (``0``,
+OFF) -- see that constant's own comment for the sweep: every value
+tried either matched the unguarded baseline's four failures exactly
+(a no-op at this corpus's rank distribution) or introduced new ones.
+The root cause of the four regressions is in the FTS5 arm's own
+ranking, not fusion weighting -- this knob is exposed for an operator
+whose corpus shape it might genuinely help, not as this issue's fix.
+
+Precedence: ``ATHENAEUM_RECALL_HYBRID_GUARD_RANK`` env (a non-negative
+int; ``0`` explicitly disables guarding) > ``recall.hybrid.guard_rank``
+yaml (only read when ``recall.hybrid`` is the dict shape) > the
+search-module default. A malformed env value WARNs and falls through
+(see `_env_number`); a non-int or negative yaml value is ignored
+the same way.
+
+### `resolve_recall_hybrid_k`
+
+- **YAML path:** `recall.hybrid.k`
+- **Environment variable:** `ATHENAEUM_RECALL_HYBRID_K`
+- **CLI flag:** —
+- **Default:** `60`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve ``recall.hybrid.k`` (/).
+
+The RRF constant `athenaeum.search.reciprocal_rank_fusion`'s
+hybrid dispatch passes as ``k`` -- an independent lever investigated
+for the cross-lane regression 's FTS5 body-indexing PR
+exposed, alongside ``fts5_weight`` down-weighting and rank-guarding
+(see `athenaeum.search.reciprocal_rank_fusion`'s own docstring
+for the full mechanism and the swept values). A smaller ``k`` sharpens
+rank discrimination within each list -- at the extreme (``k=1``) this
+fixed ONE of the four regressions (``core/person_not_repo``'s guard)
+but not the other three, and introduced common exact-score ties
+decided by dict-insertion order rather than genuine relevance --
+measurably not a safe default.
+
+Default `athenaeum.search._DEFAULT_HYBRID_K` (``60``, matching
+`athenaeum.search.reciprocal_rank_fusion`'s own unweighted
+default -- a no-op) -- see that constant's own comment for the sweep
+(``k`` in ``{1, 2, 3, 5, 8, 10, 15, 20, 30}`` against the four measured
+regressions) and the root-cause finding: the four regressions trace to
+the FTS5 arm's OWN ranking (or a page's absence from both candidate
+lists entirely), not to how fusion weighs two otherwise-good rankings
+-- no fusion parameter can fix that from this side.
+
+Precedence: ``ATHENAEUM_RECALL_HYBRID_K`` env (a positive int) >
+``recall.hybrid.k`` yaml (only read when ``recall.hybrid`` is the dict
+shape) > the search-module default. A malformed env value WARNs and
+falls through (see `_env_number`); a non-int or non-positive
+yaml value is ignored the same way (``k=0`` divides by the raw rank
+alone, which is a valid RRF variant but not one this knob is meant to
+express -- pass a real positive int).
 
 ### `resolve_index_globs (include_globs)`
 

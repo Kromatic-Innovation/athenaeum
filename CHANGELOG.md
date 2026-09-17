@@ -63,6 +63,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `FTS5Backend.query` — their ranking does not benefit from this weighting
   change (and was not asked to; the hook is explicitly out of scope for
   this issue).
+- **Cross-lane regression investigated, not resolved (issue athenaeum#1800):
+  three new `reciprocal_rank_fusion` knobs (`recall.hybrid.fts5_weight`,
+  `recall.hybrid.guard_rank`, `recall.hybrid.k`), all defaulting to a no-op
+  after a sweep found none of the three fixes the four regressions above
+  without breaking substantially more than it fixes.** Uniformly
+  down-weighting the FTS5 arm (`fts5_weight`) produced an IDENTICAL
+  32-failure set at every value from `0.9` down to `0.4` (28 new
+  regressions, none of the original four actually cleared) — the mechanism
+  many `_VECTOR_XFAIL` gains rely on (a page absent from the vector list
+  entirely, rescued only by a full-weight FTS5 rank) breaks under ANY
+  uniform reduction long before the specific moderately-ranked-both-list
+  crowding causing the four regressions weakens. Rank-guarding
+  (`guard_rank`, protecting a strongly-ranked single-list hit from being
+  outscored by a both-list hit) was a no-op at guard values 1-2 (none of
+  the four regressions involve a single-list hit ranked that well in its
+  own list) and introduced 5-10 new regressions at guard values 3+.
+  Reducing RRF's `k` constant (`60` → smaller sharpens rank discrimination)
+  fixed exactly one of the four (`core/person_not_repo`'s disambiguation
+  guard) at `k=1`, but not the other three, and `k=1` makes exact
+  fused-score ties common — decided by dict-insertion order, not genuine
+  relevance, so not shippable as a default. Inspecting the actual candidate
+  lists for all four regressions found the root cause is NOT a fusion
+  parameter: in every case FTS5's own post-body-indexing ranking places a
+  distractor or superseded page ahead of the expected one, or (one case,
+  `core/ratecard_tooling_owner`'s second expected page `tool-buildpipe`)
+  the expected page is absent from both backends' candidate lists
+  entirely — no fusion-side lever can invent an ordering neither input
+  list produced. The three knobs are kept as reviewable, documented,
+  tested (`tests/test_search.py`) levers for a different corpus shape, and
+  the sweep data lives in `src/athenaeum/search.py`'s
+  `_DEFAULT_HYBRID_{FTS5_WEIGHT,GUARD_RANK,K}` comments so the next lane
+  does not repeat it. Posted as a comment on athenaeum#1800 with the full
+  per-probe mechanism table; the four regressions remain un-xfailed (per
+  athenaeum#1789's own PR, correctly refusing to silently retire the
+  disambiguation guard test) pending a fix in the FTS5 arm's own ranking.
 
 ### Added
 

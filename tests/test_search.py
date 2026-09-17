@@ -2580,6 +2580,92 @@ class TestReciprocalRankFusion:
 
         assert _DEFAULT_RRF_K == 60
 
+    # -----------------------------------------------------------------
+    # secondary_weight / guard_rank (issue athenaeum#1800 / athenaeum#1789
+    # cross-lane regression). Both default to a no-op -- pinned here --
+    # after a sweep against the four measured regressions found neither
+    # lever fixes them without breaking far more than it fixes; see
+    # ``_DEFAULT_HYBRID_FTS5_WEIGHT`` / ``_DEFAULT_HYBRID_GUARD_RANK`` /
+    # ``_DEFAULT_HYBRID_K``'s own comments in search.py for the swept
+    # values. Kept as reviewable, working knobs for a different corpus
+    # shape, not this issue's fix.
+    # -----------------------------------------------------------------
+
+    def test_default_secondary_weight_is_a_no_op(self) -> None:
+        from athenaeum.search import reciprocal_rank_fusion
+
+        primary = [("both.md", "Both", 0.1)]
+        secondary = [("both.md", "Both", -1.0)]
+        with_default = reciprocal_rank_fusion(primary, secondary, n=5)
+        explicit_1_0 = reciprocal_rank_fusion(primary, secondary, n=5, secondary_weight=1.0)
+        assert with_default == explicit_1_0
+
+    def test_secondary_weight_below_one_reduces_secondary_only_score(self) -> None:
+        from athenaeum.search import reciprocal_rank_fusion
+
+        secondary_only = [("s.md", "S", -1.0)]
+        full_weight = reciprocal_rank_fusion([], secondary_only, n=1)
+        half_weight = reciprocal_rank_fusion([], secondary_only, n=1, secondary_weight=0.5)
+        assert half_weight[0][2] == full_weight[0][2] / 2
+
+    def test_secondary_weight_never_touches_primary_only_score(self) -> None:
+        from athenaeum.search import reciprocal_rank_fusion
+
+        primary_only = [("p.md", "P", 0.1)]
+        full_weight = reciprocal_rank_fusion(primary_only, [], n=1)
+        zero_weight = reciprocal_rank_fusion(primary_only, [], n=1, secondary_weight=0.0)
+        assert full_weight == zero_weight
+
+    def test_default_guard_rank_is_a_no_op(self) -> None:
+        """guard_rank=0 (the default) must be byte-identical to guard_rank
+        not existing -- proven against the exact scenario a nonzero guard
+        changes: a strongly-ranked single-list hit vs. a moderately-ranked
+        both-list hit."""
+        from athenaeum.search import reciprocal_rank_fusion
+
+        primary = [("single.md", "Single", 0.1), ("filler-a.md", "A", 0.2)]
+        secondary = [
+            ("both.md", "Both", -1.0),
+            ("filler-b.md", "B", -2.0),
+            ("filler-c.md", "C", -3.0),
+        ]
+        # "both.md" also needs to appear in primary at a moderate rank to
+        # construct the crowding shape guard_rank is meant to catch.
+        primary_with_both = [*primary, ("both.md", "Both", 0.3)]
+        no_guard = reciprocal_rank_fusion(primary_with_both, secondary, n=5)
+        explicit_zero = reciprocal_rank_fusion(primary_with_both, secondary, n=5, guard_rank=0)
+        assert no_guard == explicit_zero
+
+    def test_guard_rank_protects_a_strong_single_list_hit(self) -> None:
+        """A single-list hit ranked at or better than guard_rank, within
+        its own list, must outrank every both-list hit -- regardless of
+        fused score -- once guarding is enabled."""
+        from athenaeum.search import reciprocal_rank_fusion
+
+        # "single.md": primary rank 1, absent from secondary.
+        # "both.md": primary rank 2, secondary rank 1 -- a strong
+        # BOTH-list hit that would normally outscore "single.md".
+        primary = [("single.md", "Single", 0.1), ("both.md", "Both", 0.2)]
+        secondary = [("both.md", "Both", -5.0)]
+
+        unguarded = reciprocal_rank_fusion(primary, secondary, n=2)
+        assert unguarded[0][0] == "both.md"  # both-list hit wins without a guard
+
+        guarded = reciprocal_rank_fusion(primary, secondary, n=2, guard_rank=1)
+        assert guarded[0][0] == "single.md"  # guard protects the single-list hit
+        assert guarded[1][0] == "both.md"
+
+    def test_guard_rank_does_not_protect_a_weakly_ranked_single_list_hit(self) -> None:
+        from athenaeum.search import reciprocal_rank_fusion
+
+        # "weak.md" is primary rank 2 -- worse than a guard_rank of 1, so
+        # it must NOT be protected ahead of "both.md" (present in both
+        # lists at rank 1 each, the strongest possible fused score).
+        primary = [("both.md", "Both", 0.1), ("weak.md", "Weak", 0.2)]
+        secondary = [("both.md", "Both", -5.0)]
+        guarded = reciprocal_rank_fusion(primary, secondary, n=2, guard_rank=1)
+        assert guarded[0][0] == "both.md"  # unprotected -- ordered by fused score
+
 
 class TestFts5IndexAvailable:
     def test_false_when_no_db_file(self, tmp_path: Path) -> None:

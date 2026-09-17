@@ -65,6 +65,9 @@ from athenaeum.config import (
     resolve_person_registry_root,
     resolve_push_token_budget,
     resolve_recall_hybrid,
+    resolve_recall_hybrid_fts5_weight,
+    resolve_recall_hybrid_guard_rank,
+    resolve_recall_hybrid_k,
     resolve_recall_relevance_floor,
     resolve_scope_aware_recall_enabled,
 )
@@ -1383,7 +1386,14 @@ def _recall_via_backend(
                         for hit in fts5_hits
                         if meets_relevance_floor("fts5", hit[2], fts5_floor)
                     ]
-                hits = reciprocal_rank_fusion(wide_vector_hits, fts5_hits, n=top_k)
+                hits = reciprocal_rank_fusion(
+                    wide_vector_hits,
+                    fts5_hits,
+                    n=top_k,
+                    k=resolve_recall_hybrid_k(config),
+                    secondary_weight=resolve_recall_hybrid_fts5_weight(config),
+                    guard_rank=resolve_recall_hybrid_guard_rank(config),
+                )
 
     if not hits:
         return f"No wiki pages matched query: {query!r}{unrecognized_note}"
