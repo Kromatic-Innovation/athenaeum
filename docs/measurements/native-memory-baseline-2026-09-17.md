@@ -430,25 +430,40 @@ zero correct answers. Ratio is `push_breadcrumb_pull / native_grep`.
 **Which cells changed grade, and why.** Re-grading all 1392 stored rows
 with the updated `grade_correctness` flips exactly 17 rows from wrong to
 correct, never the other direction (the uid-citation rule is additive to
-the tag rule, so it can only add correct answers, never remove one).
-Fifteen of the seventeen are the `redundancy` class's single probe,
-`keelbridge_programme_scope`, across five scales and the `pull`,
-`push_breadcrumb_pull` and `push_pages_upper_bound` arms — in every one of
-those rows the answer names the target page's literal uid
+the tag rule, so it can only add correct answers, never remove one). This
+accounting is read directly off a per-row old-vs-new diff over the stored
+rows, not narrated from a single example.
+
+`redundancy`'s single probe, `keelbridge_programme_scope`, accounts for
+**11** of the seventeen: `pull` at `core`/`medium`/`medium_dense`/
+`medium_verydense`/`small`, `push_pages_upper_bound` at `large`/`medium`/
+`small`, and `push_breadcrumb_pull` at `medium`/`medium_verydense`/`small`.
+In every one of these the answer names the target page's literal uid
 (`project-keelbridge`), that uid is one of the probe's `expected_uids`, and
-it was actually present in that cell's own recall output, so the new rule's
-three conditions are all met. The other two flips are `disambiguation`'s
-`person_not_repo` probe on `push_pages_upper_bound` at `medium_dense` and
-`medium_verydense` (same shape: the delivered page's literal uid, cited and
-delivered). **`disambiguation`'s `repo_not_person` probe — the cell named
-in §5/§6 as the open uid-vs-tag question — does NOT flip anywhere**: its
-answers cite the bare string `rowanwrenfield` (the page's name/tag
-vocabulary, truncated into the 400-character recall snippet); the answer
-never contains the literal uid `repo-rowanwrenfield` as a substring, so the
-rule (which requires the *uid* to appear in the answer, not merely a
-fragment of it) is not satisfied. That cell's §5/§6 finding is superseded
-by this addendum: it is not a case the athenaeum#1793 ruling resolves, and
-remains a correctness loss under either grading rule.
+it was actually present in that cell's own recall output.
+
+`disambiguation`'s `repo_not_person` probe accounts for **4**:
+`pull` at `core`/`large`/`small` and `push_pages_upper_bound` at
+`medium_dense`. These flip because the answer carries a malformed but
+literal citation, `[ref: repo-rowanwrenfield]` — the actual uid string, not
+the bare page name — so the rule's substring check is satisfied.
+
+`disambiguation`'s `person_not_repo` probe accounts for the remaining
+**2**: `push_pages_upper_bound` at `medium_dense`/`medium_verydense` (same
+shape: the delivered page's literal uid, cited and delivered).
+
+**The one `repo_not_person` cell that matters for §7 — `push_breadcrumb_pull`
+at `medium`, the verdict arm — does NOT flip**, and condition 2 at `medium`
+is therefore unchanged from the original report. That cell's answer cites
+the bare string `rowanwrenfield` (the page's name/tag vocabulary, truncated
+into the 400-character recall snippet), never the literal uid
+`repo-rowanwrenfield`; a page-name citation is not what the ruling accepts
+— accepting it would be a new, separate ruling, not an application of this
+one. The other `repo_not_person` rows above (`pull`, `push_pages_upper_bound`)
+do cite the literal uid and do flip, so the §5/§6 finding is only partially
+superseded: at `medium` on the verdict arm specifically, it remains a
+correctness loss under either grading rule; on other arms/scales for the
+same probe, several rows now grade correct.
 
 **Native arms checked, not just excluded by construction.** `_delivered_uids`
 wires `native_grep` into the same rule: its stored
