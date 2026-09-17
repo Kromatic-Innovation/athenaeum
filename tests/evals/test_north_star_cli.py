@@ -22,7 +22,7 @@ import pytest
 
 from tests.evals import north_star_cli
 from tests.evals.containment import DEFAULT_CELL_TOKEN_ESTIMATE, price_grid
-from tests.evals.north_star_report import load_rollout_rows
+from tests.evals.north_star_report import DEFAULT_VERDICT_ARM, load_rollout_rows
 from tests.evals.rollout import ALL_ARMS, RolloutRecord, TurnTokenUsage
 
 pytestmark = pytest.mark.rollout
@@ -61,6 +61,14 @@ def _stub_run_probe_all_arms(
 # ---------------------------------------------------------------------------
 # Default --max-spend arithmetic proof
 # ---------------------------------------------------------------------------
+
+
+def test_verdict_arm_flag_defaults_to_the_report_module_constant() -> None:
+    """The CLI's own default must track ``DEFAULT_VERDICT_ARM`` (imported
+    from ``north_star_report``), never a second, independently-drifting
+    literal."""
+    args = north_star_cli.build_arg_parser().parse_args([])
+    assert args.verdict_arm == DEFAULT_VERDICT_ARM
 
 
 def test_default_max_spend_covers_smoke_scale() -> None:

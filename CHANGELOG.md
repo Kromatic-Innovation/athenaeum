@@ -58,7 +58,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   when the better native arm scored zero correct answers while the
   verdict arm scored at least one, and `undefined` (a fail) only when both
   sides scored zero; condition 2 skips (and names) any class where either
-  side has no gradable rows instead of silently treating it as a pass.
+  side has no gradable rows instead of silently treating it as a pass;
+  condition 3 gives a class with no native rows at a scale AT ALL the same
+  skip-and-name treatment, and fails the scale outright only when no class
+  at it has any native cost data to compare.
 - **`docs/use-cases.md`: the north star decomposed into the questions memory
   is actually asked, and a kill criterion.** "Surface the right information at
   the right time" is a quality bar with no customer attached, and nothing in

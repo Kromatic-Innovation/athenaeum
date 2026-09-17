@@ -1102,3 +1102,148 @@ def test_decision_block_states_the_amortisation_denominator_in_words() -> None:
     rendered = render_report(report)
     probe_count = len(_CORPUS.probes)
     assert f"write cost amortised over {probe_count} probes at `{CORPUS_SCALE}`." in rendered
+
+
+# ---------------------------------------------------------------------------
+# Final round (Quine re-review, PR#1740): the verdict_arm seam between
+# compute_verdicts and compute_cost_ratios, _READING_RANK["undefined"]'s
+# worst-rank position, and the passing-cutoff render path.
+# ---------------------------------------------------------------------------
+
+
+def test_compute_verdicts_passes_verdict_arm_through_to_cost_ratios() -> None:
+    """A fixture where ``--verdict-arm pull`` wins condition 1 (a
+    relationship row) AND has a DEFINED, in-budget cost (a separate,
+    non-relationship row) -- condition 3 must read `target`/`limit` for
+    `pull` specifically. If compute_verdicts dropped `verdict_arm` when
+    calling compute_cost_ratios (silently falling back to
+    DEFAULT_VERDICT_ARM, "push_breadcrumb_pull"), no CostPerCorrect row
+    would match that arm at all, `athenaeum_cost` would be `None`, and this
+    would flip straight to `"undefined"` even though `pull` unambiguously
+    won and stayed in budget -- that flip is what this test detects."""
+    rows = [
+        # Relationship subset: pull wins condition 1.
+        _row(
+            _record(
+                arm=Arm.PULL,
+                probe_id=RELATIONSHIP_PROBE_ID,
+                probe_class="single_hop",
+                answer=f"terms are {RELATIONSHIP_ANSWER_TOKEN}",
+            )
+        ),
+        _row(
+            _record(
+                arm=Arm.NATIVE_INDEX,
+                probe_id=RELATIONSHIP_PROBE_ID,
+                probe_class="single_hop",
+                answer="I don't know",
+            )
+        ),
+        # Separate, non-relationship class: pull has a DEFINED, in-budget
+        # cost per correct (150 / 100 = 1.5 -> "limit").
+        _row(
+            _record(
+                arm=Arm.PULL,
+                probe_id=OTHER_PROBE_ID,
+                probe_class="cost_class",
+                answer=f"25 days ({OTHER_ANSWER_TOKEN})",
+                input_tokens=100,
+                output_tokens=50,
+            )
+        ),
+        _row(
+            _record(
+                arm=Arm.NATIVE_INDEX,
+                probe_id=OTHER_PROBE_ID,
+                probe_class="cost_class",
+                answer=f"25 days ({OTHER_ANSWER_TOKEN})",
+                input_tokens=70,
+                output_tokens=30,
+            )
+        ),
+    ]
+    verdicts = compute_verdicts(
+        rows, verdict_arm="pull", relationship_probe_ids=frozenset({RELATIONSHIP_PROBE_ID})
+    )
+    assert len(verdicts) == 1
+    verdict = verdicts[0]
+    assert verdict.condition1_pass is True
+    assert verdict.condition3_reading in ("target", "limit")
+    assert verdict.condition3_pass is True
+
+
+def test_reading_rank_undefined_beats_limit_as_the_worst_reading() -> None:
+    """One `limit` class and one `undefined` class (both COMPARED -- native
+    ran in both) at the same scale: the worst reading must be `undefined`,
+    never `limit`. This pins `_READING_RANK["undefined"]` above `"limit"`
+    directly through `compute_verdicts` (not just `compute_cost_ratios`)."""
+    rows = [
+        # class_a: limit (verdict 150, native 100 -> ratio 1.5).
+        _row(
+            _record(
+                arm=VERDICT_ARM,
+                probe_id=OTHER_PROBE_ID,
+                probe_class="class_a",
+                answer=f"25 days ({OTHER_ANSWER_TOKEN})",
+                input_tokens=100,
+                output_tokens=50,
+            )
+        ),
+        _row(
+            _record(
+                arm=Arm.NATIVE_INDEX,
+                probe_id=OTHER_PROBE_ID,
+                probe_class="class_a",
+                answer=f"25 days ({OTHER_ANSWER_TOKEN})",
+                input_tokens=70,
+                output_tokens=30,
+            )
+        ),
+        # class_b: undefined -- BOTH sides score zero (native_present True,
+        # so this is a COMPARED class under R5, not a skip).
+        _row(
+            _record(
+                arm=VERDICT_ARM,
+                probe_id=OTHER_PROBE_ID_2,
+                probe_class="class_b",
+                answer="no idea",
+            )
+        ),
+        _row(
+            _record(
+                arm=Arm.NATIVE_INDEX,
+                probe_id=OTHER_PROBE_ID_2,
+                probe_class="class_b",
+                answer="no idea",
+            )
+        ),
+    ]
+    verdicts = compute_verdicts(rows, relationship_probe_ids=frozenset())
+    assert len(verdicts) == 1
+    assert verdicts[0].condition3_reading == "undefined"
+    assert verdicts[0].condition3_pass is False
+
+
+def test_render_decision_block_prints_the_passing_cutoff_scale() -> None:
+    """A fixture where `medium` passes all three conditions -- the block
+    must print the ACTUAL cutoff scale, never a hardcoded `none`."""
+    verdicts = [_all_pass_verdict("medium")]
+    rendered = "\n".join(render_decision_block(_minimal_report(), verdicts))
+    assert "**Cutoff scale:** `medium`" in rendered
+    assert "**Cutoff scale:** `none`" not in rendered
+
+
+def test_condition1_fails_when_there_are_no_relationship_rows() -> None:
+    rows = [
+        _row(
+            _record(
+                arm=VERDICT_ARM,
+                probe_id=OTHER_PROBE_ID,
+                probe_class="single_hop",
+                answer=f"25 days ({OTHER_ANSWER_TOKEN})",
+            )
+        ),
+    ]
+    verdicts = compute_verdicts(rows, relationship_probe_ids=frozenset())
+    assert len(verdicts) == 1
+    assert verdicts[0].condition1_pass is False
