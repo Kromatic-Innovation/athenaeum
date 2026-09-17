@@ -1087,3 +1087,38 @@ def test_render_report_includes_index_coverage_and_crossover_sections() -> None:
     assert "## Index coverage (NATIVE_INDEX only" in text
     assert "## Crossover scale" in text
     assert "0.750" in text
+
+
+# ---------------------------------------------------------------------------
+# Mode per cell (issue athenaeum#1733) -- a render-only section over
+# report.rows directly; must not require touching GroupStats/
+# compute_group_stats/grade_correctness (reserved for sibling lanes).
+# ---------------------------------------------------------------------------
+
+
+def test_render_report_mode_per_cell_reflects_each_row_own_mode() -> None:
+    api_record = RolloutRecord(
+        arm=Arm.PULL,
+        probe_id=PROBE_ID,
+        probe_class="single_hop",
+        corpus_scale=CORPUS_SCALE,
+        answer="25 days",
+        mode="api",
+    )
+    cli_record = RolloutRecord(
+        arm=Arm.NATIVE_GREP,
+        probe_id=PROBE_ID,
+        probe_class="single_hop",
+        corpus_scale=CORPUS_SCALE,
+        answer="25 days",
+        mode="cli",
+    )
+    rows = [_row(api_record), _row(cli_record)]
+    report = build_report(rows)
+
+    text = render_report(report)
+
+    assert "## Mode per cell" in text
+    mode_section = text[text.index("## Mode per cell") :]
+    assert f"| {PROBE_ID} | pull | {CORPUS_SCALE} | 0 | api |" in mode_section
+    assert f"| {PROBE_ID} | native_grep | {CORPUS_SCALE} | 0 | cli |" in mode_section

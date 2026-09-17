@@ -1,0 +1,273 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Offline tests for the API-backed tool-use mode (issue athenaeum#1733).
+
+Everything here is ``rollout``-marked (deselected by default, same as
+``eval``/``embedding`` — see ``pyproject.toml`` and ``tests/evals/test_rollout.py``'s
+own module docstring) AND runs with no network call and no subprocess spawn.
+
+Two of the three tests replay a pre-scripted (\"recorded\") sequence of
+Anthropic Messages API responses through a queued stub client
+(:class:`_QueuedApiClient`) rather than ``tests.evals.harness.replay_client``
+-- that helper enforces a single-response prompt-hash contract and cannot
+model a multi-turn tool-use loop. The stub's response objects are
+attribute-shaped (``block.type``/``.name``/``.input``/``.text``,
+``response.stop_reason``, ``response.usage``) to match what
+:func:`tests.evals.rollout._api_response_blocks` and
+:meth:`tests.evals.harness.EvalSession.observe_response` actually read off a
+real SDK response -- the same discipline ``harness.py``'s own
+``_ReplayBlock`` uses for its single-response replay.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+
+from tests.evals.corpus import build_corpus
+from tests.evals.harness import EvalSession
+from tests.evals.rollout import (
+    NATIVE_INDEX_MAX_CHARS,
+    NATIVE_INDEX_MAX_LINES,
+    RECALL_TOOL_NAME,
+    materialize_native_memory,
+    run_native_grep_api,
+    run_pull_api,
+    truncate_native_index,
+)
+
+pytestmark = pytest.mark.rollout
+
+
+# ---------------------------------------------------------------------------
+# Queued stub client -- a "recorded" turn-by-turn response sequence
+# ---------------------------------------------------------------------------
+
+
+def _text_block(text: str) -> SimpleNamespace:
+    return SimpleNamespace(type="text", text=text)
+
+
+def _tool_use_block(*, id: str, name: str, input: dict[str, Any]) -> SimpleNamespace:
+    return SimpleNamespace(type="tool_use", id=id, name=name, input=input)
+
+
+def _usage(input_tokens: int = 10, output_tokens: int = 5) -> SimpleNamespace:
+    return SimpleNamespace(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_creation_input_tokens=0,
+        cache_read_input_tokens=0,
+    )
+
+
+@dataclasses.dataclass
+class _RecordedTurn:
+    """One "recorded" turn in a scripted api-mode transcript."""
+
+    content: list[SimpleNamespace]
+    stop_reason: str
+    usage: SimpleNamespace = dataclasses.field(default_factory=_usage)
+
+
+class _QueuedApiClient:
+    """A ``client.messages.create(**params)`` stub that returns a fixed,
+    pre-scripted sequence of responses in order -- the queued-turn analogue
+    of :func:`tests.evals.harness.replay_client` for a multi-turn loop.
+    Raises ``AssertionError`` if the loop asks for more turns than were
+    recorded (a scripting bug in the test, never a silent pass)."""
+
+    def __init__(self, turns: list[_RecordedTurn]) -> None:
+        self._turns = list(turns)
+        self.calls: list[dict[str, Any]] = []
+
+        class _Messages:
+            def create(inner_self, **params: Any) -> SimpleNamespace:
+                self.calls.append(params)
+                assert self._turns, "queued client exhausted -- recorded too few turns"
+                turn = self._turns.pop(0)
+                return SimpleNamespace(
+                    content=turn.content, usage=turn.usage, stop_reason=turn.stop_reason
+                )
+
+        self.messages = _Messages()
+
+
+# ---------------------------------------------------------------------------
+# 1. Truncation rule, pinned against the `medium` corpus
+# ---------------------------------------------------------------------------
+
+
+def test_truncate_native_index_pins_the_200_line_25kb_cap_at_medium_scale(
+    tmp_path: Path,
+) -> None:
+    """`medium` (1,000 pages, per docs/design/native-memory-baseline.md §3)
+    is well past the documented cap, so the written index is expected to
+    overflow both limits and truncation must actually engage -- the
+    "truncation is the finding, not a confound" case the design doc names.
+    """
+    corpus = build_corpus("medium")
+    memory_dir = materialize_native_memory(corpus, tmp_path, write_index=True)
+    written = (memory_dir / "MEMORY.md").read_text(encoding="utf-8")
+
+    # The full index really does overflow both caps at this scale -- if it
+    # did not, this test would be pinning a truncation that never engages.
+    # Counted by Python str length (Quine review, issue athenaeum#1733), NOT
+    # UTF-8 encoded bytes -- the actual cap truncate_native_index enforces;
+    # this corpus's index lines contain an em dash (3 UTF-8 bytes, 1 char),
+    # so a byte-encoded assertion here would test a DIFFERENT cap than the
+    # one the function actually applies.
+    assert written.count("\n- ") + (1 if written.startswith("- ") else 0) > NATIVE_INDEX_MAX_LINES
+    assert len(written) > NATIVE_INDEX_MAX_CHARS
+
+    truncated = truncate_native_index(written)
+
+    bullet_lines = [line for line in truncated.splitlines() if line.startswith("- ")]
+    assert len(bullet_lines) <= NATIVE_INDEX_MAX_LINES
+    assert len(truncated) <= NATIVE_INDEX_MAX_CHARS
+    # Never a partial line: every line in the truncated text is a COMPLETE
+    # line that also appears, verbatim, in the untruncated index.
+    written_lines = set(written.splitlines())
+    for line in truncated.splitlines():
+        assert line in written_lines
+    # And it is a genuine PREFIX of the written index (whole lines dropped
+    # off the end, never reordered or altered).
+    assert (
+        written.startswith(truncated.rstrip("\n"))
+        or written.splitlines()[: len(truncated.splitlines())] == truncated.splitlines()
+    )
+
+
+def test_truncate_native_index_is_a_no_op_under_the_cap() -> None:
+    small_index = "- a — b\n- c — d\n"
+    assert truncate_native_index(small_index) == small_index
+
+
+# ---------------------------------------------------------------------------
+# 2. Recorded-fixture NATIVE_GREP replay, end to end
+# ---------------------------------------------------------------------------
+
+
+def test_native_grep_api_recorded_fixture_replay_end_to_end(tmp_path: Path) -> None:
+    corpus = build_corpus("core")
+    probe = next(p for p in corpus.probes if p.id == "pto_allowance")
+    target_filename = f"{probe.expected_uids[0]}.md"
+
+    turns = [
+        _RecordedTurn(
+            content=[
+                _tool_use_block(id="toolu_grep_1", name="grep", input={"pattern": "PTO allowance"})
+            ],
+            stop_reason="tool_use",
+        ),
+        _RecordedTurn(
+            content=[
+                _tool_use_block(id="toolu_read_1", name="read", input={"path": target_filename})
+            ],
+            stop_reason="tool_use",
+        ),
+        _RecordedTurn(
+            content=[_text_block("The PTO allowance is 25 days per year.")],
+            stop_reason="end_turn",
+        ),
+    ]
+    client = _QueuedApiClient(turns)
+    session = EvalSession()
+
+    record = run_native_grep_api(
+        probe, tmp_path, "core", client=client, session=session, model="test-model"
+    )
+
+    assert record.mode == "api"
+    assert record.answer == "The PTO allowance is 25 days per year."
+    assert record.turn_count == 3
+    assert [c.name for c in record.tool_calls] == ["grep", "read"]
+    # No "query" key on the grep tool's input, so ToolCall.query falls back
+    # to the stringified input dict -- the SAME extraction
+    # `tests.evals.rollout.parse_stream` uses for a non-recall tool_use
+    # block (`str(tool_input.get("query", tool_input))`).
+    assert record.tool_calls[0].query == str({"pattern": "PTO allowance"})
+    # The read tool actually found and returned the real materialized page.
+    native_memory = record.transcript[0]["native_memory"]
+    assert target_filename in native_memory["loaded_memory_files"]
+    assert "25 days" in native_memory["loaded_memory_files"][target_filename]
+    # Round-trips through to_payload/from_payload with mode preserved.
+    from tests.evals.rollout import RolloutRecord
+
+    round_tripped = RolloutRecord.from_payload(record.to_payload())
+    assert round_tripped.mode == "api"
+    assert round_tripped.answer == record.answer
+    # Quine review, issue athenaeum#1733 SHOULD item 3: the native arm's
+    # system prompt must mention the memory directory (never the single-shot
+    # arms' "answer using only the context supplied" prompt).
+    sent_system = client.calls[0]["system"]
+    assert str(tmp_path) in sent_system
+
+
+# ---------------------------------------------------------------------------
+# 3. Recorded-fixture PULL rollout: a recall tool call with its query captured
+# ---------------------------------------------------------------------------
+
+
+def test_pull_api_recorded_fixture_shows_recall_tool_call_with_query_captured(
+    tmp_path: Path,
+) -> None:
+    corpus = build_corpus("core")
+    probe = next(p for p in corpus.probes if p.id == "pto_allowance")
+    wiki_root = corpus.materialize(tmp_path)
+    cache_dir = tmp_path / "cache"
+
+    turns = [
+        _RecordedTurn(
+            content=[
+                _tool_use_block(
+                    id="toolu_recall_1",
+                    name=RECALL_TOOL_NAME,
+                    input={"query": "PTO allowance days per year"},
+                )
+            ],
+            stop_reason="tool_use",
+        ),
+        _RecordedTurn(
+            content=[_text_block("The PTO allowance is 25 days per year.")],
+            stop_reason="end_turn",
+        ),
+    ]
+    client = _QueuedApiClient(turns)
+    session = EvalSession()
+
+    record = run_pull_api(
+        probe,
+        wiki_root,
+        cache_dir,
+        "core",
+        client=client,
+        session=session,
+        model="test-model",
+        search_backend="keyword",
+    )
+
+    assert record.mode == "api"
+    assert record.recall_called is True
+    assert len(record.tool_calls) == 1
+    call = record.tool_calls[0]
+    assert call.name == RECALL_TOOL_NAME
+    assert call.query == "PTO allowance days per year"
+    assert record.answer == "The PTO allowance is 25 days per year."
+
+    # The transcript matches the SAME stream-json-derived shape the CLI path
+    # produces -- north_star_report._pull_delivered_text scans exactly this
+    # shape and must find the recall tool's own delivered content.
+    from tests.evals.north_star_report import _pull_delivered_text
+
+    delivered = _pull_delivered_text(record)
+    assert delivered, f"expected non-empty delivered text; transcript={record.transcript!r}"
+    # Quine review, issue athenaeum#1733 SHOULD item 3: the PULL-style system
+    # prompt must mention the recall tool (never the single-shot arms'
+    # "answer using only the context supplied" prompt, which actively
+    # discourages calling one).
+    sent_system = client.calls[0]["system"]
+    assert "recall" in sent_system
