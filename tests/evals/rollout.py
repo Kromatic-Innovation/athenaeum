@@ -183,11 +183,40 @@ DEFAULT_ROLLOUT_MODEL = DEFAULT_CLASSIFY_MODEL
 #: evidence's ``tools`` list entry verbatim.
 RECALL_TOOL_NAME = "mcp__athenaeum__recall"
 
+#: The reference-tag contract (issue athenaeum#1753). Every arm's system
+#: prompt carries this VERBATIM and IDENTICALLY -- single-shot, tool-using
+#: api-mode, and both ``claude -p`` CLI modes -- so it cannot bias the
+#: comparison between arms. It exists because correctness is graded by a
+#: deterministic substring match against each probe's planted
+#: ``answer_tokens`` (``tests.evals.north_star_report.grade_correctness``),
+#: and those tokens ARE the corpus pages' ``Internal reference tag:`` lines.
+#: Without this instruction no model repeats an unasked-for tag, so a
+#: perfectly correct answer grades wrong and even ``oracle`` scores 0 --
+#: the contract was literally unsatisfiable before this constant existed.
+#:
+#: Deliberately plural ("every page you relied on"): ``multi_hop`` and
+#: ``follow_through`` probes plant a token on EACH of two or more pages and
+#: grading requires ALL of them, so a singular wording would silently cap
+#: those classes at wrong.
+#:
+#: Deliberately illustrated with the literal placeholder ``TAG`` and never
+#: with a real corpus token: an ``abstention`` probe grades incorrect the
+#: moment ANY planted token appears in the answer, so a model echoing an
+#: example tag would be a self-inflicted failure on exactly the class that
+#: must keep working.
+REFERENCE_TAG_INSTRUCTION = (
+    "When you have finished answering, end your reply with the internal "
+    "reference tag of every page you relied on. Each page's tag is the value "
+    "on its `Internal reference tag:` line. Write one tag per page you used, "
+    "each in the form [ref: TAG], on the final line of your reply. If you "
+    "relied on no page at all, write [ref: none] instead."
+)
+
 _SYSTEM_PROMPT = (
     "You are answering questions about a private knowledge base used only "
     "for evaluation. Answer using ONLY the context supplied below, if any. "
     "If the context does not contain the answer, say you do not know rather "
-    "than guessing or using outside knowledge."
+    "than guessing or using outside knowledge.\n\n" + REFERENCE_TAG_INSTRUCTION
 )
 
 
@@ -705,6 +734,19 @@ def build_pull_argv(claude_binary: str, mcp_config_path: Path, model: str) -> li
     added, so the model's own built-in tool set plus the one scoped MCP
     server are both available. ``--output-format stream-json --verbose`` is
     what makes the tool-choice decision observable.
+
+    ``--append-system-prompt`` carries :data:`REFERENCE_TAG_INSTRUCTION`
+    (issue athenaeum#1753) so this CLI-mode arm is told the SAME thing every
+    api-mode arm's ``system=`` tells its model. APPEND rather than
+    ``--system-prompt``: replacing the prompt would discard Claude Code's own
+    built-in instructions, which is a behavior change this eval has no
+    business making.
+
+    Putting that text in argv is NOT a break with the athenaeum#543 (L4)
+    discipline this module follows elsewhere: that rule is about the USER
+    prompt, which has a stdin channel and must use it. A system prompt has no
+    stdin channel in ``claude -p``, and this one is a fixed module constant
+    with no probe or corpus content in it.
     """
     return [
         claude_binary,
@@ -712,6 +754,8 @@ def build_pull_argv(claude_binary: str, mcp_config_path: Path, model: str) -> li
         "--mcp-config",
         str(mcp_config_path),
         "--strict-mcp-config",
+        "--append-system-prompt",
+        REFERENCE_TAG_INSTRUCTION,
         "--output-format",
         "stream-json",
         "--verbose",
@@ -1104,6 +1148,8 @@ def build_native_argv(
     mcp_config_path: Path,
     memory_dir: Path,
     model: str,
+    *,
+    append_system_prompt: str | None = REFERENCE_TAG_INSTRUCTION,
 ) -> list[str]:
     """The native-arm argv: scoped settings (auto memory), an EMPTY scoped
     MCP config (so ``--strict-mcp-config`` guarantees the athenaeum ``recall``
@@ -1112,8 +1158,21 @@ def build_native_argv(
     NATIVE_GREP, harmless for NATIVE_INDEX). Prompt goes on stdin, never
     argv — the same athenaeum#543 (L4) discipline every other arm here
     follows.
+
+    ``--append-system-prompt`` carries :data:`REFERENCE_TAG_INSTRUCTION`
+    (issue athenaeum#1753), identically to :func:`build_pull_argv` and to
+    every api-mode arm's ``system=``. APPEND is load-bearing here in
+    particular: a native-memory arm exists to observe REAL Claude Code
+    auto-memory behavior, and ``--system-prompt`` would replace the very
+    instructions that make NATIVE_INDEX/NATIVE_GREP what they are. See
+    :func:`build_pull_argv` on why a system prompt in argv does not violate
+    the stdin discipline above.
+
+    *append_system_prompt* defaults to that instruction and is passed ``None``
+    by exactly one caller, :func:`run_native_writer` -- see its own
+    call site for why the WRITE path is deliberately outside the contract.
     """
-    return [
+    argv = [
         claude_binary,
         "-p",
         "--settings",
@@ -1121,6 +1180,10 @@ def build_native_argv(
         "--mcp-config",
         str(mcp_config_path),
         "--strict-mcp-config",
+    ]
+    if append_system_prompt:
+        argv += ["--append-system-prompt", append_system_prompt]
+    argv += [
         "--add-dir",
         str(memory_dir),
         "--output-format",
@@ -1129,6 +1192,7 @@ def build_native_argv(
         "--model",
         model,
     ]
+    return argv
 
 
 def _session_id_from_transcript(transcript: Iterable[dict[str, Any]]) -> str | None:
@@ -1492,7 +1556,7 @@ _PULL_API_SYSTEM_PROMPT = (
     "query. Use it whenever the question may depend on information stored "
     "in the knowledge base -- do not rely on outside knowledge or guess. "
     "Only say you do not know once you have searched and found nothing "
-    "relevant to the question."
+    "relevant to the question.\n\n" + REFERENCE_TAG_INSTRUCTION
 )
 
 
@@ -1554,7 +1618,7 @@ def _native_index_system_prompt(memory_dir: Path) -> str:
         f"per saved topic, not the full content. When the index line is not "
         f"enough, use your `read` tool to open that topic's own file in the "
         f"memory directory, or your `grep` tool to search it, for the full "
-        f"detail."
+        f"detail.\n\n" + REFERENCE_TAG_INSTRUCTION
     )
 
 
@@ -1566,7 +1630,8 @@ def _native_grep_system_prompt(memory_dir: Path) -> str:
         f"You are Claude Code working on a project whose memory directory is "
         f"at {memory_dir}. There is no MEMORY.md index for this project — "
         f"use your `grep` tool to search the topic files in that directory, "
-        f"and your `read` tool to open one once you find it."
+        f"and your `read` tool to open one once you find it.\n\n"
+        + REFERENCE_TAG_INSTRUCTION
     )
 
 
@@ -2374,7 +2439,20 @@ def run_native_writer(
     settings_path.write_text(json.dumps(build_native_settings(memory_dir)), encoding="utf-8")
     mcp_config_path = materialize_root / "native-writer-mcp-config.json"
     mcp_config_path.write_text(json.dumps({"mcpServers": {}}), encoding="utf-8")
-    argv = build_native_argv(claude_binary, settings_path, mcp_config_path, memory_dir, model)
+    # Issue athenaeum#1753: the reference-tag instruction is deliberately
+    # withheld here. It is an ANSWER-shaping contract for the graded read
+    # path; these are WRITE sessions whose output is memory files, not a
+    # graded answer, and telling a writer to append `[ref: ...]` would only
+    # risk polluting what it saves. Every arm that produces a graded answer
+    # carries the instruction; this one produces none.
+    argv = build_native_argv(
+        claude_binary,
+        settings_path,
+        mcp_config_path,
+        memory_dir,
+        model,
+        append_system_prompt=None,
+    )
     env = {**os.environ, "CLAUDE_CONFIG_DIR": str(config_dir)}
 
     sessions: list[NativeWriterSession] = []
