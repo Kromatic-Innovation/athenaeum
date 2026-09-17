@@ -1312,16 +1312,28 @@ def _recall_via_backend(
     # This SUPERSEDES ``hits`` (the off-corpus-federated, floor-filtered,
     # `top_k`-sized vector list computed above) as the fusion's primary
     # list when hybrid actually runs -- the widened vector-only requery
-    # below does not carry the athenaeum#984 off-corpus federation, so a
-    # deployment running BOTH off_corpus and vector hybrid trades a small
-    # amount of off-corpus recall for the wider on-corpus candidate pool
-    # RRF needs; off_corpus is dark-by-default and this trade only applies
-    # when both are simultaneously configured. The `top_k`-sized ``hits``
-    # computed above remains the fallback whenever hybrid does not run at
-    # all (fts5/keyword dispatch, hybrid disabled, no fts5 index, or either
-    # query failing).
+    # below does NOT carry the athenaeum#984 off-corpus federation (a
+    # second, off-corpus-scoped widened query is out of this issue's
+    # scope). Rather than silently DISCARD the off-corpus hits
+    # ``merge_ranked_hits`` already folded into ``hits`` above (which a
+    # bare "fuse and overwrite" would do), hybrid is skipped entirely --
+    # same as the missing-fts5-index branch below -- with a logged warning,
+    # whenever this call actually federated an off-corpus root. The
+    # `top_k`-sized ``hits`` computed above (off-corpus hits included)
+    # remains the result. off_corpus is dark-by-default, so this only fires
+    # for a deployment that has explicitly configured BOTH off_corpus and
+    # vector hybrid.
     if backend_name == "vector" and resolve_recall_hybrid(config):
-        if not fts5_index_available(effective_cache):
+        if off_corpus_root is not None:
+            log.warning(
+                "recall: hybrid ranking skipped for this call -- off-corpus "
+                "federation (root %s) was applied and the hybrid dispatch "
+                "does not yet re-run it against the widened candidate pool; "
+                "falling back to vector-only ranking so the off-corpus hits "
+                "already folded into the result are not silently dropped.",
+                off_corpus_root,
+            )
+        elif not fts5_index_available(effective_cache):
             log.warning(
                 "recall: hybrid ranking requested for the vector backend but "
                 "no FTS5 index exists at %s -- falling back to vector-only "

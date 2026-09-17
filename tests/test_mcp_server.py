@@ -1871,6 +1871,212 @@ class TestRecallSearchFts5ByteIdentical:
         assert before == after
 
 
+class TestRecallSearchHybridFloorBeforeFusion:
+    """Regression test (issue athenaeum#1792 review): the relevance floor
+    must be applied to each input list BEFORE fusion, never to the fused
+    score itself. Backend ``query`` methods are monkeypatched to return
+    fixed, known scores so the test pins exact numeric behavior rather
+    than depending on the embedding stub's incidental rankings."""
+
+    def test_per_list_floor_independence_and_no_post_fusion_floor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pytest.importorskip("chromadb")
+        from athenaeum.search import FTS5Backend, VectorBackend
+
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        (wiki / "page-a.md").write_text("---\nname: Page A\n---\n\nbody\n")
+        (wiki / "page-b.md").write_text("---\nname: Page B\n---\n\nbody\n")
+
+        cache = tmp_path / "cache"
+        FTS5Backend().build_index(wiki, cache)
+        VectorBackend().build_index(wiki, cache)
+
+        # page-a: raw vector score 1.0 PASSES a vector floor of 1.7 (lower
+        # is better: 1.0 <= 1.7); raw fts5 score -1.0 FAILS an fts5 floor
+        # of -5.0 (-1.0 is not <= -5.0). If per-list filtering runs before
+        # fusion (correct), page-a is dropped from the fts5 list but
+        # SURVIVES via the vector list alone, and still appears in the
+        # final fused result -- proving failing ONE backend's floor does
+        # not disqualify a hit globally.
+        #
+        # page-b: raw vector score 1.9 FAILS the same vector floor (1.9 is
+        # not <= 1.7); its raw fts5 score -1.0 also FAILS the fts5 floor.
+        # page-b is filtered out of BOTH lists before fusion runs at all,
+        # so it must be ABSENT from the final result. This is the case
+        # that would leak through if a floor were (incorrectly) compared
+        # against the FUSED score instead of each raw per-list score: a
+        # fused score is always a small number (~0.01-0.03, one or two
+        # terms of `1/(k+rank)` with `k=60`), so `fused_score <= 1.7`
+        # would trivially be True for ANY hit under vector's own
+        # lower-is-better direction -- a post-fusion check using that
+        # direction could never reject page-b, so page-b's absence here
+        # can only be explained by pre-fusion, per-list filtering.
+        def fake_vector_query(self, query, cache_dir, *, n=5, **kwargs):
+            del query, cache_dir, n, kwargs
+            return [("page-a.md", "Page A", 1.0), ("page-b.md", "Page B", 1.9)]
+
+        def fake_fts5_query(self, query, cache_dir, *, n=5, **kwargs):
+            del query, cache_dir, n, kwargs
+            return [("page-a.md", "Page A", -1.0), ("page-b.md", "Page B", -1.0)]
+
+        monkeypatch.setattr(VectorBackend, "query", fake_vector_query)
+        monkeypatch.setattr(FTS5Backend, "query", fake_fts5_query)
+
+        result = recall_search(
+            wiki,
+            "irrelevant query text",
+            top_k=5,
+            search_backend="vector",
+            cache_dir=cache,
+            config={
+                "recall": {
+                    "hybrid": True,
+                    "relevance_floor": {"vector": 1.7, "fts5": -5.0},
+                }
+            },
+        )
+
+        assert "Page A" in result, (
+            "page-a passes the vector floor and must survive via the "
+            "vector list alone, even though it fails the fts5 floor -- "
+            "per-list floors are independent, not a global AND"
+        )
+        assert "Page B" not in result, (
+            "page-b fails BOTH per-list floors and must never reach "
+            "fusion at all -- its absence can only be explained by "
+            "pre-fusion filtering, since a fused score is always far "
+            "too small (~0.01-0.03) for a post-fusion comparison against "
+            "either configured floor (1.7, -5.0) to ever reject it"
+        )
+        # The rendered score is the FUSED score (small, `k=60` reciprocal
+        # rank terms), not either raw input score (1.0 / -1.0) -- direct
+        # evidence the surviving hit's displayed score already went
+        # through fusion, not a floor comparison against a raw score.
+        assert "(score: 1.0)" not in result
+        assert "(score: -1.0)" not in result
+
+    def test_hybrid_off_ignores_relevance_floor_hybrid_key(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Sanity companion: with ``recall.hybrid`` off, the same strict
+        vector floor is applied the ORDINARY (non-hybrid) way, directly to
+        the raw vector score -- page-b (1.9) still fails it, but page-a
+        (1.0) passes on the vector list alone with no fts5 involvement."""
+        pytest.importorskip("chromadb")
+        from athenaeum.search import FTS5Backend, VectorBackend
+
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        (wiki / "page-a.md").write_text("---\nname: Page A\n---\n\nbody\n")
+        (wiki / "page-b.md").write_text("---\nname: Page B\n---\n\nbody\n")
+
+        cache = tmp_path / "cache"
+        FTS5Backend().build_index(wiki, cache)
+        VectorBackend().build_index(wiki, cache)
+
+        def fake_vector_query(self, query, cache_dir, *, n=5, **kwargs):
+            del query, cache_dir, n, kwargs
+            return [("page-a.md", "Page A", 1.0), ("page-b.md", "Page B", 1.9)]
+
+        monkeypatch.setattr(VectorBackend, "query", fake_vector_query)
+
+        result = recall_search(
+            wiki,
+            "irrelevant query text",
+            top_k=5,
+            search_backend="vector",
+            cache_dir=cache,
+            config={
+                "recall": {
+                    "hybrid": False,
+                    "relevance_floor": {"vector": 1.7},
+                }
+            },
+        )
+        assert "Page A" in result
+        assert "Page B" not in result
+        assert "(score: 1.0)" in result
+
+
+class TestRecallSearchHybridOffCorpusInteraction:
+    """issue athenaeum#1792 review (Should 1): off_corpus federation and the
+    hybrid dispatch's widened vector-only requery don't compose (the
+    widened requery doesn't carry off-corpus hits). Hybrid must SKIP with a
+    logged warning whenever this call actually federated an off-corpus
+    root, falling back to the already off-corpus-federated ``hits`` --
+    never silently discard the federated off-corpus hits by overwriting
+    them with a fused, off-corpus-blind list."""
+
+    def test_hybrid_skips_and_warns_when_off_corpus_federated(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import logging
+
+        from athenaeum import off_corpus
+        from athenaeum.search import VectorBackend, build_fts5_index
+        from tests.conftest import init_git_repo
+
+        pytest.importorskip("chromadb")
+
+        knowledge_root = tmp_path / "knowledge"
+        wiki_root = knowledge_root / "wiki"
+        wiki_root.mkdir(parents=True)
+        (wiki_root / "ordinary.md").write_text(
+            "---\nname: Ordinary Topic\n---\n\nan ordinary corpus claim\n"
+        )
+        init_git_repo(knowledge_root)
+
+        off_corpus_dir = tmp_path / "off-corpus-store"
+        off_corpus_dir.mkdir()
+        (off_corpus_dir / "erasure-claim-one.md").write_text(
+            "---\nname: Zephyrwidgets Erasure Claim\ntype: erasure-claim\n"
+            "---\n\na very specific off-corpus fact\n"
+        )
+        config = {
+            "off_corpus": {"enabled": True, "adapter": "off-corpus-test"},
+            "storage": {
+                "adapters": {
+                    "off-corpus-test": {
+                        "backing_store": "markdown",
+                        "surface_root": str(off_corpus_dir),
+                        "corpus_policy": {
+                            "embedded": False,
+                            "recallable": True,
+                            "merge_eligible": False,
+                        },
+                    },
+                },
+                "mapping": {"erasure-claim": "off-corpus-test"},
+            },
+            "recall": {"hybrid": True},
+        }
+        cache_dir = tmp_path / "cache"
+
+        build_fts5_index(wiki_root, cache_dir, config=config)
+        VectorBackend().build_index(wiki_root, cache_dir)
+        counts = off_corpus.build_off_corpus_index(config, knowledge_root, cache_dir)
+        assert counts is not None and counts["fts5"] == 1
+
+        with caplog.at_level(logging.WARNING, logger="athenaeum.mcp_server"):
+            result = recall_search(
+                wiki_root,
+                "Zephyrwidgets",
+                search_backend="vector",
+                cache_dir=cache_dir,
+                config=config,
+            )
+
+        assert "Zephyrwidgets Erasure Claim" in result, (
+            "the off-corpus hit must survive hybrid's skip-fallback, not "
+            "be silently dropped by an overwriting fused list"
+        )
+        assert any(
+            "hybrid ranking skipped" in record.message for record in caplog.records
+        ), [record.message for record in caplog.records]
+
+
 class TestRecallSearchVectorHybridDispatch:
     """The vector dispatch path's hybrid block itself -- guarded on
     chromadb exactly like every other vector-backed test in this repo."""
@@ -1931,25 +2137,69 @@ class TestRecallSearchVectorHybridDispatch:
     def test_hybrid_surfaces_an_fts5_only_hit_vector_alone_would_miss(
         self, tmp_path: Path
     ) -> None:
-        """The mechanism end to end: a page that ranks well in fts5 (an
-        exact lexical hit) but is pushed out of a small ``top_k`` by an
-        unrelated page ranking higher in raw vector distance still surfaces
-        once both backends' index share a cache_dir and hybrid fusion runs
-        -- proven by comparing against the SAME query with hybrid off."""
+        """The mechanism end to end, WITH a hybrid-off control (issue
+        athenaeum#1792 review): a page that ranks well in fts5 (an exact
+        lexical hit on its one rare, discriminating token) but is pushed
+        out of a small ``top_k`` by several distractor pages that share
+        MORE of the query's common terms -- so a small ``top_k`` vector-
+        only ranking genuinely misses it -- still surfaces once hybrid
+        fusion runs. The control (hybrid off, same query, same index) must
+        show the page ABSENT; without it, vector alone might already rank
+        the page first on a trivially small corpus and the "surfaces via
+        fusion" claim would be unproven."""
         pytest.importorskip("chromadb")
         from athenaeum.search import FTS5Backend, VectorBackend
 
-        wiki = _hybrid_test_wiki(tmp_path)
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        # FTS5 indexes name/tags/aliases/description ONLY -- never the
+        # body (see ``FTS5Backend._CREATE_SQL``) -- while the vector
+        # backend embeds the whole file (frontmatter and body both), so
+        # the distinguishing text goes in ``description:`` where BOTH
+        # backends can see it, and each distractor's ``description:``
+        # shares every COMMON query term but not the rare one. Their
+        # combined bag-of-words overlap with the query out-scores the
+        # (single-rare-term) target page under the test suite's offline
+        # hashing-bow embedding stub (tests/offline_embeddings.py), even
+        # though the target is the only page whose description contains
+        # "Zylofoobar" at all -- verified below by the hybrid-off control.
+        query = "Zylofoobar annual review process meeting schedule budget"
+        for i in range(6):
+            (wiki / f"distractor-{i}.md").write_text(
+                f"---\nname: Distractor {i}\ndescription: annual review "
+                "process meeting schedule budget planning operations "
+                "quarterly summary logistics vendor contract\n---\n\n"
+                f"filler{i} filler{i}b filler{i}c body text here.\n"
+            )
+        (wiki / "target.md").write_text(
+            "---\nname: Target Page\ndescription: Zylofoobar annual "
+            "review.\n---\n\nShort target body.\n"
+        )
+
         cache = tmp_path / "cache"
         FTS5Backend().build_index(wiki, cache)
         VectorBackend().build_index(wiki, cache)
 
+        vector_only = recall_search(
+            wiki,
+            query,
+            top_k=5,
+            search_backend="vector",
+            cache_dir=cache,
+            config={"recall": {"hybrid": False}},
+        )
+        assert "Target Page" not in vector_only, (
+            "fixture no longer demonstrates the failure mode -- vector "
+            "alone already ranks the target page inside top_k; widen the "
+            "distractor overlap or shrink top_k further"
+        )
+
         hybrid_result = recall_search(
             wiki,
-            "Widget Works",
-            top_k=1,
+            query,
+            top_k=5,
             search_backend="vector",
             cache_dir=cache,
             config={"recall": {"hybrid": True}},
         )
-        assert "Widget Works" in hybrid_result
+        assert "Target Page" in hybrid_result

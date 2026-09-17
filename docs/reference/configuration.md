@@ -2782,6 +2782,18 @@ true by construction, not by a stored default here, which is what keeps
 every fts5-only caller (including the offline recall-covers-grep eval's
 fts5 half) byte-identical to before this issue.
 
+SIDE EFFECT WORTH NAMING (review): with this on
+(the default), a ``vector``-backend call now ALSO resolves and applies
+``recall.relevance_floor.fts5`` (and its ``push.fts5`` sibling for the
+unprompted path) to the FTS5 side list it fuses in, even though the
+caller never selected ``fts5`` as its own backend. An operator who
+configures an fts5 floor for the fts5 dispatch path only, without
+realizing a vector call now reads it too, would see that floor start
+influencing vector recall output the moment this knob is on (which it
+is, by default). Setting ``recall.hybrid: false`` is the way to opt a
+deployment back out of that coupling, in addition to opting out of
+fusion itself.
+
 Precedence: ``ATHENAEUM_RECALL_HYBRID`` env (``1``/``true``/``yes``/``on``,
 case-insensitive, and their negations for false) > ``recall.hybrid`` yaml
 (a plain ``bool``) > default ``True``. No seed in ``_DEFAULTS``.

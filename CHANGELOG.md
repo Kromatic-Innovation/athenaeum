@@ -89,7 +89,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   together, since the widened vector requery does not carry it. New
   opt-out config knob `recall.hybrid` / `ATHENAEUM_RECALL_HYBRID` (default
   on for the vector dispatch path; the `fts5` and `keyword` paths never
-  consult it, so they stay byte-identical -- pinned by a new test). Of the
+  consult it, so they stay byte-identical -- pinned by a new test). Note
+  the coupling this floor-resolution creates, documented on
+  `resolve_recall_hybrid`: with hybrid on (the default), a `vector` call
+  now also resolves and applies `recall.relevance_floor.fts5` to the fts5
+  side list, even though the caller never selected the fts5 backend --
+  `recall.hybrid: false` opts back out of that coupling too. Of the
   17 remaining vector xfail entries, 6 overlap `_FTS5_XFAIL` outright
   (FTS5 also misses these, tracked by athenaeum#1789); the other 11 are a
   DIFFERENT failure mode -- FTS5's own top-5 (and the widened pool fed

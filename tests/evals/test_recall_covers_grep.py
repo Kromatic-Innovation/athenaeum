@@ -504,7 +504,7 @@ _FTS5_XFAIL: frozenset[tuple[str, str]] = frozenset(
 #: vector backend -- 17 of 52 (scale, probe) cases remain, measured
 #: 2026-09-17 against athenaeum#1792's reciprocal-rank-fusion hybrid (fuses
 #: a WIDENED vector list with a widened FTS5 list, both re-queried at
-#: `_HYBRID_FTS5_CANDIDATE_POOL` width over the same index root, each with
+#: `_HYBRID_CANDIDATE_POOL` width over the same index root, each with
 #: its own relevance floor applied before fusion -- see
 #: ``athenaeum.mcp_server.recall_search``'s hybrid block and
 #: ``athenaeum.search.reciprocal_rank_fusion``). Down from the 49 measured
@@ -521,18 +521,27 @@ _FTS5_XFAIL: frozenset[tuple[str, str]] = frozenset(
 #: (core: portal_design_reviewer, person_not_repo; medium:
 #: thorncastle_first_contact).
 #:
-#: Five of these seventeen are also in ``_FTS5_XFAIL`` above
+#: SIX of these seventeen are also in ``_FTS5_XFAIL`` above
 #: (confidentiality_rule and budget_threshold_current at both scales, plus
-#: medium's surname_is_ambiguous) -- fusion cannot surface a page neither
-#: input list ranks within its own widened window. The other twelve are
-#: cases where FTS5 itself reaches the page somewhere in its own ranking
-#: but the page's *grep*-reachability comes from a term that still ranks
-#: it outside BOTH backends' widened top-N for this probe's exact query
-#: wording -- a bm25-ranking / query-construction question for FTS5's own
-#: path (athenaeum#1789's scope) or the embedding model's own semantic gap,
-#: not something a fusion mechanism operating on ranked lists can repair
-#: without also widening the pool arbitrarily far (a cost/precision
-#: tradeoff, not a correctness bug in the fusion itself). Kept as one
+#: medium's surname_is_ambiguous AND medium's former_client_not_current --
+#: the latter is easy to miscount because ``_FTS5_XFAIL`` has no *core*
+#: entry for it, only medium) -- fusion cannot surface a page neither
+#: input list ranks within its own widened window; tracked by athenaeum#1789
+#: (FTS5's own query-construction path), not this issue.
+#:
+#: The other ELEVEN are a DIFFERENT failure mode, tracked by athenaeum#1800:
+#: FTS5's OWN top-5 -- and therefore the widened top-15 pool fed into
+#: fusion -- genuinely contains the expected page (these cases are absent
+#: from ``_FTS5_XFAIL``, i.e. the fts5-only coverage test passes them), but
+#: the FUSED list still drops it below `top_k`. This is reciprocal rank
+#: fusion's own scoring, not a candidate-pool-width problem: a hit present
+#: in BOTH input lists scores roughly DOUBLE a hit present in only one
+#: (`1/(k+rank_a) + 1/(k+rank_b)` vs. a lone `1/(k+rank)`), so with `k=60`
+#: enough moderately-ranked both-list hits can collectively outscore and
+#: crowd out a page that ranks well in only one list -- even though that
+#: page is exactly the one a plain grep and FTS5 alone both reach. See
+#: athenaeum#1800 for the eleven cases and the weighting/interleaving
+#: options considered. Kept as one
 #: explicit set, not a blanket "xfail everything for this backend", so a
 #: genuine per-case fix is visible one entry at a time.
 _VECTOR_XFAIL: frozenset[tuple[str, str]] = frozenset(
