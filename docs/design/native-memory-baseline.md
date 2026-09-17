@@ -169,6 +169,8 @@ The dimensions already defined for the north-star report
 | Turns and tool calls to answer | grep over 10,000 files is not free in wall-clock or tokens |
 | **Crossover scale** | the smallest scale at which Athenaeum's correctness exceeds native's, per probe class. This is the number the decision turns on |
 | **Index coverage** (`NATIVE_INDEX` only) | fraction of the corpus the truncated index still names, so a reader can see the cap bite |
+| **Cost per correct answer** (per arm, scale, probe class) | total input+output tokens for the cell divided by correct answers in the cell -- read cost in Phase 1; Phase 2 adds write cost amortised over the full probe set at that scale, with the raw write spend printed alongside. Undefined (never infinite or zero) when a cell has zero correct answers |
+| **Verdicts and cutoff scale** | the three §7 conditions read per scale (relationship use case won, no other use case lost, cost within 2×/1×/0.5× of the better native arm), and the smallest scale at or above `medium` where all three hold, or "none" with the failing condition named per scale |
 
 Reported per probe class and per scale, never as one aggregate, for the
 reason `tests/evals/data/corpus/README.md` gives: a single number cannot tell

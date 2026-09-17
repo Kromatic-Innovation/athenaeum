@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`tests/evals/north_star_report.py`: cost per correct answer, the
+  cost-ratio decision reading, and the three go/no-go verdicts (athenaeum#1734,
+  design lock `docs/design/native-memory-baseline.md` §6/§7).** Adds
+  `compute_cost_per_correct` (total input+output tokens for a
+  (probe_class, corpus_scale, arm) cell divided by correct answers in the
+  cell -- read cost only in Phase 1, plus write cost amortised over the
+  full probe set at that scale once Phase 2 `WriteCost` rows exist, with
+  raw write spend printed alongside; undefined, never infinite or zero,
+  when a cell has zero correct answers), `compute_cost_ratios` (Athenaeum's
+  cost against the better native arm's, read as `>2.0x fail`, `<=2.0x
+  limit`, `<=1.0x target`, `<=0.5x aspirational`), `compute_verdicts` (the
+  three §7 conditions per scale over the relationship-use-case probe
+  subset -- single_hop/multi_hop/disambiguation/temporal probes whose
+  expected pages are person or company type), and `compute_cutoff_scale`
+  (the smallest scale at or above `medium` where all three hold, or
+  `"none"` with the failing condition named per scale). `render_decision_block`
+  renders the result at the top of the report, before any dimension table.
 - **`docs/use-cases.md`: the north star decomposed into the questions memory
   is actually asked, and a kill criterion.** "Surface the right information at
   the right time" is a quality bar with no customer attached, and nothing in
