@@ -54,6 +54,7 @@ def _stub_run_probe_all_arms(
     search_backend: str,
     claude_binary: str,
     replicate: int,
+    mode: str = "cli",
 ) -> dict[str, RolloutRecord]:
     return _stub_records(probe_id, corpus_scale)
 
