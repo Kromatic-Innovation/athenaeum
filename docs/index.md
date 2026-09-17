@@ -123,6 +123,7 @@ Evidence, kept out of the reading path.
 - [Decomposition baseline](measurements/decomposition-baseline-2026-09-10.md)
 - [Attachment baseline](measurements/attachment-baseline-2026-09-15.md)
 - [Relatedness baseline](measurements/relatedness-baseline-2026-09-15.md)
+- [Native-memory baseline — measurement report](measurements/native-memory-baseline-2026-09-17.md) — the read-path comparison against Claude Code auto memory.
 - [Deploy SHA stamp](measurements/deploy-sha-stamp.md)
 - [LLM provider cost audit](measurements/audits/2026-08-06-llm-provider-cost-audit.md)
 
