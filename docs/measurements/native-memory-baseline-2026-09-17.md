@@ -344,9 +344,8 @@ measurement report above. Only the deterministic grading function changed.
 
 **Decision block, re-graded (verbatim from the re-graded report):**
 
-**Cutoff scale: `none`** — unchanged. No scale at or above `medium` passes
-all three conditions, before or after this re-grade. Failing condition per
-scale:
+**Cutoff scale: `none`** -- no scale at or above `medium` passed all three
+conditions. Failing condition per scale:
 
 - `core`: condition 1: relationship use case not won -- `push_breadcrumb_pull`
   7/9=0.778 <= best native (`native_grep`) 0.889; condition 2: worse than
@@ -358,10 +357,7 @@ scale:
   `fail` for `multi_hop` (ratio=4.445).
 - `medium`: condition 1: **pass**; condition 2: worse than native on
   `disambiguation` (0.000 < 1.000); condition 3: worst reading is `fail`
-  for `multi_hop` (ratio=2.523) — **previously `undefined` for `redundancy`
-  (§3's run 5 block), now defined and passing at 1.45x** (see below); the
-  worst reading is now `multi_hop`'s pre-existing fail, not a masked
-  `undefined`.
+  for `multi_hop` (ratio=2.523).
 - `medium_dense`: condition 1: **pass**; condition 2: worse than native on
   `disambiguation` (0.000 < 1.000); condition 3: worst reading is `fail`
   for `distractor_robustness` (ratio=4.381).
@@ -372,8 +368,7 @@ scale:
 - `small`: condition 1: relationship use case not won -- `push_breadcrumb_pull`
   7/9=0.778 <= best native (`native_grep`) 0.889; condition 2: worse than
   native on `disambiguation` (0.000 < 1.000); condition 3: worst reading is
-  `fail` for `disambiguation` (ratio=3.650) — previously `undefined` for
-  `redundancy`, now defined and passing (see below).
+  `fail` for `disambiguation` (ratio=3.650).
 
 | scale | cutoff eligible | condition 1 | condition 2 | condition 3 | reading | all pass |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -384,11 +379,19 @@ scale:
 | medium_verydense | no | fail | fail | fail | undefined | fail |
 | small | no | fail | fail | fail | fail | fail |
 
-The only column-level change from §3's run 5 table is the `reading` column
-at `medium` and `small` (`undefined` → `fail`); every `condition 1`/`2`/`3`
-cell and the `all pass` column are unchanged, and the cutoff scale is still
-`none`. The re-grade closes an open grading question, it does not change
-the go/no-go reading.
+**What changed from §3's run 5 block, read alongside the verbatim block
+above:** only the `reading` column at `medium` and `small` moves
+(`undefined` → `fail`). At `medium`, `redundancy`'s cost-per-correct cell
+was `undefined` (zero correct answers) in §3 and is now defined at 1.45x
+(`limit`, see the cost table below) once its one probe
+(`keelbridge_programme_scope`) flips correct -- so the scale's worst
+condition-3 reading is now `multi_hop`'s pre-existing 2.523x `fail`, no
+longer masked by `redundancy`'s `undefined`. `small` moves the same way:
+`redundancy` goes from `undefined` to defined-and-passing, and
+`disambiguation`'s pre-existing 3.650x `fail` becomes the worst reading.
+Every `condition 1`/`2`/`3` cell and the `all pass` column are unchanged,
+and the cutoff scale is still `none`. The re-grade closes an open grading
+question; it does not change the go/no-go reading.
 
 **Medium correctness, verdict arm vs. native, re-graded (athenaeum#1793):**
 
@@ -440,12 +443,35 @@ three conditions are all met. The other two flips are `disambiguation`'s
 delivered). **`disambiguation`'s `repo_not_person` probe — the cell named
 in §5/§6 as the open uid-vs-tag question — does NOT flip anywhere**: its
 answers cite the bare string `rowanwrenfield` (the page's name/tag
-vocabulary, truncated into the 400-character recall snippet), never the
-page's actual uid `repo-rowanwrenfield`; the ruling requires the literal
-uid string, and `rowanwrenfield` is not a substring of `repo-rowanwrenfield`
-normalized. That cell's §5/§6 finding is superseded by this addendum: it is
-not a case the athenaeum#1793 ruling resolves, and remains a correctness
-loss under either grading rule. Three of the seventeen flips land in a
+vocabulary, truncated into the 400-character recall snippet); the answer
+never contains the literal uid `repo-rowanwrenfield` as a substring, so the
+rule (which requires the *uid* to appear in the answer, not merely a
+fragment of it) is not satisfied. That cell's §5/§6 finding is superseded
+by this addendum: it is not a case the athenaeum#1793 ruling resolves, and
+remains a correctness loss under either grading rule.
+
+**Native arms checked, not just excluded by construction.** `_delivered_uids`
+wires `native_grep` into the same rule: its stored
+`transcript[0]["native_memory"]["loaded_memory_files"]` (the files its own
+read tool actually returned content for, in both cli and api mode -- the
+two constructors write the identical key) gives a uid-bearing basis the
+same way `recall` output does for `pull`/`push_breadcrumb_pull`, and 167 of
+the 174 `native_grep` rows in this store yield a non-empty delivered-uid
+set. Checked directly against the data: only 3 `native_grep` rows cite a
+literal `expected_uids` string in their answer at all, and all three were
+already correct under the pre-athenaeum#1793 tag rule (each answer quotes
+the target page's body verbatim, which contains both its tag and its uid) --
+so this rule produces zero `native_grep` flips on this dataset, in either
+direction; it is exercised, not inert, but has no effect here. `native_index`
+has no per-file tool output to extract a uid from (only the loaded
+`MEMORY.md` index text, which names pages by index line, not uid -- see
+`_native_loaded_uids`'s docstring) and is excluded structurally; 7 of its
+174 rows cite a literal `expected_uids` string, and none of them can flip
+under this rule. Neither native arm is denied a flip it would otherwise
+have earned: the check above is exhaustive over this store, not a sampled
+spot-check.
+
+Three of the seventeen flips land in a
 `push_breadcrumb_pull` (verdict-arm) cell -- `redundancy` at `medium`,
 `medium_verydense` and `small` -- but only `medium` is a cutoff-eligible
 scale (§7's decision reads only `medium` and `large`; `medium_dense`/
