@@ -84,6 +84,11 @@ load and its own tools, so it is worth one run to confirm the API-mode
 numbers, not the path the decision rests on. The report states which mode
 produced each cell.
 
+Selected via `run_probe_all_arms(mode=...)` or `tests/evals/north_star_cli.py
+--mode` (falls back to the `ATHENAEUM_EVAL_MODE` env var, default `api`) —
+`"api"` or `"cli"`, the same two values named wherever mode appears
+(issue athenaeum#1733).
+
 | Arm | Store | Index | Model's read path |
 |---|---|---|---|
 | `NATIVE_INDEX` | corpus pages materialised as topic files in an auto-memory directory | `MEMORY.md` built as one `name — description` line per page, then truncated exactly as Claude Code truncates it | index in context; topic files on demand |
@@ -94,12 +99,32 @@ memory becomes at that scale, so it runs at every scale; the truncation is
 the finding, not a confound. `NATIVE_GREP` isolates the no-index case so a
 result can say whether the index helped at all.
 
-In API mode the harness builds the index and applies the documented
-truncation itself (first 200 lines or 25KB, whichever comes first), pinned by
-a test, and injects it as the first user turn to mirror Claude Code's load.
-In CLI mode the auto-memory directory is supplied through
-`autoMemoryDirectory` in a settings file passed to the subprocess, so Claude
-Code performs its own load and truncation.
+In API mode the harness builds the index and applies the real cap itself
+(first 200 lines, then a further cut by STRING LENGTH past 25000 characters
+-- `NATIVE_INDEX_MAX_CHARS`, extracted from the 2.1.274 binary as `jW =
+25000`, not a `25 * 1024` approximation, and not UTF-8 bytes -- within that
+window, matching the real loader), pinned by a test, and injects it as the
+first user turn to mirror Claude Code's load, appending a reproduction of
+Claude Code 2.1.274's own truncation-notice template when the cap actually
+bound: a three-form size clause (lines-only, chars-only, or `"{N} lines and
+{X}"` when both are exceeded -- never the literal word "both"), the exact
+cut-count/start-line, and an 80-character word-boundary-cut snippet ending in
+a single `…`, all filled from the actual truncation performed (recorded as
+`truncated_by_harness`, since a harness truncation is a distinct fact from
+`truncated_by_claude_code`). In CLI mode
+the auto-memory directory is supplied through `autoMemoryDirectory`
+in a settings file passed to the subprocess, so Claude Code performs its own
+load and truncation.
+
+Each API-mode arm's system prompt mirrors what its real counterpart actually
+gives the model: the `PULL`-style arms are told a `recall` tool exists over
+the knowledge base and to use it before concluding it does not know, using
+the MCP server's own `recall` tool description and parameters
+(`query`/`top_k`/`with_pii`/`history`/`type`) rather than a paraphrase; the
+native arms are told their memory directory's path and that `MEMORY.md` (when
+present) is an index whose topic files are opened on demand with `grep`/
+`read`, mirroring Claude Code's own auto-memory instructions rather than the
+single-shot arms' "answer using only the context supplied" prompt.
 
 The recall relevance floor ships inactive and the shell hook does not apply
 it even when set (athenaeum#1665). The first run uses the floor **as

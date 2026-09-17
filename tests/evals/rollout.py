@@ -72,20 +72,23 @@ so no ``tests/fixtures/layer_declarations.py`` entry is needed.
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import uuid
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from enum import Enum
 from pathlib import Path
 from typing import Any
 
 from athenaeum.config import DEFAULT_CLASSIFY_MODEL
-from athenaeum.mcp_server import recall_search
+from athenaeum.entity_schema import declared_entity_classes
+from athenaeum.mcp_server import RECALL_TOOL_INPUT_SCHEMA, recall_search, recall_tool_docstring
 from athenaeum.provider import response_text as provider_response_text
 from athenaeum.push_metrics import estimate_tokens
 from athenaeum.search import get_backend
@@ -238,6 +241,22 @@ class RolloutRecord:
     injected_context_tokens: int | None = None
     turn_count: int = 0
     transcript: list[dict[str, Any]] = dataclasses.field(default_factory=list)
+    #: Issue athenaeum#1733: which execution path produced this record --
+    #: ``"api"`` (Anthropic Messages API tool-use loop, the primary path per
+    #: docs/design/native-memory-baseline.md §4) or ``"cli"`` (``claude -p``,
+    #: the fidelity spot-check). EVERY constructor in this module sets this
+    #: field EXPLICITLY -- every CLI runner passes ``"cli"``, every api
+    #: runner and every single-shot arm (NONE, PUSH_PAGES_UPPER_BOUND,
+    #: PUSH_BREADCRUMB, ORACLE -- unaffected by *mode*, they always call the
+    #: live Anthropic API directly) passes ``"api"``. The field's own default
+    #: (used only by a caller outside this module building a bare
+    #: ``RolloutRecord()`` directly) is ``"cli"`` -- the conservative choice,
+    #: never claiming api-mode fidelity a caller did not actually produce.
+    #: :meth:`from_payload` mirrors this: a payload persisted before this
+    #: field existed decodes via ``payload.get("mode", "cli")`` back-compat
+    #: (those rows were all produced by the ``claude -p`` path, since that
+    #: was the only path that existed then).
+    mode: str = "cli"
 
     @property
     def total_input_tokens(self) -> int:
@@ -274,6 +293,7 @@ class RolloutRecord:
             "injected_context_tokens": self.injected_context_tokens,
             "turn_count": self.turn_count,
             "transcript": self.transcript,
+            "mode": self.mode,
         }
 
     @classmethod
@@ -294,6 +314,12 @@ class RolloutRecord:
             injected_context_tokens=payload.get("injected_context_tokens"),
             turn_count=payload.get("turn_count", 0),
             transcript=payload.get("transcript", []),
+            # Back-compat: every row persisted before issue athenaeum#1733 was
+            # produced by the claude -p path (the only path that existed
+            # then), so an absent key decodes as "cli", never the current
+            # default of "api" -- the same discipline Arm._missing_ uses for
+            # the pre-athenaeum#1574 "push" alias.
+            mode=payload.get("mode", "cli"),
         )
 
 
@@ -366,6 +392,7 @@ def run_none(
         injected_context_tokens=None,
         turn_count=1,
         transcript=[{"system": _SYSTEM_PROMPT, "user": user_text, "answer": answer}],
+        mode="api",
     )
 
 
@@ -422,6 +449,7 @@ def run_push_pages_upper_bound(
                 "answer": answer,
             }
         ],
+        mode="api",
     )
 
 
@@ -573,6 +601,7 @@ def run_push_breadcrumb(
                 "answer": answer,
             }
         ],
+        mode="api",
     )
 
 
@@ -623,6 +652,7 @@ def run_oracle(
                 "answer": answer,
             }
         ],
+        mode="api",
     )
 
 
@@ -850,6 +880,7 @@ def run_pull(
         injected_context_tokens=None,
         turn_count=parsed.turn_count,
         transcript=parsed.transcript,
+        mode="cli",
     )
 
 
@@ -921,6 +952,7 @@ def run_push_breadcrumb_pull(
         injected_context_tokens=estimate_tokens(breadcrumb) if breadcrumb else 0,
         turn_count=parsed.turn_count,
         transcript=transcript,
+        mode="cli",
     )
 
 
@@ -939,15 +971,23 @@ def run_push_breadcrumb_pull(
 # the session transcript rather than recomputing the cap.
 # ---------------------------------------------------------------------------
 
-#: Claude Code's documented auto-memory load cap (200 lines OR 25KB,
-#: whichever comes first — https://code.claude.com/docs/en/memory, verified
-#: against live Claude Code 2.1.273 on 2026-09-16, see the design doc's §2).
-#: Used ONLY for reporting/assertions below and NEVER to pre-truncate
-#: anything the runner writes: :func:`materialize_native_memory` always
-#: writes the FULL index, and Claude Code performs the actual truncation —
-#: these constants exist purely to interpret what came back afterward.
+#: Claude Code's documented auto-memory load cap (200 lines OR 25000
+#: characters, whichever comes first — https://code.claude.com/docs/en/memory,
+#: verified against live Claude Code 2.1.273 on 2026-09-16, see the design
+#: doc's §2). ``NATIVE_INDEX_MAX_CHARS`` is 25000 exactly (Quine review,
+#: issue athenaeum#1733: extracted from the 2.1.274 binary as ``jW = 25000``),
+#: not a ``25 * 1024`` byte-budget approximation -- the two differ by 600
+#: and the real cap is the smaller number. Used for reporting/assertions in
+#: CLI mode and NEVER to pre-truncate anything :func:`materialize_native_memory`
+#: writes -- that function always writes the FULL index, and in CLI mode
+#: Claude Code performs the actual truncation; these constants exist there
+#: purely to interpret what came back afterward. Issue athenaeum#1733's api
+#: mode is the one deliberate exception: with no Claude Code process to
+#: perform the load, the harness applies these SAME constants itself via
+#: :func:`truncate_native_index` before injecting the index, so the
+#: truncation observed is identical either way.
 NATIVE_INDEX_MAX_LINES = 200
-NATIVE_INDEX_MAX_BYTES = 25 * 1024
+NATIVE_INDEX_MAX_CHARS = 25000
 
 #: Per-page index-line description length. A "sane length" clip (issue
 #: athenaeum#1725's own phrasing) so one wildly long page body cannot blow up
@@ -1311,6 +1351,7 @@ def run_native_index(
         injected_context_tokens=None,
         turn_count=parsed.turn_count,
         transcript=transcript,
+        mode="cli",
     )
 
 
@@ -1375,6 +1416,860 @@ def run_native_grep(
         injected_context_tokens=None,
         turn_count=parsed.turn_count,
         transcript=transcript,
+        mode="cli",
+    )
+
+
+# ---------------------------------------------------------------------------
+# API mode — Anthropic Messages API tool-use loop (issue athenaeum#1733,
+# design lock docs/design/native-memory-baseline.md §4)
+#
+# The four functions above (run_pull, run_push_breadcrumb_pull,
+# run_native_index, run_native_grep) all spawn a logged-in `claude -p`
+# subprocess -- high-fidelity, but unusable from a GitHub Actions runner or
+# any lane container, none of which carry a logged-in CLI. This section is
+# the API-backed twin of each: the SAME arm semantics (a genuine multi-turn
+# tool-use loop; choosing not to call a tool is a recorded outcome, never an
+# error), but driven directly over `client.messages.create(tools=...)`,
+# with the harness itself serving the tools a real MCP server or Claude
+# Code's own built-ins would otherwise provide:
+#   * `recall` -- an in-process call to `athenaeum.mcp_server.recall_search`
+#     over the materialized wiki, for PULL / PUSH_BREADCRUMB_PULL.
+#   * `grep` / `read` -- bounded, harness-served file search and read over
+#     the materialized native-memory directory, for NATIVE_INDEX /
+#     NATIVE_GREP. Confined to that directory (`_resolve_under_memory_dir`
+#     refuses anything outside it) and bounded (`_NATIVE_GREP_MAX_MATCHES`,
+#     `_NATIVE_READ_MAX_BYTES`) so a runaway grep at `large` scale cannot
+#     blow the token ceiling.
+#
+# Every function here emits its transcript in the SAME shape
+# `tests.evals.rollout.parse_stream` produces from a real stream-json
+# transcript (`{"type": "assistant", "message": {"content": [...], "usage":
+# {...}}}`, `{"type": "user", "message": {"content": [{"type": "tool_result",
+# "content": ...}]}}`) -- NOT a raw Messages-API message list -- so
+# `north_star_report._pull_delivered_text`, which scans exactly that shape,
+# needs no mode branch (issue athenaeum#1733's own AC). `RolloutRecord.mode`
+# is the only thing a caller needs to check to know which path produced a
+# row.
+# ---------------------------------------------------------------------------
+
+GREP_TOOL_NAME = "grep"
+READ_TOOL_NAME = "read"
+
+#: Bounds on api-mode ``grep`` output -- match COUNT, per-line length, and
+#: TOTAL bytes, all three (Quine review, issue athenaeum#1733: a count cap
+#: alone still lets a pathological pattern return unboundedly long lines, or
+#: a scale where even 50 short matches sum to more than is worth billing).
+#: Sized generously above what any real probe answer needs, so this never
+#: clips a legitimate result -- it exists to stop a runaway, not to shape a
+#: normal one. ``_NATIVE_READ_MAX_BYTES`` is the separate ``read`` tool's own
+#: bound (a single file, not a match list).
+_NATIVE_GREP_MAX_MATCHES = 50
+_NATIVE_GREP_MAX_LINE_CHARS = 300
+_NATIVE_GREP_MAX_TOTAL_BYTES = 8_000
+_NATIVE_READ_MAX_BYTES = 20_000
+
+#: Max tool-use round-trips before an api-mode loop gives up and returns
+#: whatever text it has -- never an error (mirrors run_pull/run_native_*'s
+#: "not calling a tool is a recorded outcome" contract: a loop that never
+#: converges on a final text answer records an empty answer, not a crash).
+_API_LOOP_MAX_TURNS = 6
+
+
+#: Issue athenaeum#1733, Quine review: a tool-using api-mode arm must not be
+#: sent the single-shot arms' ``_SYSTEM_PROMPT`` ("answer using ONLY the
+#: context supplied") -- that instruction actively discourages the model
+#: from ever calling a tool, since no context is "supplied" until it does.
+#: This is the PULL-style system prompt instead: it tells the model the
+#: `recall` tool exists and when to reach for it, mirroring what a real MCP
+#: connection's tool description implicitly conveys plus the explicit
+#: guidance a system prompt gives a model deciding whether to call it.
+_PULL_API_SYSTEM_PROMPT = (
+    "You are answering questions about a private knowledge base. You have a "
+    "`recall` tool that searches that knowledge base for pages relevant to a "
+    "query. Use it whenever the question may depend on information stored "
+    "in the knowledge base -- do not rely on outside knowledge or guess. "
+    "Only say you do not know once you have searched and found nothing "
+    "relevant to the question."
+)
+
+
+def _entity_classes_str_for(wiki_root: Path) -> str:
+    """The SAME declared-entity-classes string the real MCP server computes
+    for its ``recall`` tool description (:func:`create_server`'s own
+    ``_entity_classes_str``), so the api-mode tool's ``type`` parameter
+    description names the actual classes this materialized corpus declares,
+    not a placeholder."""
+    declared = sorted(declared_entity_classes(wiki_root))
+    return ", ".join(declared) if declared else "(none yet)"
+
+
+def _recall_tool_schema(wiki_root: Path) -> dict[str, Any]:
+    """The api-mode recall tool: named identically to :data:`RECALL_TOOL_NAME`
+    (the CLI path's MCP tool name) AND described with the MCP server's REAL
+    description text (:func:`athenaeum.mcp_server.recall_tool_docstring`) and
+    REAL input parameters (:data:`athenaeum.mcp_server.RECALL_TOOL_INPUT_SCHEMA`)
+    -- issue athenaeum#1733 Quine review: a two-sentence paraphrase is not
+    the same tool a real MCP connection would offer, and the model's
+    tool-choice behavior can depend on that description's actual content.
+
+    ``inspect.cleandoc`` is applied to the docstring for the SAME reason
+    FastMCP itself applies it (matching ``inspect.getdoc``'s normalization)
+    before turning a function's docstring into a served tool description --
+    the raw triple-quoted string still carries the source file's function-
+    body indentation; without cleaning, this schema's description would
+    never byte-match what a real MCP client actually receives from the
+    live ``recall`` tool (pinned by
+    ``tests/test_recall_tool_schema_parity.py``).
+    """
+    full_doc = inspect.cleandoc(recall_tool_docstring(_entity_classes_str_for(wiki_root)))
+    # FastMCP's own `.description` is only the SUMMARY portion of a
+    # docstring -- everything before the "Args:" section, which it instead
+    # decomposes into each parameter's own schema-level description (already
+    # mirrored, separately, in :data:`RECALL_TOOL_INPUT_SCHEMA`). Splitting
+    # here the same way is what makes this description byte-match the REAL
+    # served tool's, pinned by ``tests/test_recall_tool_schema_parity.py``,
+    # rather than sending the model a description with a redundant Args:
+    # section its own tool schema already encodes structurally.
+    summary = full_doc.split("\n\nArgs:")[0].strip()
+    return {
+        "name": RECALL_TOOL_NAME,
+        "description": summary,
+        "input_schema": RECALL_TOOL_INPUT_SCHEMA,
+    }
+
+
+def _native_index_system_prompt(memory_dir: Path) -> str:
+    """Mirrors Claude Code's real auto-memory instructions (issue
+    athenaeum#1733, Quine review — §4/design doc §2): the model is told
+    where its memory directory lives, that ``MEMORY.md`` is an index rather
+    than the full content, and that topic files are opened on demand with
+    ``grep``/``read`` — not a single-shot “ONLY the context supplied” prompt.
+    """
+    return (
+        f"You are Claude Code working on a project whose memory directory is "
+        f"at {memory_dir}. MEMORY.md, included below, is an INDEX — one line "
+        f"per saved topic, not the full content. When the index line is not "
+        f"enough, use your `read` tool to open that topic's own file in the "
+        f"memory directory, or your `grep` tool to search it, for the full "
+        f"detail."
+    )
+
+
+def _native_grep_system_prompt(memory_dir: Path) -> str:
+    """Same mirroring as :func:`_native_index_system_prompt`, for the arm
+    with no index at all: the model is told its memory directory's path and
+    that it must search rather than read an index that does not exist."""
+    return (
+        f"You are Claude Code working on a project whose memory directory is "
+        f"at {memory_dir}. There is no MEMORY.md index for this project — "
+        f"use your `grep` tool to search the topic files in that directory, "
+        f"and your `read` tool to open one once you find it."
+    )
+
+
+#: Max chars of the first cut-off line shown in the ``WARNING:`` marker's
+#: quoted preview -- matches the real loader's own ``Nq(M, 80)`` (Quine
+#: review, issue athenaeum#1733: extracted from the 2.1.274 binary).
+_NATIVE_INDEX_WARNING_SNIPPET_MAX_CHARS = 80
+
+#: The single-character ellipsis (U+2026) the real loader's ``Nq`` suffixes
+#: a cut preview with -- NOT three ASCII periods.
+_ELLIPSIS = "…"
+
+
+def _format_char_budget(n: int) -> str:
+    """*n* characters, formatted the way the real loader's own size clause
+    renders a count -- one decimal place, ``KB`` suffix. Used for BOTH the
+    measured size and the limit itself (``_format_char_budget(NATIVE_INDEX_MAX_CHARS)``),
+    so the two numbers in a size clause are never rendered by two different
+    unit conventions."""
+    return f"{n / 1024:.1f}KB"
+
+
+def _real_line_count(text: str) -> int:
+    """Line count the way the real loader counts it (Quine review, issue
+    athenaeum#1733): the STRIPPED text's newline count plus one, not
+    ``len(text.splitlines())`` -- these agree for ordinary content but not
+    for edge cases (trailing blank lines, no trailing newline), and the
+    ruling is explicit that the real loader strips first. ``0`` for an
+    empty/whitespace-only *text*."""
+    stripped = text.strip()
+    return stripped.count("\n") + 1 if stripped else 0
+
+
+def _native_index_warning_snippet(line: str) -> str:
+    """Reproduces the real loader's ``Nq(M, 80)``: at most 80 characters,
+    cut at a WORD boundary (never mid-word) when the line is longer, suffixed
+    with a single ``…`` (U+2026) when cut."""
+    stripped = line.strip()
+    if len(stripped) <= _NATIVE_INDEX_WARNING_SNIPPET_MAX_CHARS:
+        return stripped
+    window = stripped[:_NATIVE_INDEX_WARNING_SNIPPET_MAX_CHARS]
+    last_space = window.rfind(" ")
+    if last_space > 0:
+        window = window[:last_space]
+    return window + _ELLIPSIS
+
+
+def _native_index_text_with_warning(written: str, truncated: str) -> tuple[str, bool]:
+    """Returns ``(text_to_inject, was_truncated)``. *truncated* is
+    :func:`truncate_native_index`'s pure output (never touched by this
+    function -- the cap arithmetic it pins stays exactly as tested); when it
+    differs from *written*, this function APPENDS the ``WARNING:`` marker,
+    reproducing Claude Code 2.1.274's own truncation-notice template
+    (extracted from the binary, Quine review issue athenaeum#1733):
+
+        (blank line)
+        > WARNING: MEMORY.md is {N lines (limit: 200) | X (limit: Y) --
+        index entries are too long | N lines and X}. Only part of it was
+        loaded: {M of N lines were cut off, starting at line L ("...…") |
+        everything after the first n characters of line 1 was cut off}.
+        Keep index entries to one line under ~200 chars; move detail into
+        topic files.
+
+    N/X/M/L are filled from THIS truncation (never hardcoded): N is
+    *written*'s real line count (:func:`_real_line_count`), X its total
+    character length rendered by the SAME formatter as the limit
+    (:func:`_format_char_budget`), M the count of real lines actually
+    dropped, L the 1-indexed line number the drop starts at, and the quoted
+    preview is :func:`_native_index_warning_snippet` of that first dropped
+    line. When even the FIRST line does not fit (``L`` would be 1 but ZERO
+    complete lines were included), the continuation clause switches to the
+    line-1-partial form instead -- there is no complete first line to quote.
+    The size clause has three forms (never a bare "both"): lines-only,
+    chars-only, or -- when both caps are exceeded -- ``"{N} lines and
+    {X}"``. The ``> WARNING:`` prefix is kept verbatim -- it is what
+    :func:`_native_index_coverage`'s own CLI-mode detector keys on.
+    """
+    written_lines = written.splitlines(keepends=True)
+    truncated_lines = truncated.splitlines(keepends=True)
+    was_truncated = len(truncated_lines) < len(written_lines)
+    if not was_truncated:
+        return truncated, False
+
+    total_lines = _real_line_count(written)
+    total_chars = len(written)
+    cutoff = len(truncated_lines)
+    cutoff_real = _real_line_count(truncated)
+    cut_count = total_lines - cutoff_real
+    start_line = cutoff_real + 1
+
+    exceeded_lines = total_lines > NATIVE_INDEX_MAX_LINES
+    exceeded_chars = total_chars > NATIVE_INDEX_MAX_CHARS
+    char_clause = (
+        f"{_format_char_budget(total_chars)} (limit: {_format_char_budget(NATIVE_INDEX_MAX_CHARS)})"
+    )
+    if exceeded_lines and exceeded_chars:
+        size_clause = f"{total_lines} lines and {char_clause}"
+    elif exceeded_lines:
+        size_clause = f"{total_lines} lines (limit: {NATIVE_INDEX_MAX_LINES})"
+    else:
+        # Em dash, matching the real template exactly (Quine review, issue
+        # athenaeum#1733) -- no lint in this repo forbids it (it already
+        # appears throughout this module's own docstrings).
+        size_clause = f"{char_clause} — index entries are too long"
+
+    if cutoff_real == 0:
+        # Not even line 1 fit -- there is no complete dropped line to quote,
+        # so the continuation names how many characters of line 1 itself
+        # were kept before the cut, not a line range.
+        continuation = (
+            f"everything after the first {NATIVE_INDEX_MAX_CHARS} characters "
+            f"of line 1 was cut off"
+        )
+    else:
+        snippet = (
+            _native_index_warning_snippet(written_lines[cutoff])
+            if cutoff < len(written_lines)
+            else ""
+        )
+        continuation = (
+            f'{cut_count} of {total_lines} lines were cut off, starting at line '
+            f'{start_line} ("{snippet}")'
+        )
+
+    warning = (
+        f"\n> WARNING: MEMORY.md is {size_clause}. Only part of it was loaded: "
+        f"{continuation}. Keep index entries to one line under "
+        f"~200 chars; move detail into topic files.\n"
+    )
+    return truncated + warning, True
+
+
+def _native_grep_tool_schema() -> dict[str, Any]:
+    return {
+        "name": GREP_TOOL_NAME,
+        "description": (
+            "Search the markdown files in the memory directory for a substring or regex "
+            "pattern (case-insensitive). Returns matching lines with their file path and "
+            "line number."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"pattern": {"type": "string", "description": "substring or regex"}},
+            "required": ["pattern"],
+        },
+    }
+
+
+def _native_read_tool_schema() -> dict[str, Any]:
+    return {
+        "name": READ_TOOL_NAME,
+        "description": "Read the full contents of one file in the memory directory, by path.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"path": {"type": "string", "description": "file path to read"}},
+            "required": ["path"],
+        },
+    }
+
+
+def _resolve_under_memory_dir(memory_dir: Path, raw_path: str) -> Path | None:
+    """Resolve *raw_path* against *memory_dir*, refusing anything that
+    escapes it (an absolute path elsewhere, or a ``..`` traversal). Returns
+    ``None`` rather than raising -- a confined tool executor reports an
+    error string back to the model, exactly like a real file-not-found,
+    never crashes the rollout."""
+    base = memory_dir.resolve()
+    candidate = Path(raw_path)
+    resolved = candidate.resolve() if candidate.is_absolute() else (base / candidate).resolve()
+    try:
+        resolved.relative_to(base)
+    except ValueError:
+        return None
+    return resolved
+
+
+def _native_grep_executor(memory_dir: Path, tool_input: Mapping[str, Any]) -> str:
+    pattern_raw = str(tool_input.get("pattern", ""))
+    if not pattern_raw:
+        return "error: empty pattern"
+    try:
+        pattern = re.compile(pattern_raw, re.IGNORECASE)
+    except re.error as exc:
+        return f"error: invalid pattern: {exc}"
+    matches: list[str] = []
+    total_bytes = 0
+    for path in sorted(memory_dir.rglob("*.md")):
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            if not pattern.search(line):
+                continue
+            clipped_line = line.strip()[:_NATIVE_GREP_MAX_LINE_CHARS]
+            entry = f"{path.relative_to(memory_dir)}:{lineno}: {clipped_line}"
+            entry_bytes = len(entry.encode("utf-8")) + 1  # +1 for the joining newline
+            if (
+                len(matches) >= _NATIVE_GREP_MAX_MATCHES
+                or total_bytes + entry_bytes > _NATIVE_GREP_MAX_TOTAL_BYTES
+            ):
+                matches.append("[truncated: max matches or max bytes reached]")
+                return "\n".join(matches)
+            matches.append(entry)
+            total_bytes += entry_bytes
+    return "\n".join(matches) if matches else "no matches"
+
+
+def _native_read_executor(
+    memory_dir: Path, tool_input: Mapping[str, Any], *, loaded: dict[str, str]
+) -> str:
+    # Resolve ONCE and reuse for both the confinement check AND the later
+    # relative-path key -- Quine review, issue athenaeum#1733: a two-arg
+    # comparison of a RESOLVED path (what ``_resolve_under_memory_dir``
+    # returns) against an UNRESOLVED ``memory_dir`` raises ``ValueError`` on
+    # any host where the base scratch directory is itself a symlink (macOS's
+    # ``/tmp`` -> ``/private/tmp`` is exactly this case), aborting every
+    # ``read`` call and, per :func:`run_api_tool_loop`'s never-raise
+    # contract, the whole probe. Using the SAME resolved base throughout
+    # this function is what makes the comparison symlink-safe.
+    base = memory_dir.resolve()
+    raw_path = str(tool_input.get("path", ""))
+    resolved = _resolve_under_memory_dir(memory_dir, raw_path)
+    if resolved is None or not resolved.is_file():
+        return f"error: path not found or outside the memory directory: {raw_path!r}"
+    try:
+        text = resolved.read_text(encoding="utf-8")
+    except OSError as exc:
+        return f"error: could not read {raw_path!r}: {exc}"
+    truncated = text[:_NATIVE_READ_MAX_BYTES]
+    loaded[str(resolved.relative_to(base))] = truncated
+    return truncated
+
+
+def truncate_native_index(
+    text: str,
+    *,
+    max_lines: int = NATIVE_INDEX_MAX_LINES,
+    max_chars: int = NATIVE_INDEX_MAX_CHARS,
+) -> str:
+    """Apply Claude Code's documented auto-memory load cap to *text* --
+    the first *max_lines* lines, THEN (within that window) cut further by
+    cumulative STRING LENGTH once past *max_chars* (design doc §2/§4) -- so
+    api-mode NATIVE_INDEX can inject the SAME truncated index CLI mode
+    receives from Claude Code's own loader, rather than the full,
+    untruncated ``MEMORY.md``.
+
+    Counted by Python ``str`` length, NOT UTF-8 encoded bytes (Quine review,
+    issue athenaeum#1733) -- the real loader measures string length the way
+    its own runtime does, and this corpus's index lines contain multi-byte
+    characters (an em dash between name and description) that a byte count
+    would over-weight relative to the real cap. The line cap is applied
+    FIRST and the char cap only within what remains, matching the real
+    loader's own two-stage behavior, not two independent caps taken as a
+    minimum over the whole file.
+
+    Counts whole lines only: a line that would push the cumulative char
+    count past *max_chars* is dropped in full, never split -- matching the
+    CLI path's own observation (`_native_index_coverage`'s docstring) that
+    the real loader's truncation is a content boundary, not an arbitrary
+    character cut. Never raises; an empty *text* returns ``""``.
+    """
+    lines = text.splitlines(keepends=True)
+    out: list[str] = []
+    total_chars = 0
+    for line in lines[:max_lines]:
+        line_chars = len(line)
+        if total_chars + line_chars > max_chars:
+            break
+        out.append(line)
+        total_chars += line_chars
+    return "".join(out)
+
+
+def _api_response_blocks(response: Any) -> list[dict[str, Any]]:
+    """Normalize ``response.content`` into plain dicts -- ``{"type": "text",
+    "text": ...}`` or ``{"type": "tool_use", "id": ..., "name": ...,
+    "input": ...}`` -- so the loop below (and the transcript it records)
+    never touches SDK block objects directly."""
+    blocks: list[dict[str, Any]] = []
+    for block in getattr(response, "content", None) or []:
+        btype = getattr(block, "type", None)
+        if btype == "text":
+            blocks.append({"type": "text", "text": str(getattr(block, "text", "") or "")})
+        elif btype == "tool_use":
+            raw_input = getattr(block, "input", None)
+            blocks.append(
+                {
+                    "type": "tool_use",
+                    "id": str(getattr(block, "id", "") or ""),
+                    "name": str(getattr(block, "name", "") or ""),
+                    "input": raw_input if isinstance(raw_input, dict) else {},
+                }
+            )
+    return blocks
+
+
+def run_api_tool_loop(
+    *,
+    user_prompt: str,
+    system: str,
+    tools: list[dict[str, Any]],
+    tool_executor: Callable[[str, dict[str, Any]], str],
+    client: Any,
+    session: EvalSession,
+    model: str,
+    max_turns: int = _API_LOOP_MAX_TURNS,
+) -> tuple[str, list[ToolCall], list[TurnTokenUsage], int, list[dict[str, Any]]]:
+    """Drive one Anthropic Messages API tool-use loop to completion (or
+    *max_turns*), starting from a single user message.
+
+    *system* has NO default (Quine review, issue athenaeum#1733): every
+    caller must pass an arm-appropriate prompt explicitly -- there is no
+    safe generic fallback, and the single-shot arms' own ``_SYSTEM_PROMPT``
+    ("answer using ONLY the context supplied") is actively WRONG for a
+    tool-using loop, since it discourages the very tool call this loop
+    exists to observe. A missing *system* is a caller bug, not a case to
+    silently paper over with a default that would be wrong for every arm
+    that forgot to pass one.
+
+    Returns ``(answer, tool_calls, turn_tokens, turn_count, transcript)`` --
+    the exact tuple every api-mode arm function assembles its
+    :class:`RolloutRecord` from. *tool_executor* is called as
+    ``tool_executor(name, tool_input)`` for every ``tool_use`` block the
+    model emits, in order, and must never raise (a confined executor
+    returns an error STRING on a bad input, per :func:`_native_read_executor`
+    / :func:`_native_grep_executor`'s own contract) -- an executor that
+    raises would abort the rollout the same way a genuine ``claude -p``
+    spawn failure does, which is not this loop's contract: choosing a bad
+    tool input is the model's mistake to observe, not the harness's to
+    crash on.
+
+    Never raises on a loop that never calls a tool at all (a legitimate
+    recorded outcome, same as :func:`parse_pull_stream`), nor on one that
+    exhausts *max_turns* without a final text answer (returns whatever text
+    was last seen, possibly "").
+    """
+    messages: list[dict[str, Any]] = [{"role": "user", "content": user_prompt}]
+    transcript: list[dict[str, Any]] = [
+        {"type": "user", "message": {"content": [{"type": "text", "text": user_prompt}]}}
+    ]
+    tool_calls: list[ToolCall] = []
+    turn_tokens: list[TurnTokenUsage] = []
+    answer = ""
+    turn = 0
+
+    for _ in range(max_turns):
+        turn += 1
+        response = client.messages.create(
+            model=model,
+            max_tokens=1024,
+            system=system,
+            messages=messages,
+            tools=tools,
+        )
+        usage = _observe_turn(session, model, response, turn=turn)
+        turn_tokens.append(usage)
+        blocks = _api_response_blocks(response)
+        transcript.append(
+            {
+                "type": "assistant",
+                "message": {
+                    "content": blocks,
+                    "usage": {
+                        "input_tokens": usage.input_tokens,
+                        "output_tokens": usage.output_tokens,
+                    },
+                },
+            }
+        )
+        messages.append({"role": "assistant", "content": blocks})
+
+        text_blocks = [b["text"] for b in blocks if b["type"] == "text" and b["text"]]
+        if text_blocks:
+            answer = text_blocks[-1]
+        tool_use_blocks = [b for b in blocks if b["type"] == "tool_use"]
+        stop_reason = getattr(response, "stop_reason", None)
+        if not tool_use_blocks or (stop_reason is not None and stop_reason != "tool_use"):
+            break
+
+        tool_result_content: list[dict[str, Any]] = []
+        for block in tool_use_blocks:
+            name = block["name"]
+            tool_input = block["input"]
+            query = str(tool_input.get("query", tool_input))
+            tool_calls.append(ToolCall(name=name, query=query))
+            try:
+                result_text = tool_executor(name, tool_input)
+            except Exception as exc:  # noqa: BLE001 -- never-raise contract (Quine review)
+                # A confined executor is documented to return an error
+                # STRING rather than raise -- but "never raise" is this
+                # loop's OWN contract, not something it may assume every
+                # executor upholds perfectly. Catching here turns an
+                # unexpected executor exception into an ordinary
+                # tool_result the model sees (exactly like a bad path or a
+                # bad regex already produces), rather than aborting the
+                # whole rollout the way a genuine claude -p spawn failure
+                # does -- that asymmetry would be a mode-dependent error
+                # surface, which this module's parity goal forbids.
+                result_text = f"error: tool {name!r} raised {exc.__class__.__name__}: {exc}"
+            tool_result_content.append(
+                {"type": "tool_result", "tool_use_id": block["id"], "content": result_text}
+            )
+        transcript.append({"type": "user", "message": {"content": tool_result_content}})
+        messages.append({"role": "user", "content": tool_result_content})
+
+    return answer, tool_calls, turn_tokens, turn, transcript
+
+
+def run_pull_api(
+    probe: Probe,
+    wiki_root: Path,
+    cache_dir: Path,
+    corpus_scale: str,
+    *,
+    client: Any,
+    session: EvalSession,
+    model: str = DEFAULT_ROLLOUT_MODEL,
+    search_backend: str = "fts5",
+) -> RolloutRecord:
+    """API-mode PULL arm: the ``recall`` tool is served in-process (a direct
+    call to :func:`athenaeum.mcp_server.recall_search` over *wiki_root* --
+    exactly the function the shipped MCP server itself calls, same as
+    :func:`run_push_pages_upper_bound`'s reuse), rather than spawned via a
+    scoped ``claude -p --mcp-config``. Takes *wiki_root* directly (unlike
+    :func:`run_pull`, which takes the knowledge root and lets ``athenaeum
+    serve`` derive the wiki root itself) because there is no subprocess
+    here to do that derivation.
+    """
+
+    def _executor(name: str, tool_input: dict[str, Any]) -> str:
+        if name != RECALL_TOOL_NAME:
+            return f"error: unknown tool {name!r}"
+        # *search_backend* is the SAME parameter ``run_probe_all_arms``
+        # threads to every other arm (CLI PULL's own ``--search-backend``
+        # included) -- never a second, independently-defaulted value that
+        # could silently diverge between modes (Quine review, item 9).
+        # ``extra_roots``/``caller_audience``/``config``/``tool_use_id``/
+        # ``session_resolver`` are the real server's OTHER ``recall_search``
+        # kwargs (see ``athenaeum.mcp_server.create_server``'s own ``recall``
+        # closure) and are intentionally absent here: this materialized eval
+        # corpus has no scope-aware audience or per-deployment config to
+        # pass, and there is no MCP tool-use session for the resolver to key
+        # on -- api mode measures the SAME retrieval call with those inputs
+        # at their defaults, not a degraded one.
+        return recall_search(
+            wiki_root,
+            str(tool_input.get("query", "")),
+            top_k=int(tool_input.get("top_k") or 5),
+            search_backend=search_backend,
+            cache_dir=cache_dir,
+            with_pii=bool(tool_input.get("with_pii", False)),
+            history=bool(tool_input.get("history", False)),
+            type_filter=tool_input.get("type"),
+        )
+
+    answer, tool_calls, turn_tokens, turn_count, transcript = run_api_tool_loop(
+        user_prompt=probe.query,
+        tools=[_recall_tool_schema(wiki_root)],
+        tool_executor=_executor,
+        client=client,
+        session=session,
+        model=model,
+        system=_PULL_API_SYSTEM_PROMPT,
+    )
+    return RolloutRecord(
+        arm=Arm.PULL,
+        probe_id=probe.id,
+        probe_class=probe.probe_class,
+        corpus_scale=corpus_scale,
+        answer=answer,
+        turn_tokens=turn_tokens,
+        tool_calls=tool_calls,
+        recall_called=bool(tool_calls),
+        injected_context_tokens=None,
+        turn_count=turn_count,
+        transcript=transcript,
+        mode="api",
+    )
+
+
+def run_push_breadcrumb_pull_api(
+    probe: Probe,
+    knowledge_root: Path,
+    hook_home: Path,
+    cache_dir: Path,
+    corpus_scale: str,
+    *,
+    client: Any,
+    session: EvalSession,
+    model: str = DEFAULT_ROLLOUT_MODEL,
+    search_backend: str = "fts5",
+    context_fn: Callable[..., str] | None = None,
+    wiki_root: Path | None = None,
+) -> RolloutRecord:
+    """API-mode PUSH_BREADCRUMB_PULL: the breadcrumb is assembled by
+    ACTUALLY RUNNING the shipped hooks, exactly like
+    :func:`run_push_breadcrumb_pull` -- only the tool-use loop itself is
+    API-backed rather than a ``claude -p`` spawn. *wiki_root* defaults to
+    ``knowledge_root / "wiki"`` (:meth:`tests.evals.corpus.Corpus.materialize`'s
+    own layout), matching what ``athenaeum serve --path knowledge_root``
+    would derive for the CLI path.
+    """
+    assemble = context_fn or build_push_breadcrumb_context
+    breadcrumb = assemble(knowledge_root, hook_home, probe.query)
+    resolved_wiki_root = wiki_root if wiki_root is not None else knowledge_root / "wiki"
+    prompt_text = f"{breadcrumb}\n\n{probe.query}" if breadcrumb else probe.query
+
+    def _executor(name: str, tool_input: dict[str, Any]) -> str:
+        if name != RECALL_TOOL_NAME:
+            return f"error: unknown tool {name!r}"
+        # Same *search_backend* parity note as :func:`run_pull_api`'s own
+        # executor -- see that docstring comment for which real server
+        # kwargs are intentionally absent here.
+        return recall_search(
+            resolved_wiki_root,
+            str(tool_input.get("query", "")),
+            top_k=int(tool_input.get("top_k") or 5),
+            search_backend=search_backend,
+            cache_dir=cache_dir,
+            with_pii=bool(tool_input.get("with_pii", False)),
+            history=bool(tool_input.get("history", False)),
+            type_filter=tool_input.get("type"),
+        )
+
+    answer, tool_calls, turn_tokens, turn_count, loop_transcript = run_api_tool_loop(
+        user_prompt=prompt_text,
+        tools=[_recall_tool_schema(resolved_wiki_root)],
+        tool_executor=_executor,
+        client=client,
+        session=session,
+        model=model,
+        system=_PULL_API_SYSTEM_PROMPT,
+    )
+    # Same transcript[0] shape run_push_breadcrumb_pull uses, so
+    # north_star_report._push_delivered_text's transcript[0]["pushed_context"]
+    # read needs no mode branch either.
+    transcript = [{"pushed_context": breadcrumb}, *loop_transcript]
+    return RolloutRecord(
+        arm=Arm.PUSH_BREADCRUMB_PULL,
+        probe_id=probe.id,
+        probe_class=probe.probe_class,
+        corpus_scale=corpus_scale,
+        answer=answer,
+        turn_tokens=turn_tokens,
+        tool_calls=tool_calls,
+        recall_called=bool(tool_calls),
+        injected_context_tokens=estimate_tokens(breadcrumb) if breadcrumb else 0,
+        turn_count=turn_count,
+        transcript=transcript,
+        mode="api",
+    )
+
+
+def run_native_index_api(
+    probe: Probe,
+    materialize_root: Path,
+    corpus_scale: str,
+    *,
+    client: Any,
+    session: EvalSession,
+    model: str = DEFAULT_ROLLOUT_MODEL,
+) -> RolloutRecord:
+    """API-mode NATIVE_INDEX: the harness itself builds the full index,
+    applies the documented truncation (:func:`truncate_native_index`), and
+    injects the truncated result as the FIRST user turn (design doc §4) --
+    prepended to the probe's query in one message, the same shape
+    :func:`run_push_breadcrumb_pull` already uses for its own caller-
+    assembled context. ``grep``/``read`` tools are served over the
+    materialized topic-file directory so the model can still open a page
+    the index names.
+
+    Index coverage is computed directly from what THIS function injected
+    (the truncated text), never re-derived by reading anything back --
+    unlike the CLI path (:func:`read_loaded_memory_files`), there is no
+    separate loader here whose behavior needs observing after the fact:
+    the harness IS the loader in api mode.
+    """
+    corpus = build_corpus(corpus_scale)
+    memory_dir = materialize_native_memory(corpus, materialize_root, write_index=True)
+    index_path = memory_dir / "MEMORY.md"
+    written_index_text = index_path.read_text(encoding="utf-8") if index_path.exists() else ""
+    truncated_index_text = truncate_native_index(written_index_text)
+    # Inject the SAME ``WARNING:`` marker text Claude Code's own truncated
+    # load ends with (Quine review, issue athenaeum#1733) -- so the model
+    # sees an identical truncation signal either mode produces, and
+    # ``injected_index_text`` (not the bare capped text) is what actually
+    # goes in front of the model AND what coverage is computed from below.
+    injected_index_text, was_truncated = _native_index_text_with_warning(
+        written_index_text, truncated_index_text
+    )
+    coverage = _native_index_coverage(corpus, written_index_text, injected_index_text)
+    coverage_dict = dataclasses.asdict(coverage)
+    # Rename/override for api mode (Quine review): ``truncated_by_claude_code``
+    # is a claim about WHO truncated the index, and in api mode that is
+    # always false -- THIS harness truncated it, not a Claude Code process.
+    # ``truncated_by_harness`` is the api-mode-only fact
+    # ``_native_index_text_with_warning`` already decided; recording it under
+    # its own name (rather than overloading the CLI field) means a reader of
+    # a stored row can tell which of the two ever fired, per row, without
+    # cross-referencing ``mode``.
+    coverage_dict["truncated_by_claude_code"] = False
+    coverage_dict["truncated_by_harness"] = was_truncated
+
+    prompt_text = f"Memory index (MEMORY.md):\n\n{injected_index_text}\n\nQuestion: {probe.query}"
+    loaded_files: dict[str, str] = {}
+
+    def _executor(name: str, tool_input: dict[str, Any]) -> str:
+        if name == GREP_TOOL_NAME:
+            return _native_grep_executor(memory_dir, tool_input)
+        if name == READ_TOOL_NAME:
+            return _native_read_executor(memory_dir, tool_input, loaded=loaded_files)
+        return f"error: unknown tool {name!r}"
+
+    answer, tool_calls, turn_tokens, turn_count, loop_transcript = run_api_tool_loop(
+        user_prompt=prompt_text,
+        tools=[_native_grep_tool_schema(), _native_read_tool_schema()],
+        tool_executor=_executor,
+        client=client,
+        session=session,
+        model=model,
+        system=_native_index_system_prompt(memory_dir),
+    )
+    transcript = [
+        {
+            "native_memory": {
+                **coverage_dict,
+                "loaded_index_text": injected_index_text,
+            }
+        },
+        *loop_transcript,
+    ]
+    return RolloutRecord(
+        arm=Arm.NATIVE_INDEX,
+        probe_id=probe.id,
+        probe_class=probe.probe_class,
+        corpus_scale=corpus_scale,
+        answer=answer,
+        turn_tokens=turn_tokens,
+        tool_calls=tool_calls,
+        recall_called=False,
+        injected_context_tokens=None,
+        turn_count=turn_count,
+        transcript=transcript,
+        mode="api",
+    )
+
+
+def run_native_grep_api(
+    probe: Probe,
+    materialize_root: Path,
+    corpus_scale: str,
+    *,
+    client: Any,
+    session: EvalSession,
+    model: str = DEFAULT_ROLLOUT_MODEL,
+) -> RolloutRecord:
+    """API-mode NATIVE_GREP: same materialized topic files as
+    :func:`run_native_grep`, no ``MEMORY.md``, harness-served ``grep``/
+    ``read`` tools over the directory.
+    """
+    corpus = build_corpus(corpus_scale)
+    memory_dir = materialize_native_memory(corpus, materialize_root, write_index=False)
+    prompt_text = (
+        f"The knowledge base is a directory of markdown files at {memory_dir}. "
+        f"Use your grep and read tools to find the answer.\n\n"
+        f"Question: {probe.query}"
+    )
+    loaded_files: dict[str, str] = {}
+
+    def _executor(name: str, tool_input: dict[str, Any]) -> str:
+        if name == GREP_TOOL_NAME:
+            return _native_grep_executor(memory_dir, tool_input)
+        if name == READ_TOOL_NAME:
+            return _native_read_executor(memory_dir, tool_input, loaded=loaded_files)
+        return f"error: unknown tool {name!r}"
+
+    answer, tool_calls, turn_tokens, turn_count, loop_transcript = run_api_tool_loop(
+        user_prompt=prompt_text,
+        tools=[_native_grep_tool_schema(), _native_read_tool_schema()],
+        tool_executor=_executor,
+        client=client,
+        session=session,
+        model=model,
+        system=_native_grep_system_prompt(memory_dir),
+    )
+    transcript = [
+        {"native_memory": {"memory_dir": str(memory_dir), "loaded_memory_files": loaded_files}},
+        *loop_transcript,
+    ]
+    return RolloutRecord(
+        arm=Arm.NATIVE_GREP,
+        probe_id=probe.id,
+        probe_class=probe.probe_class,
+        corpus_scale=corpus_scale,
+        answer=answer,
+        turn_tokens=turn_tokens,
+        tool_calls=tool_calls,
+        recall_called=False,
+        injected_context_tokens=None,
+        turn_count=turn_count,
+        transcript=transcript,
+        mode="api",
     )
 
 
@@ -1534,6 +2429,7 @@ def run_probe_all_arms(
     claude_binary: str = "claude",
     replicate: int = 0,
     client: Any | None = None,
+    mode: str = "api",
     pull_runner: Callable[..., RolloutRecord] | None = None,
     breadcrumb_context_fn: Callable[..., str] | None = None,
     breadcrumb_pull_runner: Callable[..., RolloutRecord] | None = None,
@@ -1562,7 +2458,29 @@ def run_probe_all_arms(
     so a caller, including the offline test suite, can supply stubs and
     exercise the arm-dispatch wiring without a network call or a subprocess
     spawn.
+
+    *mode* (issue athenaeum#1733) selects the execution path for the four
+    tool-using arms ONLY -- ``"api"`` (default, matching
+    ``north_star_cli.py``'s own default so there is exactly ONE default
+    across this module and its CLI driver, per Quine review) drives an
+    Anthropic Messages API tool-use loop (see
+    ``run_pull_api``/``run_push_breadcrumb_pull_api``/``run_native_index_api``/
+    ``run_native_grep_api``, docs/design/native-memory-baseline.md §4) and
+    requires *client* (no ``claude`` binary is ever invoked in this mode).
+    ``"cli"`` spawns ``claude -p`` as it always has -- pass it explicitly for
+    that behavior; every offline test in this suite that wants CLI-shaped
+    dispatch (a ``materialize_root``/``claude_binary``-taking stub) now
+    passes ``mode="cli"`` explicitly rather than relying on a default that
+    used to be "cli" but no longer is.
+    An explicitly passed ``pull_runner``/``breadcrumb_pull_runner``/
+    ``native_index_runner``/``native_grep_runner`` always wins over *mode*'s
+    default resolution -- exactly how these seams already behaved before
+    *mode* existed, so no caller that already injects a stub needs to change.
+    The four single-shot arms (NONE, PUSH_PAGES_UPPER_BOUND, PUSH_BREADCRUMB,
+    ORACLE) are unaffected by *mode*: they always call *client* directly.
     """
+    if mode not in ("cli", "api"):
+        raise ValueError(f"unknown mode {mode!r}; expected 'cli' or 'api'")
     corpus = build_corpus(corpus_scale)
     probe = _find_probe(corpus, probe_id)
     wiki_root = corpus.materialize(materialize_root)
@@ -1580,10 +2498,18 @@ def run_probe_all_arms(
     )
 
     resolved_client = client if client is not None else build_live_client()
-    resolved_pull_runner = pull_runner if pull_runner is not None else run_pull
-    resolved_breadcrumb_pull_runner = breadcrumb_pull_runner or run_push_breadcrumb_pull
-    resolved_native_index_runner = native_index_runner or run_native_index
-    resolved_native_grep_runner = native_grep_runner or run_native_grep
+    resolved_pull_runner = pull_runner if pull_runner is not None else (
+        run_pull_api if mode == "api" else run_pull
+    )
+    resolved_breadcrumb_pull_runner = breadcrumb_pull_runner or (
+        run_push_breadcrumb_pull_api if mode == "api" else run_push_breadcrumb_pull
+    )
+    resolved_native_index_runner = native_index_runner or (
+        run_native_index_api if mode == "api" else run_native_index
+    )
+    resolved_native_grep_runner = native_grep_runner or (
+        run_native_grep_api if mode == "api" else run_native_grep
+    )
 
     records: dict[str, RolloutRecord] = {}
     for cell in cells:
@@ -1622,16 +2548,31 @@ def run_probe_all_arms(
             # Takes ``materialize_root`` (the KNOWLEDGE root), same as PULL
             # — see the PULL branch's own comment below for why that must
             # NOT be ``wiki_root``.
-            record = resolved_breadcrumb_pull_runner(
-                probe,
-                materialize_root,
-                hook_home,
-                cache_dir,
-                corpus_scale,
-                claude_binary=claude_binary,
-                model=model,
-                context_fn=breadcrumb_context_fn,
-            )
+            if mode == "api":
+                record = resolved_breadcrumb_pull_runner(
+                    probe,
+                    materialize_root,
+                    hook_home,
+                    cache_dir,
+                    corpus_scale,
+                    client=resolved_client,
+                    session=session,
+                    model=model,
+                    search_backend=search_backend,
+                    context_fn=breadcrumb_context_fn,
+                    wiki_root=wiki_root,
+                )
+            else:
+                record = resolved_breadcrumb_pull_runner(
+                    probe,
+                    materialize_root,
+                    hook_home,
+                    cache_dir,
+                    corpus_scale,
+                    claude_binary=claude_binary,
+                    model=model,
+                    context_fn=breadcrumb_context_fn,
+                )
         elif arm is Arm.NATIVE_INDEX:
             # A dedicated subdirectory, NOT ``materialize_root`` itself:
             # NATIVE_INDEX and NATIVE_GREP each write their own
@@ -1639,21 +2580,41 @@ def run_probe_all_arms(
             # files, and both run in the same ``run_probe_all_arms`` call —
             # sharing ``materialize_root`` between them would let one
             # arm's config/settings files clobber the other's.
-            record = resolved_native_index_runner(
-                probe,
-                materialize_root / "native_index",
-                corpus_scale,
-                claude_binary=claude_binary,
-                model=model,
-            )
+            if mode == "api":
+                record = resolved_native_index_runner(
+                    probe,
+                    materialize_root / "native_index",
+                    corpus_scale,
+                    client=resolved_client,
+                    session=session,
+                    model=model,
+                )
+            else:
+                record = resolved_native_index_runner(
+                    probe,
+                    materialize_root / "native_index",
+                    corpus_scale,
+                    claude_binary=claude_binary,
+                    model=model,
+                )
         elif arm is Arm.NATIVE_GREP:
-            record = resolved_native_grep_runner(
-                probe,
-                materialize_root / "native_grep",
-                corpus_scale,
-                claude_binary=claude_binary,
-                model=model,
-            )
+            if mode == "api":
+                record = resolved_native_grep_runner(
+                    probe,
+                    materialize_root / "native_grep",
+                    corpus_scale,
+                    client=resolved_client,
+                    session=session,
+                    model=model,
+                )
+            else:
+                record = resolved_native_grep_runner(
+                    probe,
+                    materialize_root / "native_grep",
+                    corpus_scale,
+                    claude_binary=claude_binary,
+                    model=model,
+                )
         else:
             # PULL gets ``materialize_root``, NOT ``wiki_root``, and the two
             # arms differing here is deliberate rather than a slip:
@@ -1669,13 +2630,25 @@ def run_probe_all_arms(
             # This is the last remaining arm (PULL) by elimination — every
             # other member of ``ALL_ARMS`` is handled by an explicit branch
             # above.
-            record = resolved_pull_runner(
-                probe,
-                materialize_root,
-                cache_dir,
-                corpus_scale,
-                claude_binary=claude_binary,
-                model=model,
-            )
+            if mode == "api":
+                record = resolved_pull_runner(
+                    probe,
+                    wiki_root,
+                    cache_dir,
+                    corpus_scale,
+                    client=resolved_client,
+                    session=session,
+                    model=model,
+                    search_backend=search_backend,
+                )
+            else:
+                record = resolved_pull_runner(
+                    probe,
+                    materialize_root,
+                    cache_dir,
+                    corpus_scale,
+                    claude_binary=claude_binary,
+                    model=model,
+                )
         records[arm.value] = record
     return records
