@@ -25,12 +25,16 @@ from typing import Any
 from tests.evals.corpus import Observation
 from tests.evals.harness import EvalSession
 from tests.evals.rollout import (
+    _WRITER_API_LOOP_MAX_TURNS,
     EDIT_TOOL_NAME,
     GREP_TOOL_NAME,
     LIST_TOOL_NAME,
+    NATIVE_INDEX_MAX_CHARS,
+    NATIVE_INDEX_MAX_LINES,
     READ_TOOL_NAME,
     WRITE_TOOL_NAME,
     NativeWriterResult,
+    _native_writer_system_prompt,
     run_native_writer,
     run_native_writer_api,
     run_native_writer_dispatch,
@@ -366,3 +370,169 @@ def test_run_native_writer_cli_mode_still_sets_mode_field(tmp_path: Path, monkey
     result = run_native_writer([_obs(1)], tmp_path)
 
     assert result.mode == "cli"
+
+
+# ---------------------------------------------------------------------------
+# 8. The prompt states the real 200-line/25KB load cap (Quine review, Must 2)
+# ---------------------------------------------------------------------------
+
+
+def test_writer_system_prompt_states_the_real_index_load_cap(tmp_path: Path) -> None:
+    """docs/design/native-memory-baseline.md §2: only the first 200 lines
+    or 25KB of MEMORY.md are loaded, nothing past that -- the prompt must
+    say so exactly, not claim the index is "loaded in full", so the model
+    has the real incentive to keep important lines near the top."""
+    prompt = _native_writer_system_prompt(tmp_path / "memory")
+
+    assert str(NATIVE_INDEX_MAX_LINES) in prompt
+    assert str(NATIVE_INDEX_MAX_CHARS) in prompt
+    assert "loaded in full" not in prompt
+    assert "near the top" in prompt
+
+
+# ---------------------------------------------------------------------------
+# 9. Contract test: CLI-mode and api-mode NativeWriterResult have the same
+#    fields populated on the same fixture stream, differing only in mode
+#    and prompt_fidelity (issue athenaeum#1774 AC, Should 1).
+# ---------------------------------------------------------------------------
+
+
+def test_cli_and_api_writer_results_have_the_same_fields_populated(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import json as _json
+    from types import SimpleNamespace
+
+    observations = [_obs(1, "first fact"), _obs(2, "second fact")]
+
+    # -- CLI mode: stub subprocess.run, reusing the existing CLI stub shape
+    # (tests/evals/test_rollout_native_writer.py's own _fake_stdout). --
+    cli_root = tmp_path / "cli"
+    monkeypatch.setattr("tests.evals.rollout.shutil.which", lambda _binary: "/usr/bin/claude")
+
+    def fake_run(argv: list[str], **kwargs: Any) -> SimpleNamespace:
+        # Stand in for the model's own Write tool call landing a file on
+        # disk under the auto-memory directory this runner prepared -- same
+        # shape as test_rollout_native_writer.py's own
+        # test_memory_files_reads_back_whatever_the_model_actually_wrote.
+        (cli_root / "memory").mkdir(parents=True, exist_ok=True)
+        (cli_root / "memory" / "note.md").write_text("kept fact", encoding="utf-8")
+        events = [
+            {"type": "system", "subtype": "init", "mcp_servers": [], "tools": []},
+            {
+                "type": "assistant",
+                "message": {
+                    "usage": {"input_tokens": 12, "output_tokens": 4},
+                    "content": [
+                        {"type": "tool_use", "name": "Write", "input": {"file_path": "note.md"}},
+                        {"type": "text", "text": "noted."},
+                    ],
+                },
+            },
+            {"type": "result", "result": "noted."},
+        ]
+        return SimpleNamespace(stdout="\n".join(_json.dumps(e) for e in events), stderr="")
+
+    monkeypatch.setattr("tests.evals.rollout.subprocess.run", fake_run)
+    cli_result = run_native_writer(observations, cli_root, claude_binary="claude")
+
+    # -- api mode: stub client, one write tool call per session. --
+    api_root = tmp_path / "api"
+    turns = [
+        _RecordedTurn(
+            content=[
+                _tool_use_block(
+                    id="toolu_write_1",
+                    name=WRITE_TOOL_NAME,
+                    input={"path": "note.md", "content": "kept fact"},
+                )
+            ],
+            stop_reason="tool_use",
+        ),
+        _RecordedTurn(content=[_text_block("noted.")], stop_reason="end_turn"),
+        _RecordedTurn(
+            content=[
+                _tool_use_block(
+                    id="toolu_write_2",
+                    name=WRITE_TOOL_NAME,
+                    input={"path": "note.md", "content": "kept fact, updated"},
+                )
+            ],
+            stop_reason="tool_use",
+        ),
+        _RecordedTurn(content=[_text_block("noted.")], stop_reason="end_turn"),
+    ]
+    client = _QueuedApiClient(turns)
+    session = EvalSession()
+    api_result = run_native_writer_api(
+        observations, api_root, client=client, session=session, model="test-model"
+    )
+
+    # Same fields populated, same shape.
+    assert [s.observation_uid for s in cli_result.sessions] == [
+        s.observation_uid for s in api_result.sessions
+    ]
+    assert len(cli_result.sessions) == len(api_result.sessions) == 2
+    for cli_session, api_session in zip(cli_result.sessions, api_result.sessions, strict=True):
+        assert len(cli_session.tool_calls) == len(api_session.tool_calls) == 1
+        assert cli_session.turn_tokens and api_session.turn_tokens
+        assert cli_session.turn_count > 0
+        assert api_session.turn_count > 0
+        assert cli_session.transcript
+        assert api_session.transcript
+        # turns_exhausted is meaningful (and defaults False) on both --
+        # neither fixture here exhausts the budget.
+        assert cli_session.turns_exhausted is False
+        assert api_session.turns_exhausted is False
+    assert cli_result.memory_files and api_result.memory_files
+
+    # Differ ONLY in mode and prompt_fidelity.
+    assert cli_result.mode == "cli"
+    assert api_result.mode == "api"
+    assert cli_result.prompt_fidelity is None
+    assert api_result.prompt_fidelity == "reconstructed"
+
+
+# ---------------------------------------------------------------------------
+# 10. turns_exhausted is set when the writer's own (larger) turn budget is
+#     cut off mid-tool-use (issue athenaeum#1774 Quine review, Should 2).
+# ---------------------------------------------------------------------------
+
+
+def test_turns_exhausted_set_when_stub_outlasts_the_writer_budget(tmp_path: Path) -> None:
+    # One more tool-use turn than the writer's budget allows, so the loop
+    # is cut off with a pending tool call still in flight.
+    turns = [
+        _RecordedTurn(
+            content=[_tool_use_block(id=f"toolu_list_{i}", name=LIST_TOOL_NAME, input={})],
+            stop_reason="tool_use",
+        )
+        for i in range(_WRITER_API_LOOP_MAX_TURNS + 2)
+    ]
+    client = _QueuedApiClient(turns)
+    session = EvalSession()
+
+    result = run_native_writer_api(
+        [_obs(1)], tmp_path, client=client, session=session, model="test-model"
+    )
+
+    assert result.sessions[0].turn_count == _WRITER_API_LOOP_MAX_TURNS
+    assert result.sessions[0].turns_exhausted is True
+
+
+def test_turns_exhausted_false_when_the_model_finishes_within_budget(tmp_path: Path) -> None:
+    turns = [
+        _RecordedTurn(
+            content=[_tool_use_block(id="toolu_list_1", name=LIST_TOOL_NAME, input={})],
+            stop_reason="tool_use",
+        ),
+        _RecordedTurn(content=[_text_block("nothing worth saving.")], stop_reason="end_turn"),
+    ]
+    client = _QueuedApiClient(turns)
+    session = EvalSession()
+
+    result = run_native_writer_api(
+        [_obs(1)], tmp_path, client=client, session=session, model="test-model"
+    )
+
+    assert result.sessions[0].turns_exhausted is False

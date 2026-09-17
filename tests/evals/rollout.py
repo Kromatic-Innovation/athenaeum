@@ -1630,6 +1630,18 @@ _NATIVE_READ_MAX_BYTES = 20_000
 #: converges on a final text answer records an empty answer, not a crash).
 _API_LOOP_MAX_TURNS = 6
 
+#: Issue athenaeum#1774 Quine review (Should 2): the writer's own, LARGER
+#: turn budget. `_API_LOOP_MAX_TURNS` above was sized for a single-answer
+#: read loop; the writer's prompt (`_NATIVE_WRITER_SYSTEM_PROMPT_TEMPLATE`)
+#: can legitimately ask for `list`, a `read`/`grep` check, a `write`/`edit`,
+#: AND an index update in the course of filing ONE observation, which is
+#: already close to `_API_LOOP_MAX_TURNS` before the model even replies with
+#: its final text. Named separately, not merely a larger default passed at
+#: the call site, so a reader of `run_native_writer_api`'s call to
+#: `run_api_tool_loop` sees this is a deliberately different budget, not an
+#: inconsistency.
+_WRITER_API_LOOP_MAX_TURNS = 12
+
 
 #: Issue athenaeum#1733, Quine review: a tool-using api-mode arm must not be
 #: sent the single-shot arms' ``_SYSTEM_PROMPT`` ("answer using ONLY the
@@ -2554,6 +2566,14 @@ class NativeWriterSession:
     turn_tokens: list[TurnTokenUsage]
     turn_count: int
     transcript: list[dict[str, Any]]
+    #: Issue athenaeum#1774 Quine review (Should 2): ``True`` when this
+    #: session's :func:`run_api_tool_loop` call ran out of
+    #: ``_WRITER_API_LOOP_MAX_TURNS`` turns while the model still had a
+    #: pending tool call -- i.e. the loop was cut off, not merely reaching a
+    #: natural end on its last permitted turn. Always ``False`` for a
+    #: ``claude -p`` (CLI-mode) session: that path has no comparable
+    #: harness-imposed turn cap to exhaust.
+    turns_exhausted: bool = False
 
 
 @dataclasses.dataclass(frozen=True)
@@ -2573,6 +2593,18 @@ class NativeWriterResult:
     #: back-compat-default reasoning as :attr:`RolloutRecord.mode`. Every
     #: constructor in this module sets it explicitly.
     mode: str = "cli"
+    #: Issue athenaeum#1774 Quine review (Must 1): ``"reconstructed"`` for
+    #: an api-mode result -- :func:`_native_writer_system_prompt` mirrors
+    #: Claude Code's DOCUMENTED auto-memory writing behaviour, not its own
+    #: closed-source write-side prompt (which is not extractable), and
+    #: diverges from it in ways with OPPOSITE effect on measured native
+    #: write cost (see that function's own docstring for the two directions
+    #: named). ``None`` for a ``"cli"`` result: :func:`run_native_writer`
+    #: observes the real Claude Code prompt directly, so there is nothing to
+    #: label as reconstructed. A report reading this field labels every
+    #: api-mode Phase 2 number an approximation pending the CLI spot-check,
+    #: never silently pools it with a cli-mode row as equally faithful.
+    prompt_fidelity: str | None = None
 
     @property
     def total_tool_calls(self) -> int:
@@ -2671,7 +2703,11 @@ def run_native_writer(
         if path.is_file()
     }
     return NativeWriterResult(
-        sessions=sessions, memory_dir=memory_dir, memory_files=memory_files, mode="cli"
+        sessions=sessions,
+        memory_dir=memory_dir,
+        memory_files=memory_files,
+        mode="cli",
+        prompt_fidelity=None,
     )
 
 
@@ -2823,6 +2859,29 @@ def _native_list_executor(memory_dir: Path) -> str:
 #: byte-exact copy, and that gap is exactly what the CLI-mode spot-check
 #: (`run_native_writer`) exists to catch (design doc §4: "the existing
 #: claude -p path stays as an optional fidelity spot-check").
+#:
+#: Two KNOWN divergences from the real prompt, with OPPOSITE effect on
+#: measured native write cost (issue athenaeum#1774 Quine review, Must 1),
+#: so neither can be assumed to net out:
+#:
+#: 1. The harness's own `- <name> — <description>` index-line format is
+#:    handed to the model as an instruction here, rather than emerging from
+#:    the model's own unprompted filing judgment the way it would in a real
+#:    session -- this biases toward BETTER, cheaper filing than a real
+#:    auto-memory writer produces (understating native write cost / write
+#:    quality relative to reality).
+#: 2. The explicit `list`-before-writing and check-before-`edit`
+#:    instructions add tool calls a real auto-memory writer is not
+#:    documented to be told to make -- this biases toward MORE turns and
+#:    higher token spend than a real writer incurs (overstating native
+#:    write cost relative to reality).
+#:
+#: Because these two push in opposite directions, a Phase 2 number produced
+#: from this prompt is an APPROXIMATION, not a calibrated substitute for the
+#: real prompt -- :attr:`NativeWriterResult.prompt_fidelity` labels every
+#: api-mode row `"reconstructed"` so a report can say so, and the CLI-mode
+#: spot-check (`run_native_writer`) remains the only path that observes
+#: Claude Code's actual write-side prompt.
 _NATIVE_WRITER_SYSTEM_PROMPT_TEMPLATE = (
     "You are Claude Code working on a project whose memory directory is at "
     "{memory_dir}. You maintain your own long-term memory there: markdown "
@@ -2831,17 +2890,43 @@ _NATIVE_WRITER_SYSTEM_PROMPT_TEMPLATE = (
     "remembering, decide for yourself whether it belongs in an existing topic "
     "file (use `edit` to update it) or a new one (use `write` to create it), "
     "and keep MEMORY.md's index line for that topic current and short -- "
-    "index lines are loaded in full at the start of every session, so keep "
-    "each one to about one line. Use `list` to see what is already saved and "
-    "`read`/`grep` to check a topic file's current content before editing it. "
-    "Use your own judgment about what is worth remembering -- not every note "
-    "needs to be saved. If nothing here is worth saving, do not write "
-    "anything."
+    f"only the first {NATIVE_INDEX_MAX_LINES} lines or {NATIVE_INDEX_MAX_CHARS} "
+    "characters of MEMORY.md, whichever comes first, are loaded at the start "
+    "of every session; nothing past that is loaded, so keep the most "
+    "important entries near the top and each one to about one line. Use "
+    "`list` to see what is already saved and `read`/`grep` to check a topic "
+    "file's current content before editing it. Use your own judgment about "
+    "what is worth remembering -- not every note needs to be saved. If "
+    "nothing here is worth saving, do not write anything."
 )
 
 
 def _native_writer_system_prompt(memory_dir: Path) -> str:
     return _NATIVE_WRITER_SYSTEM_PROMPT_TEMPLATE.format(memory_dir=memory_dir)
+
+
+def _api_loop_turns_exhausted(
+    turn_count: int, max_turns: int, transcript: list[dict[str, Any]]
+) -> bool:
+    """Whether a :func:`run_api_tool_loop` call was cut off by *max_turns*
+    while the model still had a pending tool call, rather than reaching a
+    natural end (no tool use, or a non-``tool_use`` stop reason) on exactly
+    its last permitted turn (issue athenaeum#1774 Quine review, Should 2).
+
+    Computed from the returned tuple alone -- :func:`run_api_tool_loop`'s
+    own signature is unchanged, so every OTHER caller in this module is
+    unaffected. The distinguishing fact is transcript shape: the loop
+    appends a tool-result ``"user"`` transcript entry only when it is about
+    to CONTINUE (i.e. it did not break), so that entry is the LAST thing in
+    the transcript if and only if the loop ran out of turns mid-tool-use.
+    A natural end always breaks BEFORE appending that entry, so the
+    transcript ends on the ``"assistant"`` entry instead. ``turn_count ==
+    max_turns`` alone is not sufficient: a natural end can also happen to
+    land on the final permitted turn.
+    """
+    if turn_count != max_turns or not transcript:
+        return False
+    return transcript[-1].get("type") == "user"
 
 
 def run_native_writer_api(
@@ -2869,8 +2954,17 @@ def run_native_writer_api(
     this arm produces memory files, not a graded answer (design doc §5: "The
     write-path sessions of Phase 2 are outside this contract").
 
+    Uses :data:`_WRITER_API_LOOP_MAX_TURNS`, not the read arms'
+    :data:`_API_LOOP_MAX_TURNS` -- see that constant's own docstring for
+    why the writer needs a larger budget. Each session's
+    ``turns_exhausted`` is set from :func:`_api_loop_turns_exhausted` when
+    that budget was cut off mid-tool-use, so a report can distinguish "the
+    model finished filing" from "the harness stopped it before it could."
+
     Returns the same :class:`NativeWriterResult` shape :func:`run_native_writer`
-    returns (``mode="api"``), so
+    returns (``mode="api"``, ``prompt_fidelity="reconstructed"`` -- see
+    :attr:`NativeWriterResult.prompt_fidelity`'s own docstring for what that
+    labels), so
     :func:`tests.evals.north_star_report.compute_write_path_stats` needs no
     change to consume either.
     """
@@ -2910,6 +3004,7 @@ def run_native_writer_api(
             client=client,
             session=session,
             model=model,
+            max_turns=_WRITER_API_LOOP_MAX_TURNS,
         )
         sessions.append(
             NativeWriterSession(
@@ -2919,6 +3014,9 @@ def run_native_writer_api(
                 turn_tokens=turn_tokens,
                 turn_count=turn_count,
                 transcript=transcript,
+                turns_exhausted=_api_loop_turns_exhausted(
+                    turn_count, _WRITER_API_LOOP_MAX_TURNS, transcript
+                ),
             )
         )
 
@@ -2928,7 +3026,11 @@ def run_native_writer_api(
         if path.is_file()
     }
     return NativeWriterResult(
-        sessions=sessions, memory_dir=memory_dir, memory_files=memory_files, mode="api"
+        sessions=sessions,
+        memory_dir=memory_dir,
+        memory_files=memory_files,
+        mode="api",
+        prompt_fidelity="reconstructed",
     )
 
 
