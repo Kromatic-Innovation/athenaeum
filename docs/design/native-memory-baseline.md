@@ -207,10 +207,19 @@ All three conditions read the SAME Athenaeum arm -- `push_breadcrumb_pull`,
 the shipped configuration -- never a different, most-favourable arm picked
 per condition; other Athenaeum arms still appear in the report's per-dimension
 tables, just never in these verdicts (`--verdict-arm` overrides the default).
-When the better native arm scored zero correct answers on a probe class while
-the verdict arm scored at least one, condition 3 reads `native-zero`, a pass
-stated in words rather than a fabricated ratio; if both sides scored zero, it
-is `undefined` and fails.
+"Better native arm" means two different things across these conditions, both
+the harshest reading available to Athenaeum: for condition 1, the native arm
+with the higher pooled correctness rate; for condition 3, the native arm with
+the cheaper *defined* cost per correct -- a native arm that scored zero
+correct answers has no defined cost and is never picked as "cheaper" by that
+alone. When the better native arm scored zero correct answers on a probe
+class while the verdict arm scored at least one, condition 3 reads
+`native-zero`, a pass stated in words rather than a fabricated ratio; if both
+sides scored zero, it is `undefined` and fails. When a probe class has no
+native rows at a scale at all, condition 3 skips that class (named, counted)
+rather than failing the scale outright -- the same treatment condition 2
+gives a one-sided class; the scale fails condition 3 only when no class at
+it has any native cost data to compare.
 
 The result lands as a dated report under `docs/measurements/`, following the
 convention `measurements/README.md` documents: the runner ships in-tree and
