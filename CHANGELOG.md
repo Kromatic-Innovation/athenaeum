@@ -22,6 +22,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tests/test_eval_corpus_leakage.py`'s native-memory materializer check
   now include it. `docs/design/native-memory-baseline.md` §3 names the new
   scale.
+- **Bounded concurrency for the north-star grid, plus a job window that can
+  hold it (issue athenaeum#1751).** `tests/evals/north_star_cli.py` gained
+  `--workers` (default 4) and `evals.yml`'s `north-star` job a matching
+  `north_star_workers` dispatch input; the job's `timeout-minutes` rose from
+  60 to 300. A `--scale full` dispatch plans 1392 cells, which no serial run
+  could finish inside the old window — it would have been killed mid-grid
+  after paying for the cells it completed. The (probe, corpus_scale,
+  replicate) group is the unit of concurrency: each worker gets its own
+  materialized corpus tree (shared trees would be a write-write race on the
+  wiki pages and the search index), `ResultStore.append` serialises on a
+  lock so two workers cannot interleave a partial JSONL line, and
+  `EvalSession`'s token counters are lock-guarded so a lost update cannot
+  silently loosen the ceiling that spends against them. When the rollout
+  token ceiling trips mid-grid it stops *every* worker, not only the one
+  that noticed. `--dry-run` now prints the projected wall clock at the
+  chosen worker count alongside the price — including on the over-budget
+  refusal path, which is the path an operator sizing a full dispatch is
+  actually on. Partial-run safety: the run records its planned cell count in
+  a sidecar beside the store before the first cell runs, the workflow keeps
+  the store under `measurements/` and uploads it `if: always()` (a timeout
+  kill writes no markdown report at all, so the JSONL is the only artifact —
+  and re-running with the same `--store` resumes from it), and the report
+  renders a `partial: N of M cells` banner at the top of the decision block
+  when the store holds fewer rows than planned. No prompt, model or arm
+  changed.
 - **`temporal` probes with person/company expected pages (issue
   athenaeum#1744).** The go/no-go rule's condition 1 relationship subset
   (`_relationship_probe_ids` in `tests/evals/north_star_report.py`) is
