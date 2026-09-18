@@ -276,6 +276,138 @@ def test_run_phase2_resume_skips_completed_pairs(
 
 
 # ---------------------------------------------------------------------------
+# 2b. Partial (exit 75) resume behavior (Quine review of PR#1813, should-fix 1)
+# ---------------------------------------------------------------------------
+
+
+def test_phase2_partial_keys_reads_the_latest_meta_row() -> None:
+    rows = [
+        {"kind": "meta", "system": "athenaeum", "corpus_scale": "medium", "partial": True},
+        # A native meta row never carries "partial" at all -- must not be
+        # mistaken for a partial key.
+        {"kind": "meta", "system": "native", "corpus_scale": "medium"},
+    ]
+    assert north_star_cli._phase2_partial_keys(rows) == {("athenaeum", "medium")}
+
+
+def test_phase2_partial_keys_only_the_latest_meta_row_counts() -> None:
+    """A key re-run after a partial compile appends a FRESH meta row; if
+    that second attempt succeeded (partial=False), the key must no longer
+    read as partial -- only the LATEST row per (system, scale) counts."""
+    rows = [
+        {"kind": "meta", "system": "athenaeum", "corpus_scale": "medium", "partial": True},
+        {"kind": "meta", "system": "athenaeum", "corpus_scale": "medium", "partial": False},
+    ]
+    assert north_star_cli._phase2_partial_keys(rows) == set()
+
+
+def test_run_phase2_reruns_a_partial_key_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A (system, scale) pair whose only rows came from a partial (exit 75)
+    compile must be RE-RUN on resume, not silently accepted as done --
+    the opposite of the ordinary completed-pair skip."""
+    calls: list[tuple[str, str]] = []
+
+    def _spy_group(system: str, scale: str, **_kwargs: Any) -> list[dict[str, Any]]:
+        calls.append((system, scale))
+        return [
+            {"kind": "write_path", "system": system, "corpus_scale": scale},
+            {"kind": "write_cost", "system": system, "corpus_scale": scale},
+            {"kind": "meta", "system": system, "corpus_scale": scale, "partial": False},
+        ]
+
+    monkeypatch.setattr(north_star_cli, "_run_phase2_group", _spy_group)
+    phase2_store_path = tmp_path / "results.jsonl.phase2.jsonl"
+    north_star_cli._phase2_append_rows(
+        phase2_store_path,
+        [
+            {"kind": "write_path", "system": "athenaeum", "corpus_scale": "medium"},
+            {"kind": "write_cost", "system": "athenaeum", "corpus_scale": "medium"},
+            {
+                "kind": "meta",
+                "system": "athenaeum",
+                "corpus_scale": "medium",
+                "exit_code": 75,
+                "partial": True,
+            },
+        ],
+    )
+    args = north_star_cli.build_arg_parser().parse_args(
+        [
+            "--scale",
+            "smoke",
+            "--phase2",
+            "--phase2-scales",
+            "medium",
+            "--phase2-systems",
+            "athenaeum",
+        ]
+    )
+    north_star_cli.run_phase2(
+        args,
+        client=object(),
+        session=EvalSession(),
+        materialize_root=tmp_path / "mat",
+        phase2_store_path=phase2_store_path,
+    )
+    # Re-run, not skipped.
+    assert calls == [("athenaeum", "medium")]
+    # And the key is no longer partial after the successful re-run.
+    rows = north_star_cli._phase2_read_rows(phase2_store_path)
+    assert north_star_cli._phase2_partial_keys(rows) == set()
+
+
+def test_run_phase2_accept_partial_flag_skips_and_warns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--phase2-accept-partial accepts the partial rows as final and skips
+    re-running that key, printing a warning naming it."""
+
+    def _explode(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("--phase2-accept-partial must not re-run the partial key")
+
+    monkeypatch.setattr(north_star_cli, "_run_phase2_group", _explode)
+    phase2_store_path = tmp_path / "results.jsonl.phase2.jsonl"
+    north_star_cli._phase2_append_rows(
+        phase2_store_path,
+        [
+            {"kind": "write_path", "system": "athenaeum", "corpus_scale": "medium"},
+            {"kind": "write_cost", "system": "athenaeum", "corpus_scale": "medium"},
+            {
+                "kind": "meta",
+                "system": "athenaeum",
+                "corpus_scale": "medium",
+                "exit_code": 75,
+                "partial": True,
+            },
+        ],
+    )
+    args = north_star_cli.build_arg_parser().parse_args(
+        [
+            "--scale",
+            "smoke",
+            "--phase2",
+            "--phase2-scales",
+            "medium",
+            "--phase2-systems",
+            "athenaeum",
+            "--phase2-accept-partial",
+        ]
+    )
+    north_star_cli.run_phase2(
+        args,
+        client=object(),
+        session=EvalSession(),
+        materialize_root=tmp_path / "mat",
+        phase2_store_path=phase2_store_path,
+    )
+    err = capsys.readouterr().err
+    assert "partial" in err
+    assert "('athenaeum', 'medium')" in err
+
+
+# ---------------------------------------------------------------------------
 # 3. main() end to end, offline
 # ---------------------------------------------------------------------------
 
@@ -384,6 +516,41 @@ def test_main_phase2_spend_gate_refuses_combined_projection(
     assert "--max-spend" in err
 
 
+def test_main_phase2_token_gate_refuses_combined_projection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The token-ceiling refusal (--max-tokens) must also see Phase 2's
+    projection combined with the read grid's, mirroring
+    test_main_phase2_spend_gate_refuses_combined_projection above but for
+    the token-ceiling gate rather than the USD one -- Quine review of
+    PR#1813, should-fix 2."""
+
+    def _explode(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("a refused run must never spend")
+
+    monkeypatch.setattr(north_star_cli, "compile_observation_stream", _explode)
+    monkeypatch.setattr(north_star_cli, "run_native_writer_dispatch", _explode)
+    monkeypatch.setattr(north_star_cli, "run_probe_all_arms", _explode)
+    monkeypatch.setattr(north_star_cli, "build_live_client", _explode)
+    monkeypatch.setattr(north_star_cli, "_default_store_path", lambda: tmp_path / "r.jsonl")
+
+    # --max-spend generously high so the USD gate never fires first and
+    # masks the token-ceiling message this test is pinning; --max-tokens is
+    # the ceiling actually under test, sized to comfortably cover the
+    # "smoke"-scale read grid (8 cells) alone but nowhere near enough once
+    # Phase 2's projection (213 observations x 2 groups x 1,500
+    # tokens/observation ~= 639,000) is added in.
+    exit_code = north_star_cli.main(
+        ["--scale", "smoke", "--phase2", "--max-spend", "1000", "--max-tokens", "100000"]
+    )
+
+    assert exit_code == 1
+    assert not (tmp_path / "r.jsonl").exists()
+    err = capsys.readouterr().err
+    assert "token ceiling" in err
+    assert "--max-tokens" in err
+
+
 def test_main_phase2_partial_compile_recorded_not_silently_pooled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -431,6 +598,13 @@ def test_main_phase2_partial_compile_recorded_not_silently_pooled(
     # The numbers are NOT withheld -- write_path/write_cost rows still land.
     assert any(r["kind"] == "write_cost" for r in rows)
     assert any(r["kind"] == "write_path" for r in rows)
+    # And the rendered report visibly marks the row, not a silently-clean
+    # table (Quine review of PR#1813, should-fix 1).
+    [report_path] = list((tmp_path / "measurements").glob("north-star-*.md"))
+    report_text = report_path.read_text(encoding="utf-8")
+    assert "| athenaeum | medium |" in report_text
+    assert "| yes |" in report_text
+    assert "deadline-tripped" in report_text
 
 
 # ---------------------------------------------------------------------------
@@ -465,6 +639,36 @@ def test_build_report_renders_write_path_section_and_phase2_summary() -> None:
     assert "phase2: on (scales=medium, systems=athenaeum,native)" in text
     assert "| athenaeum | medium | 5 | 5 |" in text
     assert "_no Phase 2 write-path data in this run_" not in text
+    # No phase2_partial given -- the row must render as NOT partial, and
+    # the deadline-tripped caption must not appear at all.
+    assert "| no |" in text
+    assert "deadline-tripped" not in text
+
+
+def test_build_report_marks_a_partial_row_in_the_write_path_table() -> None:
+    stats = WritePathStats(
+        system="athenaeum",
+        corpus_scale="medium",
+        pages_targeted=5,
+        pages_written=2,
+        answer_tokens_total=3,
+        answer_tokens_retained=1,
+        observations_total=20,
+        observations_measured=3,
+        observations_dropped=2,
+    )
+    cost = WriteCost(system="athenaeum", corpus_scale="medium", input_tokens=500, output_tokens=80)
+    report = north_star_cli.build_report(
+        [],
+        write_path_stats=[stats],
+        write_costs=[cost],
+        phase2_partial=[("athenaeum", "medium")],
+    )
+    from tests.evals.north_star_report import render_report
+
+    text = render_report(report)
+    assert "| yes |" in text
+    assert "deadline-tripped" in text
 
 
 def test_build_report_phase2_summary_defaults_to_empty_and_renders_nothing() -> None:

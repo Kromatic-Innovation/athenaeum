@@ -457,24 +457,61 @@ def _phase2_read_rows(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _phase2_latest_rows(
+    rows: Sequence[dict[str, Any]],
+) -> dict[tuple[str, str, str], dict[str, Any]]:
+    """The LATEST row for each ``(kind, system, corpus_scale)`` triple.
+
+    A resumed/re-run ``(system, scale)`` pair (issue athenaeum#1785 Quine
+    review of PR#1813, should-fix 1: a partial compile is re-run by
+    default, not accepted) appends a FRESH ``write_path``/``write_cost``/
+    ``meta`` trio after the earlier one -- the later trio is canonical,
+    mirroring ``ResultStore``'s own last-write-wins reasoning for a resumed
+    group (``load_rollout_rows_and_diagnostics``'s duplicate-row handling).
+    Rows of any other ``kind`` are ignored."""
+    latest: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for row in rows:
+        kind = row.get("kind")
+        if kind not in ("write_path", "write_cost", "meta"):
+            continue
+        key = (kind, row.get("system"), row.get("corpus_scale"))
+        latest[key] = row
+    return latest
+
+
 def _phase2_completed_keys(rows: Sequence[dict[str, Any]]) -> set[tuple[str, str]]:
-    """``(system, corpus_scale)`` pairs already carrying BOTH a
+    """``(system, corpus_scale)`` pairs whose LATEST rows carry BOTH a
     ``write_path`` and a ``write_cost`` row -- the PAIR is the completion
     signal for resume (issue athenaeum#1785), not either row alone: a crash
     between writing the two would otherwise strand a ``(system, scale)``
     with retention stats recorded but no cost, silently skipped forever on
     a later resume. :func:`_run_phase2_group` always appends both rows (plus
     a ``meta`` row) in a single call, so an interrupted run leaves at most
-    one incomplete pair, correctly re-run on resume."""
-    have_stats: set[tuple[str, str]] = set()
-    have_cost: set[tuple[str, str]] = set()
-    for row in rows:
-        key = (row.get("system"), row.get("corpus_scale"))
-        if row.get("kind") == "write_path":
-            have_stats.add(key)
-        elif row.get("kind") == "write_cost":
-            have_cost.add(key)
+    one incomplete pair, correctly re-run on resume. Does NOT by itself
+    distinguish a clean completion from a partial one -- see
+    :func:`_phase2_partial_keys`, which callers must consult separately
+    before treating a "completed" key as safe to skip."""
+    latest = _phase2_latest_rows(rows)
+    have_stats = {(s, c) for (kind, s, c) in latest if kind == "write_path"}
+    have_cost = {(s, c) for (kind, s, c) in latest if kind == "write_cost"}
     return have_stats & have_cost
+
+
+def _phase2_partial_keys(rows: Sequence[dict[str, Any]]) -> set[tuple[str, str]]:
+    """``(system, corpus_scale)`` pairs whose LATEST ``meta`` row carries
+    ``partial: True`` -- issue athenaeum#1785 (Quine review of PR#1813,
+    should-fix 1). Only an athenaeum compile's ``meta`` row ever carries
+    this key (:func:`_run_phase2_group`'s athenaeum branch); a native
+    group's ``meta`` row has no ``partial`` field and is never included
+    here. Used both to gate resume (a partial key is re-run, not skipped,
+    unless ``--phase2-accept-partial``) and to mark the rendered "Write
+    path (Phase 2)" table (``build_report(phase2_partial=...)``)."""
+    latest = _phase2_latest_rows(rows)
+    return {
+        (s, c)
+        for (kind, s, c), row in latest.items()
+        if kind == "meta" and row.get("partial") is True
+    }
 
 
 def _phase2_append_rows(path: Path, rows: Sequence[dict[str, Any]]) -> None:
@@ -507,14 +544,20 @@ def _write_cost_row(cost: WriteCost) -> dict[str, Any]:
 def load_phase2_results(path: Path) -> tuple[list[WritePathStats], list[WriteCost]]:
     """Read the Phase 2 sibling JSONL at *path* back into the
     ``(write_path_stats, write_costs)`` shape :func:`~tests.evals.north_star_report.build_report`
-    accepts. A row of an unrecognised ``kind`` (e.g. ``meta``), or one
-    missing a required field, is skipped rather than raising -- the sibling
-    store is diagnostic-friendly by design (issue athenaeum#1785), and a
+    accepts.
+
+    Reads the LATEST row per ``(kind, system, corpus_scale)`` (issue
+    athenaeum#1785 Quine review of PR#1813, should-fix 1 -- see
+    :func:`_phase2_latest_rows`), not every row: a partial key that was
+    re-run appends a second ``write_path``/``write_cost`` trio, and only the
+    final one should reach the report, never both pooled as two separate
+    rows for the same pair. A row of an unrecognised ``kind`` (e.g.
+    ``meta``), or one missing a required field, is skipped rather than
+    raising -- the sibling store is diagnostic-friendly by design, and a
     torn or partially-written row must not crash report rendering."""
     stats: list[WritePathStats] = []
     costs: list[WriteCost] = []
-    for row in _phase2_read_rows(path):
-        kind = row.get("kind")
+    for (kind, _system, _scale), row in _phase2_latest_rows(_phase2_read_rows(path)).items():
         try:
             if kind == "write_path":
                 stats.append(
@@ -634,6 +677,15 @@ def run_phase2(
     append its rows to *phase2_store_path* -- resume granularity is the
     ``(system, scale)`` pair (see :func:`_phase2_completed_keys`).
 
+    A key whose LATEST rows came from a PARTIAL (exit 75) athenaeum compile
+    (:func:`_phase2_partial_keys`) is, by default, treated as NOT done and
+    RE-RUN -- a deadline-tripped compile made real but incomplete progress,
+    and a second attempt may finish it (issue athenaeum#1785 Quine review of
+    PR#1813, should-fix 1). Pass ``--phase2-accept-partial`` to accept the
+    partial rows as final instead; that key is then skipped like any other
+    completed one, and a warning naming it is printed to stderr so a silent
+    resume never quietly settles for incomplete numbers.
+
     The observation stream is generated once per *scale* (issue
     athenaeum#1785 proposal / design doc §6.3): it is scale-invariant by
     construction (``generate_core_observations``'s own docstring), but its
@@ -645,12 +697,26 @@ def run_phase2(
     """
     scales = _resolve_phase2_scales(args)
     systems = _resolve_phase2_systems(args)
-    done = _phase2_completed_keys(_phase2_read_rows(phase2_store_path))
+    existing_rows = _phase2_read_rows(phase2_store_path)
+    done = _phase2_completed_keys(existing_rows)
+    partial = _phase2_partial_keys(existing_rows)
+    accept_partial = args.phase2_accept_partial
     for scale in scales:
         stream = generate_core_observations(scale=scale)
         for system in systems:
-            if (system, scale) in done:
-                continue
+            key = (system, scale)
+            if key in done:
+                if key not in partial:
+                    continue
+                if accept_partial:
+                    print(
+                        f"phase2: accepting partial (exit 75) compile for {key} "
+                        "(--phase2-accept-partial) -- not re-running",
+                        file=sys.stderr,
+                    )
+                    continue
+                # A partial key, --phase2-accept-partial NOT given: fall
+                # through and re-run this group.
             rows = _run_phase2_group(
                 system,
                 scale,
@@ -973,6 +1039,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help=(
             "comma-separated systems for the Phase 2 write path (default: "
             f"{','.join(DEFAULT_PHASE2_SYSTEMS)})"
+        ),
+    )
+    parser.add_argument(
+        "--phase2-accept-partial",
+        action="store_true",
+        help=(
+            "issue athenaeum#1785 (Quine review of PR#1813): by default, a (system, scale) "
+            "pair whose sibling-store rows came from a partial (exit 75, deadline-tripped) "
+            "athenaeum compile is RE-RUN on resume rather than accepted as final -- a second "
+            "attempt may finish what the first one did not. Pass this flag to accept the "
+            "partial rows as-is and skip re-running that pair instead (prints a warning "
+            "naming the key)."
         ),
     )
     return parser
@@ -1465,6 +1543,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     phase2_summary_text = _phase2_summary(
         args, phase2_write_path_stats, phase2_write_costs, phase2_store_path
     )
+    # Issue athenaeum#1785 (Quine review of PR#1813, should-fix 1): read
+    # separately from load_phase2_results's DEDUPED stats/costs, so a row
+    # marked partial is still visible to the report table even though it is
+    # ALSO the row load_phase2_results kept as canonical (a key can only be
+    # "completed" with a partial flag if it was never successfully re-run --
+    # see run_phase2's own resume logic).
+    phase2_partial_pairs = _phase2_partial_keys(_phase2_read_rows(phase2_store_path))
     try:
         report = build_report(
             list(diagnostics.rows),
@@ -1477,6 +1562,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             torn_rows=diagnostics.torn,
             duplicate_rows=diagnostics.duplicates,
             phase2_summary=phase2_summary_text,
+            phase2_partial=phase2_partial_pairs,
         )
     except MixedFloorError as exc:
         # Issue athenaeum#1764 item 1: a mixed-floor store (rows carrying
@@ -1511,6 +1597,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 duplicate_rows=diagnostics.duplicates,
                 pool_floor_values=False,
                 phase2_summary=phase2_summary_text,
+                phase2_partial=phase2_partial_pairs,
             )
         except Exception as recovery_exc:  # noqa: BLE001 -- see below
             # Quine review "should": this recovery build_report call can
