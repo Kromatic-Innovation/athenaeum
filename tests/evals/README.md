@@ -391,6 +391,71 @@ athenaeum#1742) — see "What `rollout` means" below. Rollout token usage is
 recorded on a caller-supplied `EvalSession` (typically the `rollout_session`
 fixture), never `harness.EVAL_TOKEN_CEILING`'s own accumulator.
 
+## Layer 5 — Phase 2 write path (`tests/evals/write_path.py`, `north_star_cli.py --phase2`, issue athenaeum#1726/#1830)
+
+Layer 4 above grades a READ over an already-finished store. Phase 2 grades
+the WRITE that produced one.
+
+**The arm (issue athenaeum#1830, operator ruling on
+Kromatic-Innovation/athenaeum#1791 comment 5732689494):** "the librarian is
+not a fact writer and never acts as one in production; it files what Claude
+(or an adapter) has already written into raw intake." So the athenaeum
+write-path arm is *the native writer's own memory files, compiled by the
+librarian* — `tests.evals.write_path.compile_native_memory_files` takes
+`NativeWriterResult.memory_files` (`run_native_writer_dispatch`,
+`tests/evals/rollout.py`), materialises them under `raw/auto-memory/` in
+production intake shape (one file per native memory file; a filename that
+misses `athenaeum.intake.AUTO_MEMORY_FILE_RE`'s convention is refiled under
+`reference_`, a named adaptation, not a claim about what Claude wrote — see
+that function's own docstring), and runs the SAME production entrypoint
+`athenaeum.librarian.run` every other compile path in this suite uses.
+Retention is scored on the result with
+`tests.evals.north_star_report.compute_write_path_stats` — "Claude's
+memories versus Claude's memories after filing," not raw observations
+compiled directly.
+
+`north_star_cli.run_phase2` always runs `native` before `athenaeum` for a
+given corpus scale (the athenaeum group's input IS the native group's
+output), auto-including `native` as a dependency even when
+`--phase2-systems athenaeum` is passed alone. A scale whose native result is
+unavailable (never run, or its materialized memory directory could not be
+recovered on resume) marks the athenaeum cell a HARNESS FAILURE, never a
+silent zero — see `north_star_cli._run_phase2_group`'s own docstring.
+
+**Filing loss** (AC2): a second, separate retention row
+(`tests.evals.north_star_report.FilingLossStats`/`compute_filing_loss_stats`)
+scores the compiled store against the tokens the NATIVE writer itself
+already retained, not the full observation stream — so filing loss is
+distinguishable from Claude's own write loss. A token Claude never wrote
+down at all is a native write loss (visible on the ordinary
+`WritePathStats` row for `system="native"`), never a filing loss.
+
+**Lost token ids** (AC "name the lost facts"): `WritePathStats.lost_token_ids`
+names the durable planted tokens missing from the compiled store, per
+system/scale, rather than leaving a reader to infer them from a bare count.
+
+**Transient grading** (`Observation.retain=False`, issue athenaeum#1824/#1830):
+a transient (temporary-outage-shaped) observation's planted token grades
+CORRECT when absent from the compiled store, or present only on page(s)
+carrying a short decay bucket (`daily`/`weekly`, `athenaeum.models.MEMORY_BUCKETS`)
+or a near-term `valid_until` (within two weeks of the observation's own
+timestamp) — and WRONG only when filed durably (no decay signal, or a
+long-horizon `valid_until`). Keeping a transient fact is only a defect if it
+is filed as if it will never expire.
+
+**Diagnostic-only path:** `compile_observation_stream` (compiling raw
+observations directly, bypassing the native writer entirely) is unchanged
+in signature and still exported/tested — it is the job the librarian never
+performs in production, so it feeds no default Phase 2 row or report
+section anymore; see `docs/measurements/write-path-retention-2026-09-18.md`
+for the measurement it originally produced.
+
+Offline coverage: `tests/evals/test_write_path.py` (the compile drivers,
+against `tests.conftest.FakeLLMClient`, no network), `tests/evals/test_write_path_stats.py`
+(`compute_write_path_stats`/`compute_filing_loss_stats`, pure computation),
+`tests/evals/test_phase2_cli.py` (CLI flags, the sibling-JSONL resume
+contract, and `main()` end to end with both producers stubbed).
+
 ## Build prerequisites
 
 - CI pulls `ANTHROPIC_API_KEY` from 1Password at run time
