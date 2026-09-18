@@ -135,8 +135,8 @@ DEFAULT_REPLICATES: tuple[int, ...] = (0,)
 
 #: Issue athenaeum#1787: the ONLY corpus scales a ``--search-backend
 #: vector`` dispatch may name -- the backend-fidelity second dispatch is a
-#: comparison pass against two representative scales (issue #1787's own
-#: proposal), not the full 6-scale fts5 grid.
+#: comparison pass against two representative scales (issue athenaeum#1787's
+#: own proposal), not the full 6-scale fts5 grid.
 _VECTOR_SCOPED_SCALES: frozenset[str] = frozenset({"core", "medium"})
 
 #: Mirrors ``containment_cli.DEFAULT_MAX_SPEND_USD`` -- the ``smoke`` scale
