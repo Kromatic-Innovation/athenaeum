@@ -102,6 +102,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import uuid
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from enum import Enum
@@ -811,6 +812,211 @@ def build_breadcrumb_hook_env(
     }
 
 
+#: Issue athenaeum#1834: run 35388861368 died at 480/720 cells because the
+#: ONE-TIME hook index build (SESSION_START_HOOK re-embedding the whole
+#: materialized corpus) shared its budget with the fast per-cell query
+#: timeout below. This is a named constant, not a magic 30.0, and sized for
+#: the build alone -- it is paid at most once per (corpus_scale,
+#: knowledge_root), see :data:`_HOOK_INDEX_CACHE`.
+HOOK_INDEX_BUILD_TIMEOUT_SECONDS: float = 300.0
+
+#: The per-cell USER_PROMPT_HOOK query timeout (issue athenaeum#1834) --
+#: unchanged in VALUE from the original single fixed timeout this constant
+#: replaces; only the one-time index build above now has its own, larger
+#: budget.
+HOOK_QUERY_TIMEOUT_SECONDS: float = 30.0
+
+
+class HookIndexBuildError(RuntimeError):
+    """SESSION_START_HOOK failed or timed out building the breadcrumb hook's
+    search index (issue athenaeum#1834). Callers of
+    :func:`build_push_breadcrumb_context` (and its ``build_hook_index``/
+    ``query_hook`` halves) catch this and record it as a
+    ``RolloutRecord.harness_failure`` rather than letting it crash the grid
+    -- exactly the failure mode that killed Evals run 35388861368."""
+
+
+#: Issue athenaeum#1834 AC1: memoizes the ONE-TIME hook index build per
+#: (corpus_scale, knowledge_root) so every probe at a given scale -- not
+#: just the two breadcrumb arms within a single ``run_probe_all_arms``
+#: call -- reuses a single ``SESSION_START_HOOK`` spawn. Keyed on
+#: ``str(knowledge_root.resolve())`` alone: that path already encodes
+#: corpus_scale (``north_star_cli._run_group``'s
+#: ``group_root = materialize_root / f"w{slot}" / f"{corpus_scale}-{replicate}"``
+#: is the ``knowledge_root`` every breadcrumb call receives), so it IS the
+#: ``(corpus_scale, knowledge_root)`` pair the issue names -- without
+#: widening ``build_push_breadcrumb_context``'s public
+#: ``(knowledge_root, hook_home, query)`` seam that the offline grid-dispatch
+#: wiring tests already stub.
+#:
+#: Value is ``None`` for a successful build, or the failure message string
+#: for a build that raised -- STICKY: a cache hit on a stored failure
+#: re-raises immediately rather than re-spawning, so one slow or broken
+#: build cannot retry-storm every remaining cell at that scale.
+_HOOK_INDEX_CACHE: dict[str, str | None] = {}
+
+#: One :class:`threading.Lock` per cache key, created lazily by
+#: :func:`_hook_index_lock_for`. A SINGLE lock guarding the whole build
+#: would serialize grid workers building DIFFERENT scales' indices behind
+#: each other's up-to-``HOOK_INDEX_BUILD_TIMEOUT_SECONDS`` build --
+#: defeating the parallelism ``--workers`` exists for. Per-key locks mean
+#: only threads racing to build the SAME ``knowledge_root`` ever wait on
+#: one another.
+_HOOK_INDEX_LOCKS: dict[str, threading.Lock] = {}
+
+#: Guards ONLY the two small dicts above (fast dict get/set/clear) -- never
+#: held across a hook subprocess spawn.
+_HOOK_INDEX_REGISTRY_LOCK = threading.Lock()
+
+
+def _hook_index_lock_for(key: str) -> threading.Lock:
+    with _HOOK_INDEX_REGISTRY_LOCK:
+        lock = _HOOK_INDEX_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _HOOK_INDEX_LOCKS[key] = lock
+        return lock
+
+
+def clear_hook_index_cache() -> None:
+    """Test-only reset of the module-level per-scale hook index cache
+    (issue athenaeum#1834). An autouse test fixture calls this between
+    tests so one test's cached key can never make a later test see zero
+    subprocess spawns (or a stale failure) for the wrong reason."""
+    with _HOOK_INDEX_REGISTRY_LOCK:
+        _HOOK_INDEX_CACHE.clear()
+        _HOOK_INDEX_LOCKS.clear()
+
+
+def _hook_index_present(hook_home: Path) -> bool:
+    """Best-effort check that ``SESSION_START_HOOK`` actually left a usable
+    FTS5 index under *hook_home* (``athenaeum.search._DB_NAME``, always
+    written by ``build_fts5_index`` regardless of which backend is
+    primary -- see that hook script's own "Always build FTS5" comment).
+    Guards the cache against a *knowledge_root* that was recreated (or
+    never actually written) between a successful build and a later cache
+    hit, so a stale 'built' cache entry can never silently serve an empty
+    breadcrumb (issue athenaeum#1834's own failure class, one level up)."""
+    return (hook_home / ".cache" / "athenaeum" / "wiki-index.db").exists()
+
+
+def _describe_hook_subprocess_error(
+    exc: subprocess.TimeoutExpired | subprocess.CalledProcessError,
+) -> str:
+    """A short, stable reason string for a hook subprocess failure (issue
+    athenaeum#1834): the exception class, its message, and a truncated
+    stderr tail. ``stderr`` on either exception type may be ``None`` or
+    ``bytes`` depending on how the subprocess call was invoked, so it is
+    decoded defensively (``errors="replace"``) rather than assumed to be a
+    ``str``."""
+    stderr = exc.stderr
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", errors="replace")
+    tail = (stderr or "").strip()[-500:]
+    reason = f"{type(exc).__name__}: {exc}"
+    return f"{reason} -- stderr tail: {tail!r}" if tail else reason
+
+
+def build_hook_index(
+    knowledge_root: Path,
+    hook_home: Path,
+    *,
+    athenaeum_src: Path | None = None,
+    timeout: float = HOOK_INDEX_BUILD_TIMEOUT_SECONDS,
+) -> None:
+    """Run :data:`SESSION_START_HOOK` once to build the breadcrumb hook's
+    own search index from *knowledge_root* under *hook_home* as a throwaway
+    ``HOME`` -- the ``build_hook_index`` half of what
+    ``build_push_breadcrumb_context`` used to do in one call (issue
+    athenaeum#1834). Memoized per ``str(knowledge_root.resolve())`` in
+    :data:`_HOOK_INDEX_CACHE`: a second call for the SAME *knowledge_root*
+    is a no-op (or, on a cache hit for a previously-failed build, an
+    immediate :class:`HookIndexBuildError` re-raise -- see that cache's own
+    docstring) rather than a second subprocess spawn. Thread-safe: multiple
+    grid workers may race to build the same scale's index and only the
+    first actually spawns the subprocess.
+
+    Raises :class:`HookIndexBuildError` (never a bare
+    ``subprocess.TimeoutExpired``/``CalledProcessError``) so every caller
+    has exactly one exception type to catch and convert into a
+    ``RolloutRecord.harness_failure``.
+    """
+    if shutil.which("bash") is None:
+        raise RuntimeError("bash not found on PATH (required to run the shipped hooks)")
+    key = str(knowledge_root.resolve())
+    with _hook_index_lock_for(key):
+        if key in _HOOK_INDEX_CACHE:
+            cached_failure = _HOOK_INDEX_CACHE[key]
+            if cached_failure is not None and not _hook_index_present(hook_home):
+                raise HookIndexBuildError(cached_failure)
+            if cached_failure is None and _hook_index_present(hook_home):
+                return
+            # Either a stored success whose index vanished (a recreated
+            # knowledge_root -- see _hook_index_present's docstring) or a
+            # stored failure whose index now exists anyway (a retry outside
+            # this cache) -- both fall through and rebuild for real rather
+            # than trusting a cache entry the filesystem no longer backs up.
+        env = build_breadcrumb_hook_env(knowledge_root, hook_home, athenaeum_src=athenaeum_src)
+        try:
+            subprocess.run(
+                ["bash", str(SESSION_START_HOOK)],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=True,
+            )
+        except (subprocess.TimeoutExpired, subprocess.CalledProcessError) as exc:
+            reason = _describe_hook_subprocess_error(exc)
+            _HOOK_INDEX_CACHE[key] = reason
+            raise HookIndexBuildError(reason) from exc
+        _HOOK_INDEX_CACHE[key] = None
+
+
+def query_hook(
+    knowledge_root: Path,
+    hook_home: Path,
+    query: str,
+    *,
+    session_id: str | None = None,
+    athenaeum_src: Path | None = None,
+    timeout: float = HOOK_QUERY_TIMEOUT_SECONDS,
+) -> str:
+    """Run :data:`USER_PROMPT_HOOK` for *query* against the index
+    :func:`build_hook_index` already built under *hook_home*, and return
+    ``hookSpecificOutput.additionalContext`` verbatim -- the ``query_hook``
+    half of what ``build_push_breadcrumb_context`` used to do in one call
+    (issue athenaeum#1834). Does NOT build or check for an index itself --
+    callers always run :func:`build_hook_index` first (this is what
+    :func:`build_push_breadcrumb_context` below does for a single caller).
+
+    Returns ``""`` when the hook itself declines to inject anything -- a
+    too-short prompt, no FTS match -- mirroring the hook's own "exit 0, no
+    output" behaviour. Raises :class:`HookIndexBuildError` on a subprocess
+    timeout or nonzero exit, same exception type :func:`build_hook_index`
+    raises, so callers need only one ``except`` clause.
+    """
+    env = build_breadcrumb_hook_env(knowledge_root, hook_home, athenaeum_src=athenaeum_src)
+    stdin_payload = json.dumps(
+        {"prompt": query, "session_id": session_id or f"rollout-{uuid.uuid4().hex}"}
+    )
+    try:
+        result = subprocess.run(
+            ["bash", str(USER_PROMPT_HOOK)],
+            input=stdin_payload,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise HookIndexBuildError(_describe_hook_subprocess_error(exc)) from exc
+    if not result.stdout.strip():
+        return ""
+    payload = json.loads(result.stdout)
+    return str(payload.get("hookSpecificOutput", {}).get("additionalContext", ""))
+
+
 def build_push_breadcrumb_context(
     knowledge_root: Path,
     hook_home: Path,
@@ -818,7 +1024,7 @@ def build_push_breadcrumb_context(
     *,
     session_id: str | None = None,
     athenaeum_src: Path | None = None,
-    timeout: float = 30.0,
+    timeout: float = HOOK_QUERY_TIMEOUT_SECONDS,
 ) -> str:
     """Assemble the breadcrumb PUSH arm's context by ACTUALLY RUNNING the
     shipped hooks against *knowledge_root* — never a Python reimplementation
@@ -827,43 +1033,53 @@ def build_push_breadcrumb_context(
     structural here, not merely tested: there is no second code path that
     could drift from the shipped one).
 
-    Runs :data:`SESSION_START_HOOK` under *hook_home* as a throwaway
-    ``HOME`` to build the hook's own FTS5 index from *knowledge_root*, then
-    runs :data:`USER_PROMPT_HOOK` for *query* against that SAME ``HOME`` and
-    returns ``hookSpecificOutput.additionalContext`` verbatim — byte-for-byte
-    what a real Claude Code session would receive for the same prompt on the
-    same materialized corpus.
+    Kept as a single-call convenience wrapper around :func:`build_hook_index`
+    (memoized, see :data:`_HOOK_INDEX_CACHE`) then :func:`query_hook` --
+    this is the exact ``(knowledge_root, hook_home, query)`` seam every
+    offline caller (including the grid-dispatch wiring tests' stubs) already
+    depends on, so it keeps that signature byte-for-byte (issue
+    athenaeum#1834: "keep the context_fn injectable seam working"). *timeout*
+    applies to the query half only now; the index-build half always uses
+    :data:`HOOK_INDEX_BUILD_TIMEOUT_SECONDS`, since a caller of this
+    single-call wrapper has no way to name two different timeouts.
 
     Returns ``""`` (never raises) when the hook itself declines to inject
     anything — no index, a too-short prompt, no FTS match — mirroring the
     hook's own "exit 0, no output" behaviour; the hook never raises either.
+    Raises :class:`HookIndexBuildError` on a hook subprocess timeout or
+    nonzero exit -- callers that must keep the grid running on that failure
+    catch it (see :func:`run_push_breadcrumb` and its PUSH_BREADCRUMB_PULL
+    siblings).
     """
-    if shutil.which("bash") is None:
-        raise RuntimeError("bash not found on PATH (required to run the shipped hooks)")
-    env = build_breadcrumb_hook_env(knowledge_root, hook_home, athenaeum_src=athenaeum_src)
-    subprocess.run(
-        ["bash", str(SESSION_START_HOOK)],
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=True,
-    )
-    stdin_payload = json.dumps(
-        {"prompt": query, "session_id": session_id or f"rollout-{uuid.uuid4().hex}"}
-    )
-    result = subprocess.run(
-        ["bash", str(USER_PROMPT_HOOK)],
-        input=stdin_payload,
-        env=env,
-        capture_output=True,
-        text=True,
+    build_hook_index(knowledge_root, hook_home, athenaeum_src=athenaeum_src)
+    return query_hook(
+        knowledge_root,
+        hook_home,
+        query,
+        session_id=session_id,
+        athenaeum_src=athenaeum_src,
         timeout=timeout,
     )
-    if not result.stdout.strip():
-        return ""
-    payload = json.loads(result.stdout)
-    return str(payload.get("hookSpecificOutput", {}).get("additionalContext", ""))
+
+
+def _safe_assemble_breadcrumb(
+    assemble: Callable[..., str], knowledge_root: Path, hook_home: Path, query: str
+) -> tuple[str, str | None]:
+    """Run *assemble* (:func:`build_push_breadcrumb_context` or an injected
+    stub) and turn a hook subprocess failure into ``("", reason)`` instead
+    of propagating it (issue athenaeum#1834 AC2) -- a stubbed *assemble* in
+    the offline test suite may itself raise ``subprocess.TimeoutExpired``/
+    ``CalledProcessError`` directly (rather than the
+    :class:`HookIndexBuildError` the real implementation wraps them in), so
+    both are caught here, not just the wrapped form. Any other exception
+    from *assemble* still propagates -- only these well-known hook failure
+    modes are converted into a harness-failure reason string."""
+    try:
+        return assemble(knowledge_root, hook_home, query), None
+    except HookIndexBuildError as exc:
+        return "", str(exc)
+    except (subprocess.TimeoutExpired, subprocess.CalledProcessError) as exc:
+        return "", _describe_hook_subprocess_error(exc)
 
 
 def run_push_breadcrumb(
@@ -893,7 +1109,9 @@ def run_push_breadcrumb(
     :func:`run_probe_all_arms`'s ``pull_runner`` seam already uses.
     """
     assemble = context_fn or build_push_breadcrumb_context
-    breadcrumb = assemble(knowledge_root, hook_home, probe.query)
+    breadcrumb, harness_failure = _safe_assemble_breadcrumb(
+        assemble, knowledge_root, hook_home, probe.query
+    )
     answer, turn_usage, user_text = _single_shot(
         context=breadcrumb or None, probe=probe, client=client, session=session, model=model
     )
@@ -905,9 +1123,11 @@ def run_push_breadcrumb(
     # ``build_breadcrumb_hook_env``) graded silently as an ordinary miss
     # here even though it was caught on the PULL sibling. Same condition,
     # same message text, so a report reader sees one failure mode, not two
-    # differently-worded ones.
-    harness_failure = None
-    if not breadcrumb and probe.expected_uids:
+    # differently-worded ones. A hook subprocess failure (issue
+    # athenaeum#1834) takes precedence over that generic check -- it is a
+    # harness failure with a KNOWN cause, never re-derived from the empty
+    # breadcrumb it also happens to produce.
+    if harness_failure is None and not breadcrumb and probe.expected_uids:
         harness_failure = (
             "push arm delivered an empty breadcrumb (pushed_context == '') for a "
             "non-abstention probe -- never graded as an ordinary miss"
@@ -1270,7 +1490,9 @@ def run_push_breadcrumb_pull(
     legitimate, recorded outcome, never an error.
     """
     assemble = context_fn or build_push_breadcrumb_context
-    breadcrumb = assemble(knowledge_root, hook_home, probe.query)
+    breadcrumb, hook_failure = _safe_assemble_breadcrumb(
+        assemble, knowledge_root, hook_home, probe.query
+    )
 
     if shutil.which(claude_binary) is None:
         raise RuntimeError(f"{claude_binary!r} not found on PATH")
@@ -1314,7 +1536,13 @@ def run_push_breadcrumb_pull(
     # that silent-swallow shape);
     # it only ensures the cell is never graded as an ordinary retrieval
     # miss when the harness itself may be at fault.
-    harness_failure = _permission_request_harness_failure(parsed.answer)
+    # Issue athenaeum#1834: a hook subprocess failure takes precedence over
+    # both checks below -- it is a harness failure with a known cause, not
+    # re-derived from the answer text or the empty breadcrumb it also
+    # happens to produce.
+    harness_failure = hook_failure
+    if harness_failure is None:
+        harness_failure = _permission_request_harness_failure(parsed.answer)
     if harness_failure is None and not breadcrumb and probe.expected_uids:
         harness_failure = (
             "push arm delivered an empty breadcrumb (pushed_context == '') for a "
@@ -2604,7 +2832,9 @@ def run_push_breadcrumb_pull_api(
     would derive for the CLI path.
     """
     assemble = context_fn or build_push_breadcrumb_context
-    breadcrumb = assemble(knowledge_root, hook_home, probe.query)
+    breadcrumb, harness_failure = _safe_assemble_breadcrumb(
+        assemble, knowledge_root, hook_home, probe.query
+    )
     resolved_wiki_root = wiki_root if wiki_root is not None else knowledge_root / "wiki"
     prompt_text = f"{breadcrumb}\n\n{probe.query}" if breadcrumb else probe.query
     # Issue athenaeum#1761: *knowledge_root* is already the exact root
@@ -2647,6 +2877,15 @@ def run_push_breadcrumb_pull_api(
     # north_star_report._push_delivered_text's transcript[0]["pushed_context"]
     # read needs no mode branch either.
     transcript = [{"pushed_context": breadcrumb}, *loop_transcript]
+    # Issue athenaeum#1834: this api-mode PUSH_BREADCRUMB_PULL sibling never
+    # had a harness_failure field at all before this issue -- a hook
+    # subprocess failure is now recorded here the same way its CLI sibling
+    # (:func:`run_push_breadcrumb_pull`) records one.
+    if harness_failure is None and not breadcrumb and probe.expected_uids:
+        harness_failure = (
+            "push arm delivered an empty breadcrumb (pushed_context == '') for a "
+            "non-abstention probe -- never graded as an ordinary miss"
+        )
     return RolloutRecord(
         arm=Arm.PUSH_BREADCRUMB_PULL,
         probe_id=probe.id,
@@ -2660,6 +2899,7 @@ def run_push_breadcrumb_pull_api(
         turn_count=turn_count,
         transcript=transcript,
         mode="api",
+        harness_failure=harness_failure,
     )
 
 
