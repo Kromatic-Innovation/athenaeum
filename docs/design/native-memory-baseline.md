@@ -403,6 +403,46 @@ construction. See `tests/evals/north_star_report.py`'s `grade_correctness`/
 The write-path sessions of Phase 2 are outside this contract — they produce memory
 files, not graded answers.
 
+**Superseded by issue athenaeum#1831 (2026-09-18 operator ruling on
+athenaeum#1791 comment 5732689494): the reference tag no longer feeds
+correctness at all.** Everything above this paragraph is HISTORY, kept for
+context on how the contract got here, not the live grading rule. The
+operator's own words: "If the answer is right, it is right. Grade the answer
+on content, and establish which pages were used from evidence we already
+have rather than from a quoted tag." `grade_correctness` now requires, per
+answer-bearing `expected_uids` page (a page carrying one of the probe's
+`answer_tokens` — see `tests.evals.corpus.answer_bearing_uids`): (a) that
+page's planted `answer_markers` value — the FACT itself, a date/number/name,
+never the tag, and never a substring of the probe's `query` (both enforced
+by `validate_core`) — present in the normalized answer, AND (b) that page's
+uid in `tests.evals.north_star_report._delivered_uids` for this arm/cell.
+`Arm.NONE` is graded content-only (marker match alone) because it has no
+delivery channel at all — this is what lets `weak_probes` keep catching a
+floor leak (prior knowledge/a guessable marker), the same purpose it served
+under the tag rule. `PUSH_BREADCRUMB` and `NATIVE_INDEX`, which the
+athenaeum#1793-era text above called uid-evidence-free, now have their OWN
+real per-page evidence: a breadcrumb's rendered bullet names the page
+(`_breadcrumb_delivered_uids`), and a NATIVE_INDEX topic file the model's own
+`read` tool actually opened during the turn is recorded exactly the way
+NATIVE_GREP's already was (`_native_loaded_uids`, fed by `run_native_index`'s
+now-recorded `loaded_memory_files`) — deliberately NOT the loaded `MEMORY.md`
+index text itself, which at `core` scale names every page unconditionally
+and would be a tautology, not evidence. The reference tag's own satisfaction
+survives as `tag_followed` (`tests.evals.north_star_report.tag_followed`), a
+report-only diagnostic rendered per arm and per mode — it feeds no §7
+condition and no `GroupStats` win/loss; `correctness_rate` is graded on
+`answer_markers` now. `REFERENCE_TAG_INSTRUCTION` itself is UNCHANGED text —
+every arm still asks for the tag, so `tag_followed` stays measurable — see
+`tests/evals/test_reference_tag_contract.py`. `Corpus.fingerprint()` hashes
+rendered page bytes only, never probe fields, so authoring `answer_markers`
+did not change it; the fingerprint recorded against any floor table dated
+before this issue is not comparable to one graded under this rule regardless.
+"Superseded" above means the athenaeum#1793 uid-citation-in-answer-text rule
+(closing the AC's leak guard by requiring the delivered uid to appear
+literally in the answer) is GONE, not merely extended: content plus
+delivery evidence from the transcript replaces it outright, never stacks
+with it.
+
 **The 2026-09-17 15:43Z run (workflow run 35239792240, develop `af0596bb`,
 1392 rows, API mode) failed the oracle positive control, and its decision
 block is void** (athenaeum#1759). Two deterministic, distinct defects, both
