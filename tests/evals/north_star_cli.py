@@ -579,6 +579,11 @@ def load_phase2_results(path: Path) -> tuple[list[WritePathStats], list[WriteCos
                         observations_total=row["observations_total"],
                         observations_measured=row["observations_measured"],
                         observations_dropped=row.get("observations_dropped"),
+                        # Issue athenaeum#1824: ``.get`` with the dataclass's
+                        # own defaults so a sibling-store row appended by a
+                        # run that predates these two fields still loads.
+                        transient_total=row.get("transient_total", 0),
+                        transient_retained=row.get("transient_retained"),
                     )
                 )
             elif kind == "write_cost":
@@ -639,6 +644,10 @@ def _run_phase2_group(
             "corpus_scale": scale,
             "exit_code": outcome.exit_code,
             "partial": outcome.partial,
+            # Issue athenaeum#1824: nonzero means the compile was scored
+            # before its input finished compiling, so the retention number
+            # on the sibling write_path row is a floor, not a result.
+            "deferred_raw_files": outcome.deferred_raw_files,
         }
     elif system == "native":
         result = run_native_writer_dispatch(
