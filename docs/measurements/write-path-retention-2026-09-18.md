@@ -2,6 +2,23 @@
 
 # Write-path retention — per-gate diagnosis, 2026-09-18
 
+> **Note (issue athenaeum#1830, 2026-09-18 operator ruling on
+> Kromatic-Innovation/athenaeum#1791 comment 5732689494):** the athenaeum row
+> below measured the RETIRED raw-observation-compile shape
+> (`tests.evals.write_path.compile_observation_stream` run directly against
+> the observation stream) — a job the librarian never performs in
+> production, since it files what Claude has already written rather than
+> writing facts itself. That shape stays exported as a diagnostic, but the
+> default Phase 2 athenaeum arm now compiles the NATIVE writer's own memory
+> files instead (`compile_native_memory_files`), materialised as auto-memory
+> intake under `raw/auto-memory/` the way production intake receives them.
+> Retention is now measured on that compiled result against those same
+> native files ("Claude's memories versus Claude's memories after filing"),
+> plus a separate filing-loss row distinguishing the librarian's own loss
+> from Claude's own write loss. The per-gate analysis below (the `max_files`
+> window, session-bundling shape) is still the correct diagnosis of the RUN
+> it describes; it just no longer describes the current default arm.
+
 Issue athenaeum#1824. The Phase 2 smoke run
 ([35292686290](https://github.com/Kromatic-Innovation/athenaeum/actions/runs/35292686290),
 develop `831ce902`) compiled the medium observation stream through the real
