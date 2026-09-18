@@ -255,6 +255,51 @@ def _permission_request_harness_failure(answer: str) -> str | None:
     return None
 
 
+#: Substrings (case-insensitive) marking a native-arm final answer as an
+#: unauthenticated ``claude -p`` session rather than a graded response
+#: (issue athenaeum#1826 defect 4). Taken verbatim from the 2026-09-18
+#: cli-mode spot-check's ``native_grep`` transcripts: the login does not
+#: follow into :func:`seed_native_claude_config`'s throwaway
+#: ``CLAUDE_CONFIG_DIR`` on macOS (its ``.claude.json`` carries only a
+#: copied ``cachedGrowthBookFeatures`` object -- no ``oauthAccount``/
+#: keychain-backed credential), so every native cell answered with a login
+#: prompt and was graded 0/6 as an ordinary miss, flattering nothing and
+#: measuring nothing about auto-memory.
+_NOT_LOGGED_IN_MARKERS: tuple[str, ...] = (
+    "not logged in",
+    "please run /login",
+    "please run `/login`",
+)
+
+
+def _not_logged_in_harness_failure(answer: str) -> str | None:
+    """``None`` when *answer* reads like a real response; otherwise a
+    short, stable reason string for ``RolloutRecord.harness_failure`` --
+    see :data:`_NOT_LOGGED_IN_MARKERS`.
+
+    Issue athenaeum#1826 defect 4: :func:`_spawn_native` seeds a THROWAWAY
+    ``CLAUDE_CONFIG_DIR`` (:func:`seed_native_claude_config`) rather than
+    the operator's own isolated-but-authenticated one
+    (:func:`_require_isolated_cli_config`, already used by
+    :func:`run_pull`/:func:`run_push_breadcrumb_pull`) because reusing that
+    directory here is NOT provably safe: :func:`seed_native_claude_config`
+    writes a fresh ``.claude.json`` carrying ONLY a copied
+    ``cachedGrowthBookFeatures`` object (by design -- see its own
+    docstring's "no identity or credential material crosses into the
+    isolated config" guarantee), and pointed at the operator's real
+    isolated config directory that write would OVERWRITE the very
+    ``oauthAccount``/identity state that makes it authenticated in the
+    first place. Marking the observable failure mode instead is the
+    option this issue's own acceptance criteria call out as equally
+    acceptable when the first is judged unsafe.
+    """
+    lowered = answer.lower()
+    for marker in _NOT_LOGGED_IN_MARKERS:
+        if marker in lowered:
+            return f"native arm answered as an unauthenticated cli session ({marker!r})"
+    return None
+
+
 def _require_isolated_cli_config() -> str:
     """Return the operator-set isolated ``CLAUDE_CONFIG_DIR`` or raise.
 
@@ -742,6 +787,19 @@ def build_breadcrumb_hook_env(
         "KNOWLEDGE_ROOT": str(knowledge_root),
         "ATHENAEUM_SRC": str(src),
         "ATHENAEUM_PYTHON": sys.executable,
+        "PYTHON": sys.executable,
+        # athenaeum#1826 (defect 2): without this, the hooks' interpreter
+        # can only import athenaeum via the ATHENAEUM_SRC single-file fast
+        # path (session-start-recall.sh's build_fts5_index/STOPWORDS
+        # loaders, and user-prompt-recall.sh's query_vector_index loader) --
+        # user-prompt-recall.sh's relevance-floor `from athenaeum.config
+        # import ...` is a DELIBERATELY plain package import (see that
+        # script's own comment on why it is not routed through
+        # ATHENAEUM_SRC), so it needs athenaeum importable the normal way.
+        # Derived from this module's own file location, never cwd, so the
+        # path is correct regardless of where pytest/the eval CLI is
+        # invoked from.
+        "PYTHONPATH": str((_REPO_ROOT / "src").resolve()),
         # Deliberately a path that cannot exist, so `command -v $ATHENAEUM_CLI`
         # fails deterministically and the hook falls through to its offline
         # regex term extractor — same reasoning as hook_env's own
@@ -839,6 +897,21 @@ def run_push_breadcrumb(
     answer, turn_usage, user_text = _single_shot(
         context=breadcrumb or None, probe=probe, client=client, session=session, model=model
     )
+    # Issue athenaeum#1826 defect 3: this api-mode arm never got the same
+    # empty-breadcrumb-for-a-non-abstention-probe check
+    # ``run_push_breadcrumb_pull`` applies (issue athenaeum#1819 defect 2) --
+    # so a hook-side failure (e.g. the harness environment not letting the
+    # hook's interpreter import athenaeum at all -- see
+    # ``build_breadcrumb_hook_env``) graded silently as an ordinary miss
+    # here even though it was caught on the PULL sibling. Same condition,
+    # same message text, so a report reader sees one failure mode, not two
+    # differently-worded ones.
+    harness_failure = None
+    if not breadcrumb and probe.expected_uids:
+        harness_failure = (
+            "push arm delivered an empty breadcrumb (pushed_context == '') for a "
+            "non-abstention probe -- never graded as an ordinary miss"
+        )
     return RolloutRecord(
         arm=Arm.PUSH_BREADCRUMB,
         probe_id=probe.id,
@@ -859,6 +932,7 @@ def run_push_breadcrumb(
             }
         ],
         mode="api",
+        harness_failure=harness_failure,
     )
 
 
@@ -1685,6 +1759,10 @@ def run_native_index(
         # _spawn_native) regardless of the ambient environment, so this row
         # is unconditionally isolated.
         config_isolated=True,
+        # Issue athenaeum#1826 defect 4: see _not_logged_in_harness_failure's
+        # own docstring for why this arm marks rather than reuses the
+        # operator's authenticated config directory.
+        harness_failure=_not_logged_in_harness_failure(parsed.answer),
     )
 
 
@@ -1753,6 +1831,10 @@ def run_native_grep(
         # Issue athenaeum#1819 defect 3: see the matching comment in
         # run_native_index -- always isolated by construction.
         config_isolated=True,
+        # Issue athenaeum#1826 defect 4: see _not_logged_in_harness_failure's
+        # own docstring for why this arm marks rather than reuses the
+        # operator's authenticated config directory.
+        harness_failure=_not_logged_in_harness_failure(parsed.answer),
     )
 
 
