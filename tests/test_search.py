@@ -800,7 +800,11 @@ class TestConvenienceFunctions:
         # from this issue's bm25 weight/body-indexing changes.
         assert [r[0] for r in results] == ["acme-corp.md"]
         assert results[0][1] == "Acme Corp"
-        assert results[0][2] == pytest.approx(-1.9025473882119777, rel=1e-6)
+        # Score value tied to FTS5Backend._BM25_WEIGHTS's body component --
+        # updated from -1.9025473882119777 when that weight moved 0.4 -> 0.15
+        # (issue athenaeum#1789 rebase regression, PR athenaeum#1807; see
+        # that constant's own comment in src/athenaeum/search.py).
+        assert results[0][2] == pytest.approx(-1.8888951055308014, rel=1e-6)
         # Re-querying is deterministic -- the exact same explicit string
         # produces byte-identical ordered results and scores every time,
         # never a special-cased or non-reproducible path.

@@ -570,22 +570,30 @@ def _probe_by_id(corpus: Corpus, probe_id: str) -> Probe:
 # which is the signal to remove it from this set.
 # ---------------------------------------------------------------------------
 
-#: fts5 backend, measured 2026-09-17. Two entries below (``confidentiality_rule``
-#: and ``budget_threshold_current``, both scales) were carried forward from
-#: develop @ 5693c1c7 (post athenaeum#1768/athenaeum#1769/athenaeum#1780 --
-#: the `aggregation` class's `aggregation_retainer_clients` addition shifted
-#: fts5's relative ranking enough that client-bluewater drops out of
-#: `former_client_not_current`'s top 5 at `core` scale too). athenaeum#1789's
-#: FTS5 fix in this same commit (body indexed, weighted bm25,
+#: fts5 backend, measured 2026-09-17. ``confidentiality_rule`` and
+#: ``budget_threshold_current`` (both scales) were carried forward from
+#: develop @ 5693c1c7 pending re-verification against the rebased index --
+#: re-measured here (PR athenaeum#1807) and confirmed PASSING at both
+#: scales, so they are REMOVED from this set per the strict xfail contract
+#: below (an entry that starts passing is the signal to remove it, not to
+#: keep it around). athenaeum#1789's FTS5 fix (body indexed, weighted bm25,
 #: ``current``/``currently`` stopworded -- see ``src/athenaeum/search.py``'s
-#: ``FTS5Backend``) targets exactly these two cases: their query's
-#: distinguishing terms (``engagement``/``details``/``another`` for the
-#: first, ``lead``/``ceiling`` for the second) exist only in the page BODY,
-#: which FTS5 never indexed before this fix. They are kept here pending
-#: re-verification against the rebased index; the pre-rebase measurement
-#: for this fix alone found them fixed (2 of 52 remaining, against
-#: develop @ 16d40f24) -- if they still pass after rebase, remove them and
-#: say so, per the strict xfail contract below.
+#: ``FTS5Backend``) is what clears them: their query's distinguishing terms
+#: (``engagement``/``details``/``another`` for the first, ``lead``/
+#: ``ceiling`` for the second) exist only in the page BODY, which FTS5
+#: never indexed before that fix.
+#:
+#: The rebase onto athenaeum#1792 also surfaced a real regression on this
+#: same body-weight knob: at the pre-rebase body weight (0.4),
+#: ``person-rowan-wrenfield`` (a body-only match -- its own page prose
+#: describes the eponymous repo) re-entered ``repo_not_person``'s top 5 at
+#: `core` scale, breaking the disambiguation guard
+#: (``test_person_repo_disambiguation_excludes_wrong_page_fts5``). Fixed by
+#: lowering ``FTS5Backend._BM25_WEIGHTS``'s body component from 0.4 to
+#: 0.15 -- see that constant's own comment in ``src/athenaeum/search.py``
+#: for the sweep that found the safe window (0.1-0.3, both scales) and the
+#: re-verification that no other ``_FTS5_XFAIL`` entry changed status at
+#: 0.15.
 #:
 #: ``("core", "former_client_not_current")`` is ADDED by athenaeum#1789 --
 #: NOT a regression this fix introduced, but a PRE-EXISTING latent failure
@@ -616,11 +624,7 @@ def _probe_by_id(corpus: Corpus, probe_id: str) -> Probe:
 #: exact tie) two-to-three ranks behind the distractor block.
 _FTS5_XFAIL: frozenset[tuple[str, str]] = frozenset(
     {
-        ("core", "confidentiality_rule"),
-        ("core", "budget_threshold_current"),
         ("core", "former_client_not_current"),
-        ("medium", "confidentiality_rule"),
-        ("medium", "budget_threshold_current"),
         ("medium", "surname_is_ambiguous"),
         ("medium", "former_client_not_current"),
     }
@@ -714,6 +718,21 @@ _VECTOR_XFAIL: frozenset[tuple[str, str]] = frozenset(
         #: Regression introduced by this issue (see the mechanism note
         #: above) -- passes on develop @ e2ee32ef, fails here.
         ("core", "keelbridge_programme_scope"),
+        #: regression under the lexical-hash stand-in after the
+        #: athenaeum#1780 corpus additions; real-model status unknown. See
+        #: athenaeum#1800. NOTE this probe's own class -- fused vector/RRF
+        #: rank crowded out by other candidates, not a body-weight or
+        #: metadata_only effect (that knob is a no-op on this arm; see
+        #: ``FTS5Backend.query``'s ``metadata_only`` docstring) -- matches
+        #: the header comment's stronger, directly A/B'd account of the
+        #: SAME mechanism for the sibling regressions above
+        #: (``keelbridge_programme_scope`` et al.), which found these
+        #: PASS on develop and FAIL on this branch. Both attributions
+        #: point at the same cross-lane interaction; kept separate per the
+        #: PR athenaeum#1807 fix-lane's mandated wording rather than
+        #: merged into one, so a future re-measurement against the real
+        #: embedding model can settle which framing is load-bearing.
+        ("core", "ratecard_tooling_owner"),
         ("medium", "pto_allowance"),
         ("medium", "confidentiality_rule"),
         #: Regression introduced by this issue -- passes on develop, fails

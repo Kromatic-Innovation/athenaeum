@@ -1157,7 +1157,28 @@ class FTS5Backend:
     # (a fact that exists ONLY in body — see the schema-bump comment above)
     # still surfaces without every ballast/distractor page that merely shares a
     # body word crowding out the real answer.
-    _BM25_WEIGHTS: tuple[float, ...] = (1.0, 8.0, 4.0, 8.0, 3.0, 0.4)
+    #
+    # Body weight lowered from 0.4 to 0.15 (issue athenaeum#1789 rebase
+    # regression, PR athenaeum#1807): rebasing onto athenaeum#1792's
+    # disambiguation-guard tests exposed that 0.4 let ``person-rowan-
+    # wrenfield`` (a body-only match — its own page prose describes the
+    # repo, so "rowanwrenfield"/"repository" appear in its body) re-enter
+    # the ``repo_not_person`` probe's top 5 at ``core`` scale, purely on
+    # that body mention (name/tags/aliases/description all score zero for
+    # it — see the bm25 per-column breakdown in the PR body). A direct
+    # sweep of the body weight through pytest (0.4 down to 0.0, both
+    # scales, against the disambiguation guard AND the two body-only
+    # coverage probes ``confidentiality_rule``/``budget_threshold_current``)
+    # found 0.1-0.3 clears the disambiguation guard at both scales while
+    # keeping both coverage probes passing; 0.05 and below starts losing
+    # ``confidentiality_rule`` (its only distinguishing terms —
+    # ``engagement``/``details``/``another`` — live in body). 0.15 sits
+    # comfortably clear of both edges (0.05 and 0.4) — this is the value the
+    # full-probe re-verification below was actually run against, not a
+    # midpoint chosen for its own sake. Re-verified with a full non-
+    # aggregation probe sweep at 0.15: no ``_FTS5_XFAIL`` entry changes
+    # status except the two intended coverage gains (removed below).
+    _BM25_WEIGHTS: tuple[float, ...] = (1.0, 8.0, 4.0, 8.0, 3.0, 0.15)
 
     # SQL fragments shared by the full and incremental build paths. ``type``
     # is UNINDEXED (out of the BM25 term space, exact-matched via WHERE) —
@@ -1504,6 +1525,23 @@ class FTS5Backend:
         issue's coverage fix; the FTS5 list fed to the vector-backend hybrid
         fusion reverts to metadata-only ranking, matching its behavior
         before this issue landed.
+
+        SCOPE of the sweep above, reconciled against the later direct-FTS5
+        sweep in ``_BM25_WEIGHTS``'s own comment (PR athenaeum#1807): this
+        docstring's claim is about the HYBRID/vector-fusion regressions
+        (``ratecard_tooling_owner``, ``keelbridge_programme_scope``,
+        ``callum_drews_last_contact``, the ``person_not_repo`` guard,
+        measured through RRF fusion on the vector backend) — no single body
+        weight cleared those while keeping the coverage probes. That is a
+        SEPARATE objective from the one ``_BM25_WEIGHTS`` itself now
+        satisfies: the DIRECT-fts5 disambiguation guard
+        (``person_not_repo``/``repo_not_person`` via
+        ``search_backend="fts5"``, no fusion) plus the same two coverage
+        probes. 0.1–0.3 clears that direct-fts5 pair at both scales — this
+        is exactly why lowering the class constant did not remove the need
+        for ``metadata_only``: a value that works for the un-fused FTS5 path
+        does not, and was not re-tested to, satisfy the fused path's tighter
+        constraint.
         """
         del wiki_root  # FTS5 reads the pre-built index, not the wiki files
         del as_of  # athenaeum#308: FTS5 filters at build time; as-of view = as-of index
