@@ -253,16 +253,25 @@ def resolve_owner(config: dict[str, Any] | None) -> dict[str, Any] | None:
           uid: <owner-person-uid>                # canonical owner person UID
           google_contact: people/<contact-id>    # owner Google contact id
           aliases: ["<your_user_handle>", ...]   # optional name/handle aliases
+          emails: ["<you@example.com>", ...]     # optional owner addresses
 
     Aliases used for name matching must be FULL names (≥2 tokens); a
     single-token alias is ignored for name matching so it cannot absorb
     every stranger who shares that one name.
 
-    Returns a normalized dict ``{"uid", "google_contact", "aliases"}`` when at
-    least one usable field is set, else ``None``. A ``None`` return makes every
-    owner-aware behavior (auto-bind, owner join keys, ``user_*`` routing) inert
-    so the package works for any user with no owner configured. No default is
-    seeded into ``_DEFAULTS`` (issue athenaeum#231) — an unset owner is genuinely empty.
+    ``emails`` lists the owner's OWN mailbox addresses. It is not a match
+    signal — nothing binds a page to the owner because it shares an address.
+    It is an EXCLUSION list: the person merge refuses to union one of these
+    onto a page that is not the owner's, so a contaminated import fragment
+    cannot silently attribute the operator's mailbox to an unrelated contact
+    (issue athenaeum#1739). Addresses are lowercased and blanks dropped.
+
+    Returns a normalized dict ``{"uid", "google_contact", "aliases", "emails"}``
+    when at least one usable field is set, else ``None``. A ``None`` return
+    makes every owner-aware behavior (auto-bind, owner join keys, ``user_*``
+    routing, the merge address guard) inert so the package works for any user
+    with no owner configured. No default is seeded into ``_DEFAULTS`` (issue
+    athenaeum#231) — an unset owner is genuinely empty.
     """
     if not isinstance(config, dict):
         return None
@@ -281,10 +290,19 @@ def resolve_owner(config: dict[str, Any] | None) -> dict[str, Any] | None:
     aliases: list[str] = []
     if isinstance(aliases_raw, list):
         aliases = [s for s in (_clean_str(a) for a in aliases_raw) if s]
+    emails_raw = raw.get("emails")
+    emails: list[str] = []
+    if isinstance(emails_raw, list):
+        emails = [s.lower() for s in (_clean_str(e) for e in emails_raw) if s]
 
-    if not (uid or google_contact or aliases):
+    if not (uid or google_contact or aliases or emails):
         return None  # blank/empty owner block is inert
-    return {"uid": uid, "google_contact": google_contact, "aliases": aliases}
+    return {
+        "uid": uid,
+        "google_contact": google_contact,
+        "aliases": aliases,
+        "emails": emails,
+    }
 
 
 def resolve_owner_asserter(config: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -3664,12 +3682,19 @@ search_backend: fts5
 #     always treated as an owner alias when an owner is configured. Name
 #     aliases must be FULL names (>=2 tokens) — a single-token alias is
 #     ignored for name matching so it cannot absorb every same-named stranger.
+#   emails: optional list of the owner's OWN mailbox addresses. NOT a match
+#     signal — it is an exclusion list. The person merge refuses to union one
+#     of these onto a page that is not the owner's, so a contaminated import
+#     fragment cannot attribute the operator's mailbox to an unrelated
+#     contact (issue athenaeum#1739).
 # owner:
 #   uid: <owner-person-uid>
 #   google_contact: people/<google-contact-id>
 #   aliases:
 #     - <your_user_handle>
 #     - <Your Name>
+#   emails:
+#     - <you@example.com>
 
 # Person dedup join keys (issue athenaeum#269). The merge always dedups on the
 # generic ``google_contact`` field. Operators whose contacts carry the

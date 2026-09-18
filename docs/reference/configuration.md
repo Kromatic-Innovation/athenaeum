@@ -220,17 +220,25 @@ owner:
   uid: <owner-person-uid>                # canonical owner person UID
   google_contact: people/<contact-id>    # owner Google contact id
   aliases: ["<your_user_handle>", ...]   # optional name/handle aliases
+  emails: ["<you@example.com>", ...]     # optional owner addresses
 ```
 
 Aliases used for name matching must be FULL names (≥2 tokens); a
 single-token alias is ignored for name matching so it cannot absorb
 every stranger who shares that one name.
 
-Returns a normalized dict ``{"uid", "google_contact", "aliases"}`` when at
-least one usable field is set, else ``None``. A ``None`` return makes every
-owner-aware behavior (auto-bind, owner join keys, ``user_*`` routing) inert
-so the package works for any user with no owner configured. No default is
-seeded into ``_DEFAULTS`` — an unset owner is genuinely empty.
+``emails`` lists the owner's OWN mailbox addresses. It is not a match
+signal — nothing binds a page to the owner because it shares an address.
+It is an EXCLUSION list: the person merge refuses to union one of these
+onto a page that is not the owner's, so a contaminated import fragment
+cannot silently attribute the operator's mailbox to an unrelated contact
+Addresses are lowercased and blanks dropped.
+
+Returns a normalized dict ``{"uid", "google_contact", "aliases", "emails"}``
+when at least one usable field is set, else ``None``. A ``None`` return
+makes every owner-aware behavior (auto-bind, owner join keys, ``user_*``
+routing, the merge address guard) inert so the package works for any user
+with no owner configured. No default is seeded into ``_DEFAULTS`` — an unset owner is genuinely empty.
 
 ### `resolve_pull_before_run`
 

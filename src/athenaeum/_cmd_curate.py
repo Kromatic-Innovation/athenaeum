@@ -292,7 +292,11 @@ def cmd_dedupe(args: argparse.Namespace) -> int:
     else:
         text = sys.stdin.read()
     pairs = pairs_from_yaml(text)
-    from athenaeum.config import load_config, resolve_google_contact_keys
+    from athenaeum.config import (
+        load_config,
+        resolve_google_contact_keys,
+        resolve_owner,
+    )
 
     cfg = load_config(wiki_root.parent)
     lock = _acquire_or_exit(wiki_root.parent, args, cfg)
@@ -300,8 +304,16 @@ def cmd_dedupe(args: argparse.Namespace) -> int:
         return lock
     try:
         gc_keys = resolve_google_contact_keys(cfg)
+        # Owner is resolved on the APPLY path too, not just --find: it arms
+        # the owner-address guard in the merge (issue athenaeum#1739). Without it
+        # the guard exists but nothing reaches it from the CLI.
+        owner = resolve_owner(cfg)
         merge_report = merge_duplicate_persons(
-            pairs, apply=True, wiki_root=wiki_root, google_contact_keys=gc_keys
+            pairs,
+            apply=True,
+            wiki_root=wiki_root,
+            google_contact_keys=gc_keys,
+            owner=owner,
         )
     finally:
         lock.release()
@@ -313,6 +325,9 @@ def cmd_dedupe(args: argparse.Namespace) -> int:
         f"references_rewritten={merge_report.references_rewritten} "
         f"errors={len(merge_report.errors)}"
     )
+    # Key and count only — the dropped value is the operator's own address.
+    for key, count in sorted(merge_report.owner_addresses_dropped.items()):
+        print(f"owner_addresses_dropped[{key}]={count}")
     for err in merge_report.errors:
         print(f"  ERROR: {err}", file=sys.stderr)
     return 0 if not merge_report.errors else 1
