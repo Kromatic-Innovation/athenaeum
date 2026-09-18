@@ -1583,6 +1583,15 @@ def compute_verdicts(
       when NO class at this scale has any native cost data to compare --
       there is nothing to certify a pass against.
     """
+    # Issue athenaeum#1787: §7 verdicts are pinned to the shipped fts5
+    # configuration (ruling R1) -- a vector-backend row must never enter
+    # this computation, even if a caller passes a mixed *rows* sequence
+    # (the CLI's own check_floor_mismatch refuses to mix backends into one
+    # --store, but this function has no such guarantee about its caller).
+    # A pre-athenaeum#1764 row's `search_backend` is `None` (the field did
+    # not exist yet) and is treated as fts5, the only backend that existed
+    # before that issue -- only a REAL recorded `"vector"` is excluded.
+    rows = [r for r in rows if r.record.search_backend in (None, "fts5")]
     if relationship_probe_ids is None:
         relationship_probe_ids = _relationship_probe_ids(
             {row.record.corpus_scale for row in rows}
@@ -2194,6 +2203,22 @@ def _fmt(value: float | None, digits: int = 3) -> str:
     return "n/a" if value is None else f"{value:.{digits}f}"
 
 
+def _report_search_backend_display(rows: Sequence[RolloutRow]) -> str:
+    """Issue athenaeum#1787: the distinct ``search_backend`` value(s)
+    carried by *rows*, for the report header -- so a reader can tell a
+    vector-dispatch report from the default fts5 report at a glance without
+    opening the store JSONL. A ``None`` backend (pre-athenaeum#1764 store)
+    reads as ``"fts5"``, the only backend that existed before that issue.
+    ``check_floor_mismatch`` already refuses to mix backends into one
+    ``--store`` at dispatch time, so this is normally a single value; a
+    genuinely mixed set (only reachable via ``--allow-floor-mismatch``)
+    prints every distinct value so the header never hides that a mismatch
+    was allowed through.
+    """
+    backends = sorted({r.record.search_backend or "fts5" for r in rows})
+    return ", ".join(backends) if backends else "fts5"
+
+
 def render_report(report: NorthStarReport) -> str:
     """Render *report* as markdown, in the issue's own dimension order:
     PULL no-call rate first, then query quality, cost, efficiency, waste,
@@ -2211,6 +2236,11 @@ def render_report(report: NorthStarReport) -> str:
     lines.append(f"- generated: {report.generated}")
     lines.append(f"- athenaeum_version: {report.athenaeum_version}")
     lines.append(f"- git_sha: {report.git_sha}")
+    # issue athenaeum#1787: printed unconditionally so a vector-dispatch
+    # report (a distinct --store, per check_floor_mismatch) is visibly
+    # labelled its own section beside the default fts5 report, never
+    # merged into it.
+    lines.append(f"- search_backend: {_report_search_backend_display(report.rows)}")
     # issue athenaeum#1761: printed unconditionally, "off" when no operator
     # ever set a floor -- so a reader never has to infer floor status from
     # absence.
