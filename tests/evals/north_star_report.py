@@ -88,12 +88,14 @@ import dataclasses
 import json
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from athenaeum.footnote_markers import (
     INLINE_MARKER_RE,
     parse_footnote_definitions,
 )
+from athenaeum.models import parse_bucket, parse_frontmatter, validity_bound_str
 from athenaeum.push_metrics import estimate_tokens
 from athenaeum.shadow_linkage import _get_git_sha, _get_version
 from athenaeum.store import now_iso
@@ -1120,6 +1122,93 @@ class WritePathStats:
     transient_total: int = 0
     transient_retained: int | None = None
 
+    # Issue athenaeum#1830 (AC "name the lost facts"): the DURABLE answer
+    # tokens that were targeted (``token_bearing`` observations) but not
+    # found anywhere in *store_files* -- i.e. exactly the tokens missing
+    # from ``answer_tokens_retained``, named rather than left as a bare
+    # count. Sorted for determinism; defaulted to ``()`` so every existing
+    # construction site and every sibling-store row written before this
+    # field existed still loads.
+    lost_token_ids: tuple[str, ...] = ()
+
+
+#: Decay buckets (:data:`athenaeum.models.MEMORY_BUCKETS`) short enough that
+#: filing a transient observation under one is a REASONABLE decay, not a
+#: durable claim (issue athenaeum#1830, operator ruling: "keeping a
+#: transient fact is only wrong if it is filed without a reasonable decay").
+#: ``"durable"`` is deliberately excluded -- it is the one bucket whose own
+#: name says the opposite of "temporary".
+_SHORT_MEMORY_BUCKETS: frozenset[str] = frozenset({"daily", "weekly"})
+
+#: How close a compiled page's ``valid_until`` must fall to the transient
+#: observation's OWN timestamp to count as "near-term" (issue athenaeum#1830).
+#: Anchored to the observation's own timestamp, never ``date.today()`` --
+#: a grading rule that depends on when the suite happens to run is not a
+#: reproducible measurement. No existing precedent constant covers this
+#: window; two weeks is chosen as clearly shorter than the corpus's own
+#: multi-month observation date range (``tests/evals/corpus.py``) while
+#: still wide enough that an off-by-a-few-days ``valid_until`` is not
+#: penalised as if it were durable.
+_TRANSIENT_NEAR_TERM_DAYS = 14
+
+
+def _observation_timestamp(observation: Observation) -> datetime | None:
+    """Parse :attr:`Observation.timestamp` (``%Y%m%dT%H%M%SZ``, see that
+    field's own ``filename`` property) into a ``datetime``, or ``None`` for
+    a value that does not match -- fail-open, mirroring every frontmatter
+    reader in :mod:`athenaeum.models` this function's callers already use."""
+    try:
+        return datetime.strptime(observation.timestamp, "%Y%m%dT%H%M%SZ")
+    except ValueError:
+        return None
+
+
+def _transient_token_handled_correctly(
+    token: str,
+    *,
+    anchor: datetime | None,
+    store_files: Mapping[str, str],
+) -> bool:
+    """Grade one transient (``retain=False``) token per the issue athenaeum#1830
+    operator ruling: correct when the token is ABSENT from every compiled
+    page, or present only on page(s) that all carry a short decay bucket
+    (:data:`_SHORT_MEMORY_BUCKETS`) or a ``valid_until`` within
+    :data:`_TRANSIENT_NEAR_TERM_DAYS` of the observation's own timestamp.
+    Wrong only when at least one page carrying the token is filed with
+    neither -- i.e. filed as durable.
+
+    A page's frontmatter is read PER PAGE, not off a joined corpus string
+    (unlike the durable-retention scan below), because bucket/valid_until
+    are page-level facts :func:`athenaeum.models.parse_frontmatter` can only
+    read from one page's own text. A token that landed on more than one page
+    must be handled correctly on ALL of them to grade correct -- one durable
+    copy is still a durable filing of the fact.
+    """
+    for text in store_files.values():
+        if token not in text:
+            continue
+        meta, _body = parse_frontmatter(text)
+        bucket = parse_bucket(meta)
+        if bucket in _SHORT_MEMORY_BUCKETS:
+            continue
+        valid_until_raw = validity_bound_str(meta, "valid_until")
+        if valid_until_raw and anchor is not None:
+            try:
+                valid_until = datetime.strptime(valid_until_raw, "%Y-%m-%d")
+            except ValueError:
+                valid_until = None
+            if valid_until is not None and valid_until - anchor <= timedelta(
+                days=_TRANSIENT_NEAR_TERM_DAYS
+            ):
+                continue
+        # Neither a short bucket nor a near-term valid_until on a page that
+        # carries the token -- filed as durable, which is the only case the
+        # operator ruling calls wrong.
+        return False
+    # Absent everywhere, or present only on page(s) that all graded short/
+    # near-term above.
+    return True
+
 
 def compute_write_path_stats(
     system: str,
@@ -1154,14 +1243,38 @@ def compute_write_path_stats(
     that correctly discarded an outage note would be scored as having
     dropped a fact. They get their own pair instead: ``transient_total`` and
     ``transient_retained``, where a LOW retained count is the good result.
+
+    Issue athenaeum#1830 (operator ruling): a transient token is graded
+    WRONG only when it is filed DURABLY -- present on a compiled page with
+    neither a short decay bucket nor a near-term ``valid_until``
+    (:func:`_transient_token_handled_correctly`). An absent token, or one
+    filed with a reasonable decay, grades correct. This is why the transient
+    half of this function reads *store_files* PER PAGE (for frontmatter)
+    rather than joined into ``corpus_text`` like the durable half above,
+    which never needed frontmatter at all.
     """
     corpus_text = "\n".join(store_files.values())
     token_bearing = [obs for obs in observations if obs.answer_tokens and obs.retain]
     transient_bearing = [obs for obs in observations if obs.answer_tokens and not obs.retain]
     transient_tokens = sorted({token for obs in transient_bearing for token in obs.answer_tokens})
-    transient_kept = {token for token in transient_tokens if token in corpus_text}
+    # Anchor each transient token to the timestamp of the (single)
+    # observation that planted it -- corpus.py's transient observations are
+    # one token each, so this is an exact, not approximate, mapping.
+    transient_anchor: dict[str, datetime | None] = {}
+    for obs in transient_bearing:
+        anchor = _observation_timestamp(obs)
+        for token in obs.answer_tokens:
+            transient_anchor[token] = anchor
+    transient_wrong = {
+        token
+        for token in transient_tokens
+        if not _transient_token_handled_correctly(
+            token, anchor=transient_anchor.get(token), store_files=store_files
+        )
+    }
     all_tokens = sorted({token for obs in token_bearing for token in obs.answer_tokens})
     retained_tokens = {token for token in all_tokens if token in corpus_text}
+    lost_tokens = sorted(set(all_tokens) - retained_tokens)
 
     targeted_pages = sorted({obs.page_uid for obs in token_bearing})
     written_pages = {
@@ -1185,7 +1298,73 @@ def compute_write_path_stats(
         observations_measured=len(token_bearing),
         observations_dropped=len(dropped) if has_measurable_data else None,
         transient_total=len(transient_tokens),
-        transient_retained=len(transient_kept) if transient_tokens else None,
+        transient_retained=len(transient_wrong) if transient_tokens else None,
+        lost_token_ids=tuple(lost_tokens),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Filing loss (issue athenaeum#1830 AC2) -- distinct from
+# ``compute_write_path_stats`` above: that scores the compiled store against
+# every observation Claude was ever GIVEN; this scores it against the
+# tokens Claude's OWN native writer chose to RETAIN in its memory files, so
+# the filing step's own loss is separable from Claude's write judgement.
+# See the AC's own counter-example: native drops token X, the librarian
+# keeps everything else it was handed -- filing loss 0, total loss 1.
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass(frozen=True)
+class FilingLossStats:
+    """"Claude's memories versus Claude's memories after filing" (issue
+    athenaeum#1830 operator ruling) -- the second, separate retention row
+    the AC requires beside :class:`WritePathStats`.
+
+    ``native_tokens_total`` is the count of durable (``retain=True``)
+    planted answer tokens found anywhere in the NATIVE writer's own
+    ``memory_files`` -- the denominator, i.e. what Claude itself chose to
+    keep before any filing happened. ``filed_tokens_retained`` is how many
+    of those survive in the LIBRARIAN-compiled store; ``None`` only when
+    ``native_tokens_total`` is 0 (nothing to measure, never a fabricated
+    0/0). ``lost_token_ids`` names the ones that did not survive filing.
+    """
+
+    system: str
+    corpus_scale: str
+    native_tokens_total: int
+    filed_tokens_retained: int | None
+    lost_token_ids: tuple[str, ...] = ()
+
+
+def compute_filing_loss_stats(
+    system: str,
+    corpus_scale: str,
+    observations: Sequence[Observation],
+    native_files: Mapping[str, str],
+    compiled_store_files: Mapping[str, str],
+) -> FilingLossStats:
+    """Score *compiled_store_files* (the librarian's compile of
+    *native_files*) against the subset of durable planted tokens *native_files*
+    itself already retained -- see :class:`FilingLossStats`.
+
+    A token Claude never wrote down at all is excluded from the denominator
+    entirely: it is a native WRITE loss (already visible on the ordinary
+    :func:`compute_write_path_stats` row for the ``native`` system), not a
+    FILING loss -- the librarian was never given the chance to keep it.
+    """
+    native_text = "\n".join(native_files.values())
+    compiled_text = "\n".join(compiled_store_files.values())
+    token_bearing = [obs for obs in observations if obs.answer_tokens and obs.retain]
+    all_tokens = sorted({token for obs in token_bearing for token in obs.answer_tokens})
+    native_retained = sorted(token for token in all_tokens if token in native_text)
+    filed_retained = {token for token in native_retained if token in compiled_text}
+    lost = sorted(set(native_retained) - filed_retained)
+    return FilingLossStats(
+        system=system,
+        corpus_scale=corpus_scale,
+        native_tokens_total=len(native_retained),
+        filed_tokens_retained=len(filed_retained) if native_retained else None,
+        lost_token_ids=tuple(lost),
     )
 
 
@@ -2166,6 +2345,12 @@ class NorthStarReport:
     # retention accuracy), empty for a Phase-1-only run. Appended last so
     # existing positional construction and sibling-lane merges stay safe.
     write_costs: tuple[WriteCost, ...] = ()
+    # issue athenaeum#1830 AC2: the "filing loss" row, separate from
+    # write_path_stats -- empty for a Phase-1-only run and for any
+    # write_path_stats row that carries no matching filing-loss measurement
+    # (e.g. compile_observation_stream's diagnostic path, which has no
+    # native memory files to file).
+    filing_loss_stats: tuple[FilingLossStats, ...] = ()
     # ruling R1 (Quine review of PR#1740): the ONE Athenaeum arm every §7
     # verdict reads. Stored on the report (not just passed as a function
     # arg) so render_report/render_decision_block always render the SAME
@@ -2288,6 +2473,7 @@ def build_report(
     abort_reason: str = "",
     write_path_stats: Sequence[WritePathStats] = (),
     write_costs: Sequence[WriteCost] = (),
+    filing_loss_stats: Sequence[FilingLossStats] = (),
     verdict_arm: str = DEFAULT_VERDICT_ARM,
     planned_cells: int | None = None,
     torn_rows: int = 0,
@@ -2304,6 +2490,10 @@ def build_report(
     *rows*, it cannot be derived from a :class:`ResultStore` here, since it
     is scored against an :class:`~tests.evals.corpus.Observation` stream and
     a system's raw store contents, neither of which a ``RolloutRow`` carries.
+    *filing_loss_stats* is the same kind of pre-computed input, one level
+    further down the pipeline (issue athenaeum#1830 AC2): retention of the
+    compiled store against the NATIVE writer's own retained tokens, not the
+    full observation stream -- see :class:`FilingLossStats`.
 
     Raises :class:`ValueError` (issue athenaeum#1761) when *rows* carry more
     than one distinct ``relevance_floor_vector`` or ``relevance_floor_fts5``
@@ -2351,6 +2541,7 @@ def build_report(
         weak_probes=weak_probes(graded_rows),
         write_path_stats=tuple(write_path_stats),
         write_costs=tuple(write_costs),
+        filing_loss_stats=tuple(filing_loss_stats),
         verdict_arm=verdict_arm,
         planned_cells=planned_cells,
         torn_rows=torn_rows,
@@ -2825,15 +3016,18 @@ def render_report(report: NorthStarReport) -> str:
         )
     lines.append("")
 
-    lines.append("## Write path (Phase 2, athenaeum#1726)")
+    lines.append("## Write path (Phase 2, athenaeum#1726) -- native memories filed by librarian")
     lines.append("")
     lines.append(
-        "Given the SAME observation stream, whose resulting store still carries the planted "
-        "`answer_tokens` -- the write half of the comparison (design doc "
-        "`docs/design/native-memory-baseline.md` §5), and the first measurement of the "
-        "observation filter against a baseline other than itself. Scoped to observations "
-        "carrying at least one planted token (`observations_measured` of `observations_total`); "
-        "an observation with no token plants nothing this scanner can check. `n/a` means no "
+        "Issue athenaeum#1830 (operator ruling, Kromatic-Innovation/athenaeum#1791 comment "
+        "5732689494): the librarian is not a fact writer and never acts as one in production "
+        "-- it files what Claude has already written. The `athenaeum` row below is the "
+        "NATIVE writer's own memory files, materialised as auto-memory intake and compiled "
+        "by the librarian -- \"Claude's memories versus Claude's memories after filing,\" not "
+        "raw observations compiled directly (`tests.evals.write_path.compile_observation_stream` "
+        "still exists as a diagnostic; it feeds no row here). Scoped to observations carrying "
+        "at least one planted token (`observations_measured` of `observations_total`); an "
+        "observation with no token plants nothing this scanner can check. `n/a` means no "
         "token-bearing observation was present for that system/scale, never a fabricated 0."
     )
     lines.append("")
@@ -2849,23 +3043,29 @@ def render_report(report: NorthStarReport) -> str:
             )
             lines.append("")
         lines.append(
-            "_`transient_retained` (issue athenaeum#1824) is the one column where LOWER is "
-            "better: it counts planted tokens from `retain=False` observations -- a temporary "
-            "outage, a point-in-time status, a task-scoped instruction -- that the store kept "
-            "anyway. It is scored against its own denominator (`transient_total`) and is "
-            "excluded from every retention column, so discarding a transient observation is "
-            "never counted as losing a fact._"
+            "_`transient_retained` (issue athenaeum#1824/#1830) is the one column where LOWER "
+            "is better: it counts planted tokens from `retain=False` observations -- a "
+            "temporary outage, a point-in-time status, a task-scoped instruction -- that were "
+            "filed DURABLY (neither a short decay bucket nor a near-term `valid_until`). A "
+            "transient token that is absent, or filed with a reasonable decay, grades correct "
+            "and is not counted here. It is scored against its own denominator "
+            "(`transient_total`) and excluded from every retention column. `lost_token_ids` "
+            "names the durable tokens missing from `answer_tokens_retained` (issue "
+            "athenaeum#1830, \"name the lost facts\")._"
         )
         lines.append("")
         lines.append(
             "| system | corpus_scale | pages_targeted | pages_written | answer_tokens_total | "
             "answer_tokens_retained | transient_total | transient_retained | "
             "observations_total | observations_measured | "
-            "observations_dropped | partial |"
+            "observations_dropped | lost_token_ids | partial |"
         )
-        lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+        lines.append(
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"
+        )
         for w in report.write_path_stats:
             partial = "yes" if (w.system, w.corpus_scale) in report.phase2_partial else "no"
+            lost = ", ".join(w.lost_token_ids) if w.lost_token_ids else "none"
             lines.append(
                 f"| {w.system} | {w.corpus_scale} | {w.pages_targeted} | "
                 f"{w.pages_written if w.pages_written is not None else 'n/a'} | "
@@ -2875,10 +3075,38 @@ def render_report(report: NorthStarReport) -> str:
                 f"{w.transient_retained if w.transient_retained is not None else 'n/a'} | "
                 f"{w.observations_total} | {w.observations_measured} | "
                 f"{w.observations_dropped if w.observations_dropped is not None else 'n/a'} | "
-                f"{partial} |"
+                f"{lost} | {partial} |"
             )
     else:
         lines.append("_no Phase 2 write-path data in this run_")
+    lines.append("")
+
+    lines.append("### Filing loss (issue athenaeum#1830)")
+    lines.append("")
+    lines.append(
+        "A second, SEPARATE retention row: the compiled store measured against the tokens "
+        "the NATIVE writer itself already retained, not against the full observation stream "
+        "-- so filing loss is distinguishable from Claude's own write loss (see "
+        "`compute_filing_loss_stats`). A token Claude never wrote down at all is excluded "
+        "from `native_tokens_total` entirely; it is a native write loss, already visible on "
+        "the ordinary table above, not a filing loss."
+    )
+    lines.append("")
+    if report.filing_loss_stats:
+        lines.append(
+            "| system | corpus_scale | native_tokens_total | filed_tokens_retained | "
+            "lost_token_ids |"
+        )
+        lines.append("| --- | --- | --- | --- | --- |")
+        for f in report.filing_loss_stats:
+            lost = ", ".join(f.lost_token_ids) if f.lost_token_ids else "none"
+            lines.append(
+                f"| {f.system} | {f.corpus_scale} | {f.native_tokens_total} | "
+                f"{f.filed_tokens_retained if f.filed_tokens_retained is not None else 'n/a'} | "
+                f"{lost} |"
+            )
+    else:
+        lines.append("_no filing-loss data in this run_")
     lines.append("")
 
     lines.append("## Crossover scale (athenaeum#1725)")
