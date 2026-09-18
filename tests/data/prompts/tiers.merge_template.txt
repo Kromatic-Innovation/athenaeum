@@ -14,7 +14,9 @@ observation into the existing page body, per the system instructions, e.g.:
 {{"ops": [{{"op": "insert_after", "anchor": "<snippet>", "text": "..."}}],
 "adds_new_claim": true, "new_claims": ["..."]}}
 Copy every anchor VERBATIM from the existing body above; each anchor must
-occur exactly once. Cite the source in new footnotes as [^n]: {source_ref}.
+occur exactly once. Cite the source in new footnotes as [^n]: {source_ref}, and
+put an inline `[^n]` marker at the end of every sentence your ops add that
+derives from the new observation.
 Always include "adds_new_claim" (true/false, see system instructions); when
 false, the body will not be rewritten regardless of "ops", so return
 {{"ops": [], "adds_new_claim": false}}.

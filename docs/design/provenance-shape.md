@@ -865,6 +865,69 @@ change ships with this note** — no policy pack exists yet, so today's
 unaffected; this paragraph exists so the policy-pack work does not reinvent
 a competing rule for the pages `bucket: daily` already governs.
 
+### 8.9 Inline per-claim footnote markers (`[^src-N]`, issue athenaeum#1730)
+
+`docs/use-cases.md` §3.5 requires that **provenance survive compilation**: a
+compiled page is itself a source for the level above, so per-claim sources
+cannot be flattened into a page-level footnote. Until this slice they were.
+`merge_cluster_row` unions every member's `sources[]` into one deduped list,
+`render_source_footnotes` renders that list as `[^src-1]`, `[^src-2]` …
+footnote DEFINITIONS, and the definitions were appended to a body in which
+nothing referred to them — definitions with no referents, which is a
+bibliography wearing footnote syntax. The structured list survived in
+frontmatter, but no body sentence tied to an entry in it.
+
+**What ships.** `synthesize_body` now stamps each member's own `[^src-N]`
+markers onto the prose sentences that member contributed
+(`athenaeum.footnote_markers.attach_markers`). Member A's sentence cites A's
+source and not B's; the definitions it points at are the same ones
+`render_source_footnotes` already rendered.
+
+- **One label spelling, one dedupe identity.** The label is the source's
+  1-based position in the deduped list, resolved through
+  `merge.source_dedupe_key` — the SAME `(session, turn)` identity
+  `dedupe_sources` collapses on, extracted so the marker index and the dedupe
+  cannot disagree. A marker pointing at the wrong footnote is worse than no
+  marker.
+- **Dedupe before stamping.** Paragraph dedupe compares UNMARKED text: two
+  members wording a claim identically must still collapse, and stamping first
+  would make their markers differ and defeat the exact-match compare. The
+  survivor keeps the FIRST citing member's markers — the same first-wins rule
+  §8's `valid_from`/`valid_until` collapse already applies.
+- **Back-compatible.** `synthesize_body`'s `member_labels` argument is
+  optional; omitted, output is byte-identical. `render_merged_entry` is
+  untouched — it still renders the trailing definitions appendix and stamps
+  nothing, because at render time only the union exists. Attachment happens
+  where the member→source association is still available, which is the
+  compile, not the renderer.
+- **Granularity, stated honestly.** A marker attaches at MEMBER granularity, so
+  a member citing two sources marks with both. That is a genuine improvement on
+  the page-level union — a sentence resolves to the sources of the claim it
+  came from — and it is **not** true per-sentence provenance. Claims as
+  addressable units with their own coordinates is the dimensional memory model
+  (athenaeum#709), `moscow:wont` as of 2026-09-16; this is the slice that does
+  not depend on it.
+
+**Read paths.** `read_entity`'s payload carries a `footnotes` map (label →
+the source string its definition renders), DERIVED from `body` rather than
+stored; `recall` renders a `**Footnotes:**` block resolving only the markers
+its SNIPPET cites, since resolving the whole page bibliography onto an excerpt
+would reinstate the union this slice removes.
+
+**Post-check, not a gate.** `athenaeum status` reports pages whose share of
+uncited prose sentences exceeds `librarian.unmarked_sentence_max_ratio`
+(default `0.5`). Deterministic, and warn-only by design — the same posture as
+the page-size guardrail (`docs/why-athenaeum.md` §5). Writer and measurer share
+one sentence segmentation (`footnote_markers.iter_prose_sentences`), so a page
+the compile wrote scores zero uncited sentences by construction; two segmenters
+would drift and the metric would stop describing the writer.
+
+The tier-3 create and merge prompts ask the model for the same inline marker on
+each sentence it writes from a source, so LLM-written pages and compiled pages
+carry one convention rather than two.
+
+Pinned by `tests/test_per_claim_provenance.py`.
+
 ## 9. Multi-dimensional scoped claims (`scope: {org, locale}` + time)
 
 Issue athenaeum#329 (buildable subset of the design pass). Generalizes §8's TIME

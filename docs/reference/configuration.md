@@ -2535,6 +2535,33 @@ Env ``ATHENAEUM_SUPERSESSION_SELF_REVISION_WINDOW_DAYS`` > yaml
 ``librarian.supersession_self_revision_window_days`` > ``90``. See
 `_resolve_positive_int_knob` for the coercion contract.
 
+### `resolve_unmarked_sentence_max_ratio`
+
+- **YAML path:** `librarian.unmarked_sentence_max_ratio`
+- **Environment variable:** `ATHENAEUM_UNMARKED_SENTENCE_MAX_RATIO`
+- **CLI flag:** —
+- **Default:** `0.5`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the tolerated share of UNCITED prose sentences on a page.
+
+A compiled page is itself a source for the level above
+(``docs/use-cases.md`` §3.5), so an agent following breadcrumbs needs the
+sentence it is reading to resolve to its own source. The deterministic
+post-check in `athenaeum.footnote_markers` counts prose sentences
+carrying no inline ``[^src-N]`` marker; a page whose ratio EXCEEDS this is
+surfaced in ``athenaeum status``.
+
+Warn-only, exactly like the page-size guardrail (``docs/why-athenaeum.md``
+§5) — nothing is ever blocked, rewritten, or refused on this number.
+
+Env ``ATHENAEUM_UNMARKED_SENTENCE_MAX_RATIO`` > yaml
+``librarian.unmarked_sentence_max_ratio`` > default ``0.5``. Clamped to
+``[0.0, 1.0]``; ``1.0`` tolerates an entirely uncited page and is the
+off switch. The default is deliberately loose: most of the corpus predates
+inline markers, and a guardrail that flags every page on the day it ships
+is one an operator learns to ignore.
+
 ### `resolve_verdict_epoch_batch_interval_days`
 
 - **YAML path:** `librarian.verdict_epoch_batch_interval_days`

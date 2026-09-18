@@ -620,9 +620,16 @@ class TestSourceFootnoteRendering:
         from athenaeum.merge import render_merged_entry
 
         # Slice-A contract (Quine S2): footnotes are a trailing sources
-        # APPENDIX. The original body text precedes all [^src-N] definitions,
-        # and the synthesized body carries no inline [^src-N] reference marker
-        # attached to the fact (per-fact inline attachment is slice B).
+        # APPENDIX. The original body text precedes all [^src-N] definitions.
+        #
+        # Issue athenaeum#1730 (the slice B this comment used to await) added
+        # the inline markers — but attaches them in ``merge_cluster_row``,
+        # where the member->source association still exists, NOT here. By the
+        # time ``render_merged_entry`` runs, only the page-level union is left
+        # and it could not say which sentence came from which source. So the
+        # renderer is still marker-free over a body handed to it, and that is
+        # the boundary this test now pins: an entry whose body arrives
+        # unmarked comes back out unmarked.
         out = render_merged_entry(self._entry())
         body_marker = out.index("Tristan's profile.")
         first_footnote = out.index("[^src-1]:")

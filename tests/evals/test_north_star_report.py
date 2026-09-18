@@ -1327,6 +1327,7 @@ def _group_stat(
         correctness_rate=correctness,
         harm_free_rate=None,
         coverage_rate=None,
+        marker_resolution_rate=None,
         mean_index_coverage=None,
     )
 

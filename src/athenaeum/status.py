@@ -66,7 +66,9 @@ from athenaeum.config import (
     resolve_cache_dir,
     resolve_page_flag_bytes,
     resolve_page_warn_bytes,
+    resolve_unmarked_sentence_max_ratio,
 )
+from athenaeum.footnote_markers import unmarked_sentence_ratio
 from athenaeum.intake import discover_raw_files
 from athenaeum.models import parse_frontmatter
 from athenaeum.run_summary_log import read_latest_embedder_counts, read_refusal_streak
@@ -106,6 +108,13 @@ class StatusInfo(TypedDict):
     # ``pages_flag`` only.
     pages_warn: list[tuple[str, int]]
     pages_flag: list[tuple[str, int]]
+    # Issue athenaeum#1730: wiki pages whose share of prose sentences carrying no
+    # inline ``[^src-N]`` footnote marker EXCEEDS
+    # ``librarian.unmarked_sentence_max_ratio``, each an
+    # ``(filename, unmarked, total)`` triple sorted worst-ratio-first. Warn
+    # only — a compiled page is a source for the level above, so uncited prose
+    # is a provenance gap worth showing, never a reason to refuse a page.
+    pages_unmarked: list[tuple[str, int, int]]
     # Issue athenaeum#470: backlog-drain ETA advisory — a human sentence projecting
     # time-to-drain and naming the ``athenaeum drain`` remedy, or ``None`` when
     # the backlog is empty or its projected ETA is at/below
@@ -246,6 +255,44 @@ def scan_page_sizes(
     return pages_warn, pages_flag
 
 
+def scan_unmarked_sentences(
+    wiki_root: Path,
+    max_ratio: float,
+) -> list[tuple[str, int, int]]:
+    """Wiki pages whose uncited-prose ratio exceeds *max_ratio* (issue athenaeum#1730).
+
+    Returns ``(filename, unmarked, total)`` triples, worst ratio first, for
+    every entity page over the threshold. Deterministic: the count comes from
+    :func:`athenaeum.footnote_markers.unmarked_sentence_ratio`, the same
+    segmentation the compile step uses when it stamps markers on, so a page
+    written by the compile scores zero unmarked sentences rather than
+    disagreeing with its own writer.
+
+    Warn-only and side-effect-free, matching :func:`scan_page_sizes` — this
+    module may advise, never act (see the module docstring). A page with no
+    prose sentences at all is never flagged: nothing to cite is not the same
+    condition as cited nothing.
+    """
+    out: list[tuple[str, int, int]] = []
+    if not wiki_root.exists():
+        return out
+    for fpath in sorted(wiki_root.glob("*.md")):
+        if fpath.name.startswith("_"):
+            continue
+        try:
+            text = fpath.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        meta, body = parse_frontmatter(text)
+        if not meta or not meta.get("name"):
+            continue
+        coverage = unmarked_sentence_ratio(body)
+        if coverage.total and coverage.ratio > max_ratio:
+            out.append((fpath.name, coverage.unmarked, coverage.total))
+    out.sort(key=lambda item: (item[1] / item[2], item[1]), reverse=True)
+    return out
+
+
 def status(knowledge_root: Path) -> StatusInfo:
     """Gather status information about a knowledge base."""
     wiki_root = knowledge_root / "wiki"
@@ -349,6 +396,13 @@ def status(knowledge_root: Path) -> StatusInfo:
     warn_bytes = resolve_page_warn_bytes(config)
     flag_bytes = resolve_page_flag_bytes(config)
     pages_warn, pages_flag = scan_page_sizes(wiki_root, warn_bytes, flag_bytes)
+
+    # Per-claim provenance post-check (issue athenaeum#1730). Same posture as the
+    # oversized-page scan directly above: a configurable soft threshold, a
+    # surfaced count, and nothing blocked.
+    pages_unmarked = scan_unmarked_sentences(
+        wiki_root, resolve_unmarked_sentence_max_ratio(config)
+    )
 
     # Backlog-drain ETA advisor (issue athenaeum#470): surface the same projection the
     # end-of-run WARNING emits, so status/MCP surfaces show it between runs.
@@ -469,6 +523,7 @@ def status(knowledge_root: Path) -> StatusInfo:
         "pending_questions": pending_questions,
         "pages_warn": pages_warn,
         "pages_flag": pages_flag,
+        "pages_unmarked": pages_unmarked,
         "drain_advisory": drain_advisory,
         "schema_fragments": schema_fragments,
         "zero_yield_consecutive": zero_yield_consecutive,
@@ -603,6 +658,14 @@ def format_status(info: StatusInfo) -> str:
         lines.append(f"  [flag] {name} ({size} bytes)")
     for name, size in pages_warn:
         lines.append(f"  [warn] {name} ({size} bytes)")
+
+    # Issue athenaeum#1730: uncited-prose summary. ``.get`` keeps pre-athenaeum#1730
+    # status dicts formatting cleanly, same as the block above.
+    pages_unmarked = info.get("pages_unmarked", [])
+    lines.append(f"Pages over the uncited-sentence ratio: {len(pages_unmarked)}")
+    for name, unmarked, total in pages_unmarked:
+        pct = round(100 * unmarked / total) if total else 0
+        lines.append(f"  [warn] {name} ({unmarked}/{total} sentences uncited, {pct}%)")
 
     # Issue athenaeum#567: one divergence line per operator-tunable schema fragment —
     # ``default`` when it matches the bundled copy, ``edited (sha8 …)`` when the

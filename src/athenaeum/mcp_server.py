@@ -79,6 +79,7 @@ from athenaeum.entity_schema import (
 from athenaeum.enumeration import DEFAULT_LIMIT as _ENUMERATE_DEFAULT_LIMIT
 from athenaeum.enumeration import enumerate_entities as _enumerate_entities
 from athenaeum.enumeration import predicate_from_dict as _predicate_from_dict
+from athenaeum.footnote_markers import INLINE_MARKER_RE, resolve_markers
 from athenaeum.killswitch import is_disabled
 from athenaeum.models import (
     DEFAULT_SOURCE_TYPE,
@@ -688,6 +689,25 @@ def _extract_outbound_links(body: str) -> list[str]:
         seen.add(raw)
         slugs.append(raw)
     return slugs
+
+
+def _cited_marker_labels(snippet: str) -> list[str]:
+    """Footnote labels the *snippet* cites, order-preserved, deduped (athenaeum#1730).
+
+    A recall hit renders an EXCERPT, so the markers it actually carries are a
+    subset of the page's. This is the selector that keeps the hit's resolved
+    ``**Footnotes:**`` block to the sources the reader can actually see a
+    marker for.
+    """
+    labels: list[str] = []
+    seen: set[str] = set()
+    for m in INLINE_MARKER_RE.finditer(snippet):
+        label = m.group(1)
+        if label in seen:
+            continue
+        seen.add(label)
+        labels.append(label)
+    return labels
 
 
 def _recall_metadata_lines(fm: dict[str, object]) -> list[str]:
@@ -1562,6 +1582,23 @@ def _recall_via_backend(
         outbound = _extract_outbound_links(body) if body else []
         if outbound:
             links_line = f"**Links:** {', '.join(outbound)}\n"
+        # Issue athenaeum#1730: resolve the footnote markers the SNIPPET
+        # actually cites against the page's own footnote definitions, so a
+        # caller reaching a sentence in a recall hit reaches that sentence's
+        # source in one hop instead of re-fetching the page and parsing
+        # markdown. Scoped to the snippet on purpose — resolving the page's
+        # whole bibliography onto an excerpt would reinstate exactly the
+        # page-level union this issue removes. Omitted entirely when the
+        # snippet cites nothing, so a hit on a page with no inline markers
+        # renders byte-identically to before.
+        footnotes_block = ""
+        if snip and body:
+            cited = resolve_markers(body, _cited_marker_labels(snip))
+            if cited:
+                rendered = "".join(
+                    f"- [^{label}] → {source}\n" for label, source in cited.items()
+                )
+                footnotes_block = f"**Footnotes:**\n{rendered}"
         # Issue athenaeum#718: matched-scope header segment — computed on
         # EVERY hit, unconditionally (not gated on `unprompted`), so the
         # consuming agent sees why a hit was pushed regardless of which
@@ -1578,7 +1615,7 @@ def _recall_via_backend(
             f"**Tags:** {tags}\n"
             f"**Uid:** {uid}\n"
             f"**Type:** {page_type}\n"
-            f"{meta_block}{scope_block}{links_line}{excluded_block}\n"
+            f"{meta_block}{scope_block}{links_line}{footnotes_block}{excluded_block}\n"
             f"{snip}\n"
         )
         # Issue athenaeum#718: meter the FULLY RENDERED block --
@@ -2201,6 +2238,14 @@ def read_entity_tool_docstring() -> str:
         Same fail-closed audience scoping as ``recall`` (issues
         athenaeum#312/#538): a restricted caller never receives page content, or
         any excluded value, for a page it is not authorized to read.
+
+        The result's ``footnotes`` map (issue athenaeum#1730) resolves every
+        footnote label defined on the page to the source string its
+        definition renders — ``{"src-1": "**Source:** user-stated —
+        `abc123#turn4`"}``. Sentences on a compiled page carry inline
+        ``[^src-N]`` markers naming the source of THAT claim, so a sentence
+        reaches its own source in one hop through this map, rather than
+        through the page-level list of every source the page cites.
 
         Every returned value carries its usage classification (issue
         athenaeum#866) in the result's ``classifications``, co-indexed with the

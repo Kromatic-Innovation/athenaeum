@@ -618,6 +618,12 @@ class TestCliEntityCommand:
             # unchanged, so an existing consumer of this payload keeps working.
             "validity",
             "do_not_email",
+            # athenaeum#1730 — marker -> source string for every footnote the
+            # page defines, DERIVED from `body` rather than stored, so a caller
+            # can resolve the inline `[^src-N]` marker on a sentence to that
+            # sentence's own source without parsing markdown. Additive in the
+            # same sense as the two keys above.
+            "footnotes",
         }
 
     def test_withheld_by_default_with_a_marker(

@@ -40,7 +40,12 @@ a model):
   append_section plus a footnote.
 
 Content rules (the page's editorial policy — unchanged):
-- Add footnotes for new claims, citing the source.
+- Add footnotes for new claims, citing the source, AND put an inline `[^n]`
+  marker at the end of every sentence you add that derives from the new
+  observation, after its closing punctuation. A sentence carrying no marker
+  cannot be traced to a source once it is on the page; the page-level source
+  list cannot say which sentence came from which source, which is exactly the
+  gap the inline marker closes.
 - Before adding a new bullet, check whether the new observation merely
   re-confirms a fact already stated in the existing content (a repeat
   observation, re-confirmation, or restatement with no new information).

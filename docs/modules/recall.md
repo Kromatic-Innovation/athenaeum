@@ -36,6 +36,50 @@ A bare email address, or a query phrased as a lookup question, bypasses the rank
 entirely and resolves as an exact reverse lookup against the identity registry instead of a
 BM25/vector search.
 
+## Per-claim provenance: the `footnotes` map
+
+A compiled page is itself a source for the level above, so an agent following
+breadcrumbs needs the sentence it is reading to resolve to the source of *that
+claim* — not to a bibliography covering the whole page. Compiled pages
+therefore carry an inline `[^src-N]` marker on each sentence, naming the source
+of the claim that sentence came from, and both read paths resolve those markers
+for the caller so nobody has to parse markdown to follow one:
+
+- **`read_entity`** returns a `footnotes` map alongside `body` — every footnote
+  label defined on the page, mapped to the source string its definition
+  renders:
+
+  ```json
+  {
+    "uid": "0a1b2c3d",
+    "body": "Jordan Reyes joined Acme Corp in 2011.[^src-1]\n\n[^src-1]: **Source:** ...",
+    "footnotes": { "src-1": "**Source:** user-stated — `abc123#turn4`" }
+  }
+  ```
+
+  The map is **derived from `body`, not stored**: the page markdown stays the
+  single source of truth, and a page with no footnotes yields an empty map
+  rather than a missing key.
+
+- **`recall`** renders a `**Footnotes:**` block on a hit, resolving only the
+  markers the returned **snippet** actually cites. Scoping it to the snippet is
+  the point: resolving the page's whole bibliography onto an excerpt would put
+  back exactly the page-level union the marker replaces. A hit whose snippet
+  cites nothing renders with no such block at all.
+
+**What the granularity actually is.** A marker attaches at the granularity of
+the memory that contributed the sentence, so one memory citing two sources
+marks its sentences with both. That resolves a sentence to the sources of the
+claim it came from, which the page-level list could not do — and it is not yet
+per-sentence provenance. Claims as addressable units with their own coordinates
+is a separate, larger piece of work.
+
+**The uncited-prose guardrail.** `athenaeum status` reports pages whose share of
+prose sentences carrying no marker exceeds `librarian.unmarked_sentence_max_ratio`
+(default `0.5`; `1.0` switches it off). Deterministic, and **warn-only** — the
+same posture as the oversized-page guardrail. Nothing is ever blocked,
+rewritten, or refused on this number.
+
 ## What it reads
 
 - The compiled wiki (`wiki/*.md`) and its search index — FTS5's SQLite database or the

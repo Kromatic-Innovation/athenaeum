@@ -3066,7 +3066,12 @@ Write a clean, factual entity page in markdown. Follow these rules:
   classification: do not invent a classification the note does not
   state. If an absent field matters to this page, raise it in
   `## Open Questions` instead of guessing.
-- Use footnotes to cite the source: [^1]: source reference
+- Cite the source with a footnote, and put an inline `[^1]` marker at the END
+  of EVERY sentence you write that derives from it, after the closing
+  punctuation, the way Wikipedia does. Define the footnote once at the bottom:
+  `[^1]: source reference`. The footnote, not the page, is the unit of trust:
+  a reader must be able to resolve the sentence in front of them to its own
+  source, not to a bibliography that covers the whole page.
 - Keep it concise — 3-10 lines of content is typical for a new entity
 - Do NOT include YAML frontmatter — that is handled separately
 - If there are open questions or uncertainties, add an `## Open Questions` section
@@ -3089,7 +3094,9 @@ Access: {access}
 ## Instructions
 Write the body content (no frontmatter) for this entity's wiki page, led by
 the single `Description: ...` line described in the rules.
-Use footnotes citing the source as: [^1]: {source_ref}
+Put an inline `[^1]` marker at the end of every sentence you draw from the
+observation above, after its closing punctuation, and define the footnote once
+as: [^1]: {source_ref}
 """
     + UNTRUSTED_DATA_CLAUSE
 )
@@ -3143,7 +3150,12 @@ a model):
   append_section plus a footnote.
 
 Content rules (the page's editorial policy — unchanged):
-- Add footnotes for new claims, citing the source.
+- Add footnotes for new claims, citing the source, AND put an inline `[^n]`
+  marker at the end of every sentence you add that derives from the new
+  observation, after its closing punctuation. A sentence carrying no marker
+  cannot be traced to a source once it is on the page; the page-level source
+  list cannot say which sentence came from which source, which is exactly the
+  gap the inline marker closes.
 - Before adding a new bullet, check whether the new observation merely
   re-confirms a fact already stated in the existing content (a repeat
   observation, re-confirmation, or restatement with no new information).
@@ -3202,7 +3214,11 @@ follow on the same line.
 Rules:
 - Preserve all existing content
 - Add new information in the appropriate section
-- Add footnotes for new claims, citing the source
+- Add footnotes for new claims, citing the source, and put an inline `[^n]`
+  marker at the end of every sentence you add that derives from the new
+  observation, after its closing punctuation. Leave the markers already on
+  existing sentences exactly as they are — they cite sources you were not
+  given and cannot re-derive.
 - Before adding a new bullet, check whether the new observation merely
   re-confirms a fact already stated in the existing content (a repeat
   observation, re-confirmation, or restatement with no new information).
@@ -3352,7 +3368,9 @@ observation into the existing page body, per the system instructions, e.g.:
 {{"ops": [{{"op": "insert_after", "anchor": "<snippet>", "text": "..."}}],
 "adds_new_claim": true, "new_claims": ["..."]}}
 Copy every anchor VERBATIM from the existing body above; each anchor must
-occur exactly once. Cite the source in new footnotes as [^n]: {source_ref}.
+occur exactly once. Cite the source in new footnotes as [^n]: {source_ref}, and
+put an inline `[^n]` marker at the end of every sentence your ops add that
+derives from the new observation.
 Always include "adds_new_claim" (true/false, see system instructions); when
 false, the body will not be rewritten regardless of "ops", so return
 {{"ops": [], "adds_new_claim": false}}.

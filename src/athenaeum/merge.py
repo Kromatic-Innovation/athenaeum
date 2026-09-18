@@ -84,7 +84,7 @@ import json
 import logging
 import re
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -130,6 +130,7 @@ from athenaeum.fingerprint import (
     record_resolution,
     resolve_not_a_conflict_ttl_days,
 )
+from athenaeum.footnote_markers import attach_markers, marker_label
 from athenaeum.intake import discover_auto_memory_files
 from athenaeum.merge_type_gate import (
     _merge_proposal_suppression_reason,
@@ -897,6 +898,20 @@ def _validity_window_phrase(src: dict[str, Any]) -> str:
     return ""
 
 
+def source_dedupe_key(entry: dict[str, Any]) -> tuple[str, Any]:
+    """The ``(session, turn)`` identity two source citations collapse on.
+
+    Extracted from :func:`dedupe_sources` (issue athenaeum#1730) because a
+    SECOND caller now needs the same identity: to attach a compiled page's
+    ``[^src-N]`` marker to the sentences of the member that cited it,
+    :func:`merge_cluster_row` has to find each member source's position in the
+    deduped list. Deriving that key independently would let the marker index
+    and the dedupe disagree — a marker pointing at the wrong footnote is worse
+    than no marker, so there is exactly one definition.
+    """
+    return (str(entry.get("session", "")), entry.get("turn"))
+
+
 def dedupe_sources(entries: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     """Dedupe on ``(session, turn)``. First occurrence wins.
 
@@ -920,10 +935,7 @@ def dedupe_sources(entries: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     seen: set[tuple[str, Any]] = set()
     out: list[dict[str, Any]] = []
     for entry in entries:
-        key = (
-            str(entry.get("session", "")),
-            entry.get("turn"),
-        )
+        key = source_dedupe_key(entry)
         if key in seen:
             continue
         seen.add(key)
@@ -938,6 +950,7 @@ def dedupe_sources(entries: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def synthesize_body(
     member_bodies: list[tuple[str, str, str]],
+    member_labels: Sequence[Sequence[str]] | None = None,
 ) -> str:
     """Concatenate member bodies, dropping paragraphs seen verbatim before.
 
@@ -946,16 +959,35 @@ def synthesize_body(
             cluster input order. Scope + filename become the section
             header so readers can trace a paragraph back to its origin
             raw file without hunting.
+        member_labels: issue athenaeum#1730 — optional per-member footnote
+            labels, index-aligned with *member_bodies*. When given, every
+            prose sentence a member contributes is stamped with THAT
+            member's own ``[^src-N]`` markers
+            (:func:`athenaeum.footnote_markers.attach_markers`), so a
+            sentence resolves to the source of the claim it came from
+            instead of to the page-level union of every member's sources.
+            Omitted (the default) the body is concatenated exactly as
+            before — every existing caller keeps its current output.
 
     The dedupe is exact-match paragraph level (whitespace-trimmed). Two
     files saying "X causes Y" with identical wording contribute that
     paragraph once; variant phrasings are kept. This is the deliberately
     simple strategy documented in the PR body — LLM paraphrase/merge is
     a follow-up in C4+.
+
+    Dedupe runs on the UNMARKED paragraph text, before markers are
+    attached: two members wording a claim identically must still collapse
+    to one paragraph, and stamping first would make their markers differ
+    and defeat the exact-match compare. The surviving copy therefore
+    carries the FIRST citing member's markers only — the same first-wins
+    rule :func:`dedupe_sources` applies to the sources themselves.
     """
     seen_paragraphs: set[str] = set()
     sections: list[str] = []
-    for scope, filename, body in member_bodies:
+    for index, (scope, filename, body) in enumerate(member_bodies):
+        labels: Sequence[str] = ()
+        if member_labels is not None and index < len(member_labels):
+            labels = member_labels[index]
         kept_paragraphs: list[str] = []
         for para in re.split(r"\n\s*\n", body):
             canonical = " ".join(para.split())
@@ -964,7 +996,7 @@ def synthesize_body(
             if canonical in seen_paragraphs:
                 continue
             seen_paragraphs.add(canonical)
-            kept_paragraphs.append(para.strip())
+            kept_paragraphs.append(attach_markers(para.strip(), labels))
         if not kept_paragraphs:
             continue
         header = f"## From `{scope}/{filename}`"
@@ -1195,6 +1227,12 @@ def merge_cluster_row(
     # truth), plus a synthetic entry from originSessionId/turn when a
     # member has no sources[] at all.
     raw_sources: list[dict[str, Any]] = []
+    # Issue athenaeum#1730: the SAME sources, kept partitioned by the member
+    # that cited them. The flat ``raw_sources`` list is what dedupes into the
+    # page's footnote definitions; this parallel list is what lets each
+    # member's own sentences cite its own sources instead of the page-level
+    # union. Index-aligned with ``members``.
+    member_sources: list[list[dict[str, Any]]] = []
     for _mp, am in members:
         try:
             text = am.path.read_text(encoding="utf-8")
@@ -1202,6 +1240,7 @@ def merge_cluster_row(
             text = ""
         meta, _ = parse_frontmatter(text) if text else ({}, "")
         sources_raw = meta.get("sources") if meta else None
+        own: list[dict[str, Any]] = []
         if isinstance(sources_raw, list) and sources_raw:
             for s in sources_raw:
                 parsed = _parse_one_source(s, am.origin_scope)
@@ -1210,26 +1249,51 @@ def merge_cluster_row(
                     # travels with each claim it cites into the compiled entry.
                     _stamp_member_validity(parsed, am)
                     raw_sources.append(parsed)
+                    own.append(parsed)
         else:
             implicit = _am_as_implicit_source(am)
             if implicit is not None:
                 _stamp_member_validity(implicit, am)
                 raw_sources.append(implicit)
+                own.append(implicit)
+        member_sources.append(own)
 
     deduped = dedupe_sources(raw_sources)
 
+    # Issue athenaeum#1730: resolve each member's sources to the ``[^src-N]``
+    # labels ``render_source_footnotes`` will define for them. The label is
+    # the source's 1-based position in ``deduped``, found through the SAME
+    # ``(session, turn)`` identity the dedupe collapsed on
+    # (:func:`source_dedupe_key`) — so a member whose citation was deduped
+    # away against an earlier member's still marks its sentences with the
+    # surviving footnote rather than losing its citation.
+    label_by_key: dict[tuple[str, Any], str] = {}
+    for position, source in enumerate(deduped, 1):
+        label_by_key.setdefault(source_dedupe_key(source), marker_label(position))
+    member_labels: list[list[str]] = []
+    for own in member_sources:
+        labels: list[str] = []
+        for source in own:
+            label = label_by_key.get(source_dedupe_key(source))
+            if label is not None and label not in labels:
+                labels.append(label)
+        member_labels.append(labels)
+
     # Body: concatenate member bodies (minus frontmatter) with a scope/
-    # filename header and paragraph-level dedupe.
+    # filename header and paragraph-level dedupe, each member's prose stamped
+    # with that member's own footnote markers.
     member_bodies: list[tuple[str, str, str]] = []
-    for _mp, am in members:
+    body_labels: list[list[str]] = []
+    for index, (_mp, am) in enumerate(members):
         try:
             text = am.path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
         _, body = parse_frontmatter(text)
         member_bodies.append((am.origin_scope, am.path.name, body))
+        body_labels.append(member_labels[index])
 
-    body = synthesize_body(member_bodies)
+    body = synthesize_body(member_bodies, body_labels)
 
     return MergedWikiEntry(
         topic_slug=topic_slug,
