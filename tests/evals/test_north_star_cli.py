@@ -94,15 +94,23 @@ def test_corpus_scales_flag_rejects_an_unknown_scale() -> None:
 
 
 def test_corpus_scales_flag_accepts_xlarge_explicitly() -> None:
-    args = north_star_cli.build_arg_parser().parse_args(["--corpus-scales", "xlarge"])
+    # xlarge is out of _VECTOR_SCOPED_SCALES, so fts5 (issue athenaeum#1825:
+    # no longer the CLI default) is passed explicitly here -- this test is
+    # about xlarge acceptance, not backend scoping.
+    args = north_star_cli.build_arg_parser().parse_args(
+        ["--search-backend", "fts5", "--corpus-scales", "xlarge"]
+    )
     cells = north_star_cli._build_cells(args)
     assert cells
     assert all(c.corpus_scale == "xlarge" for c in cells)
 
 
-def test_search_backend_flag_defaults_to_fts5() -> None:
+def test_search_backend_flag_defaults_to_vector() -> None:
+    """Issue athenaeum#1825: ``vector`` is the shipped default and the pinned
+    north-star verdict arm; ``fts5`` is the opt-in second-dispatch fidelity
+    pass (issue athenaeum#1787)."""
     args = north_star_cli.build_arg_parser().parse_args([])
-    assert args.search_backend == "fts5"
+    assert args.search_backend == "vector"
 
 
 def test_vector_search_backend_rejects_a_scale_outside_core_and_medium() -> None:
@@ -126,10 +134,13 @@ def test_vector_search_backend_accepts_core_and_medium() -> None:
 
 
 def test_fts5_search_backend_is_unaffected_by_the_vector_scale_scope() -> None:
-    """The default fts5 backend must never be scoped down by
-    ``_VECTOR_SCOPED_SCALES`` -- only an explicit ``--search-backend
-    vector`` triggers that check."""
-    args = north_star_cli.build_arg_parser().parse_args(["--corpus-scales", "large"])
+    """The fts5 backend must never be scoped down by
+    ``_VECTOR_SCOPED_SCALES`` -- only ``--search-backend vector`` (the
+    default, issue athenaeum#1825) triggers that check, so an explicit
+    ``--search-backend fts5`` opt-out is passed here."""
+    args = north_star_cli.build_arg_parser().parse_args(
+        ["--search-backend", "fts5", "--corpus-scales", "large"]
+    )
     cells = north_star_cli._build_cells(args)
     assert cells
     assert all(c.corpus_scale == "large" for c in cells)

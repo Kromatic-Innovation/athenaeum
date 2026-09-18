@@ -51,6 +51,26 @@ def _require(tool: str) -> None:
         pytest.skip(f"{tool} not available on this runner")
 
 
+def _write_shadow_athenaeum_package(tmp_path: Path) -> Path:
+    """athenaeum#1826: a directory holding a SHADOW ``athenaeum`` package
+    whose ``__init__.py`` unconditionally raises ``ImportError`` -- put
+    first on ``PYTHONPATH``, this makes a plain ``import athenaeum`` fail
+    deterministically on every runner, regardless of whether a real
+    ``athenaeum`` happens to be installed in site-packages there (as CI's
+    ``pip install -e .`` does). A regular package (has ``__init__.py``)
+    earlier on ``sys.path`` wins immediately over anything found later --
+    the same precedence rule that makes the fix under test (inserting
+    ``$ATHENAEUM_SRC/src`` at the FRONT of ``sys.path`` before importing)
+    the thing that lets the real ``athenaeum.search`` resolve instead of
+    this shadow, rather than the shadow being skippable simply because it
+    comes second."""
+    shadow_root = tmp_path / "shadow-athenaeum-pythonpath"
+    package_dir = shadow_root / "athenaeum"
+    package_dir.mkdir(parents=True, exist_ok=True)
+    (package_dir / "__init__.py").write_text('raise ImportError("shadowed for test")\n')
+    return shadow_root
+
+
 def _require_hook_python(hook_env: dict[str, str], module: str) -> None:
     """Skip when the hook's python can't import *module* under the isolated HOME.
 
@@ -243,6 +263,13 @@ def hook_env(tmp_path: Path) -> dict[str, str]:
 
 class TestSessionStartRecall:
     def test_builds_fts5_index(self, hook_env: dict[str, str], tmp_path: Path) -> None:
+        """FTS5 is built unconditionally regardless of ``search_backend``.
+
+        The ``hook_env`` fixture's ``athenaeum.yaml`` pins ``search_backend:
+        fts5`` explicitly (an fts5 opt-out, issue athenaeum#1825), so
+        ``config.env`` reflects that explicit choice here -- see
+        ``test_defaults_to_vector_when_no_config_key`` below for the actual
+        no-yaml-key default."""
         _require("bash")
         _require_hook_python(hook_env, "athenaeum.search")
         result = subprocess.run(
@@ -262,6 +289,153 @@ class TestSessionStartRecall:
 
         index_db = tmp_path / ".cache" / "athenaeum" / "wiki-index.db"
         assert index_db.is_file()
+
+    def test_builds_fts5_index_when_python_cannot_import_athenaeum_directly(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """athenaeum#1826 counter-example (AC1): an interpreter that cannot
+        `import athenaeum` on its own, with `ATHENAEUM_SRC` set, must still
+        build the index via the `ATHENAEUM_SRC/src` sys.path fast path.
+
+        Forces the precondition deterministically -- rather than relying on
+        the runner's ambient install state, which CI's `pip install -e .`
+        makes untrue there (a skip-on-violated-precondition version of this
+        test never actually ran on CI, exactly the runner where the
+        original regression slipped through) -- by putting a SHADOW
+        `athenaeum` package first on `PYTHONPATH`: a package whose
+        `__init__.py` unconditionally raises `ImportError`. A plain `import
+        athenaeum` hits that shadow before it ever reaches any real
+        installed copy, on every runner. The fix under test inserts
+        `$ATHENAEUM_SRC/src` at the FRONT of `sys.path` before importing, so
+        the real `athenaeum` package there is found first and the shadow is
+        never reached -- proving the fast path, not merely proving nothing
+        else was on sys.path. Before the fix, `session-start-recall.sh`'s
+        two `athenaeum_search_only` `spec_from_file_location` loaders
+        (`build_fts5_index`, `STOPWORDS`) registered `search.py` under a
+        synthetic module name outside the `athenaeum` package, so
+        `search.py`'s own module-level `from athenaeum.authority import
+        is_pointer_stub` raised `ModuleNotFoundError` even with
+        `ATHENAEUM_SRC` set -- see this class's
+        `test_fts5_build_failure_is_nonzero_exit_with_stderr_not_stdout` for
+        that failure mode pinned directly.
+        """
+        _require("bash")
+
+        shadow_env = dict(hook_env)
+        shadow_env["PYTHONPATH"] = str(_write_shadow_athenaeum_package(tmp_path))
+
+        precondition = subprocess.run(
+            [shadow_env["ATHENAEUM_PYTHON"], "-c", "import athenaeum"],
+            env=shadow_env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert precondition.returncode != 0, (
+            "test setup bug: the shadow athenaeum package on PYTHONPATH did "
+            "not block a plain `import athenaeum`"
+        )
+
+        result = subprocess.run(
+            ["bash", str(SESSION_START)],
+            env=shadow_env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+
+        index_db = tmp_path / ".cache" / "athenaeum" / "wiki-index.db"
+        assert index_db.is_file()
+
+    def test_defaults_to_vector_when_no_config_key(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """Issue athenaeum#1825: ``vector`` is the shipped default -- a
+        knowledge root whose ``athenaeum.yaml`` names no ``search_backend``
+        key at all must resolve to it, matching
+        ``athenaeum.config._DEFAULTS``. Overrides the ``hook_env`` fixture's
+        own explicit ``search_backend: fts5`` pin (see
+        ``test_builds_fts5_index`` above) so this test exercises the real
+        no-key default, not that fixture's opt-out."""
+        knowledge_yaml = Path(hook_env["KNOWLEDGE_ROOT"]) / "athenaeum.yaml"
+        knowledge_yaml.write_text("auto_recall: true\n")
+
+        _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
+        result = subprocess.run(
+            ["bash", str(SESSION_START)],
+            env=hook_env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+
+        config_env = tmp_path / ".cache" / "athenaeum" / "config.env"
+        body = config_env.read_text()
+        assert "SEARCH_BACKEND=vector" in body
+
+    def test_fts5_build_failure_is_nonzero_exit_with_stderr_not_stdout(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """athenaeum#1826 AC1: a genuinely failed index build (no working
+        `ATHENAEUM_SRC` fast path and no importable `athenaeum`) must exit
+        non-zero with the traceback on stderr -- not exit 0 with the
+        traceback swallowed onto stdout via the old `2>&1 || true`.
+
+        Forces the failure deterministically the same way the counter-
+        example test above forces its success: a shadow `athenaeum` package
+        (its `__init__.py` unconditionally raises `ImportError`) goes first
+        on `PYTHONPATH`, so a plain `import athenaeum` fails on every
+        runner regardless of ambient install state. `ATHENAEUM_SRC` also
+        points at a directory that provably contains no `athenaeum`, so the
+        fast path contributes nothing and resolution falls through to the
+        shadow -- both routes fail, which is the genuine-failure case this
+        test needs.
+        """
+        _require("bash")
+
+        broken_env = dict(hook_env)
+        broken_env["PYTHONPATH"] = str(_write_shadow_athenaeum_package(tmp_path))
+        # A src/ directory that provably does not contain athenaeum, so
+        # BOTH the ATHENAEUM_SRC fast path and a plain `import athenaeum`
+        # fail -- this is the genuine-failure case, distinct from the
+        # fast-path-success counter-example above.
+        broken_env["ATHENAEUM_SRC"] = str(tmp_path / "no-such-checkout")
+
+        precondition = subprocess.run(
+            [broken_env["ATHENAEUM_PYTHON"], "-c", "import athenaeum"],
+            env=broken_env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert precondition.returncode != 0, (
+            "test setup bug: the shadow athenaeum package on PYTHONPATH did "
+            "not block a plain `import athenaeum`"
+        )
+
+        result = subprocess.run(
+            ["bash", str(SESSION_START)],
+            env=broken_env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode != 0, (
+            "a failed FTS5 index build must exit the hook non-zero, not "
+            "silently succeed"
+        )
+        assert "ModuleNotFoundError" in result.stderr or "Traceback" in result.stderr, (
+            f"expected the import failure on stderr, got: {result.stderr!r}"
+        )
+        assert "Traceback" not in result.stdout, (
+            f"the traceback must not land on stdout: {result.stdout!r}"
+        )
+
+        index_db = tmp_path / ".cache" / "athenaeum" / "wiki-index.db"
+        assert not index_db.is_file()
 
     def test_config_env_and_cache_dir_are_owner_only(
         self, hook_env: dict[str, str], tmp_path: Path

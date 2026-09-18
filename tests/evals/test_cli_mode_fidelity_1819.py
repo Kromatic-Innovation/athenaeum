@@ -36,6 +36,7 @@ from tests.evals.rollout import (
     RECALL_TOOL_NAME,
     _permission_request_harness_failure,
     _require_isolated_cli_config,
+    build_breadcrumb_hook_env,
     build_pull_argv,
     build_push_breadcrumb_context,
     run_pull,
@@ -88,6 +89,55 @@ def test_permission_request_harness_failure_is_none_for_a_real_answer() -> None:
 # ---------------------------------------------------------------------------
 # Defect 3: refuse cli mode when CLAUDE_CONFIG_DIR is unset
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# athenaeum#1826 defect 2: the harness hook env must let its own interpreter
+# import athenaeum -- offline, no bash/hook spawn.
+# ---------------------------------------------------------------------------
+
+
+def test_build_breadcrumb_hook_env_python_can_import_athenaeum(tmp_path: Path) -> None:
+    """athenaeum#1826 AC2: the env this harness shells the hooks with must
+    let ITS OWN interpreter ``import athenaeum`` -- reproduced offline
+    (issue's own repro: ``PYTHON=~/.pyenv/versions/3.11.15/bin/python``,
+    ``PYTHONPATH=None``) by asserting the built env dict, passed straight to
+    a real subprocess, can do exactly that. This is the same isolation a
+    hook subprocess actually runs under (no ambient PYTHONPATH inherited --
+    ``build_breadcrumb_hook_env`` builds a full replacement env, not an
+    overlay), so a pass here is not an artifact of the test runner's own
+    sys.path.
+    """
+    env = build_breadcrumb_hook_env(tmp_path / "knowledge", tmp_path / "hook_home")
+    assert "PYTHONPATH" in env
+    assert Path(env["PYTHONPATH"]).is_absolute()
+    proc = subprocess.run(
+        [env["PYTHON"], "-c", "import athenaeum"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert proc.returncode == 0, f"stderr: {proc.stderr}"
+
+
+def test_build_breadcrumb_hook_env_pythonpath_is_derived_from_module_location(
+    tmp_path: Path,
+) -> None:
+    """AC2: derived from this module's OWN file location, never cwd -- so a
+    caller invoked from an unrelated working directory still gets a working
+    PYTHONPATH. Simulated here by chdir-ing away before building the env.
+    """
+    import os
+
+    previous_cwd = os.getcwd()
+    try:
+        os.chdir(str(tmp_path))
+        env = build_breadcrumb_hook_env(tmp_path / "knowledge", tmp_path / "hook_home")
+    finally:
+        os.chdir(previous_cwd)
+    assert Path(env["PYTHONPATH"]).name == "src"
+    assert (Path(env["PYTHONPATH"]) / "athenaeum" / "__init__.py").is_file()
 
 
 def test_require_isolated_cli_config_raises_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:

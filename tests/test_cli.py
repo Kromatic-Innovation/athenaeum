@@ -103,12 +103,16 @@ class TestRebuildIndex:
         assert rc == 0
         assert "FTS5 index rebuilt (full):" in capsys.readouterr().out
 
-    def test_defaults_to_fts5_when_no_config(
+    def test_defaults_to_vector_when_no_config(
         self,
         knowledge_with_wiki: Path,
         tmp_path: Path,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
+        """Issue athenaeum#1825: ``vector`` is the shipped default when
+        ``athenaeum.yaml`` names no ``search_backend`` (see
+        ``test_reads_backend_from_config`` above for the ``fts5`` opt-out via
+        explicit config)."""
         cache = tmp_path / "cache"
         rc = main(
             [
@@ -120,7 +124,7 @@ class TestRebuildIndex:
             ]
         )
         assert rc == 0
-        assert "FTS5 index rebuilt" in capsys.readouterr().out
+        assert "Vector index rebuilt" in capsys.readouterr().out
 
     def test_missing_wiki_returns_error(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -197,9 +201,38 @@ class TestServe:
         assert captured["raw_root"] == knowledge_with_wiki / "raw"
         assert captured["cache_dir"] is not None
 
-    def test_serve_defaults_to_fts5_from_config_defaults(
+    def test_serve_defaults_to_vector_from_config_defaults(
         self, knowledge_with_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Issue athenaeum#1825: ``vector`` is the shipped default when
+        ``athenaeum.yaml`` names no ``search_backend``."""
+        captured: dict[str, object] = {}
+
+        class _FakeServer:
+            def run(self) -> None:
+                raise KeyboardInterrupt
+
+        def _fake_create_server(**kwargs: object) -> _FakeServer:
+            captured.update(kwargs)
+            return _FakeServer()
+
+        import athenaeum.mcp_server as mcp_mod
+
+        monkeypatch.setattr(mcp_mod, "create_server", _fake_create_server)
+
+        rc = main(["serve", "--path", str(knowledge_with_wiki)])
+        assert rc == 0
+        assert captured["search_backend"] == "vector"
+
+    def test_serve_honors_fts5_opt_out_from_config(
+        self, knowledge_with_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Issue athenaeum#1825: an explicit ``search_backend: fts5`` in
+        ``athenaeum.yaml`` still opts a ``serve`` invocation out of the
+        shipped ``vector`` default."""
+        (knowledge_with_wiki / "athenaeum.yaml").write_text(
+            "auto_recall: true\nsearch_backend: fts5\n"
+        )
         captured: dict[str, object] = {}
 
         class _FakeServer:

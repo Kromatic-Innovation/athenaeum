@@ -19,6 +19,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fixed on this branch but not yet re-run, so this report withholds their
   tables pending the next dispatch.
 
+### Changed
+
+- **`search_backend` (hybrid vector + FTS5) is now the shipped default
+  everywhere the code defaulted to `fts5` (issue athenaeum#1825, operator
+  ruling on issue athenaeum#1736, 2026-09-18).** `athenaeum.config._DEFAULTS`
+  and the `athenaeum.yaml` template default to `search_backend: vector`;
+  `fts5` is the opt-out. `examples/claude-code/user-prompt-recall.sh` and
+  `session-start-recall.sh` default `SEARCH_BACKEND` to `vector`; the
+  `<50ms` latency contract now describes the `fts5` fallback path, not the
+  default. `.github/workflows/evals.yml`'s `north_star_search_backend`
+  dispatch input and `tests/evals/north_star_cli.py`'s `--search-backend`
+  flag default to `vector`; `fts5` is now the second-dispatch fidelity
+  pass. `north_star_report.compute_verdicts` keeps only
+  `search_backend == "vector"` rows for the design-doc §7 decision (an
+  fts5-only store, including every pre-athenaeum#1764 row, now renders an
+  empty verdict that names the pin and why). A default install without the
+  `[vector]` extra (chromadb) degrades to `fts5` at query time with one
+  logged warning and no traceback (`VectorBackend.query`).
+  `docs/design/native-memory-baseline.md` §7 records the re-pin and its
+  measured basis.
+
 ### Fixed
 
 - **The cross-lane regression athenaeum#1789's FTS5 body-indexing caused in

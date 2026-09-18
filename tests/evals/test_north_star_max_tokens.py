@@ -476,6 +476,12 @@ def test_the_full_grid_dry_run_prices_at_the_measured_mix(
             [
                 "--scale",
                 "full",
+                # Issue athenaeum#1825: this test prices the FULL (fts5,
+                # unscoped) 6-scale grid -- the shipped "vector" default is
+                # scoped to core+medium (issue athenaeum#1787), so fts5 is
+                # opted into explicitly here.
+                "--search-backend",
+                "fts5",
                 "--dry-run",
                 "--max-spend",
                 "50",

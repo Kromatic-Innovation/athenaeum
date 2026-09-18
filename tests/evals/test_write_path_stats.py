@@ -20,7 +20,14 @@ from tests.evals.north_star_report import (
 )
 
 
-def _obs(uid: str, page_uid: str, body: str, *, tokens: tuple[str, ...] = ()) -> Observation:
+def _obs(
+    uid: str,
+    page_uid: str,
+    body: str,
+    *,
+    tokens: tuple[str, ...] = (),
+    retain: bool = True,
+) -> Observation:
     return Observation(
         uid=uid,
         page_uid=page_uid,
@@ -29,6 +36,7 @@ def _obs(uid: str, page_uid: str, body: str, *, tokens: tuple[str, ...] = ()) ->
         uuid8="aaaaaaaa",
         body=body,
         answer_tokens=tokens,
+        retain=retain,
     )
 
 
@@ -141,5 +149,87 @@ def test_render_report_includes_write_path_table_when_stats_supplied() -> None:
     )
     rendered = render_report(_minimal_report(stats))
 
-    assert "| athenaeum | core | 2 | 2 | 2 | 2 | 3 | 2 | 0 |" in rendered
-    assert "| native | core | 2 | n/a | 0 | n/a | 3 | 0 | n/a |" in rendered
+    assert "| athenaeum | core | 2 | 2 | 2 | 2 | 0 | n/a | 3 | 2 | 0 |" in rendered
+    assert "| native | core | 2 | n/a | 0 | n/a | 0 | n/a | 3 | 0 | n/a |" in rendered
+
+
+# ---------------------------------------------------------------------------
+# Transient (``retain=False``) ground truth -- issue athenaeum#1824.
+# ---------------------------------------------------------------------------
+
+
+def test_transient_tokens_are_scored_separately_from_retention() -> None:
+    """A transient observation must not touch ANY retention field: its token
+    is ground truth for the opposite expectation, so counting it in would
+    both inflate the denominator and score a correct discard as a loss."""
+    observations = [
+        _obs("obs-1", "page-a", "durable fact", tokens=("Cinderquill",)),
+        _obs(
+            "obs-2",
+            "transient-outage",
+            "the portal is down this afternoon",
+            tokens=("Zephrandil",),
+            retain=False,
+        ),
+    ]
+    store = {"page-a.md": "...Cinderquill..."}
+
+    stats = compute_write_path_stats("athenaeum", "core", observations, store)
+
+    # Retention side sees only the durable observation.
+    assert stats.pages_targeted == 1
+    assert stats.pages_written == 1
+    assert stats.answer_tokens_total == 1
+    assert stats.answer_tokens_retained == 1
+    assert stats.observations_measured == 1
+    assert stats.observations_dropped == 0
+    # Transient side: the outage note was correctly discarded.
+    assert stats.transient_total == 1
+    assert stats.transient_retained == 0
+
+
+def test_a_retained_transient_token_is_counted_against_the_store() -> None:
+    observations = [
+        _obs("obs-1", "page-a", "durable fact", tokens=("Cinderquill",)),
+        _obs("obs-2", "transient-outage", "down today", tokens=("Zephrandil",), retain=False),
+    ]
+    store = {"page-a.md": "...Cinderquill...", "notes.md": "...Zephrandil..."}
+
+    stats = compute_write_path_stats("athenaeum", "core", observations, store)
+
+    assert stats.answer_tokens_retained == stats.answer_tokens_total == 1
+    assert stats.transient_total == 1
+    assert stats.transient_retained == 1, "hoarding a transient fact must be visible"
+
+
+def test_transient_retained_is_none_when_no_transient_observation_is_present() -> None:
+    """``None``, never a fabricated 0 -- the same discipline every other
+    optional field on :class:`WritePathStats` already holds."""
+    observations = [_obs("obs-1", "page-a", "durable fact", tokens=("Cinderquill",))]
+    stats = compute_write_path_stats("athenaeum", "core", observations, {"a.md": "Cinderquill"})
+
+    assert stats.transient_total == 0
+    assert stats.transient_retained is None
+
+
+def test_render_report_renders_the_transient_columns() -> None:
+    stats = (
+        WritePathStats(
+            system="athenaeum",
+            corpus_scale="core",
+            pages_targeted=1,
+            pages_written=1,
+            answer_tokens_total=1,
+            answer_tokens_retained=1,
+            observations_total=2,
+            observations_measured=1,
+            observations_dropped=0,
+            transient_total=3,
+            transient_retained=1,
+        ),
+    )
+    rendered = render_report(_minimal_report(stats))
+
+    assert "transient_total | transient_retained" in rendered
+    assert "| athenaeum | core | 1 | 1 | 1 | 1 | 3 | 1 | 2 | 1 | 0 |" in rendered
+    assert "LOWER is better" in rendered

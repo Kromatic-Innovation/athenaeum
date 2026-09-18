@@ -97,7 +97,7 @@ cfg = load_config(sys.argv[1] if len(sys.argv) > 1 else None)
 env_path = sys.argv[2]
 with open(env_path, 'w') as f:
     f.write(f'AUTO_RECALL={str(cfg.get(\"auto_recall\", True)).lower()}\n')
-    f.write(f'SEARCH_BACKEND={cfg.get(\"search_backend\", \"fts5\")}\n')
+    f.write(f'SEARCH_BACKEND={cfg.get(\"search_backend\", \"vector\")}\n')
     provider = 'chromadb'
     if isinstance(cfg.get('vector'), dict):
         provider = cfg['vector'].get('provider', 'chromadb')
@@ -142,7 +142,9 @@ fi
 if [ "$_read_config_ok" = false ]; then
   CONFIG_YAML="${KNOWLEDGE_ROOT}/athenaeum.yaml"
   _auto_recall="true"
-  _search_backend="fts5"
+  # Issue athenaeum#1825: re-pinned default, matching
+  # athenaeum.config._DEFAULTS["search_backend"].
+  _search_backend="vector"
   _vector_provider="chromadb"
   # Issue athenaeum#1120: same yaml-only resolution as the python path above
   # — env override happens at per-turn-hook runtime, not here.
@@ -237,19 +239,14 @@ fi
 # Always build FTS5 — it's cheap (~1s for 3k pages) and rescues short-query
 # recall even when the vector backend is the primary. See docs/design/recall-architecture.md.
 "$PYTHON" -c "
-import sys, os, importlib.util
+import sys, os
 src = os.environ.get('ATHENAEUM_SRC', '')
-path = os.path.join(src, 'src/athenaeum/search.py') if src else ''
-if path and os.path.isfile(path):
-    spec = importlib.util.spec_from_file_location('athenaeum_search_only', path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    build_fts5_index = mod.build_fts5_index
-else:
-    from athenaeum.search import build_fts5_index
+if src:
+    sys.path.insert(0, os.path.join(src, 'src'))
+from athenaeum.search import build_fts5_index
 count = build_fts5_index(sys.argv[1], sys.argv[2])
 print(f'[Knowledge] FTS5 index: {count} wiki pages', file=sys.stderr)
-" "$WIKI_ROOT" "$CACHE_DIR" 2>&1 || true
+" "$WIKI_ROOT" "$CACHE_DIR"
 
 # Cache the canonical stopword list once per session. The per-turn
 # recall hook reads this file instead of hard-coding its own copy,
@@ -258,16 +255,11 @@ print(f'[Knowledge] FTS5 index: {count} wiki pages', file=sys.stderr)
 # a partial file.
 _stopwords_tmp=$(mktemp "${CACHE_DIR}/stopwords.txt.XXXXXX")
 if "$PYTHON" -c "
-import sys, os, importlib.util
+import sys, os
 src = os.environ.get('ATHENAEUM_SRC', '')
-path = os.path.join(src, 'src/athenaeum/search.py') if src else ''
-if path and os.path.isfile(path):
-    spec = importlib.util.spec_from_file_location('athenaeum_search_only', path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    STOPWORDS = mod.STOPWORDS
-else:
-    from athenaeum.search import STOPWORDS
+if src:
+    sys.path.insert(0, os.path.join(src, 'src'))
+from athenaeum.search import STOPWORDS
 print('\n'.join(STOPWORDS))
 " > "$_stopwords_tmp" 2>/dev/null && [ -s "$_stopwords_tmp" ]; then
   mv "$_stopwords_tmp" "${CACHE_DIR}/stopwords.txt"
@@ -275,7 +267,7 @@ else
   rm -f "$_stopwords_tmp"
 fi
 
-if [ "${SEARCH_BACKEND:-fts5}" = "vector" ]; then
+if [ "${SEARCH_BACKEND:-vector}" = "vector" ]; then
   # Vector rebuild is expensive (~45s on a ~3k-page wiki) so skip when the
   # existing index is newer than the newest wiki page. FTS5 above is cheap
   # enough to always rebuild. Override with ATHENAEUM_FORCE_REBUILD=1.
@@ -298,21 +290,16 @@ if [ "${SEARCH_BACKEND:-fts5}" = "vector" ]; then
 
   if [ "$_vector_fresh" = false ]; then
     "$PYTHON" -c "
-import sys, os, importlib.util
+import sys, os
 src = os.environ.get('ATHENAEUM_SRC', '')
-path = os.path.join(src, 'src/athenaeum/search.py') if src else ''
-if path and os.path.isfile(path):
-    spec = importlib.util.spec_from_file_location('athenaeum_search_only', path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    build_vector_index = mod.build_vector_index
-else:
-    from athenaeum.search import build_vector_index
+if src:
+    sys.path.insert(0, os.path.join(src, 'src'))
+from athenaeum.search import build_vector_index
 try:
     count = build_vector_index(sys.argv[1], sys.argv[2])
     print(f'[Knowledge] Vector index: {count} wiki pages', file=sys.stderr)
 except ImportError as e:
     print(f'[Knowledge] Vector backend unavailable: {e}', file=sys.stderr)
-" "$WIKI_ROOT" "$CACHE_DIR" 2>&1 || true
+" "$WIKI_ROOT" "$CACHE_DIR" || true
   fi
 fi

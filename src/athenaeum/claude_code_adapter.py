@@ -213,7 +213,7 @@ def main(argv: list[str] | None = None) -> int:
             prompt,
             session_id,
             cache_dir=cache_dir,
-            search_backend=os.environ.get("SEARCH_BACKEND", "fts5"),
+            search_backend=os.environ.get("SEARCH_BACKEND", "vector"),
         )
         text = envelope["render"]["text"]
         if text:

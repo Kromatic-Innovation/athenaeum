@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # UserPromptSubmit hook: surface wiki pages relevant to the user's message.
 #
-# Runs a hybrid FTS5 + (optional) vector search against the athenaeum index
-# built by session-start-recall.sh. Typical runtime: <50ms (FTS5 only, no
-# vector index active this turn), ~400ms (a turn where the vector backend
-# runs), ~1.5s when the LLM topic extractor is enabled. The <50ms contract
-# applies ONLY to a turn where the vector half does not run at all (no
-# vector index, or `SEARCH_BACKEND=fts5`) — see athenaeum#1120's
+# Runs a hybrid FTS5 + vector search against the athenaeum index built by
+# session-start-recall.sh. `SEARCH_BACKEND=vector` (hybrid vector + FTS5
+# RRF fusion) is the shipped default (issue athenaeum#1825, operator ruling
+# on issue athenaeum#1736) -- typical runtime ~400ms, ~1.5s when the LLM
+# topic extractor is enabled. `SEARCH_BACKEND=fts5` is the opt-out fallback
+# path: FTS5-only, no vector index consulted at all, typical runtime <50ms.
+# That <50ms contract applies ONLY on the fts5 fallback path (no vector
+# index, or an explicit `SEARCH_BACKEND=fts5`) — see athenaeum#1120's
 # seam-decision comment below for why tier filtering and the push-token
 # budget stayed inside that contract. It is NOT "FTS5 rows are always
 # cheap to post-process": issue athenaeum#1665 corrected an earlier
@@ -198,7 +200,7 @@ if [ -f "$CONFIG_ENV" ]; then
   set +a
 fi
 AUTO_RECALL="${AUTO_RECALL:-true}"
-SEARCH_BACKEND="${SEARCH_BACKEND:-fts5}"
+SEARCH_BACKEND="${SEARCH_BACKEND:-vector}"
 # Issue athenaeum#1120: env override first (mirrors
 # athenaeum.config.resolve_push_token_budget's own precedence), then the
 # config.env value session-start-recall.sh cached from
@@ -1039,6 +1041,22 @@ from pathlib import Path
 src = os.environ.get('ATHENAEUM_SRC', '')
 path = os.path.join(src, 'src/athenaeum/search.py') if src else ''
 if path and os.path.isfile(path):
+    # athenaeum#1826: search.py imports `from athenaeum.authority import
+    # is_pointer_stub` at module scope, so loading it as a standalone file
+    # (deliberately kept -- see the block comment above -- for single-file
+    # stub loading in tests, independent of the plain `athenaeum.config`
+    # package import just below) still needs the real package reachable on
+    # sys.path for THAT internal import to resolve. Insert it before
+    # exec_module rather than switching to a plain package import here:
+    # this script also puts a real athenaeum checkout's src/ on
+    # PYTHONPATH (see the athenaeum.config import below), and a plain
+    # `from athenaeum.search import ...` would let that real, later
+    # sys.path entry's REGULAR package win over an earlier ATHENAEUM_SRC
+    # namespace portion whenever it lacks __init__.py -- exactly what a
+    # test's fake single-file stub is.
+    real_src = os.path.join(src, 'src')
+    if real_src not in sys.path:
+        sys.path.insert(0, real_src)
     spec = importlib.util.spec_from_file_location('athenaeum.search', path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)

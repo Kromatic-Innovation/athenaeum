@@ -3064,6 +3064,36 @@ level) so a mis-configured operator gets a clear signal at serve time
 rather than a silent no-op. ``label_restrict`` is inert until content
 actually matches, so an ``off``/unset install never touches intake.
 
+## `search_backend`
+
+### `resolve_search_backend`
+
+- **YAML path:** `search_backend`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `'vector'`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve ``search_backend`` -- which backend answers a recall query.
+
+``"vector"`` is the shipped default: hybrid semantic search (chromadb
+local embeddings) fused with FTS5 via reciprocal rank fusion, on by
+default -- see `resolve_recall_hybrid` for that opt-out knob.
+``"fts5"`` (SQLite FTS5, BM25 ranking, no extra dependencies) is the
+opt-out: set ``search_backend: fts5`` in the yaml config to use it
+exclusively. ``"keyword"`` (scan-on-query, zero setup) is also a valid
+value but has no dedicated resolver of its own -- callers compare this
+resolver's return value directly against the three recognized names.
+
+When ``"vector"`` is configured but chromadb (the ``[vector]`` extra) is
+not installed, `athenaeum.search.VectorBackend.query` degrades to
+the ``fts5`` backend for that call with one logged warning and no
+traceback -- this resolver itself reports only the CONFIGURED backend
+name, not the one that actually answered a given call.
+
+Precedence: yaml ``search_backend`` > code default (``"vector"``). No
+dedicated environment variable.
+
 ## `sensitivity`
 
 ### `resolve_sensitivity_classes`

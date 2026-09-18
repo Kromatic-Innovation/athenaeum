@@ -12,7 +12,9 @@
 # (>1h old) are reclaimed automatically.
 #
 # Reads backend selection from $CACHE_DIR/config.env (written by
-# session-start-recall.sh on a prior run). Defaults to fts5.
+# session-start-recall.sh on a prior run). Defaults to vector (issue
+# athenaeum#1825; fts5 is the opt-out written into config.env when
+# athenaeum.yaml names it explicitly).
 #
 # Configure as a SessionEnd hook in ~/.claude/settings.json:
 #   "SessionEnd": [{
@@ -93,7 +95,7 @@ if [ -f "$CONFIG_ENV" ]; then
   # shellcheck disable=SC1090
   source "$CONFIG_ENV"
 fi
-SEARCH_BACKEND="${SEARCH_BACKEND:-fts5}"
+SEARCH_BACKEND="${SEARCH_BACKEND:-vector}"
 
 # ── Delegate to athenaeum.search ─────────────────────────────────────────
 _SEARCH_MOD="${ATHENAEUM_SRC:-}/src/athenaeum/search.py"

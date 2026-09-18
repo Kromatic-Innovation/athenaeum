@@ -282,20 +282,34 @@ is never run in CI.
    `--allowedTools mcp__athenaeum__recall mcp__athenaeum__read_entity`, so a
    non-interactive PULL/PUSH_BREADCRUMB_PULL cell no longer stalls on an
    unresolved MCP permission prompt (defect 1). Nothing to set for this.
-3. **Dispatch:**
+3. **On a subscription-only machine (no `ANTHROPIC_API_KEY`), set
+   `ATHENAEUM_LLM_PROVIDER=claude-cli`.** `--mode cli` only routes the
+   PULL-family and native-memory cells through a spawned `claude -p`; the
+   run's single-shot arms (`NONE`, `PUSH_PAGES_UPPER_BOUND`,
+   `PUSH_BREADCRUMB`, `ORACLE`) still call `tests.evals.harness.build_live_client`
+   directly, which aborts with `RuntimeError: no LLM backend available` if
+   neither `ANTHROPIC_API_KEY` nor `ATHENAEUM_LLM_PROVIDER=claude-cli` is
+   set (issue athenaeum#1826: this is exactly where the first attempt of
+   the 2026-09-18 round aborted). Set both env vars together for a
+   subscription-only run to work end to end.
+4. **Dispatch**, a full six-probe command covering the single-shot,
+   push-breadcrumb, and native arms in one run:
 
    ```sh
    CLAUDE_CONFIG_DIR=/path/to/isolated-claude-config \
+     ATHENAEUM_LLM_PROVIDER=claude-cli \
      python -m tests.evals.north_star_cli \
      --mode cli --scale smoke --corpus-scales medium \
-     --probes abstain_unknown_policy,pto_allowance \
+     --search-backend vector \
+     --probes abstain_unknown_policy,abstain_unknown_client,pto_allowance,confidentiality_rule,bluewater_terms,onboarding_length \
      --claude-binary claude
    ```
 
-4. **Read the header.** The generated report prints `harness failures: N`
+5. **Read the header.** The generated report prints `harness failures: N`
    (cells excluded from correctness/cost because a turn ended on an
-   unresolved permission request, or a `push_breadcrumb_pull` cell
-   delivered an empty breadcrumb for a non-abstention probe -- see
+   unresolved permission request, a `push_breadcrumb`/`push_breadcrumb_pull`
+   cell delivered an empty breadcrumb for a non-abstention probe, or a
+   native cell answered as an unauthenticated `claude -p` session -- see
    `RolloutRecord.harness_failure`) and `config isolated: yes|no|mixed` for
    any store carrying a cli-mode row (`RolloutRecord.config_isolated`). A
    harness failure is never graded as an ordinary miss; re-run the affected

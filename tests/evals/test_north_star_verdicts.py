@@ -24,8 +24,6 @@ cost-ratio-band and cutoff-scale tests operate on hand-built
 
 from __future__ import annotations
 
-import dataclasses
-
 from tests.evals.containment import GridCell
 from tests.evals.corpus import build_corpus
 from tests.evals.north_star_report import (
@@ -86,6 +84,13 @@ def _record(
     answer: str,
     input_tokens: int = 100,
     output_tokens: int = 50,
+    # Issue athenaeum#1825: compute_verdicts now keeps only
+    # `search_backend == "vector"` rows (re-pinned by operator ruling on
+    # issue athenaeum#1736), so every fixture built by this helper must
+    # carry that stamp by default or the whole verdicts suite's ordinary
+    # (backend-agnostic) test data would be silently excluded. Tests that
+    # specifically exercise the fts5/None exclusion pass a different value.
+    search_backend: str = "vector",
 ) -> RolloutRecord:
     return RolloutRecord(
         arm=arm,
@@ -96,6 +101,7 @@ def _record(
         turn_tokens=[
             TurnTokenUsage(turn=0, input_tokens=input_tokens, output_tokens=output_tokens)
         ],
+        search_backend=search_backend,
     )
 
 
@@ -430,21 +436,27 @@ def test_relationship_probe_ids_excludes_wrong_type_despite_class_match() -> Non
 
 
 # ---------------------------------------------------------------------------
-# Issue athenaeum#1787: §7 verdicts are pinned to the shipped fts5
-# configuration (ruling R1) -- a vector-backend second dispatch's rows must
-# never enter compute_verdicts, even if a caller hands it a mixed *rows*
-# sequence (check_floor_mismatch only guards the CLI's own --store path,
-# not this function directly).
+# Issue athenaeum#1825: §7 verdicts are RE-PINNED to the "vector" arm
+# (operator ruling on issue athenaeum#1736, 2026-09-18) -- this SUPERSEDES
+# the earlier fts5 pin (ruling R1, issue athenaeum#1787). An fts5-backend
+# row (and a pre-athenaeum#1764 row whose `search_backend` is the dataclass
+# default -- ``None``, since the field did not exist yet) must never enter
+# compute_verdicts, even if a caller hands it a mixed *rows* sequence
+# (check_floor_mismatch only guards the CLI's own --store path, not this
+# function directly). The spoiler set direction below FLIPS from the
+# pre-athenaeum#1825 shape: it is now the fts5/None-backend rows that must be
+# excluded, not the vector rows.
 # ---------------------------------------------------------------------------
 
 
-def test_compute_verdicts_ignores_vector_backend_rows() -> None:
-    """A spoiler set of ``search_backend="vector"`` rows, planted so that if
-    they were pooled into condition 1's correctness rate the verdict would
-    FLIP from pass to fail, must not move the verdict at all: the fts5-only
-    computation and the fts5-plus-vector-spoiler computation must agree.
+def test_compute_verdicts_ignores_fts5_backend_rows() -> None:
+    """A spoiler set of default-backend (``search_backend=None``, the
+    pre-athenaeum#1764/fts5 shape) rows, planted so that if they were pooled
+    into condition 1's correctness rate the verdict would FLIP from pass to
+    fail, must not move the verdict at all: the vector-only computation and
+    the vector-plus-fts5-spoiler computation must agree.
     """
-    fts5_rows = [
+    vector_rows = [
         _row(
             _record(
                 arm=VERDICT_ARM,
@@ -463,46 +475,92 @@ def test_compute_verdicts_ignores_vector_backend_rows() -> None:
         ),
     ]
 
-    # Spoiler: the SAME probe, stamped search_backend="vector", with the
-    # verdict arm now wrong and native now right -- if pooled with the fts5
-    # rows above this would flip condition 1 from pass (1/1 > 0/1) to a tie
-    # or a fail. It must be excluded entirely, not merely outweighed.
-    vector_rows = [
+    # Spoiler: the SAME probe, with the dataclass-default ``search_backend``
+    # (``None`` -- the pre-athenaeum#1764/fts5 shape), with the verdict arm
+    # now wrong and native now right -- if pooled with the vector rows above
+    # this would flip condition 1 from pass (1/1 > 0/1) to a tie or a fail.
+    # It must be excluded entirely, not merely outweighed.
+    fts5_rows = [
         _row(
-            dataclasses.replace(
-                _record(
-                    arm=VERDICT_ARM,
-                    probe_id=RELATIONSHIP_PROBE_ID,
-                    probe_class="single_hop",
-                    answer="I don't know",
-                ),
-                search_backend="vector",
+            _record(
+                arm=VERDICT_ARM,
+                probe_id=RELATIONSHIP_PROBE_ID,
+                probe_class="single_hop",
+                answer="I don't know",
+                search_backend=None,
             ),
             replicate=1,
         ),
         _row(
-            dataclasses.replace(
-                _record(
-                    arm=Arm.NATIVE_INDEX,
-                    probe_id=RELATIONSHIP_PROBE_ID,
-                    probe_class="single_hop",
-                    answer=f"terms are {RELATIONSHIP_ANSWER_TOKEN}",
-                ),
-                search_backend="vector",
+            _record(
+                arm=Arm.NATIVE_INDEX,
+                probe_id=RELATIONSHIP_PROBE_ID,
+                probe_class="single_hop",
+                answer=f"terms are {RELATIONSHIP_ANSWER_TOKEN}",
+                search_backend=None,
             ),
             replicate=1,
         ),
     ]
 
     relationship_ids = frozenset({RELATIONSHIP_PROBE_ID})
-    fts5_only = compute_verdicts(fts5_rows, relationship_probe_ids=relationship_ids)
-    mixed = compute_verdicts(fts5_rows + vector_rows, relationship_probe_ids=relationship_ids)
+    vector_only = compute_verdicts(vector_rows, relationship_probe_ids=relationship_ids)
+    mixed = compute_verdicts(vector_rows + fts5_rows, relationship_probe_ids=relationship_ids)
 
-    assert len(fts5_only) == 1
+    assert len(vector_only) == 1
     assert len(mixed) == 1
-    assert fts5_only[0].condition1_pass is True
+    assert vector_only[0].condition1_pass is True
     assert mixed[0].condition1_pass is True
-    assert mixed[0] == fts5_only[0]
+    assert mixed[0] == vector_only[0]
+
+
+def test_render_decision_block_names_the_pin_for_an_fts5_only_store() -> None:
+    """Issue athenaeum#1825 AC: an old fts5-only store (every row
+    ``search_backend=None``, the pre-athenaeum#1764 shape) renders a §7
+    decision block that says WHICH backend the verdict arm is pinned to and
+    WHY the verdict is empty -- not the generic "no scale ... was
+    evaluated" wording a genuinely empty store gets."""
+    fts5_only_rows = [
+        _row(
+            _record(
+                arm=VERDICT_ARM,
+                probe_id=RELATIONSHIP_PROBE_ID,
+                probe_class="single_hop",
+                answer=f"terms are {RELATIONSHIP_ANSWER_TOKEN}",
+                search_backend=None,
+            )
+        ),
+        _row(
+            _record(
+                arm=Arm.NATIVE_INDEX,
+                probe_id=RELATIONSHIP_PROBE_ID,
+                probe_class="single_hop",
+                answer="I don't know",
+                search_backend=None,
+            )
+        ),
+    ]
+    report = build_report(fts5_only_rows)
+
+    rendered = "\n".join(render_decision_block(report))
+
+    assert '`search_backend="vector"`' in rendered
+    assert "athenaeum#1736" in rendered
+    assert "2026-09-18" in rendered
+    # Must NOT read as the genuinely-empty-store message -- that would hide
+    # the real reason (wrong backend dispatched, not "no run happened").
+    assert "so there is nothing to certify a cutoff against" not in rendered
+
+
+def test_render_decision_block_genuinely_empty_store_keeps_the_generic_message() -> None:
+    """Control for the test above: a truly empty store (no rows at all)
+    must still get the pre-existing generic message, not the fts5-only-pin
+    explanation -- that explanation requires rows to be PRESENT and ALL
+    excluded, not merely absent."""
+    rendered = "\n".join(render_decision_block(_minimal_report()))
+
+    assert "so there is nothing to certify a cutoff against" in rendered
+    assert "has rows, but none recorded" not in rendered
 
 
 # ---------------------------------------------------------------------------
