@@ -67,6 +67,28 @@ Reuse, not reimplementation:
 Layering: sits under ``tests/evals/`` (test-only), like
 ``tests/evals/containment.py`` — no ``src/athenaeum/*.py`` module is added,
 so no ``tests/fixtures/layer_declarations.py`` entry is needed.
+
+**cli-mode config isolation (issue athenaeum#1819 defect 3).** Every
+``claude -p`` spawn in this module (PULL, PUSH_BREADCRUMB_PULL, and the two
+native arms) must run under an isolated ``CLAUDE_CONFIG_DIR`` — never the
+operator's own ``~/.claude.json`` — or the operator's live SessionStart
+hooks and MCP servers fire inside the eval. The native arms
+(:func:`_spawn_native`, :func:`run_native_writer`) always mint their own
+throwaway config directory via :func:`seed_native_claude_config`, so they
+need nothing from the caller. PULL and PUSH_BREADCRUMB_PULL do not mint one
+— :func:`_require_isolated_cli_config` instead REFUSES to start cli mode
+when the operator has not set ``CLAUDE_CONFIG_DIR`` themselves, rather than
+auto-seeding a directory here. That asymmetry is deliberate: an
+auto-seeded directory that still carries a working ``claude`` login cannot
+be verified offline (this module's own test suite never spawns a live
+``claude -p``), and on macOS the CLI's login is keychain-backed, so a
+freshly seeded, otherwise-empty config directory can silently lose it —
+this is exactly why :func:`seed_native_claude_config` itself only ever
+copies the ambient config's cached feature flags, never its credentials.
+Set ``CLAUDE_CONFIG_DIR`` to a directory seeded with a real ``claude``
+login (for example one produced by ``claude setup-token`` or a prior
+interactive login copied aside) before running the cli-mode spot-check —
+see ``tests/evals/README.md``.
 """
 
 from __future__ import annotations
@@ -198,6 +220,74 @@ RECALL_TOOL_NAME = "mcp__athenaeum__recall"
 #: of any page whose tag falls outside ``recall``'s 400-character snippet
 #: window (``athenaeum.mcp_server._snippet``).
 READ_ENTITY_TOOL_NAME = "mcp__athenaeum__read_entity"
+
+#: MCP tools pre-approved for a spawned PULL-family ``claude -p`` session
+#: (issue athenaeum#1819 defect 1). A non-interactive ``-p`` session cannot
+#: answer a permission prompt: an MCP tool merely AVAILABLE via
+#: ``--mcp-config`` but not pre-approved ends the turn that tries to use it
+#: on a permission request instead of a result -- observed verbatim in
+#: every ``pull``/``push_breadcrumb_pull`` cell of the 2026-09-18 cli-mode
+#: spot-check. Built-in tools (Read/Grep/Glob/Bash/...) need no such
+#: pre-approval here -- the native arms already exercise those freely with
+#: no extra flag -- so only the MCP-scoped tool names are listed.
+PULL_ALLOWED_TOOLS: tuple[str, ...] = (RECALL_TOOL_NAME, READ_ENTITY_TOOL_NAME)
+
+#: Substrings (case-insensitive) that mark a ``claude -p`` final answer as
+#: an unresolved permission request rather than a graded response (issue
+#: athenaeum#1819 defect 1), taken verbatim from the 2026-09-18 spot-check
+#: transcripts.
+_PERMISSION_REQUEST_MARKERS: tuple[str, ...] = (
+    "need your permission",
+    "approve the permission",
+    "requires approval",
+)
+
+
+def _permission_request_harness_failure(answer: str) -> str | None:
+    """``None`` when *answer* reads like a real response; otherwise a
+    short, stable reason string for ``RolloutRecord.harness_failure`` --
+    see :data:`_PERMISSION_REQUEST_MARKERS`.
+    """
+    lowered = answer.lower()
+    for marker in _PERMISSION_REQUEST_MARKERS:
+        if marker in lowered:
+            return f"final answer looks like an unresolved permission request ({marker!r})"
+    return None
+
+
+def _require_isolated_cli_config() -> str:
+    """Return the operator-set isolated ``CLAUDE_CONFIG_DIR`` or raise.
+
+    Issue athenaeum#1819 defect 3: :func:`run_pull` and
+    :func:`run_push_breadcrumb_pull` pass no ``env=`` to
+    ``subprocess.run``, so the spawned ``claude -p`` inherits
+    ``os.environ`` verbatim. When the caller's own ``CLAUDE_CONFIG_DIR`` is
+    already set, that inherited value already isolates the child -- this
+    function does nothing further in that case. When it is UNSET, the
+    child would silently fall through to the OPERATOR's real
+    ``~/.claude.json`` and fire the operator's own ``SessionStart`` hooks
+    inside the eval -- the exact contamination the 2026-09-18 spot-check
+    observed.
+
+    Deliberately a refusal, not an auto-seeded isolated directory: seeding
+    one that still carries a working ``claude`` login is NOT provable
+    offline (this module's tests never spawn a live ``claude -p`` -- see
+    the module docstring), and on macOS the CLI's login is keychain-backed,
+    so a freshly seeded config directory can lose it entirely (see this
+    module's own docstring and ``tests/evals/README.md``). Refusing with a
+    clear message is the option this issue's fix can actually verify.
+    """
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    if not config_dir:
+        raise RuntimeError(
+            "CLAUDE_CONFIG_DIR is not set -- refusing to spawn `claude -p` for cli "
+            "mode, since it would silently inherit the operator's own Claude Code "
+            "config (~/.claude.json) and fire the operator's SessionStart hooks "
+            "inside the eval (issue athenaeum#1819). Set CLAUDE_CONFIG_DIR to an "
+            "isolated directory that still carries your `claude` login before "
+            "running the cli-mode spot-check -- see tests/evals/README.md."
+        )
+    return config_dir
 
 #: The reference-tag contract (issue athenaeum#1753). Every arm's system
 #: prompt carries this VERBATIM and IDENTICALLY -- single-shot, tool-using
@@ -371,6 +461,28 @@ class RolloutRecord:
     #: the harness measured a configuration nobody ships. Read by
     #: ``north_star_report.build_report``'s ``hybrid: on|off`` header line.
     hybrid_active: bool | None = None
+    #: Issue athenaeum#1819: a short, stable reason string when this cell's
+    #: run is not a valid measurement at all -- a cli-mode PULL/
+    #: PUSH_BREADCRUMB_PULL turn that ended on an unresolved MCP permission
+    #: request (defect 1), or a cli-mode PUSH_BREADCRUMB_PULL cell whose
+    #: breadcrumb assembly produced nothing for a non-abstention probe
+    #: (defect 2). ``None`` means the cell is a real measurement -- the
+    #: conservative default and decode, matching this dataclass's own
+    #: back-compat discipline (see ``mode``'s docstring): every row
+    #: persisted before this field existed decodes as ``None`` ("not known
+    #: to be a harness failure"), never as a failure it was never checked
+    #: for. ``tests.evals.north_star_report.build_report`` excludes any row
+    #: with this set from correctness and cost, counting it separately
+    #: instead of grading it as an ordinary miss.
+    harness_failure: str | None = None
+    #: Issue athenaeum#1819 defect 3: whether this cli-mode spawn ran under
+    #: an operator-isolated ``CLAUDE_CONFIG_DIR`` rather than the
+    #: operator's own ambient Claude Code config. ``False`` is the
+    #: conservative default and decode for a pre-existing row -- "not known
+    #: to be isolated" -- never a claim of isolation a stored row did not
+    #: actually have. Left ``False`` (not applicable) for every api-mode
+    #: record: no ``claude -p`` process is ever spawned on that path.
+    config_isolated: bool = False
 
     @property
     def total_input_tokens(self) -> int:
@@ -413,6 +525,8 @@ class RolloutRecord:
             "retrieval_hit_scores": self.retrieval_hit_scores,
             "search_backend": self.search_backend,
             "hybrid_active": self.hybrid_active,
+            "harness_failure": self.harness_failure,
+            "config_isolated": self.config_isolated,
         }
 
     @classmethod
@@ -454,6 +568,13 @@ class RolloutRecord:
             # field existed -- ``None`` decodes as "unknown/not applicable",
             # the same meaning it carries for a freshly-constructed record.
             hybrid_active=payload.get("hybrid_active"),
+            # Issue athenaeum#1819: absent on every row persisted before this
+            # field existed -- ``None``/``False`` decode as "not known to be
+            # a harness failure" / "not known to be isolated", the same
+            # conservative meaning they carry for a freshly-constructed
+            # record.
+            harness_failure=payload.get("harness_failure"),
+            config_isolated=payload.get("config_isolated", False),
         )
 
 
@@ -852,6 +973,14 @@ def build_pull_argv(claude_binary: str, mcp_config_path: Path, model: str) -> li
     prompt, which has a stdin channel and must use it. A system prompt has no
     stdin channel in ``claude -p``, and this one is a fixed module constant
     with no probe or corpus content in it.
+
+    ``--allowedTools`` pre-approves :data:`PULL_ALLOWED_TOOLS` (issue
+    athenaeum#1819 defect 1): a non-interactive ``-p`` session cannot answer
+    a permission prompt, so an MCP tool merely present via ``--mcp-config``
+    but not pre-approved ends the turn that tries to use it on a permission
+    request instead of a result. ``--strict-mcp-config`` still governs which
+    servers are even VISIBLE; ``--allowedTools`` governs whether the tools
+    those servers expose may be invoked without stopping for approval.
     """
     return [
         claude_binary,
@@ -859,6 +988,8 @@ def build_pull_argv(claude_binary: str, mcp_config_path: Path, model: str) -> li
         "--mcp-config",
         str(mcp_config_path),
         "--strict-mcp-config",
+        "--allowedTools",
+        *PULL_ALLOWED_TOOLS,
         "--append-system-prompt",
         REFERENCE_TAG_INSTRUCTION,
         "--output-format",
@@ -1000,6 +1131,7 @@ def run_pull(
     """
     if shutil.which(claude_binary) is None:
         raise RuntimeError(f"{claude_binary!r} not found on PATH")
+    _require_isolated_cli_config()
 
     mcp_config = build_pull_mcp_config(knowledge_root, cache_dir, athenaeum_bin=athenaeum_bin)
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1032,6 +1164,8 @@ def run_pull(
         turn_count=parsed.turn_count,
         transcript=parsed.transcript,
         mode="cli",
+        harness_failure=_permission_request_harness_failure(parsed.answer),
+        config_isolated=True,
     )
 
 
@@ -1066,6 +1200,7 @@ def run_push_breadcrumb_pull(
 
     if shutil.which(claude_binary) is None:
         raise RuntimeError(f"{claude_binary!r} not found on PATH")
+    _require_isolated_cli_config()
 
     mcp_config = build_pull_mcp_config(knowledge_root, cache_dir, athenaeum_bin=athenaeum_bin)
     prompt_text = f"{breadcrumb}\n\n{probe.query}" if breadcrumb else probe.query
@@ -1091,6 +1226,26 @@ def run_push_breadcrumb_pull(
     # scans the whole list for ``type == "user"`` entries, so the leading
     # dict (which has no ``type`` key) is simply skipped by that scan.
     transcript = [{"pushed_context": breadcrumb}, *parsed.transcript]
+    # Issue athenaeum#1819 defect 2: an empty breadcrumb for a probe that
+    # DOES have ground-truth pages (``probe.expected_uids`` non-empty) is
+    # never the shipped hook's legitimate "nothing relevant" behaviour --
+    # that behaviour IS legitimate for an abstention probe (no
+    # ``expected_uids`` at all, mirroring ``_oracle_context``'s own empty
+    # result for the same class), so only the non-abstention case is
+    # marked. This does not claim to know WHY the hook produced nothing
+    # (a nonzero ``USER_PROMPT_HOOK`` exit is silently swallowed by
+    # :func:`build_push_breadcrumb_context`'s ``if not result.stdout.strip():
+    # return ""`` -- see that function's docstring and
+    # ``tests/evals/test_cli_mode_fidelity_1819.py`` for a pinned repro of
+    # that silent-swallow shape);
+    # it only ensures the cell is never graded as an ordinary retrieval
+    # miss when the harness itself may be at fault.
+    harness_failure = _permission_request_harness_failure(parsed.answer)
+    if harness_failure is None and not breadcrumb and probe.expected_uids:
+        harness_failure = (
+            "push arm delivered an empty breadcrumb (pushed_context == '') for a "
+            "non-abstention probe -- never graded as an ordinary miss"
+        )
     return RolloutRecord(
         arm=Arm.PUSH_BREADCRUMB_PULL,
         probe_id=probe.id,
@@ -1104,6 +1259,8 @@ def run_push_breadcrumb_pull(
         turn_count=parsed.turn_count,
         transcript=transcript,
         mode="cli",
+        harness_failure=harness_failure,
+        config_isolated=True,
     )
 
 
@@ -1523,6 +1680,11 @@ def run_native_index(
         turn_count=parsed.turn_count,
         transcript=transcript,
         mode="cli",
+        # Issue athenaeum#1819 defect 3: the native arms always mint their
+        # own throwaway CLAUDE_CONFIG_DIR (seed_native_claude_config, via
+        # _spawn_native) regardless of the ambient environment, so this row
+        # is unconditionally isolated.
+        config_isolated=True,
     )
 
 
@@ -1588,6 +1750,9 @@ def run_native_grep(
         turn_count=parsed.turn_count,
         transcript=transcript,
         mode="cli",
+        # Issue athenaeum#1819 defect 3: see the matching comment in
+        # run_native_index -- always isolated by construction.
+        config_isolated=True,
     )
 
 

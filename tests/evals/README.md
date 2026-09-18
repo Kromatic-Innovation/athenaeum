@@ -260,6 +260,48 @@ provides the containment the real comparison will need:
   `--max-spend 75`, it died at 392 of 1392 cells on the 2,000,000-token
   constant with about $73 still authorized.
 
+### Running the cli-mode spot-check (issue athenaeum#1819)
+
+`--mode cli` spawns a real, logged-in `claude -p` for every PULL-family and
+native-memory cell instead of driving the Anthropic Messages API directly
+(`--mode api`, the default) -- the fidelity check against the actual
+production surface. It costs real tokens, needs a local `claude` login, and
+is never run in CI.
+
+1. **Isolate the config.** Set `CLAUDE_CONFIG_DIR` to a directory that
+   already carries a working `claude` login before dispatching -- cli mode
+   REFUSES to start otherwise (`tests.evals.rollout._require_isolated_cli_config`),
+   rather than silently falling back to your real `~/.claude.json` and
+   firing your own `SessionStart` hooks inside the eval. On macOS the CLI's
+   login is keychain-backed, so this directory has to come from a real
+   login (for example `claude setup-token`, or copying aside a directory
+   you already logged in with) -- there is no way to mint one offline that
+   still authenticates; see `tests/evals/rollout.py`'s own module docstring
+   for why an auto-seeded directory is not an option here.
+2. **Recall is pre-approved automatically.** `build_pull_argv` passes
+   `--allowedTools mcp__athenaeum__recall mcp__athenaeum__read_entity`, so a
+   non-interactive PULL/PUSH_BREADCRUMB_PULL cell no longer stalls on an
+   unresolved MCP permission prompt (defect 1). Nothing to set for this.
+3. **Dispatch:**
+
+   ```sh
+   CLAUDE_CONFIG_DIR=/path/to/isolated-claude-config \
+     python -m tests.evals.north_star_cli \
+     --mode cli --scale smoke --corpus-scales medium \
+     --probes abstain_unknown_policy,pto_allowance \
+     --claude-binary claude
+   ```
+
+4. **Read the header.** The generated report prints `harness failures: N`
+   (cells excluded from correctness/cost because a turn ended on an
+   unresolved permission request, or a `push_breadcrumb_pull` cell
+   delivered an empty breadcrumb for a non-abstention probe -- see
+   `RolloutRecord.harness_failure`) and `config isolated: yes|no|mixed` for
+   any store carrying a cli-mode row (`RolloutRecord.config_isolated`). A
+   harness failure is never graded as an ordinary miss; re-run the affected
+   cells (or the whole spot-check) rather than trusting a report with a
+   non-zero harness-failure count.
+
 ### What `rollout` means (issue athenaeum#1742)
 
 `rollout` means **this test costs tokens** — it constructs a live LLM
