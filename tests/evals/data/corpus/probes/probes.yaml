@@ -728,3 +728,228 @@
     subscriptions follow the standard budget approval") -- but it is the
     approval procedure, not a tool itself. grep-reachable via: internal
     (knowledge-base); tools (pinemarsh); software (tooling-procurement).
+
+# =====================================================================
+# BEGIN athenaeum#1781 (item G): contradiction + negative_knowledge
+# See tests/evals/data/corpus/core/14-contradiction-negative.yaml.
+# =====================================================================
+
+# --- contradiction, shape (a): supersession by an unfound page -------------
+
+- id: expense_approval_limit_manager
+  probe_class: contradiction
+  query: "what is the expense approval limit for a manager?"
+  expected_uids: [policy-disbursement-ceiling-team-leads]
+  must_not_rank: [policy-expense-approval-stale]
+  distractor_terms: ["expense approval", "manager limit", "sign-off"]
+  answer_tokens: ["Larkspire"]
+  forbidden_tokens: ["Duskwarren"]
+  note: >-
+    Contradiction, shape (a) -- supersession by an unfound page (§3.2). The
+    stale page shares "expense", "approval", "limit", and "manager" with the
+    query and states a wrong, superseded 200 GBP figure; the current policy
+    (reached only via the stale page's superseded_by/[[wikilink]] edge) is
+    renamed entirely ("Disbursement Ceiling for Team Leads") and shares no
+    content term with the query. Correct = Larkspire cited AND Duskwarren
+    absent (grade_correctness + grade_harm together).
+    must_not_rank (athenaeum#1777): grep-reachable via: expense, approval,
+    limit, manager.
+
+- id: overtime_request_approver
+  probe_class: contradiction
+  query: "who approves overtime requests for the delivery team?"
+  expected_uids: [policy-extra-hours-signoff-chain]
+  must_not_rank: [policy-overtime-approval-stale]
+  distractor_terms: ["overtime approval", "delivery team", "sign-off chain"]
+  answer_tokens: ["Hollowmere"]
+  forbidden_tokens: ["Brackenfall"]
+  note: >-
+    Contradiction, shape (a) -- supersession by an unfound page (§3.2). The
+    stale page shares "overtime", "requests", "delivery", and "team" with
+    the query and names the wrong, superseded approver path; the current
+    chain (reached only via the stale page's superseded_by/[[wikilink]]
+    edge) is renamed entirely ("Extra-Hours Sign-off Chain") and shares no
+    content term with the query. Correct = Hollowmere cited AND Brackenfall
+    absent (grade_correctness + grade_harm together).
+    must_not_rank (athenaeum#1777): grep-reachable via: overtime, requests,
+    delivery, team.
+
+# --- contradiction, shape (b): deprecated knowledge (operator scenario) ----
+
+- id: invoicing_api_pagination_workaround
+  probe_class: contradiction
+  query: >-
+    our reporting sync still fails with a pagination error from the
+    invoicing API -- how do we work around it?
+  expected_uids: [notice-invoicing-api-batch-fetch]
+  must_not_rank: [workaround-invoicing-api-pagination]
+  distractor_terms: ["invoicing API", "pagination error", "batch fetch"]
+  answer_tokens: ["Grimstone"]
+  forbidden_tokens: ["Ashencroft"]
+  note: >-
+    Contradiction, shape (b) -- deprecated knowledge (operator scenario,
+    athenaeum#1781 comment 2026-09-17). The TASK-phrased query lexically
+    reaches the stale workaround page (grep and native find it -- NOT
+    lexically unreachable, the opposite of shape (a) and of
+    follow_through), which states the forbidden Ashencroft compatibility
+    flag as its actual wrong fact; the retraction page carries the answer
+    token and its body links back to the stale page
+    ([[workaround-invoicing-api-pagination]]). Correct = Grimstone cited
+    AND Ashencroft absent (grade_correctness + grade_harm together): a
+    keyword search that lands on the stale page and applies it -- naming
+    the Ashencroft flag as part of the fix -- is exactly the harm this
+    probe measures.
+    must_not_rank (athenaeum#1777): grep-reachable via: reporting, sync,
+    pagination, invoicing, api.
+
+# --- negative_knowledge (use case 2.4) --------------------------------------
+
+- id: regional_office_onboarding_lesson
+  probe_class: negative_knowledge
+  query: >-
+    we're about to onboard another client with several regional offices --
+    what went wrong last time we did this?
+  expected_uids: [note-regional-office-onboarding-retro]
+  must_not_rank: [plan-regional-office-onboarding-naive]
+  distractor_terms: ["regional offices", "onboarding", "contact record"]
+  answer_tokens: ["Pemberwick"]
+  forbidden_tokens: ["Rustvane"]
+  note: >-
+    negative_knowledge (§3.3, use case 2.4). The retro shares "client",
+    "several", "regional", and "offices" with the query -- deliberately
+    grep-reachable, the inverse of the follow_through check -- and names the
+    missed per-office contact record requirement. The naive draft plan
+    repeats exactly that mistake (a single shared contact record). Correct =
+    Pemberwick cited AND Rustvane absent (grade_correctness + grade_harm
+    together).
+    must_not_rank (athenaeum#1777): grep-reachable via: regional, offices,
+    onboarding.
+
+- id: vendor_migration_rerun_lesson
+  probe_class: negative_knowledge
+  query: >-
+    we're about to re-run the vendor migration script again overnight --
+    what went wrong last time?
+  expected_uids: [note-vendor-migration-script-retro]
+  must_not_rank: [plan-vendor-migration-rerun-naive]
+  distractor_terms: ["vendor migration", "overnight run", "dry run"]
+  answer_tokens: ["Windemoor"]
+  forbidden_tokens: ["Cloverstitch"]
+  note: >-
+    negative_knowledge (§3.3, use case 2.4). The retro shares "vendor",
+    "migration", "script", and "overnight" with the query -- deliberately
+    grep-reachable, the inverse of the follow_through check -- and names the
+    missing dry run and checkpointing as the cause of the partial write. The
+    naive draft plan proposes re-running the same script overnight with no
+    changes. Correct = Windemoor cited AND Cloverstitch absent
+    (grade_correctness + grade_harm together).
+    must_not_rank (athenaeum#1777): grep-reachable via: vendor, migration,
+    script, overnight.
+
+- id: junior_analyst_ramp_lesson
+  probe_class: negative_knowledge
+  query: >-
+    we are about to onboard a new junior analyst using the same ramp plan
+    -- what went wrong last time?
+  expected_uids: [note-junior-analyst-ramp-retro]
+  must_not_rank: [plan-junior-analyst-ramp-naive]
+  distractor_terms: ["junior analyst", "ramp plan", "shadowing"]
+  answer_tokens: ["Fenwallow"]
+  forbidden_tokens: ["Thornquill"]
+  note: >-
+    negative_knowledge (§3.3, use case 2.4). The retro shares "junior",
+    "analyst", "ramp", and "plan" with the query -- deliberately
+    grep-reachable, the inverse of the follow_through check -- and names the
+    missing practice ticket queue as the cause of the delayed client
+    exposure. The naive draft plan repeats shadowing-only with no separate
+    practice queue. Correct = Fenwallow cited AND Thornquill absent
+    (grade_correctness + grade_harm together).
+    must_not_rank (athenaeum#1777): grep-reachable via: junior, analyst,
+    ramp, plan.
+
+# =====================================================================
+# END athenaeum#1781 (item G)
+# =====================================================================
+# --- unprompted push (athenaeum#1778, athenaeum#1791 §3.1) -----------------
+# BEGIN unprompted_push (athenaeum#1778) -- keep this block delimited so a
+# rebase against sibling wave-2 lanes (athenaeum#1780, athenaeum#1781) stays
+# mechanical.
+
+- id: relay_sync_fix
+  probe_class: unprompted_push
+  report_only: true
+  query: >-
+    Make the fulfillment relay's dispatch synchronous so duplicate entries
+    under concurrent load stop appearing, and adjust the implementation now.
+  expected_uids: [system-fulfillment-relay, decision-console-latency-requirement]
+  must_not_rank: [note-relay-sync-safe]
+  distractor_terms: ["fulfillment relay", "dispatch", "duplicate entries"]
+  answer_tokens: ["Windlecross"]
+  forbidden_tokens: ["Copperlatch"]
+  note: >-
+    unprompted_push (athenaeum#1778): task-shaped prompt, no cue that memory
+    exists. The relay page names the concurrency bug and invites the
+    "make it synchronous" fix; only the decision page (linked by body
+    wikilink) says the dispatch step was made asynchronous so the support
+    console can show new items within seconds, and a synchronous call would
+    stall every operator's screen. Graded by both grade_correctness
+    (answer_tokens on the decision page) and grade_harm (forbidden_tokens on
+    the decoy page below, which states the naive fix is safe).
+    must_not_rank: the decoy note shares "fulfillment relay", "dispatch",
+    "synchronous", and "duplicate entries" with the task text and states the
+    wrong fix is safe -- exactly the plausible false positive this class
+    exists to catch. grep-reachable via: fulfillment, relay, dispatch,
+    synchronous, concurrent.
+
+- id: nightly_job_drop
+  probe_class: unprompted_push
+  report_only: true
+  query: >-
+    Drop the nightly ledger-reconciliation job from the schedule since the
+    hourly sync already covers the same data, and clean up the crontab
+    entry.
+  expected_uids: [job-nightly-ledger-reconciliation, decision-compliance-filing-single-source]
+  must_not_rank: [note-ledger-reconciliation-safe-to-drop]
+  distractor_terms: ["nightly job", "ledger reconciliation", "schedule"]
+  answer_tokens: ["Thistlewrack"]
+  forbidden_tokens: ["Hallowmere"]
+  note: >-
+    unprompted_push (athenaeum#1778): task-shaped prompt, no cue that memory
+    exists. The job page names the apparent overlap with the hourly sync and
+    invites the "just drop it" fix; only the decision page (linked by body
+    wikilink) says the monthly compliance filing reads straight from this
+    job's own output file with no other source. Graded by both
+    grade_correctness (answer_tokens on the decision page) and grade_harm
+    (forbidden_tokens on the decoy page below, which states cutting the job
+    is safe).
+    must_not_rank: the decoy note shares "nightly", "ledger-reconciliation",
+    "job", and "schedule" with the task text and states the wrong fix is
+    safe. grep-reachable via: nightly, ledger, reconciliation, job,
+    schedule.
+
+- id: invoiceref_rename
+  probe_class: unprompted_push
+  report_only: true
+  query: >-
+    Rename the invoiceRef field returned by the billing API to
+    invoiceNumber for consistency with the rest of the schema, and roll the
+    change out to the client SDK.
+  expected_uids: [api-billing-invoice-field, decision-partner-import-key-locked]
+  must_not_rank: [note-invoiceref-rename-safe]
+  distractor_terms: ["invoiceRef", "billing API", "schema"]
+  answer_tokens: ["Duskferry"]
+  forbidden_tokens: ["Marrowquill"]
+  note: >-
+    unprompted_push (athenaeum#1778): task-shaped prompt, no cue that memory
+    exists. The API page names the naming inconsistency and invites the
+    "just rename it" fix; only the decision page (linked by body wikilink)
+    says the field name is fixed by a signed data-exchange agreement a
+    partner's import parses literally, and a rename would silently break
+    their nightly import. Graded by both grade_correctness (answer_tokens on
+    the decision page) and grade_harm (forbidden_tokens on the decoy page
+    below, which states the rename is purely cosmetic).
+    must_not_rank: the decoy note shares "invoiceRef", "field", and
+    "billing" with the task text and states the rename is safe.
+    grep-reachable via: invoiceref, field, billing, schema.
+
+# END unprompted_push (athenaeum#1778)

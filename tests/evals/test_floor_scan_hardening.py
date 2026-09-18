@@ -487,6 +487,11 @@ def test_main_allow_floor_mismatch_override_also_covers_backend(
             str(store_path),
             "--search-backend",
             "vector",
+            # Issue athenaeum#1787: a vector dispatch is scoped to
+            # core+medium -- named explicitly here since this test is about
+            # the floor/backend-mismatch bypass, not the scale scope.
+            "--corpus-scales",
+            "core",
             "--allow-floor-mismatch",
             "--materialize-root",
             str(tmp_path / "mat"),
@@ -524,6 +529,11 @@ def test_main_none_backend_store_passes_regardless_of_requested_backend(
             str(store_path),
             "--search-backend",
             "vector",
+            # Issue athenaeum#1787: a vector dispatch is scoped to
+            # core+medium -- named explicitly here since this test is about
+            # the None-backend back-compat behaviour, not the scale scope.
+            "--corpus-scales",
+            "core",
             "--materialize-root",
             str(tmp_path / "mat"),
             "--out-dir",

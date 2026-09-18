@@ -153,6 +153,13 @@ _STOPWORDS = frozenset(
 )
 _WORD_RE = re.compile(r"[a-z0-9]+")
 
+#: Literal deny-list phrases that mark a prompt as question-shaped rather
+#: than task-shaped (issue athenaeum#1778, athenaeum#1791 §3.1) -- checked
+#: by :func:`validate_core`'s ``unprompted_push`` guard. Deliberately small
+#: and literal, not an NLP classifier: the class only needs to rule out the
+#: obvious tells a work-order prompt would never carry.
+_INTERROGATIVE_DENYLIST: tuple[str, ...] = ("what", "who", "why did", "do we know")
+
 
 def _content_terms(text: str) -> set[str]:
     words = _WORD_RE.findall(text.lower())
@@ -386,8 +393,8 @@ CONDITION_2_ENROLLED: frozenset[str] = frozenset(
     }
 )
 
-#: Probe classes introduced by eval wave 2 (issue athenaeum#1791) -- empty
-#: until the sibling issues that add them (items D/E/F/G: athenaeum#1778
+#: Probe classes introduced by eval wave 2 (issue athenaeum#1791) -- grows
+#: as the sibling issues that add them (items D/E/F/G: athenaeum#1778
 #: ``unprompted_push``, athenaeum#1780 ``aggregation``, athenaeum#1781
 #: ``contradiction``/``negative_knowledge``) land and add their own class
 #: name here. Which classes belong in this set is explicitly OUT OF SCOPE
@@ -395,14 +402,18 @@ CONDITION_2_ENROLLED: frozenset[str] = frozenset(
 #: decided by each class's own issue, not inferred from whatever is not
 #: yet in :data:`CONDITION_2_ENROLLED`.
 #:
-#: Forward-declared, not yet read by :func:`validate_core`: the guard
-#: implemented there is BLANKET (every probe's ``report_only`` must equal
-#: ``probe_class not in CONDITION_2_ENROLLED``, not only probes whose class
-#: is in this set) -- strictly stronger than scoping the check to this
-#: constant, and correct today because it is empty. A sibling issue landing
-#: a class here does not need to change the guard; it only needs to leave
-#: that class's ``report_only`` unset (or ``True``) in ``probes.yaml``.
-WAVE_2_PROBE_CLASSES: frozenset[str] = frozenset()
+#: Not read by :func:`validate_core`: the guard implemented there is
+#: BLANKET (every probe's ``report_only`` must equal ``probe_class not in
+#: CONDITION_2_ENROLLED``, not only probes whose class is in this set) --
+#: strictly stronger than scoping the check to this constant. A sibling
+#: issue landing a class here does not need to change the guard; it only
+#: needs to leave that class's ``report_only`` unset (or ``True``) in
+#: ``probes.yaml``. Grew to ``{"contradiction", "negative_knowledge"}`` with
+#: item G (athenaeum#1781), and to also include ``"unprompted_push"`` with
+#: item D (athenaeum#1778); all three sibling wave-2 classes are enrolled.
+WAVE_2_PROBE_CLASSES: frozenset[str] = frozenset(
+    {"unprompted_push", "contradiction", "negative_knowledge"}
+)
 
 
 @dataclass(frozen=True)
@@ -501,14 +512,67 @@ class Probe:
     DECOY page, used by ``tests.evals.north_star_report.grade_harm`` to
     detect an answer that proposes the corpus's planted-wrong fact rather
     than merely missing the right one (the ``unprompted_push``/
-    ``contradiction`` classes, items D/G -- this issue ships the mechanism
-    only, no probe class uses the field yet). Empty for every probe today.
+    ``contradiction`` classes, items D/G).
     :func:`validate_core` requires each value to be PLANTABLE (occur in the
     body of some corpus page), to collide with no probe's ``answer_tokens``
     value anywhere in the corpus (the same collision ``grade_correctness``'s
     abstention confabulation check already guards ``answer_tokens`` against
     -- a shared value would let a legitimate answer grade as harmful, or a
     harmful one grade as safe), and to be shared between no two pages.
+    **Authoring rule (issue athenaeum#1811 Quine finding on athenaeum#1781):
+    the forbidden token must BE the wrong answer's own name, stated in the
+    decoy page's prose (a named person, endpoint, flag, vendor, or tool the
+    page states as the fact) -- never a bolt-on marker line appended after
+    the real stale content.** Nothing instructs a model to cite a decoy the
+    way ``REFERENCE_TAG_INSTRUCTION`` instructs it to cite an answer page's
+    tag; a model that lands on the stale page and applies its advice only
+    ever reproduces words that are actually part of that advice, so a
+    forbidden token sitting on a detached line is structurally unreachable
+    by any answer a model would actually give, making ``grade_harm``
+    unfireable regardless of what the model does.
+
+    ``contradiction`` (issue athenaeum#1781, athenaeum#1791 §3.2) reuses
+    ``must_not_rank`` to name a single STALE page (same ``superseded_by:``/
+    body-``[[wikilink]]`` convention as ``05-temporal.yaml``) that a keyword
+    search on the query plausibly lands on and that carries one of
+    ``forbidden_tokens``; the page ``superseded_by`` resolves to must be in
+    ``expected_uids`` and carry its own ``answer_tokens`` value. Two shapes
+    share this mechanism: (a) supersession by an unfound page, where the
+    superseding page is authored to share no content term with the query,
+    so only the link reaches it; (b) the operator's deprecated-knowledge
+    scenario, a TASK-phrased query that reaches a stale workaround page
+    whose retraction links back to it. Correct means ``grade_correctness``
+    AND ``grade_harm`` both pass -- the answer token cited and the
+    forbidden token absent.
+
+    ``negative_knowledge`` (issue athenaeum#1781, athenaeum#1791 §3.3, use
+    case 2.4 "what went wrong last time?") is checked the INVERSE of the
+    ``follow_through`` lexical-unreachability rule: at least one
+    ``expected_uids`` page must share a content term (exact, or a stemmed
+    prefix via ``uid``/``name``/``tags``) with the query -- deliberately
+    grep-reachable, so a ``negative_knowledge`` probe whose retro page is
+    lexically unreachable is a ``follow_through`` probe filed under the
+    wrong class. ``forbidden_tokens`` sits on a separate "naive plan" decoy
+    page that repeats the mistake the retro warns against.
+
+    ``unprompted_push`` (issue athenaeum#1778, athenaeum#1791 §3.1) is a
+    TASK-shaped prompt (a work order, not a question) with no cue that
+    memory exists -- ``query`` must not end in ``?`` or contain an
+    :data:`_INTERROGATIVE_DENYLIST` phrase. Structurally it is the same
+    breadcrumb-then-wikilink shape as ``follow_through``: a task-context
+    page in ``expected_uids`` that shares a content term with ``query`` (the
+    "obvious fix" surface a task-shaped prompt itself reaches), linked by a
+    body ``[[wikilink]]`` to a decision/lesson page whose body, ``uid``,
+    ``name``, and ``tags`` share no content term (exact, or the same
+    ``_shares_stemmed_term`` stemmed prefix) with ``query`` and that carries
+    the planted ``answer_tokens`` value. Unlike ``follow_through``, the
+    task-context page need not be an incomplete answer on its own -- the
+    property this class isolates is the prompt giving no cue to consult the
+    second page, not the first page being unusable. A separate DECOY page
+    (never in ``expected_uids``) states the plausible-but-wrong "just do it"
+    fix and carries the probe's ``forbidden_tokens`` value, so a correct
+    answer is graded by both ``grade_correctness`` (cites the decision
+    page's token) and ``grade_harm`` (avoids the decoy page's token).
     """
 
     id: str
@@ -950,6 +1014,247 @@ def validate_core(pages: list[Page], probes: list[Probe]) -> list[str]:
                         f"on multiple expected_uids pages {sorted(owners)} -- each token must "
                         "sit on a distinct page so coverage counts pages, not repeats"
                     )
+        if probe.probe_class == "contradiction":
+            # Issue athenaeum#1781, athenaeum#1791 §3.2. Both shapes -- (a)
+            # supersession by an unfound page, and (b) the operator's
+            # deprecated-knowledge scenario -- reuse `must_not_rank` to name
+            # the single STALE/workaround page a keyword search plausibly
+            # lands on, and the existing `superseded_by`/body-wikilink
+            # convention (`05-temporal.yaml`) to name the correct page it
+            # points at. The check is deliberately shape-agnostic: shape (a)
+            # additionally authors its superseding page to share no content
+            # term with the query (so the link is the ONLY way to reach it)
+            # and shape (b) additionally has the retraction page link back
+            # to the stale page -- neither is enforced generically here,
+            # the same "authoring discipline the check does not enforce"
+            # shape as the `multi_hop` answer-identity-uniqueness caveat
+            # above (see the `Probe` docstring).
+            if len(probe.must_not_rank) != 1:
+                problems.append(
+                    f"probe {probe.id!r}: contradiction probes must name exactly one "
+                    "must_not_rank page (the stale/superseded page a keyword search "
+                    "plausibly lands on)"
+                )
+            elif not probe.forbidden_tokens:
+                problems.append(
+                    f"probe {probe.id!r}: contradiction probes must carry forbidden_tokens "
+                    "(planted on the stale must_not_rank page)"
+                )
+            else:
+                stale_uid = probe.must_not_rank[0]
+                stale_page = pages_by_uid.get(stale_uid)
+                if stale_page is not None:
+                    query_terms = _content_terms(probe.query)
+                    stale_meta_terms = _content_terms(
+                        f"{stale_page.uid.replace('-', ' ')} {stale_page.name} "
+                        f"{' '.join(stale_page.tags)}"
+                    )
+                    if not (
+                        (_content_terms(stale_page.body) & query_terms)
+                        or _shares_stemmed_term(stale_meta_terms, query_terms)
+                    ):
+                        problems.append(
+                            f"probe {probe.id!r}: contradiction's must_not_rank (stale) page "
+                            f"{stale_uid!r} must be lexically reachable from the query -- a "
+                            "keyword search that cannot even find the stale page proves "
+                            "nothing about ranking it below the correct answer"
+                        )
+                    # Issue athenaeum#1811 Quine finding: the forbidden token must
+                    # be the wrong answer's own name, stated as part of the stale
+                    # prose (outside any tag line) -- a model that applies the stale
+                    # fact then naturally echoes it, the same way the reference-tag
+                    # instruction drives citation of a real answer token. A token
+                    # sitting only on a bolt-on "Internal reference tag:"-shaped
+                    # line gives a model applying the stale advice no reason to ever
+                    # repeat it, making grade_harm structurally unfireable.
+                    stale_non_tag_lines = "\n".join(
+                        line
+                        for line in stale_page.body.splitlines()
+                        if not line.strip().startswith("Internal reference tag:")
+                    )
+                    if not any(token in stale_non_tag_lines for token in probe.forbidden_tokens):
+                        problems.append(
+                            f"probe {probe.id!r}: contradiction's must_not_rank page "
+                            f"{stale_uid!r} does not carry any of the probe's forbidden_tokens "
+                            "in its prose (outside any 'Internal reference tag:' line) -- the "
+                            "forbidden token must be the wrong answer's own name, not a "
+                            "bolt-on marker a model applying the stale fact has no reason to "
+                            "repeat"
+                        )
+                    if not stale_page.superseded_by:
+                        problems.append(
+                            f"probe {probe.id!r}: contradiction's stale page {stale_uid!r} "
+                            "must declare superseded_by"
+                        )
+                    else:
+                        target_page = next(
+                            (p for p in pages if p.name == stale_page.superseded_by), None
+                        )
+                        if target_page is None:
+                            problems.append(
+                                f"probe {probe.id!r}: contradiction's stale page {stale_uid!r} "
+                                f"superseded_by {stale_page.superseded_by!r} does not resolve "
+                                "to any page's name"
+                            )
+                        else:
+                            if target_page.uid not in probe.expected_uids:
+                                problems.append(
+                                    f"probe {probe.id!r}: contradiction's stale page "
+                                    f"{stale_uid!r} superseded_by resolves to "
+                                    f"{target_page.uid!r}, which is not in expected_uids"
+                                )
+                            if not _TAG_LINE_RE.search(target_page.body):
+                                problems.append(
+                                    f"probe {probe.id!r}: contradiction's superseding page "
+                                    f"{target_page.uid!r} carries no 'Internal reference tag:' "
+                                    "line of its own"
+                                )
+                            if target_page.uid not in _body_wikilink_targets(stale_page.body):
+                                problems.append(
+                                    f"probe {probe.id!r}: contradiction's stale page "
+                                    f"{stale_uid!r} must link to the superseding page "
+                                    f"{target_page.uid!r} via a body [[wikilink]], not only "
+                                    "superseded_by"
+                                )
+        if probe.probe_class == "negative_knowledge":
+            # Issue athenaeum#1781, athenaeum#1791 §3.3 (use case 2.4). The
+            # INVERSE of the `follow_through` lexical-unreachability check:
+            # a `negative_knowledge` probe's retro/lesson page must share a
+            # content term with the query (grep can find it) -- a probe
+            # whose target is lexically unreachable is a `follow_through`
+            # probe filed under the wrong class.
+            if not probe.forbidden_tokens:
+                problems.append(
+                    f"probe {probe.id!r}: negative_knowledge probes must carry "
+                    "forbidden_tokens (planted on a naive-plan decoy page)"
+                )
+            elif probe.must_not_rank:
+                # Issue athenaeum#1811 Quine finding, same rule as contradiction
+                # above: the forbidden token must be the naive plan's own wrong
+                # answer, stated in prose (outside any tag line), not a bolt-on
+                # marker nothing drives a model to repeat.
+                naive_uid = probe.must_not_rank[0]
+                naive_page = pages_by_uid.get(naive_uid)
+                if naive_page is not None:
+                    naive_non_tag_lines = "\n".join(
+                        line
+                        for line in naive_page.body.splitlines()
+                        if not line.strip().startswith("Internal reference tag:")
+                    )
+                    if not any(
+                        token in naive_non_tag_lines for token in probe.forbidden_tokens
+                    ):
+                        problems.append(
+                            f"probe {probe.id!r}: negative_knowledge's must_not_rank page "
+                            f"{naive_uid!r} does not carry any of the probe's "
+                            "forbidden_tokens in its prose (outside any 'Internal reference "
+                            "tag:' line) -- the forbidden token must be the naive plan's own "
+                            "wrong answer, not a bolt-on marker"
+                        )
+            query_terms = _content_terms(probe.query)
+            reachable = False
+            for uid in probe.expected_uids:
+                page = pages_by_uid.get(uid)
+                if page is None:
+                    continue
+                page_meta_terms = _content_terms(
+                    f"{page.uid.replace('-', ' ')} {page.name} {' '.join(page.tags)}"
+                )
+                if (_content_terms(page.body) & query_terms) or _shares_stemmed_term(
+                    page_meta_terms, query_terms
+                ):
+                    reachable = True
+                    break
+            if not reachable:
+                problems.append(
+                    f"probe {probe.id!r}: negative_knowledge probes must have at least one "
+                    "expected_uids page lexically reachable from the query (the inverse of "
+                    "the follow_through check) -- otherwise this is a follow_through probe "
+                    "filed under the wrong class"
+                )
+        if probe.probe_class == "unprompted_push":
+            # Issue athenaeum#1778, athenaeum#1791 §3.1: five checks.
+            #
+            # (1)/(2)/(3) mirror the follow_through qualifying-hop check
+            # above -- a task-context page in expected_uids that shares a
+            # content term with the query (the "obvious fix" breadcrumb a
+            # task-shaped prompt itself reaches, checked lexically the same
+            # way `distractor_terms` competition works elsewhere), reached
+            # by a body [[wikilink]] (`_body_wikilink_targets`, never a
+            # frontmatter-only `related`/`links` edge -- same asymmetry
+            # `follow_through` guards) to a decision/lesson page whose body,
+            # uid, name, and tags share no content term (exact, or a
+            # >=5-character stemmed prefix) with the query, and that carries
+            # a planted `answer_tokens` value. Unlike `follow_through`, the
+            # task-context page is not required to be an incomplete answer
+            # on its own -- the property this class isolates is that the
+            # PROMPT gives no cue to consult the decision page, not that the
+            # first page is unusable.
+            #
+            # (4) `forbidden_tokens` must be present (the mechanism itself --
+            # plantable on a decoy page, absent from every expected_uids
+            # page, colliding with no `answer_tokens` value -- is the
+            # generic athenaeum#1772 check above, which runs for every probe
+            # class already).
+            #
+            # (5) the prompt must be task-shaped, not question-shaped: no
+            # trailing "?" and none of :data:`_INTERROGATIVE_DENYLIST`.
+            stripped_query = probe.query.strip()
+            lowered_query = stripped_query.lower()
+            if stripped_query.endswith("?") or any(
+                phrase in lowered_query for phrase in _INTERROGATIVE_DENYLIST
+            ):
+                problems.append(
+                    f"probe {probe.id!r}: unprompted_push probes must be task-shaped, not "
+                    "question-shaped -- query ends in '?' or contains an interrogative cue "
+                    f"from {_INTERROGATIVE_DENYLIST!r}"
+                )
+            if not probe.forbidden_tokens:
+                problems.append(
+                    f"probe {probe.id!r}: unprompted_push probes must plant at least one "
+                    "forbidden_tokens value on a decoy page (graded by grade_harm, issue "
+                    "athenaeum#1772)"
+                )
+            expected_pages = [
+                pages_by_uid[uid] for uid in probe.expected_uids if uid in pages_by_uid
+            ]
+            expected_uid_set = set(probe.expected_uids)
+            query_terms = _content_terms(probe.query)
+            reachable_pages = [
+                page for page in expected_pages if _content_terms(page.body) & query_terms
+            ]
+            if not reachable_pages:
+                problems.append(
+                    f"probe {probe.id!r}: unprompted_push needs a task-context page in "
+                    "expected_uids that shares a content term with the query -- the "
+                    "breadcrumb the task text itself reaches"
+                )
+            has_qualifying_hop = False
+            for page in reachable_pages:
+                for target_uid in _body_wikilink_targets(page.body):
+                    if target_uid == page.uid or target_uid not in expected_uid_set:
+                        continue
+                    target = pages_by_uid.get(target_uid)
+                    if target is None:
+                        continue
+                    if _content_terms(target.body) & query_terms:
+                        continue
+                    target_meta_terms = _content_terms(
+                        f"{target.uid.replace('-', ' ')} {target.name} {' '.join(target.tags)}"
+                    )
+                    if _shares_stemmed_term(target_meta_terms, query_terms):
+                        continue
+                    if not any(token in target.body for token in probe.answer_tokens):
+                        continue
+                    has_qualifying_hop = True
+            if not has_qualifying_hop:
+                problems.append(
+                    f"probe {probe.id!r}: unprompted_push probes need a body [[wikilink]] "
+                    "(not just a frontmatter related/links edge) from a task-context page "
+                    "that shares a content term with the query, to a decision/lesson page "
+                    "that carries a planted answer token and whose body, uid, name, and "
+                    "tags share no content term (including a stemmed prefix) with the query"
+                )
     for page in pages:
         for edge in page.related:
             if edge.uid not in uids:
@@ -1046,6 +1351,30 @@ def validate_core(pages: list[Page], probes: list[Probe]) -> list[str]:
                         f"probe {probe.id!r}: forbidden_tokens value {token!r} collides "
                         f"(as a normalized substring, either direction) with answer_tokens "
                         f"value {answer_token!r} somewhere in the corpus"
+                    )
+            # Issue athenaeum#1811 (Quine review): a forbidden token planted
+            # as a DETACHED marker line -- "Internal shorthand: Copperlatch."
+            # -- is never something a model performing the harmful action
+            # would naturally write in its own answer, so `grade_harm` could
+            # never fire even on a genuinely harmful cell. The token must
+            # instead sit inside the decoy page's PROSE describing the
+            # harmful action itself (a named flag, helper, script, or
+            # vendor the naive fix concretely adopts), on a line carrying at
+            # least four other content terms besides the token -- cheap
+            # proxy for "embedded in a sentence a model would echo," not "a
+            # bare label."
+            if len(owner_uids) == 1:
+                owner_page = pages_by_uid[owner_uids[0]]
+                embedded_in_prose = any(
+                    token in line and len(_content_terms(line.replace(token, ""))) >= 4
+                    for line in owner_page.body.splitlines()
+                )
+                if not embedded_in_prose:
+                    problems.append(
+                        f"probe {probe.id!r}: forbidden_tokens value {token!r} must be "
+                        f"embedded in {owner_uids[0]!r}'s prose describing the harmful "
+                        "action -- not sit alone on a marker/label line -- so a model "
+                        "that performs the naive fix would naturally write it"
                     )
 
     # Issue athenaeum#1779: the long-page tier's deterministic honesty check.
@@ -1311,14 +1640,19 @@ SCALES: dict[str, Scale] = {
     # Core only -- no generation. The offline default: fast, fully
     # hand-authored, and what unit/e2e tests run against.
     "core": Scale("core", total_pages=0, distractors_per_probe=0),
-    # 280 rather than 200: athenaeum#1780's 14 new core pages (plus 6 more
-    # distractor pages, 2 per its 3 new probes) grew core+long+distractor to
-    # 207 at this scale, exceeding the original 200-page floor and silently
-    # zeroing ballast (test_page_floors_leave_room_for_ballast) -- the same
-    # failure mode this floor's own docstring warns about. 280 restores a
-    # comparable ballast margin (~73 pages) to the original design's, not
-    # just enough to clear zero.
-    "small": Scale("small", total_pages=280, distractors_per_probe=2),
+    # 300, repinned from 200 (athenaeum#1780, then again by athenaeum#1781
+    # item G / Quine review): the hand-authored core has grown across both
+    # issues (athenaeum#1780's 14 new pages, this PR's 12 contradiction/
+    # negative_knowledge pages, plus each issue's own new distractor pages
+    # at 2-per-probe) to the point that core+distractor alone at this scale
+    # is 231 pages (measured against the final merged corpus), already
+    # exceeding the original 200-page floor and leaving zero ballast --
+    # quietly collapsing `small` into a non-distinct point on the size axis
+    # (`test_page_floors_leave_room_for_ballast`) -- the same failure mode
+    # this floor's own docstring warns about. 300 restores 69 pages of
+    # ballast headroom for the merged corpus; re-derive again if a future
+    # PR's core/probe growth closes it.
+    "small": Scale("small", total_pages=300, distractors_per_probe=2),
     "medium": Scale("medium", total_pages=1_000, distractors_per_probe=2),
     "large": Scale("large", total_pages=10_000, distractors_per_probe=2),
     # A real single-operator deployment is already past 20,000 pages

@@ -23,6 +23,7 @@ from tests.evals.corpus import (
     Page,
     Probe,
     RelatedEdge,
+    _body_wikilink_targets,
     _content_terms,
     _shares_stemmed_term,
     build_corpus,
@@ -206,7 +207,13 @@ def test_validate_core_rejects_forbidden_token_shared_between_two_pages() -> Non
 def test_validate_core_accepts_valid_forbidden_tokens() -> None:
     """issue athenaeum#1772 positive control: a ``forbidden_tokens`` value
     that is plantable on exactly one page and collides with no probe's
-    ``answer_tokens`` passes ``validate_core`` cleanly."""
+    ``answer_tokens`` passes ``validate_core`` cleanly.
+
+    The decoy body is deliberately full prose, not a bare marker line
+    (issue athenaeum#1811's finding, applied to this positive control too):
+    ``Ghostword`` sits inside a sentence with several other content words,
+    the way a model performing the harmful action would naturally write it.
+    """
     pages = [
         Page(
             uid="page-a",
@@ -219,7 +226,7 @@ def test_validate_core_accepts_valid_forbidden_tokens() -> None:
             uid="page-decoy",
             type="note",
             name="Decoy Page",
-            body="Ghostword appears on this decoy page.",
+            body="Apply the Ghostword shortcut to skip the review step entirely.",
             tier="core",
         ),
     ]
@@ -1019,6 +1026,421 @@ def test_follow_through_second_pages_are_lexically_unreachable_and_tokened() -> 
         assert any(token in second_page.body for token in probe.answer_tokens), probe.id
 
 
+# =====================================================================
+# BEGIN athenaeum#1781 (item G): contradiction + negative_knowledge
+# =====================================================================
+
+
+def _contradiction_pair(
+    *,
+    stale_reachable: bool = True,
+    forbidden_on_stale: bool = True,
+    superseded_by_resolves: bool = True,
+    superseded_by_name_missing: bool = False,
+    target_in_expected: bool = True,
+    target_has_tag_line: bool = True,
+    stale_links_to_target: bool = True,
+) -> tuple[list[Page], Probe]:
+    """Minimal two-page ``contradiction`` fixture, each check independently
+    toggleable -- same convention as ``_two_page_follow_through`` above."""
+    if stale_reachable and forbidden_on_stale:
+        stale_body = (
+            "The sync error is handled by enabling the DecoyTokenOne compatibility flag "
+            "before retrying. "
+        )
+    elif stale_reachable:
+        stale_body = "The sync error is handled by retrying with backoff. "
+    else:
+        stale_body = "Nothing about widgets here. "
+    if superseded_by_name_missing:
+        target_name = "Ghost Notice That Does Not Exist"
+    else:
+        target_name = "Target Notice" if superseded_by_resolves else ""
+    target_uid = "page-target" if target_in_expected else "page-elsewhere"
+    if stale_links_to_target:
+        stale_body += f"\n\nSee [[{target_uid}]] for the current notice."
+    stale = Page(
+        uid="page-stale",
+        type="note",
+        name="Stale Notice",
+        body=stale_body,
+        tier="core",
+        superseded_by=target_name,
+    )
+    target_body = "The current notice supersedes the workaround."
+    if target_has_tag_line:
+        target_body += "\n\nInternal reference tag: AnswerTokenOne."
+    target = Page(
+        uid="page-target",
+        type="note",
+        name="Target Notice",
+        body=target_body,
+        tier="core",
+    )
+    pages = [stale, target]
+    probe = Probe(
+        id="synthetic_contradiction",
+        probe_class="contradiction",
+        query="how do we work around the sync error?",
+        expected_uids=("page-target",),
+        must_not_rank=("page-stale",),
+        answer_tokens=("AnswerTokenOne",),
+        forbidden_tokens=("DecoyTokenOne",),
+        report_only=True,
+    )
+    return pages, probe
+
+
+def test_contradiction_requires_exactly_one_must_not_rank_page() -> None:
+    """AC (issue athenaeum#1781): a ``contradiction`` probe must name
+    exactly one ``must_not_rank`` page -- the stale page a keyword search
+    plausibly lands on."""
+    pages, probe = _contradiction_pair()
+    probe = Probe(
+        id=probe.id,
+        probe_class=probe.probe_class,
+        query=probe.query,
+        expected_uids=probe.expected_uids,
+        must_not_rank=(),
+        answer_tokens=probe.answer_tokens,
+        forbidden_tokens=probe.forbidden_tokens,
+        report_only=True,
+    )
+    problems = validate_core(pages, [probe])
+    assert any("exactly one" in p for p in problems), problems
+
+
+def test_contradiction_rejects_stale_page_lexically_unreachable() -> None:
+    """AC (issue athenaeum#1781): the stale page must be reachable from the
+    query -- otherwise a keyword search cannot even find it, which proves
+    nothing about ranking it below the correct answer."""
+    pages, probe = _contradiction_pair(stale_reachable=False)
+    problems = validate_core(pages, [probe])
+    assert any("must be lexically reachable" in p for p in problems), problems
+
+
+def test_contradiction_rejects_missing_forbidden_token_on_stale_page() -> None:
+    """AC (issue athenaeum#1781): the stale/must_not_rank page must actually
+    carry one of the probe's ``forbidden_tokens``."""
+    pages, probe = _contradiction_pair(forbidden_on_stale=False)
+    problems = validate_core(pages, [probe])
+    assert any("does not carry any of the probe's forbidden_tokens" in p for p in problems), (
+        problems
+    )
+
+
+def test_contradiction_rejects_superseded_by_that_does_not_resolve() -> None:
+    """AC (issue athenaeum#1781): ``superseded_by`` must resolve to a page
+    that exists."""
+    pages, probe = _contradiction_pair(superseded_by_resolves=False)
+    problems = validate_core(pages, [probe])
+    assert any("must declare superseded_by" in p for p in problems), problems
+
+
+def test_contradiction_rejects_superseded_by_naming_no_existing_page() -> None:
+    """AC (issue athenaeum#1781), the sibling branch to the test above
+    (Quine review, S1): that test exercises the "declares nothing" branch
+    (``superseded_by == ""``); this one exercises the distinct "declares a
+    name that resolves to no page" branch -- the stale page DOES declare a
+    ``superseded_by`` value, but it names no existing page's ``name:``."""
+    pages, probe = _contradiction_pair(superseded_by_name_missing=True)
+    problems = validate_core(pages, [probe])
+    assert any("does not resolve to any page's name" in p for p in problems), problems
+
+
+def test_contradiction_rejects_superseding_page_outside_expected_uids() -> None:
+    """AC (issue athenaeum#1781): the page ``superseded_by`` resolves to
+    must be in the probe's own ``expected_uids``."""
+    pages, probe = _contradiction_pair(target_in_expected=False)
+    # Rename the actual target page to the "elsewhere" uid the stale page
+    # linked to, so superseded_by resolves but to a page outside expected_uids.
+    pages[1] = Page(
+        uid="page-elsewhere",
+        type="note",
+        name="Target Notice",
+        body="The current notice supersedes the workaround.\n\n"
+        "Internal reference tag: AnswerTokenOne.",
+        tier="core",
+    )
+    problems = validate_core(pages, [probe])
+    assert any("which is not in expected_uids" in p for p in problems), problems
+
+
+def test_contradiction_rejects_superseding_page_with_no_tag_line() -> None:
+    """AC (issue athenaeum#1781): the superseding page must carry its own
+    'Internal reference tag:' line."""
+    pages, probe = _contradiction_pair(target_has_tag_line=False)
+    problems = validate_core(pages, [probe])
+    assert any("carries no 'Internal reference tag:' line" in p for p in problems), problems
+
+
+def test_contradiction_rejects_missing_body_wikilink_to_superseding_page() -> None:
+    """AC (issue athenaeum#1781): ``superseded_by`` alone is not enough --
+    the stale page must also link to the superseding page via a body
+    ``[[wikilink]]`` (same asymmetry ``follow_through`` guards: a live
+    ``recall`` hit renders its ``**Links:**`` line from the body only)."""
+    pages, probe = _contradiction_pair(stale_links_to_target=False)
+    problems = validate_core(pages, [probe])
+    assert any("via a body [[wikilink]]" in p for p in problems), problems
+
+
+def test_contradiction_passes_when_every_check_holds() -> None:
+    """Positive control: every contradiction check holds, so no
+    contradiction-specific problem is reported for this probe."""
+    pages, probe = _contradiction_pair()
+    problems = validate_core(pages, [probe])
+    own_problems = [p for p in problems if probe.id in p]
+    assert own_problems == [], own_problems
+
+
+def _negative_knowledge_pair(*, retro_reachable: bool = True) -> tuple[list[Page], Probe]:
+    retro_body = (
+        "The last regional rollout took an extra two weeks because of a "
+        "missing contact record."
+        if retro_reachable
+        else "Unrelated notes on garden fences."
+    )
+    retro_name = "Regional rollout retro" if retro_reachable else "Unrelated widget notes"
+    retro = Page(
+        uid="page-retro",
+        type="note",
+        name=retro_name,
+        body=retro_body + "\n\nInternal reference tag: AnswerTokenTwo.",
+        tier="core",
+    )
+    decoy = Page(
+        uid="page-naive-plan",
+        type="note",
+        name="Regional rollout plan (draft)",
+        body="Reuse the DecoyTokenTwo shared-contact template to save time.",
+        tier="core",
+    )
+    probe = Probe(
+        id="synthetic_negative_knowledge",
+        probe_class="negative_knowledge",
+        query="we're about to do another regional rollout -- what went wrong last time?",
+        expected_uids=("page-retro",),
+        must_not_rank=("page-naive-plan",),
+        answer_tokens=("AnswerTokenTwo",),
+        forbidden_tokens=("DecoyTokenTwo",),
+        report_only=True,
+    )
+    return [retro, decoy], probe
+
+
+def test_negative_knowledge_rejects_unreachable_retro_page() -> None:
+    """AC (issue athenaeum#1781): the inverse of the ``follow_through``
+    check -- a ``negative_knowledge`` probe's retro page must be lexically
+    reachable from the query, or this is a ``follow_through`` probe filed
+    under the wrong class."""
+    pages, probe = _negative_knowledge_pair(retro_reachable=False)
+    problems = validate_core(pages, [probe])
+    own_problems = [p for p in problems if probe.id in p]
+    assert any("inverse of the follow_through check" in p for p in own_problems), own_problems
+
+
+def test_negative_knowledge_requires_forbidden_tokens() -> None:
+    """AC (issue athenaeum#1781): a ``negative_knowledge`` probe must carry
+    ``forbidden_tokens``, planted on a naive-plan decoy page."""
+    pages, probe = _negative_knowledge_pair()
+    probe = Probe(
+        id=probe.id,
+        probe_class=probe.probe_class,
+        query=probe.query,
+        expected_uids=probe.expected_uids,
+        must_not_rank=probe.must_not_rank,
+        answer_tokens=probe.answer_tokens,
+        forbidden_tokens=(),
+        report_only=True,
+    )
+    problems = validate_core(pages, [probe])
+    own_problems = [p for p in problems if probe.id in p]
+    assert any("must carry forbidden_tokens" in p for p in own_problems), own_problems
+
+
+def test_negative_knowledge_passes_when_every_check_holds() -> None:
+    """Positive control: every negative_knowledge check holds, so no
+    negative_knowledge-specific problem is reported for this probe."""
+    pages, probe = _negative_knowledge_pair()
+    problems = validate_core(pages, [probe])
+    own_problems = [p for p in problems if probe.id in p]
+    assert own_problems == [], own_problems
+
+
+def test_contradiction_and_negative_knowledge_probes_are_report_only() -> None:
+    """AC (issue athenaeum#1781, athenaeum#1791 §2.1): both new classes stay
+    OUTSIDE CONDITION_2_ENROLLED and every real fixture probe of either
+    class is report_only -- promotion is an explicit operator ruling on
+    athenaeum#1736's thread, never a side effect of this PR."""
+    assert "contradiction" not in CONDITION_2_ENROLLED
+    assert "negative_knowledge" not in CONDITION_2_ENROLLED
+    probes = [
+        p for p in load_probes() if p.probe_class in ("contradiction", "negative_knowledge")
+    ]
+    assert probes, "expected at least one contradiction/negative_knowledge probe"
+    assert all(p.report_only for p in probes)
+
+
+def test_contradiction_and_negative_knowledge_real_fixtures_are_valid() -> None:
+    """Restates ``test_core_corpus_is_internally_consistent`` scoped to just
+    the two new classes, so a regression in either is caught even if some
+    other corpus problem were (hypothetically) suppressed elsewhere."""
+    pages_by_uid = {page.uid: page for page in load_core_pages()}
+    probes = [
+        p for p in load_probes() if p.probe_class in ("contradiction", "negative_knowledge")
+    ]
+    assert len(probes) == 6
+    problems = validate_core(load_core_pages(), probes)
+    own_problems = [p for p in problems if any(pr.id in p for pr in probes)]
+    assert own_problems == [], own_problems
+    for probe in probes:
+        for uid in probe.expected_uids + probe.must_not_rank:
+            assert uid in pages_by_uid, (probe.id, uid)
+
+
+def test_deprecated_knowledge_retraction_links_back_to_the_stale_page() -> None:
+    """AC (issue athenaeum#1781, operator comment 2026-09-17; Quine review
+    S2): shape (b)'s retraction/deprecation page must itself link BACK to
+    the stale page via a body ``[[wikilink]]`` -- the operator's explicit
+    requirement, previously unenforced by any contract test. Scoped to
+    ``invoicing_api_pagination_workaround``, the one shape-(b) probe in the
+    real fixtures."""
+    pages_by_uid = {page.uid: page for page in load_core_pages()}
+    probe = next(
+        p for p in load_probes() if p.id == "invoicing_api_pagination_workaround"
+    )
+    stale_uid = probe.must_not_rank[0]
+    (answer_uid,) = probe.expected_uids
+    retraction_page = pages_by_uid[answer_uid]
+    assert stale_uid in _body_wikilink_targets(retraction_page.body), (
+        probe.id,
+        stale_uid,
+        retraction_page.body,
+    )
+
+
+# =====================================================================
+# END athenaeum#1781 (item G)
+# =====================================================================
+def test_unprompted_push_decision_pages_are_lexically_unreachable_and_tokened() -> None:
+    """athenaeum#1778: the ``unprompted_push`` counterpart of
+    ``test_follow_through_second_pages_are_lexically_unreachable_and_tokened``,
+    pinned against the live ``13-unprompted-push.yaml`` fixture.
+
+    For every real ``unprompted_push`` probe: exactly one ``expected_uids``
+    page (the task-context page) shares a content term with the query, the
+    other (the decision page) shares none -- exact or a >=5-character
+    stemmed prefix, via body OR uid/name/tags -- and carries one of the
+    probe's ``answer_tokens``. ``validate_core``'s own check already
+    enforces this structurally; this test restates it directly against the
+    live fixture, independent of that check's control flow.
+    """
+    pages_by_uid = {page.uid: page for page in load_core_pages()}
+    probes = [p for p in load_probes() if p.probe_class == "unprompted_push"]
+    assert probes, "expected at least one unprompted_push probe"
+    for probe in probes:
+        assert probe.report_only is True, probe.id
+        assert probe.probe_class not in CONDITION_2_ENROLLED
+        assert probe.forbidden_tokens, probe.id
+        query_terms = _content_terms(probe.query)
+        expected_pages = [pages_by_uid[uid] for uid in probe.expected_uids]
+        decision_pages = [
+            page
+            for page in expected_pages
+            if not (_content_terms(page.body) & query_terms)
+            and not _shares_stemmed_term(
+                _content_terms(f"{page.uid.replace('-', ' ')} {page.name} {' '.join(page.tags)}"),
+                query_terms,
+            )
+        ]
+        assert len(decision_pages) == 1, (probe.id, [p.uid for p in expected_pages])
+        decision_page = decision_pages[0]
+        assert any(token in decision_page.body for token in probe.answer_tokens), probe.id
+        # The forbidden token sits on a decoy page outside expected_uids.
+        for token in probe.forbidden_tokens:
+            assert not any(token in page.body for page in expected_pages), probe.id
+
+
+def test_unprompted_push_rejects_a_question_shaped_prompt() -> None:
+    """AC (athenaeum#1778, §3.1 check 5): the class only measures a
+    task-shaped prompt (a work order, not a query) -- a query ending in
+    ``?`` must be rejected at load, independent of every other assertion.
+    """
+    pages = [
+        Page(
+            uid="page-a",
+            type="note",
+            name="Page A",
+            body="Zamforge handles the nightly widget batch. See [[page-b]] for the reason.",
+            tier="core",
+        ),
+        Page(
+            uid="page-b",
+            type="note",
+            name="Page B",
+            body=(
+                "Quiet unrelated prose about a coastal harbour town.\n\n"
+                "Internal reference tag: TokenOne."
+            ),
+            tier="core",
+        ),
+        Page(
+            uid="page-decoy",
+            type="note",
+            name="Decoy",
+            body="Cutting the widget batch is safe. Marker: TokenHarm.",
+            tier="core",
+        ),
+    ]
+    probe = Probe(
+        id="synthetic_unprompted_push_question",
+        probe_class="unprompted_push",
+        query="why does the widget batch run nightly?",
+        expected_uids=("page-a", "page-b"),
+        answer_tokens=("TokenOne",),
+        forbidden_tokens=("TokenHarm",),
+        report_only=True,
+    )
+    problems = validate_core(pages, [probe])
+    assert any("task-shaped" in p for p in problems), problems
+
+
+def test_unprompted_push_rejects_no_forbidden_tokens() -> None:
+    """AC (athenaeum#1778, §3.1 check 4): the class exists to grade harm as
+    well as correctness -- a probe with no ``forbidden_tokens`` has nothing
+    for ``grade_harm`` to check and must be rejected at load.
+    """
+    pages = [
+        Page(
+            uid="page-a",
+            type="note",
+            name="Page A",
+            body="Zamforge handles the nightly widget batch. See [[page-b]] for the reason.",
+            tier="core",
+        ),
+        Page(
+            uid="page-b",
+            type="note",
+            name="Page B",
+            body=(
+                "Quiet unrelated prose about a coastal harbour town.\n\n"
+                "Internal reference tag: TokenOne."
+            ),
+            tier="core",
+        ),
+    ]
+    probe = Probe(
+        id="synthetic_unprompted_push_no_harm",
+        probe_class="unprompted_push",
+        query="Make the widget batch run hourly instead of nightly.",
+        expected_uids=("page-a", "page-b"),
+        answer_tokens=("TokenOne",),
+        report_only=True,
+    )
+    problems = validate_core(pages, [probe])
+    assert any("forbidden_tokens value on a decoy page" in p for p in problems), problems
+
+
 def test_generation_is_deterministic_within_a_process() -> None:
     first = build_corpus(scale="small", seed=4242)
     second = build_corpus(scale="small", seed=4242)
@@ -1116,7 +1538,19 @@ def test_xlarge_scale_is_pinned() -> None:
     # probe's criterion) and had each gain one appended `Internal reference
     # tag:` line -- the only edits this issue makes to pages outside
     # `core/15-aggregation.yaml` -- shifting the fingerprint once more.
-    assert corpus.fingerprint() == "8a5e67c4e350c1de"
+    # athenaeum#1781 (item G): 14-contradiction-negative.yaml added 12 core
+    # pages and 6 probes (contradiction x3, negative_knowledge x3), shifting
+    # the fingerprint again -- same class of expected change as the prior
+    # entries in this comment.
+    # athenaeum#1778: 13-unprompted-push.yaml added nine new core pages
+    # (three task-context/decision/decoy triples) and three new probes,
+    # which shifts the fingerprint the same way any core-page addition does.
+    # Re-shifted once more when the three decoy pages' forbidden_tokens were
+    # replanted into full prose (issue athenaeum#1811 finding) instead of a
+    # detached marker line -- and again on rebase onto develop b8683e18
+    # (post athenaeum#1779/#1780/#1781), re-measured directly against
+    # `build_corpus(scale="xlarge")` on this branch.
+    assert corpus.fingerprint() == "d54a80bb2a25ca79"
 
 
 def test_long_tier_tag_is_outside_the_recall_snippet() -> None:

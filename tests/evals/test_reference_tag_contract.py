@@ -360,6 +360,15 @@ def test_the_tags_recall_alone_cannot_deliver_split_into_two_mechanisms(tmp_path
     for probe in _CORPUS.probes:
         if not probe.answer_tokens:
             continue
+        if probe.probe_class == "unprompted_push":
+            # athenaeum#1778: this class plants its answer token on a
+            # decision page DESIGNED to share no query vocabulary at all
+            # (validate_core's own lexical-unreachability check) -- a plain
+            # FTS5 recall_search over the query can never rank it into
+            # top_k regardless of page length, which is the property the
+            # class exists to measure, not a truncation-vs-ranking outcome
+            # this test's two-mechanism taxonomy is scoped to.
+            continue
         response = recall_search(
             wiki_root,
             probe.query,
