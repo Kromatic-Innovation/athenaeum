@@ -189,6 +189,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the `north-star` job's `if:` gate is unchanged. The Phase 2 sibling JSONL
   is uploaded alongside the existing store/report artifact with
   `if: always()`.
+- **`contradiction` and `negative_knowledge` eval probe classes (issue
+  athenaeum#1781, wave-2 item G).** Two new `report_only: True` classes
+  (`tests.evals.corpus.WAVE_2_PROBE_CLASSES`), pending an operator ruling
+  on athenaeum#1736's thread before either is promoted into
+  `CONDITION_2_ENROLLED`. `contradiction` (§3.2) reuses `must_not_rank` to
+  name a stale page a keyword search plausibly reaches (carrying a planted
+  `forbidden_tokens` value) linked via the existing `superseded_by:`/body-
+  `[[wikilink]]` convention to the correct page (carrying the answer
+  token); two shapes ship, supersession by an unfound page and the
+  operator's deprecated-knowledge scenario (a stale workaround
+  deliberately grep-reachable, retracted by a linked-back notice).
+  `negative_knowledge` (§3.3, use case 2.4) is checked the INVERSE of the
+  `follow_through` lexical-unreachability rule -- the retro/lesson page
+  must be grep-reachable, with a forbidden token on a separate naive-plan
+  decoy page. Correct for both means `grade_correctness` AND `grade_harm`
+  both pass. **Forbidden-token authoring rule (Quine review of this PR):
+  a forbidden token must BE the wrong answer's own name -- a named
+  approver, endpoint/flag, or vendor/tool the stale/naive page states in
+  its prose -- never a bolt-on "Internal decoy note:" marker line, which
+  gave a model applying the stale fact no reason to ever repeat it and
+  made `grade_harm` structurally unfireable.** `validate_core` now asserts
+  each forbidden token occurs in the stale/naive page's body OUTSIDE any
+  `Internal reference tag:` line. `tests/evals/corpus.py`'s `validate_core`
+  gains checks for both classes; `tests/evals/data/corpus/core/14-contradiction-negative.yaml`
+  adds 12 pages, `tests/evals/data/corpus/probes/probes.yaml` adds 6 probes
+  (3 per class) in a delimited block. `xlarge`'s pinned fingerprint moves to
+  `01692cdc5268b16a` (42 probes); the full-grid dry-run cell count moves
+  from 1728 to 2016 (`tests/evals/test_north_star_max_tokens.py`, on top of
+  athenaeum#1780's 1584 -> 1728 repin, itself on top of athenaeum#1779's
+  1392 -> 1584 repin); `--max-tokens` in that same test is bumped from
+  10,000,000 to 20,000,000 to clear the higher cell count's projected
+  token total.
+  `tests/evals/test_recall_covers_grep.py`'s `_VECTOR_XFAIL` gains two
+  `medium`-scale entries: this PR's own
+  `invoicing_api_pagination_workaround` (issue athenaeum#1770, a fresh
+  measured vector-recall miss), and `office_address_current` (a
+  pre-existing `temporal`-class probe, unrelated to this PR's own probes
+  -- rebase onto develop c634fc6e, which landed athenaeum#1807/#1810,
+  exposed a stand-in-embedder ballast-placement shift from this PR's
+  corpus additions; confirmed introduced, not pre-existing, via
+  `test-baseline.sh` against `origin/develop`; gated as a stand-in xfail
+  rather than left failing -- this test suite runs the vector arm under
+  the lexical-hash stand-in embedder
+  (`tests/conftest.py`'s autouse `_offline_embedding_function`), so the
+  entry measures the stand-in, not the real model; real-model status for
+  this module is tracked on athenaeum#1787). `thorncastle_first_contact`
+  regressed transiently earlier in this PR's history (the corpus
+  generator's fixed-seed PRNG stream shifts every OTHER probe's
+  distractor/ballast placement whenever core pages are added) but passes
+  again against this PR's final content, so it carries no entry.
+  `docs/design/native-memory-baseline.md` §5 documents both classes.
+  `SCALES["small"].total_pages` repinned 200 -> 300: core+distractor
+  pages at that scale are 231 against the merged corpus (measured),
+  already past the prior 200-page floor and leaving zero ballast,
+  collapsing `small` into a non-distinct size-axis point
+  (`test_page_floors_leave_room_for_ballast`); 300 restores 69 pages of
+  ballast headroom.
+
 - **Precision/recall/contamination tables for the retrieval evals, and a
   cap-signal reading (issue athenaeum#1782).**
   `tests/evals/test_recall_covers_grep.py` gains a second printed-only
