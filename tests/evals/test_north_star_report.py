@@ -302,6 +302,51 @@ def _row(record: RolloutRecord, *, replicate: int = 0) -> RolloutRow:
 
 
 # ---------------------------------------------------------------------------
+# "hybrid: on|off" header line -- issue athenaeum#1816
+# ---------------------------------------------------------------------------
+
+
+def test_hybrid_line_absent_for_a_non_vector_report() -> None:
+    """No vector row at all -- the question does not apply, so the line
+    is omitted entirely rather than printing a value for a backend that
+    was never dispatched."""
+    record = dataclasses.replace(_none_record(), search_backend="fts5")
+    text = render_report(build_report([_row(record)]))
+    assert "hybrid:" not in text
+
+
+def test_hybrid_line_on_for_an_active_vector_dispatch() -> None:
+    record = dataclasses.replace(
+        _none_record(), search_backend="vector", hybrid_active=True
+    )
+    text = render_report(build_report([_row(record)]))
+    assert "- hybrid: on" in text
+
+
+def test_hybrid_line_off_reproduces_the_pre_fix_measurement() -> None:
+    """Issue athenaeum#1816's own bug: a vector dispatch that built only
+    the vector index, so every recall call fell back to vector-only
+    ranking. Header must surface that plainly rather than silently
+    reading like a normal vector report."""
+    record = dataclasses.replace(
+        _none_record(), search_backend="vector", hybrid_active=False
+    )
+    text = render_report(build_report([_row(record)]))
+    assert "- hybrid: off" in text
+
+
+def test_hybrid_line_unknown_for_rows_predating_the_field() -> None:
+    """Back-compat: a store persisted before issue athenaeum#1816 has
+    ``hybrid_active=None`` on every row -- must read as "unknown", never
+    silently coerced to "on" or "off"."""
+    record = dataclasses.replace(
+        _none_record(), search_backend="vector", hybrid_active=None
+    )
+    text = render_report(build_report([_row(record)]))
+    assert "- hybrid: unknown" in text
+
+
+# ---------------------------------------------------------------------------
 # Text metrics
 # ---------------------------------------------------------------------------
 

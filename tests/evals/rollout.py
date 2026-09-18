@@ -98,7 +98,7 @@ from athenaeum.mcp_server import (
 )
 from athenaeum.provider import response_text as provider_response_text
 from athenaeum.push_metrics import estimate_tokens
-from athenaeum.search import get_backend
+from athenaeum.search import fts5_index_available, get_backend
 from tests.evals.containment import GridCell, SpendCeilingExceededError, build_grid
 from tests.evals.corpus import Corpus, Observation, Probe, build_corpus
 from tests.evals.harness import EvalSession, build_live_client
@@ -354,6 +354,23 @@ class RolloutRecord:
     #: better) together with vector distances (0 to 2, lower is better)
     #: into one meaningless blended percentile summary.
     search_backend: str | None = None
+    #: Issue athenaeum#1816: whether the vector-backend RRF hybrid fusion
+    #: (``mcp_server.recall_search``'s ``backend_name == "vector" and
+    #: resolve_recall_hybrid(config)`` block) had a real FTS5 index to fuse
+    #: against for this row's materialized cache -- i.e.
+    #: ``athenaeum.search.fts5_index_available(cache_dir)`` checked right
+    #: after the group's index build, mirroring exactly how
+    #: ``relevance_floor_vector``/``relevance_floor_fts5`` above are
+    #: resolved outside this module and stamped onto every record of a
+    #: group by the CLI/grid wiring (``tests.evals.north_star_cli``), never
+    #: here -- ``run_probe_all_arms`` has no opinion on it either.
+    #: ``None`` for a non-vector backend (the question does not apply) and
+    #: for any row persisted before this field existed. Before this issue's
+    #: fix, a ``--search-backend vector`` dispatch built ONLY the vector
+    #: index, so every one of its rows would have stamped ``False`` here --
+    #: the harness measured a configuration nobody ships. Read by
+    #: ``north_star_report.build_report``'s ``hybrid: on|off`` header line.
+    hybrid_active: bool | None = None
 
     @property
     def total_input_tokens(self) -> int:
@@ -395,6 +412,7 @@ class RolloutRecord:
             "relevance_floor_fts5": self.relevance_floor_fts5,
             "retrieval_hit_scores": self.retrieval_hit_scores,
             "search_backend": self.search_backend,
+            "hybrid_active": self.hybrid_active,
         }
 
     @classmethod
@@ -432,6 +450,10 @@ class RolloutRecord:
             # field existed -- ``None`` decodes as "unknown backend", the
             # same meaning it carries for a freshly-constructed record.
             search_backend=payload.get("search_backend"),
+            # Issue athenaeum#1816: absent on every row persisted before this
+            # field existed -- ``None`` decodes as "unknown/not applicable",
+            # the same meaning it carries for a freshly-constructed record.
+            hybrid_active=payload.get("hybrid_active"),
         )
 
 
@@ -3158,6 +3180,32 @@ def run_probe_all_arms(
     hook_home = materialize_root / "hook_home"
     if search_backend != "keyword":
         get_backend(search_backend).build_index(wiki_root, cache_dir)
+        # Issue athenaeum#1816: production keeps ONE cache dir backing BOTH
+        # backends (see tests/evals/test_recall_covers_grep.py's
+        # `scale_fixture` comment block for the same layout and rationale),
+        # so the RRF hybrid block in `mcp_server.recall_search`
+        # (``backend_name == "vector" and resolve_recall_hybrid(config)``,
+        # DEFAULT ON) has an FTS5 index to fuse against. A vector dispatch
+        # that built only the vector index measured a configuration nobody
+        # ships -- every ``recall_search`` call fell back to vector-only
+        # ranking and logged a warning naming this exact cache dir. Build
+        # FTS5 second (into the SAME cache_dir, cheap relative to the
+        # embedding pass just above) so a vector dispatch always has one.
+        if search_backend == "vector":
+            get_backend("fts5").build_index(wiki_root, cache_dir)
+            if not fts5_index_available(cache_dir):
+                # Should be unreachable -- build_index above either raises
+                # on a real failure or leaves a usable index -- but a
+                # silent no-op here would reproduce this exact issue with
+                # no warning at all, so fail loudly rather than let the
+                # grid run 720 cells of vector-only-ranking hybrid fusion
+                # a second time.
+                raise RuntimeError(
+                    f"vector dispatch built no FTS5 index alongside the vector "
+                    f"index at {cache_dir} -- hybrid fusion would silently "
+                    "fall back to vector-only ranking for every recall call "
+                    "in this group (issue athenaeum#1816)"
+                )
 
     # Issue athenaeum#1761 item 4: the raw backend scores for THIS probe's
     # query, against the SAME index just built above -- a same-backend/
