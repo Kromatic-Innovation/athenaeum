@@ -485,12 +485,77 @@ def test_every_token_bearing_core_page_tag_is_a_planted_token() -> None:
 def test_the_instruction_excludes_the_uid_as_a_citation_target() -> None:
     """AC2 for athenaeum#1759: 17 oracle cells in the first live grid cited
     the page's frontmatter ``uid:`` instead of its tag. The instruction must
-    say, in words, that the tag is never the uid (nor the title or
-    filename), so the model has an explicit reason to prefer the tag line
-    over the other identifier-shaped strings on the page.
+    say, in one sentence, that the tag is never the uid, title, or filename,
+    so the model has an explicit reason to prefer the tag line over the
+    other identifier-shaped strings on the page.
+
+    Pinned as a single regex over the actual clause (issue athenaeum#1762),
+    not four independent substring checks: those pass equally on a prompt
+    that mentions "uid", "never", "title", and "filename" in four unrelated
+    sentences, which would not exclude the uid as a citation target at all.
     """
-    lowered = rollout.REFERENCE_TAG_INSTRUCTION.lower()
-    assert "uid" in lowered
-    assert "never" in lowered
-    assert "title" in lowered
-    assert "filename" in lowered
+    pattern = re.compile(
+        r"never the page'?s `?uid`?,\s*its title,\s*or its filename",
+        re.IGNORECASE,
+    )
+    assert pattern.search(rollout.REFERENCE_TAG_INSTRUCTION), (
+        "REFERENCE_TAG_INSTRUCTION must contain a single clause of the shape "
+        "'never the page's uid, its title, or its filename'; got: "
+        f"{rollout.REFERENCE_TAG_INSTRUCTION!r}"
+    )
+
+
+def test_the_tag_line_is_the_final_non_blank_line_of_every_token_bearing_page() -> None:
+    """AC1 for athenaeum#1762. ``Page.to_markdown``'s docstring says the
+    ``Internal reference tag:`` line is rendered "BOLD and alone on its own
+    final line", and the athenaeum#1759 rationale for that (out-competing
+    the frontmatter ``uid:`` line as the most identifier-shaped string a
+    model reads) depends on the tag line actually being the LAST thing on
+    the page, not merely present somewhere in the body.
+    ``test_every_token_bearing_core_page_tag_is_a_planted_token`` pinned
+    count and value only; this pins position, for both the raw fixture body
+    and the rendered markdown a model actually sees.
+
+    Scoped to every token-bearing page across the whole materialized corpus
+    -- every core fixture file, wave-2 probe classes included -- since the
+    check reads pages off ``_CORPUS``, not off a probe-class allowlist, so a
+    fixture landing under any future probe class is covered the moment it
+    plants an answer token. Pinned, not merely claimed: the loop below also
+    collects which token-bearing pages named by an ``aggregation`` probe's
+    ``expected_uids`` (the wave-2 class already authored today, in
+    ``data/corpus/core/15-aggregation.yaml``) got checked, and asserts that
+    set is non-empty and exhaustive -- so this test could not silently pass
+    with every wave-2 fixture excluded by an over-eager filter.
+    """
+    every_token = {tok for probe in _CORPUS.probes for tok in probe.answer_tokens}
+    aggregation_expected_uids = {
+        uid
+        for probe in _CORPUS.probes
+        if probe.probe_class == "aggregation"
+        for uid in probe.expected_uids
+    }
+    checked_uids: set[str] = set()
+    for page in _CORPUS.pages:
+        if not any(token in page.body for token in every_token):
+            continue
+        checked_uids.add(page.uid)
+
+        body_lines = [line for line in page.body.splitlines() if line.strip()]
+        assert body_lines, f"page {page.uid!r} has an empty body"
+        assert _TAG_LINE_RE.match(body_lines[-1]), (
+            f"page {page.uid!r}'s last non-blank body line is {body_lines[-1]!r}, not an "
+            "'Internal reference tag:' line"
+        )
+
+        rendered_lines = [line for line in page.to_markdown().splitlines() if line.strip()]
+        assert rendered_lines[-1].startswith("**Internal reference tag:**"), (
+            f"page {page.uid!r}'s rendered markdown ends on {rendered_lines[-1]!r}, not the "
+            "bold tag line"
+        )
+    assert checked_uids, "no token-bearing core pages were found to check"
+
+    checked_aggregation_uids = aggregation_expected_uids & checked_uids
+    assert checked_aggregation_uids, (
+        "no token-bearing aggregation-probe page was checked -- the wave-2 fixture coverage "
+        "this test claims did not actually exercise any aggregation page"
+    )
