@@ -458,15 +458,16 @@ def test_the_full_grid_dry_run_prices_at_the_measured_mix(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Pins ``main``'s ``price_grid(per_cell=...)`` argument, which no other
-    test reaches: N cells at 4,300 in / 850 out on Haiku 4.5 ($1/$5 per
-    MTok). Repinned by athenaeum#1780's three new ``aggregation`` probes on
-    top of athenaeum#1779's long-page repin -- the full grid's cell count is
+    test reaches: 1728 cells at 4,300 in / 850 out on Haiku 4.5 ($1/$5 per
+    MTok) is 1728 * $0.00855 = $14.77. Repinned from 1584 to 1728 cells by
+    athenaeum#1780's three new ``aggregation`` probes on top of
+    athenaeum#1779's long-page repin -- the full grid's cell count is
     ``probes * scales * arms``, so a probe-count change always shifts it,
     same class of expected repin as ``Corpus.fingerprint()``. Cross-checked
     against :func:`expected_full_grid_cells`, derived from the live probe
     count, rather than trusted on the literal alone."""
     assert (
-        expected_full_grid_cells(len(north_star_cli.DEFAULT_PROBES)) == 0
+        expected_full_grid_cells(len(north_star_cli.DEFAULT_PROBES)) == 1728
     ), "expected_full_grid_cells drifted from the pinned literal below -- update both together"
     assert (
         north_star_cli.main(
@@ -487,9 +488,9 @@ def test_the_full_grid_dry_run_prices_at_the_measured_mix(
         == 0
     )
     out = capsys.readouterr().out
-    assert "cells=0" in out
+    assert "cells=1728" in out
     priced = float(out.split("estimated=$")[1].split()[0])
-    assert 0 < priced < 0, out
+    assert 14.72 < priced < 14.82, out
 
 
 def test_the_estimate_names_its_source_run() -> None:

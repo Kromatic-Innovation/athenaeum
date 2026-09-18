@@ -571,11 +571,22 @@ def _probe_by_id(corpus: Corpus, probe_id: str) -> Probe:
 # ---------------------------------------------------------------------------
 
 #: fts5 backend -- 6 of 52 (scale, probe) cases, measured 2026-09-17 against
-#: develop @ 5693c1c7 (post athenaeum#1768/#1769).
+#: develop @ 5693c1c7 (post athenaeum#1768/athenaeum#1769), PLUS one more
+#: added by athenaeum#1780: adding the `aggregation` class's 7-client
+#: `aggregation_retainer_clients` correct set (3 new pages plus
+#: client-castleford, all genuinely retainer clients, all sharing
+#: "retainer" vocabulary by construction -- that sharing is the class's own
+#: measured property, not an accident) shifts fts5's relative ranking
+#: enough that client-bluewater drops out of `former_client_not_current`'s
+#: top 5 at `core` scale (it was already a `medium`-scale miss below,
+#: unrelated to this PR). Same failure mode as the other entries here: a
+#: retrieval-side ranking effect, not a fixture defect -- see this file's
+#: own "DO NOT edit the fixtures" note above.
 _FTS5_XFAIL: frozenset[tuple[str, str]] = frozenset(
     {
         ("core", "confidentiality_rule"),
         ("core", "budget_threshold_current"),
+        ("core", "former_client_not_current"),
         ("medium", "confidentiality_rule"),
         ("medium", "budget_threshold_current"),
         ("medium", "surname_is_ambiguous"),

@@ -1116,7 +1116,7 @@ def test_xlarge_scale_is_pinned() -> None:
     # probe's criterion) and had each gain one appended `Internal reference
     # tag:` line -- the only edits this issue makes to pages outside
     # `core/15-aggregation.yaml` -- shifting the fingerprint once more.
-    assert corpus.fingerprint() == "PLACEHOLDER_FINGERPRINT"
+    assert corpus.fingerprint() == "8a5e67c4e350c1de"
 
 
 def test_long_tier_tag_is_outside_the_recall_snippet() -> None:

@@ -1266,10 +1266,14 @@ SCALES: dict[str, Scale] = {
     # Core only -- no generation. The offline default: fast, fully
     # hand-authored, and what unit/e2e tests run against.
     "core": Scale("core", total_pages=0, distractors_per_probe=0),
-    # 200 rather than 100: the hand-authored core is ~90 pages and the
-    # distractor tier adds ~40 on top, so a 100-page floor would produce zero
-    # ballast and quietly stop being a distinct point on the size axis.
-    "small": Scale("small", total_pages=200, distractors_per_probe=2),
+    # 280 rather than 200: athenaeum#1780's 14 new core pages (plus 6 more
+    # distractor pages, 2 per its 3 new probes) grew core+long+distractor to
+    # 207 at this scale, exceeding the original 200-page floor and silently
+    # zeroing ballast (test_page_floors_leave_room_for_ballast) -- the same
+    # failure mode this floor's own docstring warns about. 280 restores a
+    # comparable ballast margin (~73 pages) to the original design's, not
+    # just enough to clear zero.
+    "small": Scale("small", total_pages=280, distractors_per_probe=2),
     "medium": Scale("medium", total_pages=1_000, distractors_per_probe=2),
     "large": Scale("large", total_pages=10_000, distractors_per_probe=2),
     # A real single-operator deployment is already past 20,000 pages
