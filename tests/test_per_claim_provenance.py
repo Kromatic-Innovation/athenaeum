@@ -105,7 +105,7 @@ class TestFootnoteMarkerPrimitive:
         least as long. A four-backtick block documenting three-backtick markdown
         must stay closed — otherwise the rest of the block reads as prose and
         gets markers stapled into source code. (Found by the Seer review on
-        PR #1823; the original code compared a fixed three characters.)"""
+        athenaeum#1730's PR; the original compared a fixed three characters.)"""
         body = (
             "A real claim.\n\n"
             "````markdown\n"
