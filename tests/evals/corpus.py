@@ -1917,6 +1917,26 @@ class Observation:
     would ever land; every later slice would silently have no name or alias
     for Tier 1 to match and would be dropped as "no actions needed" before
     a single token could compile through.
+
+    ``retain`` is the second half of the write-path ground truth (issue
+    athenaeum#1824): ``True`` (the default) means "a durable fact — a store
+    that lost this token lost a fact it should have kept"; ``False`` marks a
+    TRANSIENT observation — a temporary outage, a one-off status line, an
+    instruction scoped to the task in hand — whose planted token SHOULD NOT
+    appear in any compiled page. Without it the measurement rewards
+    remembering everything, and a system that retained 36/36 would score
+    perfectly while hoarding facts that expired the same afternoon. A
+    ``retain=False`` observation still carries ``answer_tokens`` (the token
+    is what makes it checkable at all) but is scored against its own
+    denominator by
+    :func:`tests.evals.north_star_report.compute_write_path_stats`
+    (``transient_retained``, lower is better) and is excluded from the
+    retention numerator/denominator entirely.
+
+    ``page_uid`` on a transient observation names no corpus page — it is a
+    ``transient-*`` sentinel, which is exactly why the scoring split matters:
+    counted naively it would inflate ``pages_targeted`` with pages that were
+    never supposed to exist.
     """
 
     uid: str
@@ -1926,6 +1946,7 @@ class Observation:
     uuid8: str
     body: str
     answer_tokens: tuple[str, ...] = ()
+    retain: bool = True
 
     @property
     def filename(self) -> str:
@@ -2005,6 +2026,77 @@ def generate_page_observations(
     return observations
 
 
+# Transient (``retain=False``) observations -- issue athenaeum#1824.
+#
+# Ground truth for the half of the write path the first Phase 2 measurement
+# could not see: not "did the store keep this fact" but "did the store have
+# the sense to DROP it". Each entry is the kind of thing a real session
+# emits constantly and that no durable page should ever carry -- a service
+# that is down for the afternoon, a status line true only at the moment it
+# was written, an instruction scoped to the task in hand. Every one plants
+# its own invented marker token, validated against the corpus's existing
+# ``answer_tokens``/distractor-token collision rules the same way every
+# other planted token is (``test_eval_corpus_generator``), so finding one in
+# a compiled page is unambiguous evidence of over-retention rather than a
+# coincidental word match.
+#
+# (page_uid, timestamp, uuid8, token, body)
+_TRANSIENT_OBSERVATIONS: tuple[tuple[str, str, str, str, str], ...] = (
+    (
+        "transient-portal-outage",
+        "20260510T091500Z",
+        "7f1a20c4",
+        "Zephrandil",
+        "Client portal outage: the portal is returning 503s this morning and the "
+        "incident is being tracked under the temporary reference Zephrandil. "
+        "Expected to clear before lunch; nothing to action once it does.",
+    ),
+    (
+        "transient-export-status",
+        "20260511T143000Z",
+        "c3b96d18",
+        "Marrowglint",
+        "Status right now: the nightly export finished at 14:02 today under batch "
+        "label Marrowglint and the queue is empty. This is a point-in-time "
+        "status, not a standing fact.",
+    ),
+    (
+        "transient-task-instruction",
+        "20260512T101000Z",
+        "9d40ae6b",
+        "Ossivane",
+        "For this task only: skip the archived rows and stage your working copy in "
+        "the scratch sheet named Ossivane. Discard the instruction once the "
+        "backlog pass is done.",
+    ),
+)
+
+
+def generate_transient_observations() -> list["Observation"]:
+    """The stream's ``retain=False`` ground truth (issue athenaeum#1824).
+
+    Hand-authored rather than derived from a page, because there IS no page:
+    a transient observation is precisely one that should leave no compiled
+    trace, so it has no ``expected_uids`` to invert and its ``page_uid`` is a
+    ``transient-*`` sentinel. Fixed values (no RNG) keep
+    :func:`generate_core_observations` byte-deterministic for
+    ``(GENERATOR_VERSION, seed)`` exactly as before.
+    """
+    return [
+        Observation(
+            uid=f"obs-{page_uid}",
+            page_uid=page_uid,
+            source="sessions",
+            timestamp=timestamp,
+            uuid8=uuid8,
+            body=body,
+            answer_tokens=(token,),
+            retain=False,
+        )
+        for page_uid, timestamp, uuid8, token, body in _TRANSIENT_OBSERVATIONS
+    ]
+
+
 @dataclass
 class ObservationStream:
     """A materialized observation stream: the write-path counterpart to
@@ -2023,24 +2115,88 @@ class ObservationStream:
     seed: int = 0
     scale: str = "core"
 
-    def materialize(self, root: Path) -> Path:
-        """Write every observation to ``root/raw/<source>/<filename>`` --
-        the raw-intake layout ``athenaeum.intake.discover_raw_files`` walks.
-        Writes only under *root*, mirroring :meth:`Corpus.materialize`'s own
-        discipline (enforced the same way, in
-        ``tests/test_eval_corpus_leakage.py``)."""
+    def materialize(self, root: Path, *, session_size: int = 1) -> Path:
+        """Write the stream to ``root/raw/<source>/`` -- the raw-intake
+        layout ``athenaeum.intake.discover_raw_files`` walks. Writes only
+        under *root*, mirroring :meth:`Corpus.materialize`'s own discipline
+        (enforced the same way, in ``tests/test_eval_corpus_leakage.py``).
+
+        ``session_size`` is the PRODUCTION-SHAPE knob (issue athenaeum#1824).
+        At the default ``1`` every observation lands as its own raw file --
+        the shape the first Phase 2 smoke run used, and a shape production
+        intake never sees: Claude's auto-memory writes ONE file per session
+        carrying every observation that session produced, so a real day's
+        intake is a handful of multi-observation files, not hundreds of
+        singletons. That difference is not cosmetic. The librarian's
+        ``max_files`` window (``athenaeum.librarian.DEFAULT_MAX_FILES``, 50)
+        is a per-RUN batch size counted in FILES: a 213-singleton stream
+        overflows it on the first run and defers 163 files to later nights,
+        which a one-shot eval compile then scores as loss (run 35292686290 --
+        see ``docs/measurements/write-path-retention-2026-09-18.md``).
+
+        With ``session_size > 1`` consecutive observations in stream order
+        are bundled into one raw file, blank-line separated, named after the
+        FIRST observation in the bundle (so the filename stays a valid
+        ``athenaeum.intake.RAW_FILE_RE`` match and the file still sorts by
+        the time its earliest observation was recorded). Bundling follows
+        stream order, which :func:`generate_core_observations` has already
+        interleaved across entities -- exactly like a real session that
+        touched several people and policies in whatever order they came up.
+        Observations are never bundled across different ``source`` values.
+        """
+        if session_size < 1:
+            raise ValueError(f"session_size must be >= 1, got {session_size!r}")
         raw_root = root / "raw"
-        for obs in self.observations:
-            source_dir = raw_root / obs.source
+        for source, bundle in self.session_bundles(session_size=session_size):
+            source_dir = raw_root / source
             source_dir.mkdir(parents=True, exist_ok=True)
-            (source_dir / obs.filename).write_text(obs.body, encoding="utf-8")
+            body = "\n\n".join(obs.body for obs in bundle)
+            (source_dir / bundle[0].filename).write_text(body, encoding="utf-8")
         return raw_root
+
+    def session_bundles(self, *, session_size: int = 1) -> list[tuple[str, list["Observation"]]]:
+        """Group the stream into the ``(source, [observation, ...])`` bundles
+        :meth:`materialize` writes as one raw file each (issue
+        athenaeum#1824).
+
+        Exposed rather than inlined so a caller can count the FILES a given
+        ``session_size`` will produce -- the number the librarian's
+        ``max_files`` window is measured in -- without materialising a tree
+        first, and so the per-gate accounting in
+        ``docs/measurements/write-path-retention-2026-09-18.md`` can be
+        reproduced from the stream alone.
+        """
+        if session_size < 1:
+            raise ValueError(f"session_size must be >= 1, got {session_size!r}")
+        bundles: list[tuple[str, list[Observation]]] = []
+        for obs in self.observations:
+            if bundles and bundles[-1][0] == obs.source and len(bundles[-1][1]) < session_size:
+                bundles[-1][1].append(obs)
+            else:
+                bundles.append((obs.source, [obs]))
+        return bundles
 
     def answer_tokens(self) -> frozenset[str]:
         """Every distinct planted token carried anywhere in the stream --
         the denominator a "tokens retained" measurement (issue athenaeum#1726
-        AC4) is computed against."""
-        return frozenset(t for obs in self.observations for t in obs.answer_tokens)
+        AC4) is computed against.
+
+        Scoped to ``retain=True`` observations (issue athenaeum#1824): a
+        transient observation's token is ground truth for the OPPOSITE
+        expectation (it must NOT survive), so folding it in here would make
+        a correct discard look like a retention miss. Use
+        :meth:`transient_tokens` for that side.
+        """
+        return frozenset(t for obs in self.observations if obs.retain for t in obs.answer_tokens)
+
+    def transient_tokens(self) -> frozenset[str]:
+        """Every distinct planted token carried by a ``retain=False``
+        observation -- the tokens that SHOULD NOT appear in any compiled
+        page (issue athenaeum#1824). The denominator ``transient_retained``
+        is scored against; zero retained is a perfect score."""
+        return frozenset(
+            t for obs in self.observations if not obs.retain for t in obs.answer_tokens
+        )
 
 
 def generate_core_observations(
@@ -2088,6 +2244,10 @@ def generate_core_observations(
     observations: list[Observation] = []
     for page in resolved_pages:
         observations.extend(generate_page_observations(page, resolved_probes, seed=seed))
+    # Issue athenaeum#1824: the transient half of the ground truth rides the
+    # SAME stream and the SAME interleave, so neither system can tell a
+    # should-drop observation from a should-keep one by position or batch.
+    observations.extend(generate_transient_observations())
     rng = random.Random(_stable_hash(f"v{GENERATOR_VERSION}:{seed}:observation-interleave"))
     rng.shuffle(observations)
     return ObservationStream(observations=observations, seed=seed, scale=scale)
