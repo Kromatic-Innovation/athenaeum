@@ -315,12 +315,24 @@ def _target_page_text(probe: Probe, corpus: Corpus) -> str:
 # no LLM judge, matching this module's own "no LLM judge anywhere" invariant.
 #
 # Abstention probes carry no ``answer_tokens`` (nothing in the corpus answers
-# them) and are graded by a SEPARATE rule: an answer is correct abstention
-# only when it asserts NONE of the corpus's planted tokens (no confabulation
-# of some OTHER probe's answer) AND uses recognizably declining language
-# (:data:`_NOT_FOUND_PHRASES`) -- absence of a token alone is not proof the
-# arm actually declined rather than confidently asserting something else
-# wrong that happens not to collide with a planted token.
+# them) and are graded by a SEPARATE rule, :func:`_is_abstention`: an answer
+# is correct abstention only when (a) it asserts NONE of the corpus's
+# planted tokens AND NONE of the corpus's planted answer_markers -- no
+# confabulation of some OTHER probe's answer, by tag or by content -- AND
+# (b) it uses recognizably declining language (:data:`_NOT_FOUND_PHRASES`
+# plus the absence-phrase families below) -- absence of a token alone is not
+# proof the arm actually declined rather than confidently asserting
+# something else wrong that happens not to collide with a planted token.
+#
+# athenaeum#1836: a corpus distractor plants a REAL adjacent-topic page (the
+# medium scale's PTO page sits next to the absent parental-leave policy), so
+# a correct abstention often reads "there is no formal parental leave policy
+# documented" -- a phrasing the original flat ``_NOT_FOUND_PHRASES`` list
+# never covered -- rather than "not found"/"no record of". The marker-leak
+# guard (checked before any phrase) is what still catches a genuinely wrong
+# answer that happens to use the SAME absence vocabulary, e.g. "the parental
+# leave policy is 12 weeks, not formally reviewed" -- the planted marker
+# "12 weeks" leaking into the answer fails it regardless of phrasing.
 # ---------------------------------------------------------------------------
 
 #: Phrases an abstention answer is checked for, alongside the token-absence
@@ -364,6 +376,39 @@ _NOT_FOUND_PHRASES: tuple[str, ...] = (
     "do not see",
 )
 
+#: Absence-phrase families (issue athenaeum#1836): a correct abstention
+#: often names the missing thing ("no formal policy", "policy ...
+#: documented") rather than declining outright. Substrings, deliberately --
+#: the marker-leak guard in :func:`_is_abstention` is what keeps a
+#: confidently WRONG answer sharing this vocabulary ("the policy is 12
+#: weeks, not formally reviewed") from grading as a correct abstention.
+_ABSENCE_PHRASE_FAMILIES: tuple[str, ...] = (
+    "no documented",
+    "no formal",
+    "no formalised",
+    "no formalized",
+    "no established",
+    "not documented",
+    "not formalised",
+    "not formalized",
+    "not established",
+    "not have a document",
+    "not have a formal",
+    "not have an established",
+    "nothing about",
+    "not mentioned",
+    "isn't mentioned",
+    "is not mentioned",
+    "could not locate",
+    "couldn't locate",
+    "cannot locate",
+    "can't locate",
+)
+
+#: All abstention-declining phrases: the original flat list plus the
+#: absence-phrase families above.
+_ABSTENTION_PHRASES: tuple[str, ...] = _NOT_FOUND_PHRASES + _ABSENCE_PHRASE_FAMILIES
+
 
 def _normalize_for_match(text: str) -> str:
     """Lowercased text for a normalized substring match. Deliberately
@@ -378,6 +423,51 @@ def _all_answer_tokens(corpus: Corpus) -> frozenset[str]:
     abstention probe's confabulation check needs the WHOLE corpus's tokens,
     not just its own -- it has none of its own by construction."""
     return frozenset(token for probe in corpus.probes for token in probe.answer_tokens)
+
+
+def _all_answer_markers(corpus: Corpus) -> frozenset[str]:
+    """Every planted answer marker across every probe in *corpus* -- the
+    marker-leak counterpart of :func:`_all_answer_tokens` (issue
+    athenaeum#1836). An abstention answer must not assert the CONTENT of
+    some other probe's planted fact either, only decline to answer -- a
+    naked ``answer_tokens`` check alone lets "the parental leave policy is
+    12 weeks" through if "12 weeks" itself was never planted as a token.
+    Abstention probes carry no ``answer_markers`` of their own by
+    construction (``validate_core`` enforces this), so this is always a
+    non-abstention deny-list."""
+    return frozenset(
+        _normalize_for_match(marker)
+        for probe in corpus.probes
+        for _, marker in probe.answer_markers
+    )
+
+
+def _is_abstention(answer: str, probe: Probe, corpus: Corpus) -> bool:
+    """Does *answer* read as a correct abstention for *probe* (issue
+    athenaeum#1836)?
+
+    True only when BOTH hold:
+
+    (a) No leak: the normalized answer asserts none of the corpus's planted
+        ``answer_tokens`` values and none of its planted ``answer_markers``
+        values -- no confabulation of some OTHER probe's answer, by tag or
+        by content.
+    (b) Declining language: the answer contains one of
+        :data:`_ABSTENTION_PHRASES` (the original flat phrase list plus the
+        absence-phrase families for "no documented/formal/established X",
+        "nothing about X", "could not find/locate", "not mentioned").
+
+    *probe* itself is unused today (abstention probes plant no tokens or
+    markers of their own) but is kept in the signature so a future
+    per-probe exception does not require touching every call site.
+    """
+    del probe
+    normalized = _normalize_for_match(answer)
+    if any(_normalize_for_match(tok) in normalized for tok in _all_answer_tokens(corpus)):
+        return False
+    if any(marker in normalized for marker in _all_answer_markers(corpus)):
+        return False
+    return any(phrase in normalized for phrase in _ABSTENTION_PHRASES)
 
 
 def _native_loaded_uids(record: RolloutRecord) -> tuple[str, ...]:
@@ -556,15 +646,14 @@ def grade_correctness(record: RolloutRecord, probe: Probe, corpus: Corpus) -> bo
     already refuses to ship this) an answer-bearing page has no
     ``answer_markers`` entry -- a corpus authoring gap, not a graded miss.
 
-    Abstention: unchanged from before this issue -- correct only when the
-    answer asserts none of the corpus's planted tokens AND uses
-    recognizable declining language -- see the section docstring above.
+    Abstention: graded by :func:`_is_abstention` (issue athenaeum#1836) --
+    correct only when the answer asserts none of the corpus's planted
+    tokens or markers AND uses recognizable declining language -- see the
+    section docstring above.
     """
     answer = _normalize_for_match(record.answer)
     if probe.probe_class == "abstention":
-        if any(_normalize_for_match(tok) in answer for tok in _all_answer_tokens(corpus)):
-            return False
-        return any(phrase in answer for phrase in _NOT_FOUND_PHRASES)
+        return _is_abstention(record.answer, probe, corpus)
     if not probe.answer_tokens:
         return None
     pages_by_uid = {page.uid: page for page in corpus.pages}
@@ -2504,6 +2593,16 @@ class NorthStarReport:
     # reader never mistakes a deadline-tripped run's numbers for a
     # completed one. Empty frozenset (the default) marks nothing.
     phase2_partial: frozenset[tuple[str, str]] = frozenset()
+    # issue athenaeum#1836: per (arm, corpus_scale) counts of rows whose
+    # RolloutRecord.turns_exhausted is True -- a SUBSET of harness_failure_
+    # count (every turn_cap row is also a harness failure, via the
+    # "turn_cap" reason rollout.py stamps), broken out per arm/scale so a
+    # cap that bites one arm hard is visible instead of drowning in the
+    # single global harness_failure_count total. Computed over `rows`
+    # (every row, not just graded_rows -- a turn_cap row is BY DEFINITION
+    # excluded from graded_rows). Empty tuple (the default) for every
+    # pre-athenaeum#1836 report and for any run with zero turn-cap rows.
+    turn_cap_counts: tuple[TurnCapCount, ...] = ()
 
 
 class MixedFloorError(ValueError):
@@ -2550,6 +2649,35 @@ def _pooled_floor_value(rows: Sequence[RolloutRow], attr: str) -> float | None:
             "own --store path and build a report from that store alone."
         )
     return next(iter(values), None)
+
+
+@dataclasses.dataclass(frozen=True)
+class TurnCapCount:
+    """One (arm, corpus_scale) group's count of rows whose
+    ``RolloutRecord.turns_exhausted`` is ``True`` (issue athenaeum#1836) --
+    the per-group breakdown of ``NorthStarReport.harness_failure_count``'s
+    ``"turn_cap"`` slice, rendered next to that single global count so a
+    cap that bites one arm/scale hard is visible."""
+
+    arm: str
+    corpus_scale: str
+    count: int
+
+
+def _turn_cap_counts(rows: Sequence[RolloutRow]) -> tuple[TurnCapCount, ...]:
+    """:class:`TurnCapCount` for every (arm, corpus_scale) group in *rows*
+    with at least one ``turns_exhausted`` row, sorted for a stable report
+    ordering. Computed over ALL of *rows*, never ``graded_rows`` -- a
+    turn_cap row is by definition excluded from ``graded_rows``, so
+    counting only over ``graded_rows`` would always read zero."""
+    counts: dict[tuple[str, str], int] = defaultdict(int)
+    for row in rows:
+        if row.record.turns_exhausted:
+            counts[(row.record.arm.value, row.record.corpus_scale)] += 1
+    return tuple(
+        TurnCapCount(arm=arm, corpus_scale=corpus_scale, count=count)
+        for (arm, corpus_scale), count in sorted(counts.items())
+    )
 
 
 def build_report(
@@ -2636,6 +2764,7 @@ def build_report(
         relevance_floor_fts5=relevance_floor_fts5,
         phase2_summary=phase2_summary,
         phase2_partial=frozenset(phase2_partial),
+        turn_cap_counts=_turn_cap_counts(rows),
     )
 
 
@@ -2763,6 +2892,11 @@ def render_report(report: NorthStarReport) -> str:
     # issue athenaeum#1819: printed unconditionally -- 0 is a real, useful
     # value (this run had none), not something to hide by omission.
     lines.append(f"- harness failures: {report.harness_failure_count}")
+    # issue athenaeum#1836: per (arm, corpus_scale) turn_cap breakdown,
+    # printed only when non-empty -- a run with zero turn-cap rows renders
+    # byte-identical to a pre-athenaeum#1836 report.
+    for tc in report.turn_cap_counts:
+        lines.append(f"  - turn_cap[arm={tc.arm}, scale={tc.corpus_scale}]: {tc.count}")
     # issue athenaeum#1819 defect 3: printed only for a store that actually
     # carries a cli-mode row -- see _report_config_isolated_display's own
     # docstring.
