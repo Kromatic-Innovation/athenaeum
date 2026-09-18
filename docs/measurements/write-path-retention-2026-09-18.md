@@ -112,6 +112,15 @@ Re-measured on develop's stream, which now carries 285 observations
 | B — production shape only | 6 | 50 (default) | 48 | 48 | 0 | 62/62 | 3/3 |
 | C — production shape + window sized to input | 6 | sized (48) | 48 | 48 | 0 | 62/62 | 3/3 |
 
+One caveat on reading arm B: `session_bundles` groups observations in
+*stream* order, which the generator has already shuffled, so a bundle's
+contents are scattered across the date range and a bundle is named after
+whichever of its observations the shuffle put first. Under bundling, *which*
+tokens would be deferred by a partially-filled window is therefore a function
+of the shuffle rather than of anything meaningful. That is exactly why arm C,
+not arm B, is the default: with the window sized to the input nothing is ever
+partially admitted, and the question does not arise.
+
 Arm A loses 57 of 62 tokens before a single model call. Arm B recovers all of
 them by changing only the intake shape. Arm C is the new default and is the
 one that is robust: bundling alone clears the window only while the stream

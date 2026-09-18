@@ -107,6 +107,14 @@ class CompileOutcome:
     # compile returned. A nonzero value means the store was measured before
     # the input finished compiling and the retention number is a FLOOR, not
     # a result.
+    #
+    # Measured as "raw files remaining", which equals "files deferred" only
+    # because a successful compile RETIRES (deletes) every file it processed
+    # -- the librarian's move-then-retire discipline, which
+    # ``test_compile_observation_stream_materializes_raw_files_before_compiling``
+    # documents. If that ever stops holding, this field would start counting
+    # processed files as deferred; it is named for what it means rather than
+    # for how it is computed, so the dependency is recorded here.
     deferred_raw_files: int = 0
 
 
