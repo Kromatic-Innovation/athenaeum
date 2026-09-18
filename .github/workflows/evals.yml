@@ -18,6 +18,16 @@ name: Evals
 #     already loads) and uploads the rendered markdown report as an
 #     artifact. **Also gated to workflow_dispatch only, same as `eval` —
 #     NEVER on push.** See docs/design/native-memory-baseline.md §4/§9.
+#   * workflow_dispatch with `north_star=true` and
+#     `north_star_search_backend=vector` — issue athenaeum#1787: the SAME
+#     `north-star` job, dispatched a SECOND time, driving north_star_cli.py
+#     with `--search-backend vector` against its own DISTINCT store path
+#     (never the fts5 store), scoped to the `core`+`medium` corpus scales.
+#     Skips cleanly (no job failure) when all-MiniLM-L6-v2 is unavailable,
+#     following the `embedding-suite` job's MiniLM-dependency precedent.
+#     Its report is its own file beside the fts5 report, never merged into
+#     it -- see docs/design/native-memory-baseline.md §4's vector-backend
+#     caveat.
 #
 # Regular CI (ci.yml) is on `develop` only, so this workflow does NOT
 # collide with it: they trigger on distinct refs.
@@ -68,9 +78,17 @@ on:
           - "small"
           - "full"
       north_star_corpus_scales:
-        description: "north_star_cli.py --corpus-scales (comma-separated; blank = the default scales; xlarge is opt-in)"
+        description: "north_star_cli.py --corpus-scales (comma-separated; blank = the default scales; xlarge is opt-in; forced to core,medium when north_star_search_backend=vector and left blank)"
         required: false
         default: ""
+      north_star_search_backend:
+        description: "north_star_cli.py --search-backend (issue athenaeum#1787: 'vector' is a SECOND dispatch against a distinct store, scoped to core+medium, never merged with an fts5 store)"
+        required: false
+        default: "fts5"
+        type: choice
+        options:
+          - "fts5"
+          - "vector"
       north_star_max_spend:
         description: "north_star_cli.py --max-spend (refusal ceiling, USD)"
         required: false
@@ -260,7 +278,31 @@ jobs:
           OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
           ANTHROPIC_API_KEY: op://Infrastructure/anthropic-api-key/credential
 
+      - name: Check vector backend (all-MiniLM-L6-v2) availability
+        # Issue athenaeum#1787: only relevant to a vector dispatch -- an
+        # fts5 dispatch (the default) never runs this step at all, mirroring
+        # the `embedding-suite` job's own MiniLM-only-where-needed scoping.
+        # `continue-on-error` (rather than letting a network/model failure
+        # fail the job) is what lets the run step below skip cleanly instead
+        # of a hard failure -- the actual embed call, not just `import
+        # chromadb`, so a model-download failure is caught here rather than
+        # surfacing mid-grid.
+        id: minilm-check
+        if: github.event.inputs.north_star_search_backend == 'vector'
+        continue-on-error: true
+        run: |
+          python -c "from chromadb.utils.embedding_functions.onnx_mini_lm_l6_v2 import ONNXMiniLM_L6_V2; ONNXMiniLM_L6_V2()(['availability check'])"
+
+      - name: Vector dispatch skipped (MiniLM unavailable)
+        if: github.event.inputs.north_star_search_backend == 'vector' && steps.minilm-check.outcome != 'success'
+        run: |
+          echo "::notice::all-MiniLM-L6-v2 unavailable -- skipping the vector-backend north-star dispatch cleanly (issue athenaeum#1787), following the embedding-suite job's precedent for a token-free MiniLM dependency."
+
       - name: Run north-star grid
+        # Issue athenaeum#1787: an fts5 dispatch (the default) always runs;
+        # a vector dispatch runs only when the availability check above
+        # succeeded -- never a job failure when the model is unavailable.
+        if: github.event.inputs.north_star_search_backend != 'vector' || steps.minilm-check.outcome == 'success'
         env:
           # Routed through env:, never interpolated into run: (Quine review,
           # issue athenaeum#1733, SHOULD item 6) -- an untrusted/unexpected
@@ -270,6 +312,7 @@ jobs:
           ATHENAEUM_EVAL_MODE: api
           NORTH_STAR_SCALE: ${{ github.event.inputs.north_star_scale }}
           NORTH_STAR_CORPUS_SCALES: ${{ github.event.inputs.north_star_corpus_scales }}
+          NORTH_STAR_SEARCH_BACKEND: ${{ github.event.inputs.north_star_search_backend }}
           NORTH_STAR_MAX_SPEND: ${{ github.event.inputs.north_star_max_spend }}
           NORTH_STAR_MAX_TOKENS: ${{ github.event.inputs.north_star_max_tokens }}
           NORTH_STAR_WORKERS: ${{ github.event.inputs.north_star_workers }}
@@ -282,9 +325,16 @@ jobs:
           if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
             echo "::warning::ANTHROPIC_API_KEY not set (op item not provisioned) — north-star run will fail to construct a client"
           fi
+          # Issue athenaeum#1787: a vector dispatch is scoped to core+medium
+          # only -- defaulted HERE when the operator leaves
+          # north_star_corpus_scales blank, because the CLI's own default
+          # scale set (core,small,medium,large) is out of scope for
+          # --search-backend vector and north_star_cli.py refuses it.
           CORPUS_SCALES_FLAG=()
           if [ -n "${NORTH_STAR_CORPUS_SCALES:-}" ]; then
             CORPUS_SCALES_FLAG=(--corpus-scales "$NORTH_STAR_CORPUS_SCALES")
+          elif [ "${NORTH_STAR_SEARCH_BACKEND:-fts5}" = "vector" ]; then
+            CORPUS_SCALES_FLAG=(--corpus-scales "core,medium")
           fi
           # Left off entirely when blank, so the CLI derives the token
           # ceiling from --max-spend (issue athenaeum#1754) instead of this
@@ -331,13 +381,28 @@ jobs:
           # issue athenaeum#1751. On that kill path no markdown report is ever
           # written, so the JSONL and its planned-count sidecar are the ONLY
           # artifact, and re-running with the same --store resumes from them.
+          #
+          # Issue athenaeum#1787: a vector dispatch writes to a DISTINCT
+          # store path, never the fts5 store -- north_star_cli.py's own
+          # check_floor_mismatch refuses to resume a store under a different
+          # --search-backend than the one already recorded in it, so reusing
+          # the fts5 path here would simply refuse to start on a second
+          # dispatch, but naming a separate path from the start is what
+          # keeps the two passes' reports (and artifacts) distinct rather
+          # than relying on that refusal as the only guard.
+          if [ "${NORTH_STAR_SEARCH_BACKEND:-fts5}" = "vector" ]; then
+            STORE_PATH="measurements/north-star-store-vector.jsonl"
+          else
+            STORE_PATH="measurements/north-star-store.jsonl"
+          fi
           mkdir -p measurements
           python -m tests.evals.north_star_cli \
             --mode api \
             --scale "$NORTH_STAR_SCALE" \
             --max-spend "$NORTH_STAR_MAX_SPEND" \
             --workers "$NORTH_STAR_WORKERS" \
-            --store measurements/north-star-store.jsonl \
+            --search-backend "${NORTH_STAR_SEARCH_BACKEND:-fts5}" \
+            --store "$STORE_PATH" \
             --out-dir measurements \
             "${CORPUS_SCALES_FLAG[@]}" \
             "${MAX_TOKENS_FLAG[@]}" \
@@ -359,10 +424,15 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: north-star-report
+          # Issue athenaeum#1787: globbed with a `*` between `store` and
+          # `.jsonl` so a vector dispatch's distinct
+          # `north-star-store-vector.jsonl` (and its planned/phase2
+          # sidecars) upload alongside the fts5 filenames, never requiring
+          # a second artifact block.
           path: |
             measurements/north-star-*.md
-            measurements/north-star-store.jsonl
-            measurements/north-star-store.jsonl.planned.json
-            measurements/north-star-store.jsonl.phase2.jsonl
+            measurements/north-star-store*.jsonl
+            measurements/north-star-store*.jsonl.planned.json
+            measurements/north-star-store*.jsonl.phase2.jsonl
           if-no-files-found: warn
           retention-days: 30
