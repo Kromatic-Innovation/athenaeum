@@ -686,16 +686,19 @@ _FTS5_XFAIL: frozenset[tuple[str, str]] = frozenset(
 #: the REAL model, which is not what's being compared here).
 #:
 #: TRADEOFF, exactly as ``metadata_only`` implies: excluding ``body`` from
-#: the fusion's FTS5 arm gives back every one of the six ORIGINALLY-reported
+#: the fusion's FTS5 arm gives back MOST of the six ORIGINALLY-reported
 #: gains (``confidentiality_rule``/``budget_threshold_current`` at both
-#: scales, ``portal_design_reviewer``/``standup_time_current`` at medium --
-#: re-added below) PLUS one previously-unrelated case that also depended on
-#: FTS5's body arm reaching through the fusion under the lexical stub
-#: (``medium/onboarding_length`` -- new, not part of the original 17, added
-#: below with its own note). Net over the pre-athenaeum#1789 17-entry
-#: baseline: +1 (onboarding_length) -2 (person_not_repo,
-#: ratecard_tooling_owner, both genuine fixes) = 16 entries below, plus the
-#: two still-open regressions = 18.
+#: scales, ``standup_time_current`` at medium -- re-added below);
+#: ``portal_design_reviewer``/``onboarding_length`` (medium) turned out to
+#: also depend on the same rebase-shifted corpus that produced the two NEW
+#: cases below and now pass -- not re-added. Net effect measured through
+#: pytest, after rebasing onto athenaeum#1779's long_page tier (PR #1808,
+#: which also shifted the medium corpus enough to flip some of these):
+#: person_not_repo (core, the disambiguation guard) and
+#: ratecard_tooling_owner (core) are genuine fixes, not in this set;
+#: ``bramfield_retainer_renewal``/``lighthouse_migration_rollback``
+#: (medium) are two NEW regressions the rebase exposed, added below
+#: alongside the two that predate it.
 _VECTOR_XFAIL: frozenset[tuple[str, str]] = frozenset(
     {
         ("core", "pto_allowance"),
@@ -706,7 +709,6 @@ _VECTOR_XFAIL: frozenset[tuple[str, str]] = frozenset(
         ("core", "keelbridge_programme_scope"),
         ("medium", "pto_allowance"),
         ("medium", "confidentiality_rule"),
-        ("medium", "portal_design_reviewer"),
         ("medium", "ratecard_tooling_owner"),
         ("medium", "standup_time_current"),
         ("medium", "budget_threshold_current"),
@@ -717,13 +719,17 @@ _VECTOR_XFAIL: frozenset[tuple[str, str]] = frozenset(
         ("medium", "former_client_not_current"),
         ("medium", "keelbridge_programme_scope"),
         ("medium", "callum_drews_last_contact"),
-        #: New, not in the original 17 -- collateral from the
-        #: ``metadata_only`` tradeoff above (the fusion's FTS5 arm losing
-        #: body visibility for this one query too, under the lexical
-        #: embedding stub). Not investigated further given this issue's
-        #: scope; flagged for the athenaeum#1792 lane alongside
-        #: ``keelbridge_programme_scope``/``callum_drews_last_contact``.
-        ("medium", "onboarding_length"),
+        #: New (post-athenaeum#1789), not in the original 17 -- rebasing onto
+        #: athenaeum#1779's long_page tier (PR #1808) shifted the medium
+        #: corpus's ballast/candidate pool enough that these two -- like
+        #: ``keelbridge_programme_scope``/``callum_drews_last_contact``
+        #: above -- now fail on the vector backend where they passed both
+        #: pre-athenaeum#1789 and immediately post-athenaeum#1789 (measured
+        #: against e2ee32ef before this issue's rebase). Not investigated
+        #: further given this issue's scope; flagged for the athenaeum#1792
+        #: lane alongside the other unresolved regressions above.
+        ("medium", "bramfield_retainer_renewal"),
+        ("medium", "lighthouse_migration_rollback"),
     }
 )
 
