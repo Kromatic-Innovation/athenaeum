@@ -395,7 +395,16 @@ jobs:
           else
             STORE_PATH="measurements/north-star-store.jsonl"
           fi
-          mkdir -p measurements
+          # Issue athenaeum#1834: --materialize-root is otherwise a fresh
+          # `tempfile.mkdtemp()` outside $GITHUB_WORKSPACE (see
+          # north_star_cli.main), unreachable by the upload-artifact step
+          # below -- naming a path under measurements/ makes the Phase 2
+          # native memory files and the librarian's compiled knowledge/
+          # store (north_star_cli._run_phase2_group's own
+          # `materialize_root / "phase2" / f"{system}-{scale}"` layout,
+          # see tests/evals/README.md) uploadable the same way the read
+          # grid's own store already is.
+          mkdir -p measurements measurements/materialize
           python -m tests.evals.north_star_cli \
             --mode api \
             --scale "$NORTH_STAR_SCALE" \
@@ -404,6 +413,7 @@ jobs:
             --search-backend "${NORTH_STAR_SEARCH_BACKEND:-vector}" \
             --store "$STORE_PATH" \
             --out-dir measurements \
+            --materialize-root measurements/materialize \
             "${CORPUS_SCALES_FLAG[@]}" \
             "${MAX_TOKENS_FLAG[@]}" \
             "${RELEVANCE_FLOOR_VECTOR_FLAG[@]}" \
@@ -434,5 +444,39 @@ jobs:
             measurements/north-star-store*.jsonl
             measurements/north-star-store*.jsonl.planned.json
             measurements/north-star-store*.jsonl.phase2.jsonl
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload Phase 2 native memory and compiled knowledge store
+        # Issue athenaeum#1834: the Phase 2 sibling JSONL (uploaded above)
+        # carries retention STATS, never the files themselves -- the
+        # filing-loss row (write_path_filing, issue athenaeum#1830) names
+        # lost tokens with no way to see which compiled page should have
+        # carried them. This step ships the two directories a diagnosis
+        # actually reads: each native group's memory files
+        # (`phase2/native-<scale>/native/memory/`, one topic file per page --
+        # see `run_native_writer`/`run_native_writer_api`'s own `memory_dir`)
+        # and each athenaeum group's compiled store
+        # (`phase2/athenaeum-<scale>/knowledge/`, the librarian's wiki pages
+        # plus its own run log -- see `compile_native_memory_files`'s
+        # `group_root / "knowledge"` target in north_star_cli._run_phase2_group).
+        # `always()` for the same reason as the report upload above -- a run
+        # killed mid-Phase-2 still leaves whichever (system, scale) groups
+        # completed. Globbed on `native/memory` and `knowledge` explicitly,
+        # never `phase2/**`: the read grid's OWN per-worker materialized wiki
+        # trees and search-index caches (`w*/<scale>-<replicate>/cache/`,
+        # including the vector index) live under the SAME --materialize-root
+        # and would otherwise balloon this artifact with data the filing-loss
+        # diagnosis never reads. A dispatch with `--phase2` off (the default)
+        # produces neither directory -- `if-no-files-found: warn`, not `error`,
+        # is deliberate so that ordinary read-only-grid dispatch is not a
+        # failing job.
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: north-star-phase2-artifacts
+          path: |
+            measurements/materialize/phase2/*/native/memory/**
+            measurements/materialize/phase2/*/knowledge/**
           if-no-files-found: warn
           retention-days: 30

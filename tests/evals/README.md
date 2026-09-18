@@ -456,6 +456,38 @@ against `tests.conftest.FakeLLMClient`, no network), `tests/evals/test_write_pat
 `tests/evals/test_phase2_cli.py` (CLI flags, the sibling-JSONL resume
 contract, and `main()` end to end with both producers stubbed).
 
+### CI artifacts (issue athenaeum#1834)
+
+`evals.yml` passes `--materialize-root measurements/materialize` (a path
+under `$GITHUB_WORKSPACE`, not the CLI's own default `tempfile.mkdtemp()`
+outside it — see `north_star_cli.main`), so the grid's per-worker
+materialized corpus trees land at
+`measurements/materialize/w<slot>/<scale>-<replicate>/` and Phase 2's
+groups land at `measurements/materialize/phase2/<system>-<scale>/`
+(`north_star_cli._run_phase2_group`'s own `group_root`).
+
+The `north-star-report` artifact (report markdown, result store JSONL,
+planned-count sidecar, Phase 2 sibling JSONL) was previously the only
+artifact this workflow uploaded, and it carries Phase 2's retention
+*statistics* only — a filing-loss row
+(`write_path_filing`/`FilingLossStats`, issue athenaeum#1830) names lost
+token ids with no way to see which compiled page should have carried them.
+A second artifact, **`north-star-phase2-artifacts`**, ships the files
+themselves whenever `--phase2` ran:
+
+| Path glob | Contents |
+| --- | --- |
+| `measurements/materialize/phase2/*/native/memory/**` | Each `native-<scale>` group's memory files — one topic file per page (`run_native_writer`/`run_native_writer_api`'s `memory_dir`), the native writer's raw output. |
+| `measurements/materialize/phase2/*/knowledge/**` | Each `athenaeum-<scale>` group's compiled store — the librarian's wiki pages plus its own run log (`compile_native_memory_files`'s `group_root / "knowledge"` target). |
+
+Both globs are deliberately narrower than `phase2/**`: the read grid's own
+per-worker wiki trees and search-index caches (including the vector index)
+share the SAME `--materialize-root` and would otherwise balloon this
+artifact with data a filing-loss diagnosis never reads. The step runs
+`if: always()` (a run killed mid-Phase-2 still leaves whichever
+`(system, scale)` groups completed) and warns rather than fails when
+neither directory exists — the common case, since `--phase2` defaults off.
+
 ## Build prerequisites
 
 - CI pulls `ANTHROPIC_API_KEY` from 1Password at run time
