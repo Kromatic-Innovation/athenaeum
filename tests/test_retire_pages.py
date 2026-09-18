@@ -295,6 +295,15 @@ class TestIndexRebuild:
 
 
 class TestRecallIndexRebuildWiring:
+    """Issue athenaeum#1825: the shipped default backend is ``vector``, so
+    ``rebuild_recall_index`` (``_cli_shared.py``) resolves ``cfg.get(
+    "search_backend", "fts5")`` to ``"vector"`` for a ``wiki_repo`` fixture
+    with no ``athenaeum.yaml`` -- these tests stub ``build_vector_index``,
+    the function the real default now dispatches to (was
+    ``build_fts5_index`` pre-athenaeum#1825). ``test_reads_backend_from_config``-
+    style fts5-opt-out coverage for this exact wiring lives in
+    ``TestRecallIndexRebuildFts5OptOut`` below."""
+
     def test_rebuild_invoked_after_apply(
         self, wiki_repo: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -302,11 +311,11 @@ class TestRecallIndexRebuildWiring:
 
         calls: list[Path] = []
 
-        def _fake_build_fts5_index(wiki_root: Path, cache_dir: Path, **kwargs: object) -> int:
+        def _fake_build_vector_index(wiki_root: Path, cache_dir: Path, **kwargs: object) -> int:
             calls.append(wiki_root)
             return 1
 
-        monkeypatch.setattr(search_mod, "build_fts5_index", _fake_build_fts5_index)
+        monkeypatch.setattr(search_mod, "build_vector_index", _fake_build_vector_index)
 
         cache_dir = wiki_repo.parent / "cache"
         exit_code = cli.main(
@@ -334,7 +343,7 @@ class TestRecallIndexRebuildWiring:
         def _boom(wiki_root: Path, cache_dir: Path, **kwargs: object) -> int:
             raise RuntimeError("simulated fake-backend failure")
 
-        monkeypatch.setattr(search_mod, "build_fts5_index", _boom)
+        monkeypatch.setattr(search_mod, "build_vector_index", _boom)
 
         cache_dir = wiki_repo.parent / "cache"
         exit_code = cli.main(
@@ -365,6 +374,45 @@ class TestRecallIndexRebuildWiring:
         captured = capsys.readouterr()
         assert "WARN" in captured.err
         assert "recall index rebuild failed" in captured.err
+
+
+class TestRecallIndexRebuildFts5OptOut:
+    """Issue athenaeum#1825: an explicit ``search_backend: fts5`` in
+    ``athenaeum.yaml`` still opts ``retire-pages --apply``'s rebuild wiring
+    out of the shipped ``vector`` default, dispatching to
+    ``build_fts5_index`` exactly as it always did."""
+
+    def test_rebuild_invoked_after_apply(
+        self, wiki_repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (wiki_repo / "athenaeum.yaml").write_text("search_backend: fts5\n")
+        import athenaeum.search as search_mod
+
+        calls: list[Path] = []
+
+        def _fake_build_fts5_index(wiki_root: Path, cache_dir: Path, **kwargs: object) -> int:
+            calls.append(wiki_root)
+            return 1
+
+        monkeypatch.setattr(search_mod, "build_fts5_index", _fake_build_fts5_index)
+
+        cache_dir = wiki_repo.parent / "cache"
+        exit_code = cli.main(
+            [
+                "retire-pages",
+                "--path",
+                str(wiki_repo),
+                "--uids",
+                "aaaa1111",
+                "--reason",
+                "test",
+                "--cache-dir",
+                str(cache_dir),
+                "--apply",
+            ]
+        )
+        assert exit_code == 0
+        assert calls == [wiki_repo / "wiki"]
 
 
 class TestIndexRebuildFailureAborts:
