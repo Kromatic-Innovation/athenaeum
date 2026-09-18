@@ -135,6 +135,13 @@ _STOPWORDS = frozenset(
 )
 _WORD_RE = re.compile(r"[a-z0-9]+")
 
+#: Literal deny-list phrases that mark a prompt as question-shaped rather
+#: than task-shaped (issue athenaeum#1778, athenaeum#1791 §3.1) -- checked
+#: by :func:`validate_core`'s ``unprompted_push`` guard. Deliberately small
+#: and literal, not an NLP classifier: the class only needs to rule out the
+#: obvious tells a work-order prompt would never carry.
+_INTERROGATIVE_DENYLIST: tuple[str, ...] = ("what", "who", "why did", "do we know")
+
 
 def _content_terms(text: str) -> set[str]:
     words = _WORD_RE.findall(text.lower())
@@ -470,8 +477,7 @@ class Probe:
     DECOY page, used by ``tests.evals.north_star_report.grade_harm`` to
     detect an answer that proposes the corpus's planted-wrong fact rather
     than merely missing the right one (the ``unprompted_push``/
-    ``contradiction`` classes, items D/G -- this issue ships the mechanism
-    only, no probe class uses the field yet). Empty for every probe today.
+    ``contradiction`` classes, items D/G).
     :func:`validate_core` requires each value to be PLANTABLE (occur in the
     body of some corpus page), to collide with no probe's ``answer_tokens``
     value anywhere in the corpus (the same collision ``grade_correctness``'s
@@ -513,6 +519,25 @@ class Probe:
     lexically unreachable is a ``follow_through`` probe filed under the
     wrong class. ``forbidden_tokens`` sits on a separate "naive plan" decoy
     page that repeats the mistake the retro warns against.
+
+    ``unprompted_push`` (issue athenaeum#1778, athenaeum#1791 §3.1) is a
+    TASK-shaped prompt (a work order, not a question) with no cue that
+    memory exists -- ``query`` must not end in ``?`` or contain an
+    :data:`_INTERROGATIVE_DENYLIST` phrase. Structurally it is the same
+    breadcrumb-then-wikilink shape as ``follow_through``: a task-context
+    page in ``expected_uids`` that shares a content term with ``query`` (the
+    "obvious fix" surface a task-shaped prompt itself reaches), linked by a
+    body ``[[wikilink]]`` to a decision/lesson page whose body, ``uid``,
+    ``name``, and ``tags`` share no content term (exact, or the same
+    ``_shares_stemmed_term`` stemmed prefix) with ``query`` and that carries
+    the planted ``answer_tokens`` value. Unlike ``follow_through``, the
+    task-context page need not be an incomplete answer on its own -- the
+    property this class isolates is the prompt giving no cue to consult the
+    second page, not the first page being unusable. A separate DECOY page
+    (never in ``expected_uids``) states the plausible-but-wrong "just do it"
+    fix and carries the probe's ``forbidden_tokens`` value, so a correct
+    answer is graded by both ``grade_correctness`` (cites the decision
+    page's token) and ``grade_harm`` (avoids the decoy page's token).
     """
 
     id: str
@@ -1100,6 +1125,89 @@ def validate_core(pages: list[Page], probes: list[Probe]) -> list[str]:
                     "expected_uids page lexically reachable from the query (the inverse of "
                     "the follow_through check) -- otherwise this is a follow_through probe "
                     "filed under the wrong class"
+                )
+        if probe.probe_class == "unprompted_push":
+            # Issue athenaeum#1778, athenaeum#1791 §3.1: five checks.
+            #
+            # (1)/(2)/(3) mirror the follow_through qualifying-hop check
+            # above -- a task-context page in expected_uids that shares a
+            # content term with the query (the "obvious fix" breadcrumb a
+            # task-shaped prompt itself reaches, checked lexically the same
+            # way `distractor_terms` competition works elsewhere), reached
+            # by a body [[wikilink]] (`_body_wikilink_targets`, never a
+            # frontmatter-only `related`/`links` edge -- same asymmetry
+            # `follow_through` guards) to a decision/lesson page whose body,
+            # uid, name, and tags share no content term (exact, or a
+            # >=5-character stemmed prefix) with the query, and that carries
+            # a planted `answer_tokens` value. Unlike `follow_through`, the
+            # task-context page is not required to be an incomplete answer
+            # on its own -- the property this class isolates is that the
+            # PROMPT gives no cue to consult the decision page, not that the
+            # first page is unusable.
+            #
+            # (4) `forbidden_tokens` must be present (the mechanism itself --
+            # plantable on a decoy page, absent from every expected_uids
+            # page, colliding with no `answer_tokens` value -- is the
+            # generic athenaeum#1772 check above, which runs for every probe
+            # class already).
+            #
+            # (5) the prompt must be task-shaped, not question-shaped: no
+            # trailing "?" and none of :data:`_INTERROGATIVE_DENYLIST`.
+            stripped_query = probe.query.strip()
+            lowered_query = stripped_query.lower()
+            if stripped_query.endswith("?") or any(
+                phrase in lowered_query for phrase in _INTERROGATIVE_DENYLIST
+            ):
+                problems.append(
+                    f"probe {probe.id!r}: unprompted_push probes must be task-shaped, not "
+                    "question-shaped -- query ends in '?' or contains an interrogative cue "
+                    f"from {_INTERROGATIVE_DENYLIST!r}"
+                )
+            if not probe.forbidden_tokens:
+                problems.append(
+                    f"probe {probe.id!r}: unprompted_push probes must plant at least one "
+                    "forbidden_tokens value on a decoy page (graded by grade_harm, issue "
+                    "athenaeum#1772)"
+                )
+            expected_pages = [
+                pages_by_uid[uid] for uid in probe.expected_uids if uid in pages_by_uid
+            ]
+            expected_uid_set = set(probe.expected_uids)
+            query_terms = _content_terms(probe.query)
+            reachable_pages = [
+                page for page in expected_pages if _content_terms(page.body) & query_terms
+            ]
+            if not reachable_pages:
+                problems.append(
+                    f"probe {probe.id!r}: unprompted_push needs a task-context page in "
+                    "expected_uids that shares a content term with the query -- the "
+                    "breadcrumb the task text itself reaches"
+                )
+            has_qualifying_hop = False
+            for page in reachable_pages:
+                for target_uid in _body_wikilink_targets(page.body):
+                    if target_uid == page.uid or target_uid not in expected_uid_set:
+                        continue
+                    target = pages_by_uid.get(target_uid)
+                    if target is None:
+                        continue
+                    if _content_terms(target.body) & query_terms:
+                        continue
+                    target_meta_terms = _content_terms(
+                        f"{target.uid.replace('-', ' ')} {target.name} {' '.join(target.tags)}"
+                    )
+                    if _shares_stemmed_term(target_meta_terms, query_terms):
+                        continue
+                    if not any(token in target.body for token in probe.answer_tokens):
+                        continue
+                    has_qualifying_hop = True
+            if not has_qualifying_hop:
+                problems.append(
+                    f"probe {probe.id!r}: unprompted_push probes need a body [[wikilink]] "
+                    "(not just a frontmatter related/links edge) from a task-context page "
+                    "that shares a content term with the query, to a decision/lesson page "
+                    "that carries a planted answer token and whose body, uid, name, and "
+                    "tags share no content term (including a stemmed prefix) with the query"
                 )
     for page in pages:
         for edge in page.related:

@@ -458,19 +458,13 @@ def test_the_full_grid_dry_run_prices_at_the_measured_mix(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Pins ``main``'s ``price_grid(per_cell=...)`` argument, which no other
-    test reaches: 2016 cells at 4,300 in / 850 out on Haiku 4.5 ($1/$5 per
-    MTok) is 2016 * $0.00855 = $17.2368. Repinned by athenaeum#1780's three
-    new ``aggregation`` probes (on top of athenaeum#1779's long-page repin)
-    together with athenaeum#1781 (item G)'s six new
-    contradiction/negative_knowledge probes -- the full grid's cell count is
-    ``probes * scales * arms``, so a probe-count change always shifts it,
-    same class of expected repin as ``Corpus.fingerprint()``. Cross-checked
-    against :func:`expected_full_grid_cells`, derived from the live probe
-    count, rather than trusted on the literal alone. ``--max-tokens`` is
-    bumped from 10,000,000 to 20,000,000 to clear the higher cell count's
-    projected 10,382,400 tokens (~5,150/cell estimate) -- the prior ceiling
-    was already tight against 1,728 cells (8,899,200 projected) and this
-    repin pushes past it."""
+    test reaches. PLACEHOLDER: re-derived after the athenaeum#1778
+    (``unprompted_push``, 3 probes) rebase onto develop b8683e18 (which
+    already carries athenaeum#1780's ``aggregation`` and athenaeum#1781's
+    ``contradiction``/``negative_knowledge`` repins) -- see the measured
+    values this docstring is updated to below. Cross-checked against
+    :func:`expected_full_grid_cells`, derived from the live probe count,
+    rather than trusted on the literal alone."""
     assert (
         expected_full_grid_cells(len(north_star_cli.DEFAULT_PROBES)) == 2016
     ), "expected_full_grid_cells drifted from the pinned literal below -- update both together"
