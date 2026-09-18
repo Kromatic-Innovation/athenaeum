@@ -3914,6 +3914,51 @@ exec "$REAL_AWK" "$@"
         finally:
             shutil.rmtree(divergent_cache, ignore_errors=True)
 
+    def test_fts5_query_does_not_match_body_only_term(
+        self, hook_env: dict[str, str]
+    ) -> None:
+        """Issue athenaeum#1789 (Quine follow-up): schema v6 added a
+        ``body`` column to the ``wiki`` FTS5 table
+        (``athenaeum.search.FTS5Backend``), which this hook's own raw FTS5
+        query never asked for -- before this fix, ``WHERE wiki MATCH
+        '${FTS_QUERY}'`` (no column filter) started matching body content
+        too, diluting this query's relevance the same way the Python-side
+        hybrid fusion's FTS5 arm was diluted (see
+        ``FTS5Backend.query``'s ``metadata_only`` parameter). Pins that the
+        hook's column-filter prefix (``{filename name tags aliases
+        description}: (...)``) restores the pre-v6 behavior: a page whose
+        ONLY matching term lives in its body must not surface through this
+        hook, exactly as it would not have before the FTS5 body column
+        existed.
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        wiki = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
+        (wiki / "body-only-term.md").write_text(
+            "---\n"
+            "name: Unrelated Title\n"
+            "tags: [misc]\n"
+            "description: Nothing about the query here\n"
+            "---\n\n"
+            "This body mentions zzzquokkabodyterm nowhere else on the page.\n"
+        )
+        self._seed_index(hook_env)
+
+        result = self._run_hook(hook_env, "tell me about zzzquokkabodyterm")
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        context = (
+            json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+            if result.stdout.strip()
+            else ""
+        )
+        assert "Unrelated Title" not in context, (
+            "a body-only term must not surface the page through the hook's "
+            f"FTS5 query (schema v6 body dilution regression): got {context!r}"
+        )
+
 
 class TestPreCompactSave:
     def test_emits_system_message_json(self, tmp_path: Path) -> None:

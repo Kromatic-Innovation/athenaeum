@@ -1591,11 +1591,43 @@ class FTS5Backend:
         # ``repo_not_person`` name-match win. Weight args are our own fixed
         # class constant (never user input), so inlining them is safe;
         # bm25()'s weight arguments are not bindable via ``?`` parameters.
-        bm25_expr = "bm25(wiki, " + ", ".join(str(w) for w in self._BM25_WEIGHTS) + ")"
+        #
+        # ``metadata_only`` uses this SAME weighted expression -- NOT the
+        # bare ``rank`` shorthand, despite ``rank`` being the literal
+        # pre-athenaeum#1789 expression this table's query path used. Bare
+        # ``rank`` was tried (issue athenaeum#1789 Quine follow-up) and
+        # measured to perform WORSE, not better: a develop-vs-head A/B
+        # (same corpus content, same MATCH restricted to the identical five
+        # columns via the column filter below) showed a document's score
+        # DIFFERS between a 7-column table (develop, no ``body`` column at
+        # all) and this table's 8-column shape (``body`` present but never
+        # MATCHED under the filter) -- e.g. one probe's expected page
+        # scored -23.2 (rank 1) on develop's schema and only -7.5 (rank 5)
+        # on this schema, using the IDENTICAL bare-``rank`` expression and
+        # IDENTICAL column-restricted MATCH. SQLite FTS5's bm25 statistics
+        # are computed TABLE-WIDE, not query-scoped: merely adding the
+        # ``body`` column to the table changes bm25's corpus-level
+        # normalization for every OTHER column, whether or not a given
+        # query's MATCH ever touches ``body``. This means
+        # ``metadata_only``, whatever weight profile it uses, CANNOT
+        # reproduce develop's ranking byte-for-byte while ``body`` lives in
+        # the same FTS5 table -- doing that would require a genuinely
+        # separate metadata-only table/index (a real second-index design,
+        # with its own manifest/incremental-build/schema-version
+        # machinery), which is out of this fix's scope. Reusing
+        # ``_BM25_WEIGHTS`` is the pragmatic choice given that ceiling:
+        # measured against the full probe set, it produces STRICTLY FEWER
+        # vector-backend regressions than bare ``rank`` does (20 vs 28
+        # (scale, probe) cases in ``_VECTOR_XFAIL``), even though neither
+        # is byte-identical to develop. See ``_VECTOR_XFAIL``'s own comment
+        # in ``tests/evals/test_recall_covers_grep.py`` for the full,
+        # pytest-measured account of what this parameter does and does not
+        # fix.
+        score_expr = "bm25(wiki, " + ", ".join(str(w) for w in self._BM25_WEIGHTS) + ")"
         conn = sqlite3.connect(str(db_path))
         try:
             cursor = conn.execute(
-                f"SELECT filename, name, {bm25_expr} AS score FROM wiki "
+                f"SELECT filename, name, {score_expr} AS score FROM wiki "
                 f"WHERE wiki MATCH ? {exclude_clause}{audience_clause}{type_clause} "
                 f"ORDER BY score LIMIT ?",
                 [fts_query, *params, *audience_params, *type_params, n],

@@ -794,8 +794,17 @@ class TestConvenienceFunctions:
         build_fts5_index(wiki_with_pages, cache)
         explicit_query = '"acme" OR "fintech"'
         results = query_fts5_index(explicit_query, cache)
-        filenames = [r[0] for r in results]
-        assert "acme-corp.md" in filenames
+        # Ordered results AND scores, not just membership: a caller of this
+        # shape is depending on the exact ranking, and a membership-only
+        # assertion would not have caught a reordering or a score drift
+        # from this issue's bm25 weight/body-indexing changes.
+        assert [r[0] for r in results] == ["acme-corp.md"]
+        assert results[0][1] == "Acme Corp"
+        assert results[0][2] == pytest.approx(-1.9025473882119777, rel=1e-6)
+        # Re-querying is deterministic -- the exact same explicit string
+        # produces byte-identical ordered results and scores every time,
+        # never a special-cased or non-reproducible path.
+        assert query_fts5_index(explicit_query, cache) == results
 
 
 class TestHybridRescueClasses:
@@ -1077,6 +1086,108 @@ def _write_page(
     if extra_fm:
         fm += extra_fm if extra_fm.endswith("\n") else extra_fm + "\n"
     (wiki / fname).write_text(f"---\n{fm}---\n\n{body}\n")
+
+
+class TestFTS5MetadataOnly:
+    """Issue athenaeum#1789 (Quine follow-up): ``FTS5Backend.query``'s
+    ``metadata_only`` parameter, in isolation from the wider
+    develop-vs-head ranking question (see ``_VECTOR_XFAIL``'s comment in
+    ``tests/evals/test_recall_covers_grep.py`` for that account).
+    """
+
+    @pytest.fixture
+    def body_only_wiki(self, tmp_path: Path) -> Path:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        (wiki / "body-only.md").write_text(
+            "---\n"
+            "name: Sample Page Seven\n"
+            "tags: [misc]\n"
+            "aliases: [nothing relevant]\n"
+            "description: Nothing about the query here\n"
+            "---\n\n"
+            "This body mentions zzzquokkabodyterm and elsewhereterm nowhere else.\n"
+        )
+        (wiki / "metadata-match.md").write_text(
+            "---\n"
+            "name: zzzquokkabodyterm Page\n"
+            "tags: [misc]\n"
+            "---\n\n"
+            "Unrelated body content.\n"
+        )
+        return wiki
+
+    def test_metadata_only_never_matches_body_only_term(
+        self, body_only_wiki: Path, tmp_path: Path
+    ) -> None:
+        cache = tmp_path / "cache"
+        FTS5Backend().build_index(body_only_wiki, cache)
+        # Sanity: with body indexed (default), the body-only term DOES
+        # match -- proves the fixture actually exercises body indexing.
+        default_results = FTS5Backend().query(
+            "zzzquokkabodyterm", cache, n=10, wiki_root=body_only_wiki
+        )
+        default_filenames = {r[0] for r in default_results}
+        assert "body-only.md" in default_filenames
+
+        # metadata_only=True must exclude the body-only page entirely --
+        # only the page matching in NAME surfaces.
+        meta_results = FTS5Backend().query(
+            "zzzquokkabodyterm", cache, n=10, wiki_root=body_only_wiki, metadata_only=True
+        )
+        meta_filenames = {r[0] for r in meta_results}
+        assert "body-only.md" not in meta_filenames
+        assert "metadata-match.md" in meta_filenames
+
+    def test_unparenthesized_column_filter_mutation_leaks_body(
+        self, body_only_wiki: Path, tmp_path: Path
+    ) -> None:
+        """Mutation-style regression test: proves the bug an unparenthesized
+        FTS5 column filter has, the one ``metadata_only``'s own
+        implementation avoids by wrapping its OR-expression in parens. If
+        a future edit strips those parens, this test catches it directly
+        against the SQL syntax rather than relying on an end-to-end ranking
+        assertion to notice.
+        """
+        cache = tmp_path / "cache"
+        FTS5Backend().build_index(body_only_wiki, cache)
+        db_path = cache / "wiki-index.db"
+
+        # The bug: {cols}: "a" OR "b" binds the column filter to ONLY the
+        # first term ("a"); "b" becomes an unrestricted, all-column
+        # (body-included) match.
+        buggy_query = (
+            '{filename name tags aliases description}: '
+            '"zzzquokkabodyterm" OR "elsewhereterm"'
+        )
+        conn = sqlite3.connect(str(db_path))
+        try:
+            rows = conn.execute(
+                "SELECT filename FROM wiki WHERE wiki MATCH ?", (buggy_query,)
+            ).fetchall()
+        finally:
+            conn.close()
+        filenames = {r[0] for r in rows}
+        assert "body-only.md" in filenames, (
+            "this pins the BUG shape itself (unparenthesized filter leaks "
+            "body matches) so a reader can see exactly what the parens in "
+            "FTS5Backend.query's metadata_only implementation prevent"
+        )
+
+        # The fix: parenthesizing the OR-expression scopes BOTH terms.
+        fixed_query = (
+            '{filename name tags aliases description}: '
+            '("zzzquokkabodyterm" OR "elsewhereterm")'
+        )
+        conn = sqlite3.connect(str(db_path))
+        try:
+            rows = conn.execute(
+                "SELECT filename FROM wiki WHERE wiki MATCH ?", (fixed_query,)
+            ).fetchall()
+        finally:
+            conn.close()
+        filenames = {r[0] for r in rows}
+        assert "body-only.md" not in filenames
 
 
 class TestFTS5PersonRepoDisambiguation:

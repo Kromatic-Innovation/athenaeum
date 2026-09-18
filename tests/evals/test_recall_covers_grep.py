@@ -654,12 +654,36 @@ _FTS5_XFAIL: frozenset[tuple[str, str]] = frozenset(
 #: athenaeum#1789 (FTS5 body-indexing) landed, then rebasing onto
 #: athenaeum#1792 exposed a cross-lane interaction: the fusion's FTS5 arm
 #: consumes FTS5's ranking, and once FTS5 could see page body content that
-#: ranking shifted, regressing four cases: ``person_not_repo``/
-#: ``ratecard_tooling_owner``/``keelbridge_programme_scope`` (core) and
-#: ``callum_drews_last_contact`` (medium). A sweep of ``_BM25_WEIGHTS``'s
+#: ranking shifted. **Corrected finding (Quine review of PR #1807):** an
+#: A/B against `develop` @ e2ee32ef showed ALL FOUR of
+#: ``person_not_repo``/``ratecard_tooling_owner``/``keelbridge_programme_scope``
+#: (core) and ``callum_drews_last_contact`` (medium) PASS on develop and
+#: FAIL on this branch. These are regressions THIS ISSUE introduced, not
+#: cases inherited from a later rebase onto athenaeum#1779's long_page
+#: tier -- an earlier version of this comment attributed two of them to
+#: that rebase; that attribution was wrong. A sweep of ``_BM25_WEIGHTS``'s
 #: body component (0.001 through 1.0) could not clear all four without
 #: breaking the coverage fix the six ORIGINALLY-reported gains depend on --
 #: the two goals pull the same knob in opposite directions.
+#:
+#: ROOT-CAUSE MECHANISM, established by a second, more precise A/B: it is
+#: NOT the column weights. Restricting the MATCH to the identical five
+#: metadata columns on BOTH develop's 7-column table and this branch's
+#: 8-column table (``body`` added, present but never matched under the
+#: restriction), and scoring both with the IDENTICAL bare ``rank``
+#: expression, still produces DIFFERENT scores for the same document: one
+#: probe's expected page scored -23.2 (rank 1) on develop's schema and
+#: -7.5 (rank 5) on this schema. SQLite FTS5's bm25 statistics are
+#: TABLE-WIDE, not query-scoped -- merely adding the ``body`` column
+#: changes bm25's corpus-level normalization for every other column,
+#: whether or not a given query's MATCH ever reaches ``body``. This means
+#: NO column-filter-based ``metadata_only`` query, at any weight, can
+#: reproduce develop's ranking byte-for-byte while ``body`` lives in the
+#: same FTS5 table -- true byte-parity would need a genuinely separate
+#: metadata-only table/index (its own manifest/incremental-build/schema-
+#: version machinery), which is a real second-index design, out of this
+#: fix's scope. See ``FTS5Backend.query``'s ``metadata_only`` docstring
+#: for the full A/B (schemas, scores, query string, DB paths).
 #:
 #: FIX: ``FTS5Backend.query``'s ``metadata_only`` parameter (issue
 #: athenaeum#1789), wired into ``recall_search``'s hybrid FTS5 arm ONLY --
@@ -669,36 +693,17 @@ _FTS5_XFAIL: frozenset[tuple[str, str]] = frozenset(
 #: FTS5Backend.query docstring for a real bug this caught: unparenthesized,
 #: the filter binds only the FIRST OR-clause and silently lets every other
 #: term match unrestricted, including body) to exclude ``body`` from the
-#: MATCH for that one caller. Cleared the ``core`` disambiguation-guard
-#: regression outright (``test_person_repo_disambiguation_excludes_wrong_page_vector``
-#: -- asserted separately, not in this set). The ``medium``-scale
-#: ``person_not_repo``/``ratecard_tooling_owner`` coverage cases remain
-#: failing (below) -- a DIFFERENT, harder case: at ``medium`` scale
-#: ``project-pricing-review`` (one of two expected pages) drops out of the
-#: fused top 5 entirely, crowded out by ballast under the lexical stub,
-#: which ``metadata_only`` alone does not fix. Did NOT clear
-#: ``keelbridge_programme_scope``/``callum_drews_last_contact`` -- both
-#: still fail, with a candidate list unrelated to either query, under the
-#: SAME lexical stub the six gains were measured against; not further
-#: root-caused (see the athenaeum#1789 PR body for what was ruled out:
-#: index row count is correct, the hook subprocess is not the cause, the
-#: SAME persisted store queried outside pytest is only consistent using
-#: the REAL model, which is not what's being compared here).
+#: MATCH for that one caller. Scores with the SAME ``_BM25_WEIGHTS``
+#: profile the non-metadata_only path uses -- bare ``rank`` was tried and
+#: measured WORSE (28 (scale, probe) failures across the full probe set
+#: vs 20 with the weighted profile), given that true byte-parity is
+#: already ruled out by the mechanism above.
 #:
-#: TRADEOFF, exactly as ``metadata_only`` implies: excluding ``body`` from
-#: the fusion's FTS5 arm gives back MOST of the six ORIGINALLY-reported
-#: gains (``confidentiality_rule``/``budget_threshold_current`` at both
-#: scales, ``standup_time_current`` at medium -- re-added below);
-#: ``portal_design_reviewer``/``onboarding_length`` (medium) turned out to
-#: also depend on the same rebase-shifted corpus that produced the two NEW
-#: cases below and now pass -- not re-added. Net effect measured through
-#: pytest, after rebasing onto athenaeum#1779's long_page tier (PR #1808,
-#: which also shifted the medium corpus enough to flip some of these):
-#: person_not_repo (core, the disambiguation guard) and
-#: ratecard_tooling_owner (core) are genuine fixes, not in this set;
-#: ``bramfield_retainer_renewal``/``lighthouse_migration_rollback``
-#: (medium) are two NEW regressions the rebase exposed, added below
-#: alongside the two that predate it.
+#: RESULT: cleared the ``core`` disambiguation-guard regression outright
+#: (``test_person_repo_disambiguation_excludes_wrong_page_vector`` --
+#: asserted separately, not in this set). Did NOT clear the other three
+#: named regressions, or the six originally-reported gains in full -- see
+#: the entries and their own notes below for exactly what changed.
 _VECTOR_XFAIL: frozenset[tuple[str, str]] = frozenset(
     {
         ("core", "pto_allowance"),
@@ -706,28 +711,40 @@ _VECTOR_XFAIL: frozenset[tuple[str, str]] = frozenset(
         ("core", "budget_threshold_current"),
         ("core", "surname_is_ambiguous"),
         ("core", "former_client_not_current"),
+        #: Regression introduced by this issue (see the mechanism note
+        #: above) -- passes on develop @ e2ee32ef, fails here.
         ("core", "keelbridge_programme_scope"),
         ("medium", "pto_allowance"),
         ("medium", "confidentiality_rule"),
+        #: Regression introduced by this issue -- passes on develop, fails
+        #: here (see the mechanism note above).
         ("medium", "ratecard_tooling_owner"),
         ("medium", "standup_time_current"),
         ("medium", "budget_threshold_current"),
         ("medium", "tamsin_ferro_role_change"),
+        #: Regression introduced by this issue -- passes on develop, fails
+        #: here (see the mechanism note above). NOT the disambiguation
+        #: guard (that's fixed at core scale, see RESULT above) -- this is
+        #: the coverage case at medium scale, a harder failure: one of two
+        #: expected pages (``project-pricing-review``) drops out of the
+        #: fused top 5 entirely, crowded out under the lexical embedding
+        #: stub (see the module-level note above on ``_offline_embedding_function``).
         ("medium", "person_not_repo"),
         ("medium", "surname_is_ambiguous"),
         ("medium", "given_name_is_ambiguous"),
         ("medium", "former_client_not_current"),
+        #: Regression introduced by this issue -- passes on develop, fails
+        #: here (see the mechanism note above).
         ("medium", "keelbridge_programme_scope"),
         ("medium", "callum_drews_last_contact"),
-        #: New (post-athenaeum#1789), not in the original 17 -- rebasing onto
-        #: athenaeum#1779's long_page tier (PR #1808) shifted the medium
-        #: corpus's ballast/candidate pool enough that these two -- like
-        #: ``keelbridge_programme_scope``/``callum_drews_last_contact``
-        #: above -- now fail on the vector backend where they passed both
-        #: pre-athenaeum#1789 and immediately post-athenaeum#1789 (measured
-        #: against e2ee32ef before this issue's rebase). Not investigated
-        #: further given this issue's scope; flagged for the athenaeum#1792
-        #: lane alongside the other unresolved regressions above.
+        #: Regression introduced by this issue, same mechanism -- passes
+        #: on develop @ e2ee32ef (confirmed directly, not inferred),
+        #: fails here. ``bramfield_retainer_renewal``/
+        #: ``lighthouse_migration_rollback`` are probes added by
+        #: athenaeum#1779's long_page tier; develop already has them and
+        #: passes them, so this is this issue's regression, not
+        #: corpus-shift collateral -- an earlier version of this comment
+        #: said otherwise and was wrong (Quine review of PR #1807).
         ("medium", "bramfield_retainer_renewal"),
         ("medium", "lighthouse_migration_rollback"),
     }

@@ -10,36 +10,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **The cross-lane regression athenaeum#1789's FTS5 body-indexing caused in
-  athenaeum#1792's hybrid fusion, addressed on the FTS5 seam (issue
-  athenaeum#1789).** `FTS5Backend.query` gains a `metadata_only` parameter,
-  wired into `recall_search`'s hybrid FTS5 arm only (direct
+  athenaeum#1792's hybrid fusion (`recall.hybrid.{fts5_weight,guard_rank,k}`),
+  addressed on the FTS5 seam (issue athenaeum#1789, Quine review of PR
+  #1807).** `FTS5Backend.query` gains a `metadata_only` parameter, wired
+  into `recall_search`'s hybrid FTS5 arm only (direct
   `search_backend="fts5"` recall is unaffected) — it uses FTS5's own
   `{col1 col2}: (query)` column-filter syntax to exclude `body` from the
-  MATCH for that one caller, reverting the fusion's FTS5 arm to
-  (approximately) its pre-athenaeum#1789 candidate set without a second
-  index or touching `reciprocal_rank_fusion`. Found and fixed a real bug
-  along the way: the column filter must wrap its OR-expression in
-  parentheses (`{cols}: (a OR b)`) — unparenthesized, FTS5 binds the filter
-  to only the first term and silently matches every other term
-  unrestricted, including body, defeating the whole point. Net effect,
-  measured through pytest's actual test substrate (see the note below):
-  the `core`-scale `person_not_repo` disambiguation guard is fixed
-  outright; `medium`-scale `person_not_repo`/`ratecard_tooling_owner` and
-  both scales' `keelbridge_programme_scope`/`callum_drews_last_contact`
-  remain unresolved and stay in `_VECTOR_XFAIL`; the six originally-reported
-  coverage gains (`confidentiality_rule`/`budget_threshold_current` at both
-  scales, `portal_design_reviewer`/`standup_time_current` at medium) are
-  given back, plus one previously-unrelated case
-  (`medium/onboarding_length`) that turned out to depend on the same
-  fusion path. **Methodology note that cost real time:** the default pytest
-  suite replaces chromadb's real embedding model with a deterministic
-  lexical (hashing bag-of-words) stand-in (`tests/conftest.py`'s
+  MATCH for that one caller. Found and fixed a real bug along the way: the
+  column filter must wrap its OR-expression in parentheses
+  (`{cols}: (a OR b)`) — unparenthesized, FTS5 binds the filter to only the
+  first term and silently matches every other term unrestricted, including
+  body, defeating the whole point (this hook the shipped
+  `examples/claude-code/user-prompt-recall.sh` FTS5 query too, for the
+  same reason: it was diluted by body at equal weight with no column
+  filter at all — fixed with the same parenthesized filter; giving the
+  hook body matching WITH weighting is athenaeum#1798's scope, not this
+  fix's).
+  **True byte-parity with pre-athenaeum#1789 ranking is not achievable
+  by column-filtering alone** — a develop-vs-head A/B (identical corpus
+  content, identical bare-`rank` scoring, MATCH restricted to the
+  identical five columns on both a 7-column table with no `body` column
+  at all and this branch's 8-column table with `body` present but never
+  matched) showed materially different scores for the same document (one
+  probe's expected page: rank 1 on the 7-column table, rank 5 on the
+  8-column table). SQLite FTS5's bm25 statistics are table-wide, not
+  query-scoped: merely adding the `body` column changes bm25's
+  corpus-level normalization for every other column, matched or not. Bare
+  `rank` was tried for `metadata_only` and measured to perform WORSE than
+  reusing the existing weighted `_BM25_WEIGHTS` profile (28 vs 20
+  (scale, probe) failures across the full probe set), so the weighted
+  profile is kept; see `FTS5Backend.query`'s `metadata_only` docstring and
+  `_VECTOR_XFAIL`'s comment in `tests/evals/test_recall_covers_grep.py`
+  for the full A/B.
+  Net effect, measured through pytest's actual test substrate (see the
+  methodology note below — an earlier pass of this fix used a standalone
+  script and drew wrong conclusions): the `core`-scale `person_not_repo`
+  disambiguation guard is fixed outright; three regressions this issue
+  introduced remain unresolved and stay in `_VECTOR_XFAIL` —
+  `core/keelbridge_programme_scope`, `medium/callum_drews_last_contact`,
+  `medium/person_not_repo` (coverage case)/`ratecard_tooling_owner` — all
+  four confirmed via A/B against `develop` @ e2ee32ef to PASS there and
+  FAIL on this branch (an earlier version of this changelog entry
+  incorrectly attributed some of these to a later rebase onto
+  athenaeum#1779's long_page tier — that attribution was wrong, corrected
+  per Quine review); most of the six originally-reported coverage gains
+  are given back as this fix's stated tradeoff.
+  **Methodology note that cost real time:** the default pytest suite
+  replaces chromadb's real embedding model with a deterministic lexical
+  (hashing bag-of-words) stand-in (`tests/conftest.py`'s
   `_offline_embedding_function`, issue athenaeum#1091) — a standalone
   script that imports `athenaeum` directly uses the real, network-fetched
   model instead and shows different, better-looking results that do not
   reflect what CI actually runs. Every number above was verified through
-  `pytest`, not a standalone script; see `_VECTOR_XFAIL`'s own comment in
-  `tests/evals/test_recall_covers_grep.py` for the full account.
+  `pytest`, not a standalone script; see `docs/design/native-memory-baseline.md`
+  §5 for how to opt into the real model locally, and `_VECTOR_XFAIL`'s own
+  comment in `tests/evals/test_recall_covers_grep.py` for the full account.
+  Cites athenaeum#1789, athenaeum#1798, athenaeum#1800.
 
 - **FTS5 never indexed a page's body, only its frontmatter — the root cause
   of two of the six `_FTS5_XFAIL` misses in
