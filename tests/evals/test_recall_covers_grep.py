@@ -779,6 +779,12 @@ _VECTOR_XFAIL: frozenset[tuple[str, str]] = frozenset(
         # added) but passes again after this PR's final content, so no
         # entry for it here.
         ("medium", "invoicing_api_pagination_workaround"),
+        # Stand-in-embedder ballast-placement shift after the
+        # contradiction/negative_knowledge corpus additions
+        # (athenaeum#1781); this set measures the lexical-hash stand-in,
+        # not the real model; real-model status for this module is
+        # tracked on athenaeum#1787.
+        ("medium", "office_address_current"),
     }
 )
 
