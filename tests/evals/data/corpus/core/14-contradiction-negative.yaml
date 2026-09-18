@@ -1,0 +1,234 @@
+# contradiction / negative_knowledge probe pairs (issue athenaeum#1781,
+# athenaeum#1791 §3.2/§3.3). Invented; see ../README.md for the content
+# policy.
+#
+# --- contradiction (§3.2) ---------------------------------------------------
+#
+# Two shapes, both graded by `grade_correctness` (answer_tokens cited) AND
+# `grade_harm` (forbidden_tokens absent) together -- correct means both hold.
+#
+# Shape (a), "supersession by an unfound page" (pairs 1-2 below): the query
+# lexically reaches a STALE page (same `superseded_by:` convention as
+# `05-temporal.yaml`) that carries a forbidden token, linked by a body
+# `[[wikilink]]` to a superseding page that carries the answer token and
+# shares NO content term with the query -- so nothing but the link/
+# `superseded_by:` edge can surface the correct page; the query's own
+# vocabulary only ever lands on the stale one.
+#
+# Shape (b), "deprecated knowledge" (pair 3 below; operator-added scenario,
+# athenaeum#1781 comment 2026-09-17): a TASK-phrased prompt lexically
+# reaches a stale WORKAROUND page (grep and native find it -- deliberately
+# NOT lexically unreachable, the opposite of shape (a) and of the
+# `follow_through` class), which carries a forbidden token, linked to a
+# retraction/deprecation page that carries the answer token and itself
+# links BACK to the stale page. The failure to measure: a keyword search on
+# the task lands on the stale workaround and the agent applies it; correct
+# behaviour surfaces that the page is superseded and answers from the
+# retraction.
+#
+# --- negative_knowledge (§3.3, use case 2.4) --------------------------------
+#
+# "We are about to do X again -- what went wrong last time?" The retro/
+# lesson page is the answer and is deliberately grep-reachable (the INVERSE
+# of the `follow_through` lexical-unreachability check -- a
+# `negative_knowledge` probe whose retro page is lexically unreachable is a
+# `follow_through` probe filed under the wrong class). A forbidden token
+# sits on a separate "naive plan" decoy page that repeats the mistake the
+# retro warns against.
+
+# --- contradiction, shape (a): supersession by an unfound page -------------
+
+- uid: policy-expense-approval-stale
+  type: note
+  name: Expense approval limit (prior policy)
+  tags: [finance, superseded]
+  source_ref: "session-2025-11-03"
+  created: 2025-11-03
+  updated: 2026-06-01
+  links: [policy-disbursement-ceiling-team-leads]
+  superseded_by: "Disbursement Ceiling for Team Leads"
+  body: |
+    # Expense approval limit (prior policy)
+
+    Under the prior policy, a manager's expense approval limit was governed
+    by the Duskwarren tier: spend up to that tier's cap was approved by the
+    manager alone, and anything above it required a second sign-off.
+
+    See [[policy-disbursement-ceiling-team-leads]] for the current policy.
+
+- uid: policy-disbursement-ceiling-team-leads
+  type: note
+  name: Disbursement Ceiling for Team Leads
+  tags: [finance, current]
+  source_ref: "session-2026-06-01"
+  created: 2026-06-01
+  updated: 2026-06-01
+  body: |
+    # Disbursement Ceiling for Team Leads
+
+    Team leads may sign off spending up to 750 GBP without further
+    escalation, reviewed quarterly by finance operations.
+
+    Internal reference tag: Larkspire.
+
+- uid: policy-overtime-approval-stale
+  type: note
+  name: Overtime request approval (prior policy)
+  tags: [people, superseded]
+  source_ref: "session-2025-10-12"
+  created: 2025-10-12
+  updated: 2026-05-20
+  links: [policy-extra-hours-signoff-chain]
+  superseded_by: "Extra-Hours Sign-off Chain"
+  body: |
+    # Overtime request approval (prior policy)
+
+    Overtime requests for the delivery team were approved directly by
+    Brackenfall, the resourcing lead, with no further review.
+
+    See [[policy-extra-hours-signoff-chain]] for the current chain.
+
+- uid: policy-extra-hours-signoff-chain
+  type: note
+  name: Extra-Hours Sign-off Chain
+  tags: [people, current]
+  source_ref: "session-2026-05-20"
+  created: 2026-05-20
+  updated: 2026-05-20
+  body: |
+    # Extra-Hours Sign-off Chain
+
+    Additional hours worked by any client-facing pod now route through the
+    pod's staffing coordinator for confirmation before payroll cutoff.
+
+    Internal reference tag: Hollowmere.
+
+# --- contradiction, shape (b): deprecated knowledge -------------------------
+
+- uid: workaround-invoicing-api-pagination
+  type: note
+  name: Invoicing API pagination workaround
+  tags: [engineering, workaround, superseded]
+  source_ref: "session-2026-02-18"
+  created: 2026-02-18
+  updated: 2026-06-10
+  links: [notice-invoicing-api-batch-fetch]
+  superseded_by: "Invoicing API Batch Fetch Notice"
+  body: |
+    # Invoicing API pagination workaround
+
+    TASK: when the reporting sync fails with a pagination error from the
+    invoicing API, enable the Ashencroft compatibility flag and page
+    through results in batches of 50, stitching them together client-side
+    before writing the report.
+
+    See [[notice-invoicing-api-batch-fetch]] for the current guidance.
+
+- uid: notice-invoicing-api-batch-fetch
+  type: note
+  name: Invoicing API Batch Fetch Notice
+  tags: [engineering, current, retraction]
+  source_ref: "session-2026-06-10"
+  created: 2026-06-10
+  updated: 2026-06-10
+  body: |
+    # Invoicing API Batch Fetch Notice
+
+    The invoicing API vendor shipped native batch fetching in June 2026, so
+    the manual pagination-stitching workaround described in
+    [[workaround-invoicing-api-pagination]] is retired. Call the /batch
+    endpoint once instead of paging by hand.
+
+    Internal reference tag: Grimstone.
+
+# --- negative_knowledge (use case 2.4) --------------------------------------
+
+- uid: note-regional-office-onboarding-retro
+  type: note
+  name: Regional office onboarding retro
+  tags: [retro, delivery]
+  source_ref: "session-2026-04-22"
+  created: 2026-04-22
+  updated: 2026-04-22
+  body: |
+    # Regional office onboarding retro
+
+    Onboarding a client with several regional offices took an extra two
+    weeks because each office needed its own primary contact record, and
+    that requirement was not discovered until the second week.
+
+    Internal reference tag: Pemberwick.
+
+- uid: plan-regional-office-onboarding-naive
+  type: note
+  name: Regional office onboarding plan (draft)
+  tags: [plan, delivery]
+  source_ref: "session-2026-07-01"
+  created: 2026-07-01
+  updated: 2026-07-01
+  body: |
+    # Regional office onboarding plan (draft)
+
+    For the next client with regional offices, use the Rustvane
+    shared-contact template to create a single contact record covering all
+    offices, to save setup time.
+
+- uid: note-vendor-migration-script-retro
+  type: note
+  name: Vendor migration script retro
+  tags: [retro, engineering]
+  source_ref: "session-2026-03-30"
+  created: 2026-03-30
+  updated: 2026-03-30
+  body: |
+    # Vendor migration script retro
+
+    Running the vendor migration script overnight without a dry run caused
+    a partial write that took the whole next day to reconcile, because the
+    script did not checkpoint progress.
+
+    Internal reference tag: Windemoor.
+
+- uid: plan-vendor-migration-rerun-naive
+  type: note
+  name: Vendor migration rerun plan (draft)
+  tags: [plan, engineering]
+  source_ref: "session-2026-07-05"
+  created: 2026-07-05
+  updated: 2026-07-05
+  body: |
+    # Vendor migration rerun plan (draft)
+
+    Just re-run the vendor migration script overnight again using the
+    existing Cloverstitch run profile, with no changes; it should be fine
+    this time.
+
+- uid: note-junior-analyst-ramp-retro
+  type: note
+  name: Junior analyst ramp plan retro
+  tags: [retro, people]
+  source_ref: "session-2026-02-11"
+  created: 2026-02-11
+  updated: 2026-02-11
+  body: |
+    # Junior analyst ramp plan retro
+
+    The last junior analyst ramp plan assumed shadowing alone was enough,
+    but the analyst had no hands-on client exposure until week six because
+    no practice ticket queue existed yet.
+
+    Internal reference tag: Fenwallow.
+
+- uid: plan-junior-analyst-ramp-naive
+  type: note
+  name: Junior analyst ramp plan (draft)
+  tags: [plan, people]
+  source_ref: "session-2026-07-09"
+  created: 2026-07-09
+  updated: 2026-07-09
+  body: |
+    # Junior analyst ramp plan (draft)
+
+    Repeat the same junior analyst ramp plan as before: shadowing only
+    under the Thornquill onboarding track for the first month, no separate
+    practice queue needed.
