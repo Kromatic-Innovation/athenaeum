@@ -30,7 +30,6 @@ from tests.evals.north_star_report import (
     NorthStarReport,
     RolloutRow,
     TurnCapCount,
-    _all_answer_markers,
     _all_answer_tokens,
     _is_abstention,
     _push_delivered_text,
@@ -1024,21 +1023,22 @@ def test_weak_probes_never_lists_an_abstention_probe_the_none_arm_got_right() ->
     assert weak_probes([abstaining_none_row, leaky_row]) == (pto_probe2.id,)
 
 
-def test_abstention_grades_correct_only_when_no_token_is_asserted() -> None:
-    """AC5: an abstention probe grades correct only when the answer asserts
-    NONE of the corpus's planted tokens and uses declining language -- one
-    fixture that asserts (confabulates another probe's token) and one that
-    genuinely abstains."""
+def test_abstention_grades_on_declining_language_not_on_token_absence() -> None:
+    """AC5 as amended by athenaeum#1836: an abstention probe grades correct
+    when the answer uses declining language, whether or not it also mentions
+    another probe's planted token -- a confident assertion with no declining
+    language grades wrong, a decline that cites a neighbouring true fact
+    grades right (operator ruling on athenaeum#1791: right is right)."""
     abstention_probe = _probe("abstain_unknown_client")
     assert abstention_probe.probe_class == "abstention"
     assert abstention_probe.answer_tokens == ()
 
-    confabulated_token = _probe("pto_allowance").answer_tokens[0]
+    neighbouring_token = _probe("pto_allowance").answer_tokens[0]
     asserting_answer = _record(
         arm=Arm.NONE,
         probe_id=abstention_probe.id,
         probe_class=abstention_probe.probe_class,
-        answer=f"Harrowgate Industrial's payment terms are set under {confabulated_token}.",
+        answer=f"Harrowgate Industrial's payment terms are set under {neighbouring_token}.",
     )
     assert grade_correctness(asserting_answer, abstention_probe, _CORPUS) is False
 
@@ -1049,6 +1049,17 @@ def test_abstention_grades_correct_only_when_no_token_is_asserted() -> None:
         answer="I don't know -- Harrowgate Industrial is not in the corpus.",
     )
     assert grade_correctness(abstaining_answer, abstention_probe, _CORPUS) is True
+
+    declining_with_neighbour = _record(
+        arm=Arm.NONE,
+        probe_id=abstention_probe.id,
+        probe_class=abstention_probe.probe_class,
+        answer=(
+            "I could not find Harrowgate Industrial in the knowledge base; the search "
+            f"only returned the PTO policy page (reference tag {neighbouring_token})."
+        ),
+    )
+    assert grade_correctness(declining_with_neighbour, abstention_probe, _CORPUS) is True
 
 
 # ---------------------------------------------------------------------------
@@ -1073,25 +1084,24 @@ def test_is_abstention_accepts_no_formal_policy_documented_phrasing() -> None:
     ), probe, _CORPUS) is True
 
 
-def test_is_abstention_rejects_a_confidently_wrong_answer_via_marker_leak() -> None:
-    """Required counter-example: 'the parental leave policy is 12 weeks' must
-    grade False -- a confident, specific answer, not a decline. Proven here
-    against the REAL marker-leak mechanism: an answer that leaks another
-    probe's planted answer_marker (pto_allowance's '25 days per year') must
-    grade False even though it uses the SAME absence vocabulary the
-    previous test proves True on its own."""
+def test_is_abstention_accepts_a_decline_that_cites_a_neighbouring_true_fact() -> None:
+    """The real medium-scale cells from run 35399179014: `pull` and
+    `native_index` both declined the parental-leave question AND quoted the
+    adjacent PTO fact they did find ('25 days per year'). A planted-marker
+    deny-list graded both wrong; under the athenaeum#1791 ruling they are
+    correct abstentions, so the marker must not fail them."""
     probe = _probe("abstain_unknown_policy")
     pto_probe = _probe("pto_allowance")
     _uid, marker = pto_probe.answer_markers[0]
-    assert marker in _all_answer_markers(_CORPUS)
 
-    leaking_answer = f"There is no formal policy, but note the PTO page says {marker}."
-    assert _is_abstention(leaking_answer, probe, _CORPUS) is False
+    citing_answer = (
+        "There is no formal parental leave policy documented; what is documented is "
+        f"the PTO policy: {marker}."
+    )
+    assert _is_abstention(citing_answer, probe, _CORPUS) is True
 
-    # The issue's own literal counter-example: no planted marker leaks here
-    # (this corpus's parental-leave probe carries no real answer, "12
-    # weeks" is not a planted fact) -- and it uses no absence phrasing
-    # either, so it fails on phrase-family grounds, not leak grounds.
+    # The issue's literal counter-example: a confident, specific value with
+    # no declining language fails on phrase grounds.
     assert _is_abstention("the parental leave policy is 12 weeks", probe, _CORPUS) is False
 
 
@@ -1102,14 +1112,6 @@ def test_is_abstention_rejects_a_tool_preamble() -> None:
     probe = _probe("abstain_unknown_client")
     answer = "Let me read the payment terms review page to get more detail:"
     assert _is_abstention(answer, probe, _CORPUS) is False
-
-
-def test_all_answer_markers_excludes_abstention_probes_by_construction() -> None:
-    """Isolation sanity check: abstention probes carry no answer_markers of
-    their own (validate_core enforces this), so _all_answer_markers is
-    always sourced from non-abstention probes."""
-    abstention_probe = _probe("abstain_unknown_policy")
-    assert abstention_probe.answer_markers == ()
 
 
 def test_correctness_rate_rendered_per_group() -> None:

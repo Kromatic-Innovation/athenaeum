@@ -313,13 +313,16 @@ def test_abstention_with_ref_none_still_grades_correct(probe_id: str) -> None:
     assert grade_correctness(record, probe, _CORPUS) is True
 
 
-def test_abstention_citing_a_real_tag_still_grades_wrong() -> None:
-    """The other half of AC2: a planted token in an abstention answer is a
-    confabulation-by-retrieval signal and stays incorrect, even when it
-    arrives inside a well-formed ``[ref: ...]`` citation and is wrapped in
-    declining language."""
+def test_abstention_citing_a_real_tag_grades_right_when_it_declines() -> None:
+    """athenaeum#1753 AC2's other half, AMENDED by athenaeum#1836 (operator
+    ruling on athenaeum#1791, applied on athenaeum#1736 from run
+    35399179014): a decline that also cites the neighbouring page it DID find
+    -- tag and all -- is a correct abstention, not confabulation-by-retrieval.
+    Every arm's honest medium-scale abstention on the parental-leave probe
+    quoted the adjacent PTO fact this way, and the old deny-list graded them
+    all wrong. A confident value with no declining language still fails."""
     probe = _probe("abstain_unknown_policy")
-    confabulated = _record(
+    declining_with_neighbour = _record(
         arm=Arm.ORACLE,
         probe_id=probe.id,
         probe_class=probe.probe_class,
@@ -328,7 +331,15 @@ def test_abstention_citing_a_real_tag_still_grades_wrong() -> None:
             "25 days.\n\n[ref: Cinderquill]"
         ),
     )
-    assert grade_correctness(confabulated, probe, _CORPUS) is False
+    assert grade_correctness(declining_with_neighbour, probe, _CORPUS) is True
+
+    confident = _record(
+        arm=Arm.ORACLE,
+        probe_id=probe.id,
+        probe_class=probe.probe_class,
+        answer="Parental leave is 25 days.\n\n[ref: Cinderquill]",
+    )
+    assert grade_correctness(confident, probe, _CORPUS) is False
 
 
 # ---------------------------------------------------------------------------
