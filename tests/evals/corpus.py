@@ -225,7 +225,18 @@ def _body_wikilink_targets(body: str) -> list[str]:
 # Bumped to 2 by issue athenaeum#1570: ``related:`` is now RENDERED into
 # frontmatter, so every page carrying an authored edge emits different bytes
 # than it did at version 1.
-GENERATOR_VERSION = 2
+# Bumped to 3 by issue athenaeum#1831: NOT a page-byte change --
+# ``Corpus.fingerprint()`` digests ``self.pages`` only, never ``self.probes``,
+# so a probes.yaml-only change (every probe's new ``answer_markers``) leaves
+# no page byte different and would otherwise leave the fingerprint
+# unchanged even though every probe's grading ground truth just changed.
+# Bumping the version constant is the deliberate, honest way to invalidate
+# comparison against any floor table recorded before this issue -- the AC's
+# own requirement ("Corpus.fingerprint() changes ... floor tables predating
+# it are not comparable") is otherwise unsatisfiable by construction. A
+# reader of a diff against this constant should NOT go looking for a page
+# content change; there isn't one.
+GENERATOR_VERSION = 3
 
 CORPUS_ROOT = Path(__file__).parent / "data" / "corpus"
 CORE_DIR = CORPUS_ROOT / "core"
@@ -437,6 +448,25 @@ class Probe:
     Empty for abstention probes -- there, correctness is graded by a
     separate rule (no token to plant when nothing answers the probe).
 
+    ``answer_markers`` (issue athenaeum#1831, operator ruling on athenaeum#1791
+    comment 5732689494: "grade the answer on content") is the CONTENT ground
+    truth ``grade_correctness`` actually grades on, replacing the
+    ``answer_tokens`` tag as the correctness criterion (the tag becomes a
+    report-only ``tag_followed`` diagnostic, see
+    ``tests.evals.north_star_report.grade_correctness``'s own docstring). Each
+    entry is a ``(uid, marker)`` pair: *marker* is the planted FACT itself
+    (a date, a number, a name -- never the ``Internal reference tag:``
+    token, and never a substring of ``query``, both enforced by
+    :func:`validate_core`), occurring literally in *uid*'s page body. Only
+    ANSWER-BEARING expected pages need an entry -- a page that plants one of
+    ``answer_tokens`` (see :func:`answer_bearing_uids`), NOT every
+    ``expected_uids`` page: a ``disambiguation``/``distractor_robustness``
+    probe's context pages, a ``redundancy`` probe's duplicate-fact pages
+    beyond the first, and a ``contradiction``/``negative_knowledge`` probe's
+    STALE page (which a correct answer must NOT assert) all stay retrieval-
+    only ground truth, exactly as ``answer_tokens`` already treats them.
+    Empty for abstention probes, mirroring ``answer_tokens``.
+
     ``follow_through`` (issue athenaeum#1737) is the class a good grep cannot
     pass by accident: the query surfaces one page (a breadcrumb) whose
     complete answer requires following a wikilink to a SECOND page the
@@ -582,6 +612,7 @@ class Probe:
     must_not_rank: tuple[str, ...] = ()
     distractor_terms: tuple[str, ...] = ()
     answer_tokens: tuple[str, ...] = ()
+    answer_markers: tuple[tuple[str, str], ...] = ()
     forbidden_tokens: tuple[str, ...] = ()
     note: str = ""
     report_only: bool = False
@@ -740,6 +771,16 @@ def load_probes() -> list[Probe]:
             must_not_rank=tuple(raw.get("must_not_rank", ())),
             distractor_terms=tuple(raw.get("distractor_terms", ())),
             answer_tokens=tuple(raw.get("answer_tokens", ())),
+            # Authored as a ``{uid: marker}`` mapping (order-independent at
+            # authoring time); re-ordered here to follow ``expected_uids``'s
+            # own order so two loads of the same yaml always produce the
+            # same tuple -- generation determinism (module docstring) would
+            # otherwise depend on the yaml library's dict-iteration order.
+            answer_markers=tuple(
+                (uid, (raw.get("answer_markers") or {})[uid])
+                for uid in raw.get("expected_uids", ())
+                if uid in (raw.get("answer_markers") or {})
+            ),
             forbidden_tokens=tuple(raw.get("forbidden_tokens", ())),
             note=raw.get("note", ""),
             report_only=bool(
@@ -749,6 +790,28 @@ def load_probes() -> list[Probe]:
         )
         for raw in _load_yaml(PROBES_PATH)
     ]
+
+
+def answer_bearing_uids(probe: "Probe", pages_by_uid: dict[str, "Page"]) -> tuple[str, ...]:
+    """*probe*'s ``expected_uids`` pages that actually carry one of its
+    ``answer_tokens`` values in their body -- the SAME substring test
+    :func:`validate_core`'s tag-line check already applies per page,
+    generalized into one reusable definition of "answer-bearing" (issue
+    athenaeum#1831) so :mod:`tests.evals.north_star_report`'s grader and
+    this module's own ``answer_markers`` validation never diverge on what
+    counts. A ``disambiguation``/``distractor_robustness`` probe's context
+    pages, a ``redundancy`` probe's non-planting duplicates, and a
+    ``contradiction``/``negative_knowledge`` probe's stale page are all
+    ``expected_uids`` (retrieval ground truth) without being answer-bearing
+    -- :func:`grade_correctness` must not require a marker+delivery pair for
+    those, only for the page(s) that actually plant the fact.
+    """
+    return tuple(
+        uid
+        for uid in probe.expected_uids
+        if uid in pages_by_uid
+        and any(token in pages_by_uid[uid].body for token in probe.answer_tokens)
+    )
 
 
 def validate_core(pages: list[Page], probes: list[Probe]) -> list[str]:
@@ -873,6 +936,58 @@ def validate_core(pages: list[Page], probes: list[Probe]) -> list[str]:
                         f"probe {probe.id!r}: answer_tokens value {token!r} does not occur on "
                         "an 'Internal reference tag:' line of any expected_uids page"
                     )
+        # Issue athenaeum#1831 (operator ruling on athenaeum#1791 comment
+        # 5732689494): `answer_markers` is the CONTENT ground truth
+        # `grade_correctness` now grades on. Same normalization as the
+        # `forbidden_tokens` collision check just above (plain `.lower()`,
+        # not `_content_terms` overlap -- a stemmed/term-set comparison would
+        # reject nearly every date/number marker, which is exactly the shape
+        # a marker is meant to be).
+        if probe.probe_class == "abstention":
+            if probe.answer_markers:
+                problems.append(f"probe {probe.id!r}: abstention probes must have no answer_markers")
+        else:
+            marker_uids = {uid for uid, _marker in probe.answer_markers}
+            expected_uid_set = set(probe.expected_uids)
+            for uid, _marker in probe.answer_markers:
+                if uid not in expected_uid_set:
+                    problems.append(
+                        f"probe {probe.id!r}: answer_markers names uid {uid!r} not in "
+                        "expected_uids"
+                    )
+            required_uids = set(answer_bearing_uids(probe, pages_by_uid))
+            missing = required_uids - marker_uids
+            if missing:
+                problems.append(
+                    f"probe {probe.id!r}: no answer_markers entry for answer-bearing "
+                    f"expected_uids page(s) {sorted(missing)}"
+                )
+            normalized_query = probe.query.lower()
+            normalized_tag_tokens = {tok.lower() for tok in probe.answer_tokens}
+            for uid, marker in probe.answer_markers:
+                normalized_marker = marker.lower()
+                page = pages_by_uid.get(uid)
+                if page is not None and marker not in page.body:
+                    problems.append(
+                        f"probe {probe.id!r}: answer_markers value {marker!r} does not occur "
+                        f"in expected_uids page {uid!r}'s body -- it must be plantable"
+                    )
+                if normalized_marker in normalized_query or normalized_query in normalized_marker:
+                    problems.append(
+                        f"probe {probe.id!r}: answer_markers value {marker!r} appears in the "
+                        "probe's own query -- a marker must be distinct from the query's "
+                        "vocabulary, not merely from the tag"
+                    )
+                for tag_token in normalized_tag_tokens:
+                    if normalized_marker == tag_token or (
+                        tag_token in normalized_marker or normalized_marker in tag_token
+                    ):
+                        problems.append(
+                            f"probe {probe.id!r}: answer_markers value {marker!r} collides "
+                            f"(as a normalized substring, either direction) with the "
+                            f"'Internal reference tag:' token {tag_token!r} -- a content "
+                            "marker must be distinct from the citation tag"
+                        )
         if probe.probe_class == "follow_through":
             expected_pages = [
                 pages_by_uid[uid] for uid in probe.expected_uids if uid in pages_by_uid
@@ -1352,6 +1467,19 @@ def validate_core(pages: list[Page], probes: list[Probe]) -> list[str]:
                         f"(as a normalized substring, either direction) with answer_tokens "
                         f"value {answer_token!r} somewhere in the corpus"
                     )
+            # Issue athenaeum#1831: the same collision guard, extended to
+            # `answer_markers` -- without it a correct, content-marker-citing
+            # answer could also contain a forbidden_tokens substring purely
+            # by textual accident and grade as harmful (or vice versa).
+            for marker_probe in probes:
+                for _uid, marker in marker_probe.answer_markers:
+                    normalized_marker = _normalized(marker)
+                    if normalized_token in normalized_marker or normalized_marker in normalized_token:
+                        problems.append(
+                            f"probe {probe.id!r}: forbidden_tokens value {token!r} collides "
+                            f"(as a normalized substring, either direction) with probe "
+                            f"{marker_probe.id!r}'s answer_markers value {marker!r}"
+                        )
             # Issue athenaeum#1811 (Quine review): a forbidden token planted
             # as a DETACHED marker line -- "Internal shorthand: Copperlatch."
             # -- is never something a model performing the harmful action

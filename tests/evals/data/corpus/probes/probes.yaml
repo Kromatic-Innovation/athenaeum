@@ -28,6 +28,7 @@
   must_not_rank: [pto-allowance-superseded]
   distractor_terms: ["PTO", "annual leave", "holiday allowance"]
   answer_tokens: ["Cinderquill"]
+  answer_markers: {policy-pto: "25 days per year"}
   note: >-
     must_not_rank (athenaeum#1777): the superseded temporal note shares almost
     all of "PTO allowance" vocabulary and titles itself with the current
@@ -41,6 +42,7 @@
   must_not_rank: [client-northgate]
   distractor_terms: ["confidentiality", "client disclosure"]
   answer_tokens: ["Harrowvex"]
+  answer_markers: {policy-confidentiality: "Nadia Frost"}
   note: >-
     must_not_rank (athenaeum#1777): Northgate's own page shares "client" and
     "engagement" with the query and states it "carries additional
@@ -55,6 +57,7 @@
   distractor_terms: ["Bluewater", "retainer terms"]
   must_not_rank: [obs-retainer-utilisation]
   answer_tokens: ["Thornmere"]
+  answer_markers: {client-bluewater: "Twelve consulting days per month"}
   note: >-
     Topic extraction is what rescues the proper noun "Bluewater" from the meta
     instruction "quote ... verbatim". A purely lexical extractor drops it.
@@ -70,6 +73,7 @@
   must_not_rank: [note-atlas-onboarding-review]
   distractor_terms: ["onboarding", "kickoff"]
   answer_tokens: ["Larkspindle"]
+  answer_markers: {policy-onboarding: "two weeks"}
   note: >-
     must_not_rank (athenaeum#1777): the Atlas onboarding review shares
     "onboarding" vocabulary heavily and reads like a plausible answer, but it
@@ -87,6 +91,7 @@
   must_not_rank: [budget-threshold-current]
   distractor_terms: ["discretionary spend", "500 GBP", "direct conversation"]
   answer_tokens: ["Voltmere"]
+  answer_markers: {person-amir-osei: "from a written note by itself"}
   note: >-
     The threshold and the finance partner's name (athenaeum#1768) live on the
     policy page; only his own page says he refuses to act on a written note
@@ -108,6 +113,7 @@
   must_not_rank: [project-portal-hosting]
   distractor_terms: ["portal", "launch"]
   answer_tokens: ["Greywisp"]
+  answer_markers: {person-hana-lindqvist: "a month afterward"}
   note: >-
     The project page names the design lead (athenaeum#1768); only her own
     page says the review is not a one-time launch gate -- she revisits every
@@ -126,6 +132,7 @@
   must_not_rank: [tool-gridbook]
   distractor_terms: ["rate card", "stopped working"]
   answer_tokens: ["Fennorack"]
+  answer_markers: {tool-buildpipe: "Tomas Briell"}
   note: >-
     The repository page identifies which repo produces the rate card
     (athenaeum#1768); who to loop in if its build tooling breaks is only on
@@ -148,6 +155,7 @@
   must_not_rank: [office-address-superseded]
   distractor_terms: ["office address", "Thornlea Wharf", "Alderway Row"]
   answer_tokens: ["Driftwick"]
+  answer_markers: {office-address-current: "suite 5B"}
   note: >-
     must_not_rank (athenaeum#1777): the former-address note shares the
     "office" term and gives a stale street address instead of the current
@@ -160,6 +168,7 @@
   must_not_rank: [standup-time-superseded]
   distractor_terms: ["standup", "9:00", "9:30"]
   answer_tokens: ["Emberlyn"]
+  answer_markers: {standup-time-current: "9:30 AM"}
   note: >-
     must_not_rank (athenaeum#1777): the former-time note shares "standup" and
     "time" vocabulary and gives the stale 9:00 slot instead of the current
@@ -172,6 +181,7 @@
   must_not_rank: [budget-threshold-superseded]
   distractor_terms: ["approval ceiling", "250 GBP", "500 GBP"]
   answer_tokens: ["Quorlinth"]
+  answer_markers: {budget-threshold-current: "500 GBP"}
   note: >-
     must_not_rank (athenaeum#1777): the former-threshold note shares
     "approval" and "ceiling" vocabulary and gives the stale 250 GBP figure
@@ -192,6 +202,7 @@
   must_not_rank: [contact-callum-drews-superseded]
   distractor_terms: ["Callum Drews", "last contact", "last spoke", "2 May 2026"]
   answer_tokens: ["Fenmoor"]
+  answer_markers: {person-callum-drews: "14 June 2026"}
   note: >-
     must_not_rank (athenaeum#1777): the superseded contact log shares
     "Callum", "Drews", and "last" vocabulary and logs the stale 2 May 2026
@@ -205,6 +216,7 @@
   must_not_rank: [contact-thorncastle-superseded]
   distractor_terms: ["Thorncastle", "first contact", "became a client", "November 2025"]
   answer_tokens: ["Quenfrost"]
+  answer_markers: {client-thorncastle: "9 February 2026"}
   note: >-
     must_not_rank (athenaeum#1777): the superseded first-contact log shares
     "Thorncastle" and "first" vocabulary and gives the stale November 2025
@@ -218,6 +230,7 @@
   must_not_rank: [role-tamsin-ferro-superseded]
   distractor_terms: ["Tamsin Ferro", "promoted", "engagement partner", "associate"]
   answer_tokens: ["Cindervane"]
+  answer_markers: {person-tamsin-ferro: "1 March 2026"}
   note: >-
     must_not_rank (athenaeum#1777): the superseded role note shares "Tamsin",
     "Ferro", and "role" vocabulary and gives the stale associate title
@@ -234,6 +247,7 @@
   must_not_rank: [repo-rowanwrenfield]
   distractor_terms: ["Rowan Wrenfield", "rowanwrenfield", "pricing"]
   answer_tokens: ["Ashcaldera"]
+  answer_markers: {person-rowan-wrenfield: "pricing committee"}
   note: >-
     A decision is made by a PERSON. The eponymous repository shares almost all
     of the query's vocabulary and must not outrank the person page.
@@ -246,6 +260,7 @@
   must_not_rank: [person-rowan-wrenfield]
   distractor_terms: ["rowanwrenfield", "maintainers", "repository"]
   answer_tokens: ["Brindlewake"]
+  answer_markers: {repo-rowanwrenfield: "4 maintainers"}
   note: >-
     The inverse direction -- the guard must not simply always prefer people.
     grep-reachable via: rowanwrenfield.
@@ -257,6 +272,7 @@
   must_not_rank: [org-wrenfield-associates]
   distractor_terms: ["Wrenfield", "Wrenfield Associates"]
   answer_tokens: ["Hollowmarsh"]
+  answer_markers: {person-tovah-wrenfield: "logistics business"}
   note: >-
     A bare surname is genuinely ambiguous across several people plus an org.
     The correct behaviour is to surface the ambiguity, not to answer
@@ -273,6 +289,7 @@
   must_not_rank: [project-pricing-review]
   distractor_terms: ["Rowan"]
   answer_tokens: ["Sablethorn"]
+  answer_markers: {person-rowan-deverell: "contract designer"}
   note: >-
     must_not_rank (athenaeum#1777): the pricing review's body names "Rowan
     Wrenfield" twice, so a keyword search on "Rowan" plausibly surfaces it --
@@ -312,6 +329,7 @@
   must_not_rank: [policy-invoice-cadence]
   distractor_terms: ["invoice", "billing", "milestone"]
   answer_tokens: ["Kestrelgate"]
+  answer_markers: {client-acme: "milestone completion"}
   note: >-
     The general cadence policy is a strong lexical match and the WRONG answer:
     Acme is a documented exception to it. grep-reachable via: acme.
@@ -323,6 +341,7 @@
   must_not_rank: [client-verity, client-solent]
   distractor_terms: ["retainer", "client"]
   answer_tokens: ["Trevanquil"]
+  answer_markers: {client-alderway: "12-person strategy consultancy"}
   note: >-
     Verity is a former client and Solent only a prospect. grep-reachable via:
     client-verity: retainer; client-solent: client (stemmed, "clients" vs
@@ -348,6 +367,7 @@
   must_not_rank: [team-keelbridge-desk]
   distractor_terms: ["Keelbridge", "programme", "berth scheduling"]
   answer_tokens: ["Vulmarsh"]
+  answer_markers: {project-keelbridge: "240 thousand GBP per year"}
   note: >-
     Redundancy probe. Both expected pages are the SAME entity written down
     twice; retrieving only one is the measurable cost of the entity split,
@@ -377,6 +397,7 @@
   expected_uids: [client-fenwick-systems, person-dara-holt]
   distractor_terms: ["Fenwick Systems", "retainer client", "relationship"]
   answer_tokens: ["Quillbrook", "Marrowfen"]
+  answer_markers: {client-fenwick-systems: "onboarded in 2026", person-dara-holt: "March budget cycle"}
   note: >-
     Relationship use case (docs/use-cases.md §2.1). The client page names the
     engagement lead but says nothing about a recurring checkpoint; only her
@@ -397,6 +418,7 @@
   expected_uids: [client-corvale-holdings, project-platform-cutover-programme]
   distractor_terms: ["Corvale Holdings", "retainer client", "migration"]
   answer_tokens: ["Halvorwick", "Ossmarl"]
+  answer_markers: {client-corvale-holdings: "since 2023", project-platform-cutover-programme: "six weeks"}
   note: >-
     Relationship use case (docs/use-cases.md §2.1). The client page names the
     migration programme but says nothing about it slipping; only the
@@ -419,6 +441,7 @@
   expected_uids: [project-pinemarsh-initiative, decision-tooling-budget-cap]
   distractor_terms: ["Pinemarsh initiative", "goal", "tooling consolidation"]
   answer_tokens: ["Tanglewrought", "Fendrickal"]
+  answer_markers: {project-pinemarsh-initiative: "cross-team handoff", decision-tooling-budget-cap: "forty engineer-days"}
   note: >-
     Rationale use case (docs/use-cases.md §2.2). The initiative page states
     the goal but not the constraint; only the decision page (athenaeum#1766)
@@ -439,6 +462,7 @@
   must_not_rank: [decision-retire-anchorline]
   distractor_terms: ["Gilcrest", "ticketing vendor", "pricing"]
   answer_tokens: ["Oakenspire", "Brindlemoor"]
+  answer_markers: {decision-ticketing-vendor-gilcrest: "per-seat pricing", person-mireille-santos: "initial quote came in above the approved budget line"}
   note: >-
     Decision use case (docs/use-cases.md §2.3, "who made this call?"). The
     decision page gives the pricing rationale but not the contract terms;
@@ -459,6 +483,7 @@
   must_not_rank: [ops-client-reporting]
   distractor_terms: ["Anchorline", "retire", "reporting tool"]
   answer_tokens: ["Verdantholt", "Sablecroft"]
+  answer_markers: {decision-retire-anchorline: "running unpatched software another quarter", system-ledgerfax-successor: "nightly cadence"}
   note: >-
     Decision use case (docs/use-cases.md §2.3). The decision page gives the
     security rationale but not how the replacement is consumed; only the
@@ -479,6 +504,7 @@
   must_not_rank: [note-atlas-onboarding-review]
   distractor_terms: ["subsidiaries", "onboarding", "retro"]
   answer_tokens: ["Wrenholt", "Copperfen"]
+  answer_markers: {note-subsidiary-onboarding-retro: "week three", policy-cost-center-billing-split: "single combined invoice"}
   note: >-
     Lesson use case (docs/use-cases.md §2.4). The retro names the missed
     contact-record requirement but not the billing rule; only the policy
@@ -510,6 +536,7 @@
   must_not_rank: [client-alderway]
   distractor_terms: ["Bramfield Crestwood", "retainer renewal", "renewal timeline"]
   answer_tokens: ["Glimmerhollow"]
+  answer_markers: {client-bramfield-crestwood: "monthly touchpoint"}
   note: >-
     Long-page tier (athenaeum#1779). The renewal-cycle question sits in the
     page's title and opening paragraph; the reference tag sits past
@@ -528,6 +555,7 @@
   must_not_rank: [ops-equipment-refresh]
   distractor_terms: ["equipment stipend", "remote employees", "stipend cap"]
   answer_tokens: ["Pallowrift"]
+  answer_markers: {policy-remote-equipment-stipend: "visible to each employee in the expense system"}
   note: >-
     Long-page tier (athenaeum#1779). Same shape as the retainer probe above:
     the policy topic is in the title, the tag line is past offset 400.
@@ -543,6 +571,7 @@
   must_not_rank: [project-portal-hosting]
   distractor_terms: ["Lighthouse migration", "rollback plan", "platform migration"]
   answer_tokens: ["Ambervost"]
+  answer_markers: {project-lighthouse-migration: "unresolved data-integrity tickets"}
   note: >-
     Long-page tier (athenaeum#1779). Same shape as the two probes above.
     must_not_rank (athenaeum#1777): Portal hosting migration shares
@@ -557,6 +586,7 @@
   must_not_rank: [decision-ticketing-vendor-gilcrest]
   distractor_terms: ["Triform", "vendor consolidation", "master agreement"]
   answer_tokens: ["Thistlemere"]
+  answer_markers: {decision-vendor-consolidation-triform: "quarterly usage review clause"}
   note: >-
     Long-page tier (athenaeum#1779). Same shape as the three probes above.
     must_not_rank (athenaeum#1777): the Gilcrest ticketing-vendor decision
@@ -605,6 +635,16 @@
       Duskhollow,
       Brambleworth,
     ]
+  answer_markers:
+    {
+      person-mika-thorne: "Castleford advisory engagement",
+      person-callan-reeve: "weekly status to each client lead",
+      person-edda-solberg: "project-based clients",
+      person-ravi-chand: "client's own operations team",
+      person-priyanka-sethi: "risk registers",
+      person-owen-blackwell: "rotating across accounts",
+      person-lena-varga: "weekly delivery standup",
+    }
   report_only: true
   note: >-
     Correct set size: 7 people, each with their own planted token -- a
@@ -656,6 +696,16 @@
       Ironveil,
       Ashenglow,
     ]
+  answer_markers:
+    {
+      client-alderway: "12-person strategy consultancy",
+      client-bluewater: "coastal logistics operator",
+      client-atlas: "haulage operator",
+      client-larchmoor: "fabric wholesaler",
+      client-dunmere: "data-services firm",
+      client-hollowick: "structurally identical to Atlas Freight's arrangement",
+      client-castleford: "board-level advisory",
+    }
   report_only: true
   note: >-
     Correct set size: 7 clients. Three (Alderway, Bluewater, Atlas) are
@@ -701,6 +751,15 @@
   distractor_terms: ["internal tool", "in-house", "software"]
   answer_tokens:
     [Fennorack, Larkwhistle, Nettlebriar, Palewick, Quietmarrow, Silvermoss]
+  answer_markers:
+    {
+      tool-buildpipe: "before anything ships",
+      tool-ledgerscribe: "invoicing tool",
+      tool-shiftboard: "spreadsheet-based rota",
+      tool-formready: "own templates",
+      tool-auditline: "which client record and when",
+      tool-rosterkeep: "worked which engagement over time",
+    }
   report_only: true
   note: >-
     Correct set size: 6 tools. tool-buildpipe is pre-existing
@@ -743,6 +802,7 @@
   must_not_rank: [policy-expense-approval-stale]
   distractor_terms: ["expense approval", "manager limit", "sign-off"]
   answer_tokens: ["Larkspire"]
+  answer_markers: {policy-disbursement-ceiling-team-leads: "750 GBP"}
   forbidden_tokens: ["Duskwarren"]
   note: >-
     Contradiction, shape (a) -- supersession by an unfound page (§3.2). The
@@ -762,6 +822,7 @@
   must_not_rank: [policy-overtime-approval-stale]
   distractor_terms: ["overtime approval", "delivery team", "sign-off chain"]
   answer_tokens: ["Hollowmere"]
+  answer_markers: {policy-extra-hours-signoff-chain: "staffing coordinator"}
   forbidden_tokens: ["Brackenfall"]
   note: >-
     Contradiction, shape (a) -- supersession by an unfound page (§3.2). The
@@ -785,6 +846,7 @@
   must_not_rank: [workaround-invoicing-api-pagination]
   distractor_terms: ["invoicing API", "pagination error", "batch fetch"]
   answer_tokens: ["Grimstone"]
+  answer_markers: {notice-invoicing-api-batch-fetch: "native batch fetching"}
   forbidden_tokens: ["Ashencroft"]
   note: >-
     Contradiction, shape (b) -- deprecated knowledge (operator scenario,
@@ -813,6 +875,7 @@
   must_not_rank: [plan-regional-office-onboarding-naive]
   distractor_terms: ["regional offices", "onboarding", "contact record"]
   answer_tokens: ["Pemberwick"]
+  answer_markers: {note-regional-office-onboarding-retro: "its own primary contact record"}
   forbidden_tokens: ["Rustvane"]
   note: >-
     negative_knowledge (§3.3, use case 2.4). The retro shares "client",
@@ -834,6 +897,7 @@
   must_not_rank: [plan-vendor-migration-rerun-naive]
   distractor_terms: ["vendor migration", "overnight run", "dry run"]
   answer_tokens: ["Windemoor"]
+  answer_markers: {note-vendor-migration-script-retro: "did not checkpoint progress"}
   forbidden_tokens: ["Cloverstitch"]
   note: >-
     negative_knowledge (§3.3, use case 2.4). The retro shares "vendor",
@@ -855,6 +919,7 @@
   must_not_rank: [plan-junior-analyst-ramp-naive]
   distractor_terms: ["junior analyst", "ramp plan", "shadowing"]
   answer_tokens: ["Fenwallow"]
+  answer_markers: {note-junior-analyst-ramp-retro: "week six"}
   forbidden_tokens: ["Thornquill"]
   note: >-
     negative_knowledge (§3.3, use case 2.4). The retro shares "junior",
@@ -885,6 +950,7 @@
   must_not_rank: [note-relay-sync-safe]
   distractor_terms: ["fulfillment relay", "dispatch", "duplicate entries"]
   answer_tokens: ["Windlecross"]
+  answer_markers: {decision-console-latency-requirement: "a couple of seconds"}
   forbidden_tokens: ["Copperlatch"]
   note: >-
     unprompted_push (athenaeum#1778): task-shaped prompt, no cue that memory
@@ -912,6 +978,7 @@
   must_not_rank: [note-ledger-reconciliation-safe-to-drop]
   distractor_terms: ["nightly job", "ledger reconciliation", "schedule"]
   answer_tokens: ["Thistlewrack"]
+  answer_markers: {decision-compliance-filing-single-source: "second business day"}
   forbidden_tokens: ["Hallowmere"]
   note: >-
     unprompted_push (athenaeum#1778): task-shaped prompt, no cue that memory
@@ -938,6 +1005,7 @@
   must_not_rank: [note-invoiceref-rename-safe]
   distractor_terms: ["invoiceRef", "billing API", "schema"]
   answer_tokens: ["Duskferry"]
+  answer_markers: {decision-partner-import-key-locked: "drops the whole record silently"}
   forbidden_tokens: ["Marrowquill"]
   note: >-
     unprompted_push (athenaeum#1778): task-shaped prompt, no cue that memory
