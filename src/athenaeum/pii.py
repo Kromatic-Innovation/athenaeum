@@ -177,6 +177,7 @@ from pathlib import Path
 from typing import Any
 
 from athenaeum.atomic_io import atomic_write_text
+from athenaeum.footnote_markers import parse_footnote_definitions
 from athenaeum.models import (
     EntityIndex,
     parse_frontmatter,
@@ -3827,12 +3828,24 @@ class EntityRead:
     )
 
     def to_dict(self) -> dict[str, Any]:
-        """JSON-serializable dict: paths as ``str``, redactions as a list of dicts."""
+        """JSON-serializable dict: paths as ``str``, redactions as a list of dicts.
+
+        ``footnotes`` (issue athenaeum#1730) maps every footnote label defined on
+        the page to the source string its definition renders — ``{"src-1":
+        "**Source:** user-stated — `abc123#turn4`"}``. It is DERIVED from
+        ``body``, not stored: the page markdown remains the single source of
+        truth, and the map is the resolution step a caller would otherwise
+        have to do by parsing markdown itself. With inline ``[^src-N]``
+        markers now written onto the sentences they support, a caller can go
+        from the sentence it is reading to that sentence's own source in one
+        hop, instead of to the page-level bibliography.
+        """
         return {
             "uid": self.uid,
             "page_path": str(self.page_path),
             "frontmatter": self.frontmatter,
             "body": self.body,
+            "footnotes": parse_footnote_definitions(self.body),
             "contact": self.contact,
             "redactions": [marker.to_dict() for marker in self.redactions],
             "contact_included": self.contact_included,

@@ -90,6 +90,10 @@ from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 
+from athenaeum.footnote_markers import (
+    INLINE_MARKER_RE,
+    parse_footnote_definitions,
+)
 from athenaeum.push_metrics import estimate_tokens
 from athenaeum.shadow_linkage import _get_git_sha, _get_version
 from athenaeum.store import now_iso
@@ -573,6 +577,54 @@ def grade_coverage(record: RolloutRecord, probe: Probe) -> float | None:
     return matched / len(probe.answer_tokens)
 
 
+def grade_marker_resolution(
+    record: RolloutRecord, probe: Probe, corpus: Corpus
+) -> bool | None:
+    """Does every footnote marker the answer CITES resolve to a planted source?
+
+    The optional follow-through check issue athenaeum#1730 adds to the
+    ``follow_through`` probe class (issue athenaeum#1725). ``recall`` now
+    renders, and compiled pages now carry, inline ``[^src-N]`` markers naming
+    the source of the sentence they sit on; the question this grades is
+    whether an answer that quotes a marker quoted a REAL one — a marker that
+    resolves to a footnote definition on the page that planted the answer
+    token — rather than inventing a citation-shaped string.
+
+    **Recorded only.** Not a floor, and deliberately not wired into
+    :func:`compute_verdicts`: it feeds no §7 condition, exactly like
+    :func:`grade_harm` and :func:`grade_coverage`. Enrolling it in a decision
+    is a distinct, explicit operator ruling (design doc §7 note, issue
+    athenaeum#1776), never derived here.
+
+    Returns ``None`` — never ``False`` — in the two "nothing to grade" cases,
+    which is the whole reason this can ship on a corpus that plants no
+    markers yet:
+
+    * the answer cites no marker at all (a model that never cites cannot mis-cite,
+      and grading that as a failure would score every arm zero today); and
+    * no expected page that plants an answer token defines any footnote, so
+      there is no ground truth to resolve against.
+
+    ``True`` when every cited label has a definition on such a page; ``False``
+    when any cited label has none.
+    """
+    cited = {m.group(1) for m in INLINE_MARKER_RE.finditer(record.answer)}
+    if not cited:
+        return None
+    pages_by_uid = {page.uid: page for page in corpus.pages}
+    definitions: dict[str, str] = {}
+    for uid in probe.expected_uids:
+        page = pages_by_uid.get(uid)
+        if page is None:
+            continue
+        if probe.answer_tokens and not any(tok in page.body for tok in probe.answer_tokens):
+            continue
+        definitions.update(parse_footnote_definitions(page.body))
+    if not definitions:
+        return None
+    return all(label in definitions for label in cited)
+
+
 def weak_probes(rows: Sequence[RolloutRow]) -> tuple[str, ...]:
     """Probe ids the NONE arm (no context at all) already answers correctly.
 
@@ -813,6 +865,12 @@ class GroupStats:
     # (probe carries answer_tokens). Feeds no §7 condition.
     coverage_rate: float | None
 
+    # Marker resolution (issue athenaeum#1730, report_only) -- all arms;
+    # computed only over rows whose answer cites a footnote marker AND whose
+    # expected token-bearing pages define one. None on a corpus that plants
+    # no markers, for every group. Feeds no §7 condition.
+    marker_resolution_rate: float | None
+
     # Index coverage (issue athenaeum#1725, NATIVE_INDEX only) -- the
     # fraction of the corpus the TRUNCATED index still names, read back from
     # what Claude Code actually loaded. None (never 0.0) for every other arm
@@ -844,6 +902,7 @@ def compute_group_stats(rows: Sequence[RolloutRow]) -> list[GroupStats]:
         correctness_flags: list[float] = []
         harm_flags: list[float] = []
         coverage_values: list[float] = []
+        marker_resolutions: list[float] = []
         index_coverages: list[float] = []
 
         for row in group:
@@ -892,6 +951,10 @@ def compute_group_stats(rows: Sequence[RolloutRow]) -> list[GroupStats]:
             if coverage is not None:
                 coverage_values.append(coverage)
 
+            resolved = grade_marker_resolution(record, probe, corpus)
+            if resolved is not None:
+                marker_resolutions.append(1.0 if resolved else 0.0)
+
             if record.arm is Arm.NATIVE_INDEX:
                 coverage_value = _native_index_coverage_value(record)
                 if coverage_value is not None:
@@ -918,6 +981,7 @@ def compute_group_stats(rows: Sequence[RolloutRow]) -> list[GroupStats]:
                 correctness_rate=_mean(correctness_flags),
                 harm_free_rate=_mean(harm_flags),
                 coverage_rate=_mean(coverage_values),
+                marker_resolution_rate=_mean(marker_resolutions),
                 mean_index_coverage=(
                     _mean(index_coverages) if arm == Arm.NATIVE_INDEX.value else None
                 ),
@@ -2647,6 +2711,28 @@ def render_report(report: NorthStarReport) -> str:
         lines.append(
             f"| {s.probe_class} | {s.corpus_scale} | {s.arm} | {s.n} | "
             f"{_fmt(s.coverage_rate)} |"
+        )
+    lines.append("")
+
+    lines.append("## Marker resolution (issue athenaeum#1730, report_only)")
+    lines.append("")
+    lines.append(
+        "`marker_resolution_rate` is the share of answers whose CITED `[^src-N]` footnote "
+        "markers all resolve to a footnote definition on a page that plants one of the "
+        "probe's `answer_tokens` -- see `grade_marker_resolution`. It asks whether an answer "
+        "that quotes a citation quoted a real one, now that compiled pages carry inline "
+        "per-claim markers and `recall` resolves them on the hit. `report_only`: this "
+        "mechanism feeds no §7 condition and `compute_verdicts` is unchanged by it. `n/a` "
+        "means no answer in that group cited a marker, or no token-bearing expected page "
+        "defines one -- both are 'nothing to grade', never a graded zero."
+    )
+    lines.append("")
+    lines.append("| probe_class | corpus_scale | arm | n | marker_resolution_rate |")
+    lines.append("| --- | --- | --- | --- | --- |")
+    for s in report.stats:
+        lines.append(
+            f"| {s.probe_class} | {s.corpus_scale} | {s.arm} | {s.n} | "
+            f"{_fmt(s.marker_resolution_rate)} |"
         )
     lines.append("")
 

@@ -1118,6 +1118,34 @@ def _resolve_sample_rate(
     return default
 
 
+def resolve_unmarked_sentence_max_ratio(config: dict[str, Any] | None) -> float:
+    """Resolve the tolerated share of UNCITED prose sentences on a page (athenaeum#1730).
+
+    A compiled page is itself a source for the level above
+    (``docs/use-cases.md`` §3.5), so an agent following breadcrumbs needs the
+    sentence it is reading to resolve to its own source. The deterministic
+    post-check in :mod:`athenaeum.footnote_markers` counts prose sentences
+    carrying no inline ``[^src-N]`` marker; a page whose ratio EXCEEDS this is
+    surfaced in ``athenaeum status``.
+
+    Warn-only, exactly like the page-size guardrail (``docs/why-athenaeum.md``
+    §5) — nothing is ever blocked, rewritten, or refused on this number.
+
+    Env ``ATHENAEUM_UNMARKED_SENTENCE_MAX_RATIO`` > yaml
+    ``librarian.unmarked_sentence_max_ratio`` > default ``0.5``. Clamped to
+    ``[0.0, 1.0]``; ``1.0`` tolerates an entirely uncited page and is the
+    off switch. The default is deliberately loose: most of the corpus predates
+    inline markers, and a guardrail that flags every page on the day it ships
+    is one an operator learns to ignore.
+    """
+    return _resolve_sample_rate(
+        config,
+        env_var="ATHENAEUM_UNMARKED_SENTENCE_MAX_RATIO",
+        key="unmarked_sentence_max_ratio",
+        default=0.5,
+    )
+
+
 def resolve_audit_sample_rate_t2_approvals(config: dict[str, Any] | None) -> float:
     """Resolve the share of T2 approvals sampled for human audit (athenaeum#438).
 
@@ -3857,6 +3885,7 @@ search_backend: fts5
 #   max_merge_sources: 5
 #   min_merge_mean_similarity: 0.6
 #   min_merge_confidence: 0.0
+#   unmarked_sentence_max_ratio: 0.5
 #   page_warn_bytes: 8192
 #   page_flag_bytes: 16384
 #   drain_warn_days: 3

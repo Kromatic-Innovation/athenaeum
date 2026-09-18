@@ -54,6 +54,10 @@ PINNED_IMPORTS: dict[str, frozenset[str]] = {
             "athenaeum.atomic_io",
             "athenaeum.authority",
             "athenaeum.config",
+            # Issue athenaeum#1730: `pii.EntityRead.to_dict` derives its
+            # `footnotes` map from the page body. Pure `re` over text -- pulls
+            # in nothing of its own, which is why it is admitted here.
+            "athenaeum.footnote_markers",
             "athenaeum.models",
             "athenaeum.pii",
             "athenaeum.search",

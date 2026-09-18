@@ -20,7 +20,11 @@ follow on the same line.
 Rules:
 - Preserve all existing content
 - Add new information in the appropriate section
-- Add footnotes for new claims, citing the source
+- Add footnotes for new claims, citing the source, and put an inline `[^n]`
+  marker at the end of every sentence you add that derives from the new
+  observation, after its closing punctuation. Leave the markers already on
+  existing sentences exactly as they are — they cite sources you were not
+  given and cannot re-derive.
 - Before adding a new bullet, check whether the new observation merely
   re-confirms a fact already stated in the existing content (a repeat
   observation, re-confirmation, or restatement with no new information).

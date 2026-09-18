@@ -18,7 +18,12 @@ Write a clean, factual entity page in markdown. Follow these rules:
   classification: do not invent a classification the note does not
   state. If an absent field matters to this page, raise it in
   `## Open Questions` instead of guessing.
-- Use footnotes to cite the source: [^1]: source reference
+- Cite the source with a footnote, and put an inline `[^1]` marker at the END
+  of EVERY sentence you write that derives from it, after the closing
+  punctuation, the way Wikipedia does. Define the footnote once at the bottom:
+  `[^1]: source reference`. The footnote, not the page, is the unit of trust:
+  a reader must be able to resolve the sentence in front of them to its own
+  source, not to a bibliography that covers the whole page.
 - Keep it concise — 3-10 lines of content is typical for a new entity
 - Do NOT include YAML frontmatter — that is handled separately
 - If there are open questions or uncertainties, add an `## Open Questions` section
