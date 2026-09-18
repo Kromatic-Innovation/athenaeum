@@ -513,6 +513,14 @@ def _two_page_follow_through(
         query="what is the history of galaxy formation?",
         expected_uids=("page-a", "page-b"),
         answer_tokens=("TokenOne", "TokenTwo"),
+        # Markers only need to be plantable/distinct for the DEFAULT param
+        # set the positive-control test below actually exercises -- other
+        # tests reusing this helper with different params assert on a
+        # SPECIFIC substring in `problems`, not an empty list, so an extra
+        # "no answer_markers entry" problem from a param combination where
+        # one of these markers is not the page's own text does not break
+        # them.
+        answer_markers=(("page-a", "sits here, in a note"), ("page-b", "quiet coastal harbour town")),
     )
     return pages, probe
 
@@ -1085,6 +1093,7 @@ def _contradiction_pair(
         expected_uids=("page-target",),
         must_not_rank=("page-stale",),
         answer_tokens=("AnswerTokenOne",),
+        answer_markers=(("page-target", "current notice supersedes"),),
         forbidden_tokens=("DecoyTokenOne",),
         report_only=True,
     )
@@ -1222,6 +1231,7 @@ def _negative_knowledge_pair(*, retro_reachable: bool = True) -> tuple[list[Page
         expected_uids=("page-retro",),
         must_not_rank=("page-naive-plan",),
         answer_tokens=("AnswerTokenTwo",),
+        answer_markers=(("page-retro", "extra two weeks"),),
         forbidden_tokens=("DecoyTokenTwo",),
         report_only=True,
     )
@@ -1550,7 +1560,14 @@ def test_xlarge_scale_is_pinned() -> None:
     # detached marker line -- and again on rebase onto develop b8683e18
     # (post athenaeum#1779/#1780/#1781), re-measured directly against
     # `build_corpus(scale="xlarge")` on this branch.
-    assert corpus.fingerprint() == "d43d57cbdcf06afe"
+    # athenaeum#1831: GENERATOR_VERSION bumped 2 -> 3 (no page byte changed --
+    # `answer_markers` is a probes.yaml-only field `fingerprint()` never
+    # hashes; the version bump is the deliberate way to invalidate
+    # comparison against any floor table recorded before this issue, per
+    # this test's own docstring on why a GENERATOR_VERSION bump is expected
+    # to move this pin), re-measured directly against
+    # `build_corpus(scale="xlarge")` on this branch.
+    assert corpus.fingerprint() == "a110f2b328695f3a"
 
 
 def test_long_tier_tag_is_outside_the_recall_snippet() -> None:
