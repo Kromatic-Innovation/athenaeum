@@ -418,7 +418,9 @@ def _native_loaded_uids(record: RolloutRecord) -> tuple[str, ...]:
     return tuple(Path(path_str).stem for path_str in loaded if Path(path_str).stem)
 
 
-def _breadcrumb_delivered_uids(record: RolloutRecord, probe: Probe, corpus: Corpus) -> tuple[str, ...]:
+def _breadcrumb_delivered_uids(
+    record: RolloutRecord, probe: Probe, corpus: Corpus
+) -> tuple[str, ...]:
     """Uids of *probe*'s ``expected_uids`` pages actually NAMED in the
     PUSH_BREADCRUMB arm's delivered text (issue athenaeum#1831).
 

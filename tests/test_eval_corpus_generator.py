@@ -520,7 +520,10 @@ def _two_page_follow_through(
         # "no answer_markers entry" problem from a param combination where
         # one of these markers is not the page's own text does not break
         # them.
-        answer_markers=(("page-a", "sits here, in a note"), ("page-b", "quiet coastal harbour town")),
+        answer_markers=(
+            ("page-a", "sits here, in a note"),
+            ("page-b", "quiet coastal harbour town"),
+        ),
     )
     return pages, probe
 

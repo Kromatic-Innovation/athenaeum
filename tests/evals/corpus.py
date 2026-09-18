@@ -945,7 +945,9 @@ def validate_core(pages: list[Page], probes: list[Probe]) -> list[str]:
         # a marker is meant to be).
         if probe.probe_class == "abstention":
             if probe.answer_markers:
-                problems.append(f"probe {probe.id!r}: abstention probes must have no answer_markers")
+                problems.append(
+                    f"probe {probe.id!r}: abstention probes must have no answer_markers"
+                )
         else:
             marker_uids = {uid for uid, _marker in probe.answer_markers}
             expected_uid_set = set(probe.expected_uids)
@@ -1474,7 +1476,10 @@ def validate_core(pages: list[Page], probes: list[Probe]) -> list[str]:
             for marker_probe in probes:
                 for _uid, marker in marker_probe.answer_markers:
                     normalized_marker = _normalized(marker)
-                    if normalized_token in normalized_marker or normalized_marker in normalized_token:
+                    if (
+                        normalized_token in normalized_marker
+                        or normalized_marker in normalized_token
+                    ):
                         problems.append(
                             f"probe {probe.id!r}: forbidden_tokens value {token!r} collides "
                             f"(as a normalized substring, either direction) with probe "
