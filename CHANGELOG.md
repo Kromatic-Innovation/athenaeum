@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Phase 2 CLI flags + sibling store (issue athenaeum#1785).**
+  `north_star_cli.py` gains `--phase2` (off by default), `--phase2-scales`
+  (default `medium` — not `core`, since `WritePathStats`/`WriteCost` are
+  keyed by `(system, corpus_scale)` and §7 condition 3 reads write cost
+  only at `medium` and above), `--phase2-store` (default
+  `<store>.phase2.jsonl`), and `--phase2-systems` (default
+  `athenaeum,native`). When on, the CLI runs `compile_observation_stream`
+  and `run_native_writer_dispatch` for each requested `(system, scale)`
+  pair before the read grid, writing `write_path`/`write_cost`/`meta` rows
+  to a SIBLING JSONL — never through the main `ResultStore`/
+  `GridCell.cell_key()` path, since a probe-less write-path row would
+  corrupt that store's resume contract. `--max-spend`/`--max-tokens` now
+  gate Phase 1 and Phase 2 combined; `--dry-run` projects Phase 2 cost from
+  a documented per-observation estimate and makes zero paid calls. A
+  partial (exit 75) athenaeum compile is recorded with its real numbers
+  plus a visible `partial` flag, never silently pooled. `build_report`
+  gains a `phase2_summary` field/param (report header line: on/off,
+  scales, systems, and the API-writer `prompt_fidelity` marker) and now
+  actually receives `write_path_stats`/`write_costs` from a live CLI run,
+  so the pre-existing "Write path (Phase 2)" report section renders real
+  data for the first time.
+- **Phase 2 `evals.yml` dispatch inputs (issue athenaeum#1786).** Three
+  `workflow_dispatch` inputs — `north_star_phase2` (choice `false`/`true`,
+  default `false`), `north_star_phase2_scales`, `north_star_phase2_systems`
+  (default `athenaeum,native`) — forwarded to `north_star_cli.py` as
+  `--phase2`/`--phase2-scales`/`--phase2-systems` in the same step that
+  already forwards `north_star_relevance_floor_*`. Manual dispatch only;
+  the `north-star` job's `if:` gate is unchanged. The Phase 2 sibling JSONL
+  is uploaded alongside the existing store/report artifact with
+  `if: always()`.
 - **Precision/recall/contamination tables for the retrieval evals, and a
   cap-signal reading (issue athenaeum#1782).**
   `tests/evals/test_recall_covers_grep.py` gains a second printed-only

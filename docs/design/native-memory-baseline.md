@@ -223,6 +223,33 @@ Both phases stay a synthetic-corpus, synthetic-probe comparison; no live
 head-to-head against an operator's real Claude Code sessions and real native
 memory is planned (issue athenaeum#1728).
 
+**Dispatching Phase 2 (issue athenaeum#1785/#1786).** `north_star_cli.py`
+gained `--phase2` (off by default; existing non-Phase-2 behavior is
+unchanged when omitted), `--phase2-scales` (default `medium` -- not `core`,
+because `WritePathStats`/`WriteCost` are keyed by `(system, corpus_scale)`
+and §7 condition 3 only reads write cost at `medium` and above), and
+`--phase2-systems` (default `athenaeum,native`). When `--phase2` is on, the
+CLI drives `compile_observation_stream` and `run_native_writer_dispatch`
+for each requested `(system, scale)` pair BEFORE the read grid, one row per
+pair to a SIBLING JSONL derived from `--store` (`<store>.phase2.jsonl` by
+default, or `--phase2-store`) -- deliberately never through the main
+`ResultStore`/`GridCell.cell_key()` path, since a probe-less write-path row
+would corrupt that store's resume contract. `--max-spend`/`--max-tokens`
+govern Phase 1 and Phase 2 combined: the pre-flight refusal prices both
+before either can spend a token, and the runtime ceiling check (shared
+`EvalSession`) covers whichever ran first. `evals.yml` forwards three
+matching `workflow_dispatch` inputs (`north_star_phase2`,
+`north_star_phase2_scales`, `north_star_phase2_systems`) through to these
+flags, manual dispatch only, never on push. **Every Phase 2 number produced
+by the API-mode native writer is labelled approximate**: the CLI's default
+`--mode api` drives `run_native_writer_api`, whose system prompt
+*reconstructs* Claude Code's documented (not extractable, closed-source)
+auto-memory write behavior
+(`NativeWriterResult.prompt_fidelity == "reconstructed"`) -- the report
+header and the sibling store's `meta` rows both carry this marker, so a
+reader never mistakes an api-mode figure for the CLI-mode
+(`run_native_writer`, real `claude -p`) fidelity spot-check.
+
 **Probes must include follow-through.** A single-shot probe whose answer sits
 in the surfaced page's first lines cannot tell breadcrumb delivery from
 full-page delivery, and cannot tell either from a good grep. The realistic
