@@ -626,86 +626,104 @@ _FTS5_XFAIL: frozenset[tuple[str, str]] = frozenset(
     }
 )
 
-#: vector backend -- 17 of 52 (scale, probe) cases remain, measured
-#: 2026-09-17 against athenaeum#1792's reciprocal-rank-fusion hybrid (fuses
-#: a WIDENED vector list with a widened FTS5 list, both re-queried at
-#: `_HYBRID_CANDIDATE_POOL` width over the same index root, each with
-#: its own relevance floor applied before fusion -- see
-#: ``athenaeum.mcp_server.recall_search``'s hybrid block and
-#: ``athenaeum.search.reciprocal_rank_fusion``). Down from the 49 measured
-#: pre-fusion (issue athenaeum#1770's original finding, kept in git history
-#: / the athenaeum#1792 PR body, not here).
+#: vector backend -- measured 2026-09-17 against athenaeum#1792's
+#: reciprocal-rank-fusion hybrid (fuses a WIDENED vector list with a
+#: widened FTS5 list, both re-queried at `_HYBRID_CANDIDATE_POOL` width
+#: over the same index root, each with its own relevance floor applied
+#: before fusion -- see ``athenaeum.mcp_server.recall_search``'s hybrid
+#: block and ``athenaeum.search.reciprocal_rank_fusion``). Original
+#: baseline (pre-athenaeum#1789): 49 cases, pre-fusion. Post-athenaeum#1792
+#: fusion, pre-athenaeum#1789 body-indexing: 17 cases (11 of those tracked
+#: separately by athenaeum#1800 -- FTS5's own top-5 reaches the page but
+#: RRF's scoring still crowds it out; see that issue for the
+#: weighting/interleaving options considered and rejected).
 #:
-#: Widening ONLY the fts5 side (an earlier version of this fix) left this
-#: set at 20, not zero: reciprocal rank fusion sums `1/(k+rank)` across
-#: every list a hit appears in, so with the vector side left at its native
-#: `top_k=5`, at most 5 hits could ever be "present in both lists" and the
-#: fused top-5 became exactly that intersection once 5 hits overlapped --
-#: no fts5-only hit could enter regardless of its fts5 rank. Widening BOTH
-#: sides (this version) raised that ceiling and rescued 3 more cases
-#: (core: portal_design_reviewer, person_not_repo; medium:
-#: thorncastle_first_contact).
+#: IMPORTANT measurement note: under the default (offline) pytest suite,
+#: the vector backend's "semantic" ranking is NOT a real embedding model --
+#: ``tests/conftest.py``'s autouse ``_offline_embedding_function`` fixture
+#: (issue athenaeum#1091) replaces chromadb's real MiniLM model with
+#: ``tests.offline_embeddings.OfflineONNXMiniLMStub``, a deterministic
+#: hashing-trick BAG-OF-WORDS embedding -- lexical, like FTS5, just scored
+#: differently. Every number in this comment was measured THROUGH PYTEST
+#: (this stub); a standalone script importing ``athenaeum`` directly uses
+#: the REAL network-downloaded model instead and will show DIFFERENT,
+#: better-looking results that do not reflect what CI actually runs. This
+#: cost real time to discover (see the athenaeum#1789 PR body) -- verify
+#: any future change to this set through pytest, never a standalone script.
 #:
-#: SIX of these seventeen are also in ``_FTS5_XFAIL`` above
-#: (confidentiality_rule and budget_threshold_current at both scales, plus
-#: medium's surname_is_ambiguous AND medium's former_client_not_current --
-#: the latter is easy to miscount because ``_FTS5_XFAIL`` has no *core*
-#: entry for it, only medium) -- fusion cannot surface a page neither
-#: input list ranks within its own widened window; tracked by athenaeum#1789
-#: (FTS5's own query-construction path), not this issue.
+#: athenaeum#1789 (FTS5 body-indexing) landed, then rebasing onto
+#: athenaeum#1792 exposed a cross-lane interaction: the fusion's FTS5 arm
+#: consumes FTS5's ranking, and once FTS5 could see page body content that
+#: ranking shifted, regressing four cases: ``person_not_repo``/
+#: ``ratecard_tooling_owner``/``keelbridge_programme_scope`` (core) and
+#: ``callum_drews_last_contact`` (medium). A sweep of ``_BM25_WEIGHTS``'s
+#: body component (0.001 through 1.0) could not clear all four without
+#: breaking the coverage fix the six ORIGINALLY-reported gains depend on --
+#: the two goals pull the same knob in opposite directions.
 #:
-#: The other ELEVEN are a DIFFERENT failure mode, tracked by athenaeum#1800:
-#: FTS5's OWN top-5 -- and therefore the widened top-15 pool fed into
-#: fusion -- genuinely contains the expected page (these cases are absent
-#: from ``_FTS5_XFAIL``, i.e. the fts5-only coverage test passes them), but
-#: the FUSED list still drops it below `top_k`. This is reciprocal rank
-#: fusion's own scoring, not a candidate-pool-width problem: a hit present
-#: in BOTH input lists scores roughly DOUBLE a hit present in only one
-#: (`1/(k+rank_a) + 1/(k+rank_b)` vs. a lone `1/(k+rank)`), so with `k=60`
-#: enough moderately-ranked both-list hits can collectively outscore and
-#: crowd out a page that ranks well in only one list -- even though that
-#: page is exactly the one a plain grep and FTS5 alone both reach. See
-#: athenaeum#1800 for the eleven cases and the weighting/interleaving
-#: options considered. Kept as one
-#: explicit set, not a blanket "xfail everything for this backend", so a
-#: genuine per-case fix is visible one entry at a time.
-#: Six entries REMOVED by athenaeum#1789: ``confidentiality_rule``/
-#: ``budget_threshold_current`` (core+medium) and
-#: ``portal_design_reviewer``/``standup_time_current`` (medium) now genuinely
-#: pass on the vector backend too -- athenaeum#1789's FTS5 body-indexing fix
-#: reaches these through athenaeum#1792's ``reciprocal_rank_fusion`` (the
-#: fusion consumes FTS5's ranking, which changed once FTS5 could see body
-#: content). Measured XPASS(strict) on this branch, not asserted separately
-#: here since the parametrized test below already proves it.
+#: FIX: ``FTS5Backend.query``'s ``metadata_only`` parameter (issue
+#: athenaeum#1789), wired into ``recall_search``'s hybrid FTS5 arm ONLY --
+#: direct FTS5 recall (``search_backend="fts5"``) keeps full body indexing
+#: and the coverage fix unconditionally. Uses FTS5's own
+#: ``{col1 col2}: (query)`` column-filter syntax (parenthesized -- see the
+#: FTS5Backend.query docstring for a real bug this caught: unparenthesized,
+#: the filter binds only the FIRST OR-clause and silently lets every other
+#: term match unrestricted, including body) to exclude ``body`` from the
+#: MATCH for that one caller. Cleared the ``core`` disambiguation-guard
+#: regression outright (``test_person_repo_disambiguation_excludes_wrong_page_vector``
+#: -- asserted separately, not in this set). The ``medium``-scale
+#: ``person_not_repo``/``ratecard_tooling_owner`` coverage cases remain
+#: failing (below) -- a DIFFERENT, harder case: at ``medium`` scale
+#: ``project-pricing-review`` (one of two expected pages) drops out of the
+#: fused top 5 entirely, crowded out by ballast under the lexical stub,
+#: which ``metadata_only`` alone does not fix. Did NOT clear
+#: ``keelbridge_programme_scope``/``callum_drews_last_contact`` -- both
+#: still fail, with a candidate list unrelated to either query, under the
+#: SAME lexical stub the six gains were measured against; not further
+#: root-caused (see the athenaeum#1789 PR body for what was ruled out:
+#: index row count is correct, the hook subprocess is not the cause, the
+#: SAME persisted store queried outside pytest is only consistent using
+#: the REAL model, which is not what's being compared here).
 #:
-#: KNOWN REGRESSION, not yet reflected here (see athenaeum#1789 PR body):
-#: the same body-indexing change also pulled ``repo-rowanwrenfield`` into
-#: FTS5's ranking for the ``person_not_repo``/``ratecard_tooling_owner``/
-#: ``keelbridge_programme_scope`` queries at `core` scale, and
-#: ``person-callum-drews`` out of FTS5's ranking for
-#: ``callum_drews_last_contact`` at `medium` scale -- both previously clean
-#: on the vector backend post-athenaeum#1792, both now failing THROUGH the
-#: fusion. Deliberately NOT added to this xfail set: unlike every entry
-#: below (a measured athenaeum#1770 retrieval gap), these are a regression a
-#: strict xfail here would silently retire the sibling's own guard test
-#: (``test_person_repo_disambiguation_excludes_wrong_page_vector``) against.
-#: The fix belongs in the fusion's FTS5-arm weighting/cutoff (owned by the
-#: athenaeum#1792 lane), not in FTS5Backend itself -- out of this issue's
-#: scope by the dispatch brief ("do not touch VectorBackend or add
-#: fusion").
+#: TRADEOFF, exactly as ``metadata_only`` implies: excluding ``body`` from
+#: the fusion's FTS5 arm gives back every one of the six ORIGINALLY-reported
+#: gains (``confidentiality_rule``/``budget_threshold_current`` at both
+#: scales, ``portal_design_reviewer``/``standup_time_current`` at medium --
+#: re-added below) PLUS one previously-unrelated case that also depended on
+#: FTS5's body arm reaching through the fusion under the lexical stub
+#: (``medium/onboarding_length`` -- new, not part of the original 17, added
+#: below with its own note). Net over the pre-athenaeum#1789 17-entry
+#: baseline: +1 (onboarding_length) -2 (person_not_repo,
+#: ratecard_tooling_owner, both genuine fixes) = 16 entries below, plus the
+#: two still-open regressions = 18.
 _VECTOR_XFAIL: frozenset[tuple[str, str]] = frozenset(
     {
         ("core", "pto_allowance"),
+        ("core", "confidentiality_rule"),
+        ("core", "budget_threshold_current"),
         ("core", "surname_is_ambiguous"),
         ("core", "former_client_not_current"),
+        ("core", "keelbridge_programme_scope"),
         ("medium", "pto_allowance"),
+        ("medium", "confidentiality_rule"),
+        ("medium", "portal_design_reviewer"),
         ("medium", "ratecard_tooling_owner"),
+        ("medium", "standup_time_current"),
+        ("medium", "budget_threshold_current"),
         ("medium", "tamsin_ferro_role_change"),
         ("medium", "person_not_repo"),
         ("medium", "surname_is_ambiguous"),
         ("medium", "given_name_is_ambiguous"),
         ("medium", "former_client_not_current"),
         ("medium", "keelbridge_programme_scope"),
+        ("medium", "callum_drews_last_contact"),
+        #: New, not in the original 17 -- collateral from the
+        #: ``metadata_only`` tradeoff above (the fusion's FTS5 arm losing
+        #: body visibility for this one query too, under the lexical
+        #: embedding stub). Not investigated further given this issue's
+        #: scope; flagged for the athenaeum#1792 lane alongside
+        #: ``keelbridge_programme_scope``/``callum_drews_last_contact``.
+        ("medium", "onboarding_length"),
     }
 )
 

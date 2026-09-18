@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The cross-lane regression athenaeum#1789's FTS5 body-indexing caused in
+  athenaeum#1792's hybrid fusion, addressed on the FTS5 seam (issue
+  athenaeum#1789).** `FTS5Backend.query` gains a `metadata_only` parameter,
+  wired into `recall_search`'s hybrid FTS5 arm only (direct
+  `search_backend="fts5"` recall is unaffected) — it uses FTS5's own
+  `{col1 col2}: (query)` column-filter syntax to exclude `body` from the
+  MATCH for that one caller, reverting the fusion's FTS5 arm to
+  (approximately) its pre-athenaeum#1789 candidate set without a second
+  index or touching `reciprocal_rank_fusion`. Found and fixed a real bug
+  along the way: the column filter must wrap its OR-expression in
+  parentheses (`{cols}: (a OR b)`) — unparenthesized, FTS5 binds the filter
+  to only the first term and silently matches every other term
+  unrestricted, including body, defeating the whole point. Net effect,
+  measured through pytest's actual test substrate (see the note below):
+  the `core`-scale `person_not_repo` disambiguation guard is fixed
+  outright; `medium`-scale `person_not_repo`/`ratecard_tooling_owner` and
+  both scales' `keelbridge_programme_scope`/`callum_drews_last_contact`
+  remain unresolved and stay in `_VECTOR_XFAIL`; the six originally-reported
+  coverage gains (`confidentiality_rule`/`budget_threshold_current` at both
+  scales, `portal_design_reviewer`/`standup_time_current` at medium) are
+  given back, plus one previously-unrelated case
+  (`medium/onboarding_length`) that turned out to depend on the same
+  fusion path. **Methodology note that cost real time:** the default pytest
+  suite replaces chromadb's real embedding model with a deterministic
+  lexical (hashing bag-of-words) stand-in (`tests/conftest.py`'s
+  `_offline_embedding_function`, issue athenaeum#1091) — a standalone
+  script that imports `athenaeum` directly uses the real, network-fetched
+  model instead and shows different, better-looking results that do not
+  reflect what CI actually runs. Every number above was verified through
+  `pytest`, not a standalone script; see `_VECTOR_XFAIL`'s own comment in
+  `tests/evals/test_recall_covers_grep.py` for the full account.
+
 - **FTS5 never indexed a page's body, only its frontmatter — the root cause
   of two of the six `_FTS5_XFAIL` misses in
   `tests/evals/test_recall_covers_grep.py` (issue athenaeum#1789).**

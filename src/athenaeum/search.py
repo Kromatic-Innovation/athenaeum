@@ -1473,8 +1473,38 @@ class FTS5Backend:
         caller_audience: set[str] | None = None,
         as_of: date | None = None,
         type_filter: str | Sequence[str] | None = None,
+        metadata_only: bool = False,
     ) -> list[tuple[str, str, float]]:
-        """Query the FTS5 index. Returns ``(filename, name, score)`` triples."""
+        """Query the FTS5 index. Returns ``(filename, name, score)`` triples.
+
+        ``metadata_only`` (issue athenaeum#1789 cross-lane regression, tracked
+        against athenaeum#1800): when ``True``, the MATCH is restricted to the
+        ``name``/``tags``/``aliases``/``description`` columns via FTS5's own
+        ``{col1 col2 ...}: query`` column-filter syntax — ``body`` (added by
+        this same issue) is excluded from the match entirely, not merely
+        down-weighted. This is a QUERY-time restriction over the existing
+        index (no second table, no rebuild) so a caller can get the
+        pre-athenaeum#1789 candidate SET back on demand. Default ``False``
+        preserves this method's normal (body-included) behavior for every
+        existing caller — this parameter is additive.
+
+        Exists because a sweep of ``_BM25_WEIGHTS``'s body component (0.01
+        through 1.0) could not, at any single value, simultaneously keep
+        ``body`` visible enough for the coverage probes that need it
+        (``confidentiality_rule``, ``budget_threshold_current`` — their
+        answer terms exist ONLY in body) while keeping it invisible enough
+        to stop a handful of pages from re-entering the ranking purely on a
+        body mention (the ``person_not_repo``/``keelbridge_programme_scope``/
+        ``callum_drews_last_contact`` regressions) — the two goals pull the
+        same knob in opposite directions with no shared value that satisfies
+        both. Excluding body outright for ONE specific caller (the hybrid
+        fusion's FTS5 arm, wired in ``mcp_server.recall_search``) sidesteps
+        that tension instead of trying to split it: direct FTS5 recall
+        (``search_backend="fts5"``) keeps full body indexing and this
+        issue's coverage fix; the FTS5 list fed to the vector-backend hybrid
+        fusion reverts to metadata-only ranking, matching its behavior
+        before this issue landed.
+        """
         del wiki_root  # FTS5 reads the pre-built index, not the wiki files
         del as_of  # athenaeum#308: FTS5 filters at build time; as-of view = as-of index
         db_path = cache_dir / _DB_NAME
@@ -1492,6 +1522,22 @@ class FTS5Backend:
 
         # Build FTS5 MATCH expression: "word1" OR "word2" ...
         fts_query = " OR ".join(f'"{t}"' for t in terms[:8])
+        if metadata_only:
+            # FTS5 column-filter syntax: ``{col1 col2 ...}: <query>`` scopes
+            # the MATCH to only the named columns for this one query — no
+            # schema change, no second index. ``body`` is the only indexed
+            # column left out; ``audience``/``type`` are UNINDEXED already
+            # and never part of a column filter. The column filter binds to
+            # only the SINGLE phrase/group immediately following the colon
+            # (SQLite FTS5 query-syntax precedence) — without the explicit
+            # parens, ``{cols}: "a" OR "b"`` restricts only ``"a"`` to those
+            # columns and leaves ``"b"`` an unrestricted (all-column,
+            # body-included) match, silently defeating the whole point for
+            # every term but the first. Verified directly against this
+            # corpus: unparenthesized, a page whose ONLY matching term was
+            # in body (`policy-confidentiality`, term "engagement") still
+            # matched at rank 1 despite the "restriction".
+            fts_query = "{filename name tags aliases description}: (" + fts_query + ")"
 
         # Build exclusion clause
         exclude_clause = ""
