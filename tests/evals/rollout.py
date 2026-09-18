@@ -530,6 +530,24 @@ class RolloutRecord:
     #: actually have. Left ``False`` (not applicable) for every api-mode
     #: record: no ``claude -p`` process is ever spawned on that path.
     config_isolated: bool = False
+    #: Issue athenaeum#1836: ``True`` when this record's api-mode tool loop
+    #: (:func:`run_api_tool_loop`) was cut off by ``_API_LOOP_MAX_TURNS``
+    #: while a tool call was still pending, rather than reaching a natural
+    #: end -- set from :func:`_api_loop_turns_exhausted`, the SAME helper
+    #: :class:`NativeWriterSession`'s own ``turns_exhausted`` field already
+    #: used for the write path (see that field's docstring). A record with
+    #: this ``True`` has its last-seen text -- the tool preamble the model
+    #: was mid-sentence on, e.g. "Let me read the payment terms page to get
+    #: more detail:" -- graded as the ``answer`` field for backward
+    #: compatibility, but ``harness_failure`` is ALSO set (reason
+    #: ``"turn_cap"``) so the report excludes it from correctness/cost
+    #: exactly like any other harness failure, instead of grading a
+    #: mid-sentence fragment as a wrong answer. ``False`` is the
+    #: conservative default and decode for every row persisted before this
+    #: field existed, and for every non-api-tool-loop arm (NONE,
+    #: PUSH_PAGES_UPPER_BOUND, PUSH_BREADCRUMB, ORACLE, and every cli-mode
+    #: record) -- none of those has a turn cap this field could describe.
+    turns_exhausted: bool = False
 
     @property
     def total_input_tokens(self) -> int:
@@ -574,6 +592,7 @@ class RolloutRecord:
             "hybrid_active": self.hybrid_active,
             "harness_failure": self.harness_failure,
             "config_isolated": self.config_isolated,
+            "turns_exhausted": self.turns_exhausted,
         }
 
     @classmethod
@@ -622,6 +641,11 @@ class RolloutRecord:
             # record.
             harness_failure=payload.get("harness_failure"),
             config_isolated=payload.get("config_isolated", False),
+            # Issue athenaeum#1836: absent on every row persisted before
+            # this field existed -- ``False`` decodes as "not known to have
+            # hit the turn cap", the same conservative meaning it carries
+            # for a freshly-constructed record.
+            turns_exhausted=payload.get("turns_exhausted", False),
         )
 
 
@@ -2811,6 +2835,11 @@ def run_pull_api(
         model=model,
         system=_PULL_API_SYSTEM_PROMPT,
     )
+    # Issue athenaeum#1836: a loop cut off mid-tool-use leaves ``answer`` as
+    # whatever text the model last emitted -- a tool preamble, not a final
+    # answer -- so this cell is a harness failure, excluded from grading,
+    # not an ordinary wrong answer.
+    turns_exhausted = _api_loop_turns_exhausted(turn_count, _API_LOOP_MAX_TURNS, transcript)
     return RolloutRecord(
         arm=Arm.PULL,
         probe_id=probe.id,
@@ -2824,6 +2853,8 @@ def run_pull_api(
         turn_count=turn_count,
         transcript=transcript,
         mode="api",
+        harness_failure=_turn_cap_harness_failure(turns_exhausted),
+        turns_exhausted=turns_exhausted,
     )
 
 
@@ -2904,6 +2935,14 @@ def run_push_breadcrumb_pull_api(
             "push arm delivered an empty breadcrumb (pushed_context == '') for a "
             "non-abstention probe -- never graded as an ordinary miss"
         )
+    # Issue athenaeum#1836: a turn-cap cutoff is checked (and, if it never
+    # fired, reported as ``None``) independently of the breadcrumb-failure
+    # check above, but only overrides ``harness_failure`` when that check
+    # found nothing -- an empty-breadcrumb cell that ALSO happened to hit
+    # the turn cap keeps its more specific empty-breadcrumb reason.
+    turns_exhausted = _api_loop_turns_exhausted(turn_count, _API_LOOP_MAX_TURNS, loop_transcript)
+    if harness_failure is None:
+        harness_failure = _turn_cap_harness_failure(turns_exhausted)
     return RolloutRecord(
         arm=Arm.PUSH_BREADCRUMB_PULL,
         probe_id=probe.id,
@@ -2918,6 +2957,7 @@ def run_push_breadcrumb_pull_api(
         transcript=transcript,
         mode="api",
         harness_failure=harness_failure,
+        turns_exhausted=turns_exhausted,
     )
 
 
@@ -3004,6 +3044,9 @@ def run_native_index_api(
         },
         *loop_transcript,
     ]
+    # Issue athenaeum#1836: see run_pull_api's own comment -- a cutoff mid-
+    # tool-use leaves ``answer`` as a tool preamble, not a graded response.
+    turns_exhausted = _api_loop_turns_exhausted(turn_count, _API_LOOP_MAX_TURNS, loop_transcript)
     return RolloutRecord(
         arm=Arm.NATIVE_INDEX,
         probe_id=probe.id,
@@ -3017,6 +3060,8 @@ def run_native_index_api(
         turn_count=turn_count,
         transcript=transcript,
         mode="api",
+        harness_failure=_turn_cap_harness_failure(turns_exhausted),
+        turns_exhausted=turns_exhausted,
     )
 
 
@@ -3062,6 +3107,9 @@ def run_native_grep_api(
         {"native_memory": {"memory_dir": str(memory_dir), "loaded_memory_files": loaded_files}},
         *loop_transcript,
     ]
+    # Issue athenaeum#1836: see run_pull_api's own comment -- a cutoff mid-
+    # tool-use leaves ``answer`` as a tool preamble, not a graded response.
+    turns_exhausted = _api_loop_turns_exhausted(turn_count, _API_LOOP_MAX_TURNS, loop_transcript)
     return RolloutRecord(
         arm=Arm.NATIVE_GREP,
         probe_id=probe.id,
@@ -3075,6 +3123,8 @@ def run_native_grep_api(
         turn_count=turn_count,
         transcript=transcript,
         mode="api",
+        harness_failure=_turn_cap_harness_failure(turns_exhausted),
+        turns_exhausted=turns_exhausted,
     )
 
 
@@ -3472,6 +3522,27 @@ def _api_loop_turns_exhausted(
     if turn_count != max_turns or not transcript:
         return False
     return transcript[-1].get("type") == "user"
+
+
+#: Issue athenaeum#1836: the ``harness_failure`` reason stamped on a read
+#: arm's record when :func:`_api_loop_turns_exhausted` is ``True`` for it --
+#: a stable, greppable ``"turn_cap"`` prefix (mirroring
+#: ``_permission_request_harness_failure``/``_not_logged_in_harness_failure``'s
+#: own short-reason convention) so ``north_star_report`` can count these
+#: separately from every other harness-failure reason, not just exclude
+#: them from grading the same way.
+_TURN_CAP_HARNESS_FAILURE_REASON = (
+    "turn_cap: api tool loop exhausted its turn budget with a tool call still "
+    "pending -- the recorded answer is a mid-turn tool preamble, not a graded response"
+)
+
+
+def _turn_cap_harness_failure(turns_exhausted: bool) -> str | None:
+    """``_TURN_CAP_HARNESS_FAILURE_REASON`` when *turns_exhausted*, else
+    ``None`` -- the one-line translation every read-arm api caller applies
+    to its own :func:`_api_loop_turns_exhausted` result (issue
+    athenaeum#1836)."""
+    return _TURN_CAP_HARNESS_FAILURE_REASON if turns_exhausted else None
 
 
 def run_native_writer_api(
