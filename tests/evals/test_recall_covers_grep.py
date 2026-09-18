@@ -785,6 +785,11 @@ _VECTOR_XFAIL: frozenset[tuple[str, str]] = frozenset(
         # not the real model; real-model status for this module is
         # tracked on athenaeum#1787.
         ("medium", "office_address_current"),
+        # Stand-in-embedder ballast-placement shift after the
+        # unprompted_push corpus additions (athenaeum#1778); this set
+        # measures the lexical-hash stand-in, not the real model;
+        # real-model status for this module is tracked on athenaeum#1787.
+        ("medium", "relay_sync_fix"),
     }
 )
 

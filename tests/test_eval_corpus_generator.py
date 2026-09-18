@@ -1548,8 +1548,9 @@ def test_xlarge_scale_is_pinned() -> None:
     # Re-shifted once more when the three decoy pages' forbidden_tokens were
     # replanted into full prose (issue athenaeum#1811 finding) instead of a
     # detached marker line -- and again on rebase onto develop b8683e18
-    # (post athenaeum#1779/#1780/#1781), re-measured below.
-    assert corpus.fingerprint() == "01692cdc5268b16a"  # PLACEHOLDER: re-derive after rebase
+    # (post athenaeum#1779/#1780/#1781), re-measured directly against
+    # `build_corpus(scale="xlarge")` on this branch.
+    assert corpus.fingerprint() == "d54a80bb2a25ca79"
 
 
 def test_long_tier_tag_is_outside_the_recall_snippet() -> None:
