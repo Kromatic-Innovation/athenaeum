@@ -348,8 +348,9 @@ def test_pull_api_reaches_a_reference_tag_recall_alone_cannot_show(tmp_path: Pat
         _RecordedTurn(
             content=[
                 _text_block(
-                    "Rowan Wrenfield decided to hold the day rate flat through FY2026 "
-                    f"and absorb the indirect cost increase.\n\n[ref: {tag}]"
+                    "Rowan Wrenfield, who sits on the pricing committee, decided to hold "
+                    "the day rate flat through FY2026 and absorb the indirect cost "
+                    f"increase.\n\n[ref: {tag}]"
                 )
             ],
             stop_reason="end_turn",

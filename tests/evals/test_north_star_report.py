@@ -44,6 +44,7 @@ from tests.evals.north_star_report import (
     lexical_overlap,
     load_rollout_rows,
     render_report,
+    tag_followed,
     uid_citation_rate,
     weak_probes,
     write_report,
@@ -596,63 +597,61 @@ def _recall_output_record(
     )
 
 
-def test_correctness_grades_incorrect_on_distractor_token_without_probes_own_token() -> None:
-    """AC2: an answer containing a DIFFERENT probe's planted token -- a
-    distractor page's own ground truth, not this probe's -- must not grade
-    correct just because it contains *some* recognized token."""
-    pto_probe = _probe("pto_allowance")  # token: Cinderquill, on policy-pto
-    other_probe = _probe("confidentiality_rule")  # token: Harrowvex, on policy-confidentiality
-    assert pto_probe.answer_tokens and other_probe.answer_tokens
-    assert pto_probe.answer_tokens != other_probe.answer_tokens
+def test_correctness_grades_incorrect_on_distractor_marker_without_probes_own_marker() -> None:
+    """AC2 (issue athenaeum#1831): an answer containing a DIFFERENT probe's
+    planted content marker -- a distractor page's own ground truth, not
+    this probe's -- must not grade correct just because it contains *some*
+    recognized marker."""
+    pto_probe = _probe("pto_allowance")  # marker: "25 days per year", on policy-pto
+    other_probe = _probe("confidentiality_rule")  # marker: "Nadia Frost", on policy-confidentiality
+    assert pto_probe.answer_markers and other_probe.answer_markers
+    assert pto_probe.answer_markers != other_probe.answer_markers
 
-    distractor_token = other_probe.answer_tokens[0]
+    _distractor_uid, distractor_marker = other_probe.answer_markers[0]
     wrong_answer = _record(
-        arm=Arm.NONE,
+        arm=Arm.ORACLE,
         probe_id=pto_probe.id,
         probe_class=pto_probe.probe_class,
-        answer=f"The PTO allowance is documented under {distractor_token}.",
+        answer=f"The PTO allowance is documented, see {distractor_marker}.",
     )
     assert grade_correctness(wrong_answer, pto_probe, _CORPUS) is False
 
     # Positive control: the SAME shape of answer, but carrying the probe's
-    # own token, grades correct -- proves the miss above is about which
-    # token is present, not some unrelated reason (e.g. answer length).
-    right_token = pto_probe.answer_tokens[0]
+    # own marker, grades correct -- proves the miss above is about which
+    # marker is present, not some unrelated reason (e.g. answer length).
+    _right_uid, right_marker = pto_probe.answer_markers[0]
     right_answer = _record(
         arm=Arm.ORACLE,
         probe_id=pto_probe.id,
         probe_class=pto_probe.probe_class,
-        answer=f"The PTO allowance is documented under {right_token}.",
+        answer=f"The PTO allowance is {right_marker}.",
     )
     assert grade_correctness(right_answer, pto_probe, _CORPUS) is True
 
 
-def test_follow_through_grading_requires_every_planted_token() -> None:
-    """AC3 (issue athenaeum#1737): ``follow_through`` probes plant a token on
-    EACH of at least two pages -- an answer that surfaced the breadcrumb page
-    but never followed the edge to the second-hop page carries only one of
-    them, and must grade incorrect, never a partial credit."""
+def test_follow_through_grading_requires_every_planted_marker() -> None:
+    """AC3 (issue athenaeum#1831, athenaeum#1737): ``follow_through`` probes
+    plant a marker on EACH of at least two pages -- an answer that carries
+    only one of them must grade incorrect, never a partial credit."""
     probe = _probe("fenwick_relationship_history")
-    assert len(probe.answer_tokens) >= 2
+    assert len(probe.answer_markers) == 2
+    (_uid1, marker1), (_uid2, marker2) = probe.answer_markers
 
-    one_token_answer = _record(
-        arm=Arm.PULL,
-        probe_id=probe.id,
-        probe_class=probe.probe_class,
-        answer=f"Fenwick Systems' relationship is coordinated per {probe.answer_tokens[0]}.",
-    )
-    assert grade_correctness(one_token_answer, probe, _CORPUS) is False
-
-    all_tokens_answer = _record(
+    one_marker_answer = _record(
         arm=Arm.ORACLE,
         probe_id=probe.id,
         probe_class=probe.probe_class,
-        answer=(
-            f"Fenwick Systems' relationship is coordinated per {probe.answer_tokens[0]}, "
-            f"and renegotiation timing is tracked per {probe.answer_tokens[1]}."
-        ),
+        answer=f"Fenwick Systems' relationship: {marker1}.",
     )
-    assert grade_correctness(all_tokens_answer, probe, _CORPUS) is True
+    assert grade_correctness(one_marker_answer, probe, _CORPUS) is False
+
+    all_markers_answer = _record(
+        arm=Arm.ORACLE,
+        probe_id=probe.id,
+        probe_class=probe.probe_class,
+        answer=f"Fenwick Systems' relationship: {marker1}. Checkpoint: {marker2}.",
+    )
+    assert grade_correctness(all_markers_answer, probe, _CORPUS) is True
 
 
 # ---------------------------------------------------------------------------
@@ -739,86 +738,194 @@ def test_uid_not_in_expected_uids_grades_wrong_even_if_delivered() -> None:
     assert grade_correctness(wrong_uid_answer, pto_probe, _CORPUS) is False
 
 
-def test_uid_citation_tag_path_unchanged_when_no_uid_present() -> None:
-    """Regression: a plain tag citation, with no recall output at all,
-    still grades correct -- the uid-citation rule is additive, never a
-    replacement for the athenaeum#1753 tag contract."""
+def test_tag_quoted_but_marker_absent_grades_wrong() -> None:
+    """AC counter-example 3 (issue athenaeum#1831): the answer quotes the
+    page's ``[ref: TAG]`` token but never states the content marker --
+    correctness no longer credits the tag at all. ``_tag_followed`` still
+    credits the citation, as the report-only diagnostic it now is."""
     pto_probe = _probe("pto_allowance")
     tag_answer = _record(
         arm=Arm.ORACLE,
         probe_id=pto_probe.id,
         probe_class=pto_probe.probe_class,
-        answer=f"25 days per year, per {pto_probe.answer_tokens[0]}.",
+        answer=f"[ref: {pto_probe.answer_tokens[0]}]",
     )
-    assert grade_correctness(tag_answer, pto_probe, _CORPUS) is True
+    assert grade_correctness(tag_answer, pto_probe, _CORPUS) is False
+    assert tag_followed(tag_answer, pto_probe) is True
 
 
-def test_breadcrumb_only_arm_citing_uid_grades_wrong() -> None:
-    """PUSH_BREADCRUMB delivers no uid-bearing text at all (issue
-    athenaeum#1574 AC4) -- a breadcrumb-only answer that cites a page's uid
-    string still grades wrong, since :func:`_delivered_uids` is structurally
-    ``()`` for this arm regardless of what the answer says."""
+def test_push_breadcrumb_grades_on_the_bullets_own_name_evidence() -> None:
+    """PUSH_BREADCRUMB carries no uid marker at all (issue athenaeum#1574
+    AC4), but its rendered bullet DOES name the page (``  - <name> --
+    <description>``) -- issue athenaeum#1831's ``_breadcrumb_delivered_uids``
+    reads that as real, selective delivery evidence (top-3 of the whole
+    corpus), never content-only. Marker present AND the page named in the
+    breadcrumb -> correct; marker present but the page NOT named (a
+    different page's breadcrumb, or none at all) -> wrong, the same leak
+    guard every other arm gets."""
     pto_probe = _probe("pto_allowance")
-    breadcrumb_answer = _record(
+    _uid, marker = pto_probe.answer_markers[0]
+    named_answer = _record(
         arm=Arm.PUSH_BREADCRUMB,
         probe_id=pto_probe.id,
         probe_class=pto_probe.probe_class,
-        answer="The PTO allowance is 25 days per year; see policy-pto.",
-        transcript=[{"pushed_context": BREADCRUMB_DELIVERED}],
+        answer=f"The PTO allowance is {marker}.",
+        transcript=[{"pushed_context": BREADCRUMB_DELIVERED}],  # names "PTO policy"
     )
-    assert grade_correctness(breadcrumb_answer, pto_probe, _CORPUS) is False
+    assert grade_correctness(named_answer, pto_probe, _CORPUS) is True
+
+    unnamed_answer = _record(
+        arm=Arm.PUSH_BREADCRUMB,
+        probe_id=pto_probe.id,
+        probe_class=pto_probe.probe_class,
+        answer=f"The PTO allowance is {marker}.",
+        transcript=[
+            {"pushed_context": "  - Confidentiality policy — who may see client data\n"}
+        ],
+    )
+    assert grade_correctness(unnamed_answer, pto_probe, _CORPUS) is False
 
 
-def test_follow_through_multi_token_satisfied_by_mix_of_tag_and_uid() -> None:
-    """Each planted token independently takes either path: the first token
-    is satisfied by its tag, the second by a uid citation of ITS OWN page,
-    delivered in the same recall output -- the all-tokens requirement is
-    otherwise unchanged."""
+def test_native_index_grades_on_a_topic_file_actually_read() -> None:
+    """NATIVE_INDEX's loaded MEMORY.md index text is never used as delivery
+    evidence (issue athenaeum#1831 -- at ``core`` scale it untruncatedly
+    names every page, which would be a tautology, not evidence). What counts
+    is a topic file the model's OWN ``read`` tool actually opened during the
+    turn, recorded the same ``loaded_memory_files`` way NATIVE_GREP already
+    is (see ``run_native_index``). Marker present AND the topic file read ->
+    correct; marker present with nothing read -> wrong."""
+    pto_probe = _probe("pto_allowance")
+    _uid, marker = pto_probe.answer_markers[0]
+    read_record = _record(
+        arm=Arm.NATIVE_INDEX,
+        probe_id=pto_probe.id,
+        probe_class=pto_probe.probe_class,
+        answer=f"The PTO allowance is {marker}.",
+        transcript=[
+            {
+                "native_memory": {
+                    "loaded_memory_files": {"/memory/policy-pto.md": "..."},
+                }
+            }
+        ],
+    )
+    assert grade_correctness(read_record, pto_probe, _CORPUS) is True
+
+    unread_record = _record(
+        arm=Arm.NATIVE_INDEX,
+        probe_id=pto_probe.id,
+        probe_class=pto_probe.probe_class,
+        answer=f"The PTO allowance is {marker}.",
+        transcript=[{"native_memory": {"loaded_memory_files": {}}}],
+    )
+    assert grade_correctness(unread_record, pto_probe, _CORPUS) is False
+
+
+def test_follow_through_markers_both_pages_delivered_grades_correct() -> None:
+    """Each planted marker independently requires its OWN page to be
+    delivered: both markers present, and both pages' uids in this cell's
+    own recall output -- grades correct."""
     probe = _probe("fenwick_relationship_history")
-    assert probe.answer_tokens == ("Quillbrook", "Marrowfen")
     assert probe.expected_uids == (FENWICK_UID, DARA_UID)
+    (_uid1, marker1), (_uid2, marker2) = probe.answer_markers
 
-    mixed_answer = _recall_output_record(
+    both_delivered_answer = _recall_output_record(
         arm=Arm.PULL,
         probe_id=probe.id,
         probe_class=probe.probe_class,
-        answer=(
-            f"Fenwick Systems' relationship is coordinated per {probe.answer_tokens[0]}, "
-            f"and the recurring checkpoint is covered on {DARA_UID}."
-        ),
+        answer=f"{marker1}. {marker2}.",
         recall_text=_FENWICK_RECALL_TEXT + "\n" + _DARA_RECALL_TEXT,
     )
-    assert grade_correctness(mixed_answer, probe, _CORPUS) is True
+    assert grade_correctness(both_delivered_answer, probe, _CORPUS) is True
 
 
-def test_follow_through_uid_citation_does_not_cross_pages() -> None:
-    """A uid citation only satisfies the token ITS OWN page plants: citing
-    the delivered `person-dara-holt` uid does nothing for the FIRST token
-    ("Quillbrook", planted on `client-fenwick-systems`) -- the per-page
-    binding in :func:`_answer_token_satisfied` must not let one delivered
-    uid satisfy every token in the probe."""
+def test_follow_through_markers_only_one_page_delivered_grades_wrong() -> None:
+    """AC counter-example 4 (issue athenaeum#1831): a multi_hop/follow_through
+    probe with BOTH markers present in the answer, but only ONE of the two
+    expected pages' uids actually delivered -- must grade wrong."""
     probe = _probe("fenwick_relationship_history")
-    only_second_uid_answer = _recall_output_record(
+    (_uid1, marker1), (_uid2, marker2) = probe.answer_markers
+
+    only_dara_delivered_answer = _recall_output_record(
         arm=Arm.PULL,
         probe_id=probe.id,
         probe_class=probe.probe_class,
-        answer=f"See {DARA_UID} for the relationship and checkpoint details.",
-        recall_text=_FENWICK_RECALL_TEXT + "\n" + _DARA_RECALL_TEXT,
+        answer=f"{marker1}. {marker2}.",
+        recall_text=_DARA_RECALL_TEXT,  # only dara-holt delivered, not fenwick-systems
     )
-    assert grade_correctness(only_second_uid_answer, probe, _CORPUS) is False
+    assert grade_correctness(only_dara_delivered_answer, probe, _CORPUS) is False
+
+
+def test_athenaeum_1831_acceptance_criteria_counter_examples() -> None:
+    """The four counter-example tests issue athenaeum#1831's acceptance
+    criteria name explicitly, in one place for direct traceability. Each is
+    ALSO covered by its own dedicated test elsewhere in this module (see
+    each assertion's comment for the sibling test) -- this one exists so a
+    reviewer can check the AC off against a single, self-contained test.
+
+    1. correct marker, no tag, page delivered -> True
+    2. correct marker, page NOT delivered (leaked/guessed) -> False
+    3. tag quoted, marker absent -> False
+    4. multi_hop probe: both markers present, only one page delivered -> False
+    """
+    pto_probe = _probe("pto_allowance")
+    _pto_uid, pto_marker = pto_probe.answer_markers[0]
+    tag = pto_probe.answer_tokens[0]
+
+    # (1) -- see also test_correctness_no_longer_needs_the_tag_but_tag_followed_still_does
+    # in test_reference_tag_contract.py.
+    no_tag_delivered = _record(
+        arm=Arm.ORACLE,
+        probe_id=pto_probe.id,
+        probe_class=pto_probe.probe_class,
+        answer=f"The firm's PTO allowance is {pto_marker}.",
+    )
+    assert grade_correctness(no_tag_delivered, pto_probe, _CORPUS) is True
+
+    # (2) -- correct marker, but PULL's own transcript delivered nothing for
+    # this probe (no recall call at all): the leak guard denies credit.
+    leaked_marker_undelivered = _record(
+        arm=Arm.PULL,
+        probe_id=pto_probe.id,
+        probe_class=pto_probe.probe_class,
+        answer=f"The firm's PTO allowance is {pto_marker}.",
+    )
+    assert grade_correctness(leaked_marker_undelivered, pto_probe, _CORPUS) is False
+
+    # (3) -- see also test_tag_quoted_but_marker_absent_grades_wrong above.
+    tag_only = _record(
+        arm=Arm.ORACLE,
+        probe_id=pto_probe.id,
+        probe_class=pto_probe.probe_class,
+        answer=f"[ref: {tag}]",
+    )
+    assert grade_correctness(tag_only, pto_probe, _CORPUS) is False
+
+    # (4) -- see also test_follow_through_markers_only_one_page_delivered_grades_wrong
+    # above, which this mirrors using the same fenwick_relationship_history probe.
+    fenwick_probe = _probe("fenwick_relationship_history")
+    (_uid1, marker1), (_uid2, marker2) = fenwick_probe.answer_markers
+    only_one_page_delivered = _recall_output_record(
+        arm=Arm.PULL,
+        probe_id=fenwick_probe.id,
+        probe_class=fenwick_probe.probe_class,
+        answer=f"{marker1}. {marker2}.",
+        recall_text=_FENWICK_RECALL_TEXT,  # only client-fenwick-systems delivered
+    )
+    assert grade_correctness(only_one_page_delivered, fenwick_probe, _CORPUS) is False
 
 
 def test_weak_probes_lists_probe_the_none_arm_already_answers_correctly() -> None:
     """AC4: a probe the NONE arm (no context delivered) answers correctly is
     a floor-leak signal and must be named in the weak-probe list."""
     pto_probe = _probe("pto_allowance")
-    leaking_token = pto_probe.answer_tokens[0]
+    _leaking_uid, leaking_marker = pto_probe.answer_markers[0]
     leaky_none_row = _row(
         _record(
             arm=Arm.NONE,
             probe_id=pto_probe.id,
             probe_class=pto_probe.probe_class,
-            answer=f"It's 25 days, code {leaking_token}.",
+            answer=f"It's {leaking_marker}.",
         )
     )
 
@@ -863,12 +970,13 @@ def test_weak_probes_never_lists_an_abstention_probe_the_none_arm_got_right() ->
 
     # Positive control in the same run: a genuine floor leak IS still listed.
     pto_probe2 = _probe("pto_allowance")
+    _uid2, marker2 = pto_probe2.answer_markers[0]
     leaky_row = _row(
         _record(
             arm=Arm.NONE,
             probe_id=pto_probe2.id,
             probe_class=pto_probe2.probe_class,
-            answer=f"It's 25 days, code {pto_probe2.answer_tokens[0]}.",
+            answer=f"It's {marker2}.",
         )
     )
 
@@ -907,7 +1015,7 @@ def test_correctness_rate_rendered_per_group() -> None:
     section broken out per (probe_class, corpus_scale, arm), the same shape
     as every other dimension."""
     pto_probe = _probe("pto_allowance")
-    token = pto_probe.answer_tokens[0]
+    _uid, marker = pto_probe.answer_markers[0]
     rows = [
         _row(
             _record(
@@ -922,7 +1030,7 @@ def test_correctness_rate_rendered_per_group() -> None:
                 arm=Arm.ORACLE,
                 probe_id=pto_probe.id,
                 probe_class=pto_probe.probe_class,
-                answer=f"25 days, per {token}.",
+                answer=f"{marker}.",
             )
         ),
     ]
@@ -1211,7 +1319,7 @@ def test_no_model_client_constructed_on_report_path(
     # this guard did not exercise before this issue.
     pto_probe = _probe("pto_allowance")
     abstention_probe = _probe("abstain_unknown_client")
-    leaking_token = pto_probe.answer_tokens[0]
+    _leaking_uid, leaking_marker = pto_probe.answer_markers[0]
 
     rows = [
         _row(_none_record()),
@@ -1223,7 +1331,7 @@ def test_no_model_client_constructed_on_report_path(
                 arm=Arm.NONE,
                 probe_id=pto_probe.id,
                 probe_class=pto_probe.probe_class,
-                answer=f"It's 25 days, per {leaking_token}.",
+                answer=f"It's {leaking_marker}.",
             )
         ),
         _row(
@@ -1329,6 +1437,7 @@ def _group_stat(
         coverage_rate=None,
         marker_resolution_rate=None,
         mean_index_coverage=None,
+        tag_followed_rate=None,
     )
 
 
