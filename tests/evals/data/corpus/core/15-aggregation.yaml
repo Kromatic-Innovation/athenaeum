@@ -1,11 +1,11 @@
 # aggregation probe class (issue athenaeum#1780, athenaeum#1791 §2.1/§3.4).
 #
-# Many-correct-answer sets, self-contained in this file so the class's
-# fixture never touches a page another probe class's expected_uids/
-# must_not_rank already depends on. `grade_coverage` (issue athenaeum#1773)
-# grades these by MATCHED FRACTION of `answer_tokens`, not the all-or-nothing
-# `grade_correctness` rule -- an answer naming 5 of 6 correct pages here
-# scores 5/6, not 0.
+# Many-correct-answer sets, mostly self-contained in this file so the
+# class's fixture never touches a page another probe class's
+# expected_uids/must_not_rank already depends on. `grade_coverage` (issue
+# athenaeum#1773) grades these by MATCHED FRACTION of `answer_tokens`, not
+# the all-or-nothing `grade_correctness` rule -- an answer naming 6 of 7
+# correct pages here scores 6/7, not 0.
 #
 # Every page below carries its own single planted `Internal reference tag:`
 # line, listed in its probe's `answer_tokens` -- `grade_coverage` counts
@@ -14,8 +14,19 @@
 # correctness. `must_not_rank` on every probe names REAL, UNEDITED pages
 # elsewhere in the core corpus that already share the query's vocabulary
 # through their own pre-existing tags/body text (never a phrase invented and
-# planted just to manufacture a decoy) -- see each probe's note in
-# probes.yaml for the "grep-reachable via:" citation.
+# planted just to manufacture a decoy, and never asserted by eye -- see each
+# probe's note in probes.yaml, which cites `_content_terms`/
+# `_shares_stemmed_term` overlap against the exact query, per Quine review
+# of PR athenaeum#1810).
+#
+# TWO existing pages (`person-lena-varga` in `core/00-people.yaml`,
+# `client-castleford` in `core/01-clients.yaml`) each gained exactly one
+# appended `Internal reference tag:` body line, per that same review: both
+# already genuinely satisfied their probe's criterion by their own
+# pre-existing tags/body text, and leaving a page that genuinely qualifies
+# out of `expected_uids` entirely is a ground-truth false negative -- the
+# one shape this class must never have. No OTHER existing page anywhere in
+# the corpus was edited.
 #
 # report_only: True on all three (athenaeum#1791 §2.1's ruling) -- coverage
 # feeds no design-doc §7 condition until an explicit operator ruling on
@@ -23,11 +34,16 @@
 
 # --- delivery-role people (probe: aggregation_delivery_roles) ---------------
 #
-# Six people newly authored here, each in a genuinely delivery-facing role.
-# The near-miss set (`meeting-standup`, `project-portal-refresh`,
-# `policy-onboarding` in probes.yaml) is left untouched: all three already
-# carry the literal `delivery` tag and vocabulary in `core/03-projects-tools.yaml`
-# and `core/02-policies.yaml`, which is exactly the false-positive shape this
+# Six people newly authored here, each in a genuinely delivery-facing role,
+# plus `person-lena-varga` (`core/00-people.yaml`) -- already tags [person,
+# delivery], "runs delivery for the client portal refresh" -- who already
+# satisfied the criterion before this issue and is now in `expected_uids`
+# with one appended `Internal reference tag:` line (Quine review of PR
+# athenaeum#1810; see this file's header). The near-miss set
+# (`meeting-standup`, `project-portal-refresh`, `policy-onboarding` in
+# probes.yaml) is left untouched: all three already carry the literal
+# `delivery` tag and vocabulary in `core/03-projects-tools.yaml` and
+# `core/02-policies.yaml`, which is exactly the false-positive shape this
 # probe measures -- a keyword search on "delivery" surfaces a meeting, a
 # project, and a policy, none of which is a PERSON the query asks for.
 
@@ -124,16 +140,16 @@
 
 # --- retainer clients (probe: aggregation_retainer_clients) -----------------
 #
-# Three new clients on a standing retainer, alongside three pre-existing
-# retainer clients (`client-alderway`/`client-bluewater`/`client-atlas` in
-# `core/01-clients.yaml`) whose OWN pre-existing `Internal reference tag:`
-# lines (Trevanquil/Thornmere/Ashfallow) are reused as-is in
-# `aggregation_retainer_clients`'s `answer_tokens` -- no edit to that file.
-# `client-castleford` is also a genuine retainer client by its own existing
-# tag and is deliberately left OUT of both `expected_uids` and
-# `must_not_rank`: it is not a near-miss (it really does qualify), and
-# including it in `expected_uids` would require adding it a tag line this
-# issue has no need to touch that file for.
+# Three new clients on a standing retainer, alongside FOUR pre-existing
+# retainer clients in `core/01-clients.yaml`: `client-alderway`/
+# `client-bluewater`/`client-atlas`, whose OWN pre-existing `Internal
+# reference tag:` lines (Trevanquil/Thornmere/Ashfallow) are reused as-is in
+# `aggregation_retainer_clients`'s `answer_tokens` -- no edit to that file --
+# and `client-castleford`, which already satisfied the criterion by its own
+# existing tag and body ("quarterly advisory retainer") before this issue
+# and is now in `expected_uids` with one appended `Internal reference tag:`
+# line (Quine review of PR athenaeum#1810; see this file's header) rather
+# than left out as a page that "really does qualify" but goes ungraded.
 
 - uid: client-larchmoor
   type: company
@@ -185,12 +201,14 @@
 # Five new internally-built tools, alongside the pre-existing `tool-buildpipe`
 # (`core/03-projects-tools.yaml`), whose OWN pre-existing tag (Fennorack) is
 # reused in `aggregation_inhouse_tools`'s `answer_tokens` -- no edit to that
-# file. `tool-pagevault` and `tool-gridbook` are deliberately left OUT of
-# `expected_uids`: both are third-party SaaS by their own existing `tags:
-# [tooling, saas]`, not in-house software, which is exactly why they work as
-# untouched near-misses in `must_not_rank` instead -- a keyword search on
-# "tooling" or "internal" reaches them, but they are subscriptions, not
-# something the firm builds and runs itself.
+# file. `must_not_rank` is `project-knowledge-base`, `project-pinemarsh-
+# initiative` (`core/03-projects-tools.yaml`/`core/10-follow-through.yaml`),
+# and `policy-tooling-procurement` (`core/02-policies.yaml`), each verified
+# with `_content_terms`/`_shares_stemmed_term` against this exact query, not
+# by eye -- see the probe's note in probes.yaml (Quine review of PR
+# athenaeum#1810 found the original pair, `tool-pagevault`/`tool-gridbook`,
+# had ZERO overlap: "tooling" and "tools" do not collide under the 5-char
+# stem rule, so neither was actually grep-reachable via this query).
 
 - uid: tool-ledgerscribe
   type: project
