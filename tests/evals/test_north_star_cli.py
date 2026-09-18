@@ -100,6 +100,41 @@ def test_corpus_scales_flag_accepts_xlarge_explicitly() -> None:
     assert all(c.corpus_scale == "xlarge" for c in cells)
 
 
+def test_search_backend_flag_defaults_to_fts5() -> None:
+    args = north_star_cli.build_arg_parser().parse_args([])
+    assert args.search_backend == "fts5"
+
+
+def test_vector_search_backend_rejects_a_scale_outside_core_and_medium() -> None:
+    """Issue athenaeum#1787: the vector-backend second dispatch is scoped
+    to ``core``+``medium`` only -- validated before any spend, same as
+    :func:`test_corpus_scales_flag_rejects_an_unknown_scale` above."""
+    args = north_star_cli.build_arg_parser().parse_args(
+        ["--search-backend", "vector", "--corpus-scales", "core,large"]
+    )
+    with pytest.raises(ValueError, match="scoped to"):
+        north_star_cli._build_cells(args)
+
+
+def test_vector_search_backend_accepts_core_and_medium() -> None:
+    args = north_star_cli.build_arg_parser().parse_args(
+        ["--search-backend", "vector", "--corpus-scales", "core,medium", "--scale", "full"]
+    )
+    cells = north_star_cli._build_cells(args)
+    assert cells
+    assert {c.corpus_scale for c in cells} == {"core", "medium"}
+
+
+def test_fts5_search_backend_is_unaffected_by_the_vector_scale_scope() -> None:
+    """The default fts5 backend must never be scoped down by
+    ``_VECTOR_SCOPED_SCALES`` -- only an explicit ``--search-backend
+    vector`` triggers that check."""
+    args = north_star_cli.build_arg_parser().parse_args(["--corpus-scales", "large"])
+    cells = north_star_cli._build_cells(args)
+    assert cells
+    assert all(c.corpus_scale == "large" for c in cells)
+
+
 def test_default_max_spend_covers_smoke_scale() -> None:
     cells = north_star_cli._build_cells(north_star_cli.build_arg_parser().parse_args([]))
     estimate = price_grid(

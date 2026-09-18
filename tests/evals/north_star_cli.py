@@ -133,6 +133,12 @@ DEFAULT_CORPUS_SCALES: tuple[str, ...] = tuple(
 )
 DEFAULT_REPLICATES: tuple[int, ...] = (0,)
 
+#: Issue athenaeum#1787: the ONLY corpus scales a ``--search-backend
+#: vector`` dispatch may name -- the backend-fidelity second dispatch is a
+#: comparison pass against two representative scales (issue #1787's own
+#: proposal), not the full 6-scale fts5 grid.
+_VECTOR_SCOPED_SCALES: frozenset[str] = frozenset({"core", "medium"})
+
 #: Mirrors ``containment_cli.DEFAULT_MAX_SPEND_USD`` -- the ``smoke`` scale
 #: (always exactly 1 cell) must never self-refuse at its own default; see
 #: ``test_north_star_cli.py::test_default_max_spend_covers_smoke_scale``.
@@ -1087,6 +1093,19 @@ def _build_cells(args: argparse.Namespace) -> list[GridCell]:
         raise ValueError(
             f"unknown corpus scale(s) {unknown!r} in --corpus-scales; known: {sorted(SCALES)}"
         )
+    # Issue athenaeum#1787: the vector-backend second dispatch is scoped to
+    # `core` + `medium` only (29 * 8 * 2 = 464 cells, design doc §3.6) --
+    # validated HERE, at parse time, same "validate before spend" discipline
+    # as the unknown-scale check above, rather than left to run an
+    # unbounded (and unbudgeted-for) vector grid at `large`/`xlarge`.
+    if args.search_backend == "vector":
+        out_of_scope = [s for s in corpus_scales if s not in _VECTOR_SCOPED_SCALES]
+        if out_of_scope:
+            raise ValueError(
+                f"--search-backend vector is scoped to {sorted(_VECTOR_SCOPED_SCALES)!r} "
+                f"only (issue athenaeum#1787); --corpus-scales named {out_of_scope!r} too. "
+                "Pass --corpus-scales core,medium (or a subset) for a vector dispatch."
+            )
     replicates = [int(r) for r in args.replicates.split(",")]
     placeholder_cells = build_grid(
         args.scale,

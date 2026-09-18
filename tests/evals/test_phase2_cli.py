@@ -708,7 +708,10 @@ def test_evals_yml_wires_the_phase2_inputs_to_the_flags() -> None:
     assert '"${PHASE2_SCALES_FLAG[@]}"' in evals_yml
     assert 'PHASE2_SYSTEMS_FLAG=(--phase2-systems "$NORTH_STAR_PHASE2_SYSTEMS")' in evals_yml
     assert '"${PHASE2_SYSTEMS_FLAG[@]}"' in evals_yml
-    assert "measurements/north-star-store.jsonl.phase2.jsonl" in evals_yml
+    # Issue athenaeum#1787: the sidecar path is globbed with a `*` between
+    # `store` and `.jsonl` so a vector dispatch's distinct store name
+    # uploads under the same pattern (see the workflow's own comment).
+    assert "measurements/north-star-store*.jsonl.phase2.jsonl" in evals_yml
     # AC5: the new inputs must not have grown the job a push trigger -- the
     # north-star job stays dispatch-only and opt-in, same gate as before.
     assert (

@@ -180,6 +180,35 @@ checkout should be treated the same way an unset relevance floor is treated
 above: read alongside a clear label of which side of the fix it predates,
 never as a like-for-like comparison with a post-fusion run.
 
+**Dispatching the vector-backend second pass (issue athenaeum#1787).**
+`north_star_cli.py --search-backend vector` (default `fts5`) is a SECOND,
+separate `workflow_dispatch` from the default grid, never a flag flipped on
+the same run -- `check_floor_mismatch` (`north_star_cli.py:347`) already
+refuses to resume a store recorded under one backend with a different
+`--search-backend`, so mixing the two into one `--store` is a hard error by
+construction, not merely discouraged. The vector pass is scoped to the
+`core`+`medium` corpus scales only (`north_star_cli.py`'s
+`_VECTOR_SCOPED_SCALES`, validated at parse time the same way an unknown
+scale is): a vector-backend `large`/`xlarge` pass is out of scope for this
+comparison and the CLI refuses it before pricing the grid. `evals.yml`
+gained a `north_star_search_backend` dispatch input (`"fts5"` default,
+`"vector"` the second-pass option); when it is `"vector"` and
+`north_star_corpus_scales` is left blank the workflow defaults it to
+`core,medium` itself, and the run step writes to a DISTINCT store path
+(`measurements/north-star-store-vector.jsonl`, never the fts5
+`north-star-store.jsonl`) so the two passes' resume state can never
+collide. When `all-MiniLM-L6-v2` is unavailable (network egress blocked,
+model download failing) the workflow's `Check vector backend availability`
+step catches it and the run step skips cleanly -- no job failure -- printing
+a `::notice::`, the same token-free-dependency precedent the
+`embedding-suite` job already established for MiniLM. The rendered report
+is its own markdown file beside the fts5 report (never merged into it,
+issue athenaeum#1764's per-backend grouping in `north_star_cli.floor_scan_summary`
+is the same discipline one level down), and `north_star_report.compute_verdicts`
+filters any non-`fts5` row out before computing the design-doc §7 decision
+block regardless of what its caller passes it, so a vector-backend row can
+never move the shipped-configuration verdict (ruling R1) even by mistake.
+
 ## 5. Two phases, because the corpus is compiled pages
 
 The synthetic corpus is compiled wiki pages plus probes. It has no raw
