@@ -224,8 +224,19 @@ class SearchBackend(Protocol):
         caller_audience: set[str] | None = None,
         as_of: date | None = None,
         type_filter: str | Sequence[str] | None = None,
+        metadata_only: bool = False,
     ) -> list[tuple[str, str, float]]:
         """Search the index.
+
+        ``metadata_only`` (issue athenaeum#1789 cross-lane regression, tracked
+        against athenaeum#1800) restricts the query to a page's identity
+        fields (name/tags/aliases/description), excluding body content, for
+        callers that need the pre-athenaeum#1789 candidate set. Only
+        ``FTS5Backend`` implements this (see its ``query`` docstring for the
+        full rationale); every other backend accepts and ignores the
+        parameter, matching this Protocol's existing pattern for a param one
+        backend needs and the rest don't act on (e.g. ``wiki_root``,
+        ``as_of`` below).
 
         ``wiki_root`` is used by scan-on-query backends (e.g. keyword) that
         don't maintain an on-disk index; indexed backends ignore it.
@@ -2254,10 +2265,12 @@ class VectorBackend:
         caller_audience: set[str] | None = None,
         as_of: date | None = None,
         type_filter: str | Sequence[str] | None = None,
+        metadata_only: bool = False,
     ) -> list[tuple[str, str, float]]:
         """Query the chromadb collection with semantic search."""
         del wiki_root  # Vector reads the pre-built chromadb collection
         del as_of  # athenaeum#308: vector filters at build time; as-of view = as-of index
+        del metadata_only  # athenaeum#1789: FTS5-only knob, no-op here (Protocol-shared param)
         chromadb = self._get_chromadb()
 
         vector_dir = cache_dir / _VECTOR_DIR
@@ -2666,6 +2679,7 @@ class KeywordBackend:
         as_of: date | None = None,
         type_filter: str | Sequence[str] | None = None,
         store: Store | None = None,
+        metadata_only: bool = False,
     ) -> list[tuple[str, str, float]]:
         """Score every non-underscore wiki page and return the top-n hits.
 
@@ -2685,6 +2699,7 @@ class KeywordBackend:
         filesystem fallback this backend exists for is unaffected.
         """
         del cache_dir
+        del metadata_only  # athenaeum#1789: FTS5-only knob, no-op here (Protocol-shared param)
         if wiki_root is None or not wiki_root.is_dir():
             return []
 

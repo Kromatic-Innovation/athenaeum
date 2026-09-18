@@ -658,7 +658,7 @@ _FTS5_XFAIL: frozenset[tuple[str, str]] = frozenset(
 #: athenaeum#1789 (FTS5 body-indexing) landed, then rebasing onto
 #: athenaeum#1792 exposed a cross-lane interaction: the fusion's FTS5 arm
 #: consumes FTS5's ranking, and once FTS5 could see page body content that
-#: ranking shifted. **Corrected finding (Quine review of PR #1807):** an
+#: ranking shifted. **Corrected finding (Quine review of PR athenaeum#1807):** an
 #: A/B against `develop` @ e2ee32ef showed ALL FOUR of
 #: ``person_not_repo``/``ratecard_tooling_owner``/``keelbridge_programme_scope``
 #: (core) and ``callum_drews_last_contact`` (medium) PASS on develop and
@@ -763,7 +763,7 @@ _VECTOR_XFAIL: frozenset[tuple[str, str]] = frozenset(
         #: athenaeum#1779's long_page tier; develop already has them and
         #: passes them, so this is this issue's regression, not
         #: corpus-shift collateral -- an earlier version of this comment
-        #: said otherwise and was wrong (Quine review of PR #1807).
+        #: said otherwise and was wrong (Quine review of PR athenaeum#1807).
         ("medium", "bramfield_retainer_renewal"),
         ("medium", "lighthouse_migration_rollback"),
     }

@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The cross-lane regression athenaeum#1789's FTS5 body-indexing caused in
   athenaeum#1792's hybrid fusion (`recall.hybrid.{fts5_weight,guard_rank,k}`),
   addressed on the FTS5 seam (issue athenaeum#1789, Quine review of PR
-  #1807).** `FTS5Backend.query` gains a `metadata_only` parameter, wired
+  athenaeum#1807).** `FTS5Backend.query` gains a `metadata_only` parameter, wired
   into `recall_search`'s hybrid FTS5 arm only (direct
   `search_backend="fts5"` recall is unaffected) — it uses FTS5's own
   `{col1 col2}: (query)` column-filter syntax to exclude `body` from the
@@ -99,7 +99,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   distractor pages sharing the probe's vocabulary in both name and body are
   not reliably separable from genuine answer pages by lexical signal alone.
   **Known cross-lane regression, not fixed here:** rebasing onto develop
-  after issue athenaeum#1792's `reciprocal_rank_fusion` (PR #1799) merged
+  after issue athenaeum#1792's `reciprocal_rank_fusion` (PR athenaeum#1799) merged
   showed the vector backend's `_VECTOR_XFAIL` set gained six genuine passes
   (this fix's body-indexing reaches them through the fusion) but the same
   ranking shift pulls `repo-rowanwrenfield` into FTS5's ranking for
