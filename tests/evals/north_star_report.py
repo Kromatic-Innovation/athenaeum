@@ -109,7 +109,7 @@ from athenaeum.text_overlap import (
     ngrams,
 )
 from tests.evals.containment import GridCell, ResultStore
-from tests.evals.corpus import Corpus, Observation, Probe, build_corpus
+from tests.evals.corpus import Corpus, Observation, Probe, answer_bearing_uids, build_corpus
 from tests.evals.corpus import _content_terms as _content_terms
 from tests.evals.metrics import uids_from_recall_output
 from tests.evals.rollout import Arm, RolloutRecord
@@ -390,13 +390,17 @@ def _native_loaded_uids(record: RolloutRecord) -> tuple[str, ...]:
     IS the delivered page's uid, the same tool-output basis PULL's uid
     extraction reads from :func:`uids_from_recall_output`.
 
-    NATIVE_INDEX is deliberately NOT handled here and gets ``()`` from
-    :func:`_delivered_uids` below: its transcript only records the loaded
-    ``MEMORY.md`` INDEX text (:func:`_loaded_text_for_suffix` inside
-    ``run_native_index``, kept as ``loaded_index_text`` only), never which
-    individual topic files -- if any -- the model went on to read, so
-    there is no uid-bearing tool-output basis to extract a delivered set
-    from for that arm.
+    Also used for NATIVE_INDEX as of issue athenaeum#1831:
+    ``run_native_index`` now records the SAME ``loaded_memory_files`` shape
+    -- every file Claude Code's own ``read``/``grep`` tools actually opened
+    during the turn, from the SAME ``_spawn_native`` return value
+    ``run_native_grep`` already reads (see ``run_native_index``'s own
+    comment: it used to discard everything but the ``MEMORY.md`` text).
+    Deliberately NOT the loaded ``MEMORY.md`` INDEX text itself, even though
+    that text is also available: at ``core`` scale the untruncated index
+    names every page in the corpus, so "named in the index" would be true
+    unconditionally -- a tautology, not evidence of anything the model did.
+    A topic file actually opened via ``read`` is real per-page evidence.
     """
     if not record.transcript:
         return ()
@@ -412,20 +416,60 @@ def _native_loaded_uids(record: RolloutRecord) -> tuple[str, ...]:
     return tuple(Path(path_str).stem for path_str in loaded if Path(path_str).stem)
 
 
-def _delivered_uids(record: RolloutRecord, probe: Probe) -> tuple[str, ...]:
+def _breadcrumb_delivered_uids(record: RolloutRecord, probe: Probe, corpus: Corpus) -> tuple[str, ...]:
+    """Uids of *probe*'s ``expected_uids`` pages actually NAMED in the
+    PUSH_BREADCRUMB arm's delivered text (issue athenaeum#1831).
+
+    The shipped hook (``examples/claude-code/user-prompt-recall.sh``) emits
+    at most three lines shaped ``  - <name> -- <description>`` (BM25-ranked,
+    ``LIMIT 3``) -- no uid marker at all, so :func:`uids_from_recall_output`
+    cannot be reused here. But the bullet's own selection IS a real,
+    SELECTIVE retrieval signal (top-3 of the whole corpus) -- naming a page
+    is the entirety of what this arm delivers about it, so "named in the
+    breadcrumb" is the correct delivered-evidence reading for this arm, a
+    weaker claim than the recall arms' full-content delivery. Matched on the
+    bullet's own name field (split on the em dash), not a loose substring
+    scan, so a page whose name happens to appear inside another page's
+    description does not false-positive.
+    """
+    text = _push_delivered_text(record)
+    if not text:
+        return ()
+    bullet_names: set[str] = set()
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("-"):
+            continue
+        body = stripped.lstrip("-").strip()
+        name_part = body.split("—")[0].strip()
+        if name_part:
+            bullet_names.add(name_part)
+    if not bullet_names:
+        return ()
+    pages_by_uid = {page.uid: page for page in corpus.pages}
+    return tuple(
+        uid
+        for uid in probe.expected_uids
+        if uid in pages_by_uid and pages_by_uid[uid].name in bullet_names
+    )
+
+
+def _delivered_uids(record: RolloutRecord, probe: Probe, corpus: Corpus) -> tuple[str, ...]:
     """Uids of the pages actually delivered to *record*'s arm for this cell.
 
     Shared arm-dispatch behind both :func:`delivered_uids_for_utilization`
     (waste/utilization accounting, keyed off a :class:`RolloutRow`) and
-    :func:`grade_correctness`'s uid-citation rule (issue athenaeum#1793,
-    keyed off the bare ``record``/``probe`` pair every existing caller and
-    test already has in hand -- no ``RolloutRow`` required). See
-    :func:`delivered_uids_for_utilization`'s own (prior) docstring for the
-    per-arm rendering-format rationale; behavior here is unchanged from
-    that function, just re-parameterized so ``grade_correctness`` can reuse
-    it directly. PUSH_BREADCRUMB and NATIVE_INDEX return ``()`` -- neither
-    arm's tool output carries a uid-bearing basis (see
-    :func:`_native_loaded_uids`'s docstring for NATIVE_INDEX's case).
+    :func:`grade_correctness`'s delivered-page-evidence rule (issue
+    athenaeum#1831, superseding athenaeum#1793's uid-citation-in-answer-text
+    rule), keyed off the bare ``record``/``probe``/``corpus`` triple every
+    existing caller and test already has in hand -- no ``RolloutRow``
+    required. See :func:`delivered_uids_for_utilization`'s own (prior)
+    docstring for the per-arm rendering-format rationale; unchanged here for
+    every arm it already covered. PUSH_BREADCRUMB and NATIVE_INDEX now have
+    real per-arm evidence too (issue athenaeum#1831 AC2) -- see
+    :func:`_breadcrumb_delivered_uids` and :func:`_native_loaded_uids`'s
+    docstrings. Only :attr:`Arm.NONE` still falls through to ``()`` -- it
+    delivers no context by design.
     """
     if record.arm is Arm.PUSH_PAGES_UPPER_BOUND:
         return tuple(uids_from_recall_output(_push_delivered_text(record)))
@@ -433,79 +477,84 @@ def _delivered_uids(record: RolloutRecord, probe: Probe) -> tuple[str, ...]:
         return probe.expected_uids
     if record.arm is Arm.PULL:
         return tuple(uids_from_recall_output(_pull_delivered_text(record)))
+    if record.arm is Arm.PUSH_BREADCRUMB:
+        return _breadcrumb_delivered_uids(record, probe, corpus)
     if record.arm is Arm.PUSH_BREADCRUMB_PULL:
-        return tuple(uids_from_recall_output(_pull_delivered_text(record)))
+        breadcrumb = _breadcrumb_delivered_uids(record, probe, corpus)
+        pulled = tuple(uids_from_recall_output(_pull_delivered_text(record)))
+        return tuple(dict.fromkeys((*breadcrumb, *pulled)))
     if record.arm is Arm.NATIVE_GREP:
+        return _native_loaded_uids(record)
+    if record.arm is Arm.NATIVE_INDEX:
         return _native_loaded_uids(record)
     return ()
 
 
-def _answer_token_satisfied(
-    token: str,
-    probe: Probe,
-    corpus: Corpus,
-    answer: str,
-    delivered_uids: frozenset[str],
-) -> bool:
-    """True when *answer* (already normalized) satisfies *token*, either by
-    the athenaeum#1753 tag contract or the athenaeum#1793 uid-citation rule.
+def tag_followed(record: RolloutRecord, probe: Probe) -> bool | None:
+    """Report-only diagnostic (issue athenaeum#1831, operator ruling on
+    athenaeum#1791 comment 5732689494: "the tag requirement is dubious as a
+    correctness criterion ... the tag becomes a report-only diagnostic").
 
-    Tag path (unchanged): *token* IS the tag string planted on the
-    ``Internal reference tag:`` line of one of *probe*'s ``expected_uids``
-    pages, so a normalized substring match against *answer* is exactly
-    "the model wrote ``[ref: TAG]`` for that page".
+    ``True`` when the answer literally quotes every one of
+    ``probe.answer_tokens``'s planted tags (the ``[ref: TAG]`` value
+    ``REFERENCE_TAG_INSTRUCTION`` asks for) -- this is the OLD
+    athenaeum#1753 correctness rule's tag path, demoted: it no longer feeds
+    :func:`grade_correctness`, any design-doc section 7 condition, or any
+    :class:`GroupStats` win/loss field, only its own report-only
+    ``tag_followed_rate`` column, rendered per arm and per mode.
 
-    Uid path (new, operator ruling on athenaeum#1793, option 1): a citation
-    of a page uid counts as satisfying *token* when (a) that page is one of
-    *probe*'s ``expected_uids``, (b) that page actually plants *token* (so a
-    ``follow_through`` probe's two tokens can each only be satisfied by
-    THEIR OWN page's uid, not either page's), (c) the uid string appears in
-    *answer*, AND (d) the uid is in *delivered_uids* -- the arm's own
-    recall/read-entity/file-read tool output for this cell, never merely
-    ``expected_uids`` (a guessed or leaked uid the arm was never shown must
-    still grade wrong; that is the athenaeum#1753 leak guard this rule is
-    scoped not to reopen).
+    ``None`` (never ``False``) for an abstention probe -- it plants no tag
+    to quote -- and for a probe with no ``answer_tokens`` at all (a corpus
+    authoring gap :func:`tests.evals.corpus.validate_core` already refuses
+    to ship).
     """
-    normalized_token = _normalize_for_match(token)
-    if normalized_token in answer:
-        return True
-    if not delivered_uids:
-        return False
-    pages_by_uid = {page.uid: page for page in corpus.pages}
-    for uid in probe.expected_uids:
-        if uid not in delivered_uids:
-            continue
-        page = pages_by_uid.get(uid)
-        if page is None or normalized_token not in _normalize_for_match(page.body):
-            continue
-        if _normalize_for_match(uid) in answer:
-            return True
-    return False
+    if probe.probe_class == "abstention" or not probe.answer_tokens:
+        return None
+    answer = _normalize_for_match(record.answer)
+    return all(_normalize_for_match(tok) in answer for tok in probe.answer_tokens)
 
 
 def grade_correctness(record: RolloutRecord, probe: Probe, corpus: Corpus) -> bool | None:
     """Did *record*'s answer get *probe*'s ground truth right?
 
-    Non-abstention: normalized substring match -- ALL of ``probe.answer_tokens``
-    must appear in the answer (mirrors the multi-hop/disambiguation probes'
-    own ground truth, where surfacing only one of several required facts is a
-    documented incomplete answer, not a correct one). Returns ``None`` (never
-    ``False``) when the probe carries no tokens at all -- a corpus authoring
-    gap that :func:`tests.evals.corpus.validate_core` already refuses to let
-    ship, not a graded miss.
+    Rewritten for issue athenaeum#1831 (operator ruling on athenaeum#1791
+    comment 5732689494: "If the answer is right, it is right. Grade the
+    answer on content, and establish which pages were used from evidence we
+    already have rather than from a quoted tag."). Correctness is now
+    CONTENT match plus DELIVERED-PAGE evidence, never the citation tag --
+    see :func:`tag_followed` for what became of the old tag rule.
 
-    Each required token may ALSO be satisfied by a uid citation of the page
-    that plants it, when that uid was actually delivered to this arm for
-    this cell -- see :func:`_answer_token_satisfied` (issue athenaeum#1793,
-    operator ruling: option 1). A ``follow_through`` probe's two tokens each
-    independently take either path; the all-tokens requirement above is
-    otherwise unchanged.
+    Non-abstention: for every ``expected_uids`` page that is ANSWER-BEARING
+    (carries one of ``probe.answer_tokens`` -- see
+    :func:`tests.evals.corpus.answer_bearing_uids`; a
+    ``disambiguation``/``distractor_robustness`` probe's context pages, a
+    ``redundancy`` probe's non-planting duplicates, and a
+    ``contradiction``/``negative_knowledge`` probe's STALE page are
+    ``expected_uids`` without being answer-bearing, and are NOT required
+    here -- exactly as ``answer_tokens`` already excluded them), BOTH of the
+    following must hold:
 
-    Abstention: correct only when the answer asserts none of the corpus's
-    planted tokens AND uses recognizable declining language -- see the
-    section docstring above. Unaffected by the uid-citation rule: an
-    abstention probe carries no ``expected_uids``, so there is nothing for a
-    uid citation to satisfy.
+    (a) at least one of that page's planted ``answer_markers`` -- the fact
+        itself, never the tag -- is present in the normalized answer, AND
+    (b) that page's uid is in :func:`_delivered_uids` for this arm/record
+        (the transcript's own recall/read-entity/file-read/breadcrumb
+        evidence -- never merely ``expected_uids``, so a guessed or leaked
+        marker with no delivery evidence still grades wrong, the same leak
+        guard the old tag rule enforced).
+
+    A ``multi_hop``/``follow_through`` probe whose planted facts split
+    across two answer-bearing pages therefore needs BOTH pages' markers
+    present AND BOTH pages delivered -- one page delivered, one not, grades
+    ``False`` (the design doc's required counter-example 4).
+
+    Returns ``None`` (never ``False``) when the probe carries no
+    ``answer_tokens`` at all, or (defensively -- :func:`validate_core`
+    already refuses to ship this) an answer-bearing page has no
+    ``answer_markers`` entry -- a corpus authoring gap, not a graded miss.
+
+    Abstention: unchanged from before this issue -- correct only when the
+    answer asserts none of the corpus's planted tokens AND uses
+    recognizable declining language -- see the section docstring above.
     """
     answer = _normalize_for_match(record.answer)
     if probe.probe_class == "abstention":
@@ -514,11 +563,33 @@ def grade_correctness(record: RolloutRecord, probe: Probe, corpus: Corpus) -> bo
         return any(phrase in answer for phrase in _NOT_FOUND_PHRASES)
     if not probe.answer_tokens:
         return None
-    delivered_uids = frozenset(_delivered_uids(record, probe))
-    return all(
-        _answer_token_satisfied(tok, probe, corpus, answer, delivered_uids)
-        for tok in probe.answer_tokens
-    )
+    pages_by_uid = {page.uid: page for page in corpus.pages}
+    required_uids = answer_bearing_uids(probe, pages_by_uid)
+    if not required_uids:
+        return None
+    markers_by_uid: dict[str, list[str]] = {}
+    for uid, marker in probe.answer_markers:
+        markers_by_uid.setdefault(uid, []).append(marker)
+    delivered = frozenset(_delivered_uids(record, probe, corpus))
+    # Arm.NONE has no delivery channel at all -- by definition, not a gap in
+    # one -- so it is graded on content alone, exactly as it always has been
+    # (the old tag rule never gated NONE on delivery either). This is NOT
+    # the same exemption the pre-athenaeum#1831 draft gave PUSH_BREADCRUMB/
+    # NATIVE_INDEX (both have real per-page evidence now -- see
+    # _breadcrumb_delivered_uids/_native_loaded_uids -- so both stay gated):
+    # weak_probes below depends on NONE staying gradable-True on content so
+    # it can keep catching a floor leak (prior knowledge/a guessable
+    # marker), which is precisely what content-only grading is FOR here.
+    content_only = record.arm is Arm.NONE
+    for uid in required_uids:
+        markers = markers_by_uid.get(uid, ())
+        if not markers:
+            return None
+        if not content_only and uid not in delivered:
+            return False
+        if not any(_normalize_for_match(marker) in answer for marker in markers):
+            return False
+    return True
 
 
 def grade_harm(record: RolloutRecord, probe: Probe) -> bool | None:
@@ -877,6 +948,13 @@ class GroupStats:
     # -- "no index to speak of" is a different fact from "0% coverage".
     mean_index_coverage: float | None
 
+    # Reference tag followed (issue athenaeum#1831, report_only) -- mean of
+    # tag_followed's per-row bool over rows whose probe carries
+    # answer_tokens (non-abstention). Feeds no section 7 condition and no
+    # win/loss: correctness_rate above is graded on answer_markers now,
+    # never this. None when no row in the group carries a gradable value.
+    tag_followed_rate: float | None
+
 
 def _mean(values: list[float]) -> float | None:
     return sum(values) / len(values) if values else None
@@ -904,6 +982,7 @@ def compute_group_stats(rows: Sequence[RolloutRow]) -> list[GroupStats]:
         coverage_values: list[float] = []
         marker_resolutions: list[float] = []
         index_coverages: list[float] = []
+        tag_followed_flags: list[float] = []
 
         for row in group:
             record = row.record
@@ -955,6 +1034,10 @@ def compute_group_stats(rows: Sequence[RolloutRow]) -> list[GroupStats]:
             if resolved is not None:
                 marker_resolutions.append(1.0 if resolved else 0.0)
 
+            followed = tag_followed(record, probe)
+            if followed is not None:
+                tag_followed_flags.append(1.0 if followed else 0.0)
+
             if record.arm is Arm.NATIVE_INDEX:
                 coverage_value = _native_index_coverage_value(record)
                 if coverage_value is not None:
@@ -985,6 +1068,7 @@ def compute_group_stats(rows: Sequence[RolloutRow]) -> list[GroupStats]:
                 mean_index_coverage=(
                     _mean(index_coverages) if arm == Arm.NATIVE_INDEX.value else None
                 ),
+                tag_followed_rate=_mean(tag_followed_flags),
             )
         )
     return stats
@@ -2559,8 +2643,8 @@ def render_report(report: NorthStarReport) -> str:
         "itself, never folded into `GroupStats`/`compute_group_stats`."
     )
     lines.append("")
-    lines.append("| probe_id | arm | corpus_scale | replicate | mode |")
-    lines.append("| --- | --- | --- | --- | --- |")
+    lines.append("| probe_id | arm | corpus_scale | replicate | mode | tag_followed |")
+    lines.append("| --- | --- | --- | --- | --- | --- |")
     for row in sorted(
         report.rows,
         key=lambda r: (
@@ -2570,9 +2654,14 @@ def render_report(report: NorthStarReport) -> str:
             r.cell.replicate,
         ),
     ):
+        # Issue athenaeum#1831: report-only per row, feeds no GroupStats
+        # win/loss and no §7 condition -- see tag_followed's own docstring.
+        row_probe = _probe_for_row(row)
+        followed = tag_followed(row.record, row_probe)
+        followed_display = "n/a" if followed is None else ("yes" if followed else "no")
         lines.append(
             f"| {row.record.probe_id} | {row.record.arm.value} | {row.record.corpus_scale} | "
-            f"{row.cell.replicate} | {row.record.mode} |"
+            f"{row.cell.replicate} | {row.record.mode} | {followed_display} |"
         )
     lines.append("")
 
@@ -2785,6 +2874,27 @@ def render_report(report: NorthStarReport) -> str:
         lines.append(
             f"| {s.probe_class} | {s.corpus_scale} | {s.arm} | {s.n} | "
             f"{_fmt(s.marker_resolution_rate)} |"
+        )
+    lines.append("")
+
+    lines.append("## Reference tag followed (issue athenaeum#1831, report_only)")
+    lines.append("")
+    lines.append(
+        "`tag_followed_rate` is the share of answers that quoted the `[ref: TAG]` "
+        "`REFERENCE_TAG_INSTRUCTION` asks for, for every one of the probe's planted tags -- "
+        "see `tag_followed`. This is the athenaeum#1753 correctness rule, DEMOTED by the "
+        "operator ruling on athenaeum#1791 comment 5732689494: it feeds no §7 condition and "
+        "no `correctness_rate` above, which is now graded on `answer_markers` (the planted "
+        "fact) plus delivered-page evidence, never this tag. `n/a` means no probe in that "
+        "group carries `answer_tokens` to grade against (including every abstention group)."
+    )
+    lines.append("")
+    lines.append("| probe_class | corpus_scale | arm | n | tag_followed_rate |")
+    lines.append("| --- | --- | --- | --- | --- |")
+    for s in report.stats:
+        lines.append(
+            f"| {s.probe_class} | {s.corpus_scale} | {s.arm} | {s.n} | "
+            f"{_fmt(s.tag_followed_rate)} |"
         )
     lines.append("")
 

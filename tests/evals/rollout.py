@@ -1732,11 +1732,24 @@ def run_native_index(
 
     loaded_index_text = _loaded_text_for_suffix(loaded_files, "MEMORY.md")
     coverage = _native_index_coverage(corpus, written_index_text, loaded_index_text)
+    # Issue athenaeum#1831: a topic file the model went on to `read` during
+    # the turn (beyond the index) is real per-page delivery evidence -- the
+    # SAME `loaded_memory_files` shape `run_native_grep` already records
+    # below, filtered to drop the index file itself (`MEMORY.md` names no
+    # page). Previously discarded entirely; `north_star_report._delivered_uids`
+    # now reads this for NATIVE_INDEX the same way it already reads
+    # NATIVE_GREP's, via `_native_loaded_uids`.
+    loaded_topic_files = {
+        path_str: content
+        for path_str, content in loaded_files.items()
+        if not path_str.endswith("MEMORY.md")
+    }
     transcript = [
         {
             "native_memory": {
                 **dataclasses.asdict(coverage),
                 "loaded_index_text": loaded_index_text,
+                "loaded_memory_files": loaded_topic_files,
             }
         },
         *parsed.transcript,
@@ -2724,6 +2737,11 @@ def run_native_index_api(
             "native_memory": {
                 **coverage_dict,
                 "loaded_index_text": injected_index_text,
+                # Issue athenaeum#1831: topic files the model actually
+                # opened via the `read` tool during this turn -- the same
+                # per-page delivery evidence `run_native_grep_api` already
+                # records, and cli-mode `run_native_index` now records too.
+                "loaded_memory_files": loaded_files,
             }
         },
         *loop_transcript,
