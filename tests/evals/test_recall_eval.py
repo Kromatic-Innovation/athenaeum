@@ -208,6 +208,19 @@ _PROBE_CLASSES: tuple[str, ...] = tuple(sorted({p.probe_class for p in _ALL_PROB
 # already the minimum non-zero pass count) rather than a measured value --
 # replace with a measured floor the first time this class actually runs
 # live.
+#
+# ``contradiction``/``negative_knowledge`` (issue athenaeum#1781, wave-2
+# item G) are NOT measured against a live backend either, same reason and
+# same derivation method as ``follow_through`` immediately above: this
+# table exists to keep regular (non-``eval``, credential-gated) CI in sync
+# with ``probes.yaml`` via ``test_floor_table_covers_every_probe_class_on_
+# every_backend``, not to state a measured live floor. Both classes are
+# also `report_only: True` (`tests.evals.corpus.WAVE_2_PROBE_CLASSES`, not
+# yet in `CONDITION_2_ENROLLED`), so a floor here has no bearing on any §7
+# decision condition regardless. Set to the same conservative 1-of-6 floor
+# as ``follow_through``/``distractor_robustness``/``redundancy`` -- lower
+# this further, or replace it with a measured floor, the first time either
+# class actually runs live.
 _FLOOR_BY_BACKEND_AND_CLASS: dict[tuple[str, str], int] = {
     ("fts5", "single_hop"): 3,
     ("fts5", "multi_hop"): 2,
@@ -217,6 +230,8 @@ _FLOOR_BY_BACKEND_AND_CLASS: dict[tuple[str, str], int] = {
     ("fts5", "redundancy"): 1,
     ("fts5", "follow_through"): 1,
     ("fts5", "aggregation"): 1,
+    ("fts5", "contradiction"): 1,
+    ("fts5", "negative_knowledge"): 1,
     ("fts5", "abstention"): 0,
     ("vector", "single_hop"): 3,
     ("vector", "multi_hop"): 2,
@@ -226,6 +241,8 @@ _FLOOR_BY_BACKEND_AND_CLASS: dict[tuple[str, str], int] = {
     ("vector", "redundancy"): 1,
     ("vector", "follow_through"): 1,
     ("vector", "aggregation"): 1,
+    ("vector", "contradiction"): 1,
+    ("vector", "negative_knowledge"): 1,
     ("vector", "abstention"): 0,
 }
 
