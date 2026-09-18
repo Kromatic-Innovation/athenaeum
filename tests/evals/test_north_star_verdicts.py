@@ -65,15 +65,65 @@ _CORPUS = build_corpus(scale=CORPUS_SCALE)
 # - "abstain_unknown_person" (abstention) has no expected_uids at all.
 RELATIONSHIP_PROBE_ID = "bluewater_terms"
 RELATIONSHIP_ANSWER_TOKEN = "Thornmere"
+RELATIONSHIP_UID = "client-bluewater"
+RELATIONSHIP_ANSWER_MARKER = "Twelve consulting days per month"
 MULTI_HOP_RELATIONSHIP_PROBE_ID = "spend_approver_named"
 MULTI_HOP_RELATIONSHIP_ANSWER_TOKEN = "Voltmere"
+# Only "person-amir-osei" is answer-bearing for this multi_hop probe -- its
+# other expected_uids page, "policy-budget-approval", carries no planted
+# marker (tests.evals.corpus.answer_bearing_uids confirms this on the real
+# core corpus). Delivering only the policy page would therefore never grade
+# correct; the person page is the one that matters here.
+MULTI_HOP_RELATIONSHIP_UID = "person-amir-osei"
+MULTI_HOP_RELATIONSHIP_ANSWER_MARKER = "from a written note by itself"
 OTHER_PROBE_ID = "pto_allowance"
 OTHER_ANSWER_TOKEN = "Cinderquill"
+OTHER_UID = "policy-pto"
+OTHER_ANSWER_MARKER = "25 days per year"
 OTHER_PROBE_ID_2 = "confidentiality_rule"
 OTHER_ANSWER_TOKEN_2 = "Harrowvex"
+OTHER_UID_2 = "policy-confidentiality"
+OTHER_ANSWER_MARKER_2 = "Nadia Frost"
 ABSTENTION_PROBE_ID = "abstain_unknown_person"
 
 VERDICT_ARM = Arm.PUSH_BREADCRUMB_PULL
+
+
+def _recall_transcript(*uids: str) -> list[dict]:
+    """A PULL/PUSH_BREADCRUMB_PULL-shaped transcript whose recall
+    tool_result names *uids* via ``**Uid:** <uid>`` lines -- the same shape
+    ``_pull_delivered_text`` parses (mirrors
+    ``test_north_star_report.py``'s ``_recall_output_record`` helper)."""
+    text = "".join(f"**Uid:** {uid}\n" for uid in uids)
+    return [
+        {
+            "type": "user",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "t1",
+                        "content": [{"type": "text", "text": text}],
+                    }
+                ]
+            },
+        }
+    ]
+
+
+def _push_transcript(*uids: str) -> list[dict]:
+    """A PUSH_PAGES_UPPER_BOUND-shaped transcript: *uids* named via
+    ``**Uid:** <uid>`` lines in ``transcript[0]["pushed_context"]``, the
+    field ``_push_delivered_text`` reads."""
+    text = "".join(f"**Uid:** {uid}\n" for uid in uids)
+    return [{"pushed_context": text}]
+
+
+def _native_transcript(*uids: str) -> list[dict]:
+    """A NATIVE_INDEX/NATIVE_GREP-shaped transcript: *uids* as the stems of
+    ``transcript[0]["native_memory"]["loaded_memory_files"]`` paths, the
+    shape ``_native_loaded_uids`` reads."""
+    return [{"native_memory": {"loaded_memory_files": {f"{uid}.md": "" for uid in uids}}}]
 
 
 def _record(
@@ -91,6 +141,13 @@ def _record(
     # (backend-agnostic) test data would be silently excluded. Tests that
     # specifically exercise the fts5/None exclusion pass a different value.
     search_backend: str = "vector",
+    # Issue athenaeum#1831: grade_correctness now also requires the page's
+    # uid in this rollout's delivered-uid evidence (arm-specific, extracted
+    # from the transcript) -- see _recall_transcript/_push_transcript/
+    # _native_transcript above. None (the default) means "no transcript",
+    # correct for Arm.ORACLE (delivers expected_uids without one) and for
+    # any fixture whose answer is deliberately wrong.
+    transcript: list[dict] | None = None,
 ) -> RolloutRecord:
     return RolloutRecord(
         arm=arm,
@@ -102,6 +159,7 @@ def _record(
             TurnTokenUsage(turn=0, input_tokens=input_tokens, output_tokens=output_tokens)
         ],
         search_backend=search_backend,
+        transcript=transcript if transcript is not None else [],
     )
 
 
@@ -294,10 +352,10 @@ def test_cost_per_correct_correct_cell_divides_total_tokens() -> None:
     rows = [
         _row(
             _record(
-                arm=Arm.PULL,
+                arm=Arm.ORACLE,
                 probe_id=OTHER_PROBE_ID,
                 probe_class="single_hop",
-                answer=f"25 days ({OTHER_ANSWER_TOKEN})",
+                answer=f"the allowance is {OTHER_ANSWER_MARKER}",
                 input_tokens=80,
                 output_tokens=20,
             )
@@ -323,10 +381,10 @@ def test_write_cost_amortized_and_raw_when_write_costs_supplied() -> None:
     rows = [
         _row(
             _record(
-                arm=Arm.PULL,
+                arm=Arm.ORACLE,
                 probe_id=OTHER_PROBE_ID,
                 probe_class="single_hop",
-                answer=f"25 days ({OTHER_ANSWER_TOKEN})",
+                answer=f"the allowance is {OTHER_ANSWER_MARKER}",
                 input_tokens=100,
                 output_tokens=50,
             )
@@ -357,10 +415,10 @@ def test_render_cost_per_correct_table_omits_write_columns_when_phase1_only() ->
     rows = [
         _row(
             _record(
-                arm=Arm.PULL,
+                arm=Arm.ORACLE,
                 probe_id=OTHER_PROBE_ID,
                 probe_class="single_hop",
-                answer=f"25 days ({OTHER_ANSWER_TOKEN})",
+                answer=f"the allowance is {OTHER_ANSWER_MARKER}",
             )
         ),
     ]
@@ -377,10 +435,10 @@ def test_render_report_is_phase1_only_when_report_carries_no_write_costs() -> No
     rows = [
         _row(
             _record(
-                arm=Arm.PULL,
+                arm=Arm.ORACLE,
                 probe_id=OTHER_PROBE_ID,
                 probe_class="single_hop",
-                answer=f"25 days ({OTHER_ANSWER_TOKEN})",
+                answer=f"the allowance is {OTHER_ANSWER_MARKER}",
             )
         ),
     ]
@@ -462,7 +520,8 @@ def test_compute_verdicts_ignores_fts5_backend_rows() -> None:
                 arm=VERDICT_ARM,
                 probe_id=RELATIONSHIP_PROBE_ID,
                 probe_class="single_hop",
-                answer=f"terms are {RELATIONSHIP_ANSWER_TOKEN}",
+                answer=f"terms are {RELATIONSHIP_ANSWER_MARKER}",
+                transcript=_recall_transcript(RELATIONSHIP_UID),
             )
         ),
         _row(
@@ -496,7 +555,7 @@ def test_compute_verdicts_ignores_fts5_backend_rows() -> None:
                 arm=Arm.NATIVE_INDEX,
                 probe_id=RELATIONSHIP_PROBE_ID,
                 probe_class="single_hop",
-                answer=f"terms are {RELATIONSHIP_ANSWER_TOKEN}",
+                answer=f"terms are {RELATIONSHIP_ANSWER_MARKER}",
                 search_backend=None,
             ),
             replicate=1,
@@ -526,7 +585,7 @@ def test_render_decision_block_names_the_pin_for_an_fts5_only_store() -> None:
                 arm=VERDICT_ARM,
                 probe_id=RELATIONSHIP_PROBE_ID,
                 probe_class="single_hop",
-                answer=f"terms are {RELATIONSHIP_ANSWER_TOKEN}",
+                answer=f"terms are {RELATIONSHIP_ANSWER_MARKER}",
                 search_backend=None,
             )
         ),
@@ -588,7 +647,8 @@ def test_condition1_pooled_fails_even_though_max_over_classes_would_pass() -> No
                 arm=VERDICT_ARM,
                 probe_id=RELATIONSHIP_PROBE_ID,
                 probe_class="single_hop",
-                answer=f"terms are {RELATIONSHIP_ANSWER_TOKEN}",
+                answer=f"terms are {RELATIONSHIP_ANSWER_MARKER}",
+                transcript=_recall_transcript(RELATIONSHIP_UID),
             )
         ),
         _row(
@@ -619,9 +679,12 @@ def test_condition1_pooled_fails_even_though_max_over_classes_would_pass() -> No
                     probe_id=MULTI_HOP_RELATIONSHIP_PROBE_ID,
                     probe_class="multi_hop",
                     answer=(
-                        f"the answer is {MULTI_HOP_RELATIONSHIP_ANSWER_TOKEN}"
+                        f"the answer is {MULTI_HOP_RELATIONSHIP_ANSWER_MARKER}"
                         if i < 3
                         else "no idea"
+                    ),
+                    transcript=(
+                        _native_transcript(MULTI_HOP_RELATIONSHIP_UID) if i < 3 else None
                     ),
                 ),
                 replicate=i,
@@ -649,7 +712,8 @@ def test_condition2_skips_a_class_with_no_gradable_rows_on_one_side() -> None:
                 arm=VERDICT_ARM,
                 probe_id=OTHER_PROBE_ID_2,
                 probe_class="single_hop",
-                answer=f"policy is {OTHER_ANSWER_TOKEN_2}",
+                answer=f"policy is {OTHER_ANSWER_MARKER_2}",
+                transcript=_recall_transcript(OTHER_UID_2),
             )
         ),
         _row(
@@ -657,7 +721,8 @@ def test_condition2_skips_a_class_with_no_gradable_rows_on_one_side() -> None:
                 arm=Arm.NATIVE_INDEX,
                 probe_id=OTHER_PROBE_ID_2,
                 probe_class="single_hop",
-                answer=f"policy is {OTHER_ANSWER_TOKEN_2}",
+                answer=f"policy is {OTHER_ANSWER_MARKER_2}",
+                transcript=_native_transcript(OTHER_UID_2),
             )
         ),
         # Skipped class: abstention, verdict arm only -- no native row.
@@ -695,6 +760,7 @@ def _condition3_rows(
                 probe_id=OTHER_PROBE_ID,
                 probe_class="single_hop",
                 answer=verdict_answer,
+                transcript=_recall_transcript(OTHER_UID),
                 **token_kwargs,
             )
         ),
@@ -704,6 +770,7 @@ def _condition3_rows(
                 probe_id=OTHER_PROBE_ID,
                 probe_class="single_hop",
                 answer=native_answer,
+                transcript=_native_transcript(OTHER_UID),
             )
         ),
     ]
@@ -711,8 +778,8 @@ def _condition3_rows(
 
 def test_condition3_verdict_level_limit() -> None:
     rows = _condition3_rows(
-        verdict_answer=f"25 days ({OTHER_ANSWER_TOKEN})",
-        native_answer=f"25 days ({OTHER_ANSWER_TOKEN})",
+        verdict_answer=f"25 days ({OTHER_ANSWER_MARKER})",
+        native_answer=f"25 days ({OTHER_ANSWER_MARKER})",
         input_tokens=250,
         output_tokens=50,  # verdict cost = 300
     )
@@ -723,8 +790,8 @@ def test_condition3_verdict_level_limit() -> None:
 
 def test_condition3_verdict_level_fail() -> None:
     rows = _condition3_rows(
-        verdict_answer=f"25 days ({OTHER_ANSWER_TOKEN})",
-        native_answer=f"25 days ({OTHER_ANSWER_TOKEN})",
+        verdict_answer=f"25 days ({OTHER_ANSWER_MARKER})",
+        native_answer=f"25 days ({OTHER_ANSWER_MARKER})",
         input_tokens=450,
         output_tokens=50,  # verdict cost = 500, native default cost = 150 -> ratio 3.33
     )
@@ -742,7 +809,7 @@ def test_condition3_verdict_level_undefined_when_both_sides_score_zero() -> None
 
 def test_condition3_verdict_level_native_zero_passes() -> None:
     rows = _condition3_rows(
-        verdict_answer=f"25 days ({OTHER_ANSWER_TOKEN})", native_answer="no idea"
+        verdict_answer=f"25 days ({OTHER_ANSWER_MARKER})", native_answer="no idea"
     )
     verdicts = compute_verdicts(rows, relationship_probe_ids=frozenset())
     assert verdicts[0].condition3_reading == "native-zero"
@@ -771,7 +838,8 @@ def test_arm_pinning_ignores_a_winning_non_verdict_arm() -> None:
                 arm=Arm.PUSH_PAGES_UPPER_BOUND,
                 probe_id=RELATIONSHIP_PROBE_ID,
                 probe_class="single_hop",
-                answer=f"terms are {RELATIONSHIP_ANSWER_TOKEN}",
+                answer=f"terms are {RELATIONSHIP_ANSWER_MARKER}",
+                transcript=_push_transcript(RELATIONSHIP_UID),
             )
         ),
         # the verdict arm (push_breadcrumb_pull) loses.
@@ -894,7 +962,8 @@ def test_condition1_passes_and_condition2_fails_on_a_compared_class() -> None:
                 arm=VERDICT_ARM,
                 probe_id=RELATIONSHIP_PROBE_ID,
                 probe_class="single_hop",
-                answer=f"terms are {RELATIONSHIP_ANSWER_TOKEN}",
+                answer=f"terms are {RELATIONSHIP_ANSWER_MARKER}",
+                transcript=_recall_transcript(RELATIONSHIP_UID),
             )
         ),
         _row(
@@ -919,7 +988,8 @@ def test_condition1_passes_and_condition2_fails_on_a_compared_class() -> None:
                 arm=Arm.NATIVE_INDEX,
                 probe_id=OTHER_PROBE_ID,
                 probe_class="single_hop",
-                answer=f"25 days ({OTHER_ANSWER_TOKEN})",
+                answer=f"25 days ({OTHER_ANSWER_MARKER})",
+                transcript=_native_transcript(OTHER_UID),
             )
         ),
     ]
@@ -942,7 +1012,8 @@ def test_condition2_arm_pinning_ignores_a_rescuing_non_verdict_arm() -> None:
                 arm=Arm.PUSH_PAGES_UPPER_BOUND,
                 probe_id=OTHER_PROBE_ID_2,
                 probe_class="single_hop",
-                answer=f"policy is {OTHER_ANSWER_TOKEN_2}",
+                answer=f"policy is {OTHER_ANSWER_MARKER_2}",
+                transcript=_push_transcript(OTHER_UID_2),
             )
         ),
         _row(
@@ -958,7 +1029,8 @@ def test_condition2_arm_pinning_ignores_a_rescuing_non_verdict_arm() -> None:
                 arm=Arm.NATIVE_INDEX,
                 probe_id=OTHER_PROBE_ID_2,
                 probe_class="single_hop",
-                answer=f"policy is {OTHER_ANSWER_TOKEN_2}",
+                answer=f"policy is {OTHER_ANSWER_MARKER_2}",
+                transcript=_native_transcript(OTHER_UID_2),
             )
         ),
     ]
@@ -988,7 +1060,8 @@ def test_build_report_and_render_report_thread_a_non_default_verdict_arm() -> No
                 arm=Arm.NATIVE_INDEX,
                 probe_id=RELATIONSHIP_PROBE_ID,
                 probe_class="single_hop",
-                answer=f"terms are {RELATIONSHIP_ANSWER_TOKEN}",  # native wins
+                answer=f"terms are {RELATIONSHIP_ANSWER_MARKER}",  # native wins
+                transcript=_native_transcript(RELATIONSHIP_UID),
             )
         ),
     ]
@@ -1014,7 +1087,8 @@ def test_condition1_tie_does_not_pass() -> None:
                 arm=VERDICT_ARM,
                 probe_id=RELATIONSHIP_PROBE_ID,
                 probe_class="single_hop",
-                answer=f"terms are {RELATIONSHIP_ANSWER_TOKEN}",
+                answer=f"terms are {RELATIONSHIP_ANSWER_MARKER}",
+                transcript=_recall_transcript(RELATIONSHIP_UID),
             ),
             replicate=0,
         ),
@@ -1032,7 +1106,8 @@ def test_condition1_tie_does_not_pass() -> None:
                 arm=Arm.NATIVE_INDEX,
                 probe_id=RELATIONSHIP_PROBE_ID,
                 probe_class="single_hop",
-                answer=f"terms are {RELATIONSHIP_ANSWER_TOKEN}",
+                answer=f"terms are {RELATIONSHIP_ANSWER_MARKER}",
+                transcript=_native_transcript(RELATIONSHIP_UID),
             ),
             replicate=0,
         ),
@@ -1066,7 +1141,8 @@ def test_condition1_picks_the_higher_pooled_native_rate() -> None:
                 arm=VERDICT_ARM,
                 probe_id=RELATIONSHIP_PROBE_ID,
                 probe_class="single_hop",
-                answer=f"terms are {RELATIONSHIP_ANSWER_TOKEN}",
+                answer=f"terms are {RELATIONSHIP_ANSWER_MARKER}",
+                transcript=_recall_transcript(RELATIONSHIP_UID),
             ),
             replicate=0,
         ),
@@ -1096,7 +1172,8 @@ def test_condition1_picks_the_higher_pooled_native_rate() -> None:
                 arm=Arm.NATIVE_GREP,
                 probe_id=RELATIONSHIP_PROBE_ID,
                 probe_class="single_hop",
-                answer=f"terms are {RELATIONSHIP_ANSWER_TOKEN}",
+                answer=f"terms are {RELATIONSHIP_ANSWER_MARKER}",
+                transcript=_native_transcript(RELATIONSHIP_UID),
             )
         ),
     ]
@@ -1144,9 +1221,10 @@ def test_condition3_reports_the_worst_reading_not_the_best() -> None:
                 arm=VERDICT_ARM,
                 probe_id=OTHER_PROBE_ID,
                 probe_class="class_a",
-                answer=f"25 days ({OTHER_ANSWER_TOKEN})",
+                answer=f"25 days ({OTHER_ANSWER_MARKER})",
                 input_tokens=250,
                 output_tokens=50,
+                transcript=_recall_transcript(OTHER_UID),
             )
         ),
         _row(
@@ -1154,7 +1232,8 @@ def test_condition3_reports_the_worst_reading_not_the_best() -> None:
                 arm=Arm.NATIVE_INDEX,
                 probe_id=OTHER_PROBE_ID,
                 probe_class="class_a",
-                answer=f"25 days ({OTHER_ANSWER_TOKEN})",
+                answer=f"25 days ({OTHER_ANSWER_MARKER})",
+                transcript=_native_transcript(OTHER_UID),
             )
         ),
         # class_b: verdict cost 500, native cost 150 -> ratio ~3.33 ("fail").
@@ -1163,9 +1242,10 @@ def test_condition3_reports_the_worst_reading_not_the_best() -> None:
                 arm=VERDICT_ARM,
                 probe_id=OTHER_PROBE_ID_2,
                 probe_class="class_b",
-                answer=f"policy is {OTHER_ANSWER_TOKEN_2}",
+                answer=f"policy is {OTHER_ANSWER_MARKER_2}",
                 input_tokens=450,
                 output_tokens=50,
+                transcript=_recall_transcript(OTHER_UID_2),
             )
         ),
         _row(
@@ -1173,7 +1253,8 @@ def test_condition3_reports_the_worst_reading_not_the_best() -> None:
                 arm=Arm.NATIVE_INDEX,
                 probe_id=OTHER_PROBE_ID_2,
                 probe_class="class_b",
-                answer=f"policy is {OTHER_ANSWER_TOKEN_2}",
+                answer=f"policy is {OTHER_ANSWER_MARKER_2}",
+                transcript=_native_transcript(OTHER_UID_2),
             )
         ),
     ]
@@ -1194,9 +1275,10 @@ def test_condition3_skips_a_class_with_no_native_rows_at_all() -> None:
                 arm=VERDICT_ARM,
                 probe_id=OTHER_PROBE_ID,
                 probe_class="class_a",
-                answer=f"25 days ({OTHER_ANSWER_TOKEN})",
+                answer=f"25 days ({OTHER_ANSWER_MARKER})",
                 input_tokens=250,
                 output_tokens=50,
+                transcript=_recall_transcript(OTHER_UID),
             )
         ),
         _row(
@@ -1204,7 +1286,8 @@ def test_condition3_skips_a_class_with_no_native_rows_at_all() -> None:
                 arm=Arm.NATIVE_INDEX,
                 probe_id=OTHER_PROBE_ID,
                 probe_class="class_a",
-                answer=f"25 days ({OTHER_ANSWER_TOKEN})",
+                answer=f"25 days ({OTHER_ANSWER_MARKER})",
+                transcript=_native_transcript(OTHER_UID),
             )
         ),
         # class_b: verdict arm only -- NO native row at all -- skipped.
@@ -1213,7 +1296,7 @@ def test_condition3_skips_a_class_with_no_native_rows_at_all() -> None:
                 arm=VERDICT_ARM,
                 probe_id=OTHER_PROBE_ID_2,
                 probe_class="class_b",
-                answer=f"policy is {OTHER_ANSWER_TOKEN_2}",
+                answer=f"policy is {OTHER_ANSWER_MARKER_2}",
             )
         ),
     ]
@@ -1237,10 +1320,10 @@ def test_decision_block_states_the_amortisation_denominator_in_words() -> None:
     rows = [
         _row(
             _record(
-                arm=Arm.PULL,
+                arm=Arm.ORACLE,
                 probe_id=OTHER_PROBE_ID,
                 probe_class="single_hop",
-                answer=f"25 days ({OTHER_ANSWER_TOKEN})",
+                answer=f"the allowance is {OTHER_ANSWER_MARKER}",
             )
         ),
     ]
@@ -1279,7 +1362,8 @@ def test_compute_verdicts_passes_verdict_arm_through_to_cost_ratios() -> None:
                 arm=Arm.PULL,
                 probe_id=RELATIONSHIP_PROBE_ID,
                 probe_class="single_hop",
-                answer=f"terms are {RELATIONSHIP_ANSWER_TOKEN}",
+                answer=f"terms are {RELATIONSHIP_ANSWER_MARKER}",
+                transcript=_recall_transcript(RELATIONSHIP_UID),
             )
         ),
         _row(
@@ -1297,9 +1381,10 @@ def test_compute_verdicts_passes_verdict_arm_through_to_cost_ratios() -> None:
                 arm=Arm.PULL,
                 probe_id=OTHER_PROBE_ID,
                 probe_class="cost_class",
-                answer=f"25 days ({OTHER_ANSWER_TOKEN})",
+                answer=f"25 days ({OTHER_ANSWER_MARKER})",
                 input_tokens=100,
                 output_tokens=50,
+                transcript=_recall_transcript(OTHER_UID),
             )
         ),
         _row(
@@ -1307,9 +1392,10 @@ def test_compute_verdicts_passes_verdict_arm_through_to_cost_ratios() -> None:
                 arm=Arm.NATIVE_INDEX,
                 probe_id=OTHER_PROBE_ID,
                 probe_class="cost_class",
-                answer=f"25 days ({OTHER_ANSWER_TOKEN})",
+                answer=f"25 days ({OTHER_ANSWER_MARKER})",
                 input_tokens=70,
                 output_tokens=30,
+                transcript=_native_transcript(OTHER_UID),
             )
         ),
     ]
@@ -1335,9 +1421,10 @@ def test_reading_rank_undefined_beats_limit_as_the_worst_reading() -> None:
                 arm=VERDICT_ARM,
                 probe_id=OTHER_PROBE_ID,
                 probe_class="class_a",
-                answer=f"25 days ({OTHER_ANSWER_TOKEN})",
+                answer=f"25 days ({OTHER_ANSWER_MARKER})",
                 input_tokens=100,
                 output_tokens=50,
+                transcript=_recall_transcript(OTHER_UID),
             )
         ),
         _row(
@@ -1345,9 +1432,10 @@ def test_reading_rank_undefined_beats_limit_as_the_worst_reading() -> None:
                 arm=Arm.NATIVE_INDEX,
                 probe_id=OTHER_PROBE_ID,
                 probe_class="class_a",
-                answer=f"25 days ({OTHER_ANSWER_TOKEN})",
+                answer=f"25 days ({OTHER_ANSWER_MARKER})",
                 input_tokens=70,
                 output_tokens=30,
+                transcript=_native_transcript(OTHER_UID),
             )
         ),
         # class_b: undefined -- BOTH sides score zero (native_present True,
@@ -1391,7 +1479,7 @@ def test_condition1_fails_when_there_are_no_relationship_rows() -> None:
                 arm=VERDICT_ARM,
                 probe_id=OTHER_PROBE_ID,
                 probe_class="single_hop",
-                answer=f"25 days ({OTHER_ANSWER_TOKEN})",
+                answer=f"25 days ({OTHER_ANSWER_MARKER})",
             )
         ),
     ]
@@ -1420,7 +1508,8 @@ def test_condition2_and_3_report_only_class_excluded_matches_rows_removed() -> N
                 arm=VERDICT_ARM,
                 probe_id=OTHER_PROBE_ID_2,
                 probe_class="single_hop",
-                answer=f"policy is {OTHER_ANSWER_TOKEN_2}",
+                answer=f"policy is {OTHER_ANSWER_MARKER_2}",
+                transcript=_recall_transcript(OTHER_UID_2),
             )
         ),
         _row(
@@ -1428,7 +1517,8 @@ def test_condition2_and_3_report_only_class_excluded_matches_rows_removed() -> N
                 arm=Arm.NATIVE_INDEX,
                 probe_id=OTHER_PROBE_ID_2,
                 probe_class="single_hop",
-                answer=f"policy is {OTHER_ANSWER_TOKEN_2}",
+                answer=f"policy is {OTHER_ANSWER_MARKER_2}",
+                transcript=_native_transcript(OTHER_UID_2),
             )
         ),
     ]
@@ -1446,7 +1536,7 @@ def test_condition2_and_3_report_only_class_excluded_matches_rows_removed() -> N
                 arm=Arm.NATIVE_INDEX,
                 probe_id=OTHER_PROBE_ID,
                 probe_class="unprompted_push",
-                answer=f"25 days ({OTHER_ANSWER_TOKEN})",
+                answer=f"25 days ({OTHER_ANSWER_MARKER})",
             )
         ),
     ]
@@ -1508,7 +1598,8 @@ def test_render_report_decision_block_pinned_with_report_only_line_added() -> No
                 arm=Arm.NATIVE_INDEX,
                 probe_id=RELATIONSHIP_PROBE_ID,
                 probe_class="single_hop",
-                answer=f"terms are {RELATIONSHIP_ANSWER_TOKEN}",
+                answer=f"terms are {RELATIONSHIP_ANSWER_MARKER}",
+                transcript=_native_transcript(RELATIONSHIP_UID),
             )
         ),
     ]
