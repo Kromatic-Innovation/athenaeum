@@ -1550,7 +1550,7 @@ def test_xlarge_scale_is_pinned() -> None:
     # detached marker line -- and again on rebase onto develop b8683e18
     # (post athenaeum#1779/#1780/#1781), re-measured directly against
     # `build_corpus(scale="xlarge")` on this branch.
-    assert corpus.fingerprint() == "d54a80bb2a25ca79"
+    assert corpus.fingerprint() == "d43d57cbdcf06afe"
 
 
 def test_long_tier_tag_is_outside_the_recall_snippet() -> None:

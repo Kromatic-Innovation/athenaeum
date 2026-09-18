@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Wave-2 north-star measurement report (issue athenaeum#1788).**
+  `docs/measurements/native-memory-baseline-2026-09-18.md` documents the
+  sixth north-star grid (workflow run 35305241221, 2160 rows), the first to
+  include the report-only classes (`aggregation`, `contradiction`,
+  `negative_knowledge`, `unprompted_push`) and the athenaeum#1788
+  two-oracle gate. `unprompted_push`/`negative_knowledge` gate clean;
+  `contradiction`/`aggregation` fail their oracle gate on fixture defects
+  fixed on this branch but not yet re-run, so this report withholds their
+  tables pending the next dispatch.
+
 ### Fixed
 
 - **The cross-lane regression athenaeum#1789's FTS5 body-indexing caused in

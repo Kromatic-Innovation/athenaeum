@@ -334,6 +334,28 @@ _NOT_FOUND_PHRASES: tuple[str, ...] = (
     "no record of",
     "does not contain",
     "doesn't contain",
+    # Sixth grid (2026-09-18, run 35305241221): 16 of 18 oracle abstention
+    # rows declined with the shapes below and none of the phrases above,
+    # grading a correct refusal as wrong (athenaeum#1788 gate). Each is a
+    # statement of missing information, never a hedge that could dress up a
+    # confabulated answer -- the planted-token deny-list above still runs
+    # first.
+    "don't have access",
+    "do not have access",
+    "don't have any information",
+    "do not have any information",
+    "don't have information",
+    "do not have information",
+    "don't have any context",
+    "do not have any context",
+    "no context provided",
+    "not in the knowledge base",
+    "not included in the",
+    "couldn't find",
+    "could not find",
+    "found no ",
+    "don't see",
+    "do not see",
 )
 
 
