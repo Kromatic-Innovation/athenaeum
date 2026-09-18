@@ -50,10 +50,9 @@
   body: |
     # Expense approval limit (prior policy)
 
-    The expense approval limit for a manager was 200 GBP under the prior
-    policy. Any spend above that required a second sign-off.
-
-    Internal decoy note: Duskwarren.
+    Under the prior policy, a manager's expense approval limit was governed
+    by the Duskwarren tier: spend up to that tier's cap was approved by the
+    manager alone, and anything above it required a second sign-off.
 
     See [[policy-disbursement-ceiling-team-leads]] for the current policy.
 
@@ -84,10 +83,8 @@
   body: |
     # Overtime request approval (prior policy)
 
-    Overtime requests for the delivery team were approved by the resourcing
-    lead directly.
-
-    Internal decoy note: Brackenfall.
+    Overtime requests for the delivery team were approved directly by
+    Brackenfall, the resourcing lead, with no further review.
 
     See [[policy-extra-hours-signoff-chain]] for the current chain.
 
@@ -121,10 +118,9 @@
     # Invoicing API pagination workaround
 
     TASK: when the reporting sync fails with a pagination error from the
-    invoicing API, manually page through results in batches of 50 and
-    stitch them together client-side before writing the report.
-
-    Internal decoy note: Ashencroft.
+    invoicing API, enable the Ashencroft compatibility flag and page
+    through results in batches of 50, stitching them together client-side
+    before writing the report.
 
     See [[notice-invoicing-api-batch-fetch]] for the current guidance.
 
@@ -173,10 +169,9 @@
   body: |
     # Regional office onboarding plan (draft)
 
-    For the next client with regional offices, create a single shared
-    contact record covering all offices to save setup time.
-
-    Internal decoy note: Rustvane.
+    For the next client with regional offices, use the Rustvane
+    shared-contact template to create a single contact record covering all
+    offices, to save setup time.
 
 - uid: note-vendor-migration-script-retro
   type: note
@@ -204,10 +199,9 @@
   body: |
     # Vendor migration rerun plan (draft)
 
-    Just re-run the same vendor migration script overnight again with no
-    changes; it should be fine this time.
-
-    Internal decoy note: Cloverstitch.
+    Just re-run the vendor migration script overnight again using the
+    existing Cloverstitch run profile, with no changes; it should be fine
+    this time.
 
 - uid: note-junior-analyst-ramp-retro
   type: note
@@ -235,7 +229,6 @@
   body: |
     # Junior analyst ramp plan (draft)
 
-    Repeat the same junior analyst ramp plan as before: shadowing only for
-    the first month, no separate practice queue needed.
-
-    Internal decoy note: Thornquill.
+    Repeat the same junior analyst ramp plan as before: shadowing only
+    under the Thornquill onboarding track for the first month, no separate
+    practice queue needed.

@@ -478,6 +478,17 @@ class Probe:
     abstention confabulation check already guards ``answer_tokens`` against
     -- a shared value would let a legitimate answer grade as harmful, or a
     harmful one grade as safe), and to be shared between no two pages.
+    **Authoring rule (issue athenaeum#1811 Quine finding on athenaeum#1781):
+    the forbidden token must BE the wrong answer's own name, stated in the
+    decoy page's prose (a named person, endpoint, flag, vendor, or tool the
+    page states as the fact) -- never a bolt-on marker line appended after
+    the real stale content.** Nothing instructs a model to cite a decoy the
+    way ``REFERENCE_TAG_INSTRUCTION`` instructs it to cite an answer page's
+    tag; a model that lands on the stale page and applies its advice only
+    ever reproduces words that are actually part of that advice, so a
+    forbidden token sitting on a detached line is structurally unreachable
+    by any answer a model would actually give, making ``grade_harm``
+    unfireable regardless of what the model does.
 
     ``contradiction`` (issue athenaeum#1781, athenaeum#1791 §3.2) reuses
     ``must_not_rank`` to name a single STALE page (same ``superseded_by:``/
@@ -977,10 +988,27 @@ def validate_core(pages: list[Page], probes: list[Probe]) -> list[str]:
                             "keyword search that cannot even find the stale page proves "
                             "nothing about ranking it below the correct answer"
                         )
-                    if not any(token in stale_page.body for token in probe.forbidden_tokens):
+                    # Issue athenaeum#1811 Quine finding: the forbidden token must
+                    # be the wrong answer's own name, stated as part of the stale
+                    # prose (outside any tag line) -- a model that applies the stale
+                    # fact then naturally echoes it, the same way the reference-tag
+                    # instruction drives citation of a real answer token. A token
+                    # sitting only on a bolt-on "Internal reference tag:"-shaped
+                    # line gives a model applying the stale advice no reason to ever
+                    # repeat it, making grade_harm structurally unfireable.
+                    stale_non_tag_lines = "\n".join(
+                        line
+                        for line in stale_page.body.splitlines()
+                        if not line.strip().startswith("Internal reference tag:")
+                    )
+                    if not any(token in stale_non_tag_lines for token in probe.forbidden_tokens):
                         problems.append(
                             f"probe {probe.id!r}: contradiction's must_not_rank page "
-                            f"{stale_uid!r} does not carry any of the probe's forbidden_tokens"
+                            f"{stale_uid!r} does not carry any of the probe's forbidden_tokens "
+                            "in its prose (outside any 'Internal reference tag:' line) -- the "
+                            "forbidden token must be the wrong answer's own name, not a "
+                            "bolt-on marker a model applying the stale fact has no reason to "
+                            "repeat"
                         )
                     if not stale_page.superseded_by:
                         problems.append(
@@ -1029,6 +1057,29 @@ def validate_core(pages: list[Page], probes: list[Probe]) -> list[str]:
                     f"probe {probe.id!r}: negative_knowledge probes must carry "
                     "forbidden_tokens (planted on a naive-plan decoy page)"
                 )
+            elif probe.must_not_rank:
+                # Issue athenaeum#1811 Quine finding, same rule as contradiction
+                # above: the forbidden token must be the naive plan's own wrong
+                # answer, stated in prose (outside any tag line), not a bolt-on
+                # marker nothing drives a model to repeat.
+                naive_uid = probe.must_not_rank[0]
+                naive_page = pages_by_uid.get(naive_uid)
+                if naive_page is not None:
+                    naive_non_tag_lines = "\n".join(
+                        line
+                        for line in naive_page.body.splitlines()
+                        if not line.strip().startswith("Internal reference tag:")
+                    )
+                    if not any(
+                        token in naive_non_tag_lines for token in probe.forbidden_tokens
+                    ):
+                        problems.append(
+                            f"probe {probe.id!r}: negative_knowledge's must_not_rank page "
+                            f"{naive_uid!r} does not carry any of the probe's "
+                            "forbidden_tokens in its prose (outside any 'Internal reference "
+                            "tag:' line) -- the forbidden token must be the naive plan's own "
+                            "wrong answer, not a bolt-on marker"
+                        )
             query_terms = _content_terms(probe.query)
             reachable = False
             for uid in probe.expected_uids:
@@ -1411,14 +1462,18 @@ SCALES: dict[str, Scale] = {
     # Core only -- no generation. The offline default: fast, fully
     # hand-authored, and what unit/e2e tests run against.
     "core": Scale("core", total_pages=0, distractors_per_probe=0),
-    # 280 rather than 200: athenaeum#1780's 14 new core pages (plus 6 more
-    # distractor pages, 2 per its 3 new probes) grew core+long+distractor to
-    # 207 at this scale, exceeding the original 200-page floor and silently
-    # zeroing ballast (test_page_floors_leave_room_for_ballast) -- the same
-    # failure mode this floor's own docstring warns about. 280 restores a
-    # comparable ballast margin (~73 pages) to the original design's, not
-    # just enough to clear zero.
-    "small": Scale("small", total_pages=280, distractors_per_probe=2),
+    # 300, repinned from 200 (athenaeum#1780, then again by athenaeum#1781
+    # item G / Quine review): the hand-authored core has grown across both
+    # issues (athenaeum#1780's 14 new pages, this PR's 12 contradiction/
+    # negative_knowledge pages, plus each issue's own new distractor pages
+    # at 2-per-probe) to the point that core+distractor alone at this scale
+    # already exceeded the original 200-page floor, leaving zero ballast and
+    # quietly collapsing `small` into a non-distinct point on the size axis
+    # (`test_page_floors_leave_room_for_ballast`) -- the same failure mode
+    # this floor's own docstring warns about. 300 restores comfortable
+    # ballast headroom for the merged corpus; re-derive again if a future
+    # PR's core/probe growth closes it.
+    "small": Scale("small", total_pages=300, distractors_per_probe=2),
     "medium": Scale("medium", total_pages=1_000, distractors_per_probe=2),
     "large": Scale("large", total_pages=10_000, distractors_per_probe=2),
     # A real single-operator deployment is already past 20,000 pages

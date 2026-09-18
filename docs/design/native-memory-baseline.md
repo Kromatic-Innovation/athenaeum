@@ -292,6 +292,23 @@ the fixture, not the arm. Fixture:
 `tests/evals/data/corpus/core/14-contradiction-negative.yaml`, 6 probes (3
 per class) in `tests/evals/data/corpus/probes/probes.yaml`.
 
+**A forbidden token must be the wrong answer's own name, never a bolt-on
+marker (Quine review of PR athenaeum#1811 on athenaeum#1781).** The
+fixture originally planted each `forbidden_tokens` value as a detached
+"Internal decoy note: X." line appended after the stale page's real wrong
+fact ("200 GBP", "the resourcing lead", "batches of 50"). That made
+`grade_harm` structurally unfireable on all six probes: the reference-tag
+instruction below tells a model to cite the tag of a page it draws an
+ANSWER from, but nothing tells it to reproduce a decoy line, so a model
+that lands on the stale page and genuinely applies its advice answers
+with the real content and never the invented word. The fix makes the
+forbidden token BE the stale fact -- an invented, corpus-unique proper
+noun the page states as the actual (wrong) answer, the same way an
+answer page's tag token functions as its actual (correct) answer: a named
+approver, a named endpoint or flag, a named vendor or tool. A model that
+applies the stale advice then naturally echoes the token as part of its
+own answer, which is what makes the harm axis fireable at all.
+
 **Every arm is told to cite the page's reference tag.** Correctness is a
 deterministic substring match against each probe's planted `answer_tokens`
 (§8 forbids an LLM judge), and those tokens are the invented words the corpus

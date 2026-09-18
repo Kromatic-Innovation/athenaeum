@@ -23,6 +23,7 @@ from tests.evals.corpus import (
     Page,
     Probe,
     RelatedEdge,
+    _body_wikilink_targets,
     _content_terms,
     _shares_stemmed_term,
     build_corpus,
@@ -1029,20 +1030,26 @@ def _contradiction_pair(
     stale_reachable: bool = True,
     forbidden_on_stale: bool = True,
     superseded_by_resolves: bool = True,
+    superseded_by_name_missing: bool = False,
     target_in_expected: bool = True,
     target_has_tag_line: bool = True,
     stale_links_to_target: bool = True,
 ) -> tuple[list[Page], Probe]:
     """Minimal two-page ``contradiction`` fixture, each check independently
     toggleable -- same convention as ``_two_page_follow_through`` above."""
-    stale_body = (
-        "The pagination workaround handles the sync error. "
-        if stale_reachable
-        else "Nothing about widgets here. "
-    )
-    if forbidden_on_stale:
-        stale_body += "Internal decoy note: DecoyTokenOne."
-    target_name = "Target Notice" if superseded_by_resolves else ""
+    if stale_reachable and forbidden_on_stale:
+        stale_body = (
+            "The sync error is handled by enabling the DecoyTokenOne compatibility flag "
+            "before retrying. "
+        )
+    elif stale_reachable:
+        stale_body = "The sync error is handled by retrying with backoff. "
+    else:
+        stale_body = "Nothing about widgets here. "
+    if superseded_by_name_missing:
+        target_name = "Ghost Notice That Does Not Exist"
+    else:
+        target_name = "Target Notice" if superseded_by_resolves else ""
     target_uid = "page-target" if target_in_expected else "page-elsewhere"
     if stale_links_to_target:
         stale_body += f"\n\nSee [[{target_uid}]] for the current notice."
@@ -1124,6 +1131,17 @@ def test_contradiction_rejects_superseded_by_that_does_not_resolve() -> None:
     assert any("must declare superseded_by" in p for p in problems), problems
 
 
+def test_contradiction_rejects_superseded_by_naming_no_existing_page() -> None:
+    """AC (issue athenaeum#1781), the sibling branch to the test above
+    (Quine review, S1): that test exercises the "declares nothing" branch
+    (``superseded_by == ""``); this one exercises the distinct "declares a
+    name that resolves to no page" branch -- the stale page DOES declare a
+    ``superseded_by`` value, but it names no existing page's ``name:``."""
+    pages, probe = _contradiction_pair(superseded_by_name_missing=True)
+    problems = validate_core(pages, [probe])
+    assert any("does not resolve to any page's name" in p for p in problems), problems
+
+
 def test_contradiction_rejects_superseding_page_outside_expected_uids() -> None:
     """AC (issue athenaeum#1781): the page ``superseded_by`` resolves to
     must be in the probe's own ``expected_uids``."""
@@ -1188,8 +1206,7 @@ def _negative_knowledge_pair(*, retro_reachable: bool = True) -> tuple[list[Page
         uid="page-naive-plan",
         type="note",
         name="Regional rollout plan (draft)",
-        body="Reuse a single shared contact record to save time.\n\n"
-        "Internal decoy note: DecoyTokenTwo.",
+        body="Reuse the DecoyTokenTwo shared-contact template to save time.",
         tier="core",
     )
     probe = Probe(
@@ -1273,6 +1290,27 @@ def test_contradiction_and_negative_knowledge_real_fixtures_are_valid() -> None:
     for probe in probes:
         for uid in probe.expected_uids + probe.must_not_rank:
             assert uid in pages_by_uid, (probe.id, uid)
+
+
+def test_deprecated_knowledge_retraction_links_back_to_the_stale_page() -> None:
+    """AC (issue athenaeum#1781, operator comment 2026-09-17; Quine review
+    S2): shape (b)'s retraction/deprecation page must itself link BACK to
+    the stale page via a body ``[[wikilink]]`` -- the operator's explicit
+    requirement, previously unenforced by any contract test. Scoped to
+    ``invoicing_api_pagination_workaround``, the one shape-(b) probe in the
+    real fixtures."""
+    pages_by_uid = {page.uid: page for page in load_core_pages()}
+    probe = next(
+        p for p in load_probes() if p.id == "invoicing_api_pagination_workaround"
+    )
+    stale_uid = probe.must_not_rank[0]
+    (answer_uid,) = probe.expected_uids
+    retraction_page = pages_by_uid[answer_uid]
+    assert stale_uid in _body_wikilink_targets(retraction_page.body), (
+        probe.id,
+        stale_uid,
+        retraction_page.body,
+    )
 
 
 # =====================================================================

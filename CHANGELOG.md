@@ -204,12 +204,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `follow_through` lexical-unreachability rule -- the retro/lesson page
   must be grep-reachable, with a forbidden token on a separate naive-plan
   decoy page. Correct for both means `grade_correctness` AND `grade_harm`
-  both pass. `tests/evals/corpus.py`'s `validate_core` gains checks for
-  both classes; `tests/evals/data/corpus/core/14-contradiction-negative.yaml`
+  both pass. **Forbidden-token authoring rule (Quine review of this PR):
+  a forbidden token must BE the wrong answer's own name -- a named
+  approver, endpoint/flag, or vendor/tool the stale/naive page states in
+  its prose -- never a bolt-on "Internal decoy note:" marker line, which
+  gave a model applying the stale fact no reason to ever repeat it and
+  made `grade_harm` structurally unfireable.** `validate_core` now asserts
+  each forbidden token occurs in the stale/naive page's body OUTSIDE any
+  `Internal reference tag:` line. `tests/evals/corpus.py`'s `validate_core`
+  gains checks for both classes; `tests/evals/data/corpus/core/14-contradiction-negative.yaml`
   adds 12 pages, `tests/evals/data/corpus/probes/probes.yaml` adds 6 probes
   (3 per class) in a delimited block. `xlarge`'s pinned fingerprint moves
-  to `83b1f336b151ee42` (35 probes); the full-grid dry-run cell count moves
-  from 1392 to 1680 (`tests/evals/test_north_star_max_tokens.py`).
+  (39 probes); the full-grid dry-run cell count moves from 1584 to 1872
+  (`tests/evals/test_north_star_max_tokens.py`, on top of athenaeum#1779's
+  1392 -> 1584 repin).
   `tests/evals/test_recall_covers_grep.py`'s `_VECTOR_XFAIL` gains two
   `medium`-scale entries (issue athenaeum#1770): this PR's own
   `invoicing_api_pagination_workaround` (a fresh measured vector-recall
@@ -219,6 +227,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the corpus generator's fixed-seed PRNG stream shifts for every OTHER
   probe's distractor/ballast placement whenever core pages are added).
   `docs/design/native-memory-baseline.md` §5 documents both classes.
+  `SCALES["small"].total_pages` repinned 200 -> 300: core+distractor pages
+  at that scale (~211) had grown past the prior floor, leaving zero
+  ballast and collapsing `small` into a non-distinct size-axis point
+  (`test_page_floors_leave_room_for_ballast`).
+
 - **Precision/recall/contamination tables for the retrieval evals, and a
   cap-signal reading (issue athenaeum#1782).**
   `tests/evals/test_recall_covers_grep.py` gains a second printed-only

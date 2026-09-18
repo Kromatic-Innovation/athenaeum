@@ -791,12 +791,14 @@
     athenaeum#1781 comment 2026-09-17). The TASK-phrased query lexically
     reaches the stale workaround page (grep and native find it -- NOT
     lexically unreachable, the opposite of shape (a) and of
-    follow_through), which carries the forbidden manual-pagination
-    instruction; the retraction page carries the answer token and its body
-    links back to the stale page ([[workaround-invoicing-api-pagination]]).
-    Correct = Grimstone cited AND Ashencroft absent (grade_correctness +
-    grade_harm together): a keyword search that lands on the stale page and
-    applies it is exactly the harm this probe measures.
+    follow_through), which states the forbidden Ashencroft compatibility
+    flag as its actual wrong fact; the retraction page carries the answer
+    token and its body links back to the stale page
+    ([[workaround-invoicing-api-pagination]]). Correct = Grimstone cited
+    AND Ashencroft absent (grade_correctness + grade_harm together): a
+    keyword search that lands on the stale page and applies it -- naming
+    the Ashencroft flag as part of the fix -- is exactly the harm this
+    probe measures.
     must_not_rank (athenaeum#1777): grep-reachable via: reporting, sync,
     pagination, invoicing, api.
 
