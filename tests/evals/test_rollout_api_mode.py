@@ -29,12 +29,14 @@ from typing import Any
 from tests.evals.corpus import build_corpus
 from tests.evals.harness import EvalSession
 from tests.evals.rollout import (
+    _API_LOOP_MAX_TURNS,
     NATIVE_INDEX_MAX_CHARS,
     NATIVE_INDEX_MAX_LINES,
     READ_ENTITY_TOOL_NAME,
     RECALL_TOOL_NAME,
     materialize_native_memory,
     run_native_grep_api,
+    run_native_index_api,
     run_pull_api,
     run_push_breadcrumb_pull_api,
     truncate_native_index,
@@ -451,3 +453,184 @@ def test_push_breadcrumb_pull_api_serves_read_entity_in_process(tmp_path: Path) 
     assert "Wrenfield Associates" in delivered
     assert tag in delivered
     assert "unknown tool" not in delivered
+
+
+# ---------------------------------------------------------------------------
+# 6. Turn-cap harness failure (issue athenaeum#1836): a read arm's api tool
+# loop that is cut off mid-tool-use is a harness failure, excluded from
+# grading -- not an ordinary wrong answer graded on its trailing tool
+# preamble. The counter-example (a loop that ends with a TEXT answer on
+# its last permitted turn) must NOT be marked, per the issue's own AC2.
+# ---------------------------------------------------------------------------
+
+
+def _pending_tool_use_turns(n: int) -> list[_RecordedTurn]:
+    """*n* consecutive tool_use turns, each `stop_reason="tool_use"` -- a
+    loop that never gets to emit a final text answer."""
+    return [
+        _RecordedTurn(
+            content=[_tool_use_block(id=f"toolu_grep_{i}", name="grep", input={"pattern": "x"})],
+            stop_reason="tool_use",
+        )
+        for i in range(n)
+    ]
+
+
+def test_pull_api_marks_turn_cap_harness_failure_when_cut_off_mid_tool_use(
+    tmp_path: Path,
+) -> None:
+    """Real-world shape from run 35399179014 (issue athenaeum#1836): six
+    tool_use turns, no final text answer -- the loop is cut off with a
+    pending tool call, and the cell must be a turn_cap harness failure, not
+    a wrong answer graded on the last tool preamble."""
+    corpus = build_corpus("core")
+    probe = next(p for p in corpus.probes if p.id == "pto_allowance")
+    wiki_root = corpus.materialize(tmp_path)
+
+    turns = [
+        _RecordedTurn(
+            content=[
+                _tool_use_block(
+                    id=f"toolu_recall_{i}",
+                    name=RECALL_TOOL_NAME,
+                    input={"query": "PTO allowance"},
+                )
+            ],
+            stop_reason="tool_use",
+        )
+        for i in range(_API_LOOP_MAX_TURNS)
+    ]
+    client = _QueuedApiClient(turns)
+
+    record = run_pull_api(
+        probe,
+        wiki_root,
+        tmp_path / "cache",
+        "core",
+        client=client,
+        session=EvalSession(),
+        model="test-model",
+        search_backend="keyword",
+    )
+
+    assert record.turn_count == _API_LOOP_MAX_TURNS
+    assert record.turns_exhausted is True
+    assert record.harness_failure is not None
+    assert "turn_cap" in record.harness_failure
+
+
+def test_pull_api_not_turn_cap_when_text_answer_lands_on_the_last_turn(tmp_path: Path) -> None:
+    """AC2 counter-example: a loop that ends with a TEXT answer on its
+    final permitted turn reached a natural end, not a cutoff -- must NOT be
+    marked a harness failure."""
+    corpus = build_corpus("core")
+    probe = next(p for p in corpus.probes if p.id == "pto_allowance")
+    wiki_root = corpus.materialize(tmp_path)
+
+    turns = [
+        _RecordedTurn(
+            content=[
+                _tool_use_block(
+                    id=f"toolu_recall_{i}",
+                    name=RECALL_TOOL_NAME,
+                    input={"query": "PTO allowance"},
+                )
+            ],
+            stop_reason="tool_use",
+        )
+        for i in range(_API_LOOP_MAX_TURNS - 1)
+    ]
+    turns.append(
+        _RecordedTurn(
+            content=[_text_block("The PTO allowance is 25 days per year.")],
+            stop_reason="end_turn",
+        )
+    )
+    client = _QueuedApiClient(turns)
+
+    record = run_pull_api(
+        probe,
+        wiki_root,
+        tmp_path / "cache",
+        "core",
+        client=client,
+        session=EvalSession(),
+        model="test-model",
+        search_backend="keyword",
+    )
+
+    assert record.turn_count == _API_LOOP_MAX_TURNS
+    assert record.turns_exhausted is False
+    assert record.harness_failure is None
+    assert record.answer == "The PTO allowance is 25 days per year."
+
+
+def test_push_breadcrumb_pull_api_marks_turn_cap_harness_failure(tmp_path: Path) -> None:
+    """The exact arm/shape named in the issue's real example: `push_breadcrumb_pull`
+    ending on a pending tool call after `_API_LOOP_MAX_TURNS` turns."""
+    corpus = build_corpus("core")
+    probe = next(p for p in corpus.probes if p.id == "person_not_repo")
+    knowledge_root = tmp_path / "knowledge"
+    corpus.materialize(knowledge_root)
+
+    turns = [
+        _RecordedTurn(
+            content=[
+                _tool_use_block(
+                    id=f"toolu_read_{i}",
+                    name=READ_ENTITY_TOOL_NAME,
+                    input={"uid": "person-rowan-wrenfield", "entity_class": "person"},
+                )
+            ],
+            stop_reason="tool_use",
+        )
+        for i in range(_API_LOOP_MAX_TURNS)
+    ]
+    client = _QueuedApiClient(turns)
+
+    record = run_push_breadcrumb_pull_api(
+        probe,
+        knowledge_root,
+        tmp_path / "hook-home",
+        tmp_path / "cache",
+        "core",
+        client=client,
+        session=EvalSession(),
+        model="test-model",
+        search_backend="keyword",
+        context_fn=lambda *_args: "some breadcrumb",
+    )
+
+    assert record.turns_exhausted is True
+    assert record.harness_failure is not None
+    assert "turn_cap" in record.harness_failure
+
+
+def test_native_grep_api_marks_turn_cap_harness_failure(tmp_path: Path) -> None:
+    corpus = build_corpus("core")
+    probe = next(p for p in corpus.probes if p.id == "pto_allowance")
+
+    client = _QueuedApiClient(_pending_tool_use_turns(_API_LOOP_MAX_TURNS))
+
+    record = run_native_grep_api(
+        probe, tmp_path, "core", client=client, session=EvalSession(), model="test-model"
+    )
+
+    assert record.turns_exhausted is True
+    assert record.harness_failure is not None
+    assert "turn_cap" in record.harness_failure
+
+
+def test_native_index_api_marks_turn_cap_harness_failure(tmp_path: Path) -> None:
+    corpus = build_corpus("core")
+    probe = next(p for p in corpus.probes if p.id == "pto_allowance")
+
+    client = _QueuedApiClient(_pending_tool_use_turns(_API_LOOP_MAX_TURNS))
+
+    record = run_native_index_api(
+        probe, tmp_path, "core", client=client, session=EvalSession(), model="test-model"
+    )
+
+    assert record.turns_exhausted is True
+    assert record.harness_failure is not None
+    assert "turn_cap" in record.harness_failure

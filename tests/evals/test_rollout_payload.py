@@ -171,3 +171,31 @@ def test_from_payload_ignores_extra_persisted_keys() -> None:
     restored = RolloutRecord.from_payload(payload)
 
     assert restored == _full_record()
+
+
+def test_from_payload_defaults_turns_exhausted_for_a_pre_1836_payload() -> None:
+    """Issue athenaeum#1836: a row persisted before ``turns_exhausted``
+    existed carries no such key -- must decode as ``False`` ("not known to
+    have hit the turn cap"), the same conservative back-compat discipline
+    ``config_isolated`` already established, never raise ``KeyError``."""
+    payload = _full_record().to_payload()
+    del payload["turns_exhausted"]
+
+    restored = RolloutRecord.from_payload(payload)
+
+    assert restored.turns_exhausted is False
+
+
+def test_round_trip_preserves_turns_exhausted_true() -> None:
+    record = RolloutRecord(
+        arm=Arm.PULL,
+        probe_id="p",
+        probe_class="single_hop",
+        corpus_scale="medium",
+        answer="Let me read the payment terms review page to get more detail:",
+        turns_exhausted=True,
+        harness_failure="turn_cap: api tool loop exhausted its turn budget",
+    )
+    restored = RolloutRecord.from_payload(json.loads(json.dumps(record.to_payload())))
+    assert restored.turns_exhausted is True
+    assert restored == record

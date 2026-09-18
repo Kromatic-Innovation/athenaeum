@@ -29,7 +29,9 @@ from tests.evals.north_star_report import (
     GroupStats,
     NorthStarReport,
     RolloutRow,
+    TurnCapCount,
     _all_answer_tokens,
+    _is_abstention,
     _push_delivered_text,
     append_rollout_row,
     build_report,
@@ -389,6 +391,44 @@ def test_harness_failed_row_stays_in_total_rollout_rows_and_mode_table() -> None
     assert len(report.rows) == 2
     assert len(report.graded_rows) == 1
     assert report.harness_failure_count == 1
+
+
+def test_turn_cap_counts_empty_when_nothing_hit_the_cap() -> None:
+    """issue athenaeum#1836: a run with zero turns_exhausted rows renders
+    byte-identical to a pre-athenaeum#1836 report -- no turn_cap line at
+    all, not a zero-count one."""
+    report = build_report([_row(_none_record())])
+    assert report.turn_cap_counts == ()
+    text = render_report(report)
+    assert "turn_cap" not in text
+
+
+def test_turn_cap_counts_broken_out_per_arm_and_scale() -> None:
+    """AC3: the report renders a per-arm, per-scale turn_cap count next to
+    the harness-failure count. Two turn_cap rows on the same (arm, scale)
+    group count together; a harness failure of a DIFFERENT kind on another
+    row is excluded from this specific count."""
+    turn_capped_1 = dataclasses.replace(
+        _oracle_record(answer="Let me read the payment terms page to get more detail:"),
+        arm=Arm.PUSH_BREADCRUMB_PULL,
+        mode="api",
+        harness_failure="turn_cap: api tool loop exhausted its turn budget",
+        turns_exhausted=True,
+    )
+    turn_capped_2 = dataclasses.replace(turn_capped_1, probe_id="abstain_unknown_policy")
+    other_failure = dataclasses.replace(
+        _none_record(), mode="cli", harness_failure="empty pushed_context"
+    )
+    report = build_report([_row(turn_capped_1), _row(turn_capped_2), _row(other_failure)])
+
+    assert report.harness_failure_count == 3
+    assert report.turn_cap_counts == (
+        TurnCapCount(arm=Arm.PUSH_BREADCRUMB_PULL.value, corpus_scale=CORPUS_SCALE, count=2),
+    )
+    text = render_report(report)
+    assert (
+        f"turn_cap[arm={Arm.PUSH_BREADCRUMB_PULL.value}, scale={CORPUS_SCALE}]: 2" in text
+    )
 
 
 def test_config_isolated_line_absent_for_an_api_only_report() -> None:
@@ -983,21 +1023,22 @@ def test_weak_probes_never_lists_an_abstention_probe_the_none_arm_got_right() ->
     assert weak_probes([abstaining_none_row, leaky_row]) == (pto_probe2.id,)
 
 
-def test_abstention_grades_correct_only_when_no_token_is_asserted() -> None:
-    """AC5: an abstention probe grades correct only when the answer asserts
-    NONE of the corpus's planted tokens and uses declining language -- one
-    fixture that asserts (confabulates another probe's token) and one that
-    genuinely abstains."""
+def test_abstention_grades_on_declining_language_not_on_token_absence() -> None:
+    """AC5 as amended by athenaeum#1836: an abstention probe grades correct
+    when the answer uses declining language, whether or not it also mentions
+    another probe's planted token -- a confident assertion with no declining
+    language grades wrong, a decline that cites a neighbouring true fact
+    grades right (operator ruling on athenaeum#1791: right is right)."""
     abstention_probe = _probe("abstain_unknown_client")
     assert abstention_probe.probe_class == "abstention"
     assert abstention_probe.answer_tokens == ()
 
-    confabulated_token = _probe("pto_allowance").answer_tokens[0]
+    neighbouring_token = _probe("pto_allowance").answer_tokens[0]
     asserting_answer = _record(
         arm=Arm.NONE,
         probe_id=abstention_probe.id,
         probe_class=abstention_probe.probe_class,
-        answer=f"Harrowgate Industrial's payment terms are set under {confabulated_token}.",
+        answer=f"Harrowgate Industrial's payment terms are set under {neighbouring_token}.",
     )
     assert grade_correctness(asserting_answer, abstention_probe, _CORPUS) is False
 
@@ -1008,6 +1049,69 @@ def test_abstention_grades_correct_only_when_no_token_is_asserted() -> None:
         answer="I don't know -- Harrowgate Industrial is not in the corpus.",
     )
     assert grade_correctness(abstaining_answer, abstention_probe, _CORPUS) is True
+
+    declining_with_neighbour = _record(
+        arm=Arm.NONE,
+        probe_id=abstention_probe.id,
+        probe_class=abstention_probe.probe_class,
+        answer=(
+            "I could not find Harrowgate Industrial in the knowledge base; the search "
+            f"only returned the PTO policy page (reference tag {neighbouring_token})."
+        ),
+    )
+    assert grade_correctness(declining_with_neighbour, abstention_probe, _CORPUS) is True
+
+
+# ---------------------------------------------------------------------------
+# issue athenaeum#1836: absence-phrase families + marker-leak guard
+# ---------------------------------------------------------------------------
+
+
+def test_is_abstention_accepts_no_formal_policy_documented_phrasing() -> None:
+    """The exact real-world example from run 35399179014 (issue
+    athenaeum#1836): a corpus distractor (the PTO page) sits adjacent in
+    vocabulary to the absent parental-leave policy, so a correct abstention
+    reads 'no formal policy documented' rather than the flat 'not found'
+    phrases the old grader required."""
+    probe = _probe("abstain_unknown_policy")
+    answer = "The firm does not have a formalised parental leave policy documented."
+    assert _is_abstention(answer, probe, _CORPUS) is True
+    assert grade_correctness(_record(
+        arm=Arm.NONE,
+        probe_id=probe.id,
+        probe_class=probe.probe_class,
+        answer=answer,
+    ), probe, _CORPUS) is True
+
+
+def test_is_abstention_accepts_a_decline_that_cites_a_neighbouring_true_fact() -> None:
+    """The real medium-scale cells from run 35399179014: `pull` and
+    `native_index` both declined the parental-leave question AND quoted the
+    adjacent PTO fact they did find ('25 days per year'). A planted-marker
+    deny-list graded both wrong; under the athenaeum#1791 ruling they are
+    correct abstentions, so the marker must not fail them."""
+    probe = _probe("abstain_unknown_policy")
+    pto_probe = _probe("pto_allowance")
+    _uid, marker = pto_probe.answer_markers[0]
+
+    citing_answer = (
+        "There is no formal parental leave policy documented; what is documented is "
+        f"the PTO policy: {marker}."
+    )
+    assert _is_abstention(citing_answer, probe, _CORPUS) is True
+
+    # The issue's literal counter-example: a confident, specific value with
+    # no declining language fails on phrase grounds.
+    assert _is_abstention("the parental leave policy is 12 weeks", probe, _CORPUS) is False
+
+
+def test_is_abstention_rejects_a_tool_preamble() -> None:
+    """The other real-world example from the same run: a turn-capped
+    push_breadcrumb_pull cell's last-seen text was a tool preamble, never a
+    declining answer -- must not be mistaken for a correct abstention."""
+    probe = _probe("abstain_unknown_client")
+    answer = "Let me read the payment terms review page to get more detail:"
+    assert _is_abstention(answer, probe, _CORPUS) is False
 
 
 def test_correctness_rate_rendered_per_group() -> None:
