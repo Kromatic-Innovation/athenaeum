@@ -141,10 +141,11 @@ def test_parse_pull_stream_follow_through_fixture_shows_two_recalls_and_grades_c
     ``follow_through`` probe — ``fenwick_relationship_history`` — shows TWO
     ``recall`` calls (the breadcrumb page, then the second-hop page reached
     by following its link), and the resulting answer grades correct only
-    because it carries BOTH planted tokens (see
-    ``test_follow_through_grading_requires_every_planted_token`` in
-    ``tests/evals/test_north_star_report.py`` for the token-omission half of
-    this contract).
+    because it carries BOTH planted content markers AND both pages' uids are
+    in this transcript's own delivered-uid evidence (issue athenaeum#1831;
+    see ``test_follow_through_grading_requires_every_planted_marker`` in
+    ``tests/evals/test_north_star_report.py`` for the marker-omission half
+    of this contract).
 
     No live rollout was run to capture this transcript (the surrounding
     ``system``/``assistant``/``result`` events are hand-authored), but both

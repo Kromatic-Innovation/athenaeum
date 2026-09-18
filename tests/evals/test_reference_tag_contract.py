@@ -1,14 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The reference-tag grading contract (issue athenaeum#1753).
+"""The reference-tag INSTRUCTION contract (issue athenaeum#1753), and what
+survives of it after issue athenaeum#1831.
 
-Correctness is a deterministic substring match against each probe's planted
-``answer_tokens``, and those tokens are the corpus pages' own
-``Internal reference tag:`` values. No model repeats an unasked-for tag, so
-before this contract the match was unsatisfiable by a correct answer and even
-``oracle`` -- handed the ground-truth page verbatim -- graded 0 on every
-class. These tests pin the fix from both ends: every arm's system prompt
-carries one IDENTICAL instruction, and grading actually reads the tag that
-instruction asks for.
+Every arm's system prompt still carries one IDENTICAL
+``REFERENCE_TAG_INSTRUCTION``, unchanged, so
+``tests.evals.corpus.test_corpus*``/``test_north_star_report.py``'s own
+fixtures keep planting a citable tag on every answer-bearing page. What
+CHANGED (operator ruling on athenaeum#1791 comment 5732689494): the tag no
+longer feeds :func:`tests.evals.north_star_report.grade_correctness` --
+correctness is graded on content markers plus delivered-page evidence now
+(see ``tests/evals/test_north_star_report.py``'s counter-example tests). The
+tag's own satisfaction survives as the report-only
+:func:`tests.evals.north_star_report.tag_followed` diagnostic, and this file
+pins ITS contract: every arm's prompt carries the instruction, and
+``tag_followed`` actually reads the tag that instruction asks for.
 
 Token-free: no live rollout, no model client, no spend.
 """
@@ -24,7 +29,7 @@ import pytest
 
 from tests.evals import rollout
 from tests.evals.corpus import _TAG_LINE_RE, Observation, build_corpus
-from tests.evals.north_star_report import grade_correctness
+from tests.evals.north_star_report import grade_correctness, tag_followed
 from tests.evals.rollout import (
     _PULL_API_SYSTEM_PROMPT,
     _SYSTEM_PROMPT,
@@ -219,11 +224,15 @@ def test_oracle_answer_ending_in_the_reference_tag_grades_correct() -> None:
     assert grade_correctness(tagged, probe, _CORPUS) is True
 
 
-def test_the_same_oracle_answer_without_the_tag_grades_wrong() -> None:
-    """The negative half of the same control: a substantively identical --
-    and factually correct -- answer with no tag grades WRONG. This is the
-    failure mode that put ``oracle`` at 0/18, pinned so it cannot be
-    mistaken for a grading bug later."""
+def test_correctness_no_longer_needs_the_tag_but_tag_followed_still_does() -> None:
+    """Issue athenaeum#1831 (operator ruling on athenaeum#1791 comment
+    5732689494): correctness is graded on CONTENT now, never the tag -- so a
+    substantively identical, factually correct answer with no tag grades
+    RIGHT, not wrong. This is the exact inversion of what this test asserted
+    before athenaeum#1831 (it used to pin the old tag-only contract's
+    negative control); the tag's OWN satisfaction survives unchanged as the
+    separate, report-only :func:`tag_followed` diagnostic, which still grades
+    this untagged answer ``False``."""
     probe = _probe("pto_allowance")
     untagged = _record(
         arm=Arm.ORACLE,
@@ -231,16 +240,18 @@ def test_the_same_oracle_answer_without_the_tag_grades_wrong() -> None:
         probe_class=probe.probe_class,
         answer="The firm's PTO allowance is 25 days per year plus UK bank holidays.",
     )
-    assert grade_correctness(untagged, probe, _CORPUS) is False
+    assert grade_correctness(untagged, probe, _CORPUS) is True
+    assert tag_followed(untagged, probe) is False
 
 
-def test_follow_through_requires_a_tag_from_every_page() -> None:
+def test_follow_through_tag_followed_requires_a_tag_from_every_page() -> None:
     """Why the instruction is worded in the plural. A ``follow_through``
     probe plants a token on EACH of two pages -- the breadcrumb page and the
-    one reachable only by a link from it -- and grading requires both. An
-    answer citing only the first page graded correct would make the class
-    unable to tell a followed link from an unfollowed one, which is the only
-    thing it measures."""
+    one reachable only by a link from it. Issue athenaeum#1831: this is now
+    a :func:`tag_followed` assertion, not :func:`grade_correctness` -- the
+    tag is report-only, and correctness for this shape is covered by
+    ``test_follow_through_and_multi_hop_content_marker_counter_examples`` in
+    ``test_north_star_report.py`` instead."""
     probe = _probe("fenwick_relationship_history")
     first, second = probe.answer_tokens
 
@@ -251,7 +262,7 @@ def test_follow_through_requires_a_tag_from_every_page() -> None:
         probe_class=probe.probe_class,
         answer=f"{body}\n\n[ref: {first}]",
     )
-    assert grade_correctness(one_tag, probe, _CORPUS) is False
+    assert tag_followed(one_tag, probe) is False
 
     both_tags = _record(
         arm=Arm.PULL,
@@ -259,14 +270,16 @@ def test_follow_through_requires_a_tag_from_every_page() -> None:
         probe_class=probe.probe_class,
         answer=f"{body}\n\n[ref: {first}]\n[ref: {second}]",
     )
-    assert grade_correctness(both_tags, probe, _CORPUS) is True
+    assert tag_followed(both_tags, probe) is True
 
 
-def test_multi_hop_plants_a_single_tag() -> None:
+def test_multi_hop_tag_followed_plants_a_single_tag() -> None:
     """The counterpart to the test above, pinned because the distinction is
     easy to misremember: ``multi_hop``'s second hop lives in the RETRIEVAL,
     not in the ground truth, so it plants ONE token and one cited tag
-    suffices. Only ``follow_through`` splits tokens across pages."""
+    suffices. Only ``follow_through`` splits tokens across pages. Issue
+    athenaeum#1831: retargeted to :func:`tag_followed` -- see the sibling
+    test above."""
     probe = _probe("spend_approver_named")
     assert len(probe.answer_tokens) == 1
     record = _record(
@@ -278,7 +291,7 @@ def test_multi_hop_plants_a_single_tag() -> None:
             f"[ref: {probe.answer_tokens[0]}]"
         ),
     )
-    assert grade_correctness(record, probe, _CORPUS) is True
+    assert tag_followed(record, probe) is True
 
 
 @pytest.mark.parametrize(
