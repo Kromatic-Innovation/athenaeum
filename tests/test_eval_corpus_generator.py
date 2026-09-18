@@ -1419,7 +1419,7 @@ def test_xlarge_scale_is_pinned() -> None:
     # pages and 6 probes (contradiction x3, negative_knowledge x3), shifting
     # the fingerprint again -- same class of expected change as the prior
     # entries in this comment.
-    assert corpus.fingerprint() == "PLACEHOLDER_FINGERPRINT"
+    assert corpus.fingerprint() == "01692cdc5268b16a"
 
 
 def test_long_tier_tag_is_outside_the_recall_snippet() -> None:

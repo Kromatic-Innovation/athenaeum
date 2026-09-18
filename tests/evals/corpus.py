@@ -1467,10 +1467,11 @@ SCALES: dict[str, Scale] = {
     # issues (athenaeum#1780's 14 new pages, this PR's 12 contradiction/
     # negative_knowledge pages, plus each issue's own new distractor pages
     # at 2-per-probe) to the point that core+distractor alone at this scale
-    # already exceeded the original 200-page floor, leaving zero ballast and
+    # is 231 pages (measured against the final merged corpus), already
+    # exceeding the original 200-page floor and leaving zero ballast --
     # quietly collapsing `small` into a non-distinct point on the size axis
     # (`test_page_floors_leave_room_for_ballast`) -- the same failure mode
-    # this floor's own docstring warns about. 300 restores comfortable
+    # this floor's own docstring warns about. 300 restores 69 pages of
     # ballast headroom for the merged corpus; re-derive again if a future
     # PR's core/probe growth closes it.
     "small": Scale("small", total_pages=300, distractors_per_probe=2),

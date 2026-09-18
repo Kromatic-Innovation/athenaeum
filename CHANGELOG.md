@@ -214,23 +214,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Internal reference tag:` line. `tests/evals/corpus.py`'s `validate_core`
   gains checks for both classes; `tests/evals/data/corpus/core/14-contradiction-negative.yaml`
   adds 12 pages, `tests/evals/data/corpus/probes/probes.yaml` adds 6 probes
-  (3 per class) in a delimited block. `xlarge`'s pinned fingerprint moves
-  (39 probes); the full-grid dry-run cell count moves from 1584 to 1872
-  (`tests/evals/test_north_star_max_tokens.py`, on top of athenaeum#1779's
-  1392 -> 1584 repin).
-  `tests/evals/test_recall_covers_grep.py`'s `_VECTOR_XFAIL` gains two
-  `medium`-scale entries (issue athenaeum#1770): this PR's own
+  (3 per class) in a delimited block. `xlarge`'s pinned fingerprint moves to
+  `01692cdc5268b16a` (42 probes); the full-grid dry-run cell count moves
+  from 1728 to 2016 (`tests/evals/test_north_star_max_tokens.py`, on top of
+  athenaeum#1780's 1584 -> 1728 repin, itself on top of athenaeum#1779's
+  1392 -> 1584 repin); `--max-tokens` in that same test is bumped from
+  10,000,000 to 20,000,000 to clear the higher cell count's projected
+  token total.
+  `tests/evals/test_recall_covers_grep.py`'s `_VECTOR_XFAIL` gains one
+  `medium`-scale entry (issue athenaeum#1770): this PR's own
   `invoicing_api_pagination_workaround` (a fresh measured vector-recall
-  miss) and `thorncastle_first_contact` (an existing probe that measurably
-  regressed at `medium`/vector with no change to its own fixture --
-  confirmed against `develop` before this PR's corpus changes -- because
-  the corpus generator's fixed-seed PRNG stream shifts for every OTHER
-  probe's distractor/ballast placement whenever core pages are added).
-  `docs/design/native-memory-baseline.md` §5 documents both classes.
-  `SCALES["small"].total_pages` repinned 200 -> 300: core+distractor pages
-  at that scale (~211) had grown past the prior floor, leaving zero
-  ballast and collapsing `small` into a non-distinct size-axis point
-  (`test_page_floors_leave_room_for_ballast`).
+  miss). `thorncastle_first_contact` regressed transiently earlier in this
+  PR's history (the corpus generator's fixed-seed PRNG stream shifts every
+  OTHER probe's distractor/ballast placement whenever core pages are
+  added) but passes again against this PR's final content, so it carries
+  no entry. `docs/design/native-memory-baseline.md` §5 documents both
+  classes. `SCALES["small"].total_pages` repinned 200 -> 300:
+  core+distractor pages at that scale are 231 against the merged corpus
+  (measured), already past the prior 200-page floor and leaving zero
+  ballast, collapsing `small` into a non-distinct size-axis point
+  (`test_page_floors_leave_room_for_ballast`); 300 restores 69 pages of
+  ballast headroom.
+
+  **Known regression, reported not silenced (rebase onto develop
+  c634fc6e, which landed athenaeum#1807/#1810):** the same PRNG-stream-
+  shift mechanism now measurably regresses `office_address_current` (a
+  pre-existing `temporal`-class probe, unrelated to this PR's own probes)
+  at `medium`/vector --
+  `test_recall_covers_grep_reachable_expected_pages_vector[medium-office_address_current]`
+  fails on this branch and does NOT fail on `origin/develop`
+  (confirmed with `test-baseline.sh`). Left un-xfailed deliberately per
+  this PR's own review discipline -- adding an xfail here would paper
+  over a regression this PR's corpus growth caused on a probe it does not
+  own; flagged for the orchestrator/Quine to decide whether to xfail or
+  investigate further.
 
 - **Precision/recall/contamination tables for the retrieval evals, and a
   cap-signal reading (issue athenaeum#1782).**
