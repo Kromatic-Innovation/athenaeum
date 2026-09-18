@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import sys
 import threading
 import time
 from pathlib import Path
@@ -380,6 +381,71 @@ class TestVectorBackend:
             "two threads were inside SharedSystemClient.clear_system_cache() "
             "at once -- _VECTOR_CLIENT_LOCK did not serialize them"
         )
+
+
+class TestVectorQueryChromadbMissing:
+    """Issue athenaeum#1825: ``vector`` is now the shipped default backend, so a
+    default install that never ran ``pip install athenaeum[vector]`` must
+    still answer a recall. ``VectorBackend.query`` used to call
+    ``_get_chromadb()`` unconditionally, so a missing chromadb surfaced as an
+    uncaught ``ImportError`` -- a traceback, not a degraded-but-working
+    recall. These tests block the ``chromadb`` import (rather than requiring
+    it be genuinely uninstalled) so they run in every environment, including
+    CI's ``[vector]``-extra install.
+    """
+
+    def test_query_falls_back_to_fts5(
+        self, wiki_with_pages: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cache = tmp_path / "cache"
+        # An FTS5 index is built unconditionally by session-start-recall.sh
+        # in every real deployment regardless of search_backend -- reproduce
+        # that here so the fallback has something real to answer from.
+        FTS5Backend().build_index(wiki_with_pages, cache)
+
+        monkeypatch.setitem(sys.modules, "chromadb", None)
+
+        results = VectorBackend().query("lean startup methodology", cache)
+
+        assert len(results) > 0
+        filenames = [r[0] for r in results]
+        assert "lean-startup.md" in filenames
+
+    def test_query_logs_exactly_one_warning(
+        self,
+        wiki_with_pages: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        cache = tmp_path / "cache"
+        FTS5Backend().build_index(wiki_with_pages, cache)
+        monkeypatch.setitem(sys.modules, "chromadb", None)
+
+        with caplog.at_level("WARNING", logger="athenaeum.search"):
+            VectorBackend().query("lean startup methodology", cache)
+
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warnings) == 1, warnings
+        assert "chromadb" in warnings[0].message
+
+    def test_query_with_no_vector_index_ever_built(
+        self, wiki_with_pages: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The common default-install shape: no ``wiki-vectors`` dir at all
+        (vector was never buildable), only an FTS5 index. Confirms the
+        chromadb check runs BEFORE the ``vector_dir.is_dir()`` short-circuit
+        below it, so this shape degrades too, not just a pre-existing (but
+        now chromadb-less) vector index.
+        """
+        cache = tmp_path / "cache"
+        FTS5Backend().build_index(wiki_with_pages, cache)
+        assert not (cache / "wiki-vectors").is_dir()
+
+        monkeypatch.setitem(sys.modules, "chromadb", None)
+
+        results = VectorBackend().query("lean startup methodology", cache)
+        assert len(results) > 0
 
 
 class TestHitsFromQueryResults:

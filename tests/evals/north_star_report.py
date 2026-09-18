@@ -1633,15 +1633,19 @@ def compute_verdicts(
       when NO class at this scale has any native cost data to compare --
       there is nothing to certify a pass against.
     """
-    # Issue athenaeum#1787: §7 verdicts are pinned to the shipped fts5
-    # configuration (ruling R1) -- a vector-backend row must never enter
-    # this computation, even if a caller passes a mixed *rows* sequence
-    # (the CLI's own check_floor_mismatch refuses to mix backends into one
-    # --store, but this function has no such guarantee about its caller).
-    # A pre-athenaeum#1764 row's `search_backend` is `None` (the field did
-    # not exist yet) and is treated as fts5, the only backend that existed
-    # before that issue -- only a REAL recorded `"vector"` is excluded.
-    rows = [r for r in rows if r.record.search_backend in (None, "fts5")]
+    # Issue athenaeum#1825: §7 verdicts are re-pinned to the "vector" arm
+    # (operator ruling on issue athenaeum#1736, 2026-09-18 -- see
+    # docs/design/native-memory-baseline.md Section 7 for the measured
+    # basis: hybrid run 35315167602, medium pooled 27/33 vs grep 23/33, all
+    # cost classes <= 2.0x). This SUPERSEDES the earlier fts5 pin (ruling
+    # R1, issue athenaeum#1787) -- an fts5-backend row (and a
+    # pre-athenaeum#1764 row whose `search_backend` is `None`, since the
+    # field did not exist yet and every row that old was fts5-only) must
+    # never enter this computation, even if a caller passes a mixed *rows*
+    # sequence (the CLI's own check_floor_mismatch refuses to mix backends
+    # into one --store, but this function has no such guarantee about its
+    # caller). Only a REAL recorded `"vector"` row is kept.
+    rows = [r for r in rows if r.record.search_backend == "vector"]
     if relationship_probe_ids is None:
         relationship_probe_ids = _relationship_probe_ids(
             {row.record.corpus_scale for row in rows}
@@ -2020,6 +2024,26 @@ def render_decision_block(
             )
             lines.append("")
             lines.extend(failing_lines)
+            lines.append("")
+        elif not verdicts and report.graded_rows and not any(
+            row.record.search_backend == "vector" for row in report.graded_rows
+        ):
+            # Issue athenaeum#1825: the §7 arm is pinned to `search_backend
+            # == "vector"` by operator ruling on issue athenaeum#1736
+            # (2026-09-18) -- an fts5-only store (every row pre-athenaeum#1825,
+            # or an explicit fts5 dispatch) has rows, but NONE that
+            # `compute_verdicts` will admit, so `verdicts` comes back empty
+            # even though the store is not itself empty. Distinguished from
+            # the genuinely-empty-store branch below so an operator reading
+            # this report is told WHY, not left to guess between "no run
+            # happened yet" and "the wrong backend was dispatched".
+            lines.append(
+                "**Cutoff scale:** `none` -- this store has rows, but none recorded "
+                "`search_backend=\"vector\"`. The §7 verdict arm is pinned to `vector` by "
+                "operator ruling on issue athenaeum#1736 (2026-09-18); an fts5-only store "
+                "has nothing this decision block can evaluate. Dispatch a `vector` "
+                "north-star run to populate it."
+            )
             lines.append("")
         else:
             lines.append(

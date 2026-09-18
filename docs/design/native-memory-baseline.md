@@ -181,7 +181,8 @@ above: read alongside a clear label of which side of the fix it predates,
 never as a like-for-like comparison with a post-fusion run.
 
 **Dispatching the vector-backend second pass (issue athenaeum#1787).**
-`north_star_cli.py --search-backend vector` (default `fts5`) is a SECOND,
+`north_star_cli.py --search-backend vector` (the default until athenaeum#1825
+re-pinned it to `vector`, 2026-09-18) is a SECOND,
 separate `workflow_dispatch` from the default grid, never a flag flipped on
 the same run -- `check_floor_mismatch` (`north_star_cli.py:347`) already
 refuses to resume a store recorded under one backend with a different
@@ -205,9 +206,16 @@ a `::notice::`, the same token-free-dependency precedent the
 is its own markdown file beside the fts5 report (never merged into it,
 issue athenaeum#1764's per-backend grouping in `north_star_cli.floor_scan_summary`
 is the same discipline one level down), and `north_star_report.compute_verdicts`
-filters any non-`fts5` row out before computing the design-doc §7 decision
-block regardless of what its caller passes it, so a vector-backend row can
-never move the shipped-configuration verdict (ruling R1) even by mistake.
+filters out every row not recorded under the pinned verdict-arm backend
+before computing the design-doc §7 decision block regardless of what its
+caller passes it, so the other backend's row can never move the verdict
+even by mistake. **That pinned backend is `vector` as of athenaeum#1825
+(re-pinned by operator ruling, 2026-09-18 -- see §7); it was `fts5` (ruling
+R1, athenaeum#1787) before.** The rest of this subsection describes the
+mechanism as it read pre-athenaeum#1825, when `vector` was the opt-in
+second pass and `fts5` the default grid -- the CLI/workflow default named
+above has since flipped; the scoping, store-path, and refusal mechanics it
+describes have not.
 
 ## 5. Two phases, because the corpus is compiled pages
 
@@ -797,6 +805,27 @@ citation now counts toward correctness alongside the reference-tag citation
 `native-memory-baseline-2026-09-17.md` §5/§6 without changing that report's
 cutoff scale (still `none`) -- see that report's addendum for the re-graded
 numbers.
+
+**The verdict arm is re-pinned to `search_backend: vector` (hybrid vector +
+FTS5 RRF fusion, `recall.hybrid` default on) by operator ruling on
+athenaeum#1736, 2026-09-18** (issue athenaeum#1825). This supersedes the
+earlier fts5 pin (ruling R1, athenaeum#1787): `compute_verdicts` now keeps
+only `search_backend == "vector"` rows, and `search_backend: vector` is the
+shipped default everywhere the code used to default to `fts5` --
+`athenaeum.config._DEFAULTS`, the `athenaeum.yaml` template, the
+`user-prompt-recall.sh` hook, and the `evals.yml` north-star dispatch
+default. The measured basis is the complete hybrid pass (run 35315167602,
+posted on athenaeum#1787 and athenaeum#1736): at `medium` the pooled
+verdict is 27/33 against grep's 23/33, with every cost class at or under
+2.0x, while the FTS5 grids tie grep at best; the real-embedder coverage run
+(athenaeum#1800) additionally showed vector within one to two probes of
+FTS5 on the coverage suite, so hybrid is not a regression on the lexical
+cases either. The re-pin is by explicit ruling, so the earlier "paired
+re-run first" condition in the athenaeum#1736 recommendation is withdrawn.
+A store with no `search_backend: vector` rows (every pre-athenaeum#1764
+row, or an explicit fts5-only dispatch) now renders an empty §7 verdict --
+the decision block names the pin and the reason rather than reading as a
+silent "no data" gap.
 
 ## 8. Deliberately not done
 

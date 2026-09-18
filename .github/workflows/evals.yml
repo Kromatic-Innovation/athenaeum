@@ -82,13 +82,13 @@ on:
         required: false
         default: ""
       north_star_search_backend:
-        description: "north_star_cli.py --search-backend (issue athenaeum#1787: 'vector' is a SECOND dispatch against a distinct store, scoped to core+medium, never merged with an fts5 store)"
+        description: "north_star_cli.py --search-backend ('vector', the shipped default per issue athenaeum#1825, is the pinned verdict-arm dispatch; 'fts5' is now the SECOND-dispatch fidelity pass, issue athenaeum#1787: a distinct store, scoped to core+medium, never merged with a vector store)"
         required: false
-        default: "fts5"
+        default: "vector"
         type: choice
         options:
-          - "fts5"
           - "vector"
+          - "fts5"
       north_star_max_spend:
         description: "north_star_cli.py --max-spend (refusal ceiling, USD)"
         required: false
@@ -333,7 +333,7 @@ jobs:
           CORPUS_SCALES_FLAG=()
           if [ -n "${NORTH_STAR_CORPUS_SCALES:-}" ]; then
             CORPUS_SCALES_FLAG=(--corpus-scales "$NORTH_STAR_CORPUS_SCALES")
-          elif [ "${NORTH_STAR_SEARCH_BACKEND:-fts5}" = "vector" ]; then
+          elif [ "${NORTH_STAR_SEARCH_BACKEND:-vector}" = "vector" ]; then
             CORPUS_SCALES_FLAG=(--corpus-scales "core,medium")
           fi
           # Left off entirely when blank, so the CLI derives the token
@@ -390,7 +390,7 @@ jobs:
           # dispatch, but naming a separate path from the start is what
           # keeps the two passes' reports (and artifacts) distinct rather
           # than relying on that refusal as the only guard.
-          if [ "${NORTH_STAR_SEARCH_BACKEND:-fts5}" = "vector" ]; then
+          if [ "${NORTH_STAR_SEARCH_BACKEND:-vector}" = "vector" ]; then
             STORE_PATH="measurements/north-star-store-vector.jsonl"
           else
             STORE_PATH="measurements/north-star-store.jsonl"
@@ -401,7 +401,7 @@ jobs:
             --scale "$NORTH_STAR_SCALE" \
             --max-spend "$NORTH_STAR_MAX_SPEND" \
             --workers "$NORTH_STAR_WORKERS" \
-            --search-backend "${NORTH_STAR_SEARCH_BACKEND:-fts5}" \
+            --search-backend "${NORTH_STAR_SEARCH_BACKEND:-vector}" \
             --store "$STORE_PATH" \
             --out-dir measurements \
             "${CORPUS_SCALES_FLAG[@]}" \

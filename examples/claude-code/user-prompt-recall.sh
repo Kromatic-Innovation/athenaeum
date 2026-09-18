@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # UserPromptSubmit hook: surface wiki pages relevant to the user's message.
 #
-# Runs a hybrid FTS5 + (optional) vector search against the athenaeum index
-# built by session-start-recall.sh. Typical runtime: <50ms (FTS5 only, no
-# vector index active this turn), ~400ms (a turn where the vector backend
-# runs), ~1.5s when the LLM topic extractor is enabled. The <50ms contract
-# applies ONLY to a turn where the vector half does not run at all (no
-# vector index, or `SEARCH_BACKEND=fts5`) — see athenaeum#1120's
+# Runs a hybrid FTS5 + vector search against the athenaeum index built by
+# session-start-recall.sh. `SEARCH_BACKEND=vector` (hybrid vector + FTS5
+# RRF fusion) is the shipped default (issue athenaeum#1825, operator ruling
+# on issue athenaeum#1736) -- typical runtime ~400ms, ~1.5s when the LLM
+# topic extractor is enabled. `SEARCH_BACKEND=fts5` is the opt-out fallback
+# path: FTS5-only, no vector index consulted at all, typical runtime <50ms.
+# That <50ms contract applies ONLY on the fts5 fallback path (no vector
+# index, or an explicit `SEARCH_BACKEND=fts5`) — see athenaeum#1120's
 # seam-decision comment below for why tier filtering and the push-token
 # budget stayed inside that contract. It is NOT "FTS5 rows are always
 # cheap to post-process": issue athenaeum#1665 corrected an earlier
@@ -198,7 +200,7 @@ if [ -f "$CONFIG_ENV" ]; then
   set +a
 fi
 AUTO_RECALL="${AUTO_RECALL:-true}"
-SEARCH_BACKEND="${SEARCH_BACKEND:-fts5}"
+SEARCH_BACKEND="${SEARCH_BACKEND:-vector}"
 # Issue athenaeum#1120: env override first (mirrors
 # athenaeum.config.resolve_push_token_budget's own precedence), then the
 # config.env value session-start-recall.sh cached from

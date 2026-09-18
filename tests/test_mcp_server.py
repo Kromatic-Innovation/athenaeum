@@ -2203,3 +2203,46 @@ class TestRecallSearchVectorHybridDispatch:
             config={"recall": {"hybrid": True}},
         )
         assert "Target Page" in hybrid_result
+
+
+# ---------------------------------------------------------------------------
+# Default install without chromadb (issue athenaeum#1825)
+# ---------------------------------------------------------------------------
+
+
+class TestRecallSearchChromadbMissing:
+    """``search_backend`` now defaults to ``"vector"``, so a default install
+    that never ran ``pip install athenaeum[vector]`` must still answer a
+    recall through the real ``recall_search`` MCP tool entry point -- not
+    just at the ``VectorBackend.query`` unit level ``tests/test_search.py``
+    already covers. This specifically exercises the hybrid dispatch path
+    (``recall.hybrid`` on by default for ``search_backend="vector"``),
+    where ``backend.query()`` is called TWICE on the SAME backend instance
+    (the primary query, then the widened re-query for RRF fusion) -- the AC
+    is ONE warning per recall, not one per internal query() call, which a
+    unit test calling ``VectorBackend.query`` directly cannot observe."""
+
+    def test_recall_search_falls_back_to_fts5_with_one_warning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import logging
+        import sys
+
+        from athenaeum.search import FTS5Backend
+
+        wiki = _hybrid_test_wiki(tmp_path)
+        cache = tmp_path / "cache"
+        # FTS5 is built unconditionally by session-start-recall.sh in every
+        # real deployment regardless of search_backend -- reproduce that.
+        FTS5Backend().build_index(wiki, cache)
+        assert not (cache / "wiki-vectors").is_dir()  # no vector index either
+
+        monkeypatch.setitem(sys.modules, "chromadb", None)
+
+        with caplog.at_level(logging.WARNING, logger="athenaeum.search"):
+            result = recall_search(wiki, "Acme", top_k=5, search_backend="vector", cache_dir=cache)
+
+        assert "Acme Corp" in result
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warnings) == 1, warnings
+        assert "chromadb" in warnings[0].message

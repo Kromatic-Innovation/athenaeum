@@ -940,8 +940,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--search-backend",
-        default="fts5",
-        help="retrieval backend for PUSH/PULL indexing (default: fts5)",
+        default="vector",
+        help=(
+            "retrieval backend for PUSH/PULL indexing (default: vector -- "
+            "issue athenaeum#1825, the shipped default and pinned north-star "
+            "verdict arm; fts5 is the second-dispatch fidelity pass, "
+            "issue athenaeum#1787)"
+        ),
     )
     parser.add_argument("--claude-binary", default="claude")
     parser.add_argument("--store", type=Path, default=None, help="append-only JSONL result path")
@@ -1089,9 +1094,20 @@ _ARM_AXIS_PLACEHOLDER: tuple[str, ...] = ("_all_arms",)
 
 def _build_cells(args: argparse.Namespace) -> list[GridCell]:
     probes = args.probes.split(",") if args.probes else list(DEFAULT_PROBES)
-    corpus_scales = (
-        args.corpus_scales.split(",") if args.corpus_scales else list(DEFAULT_CORPUS_SCALES)
-    )
+    if args.corpus_scales:
+        corpus_scales = args.corpus_scales.split(",")
+    elif args.search_backend == "vector":
+        # Issue athenaeum#1825: --search-backend now defaults to "vector" (it
+        # used to be an explicit opt-in), so a bare CLI invocation with no
+        # --corpus-scales must narrow to _VECTOR_SCOPED_SCALES itself rather
+        # than fall through to the full DEFAULT_CORPUS_SCALES grid and trip
+        # the scope check below on every default run. Mirrors the identical
+        # blank+vector forcing evals.yml's dispatch step already applies
+        # (issue athenaeum#1787) -- that shell-level forcing predates this
+        # default flip and stays in place for the workflow-input path.
+        corpus_scales = sorted(_VECTOR_SCOPED_SCALES)
+    else:
+        corpus_scales = list(DEFAULT_CORPUS_SCALES)
     # Validated HERE, at parse time, rather than left to fail deep inside a
     # rollout once a cell for an unknown scale reaches build_corpus() --
     # issue athenaeum#1735's AC3 ("evals.yml's grid dispatch input accepts

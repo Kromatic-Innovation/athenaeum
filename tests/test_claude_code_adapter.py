@@ -645,7 +645,7 @@ class TestSearchBackendPassthrough:
         assert rc == 0
         assert captured.get("search_backend") == "vector"
 
-    def test_search_backend_defaults_to_fts5(
+    def test_search_backend_defaults_to_vector(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -672,7 +672,7 @@ class TestSearchBackendPassthrough:
         rc = adapter.main()
 
         assert rc == 0
-        assert captured.get("search_backend") == "fts5"
+        assert captured.get("search_backend") == "vector"  # issue athenaeum#1825
 
 
 # ---------------------------------------------------------------------------
