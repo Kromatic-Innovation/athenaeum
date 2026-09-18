@@ -7,7 +7,7 @@ flag parsing/validation, the sibling-JSONL round trip and its
 spend gate (both the refusal and the zero-call dry-run projection), a
 partial (exit 75) athenaeum compile recorded (never silently pooled), and
 report rendering with real WriteCost/WritePathStats rows. Both Phase 2
-producers (``compile_observation_stream``, ``run_native_writer_dispatch``)
+producers (``compile_native_memory_files``, ``run_native_writer_dispatch``)
 are monkeypatched to stubs; ``generate_core_observations`` itself is real
 (pure, deterministic, no network) per this issue's own acceptance criterion
 ("a tiny fixture stream").
@@ -27,7 +27,7 @@ import pytest
 from tests.evals import north_star_cli
 from tests.evals.corpus import generate_core_observations
 from tests.evals.harness import EvalSession
-from tests.evals.north_star_report import WriteCost, WritePathStats, build_report
+from tests.evals.north_star_report import FilingLossStats, WriteCost, WritePathStats, build_report
 from tests.evals.rollout import NativeWriterResult
 from tests.evals.write_path import CompileOutcome
 
@@ -36,19 +36,21 @@ from tests.evals.write_path import CompileOutcome
 # ---------------------------------------------------------------------------
 
 
-def _stub_compile_observation_stream(
-    stream: Any,
+def _stub_compile_native_memory_files(
+    memory_files: Any,
     knowledge_root: Path,
     *,
     client: Any,
     model: str,
+    corpus_scale: str,
     session: EvalSession | None = None,
+    scope: str = "eval-native-writer",
     run_kwargs: dict[str, Any] | None = None,
     exit_code: int = 0,
 ) -> tuple[dict[str, str], WriteCost, CompileOutcome]:
     store_files = {"page.md": "Internal reference tag: stubtoken\n"}
     write_cost = WriteCost(
-        system="athenaeum", corpus_scale=stream.scale, input_tokens=100, output_tokens=20
+        system="athenaeum", corpus_scale=corpus_scale, input_tokens=100, output_tokens=20
     )
     outcome = CompileOutcome(exit_code=exit_code, partial=exit_code == 75)
     return store_files, write_cost, outcome
@@ -107,7 +109,7 @@ def test_resolve_phase2_scales_rejects_unknown() -> None:
 
 def test_resolve_phase2_systems_defaults_to_both() -> None:
     args = north_star_cli.build_arg_parser().parse_args(["--scale", "smoke"])
-    assert north_star_cli._resolve_phase2_systems(args) == ["athenaeum", "native"]
+    assert north_star_cli._resolve_phase2_systems(args) == ["native", "athenaeum"]
 
 
 def test_resolve_phase2_systems_rejects_unknown() -> None:
@@ -144,10 +146,10 @@ def test_run_phase2_group_athenaeum_writes_the_completion_pair(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
-        north_star_cli, "compile_observation_stream", _stub_compile_observation_stream
+        north_star_cli, "compile_native_memory_files", _stub_compile_native_memory_files
     )
     stream = generate_core_observations(scale="medium")
-    rows = north_star_cli._run_phase2_group(
+    rows, memory_files = north_star_cli._run_phase2_group(
         "athenaeum",
         "medium",
         observations=stream.observations,
@@ -158,9 +160,11 @@ def test_run_phase2_group_athenaeum_writes_the_completion_pair(
         model="test-model",
         mode="api",
         claude_binary="claude",
+        native_memory_files={"note.md": "some note text"},
     )
+    assert memory_files is None
     kinds = {row["kind"] for row in rows}
-    assert kinds == {"write_path", "write_cost", "meta"}
+    assert kinds == {"write_path", "write_cost", "write_path_filing", "meta"}
     write_cost_row = next(r for r in rows if r["kind"] == "write_cost")
     assert write_cost_row["system"] == "athenaeum"
     assert write_cost_row["corpus_scale"] == "medium"
@@ -170,6 +174,36 @@ def test_run_phase2_group_athenaeum_writes_the_completion_pair(
     assert meta_row["partial"] is False
 
 
+def test_run_phase2_group_athenaeum_without_native_memory_files_is_a_harness_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _explode(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("must not compile when no native memory files are available")
+
+    monkeypatch.setattr(north_star_cli, "compile_native_memory_files", _explode)
+    stream = generate_core_observations(scale="medium")
+    rows, memory_files = north_star_cli._run_phase2_group(
+        "athenaeum",
+        "medium",
+        observations=stream.observations,
+        stream=stream,
+        materialize_root=tmp_path,
+        client=object(),
+        session=EvalSession(),
+        model="test-model",
+        mode="api",
+        claude_binary="claude",
+        native_memory_files=None,
+    )
+    assert memory_files is None
+    assert len(rows) == 1
+    assert rows[0]["kind"] == "meta"
+    assert "harness_failure" in rows[0]
+    # Never counted as a completed pair -- a later run with native available
+    # must be able to retry it.
+    assert north_star_cli._phase2_completed_keys(rows) == set()
+
+
 def test_run_phase2_group_native_writes_the_completion_pair(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -177,7 +211,7 @@ def test_run_phase2_group_native_writes_the_completion_pair(
         north_star_cli, "run_native_writer_dispatch", _stub_run_native_writer_dispatch
     )
     stream = generate_core_observations(scale="medium")
-    rows = north_star_cli._run_phase2_group(
+    rows, memory_files = north_star_cli._run_phase2_group(
         "native",
         "medium",
         observations=stream.observations,
@@ -189,6 +223,7 @@ def test_run_phase2_group_native_writes_the_completion_pair(
         mode="api",
         claude_binary="claude",
     )
+    assert memory_files == {"note.md": "some note text"}
     kinds = {row["kind"] for row in rows}
     assert kinds == {"write_path", "write_cost", "meta"}
     write_cost_row = next(r for r in rows if r["kind"] == "write_cost")
@@ -222,9 +257,24 @@ def test_phase2_sibling_store_round_trip(tmp_path: Path) -> None:
             {"kind": "meta", "system": "athenaeum", "corpus_scale": "medium", "exit_code": 0},
         ],
     )
-    loaded_stats, loaded_costs = north_star_cli.load_phase2_results(path)
+    loaded_stats, loaded_costs, loaded_filing = north_star_cli.load_phase2_results(path)
     assert loaded_stats == [stats]
     assert loaded_costs == [cost]
+    assert loaded_filing == []
+
+
+def test_phase2_sibling_store_round_trip_includes_filing_loss(tmp_path: Path) -> None:
+    path = tmp_path / "store.jsonl.phase2.jsonl"
+    filing = FilingLossStats(
+        system="athenaeum",
+        corpus_scale="medium",
+        native_tokens_total=2,
+        filed_tokens_retained=1,
+        lost_token_ids=("tok-x",),
+    )
+    north_star_cli._phase2_append_rows(path, [north_star_cli._write_path_filing_row(filing)])
+    _stats, _costs, loaded_filing = north_star_cli.load_phase2_results(path)
+    assert loaded_filing == [filing]
 
 
 def test_phase2_completed_keys_requires_both_rows() -> None:
@@ -243,13 +293,16 @@ def test_run_phase2_resume_skips_completed_pairs(
 ) -> None:
     calls: list[tuple[str, str]] = []
 
-    def _spy_group(system: str, scale: str, **_kwargs: Any) -> list[dict[str, Any]]:
+    def _spy_group(
+        system: str, scale: str, **_kwargs: Any
+    ) -> tuple[list[dict[str, Any]], dict[str, str] | None]:
         calls.append((system, scale))
-        return [
+        rows = [
             {"kind": "write_path", "system": system, "corpus_scale": scale},
             {"kind": "write_cost", "system": system, "corpus_scale": scale},
             {"kind": "meta", "system": system, "corpus_scale": scale},
         ]
+        return rows, ({"note.md": "x"} if system == "native" else None)
 
     monkeypatch.setattr(north_star_cli, "_run_phase2_group", _spy_group)
     phase2_store_path = tmp_path / "results.jsonl.phase2.jsonl"
@@ -309,13 +362,16 @@ def test_run_phase2_reruns_a_partial_key_by_default(
     the opposite of the ordinary completed-pair skip."""
     calls: list[tuple[str, str]] = []
 
-    def _spy_group(system: str, scale: str, **_kwargs: Any) -> list[dict[str, Any]]:
+    def _spy_group(
+        system: str, scale: str, **_kwargs: Any
+    ) -> tuple[list[dict[str, Any]], dict[str, str] | None]:
         calls.append((system, scale))
-        return [
+        rows = [
             {"kind": "write_path", "system": system, "corpus_scale": scale},
             {"kind": "write_cost", "system": system, "corpus_scale": scale},
             {"kind": "meta", "system": system, "corpus_scale": scale, "partial": False},
         ]
+        return rows, ({"note.md": "x"} if system == "native" else None)
 
     monkeypatch.setattr(north_star_cli, "_run_phase2_group", _spy_group)
     phase2_store_path = tmp_path / "results.jsonl.phase2.jsonl"
@@ -351,8 +407,12 @@ def test_run_phase2_reruns_a_partial_key_by_default(
         materialize_root=tmp_path / "mat",
         phase2_store_path=phase2_store_path,
     )
-    # Re-run, not skipped.
-    assert calls == [("athenaeum", "medium")]
+    # Issue athenaeum#1830: --phase2-systems athenaeum alone still runs
+    # native first -- athenaeum's compile now consumes native's own output
+    # as input, so native is a required dependency even when not explicitly
+    # requested; native was never previously recorded, so it runs too, and
+    # the partial athenaeum key is re-run (not skipped) either way.
+    assert calls == [("native", "medium"), ("athenaeum", "medium")]
     # And the key is no longer partial after the successful re-run.
     rows = north_star_cli._phase2_read_rows(phase2_store_path)
     assert north_star_cli._phase2_partial_keys(rows) == set()
@@ -372,6 +432,13 @@ def test_run_phase2_accept_partial_flag_skips_and_warns(
     north_star_cli._phase2_append_rows(
         phase2_store_path,
         [
+            # Issue athenaeum#1830: native is a required dependency for the
+            # athenaeum group even under --phase2-systems athenaeum alone --
+            # pre-populate it as done too, or the auto-included native
+            # group would call the (exploding) spy before athenaeum's own
+            # accept-partial skip is even reached.
+            {"kind": "write_path", "system": "native", "corpus_scale": "medium"},
+            {"kind": "write_cost", "system": "native", "corpus_scale": "medium"},
             {"kind": "write_path", "system": "athenaeum", "corpus_scale": "medium"},
             {"kind": "write_cost", "system": "athenaeum", "corpus_scale": "medium"},
             {
@@ -429,7 +496,7 @@ def _stub_run_probe_all_arms(probe_id: str, corpus_scale: str, **_kwargs: Any) -
 
 def test_main_phase2_end_to_end_offline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        north_star_cli, "compile_observation_stream", _stub_compile_observation_stream
+        north_star_cli, "compile_native_memory_files", _stub_compile_native_memory_files
     )
     monkeypatch.setattr(
         north_star_cli, "run_native_writer_dispatch", _stub_run_native_writer_dispatch
@@ -477,7 +544,7 @@ def test_main_phase2_dry_run_makes_zero_calls(
     def _explode(*_args: Any, **_kwargs: Any) -> Any:
         raise AssertionError("dry-run must never run Phase 2 or construct a client")
 
-    monkeypatch.setattr(north_star_cli, "compile_observation_stream", _explode)
+    monkeypatch.setattr(north_star_cli, "compile_native_memory_files", _explode)
     monkeypatch.setattr(north_star_cli, "run_native_writer_dispatch", _explode)
     monkeypatch.setattr(north_star_cli, "run_probe_all_arms", _explode)
     monkeypatch.setattr(north_star_cli, "build_live_client", _explode)
@@ -501,7 +568,7 @@ def test_main_phase2_spend_gate_refuses_combined_projection(
     def _explode(*_args: Any, **_kwargs: Any) -> Any:
         raise AssertionError("a refused run must never spend")
 
-    monkeypatch.setattr(north_star_cli, "compile_observation_stream", _explode)
+    monkeypatch.setattr(north_star_cli, "compile_native_memory_files", _explode)
     monkeypatch.setattr(north_star_cli, "run_native_writer_dispatch", _explode)
     monkeypatch.setattr(north_star_cli, "run_probe_all_arms", _explode)
     monkeypatch.setattr(north_star_cli, "build_live_client", _explode)
@@ -528,7 +595,7 @@ def test_main_phase2_token_gate_refuses_combined_projection(
     def _explode(*_args: Any, **_kwargs: Any) -> Any:
         raise AssertionError("a refused run must never spend")
 
-    monkeypatch.setattr(north_star_cli, "compile_observation_stream", _explode)
+    monkeypatch.setattr(north_star_cli, "compile_native_memory_files", _explode)
     monkeypatch.setattr(north_star_cli, "run_native_writer_dispatch", _explode)
     monkeypatch.setattr(north_star_cli, "run_probe_all_arms", _explode)
     monkeypatch.setattr(north_star_cli, "build_live_client", _explode)
@@ -560,9 +627,9 @@ def test_main_phase2_partial_compile_recorded_not_silently_pooled(
     never silently dropped (issue athenaeum#1785 brief)."""
 
     def _partial_compile(*args: Any, **kwargs: Any) -> Any:
-        return _stub_compile_observation_stream(*args, **kwargs, exit_code=75)
+        return _stub_compile_native_memory_files(*args, **kwargs, exit_code=75)
 
-    monkeypatch.setattr(north_star_cli, "compile_observation_stream", _partial_compile)
+    monkeypatch.setattr(north_star_cli, "compile_native_memory_files", _partial_compile)
     monkeypatch.setattr(
         north_star_cli, "run_native_writer_dispatch", _stub_run_native_writer_dispatch
     )
@@ -592,7 +659,10 @@ def test_main_phase2_partial_compile_recorded_not_silently_pooled(
     assert exit_code == 0
     phase2_store_path = Path(str(store_path) + ".phase2.jsonl")
     rows = north_star_cli._phase2_read_rows(phase2_store_path)
-    meta_row = next(r for r in rows if r["kind"] == "meta")
+    # Issue athenaeum#1830: native's own group also ran (it is now a
+    # required dependency of athenaeum's compile) and appended its own
+    # meta row first -- filter to athenaeum's, the one under test.
+    meta_row = next(r for r in rows if r["kind"] == "meta" and r["system"] == "athenaeum")
     assert meta_row["exit_code"] == 75
     assert meta_row["partial"] is True
     # The numbers are NOT withheld -- write_path/write_cost rows still land.

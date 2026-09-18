@@ -93,11 +93,13 @@ from tests.evals.harness import EvalSession, build_live_client
 from tests.evals.north_star_report import (
     DEFAULT_MEASUREMENTS_DIR,
     DEFAULT_VERDICT_ARM,
+    FilingLossStats,
     MixedFloorError,
     WriteCost,
     WritePathStats,
     append_rollout_row,
     build_report,
+    compute_filing_loss_stats,
     compute_write_path_stats,
     load_rollout_rows_and_diagnostics,
     write_report,
@@ -109,7 +111,7 @@ from tests.evals.rollout import (
     run_probe_all_arms,
 )
 from tests.evals.rollout_session import ROLLOUT_TOKEN_CEILING, assert_rollout_ceiling
-from tests.evals.write_path import compile_observation_stream
+from tests.evals.write_path import compile_native_memory_files
 
 #: Every probe in the hand-authored corpus -- probes are IDENTICAL across
 #: corpus scales (``tests.evals.corpus.build_corpus``'s own docstring: "every
@@ -167,9 +169,15 @@ DEFAULT_WORKERS = 4
 DEFAULT_PHASE2_SCALES: tuple[str, ...] = ("medium",)
 
 #: Both write-path producers Phase 2 drives: athenaeum's real librarian
-#: compile (:func:`~tests.evals.write_path.compile_observation_stream`) and
-#: the native writer (:func:`~tests.evals.rollout.run_native_writer_dispatch`).
-DEFAULT_PHASE2_SYSTEMS: tuple[str, ...] = ("athenaeum", "native")
+#: compile of the NATIVE writer's own memory files
+#: (:func:`~tests.evals.write_path.compile_native_memory_files`, issue
+#: athenaeum#1830) and the native writer itself
+#: (:func:`~tests.evals.rollout.run_native_writer_dispatch`). Declared order
+#: is cosmetic only -- :func:`run_phase2` always canonicalizes native before
+#: athenaeum for a given scale (see that function's own docstring), because
+#: athenaeum's compile now consumes native's output as its input rather than
+#: being an independent producer.
+DEFAULT_PHASE2_SYSTEMS: tuple[str, ...] = ("native", "athenaeum")
 _VALID_PHASE2_SYSTEMS: tuple[str, ...] = ("athenaeum", "native")
 
 #: Declared (not measured) per-OBSERVATION token estimate for Phase 2's
@@ -480,7 +488,13 @@ def _phase2_latest_rows(
     latest: dict[tuple[str, str, str], dict[str, Any]] = {}
     for row in rows:
         kind = row.get("kind")
-        if kind not in ("write_path", "write_cost", "meta"):
+        # Issue athenaeum#1830: "write_path_filing" is the FilingLossStats
+        # sibling row -- an athenaeum-only auxiliary row, never part of the
+        # write_path/write_cost completion pair (see
+        # :func:`_phase2_completed_keys`), but resolved to its latest value
+        # the same way so a resumed athenaeum group's filing-loss numbers
+        # never pool with an earlier attempt's.
+        if kind not in ("write_path", "write_cost", "write_path_filing", "meta"):
             continue
         key = (kind, row.get("system"), row.get("corpus_scale"))
         latest[key] = row
@@ -539,6 +553,11 @@ def _write_path_stats_row(stats: WritePathStats) -> dict[str, Any]:
     return {"kind": "write_path", **dataclasses.asdict(stats)}
 
 
+def _write_path_filing_row(stats: FilingLossStats) -> dict[str, Any]:
+    """Issue athenaeum#1830 AC2's second, separate retention row."""
+    return {"kind": "write_path_filing", **dataclasses.asdict(stats)}
+
+
 def _write_cost_row(cost: WriteCost) -> dict[str, Any]:
     return {
         "kind": "write_cost",
@@ -549,10 +568,12 @@ def _write_cost_row(cost: WriteCost) -> dict[str, Any]:
     }
 
 
-def load_phase2_results(path: Path) -> tuple[list[WritePathStats], list[WriteCost]]:
+def load_phase2_results(
+    path: Path,
+) -> tuple[list[WritePathStats], list[WriteCost], list[FilingLossStats]]:
     """Read the Phase 2 sibling JSONL at *path* back into the
-    ``(write_path_stats, write_costs)`` shape :func:`~tests.evals.north_star_report.build_report`
-    accepts.
+    ``(write_path_stats, write_costs, filing_loss_stats)`` shape
+    :func:`~tests.evals.north_star_report.build_report` accepts.
 
     Reads the LATEST row per ``(kind, system, corpus_scale)`` (issue
     athenaeum#1785 Quine review of PR#1813, should-fix 1 -- see
@@ -562,9 +583,14 @@ def load_phase2_results(path: Path) -> tuple[list[WritePathStats], list[WriteCos
     rows for the same pair. A row of an unrecognised ``kind`` (e.g.
     ``meta``), or one missing a required field, is skipped rather than
     raising -- the sibling store is diagnostic-friendly by design, and a
-    torn or partially-written row must not crash report rendering."""
+    torn or partially-written row must not crash report rendering.
+
+    ``filing_loss_stats`` (issue athenaeum#1830) reads any ``write_path_filing``
+    rows -- older stores predating this field simply carry none, and this
+    function returns an empty list for it, never an error."""
     stats: list[WritePathStats] = []
     costs: list[WriteCost] = []
+    filing: list[FilingLossStats] = []
     for (kind, _system, _scale), row in _phase2_latest_rows(_phase2_read_rows(path)).items():
         try:
             if kind == "write_path":
@@ -584,6 +610,9 @@ def load_phase2_results(path: Path) -> tuple[list[WritePathStats], list[WriteCos
                         # run that predates these two fields still loads.
                         transient_total=row.get("transient_total", 0),
                         transient_retained=row.get("transient_retained"),
+                        # Issue athenaeum#1830: same ``.get`` back-compat
+                        # discipline for a row written before this field.
+                        lost_token_ids=tuple(row.get("lost_token_ids", ())),
                     )
                 )
             elif kind == "write_cost":
@@ -595,9 +624,44 @@ def load_phase2_results(path: Path) -> tuple[list[WritePathStats], list[WriteCos
                         output_tokens=row["output_tokens"],
                     )
                 )
+            elif kind == "write_path_filing":
+                filing.append(
+                    FilingLossStats(
+                        system=row["system"],
+                        corpus_scale=row["corpus_scale"],
+                        native_tokens_total=row["native_tokens_total"],
+                        filed_tokens_retained=row.get("filed_tokens_retained"),
+                        lost_token_ids=tuple(row.get("lost_token_ids", ())),
+                    )
+                )
         except KeyError:
             continue
-    return stats, costs
+    return stats, costs, filing
+
+
+def _native_memory_dir(materialize_root: Path, scale: str) -> Path:
+    """Where a native group's memory files land on disk for *scale* --
+    ``run_native_writer``/``run_native_writer_api``'s own ``memory_dir``,
+    one level under :func:`_run_phase2_group`'s ``group_root`` (issue
+    athenaeum#1830: needed so :func:`run_phase2` can re-read a PRIOR run's
+    native output on resume, when the athenaeum group needs it as input but
+    the native group itself was already completed in an earlier process)."""
+    return materialize_root / "phase2" / f"native-{scale}" / "native" / "memory"
+
+
+def _read_memory_files(memory_dir: Path) -> dict[str, str]:
+    """Every file under *memory_dir*, as ``{relpath: text}`` -- the same
+    read :func:`~tests.evals.rollout.run_native_writer` does for
+    ``NativeWriterResult.memory_files``, reused here to reconstruct that
+    dict from disk on resume (issue athenaeum#1830). ``{}`` for a missing
+    or empty directory, never an error."""
+    if not memory_dir.is_dir():
+        return {}
+    return {
+        str(path.relative_to(memory_dir)): path.read_text(encoding="utf-8")
+        for path in sorted(memory_dir.rglob("*"))
+        if path.is_file()
+    }
 
 
 def _run_phase2_group(
@@ -612,32 +676,77 @@ def _run_phase2_group(
     model: str,
     mode: str,
     claude_binary: str,
-) -> list[dict[str, Any]]:
-    """Run Phase 2's write path for ONE ``(system, scale)``, returning the
-    sibling-store rows this group produced: always a ``write_path`` row, a
-    ``write_cost`` row (the completion pair -- see
-    :func:`_phase2_completed_keys`), and a ``meta`` row carrying whatever
-    else this issue's brief asks a Phase 2 row to record -- the compile's
-    own exit code/partial flag for ``athenaeum``, or
-    mode/prompt_fidelity/turns_exhausted/session count for ``native``.
+    native_memory_files: dict[str, str] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, str] | None]:
+    """Run Phase 2's write path for ONE ``(system, scale)``, returning
+    ``(rows, memory_files)``.
+
+    *rows* is the sibling-store rows this group produced: for ``native``, a
+    ``write_path`` row, a ``write_cost`` row (the completion pair -- see
+    :func:`_phase2_completed_keys`), and a ``meta`` row carrying
+    mode/prompt_fidelity/turns_exhausted/session count. For ``athenaeum``,
+    the same ``write_path``/``write_cost`` pair PLUS a ``write_path_filing``
+    row (issue athenaeum#1830 AC2 -- see :func:`compute_filing_loss_stats`)
+    and a ``meta`` row carrying the compile's own exit code/partial flag.
+
+    *memory_files* is :attr:`~tests.evals.rollout.NativeWriterResult.memory_files`
+    for a ``system == "native"`` group -- so :func:`run_phase2` can feed it
+    straight into the NEXT ``athenaeum`` group at the same scale without a
+    disk round-trip -- and ``None`` for every other group.
+
+    Operator ruling, issue athenaeum#1830 (Kromatic-Innovation/athenaeum#1791
+    comment 5732689494): "the athenaeum write-path arm becomes 'the native
+    arm's own memory files, compiled by the librarian'." So for
+    ``system == "athenaeum"``, *native_memory_files* is the group's actual
+    INPUT, not an optional comparison arm -- :func:`run_phase2` always
+    supplies it when available. When it is ``None`` (no native result
+    exists for this scale -- native was never run, or its materialized
+    memory directory could not be recovered on resume), this group is a
+    HARNESS FAILURE, per this issue's own acceptance criterion ("a missing
+    native result for a scale marks the athenaeum cell as harness failure,
+    never a silent zero"): it returns a single ``meta`` row naming the
+    failure and NO ``write_path``/``write_cost``/``write_path_filing``
+    rows, so :func:`_phase2_completed_keys` never marks the pair done and a
+    later run (once native is available) retries it.
 
     A partial (exit 75) athenaeum compile is recorded here with
     ``meta.partial = True`` and its real ``write_path``/``write_cost`` rows
     -- CompileOutcome's own docstring: that run made real, partial progress
     and the resulting store is still valid to measure. "Never silently
-    pooled" (this issue's brief) means the partial flag must be visible on
-    the row, not that the numbers are withheld.
+    pooled" (issue athenaeum#1785's brief) means the partial flag must be
+    visible on the row, not that the numbers are withheld.
     """
     group_root = materialize_root / "phase2" / f"{system}-{scale}"
     if system == "athenaeum":
-        store_files, write_cost, outcome = compile_observation_stream(
-            stream,
+        if native_memory_files is None:
+            return (
+                [
+                    {
+                        "kind": "meta",
+                        "system": system,
+                        "corpus_scale": scale,
+                        "harness_failure": (
+                            "issue athenaeum#1830: no native memory files available "
+                            "for this scale -- the athenaeum arm compiles the native "
+                            "arm's OWN output and cannot run without it; this cell "
+                            "was skipped, not scored as a silent zero"
+                        ),
+                    }
+                ],
+                None,
+            )
+        store_files, write_cost, outcome = compile_native_memory_files(
+            native_memory_files,
             group_root / "knowledge",
             client=client,
             model=model,
+            corpus_scale=scale,
             session=session,
         )
         stats = compute_write_path_stats(system, scale, observations, store_files)
+        filing_loss = compute_filing_loss_stats(
+            system, scale, observations, native_memory_files, store_files
+        )
         meta = {
             "kind": "meta",
             "system": system,
@@ -649,6 +758,15 @@ def _run_phase2_group(
             # on the sibling write_path row is a floor, not a result.
             "deferred_raw_files": outcome.deferred_raw_files,
         }
+        return (
+            [
+                _write_path_stats_row(stats),
+                _write_cost_row(write_cost),
+                _write_path_filing_row(filing_loss),
+                meta,
+            ],
+            None,
+        )
     elif system == "native":
         result = run_native_writer_dispatch(
             observations,
@@ -677,9 +795,12 @@ def _run_phase2_group(
             "turns_exhausted": sum(1 for s in result.sessions if s.turns_exhausted),
             "sessions": len(result.sessions),
         }
+        return (
+            [_write_path_stats_row(stats), _write_cost_row(write_cost), meta],
+            result.memory_files,
+        )
     else:  # pragma: no cover -- _resolve_phase2_systems already validates
         raise ValueError(f"unknown Phase 2 system {system!r}")
-    return [_write_path_stats_row(stats), _write_cost_row(write_cost), meta]
 
 
 def run_phase2(
@@ -711,19 +832,47 @@ def run_phase2(
     requested *scale* keeps that row's ``corpus_scale`` matching the label
     this run is reporting under, even though the underlying observations
     are byte-identical across scales.
+
+    Ordering, issue athenaeum#1830 AC1: within EACH scale, ``native`` always
+    runs before ``athenaeum`` regardless of the order ``--phase2-systems``
+    declared -- the athenaeum group now compiles the native group's OWN
+    ``memory_files`` as input (:func:`_run_phase2_group`'s own docstring),
+    so it is a dependent, not an independent producer. ``athenaeum`` alone
+    in ``--phase2-systems`` therefore auto-includes ``native`` as a required
+    dependency (its rows are still recorded -- there is no way to compile
+    "nothing" for athenaeum to consume). On resume, a native key already
+    ``done`` has no in-memory ``memory_files`` from THIS process -- they are
+    re-read from disk (:func:`_read_memory_files`/:func:`_native_memory_dir`);
+    if that directory is gone (a fresh materialize_root, e.g. a different
+    host), the athenaeum group for that scale is a harness failure rather
+    than a silent zero (see :func:`_run_phase2_group`'s own docstring).
     """
     scales = _resolve_phase2_scales(args)
     systems = _resolve_phase2_systems(args)
+    if "athenaeum" in systems and "native" not in systems:
+        systems = [*systems, "native"]
+    # Native always precedes athenaeum for a given scale (issue
+    # athenaeum#1830 AC1) -- canonicalize here rather than trust
+    # --phase2-systems' own order. list.sort/sorted is stable, so this
+    # never reorders two entries of the SAME resolved group (there is only
+    # one of each).
+    ordered_systems = sorted(systems, key=lambda s: 0 if s == "native" else 1)
     existing_rows = _phase2_read_rows(phase2_store_path)
     done = _phase2_completed_keys(existing_rows)
     partial = _phase2_partial_keys(existing_rows)
     accept_partial = args.phase2_accept_partial
     for scale in scales:
         stream = generate_core_observations(scale=scale)
-        for system in systems:
+        native_memory_files: dict[str, str] | None = None
+        for system in ordered_systems:
             key = (system, scale)
             if key in done:
                 if key not in partial:
+                    if system == "native":
+                        native_memory_files = (
+                            _read_memory_files(_native_memory_dir(materialize_root, scale))
+                            or None
+                        )
                     continue
                 if accept_partial:
                     print(
@@ -734,7 +883,7 @@ def run_phase2(
                     continue
                 # A partial key, --phase2-accept-partial NOT given: fall
                 # through and re-run this group.
-            rows = _run_phase2_group(
+            rows, memory_files = _run_phase2_group(
                 system,
                 scale,
                 observations=stream.observations,
@@ -745,7 +894,10 @@ def run_phase2(
                 model=args.model,
                 mode=args.mode,
                 claude_binary=args.claude_binary,
+                native_memory_files=native_memory_files if system == "athenaeum" else None,
             )
+            if system == "native":
+                native_memory_files = memory_files
             _phase2_append_rows(phase2_store_path, rows)
 
 
@@ -1639,7 +1791,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     # KeyboardInterrupt) already appended its rows durably (fsync'd,
     # ResultStore-style -- see _phase2_append_rows), so a PARTIAL report
     # still shows whatever Phase 2 data exists.
-    phase2_write_path_stats, phase2_write_costs = load_phase2_results(phase2_store_path)
+    phase2_write_path_stats, phase2_write_costs, phase2_filing_loss_stats = load_phase2_results(
+        phase2_store_path
+    )
     phase2_summary_text = _phase2_summary(
         args, phase2_write_path_stats, phase2_write_costs, phase2_store_path
     )
@@ -1657,6 +1811,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             abort_reason=abort_reason,
             write_path_stats=phase2_write_path_stats,
             write_costs=phase2_write_costs,
+            filing_loss_stats=phase2_filing_loss_stats,
             verdict_arm=args.verdict_arm,
             planned_cells=read_planned_cells(store),
             torn_rows=diagnostics.torn,
@@ -1697,6 +1852,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 abort_reason=abort_reason,
                 write_path_stats=phase2_write_path_stats,
                 write_costs=phase2_write_costs,
+                filing_loss_stats=phase2_filing_loss_stats,
                 verdict_arm=args.verdict_arm,
                 planned_cells=read_planned_cells(store),
                 torn_rows=diagnostics.torn,
