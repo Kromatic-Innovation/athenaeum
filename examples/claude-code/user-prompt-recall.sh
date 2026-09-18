@@ -891,6 +891,18 @@ if [ "$HAS_DESCRIPTION_COLUMN" = true ]; then
   DESC_COL="$PM_DESC_EXPR"
 fi
 
+# Issue athenaeum#1789 (Quine follow-up): the column list for the FTS5
+# MATCH column-filter below (`{...}: (query)`) must name only columns that
+# actually exist in THIS db -- FTS5 raises an error for an unknown column
+# name in a filter, which the FTS5 query's `2>/dev/null || echo ""` would
+# otherwise swallow into a silent EMPTY push, exactly the legacy-DB hazard
+# `HAS_DESCRIPTION_COLUMN` already exists to avoid for every other read
+# site in this file. Same reuse-the-probe discipline as `DESC_COL` above.
+FTS_MATCH_COLS="filename name tags aliases"
+if [ "$HAS_DESCRIPTION_COLUMN" = true ]; then
+  FTS_MATCH_COLS="filename name tags aliases description"
+fi
+
 FTS_RESULTS=""
 if [ -f "$DB_FILE" ]; then
   # Issue athenaeum#1343 (Plan step 3): `audience` was added to the SELECT
@@ -932,10 +944,34 @@ if [ -f "$DB_FILE" ]; then
   # push-ledger evidence for why FTS5 needed this at all (a prior version
   # of this comment wrongly assumed FTS5 was a cold path not worth the
   # trouble).
+  #
+  # Issue athenaeum#1789: the ``wiki`` table gained a ``body`` column
+  # (schema v6) so ``athenaeum.search.FTS5Backend`` could index page body
+  # content for its own (Python) query path. This raw query never asked
+  # for that -- it is not "upgraded" to search body, it is diluted: FTS5's
+  # bare ``rank`` (bm25 with every INDEXED column weighted equally)
+  # started spreading relevance over a column six that never existed when
+  # this query's tuning was last measured, and body is far longer than
+  # every other column combined, so a document's ``name``/``tags``/
+  # ``aliases``/``description`` match now competes against its own body
+  # noise. The ``{col1 col2}: (query)`` column-filter prefix below scopes
+  # the MATCH back to exactly the five columns this query always searched
+  # -- restoring this query's PRE-schema-v6 candidate set and ranking, not
+  # changing it. The parentheses are load-bearing: FTS5's column filter
+  # binds to only the single phrase/group immediately following the colon,
+  # so `{cols}: "a" OR "b"` restricts only `"a"` and leaves `"b"` an
+  # unrestricted (body-included) match -- silently defeating the whole
+  # point for every term but the first (see
+  # `athenaeum.search.FTS5Backend.query`'s `metadata_only` docstring,
+  # where the identical Python-side query hit the identical bug). Giving
+  # this query body matching WITH weighting, matching what
+  # `FTS5Backend.query`'s default (non-metadata_only) path now does, is
+  # issue athenaeum#1798's scope, not this fix's -- this restores prior
+  # behavior, it does not add the new capability.
   FTS_RESULTS=$(sqlite3 -separator $'\t' "$DB_FILE" "
     SELECT filename, name, rank, audience, 'fts5', ${DESC_COL}
     FROM wiki
-    WHERE wiki MATCH '${FTS_QUERY}'
+    WHERE wiki MATCH '{${FTS_MATCH_COLS}}: (${FTS_QUERY})'
     ${EXCLUDE}
     ORDER BY rank
     LIMIT 3;

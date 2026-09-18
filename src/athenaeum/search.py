@@ -70,6 +70,11 @@ from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from athenaeum.authority import is_pointer_stub
+from athenaeum.config import (
+    RECALL_HYBRID_FTS5_WEIGHT_DEFAULT,
+    RECALL_HYBRID_GUARD_RANK_DEFAULT,
+    RECALL_HYBRID_K_DEFAULT,
+)
 from athenaeum.models import (
     AUDIENCE_PUBLIC_TOKEN,
     audience_index_string,
@@ -224,8 +229,19 @@ class SearchBackend(Protocol):
         caller_audience: set[str] | None = None,
         as_of: date | None = None,
         type_filter: str | Sequence[str] | None = None,
+        metadata_only: bool = False,
     ) -> list[tuple[str, str, float]]:
         """Search the index.
+
+        ``metadata_only`` (issue athenaeum#1789 cross-lane regression, tracked
+        against athenaeum#1800) restricts the query to a page's identity
+        fields (name/tags/aliases/description), excluding body content, for
+        callers that need the pre-athenaeum#1789 candidate set. Only
+        ``FTS5Backend`` implements this (see its ``query`` docstring for the
+        full rationale); every other backend accepts and ignores the
+        parameter, matching this Protocol's existing pattern for a param one
+        backend needs and the rest don't act on (e.g. ``wiki_root``,
+        ``as_of`` below).
 
         ``wiki_root`` is used by scan-on-query backends (e.g. keyword) that
         don't maintain an on-disk index; indexed backends ignore it.
@@ -278,6 +294,16 @@ class SearchBackend(Protocol):
 # Exposed as the single source of truth so shell hooks and downstream
 # callers don't re-hardcode their own copy. See `athenaeum stopwords`
 # CLI subcommand and examples/claude-code/user-prompt-recall.sh.
+#
+# ``current``/``currently`` (issue athenaeum#1789): porter stemming folds
+# both to the same stem, so a query using either collides with any page
+# whose NAME/tags simply mark it as the live version of a fact (e.g. a
+# ``(current)``-suffixed page's ``tags: [..., current]``) — a purely
+# structural marker, not a topical match. On a small corpus that marker
+# tag is rare enough to carry an outsized BM25 IDF, letting a handful of
+# unrelated "current" pages outrank the real answer (measured on the
+# ``former_client_not_current`` probe). Filtered the same way the
+# existing temporal fillers (``now``, ``old``, ``new``) already are.
 STOPWORDS: tuple[str, ...] = tuple(
     sorted(
         set(
@@ -293,7 +319,7 @@ STOPWORDS: tuple[str, ...] = tuple(
             "there these thing think three through under until which while world would "
             "years your into just like made over said some than them then time very "
             "want what when will with year does really right going being looking "
-            "trying running check please sure okay yeah thanks".split()
+            "trying running check please sure okay yeah thanks current currently".split()
         )
     )
 )
@@ -1110,19 +1136,76 @@ class FTS5Backend:
     # while this build path inserts seven values, and every incremental
     # build would raise straight into an empty recall. The stamp mismatch
     # force-rebuilds instead, which is safe here because the index is a
-    # derived cache — no corpus content is lost by rebuilding it.
-    _SCHEMA_VERSION = 5
+    # derived cache — no corpus content is lost by rebuilding it. Version 6
+    # (issue athenaeum#1789) adds the ``body`` column: before this, FTS5 only
+    # ever indexed frontmatter (name/tags/aliases/description) — a fact
+    # stated only in a page's prose body was invisible to FTS5 MATCH no
+    # matter how the query or ranking was tuned, which is the root cause of
+    # the ``confidentiality_rule``/``budget_threshold_current`` coverage
+    # misses (see ``tests/evals/test_recall_covers_grep.py``'s
+    # ``_FTS5_XFAIL``): the grep baseline reads the rendered body, FTS5's
+    # index never did. Column-set change, so this needs the same bump every
+    # prior shape change did.
+    _SCHEMA_VERSION = 6
+
+    #: Cap on how much of a page's body is indexed (characters), mirroring
+    #: ``VectorBackend._DOC_LIMIT``'s precedent for bounding a per-page
+    #: index footprint. Generous relative to the hand-authored eval corpus's
+    #: page bodies (a few hundred chars) so no probe fixture is truncated;
+    #: bounds the cost of a pathologically large real page without needing
+    #: a second knob.
+    _BODY_LIMIT = 4000
+
+    # BM25 column weights (issue athenaeum#1789): ``name``/``aliases`` carry
+    # a page's identity and are weighted well above ``body`` so a page that
+    # matches by title/alias (the disambiguation win the
+    # ``person_not_repo``/``repo_not_person`` probes pin) is not diluted by
+    # adding the (much longer) body column to the row — FTS5's bm25 length-
+    # normalizes over the WHOLE row, so a naive equal-weight body column
+    # would systematically depress every other column's contribution.
+    # Order matches the indexed (non-UNINDEXED) columns in ``_CREATE_SQL``:
+    # filename, name, tags, aliases, description, body.
+    # Values measured empirically against ``tests/evals/test_recall_covers_grep.py``'s
+    # xfail set (issue athenaeum#1789): high enough on name/aliases to keep the
+    # ``person_not_repo``/``repo_not_person`` disambiguation win (the eponymous
+    # repo page's body names its namesake person, so an unweighted body column
+    # pulls it inside the top 5), low enough on body that a coverage-only match
+    # (a fact that exists ONLY in body — see the schema-bump comment above)
+    # still surfaces without every ballast/distractor page that merely shares a
+    # body word crowding out the real answer.
+    #
+    # Body weight lowered from 0.4 to 0.15 (issue athenaeum#1789 rebase
+    # regression, PR athenaeum#1807): rebasing onto athenaeum#1792's
+    # disambiguation-guard tests exposed that 0.4 let ``person-rowan-
+    # wrenfield`` (a body-only match — its own page prose describes the
+    # repo, so "rowanwrenfield"/"repository" appear in its body) re-enter
+    # the ``repo_not_person`` probe's top 5 at ``core`` scale, purely on
+    # that body mention (name/tags/aliases/description all score zero for
+    # it — see the bm25 per-column breakdown in the PR body). A direct
+    # sweep of the body weight through pytest (0.4 down to 0.0, both
+    # scales, against the disambiguation guard AND the two body-only
+    # coverage probes ``confidentiality_rule``/``budget_threshold_current``)
+    # found 0.1-0.3 clears the disambiguation guard at both scales while
+    # keeping both coverage probes passing; 0.05 and below starts losing
+    # ``confidentiality_rule`` (its only distinguishing terms —
+    # ``engagement``/``details``/``another`` — live in body). 0.15 sits
+    # comfortably clear of both edges (0.05 and 0.4) — this is the value the
+    # full-probe re-verification below was actually run against, not a
+    # midpoint chosen for its own sake. Re-verified with a full non-
+    # aggregation probe sweep at 0.15: no ``_FTS5_XFAIL`` entry changes
+    # status except the two intended coverage gains (removed below).
+    _BM25_WEIGHTS: tuple[float, ...] = (1.0, 8.0, 4.0, 8.0, 3.0, 0.15)
 
     # SQL fragments shared by the full and incremental build paths. ``type``
     # is UNINDEXED (out of the BM25 term space, exact-matched via WHERE) —
     # same storage shape ``audience`` established (issue athenaeum#312).
     _CREATE_SQL = (
         "CREATE VIRTUAL TABLE IF NOT EXISTS wiki USING fts5"
-        "(filename, name, tags, aliases, description, audience UNINDEXED, "
+        "(filename, name, tags, aliases, description, body, audience UNINDEXED, "
         "type UNINDEXED, "
         'tokenize="porter unicode61")'
     )
-    _INSERT_SQL = "INSERT INTO wiki VALUES (?,?,?,?,?,?,?)"
+    _INSERT_SQL = "INSERT INTO wiki VALUES (?,?,?,?,?,?,?,?)"
 
     def incremental_reuse_blocker(
         self, cache_dir: Path, stored: dict[str, Any] | None
@@ -1189,13 +1272,24 @@ class FTS5Backend:
         meta: dict[str, Any],
         *,
         config: dict[str, Any] | None = None,
-    ) -> tuple[str, str, str, str, str, str, str]:
+    ) -> tuple[str, str, str, str, str, str, str, str]:
         """Build the FTS5 row tuple for one page."""
         name, tags, aliases, description = _extract_frontmatter_fields(text)
         if not name:
             # For extra-root entries use the leaf stem (not the prefixed
             # indexed_name) so recall results show a clean title.
             name = path.stem
+        # Issue athenaeum#1789: the body — everything after the frontmatter
+        # close fence — is what a grep baseline over the rendered page
+        # actually reads (``tests/evals/test_recall_covers_grep.py``'s
+        # ``_grep_hits``), and prior to this it was never part of the FTS5
+        # index at all (only name/tags/aliases/description were). Reuses the
+        # SAME ``parse_frontmatter`` split ``KeywordBackend.query`` already
+        # relies on (``fm, body = parse_frontmatter(text)``) rather than a
+        # second frontmatter-boundary scanner. Truncated to ``_BODY_LIMIT``
+        # so one oversized page can't blow up the index footprint.
+        _fm, body = parse_frontmatter(text)
+        body = body[: FTS5Backend._BODY_LIMIT]
         # Issue athenaeum#312: store each page's effective audience (delimited,
         # anchored) so Layer B can filter inside the query.
         audience = audience_index_string(meta)
@@ -1218,6 +1312,7 @@ class FTS5Backend:
             tags,
             aliases,
             description,
+            body,
             audience,
             page_type,
         )
@@ -1415,8 +1510,55 @@ class FTS5Backend:
         caller_audience: set[str] | None = None,
         as_of: date | None = None,
         type_filter: str | Sequence[str] | None = None,
+        metadata_only: bool = False,
     ) -> list[tuple[str, str, float]]:
-        """Query the FTS5 index. Returns ``(filename, name, score)`` triples."""
+        """Query the FTS5 index. Returns ``(filename, name, score)`` triples.
+
+        ``metadata_only`` (issue athenaeum#1789 cross-lane regression, tracked
+        against athenaeum#1800): when ``True``, the MATCH is restricted to the
+        ``name``/``tags``/``aliases``/``description`` columns via FTS5's own
+        ``{col1 col2 ...}: query`` column-filter syntax — ``body`` (added by
+        this same issue) is excluded from the match entirely, not merely
+        down-weighted. This is a QUERY-time restriction over the existing
+        index (no second table, no rebuild) so a caller can get the
+        pre-athenaeum#1789 candidate SET back on demand. Default ``False``
+        preserves this method's normal (body-included) behavior for every
+        existing caller — this parameter is additive.
+
+        Exists because a sweep of ``_BM25_WEIGHTS``'s body component (0.01
+        through 1.0) could not, at any single value, simultaneously keep
+        ``body`` visible enough for the coverage probes that need it
+        (``confidentiality_rule``, ``budget_threshold_current`` — their
+        answer terms exist ONLY in body) while keeping it invisible enough
+        to stop a handful of pages from re-entering the ranking purely on a
+        body mention (the ``person_not_repo``/``keelbridge_programme_scope``/
+        ``callum_drews_last_contact`` regressions) — the two goals pull the
+        same knob in opposite directions with no shared value that satisfies
+        both. Excluding body outright for ONE specific caller (the hybrid
+        fusion's FTS5 arm, wired in ``mcp_server.recall_search``) sidesteps
+        that tension instead of trying to split it: direct FTS5 recall
+        (``search_backend="fts5"``) keeps full body indexing and this
+        issue's coverage fix; the FTS5 list fed to the vector-backend hybrid
+        fusion reverts to metadata-only ranking, matching its behavior
+        before this issue landed.
+
+        SCOPE of the sweep above, reconciled against the later direct-FTS5
+        sweep in ``_BM25_WEIGHTS``'s own comment (PR athenaeum#1807): this
+        docstring's claim is about the HYBRID/vector-fusion regressions
+        (``ratecard_tooling_owner``, ``keelbridge_programme_scope``,
+        ``callum_drews_last_contact``, the ``person_not_repo`` guard,
+        measured through RRF fusion on the vector backend) — no single body
+        weight cleared those while keeping the coverage probes. That is a
+        SEPARATE objective from the one ``_BM25_WEIGHTS`` itself now
+        satisfies: the DIRECT-fts5 disambiguation guard
+        (``person_not_repo``/``repo_not_person`` via
+        ``search_backend="fts5"``, no fusion) plus the same two coverage
+        probes. 0.1–0.3 clears that direct-fts5 pair at both scales — this
+        is exactly why lowering the class constant did not remove the need
+        for ``metadata_only``: a value that works for the un-fused FTS5 path
+        does not, and was not re-tested to, satisfy the fused path's tighter
+        constraint.
+        """
         del wiki_root  # FTS5 reads the pre-built index, not the wiki files
         del as_of  # athenaeum#308: FTS5 filters at build time; as-of view = as-of index
         db_path = cache_dir / _DB_NAME
@@ -1434,6 +1576,22 @@ class FTS5Backend:
 
         # Build FTS5 MATCH expression: "word1" OR "word2" ...
         fts_query = " OR ".join(f'"{t}"' for t in terms[:8])
+        if metadata_only:
+            # FTS5 column-filter syntax: ``{col1 col2 ...}: <query>`` scopes
+            # the MATCH to only the named columns for this one query — no
+            # schema change, no second index. ``body`` is the only indexed
+            # column left out; ``audience``/``type`` are UNINDEXED already
+            # and never part of a column filter. The column filter binds to
+            # only the SINGLE phrase/group immediately following the colon
+            # (SQLite FTS5 query-syntax precedence) — without the explicit
+            # parens, ``{cols}: "a" OR "b"`` restricts only ``"a"`` to those
+            # columns and leaves ``"b"`` an unrestricted (all-column,
+            # body-included) match, silently defeating the whole point for
+            # every term but the first. Verified directly against this
+            # corpus: unparenthesized, a page whose ONLY matching term was
+            # in body (`policy-confidentiality`, term "engagement") still
+            # matched at rank 1 despite the "restriction".
+            fts_query = "{filename name tags aliases description}: (" + fts_query + ")"
 
         # Build exclusion clause
         exclude_clause = ""
@@ -1477,12 +1635,55 @@ class FTS5Backend:
             type_clause = f" AND type IN ({placeholders})"
             type_params = list(normalized_types)
 
+        # Issue athenaeum#1789: rank by an explicitly WEIGHTED bm25() rather
+        # than the bare ``rank`` column (SQLite FTS5's shorthand for
+        # ``bm25(wiki)`` — every indexed column weighted 1.0). bm25's length
+        # normalization is computed over the WHOLE row, so once ``body`` (a
+        # column that dwarfs the others) entered the index unweighted, it
+        # would systematically dilute every other column's contribution and
+        # was the likeliest way to lose the ``person_not_repo``/
+        # ``repo_not_person`` name-match win. Weight args are our own fixed
+        # class constant (never user input), so inlining them is safe;
+        # bm25()'s weight arguments are not bindable via ``?`` parameters.
+        #
+        # ``metadata_only`` uses this SAME weighted expression -- NOT the
+        # bare ``rank`` shorthand, despite ``rank`` being the literal
+        # pre-athenaeum#1789 expression this table's query path used. Bare
+        # ``rank`` was tried (issue athenaeum#1789 Quine follow-up) and
+        # measured to perform WORSE, not better: a develop-vs-head A/B
+        # (same corpus content, same MATCH restricted to the identical five
+        # columns via the column filter below) showed a document's score
+        # DIFFERS between a 7-column table (develop, no ``body`` column at
+        # all) and this table's 8-column shape (``body`` present but never
+        # MATCHED under the filter) -- e.g. one probe's expected page
+        # scored -23.2 (rank 1) on develop's schema and only -7.5 (rank 5)
+        # on this schema, using the IDENTICAL bare-``rank`` expression and
+        # IDENTICAL column-restricted MATCH. SQLite FTS5's bm25 statistics
+        # are computed TABLE-WIDE, not query-scoped: merely adding the
+        # ``body`` column to the table changes bm25's corpus-level
+        # normalization for every OTHER column, whether or not a given
+        # query's MATCH ever touches ``body``. This means
+        # ``metadata_only``, whatever weight profile it uses, CANNOT
+        # reproduce develop's ranking byte-for-byte while ``body`` lives in
+        # the same FTS5 table -- doing that would require a genuinely
+        # separate metadata-only table/index (a real second-index design,
+        # with its own manifest/incremental-build/schema-version
+        # machinery), which is out of this fix's scope. Reusing
+        # ``_BM25_WEIGHTS`` is the pragmatic choice given that ceiling:
+        # measured against the full probe set, it produces STRICTLY FEWER
+        # vector-backend regressions than bare ``rank`` does (20 vs 28
+        # (scale, probe) cases in ``_VECTOR_XFAIL``), even though neither
+        # is byte-identical to develop. See ``_VECTOR_XFAIL``'s own comment
+        # in ``tests/evals/test_recall_covers_grep.py`` for the full,
+        # pytest-measured account of what this parameter does and does not
+        # fix.
+        score_expr = "bm25(wiki, " + ", ".join(str(w) for w in self._BM25_WEIGHTS) + ")"
         conn = sqlite3.connect(str(db_path))
         try:
             cursor = conn.execute(
-                f"SELECT filename, name, rank FROM wiki "
+                f"SELECT filename, name, {score_expr} AS score FROM wiki "
                 f"WHERE wiki MATCH ? {exclude_clause}{audience_clause}{type_clause} "
-                f"ORDER BY rank LIMIT ?",
+                f"ORDER BY score LIMIT ?",
                 [fts_query, *params, *audience_params, *type_params, n],
             )
             return [(row[0], row[1], row[2]) for row in cursor.fetchall()]
@@ -2069,10 +2270,12 @@ class VectorBackend:
         caller_audience: set[str] | None = None,
         as_of: date | None = None,
         type_filter: str | Sequence[str] | None = None,
+        metadata_only: bool = False,
     ) -> list[tuple[str, str, float]]:
         """Query the chromadb collection with semantic search."""
         del wiki_root  # Vector reads the pre-built chromadb collection
         del as_of  # athenaeum#308: vector filters at build time; as-of view = as-of index
+        del metadata_only  # athenaeum#1789: FTS5-only knob, no-op here (Protocol-shared param)
         chromadb = self._get_chromadb()
 
         vector_dir = cache_dir / _VECTOR_DIR
@@ -2481,6 +2684,7 @@ class KeywordBackend:
         as_of: date | None = None,
         type_filter: str | Sequence[str] | None = None,
         store: Store | None = None,
+        metadata_only: bool = False,
     ) -> list[tuple[str, str, float]]:
         """Score every non-underscore wiki page and return the top-n hits.
 
@@ -2500,6 +2704,7 @@ class KeywordBackend:
         filesystem fallback this backend exists for is unaffected.
         """
         del cache_dir
+        del metadata_only  # athenaeum#1789: FTS5-only knob, no-op here (Protocol-shared param)
         if wiki_root is None or not wiki_root.is_dir():
             return []
 
@@ -2693,16 +2898,108 @@ def fts5_index_available(cache_dir: Path) -> bool:
     return (cache_dir / _DB_NAME).is_file()
 
 
+#: Default weight applied to the ``secondary`` list's contribution in
+#: :func:`reciprocal_rank_fusion` (issue athenaeum#1800 / athenaeum#1789
+#: cross-lane regression) -- kept at ``1.0`` (a no-op) DELIBERATELY. A
+#: uniform down-weight was tried first and rejected: several of
+#: athenaeum#1792's ORIGINAL passing cases rely on a ``secondary``-only hit
+#: (the expected page absent from ``primary`` entirely) reaching the fused
+#: top-k on FTS5's full-weight rank alone -- with `_HYBRID_CANDIDATE_POOL`
+#: typically populated by 5-14 OTHER `primary`-only hits each occupying a
+#: full-weight ``1/(k+rank)`` slot, ANY uniform reduction below `1.0`
+#: immediately pushes a `secondary`-only hit below that entire block,
+#: regardless of how strongly `secondary` itself ranked it.
+#:
+#: MEASURED against the four athenaeum#1789 cross-lane regressions
+#: (``core/person_not_repo``'s ``must_not_rank`` guard,
+#: ``core/ratecard_tooling_owner``, ``core/keelbridge_programme_scope``,
+#: ``medium/callum_drews_last_contact``), sweeping the full offline
+#: recall-covers-grep suite at each value: ``1.0`` (default, byte-identical
+#: to no knob existing) -- 4 failures, the baseline. ``0.9`` through
+#: ``0.4`` -- 32 failures each (identical failure SET at every value in
+#: that range, confirming a step-function threshold rather than a gradient:
+#: this down-weighting broke 28 ADDITIONAL, previously-passing cases
+#: without fixing any of the original four). No weight in ``[0, 1]``
+#: improves on the ``1.0`` baseline -- kept at ``1.0`` (a no-op) rather
+#: than tuned, and exposed only as an independent lever for an operator
+#: with a different corpus shape to reach for. The VALUE lives in
+#: :data:`athenaeum.config.RECALL_HYBRID_FTS5_WEIGHT_DEFAULT` so the
+#: config resolver (a lower layer) never imports this module; this alias
+#: keeps the search-side name the sweep notes above refer to.
+_DEFAULT_HYBRID_FTS5_WEIGHT = RECALL_HYBRID_FTS5_WEIGHT_DEFAULT
+
+#: Default own-list-rank threshold (1-indexed, inclusive) below which a
+#: SINGLE-list hit is protected from being crowded out of the fused top-k
+#: by a BOTH-list hit, in :func:`reciprocal_rank_fusion` (issue athenaeum#1800
+#: / athenaeum#1789 cross-lane regression). See that function's docstring
+#: for the mechanism.
+#:
+#: MEASURED against the same four regressions: ``guard_rank=1`` or ``2``
+#: -- 4 failures, IDENTICAL to the unguarded baseline (a no-op at this
+#: corpus's actual rank distribution -- none of the four regressions
+#: involve a single-list hit ranked 1 or 2 in its own list). ``guard_rank=3``
+#: -- 9 failures (6 NEW regressions: ``core/pto_allowance``,
+#: ``core/portal_design_reviewer``, ``core/pinemarsh_goal_rationale``,
+#: ``core/anchorline_retirement_rationale``, ``medium/thorncastle_first_contact``,
+#: ``medium/tamsin_ferro_role_change`` -- previously-passing single-list-rank-3
+#: hits now wrongly protected ahead of genuinely-relevant both-list hits --
+#: while STILL not clearing ``core/person_not_repo`` or
+#: ``medium/callum_drews_last_contact``). ``guard_rank=4`` through ``8``
+#: -- 13-14 failures, monotonically worse. No guard value clears more than
+#: the unguarded baseline already didn't fail on; kept OFF (``0``) by
+#: default. Value lives in
+#: :data:`athenaeum.config.RECALL_HYBRID_GUARD_RANK_DEFAULT` (layering).
+_DEFAULT_HYBRID_GUARD_RANK = RECALL_HYBRID_GUARD_RANK_DEFAULT
+
+#: RRF ``k`` the vector-backend hybrid dispatch actually uses (issue
+#: athenaeum#1800 / athenaeum#1789), distinct from :data:`_DEFAULT_RRF_K`
+#: (``60``, kept as :func:`reciprocal_rank_fusion`'s own default so any
+#: OTHER direct caller/test stays byte-identical).
+#:
+#: MEASURED against the same four regressions, guard disabled: ``k=60``
+#: (this default) -- 4 failures, the baseline. ``k=2`` through ``30`` --
+#: 4 failures each, IDENTICAL failure set to the baseline (no improvement
+#: at any of these values). ``k=1`` -- 3 failures: fixes
+#: ``core/person_not_repo``'s guard, but NOT the other three, and
+#: introduces its own problem -- at ``k=1``, ``1/(1+rank)`` makes exact
+#: score TIES common (two different single-list hits, each rank 3 in
+#: DIFFERENT lists, score identically), so which one survives into the top
+#: k is decided by dict-insertion order (primary before secondary, an
+#: implementation detail, not a ranking signal) rather than genuine
+#: relevance -- not shippable as a default. Combining ``k=1`` with any
+#: nonzero ``guard_rank`` made things WORSE, not better (``guard_rank=1``:
+#: 3 failures, same as ``k=1`` alone -- ``guard_rank>=2``: 4-11 failures).
+#:
+#: Root cause, confirmed by inspecting the actual candidate lists for all
+#: four regressions: this is NOT a fusion-weighting problem. In every case
+#: FTS5's OWN ranking (or the absence of a page from BOTH backends' lists
+#: entirely -- ``core/ratecard_tooling_owner``'s second expected page,
+#: ``tool-buildpipe``, is in neither list's top 15) is what puts the wrong
+#: page ahead, or the right page nowhere reachable at all -- no fusion
+#: parameter can invent an ordering neither input list produced. See
+#: issue athenaeum#1800's PR-body comment for the full per-probe mechanism
+#: table. Kept at the RRF-standard ``60`` (a no-op) pending a fix in the
+#: FTS5 arm's own ranking (athenaeum#1789's seam). Value lives in
+#: :data:`athenaeum.config.RECALL_HYBRID_K_DEFAULT` (layering); it is
+#: asserted equal to :data:`_DEFAULT_RRF_K` so the two never drift apart
+#: silently.
+_DEFAULT_HYBRID_K = RECALL_HYBRID_K_DEFAULT
+assert _DEFAULT_HYBRID_K == _DEFAULT_RRF_K
+
+
 def reciprocal_rank_fusion(
     primary: Sequence[tuple[str, str, float]],
     secondary: Sequence[tuple[str, str, float]],
     *,
     n: int,
     k: int = _DEFAULT_RRF_K,
+    secondary_weight: float = 1.0,
+    guard_rank: int = 0,
 ) -> list[tuple[str, str, float]]:
     """Fuse two ranked ``(filename, name, score)`` hit lists (issue athenaeum#1792).
 
-    Reciprocal rank fusion: a hit's fused score is ``sum(1 / (k + rank))``
+    Reciprocal rank fusion: a hit's fused score is
+    ``1/(k+rank_primary) + secondary_weight * 1/(k+rank_secondary)`` summed
     over every input list it appears in (1-indexed rank within that list; a
     list a hit is absent from contributes 0 for that list). Chosen over any
     cross-backend score normalisation because it needs none -- FTS5's bm25
@@ -2718,27 +3015,88 @@ def reciprocal_rank_fusion(
     outside its top 5 (or not at all) still surfaces, because it is present
     in one full-weight list rather than diluted-to-absent in the other.
 
+    ``secondary_weight`` (default ``1.0``, a no-op) down-weights the
+    ``secondary`` list's contribution relative to ``primary``'s full
+    ``1.0`` weight -- an independent lever, off by default; see
+    :data:`_DEFAULT_HYBRID_FTS5_WEIGHT`'s comment for why a uniform
+    down-weight is NOT this function's fix for the crowding problem below
+    (it breaks far more than it fixes).
+
+    ``guard_rank`` (issue athenaeum#1800 / athenaeum#1789's cross-lane
+    regression; default ``0``, meaning OFF -- pass
+    :data:`_DEFAULT_HYBRID_GUARD_RANK` to enable, which the vector-backend
+    hybrid dispatch does) is RANK-GUARDED FUSION: a hit present in ONLY ONE
+    input list, ranked at or better than ``guard_rank`` (1-indexed) WITHIN
+    THAT LIST, is placed ahead of every hit present in BOTH lists,
+    regardless of raw fused score -- equivalently, "a both-list hit may
+    only outrank a single-list hit when that single-list hit's own rank is
+    worse than ``guard_rank``". Guarded hits are ordered among themselves
+    by own rank (best first); every other hit (every both-list hit, and
+    any single-list hit ranked worse than ``guard_rank``) is ordered by
+    fused score, after all guarded hits.
+
+    This targets a specific failure mode plain (unweighted) RRF has: once
+    ATHENAEUM#1789's FTS5 body-indexing widened FTS5's OWN ranking surface,
+    several PAGES FTS5 now ranks moderately well (but does not rank #1)
+    started appearing in BOTH lists, and their SUMMED score (roughly double
+    a single-list hit's own contribution) could outscore a page ranked
+    strongly -- #1, #2, or #3 -- in only ONE list. Concretely: a page
+    (``repo-rowanwrenfield``) that vector alone correctly EXCLUDES from its
+    own top ranks, once also picked up moderately by FTS5, summed enough
+    score to re-enter the fused top-k and defeat the
+    ``person_not_repo``/``repo_not_person`` disambiguation guard; the same
+    mechanism, in the opposite direction, pushed pages vector or FTS5
+    ranked #1-#3 on their OWN out of the fused top-k entirely. Guarding
+    preserves fusion's whole point for every OTHER case -- a moderately
+    (rank 4+) single-listed hit can still be rescued by summing with a
+    second list, and a both-list hit still normally outranks a WEAK
+    single-list hit -- while protecting a list's own high-confidence,
+    single-source signal from being outvoted by a coalition of
+    moderately-ranked agreement.
+
     A hit present in both lists is deduplicated by ``filename`` (the search
     backend's hit key); its rendered ``name`` is taken from whichever list
     it first appears in, ``primary`` before ``secondary`` -- both backends
     render the same page identically (issue athenaeum#1344's invariant), so
     this is a tie-break with no observable effect, not a real choice.
 
-    Returns at most ``n`` hits, ordered by fused score descending; a tie in
-    fused score keeps insertion order (``primary`` hits before new
-    ``secondary``-only hits), which is Python's stable sort applied to a
-    dict built in that same order.
+    Returns at most ``n`` hits. With ``guard_rank=0`` (default): ordered by
+    fused score descending, a tie keeping insertion order (``primary`` hits
+    before new ``secondary``-only hits), Python's stable sort applied to a
+    dict built in that same order -- byte-identical to this parameter not
+    existing. With ``guard_rank>0``: guarded single-list hits first (by own
+    rank ascending), then every other hit by fused score descending.
     """
     scores: dict[str, float] = {}
     rendered: dict[str, str] = {}
+    primary_rank: dict[str, int] = {}
+    secondary_rank: dict[str, int] = {}
     for rank, (filename, name, _score) in enumerate(primary, start=1):
         scores[filename] = scores.get(filename, 0.0) + 1.0 / (k + rank)
         rendered.setdefault(filename, name)
+        primary_rank[filename] = rank
     for rank, (filename, name, _score) in enumerate(secondary, start=1):
-        scores[filename] = scores.get(filename, 0.0) + 1.0 / (k + rank)
+        scores[filename] = scores.get(filename, 0.0) + secondary_weight / (k + rank)
         rendered.setdefault(filename, name)
-    fused = sorted(scores.items(), key=lambda item: item[1], reverse=True)
-    return [(filename, rendered[filename], score) for filename, score in fused[:n]]
+        secondary_rank[filename] = rank
+
+    if guard_rank <= 0:
+        fused = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+        return [(filename, rendered[filename], score) for filename, score in fused[:n]]
+
+    def sort_key(filename: str) -> tuple[int, int, float]:
+        p_rank = primary_rank.get(filename)
+        s_rank = secondary_rank.get(filename)
+        is_single = (p_rank is None) != (s_rank is None)  # exactly one present
+        own_rank = p_rank if p_rank is not None else s_rank
+        guarded = is_single and own_rank is not None and own_rank <= guard_rank
+        if guarded:
+            assert own_rank is not None  # narrows for mypy; guarded implies not None
+            return (0, own_rank, -scores[filename])
+        return (1, 0, -scores[filename])
+
+    ordered = sorted(scores.keys(), key=sort_key)
+    return [(filename, rendered[filename], scores[filename]) for filename in ordered[:n]]
 
 
 # ---------------------------------------------------------------------------

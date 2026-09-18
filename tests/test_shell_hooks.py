@@ -1003,13 +1003,20 @@ conn.close()
         _require_hook_python(hook_env, "athenaeum.search")
 
         wiki = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
+        # Issue athenaeum#1789: FTS5 now indexes page body, so this text must
+        # not literally contain any of the probe query's own words (the
+        # query below has "unrelated" in it too -- the prior wording of
+        # this disclaimer ironically collided with the very probe it
+        # claimed not to match, which was invisible while FTS5 indexed only
+        # frontmatter and became a real, spurious FTS5 hit once body joined
+        # the index).
         (wiki / "hot-vectester.md").write_text(
             "---\n"
             "name: Vectester Hot Page\n"
             "tags: [vectester]\n"
             "memory_tier: hot\n"
             "---\n\n"
-            "Unrelated body text, not matched by the probe query below.\n"
+            "Filler prose sharing no vocabulary with the probe sent below.\n"
         )
         (wiki / "warm-vectester.md").write_text(
             "---\n"
@@ -1017,7 +1024,7 @@ conn.close()
             "tags: [vectester]\n"
             "memory_tier: warm\n"
             "---\n\n"
-            "Unrelated body text, not matched by the probe query below.\n"
+            "Filler prose sharing no vocabulary with the probe sent below.\n"
         )
         self._seed_index(hook_env)
 
@@ -2009,35 +2016,44 @@ conn.close()
         assert isinstance(rec["ts"], str)
         assert isinstance(rec["query_hash"], str) and len(rec["query_hash"]) == 16
         assert rec["backend"] == "fts5"
-        assert isinstance(rec["items"], list) and len(rec["items"]) == 1
+        # Issue athenaeum#1789: FTS5 now indexes page BODY, not just
+        # frontmatter, so this query's "customer" term also legitimately
+        # matches `lean-startup.md` (body: "...rapid iteration and
+        # customer feedback") alongside `customer-development.md` -- both
+        # are genuinely relevant, so the exact count is no longer pinned
+        # at 1. The byte-shape/telemetry contract this test exists to pin
+        # is checked over every item, not just a single hardcoded one.
+        assert isinstance(rec["items"], list) and len(rec["items"]) >= 1
         assert rec["pushed_count"] == len(rec["items"])
         assert isinstance(rec["token_cost"], int)
         assert rec["token_cost_estimated"] is True
         assert rec["source"] == "sidecar"
 
-        item = rec["items"][0]
-        assert isinstance(item["id"], str) and item["id"]
-        assert item["tier"] == "internal"
-        assert isinstance(item["scope"], str)
-        assert isinstance(item["token_cost"], int)
-        assert isinstance(item["relevance"], float)
-        assert item["backend"] == "fts5"
-        # Issue athenaeum#1514 retired the retrieval-cost vocabulary, so a
-        # hook-written row carries NO `memory_tier` key at all. Absence is
-        # the contract, not an empty string: `athenaeum.push_metrics` reads
-        # an absent key as "written after the retirement", which an empty
-        # value could not be distinguished from. The fixture page still
-        # carries the orphaned frontmatter key -- nothing reads it, and
-        # nothing rewrote the corpus to remove it (that is this issue's
-        # stated frontmatter migration).
+        items_by_id = {it["id"]: it for it in rec["items"]}
+        assert "customer-development.md" in items_by_id
+        for item in rec["items"]:
+            assert isinstance(item["id"], str) and item["id"]
+            assert item["tier"] == "internal"
+            assert isinstance(item["scope"], str)
+            assert isinstance(item["token_cost"], int)
+            assert isinstance(item["relevance"], float)
+            assert item["backend"] == "fts5"
+            # Issue athenaeum#1514 retired the retrieval-cost vocabulary, so a
+            # hook-written row carries NO `memory_tier` key at all. Absence is
+            # the contract, not an empty string: `athenaeum.push_metrics` reads
+            # an absent key as "written after the retirement", which an empty
+            # value could not be distinguished from. The fixture page still
+            # carries the orphaned frontmatter key -- nothing reads it, and
+            # nothing rewrote the corpus to remove it (that is this issue's
+            # stated frontmatter migration).
+            assert "memory_tier" not in item, (
+                "the retired tier vocabulary must not reappear in telemetry: "
+                f"{item}"
+            )
         pushed_page = (
             Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki" / "customer-development.md"
         )
         assert "memory_tier: hot" in pushed_page.read_text()
-        assert "memory_tier" not in item, (
-            "the retired tier vocabulary must not reappear in telemetry: "
-            f"{item}"
-        )
 
     def test_telemetry_records_no_tier_for_the_realistic_mix(
         self, hook_env: dict[str, str]
@@ -3897,6 +3913,51 @@ exec "$REAL_AWK" "$@"
             assert topics, "expected a non-empty topics list to have round-tripped"
         finally:
             shutil.rmtree(divergent_cache, ignore_errors=True)
+
+    def test_fts5_query_does_not_match_body_only_term(
+        self, hook_env: dict[str, str]
+    ) -> None:
+        """Issue athenaeum#1789 (Quine follow-up): schema v6 added a
+        ``body`` column to the ``wiki`` FTS5 table
+        (``athenaeum.search.FTS5Backend``), which this hook's own raw FTS5
+        query never asked for -- before this fix, ``WHERE wiki MATCH
+        '${FTS_QUERY}'`` (no column filter) started matching body content
+        too, diluting this query's relevance the same way the Python-side
+        hybrid fusion's FTS5 arm was diluted (see
+        ``FTS5Backend.query``'s ``metadata_only`` parameter). Pins that the
+        hook's column-filter prefix (``{filename name tags aliases
+        description}: (...)``) restores the pre-v6 behavior: a page whose
+        ONLY matching term lives in its body must not surface through this
+        hook, exactly as it would not have before the FTS5 body column
+        existed.
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        wiki = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
+        (wiki / "body-only-term.md").write_text(
+            "---\n"
+            "name: Unrelated Title\n"
+            "tags: [misc]\n"
+            "description: Nothing about the query here\n"
+            "---\n\n"
+            "This body mentions zzzquokkabodyterm nowhere else on the page.\n"
+        )
+        self._seed_index(hook_env)
+
+        result = self._run_hook(hook_env, "tell me about zzzquokkabodyterm")
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        context = (
+            json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+            if result.stdout.strip()
+            else ""
+        )
+        assert "Unrelated Title" not in context, (
+            "a body-only term must not surface the page through the hook's "
+            f"FTS5 query (schema v6 body dilution regression): got {context!r}"
+        )
 
 
 class TestPreCompactSave:

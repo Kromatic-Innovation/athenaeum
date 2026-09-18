@@ -464,6 +464,35 @@ query path out of this module's scope) -- see the module's `_FTS5_XFAIL` /
 `_VECTOR_XFAIL` sets and the PR body that introduced them for the full list
 and a proposed follow-up issue.
 
+**The vector-backend numbers above, and `_VECTOR_XFAIL`, measure a lexical
+stand-in, not the real embedding model (issue athenaeum#1789).** The default
+pytest suite's `tests/conftest.py` carries an autouse fixture,
+`_offline_embedding_function`, that replaces chromadb's real
+`all-MiniLM-L6-v2` model with `tests.offline_embeddings.OfflineONNXMiniLMStub`
+-- a deterministic hashing-trick bag-of-words embedding (issue athenaeum#1091,
+built so the default suite never downloads a model or touches the network).
+It is lexical, like FTS5, just scored differently: two documents that share
+no tokens embed with zero cosine similarity, and a document's rank depends on
+token overlap with the query, not semantic meaning. Every `_VECTOR_XFAIL`
+entry, and this section's `recall_reached`/`hook_reached` columns for the
+`vector` variant, were measured against this stand-in -- CI's actual
+substrate, since `pytest` (never a standalone script calling `athenaeum`
+directly) is what runs in CI and what a contributor should verify against.
+A standalone script that imports `athenaeum` and calls `VectorBackend`/
+`recall_search` directly does NOT go through `tests/conftest.py` at all, so
+it uses the REAL, network-fetched MiniLM model and will show different,
+generally better-looking numbers that do not reflect what CI measures --
+this distinction cost real debugging time in the athenaeum#1789 PR and is
+recorded here so it isn't rediscovered the same way twice. To measure
+against the real model instead: mark the test `@pytest.mark.embedding` (see
+`_default_selection` in `tests/conftest.py`, which exempts `eval`/`live`/
+`embedding`-marked tests from both the offline-embedding-function fixture
+and the network-egress guard) and run with `-m embedding`, e.g.
+`pytest tests/evals/test_recall_covers_grep.py -m embedding` -- this needs
+real network egress to fetch the model on first use and is slow (several
+minutes for the `medium` scale), which is why it is opt-in rather than the
+default.
+
 **Precision/recall/contamination tables (issue athenaeum#1782), pooled
 ("ALL") over every non-abstention probe -- the table athenaeum#1783's cap
 ruling reads.** Same module, same measurement date/SHA, three backend

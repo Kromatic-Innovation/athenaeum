@@ -7,6 +7,156 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The cross-lane regression athenaeum#1789's FTS5 body-indexing caused in
+  athenaeum#1792's hybrid fusion (`recall.hybrid.{fts5_weight,guard_rank,k}`),
+  addressed on the FTS5 seam (issue athenaeum#1789, Quine review of PR
+  athenaeum#1807).** `FTS5Backend.query` gains a `metadata_only` parameter, wired
+  into `recall_search`'s hybrid FTS5 arm only (direct
+  `search_backend="fts5"` recall is unaffected) — it uses FTS5's own
+  `{col1 col2}: (query)` column-filter syntax to exclude `body` from the
+  MATCH for that one caller. Found and fixed a real bug along the way: the
+  column filter must wrap its OR-expression in parentheses
+  (`{cols}: (a OR b)`) — unparenthesized, FTS5 binds the filter to only the
+  first term and silently matches every other term unrestricted, including
+  body, defeating the whole point (this hook the shipped
+  `examples/claude-code/user-prompt-recall.sh` FTS5 query too, for the
+  same reason: it was diluted by body at equal weight with no column
+  filter at all — fixed with the same parenthesized filter; giving the
+  hook body matching WITH weighting is athenaeum#1798's scope, not this
+  fix's).
+  **True byte-parity with pre-athenaeum#1789 ranking is not achievable
+  by column-filtering alone** — a develop-vs-head A/B (identical corpus
+  content, identical bare-`rank` scoring, MATCH restricted to the
+  identical five columns on both a 7-column table with no `body` column
+  at all and this branch's 8-column table with `body` present but never
+  matched) showed materially different scores for the same document (one
+  probe's expected page: rank 1 on the 7-column table, rank 5 on the
+  8-column table). SQLite FTS5's bm25 statistics are table-wide, not
+  query-scoped: merely adding the `body` column changes bm25's
+  corpus-level normalization for every other column, matched or not. Bare
+  `rank` was tried for `metadata_only` and measured to perform WORSE than
+  reusing the existing weighted `_BM25_WEIGHTS` profile (28 vs 20
+  (scale, probe) failures across the full probe set), so the weighted
+  profile is kept; see `FTS5Backend.query`'s `metadata_only` docstring and
+  `_VECTOR_XFAIL`'s comment in `tests/evals/test_recall_covers_grep.py`
+  for the full A/B.
+  Net effect, measured through pytest's actual test substrate (see the
+  methodology note below — an earlier pass of this fix used a standalone
+  script and drew wrong conclusions): the `core`-scale `person_not_repo`
+  disambiguation guard is fixed outright; three regressions this issue
+  introduced remain unresolved and stay in `_VECTOR_XFAIL` —
+  `core/keelbridge_programme_scope`, `medium/callum_drews_last_contact`,
+  `medium/person_not_repo` (coverage case)/`ratecard_tooling_owner` — all
+  four confirmed via A/B against `develop` @ e2ee32ef to PASS there and
+  FAIL on this branch (an earlier version of this changelog entry
+  incorrectly attributed some of these to a later rebase onto
+  athenaeum#1779's long_page tier — that attribution was wrong, corrected
+  per Quine review); most of the six originally-reported coverage gains
+  are given back as this fix's stated tradeoff.
+  **Methodology note that cost real time:** the default pytest suite
+  replaces chromadb's real embedding model with a deterministic lexical
+  (hashing bag-of-words) stand-in (`tests/conftest.py`'s
+  `_offline_embedding_function`, issue athenaeum#1091) — a standalone
+  script that imports `athenaeum` directly uses the real, network-fetched
+  model instead and shows different, better-looking results that do not
+  reflect what CI actually runs. Every number above was verified through
+  `pytest`, not a standalone script; see `docs/design/native-memory-baseline.md`
+  §5 for how to opt into the real model locally, and `_VECTOR_XFAIL`'s own
+  comment in `tests/evals/test_recall_covers_grep.py` for the full account.
+  Cites athenaeum#1789, athenaeum#1798, athenaeum#1800.
+
+- **FTS5 never indexed a page's body, only its frontmatter — the root cause
+  of two of the six `_FTS5_XFAIL` misses in
+  `tests/evals/test_recall_covers_grep.py` (issue athenaeum#1789).**
+  `confidentiality_rule` and `budget_threshold_current` (both `core` and
+  `medium` corpus scales) were a pure COVERAGE gap: each probe's
+  distinguishing terms exist only in the page body, and
+  `FTS5Backend._row_for` built its index row from
+  `name`/`tags`/`aliases`/`description` alone — no query construction or
+  ranking change could have surfaced a term the index never stored. The
+  `wiki` FTS5 table gains a `body` column (schema version 6, truncated at
+  4000 characters), and `FTS5Backend.query` ranks with an explicit
+  `bm25(wiki, ...)` column weighting (name/aliases weighted well above
+  body) instead of the bare `rank` shorthand (implicit equal weighting) —
+  bm25 length-normalizes over the whole row, so an unweighted body column
+  would have diluted the `person_not_repo`/`repo_not_person`
+  disambiguation win (the `rowanwrenfield` repo page's own body names its
+  namesake person). `current`/`currently` join `FTS5Backend.STOPWORDS`:
+  porter stemming collided the two, so a query using either matched any
+  page whose `(current)`-suffixed name/tags merely marked it as the live
+  version of an unrelated fact, at a BM25 weight inflated by that marker's
+  rarity. `("core", "former_client_not_current")` is ADDED to
+  `_FTS5_XFAIL` — not a regression, but a pre-existing latent failure this
+  change exposed: six `client-*` pages scored IDENTICAL bm25 before this
+  fix (to four decimal places), and the three expected pages only
+  "passed" because SQLite preserves insertion order on exact ties and the
+  index is built in alphabetical filename order. `("core",
+  "confidentiality_rule")` and `("core"/"medium", "budget_threshold_current")`
+  are REMOVED, now genuine passes; `("medium", "surname_is_ambiguous")` and
+  `("medium", "former_client_not_current")` remain xfailed — purpose-built
+  distractor pages sharing the probe's vocabulary in both name and body are
+  not reliably separable from genuine answer pages by lexical signal alone.
+  **Known cross-lane regression, not fixed here:** rebasing onto develop
+  after issue athenaeum#1792's `reciprocal_rank_fusion` (PR athenaeum#1799) merged
+  showed the vector backend's `_VECTOR_XFAIL` set gained six genuine passes
+  (this fix's body-indexing reaches them through the fusion) but the same
+  ranking shift pulls `repo-rowanwrenfield` into FTS5's ranking for
+  `person_not_repo`/`ratecard_tooling_owner`/`keelbridge_programme_scope`
+  at `core` scale, and drops `person-callum-drews` out of it for
+  `callum_drews_last_contact` at `medium` scale — both previously clean on
+  the vector backend, both now failing through the fusion. See
+  `tests/evals/test_recall_covers_grep.py`'s `_VECTOR_XFAIL` comment for
+  the full account; deliberately left un-xfailed rather than silently
+  retiring the sibling lane's own disambiguation guard test. The fix
+  belongs in the fusion's FTS5-arm weighting/cutoff, owned by the
+  athenaeum#1792 lane — out of this issue's scope.
+  New unit tests in `tests/test_search.py` pin an explicit pre-quoted FTS5
+  query string's result set unchanged, and the person/repo disambiguation
+  guard as a standalone offline fixture. Out of scope, noted for a
+  follow-up: `athenaeum.context._query_fts5` and the shipped
+  `examples/claude-code/user-prompt-recall.sh` hook both build their own
+  inline FTS5 query against the bare `rank` column, independently of
+  `FTS5Backend.query` — their ranking does not benefit from this weighting
+  change (and was not asked to; the hook is explicitly out of scope for
+  this issue).
+- **Cross-lane regression investigated, not resolved (issue athenaeum#1800):
+  three new `reciprocal_rank_fusion` knobs (`recall.hybrid.fts5_weight`,
+  `recall.hybrid.guard_rank`, `recall.hybrid.k`), all defaulting to a no-op
+  after a sweep found none of the three fixes the four regressions above
+  without breaking substantially more than it fixes.** Uniformly
+  down-weighting the FTS5 arm (`fts5_weight`) produced an IDENTICAL
+  32-failure set at every value from `0.9` down to `0.4` (28 new
+  regressions, none of the original four actually cleared) — the mechanism
+  many `_VECTOR_XFAIL` gains rely on (a page absent from the vector list
+  entirely, rescued only by a full-weight FTS5 rank) breaks under ANY
+  uniform reduction long before the specific moderately-ranked-both-list
+  crowding causing the four regressions weakens. Rank-guarding
+  (`guard_rank`, protecting a strongly-ranked single-list hit from being
+  outscored by a both-list hit) was a no-op at guard values 1-2 (none of
+  the four regressions involve a single-list hit ranked that well in its
+  own list) and introduced 5-10 new regressions at guard values 3+.
+  Reducing RRF's `k` constant (`60` → smaller sharpens rank discrimination)
+  fixed exactly one of the four (`core/person_not_repo`'s disambiguation
+  guard) at `k=1`, but not the other three, and `k=1` makes exact
+  fused-score ties common — decided by dict-insertion order, not genuine
+  relevance, so not shippable as a default. Inspecting the actual candidate
+  lists for all four regressions found the root cause is NOT a fusion
+  parameter: in every case FTS5's own post-body-indexing ranking places a
+  distractor or superseded page ahead of the expected one, or (one case,
+  `core/ratecard_tooling_owner`'s second expected page `tool-buildpipe`)
+  the expected page is absent from both backends' candidate lists
+  entirely — no fusion-side lever can invent an ordering neither input
+  list produced. The three knobs are kept as reviewable, documented,
+  tested (`tests/test_search.py`) levers for a different corpus shape, and
+  the sweep data lives in `src/athenaeum/search.py`'s
+  `_DEFAULT_HYBRID_{FTS5_WEIGHT,GUARD_RANK,K}` comments so the next lane
+  does not repeat it. Posted as a comment on athenaeum#1800 with the full
+  per-probe mechanism table; the four regressions remain un-xfailed (per
+  athenaeum#1789's own PR, correctly refusing to silently retire the
+  disambiguation guard test) pending a fix in the FTS5 arm's own ranking.
+
 ### Added
 
 - **Phase 2 CLI flags + sibling store (issue athenaeum#1785).**

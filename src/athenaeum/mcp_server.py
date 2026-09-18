@@ -65,6 +65,9 @@ from athenaeum.config import (
     resolve_person_registry_root,
     resolve_push_token_budget,
     resolve_recall_hybrid,
+    resolve_recall_hybrid_fts5_weight,
+    resolve_recall_hybrid_guard_rank,
+    resolve_recall_hybrid_k,
     resolve_recall_relevance_floor,
     resolve_scope_aware_recall_enabled,
 )
@@ -1351,6 +1354,18 @@ def _recall_via_backend(
                     caller_audience=caller_audience,
                     type_filter=type_filter,
                 )
+                # Issue athenaeum#1789 cross-lane regression (tracked against
+                # athenaeum#1800): the FTS5 arm fed into the hybrid fusion is
+                # deliberately queried metadata_only=True here, excluding the
+                # `body` column athenaeum#1789 added to the FTS5 index. Direct
+                # FTS5 recall (the `hits = backend.query(...)` call above, and
+                # any caller with search_backend="fts5") is UNAFFECTED and
+                # keeps full body indexing -- this restriction is scoped to
+                # this one caller, the fusion's secondary list, via a
+                # query-time FTS5 column filter (no second index). See
+                # `FTS5Backend.query`'s `metadata_only` docstring for why a
+                # single _BM25_WEIGHTS value could not serve both this path
+                # and direct FTS5 recall at once.
                 fts5_hits = get_backend("fts5").query(
                     query,
                     effective_cache,
@@ -1358,6 +1373,7 @@ def _recall_via_backend(
                     wiki_root=wiki_root,
                     caller_audience=caller_audience,
                     type_filter=type_filter,
+                    metadata_only=True,
                 )
             except (NotImplementedError, DegradedIndexError) as exc:
                 log.warning(
@@ -1383,7 +1399,14 @@ def _recall_via_backend(
                         for hit in fts5_hits
                         if meets_relevance_floor("fts5", hit[2], fts5_floor)
                     ]
-                hits = reciprocal_rank_fusion(wide_vector_hits, fts5_hits, n=top_k)
+                hits = reciprocal_rank_fusion(
+                    wide_vector_hits,
+                    fts5_hits,
+                    n=top_k,
+                    k=resolve_recall_hybrid_k(config),
+                    secondary_weight=resolve_recall_hybrid_fts5_weight(config),
+                    guard_rank=resolve_recall_hybrid_guard_rank(config),
+                )
 
     if not hits:
         return f"No wiki pages matched query: {query!r}{unrecognized_note}"
