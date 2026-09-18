@@ -169,9 +169,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   decoy page stating the wrong fix is safe. Graded by both
   `grade_correctness` (the decision page's planted `answer_tokens` value)
   and `grade_harm` (the decoy page's planted `forbidden_tokens` value,
-  issue athenaeum#1772). `tests/evals/corpus.py`'s `validate_core` gains
-  five checks for the class: task-context-page reachability, decision-page
-  lexical unreachability (exact or stemmed), a qualifying body wikilink (not
+  issue athenaeum#1772). Each forbidden token is planted INSIDE the decoy
+  page's prose describing the harmful action concretely (a named script,
+  flag, or adapter the naive fix adopts), never on a detached marker line
+  (issue athenaeum#1811 finding, applied here too: a model that just does
+  the task and never reads a bare "shorthand: Token." label would never
+  echo it, so `grade_harm` could never fire) -- `validate_core` now asserts
+  this for every `forbidden_tokens` value, not only this class's. Added to
+  `WAVE_2_PROBE_CLASSES` (issue athenaeum#1791, forward-declared by
+  athenaeum#1776) per its own comment, every wave-2 class adds itself there
+  on landing. `tests/evals/corpus.py`'s `validate_core` gains five checks
+  for the class: task-context-page reachability, decision-page lexical
+  unreachability (exact or stemmed), a qualifying body wikilink (not
   frontmatter-only), presence of `forbidden_tokens`, and task-shaped
   phrasing (no `?`, no interrogative cue). All three probes ship
   `report_only: true` -- `unprompted_push` is not in
