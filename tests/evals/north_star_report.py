@@ -1908,8 +1908,10 @@ def render_decision_block(
     """
     resolved_verdict_arm = verdict_arm if verdict_arm is not None else report.verdict_arm
     if verdicts is None:
+        # Issue athenaeum#1819: graded_rows excludes harness-failed cells
+        # (never graded as an ordinary miss).
         verdicts = compute_verdicts(
-            report.rows, verdict_arm=resolved_verdict_arm, write_costs=report.write_costs
+            report.graded_rows, verdict_arm=resolved_verdict_arm, write_costs=report.write_costs
         )
     cutoff = compute_cutoff_scale(verdicts)
 
@@ -2054,6 +2056,21 @@ class NorthStarReport:
     # arm the report was built with, without a caller having to thread it
     # through separately.
     verdict_arm: str = DEFAULT_VERDICT_ARM
+    # issue athenaeum#1819: `rows` above MINUS every row whose
+    # RolloutRecord.harness_failure is non-null (a permission-request or
+    # empty-breadcrumb cell) -- the subset compute_group_stats/weak_probes/
+    # compute_verdicts/compute_cost_per_correct actually run against, so a
+    # harness failure is never graded as an ordinary miss. `rows` itself
+    # keeps every cell, harness failures included, for the header's "total
+    # rollout rows" count and the mode-per-cell table. Equal to `rows` for
+    # every pre-athenaeum#1819 report (nothing was ever checked for this,
+    # so nothing is excluded) and for any run with zero harness failures.
+    graded_rows: tuple[RolloutRow, ...] = ()
+    # issue athenaeum#1819: len(rows) - len(graded_rows), i.e. how many
+    # cells this report excluded from correctness/cost grading. Printed
+    # unconditionally in the header so a reader never has to diff the two
+    # row counts by hand.
+    harness_failure_count: int = 0
     # issue athenaeum#1751: how many cells the run INTENDED to complete, read
     # from the store's planned-count sidecar. ``None`` means "unknowable"
     # (a store written before that sidecar existed, or one whose sidecar was
@@ -2198,16 +2215,24 @@ def build_report(
         relevance_floor_fts5 = None
     scales = sorted({row.record.corpus_scale for row in rows})
     digests = {scale: _corpus_for_scale(scale).fingerprint() for scale in scales}
+    # Issue athenaeum#1819: never grade a harness-failed cell (a
+    # permission-request or empty-breadcrumb cli-mode row) as correctness/
+    # cost data -- `graded_rows` is the input to every stat/verdict below;
+    # `rows` itself is preserved in full on the report (see NorthStarReport.rows).
+    graded_rows = [row for row in rows if not row.record.harness_failure]
+    harness_failure_count = len(rows) - len(graded_rows)
     return NorthStarReport(
         rows=tuple(rows),
-        stats=tuple(compute_group_stats(rows)),
+        graded_rows=tuple(graded_rows),
+        harness_failure_count=harness_failure_count,
+        stats=tuple(compute_group_stats(graded_rows)),
         aborted=aborted,
         abort_reason=abort_reason,
         athenaeum_version=_get_version(),
         git_sha=_get_git_sha(),
         generated=now_iso(),
         corpus_digests=digests,
-        weak_probes=weak_probes(rows),
+        weak_probes=weak_probes(graded_rows),
         write_path_stats=tuple(write_path_stats),
         write_costs=tuple(write_costs),
         verdict_arm=verdict_arm,
@@ -2273,6 +2298,29 @@ def _report_hybrid_display(rows: Sequence[RolloutRow]) -> str | None:
     return "on" if next(iter(known)) else "off"
 
 
+def _report_config_isolated_display(rows: Sequence[RolloutRow]) -> str | None:
+    """Issue athenaeum#1819 defect 3: whether every cli-mode row in *rows*
+    ran under an operator-isolated ``CLAUDE_CONFIG_DIR``, for the report
+    header -- mirrors :func:`_report_hybrid_display`'s shape exactly.
+
+    Returns ``None`` when *rows* carries no cli-mode row at all (an
+    api-only report never spawns ``claude -p``, so the question does not
+    apply and the header omits the line). ``"mixed"`` when some cli-mode
+    rows are isolated and others are not (unreachable through normal
+    dispatch now that :func:`tests.evals.rollout._require_isolated_cli_config`
+    refuses an unset ``CLAUDE_CONFIG_DIR`` before any spawn, but never
+    silently averaged away). Otherwise ``"yes"``/``"no"`` for the single
+    value every cli-mode row in *rows* shares.
+    """
+    cli_rows = [r for r in rows if r.record.mode == "cli"]
+    if not cli_rows:
+        return None
+    known = {r.record.config_isolated for r in cli_rows}
+    if len(known) > 1:
+        return "mixed"
+    return "yes" if next(iter(known)) else "no"
+
+
 def render_report(report: NorthStarReport) -> str:
     """Render *report* as markdown, in the issue's own dimension order:
     PULL no-call rate first, then query quality, cost, efficiency, waste,
@@ -2319,6 +2367,15 @@ def render_report(report: NorthStarReport) -> str:
     for scale in sorted(report.corpus_digests):
         lines.append(f"- corpus_digest[{scale}]: {report.corpus_digests[scale]}")
     lines.append(f"- total rollout rows: {len(report.rows)}")
+    # issue athenaeum#1819: printed unconditionally -- 0 is a real, useful
+    # value (this run had none), not something to hide by omission.
+    lines.append(f"- harness failures: {report.harness_failure_count}")
+    # issue athenaeum#1819 defect 3: printed only for a store that actually
+    # carries a cli-mode row -- see _report_config_isolated_display's own
+    # docstring.
+    config_isolated_display = _report_config_isolated_display(report.rows)
+    if config_isolated_display is not None:
+        lines.append(f"- config isolated: {config_isolated_display}")
     lines.append("")
     lines.append(
         "No LLM judge is invoked anywhere on this path — every figure below is a "
@@ -2421,7 +2478,8 @@ def render_report(report: NorthStarReport) -> str:
 
     lines.extend(
         render_cost_per_correct_table(
-            compute_cost_per_correct(report.rows, write_costs=report.write_costs)
+            # Issue athenaeum#1819: graded_rows excludes harness-failed cells.
+            compute_cost_per_correct(report.graded_rows, write_costs=report.write_costs)
         )
     )
 

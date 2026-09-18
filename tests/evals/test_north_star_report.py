@@ -347,6 +347,71 @@ def test_hybrid_line_unknown_for_rows_predating_the_field() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Harness failures + config isolation -- issue athenaeum#1819
+# ---------------------------------------------------------------------------
+
+
+def test_harness_failure_count_is_zero_when_nothing_failed() -> None:
+    text = render_report(build_report([_row(_none_record())]))
+    assert "- harness failures: 0" in text
+
+
+def test_harness_failed_row_excluded_from_correctness_and_cost() -> None:
+    """A row with ``harness_failure`` set must never be graded as an
+    ordinary miss -- it is dropped from ``compute_group_stats``,
+    ``weak_probes`` and the cost-per-correct table entirely, not merely
+    scored as incorrect."""
+    failed = dataclasses.replace(
+        _oracle_record(answer="I don't have that information."),
+        arm=Arm.PUSH_BREADCRUMB_PULL,
+        mode="cli",
+        harness_failure="final answer looks like an unresolved permission request",
+    )
+    report = build_report([_row(failed)])
+    assert report.harness_failure_count == 1
+    assert report.graded_rows == ()
+    assert len(report.rows) == 1
+    assert report.stats == ()
+    text = render_report(report)
+    assert "- harness failures: 1" in text
+
+
+def test_harness_failed_row_stays_in_total_rollout_rows_and_mode_table() -> None:
+    """The row itself is never discarded from the report -- only from
+    grading -- so the header's total count and the mode-per-cell table
+    still account for it."""
+    failed = dataclasses.replace(
+        _none_record(), mode="cli", harness_failure="empty pushed_context"
+    )
+    ok = _none_record()
+    report = build_report([_row(failed), _row(ok)])
+    assert len(report.rows) == 2
+    assert len(report.graded_rows) == 1
+    assert report.harness_failure_count == 1
+
+
+def test_config_isolated_line_absent_for_an_api_only_report() -> None:
+    record = dataclasses.replace(_none_record(), mode="api")
+    text = render_report(build_report([_row(record)]))
+    assert "config isolated:" not in text
+
+
+def test_config_isolated_line_yes_when_every_cli_row_is_isolated() -> None:
+    record = dataclasses.replace(_none_record(), mode="cli", config_isolated=True)
+    text = render_report(build_report([_row(record)]))
+    assert "- config isolated: yes" in text
+
+
+def test_config_isolated_line_no_for_a_pre_1819_cli_row() -> None:
+    """Back-compat: a store persisted before issue athenaeum#1819 decodes
+    ``config_isolated=False`` on every row -- "not known to be isolated",
+    never a false claim of isolation."""
+    record = dataclasses.replace(_none_record(), mode="cli", config_isolated=False)
+    text = render_report(build_report([_row(record)]))
+    assert "- config isolated: no" in text
+
+
+# ---------------------------------------------------------------------------
 # Text metrics
 # ---------------------------------------------------------------------------
 
