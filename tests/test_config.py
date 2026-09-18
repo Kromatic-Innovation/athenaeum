@@ -739,6 +739,7 @@ class TestResolveOwner:
             "uid": "a545c038",
             "google_contact": "people/c765728850212863135",
             "aliases": ["user_tristan", "Tristan Kromer"],
+            "emails": [],
         }
 
     def test_partial_owner_uid_only(self) -> None:
@@ -746,7 +747,28 @@ class TestResolveOwner:
             "uid": "a545c038",
             "google_contact": "",
             "aliases": [],
+            "emails": [],
         }
+
+    def test_owner_emails_cleaned_and_lowercased(self) -> None:
+        # The owner's own addresses (issue athenaeum#1739). Not a match signal —
+        # an exclusion list the person merge reads, so matching must be
+        # case-insensitive at the source.
+        owner = resolve_owner(
+            {"owner": {"uid": "a545c038", "emails": ["  Owner@Example.COM ", "", None]}}
+        )
+        assert owner is not None
+        assert owner["emails"] == ["owner@example.com"]
+
+    def test_owner_emails_alone_is_enough_to_configure_an_owner(self) -> None:
+        owner = resolve_owner({"owner": {"emails": ["owner@example.com"]}})
+        assert owner is not None
+        assert owner["emails"] == ["owner@example.com"]
+
+    def test_non_list_owner_emails_is_ignored(self) -> None:
+        owner = resolve_owner({"owner": {"uid": "a545c038", "emails": "nope"}})
+        assert owner is not None
+        assert owner["emails"] == []
 
     def test_aliases_coerced_and_blanks_dropped(self) -> None:
         owner = resolve_owner({"owner": {"aliases": ["  user_x  ", "", None, 7]}})
@@ -758,6 +780,7 @@ class TestResolveOwner:
 
         assert "owner:" in _DEFAULT_CONFIG_CONTENT
         assert "google_contact" in _DEFAULT_CONFIG_CONTENT
+        assert "emails:" in _DEFAULT_CONFIG_CONTENT
 
     def test_owner_not_seeded_in_defaults(self) -> None:
         from athenaeum.config import _DEFAULTS

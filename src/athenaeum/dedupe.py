@@ -156,6 +156,11 @@ class MergeReport:
     missing_absorbed: int = 0
     skipped_parse: int = 0
     references_rewritten: int = 0
+    #: Owner addresses the merge refused to write onto a non-owner page,
+    #: counted per frontmatter key (issue athenaeum#1739). Reports the KEY and
+    #: the COUNT only — never the address value, which is the operator's own
+    #: mailbox and has no business in a log line or a CLI summary.
+    owner_addresses_dropped: dict[str, int] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
     dry_run: bool = False
 
@@ -220,6 +225,32 @@ def _owner_alias_sets(owner: dict[str, Any]) -> tuple[set[str], set[str]]:
         if n and len(n.split()) >= 2:
             norm.add(n)
     return norm, raw
+
+
+def _owner_addresses(owner: dict[str, Any] | None) -> set[str]:
+    """Return the owner's own mailbox addresses, lowercased (issue athenaeum#1739).
+
+    Drawn from two places, both already operator-supplied config:
+
+    - ``owner["emails"]`` — the explicit owner-address list
+      (:func:`athenaeum.config.resolve_owner`).
+    - Any configured alias that looks like an address (contains ``@``). The
+      alias list already mixes display names with handles and git-author
+      emails, so an owner who listed their address there gets the guard
+      without having to restate it.
+
+    Empty when no owner is configured, which makes every caller inert.
+    """
+    if not owner:
+        return set()
+    out: set[str] = set()
+    for raw in owner.get("emails") or []:
+        s = str(raw).strip().lower()
+        if s:
+            out.add(s)
+    _, alias_raw = _owner_alias_sets(owner)
+    out.update(a for a in alias_raw if "@" in a)
+    return out
 
 
 def owner_signal(meta: dict[str, Any], owner: dict[str, Any] | None) -> str | None:
@@ -609,12 +640,53 @@ def _merge_meta(
     absorbed: dict[str, Any],
     absorbed_uid: str,
     google_contact_keys: Iterable[str] = (),
+    owner: dict[str, Any] | None = None,
+    dropped: dict[str, int] | None = None,
 ) -> dict[str, Any]:
+    """Merge *absorbed*'s frontmatter into *canonical*'s.
+
+    ``owner`` (see :func:`athenaeum.config.resolve_owner`) arms the
+    owner-address guard (issue athenaeum#1739): when an owner is configured and
+    the canonical page is NOT the owner's, no ``emails`` entry matching an
+    owner address is written. Import fragments carrying the operator's own
+    mailbox otherwise propagate it onto whichever unrelated contact they
+    merge with — a contamination that passes every downstream check because
+    the record also carries a correct address.
+
+    The guard filters the VALUE WRITTEN, not just absorbed's contribution, so
+    a canonical page that was already contaminated does not keep the address
+    merely by having held it first. Merging into the owner's own page is
+    untouched: the owner keeps the owner's addresses.
+
+    ``dropped`` is an optional accumulator; when supplied, dropped entries are
+    counted into it per key (never the address value itself).
+    """
     out = dict(canonical)
+
+    # Owner-address guard (issue athenaeum#1739). Inert when no owner is
+    # configured, and inert when the canonical page IS the owner — the
+    # owner-signal test is the same one the athenaeum#263 auto-bind path uses, so
+    # "is this the owner" has exactly one definition in this module.
+    owner_addresses: set[str] = set()
+    if owner and owner_signal(canonical, owner) is None:
+        owner_addresses = _owner_addresses(owner)
 
     # List unions
     for k in _LIST_UNION_KEYS:
         merged = _union_list(canonical.get(k), absorbed.get(k))
+        if k == "emails" and owner_addresses:
+            kept = [
+                e for e in merged if str(e).strip().lower() not in owner_addresses
+            ]
+            n_dropped = len(merged) - len(kept)
+            if n_dropped:
+                if dropped is not None:
+                    dropped[k] = dropped.get(k, 0) + n_dropped
+                merged = kept
+                # An all-owner-address list collapses to empty; write the
+                # empty list rather than leaving canonical's stale value in
+                # ``out``, which would resurrect what we just refused.
+                out[k] = merged
         if merged:
             out[k] = merged
     if absorbed.get("name") and absorbed["name"] != canonical.get("name"):
@@ -702,6 +774,8 @@ def _perform_merge(
     absorbed_path: Path,
     dry_run: bool,
     google_contact_keys: Iterable[str] = (),
+    owner: dict[str, Any] | None = None,
+    dropped: dict[str, int] | None = None,
 ) -> str:
     canonical_text = canonical_path.read_text(encoding="utf-8")
     absorbed_text = absorbed_path.read_text(encoding="utf-8")
@@ -715,7 +789,12 @@ def _perform_merge(
         return f"SKIP_NO_UID:{absorbed_path.name}"
 
     new_meta = _merge_meta(
-        cmeta, ameta, absorbed_uid, google_contact_keys=google_contact_keys
+        cmeta,
+        ameta,
+        absorbed_uid,
+        google_contact_keys=google_contact_keys,
+        owner=owner,
+        dropped=dropped,
     )
     new_body = _merge_body(cbody, abody, absorbed_uid)
     new_text = render_frontmatter(new_meta) + "\n" + new_body
@@ -787,6 +866,7 @@ def merge_duplicate_persons(
     apply: bool = False,
     wiki_root: Path | None = None,
     google_contact_keys: Iterable[str] = (),
+    owner: dict[str, Any] | None = None,
 ) -> MergeReport:
     """Merge a list of duplicate pairs.
 
@@ -802,6 +882,13 @@ def merge_duplicate_persons(
     key (issue athenaeum#269); resolve it via
     :func:`athenaeum.config.resolve_google_contact_keys`. Empty (the default)
     merges on the generic key only.
+
+    ``owner`` (resolve it via :func:`athenaeum.config.resolve_owner`) arms the
+    owner-address guard (issue athenaeum#1739): an ``emails`` entry matching one of
+    the owner's own addresses is never written onto a page that is not the
+    owner's. Counts land on ``MergeReport.owner_addresses_dropped``, keyed by
+    frontmatter key. ``None`` (the default) leaves merge behaviour exactly as
+    it was.
     """
     gc_keys = tuple(google_contact_keys)
     report = MergeReport(dry_run=not apply)
@@ -818,9 +905,15 @@ def merge_duplicate_persons(
         if not apath.exists():
             report.already_merged += 1
             continue
+        pair_dropped: dict[str, int] = {}
         try:
             outcome = _perform_merge(
-                cpath, apath, dry_run=not apply, google_contact_keys=gc_keys
+                cpath,
+                apath,
+                dry_run=not apply,
+                google_contact_keys=gc_keys,
+                owner=owner,
+                dropped=pair_dropped,
             )
         except (OSError, UnicodeDecodeError) as exc:
             report.errors.append(f"{pair.absorbed_uid}: {exc}")
@@ -829,6 +922,10 @@ def merge_duplicate_persons(
             report.skipped_parse += 1
         elif outcome.startswith("MERGED") or outcome.startswith("WOULD_MERGE"):
             report.merged += 1
+            for key, count in pair_dropped.items():
+                report.owner_addresses_dropped[key] = (
+                    report.owner_addresses_dropped.get(key, 0) + count
+                )
             # Sweep cross-uid references so siblings repoint at canonical.
             # Use the directory the canonical lives in as the wiki dir
             # (matches the existing absolute-path-first contract on

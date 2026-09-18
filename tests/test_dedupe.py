@@ -1177,3 +1177,356 @@ class TestConfigDrivenGoogleContactKeys:
         }
         out = _merge_meta(canonical, absorbed, "abs-uid")
         assert "google_contact_kromatic" not in out
+
+
+class TestOwnerAddressGuard:
+    """The merge must not union an owner address onto a non-owner page.
+
+    Context (issue athenaeum#1739): a contaminated import fragment carries the
+    operator's own mailbox alongside a correct handle. ``emails`` is a
+    list-union key, so the merge previously propagated that address onto
+    whichever unrelated contact the fragment absorbed into — a record that
+    then passes every downstream check while silently attributing the
+    operator's mailbox to a stranger.
+
+    ``OWNER`` above carries ``tristan@example.com`` in its ``aliases``; the
+    ``emails``-keyed owner list is exercised separately below so both
+    sources of an owner address are pinned.
+    """
+
+    STRANGER_ADDRESS = "ada@lovelace.example"
+
+    def test_absorbed_owner_address_is_not_unioned_onto_a_stranger(self) -> None:
+        # The issue's counter-example: two NON-owner records, the absorbed
+        # one contaminated. The merged result must not list the operator.
+        canonical = {"uid": "c0ffee01", "name": "Ada Lovelace"}
+        absorbed = {
+            "uid": "c0ffee02",
+            "name": "Ada Lovelace",
+            "emails": [self.STRANGER_ADDRESS, "tristan@example.com"],
+        }
+        out = _merge_meta(canonical, absorbed, "c0ffee02", owner=OWNER)
+        assert out["emails"] == [self.STRANGER_ADDRESS]
+
+    def test_owner_address_already_on_canonical_is_not_rewritten_back(self) -> None:
+        # The guard filters the value WRITTEN, not just absorbed's
+        # contribution — otherwise a canonical page that was contaminated
+        # first keeps the address merely by having held it.
+        canonical = {
+            "uid": "c0ffee01",
+            "name": "Ada Lovelace",
+            "emails": ["tristan@example.com"],
+        }
+        absorbed = {
+            "uid": "c0ffee02",
+            "name": "Ada Lovelace",
+            "emails": [self.STRANGER_ADDRESS],
+        }
+        out = _merge_meta(canonical, absorbed, "c0ffee02", owner=OWNER)
+        assert out["emails"] == [self.STRANGER_ADDRESS]
+
+    def test_all_owner_addresses_collapses_to_empty_not_to_stale(self) -> None:
+        # Regression guard on the write path: when every entry is dropped
+        # the key must be written empty, not left holding canonical's
+        # pre-merge value.
+        canonical = {
+            "uid": "c0ffee01",
+            "name": "Ada Lovelace",
+            "emails": ["tristan@example.com"],
+        }
+        absorbed = {"uid": "c0ffee02", "name": "Ada Lovelace"}
+        out = _merge_meta(canonical, absorbed, "c0ffee02", owner=OWNER)
+        assert out["emails"] == []
+
+    def test_match_is_case_and_whitespace_insensitive(self) -> None:
+        canonical = {"uid": "c0ffee01", "name": "Ada Lovelace"}
+        absorbed = {
+            "uid": "c0ffee02",
+            "name": "Ada Lovelace",
+            "emails": ["  TRISTAN@Example.COM  "],
+        }
+        out = _merge_meta(canonical, absorbed, "c0ffee02", owner=OWNER)
+        assert out["emails"] == []
+
+    def test_owner_emails_config_key_is_honored(self) -> None:
+        # The other source of an owner address: an explicit ``emails`` list
+        # on the resolved owner, with no matching alias.
+        owner = {
+            "uid": "a545c038",
+            "google_contact": "",
+            "aliases": [],
+            "emails": ["ops@example.com"],
+        }
+        canonical = {"uid": "c0ffee01", "name": "Ada Lovelace"}
+        absorbed = {
+            "uid": "c0ffee02",
+            "name": "Ada Lovelace",
+            "emails": [self.STRANGER_ADDRESS, "ops@example.com"],
+        }
+        out = _merge_meta(canonical, absorbed, "c0ffee02", owner=owner)
+        assert out["emails"] == [self.STRANGER_ADDRESS]
+
+    def test_merging_into_the_owners_own_page_keeps_owner_addresses(self) -> None:
+        # athenaeum#263's owner auto-bind path is unchanged: the owner's own
+        # canonical page is exactly where these addresses belong.
+        canonical = {"uid": OWNER["uid"], "name": "Tristan Kromer"}
+        absorbed = {
+            "uid": "c0ffee02",
+            "name": "Tristan Kromer",
+            "emails": ["tristan@example.com"],
+        }
+        out = _merge_meta(canonical, absorbed, "c0ffee02", owner=OWNER)
+        assert out["emails"] == ["tristan@example.com"]
+
+    def test_owner_page_recognized_by_alias_not_only_by_uid(self) -> None:
+        # "Is this the owner" is the athenaeum#263 owner_signal, so a canonical
+        # owner page identified by a non-uid signal also keeps its addresses.
+        canonical = {"uid": "deadbeef", "name": "user_tristan"}
+        assert owner_signal(canonical, OWNER) is not None
+        absorbed = {
+            "uid": "c0ffee02",
+            "name": "user_tristan",
+            "emails": ["tristan@example.com"],
+        }
+        out = _merge_meta(canonical, absorbed, "c0ffee02", owner=OWNER)
+        assert out["emails"] == ["tristan@example.com"]
+
+    def test_no_owner_configured_is_inert(self) -> None:
+        # AC4: with owner=None the merge behaves exactly as before — the
+        # union is untouched, contaminated or not.
+        canonical = {"uid": "c0ffee01", "name": "Ada Lovelace"}
+        absorbed = {
+            "uid": "c0ffee02",
+            "name": "Ada Lovelace",
+            "emails": [self.STRANGER_ADDRESS, "tristan@example.com"],
+        }
+        out = _merge_meta(canonical, absorbed, "c0ffee02")
+        assert out["emails"] == [self.STRANGER_ADDRESS, "tristan@example.com"]
+        out_explicit_none = _merge_meta(canonical, absorbed, "c0ffee02", owner=None)
+        assert out_explicit_none["emails"] == out["emails"]
+
+    def test_non_owner_addresses_are_untouched(self) -> None:
+        # The guard is an exclusion list of the owner's OWN addresses, not a
+        # general address filter: everyone else's addresses still union.
+        canonical = {
+            "uid": "c0ffee01",
+            "name": "Ada Lovelace",
+            "emails": [self.STRANGER_ADDRESS],
+        }
+        absorbed = {
+            "uid": "c0ffee02",
+            "name": "Ada Lovelace",
+            "emails": ["ada@example.org"],
+        }
+        out = _merge_meta(canonical, absorbed, "c0ffee02", owner=OWNER)
+        assert out["emails"] == [self.STRANGER_ADDRESS, "ada@example.org"]
+
+    def test_other_list_union_keys_are_not_filtered(self) -> None:
+        # Scope check: only ``emails`` is guarded. Dropping owner handles
+        # from ``aliases`` would break the athenaeum#263 alias machinery.
+        canonical = {"uid": "c0ffee01", "name": "Ada Lovelace"}
+        absorbed = {
+            "uid": "c0ffee02",
+            "name": "Ada Lovelace",
+            "aliases": ["tristan@example.com"],
+            "tags": ["contact"],
+        }
+        out = _merge_meta(canonical, absorbed, "c0ffee02", owner=OWNER)
+        assert "tristan@example.com" in out["aliases"]
+        assert out["tags"] == ["contact"]
+
+    def test_drops_are_reported_by_key_and_count(self) -> None:
+        # AC3 via the accumulator that the report is built from.
+        dropped: dict[str, int] = {}
+        canonical = {"uid": "c0ffee01", "name": "Ada Lovelace"}
+        absorbed = {
+            "uid": "c0ffee02",
+            "name": "Ada Lovelace",
+            "emails": [self.STRANGER_ADDRESS, "tristan@example.com"],
+        }
+        _merge_meta(canonical, absorbed, "c0ffee02", owner=OWNER, dropped=dropped)
+        assert dropped == {"emails": 1}
+
+    def test_nothing_dropped_leaves_the_accumulator_empty(self) -> None:
+        dropped: dict[str, int] = {}
+        canonical = {"uid": "c0ffee01", "name": "Ada Lovelace"}
+        absorbed = {
+            "uid": "c0ffee02",
+            "name": "Ada Lovelace",
+            "emails": [self.STRANGER_ADDRESS],
+        }
+        _merge_meta(canonical, absorbed, "c0ffee02", owner=OWNER, dropped=dropped)
+        assert dropped == {}
+
+
+class TestOwnerAddressGuardOnTheMergeRun:
+    """End-to-end over ``merge_duplicate_persons`` and its report."""
+
+    def _pair(self, cpath: Path, apath: Path) -> DuplicatePair:
+        return DuplicatePair(
+            canonical_uid="c0ffee01",
+            absorbed_uid="c0ffee02",
+            match_signal="name_exact",
+            canonical_path=str(cpath),
+            absorbed_path=str(apath),
+        )
+
+    def test_applied_merge_does_not_write_the_owner_address(
+        self, wiki_root: Path
+    ) -> None:
+        cpath = _write_person(
+            wiki_root,
+            uid="c0ffee01",
+            name="Ada Lovelace",
+            emails=["ada@lovelace.example"],
+        )
+        apath = _write_person(
+            wiki_root,
+            uid="c0ffee02",
+            name="Ada L",
+            emails=["tristan@example.com"],
+        )
+        report = merge_duplicate_persons(
+            [self._pair(cpath, apath)], apply=True, owner=OWNER
+        )
+        assert report.merged == 1
+        text = cpath.read_text(encoding="utf-8")
+        assert "tristan@example.com" not in text
+        assert "ada@lovelace.example" in text
+
+    def test_report_carries_key_and_count_but_never_the_address(
+        self, wiki_root: Path
+    ) -> None:
+        # AC3: "count and key, not the address value". The value is the
+        # operator's own mailbox — it must not travel in a report that gets
+        # printed to a terminal or captured in a log.
+        cpath = _write_person(
+            wiki_root, uid="c0ffee01", name="Ada Lovelace", emails=["a@ex.example"]
+        )
+        apath = _write_person(
+            wiki_root,
+            uid="c0ffee02",
+            name="Ada L",
+            emails=["tristan@example.com", "user_tristan@example.com"],
+        )
+        report = merge_duplicate_persons(
+            [self._pair(cpath, apath)], apply=True, owner=OWNER
+        )
+        assert report.owner_addresses_dropped == {"emails": 1}
+        assert "tristan@example.com" not in repr(report)
+
+    def test_dry_run_reports_the_drop_without_writing(self, wiki_root: Path) -> None:
+        cpath = _write_person(
+            wiki_root, uid="c0ffee01", name="Ada Lovelace", emails=["a@ex.example"]
+        )
+        apath = _write_person(
+            wiki_root, uid="c0ffee02", name="Ada L", emails=["tristan@example.com"]
+        )
+        before = cpath.read_text(encoding="utf-8")
+        report = merge_duplicate_persons(
+            [self._pair(cpath, apath)], apply=False, owner=OWNER
+        )
+        assert report.owner_addresses_dropped == {"emails": 1}
+        assert cpath.read_text(encoding="utf-8") == before
+
+    def test_clean_run_reports_no_drops(self, wiki_root: Path) -> None:
+        cpath = _write_person(
+            wiki_root, uid="c0ffee01", name="Ada Lovelace", emails=["a@ex.example"]
+        )
+        apath = _write_person(
+            wiki_root, uid="c0ffee02", name="Ada L", emails=["b@ex.example"]
+        )
+        report = merge_duplicate_persons(
+            [self._pair(cpath, apath)], apply=True, owner=OWNER
+        )
+        assert report.owner_addresses_dropped == {}
+
+    def test_no_owner_leaves_the_run_unchanged(self, wiki_root: Path) -> None:
+        # AC4 at the run level: the default call site is byte-identical.
+        cpath = _write_person(
+            wiki_root, uid="c0ffee01", name="Ada Lovelace", emails=["a@ex.example"]
+        )
+        apath = _write_person(
+            wiki_root, uid="c0ffee02", name="Ada L", emails=["tristan@example.com"]
+        )
+        report = merge_duplicate_persons([self._pair(cpath, apath)], apply=True)
+        assert report.owner_addresses_dropped == {}
+        assert "tristan@example.com" in cpath.read_text(encoding="utf-8")
+
+
+class TestDedupeApplyCliWiresTheOwner:
+    """The guard is only real if the CLI reaches it.
+
+    ``dedupe persons --find`` already resolved the owner (athenaeum#263); the
+    ``--apply`` path did not, so an owner-aware merge would have been a
+    mechanism nothing could invoke. This test is the wiring, not the
+    algorithm — the algorithm is pinned above.
+    """
+
+    def _run_apply(self, knowledge_root: Path, pairs_path: Path) -> int:
+        import argparse
+
+        from athenaeum._cmd_curate import cmd_dedupe
+
+        args = argparse.Namespace(
+            dedupe_target="persons",
+            wiki_root=knowledge_root / "wiki",
+            find=False,
+            apply=True,
+            out=None,
+            from_path=pairs_path,
+            wait=None,
+            force=False,
+        )
+        return cmd_dedupe(args)
+
+    def _setup(self, tmp_path: Path, owner_block: str) -> tuple[Path, Path, Path]:
+        knowledge_root = tmp_path / "knowledge"
+        wiki = knowledge_root / "wiki"
+        wiki.mkdir(parents=True)
+        (knowledge_root / "athenaeum.yaml").write_text(owner_block, encoding="utf-8")
+        cpath = _write_person(
+            wiki, uid="c0ffee01", name="Ada Lovelace", emails=["ada@lovelace.example"]
+        )
+        apath = _write_person(
+            wiki, uid="c0ffee02", name="Ada L", emails=["owner@example.com"]
+        )
+        pairs_path = tmp_path / "pairs.yaml"
+        pairs_path.write_text(
+            pairs_to_yaml(
+                [
+                    DuplicatePair(
+                        canonical_uid="c0ffee01",
+                        absorbed_uid="c0ffee02",
+                        match_signal="name_exact",
+                        canonical_path=str(cpath),
+                        absorbed_path=str(apath),
+                    )
+                ]
+            ),
+            encoding="utf-8",
+        )
+        return knowledge_root, cpath, pairs_path
+
+    def test_apply_honors_the_configured_owner_emails(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        knowledge_root, cpath, pairs_path = self._setup(
+            tmp_path,
+            "owner:\n  uid: a545c038\n  emails:\n    - owner@example.com\n",
+        )
+        assert self._run_apply(knowledge_root, pairs_path) == 0
+        merged = cpath.read_text(encoding="utf-8")
+        assert "owner@example.com" not in merged
+        assert "ada@lovelace.example" in merged
+        out = capsys.readouterr().out
+        assert "owner_addresses_dropped[emails]=1" in out
+        # Key and count only — never the address itself.
+        assert "owner@example.com" not in out
+
+    def test_apply_with_no_owner_configured_is_unchanged(self, tmp_path: Path) -> None:
+        knowledge_root, cpath, pairs_path = self._setup(
+            tmp_path, "search_backend: fts5\n"
+        )
+        assert self._run_apply(knowledge_root, pairs_path) == 0
+        assert "owner@example.com" in cpath.read_text(encoding="utf-8")
