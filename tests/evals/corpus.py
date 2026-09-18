@@ -861,6 +861,50 @@ def validate_core(pages: list[Page], probes: list[Probe]) -> list[str]:
                         "or tags share a stemmed term with the query, so a native arm's grep "
                         "over its topic file's own name would reach it without the hop"
                     )
+        if probe.probe_class == "aggregation":
+            # Issue athenaeum#1780: the many-correct-answer class, graded by
+            # `grade_coverage`'s matched FRACTION of `answer_tokens` rather
+            # than `grade_correctness`'s all-or-nothing rule. Two failure
+            # modes the generic checks above do not catch:
+            #
+            # 1. A probe with no negative control scores perfectly by
+            #    naming everything a keyword search surfaces -- the same
+            #    failure `RedundantCluster.negative_control` guards against
+            #    (this module, `RedundantCluster` docstring). `must_not_rank`
+            #    must be non-empty for every aggregation probe.
+            # 2. `answer_tokens` concentrated on one `expected_uids` page (or
+            #    missing from another) would make "coverage" collapse back
+            #    into ordinary single-hop correctness -- the SAME
+            #    concentration failure `follow_through`'s check above rejects
+            #    for its own class, inverted here: aggregation wants the
+            #    tokens SPREAD one-per-page, not proving a hop was followed.
+            if not probe.must_not_rank:
+                problems.append(
+                    f"probe {probe.id!r}: aggregation probes must set must_not_rank naming "
+                    "decoy pages sharing the query's vocabulary -- a many-answer probe with "
+                    "no negative control scores perfectly by naming everything"
+                )
+            expected_pages = [
+                pages_by_uid[uid] for uid in probe.expected_uids if uid in pages_by_uid
+            ]
+            token_owners: dict[str, set[str]] = {}
+            for page in expected_pages:
+                owning_tokens = [tok for tok in probe.answer_tokens if tok in page.body]
+                if not owning_tokens:
+                    problems.append(
+                        f"probe {probe.id!r}: aggregation expected_uids page {page.uid!r} "
+                        "carries none of the probe's answer_tokens -- grade_coverage cannot "
+                        "credit a page with no planted token"
+                    )
+                for tok in owning_tokens:
+                    token_owners.setdefault(tok, set()).add(page.uid)
+            for tok, owners in token_owners.items():
+                if len(owners) > 1:
+                    problems.append(
+                        f"probe {probe.id!r}: aggregation answer_tokens value {tok!r} occurs "
+                        f"on multiple expected_uids pages {sorted(owners)} -- each token must "
+                        "sit on a distinct page so coverage counts pages, not repeats"
+                    )
     for page in pages:
         for edge in page.related:
             if edge.uid not in uids:
@@ -1222,10 +1266,14 @@ SCALES: dict[str, Scale] = {
     # Core only -- no generation. The offline default: fast, fully
     # hand-authored, and what unit/e2e tests run against.
     "core": Scale("core", total_pages=0, distractors_per_probe=0),
-    # 200 rather than 100: the hand-authored core is ~90 pages and the
-    # distractor tier adds ~40 on top, so a 100-page floor would produce zero
-    # ballast and quietly stop being a distinct point on the size axis.
-    "small": Scale("small", total_pages=200, distractors_per_probe=2),
+    # 280 rather than 200: athenaeum#1780's 14 new core pages (plus 6 more
+    # distractor pages, 2 per its 3 new probes) grew core+long+distractor to
+    # 207 at this scale, exceeding the original 200-page floor and silently
+    # zeroing ballast (test_page_floors_leave_room_for_ballast) -- the same
+    # failure mode this floor's own docstring warns about. 280 restores a
+    # comparable ballast margin (~73 pages) to the original design's, not
+    # just enough to clear zero.
+    "small": Scale("small", total_pages=280, distractors_per_probe=2),
     "medium": Scale("medium", total_pages=1_000, distractors_per_probe=2),
     "large": Scale("large", total_pages=10_000, distractors_per_probe=2),
     # A real single-operator deployment is already past 20,000 pages

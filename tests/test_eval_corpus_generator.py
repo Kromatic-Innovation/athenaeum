@@ -1107,7 +1107,16 @@ def test_xlarge_scale_is_pinned() -> None:
     # -- renamed to "Bramfield Crestwood" (verified against every existing
     # page name/alias/uid via `_content_terms`), shifting the fingerprint
     # once more.
-    assert corpus.fingerprint() == "091f41a0ce0fd2b8"
+    # athenaeum#1780: `core/15-aggregation.yaml` added 14 new core pages (the
+    # `aggregation` probe class's three many-correct-answer sets), which
+    # shifts every stored fingerprint that hashes rendered markdown, same
+    # class of expected change as the shifts above. Quine review of PR
+    # athenaeum#1810 then found two ground-truth false negatives
+    # (`person-lena-varga`, `client-castleford` each already satisfied their
+    # probe's criterion) and had each gain one appended `Internal reference
+    # tag:` line -- the only edits this issue makes to pages outside
+    # `core/15-aggregation.yaml` -- shifting the fingerprint once more.
+    assert corpus.fingerprint() == "8a5e67c4e350c1de"
 
 
 def test_long_tier_tag_is_outside_the_recall_snippet() -> None:
@@ -1139,6 +1148,7 @@ def test_long_tier_tag_is_outside_the_recall_snippet() -> None:
                     "recall snippet for its own query -- the long-page tier claim "
                     "(that read_entity is required) does not hold for this page"
                 )
+
 
 
 def test_core_scale_generates_nothing() -> None:

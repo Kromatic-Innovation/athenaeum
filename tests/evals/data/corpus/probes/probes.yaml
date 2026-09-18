@@ -562,3 +562,169 @@
     must_not_rank (athenaeum#1777): the Gilcrest ticketing-vendor decision
     shares the stemmed "vendor"/"vendors" term but is an unrelated
     single-vendor selection, not the Triform consolidation.
+# =============================================================================
+# --- aggregation (issue athenaeum#1780) -------------------------------------
+#
+# The many-correct-answer class (eval-wave-2-spec.md §3.4): graded by
+# `grade_coverage` (matched fraction of `answer_tokens`), not the
+# all-or-nothing `grade_correctness` an answer naming all-but-one correct
+# page would otherwise fail outright. `report_only: true` on every probe
+# here (athenaeum#1791 §2.1) -- coverage feeds no design-doc §7 condition
+# until an explicit operator ruling on athenaeum#1736 adds "aggregation" to
+# `CONDITION_2_ENROLLED`. Fixture: `core/15-aggregation.yaml`, self-contained
+# -- no existing page's body was edited to build these sets; every
+# `must_not_rank` page is real and UNEDITED elsewhere in the corpus, cited by
+# its own pre-existing vocabulary, never a phrase planted to manufacture a
+# decoy. Each probe's correct set is sized 5-8 pages on purpose: a hard
+# top-k cap (the shape athenaeum#1783's ruling measures overflow on) cannot
+# return a set this size from a single retrieval call, which is the whole
+# point of the class -- see each probe's note for why.
+
+- id: aggregation_delivery_roles
+  probe_class: aggregation
+  query: "who on the team works in a delivery-facing role?"
+  expected_uids:
+    [
+      person-mika-thorne,
+      person-callan-reeve,
+      person-edda-solberg,
+      person-ravi-chand,
+      person-priyanka-sethi,
+      person-owen-blackwell,
+      person-lena-varga,
+    ]
+  must_not_rank: [meeting-standup, project-portal-refresh, policy-onboarding]
+  distractor_terms: ["delivery", "delivery-facing", "delivery role"]
+  answer_tokens:
+    [
+      Mosswicket,
+      Thistlebourne,
+      Rivenglass,
+      Aldermist,
+      Copperlark,
+      Duskhollow,
+      Brambleworth,
+    ]
+  report_only: true
+  note: >-
+    Correct set size: 7 people, each with their own planted token -- a
+    top-3-capped retrieval call can return well under half of them, so a
+    correct answer requires either a wider pull or several turns; a system
+    that stops after the first hit scores well under 1/7 here, not 0/7 and
+    not 7/7, which is exactly the partial-credit signal
+    `grade_correctness`'s all-or-nothing rule cannot produce for this
+    class. person-lena-varga (Quine review of PR athenaeum#1810) already
+    satisfies the criterion in core/00-people.yaml (tags [person, delivery],
+    "runs delivery for the client portal refresh") -- a ground-truth false
+    negative left out of the six newly-authored pages is exactly what this
+    class must not have, so she is added to expected_uids with her own
+    planted token (the one edit to an existing page this fixture makes; see
+    core/15-aggregation.yaml's header for why the other two probes stay at
+    zero edits). must_not_rank (athenaeum#1777, all three pages pre-existing
+    and unedited by this issue, overlap verified with `_content_terms`/
+    `_shares_stemmed_term` against this exact query, not by eye):
+    meeting-standup's body shares "team"/"delivery" and
+    project-portal-refresh's shares "facing"/"delivery" directly;
+    policy-onboarding's body shares no term with the query, but its own
+    `tags: [policy, delivery]` line is an exact match on "delivery" a
+    native arm's grep over the rendered frontmatter still reaches. None of
+    the three is a PERSON the query asks for. grep-reachable via: delivery
+    (all three); team, facing (body text, standup/portal-refresh only).
+
+- id: aggregation_retainer_clients
+  probe_class: aggregation
+  query: "which clients are on a standing retainer, not one-off project work?"
+  expected_uids:
+    [
+      client-alderway,
+      client-bluewater,
+      client-atlas,
+      client-larchmoor,
+      client-dunmere,
+      client-hollowick,
+      client-castleford,
+    ]
+  must_not_rank: [client-verity, client-acme, client-northgate]
+  distractor_terms: ["retainer", "standing retainer", "monthly retainer"]
+  answer_tokens:
+    [
+      Trevanquil,
+      Thornmere,
+      Ashfallow,
+      Glimmerfen,
+      Hazelcroft,
+      Ironveil,
+      Ashenglow,
+    ]
+  report_only: true
+  note: >-
+    Correct set size: 7 clients. Three (Alderway, Bluewater, Atlas) are
+    pre-existing retainer clients in core/01-clients.yaml whose OWN
+    pre-existing tag lines are reused verbatim as this probe's tokens for
+    those pages -- no edit to that file. client-castleford
+    (Quine review of PR athenaeum#1810) is ALSO a genuine retainer client by
+    its own existing tag and body ("quarterly advisory retainer") and was
+    originally left out of both expected_uids and must_not_rank on the
+    reasoning that it is not a negative control -- true, but leaving a page
+    that genuinely satisfies the criterion out of expected_uids entirely is
+    a ground-truth false negative, which this class must not have either.
+    It is now included with its own planted token (the one edit to an
+    existing page this probe's set makes). A hard top-3 cap returns well
+    under half this set. must_not_rank (all three pre-existing and unedited,
+    overlap verified with `_content_terms`/`_shares_stemmed_term` against
+    this exact query, not by eye): client-verity's own body literally states
+    it "was a retainer client through 2025" (past tense, no longer one) and
+    client-acme's own body states it is "not on retainer" -- both contain
+    the literal word "retainer" (and acme also "project") while answering
+    the query in the negative. client-northgate's body shares no term with
+    the query at all, but its own `tags: [client, project-based]` line
+    stem-matches the query's "project" (5-char prefix "proje") a native
+    arm's grep over the rendered frontmatter still reaches; it is explicitly
+    project-based, engaged for a single operational review. grep-reachable
+    via: retainer (verity, acme; body); project (acme; body -- northgate;
+    tags only).
+
+- id: aggregation_inhouse_tools
+  probe_class: aggregation
+  query: "what internal software tools does the firm build and run itself, as opposed to buying as a subscription?"
+  expected_uids:
+    [
+      tool-buildpipe,
+      tool-ledgerscribe,
+      tool-shiftboard,
+      tool-formready,
+      tool-auditline,
+      tool-rosterkeep,
+    ]
+  must_not_rank:
+    [project-knowledge-base, project-pinemarsh-initiative, policy-tooling-procurement]
+  distractor_terms: ["internal tool", "in-house", "software"]
+  answer_tokens:
+    [Fennorack, Larkwhistle, Nettlebriar, Palewick, Quietmarrow, Silvermoss]
+  report_only: true
+  note: >-
+    Correct set size: 6 tools. tool-buildpipe is pre-existing
+    (core/03-projects-tools.yaml) and its OWN pre-existing tag line is
+    reused verbatim as this probe's token for that page -- no edit to that
+    file. A hard top-3 cap returns half this set at best. must_not_rank
+    (all three pre-existing and unedited; Quine review of PR athenaeum#1810
+    found the original set -- tool-pagevault/tool-gridbook -- had ZERO
+    `_content_terms` or `_shares_stemmed_term` overlap with this exact
+    query, "tooling" vs. "tools" not colliding under the 5-char stem rule,
+    so they were not actually grep-reachable via this query's own
+    vocabulary; replaced with pages whose overlap is verified with those
+    same helpers, not by eye): project-knowledge-base's own `name` ("Internal
+    knowledge base"), `tags: [project, internal]`, and body ("internal
+    documentation") all genuinely share "internal" with the query -- but it
+    is a scoping-only documentation effort ("no delivery date set"), not
+    software the firm runs. project-pinemarsh-initiative's body shares "tools"
+    directly ("consolidate three legacy scheduling tools") -- but it is a
+    project ABOUT tools, not itself one. (Its body also contains "internal",
+    but only via its own boilerplate `Internal reference tag:` line, which
+    every tagged page carries regardless of topic -- not cited as evidence
+    here, unlike project-knowledge-base's genuine, tag-line-independent use
+    of the word.)
+    policy-tooling-procurement's body shares "software" directly ("software
+    subscriptions follow the standard budget approval") -- but it is the
+    approval procedure, not a tool itself. grep-reachable via: internal
+    (knowledge-base); tools (pinemarsh); software (tooling-procurement).

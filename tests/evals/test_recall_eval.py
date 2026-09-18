@@ -192,6 +192,22 @@ _PROBE_CLASSES: tuple[str, ...] = tuple(sorted({p.probe_class for p in _ALL_PROB
 # same conservative 1-of-6 floor as ``distractor_robustness``/``redundancy``
 # rather than a measured value -- lower this further, or replace it with a
 # measured floor, the first time this class actually runs live.
+#
+# ``aggregation`` (issue athenaeum#1780) is the same situation, same fix:
+# not measured against a live backend (no ``ANTHROPIC_API_KEY`` in this
+# container, same constraint ``follow_through``'s comment above names), so
+# this entry exists only to keep the offline sync-check green, not as a
+# derived value. Its own 3 probes each carry 6-7 ``expected_uids`` (well
+# above `_passes`'s `len(expected_uids) <= 1` single-uid case), so the
+# ``>= 0.5`` ``recall_at_k`` threshold applies -- the same threshold
+# ``multi_hop``/``disambiguation`` already use for their own multi-uid
+# probes above, not a class-specific one. Set to the SAME conservative
+# 1-of-3 floor (this class has 3 probes total, vs. 6 for
+# ``distractor_robustness``/``redundancy``/``follow_through`` -- 1 is the
+# floor regardless once a class has more than one probe, since it is
+# already the minimum non-zero pass count) rather than a measured value --
+# replace with a measured floor the first time this class actually runs
+# live.
 _FLOOR_BY_BACKEND_AND_CLASS: dict[tuple[str, str], int] = {
     ("fts5", "single_hop"): 3,
     ("fts5", "multi_hop"): 2,
@@ -200,6 +216,7 @@ _FLOOR_BY_BACKEND_AND_CLASS: dict[tuple[str, str], int] = {
     ("fts5", "distractor_robustness"): 1,
     ("fts5", "redundancy"): 1,
     ("fts5", "follow_through"): 1,
+    ("fts5", "aggregation"): 1,
     ("fts5", "abstention"): 0,
     ("vector", "single_hop"): 3,
     ("vector", "multi_hop"): 2,
@@ -208,6 +225,7 @@ _FLOOR_BY_BACKEND_AND_CLASS: dict[tuple[str, str], int] = {
     ("vector", "distractor_robustness"): 1,
     ("vector", "redundancy"): 1,
     ("vector", "follow_through"): 1,
+    ("vector", "aggregation"): 1,
     ("vector", "abstention"): 0,
 }
 
