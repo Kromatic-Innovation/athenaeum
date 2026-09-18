@@ -69,7 +69,9 @@
     # buildpipe
 
     The firm's internal build and release pipeline. Maintained by Tomas Briell.
-    All internal repositories route through it before anything ships.
+    All internal repositories route through it before anything ships. An
+    in-house software tool the firm builds and runs itself, not a purchased
+    subscription.
 
     Internal reference tag: Fennorack.
 - uid: tool-pagevault
