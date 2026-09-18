@@ -155,14 +155,26 @@ def test_cached_build_failure_is_sticky_and_does_not_respawn(
     """Issue athenaeum#1834: a failed build must not retry-storm the
     remaining cells at that scale -- a cache hit on a stored failure
     re-raises immediately rather than spawning a second (equally doomed)
-    subprocess."""
+    subprocess.
+
+    The fake below writes the FTS5 marker file BEFORE raising, matching
+    ``session-start-recall.sh``'s real order ("Always build FTS5 -- it's
+    cheap, ~1s" happens first; the much slower vector build is what
+    actually blows the timeout) -- a real timeout leaves ``wiki-index.db``
+    present despite the build never completing. A fake that raised without
+    creating that file would let this test pass for the wrong reason: it
+    would take the SAME rebuild-on-cache-hit path an absent index already
+    takes, never touching the sticky-failure branch this test is about."""
     calls: list[list[str]] = []
 
-    def _always_times_out(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
+    def _partial_then_times_out(argv: list[str], *, env: dict[str, str], **kwargs: Any):
         calls.append(list(argv))
-        raise subprocess.TimeoutExpired(cmd=argv, timeout=300.0, output=b"", stderr=b"partial")
+        cache_dir = Path(env["HOME"]) / ".cache" / "athenaeum"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        (cache_dir / "wiki-index.db").write_text("partial fts5 index", encoding="utf-8")
+        raise subprocess.TimeoutExpired(cmd=argv, timeout=300.0, output=b"", stderr=b"vector hung")
 
-    monkeypatch.setattr(rollout_module.subprocess, "run", _always_times_out)
+    monkeypatch.setattr(rollout_module.subprocess, "run", _partial_then_times_out)
     knowledge_root = tmp_path / "knowledge"
     hook_home = tmp_path / "hook_home"
 

@@ -121,6 +121,7 @@ from athenaeum.mcp_server import (
 )
 from athenaeum.provider import response_text as provider_response_text
 from athenaeum.push_metrics import estimate_tokens
+from athenaeum.search import _DB_NAME as _HOOK_FTS5_DB_NAME
 from athenaeum.search import fts5_index_available, get_backend
 from tests.evals.containment import GridCell, SpendCeilingExceededError, build_grid
 from tests.evals.corpus import Corpus, Observation, Probe, build_corpus
@@ -890,14 +891,21 @@ def clear_hook_index_cache() -> None:
 
 def _hook_index_present(hook_home: Path) -> bool:
     """Best-effort check that ``SESSION_START_HOOK`` actually left a usable
-    FTS5 index under *hook_home* (``athenaeum.search._DB_NAME``, always
-    written by ``build_fts5_index`` regardless of which backend is
-    primary -- see that hook script's own "Always build FTS5" comment).
-    Guards the cache against a *knowledge_root* that was recreated (or
-    never actually written) between a successful build and a later cache
-    hit, so a stale 'built' cache entry can never silently serve an empty
-    breadcrumb (issue athenaeum#1834's own failure class, one level up)."""
-    return (hook_home / ".cache" / "athenaeum" / "wiki-index.db").exists()
+    FTS5 index under *hook_home* (``athenaeum.search._DB_NAME``, imported
+    above rather than re-literalled, so a rename there cannot silently turn
+    this guard into a no-op -- always written by ``build_fts5_index``
+    regardless of which backend is primary; see that hook script's own
+    "Always build FTS5" comment). Guards the cache's SUCCESS branch against
+    a *knowledge_root*/*hook_home* pairing that was recreated (or never
+    actually written) between a successful build and a later cache hit, so
+    a stale 'built' cache entry can never silently serve an empty breadcrumb
+    (issue athenaeum#1834's own failure class, one level up). Deliberately
+    NOT consulted for a stored FAILURE (see :func:`build_hook_index`'s own
+    comment) -- ``session-start-recall.sh`` builds FTS5 first and the
+    (much slower) vector index second, so a real timeout leaves this exact
+    file present despite the build never completing; treating presence as
+    success there would make the sticky-failure cache silently non-sticky."""
+    return (hook_home / ".cache" / "athenaeum" / _HOOK_FTS5_DB_NAME).exists()
 
 
 def _describe_hook_subprocess_error(
@@ -947,15 +955,25 @@ def build_hook_index(
     with _hook_index_lock_for(key):
         if key in _HOOK_INDEX_CACHE:
             cached_failure = _HOOK_INDEX_CACHE[key]
-            if cached_failure is not None and not _hook_index_present(hook_home):
+            if cached_failure is not None:
+                # STICKY, unconditionally -- never consult
+                # _hook_index_present here. session-start-recall.sh builds
+                # FTS5 FIRST ("cheap, ~1s") and the much slower vector
+                # index SECOND, so a real timeout on the vector half still
+                # leaves wiki-index.db sitting there despite the build
+                # never completing. Treating that partial artifact as
+                # "present therefore fine" would make a stored failure
+                # non-sticky -- exactly the retry-storm this cache exists
+                # to prevent (every remaining cell at this scale paying a
+                # fresh HOOK_INDEX_BUILD_TIMEOUT_SECONDS in turn).
                 raise HookIndexBuildError(cached_failure)
-            if cached_failure is None and _hook_index_present(hook_home):
+            if _hook_index_present(hook_home):
                 return
-            # Either a stored success whose index vanished (a recreated
-            # knowledge_root -- see _hook_index_present's docstring) or a
-            # stored failure whose index now exists anyway (a retry outside
-            # this cache) -- both fall through and rebuild for real rather
-            # than trusting a cache entry the filesystem no longer backs up.
+            # A stored SUCCESS whose index vanished -- a recreated
+            # knowledge_root, or (see _hook_index_present's docstring) the
+            # same knowledge_root paired with a DIFFERENT, never-built
+            # hook_home. Falls through and rebuilds for real rather than
+            # trusting a cache entry the filesystem no longer backs up.
         env = build_breadcrumb_hook_env(knowledge_root, hook_home, athenaeum_src=athenaeum_src)
         try:
             subprocess.run(
