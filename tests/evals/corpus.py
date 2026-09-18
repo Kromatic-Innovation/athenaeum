@@ -73,7 +73,25 @@ import yaml
 #: -- the same prefix ``validate_core`` and ``REFERENCE_TAG_INSTRUCTION``
 #: both name -- so ``Page.body`` stays matchable in plain text while the
 #: rendered markdown a model actually reads gets the unmistakable form.
+#:
+#: The ONE matcher for the tag-line concept (issue athenaeum#1762):
+#: ``validate_core`` used to run a second, looser check here (a
+#: ``line.strip().startswith("Internal reference tag:")`` scan that, unlike
+#: this pattern, tolerated indentation) which could pass a line this regex
+#: would reject -- an indented tag line would satisfy ``validate_core`` yet
+#: never be bolded by :meth:`Page.to_markdown` and fail the contract test.
+#: ``validate_core`` now calls :func:`_tag_lines`, built on this same regex,
+#: instead.
 _TAG_LINE_RE = re.compile(r"^Internal reference tag: (.+)$", re.MULTILINE)
+
+
+def _tag_lines(body: str) -> list[str]:
+    """Every full ``Internal reference tag: ...`` line in *body*, via
+    :data:`_TAG_LINE_RE` -- the single matcher every tag-line check in this
+    module, and ``test_reference_tag_contract.py``, shares (issue
+    athenaeum#1762).
+    """
+    return [m.group(0) for m in _TAG_LINE_RE.finditer(body)]
 
 #: A short, deliberately conservative stopword list -- excluded so a
 #: lexical/n-gram overlap is not dominated by function words that would
@@ -313,7 +331,23 @@ class Page:
         if self.superseded_by:
             fm.append(f"superseded_by: {q(self.superseded_by)}")
         fm.append("---")
-        body_md = _TAG_LINE_RE.sub(r"**Internal reference tag:** \1", self.body.rstrip())
+        stripped_body = self.body.rstrip()
+        # Issue athenaeum#1762: the docstring above claims the tag line ends
+        # up "alone on its own final line", and the athenaeum#1759
+        # rationale (out-competing the frontmatter `uid:` line) depends on
+        # that being true. This substitution only bolds the line in place --
+        # it never moves it -- so if a page's tag line is not already the
+        # last non-blank line of its body, the claim above would be false
+        # and silently unenforced. Fail loudly instead of rendering wrong.
+        tag_match = _TAG_LINE_RE.search(stripped_body)
+        if tag_match is not None:
+            last_line = stripped_body.splitlines()[-1]
+            if tag_match.group(0) != last_line:
+                raise ValueError(
+                    f"page {self.uid!r}: 'Internal reference tag:' line is not the final "
+                    "non-blank line of the body"
+                )
+        body_md = _TAG_LINE_RE.sub(r"**Internal reference tag:** \1", stripped_body)
         return "\n".join(fm) + "\n\n" + body_md + "\n"
 
     @property
@@ -743,20 +777,31 @@ def validate_core(pages: list[Page], probes: list[Probe]) -> list[str]:
                 problems.append(
                     f"probe {probe.id!r}: no answer_tokens value found in its answer page body"
                 )
+            # Issue athenaeum#1762: REFERENCE_TAG_INSTRUCTION calls the tag
+            # "a single word". Nothing else enforced that wording, so a
+            # multi-word or hyphenated answer_tokens value could plant a tag
+            # the instruction's own grammar rules out.
+            for token in probe.answer_tokens:
+                if any(ch.isspace() for ch in token) or "-" in token:
+                    problems.append(
+                        f"probe {probe.id!r}: answer_tokens value {token!r} contains "
+                        "whitespace or a hyphen -- REFERENCE_TAG_INSTRUCTION calls the tag "
+                        "'a single word'"
+                    )
             # Issue athenaeum#1759: a token can occur in a page body without
             # ever being ON the `Internal reference tag:` line the grading
             # contract and REFERENCE_TAG_INSTRUCTION both name -- that is
             # exactly how the follow_through fixture drifted to `Internal
             # reference code:` and passed the check above while being
             # unsatisfiable by a correct answer. Require each token to sit on
-            # a line beginning with the literal prefix in at least one
-            # expected_uids page.
+            # a line matching _TAG_LINE_RE (issue athenaeum#1762: the same
+            # matcher every other tag-line check in this module uses, not a
+            # second, looser one) in at least one expected_uids page.
             tag_lines = [
                 line
                 for uid in probe.expected_uids
                 if uid in pages_by_uid
-                for line in pages_by_uid[uid].body.splitlines()
-                if line.strip().startswith("Internal reference tag:")
+                for line in _tag_lines(pages_by_uid[uid].body)
             ]
             for token in probe.answer_tokens:
                 if not any(token in line for line in tag_lines):
