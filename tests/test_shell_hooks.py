@@ -243,6 +243,8 @@ def hook_env(tmp_path: Path) -> dict[str, str]:
 
 class TestSessionStartRecall:
     def test_builds_fts5_index(self, hook_env: dict[str, str], tmp_path: Path) -> None:
+        """FTS5 is built unconditionally regardless of ``search_backend``
+        (issue athenaeum#1825's default flip does not change this)."""
         _require("bash")
         _require_hook_python(hook_env, "athenaeum.search")
         result = subprocess.run(
@@ -258,7 +260,10 @@ class TestSessionStartRecall:
         assert config_env.is_file()
         body = config_env.read_text()
         assert "AUTO_RECALL=true" in body
-        assert "SEARCH_BACKEND=fts5" in body
+        # Issue athenaeum#1825: "vector" is now the shipped default -- a
+        # knowledge root with no athenaeum.yaml (this fixture's shape) must
+        # resolve to it, matching athenaeum.config._DEFAULTS.
+        assert "SEARCH_BACKEND=vector" in body
 
         index_db = tmp_path / ".cache" / "athenaeum" / "wiki-index.db"
         assert index_db.is_file()
