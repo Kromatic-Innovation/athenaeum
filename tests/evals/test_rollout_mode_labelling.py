@@ -107,6 +107,61 @@ def test_run_native_grep_records_mode_cli(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# athenaeum#1826 defect 4: native arms in cli mode are unauthenticated --
+# seed_native_claude_config mints a throwaway CLAUDE_CONFIG_DIR whose login
+# does not follow on macOS, so a real spot-check answered every native cell
+# with a login prompt (graded 0/6 as an ordinary miss). Reusing the
+# operator's authenticated isolated config was judged unsafe here (see
+# ``_not_logged_in_harness_failure``'s own docstring for why); this pins the
+# chosen fallback -- marking the observable "Not logged in" answer.
+# ---------------------------------------------------------------------------
+
+
+def _completed_process_with(stdout: str) -> Any:
+    def _run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout=stdout, stderr="")
+
+    return _run
+
+
+_NOT_LOGGED_IN_STDOUT = '{"type": "result", "result": "Not logged in \\u00b7 Please run /login"}\n'
+
+
+def test_run_native_index_marks_harness_failure_when_not_logged_in(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        "tests.evals.rollout.subprocess.run", _completed_process_with(_NOT_LOGGED_IN_STDOUT)
+    )
+    probe, _corpus = _pto_probe()
+    record = run_native_index(probe, tmp_path, "core")
+    assert record.harness_failure is not None
+
+
+def test_run_native_grep_marks_harness_failure_when_not_logged_in(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        "tests.evals.rollout.subprocess.run", _completed_process_with(_NOT_LOGGED_IN_STDOUT)
+    )
+    probe, _corpus = _pto_probe()
+    record = run_native_grep(probe, tmp_path, "core")
+    assert record.harness_failure is not None
+
+
+def test_run_native_index_no_harness_failure_on_a_real_answer(tmp_path: Path) -> None:
+    probe, _corpus = _pto_probe()
+    record = run_native_index(probe, tmp_path, "core")
+    assert record.harness_failure is None
+
+
+def test_run_native_grep_no_harness_failure_on_a_real_answer(tmp_path: Path) -> None:
+    probe, _corpus = _pto_probe()
+    record = run_native_grep(probe, tmp_path, "core")
+    assert record.harness_failure is None
+
+
+# ---------------------------------------------------------------------------
 # api runners: mode == "api" for all four (rounding out test_rollout_api_mode.py's
 # coverage of run_pull_api / run_native_grep_api with the remaining two).
 # ---------------------------------------------------------------------------

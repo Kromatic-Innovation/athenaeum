@@ -263,6 +263,92 @@ class TestSessionStartRecall:
         index_db = tmp_path / ".cache" / "athenaeum" / "wiki-index.db"
         assert index_db.is_file()
 
+    def test_builds_fts5_index_when_python_cannot_import_athenaeum_directly(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """athenaeum#1826 counter-example (AC1): an interpreter that cannot
+        `import athenaeum` on its own, with `ATHENAEUM_SRC` set and no
+        `athenaeum` install anywhere, must still build the index via the
+        `ATHENAEUM_SRC/src` sys.path fast path.
+
+        `hook_env`'s `ATHENAEUM_PYTHON` is `sys.executable` with an env dict
+        that carries no `PYTHONPATH`, so `python -c "import athenaeum"`
+        alone already fails here -- this test's own precondition assertion
+        below proves that before trusting the hook's result. Before the fix,
+        `session-start-recall.sh`'s two `athenaeum_search_only`
+        `spec_from_file_location` loaders (`build_fts5_index`, `STOPWORDS`)
+        registered `search.py` under a synthetic module name outside the
+        `athenaeum` package, so `search.py`'s own module-level `from
+        athenaeum.authority import is_pointer_stub` raised
+        `ModuleNotFoundError` even with `ATHENAEUM_SRC` set -- see this
+        class's `test_fts5_build_failure_is_nonzero_exit_with_stderr_not_stdout`
+        for that failure mode pinned directly.
+        """
+        _require("bash")
+
+        precondition = subprocess.run(
+            [hook_env["ATHENAEUM_PYTHON"], "-c", "import athenaeum"],
+            env=hook_env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert precondition.returncode != 0, (
+            "precondition violated: the hook's python can already import "
+            "athenaeum without the ATHENAEUM_SRC fast path, so this test "
+            "cannot distinguish the fix from a pre-existing install"
+        )
+
+        result = subprocess.run(
+            ["bash", str(SESSION_START)],
+            env=hook_env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+
+        index_db = tmp_path / ".cache" / "athenaeum" / "wiki-index.db"
+        assert index_db.is_file()
+
+    def test_fts5_build_failure_is_nonzero_exit_with_stderr_not_stdout(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """athenaeum#1826 AC1: a genuinely failed index build (no working
+        `ATHENAEUM_SRC` fast path and no installed `athenaeum`) must exit
+        non-zero with the traceback on stderr -- not exit 0 with the
+        traceback swallowed onto stdout via the old `2>&1 || true`.
+        """
+        _require("bash")
+
+        broken_env = dict(hook_env)
+        # A src/ directory that provably does not contain athenaeum, so
+        # BOTH the ATHENAEUM_SRC fast path and a plain `import athenaeum`
+        # fail -- this is the genuine-failure case, distinct from the
+        # fast-path-success counter-example above.
+        broken_env["ATHENAEUM_SRC"] = str(tmp_path / "no-such-checkout")
+
+        result = subprocess.run(
+            ["bash", str(SESSION_START)],
+            env=broken_env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode != 0, (
+            "a failed FTS5 index build must exit the hook non-zero, not "
+            "silently succeed"
+        )
+        assert "ModuleNotFoundError" in result.stderr or "Traceback" in result.stderr, (
+            f"expected the import failure on stderr, got: {result.stderr!r}"
+        )
+        assert "Traceback" not in result.stdout, (
+            f"the traceback must not land on stdout: {result.stdout!r}"
+        )
+
+        index_db = tmp_path / ".cache" / "athenaeum" / "wiki-index.db"
+        assert not index_db.is_file()
+
     def test_config_env_and_cache_dir_are_owner_only(
         self, hook_env: dict[str, str], tmp_path: Path
     ) -> None:

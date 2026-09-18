@@ -386,9 +386,14 @@ def test_run_push_breadcrumb_uses_the_injected_context_fn(tmp_path: Path) -> Non
 
 def test_run_push_breadcrumb_empty_hook_output_injects_nothing(tmp_path: Path) -> None:
     """The shipped hook returns ``""`` when it declines to inject (short
-    prompt, no index, no match) — never an error. PUSH_BREADCRUMB must
-    treat that the same way NONE treats "nothing to inject"."""
+    prompt, no index, no match) — never an error, but athenaeum#1826 defect 3:
+    for a non-abstention probe (one with ground-truth pages) an empty
+    breadcrumb is ALSO never distinguishable from a hook/harness failure, so
+    it must be marked ``harness_failure`` (same condition, same message text
+    as ``run_push_breadcrumb_pull``'s athenaeum#1819 check) rather than
+    graded as an ordinary retrieval miss."""
     probe, _corpus = _probe("pto_allowance")
+    assert probe.expected_uids  # non-abstention: this is the marked case
     session = EvalSession()
     client = FakeLLMClient(
         response=make_llm_response(
@@ -410,6 +415,39 @@ def test_run_push_breadcrumb_empty_hook_output_injects_nothing(tmp_path: Path) -
     assert record.injected_context_tokens == 0
     [call] = client.calls
     assert "Context:" not in call["messages"][0]["content"]
+    assert record.harness_failure is not None
+    assert "empty breadcrumb" in record.harness_failure
+
+
+def test_run_push_breadcrumb_empty_hook_output_is_not_harness_failure_for_abstention(
+    tmp_path: Path,
+) -> None:
+    """athenaeum#1826 defect 3, negative case: an abstention probe has no
+    ground-truth pages at all, so an empty breadcrumb there is legitimate
+    (mirrors ``_oracle_context``'s own empty result for the same class),
+    not a harness failure -- same rule ``run_push_breadcrumb_pull`` already
+    applies for the PULL sibling."""
+    probe, _corpus = _probe("abstain_unknown_policy")
+    assert not probe.expected_uids
+    session = EvalSession()
+    client = FakeLLMClient(
+        response=make_llm_response(
+            "I don't know.", usage=make_llm_usage(input_tokens=20, output_tokens=6)
+        )
+    )
+
+    record = run_push_breadcrumb(
+        probe,
+        "core",
+        knowledge_root=tmp_path / "knowledge",
+        hook_home=tmp_path / "hook_home",
+        client=client,
+        session=session,
+        model="stub-model",
+        context_fn=lambda *args, **kwargs: "",
+    )
+
+    assert record.harness_failure is None
 
 
 def test_run_oracle_uses_ground_truth_pages_directly() -> None:

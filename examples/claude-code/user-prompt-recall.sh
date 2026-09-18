@@ -1039,6 +1039,22 @@ from pathlib import Path
 src = os.environ.get('ATHENAEUM_SRC', '')
 path = os.path.join(src, 'src/athenaeum/search.py') if src else ''
 if path and os.path.isfile(path):
+    # athenaeum#1826: search.py imports `from athenaeum.authority import
+    # is_pointer_stub` at module scope, so loading it as a standalone file
+    # (deliberately kept -- see the block comment above -- for single-file
+    # stub loading in tests, independent of the plain `athenaeum.config`
+    # package import just below) still needs the real package reachable on
+    # sys.path for THAT internal import to resolve. Insert it before
+    # exec_module rather than switching to a plain package import here:
+    # this script also puts a real athenaeum checkout's src/ on
+    # PYTHONPATH (see the athenaeum.config import below), and a plain
+    # `from athenaeum.search import ...` would let that real, later
+    # sys.path entry's REGULAR package win over an earlier ATHENAEUM_SRC
+    # namespace portion whenever it lacks __init__.py -- exactly what a
+    # test's fake single-file stub is.
+    real_src = os.path.join(src, 'src')
+    if real_src not in sys.path:
+        sys.path.insert(0, real_src)
     spec = importlib.util.spec_from_file_location('athenaeum.search', path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)

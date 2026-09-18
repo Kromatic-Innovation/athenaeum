@@ -237,19 +237,14 @@ fi
 # Always build FTS5 — it's cheap (~1s for 3k pages) and rescues short-query
 # recall even when the vector backend is the primary. See docs/design/recall-architecture.md.
 "$PYTHON" -c "
-import sys, os, importlib.util
+import sys, os
 src = os.environ.get('ATHENAEUM_SRC', '')
-path = os.path.join(src, 'src/athenaeum/search.py') if src else ''
-if path and os.path.isfile(path):
-    spec = importlib.util.spec_from_file_location('athenaeum_search_only', path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    build_fts5_index = mod.build_fts5_index
-else:
-    from athenaeum.search import build_fts5_index
+if src:
+    sys.path.insert(0, os.path.join(src, 'src'))
+from athenaeum.search import build_fts5_index
 count = build_fts5_index(sys.argv[1], sys.argv[2])
 print(f'[Knowledge] FTS5 index: {count} wiki pages', file=sys.stderr)
-" "$WIKI_ROOT" "$CACHE_DIR" 2>&1 || true
+" "$WIKI_ROOT" "$CACHE_DIR"
 
 # Cache the canonical stopword list once per session. The per-turn
 # recall hook reads this file instead of hard-coding its own copy,
@@ -258,16 +253,11 @@ print(f'[Knowledge] FTS5 index: {count} wiki pages', file=sys.stderr)
 # a partial file.
 _stopwords_tmp=$(mktemp "${CACHE_DIR}/stopwords.txt.XXXXXX")
 if "$PYTHON" -c "
-import sys, os, importlib.util
+import sys, os
 src = os.environ.get('ATHENAEUM_SRC', '')
-path = os.path.join(src, 'src/athenaeum/search.py') if src else ''
-if path and os.path.isfile(path):
-    spec = importlib.util.spec_from_file_location('athenaeum_search_only', path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    STOPWORDS = mod.STOPWORDS
-else:
-    from athenaeum.search import STOPWORDS
+if src:
+    sys.path.insert(0, os.path.join(src, 'src'))
+from athenaeum.search import STOPWORDS
 print('\n'.join(STOPWORDS))
 " > "$_stopwords_tmp" 2>/dev/null && [ -s "$_stopwords_tmp" ]; then
   mv "$_stopwords_tmp" "${CACHE_DIR}/stopwords.txt"
@@ -298,21 +288,16 @@ if [ "${SEARCH_BACKEND:-fts5}" = "vector" ]; then
 
   if [ "$_vector_fresh" = false ]; then
     "$PYTHON" -c "
-import sys, os, importlib.util
+import sys, os
 src = os.environ.get('ATHENAEUM_SRC', '')
-path = os.path.join(src, 'src/athenaeum/search.py') if src else ''
-if path and os.path.isfile(path):
-    spec = importlib.util.spec_from_file_location('athenaeum_search_only', path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    build_vector_index = mod.build_vector_index
-else:
-    from athenaeum.search import build_vector_index
+if src:
+    sys.path.insert(0, os.path.join(src, 'src'))
+from athenaeum.search import build_vector_index
 try:
     count = build_vector_index(sys.argv[1], sys.argv[2])
     print(f'[Knowledge] Vector index: {count} wiki pages', file=sys.stderr)
 except ImportError as e:
     print(f'[Knowledge] Vector backend unavailable: {e}', file=sys.stderr)
-" "$WIKI_ROOT" "$CACHE_DIR" 2>&1 || true
+" "$WIKI_ROOT" "$CACHE_DIR" || true
   fi
 fi
