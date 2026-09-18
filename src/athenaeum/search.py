@@ -70,6 +70,11 @@ from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from athenaeum.authority import is_pointer_stub
+from athenaeum.config import (
+    RECALL_HYBRID_FTS5_WEIGHT_DEFAULT,
+    RECALL_HYBRID_GUARD_RANK_DEFAULT,
+    RECALL_HYBRID_K_DEFAULT,
+)
 from athenaeum.models import (
     AUDIENCE_PUBLIC_TOKEN,
     audience_index_string,
@@ -2917,8 +2922,11 @@ def fts5_index_available(cache_dir: Path) -> bool:
 #: without fixing any of the original four). No weight in ``[0, 1]``
 #: improves on the ``1.0`` baseline -- kept at ``1.0`` (a no-op) rather
 #: than tuned, and exposed only as an independent lever for an operator
-#: with a different corpus shape to reach for.
-_DEFAULT_HYBRID_FTS5_WEIGHT = 1.0
+#: with a different corpus shape to reach for. The VALUE lives in
+#: :data:`athenaeum.config.RECALL_HYBRID_FTS5_WEIGHT_DEFAULT` so the
+#: config resolver (a lower layer) never imports this module; this alias
+#: keeps the search-side name the sweep notes above refer to.
+_DEFAULT_HYBRID_FTS5_WEIGHT = RECALL_HYBRID_FTS5_WEIGHT_DEFAULT
 
 #: Default own-list-rank threshold (1-indexed, inclusive) below which a
 #: SINGLE-list hit is protected from being crowded out of the fused top-k
@@ -2939,8 +2947,9 @@ _DEFAULT_HYBRID_FTS5_WEIGHT = 1.0
 #: ``medium/callum_drews_last_contact``). ``guard_rank=4`` through ``8``
 #: -- 13-14 failures, monotonically worse. No guard value clears more than
 #: the unguarded baseline already didn't fail on; kept OFF (``0``) by
-#: default.
-_DEFAULT_HYBRID_GUARD_RANK = 0
+#: default. Value lives in
+#: :data:`athenaeum.config.RECALL_HYBRID_GUARD_RANK_DEFAULT` (layering).
+_DEFAULT_HYBRID_GUARD_RANK = RECALL_HYBRID_GUARD_RANK_DEFAULT
 
 #: RRF ``k`` the vector-backend hybrid dispatch actually uses (issue
 #: athenaeum#1800 / athenaeum#1789), distinct from :data:`_DEFAULT_RRF_K`
@@ -2970,8 +2979,12 @@ _DEFAULT_HYBRID_GUARD_RANK = 0
 #: parameter can invent an ordering neither input list produced. See
 #: issue athenaeum#1800's PR-body comment for the full per-probe mechanism
 #: table. Kept at the RRF-standard ``60`` (a no-op) pending a fix in the
-#: FTS5 arm's own ranking (athenaeum#1789's seam).
-_DEFAULT_HYBRID_K = _DEFAULT_RRF_K
+#: FTS5 arm's own ranking (athenaeum#1789's seam). Value lives in
+#: :data:`athenaeum.config.RECALL_HYBRID_K_DEFAULT` (layering); it is
+#: asserted equal to :data:`_DEFAULT_RRF_K` so the two never drift apart
+#: silently.
+_DEFAULT_HYBRID_K = RECALL_HYBRID_K_DEFAULT
+assert _DEFAULT_HYBRID_K == _DEFAULT_RRF_K
 
 
 def reciprocal_rank_fusion(

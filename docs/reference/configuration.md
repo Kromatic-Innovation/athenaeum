@@ -2822,12 +2822,12 @@ The FTS5 (``secondary``) list's weight in
 an independent lever investigated for the cross-lane regression
 's FTS5 body-indexing PR exposed, and MEASURED NOT TO FIX
 IT without breaking far more than it fixed (see that function's own
-docstring and `athenaeum.search._DEFAULT_HYBRID_FTS5_WEIGHT`'s
+docstring and `athenaeum.config.RECALL_HYBRID_FTS5_WEIGHT_DEFAULT`'s
 own comment for the swept values). Only meaningful when
 `resolve_recall_hybrid` is on -- resolved and read from the SAME
 nesting.
 
-Default `athenaeum.search._DEFAULT_HYBRID_FTS5_WEIGHT` (``1.0``,
+Default `athenaeum.config.RECALL_HYBRID_FTS5_WEIGHT_DEFAULT` (``1.0``,
 a no-op) -- see that constant's own comment for the sweep: any value
 below ``1.0`` in a ``{0.9, 0.8, 0.7, 0.6, 0.5, 0.4}`` sweep produced the
 IDENTICAL 32-failure set (28 new regressions beyond the four this issue
@@ -2861,13 +2861,13 @@ The rank-guard threshold `athenaeum.search.reciprocal_rank_fusion`'s
 hybrid dispatch passes as ``guard_rank`` -- an independent lever
 investigated for the cross-lane regression 's FTS5
 body-indexing PR exposed, and MEASURED NOT TO FIX IT (see that
-function's own docstring, and `athenaeum.search._DEFAULT_HYBRID_GUARD_RANK`'s
+function's own docstring, and `athenaeum.config.RECALL_HYBRID_GUARD_RANK_DEFAULT`'s
 own comment, for the swept values and why). A hit present in only ONE
 of the vector/fts5 lists, ranked at or better than this threshold
 WITHIN that list, cannot be crowded out of the fused result by a hit
 both lists agree on only moderately.
 
-Default `athenaeum.search._DEFAULT_HYBRID_GUARD_RANK` (``0``,
+Default `athenaeum.config.RECALL_HYBRID_GUARD_RANK_DEFAULT` (``0``,
 OFF) -- see that constant's own comment for the sweep: every value
 tried either matched the unguarded baseline's four failures exactly
 (a no-op at this corpus's rank distribution) or introduced new ones.
@@ -2904,7 +2904,7 @@ but not the other three, and introduced common exact-score ties
 decided by dict-insertion order rather than genuine relevance --
 measurably not a safe default.
 
-Default `athenaeum.search._DEFAULT_HYBRID_K` (``60``, matching
+Default `athenaeum.config.RECALL_HYBRID_K_DEFAULT` (``60``, matching
 `athenaeum.search.reciprocal_rank_fusion`'s own unweighted
 default -- a no-op) -- see that constant's own comment for the sweep
 (``k`` in ``{1, 2, 3, 5, 8, 10, 15, 20, 30}`` against the four measured
