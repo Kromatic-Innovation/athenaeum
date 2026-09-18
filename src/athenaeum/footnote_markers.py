@@ -189,6 +189,21 @@ class MarkerCoverage:
         return self.unmarked / self.total
 
 
+def _closes_fence(text: str, opener: str) -> bool:
+    """Does *text* close a code fence opened by *opener*?
+
+    CommonMark: a closing fence uses the SAME character as its opener and is
+    at least as long. Both halves matter. Matching on a fixed three characters
+    instead would let a 3-backtick line inside a 4-backtick block close it
+    early, and everything after it in the block would then be read as prose and
+    have footnote markers stapled into source code — a page documenting fenced
+    markdown is exactly where that bites.
+    """
+    char = opener[0]
+    run = len(text) - len(text.lstrip(char))
+    return run >= len(opener) and not text[run:].strip()
+
+
 def _prose_line_spans(body: str) -> Iterator[tuple[int, int]]:
     """Yield ``(start, end)`` offsets of every PROSE line in *body*.
 
@@ -211,13 +226,13 @@ def _prose_line_spans(body: str) -> Iterator[tuple[int, int]]:
                 in_html_comment = False
             continue
         if fence is not None:
-            if stripped_line.strip().startswith(fence):
+            if _closes_fence(text, fence):
                 fence = None
             continue
 
         fence_open = _FENCE_RE.match(stripped_line)
         if fence_open:
-            fence = fence_open.group(1)[:3]
+            fence = fence_open.group(1)
             continue
         if text.startswith(_HTML_COMMENT_OPEN):
             if _HTML_COMMENT_CLOSE not in stripped_line:

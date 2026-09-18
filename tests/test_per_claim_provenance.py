@@ -100,6 +100,31 @@ class TestFootnoteMarkerPrimitive:
         assert unmarked_sentence_ratio(body).total == 2
         assert "A commented-out claim.[^" not in attach_markers(body, ["src-1"])
 
+    def test_a_longer_fence_is_not_closed_by_a_shorter_inner_one(self) -> None:
+        """CommonMark: a closing fence matches its opener's character and is at
+        least as long. A four-backtick block documenting three-backtick markdown
+        must stay closed — otherwise the rest of the block reads as prose and
+        gets markers stapled into source code. (Found by the Seer review on
+        PR #1823; the original code compared a fixed three characters.)"""
+        body = (
+            "A real claim.\n\n"
+            "````markdown\n"
+            "```python\n"
+            "x = 1  # not a sentence.\n"
+            "```\n"
+            "````\n\n"
+            "Another real claim.\n"
+        )
+        assert unmarked_sentence_ratio(body).total == 2
+        assert "[^" not in attach_markers(body, ["src-1"]).split("````markdown")[1].split(
+            "````"
+        )[0]
+
+    def test_a_tilde_fence_is_not_closed_by_backticks(self) -> None:
+        """The closing fence must use the SAME character, not merely be a fence."""
+        body = "~~~\nInside. Still inside.\n```\nStill inside.\n~~~\n\nOutside.\n"
+        assert unmarked_sentence_ratio(body).total == 1
+
     def test_html_block_lines_are_not_prose(self) -> None:
         body = "<div class=\"note\">\n"
         assert unmarked_sentence_ratio(body).total == 0
