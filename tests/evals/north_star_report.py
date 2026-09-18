@@ -1042,6 +1042,20 @@ class WritePathStats:
     observations_measured: int
     observations_dropped: int | None
 
+    # Issue athenaeum#1824: the other half of the measurement. Every field
+    # above rewards REMEMBERING; these two measure whether the system had
+    # the sense to FORGET. ``transient_total`` counts the distinct tokens
+    # planted on ``retain=False`` observations (a temporary outage, a
+    # point-in-time status, a task-scoped instruction) and
+    # ``transient_retained`` how many of them the store kept -- so LOWER is
+    # better here, and a system scoring 36/36 on retention while also
+    # scoring 3/3 here is hoarding, not winning. Defaulted so every existing
+    # construction site (and every sibling-store row written before this
+    # field existed) stays valid; ``None`` means the stream carried no
+    # transient observation at all, never a fabricated 0.
+    transient_total: int = 0
+    transient_retained: int | None = None
+
 
 def compute_write_path_stats(
     system: str,
@@ -1067,9 +1081,21 @@ def compute_write_path_stats(
     *store_files* -- content-addressed, not by filename, for the same
     reason. An observation counts as **dropped** if it carried at least one
     token and not every one of its tokens survived.
+
+    Issue athenaeum#1824: ``retain=False`` (transient) observations are
+    scored SEPARATELY and are excluded from every retention field above.
+    Folding them in would corrupt all five at once -- ``answer_tokens_total``
+    and ``observations_measured`` inflate, ``pages_targeted`` grows pages
+    (``transient-*`` sentinels) that were never meant to exist, and a store
+    that correctly discarded an outage note would be scored as having
+    dropped a fact. They get their own pair instead: ``transient_total`` and
+    ``transient_retained``, where a LOW retained count is the good result.
     """
     corpus_text = "\n".join(store_files.values())
-    token_bearing = [obs for obs in observations if obs.answer_tokens]
+    token_bearing = [obs for obs in observations if obs.answer_tokens and obs.retain]
+    transient_bearing = [obs for obs in observations if obs.answer_tokens and not obs.retain]
+    transient_tokens = sorted({token for obs in transient_bearing for token in obs.answer_tokens})
+    transient_kept = {token for token in transient_tokens if token in corpus_text}
     all_tokens = sorted({token for obs in token_bearing for token in obs.answer_tokens})
     retained_tokens = {token for token in all_tokens if token in corpus_text}
 
@@ -1094,6 +1120,8 @@ def compute_write_path_stats(
         observations_total=len(observations),
         observations_measured=len(token_bearing),
         observations_dropped=len(dropped) if has_measurable_data else None,
+        transient_total=len(transient_tokens),
+        transient_retained=len(transient_kept) if transient_tokens else None,
     )
 
 
@@ -2735,11 +2763,21 @@ def render_report(report: NorthStarReport) -> str:
             )
             lines.append("")
         lines.append(
+            "_`transient_retained` (issue athenaeum#1824) is the one column where LOWER is "
+            "better: it counts planted tokens from `retain=False` observations -- a temporary "
+            "outage, a point-in-time status, a task-scoped instruction -- that the store kept "
+            "anyway. It is scored against its own denominator (`transient_total`) and is "
+            "excluded from every retention column, so discarding a transient observation is "
+            "never counted as losing a fact._"
+        )
+        lines.append("")
+        lines.append(
             "| system | corpus_scale | pages_targeted | pages_written | answer_tokens_total | "
-            "answer_tokens_retained | observations_total | observations_measured | "
+            "answer_tokens_retained | transient_total | transient_retained | "
+            "observations_total | observations_measured | "
             "observations_dropped | partial |"
         )
-        lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+        lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
         for w in report.write_path_stats:
             partial = "yes" if (w.system, w.corpus_scale) in report.phase2_partial else "no"
             lines.append(
@@ -2747,6 +2785,8 @@ def render_report(report: NorthStarReport) -> str:
                 f"{w.pages_written if w.pages_written is not None else 'n/a'} | "
                 f"{w.answer_tokens_total} | "
                 f"{w.answer_tokens_retained if w.answer_tokens_retained is not None else 'n/a'} | "
+                f"{w.transient_total} | "
+                f"{w.transient_retained if w.transient_retained is not None else 'n/a'} | "
                 f"{w.observations_total} | {w.observations_measured} | "
                 f"{w.observations_dropped if w.observations_dropped is not None else 'n/a'} | "
                 f"{partial} |"

@@ -125,6 +125,7 @@ Evidence, kept out of the reading path.
 - [Relatedness baseline](measurements/relatedness-baseline-2026-09-15.md)
 - [Native-memory baseline — measurement report](measurements/native-memory-baseline-2026-09-17.md) — the read-path comparison against Claude Code auto memory.
 - [Native-memory baseline — wave-2 measurement report](measurements/native-memory-baseline-2026-09-18.md) — the sixth north-star grid, adding the report-only classes and the two-oracle gate.
+- [Write-path retention — per-gate diagnosis](measurements/write-path-retention-2026-09-18.md) — why the Phase 2 smoke compile retained 5 of 36 planted facts, the gate that did it, and the transient-observation ground truth.
 - [Deploy SHA stamp](measurements/deploy-sha-stamp.md)
 - [LLM provider cost audit](measurements/audits/2026-08-06-llm-provider-cost-audit.md)
 

@@ -150,3 +150,67 @@ def test_generator_version_is_the_page_generators_shared_constant() -> None:
     reproducibility boundary for observations as it already is for
     :func:`tests.evals.corpus.build_corpus`."""
     assert isinstance(GENERATOR_VERSION, int)
+
+
+# ---------------------------------------------------------------------------
+# Transient (``retain=False``) ground truth and production intake shape --
+# issue athenaeum#1824.
+# ---------------------------------------------------------------------------
+
+
+def test_the_stream_carries_transient_observations_of_all_three_kinds() -> None:
+    """Without ``retain=False`` ground truth the write-path measurement
+    rewards remembering everything, so a store that hoarded an afternoon's
+    outage note would score identically to one that correctly dropped it."""
+    stream = generate_core_observations()
+    transient = [obs for obs in stream.observations if not obs.retain]
+
+    assert len(transient) >= 3
+    assert all(obs.answer_tokens for obs in transient), (
+        "a transient observation with no planted token is unmeasurable"
+    )
+    assert all(obs.page_uid.startswith("transient-") for obs in transient), (
+        "a transient observation names no corpus page"
+    )
+
+
+def test_transient_tokens_are_disjoint_from_the_retained_answer_tokens() -> None:
+    """The two denominators must not overlap: a token that is both
+    should-keep and should-drop makes every reading of the table ambiguous."""
+    stream = generate_core_observations()
+
+    assert stream.transient_tokens()
+    assert not (stream.transient_tokens() & stream.answer_tokens())
+
+
+def test_transient_tokens_occur_nowhere_in_the_compiled_corpus() -> None:
+    """Same collision discipline every other planted token is held to: a
+    transient token found in a store must be evidence of over-retention,
+    never a coincidental word match against corpus prose."""
+    from tests.evals.corpus import build_corpus
+
+    stream = generate_core_observations()
+    corpus_text = "\n".join(f"{page.name}\n{page.body}" for page in build_corpus("medium").pages)
+
+    for token in stream.transient_tokens():
+        assert token.lower() not in corpus_text.lower(), (
+            f"transient token {token!r} collides with corpus text"
+        )
+
+
+def test_session_bundles_group_consecutive_observations_without_losing_any() -> None:
+    """Production intake shape (issue athenaeum#1824): one raw file per
+    SESSION, several observations each -- and the count of bundles is the
+    number the librarian's file-counted ``max_files`` window sees."""
+    stream = generate_core_observations()
+    total = len(stream.observations)
+
+    singletons = stream.session_bundles(session_size=1)
+    assert len(singletons) == total
+
+    bundled = stream.session_bundles(session_size=6)
+    assert len(bundled) == -(-total // 6), "bundles must tile the stream exactly"
+    assert [obs for _, group in bundled for obs in group] == stream.observations, (
+        "bundling must preserve stream order and drop nothing"
+    )
+    assert all(len(group) <= 6 for _, group in bundled)
