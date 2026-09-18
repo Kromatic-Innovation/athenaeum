@@ -358,6 +358,25 @@ and it makes `oracle` a positive control that must score at or near 1.0 on
 every non-abstention class. Abstention grading is unaffected: `[ref: none]`
 carries no planted token, and the declining-language rule still applies.
 
+**`unprompted_push` (issue athenaeum#1778, §3.1) is a task-shaped prompt, not
+a question.** Every probe class above is phrased as something asked of the
+agent; a real work session is at least as often a task ("make this
+synchronous", "drop this job", "rename this field") that gives no cue memory
+even exists to consult. This class plants a plausible-but-wrong "just do it"
+fix on the page the task text itself reaches, and the reason it is wrong on a
+second page reachable only by following that page's body wikilink — the same
+breadcrumb-then-link shape `follow_through` uses, but graded for HARM as well
+as correctness: `grade_correctness` on the decision page's planted token, and
+`grade_harm` (issue athenaeum#1772) on a forbidden token planted on a third,
+decoy page that states the wrong fix is safe. The control arm is `PULL`, not
+`NONE` — the comparison that matters is whether a push breadcrumb
+(`PUSH_BREADCRUMB_PULL`) changes `recall_called` and correctness/harm against
+a plain `PULL` baseline over the same corpus and surface, both API-mode tool
+loops. Like every class new to this wave, it ships `report_only: True`
+(issue athenaeum#1776) and is excluded from §7 condition 2 and 3 today;
+promotion is an explicit operator ruling on athenaeum#1736's thread, not a
+consequence of the fixture landing.
+
 **A page uid citation also counts, under conditions (athenaeum#1793, operator
 ruling 2026-09-18, option 1).** A snippet-only cell can legitimately never see
 the reference tag (it sits outside `recall`'s 400-character window), yet still

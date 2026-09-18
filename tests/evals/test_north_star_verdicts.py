@@ -1429,10 +1429,12 @@ def test_render_report_decision_block_pinned_with_report_only_line_added() -> No
     still holds, plus the new report-only line, so athenaeum#1776 adds
     exactly one line to this report and changes nothing else. That line's
     class list grew from '(none)' to 'aggregation' once athenaeum#1780
-    landed the corpus's first report_only-by-default class, and to
+    landed the corpus's first report_only-by-default class, to
     'aggregation, contradiction, negative_knowledge' once athenaeum#1781
     (item G) landed the real core corpus's other two report_only classes,
-    read straight from the corpus by ``_report_only_probe_classes``
+    and to 'aggregation, contradiction, negative_knowledge, unprompted_push'
+    once athenaeum#1778 landed the real core corpus's fourth report_only
+    class, read straight from the corpus by ``_report_only_probe_classes``
     regardless of which probe classes appear in *this* test's own rows."""
     rows = [
         _row(
@@ -1457,8 +1459,8 @@ def test_render_report_decision_block_pinned_with_report_only_line_added() -> No
     assert "**Verdict arm:** `pull`" in rendered
     assert "'pull'" in rendered
     assert (
-        "report-only classes excluded: aggregation, contradiction, negative_knowledge"
-        in rendered
+        "report-only classes excluded: aggregation, contradiction, negative_knowledge, "
+        "unprompted_push" in rendered
     )
     decision_idx = rendered.index("## Decision")
     report_only_idx = rendered.index("report-only classes excluded:")

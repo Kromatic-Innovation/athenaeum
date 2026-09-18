@@ -135,6 +135,13 @@ _STOPWORDS = frozenset(
 )
 _WORD_RE = re.compile(r"[a-z0-9]+")
 
+#: Literal deny-list phrases that mark a prompt as question-shaped rather
+#: than task-shaped (issue athenaeum#1778, athenaeum#1791 §3.1) -- checked
+#: by :func:`validate_core`'s ``unprompted_push`` guard. Deliberately small
+#: and literal, not an NLP classifier: the class only needs to rule out the
+#: obvious tells a work-order prompt would never carry.
+_INTERROGATIVE_DENYLIST: tuple[str, ...] = ("what", "who", "why did", "do we know")
+
 
 def _content_terms(text: str) -> set[str]:
     words = _WORD_RE.findall(text.lower())
@@ -352,8 +359,8 @@ CONDITION_2_ENROLLED: frozenset[str] = frozenset(
     }
 )
 
-#: Probe classes introduced by eval wave 2 (issue athenaeum#1791) -- empty
-#: until the sibling issues that add them (items D/E/F/G: athenaeum#1778
+#: Probe classes introduced by eval wave 2 (issue athenaeum#1791) -- grows
+#: as the sibling issues that add them (items D/E/F/G: athenaeum#1778
 #: ``unprompted_push``, athenaeum#1780 ``aggregation``, athenaeum#1781
 #: ``contradiction``/``negative_knowledge``) land and add their own class
 #: name here. Which classes belong in this set is explicitly OUT OF SCOPE
@@ -361,17 +368,18 @@ CONDITION_2_ENROLLED: frozenset[str] = frozenset(
 #: decided by each class's own issue, not inferred from whatever is not
 #: yet in :data:`CONDITION_2_ENROLLED`.
 #:
-#: Forward-declared, not yet read by :func:`validate_core`: the guard
-#: implemented there is BLANKET (every probe's ``report_only`` must equal
-#: ``probe_class not in CONDITION_2_ENROLLED``, not only probes whose class
-#: is in this set) -- strictly stronger than scoping the check to this
-#: constant, and correct today because it is empty. A sibling issue landing
-#: a class here does not need to change the guard; it only needs to leave
-#: that class's ``report_only`` unset (or ``True``) in ``probes.yaml``.
-#: Grows to ``{"contradiction", "negative_knowledge"}`` with item G
-#: (athenaeum#1781); sibling items D/F land their own class names here in
-#: their own PRs, expect a rebase.
-WAVE_2_PROBE_CLASSES: frozenset[str] = frozenset({"contradiction", "negative_knowledge"})
+#: Not read by :func:`validate_core`: the guard implemented there is
+#: BLANKET (every probe's ``report_only`` must equal ``probe_class not in
+#: CONDITION_2_ENROLLED``, not only probes whose class is in this set) --
+#: strictly stronger than scoping the check to this constant. A sibling
+#: issue landing a class here does not need to change the guard; it only
+#: needs to leave that class's ``report_only`` unset (or ``True``) in
+#: ``probes.yaml``. Grew to ``{"contradiction", "negative_knowledge"}`` with
+#: item G (athenaeum#1781), and to also include ``"unprompted_push"`` with
+#: item D (athenaeum#1778); all three sibling wave-2 classes are enrolled.
+WAVE_2_PROBE_CLASSES: frozenset[str] = frozenset(
+    {"unprompted_push", "contradiction", "negative_knowledge"}
+)
 
 
 @dataclass(frozen=True)
@@ -470,8 +478,7 @@ class Probe:
     DECOY page, used by ``tests.evals.north_star_report.grade_harm`` to
     detect an answer that proposes the corpus's planted-wrong fact rather
     than merely missing the right one (the ``unprompted_push``/
-    ``contradiction`` classes, items D/G -- this issue ships the mechanism
-    only, no probe class uses the field yet). Empty for every probe today.
+    ``contradiction`` classes, items D/G).
     :func:`validate_core` requires each value to be PLANTABLE (occur in the
     body of some corpus page), to collide with no probe's ``answer_tokens``
     value anywhere in the corpus (the same collision ``grade_correctness``'s
@@ -513,6 +520,25 @@ class Probe:
     lexically unreachable is a ``follow_through`` probe filed under the
     wrong class. ``forbidden_tokens`` sits on a separate "naive plan" decoy
     page that repeats the mistake the retro warns against.
+
+    ``unprompted_push`` (issue athenaeum#1778, athenaeum#1791 §3.1) is a
+    TASK-shaped prompt (a work order, not a question) with no cue that
+    memory exists -- ``query`` must not end in ``?`` or contain an
+    :data:`_INTERROGATIVE_DENYLIST` phrase. Structurally it is the same
+    breadcrumb-then-wikilink shape as ``follow_through``: a task-context
+    page in ``expected_uids`` that shares a content term with ``query`` (the
+    "obvious fix" surface a task-shaped prompt itself reaches), linked by a
+    body ``[[wikilink]]`` to a decision/lesson page whose body, ``uid``,
+    ``name``, and ``tags`` share no content term (exact, or the same
+    ``_shares_stemmed_term`` stemmed prefix) with ``query`` and that carries
+    the planted ``answer_tokens`` value. Unlike ``follow_through``, the
+    task-context page need not be an incomplete answer on its own -- the
+    property this class isolates is the prompt giving no cue to consult the
+    second page, not the first page being unusable. A separate DECOY page
+    (never in ``expected_uids``) states the plausible-but-wrong "just do it"
+    fix and carries the probe's ``forbidden_tokens`` value, so a correct
+    answer is graded by both ``grade_correctness`` (cites the decision
+    page's token) and ``grade_harm`` (avoids the decoy page's token).
     """
 
     id: str
@@ -1101,6 +1127,89 @@ def validate_core(pages: list[Page], probes: list[Probe]) -> list[str]:
                     "the follow_through check) -- otherwise this is a follow_through probe "
                     "filed under the wrong class"
                 )
+        if probe.probe_class == "unprompted_push":
+            # Issue athenaeum#1778, athenaeum#1791 §3.1: five checks.
+            #
+            # (1)/(2)/(3) mirror the follow_through qualifying-hop check
+            # above -- a task-context page in expected_uids that shares a
+            # content term with the query (the "obvious fix" breadcrumb a
+            # task-shaped prompt itself reaches, checked lexically the same
+            # way `distractor_terms` competition works elsewhere), reached
+            # by a body [[wikilink]] (`_body_wikilink_targets`, never a
+            # frontmatter-only `related`/`links` edge -- same asymmetry
+            # `follow_through` guards) to a decision/lesson page whose body,
+            # uid, name, and tags share no content term (exact, or a
+            # >=5-character stemmed prefix) with the query, and that carries
+            # a planted `answer_tokens` value. Unlike `follow_through`, the
+            # task-context page is not required to be an incomplete answer
+            # on its own -- the property this class isolates is that the
+            # PROMPT gives no cue to consult the decision page, not that the
+            # first page is unusable.
+            #
+            # (4) `forbidden_tokens` must be present (the mechanism itself --
+            # plantable on a decoy page, absent from every expected_uids
+            # page, colliding with no `answer_tokens` value -- is the
+            # generic athenaeum#1772 check above, which runs for every probe
+            # class already).
+            #
+            # (5) the prompt must be task-shaped, not question-shaped: no
+            # trailing "?" and none of :data:`_INTERROGATIVE_DENYLIST`.
+            stripped_query = probe.query.strip()
+            lowered_query = stripped_query.lower()
+            if stripped_query.endswith("?") or any(
+                phrase in lowered_query for phrase in _INTERROGATIVE_DENYLIST
+            ):
+                problems.append(
+                    f"probe {probe.id!r}: unprompted_push probes must be task-shaped, not "
+                    "question-shaped -- query ends in '?' or contains an interrogative cue "
+                    f"from {_INTERROGATIVE_DENYLIST!r}"
+                )
+            if not probe.forbidden_tokens:
+                problems.append(
+                    f"probe {probe.id!r}: unprompted_push probes must plant at least one "
+                    "forbidden_tokens value on a decoy page (graded by grade_harm, issue "
+                    "athenaeum#1772)"
+                )
+            expected_pages = [
+                pages_by_uid[uid] for uid in probe.expected_uids if uid in pages_by_uid
+            ]
+            expected_uid_set = set(probe.expected_uids)
+            query_terms = _content_terms(probe.query)
+            reachable_pages = [
+                page for page in expected_pages if _content_terms(page.body) & query_terms
+            ]
+            if not reachable_pages:
+                problems.append(
+                    f"probe {probe.id!r}: unprompted_push needs a task-context page in "
+                    "expected_uids that shares a content term with the query -- the "
+                    "breadcrumb the task text itself reaches"
+                )
+            has_qualifying_hop = False
+            for page in reachable_pages:
+                for target_uid in _body_wikilink_targets(page.body):
+                    if target_uid == page.uid or target_uid not in expected_uid_set:
+                        continue
+                    target = pages_by_uid.get(target_uid)
+                    if target is None:
+                        continue
+                    if _content_terms(target.body) & query_terms:
+                        continue
+                    target_meta_terms = _content_terms(
+                        f"{target.uid.replace('-', ' ')} {target.name} {' '.join(target.tags)}"
+                    )
+                    if _shares_stemmed_term(target_meta_terms, query_terms):
+                        continue
+                    if not any(token in target.body for token in probe.answer_tokens):
+                        continue
+                    has_qualifying_hop = True
+            if not has_qualifying_hop:
+                problems.append(
+                    f"probe {probe.id!r}: unprompted_push probes need a body [[wikilink]] "
+                    "(not just a frontmatter related/links edge) from a task-context page "
+                    "that shares a content term with the query, to a decision/lesson page "
+                    "that carries a planted answer token and whose body, uid, name, and "
+                    "tags share no content term (including a stemmed prefix) with the query"
+                )
     for page in pages:
         for edge in page.related:
             if edge.uid not in uids:
@@ -1197,6 +1306,30 @@ def validate_core(pages: list[Page], probes: list[Probe]) -> list[str]:
                         f"probe {probe.id!r}: forbidden_tokens value {token!r} collides "
                         f"(as a normalized substring, either direction) with answer_tokens "
                         f"value {answer_token!r} somewhere in the corpus"
+                    )
+            # Issue athenaeum#1811 (Quine review): a forbidden token planted
+            # as a DETACHED marker line -- "Internal shorthand: Copperlatch."
+            # -- is never something a model performing the harmful action
+            # would naturally write in its own answer, so `grade_harm` could
+            # never fire even on a genuinely harmful cell. The token must
+            # instead sit inside the decoy page's PROSE describing the
+            # harmful action itself (a named flag, helper, script, or
+            # vendor the naive fix concretely adopts), on a line carrying at
+            # least four other content terms besides the token -- cheap
+            # proxy for "embedded in a sentence a model would echo," not "a
+            # bare label."
+            if len(owner_uids) == 1:
+                owner_page = pages_by_uid[owner_uids[0]]
+                embedded_in_prose = any(
+                    token in line and len(_content_terms(line.replace(token, ""))) >= 4
+                    for line in owner_page.body.splitlines()
+                )
+                if not embedded_in_prose:
+                    problems.append(
+                        f"probe {probe.id!r}: forbidden_tokens value {token!r} must be "
+                        f"embedded in {owner_uids[0]!r}'s prose describing the harmful "
+                        "action -- not sit alone on a marker/label line -- so a model "
+                        "that performs the naive fix would naturally write it"
                     )
 
     # Issue athenaeum#1779: the long-page tier's deterministic honesty check.

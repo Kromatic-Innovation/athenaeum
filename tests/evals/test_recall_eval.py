@@ -221,6 +221,22 @@ _PROBE_CLASSES: tuple[str, ...] = tuple(sorted({p.probe_class for p in _ALL_PROB
 # as ``follow_through``/``distractor_robustness``/``redundancy`` -- lower
 # this further, or replace it with a measured floor, the first time either
 # class actually runs live.
+#
+# ``unprompted_push`` (issue athenaeum#1778) is the same situation as
+# ``follow_through`` above -- not measured against a live backend yet, and
+# report_only (issue athenaeum#1776) besides, since ``unprompted_push`` is
+# not in ``CONDITION_2_ENROLLED``. It is also structurally different from
+# every measured class here: each probe's two ``expected_uids`` are a
+# task-context page ``validate_core`` requires to be lexically reachable
+# from the query (check 2, athenaeum#1778) and a decision page
+# ``validate_core`` requires to be lexically UNREACHABLE (check 1) -- so
+# ``recall_at_k``'s >=0.5-of-two-hops PASS threshold is expected to clear
+# on the task-context page alone most of the time, which would argue for a
+# HIGHER floor than an untested class usually gets. Set to the same
+# conservative 1-of-3 floor as ``follow_through``'s 1-of-6 anyway, not a
+# measured value, because the decision page's reachability is exactly the
+# thing no live run has confirmed either way yet -- raise this, or replace
+# it with a measured floor, the first time this class actually runs live.
 _FLOOR_BY_BACKEND_AND_CLASS: dict[tuple[str, str], int] = {
     ("fts5", "single_hop"): 3,
     ("fts5", "multi_hop"): 2,
@@ -232,6 +248,7 @@ _FLOOR_BY_BACKEND_AND_CLASS: dict[tuple[str, str], int] = {
     ("fts5", "aggregation"): 1,
     ("fts5", "contradiction"): 1,
     ("fts5", "negative_knowledge"): 1,
+    ("fts5", "unprompted_push"): 1,
     ("fts5", "abstention"): 0,
     ("vector", "single_hop"): 3,
     ("vector", "multi_hop"): 2,
@@ -243,6 +260,7 @@ _FLOOR_BY_BACKEND_AND_CLASS: dict[tuple[str, str], int] = {
     ("vector", "aggregation"): 1,
     ("vector", "contradiction"): 1,
     ("vector", "negative_knowledge"): 1,
+    ("vector", "unprompted_push"): 1,
     ("vector", "abstention"): 0,
 }
 
