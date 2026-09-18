@@ -217,11 +217,27 @@ def test_compile_observation_stream_produces_a_page_per_token_bearing_page(
     client = FakeLLMClient(responder=responder)
 
     store_files, write_cost, outcome = compile_observation_stream(
-        stream, knowledge_root, client=client, model="claude-haiku-4-5"
+        # ``session_size=1`` pins the ONE-FILE-PER-OBSERVATION shape (issue
+        # athenaeum#1824): this fixture's two observations are about two
+        # DIFFERENT entities, and ``_make_stub_responder`` routes a call by
+        # the single fixture page its messages mention, so bundling them
+        # into one raw file would hand the stub a create hop naming two
+        # pages and make the routing assertions below meaningless. The
+        # bundled production shape is covered by its own test
+        # (``...bundles_observations_into_one_raw_file``) on a stream where
+        # every observation is about the same entity.
+        stream,
+        knowledge_root,
+        client=client,
+        model="claude-haiku-4-5",
+        session_size=1,
     )
 
     assert outcome.exit_code == 0
     assert outcome.partial is False
+    # Issue athenaeum#1824: a window sized to the input leaves nothing
+    # deferred, so this run's numbers are a result rather than a floor.
+    assert outcome.deferred_raw_files == 0
 
     assert store_files, "compile produced no wiki pages at all"
     corpus_text = "\n".join(store_files.values())
@@ -258,7 +274,7 @@ def test_compile_observation_stream_output_is_consumable_by_write_path_stats(
     client = FakeLLMClient(responder=responder)
 
     store_files, _write_cost, _outcome = compile_observation_stream(
-        stream, knowledge_root, client=client, model="claude-haiku-4-5"
+        stream, knowledge_root, client=client, model="claude-haiku-4-5", session_size=1
     )
     stats = compute_write_path_stats("athenaeum", stream.scale, stream.observations, store_files)
 
@@ -266,6 +282,62 @@ def test_compile_observation_stream_output_is_consumable_by_write_path_stats(
     assert stats.pages_written == len(_FIXTURE_PAGES)
     assert stats.answer_tokens_retained == stats.answer_tokens_total == len(_FIXTURE_PAGES)
     assert stats.observations_dropped == 0
+
+
+def test_compile_observation_stream_bundles_observations_into_one_raw_file(
+    tmp_path: Path,
+) -> None:
+    """Production intake shape (issue athenaeum#1824): the driver's default
+    ``session_size`` bundles several observations into ONE raw file, the way
+    Claude's auto-memory writes one file per session, instead of the
+    one-file-per-observation shape the first Phase 2 smoke run used.
+
+    That shape difference is the whole diagnosis: the librarian's
+    ``max_files`` window is counted in FILES, so a stream materialised as
+    hundreds of singletons overflowed it and had 163 of 213 files deferred
+    to a later night (run 35292686290,
+    ``docs/measurements/write-path-retention-2026-09-18.md``). Uses a
+    single-entity stream so the stub's page routing stays unambiguous.
+    """
+    from tests.evals.write_path import _ensure_git_repo, _seed_knowledge_root
+
+    page_uid, name, paragraph, token = _FIXTURE_PAGES[0]
+    observations = [
+        Observation(
+            uid=f"obs-{page_uid}-{i:03d}",
+            page_uid=page_uid,
+            source="sessions",
+            timestamp=f"2026020{i + 1}T000000Z",
+            uuid8=f"{i:08d}",
+            body=f"{name}: {paragraph} {token}.",
+            answer_tokens=(token,),
+        )
+        for i in range(4)
+    ]
+    stream = ObservationStream(observations=observations, seed=1, scale="core")
+
+    knowledge_root = tmp_path / "knowledge"
+    _seed_knowledge_root(knowledge_root)
+    _ensure_git_repo(knowledge_root)
+    stream.materialize(knowledge_root, session_size=4)
+
+    raw_files = sorted((knowledge_root / "raw" / "sessions").glob("*.md"))
+    assert len(raw_files) == 1, "four observations must bundle into one session file"
+    assert raw_files[0].name == observations[0].filename, (
+        "a bundle is named after its EARLIEST observation, so the file still sorts "
+        "by when the session started"
+    )
+    bundled = raw_files[0].read_text(encoding="utf-8")
+    for obs in observations:
+        assert obs.body in bundled
+
+    # And the bundling knob is the only thing that changed: the same stream
+    # at session_size=1 lands as four files.
+    singleton_root = tmp_path / "singleton"
+    _seed_knowledge_root(singleton_root)
+    _ensure_git_repo(singleton_root)
+    stream.materialize(singleton_root, session_size=1)
+    assert len(sorted((singleton_root / "raw" / "sessions").glob("*.md"))) == 4
 
 
 def test_compile_observation_stream_records_spend_on_eval_session(tmp_path: Path) -> None:

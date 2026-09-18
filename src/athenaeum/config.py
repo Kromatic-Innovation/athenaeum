@@ -144,7 +144,14 @@ def resolve_cache_dir(cache_dir: Path | None = None) -> Path:
 
 _DEFAULTS: dict[str, Any] = {
     "auto_recall": True,
-    "search_backend": "fts5",
+    # Issue athenaeum#1825: re-pinned from "fts5" to "vector" (hybrid vector +
+    # FTS5 RRF fusion, recall.hybrid default on) by operator ruling on issue
+    # athenaeum#1736 -- see docs/design/native-memory-baseline.md Section 7 for
+    # the measured basis. "fts5" is now the opt-out
+    # (search_backend: fts5). A default install without the vector extra
+    # (chromadb) degrades to fts5 at query time with one logged warning --
+    # see VectorBackend.query in athenaeum.search.
+    "search_backend": "vector",
     "vector": {
         "provider": "chromadb",
         # Issue athenaeum#315 seam: the embedding model. Kept at the documented
@@ -2592,6 +2599,40 @@ def resolve_recall_relevance_floor(
     return None
 
 
+# Issue athenaeum#1825: re-pinned default, operator ruling on issue athenaeum#1736
+# (2026-09-18) -- see docs/design/native-memory-baseline.md Section 7 for the
+# measured basis. The docstring below is pulled verbatim into the GENERATED
+# docs/reference/configuration.md by scripts/gen_config_reference.py, which
+# strips every ``athenaeum#N`` token from it -- kept issue-ref-free here so the
+# stripped prose still reads as complete sentences.
+def resolve_search_backend(config: dict[str, Any] | None) -> str:
+    """Resolve ``search_backend`` -- which backend answers a recall query.
+
+    ``"vector"`` is the shipped default: hybrid semantic search (chromadb
+    local embeddings) fused with FTS5 via reciprocal rank fusion, on by
+    default -- see :func:`resolve_recall_hybrid` for that opt-out knob.
+    ``"fts5"`` (SQLite FTS5, BM25 ranking, no extra dependencies) is the
+    opt-out: set ``search_backend: fts5`` in the yaml config to use it
+    exclusively. ``"keyword"`` (scan-on-query, zero setup) is also a valid
+    value but has no dedicated resolver of its own -- callers compare this
+    resolver's return value directly against the three recognized names.
+
+    When ``"vector"`` is configured but chromadb (the ``[vector]`` extra) is
+    not installed, :meth:`athenaeum.search.VectorBackend.query` degrades to
+    the ``fts5`` backend for that call with one logged warning and no
+    traceback -- this resolver itself reports only the CONFIGURED backend
+    name, not the one that actually answered a given call.
+
+    Precedence: yaml ``search_backend`` > code default (``"vector"``). No
+    dedicated environment variable.
+    """
+    if config is not None:
+        raw = config.get("search_backend")
+        if isinstance(raw, str) and raw:
+            return raw
+    return str(_DEFAULTS["search_backend"])
+
+
 def resolve_recall_hybrid(config: dict[str, Any] | None) -> bool:
     """Resolve ``recall.hybrid`` -- the vector-backend RRF fusion opt-out (athenaeum#1792).
 
@@ -3604,12 +3645,18 @@ _DEFAULT_CONFIG_CONTENT = """\
 # When false, the hook exits immediately — recall is only via explicit MCP tool calls.
 auto_recall: true
 
-# Search backend for recall queries: "fts5" (keyword) or "vector" (semantic).
-# fts5: SQLite FTS5 with BM25 ranking and porter stemming. No extra dependencies.
-# vector: Chromadb with local embeddings. Requires: pip install athenaeum[vector]
-search_backend: fts5
+# Search backend for recall queries: "vector" (hybrid semantic + FTS5, the
+# default) or "fts5" (keyword only, the opt-out).
+# vector: Chromadb with local embeddings, fused with FTS5 via reciprocal-rank
+#   fusion (recall.hybrid, default on). Requires: pip install athenaeum[vector]
+#   -- a default install without it degrades to fts5 at query time with one
+#   logged warning, no traceback.
+# fts5: SQLite FTS5 with BM25 ranking and porter stemming. No extra
+#   dependencies. Set search_backend: fts5 to opt out of vector.
+search_backend: vector
 
-# Vector backend settings (only used when search_backend: vector)
+# Vector backend settings (used when search_backend: vector, or as the
+# fallback-warning message's install hint when chromadb is missing)
 # vector:
 #   provider: chromadb
 #   collection: wiki

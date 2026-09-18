@@ -792,9 +792,10 @@ class TestResolveOwner:
 
 class TestLoadConfig:
     def test_defaults_when_no_file(self, tmp_path: Path) -> None:
+        """Issue athenaeum#1825: ``vector`` is the shipped default."""
         cfg = load_config(tmp_path)
         assert cfg["auto_recall"] is True
-        assert cfg["search_backend"] == "fts5"
+        assert cfg["search_backend"] == "vector"
         assert cfg["vector"]["provider"] == "chromadb"
 
     def test_reads_yaml(self, tmp_path: Path) -> None:
@@ -804,6 +805,13 @@ class TestLoadConfig:
         cfg = load_config(tmp_path)
         assert cfg["auto_recall"] is False
         assert cfg["search_backend"] == "vector"
+
+    def test_fts5_opt_out_via_yaml(self, tmp_path: Path) -> None:
+        """Issue athenaeum#1825: ``fts5`` is the opt-out from the shipped
+        ``vector`` default."""
+        (tmp_path / "athenaeum.yaml").write_text("search_backend: fts5\n")
+        cfg = load_config(tmp_path)
+        assert cfg["search_backend"] == "fts5"
 
     def test_partial_override(self, tmp_path: Path) -> None:
         (tmp_path / "athenaeum.yaml").write_text("search_backend: vector\n")

@@ -97,7 +97,7 @@ cfg = load_config(sys.argv[1] if len(sys.argv) > 1 else None)
 env_path = sys.argv[2]
 with open(env_path, 'w') as f:
     f.write(f'AUTO_RECALL={str(cfg.get(\"auto_recall\", True)).lower()}\n')
-    f.write(f'SEARCH_BACKEND={cfg.get(\"search_backend\", \"fts5\")}\n')
+    f.write(f'SEARCH_BACKEND={cfg.get(\"search_backend\", \"vector\")}\n')
     provider = 'chromadb'
     if isinstance(cfg.get('vector'), dict):
         provider = cfg['vector'].get('provider', 'chromadb')
@@ -142,7 +142,9 @@ fi
 if [ "$_read_config_ok" = false ]; then
   CONFIG_YAML="${KNOWLEDGE_ROOT}/athenaeum.yaml"
   _auto_recall="true"
-  _search_backend="fts5"
+  # Issue athenaeum#1825: re-pinned default, matching
+  # athenaeum.config._DEFAULTS["search_backend"].
+  _search_backend="vector"
   _vector_provider="chromadb"
   # Issue athenaeum#1120: same yaml-only resolution as the python path above
   # — env override happens at per-turn-hook runtime, not here.
@@ -265,7 +267,7 @@ else
   rm -f "$_stopwords_tmp"
 fi
 
-if [ "${SEARCH_BACKEND:-fts5}" = "vector" ]; then
+if [ "${SEARCH_BACKEND:-vector}" = "vector" ]; then
   # Vector rebuild is expensive (~45s on a ~3k-page wiki) so skip when the
   # existing index is newer than the newest wiki page. FTS5 above is cheap
   # enough to always rebuild. Override with ATHENAEUM_FORCE_REBUILD=1.

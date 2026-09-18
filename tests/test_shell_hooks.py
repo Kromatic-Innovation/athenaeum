@@ -243,6 +243,13 @@ def hook_env(tmp_path: Path) -> dict[str, str]:
 
 class TestSessionStartRecall:
     def test_builds_fts5_index(self, hook_env: dict[str, str], tmp_path: Path) -> None:
+        """FTS5 is built unconditionally regardless of ``search_backend``.
+
+        The ``hook_env`` fixture's ``athenaeum.yaml`` pins ``search_backend:
+        fts5`` explicitly (an fts5 opt-out, issue athenaeum#1825), so
+        ``config.env`` reflects that explicit choice here -- see
+        ``test_defaults_to_vector_when_no_config_key`` below for the actual
+        no-yaml-key default."""
         _require("bash")
         _require_hook_python(hook_env, "athenaeum.search")
         result = subprocess.run(
@@ -319,6 +326,34 @@ class TestSessionStartRecall:
 
         index_db = tmp_path / ".cache" / "athenaeum" / "wiki-index.db"
         assert index_db.is_file()
+
+    def test_defaults_to_vector_when_no_config_key(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """Issue athenaeum#1825: ``vector`` is the shipped default -- a
+        knowledge root whose ``athenaeum.yaml`` names no ``search_backend``
+        key at all must resolve to it, matching
+        ``athenaeum.config._DEFAULTS``. Overrides the ``hook_env`` fixture's
+        own explicit ``search_backend: fts5`` pin (see
+        ``test_builds_fts5_index`` above) so this test exercises the real
+        no-key default, not that fixture's opt-out."""
+        knowledge_yaml = Path(hook_env["KNOWLEDGE_ROOT"]) / "athenaeum.yaml"
+        knowledge_yaml.write_text("auto_recall: true\n")
+
+        _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
+        result = subprocess.run(
+            ["bash", str(SESSION_START)],
+            env=hook_env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+
+        config_env = tmp_path / ".cache" / "athenaeum" / "config.env"
+        body = config_env.read_text()
+        assert "SEARCH_BACKEND=vector" in body
 
     def test_fts5_build_failure_is_nonzero_exit_with_stderr_not_stdout(
         self, hook_env: dict[str, str], tmp_path: Path

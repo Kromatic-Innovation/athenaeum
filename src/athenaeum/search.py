@@ -1909,6 +1909,12 @@ class VectorBackend:
         # ``None`` forces a cache-clear on the first query so a process that
         # started before an out-of-process reindex never serves stale results.
         self._seen_generation: str | None = None
+        # Issue athenaeum#1825: instance-level, not module/global -- a single
+        # recall_search call that falls back to fts5 can invoke query() on
+        # this SAME backend instance twice (the primary query, then the
+        # widened hybrid-fusion re-query in mcp_server._recall_via_backend),
+        # and the AC is ONE warning per recall, not one per query() call.
+        self._chromadb_missing_warned = False
 
     def incremental_reuse_blocker(
         self, cache_dir: Path, stored: dict[str, Any] | None
@@ -2308,11 +2314,50 @@ class VectorBackend:
         type_filter: str | Sequence[str] | None = None,
         metadata_only: bool = False,
     ) -> list[tuple[str, str, float]]:
-        """Query the chromadb collection with semantic search."""
-        del wiki_root  # Vector reads the pre-built chromadb collection
+        """Query the chromadb collection with semantic search.
+
+        Issue athenaeum#1825: ``vector`` is now the shipped default backend,
+        so a default install that never ran ``pip install athenaeum[vector]``
+        must still answer a recall -- chromadb missing can no longer surface
+        as an uncaught ``ImportError`` here. ``_get_chromadb()`` is called
+        FIRST, before the ``vector_dir`` existence check below, precisely so
+        this catches the common case (chromadb absent, no vector index ever
+        built) the same way as the rarer one (chromadb absent, a vector
+        index exists from a previous install). One warning, then delegate to
+        :class:`FTS5Backend` against the SAME ``cache_dir`` -- the FTS5 index
+        is built unconditionally by ``session-start-recall.sh`` regardless of
+        ``search_backend``, so it is present in every real deployment this
+        degrades into. ``build_index``/other methods are unaffected: building
+        a vector index genuinely requires chromadb, and its own
+        ``ImportError`` (via ``_get_chromadb()``) stays an explicit,
+        actionable failure -- this fallback is scoped to answering a query.
+        """
         del as_of  # athenaeum#308: vector filters at build time; as-of view = as-of index
+        try:
+            chromadb = self._get_chromadb()
+        except ImportError:
+            if not self._chromadb_missing_warned:
+                self._chromadb_missing_warned = True
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "search: search_backend=\"vector\" is configured but chromadb "
+                    "is not installed -- install the vector extra "
+                    "(pip install athenaeum[vector]) for semantic search; "
+                    "falling back to the fts5 backend for this query."
+                )
+            return FTS5Backend().query(
+                query,
+                cache_dir,
+                n=n,
+                exclude=exclude,
+                wiki_root=wiki_root,
+                caller_audience=caller_audience,
+                type_filter=type_filter,
+                metadata_only=metadata_only,
+            )
+        del wiki_root  # Vector reads the pre-built chromadb collection
         del metadata_only  # athenaeum#1789: FTS5-only knob, no-op here (Protocol-shared param)
-        chromadb = self._get_chromadb()
 
         vector_dir = cache_dir / _VECTOR_DIR
         if not vector_dir.is_dir():
