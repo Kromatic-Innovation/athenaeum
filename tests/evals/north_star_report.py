@@ -2051,6 +2051,14 @@ class NorthStarReport:
     # see that function's own docstring.
     relevance_floor_vector: float | None = None
     relevance_floor_fts5: float | None = None
+    # issue athenaeum#1785: one human-readable summary line describing this
+    # run's Phase 2 write-path configuration (on/off, --phase2-scales,
+    # --phase2-systems, and an API-writer fidelity marker when the native
+    # system ran in api mode) -- computed by north_star_cli.py, which owns
+    # the dispatch flags this describes, and passed straight through here
+    # for the header to render. Empty string (the default) renders nothing,
+    # byte-identical to a pre-athenaeum#1785 report.
+    phase2_summary: str = ""
 
 
 class MixedFloorError(ValueError):
@@ -2111,6 +2119,7 @@ def build_report(
     torn_rows: int = 0,
     duplicate_rows: int = 0,
     pool_floor_values: bool = True,
+    phase2_summary: str = "",
 ) -> NorthStarReport:
     """Assemble a :class:`NorthStarReport` from decoded result-store rows.
 
@@ -2165,6 +2174,7 @@ def build_report(
         duplicate_rows=duplicate_rows,
         relevance_floor_vector=relevance_floor_vector,
         relevance_floor_fts5=relevance_floor_fts5,
+        phase2_summary=phase2_summary,
     )
 
 
@@ -2200,6 +2210,11 @@ def render_report(report: NorthStarReport) -> str:
     )
     lines.append(f"- relevance_floor_vector: {floor_vector_display}")
     lines.append(f"- relevance_floor_fts5: {floor_fts5_display}")
+    # issue athenaeum#1785: printed only when non-empty, so a pre-Phase-2
+    # report (or a Phase-2-off run, which north_star_cli.py leaves this
+    # blank for) renders byte-identical to before this field existed.
+    if report.phase2_summary:
+        lines.append(f"- phase2: {report.phase2_summary}")
     for scale in sorted(report.corpus_digests):
         lines.append(f"- corpus_digest[{scale}]: {report.corpus_digests[scale]}")
     lines.append(f"- total rollout rows: {len(report.rows)}")

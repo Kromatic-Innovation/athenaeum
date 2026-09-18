@@ -55,6 +55,8 @@ asserts that half unchanged.
 from __future__ import annotations
 
 import argparse
+import dataclasses
+import json
 import os
 import queue
 import sys
@@ -63,13 +65,16 @@ import threading
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import Any
 
 import yaml
 
+from athenaeum.models import TokenUsage
 from tests.evals.containment import (
     DEFAULT_CELL_SECONDS,
     NORTH_STAR_CELL_TOKEN_ESTIMATE,
     SCALE_BUDGETS,
+    CellTokenEstimate,
     GridCell,
     ResultStore,
     SpendCeilingExceededError,
@@ -81,19 +86,28 @@ from tests.evals.containment import (
     tokens_for_spend,
     write_planned_cells,
 )
-from tests.evals.corpus import SCALES, build_corpus
-from tests.evals.harness import EvalSession
+from tests.evals.corpus import SCALES, build_corpus, generate_core_observations
+from tests.evals.harness import EvalSession, build_live_client
 from tests.evals.north_star_report import (
     DEFAULT_MEASUREMENTS_DIR,
     DEFAULT_VERDICT_ARM,
     MixedFloorError,
+    WriteCost,
+    WritePathStats,
     append_rollout_row,
     build_report,
+    compute_write_path_stats,
     load_rollout_rows_and_diagnostics,
     write_report,
 )
-from tests.evals.rollout import ALL_ARMS, DEFAULT_ROLLOUT_MODEL, run_probe_all_arms
+from tests.evals.rollout import (
+    ALL_ARMS,
+    DEFAULT_ROLLOUT_MODEL,
+    run_native_writer_dispatch,
+    run_probe_all_arms,
+)
 from tests.evals.rollout_session import ROLLOUT_TOKEN_CEILING, assert_rollout_ceiling
+from tests.evals.write_path import compile_observation_stream
 
 #: Every probe in the hand-authored corpus -- probes are IDENTICAL across
 #: corpus scales (``tests.evals.corpus.build_corpus``'s own docstring: "every
@@ -131,6 +145,41 @@ DEFAULT_MAX_SPEND_USD = 1.0
 #: worker is real even though the CPU is idle. Four is the number the
 #: workflow's own dispatch input defaults to; raise both together.
 DEFAULT_WORKERS = 4
+
+#: Default Phase 2 corpus scale(s) (issue athenaeum#1785): ``"medium"``, not
+#: ``"core"``. ``WritePathStats``/``WriteCost`` are keyed by ``(system,
+#: corpus_scale)``, and design doc §6 amortises write cost over the probe
+#: set at that scale while §7 condition 3 only reads write cost at
+#: ``"medium"`` and above (``north_star_report._CUTOFF_ELIGIBLE_SCALES``).
+#: A Phase 2 run pinned to ``"core"`` would produce a write-cost figure
+#: condition 3 cannot consume. ``generate_core_observations`` itself is
+#: scale-invariant (its own docstring: validated, then never consulted) --
+#: this default governs only which scale the resulting rows are LABELLED
+#: at, which is what the report joins on.
+DEFAULT_PHASE2_SCALES: tuple[str, ...] = ("medium",)
+
+#: Both write-path producers Phase 2 drives: athenaeum's real librarian
+#: compile (:func:`~tests.evals.write_path.compile_observation_stream`) and
+#: the native writer (:func:`~tests.evals.rollout.run_native_writer_dispatch`).
+DEFAULT_PHASE2_SYSTEMS: tuple[str, ...] = ("athenaeum", "native")
+_VALID_PHASE2_SYSTEMS: tuple[str, ...] = ("athenaeum", "native")
+
+#: Declared (not measured) per-OBSERVATION token estimate for Phase 2's
+#: pre-flight spend gate (issue athenaeum#1785) -- the write-path sibling of
+#: :data:`~tests.evals.containment.NORTH_STAR_CELL_TOKEN_ESTIMATE`, which
+#: prices one READ cell (a multi-turn tool-use loop over a materialized
+#: corpus). One Phase 2 observation is cheaper than a full read cell, same
+#: order of magnitude: the athenaeum side is a single tier1/tier2/tier3
+#: classify+write pass through the librarian over one short raw-intake
+#: note, and the native side is one short ``claude -p``-shaped tool-use
+#: session saving (at most) that same note. 1,200 input / 300 output is a
+#: round, deliberately conservative guess -- NOT a measured figure -- kept
+#: in this module rather than ``containment.py`` because it prices
+#: observations, not grid cells; replace it once the first live Phase 2
+#: grid (athenaeum#1788) establishes real numbers, the same "declared, not
+#: measured" discipline ``NORTH_STAR_CELL_TOKEN_ESTIMATE``'s own docstring
+#: states.
+PHASE2_OBSERVATION_TOKEN_ESTIMATE = CellTokenEstimate(input_tokens=1_200, output_tokens=300)
 
 
 def write_relevance_floor_config(
@@ -342,6 +391,319 @@ def _resolve_store_path(args: argparse.Namespace) -> Path:
     floor-mismatch check (issue athenaeum#1764) and the store ``main``
     actually runs cells against always agree on which file they mean."""
     return args.store if args.store is not None else _default_store_path()
+
+
+def _resolve_phase2_store_path(args: argparse.Namespace) -> Path:
+    """``--phase2-store``, or ``<store>.phase2.jsonl`` next to the resolved
+    ``--store`` path (issue athenaeum#1785) -- the SIBLING JSONL, always
+    distinct from ``--store`` itself, so Phase 2 rows (keyed by ``(system,
+    corpus_scale)``, carrying no ``GridCell.cell_key()``) can never pass
+    through the main grid's ``ResultStore``/resume contract."""
+    if args.phase2_store is not None:
+        return args.phase2_store
+    return Path(str(_resolve_store_path(args)) + ".phase2.jsonl")
+
+
+def _resolve_phase2_scales(args: argparse.Namespace) -> list[str]:
+    """``--phase2-scales``, split and validated against :data:`SCALES` --
+    the same validate-before-spend discipline :func:`_build_cells` applies
+    to ``--corpus-scales``."""
+    scales = args.phase2_scales.split(",") if args.phase2_scales else list(DEFAULT_PHASE2_SCALES)
+    unknown = [s for s in scales if s not in SCALES]
+    if unknown:
+        raise ValueError(
+            f"unknown corpus scale(s) {unknown!r} in --phase2-scales; known: {sorted(SCALES)}"
+        )
+    return scales
+
+
+def _resolve_phase2_systems(args: argparse.Namespace) -> list[str]:
+    """``--phase2-systems``, split and validated against
+    :data:`_VALID_PHASE2_SYSTEMS`."""
+    systems = (
+        args.phase2_systems.split(",") if args.phase2_systems else list(DEFAULT_PHASE2_SYSTEMS)
+    )
+    unknown = [s for s in systems if s not in _VALID_PHASE2_SYSTEMS]
+    if unknown:
+        raise ValueError(
+            f"unknown system(s) {unknown!r} in --phase2-systems; known: "
+            f"{list(_VALID_PHASE2_SYSTEMS)}"
+        )
+    return systems
+
+
+def _phase2_read_rows(path: Path) -> list[dict[str, Any]]:
+    """Every decodable row from the Phase 2 sibling JSONL at *path*.
+
+    A row that will not decode is SKIPPED, not fatal -- the same tolerance
+    :class:`~tests.evals.containment.ResultStore` applies to the main grid
+    store (a process killed mid-``write`` can leave a torn final line), kept
+    here as a small hand-rolled reader rather than a ``ResultStore``
+    instance: these rows carry no ``cell_key`` and must never pass through
+    ``GridCell.cell_key()`` (issue athenaeum#1785 proposal)."""
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows
+
+
+def _phase2_completed_keys(rows: Sequence[dict[str, Any]]) -> set[tuple[str, str]]:
+    """``(system, corpus_scale)`` pairs already carrying BOTH a
+    ``write_path`` and a ``write_cost`` row -- the PAIR is the completion
+    signal for resume (issue athenaeum#1785), not either row alone: a crash
+    between writing the two would otherwise strand a ``(system, scale)``
+    with retention stats recorded but no cost, silently skipped forever on
+    a later resume. :func:`_run_phase2_group` always appends both rows (plus
+    a ``meta`` row) in a single call, so an interrupted run leaves at most
+    one incomplete pair, correctly re-run on resume."""
+    have_stats: set[tuple[str, str]] = set()
+    have_cost: set[tuple[str, str]] = set()
+    for row in rows:
+        key = (row.get("system"), row.get("corpus_scale"))
+        if row.get("kind") == "write_path":
+            have_stats.add(key)
+        elif row.get("kind") == "write_cost":
+            have_cost.add(key)
+    return have_stats & have_cost
+
+
+def _phase2_append_rows(path: Path, rows: Sequence[dict[str, Any]]) -> None:
+    """Append *rows* to the Phase 2 sibling JSONL, flushed and fsync'd --
+    mirrors :meth:`~tests.evals.containment.ResultStore.append`'s own
+    durability discipline, but is deliberately NOT a ``ResultStore``: see
+    :func:`_phase2_read_rows`'s docstring for why."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, sort_keys=True) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _write_path_stats_row(stats: WritePathStats) -> dict[str, Any]:
+    return {"kind": "write_path", **dataclasses.asdict(stats)}
+
+
+def _write_cost_row(cost: WriteCost) -> dict[str, Any]:
+    return {
+        "kind": "write_cost",
+        "system": cost.system,
+        "corpus_scale": cost.corpus_scale,
+        "input_tokens": cost.input_tokens,
+        "output_tokens": cost.output_tokens,
+    }
+
+
+def load_phase2_results(path: Path) -> tuple[list[WritePathStats], list[WriteCost]]:
+    """Read the Phase 2 sibling JSONL at *path* back into the
+    ``(write_path_stats, write_costs)`` shape :func:`~tests.evals.north_star_report.build_report`
+    accepts. A row of an unrecognised ``kind`` (e.g. ``meta``), or one
+    missing a required field, is skipped rather than raising -- the sibling
+    store is diagnostic-friendly by design (issue athenaeum#1785), and a
+    torn or partially-written row must not crash report rendering."""
+    stats: list[WritePathStats] = []
+    costs: list[WriteCost] = []
+    for row in _phase2_read_rows(path):
+        kind = row.get("kind")
+        try:
+            if kind == "write_path":
+                stats.append(
+                    WritePathStats(
+                        system=row["system"],
+                        corpus_scale=row["corpus_scale"],
+                        pages_targeted=row["pages_targeted"],
+                        pages_written=row.get("pages_written"),
+                        answer_tokens_total=row["answer_tokens_total"],
+                        answer_tokens_retained=row.get("answer_tokens_retained"),
+                        observations_total=row["observations_total"],
+                        observations_measured=row["observations_measured"],
+                        observations_dropped=row.get("observations_dropped"),
+                    )
+                )
+            elif kind == "write_cost":
+                costs.append(
+                    WriteCost(
+                        system=row["system"],
+                        corpus_scale=row["corpus_scale"],
+                        input_tokens=row["input_tokens"],
+                        output_tokens=row["output_tokens"],
+                    )
+                )
+        except KeyError:
+            continue
+    return stats, costs
+
+
+def _run_phase2_group(
+    system: str,
+    scale: str,
+    *,
+    observations: Sequence[Any],
+    stream: Any,
+    materialize_root: Path,
+    client: Any,
+    session: EvalSession,
+    model: str,
+    mode: str,
+    claude_binary: str,
+) -> list[dict[str, Any]]:
+    """Run Phase 2's write path for ONE ``(system, scale)``, returning the
+    sibling-store rows this group produced: always a ``write_path`` row, a
+    ``write_cost`` row (the completion pair -- see
+    :func:`_phase2_completed_keys`), and a ``meta`` row carrying whatever
+    else this issue's brief asks a Phase 2 row to record -- the compile's
+    own exit code/partial flag for ``athenaeum``, or
+    mode/prompt_fidelity/turns_exhausted/session count for ``native``.
+
+    A partial (exit 75) athenaeum compile is recorded here with
+    ``meta.partial = True`` and its real ``write_path``/``write_cost`` rows
+    -- CompileOutcome's own docstring: that run made real, partial progress
+    and the resulting store is still valid to measure. "Never silently
+    pooled" (this issue's brief) means the partial flag must be visible on
+    the row, not that the numbers are withheld.
+    """
+    group_root = materialize_root / "phase2" / f"{system}-{scale}"
+    if system == "athenaeum":
+        store_files, write_cost, outcome = compile_observation_stream(
+            stream,
+            group_root / "knowledge",
+            client=client,
+            model=model,
+            session=session,
+        )
+        stats = compute_write_path_stats(system, scale, observations, store_files)
+        meta = {
+            "kind": "meta",
+            "system": system,
+            "corpus_scale": scale,
+            "exit_code": outcome.exit_code,
+            "partial": outcome.partial,
+        }
+    elif system == "native":
+        result = run_native_writer_dispatch(
+            observations,
+            group_root / "native",
+            mode=mode,
+            client=client,
+            session=session,
+            model=model,
+            claude_binary=claude_binary,
+        )
+        stats = compute_write_path_stats(system, scale, observations, result.memory_files)
+        input_tokens = sum(t.input_tokens for s in result.sessions for t in s.turn_tokens)
+        output_tokens = sum(t.output_tokens for s in result.sessions for t in s.turn_tokens)
+        write_cost = WriteCost(
+            system=system,
+            corpus_scale=scale,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
+        meta = {
+            "kind": "meta",
+            "system": system,
+            "corpus_scale": scale,
+            "mode": result.mode,
+            "prompt_fidelity": result.prompt_fidelity,
+            "turns_exhausted": sum(1 for s in result.sessions if s.turns_exhausted),
+            "sessions": len(result.sessions),
+        }
+    else:  # pragma: no cover -- _resolve_phase2_systems already validates
+        raise ValueError(f"unknown Phase 2 system {system!r}")
+    return [_write_path_stats_row(stats), _write_cost_row(write_cost), meta]
+
+
+def run_phase2(
+    args: argparse.Namespace,
+    *,
+    client: Any,
+    session: EvalSession,
+    materialize_root: Path,
+    phase2_store_path: Path,
+) -> None:
+    """Run every not-yet-completed ``(system, scale)`` Phase 2 group and
+    append its rows to *phase2_store_path* -- resume granularity is the
+    ``(system, scale)`` pair (see :func:`_phase2_completed_keys`).
+
+    The observation stream is generated once per *scale* (issue
+    athenaeum#1785 proposal / design doc §6.3): it is scale-invariant by
+    construction (``generate_core_observations``'s own docstring), but its
+    ``.scale`` attribute is what :func:`~tests.evals.write_path.compile_observation_stream`
+    stamps onto the ``WriteCost`` it returns, so generating it under the
+    requested *scale* keeps that row's ``corpus_scale`` matching the label
+    this run is reporting under, even though the underlying observations
+    are byte-identical across scales.
+    """
+    scales = _resolve_phase2_scales(args)
+    systems = _resolve_phase2_systems(args)
+    done = _phase2_completed_keys(_phase2_read_rows(phase2_store_path))
+    for scale in scales:
+        stream = generate_core_observations(scale=scale)
+        for system in systems:
+            if (system, scale) in done:
+                continue
+            rows = _run_phase2_group(
+                system,
+                scale,
+                observations=stream.observations,
+                stream=stream,
+                materialize_root=materialize_root,
+                client=client,
+                session=session,
+                model=args.model,
+                mode=args.mode,
+                claude_binary=args.claude_binary,
+            )
+            _phase2_append_rows(phase2_store_path, rows)
+
+
+def _phase2_summary(
+    args: argparse.Namespace,
+    write_path_stats: Sequence[WritePathStats],
+    write_costs: Sequence[WriteCost],
+    phase2_store_path: Path,
+) -> str:
+    """One human-readable line for the report header (issue athenaeum#1785:
+    "the report header states phase2 on/off, scales, systems and the
+    API-writer fidelity marker"). ``""`` when Phase 2 never ran and the
+    sibling store carries nothing -- :class:`NorthStarReport.phase2_summary`
+    renders nothing for an empty string, byte-identical to a report from
+    before this field existed.
+
+    The fidelity marker comes from the ``meta`` rows' ``prompt_fidelity``
+    field -- ``"reconstructed"`` for every native group that ran in
+    ``--mode api`` (:attr:`~tests.evals.rollout.NativeWriterResult.prompt_fidelity`'s
+    own docstring: an api-mode Phase 2 number is an approximation pending
+    the CLI spot-check, never silently pooled with a cli-mode row as
+    equally faithful) -- so a reader of the header alone, without opening
+    the sibling store, still sees that label.
+    """
+    if not args.phase2 and not write_path_stats and not write_costs:
+        return ""
+    fidelity_markers = sorted(
+        {
+            row["prompt_fidelity"]
+            for row in _phase2_read_rows(phase2_store_path)
+            if row.get("kind") == "meta" and row.get("prompt_fidelity")
+        }
+    )
+    fidelity_note = (
+        f", native prompt_fidelity={','.join(fidelity_markers)}" if fidelity_markers else ""
+    )
+    if not args.phase2:
+        return f"off (sibling store carries data from an earlier --phase2 run{fidelity_note})"
+    scales = _resolve_phase2_scales(args)
+    systems = _resolve_phase2_systems(args)
+    return f"on (scales={','.join(scales)}, systems={','.join(systems)}{fidelity_note})"
 
 
 def check_floor_mismatch(
@@ -574,6 +936,43 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "the retrieval_hit_scores its rows carry, then exit 0 -- makes zero paid calls "
             "and runs no cells, so an operator can choose a --relevance-floor-vector/"
             "--relevance-floor-fts5 value before dispatching a floor-on grid."
+        ),
+    )
+    parser.add_argument(
+        "--phase2",
+        action="store_true",
+        help=(
+            "issue athenaeum#1785: also run the Phase 2 write path before the read grid -- "
+            "compile_observation_stream for the athenaeum system, run_native_writer_dispatch "
+            "for the native system -- writing one row per (system, scale) to a sibling JSONL "
+            "derived from --store (see --phase2-store). Default off; existing (non-Phase-2) "
+            "CLI behavior is byte-identical when omitted."
+        ),
+    )
+    parser.add_argument(
+        "--phase2-scales",
+        default=None,
+        help=(
+            "comma-separated corpus scales for the Phase 2 write path (default: "
+            f"{','.join(DEFAULT_PHASE2_SCALES)})"
+        ),
+    )
+    parser.add_argument(
+        "--phase2-store",
+        type=Path,
+        default=None,
+        help=(
+            "sibling JSONL path for Phase 2 rows (default: <--store path>.phase2.jsonl). "
+            "Never the same file as --store: Phase 2 rows carry no GridCell.cell_key() and "
+            "must never pass through the main ResultStore's resume contract."
+        ),
+    )
+    parser.add_argument(
+        "--phase2-systems",
+        default=None,
+        help=(
+            "comma-separated systems for the Phase 2 write path (default: "
+            f"{','.join(DEFAULT_PHASE2_SYSTEMS)})"
         ),
     )
     return parser
@@ -863,6 +1262,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     token_ceiling, ceiling_source = resolve_token_ceiling(args)
     projected_tokens = len(cells) * NORTH_STAR_CELL_TOKEN_ESTIMATE.total_tokens
 
+    # Issue athenaeum#1785: validated here, before any spend, mirroring
+    # _build_cells's own "validate before spend" discipline for
+    # --corpus-scales. phase2_cell_count is (scales x systems); each of
+    # those groups runs the FULL observation stream once, so the token
+    # projection below multiplies by n_observations, not by
+    # phase2_cell_count alone.
+    phase2_scales = _resolve_phase2_scales(args) if args.phase2 else []
+    phase2_systems = _resolve_phase2_systems(args) if args.phase2 else []
+    phase2_cell_count = len(phase2_scales) * len(phase2_systems)
+    # A pure local call (generate_core_observations makes zero network
+    # calls) -- safe to run even on the dry-run/refusal path, same as
+    # every other pre-flight sizing call in this function.
+    n_phase2_observations = len(generate_core_observations().observations) if args.phase2 else 0
+    phase2_projected_tokens = (
+        phase2_cell_count * n_phase2_observations * PHASE2_OBSERVATION_TOKEN_ESTIMATE.total_tokens
+    )
+    projected_tokens += phase2_projected_tokens
+
     # Printed BEFORE pricing, and therefore on the refusal path too (issue
     # athenaeum#1751): the operator question "does a full dispatch fit the
     # job's timeout window?" is asked precisely when the grid is big enough
@@ -887,23 +1304,64 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(
             f"token ceiling: {token_ceiling} ({ceiling_source}); "
             f"projected {projected_tokens} tokens for {len(cells)} cells "
-            f"(~{NORTH_STAR_CELL_TOKEN_ESTIMATE.total_tokens} tokens/cell estimate)"
+            f"(~{NORTH_STAR_CELL_TOKEN_ESTIMATE.total_tokens} tokens/cell estimate) "
+            f"{'plus ' + str(phase2_projected_tokens) + ' Phase 2 tokens' if args.phase2 else ''}"
         )
+        if args.phase2:
+            print(
+                f"phase2: scales={','.join(phase2_scales)} systems={','.join(phase2_systems)} "
+                f"{n_phase2_observations} observations x {phase2_cell_count} (scale x system) "
+                f"groups (~{PHASE2_OBSERVATION_TOKEN_ESTIMATE.total_tokens} tokens/observation "
+                "estimate)"
+            )
 
-    try:
-        estimate = price_grid(
-            cells,
+    # Issue athenaeum#1785: the spend gate must count Phase 2 alongside the
+    # read grid -- a --max-spend that only priced Phase 1 would let a real
+    # dispatch abort mid-Phase-2 having already paid for it. price_grid
+    # prices ONE per_cell rate over a cell list; Phase 2 uses a DIFFERENT
+    # per-observation rate, so it cannot share one price_grid call with the
+    # read grid. Instead: price the read grid without letting it refuse on
+    # its own (max_spend_usd=inf can never trip SpendCeilingExceededError),
+    # price Phase 2 the same way via a synthetic per-observation TokenUsage
+    # accumulation, sum the two USD figures, and apply ONE combined refusal
+    # against --max-spend -- so neither phase can silently exceed the
+    # ceiling on its own while the sum still reads as "under budget".
+    read_grid_estimate = price_grid(
+        cells,
+        model=args.model,
+        max_spend_usd=float("inf"),
+        per_cell=NORTH_STAR_CELL_TOKEN_ESTIMATE,
+    )
+    phase2_usage = TokenUsage()
+    for _ in range(phase2_cell_count * n_phase2_observations):
+        phase2_usage.add_tokens(
+            PHASE2_OBSERVATION_TOKEN_ESTIMATE.input_tokens,
+            PHASE2_OBSERVATION_TOKEN_ESTIMATE.output_tokens,
             model=args.model,
-            max_spend_usd=max_spend,
-            per_cell=NORTH_STAR_CELL_TOKEN_ESTIMATE,
         )
-    except SpendCeilingExceededError as exc:
-        print(str(exc), file=sys.stderr)
+    phase2_estimated_usd = phase2_usage.estimated_cost_usd
+    combined_estimated_usd = read_grid_estimate.estimated_usd + phase2_estimated_usd
+    if combined_estimated_usd > max_spend:
+        print(
+            f"planned grid ({read_grid_estimate.cell_count} cells @ {args.model}) prices at "
+            f"${read_grid_estimate.estimated_usd:.2f}"
+            + (
+                f" plus Phase 2 (${phase2_estimated_usd:.2f}) = ${combined_estimated_usd:.2f}"
+                if args.phase2
+                else ""
+            )
+            + f", exceeding --max-spend ${max_spend:.2f} -- refusing to start. Shrink --scale, "
+            "the probe/arm/corpus-scale/replicate lists, --phase2-scales/--phase2-systems, or "
+            "raise --max-spend deliberately.",
+            file=sys.stderr,
+        )
         return 1
+    estimate = read_grid_estimate
 
     print(
         f"scale={args.scale} cells={estimate.cell_count} "
         f"estimated=${estimate.estimated_usd:.4f} model={args.model}"
+        + (f" phase2_estimated=${phase2_estimated_usd:.4f}" if args.phase2 else "")
     )
 
     # Deliberately NOT inside `if args.dry_run` (Quine review of PR
@@ -937,10 +1395,28 @@ def main(argv: Sequence[str] | None = None) -> int:
         tempfile.mkdtemp(prefix="athenaeum-north-star-")
     )
     session = EvalSession()
+    phase2_store_path = _resolve_phase2_store_path(args)
 
     aborted = False
     abort_reason = ""
     try:
+        if args.phase2:
+            # Issue athenaeum#1785 proposal: the write path runs BEFORE the
+            # read grid. Shares *session* with _run_cells below, so
+            # --max-spend/--max-tokens governs Phase 1 + Phase 2 combined --
+            # assert_rollout_ceiling (after _run_cells) and _run_cells's own
+            # per-group ceiling check both read the SAME accumulator Phase 2
+            # already added to. build_live_client() is called only here,
+            # inside the try and after every refusal/dry-run return above --
+            # a Phase-2-off run, or the dry-run path, never constructs one.
+            client = build_live_client()
+            run_phase2(
+                args,
+                client=client,
+                session=session,
+                materialize_root=materialize_root,
+                phase2_store_path=phase2_store_path,
+            )
         _run_cells(
             cells,
             store=store,
@@ -980,15 +1456,27 @@ def main(argv: Sequence[str] | None = None) -> int:
     # of genuinely different store contents, not the same data decoded
     # twice.
     diagnostics = load_rollout_rows_and_diagnostics(store)
+    # Read back regardless of aborted/exception state above -- a Phase 2
+    # group that completed before a Phase 1 failure (or before a
+    # KeyboardInterrupt) already appended its rows durably (fsync'd,
+    # ResultStore-style -- see _phase2_append_rows), so a PARTIAL report
+    # still shows whatever Phase 2 data exists.
+    phase2_write_path_stats, phase2_write_costs = load_phase2_results(phase2_store_path)
+    phase2_summary_text = _phase2_summary(
+        args, phase2_write_path_stats, phase2_write_costs, phase2_store_path
+    )
     try:
         report = build_report(
             list(diagnostics.rows),
             aborted=aborted,
             abort_reason=abort_reason,
+            write_path_stats=phase2_write_path_stats,
+            write_costs=phase2_write_costs,
             verdict_arm=args.verdict_arm,
             planned_cells=read_planned_cells(store),
             torn_rows=diagnostics.torn,
             duplicate_rows=diagnostics.duplicates,
+            phase2_summary=phase2_summary_text,
         )
     except MixedFloorError as exc:
         # Issue athenaeum#1764 item 1: a mixed-floor store (rows carrying
@@ -1015,11 +1503,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 list(diagnostics.rows),
                 aborted=True,
                 abort_reason=abort_reason,
+                write_path_stats=phase2_write_path_stats,
+                write_costs=phase2_write_costs,
                 verdict_arm=args.verdict_arm,
                 planned_cells=read_planned_cells(store),
                 torn_rows=diagnostics.torn,
                 duplicate_rows=diagnostics.duplicates,
                 pool_floor_values=False,
+                phase2_summary=phase2_summary_text,
             )
         except Exception as recovery_exc:  # noqa: BLE001 -- see below
             # Quine review "should": this recovery build_report call can
