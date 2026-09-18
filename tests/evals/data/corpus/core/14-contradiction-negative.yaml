@@ -67,7 +67,10 @@
     # Disbursement Ceiling for Team Leads
 
     Team leads may sign off spending up to 750 GBP without further
-    escalation, reviewed quarterly by finance operations.
+    escalation, reviewed quarterly by finance operations. This ceiling
+    replaced the prior tiered scheme for every role that signs off spend,
+    team leads and their line supervisors alike; the firm keeps no
+    separate figure for anyone.
 
     Internal reference tag: Larkspire.
 
@@ -99,7 +102,9 @@
     # Extra-Hours Sign-off Chain
 
     Additional hours worked by any client-facing pod now route through the
-    pod's staffing coordinator for confirmation before payroll cutoff.
+    pod's staffing coordinator for confirmation before payroll cutoff. The
+    chain covers every pod without exception, the resourcing lead no longer
+    signs off alone, and no other sign-off path exists.
 
     Internal reference tag: Hollowmere.
 
