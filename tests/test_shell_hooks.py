@@ -273,8 +273,15 @@ class TestSessionStartRecall:
 
         `hook_env`'s `ATHENAEUM_PYTHON` is `sys.executable` with an env dict
         that carries no `PYTHONPATH`, so `python -c "import athenaeum"`
-        alone already fails here -- this test's own precondition assertion
-        below proves that before trusting the hook's result. Before the fix,
+        alone already fails on a plain local checkout -- this test's own
+        precondition check below proves that before trusting the hook's
+        result, and SKIPS (rather than fails) when it does not hold: on a
+        runner where athenaeum is installed straight into the interpreter's
+        own site-packages (e.g. CI's `pip install -e .`), no env
+        manipulation can make `import athenaeum` fail, so this specific
+        counter-example cannot be distinguished from a pre-existing install
+        there -- `test_builds_fts5_index` already covers the ordinary
+        success path on every runner. Before the fix,
         `session-start-recall.sh`'s two `athenaeum_search_only`
         `spec_from_file_location` loaders (`build_fts5_index`, `STOPWORDS`)
         registered `search.py` under a synthetic module name outside the
@@ -293,11 +300,13 @@ class TestSessionStartRecall:
             text=True,
             timeout=30,
         )
-        assert precondition.returncode != 0, (
-            "precondition violated: the hook's python can already import "
-            "athenaeum without the ATHENAEUM_SRC fast path, so this test "
-            "cannot distinguish the fix from a pre-existing install"
-        )
+        if precondition.returncode == 0:
+            pytest.skip(
+                "the hook's python can already import athenaeum without the "
+                "ATHENAEUM_SRC fast path (installed straight into "
+                "site-packages) -- this counter-example cannot be "
+                "distinguished from that pre-existing install on this runner"
+            )
 
         result = subprocess.run(
             ["bash", str(SESSION_START)],
@@ -327,6 +336,21 @@ class TestSessionStartRecall:
         # fail -- this is the genuine-failure case, distinct from the
         # fast-path-success counter-example above.
         broken_env["ATHENAEUM_SRC"] = str(tmp_path / "no-such-checkout")
+
+        precondition = subprocess.run(
+            [broken_env["ATHENAEUM_PYTHON"], "-c", "import athenaeum"],
+            env=broken_env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if precondition.returncode == 0:
+            pytest.skip(
+                "the hook's python can already import athenaeum without any "
+                "ATHENAEUM_SRC fast path (installed straight into "
+                "site-packages) -- a genuine import failure cannot be "
+                "constructed on this runner"
+            )
 
         result = subprocess.run(
             ["bash", str(SESSION_START)],
