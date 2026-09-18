@@ -2051,6 +2051,24 @@ class NorthStarReport:
     # see that function's own docstring.
     relevance_floor_vector: float | None = None
     relevance_floor_fts5: float | None = None
+    # issue athenaeum#1785: one human-readable summary line describing this
+    # run's Phase 2 write-path configuration (on/off, --phase2-scales,
+    # --phase2-systems, and an API-writer fidelity marker when the native
+    # system ran in api mode) -- computed by north_star_cli.py, which owns
+    # the dispatch flags this describes, and passed straight through here
+    # for the header to render. Empty string (the default) renders nothing,
+    # byte-identical to a pre-athenaeum#1785 report.
+    phase2_summary: str = ""
+    # issue athenaeum#1785 (Quine review of PR#1813, should-fix 1): the
+    # (system, corpus_scale) pairs whose write_path_stats/write_costs rows
+    # came from a PARTIAL (exit 75) athenaeum compile -- read from the
+    # sibling store's ``meta`` rows, which this dataclass otherwise never
+    # sees (WritePathStats/WriteCost carry no partial flag of their own).
+    # render_report marks each matching row in the "Write path (Phase 2)"
+    # table rather than rendering it identically to a clean compile, so a
+    # reader never mistakes a deadline-tripped run's numbers for a
+    # completed one. Empty frozenset (the default) marks nothing.
+    phase2_partial: frozenset[tuple[str, str]] = frozenset()
 
 
 class MixedFloorError(ValueError):
@@ -2111,6 +2129,8 @@ def build_report(
     torn_rows: int = 0,
     duplicate_rows: int = 0,
     pool_floor_values: bool = True,
+    phase2_summary: str = "",
+    phase2_partial: Sequence[tuple[str, str]] = (),
 ) -> NorthStarReport:
     """Assemble a :class:`NorthStarReport` from decoded result-store rows.
 
@@ -2165,6 +2185,8 @@ def build_report(
         duplicate_rows=duplicate_rows,
         relevance_floor_vector=relevance_floor_vector,
         relevance_floor_fts5=relevance_floor_fts5,
+        phase2_summary=phase2_summary,
+        phase2_partial=frozenset(phase2_partial),
     )
 
 
@@ -2200,6 +2222,11 @@ def render_report(report: NorthStarReport) -> str:
     )
     lines.append(f"- relevance_floor_vector: {floor_vector_display}")
     lines.append(f"- relevance_floor_fts5: {floor_fts5_display}")
+    # issue athenaeum#1785: printed only when non-empty, so a pre-Phase-2
+    # report (or a Phase-2-off run, which north_star_cli.py leaves this
+    # blank for) renders byte-identical to before this field existed.
+    if report.phase2_summary:
+        lines.append(f"- phase2: {report.phase2_summary}")
     for scale in sorted(report.corpus_digests):
         lines.append(f"- corpus_digest[{scale}]: {report.corpus_digests[scale]}")
     lines.append(f"- total rollout rows: {len(report.rows)}")
@@ -2526,20 +2553,32 @@ def render_report(report: NorthStarReport) -> str:
     )
     lines.append("")
     if report.write_path_stats:
+        # issue athenaeum#1785 (Quine review of PR#1813, should-fix 1): a
+        # trailing "partial" column, not a silently-clean row, for any
+        # (system, corpus_scale) pair whose numbers came from a deadline-
+        # tripped (exit 75) athenaeum compile.
+        if report.phase2_partial:
+            lines.append(
+                "_rows marked `partial` came from a deadline-tripped (exit 75) athenaeum "
+                "compile -- real but incomplete progress, not a clean run._"
+            )
+            lines.append("")
         lines.append(
             "| system | corpus_scale | pages_targeted | pages_written | answer_tokens_total | "
             "answer_tokens_retained | observations_total | observations_measured | "
-            "observations_dropped |"
+            "observations_dropped | partial |"
         )
-        lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+        lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
         for w in report.write_path_stats:
+            partial = "yes" if (w.system, w.corpus_scale) in report.phase2_partial else "no"
             lines.append(
                 f"| {w.system} | {w.corpus_scale} | {w.pages_targeted} | "
                 f"{w.pages_written if w.pages_written is not None else 'n/a'} | "
                 f"{w.answer_tokens_total} | "
                 f"{w.answer_tokens_retained if w.answer_tokens_retained is not None else 'n/a'} | "
                 f"{w.observations_total} | {w.observations_measured} | "
-                f"{w.observations_dropped if w.observations_dropped is not None else 'n/a'} |"
+                f"{w.observations_dropped if w.observations_dropped is not None else 'n/a'} | "
+                f"{partial} |"
             )
     else:
         lines.append("_no Phase 2 write-path data in this run_")
