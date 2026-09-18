@@ -96,6 +96,19 @@ class CompileOutcome:
     exit_code: int
     partial: bool
 
+    # Issue athenaeum#1824. The first Phase 2 smoke run (35292686290) exited
+    # 0, reported ``partial=False``, and looked like a clean compile -- while
+    # having processed 50 of its 213 raw files and deferred the other 163 to
+    # a later night (the librarian's ``max_files`` window is a per-run batch
+    # size, not a drop; its own log said ``backlog-drain-advisor: 163
+    # deferred file(s)``). Nothing on this record could say so, so a 5-of-36
+    # retention number was read as a librarian failure for a day. This field
+    # is the missing signal: raw files still present under ``raw/`` after the
+    # compile returned. A nonzero value means the store was measured before
+    # the input finished compiling and the retention number is a FLOOR, not
+    # a result.
+    deferred_raw_files: int = 0
+
 
 def _usage_of(response: Any) -> dict[str, int]:
     """Extract the four token counters athenaeum's spend ledger reads,
@@ -265,6 +278,31 @@ def _read_wiki_store(wiki_root: Path) -> dict[str, str]:
     return store
 
 
+#: Observations bundled into one raw intake file by default (issue
+#: athenaeum#1824). Production intake is Claude's own auto-memory output:
+#: ONE file per session, carrying every observation that session produced.
+#: The first Phase 2 smoke run materialised one file per OBSERVATION instead
+#: -- 213 singleton files for a stream a real day would have delivered as a
+#: few dozen session files -- and that shape difference, not any librarian
+#: decision, is what overflowed the ``max_files`` window.
+#:
+#: Six is a plausible session length, nothing more. It is deliberately NOT
+#: chosen to squeak the stream under the 50-file window: that margin would
+#: evaporate the moment a core page is added, and it is the ``max_files``
+#: sizing in :func:`compile_observation_stream` -- not the bundle size --
+#: that actually removes the gate. Callers who want the old
+#: one-file-per-observation shape pass ``session_size=1`` explicitly.
+DEFAULT_SESSION_SIZE = 6
+
+
+def _count_raw_files(raw_root: Path) -> int:
+    """Raw intake files still present under *raw_root* -- what
+    :attr:`CompileOutcome.deferred_raw_files` reports after a compile."""
+    if not raw_root.is_dir():
+        return 0
+    return sum(1 for path in raw_root.rglob("*.md") if path.is_file())
+
+
 def compile_observation_stream(
     stream: ObservationStream,
     knowledge_root: Path,
@@ -272,6 +310,7 @@ def compile_observation_stream(
     client: Any,
     model: str,
     session: EvalSession | None = None,
+    session_size: int = DEFAULT_SESSION_SIZE,
     run_kwargs: dict[str, Any] | None = None,
 ) -> tuple[dict[str, str], WriteCost, CompileOutcome]:
     """Compile *stream* through the real librarian pipeline and return the
@@ -287,7 +326,9 @@ def compile_observation_stream(
     *knowledge_root* is seeded (or reused, if it already carries a
     ``wiki/_schema`` tree and a ``.git`` repo) with the minimal schema and
     git history the librarian needs, then *stream* is materialised into
-    ``knowledge_root/raw/<source>/`` and compiled via
+    ``knowledge_root/raw/<source>/`` -- in PRODUCTION INTAKE SHAPE,
+    *session_size* observations per raw file (:data:`DEFAULT_SESSION_SIZE`;
+    issue athenaeum#1824) -- and compiled via
     :func:`athenaeum.librarian.run` — the production entrypoint, not a
     reimplementation of Tier 1/2/3. *client* is installed for the duration of
     the compile by patching ``anthropic.Anthropic`` (mirrors
@@ -317,8 +358,9 @@ def compile_observation_stream(
     knowledge_root = Path(knowledge_root)
     _seed_knowledge_root(knowledge_root)
     _ensure_git_repo(knowledge_root)
-    stream.materialize(knowledge_root)
+    raw_root = stream.materialize(knowledge_root, session_size=session_size)
     _write_athenaeum_yaml(knowledge_root, model)
+    materialized_files = _count_raw_files(raw_root)
 
     tracking = _SpendTrackingClient(client, session=session, model=model)
 
@@ -334,6 +376,19 @@ def compile_observation_stream(
     run_options: dict[str, Any] = {
         "live_session_guard": False,
         "install_signal_handlers": False,
+        # Issue athenaeum#1824. ``max_files`` (default 50) is the librarian's
+        # per-RUN batch size: a nightly deployment works through a larger
+        # backlog over successive nights, and files beyond the window are
+        # DEFERRED, never dropped. A compile run here is one run, scored
+        # immediately -- so leaving the default in place measures "what one
+        # night compiles", not "what the librarian retains", and silently
+        # scores the deferred remainder as loss (run 35292686290: 163 of 213
+        # files deferred, 31 of 36 planted tokens attributed to that window
+        # alone). Sizing the window to the materialised file count is the
+        # single-run equivalent of letting the backlog drain. Never 0 --
+        # ``librarian_max_files`` accepts 0 as a legal window of zero files.
+        # A caller may still override it via *run_kwargs*.
+        "max_files": max(materialized_files, 1),
     }
     run_options.update(run_kwargs or {})
 
@@ -364,5 +419,9 @@ def compile_observation_stream(
         input_tokens=tracking.input_tokens,
         output_tokens=tracking.output_tokens,
     )
-    outcome = CompileOutcome(exit_code=exit_code, partial=exit_code == EXIT_GRACEFUL_PARTIAL)
+    outcome = CompileOutcome(
+        exit_code=exit_code,
+        partial=exit_code == EXIT_GRACEFUL_PARTIAL,
+        deferred_raw_files=_count_raw_files(raw_root),
+    )
     return store_files, write_cost, outcome
