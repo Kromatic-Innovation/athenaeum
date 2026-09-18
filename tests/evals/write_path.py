@@ -39,26 +39,49 @@ accounting every other eval layer's live turn uses.
 Out of scope (issue athenaeum#1775): CLI flags / ``evals.yml`` wiring
 (athenaeum#1785/#1786), the native-side writer (athenaeum#1774, item L), and
 any change to ``athenaeum.intake``/``athenaeum.tiers`` themselves.
+
+Operator ruling, issue athenaeum#1830 (Kromatic-Innovation/athenaeum#1791,
+comment 5732689494): "the librarian is not a fact writer and never acts as
+one in production; it files what Claude (or an adapter) has already written
+into raw intake." :func:`compile_observation_stream` above compiles RAW
+OBSERVATIONS directly -- a job the librarian never does in production, so
+its retention number is not comparable to anything the librarian is
+actually deployed to do. It stays exported and tested as a diagnostic (its
+signature is unchanged), but Phase 2's default athenaeum arm is now
+:func:`compile_native_memory_files`, which compiles the NATIVE writer's own
+``NativeWriterResult.memory_files`` -- Claude's own memory files, materialised
+as auto-memory intake under ``raw/auto-memory/`` the way production intake
+receives them -- so the measured comparison is "Claude's memories versus
+Claude's memories after filing," not "the librarian's judgement versus
+Claude's judgement on the same raw notes."
 """
 
 from __future__ import annotations
 
 import dataclasses
 import os
+import re
 import subprocess
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
 import yaml
 
+from athenaeum.intake import AUTO_MEMORY_FILE_RE
 from athenaeum.librarian import EXIT_GRACEFUL_PARTIAL, EXIT_LIBRARIAN_REFUSAL
 from athenaeum.librarian import run as librarian_run
 from tests.evals.corpus import ObservationStream
 from tests.evals.harness import EvalSession
 from tests.evals.north_star_report import WriteCost
 
-__all__ = ["CompileOutcome", "LibrarianCompileError", "compile_observation_stream"]
+__all__ = [
+    "CompileOutcome",
+    "LibrarianCompileError",
+    "compile_native_memory_files",
+    "compile_observation_stream",
+]
 
 
 class LibrarianCompileError(RuntimeError):
@@ -431,5 +454,167 @@ def compile_observation_stream(
         exit_code=exit_code,
         partial=exit_code == EXIT_GRACEFUL_PARTIAL,
         deferred_raw_files=_count_raw_files(raw_root),
+    )
+    return store_files, write_cost, outcome
+
+
+# ---------------------------------------------------------------------------
+# Native-memory-files compile (issue athenaeum#1830) -- the arm the operator
+# ruling above actually asks for.
+# ---------------------------------------------------------------------------
+
+#: Filenames never filed as auto-memory intake (issue athenaeum#1830).
+#: ``MEMORY.md`` is the native writer's own curated index
+#: (``_NATIVE_WRITER_SYSTEM_PROMPT_TEMPLATE``, ``tests/evals/rollout.py``) --
+#: it is a SUMMARY of the other files, not a memory of its own, and
+#: ``athenaeum.intake._AUTO_MEMORY_SKIP_NAMES`` already excludes it from
+#: production discovery for exactly that reason. Filing it here too would
+#: double-count every token it happens to echo from a real memory file.
+_NATIVE_MEMORY_SKIP_NAMES: frozenset[str] = frozenset({"MEMORY.md"})
+
+
+def _auto_memory_filename(original_name: str) -> str:
+    """Return a filename :data:`athenaeum.intake.AUTO_MEMORY_FILE_RE` will
+    match, deriving it from *original_name* (issue athenaeum#1830).
+
+    The native writer's own system prompt (``rollout._NATIVE_WRITER_SYSTEM_PROMPT_TEMPLATE``)
+    tells the model to name its own topic files -- it says nothing about the
+    ``feedback_``/``project_``/``reference_``/``user_``/``Recall_`` filename
+    convention (or the ``metadata.type`` frontmatter fallback) production
+    auto-memory intake discovery requires; that convention is out of this
+    issue's scope to add to the writer prompt (``write_path.py``'s module
+    docstring, "Out of scope"). Rather than materialise a file
+    ``athenaeum.intake.discover_auto_memory_files`` would silently skip --
+    which would make this arm's headline retention number structurally zero,
+    not a measurement of anything -- every native file is refiled under the
+    ``reference_`` prefix (the closest of the five to "an arbitrary saved
+    note", and the same prefix ``auto_memory_type_from_frontmatter`` maps to
+    the ``reference`` type): a NAMED, visible adaptation of the eval harness,
+    not a claim about what Claude itself wrote. The original name (already
+    a relative path under the memory directory, e.g. a nested topic) is
+    slugified into the filename so two different native files never collide
+    on the same auto-memory name.
+    """
+    if AUTO_MEMORY_FILE_RE.match(original_name):
+        return original_name
+    stem = Path(original_name).with_suffix("").as_posix()
+    slug = re.sub(r"[^a-z0-9]+", "-", stem.lower()).strip("-") or "note"
+    return f"reference_{slug}.md"
+
+
+def compile_native_memory_files(
+    memory_files: Mapping[str, str],
+    knowledge_root: Path,
+    *,
+    client: Any,
+    model: str,
+    corpus_scale: str,
+    session: EvalSession | None = None,
+    scope: str = "eval-native-writer",
+    run_kwargs: dict[str, Any] | None = None,
+) -> tuple[dict[str, str], WriteCost, CompileOutcome]:
+    """Compile the NATIVE writer's own output through the real librarian
+    (issue athenaeum#1830, operator ruling on Kromatic-Innovation/athenaeum#1791
+    comment 5732689494): "the athenaeum write-path arm becomes 'the native
+    arm's own memory files, compiled by the librarian', and retention is
+    measured on the compiled result against those same files."
+
+    *memory_files* is :attr:`~tests.evals.rollout.NativeWriterResult.memory_files`
+    -- Claude's own auto-memory output for the observation stream that
+    produced it, unchanged from :func:`compile_observation_stream`'s
+    RAW-observation input. Every entry except :data:`_NATIVE_MEMORY_SKIP_NAMES`
+    is materialised UNDER ``knowledge_root/raw/auto-memory/<scope>/`` -- the
+    tree :func:`athenaeum.intake.discover_auto_memory_files` walks in
+    production, not the plain ``raw/<source>/`` tree
+    :func:`compile_observation_stream` uses -- with its body carried over
+    byte-for-byte (frontmatter, if the file already carries any, preserved
+    exactly) and only its FILENAME adapted when necessary for discovery (see
+    :func:`_auto_memory_filename`).
+
+    *corpus_scale* is stamped onto the returned :class:`WriteCost` the same
+    way :func:`compile_observation_stream` stamps *stream.scale* onto its
+    own -- a native memory-file dict carries no scale of its own, since it
+    is Claude's own writer output, not a generated stream.
+
+    Otherwise identical to :func:`compile_observation_stream`: same schema
+    seeding, same git-repo discipline, same :class:`_SpendTrackingClient`
+    spend capture, same ``max_files`` sized to the materialised file count
+    (so a compile run here never defers a file the way the pre-athenaeum#1824
+    smoke run did), and the same :class:`LibrarianCompileError`/
+    :class:`CompileOutcome` exit-code contract. Returns ``(store_files,
+    write_cost, outcome)``.
+    """
+    knowledge_root = Path(knowledge_root)
+    _seed_knowledge_root(knowledge_root)
+    _ensure_git_repo(knowledge_root)
+
+    auto_memory_dir = knowledge_root / "raw" / "auto-memory" / scope
+    auto_memory_dir.mkdir(parents=True, exist_ok=True)
+    materialized = 0
+    for name, text in memory_files.items():
+        if Path(name).name in _NATIVE_MEMORY_SKIP_NAMES:
+            continue
+        filename = _auto_memory_filename(name)
+        (auto_memory_dir / filename).write_text(text, encoding="utf-8")
+        materialized += 1
+
+    _write_athenaeum_yaml(knowledge_root, model)
+
+    tracking = _SpendTrackingClient(client, session=session, model=model)
+
+    had_key = "ANTHROPIC_API_KEY" in os.environ
+    if not had_key:
+        os.environ["ANTHROPIC_API_KEY"] = "eval-write-path-compile-not-a-real-key"
+
+    run_options: dict[str, Any] = {
+        "live_session_guard": False,
+        "install_signal_handlers": False,
+        # Same reasoning as compile_observation_stream's own max_files
+        # comment (issue athenaeum#1824): size the window to the input so a
+        # single compile run never defers a file to a later night.
+        "max_files": max(materialized, 1),
+    }
+    run_options.update(run_kwargs or {})
+
+    try:
+        with patch("anthropic.Anthropic", lambda **kwargs: tracking):
+            exit_code = librarian_run(
+                raw_root=knowledge_root / "raw",
+                wiki_root=knowledge_root / "wiki",
+                knowledge_root=knowledge_root,
+                **run_options,
+            )
+    finally:
+        if not had_key:
+            os.environ.pop("ANTHROPIC_API_KEY", None)
+
+    if exit_code in (1, EXIT_LIBRARIAN_REFUSAL):
+        raise LibrarianCompileError(
+            f"athenaeum.librarian.run exited {exit_code} during "
+            "compile_native_memory_files (1=error, "
+            f"{EXIT_LIBRARIAN_REFUSAL}=EXIT_LIBRARIAN_REFUSAL, a "
+            "zero-progress refusal) — see docs/reference/exit-codes.md"
+        )
+
+    store_files = _read_wiki_store(knowledge_root / "wiki")
+    write_cost = WriteCost(
+        system="athenaeum",
+        corpus_scale=corpus_scale,
+        input_tokens=tracking.input_tokens,
+        output_tokens=tracking.output_tokens,
+    )
+    outcome = CompileOutcome(
+        exit_code=exit_code,
+        partial=exit_code == EXIT_GRACEFUL_PARTIAL,
+        # Issue athenaeum#1830: unlike raw/<source> (compile_observation_stream's
+        # own tree), auto-memory intake is NOT move-then-retire -- clustering
+        # (athenaeum.clusters) reads the same files across runs, so "still
+        # present on disk after the compile" is not evidence of deferral the
+        # way it is for CompileOutcome.deferred_raw_files's original
+        # raw/<source> meaning (see that field's own docstring). Always 0
+        # here rather than a count that would look like a real signal but
+        # isn't one; ``max_files`` is still sized to the materialised file
+        # count above, which is the actual deferral guard.
+        deferred_raw_files=0,
     )
     return store_files, write_cost, outcome

@@ -44,6 +44,8 @@ from tests.evals.write_path import (
     _MODEL_KNOBS,
     CompileOutcome,
     LibrarianCompileError,
+    _auto_memory_filename,
+    compile_native_memory_files,
     compile_observation_stream,
 )
 
@@ -470,3 +472,128 @@ def test_compile_observation_stream_returns_partial_outcome_on_graceful_partial(
     assert isinstance(outcome, CompileOutcome)
     assert outcome.exit_code == EXIT_GRACEFUL_PARTIAL
     assert outcome.partial is True
+
+
+# ---------------------------------------------------------------------------
+# compile_native_memory_files (issue athenaeum#1830) -- the arm the operator
+# ruling on Kromatic-Innovation/athenaeum#1791 comment 5732689494 actually
+# asks for: compile the NATIVE writer's own memory files, not raw
+# observations directly.
+# ---------------------------------------------------------------------------
+
+
+def test_auto_memory_filename_passes_a_conforming_name_through_unchanged() -> None:
+    assert _auto_memory_filename("reference_pto_policy.md") == "reference_pto_policy.md"
+    assert _auto_memory_filename("feedback_onboarding.md") == "feedback_onboarding.md"
+
+
+def test_auto_memory_filename_refiles_a_native_topic_file_under_reference() -> None:
+    """The native writer's own system prompt names topic files however it
+    pleases (``rollout._NATIVE_WRITER_SYSTEM_PROMPT_TEMPLATE``'s own
+    docstring note) -- a name that misses
+    ``athenaeum.intake.AUTO_MEMORY_FILE_RE`` must be refiled under
+    ``reference_``, never materialised as-is (which
+    ``discover_auto_memory_files`` would silently skip -- see the
+    discoverability test below)."""
+    assert _auto_memory_filename("policy-notes.md") == "reference_policy-notes.md"
+    assert _auto_memory_filename("PTO Notes.md") == "reference_pto-notes.md"
+
+
+def test_auto_memory_filename_is_stable_and_collision_resistant() -> None:
+    a = _auto_memory_filename("nested/topic.md")
+    b = _auto_memory_filename("other/topic.md")
+    assert a != b, "two different native paths must not collapse to the same auto-memory name"
+    assert _auto_memory_filename("nested/topic.md") == a, "must be deterministic"
+
+
+def test_compile_native_memory_files_materializes_under_auto_memory_and_skips_memory_md(
+    tmp_path: Path,
+) -> None:
+    """The discoverability proof issue athenaeum#1830 turns on: a file
+    materialised by this function must actually be found by
+    ``athenaeum.intake.discover_auto_memory_files`` -- the difference
+    between "the librarian dropped this" and "the harness never offered
+    it", exactly the distinction
+    ``docs/measurements/write-path-retention-2026-09-18.md`` §6 says was
+    misread for a day when the eval-shape gap was undiagnosed. Runs only
+    the materialize step (no model call, no librarian compile) by reaching
+    into the same private seeding helpers
+    ``test_compile_observation_stream_materializes_raw_files_before_compiling``
+    uses -- this test is about DISCOVERY, not the compile pipeline.
+    """
+    from athenaeum.intake import discover_auto_memory_files
+    from tests.evals.write_path import (
+        _NATIVE_MEMORY_SKIP_NAMES,
+        _auto_memory_filename,
+        _ensure_git_repo,
+        _seed_knowledge_root,
+    )
+
+    knowledge_root = tmp_path / "knowledge"
+    _seed_knowledge_root(knowledge_root)
+    _ensure_git_repo(knowledge_root)
+
+    memory_files = {
+        "policy-notes.md": "PTO allowance is 25 days. Cinderquill7.",
+        "MEMORY.md": "- policy-notes — PTO policy notes",
+    }
+    scope = "eval-native-writer"
+    auto_memory_dir = knowledge_root / "raw" / "auto-memory" / scope
+    auto_memory_dir.mkdir(parents=True)
+    for name, text in memory_files.items():
+        if Path(name).name in _NATIVE_MEMORY_SKIP_NAMES:
+            continue
+        (auto_memory_dir / _auto_memory_filename(name)).write_text(text, encoding="utf-8")
+
+    assert not (auto_memory_dir / "MEMORY.md").exists()
+    assert (auto_memory_dir / "reference_policy-notes.md").exists()
+
+    discovered = discover_auto_memory_files(knowledge_root)
+    discovered_paths = {f.path.name for f in discovered}
+    assert "reference_policy-notes.md" in discovered_paths, (
+        f"discover_auto_memory_files did not find the materialised file -- "
+        f"discovered paths: {discovered_paths!r}"
+    )
+    assert not any("MEMORY.md" in str(f.path) for f in discovered)
+
+
+def test_compile_native_memory_files_runs_the_real_librarian_end_to_end(
+    tmp_path: Path,
+) -> None:
+    """End to end through the REAL librarian pipeline (issue athenaeum#1830),
+    same discipline as ``compile_observation_stream``'s own integration
+    tests above: a canned client, offline, no network. The auto-memory
+    intake path routes through clustering (``athenaeum.clusters``) rather
+    than the raw-intake classify/create hop pair ``_make_stub_responder``
+    models, so this is a plumbing/spend-capture proof -- the materialize +
+    discovery half of the contract is pinned separately, above, by
+    ``test_compile_native_memory_files_materializes_under_auto_memory_and_skips_memory_md``.
+    """
+    knowledge_root = tmp_path / "knowledge"
+    memory_files = {
+        "policy-notes.md": "PTO allowance is 25 days. Cinderquill7.",
+        "MEMORY.md": "- policy-notes — PTO policy notes",
+    }
+    usage = make_llm_usage(input_tokens=37, output_tokens=11)
+
+    def _responder(**_kwargs: Any) -> Any:
+        # A harmless empty JSON array parses cleanly wherever a
+        # classify-shaped response is expected and is ignored by anything
+        # that tolerates "no findings" -- same idiom as
+        # _make_stub_responder's own "<none>" branch.
+        return make_llm_response("[]", usage=usage)
+
+    client = FakeLLMClient(responder=_responder)
+
+    store_files, write_cost, outcome = compile_native_memory_files(
+        memory_files,
+        knowledge_root,
+        client=client,
+        model="claude-haiku-4-5",
+        corpus_scale="core",
+    )
+
+    assert outcome.exit_code in (0, EXIT_GRACEFUL_PARTIAL)
+    assert write_cost.system == "athenaeum"
+    assert write_cost.corpus_scale == "core"
+    assert isinstance(store_files, dict)
