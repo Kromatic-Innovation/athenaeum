@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -304,6 +306,80 @@ class TestVectorBackend:
         assert isinstance(fname, str)
         assert isinstance(name, str)
         assert isinstance(score, float)
+
+    def test_concurrent_build_index_serializes_chromadb_cache_clear(
+        self, wiki_with_pages: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression for issue athenaeum#1816.
+
+        ``chromadb.api.client.SharedSystemClient`` keys its process-global
+        ``_identifier_to_system`` cache by persist directory, and
+        ``clear_system_cache()`` unconditionally replaces the WHOLE dict --
+        not just the caller's own entry. The north-star eval grid runs
+        ``--search-backend vector`` with multiple worker threads, each
+        calling :meth:`VectorBackend.build_index` for its OWN cache dir
+        concurrently. Before the ``_VECTOR_CLIENT_LOCK`` fix, two such
+        threads could both be inside their own clear-then-acquire window at
+        once: thread A registers its system under
+        ``_identifier_to_system[A_path]``, then thread B's concurrent
+        ``clear_system_cache()`` wipes the dict (A's entry included), and
+        A's subsequent access to ``SharedSystemClient._system`` (a bare
+        ``dict[key]``, no ``.get``) raises ``KeyError`` on A's OWN path --
+        exactly the opaque ``abort_reason`` this issue reports (a worker's
+        own ``wiki-vectors`` cache path as the entire exception message).
+
+        Proven here by making ``clear_system_cache`` linger (a bounded
+        sleep widens the race window deterministically) while tracking how
+        many threads are inside it at once, from two threads building TWO
+        DIFFERENT cache dirs concurrently. Without the lock this test's
+        ``max_concurrent`` assertion fails near-certainly (the sleep is
+        much longer than the two threads' near-simultaneous start); with
+        the lock it is 1 by construction.
+        """
+        from chromadb.api.client import SharedSystemClient
+
+        real_clear = SharedSystemClient.clear_system_cache
+        state_lock = threading.Lock()
+        state = {"current": 0, "max_concurrent": 0}
+
+        def tracking_clear() -> None:
+            with state_lock:
+                state["current"] += 1
+                state["max_concurrent"] = max(
+                    state["max_concurrent"], state["current"]
+                )
+            time.sleep(0.05)
+            real_clear()
+            with state_lock:
+                state["current"] -= 1
+
+        monkeypatch.setattr(SharedSystemClient, "clear_system_cache", tracking_clear)
+
+        errors: list[BaseException] = []
+
+        def _build(cache_dir: Path) -> None:
+            try:
+                VectorBackend().build_index(wiki_with_pages, cache_dir)
+            except BaseException as exc:  # noqa: BLE001 -- captured, not swallowed
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=_build, args=(tmp_path / f"cache-{i}",))
+            for i in range(2)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert not errors, (
+            "concurrent build_index() calls on distinct cache dirs raised: "
+            f"{errors!r}"
+        )
+        assert state["max_concurrent"] == 1, (
+            "two threads were inside SharedSystemClient.clear_system_cache() "
+            "at once -- _VECTOR_CLIENT_LOCK did not serialize them"
+        )
 
 
 class TestHitsFromQueryResults:

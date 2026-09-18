@@ -126,6 +126,39 @@ def test_round_trip_preserves_empty_defaults() -> None:
     assert restored == record
 
 
+def test_round_trip_preserves_hybrid_active() -> None:
+    """Issue athenaeum#1816: ``hybrid_active`` (whether the vector backend's
+    RRF fusion had a real FTS5 index to fuse against) must round-trip
+    losslessly for BOTH non-default values, not just survive as ``None``
+    the way ``test_round_trip_is_lossless_for_every_field`` already covers.
+    """
+    for value in (True, False):
+        record = RolloutRecord(
+            arm=Arm.PULL,
+            probe_id="p",
+            probe_class="single_hop",
+            corpus_scale="medium",
+            answer="a",
+            search_backend="vector",
+            hybrid_active=value,
+        )
+        restored = RolloutRecord.from_payload(json.loads(json.dumps(record.to_payload())))
+        assert restored.hybrid_active is value
+        assert restored == record
+
+
+def test_from_payload_defaults_hybrid_active_for_a_pre_1816_payload() -> None:
+    """A row persisted before issue athenaeum#1816 carries no
+    ``hybrid_active`` key at all -- must decode as ``None`` ("unknown/not
+    applicable"), never raise ``KeyError``."""
+    payload = _full_record().to_payload()
+    del payload["hybrid_active"]
+
+    restored = RolloutRecord.from_payload(payload)
+
+    assert restored.hybrid_active is None
+
+
 def test_from_payload_ignores_extra_persisted_keys() -> None:
     """A stored ResultStore row carries ``cell_key``/``replicate`` alongside
     the record's own fields (see

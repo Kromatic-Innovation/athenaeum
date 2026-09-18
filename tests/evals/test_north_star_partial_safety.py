@@ -739,3 +739,109 @@ def test_run_grid_appends_every_completed_cell_before_reraising(tmp_path: Path) 
     expected = {cell.cell_key() for cell in cells if cell.probe != doomed}
     assert persisted == expected, "a completed cell's row was dropped when another cell raised"
     assert store.count_torn_rows() == 0
+
+
+# ---------------------------------------------------------------------------
+# abort_reason carries the exception TYPE, not just its (possibly opaque)
+# message -- issue athenaeum#1816
+# ---------------------------------------------------------------------------
+
+
+def test_format_abort_reason_names_the_type_for_a_path_shaped_message() -> None:
+    """Pins the exact regression from run 35307958915.
+
+    ``str(KeyError('/tmp/.../wiki-vectors'))`` is a bare quoted path --
+    indistinguishable from a string literal once the exception's type is
+    dropped, which is exactly what the pre-fix ``str(exc) or
+    type(exc).__name__`` did. ``_format_abort_reason`` must always prefix
+    the type name, so a `KeyError` and a `FileNotFoundError` sharing the
+    same path-shaped message are still told apart.
+    """
+    cache_path = "/tmp/x/w3/medium-0/cache/wiki-vectors"
+    try:
+        raise KeyError(cache_path)
+    except KeyError as exc:
+        formatted = north_star_cli._format_abort_reason(exc)
+
+    assert formatted.startswith("KeyError: "), formatted
+    assert cache_path in formatted, formatted
+    # The bare pre-fix shape this replaces -- a quoted path with no type
+    # name at all -- must not be what a reader sees.
+    assert formatted != repr(cache_path)
+
+
+def test_format_abort_reason_handles_an_empty_message() -> None:
+    """``KeyboardInterrupt`` is the real (non-hypothetical) empty-message
+    case this handler sees -- ``str(KeyboardInterrupt())`` is ``""``, so
+    the pre-fix ``str(exc) or type(exc).__name__`` degraded to the bare
+    type name with no ``": "`` separator. One invariant format (accepting
+    the trailing ``": "`` with nothing after it) is pinnable; a
+    conditional between "has a message" and "does not" is not.
+    """
+    try:
+        raise KeyboardInterrupt
+    except KeyboardInterrupt as exc:
+        formatted = north_star_cli._format_abort_reason(exc)
+
+    # A raised (not merely constructed) exception always carries a
+    # traceback, so the ": " separator is followed by the locator, never
+    # bare -- the empty-message property under test is that nothing sits
+    # between "KeyboardInterrupt:" and the space before "(".
+    assert formatted.startswith("KeyboardInterrupt:  ("), formatted
+    assert __file__ in formatted, formatted
+
+
+def test_format_abort_reason_appends_the_last_traceback_frame_location() -> None:
+    """An operator reading only the rendered report header (not stderr,
+    where the full traceback is separately logged) still gets a locator."""
+
+    def _raiser() -> None:
+        raise ValueError("boom")
+
+    try:
+        _raiser()
+    except ValueError as exc:
+        formatted = north_star_cli._format_abort_reason(exc)
+
+    assert formatted.startswith("ValueError: boom ("), formatted
+    assert __file__ in formatted, formatted
+
+
+def test_format_abort_reason_survives_no_traceback() -> None:
+    """A caught-but-never-raised exception (constructed directly) carries
+    no traceback -- ``extract_tb`` must be guarded against the empty list
+    before indexing ``[-1]``, not crash the abort handler itself."""
+    exc = RuntimeError("constructed, never raised")
+    assert north_star_cli._format_abort_reason(exc) == "RuntimeError: constructed, never raised"
+
+
+def test_main_abort_reason_names_the_type_end_to_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end: a KeyError whose message is a bare cache path -- the
+    exact shape run 35307958915 aborted with -- must render in the WRITTEN
+    report with its type name attached, not as an unattributed path.
+    """
+    cache_path = str(tmp_path / "w3" / "medium-0" / "cache" / "wiki-vectors")
+
+    def _dying_stub(
+        probe_id: str,
+        corpus_scale: str,
+        *,
+        session: Any,
+        materialize_root: Any,
+        model: str,
+        search_backend: str,
+        claude_binary: str,
+        replicate: int,
+        mode: str = "cli",
+        should_stop: Any = None,
+    ) -> dict[str, RolloutRecord]:
+        raise KeyError(cache_path)
+
+    monkeypatch.setattr(north_star_cli, "run_probe_all_arms", _dying_stub)
+    exit_code = north_star_cli.main(_small_grid_args(tmp_path, workers=1))
+
+    assert exit_code == 1
+    text = _sole_report_text(tmp_path / "measurements-1")
+    assert f"KeyError: {cache_path!r}" in text, text

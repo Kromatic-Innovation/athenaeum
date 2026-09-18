@@ -2241,6 +2241,38 @@ def _report_search_backend_display(rows: Sequence[RolloutRow]) -> str:
     return ", ".join(backends) if backends else "fts5"
 
 
+def _report_hybrid_display(rows: Sequence[RolloutRow]) -> str | None:
+    """Issue athenaeum#1816: whether the vector backend's RRF hybrid fusion
+    (``mcp_server.recall_search``'s ``backend_name == "vector" and
+    resolve_recall_hybrid(config)`` block, DEFAULT ON) had a real FTS5
+    index to fuse against, for the report header -- so a vector-dispatch
+    report visibly distinguishes "measured the shipped hybrid" from "fell
+    back to vector-only ranking for every call" (the exact defect this
+    issue reports) without a reader opening the store JSONL.
+
+    Returns ``None`` when *rows* carries no vector-backend row at all --
+    the question does not apply to an fts5/keyword-only report, and the
+    header omits the line entirely rather than printing a value for a
+    backend that was never dispatched. ``"unknown"`` when every vector row
+    predates the ``hybrid_active`` field (back-compat). ``"mixed"`` for a
+    store somehow carrying both true and false (unreachable through normal
+    dispatch -- one grid, one fix -- but never silently averaged away).
+    Otherwise ``"on"``/``"off"`` for the single value every vector row in
+    this store shares.
+    """
+    vector_rows = [r for r in rows if (r.record.search_backend or "fts5") == "vector"]
+    if not vector_rows:
+        return None
+    known = {
+        r.record.hybrid_active for r in vector_rows if r.record.hybrid_active is not None
+    }
+    if not known:
+        return "unknown"
+    if len(known) > 1:
+        return "mixed"
+    return "on" if next(iter(known)) else "off"
+
+
 def render_report(report: NorthStarReport) -> str:
     """Render *report* as markdown, in the issue's own dimension order:
     PULL no-call rate first, then query quality, cost, efficiency, waste,
@@ -2263,6 +2295,11 @@ def render_report(report: NorthStarReport) -> str:
     # labelled its own section beside the default fts5 report, never
     # merged into it.
     lines.append(f"- search_backend: {_report_search_backend_display(report.rows)}")
+    # issue athenaeum#1816: printed only for a store that actually carries a
+    # vector row -- see _report_hybrid_display's own docstring.
+    hybrid_display = _report_hybrid_display(report.rows)
+    if hybrid_display is not None:
+        lines.append(f"- hybrid: {hybrid_display}")
     # issue athenaeum#1761: printed unconditionally, "off" when no operator
     # ever set a floor -- so a reader never has to infer floor status from
     # absence.

@@ -62,6 +62,7 @@ import queue
 import sys
 import tempfile
 import threading
+import traceback
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -70,6 +71,7 @@ from typing import Any
 import yaml
 
 from athenaeum.models import TokenUsage
+from athenaeum.search import fts5_index_available
 from tests.evals.containment import (
     DEFAULT_CELL_SECONDS,
     NORTH_STAR_CELL_TOKEN_ESTIMATE,
@@ -1245,9 +1247,22 @@ def _run_cells(
             )
         finally:
             slots.put(slot)
+        # Issue athenaeum#1816: same "no opinion inside run_probe_all_arms,
+        # stamped by the CLI/grid wiring" pattern the relevance-floor fields
+        # above already use. ``None`` for a non-vector backend -- the
+        # question does not apply. For vector, this cache_dir is the SAME
+        # one run_probe_all_arms just built (and, for search_backend ==
+        # "vector", already raised if the FTS5 half were missing) -- so
+        # this is confirmation for the report, not a second gate.
+        hybrid_active = (
+            fts5_index_available(group_root / "cache")
+            if search_backend == "vector"
+            else None
+        )
         for record in records.values():
             record.relevance_floor_vector = relevance_floor_vector
             record.relevance_floor_fts5 = relevance_floor_fts5
+            record.hybrid_active = hybrid_active
         with ledger_lock:
             for cell in group_cells:
                 append_rollout_row(store, cell, records[cell.arm])
@@ -1311,6 +1326,41 @@ def _run_cells(
         # group that CAN complete to complete. Only an interrupt (above) or
         # a ceiling trip (via `stop`) suppresses them.
         pool.shutdown(wait=True, cancel_futures=cancel_pending_groups)
+
+
+def _format_abort_reason(exc: BaseException) -> str:
+    """``abort_reason`` text for a mid-grid failure (issue athenaeum#1816).
+
+    Before this issue, the abort handler recorded ``str(exc) or
+    type(exc).__name__`` -- so an exception whose message IS opaque (a bare
+    ``KeyError``/``FileNotFoundError`` on a cache path, or a
+    ``KeyboardInterrupt`` with an empty message) lost its type entirely.
+    Run 35307958915's report read ``abort_reason:
+    '/tmp/.../w3/medium-0/cache/wiki-vectors'`` -- indistinguishable from a
+    string literal, with no way to tell which exception class raised it or
+    where.
+
+    Always ``f"{type(exc).__name__}: {exc}"`` -- ONE format, not a
+    conditional between "has a message" and "does not" (a
+    ``KeyboardInterrupt`` is the real, non-hypothetical empty-message case
+    this handler sees, not just a corner case): a single invariant shape is
+    pinnable by a test; two branches are not. The trailing ``": "`` with
+    nothing after it for an empty-message exception is accepted rather
+    than special-cased away.
+
+    Appends the last traceback frame (``file:line``, the frame closest to
+    the actual fault) when a traceback is attached, so an operator reading
+    only the rendered report header -- not stderr -- still gets a locator.
+    ``extract_tb`` guarded against an empty list (an exception raised and
+    caught with no traceback ever attached, e.g. constructed directly
+    rather than raised) before indexing ``[-1]``.
+    """
+    frames = traceback.extract_tb(exc.__traceback__)
+    location = ""
+    if frames:
+        frame = frames[-1]
+        location = f" ({frame.filename}:{frame.lineno})"
+    return f"{type(exc).__name__}: {exc}{location}"
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1544,7 +1594,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         # decision to stop, not a failure to report on. ``_run_cells`` has
         # already cancelled every group that had not started.
         aborted = True
-        abort_reason = str(exc) or type(exc).__name__
+        abort_reason = _format_abort_reason(exc)
+        # Issue athenaeum#1816: the full traceback -- not just the last
+        # frame folded into abort_reason above -- goes to stderr before any
+        # report is written, so an operator has the complete failure even
+        # though the rendered report header only ever carries the
+        # one-frame locator.
+        traceback.print_exc(file=sys.stderr)
 
     # Re-read rather than reusing *existing_rows* from the item-3 pre-flight
     # check above (Quine review "optional" note): that read happened BEFORE
@@ -1602,7 +1658,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         # already carries abort_reason naming the actual values found; the
         # header fields are not asked to double as that explanation.
         aborted = True
-        abort_reason = (f"{abort_reason}; {exc}" if abort_reason else str(exc))
+        # Issue athenaeum#1816: same typed-and-located shape as the primary
+        # abort handler above -- this composed message was previously
+        # `f"{abort_reason}; {exc}"`, which dropped MixedFloorError's own
+        # type off the SECOND failure the same way the untyped primary
+        # handler dropped it off the first.
+        composed = _format_abort_reason(exc)
+        abort_reason = f"{abort_reason}; {composed}" if abort_reason else composed
         try:
             report = build_report(
                 list(diagnostics.rows),

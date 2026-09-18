@@ -603,6 +603,105 @@ def test_run_probe_all_arms_dispatches_all_eight_arms_offline(tmp_path: Path) ->
     # arms that would spawn a subprocess, all three stubbed.
 
 
+def test_run_probe_all_arms_vector_backend_builds_fts5_alongside_vector(
+    tmp_path: Path,
+) -> None:
+    """Regression for issue athenaeum#1816.
+
+    Production keeps ONE cache dir backing both backends (see
+    ``tests/evals/test_recall_covers_grep.py``'s ``scale_fixture`` fixture,
+    which builds FTS5 first, then the vector index into the SAME
+    ``fts5_cache_dir``) so the vector backend's RRF hybrid dispatch
+    (``mcp_server.recall_search``, DEFAULT ON) has an FTS5 index to fuse
+    against. Before this fix, ``run_probe_all_arms(search_backend="vector")``
+    built ONLY the vector index -- every real ``recall_search`` call in a
+    vector dispatch then logged "hybrid ranking requested for the vector
+    backend but no FTS5 index exists ... falling back to vector-only
+    ranking", measuring a configuration nobody ships.
+
+    Asserts directly on the materialized cache dir (not through a stubbed
+    tool call, which would never touch the real index) that BOTH
+    ``wiki-index.db`` (FTS5) and ``wiki-vectors/`` (chromadb) exist after
+    one ``run_probe_all_arms`` call, and that every returned record is
+    stamped ``search_backend="vector"`` per the pre-existing athenaeum#1764
+    contract.
+    """
+    import pytest
+
+    pytest.importorskip("chromadb")
+
+    session = EvalSession()
+    client = FakeLLMClient(
+        response=make_llm_response(
+            "stub answer", usage=make_llm_usage(input_tokens=10, output_tokens=5)
+        )
+    )
+
+    def _stub_pull_runner(
+        probe, knowledge_root, cache_dir, corpus_scale, **kwargs
+    ) -> RolloutRecord:
+        return RolloutRecord(
+            arm=Arm.PULL,
+            probe_id=probe.id,
+            probe_class=probe.probe_class,
+            corpus_scale=corpus_scale,
+            answer="stub pull answer",
+        )
+
+    def _stub_breadcrumb_context_fn(knowledge_root, hook_home, query) -> str:
+        return "  - stub breadcrumb\n"
+
+    def _stub_breadcrumb_pull_runner(
+        probe, knowledge_root, hook_home, cache_dir, corpus_scale, **kwargs
+    ) -> RolloutRecord:
+        return RolloutRecord(
+            arm=Arm.PUSH_BREADCRUMB_PULL,
+            probe_id=probe.id,
+            probe_class=probe.probe_class,
+            corpus_scale=corpus_scale,
+            answer="stub breadcrumb-pull answer",
+        )
+
+    def _stub_native_index_runner(probe, materialize_root, corpus_scale, **kwargs):
+        return RolloutRecord(
+            arm=Arm.NATIVE_INDEX,
+            probe_id=probe.id,
+            probe_class=probe.probe_class,
+            corpus_scale=corpus_scale,
+            answer="stub native index answer",
+        )
+
+    def _stub_native_grep_runner(probe, materialize_root, corpus_scale, **kwargs):
+        return RolloutRecord(
+            arm=Arm.NATIVE_GREP,
+            probe_id=probe.id,
+            probe_class=probe.probe_class,
+            corpus_scale=corpus_scale,
+            answer="stub native grep answer",
+        )
+
+    records = run_probe_all_arms(
+        "pto_allowance",
+        "core",
+        session=session,
+        materialize_root=tmp_path,
+        search_backend="vector",
+        client=client,
+        mode="cli",
+        pull_runner=_stub_pull_runner,
+        breadcrumb_context_fn=_stub_breadcrumb_context_fn,
+        breadcrumb_pull_runner=_stub_breadcrumb_pull_runner,
+        native_index_runner=_stub_native_index_runner,
+        native_grep_runner=_stub_native_grep_runner,
+    )
+
+    cache_dir = tmp_path / "cache"
+    assert (cache_dir / "wiki-index.db").is_file(), "FTS5 index missing alongside vector"
+    assert (cache_dir / "wiki-vectors").is_dir(), "vector index missing"
+    for record in records.values():
+        assert record.search_backend == "vector"
+
+
 def test_run_probe_all_arms_native_arms_get_dedicated_subdirectories(tmp_path: Path) -> None:
     """NATIVE_INDEX and NATIVE_GREP must not share a materialize root — each
     writes its own ``memory/``, ``claude-config/`` and settings/mcp-config

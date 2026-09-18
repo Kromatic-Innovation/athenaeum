@@ -62,6 +62,7 @@ import os
 import re
 import shutil
 import sqlite3
+import threading
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from datetime import date
@@ -1737,6 +1738,24 @@ class FTS5Backend:
 
 _VECTOR_DIR = "wiki-vectors"
 _VECTOR_COLLECTION = "wiki"
+
+# Issue athenaeum#1816: chromadb's `SharedSystemClient` keys its process-global
+# `_identifier_to_system` cache by persist directory (i.e. by *this backend's*
+# own `vector_dir` -- see `chromadb.api.client.SharedSystemClient`), and
+# `clear_system_cache()` unconditionally replaces the WHOLE dict, not just the
+# caller's own entry. A north-star grid worker running `--search-backend
+# vector` with `--workers > 1` therefore raced: worker A opens a
+# `PersistentClient` for its own `wiki-vectors` path (registering it under
+# `_identifier_to_system[A_path]`), then worker B's concurrent `build_index`
+# call clears the cache for an unrelated path B -- evicting A's entry too --
+# and A's next access to `SharedSystemClient._system` (a bare `dict[key]`,
+# no `.get`) raises `KeyError: 'A_path'`. That is exactly the observed
+# abort: a `KeyError`/`FileNotFoundError` whose message is a worker's OWN
+# `wiki-vectors` cache path. This lock serializes only the
+# clear-cache-then-acquire-client window (never the embedding/query work
+# after a collection handle is in hand), so it closes the race without
+# serializing the expensive part of a build across workers.
+_VECTOR_CLIENT_LOCK = threading.Lock()
 # A build-generation token written into the collection dir on every completed
 # build_index (issue athenaeum#489). A long-lived server process reads it before each
 # query; when it changes, the process's chromadb SharedSystemClient cache is
@@ -1952,7 +1971,10 @@ class VectorBackend:
         try:
             from chromadb.api.client import SharedSystemClient
 
-            SharedSystemClient.clear_system_cache()
+            # Issue athenaeum#1816: hold the same lock build_index uses around
+            # this clear -- it mutates the same process-global dict.
+            with _VECTOR_CLIENT_LOCK:
+                SharedSystemClient.clear_system_cache()
         except Exception:  # noqa: BLE001 — pragma: no cover - chromadb internals moved
             # If the internal moved, we simply don't get auto-reopen — the
             # pre-athenaeum#489 behaviour — never a crash from the fix itself.
@@ -2172,32 +2194,42 @@ class VectorBackend:
         # chromadb caches PersistentClient systems per-path at the module
         # level. Clear it so a fresh client sees the true on-disk state
         # (avoids stale-collection "already exists" desync — see issue athenaeum#32).
+        #
+        # Issue athenaeum#1816: this clear plus the client/collection acquisition
+        # below must run under `_VECTOR_CLIENT_LOCK` -- `clear_system_cache()`
+        # replaces chromadb's ENTIRE process-global system cache, keyed by
+        # persist directory, so an unguarded concurrent call from another
+        # worker's build_index() evicts THIS worker's own in-flight system
+        # registration and a later access raises KeyError on this worker's
+        # own vector_dir path. See the lock's own docstring for the full
+        # mechanism. Never held through `_add_records` (the embedding/insert
+        # work) -- only the acquire step touches the shared dict.
         from chromadb.api.client import SharedSystemClient
 
-        SharedSystemClient.clear_system_cache()
-
         if do_incremental:
-            try:
-                client = chromadb.PersistentClient(path=str(vector_dir))
-                collection = client.get_collection(
-                    _VECTOR_COLLECTION,
-                    embedding_function=self._embedding_function(),
-                )
-            except Exception as exc:  # noqa: BLE001 — corrupt/missing collection: fall back to full rebuild
-                # Corrupt / missing collection despite a manifest — fall back
-                # to a clean full rebuild rather than accreting a bad delta.
-                # Issue athenaeum#370: log it — a silent full rmtree+re-embed of a 21k
-                # corpus was indistinguishable from a hang. WARNING so a real
-                # (expensive) full rebuild is diagnosable, not silent.
-                import logging
+            with _VECTOR_CLIENT_LOCK:
+                SharedSystemClient.clear_system_cache()
+                try:
+                    client = chromadb.PersistentClient(path=str(vector_dir))
+                    collection = client.get_collection(
+                        _VECTOR_COLLECTION,
+                        embedding_function=self._embedding_function(),
+                    )
+                except Exception as exc:  # noqa: BLE001 — corrupt/missing collection: fall back to full rebuild
+                    # Corrupt / missing collection despite a manifest — fall back
+                    # to a clean full rebuild rather than accreting a bad delta.
+                    # Issue athenaeum#370: log it — a silent full rmtree+re-embed of a 21k
+                    # corpus was indistinguishable from a hang. WARNING so a real
+                    # (expensive) full rebuild is diagnosable, not silent.
+                    import logging
 
-                logging.getLogger(__name__).warning(
-                    "vector incremental open failed (%s: %s); "
-                    "falling back to FULL rebuild (rmtree + re-embed all)",
-                    type(exc).__name__,
-                    exc,
-                )
-                do_incremental = False
+                    logging.getLogger(__name__).warning(
+                        "vector incremental open failed (%s: %s); "
+                        "falling back to FULL rebuild (rmtree + re-embed all)",
+                        type(exc).__name__,
+                        exc,
+                    )
+                    do_incremental = False
 
         if not do_incremental:
             # A stat pre-filtered scan yields placeholder bodies for unchanged
@@ -2212,12 +2244,16 @@ class VectorBackend:
             if vector_dir.exists():
                 shutil.rmtree(vector_dir)
             vector_dir.mkdir(parents=True, exist_ok=True)
-            SharedSystemClient.clear_system_cache()
-            client = chromadb.PersistentClient(path=str(vector_dir))
-            collection = client.create_collection(
-                _VECTOR_COLLECTION,
-                embedding_function=self._embedding_function(),
-            )
+            # Issue athenaeum#1816: same race as the incremental branch above --
+            # this clear + acquire must be serialized against every other
+            # worker's concurrent build_index()/query() calls.
+            with _VECTOR_CLIENT_LOCK:
+                SharedSystemClient.clear_system_cache()
+                client = chromadb.PersistentClient(path=str(vector_dir))
+                collection = client.create_collection(
+                    _VECTOR_COLLECTION,
+                    embedding_function=self._embedding_function(),
+                )
             self._add_records(collection, current)
             _write_manifest(
                 manifest_path,
@@ -2285,25 +2321,31 @@ class VectorBackend:
         # athenaeum#489: re-open if an out-of-process reindex replaced the collection.
         self._refresh_on_reindex(vector_dir)
 
-        client = chromadb.PersistentClient(path=str(vector_dir))
-        try:
-            collection = client.get_collection(_VECTOR_COLLECTION)
-        except Exception as exc:  # noqa: BLE001 — chromadb's exception class moves across releases; can't import it directly
-            # chromadb raises an InvalidCollectionException (and occasionally
-            # bare ValueError from the rust binding) when the collection is
-            # absent or its metadata is corrupt. We can't import the exception
-            # class directly because chromadb reorganises it between releases,
-            # so we catch broadly but log the class name so a real bug
-            # doesn't sit silent — "vector returns nothing" was the top
-            # first-adopter confusion in the v0.2.0 review.
-            import logging
+        # Issue athenaeum#1816: same clear-cache/acquire race as build_index --
+        # serialize against concurrent workers.
+        got_collection = True
+        with _VECTOR_CLIENT_LOCK:
+            client = chromadb.PersistentClient(path=str(vector_dir))
+            try:
+                collection = client.get_collection(_VECTOR_COLLECTION)
+            except Exception as exc:  # noqa: BLE001 — chromadb's exception class moves across releases; can't import it directly
+                # chromadb raises an InvalidCollectionException (and occasionally
+                # bare ValueError from the rust binding) when the collection is
+                # absent or its metadata is corrupt. We can't import the exception
+                # class directly because chromadb reorganises it between releases,
+                # so we catch broadly but log the class name so a real bug
+                # doesn't sit silent — "vector returns nothing" was the top
+                # first-adopter confusion in the v0.2.0 review.
+                import logging
 
-            logging.getLogger(__name__).warning(
-                "vector get_collection(%s) failed with %s: %s; " "returning empty hits",
-                _VECTOR_COLLECTION,
-                type(exc).__name__,
-                exc,
-            )
+                logging.getLogger(__name__).warning(
+                    "vector get_collection(%s) failed with %s: %s; " "returning empty hits",
+                    _VECTOR_COLLECTION,
+                    type(exc).__name__,
+                    exc,
+                )
+                got_collection = False
+        if not got_collection:
             return []
 
         count = collection.count()
