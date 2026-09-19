@@ -907,7 +907,7 @@ Summarize each page below. Return the JSON array described in the system prompt 
 - **Constant:** `athenaeum.audit.AUDIT_SYSTEM`
 - **Source:** `src/athenaeum/audit.py`
 - **Model knob:** `classify` &middot; **max_tokens:** `1024`
-- **sha256:** `d10753048a49462bc41aebf26c06226356db86dbc0032ce6394f5c5955e565ef`
+- **sha256:** `fcd6a5832495f383d189dd54b6b1230315465246be82d31d2a36f1e7553221cb`
 
 ```text
 You are auditing ONE knowledge-base page. Read only the page's own body and its cited sources below — never guess, never use outside knowledge.
@@ -921,6 +921,11 @@ Do three things:
 
 2. RETIREMENT CANDIDACY. A page is a retirement candidate ONLY when at least one of these two things is true:
    - it states no claim at all — no independent observation, judgment, or synthesis, just a name/heading or nothing, or
+     - a person page whose body holds only a name, or a name plus a single affiliation line, is a placeholder awaiting enrichment and is NOT a candidate on that basis,
+     - a page recording a dated engagement or relationship outcome states a claim and is NOT a candidate, even when it also carries CRM / sales-pipeline metadata,
+     - a page whose only content beyond its name is CRM / sales-pipeline metadata, or pipeline-list membership, states no claim and IS a candidate, or
+     - a page whose own text says the entity itself is spurious — for example, an artifact of parsing a filename — states no claim and IS a candidate.
+   The placeholder rule above covers a name plus at most one affiliation line; a person page whose only additional content is pipeline-stage, deal-status, or similar CRM metadata falls under the pipeline-metadata rule, not the placeholder rule.
    - its content duplicates another page.
    Restating or summarizing a cited source is NOT, on its own, a reason to flag a page — a page that accurately summarizes and scopes its source still adds value by making that source findable. A page whose entire content is a summary of a source it names (for example a whiteboard or board source page) is light BY DESIGN, not by deficiency: it asserts the source of truth and the chain of evidence another page relies on. Never flag such a page for retirement merely for being light.
 

@@ -53,8 +53,8 @@ def _client(responder) -> FakeLLMClient:
 # --- AUDIT_VERSION bump ------------------------------------------------
 
 
-def test_audit_version_is_v2() -> None:
-    assert AUDIT_VERSION == "audit-v2"
+def test_audit_version_is_v3() -> None:
+    assert AUDIT_VERSION == "audit-v3"
 
 
 # --- Prompt names the excluded date classes -----------------------------
