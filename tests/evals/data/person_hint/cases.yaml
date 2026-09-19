@@ -1,0 +1,121 @@
+# Person-hint golden set (issue athenaeum#1867)
+#
+# The question no other layer asks: given a wiki that already has a page for a
+# known PERSON, and a new raw file that NAMES them, does that person's page
+# gain a claim only when the file actually ASSERTS something about them -- and
+# is the rest of the file still compiled?
+#
+# `attachment/cases.yaml` runs the same entry point (`librarian.process_one`)
+# but passes no `person_registry=`, so tier 0's person-registry consult never
+# engages there and that layer cannot see this decision at all. This set
+# passes one, which is what puts the consult on the path.
+#
+# --- The anti-vacuity trap -------------------------------------------------
+#
+# On the shipped librarian the person page DOES change: tier 0 claims any raw
+# file naming a known person and prepends a dated
+# `- YYYY-MM-DD: <excerpt> (source: <ref>)` bullet to that person's page, then
+# returns -- tiers 1-3 never see the file, so nothing else in it is compiled.
+# A grader asking "did the person page change" would pass every case below.
+# `tests/evals/person_hint.py` tells four outcomes apart instead (`unchanged`,
+# `notes_bullet`, `citation_only`, `footnoted_claim`) and scores
+# `notes_bullet` as a failure in every case, expected or not.
+#
+# --- Content policy (data/corpus/README.md, a review blocker) --------------
+#
+# Every name below is INVENTED -- people, the works, the supplier, the
+# programme. Nothing is copied, paraphrased, sampled or LLM-rewritten from a
+# live knowledge tree; only the SHAPES are taken from the failure this layer
+# exists to measure -- an incidental mention becoming a claim, and a file
+# claimed whole by a person match so the rest of it is never compiled.
+# `tests/test_eval_corpus_leakage.py` is the bar and it scans this directory,
+# including `wiki/` and `raw/`.
+#
+# --- Where the fixtures live ------------------------------------------------
+#
+# `wiki/*.md` is the case wiki, copied fresh into `tmp_path` per case so one
+# case's writes are never another's starting state. `raw/<case>.md` is that
+# case's single intake file. Deliberately a small hand-authored tree in the
+# shape of `data/recall/wiki/`, NOT the generated `core` corpus the
+# attachment layer overlays: at six pages it sits far below the athenaeum#1576
+# relatedness writer's 50-page index floor, so that writer cannot fire and
+# cannot stamp an edge this layer would then have to partition out.
+#
+# --- `outcome_class` values ------------------------------------------------
+#
+#   passing_mention   : the file names a known person once, in passing, and
+#                       asserts nothing about them -> their page is
+#                       `unchanged`, and the file still compiles onto the
+#                       non-person page it is actually about
+#   asserted_claim    : the file states something new about a known person ->
+#                       their page gains a `footnoted_claim` citing the ref
+#   mixed_fanout      : the file names four known people and asserts about
+#                       two -> only those two gain claims. The negative
+#                       control against "claim everyone the file names",
+#                       which is exactly what the shipped path does
+#   name_collision    : the file is about a DIFFERENT person who shares a
+#                       known person's name, in a context that contradicts
+#                       the known page's `description:` -> the known page is
+#                       `unchanged`. The negative control against a literal
+#                       name match standing in for identity
+#   restated_fact     : the file restates a fact the page already carries ->
+#                       `citation_only` or `footnoted_claim`, and no sentence
+#                       on the page appears twice
+#
+# Scoring is structural only -- which outcome shape each person page's delta
+# takes, and whether a non-person page gained a pointer to the raw ref. No
+# check reads the model's prose for quality; that is the `merge` and
+# `underdetermined` layers' business.
+
+cases:
+  - id: passing_mention_retrospective
+    outcome_class: passing_mention
+    raw: passing_mention_retrospective.md
+    expected:
+      person_outcomes:
+        ph-person-oakmoor: unchanged
+      # AC3: the retrospective is ABOUT the programme. A run that only
+      # touched the person page compiled none of it.
+      non_person_pointer_uids:
+        - ph-project-relining
+
+  - id: role_change_note
+    outcome_class: asserted_claim
+    raw: role_change_note.md
+    expected:
+      person_outcomes:
+        ph-person-selmire: footnoted_claim
+
+  - id: memo_names_four_asserts_two
+    outcome_class: mixed_fanout
+    raw: memo_names_four_asserts_two.md
+    expected:
+      person_outcomes:
+        ph-person-vantry: footnoted_claim
+        ph-person-oakmoor: footnoted_claim
+        ph-person-selmire: unchanged
+        ph-person-pelloway: unchanged
+      require_non_person_pointer: true
+
+  - id: same_name_different_person
+    outcome_class: name_collision
+    raw: same_name_different_person.md
+    expected:
+      person_outcomes:
+        ph-person-pelloway: unchanged
+      # The file is a delivery note about the supplier, so the supplier page
+      # is where it belongs. Naming the page is strictly stronger than
+      # "something non-person moved".
+      non_person_pointer_uids:
+        - ph-company-carrowfen
+
+  - id: restates_known_fact
+    outcome_class: restated_fact
+    raw: restates_known_fact.md
+    expected:
+      person_outcomes:
+        ph-person-oakmoor:
+          - citation_only
+          - footnoted_claim
+      forbid_duplicate_sentence:
+        - ph-person-oakmoor
