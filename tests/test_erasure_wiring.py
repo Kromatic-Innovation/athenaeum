@@ -248,6 +248,14 @@ class TestAC2AnswersLaneClassification:
         knowledge_root = tmp_path / "knowledge"
         raw_root = knowledge_root / "raw"
         raw_root.mkdir(parents=True)
+        # Issue athenaeum#1804: the source ref must resolve, or this non-empty
+        # -answer/detector-raised block is now HELD instead of archived —
+        # this test is about off-corpus provenance ROUTING, not the hold
+        # path (write-back resolution is a separate mechanism from
+        # provenance-doc routing).
+        (raw_root / "recall-offcorpus:jane-doe").write_text(
+            "Jane Doe off-corpus recall.\n", encoding="utf-8"
+        )
         pending_path = knowledge_root / "wiki" / "_pending_questions.md"
         pending_path.parent.mkdir(parents=True)
         pending_path.write_text(
@@ -279,6 +287,14 @@ class TestAC2AnswersLaneClassification:
         knowledge_root = tmp_path / "knowledge"
         raw_root = knowledge_root / "raw"
         raw_root.mkdir(parents=True)
+        # Issue athenaeum#1804: the source ref must resolve, or this
+        # non-empty-answer/detector-raised block is now HELD instead of
+        # archived — this test is about provenance-doc content, not the
+        # hold path.
+        (raw_root / "sessions").mkdir()
+        (raw_root / "sessions" / "20240406T120000Z-aabb0011.md").write_text(
+            "Jane Doe notes.\n", encoding="utf-8"
+        )
         pending_path = knowledge_root / "wiki" / "_pending_questions.md"
         pending_path.parent.mkdir(parents=True)
         pending_path.write_text(
@@ -302,6 +318,13 @@ class TestAC2AnswersLaneClassification:
         knowledge_root = tmp_path / "knowledge"
         raw_root = knowledge_root / "raw"
         raw_root.mkdir(parents=True)
+        # Issue athenaeum#1804: the source ref must resolve, or this non-empty
+        # -answer/detector-raised block is now HELD instead of archived —
+        # this test is about the off-corpus-not-configured warning, not the
+        # hold path.
+        (raw_root / "recall-offcorpus:jane-doe").write_text(
+            "Jane Doe off-corpus recall.\n", encoding="utf-8"
+        )
         pending_path = knowledge_root / "wiki" / "_pending_questions.md"
         pending_path.parent.mkdir(parents=True)
         pending_path.write_text(

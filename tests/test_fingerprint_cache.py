@@ -308,6 +308,13 @@ class TestResolvedByRecorded:
         item = _item("Acme", _desc(CLAIM_A, CLAIM_B), conflict_type="factual")
         tier4_escalate([item], pending)
 
+        # Issue athenaeum#1804: the default `_item` raw_ref ("wiki/x.md") must
+        # resolve, or this non-empty-answer/detector-raised block is now HELD
+        # instead of archived — this test is about fingerprint recording,
+        # not the hold path.
+        (root / "raw" / "wiki").mkdir(parents=True, exist_ok=True)
+        (root / "raw" / "wiki" / "x.md").write_text("Acme notes.\n", encoding="utf-8")
+
         # Human flips the checkbox and answers, then ingest archives it.
         text = pending.read_text().replace("- [ ]", "- [x]", 1)
         text += "\ncorrect_a Boston is right.\n"

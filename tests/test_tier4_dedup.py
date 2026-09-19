@@ -241,6 +241,12 @@ class TestTier4Dedup:
         """
         pending = tmp_path / "_pending_questions.md"
         raw_root = tmp_path / "raw"
+        # Issue athenaeum#1804: the default `_item` raw_ref ("wiki/x.md") must
+        # resolve, or this non-empty-answer/detector-raised block is now
+        # HELD instead of archived — this test is about fingerprint
+        # suppression, not the hold path.
+        (raw_root / "wiki").mkdir(parents=True, exist_ok=True)
+        (raw_root / "wiki" / "x.md").write_text("Alpha notes.\n", encoding="utf-8")
 
         tier4_escalate([_item("Alpha", _desc_with_members("a.md", "b.md"))], pending)
         # Flip the checkbox to [x] and let ingest archive the block.
@@ -432,6 +438,12 @@ class TestTier4DedupAutoApply:
         pending = tmp_path / "_pending_questions.md"
         raw_root = tmp_path / "raw"
         cfg = {"resolve": {"auto_apply": True, "auto_apply_threshold": 0.90}}
+        # Issue athenaeum#1804: the default `_item` raw_ref ("wiki/x.md") must
+        # resolve, or this non-empty-answer/detector-raised block is now
+        # HELD instead of archived — this test is about the Also-affects
+        # round trip, not the hold path.
+        (raw_root / "wiki").mkdir(parents=True, exist_ok=True)
+        (raw_root / "wiki" / "x.md").write_text("Alpha notes.\n", encoding="utf-8")
 
         low = _item("Alpha", _desc_with_members("a.md", "b.md"))
         low.proposal = _make_proposal(0.50)
