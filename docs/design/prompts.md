@@ -907,7 +907,7 @@ Summarize each page below. Return the JSON array described in the system prompt 
 - **Constant:** `athenaeum.audit.AUDIT_SYSTEM`
 - **Source:** `src/athenaeum/audit.py`
 - **Model knob:** `classify` &middot; **max_tokens:** `1024`
-- **sha256:** `fcd6a5832495f383d189dd54b6b1230315465246be82d31d2a36f1e7553221cb`
+- **sha256:** `cedca598f910773ae8135625c978f8babca359efa7ac12e2c6c5b386a4087b68`
 
 ```text
 You are auditing ONE knowledge-base page. Read only the page's own body and its cited sources below — never guess, never use outside knowledge.
@@ -919,15 +919,16 @@ Do three things:
    - "undeterminable" with a one-line reason, when they do not.
    A date value must be ISO-8601 (YYYY-MM-DD). Never invent a value that is not actually stated. A date field (valid_from/valid_until) may ONLY be filled from a stated role, event, or effective date — NEVER from relationship or contact metadata. None of the following ever justify a date fill, even when stated on the page: a connect date (for example a LinkedIn connect date), a CRM first-contact, last-contact, last-email, or meeting date, a note date, an updated-timestamp, or any ingestion/import date. When the only dates available are of that kind, report the field as undeterminable and name the excluded date class in the reason.
 
-2. RETIREMENT CANDIDACY. A page is a retirement candidate ONLY when at least one of these two things is true:
-   - it states no claim at all — no independent observation, judgment, or synthesis, just a name/heading or nothing, or
-     - a person page whose body holds only a name, or a name plus a single affiliation line, is a placeholder awaiting enrichment and is NOT a candidate on that basis,
-     - a page recording a dated engagement or relationship outcome states a claim and is NOT a candidate, even when it also carries CRM / sales-pipeline metadata,
-     - a page whose only content beyond its name is CRM / sales-pipeline metadata, or pipeline-list membership, states no claim and IS a candidate, or
-     - a page whose own text says the entity itself is spurious — for example, an artifact of parsing a filename — states no claim and IS a candidate.
-   The placeholder rule above covers a name plus at most one affiliation line; a person page whose only additional content is pipeline-stage, deal-status, or similar CRM metadata falls under the pipeline-metadata rule, not the placeholder rule.
+2. RETIREMENT CANDIDACY. Three exclusions apply first — a page matching any of these is NEVER a retirement candidate, regardless of anything below:
+   - a person page whose body holds only a name, or a name plus a single affiliation line, is a placeholder awaiting enrichment,
+   - a page recording a dated engagement or relationship outcome states a claim and is NOT a candidate, even when it also carries CRM / sales-pipeline metadata, or
+   - a page whose entire content is a summary of a source it names (for example a whiteboard or board source page) is light BY DESIGN, not by deficiency: it asserts the source of truth and the chain of evidence another page relies on. Restating or summarizing a cited source is NOT, on its own, a reason to flag a page — a page that accurately summarizes and scopes its source still adds value by making that source findable. Never flag such a page for retirement merely for being light.
+   A page is a retirement candidate only when none of the exclusions above applies, and at least one of these is true:
+   - it states no claim at all — no independent observation, judgment, or synthesis,
+   - its only content beyond its name is CRM / sales-pipeline metadata, or pipeline-list membership,
+   - its own text says the entity itself is spurious — for example, an artifact of parsing a filename, or
    - its content duplicates another page.
-   Restating or summarizing a cited source is NOT, on its own, a reason to flag a page — a page that accurately summarizes and scopes its source still adds value by making that source findable. A page whose entire content is a summary of a source it names (for example a whiteboard or board source page) is light BY DESIGN, not by deficiency: it asserts the source of truth and the chain of evidence another page relies on. Never flag such a page for retirement merely for being light.
+   The placeholder exclusion above covers a name plus at most one affiliation line; a person page whose only additional content is pipeline-stage, deal-status, or similar CRM metadata falls under the pipeline-metadata trigger, not the placeholder exclusion.
 
 3. SOURCE SUMMARY. Only when this page's own type is a source page: decide whether it gives a summary of the source it names (a summary, not the full detail) plus any information about that source's validity. When a source page lacks that summary, report it via "source_summary_missing" with a one-line reason — this is a finding to record, never a reason to flag the page for retirement.
 
@@ -936,8 +937,8 @@ Return ONLY a JSON object, no markdown fence, no prose, in exactly this shape (i
 {
   "<field>": {"value": "<determined value>"},
   "<field>": {"undeterminable": "<one-line reason>"},
-  "retirement_candidate": true,
-  "retirement_reason": "<one-line reason, empty string when false>",
+  "retirement_candidate": false,
+  "retirement_reason": "",
   "source_summary_missing": "<one-line reason, omit key when not applicable>"
 }
 ```
