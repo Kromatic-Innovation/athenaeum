@@ -73,6 +73,12 @@ not silently baked in — see the athenaeum#797 completion report for the full l
   module adds its OWN ``correction_id`` dedup pass in front of that call
   (§8's dedup requirement — ``tier4_escalate``'s own dedup keys on a
   members-involved/passage-hash shape that a correction does not carry).
+- §6.2's final "equal rank, indistinguishable dates" branch applies the
+  correction rather than escalating when the incumbent's own per-field
+  attribution (``field_sources.<field>``, never the page-level ``source:``
+  fallback) and the incoming source name the same writer (issue
+  athenaeum#1803) — the writer is superseding its own earlier value, not
+  losing to a different claimant. See :func:`_same_writer`.
 """
 
 from __future__ import annotations
@@ -792,6 +798,27 @@ def _parse_observed_date(value: Any) -> date | None:
         return None
 
 
+def _same_writer(a: Any, b: Any) -> bool:
+    """Whether *a* and *b* identify the same writer (issue athenaeum#1803):
+    both parse via :func:`~athenaeum.provenance.parse_source` to a
+    non-``None`` :class:`~athenaeum.provenance.SourceRef` with equal
+    ``type`` and equal ``ref``. ``ts``/``confidence``/``notes`` are ignored
+    — those describe the observation, not the claimant.
+
+    ``None`` or unparseable input on either side is never the same writer
+    — an unsourced or malformed source must not be mistaken for a
+    supersession by whatever the other side happens to be.
+    """
+    try:
+        ref_a = parse_source(a)
+        ref_b = parse_source(b)
+    except ValueError:
+        return False
+    if ref_a is None or ref_b is None:
+        return False
+    return ref_a.type == ref_b.type and ref_a.ref == ref_b.ref
+
+
 def _is_monotone_clear(value: Any, op: str) -> bool:
     """Whether this op represents "unsetting" a monotone flag (§6.3) rather
     than "setting" it. ``remove`` is always an unset; ``set`` is an unset
@@ -812,6 +839,7 @@ def decide_verdict(
     monotone: bool,
     op: str,
     existing_updated: Any,
+    incumbent_attributed: bool = False,
 ) -> tuple[str, str]:
     """§6.2 conflict policy for a single value comparison.
 
@@ -825,6 +853,13 @@ def decide_verdict(
     rank 1 alone, so any non-``user`` incoming source already has a HIGHER
     (worse) numeric rank and is deferred by the ordinary rank comparison
     below.
+
+    ``incumbent_attributed`` (issue athenaeum#1803, default ``False`` so every
+    existing caller keeps today's behaviour): whether the caller resolved
+    ``existing_source`` from an explicit per-field ``field_sources.<field>``
+    entry, as opposed to falling back to the page-level ``source:``. Only
+    consulted at the final "equal rank, indistinguishable dates" branch —
+    see the module docstring's decisions list.
     """
     if existing_value == incoming_value:
         return "noop", "identical value (delta gate)"
@@ -857,6 +892,15 @@ def decide_verdict(
         return "apply", "equal rank, newer observed_at wins"
     if incoming_dt < existing_dt:
         return "defer", "equal rank, existing is newer"
+    if incumbent_attributed and _same_writer(existing_source, incoming_source):
+        # athenaeum#1803: no competing claim — the writer named by the
+        # incumbent's own per-field attribution is submitting again, so the
+        # later-processed value is that writer's current view, not a
+        # different claimant to arbitrate. Requires an explicit
+        # field_sources.<field> entry (never the page-level `source:`
+        # fallback, which is not this field's own attribution) — see
+        # _same_writer and the module docstring's decisions list.
+        return "apply", "equal rank, same day, same writer superseding its own value"
     return "escalate", "equal rank, indistinguishable dates"
 
 
@@ -1445,6 +1489,10 @@ def process_correction_record(
             # which attributes a given submitter may touch at all.
             verdict, reason = "apply", "no incumbent value for this field; not a conflict (§4)"
         else:
+            existing_fs = read_meta.get("field_sources")
+            incumbent_attributed = (
+                isinstance(existing_fs, dict) and write_field in existing_fs
+            )
             verdict, reason = decide_verdict(
                 existing_source=existing_source,
                 incoming_source=source,
@@ -1454,6 +1502,7 @@ def process_correction_record(
                 monotone=monotone,
                 op=op,
                 existing_updated=existing_meta.get("updated"),
+                incumbent_attributed=incumbent_attributed,
             )
     elif op == "add":
         existing_list = read_meta.get(write_field)
