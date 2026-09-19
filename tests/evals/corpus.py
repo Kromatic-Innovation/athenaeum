@@ -2242,6 +2242,28 @@ class Observation:
     ``transient-*`` sentinel, which is exactly why the scoring split matters:
     counted naively it would inflate ``pages_targeted`` with pages that were
     never supposed to exist.
+
+    ``expected_bucket`` is the third piece of write-path ground truth (issue
+    athenaeum#1841): the :data:`athenaeum.models.MEMORY_BUCKETS` value this
+    observation SHOULD be filed under — ``"daily"`` for an outage that clears
+    before lunch, ``"weekly"`` for an instruction scoped to a backlog pass.
+    ``""`` (the default) means "no expectation recorded", which is every
+    durable page-derived observation: its correct filing is simply
+    "retained", not "decayed on a particular horizon". Carried as DATA for
+    the same reason ``answer_tokens`` is — without it a grader can only ask
+    whether SOME short decay was picked, never whether the RIGHT one was,
+    and ``daily`` versus ``weekly`` is precisely the distinction the operator
+    ruling on athenaeum#1736 asked the evals to measure. Scored by
+    :func:`tests.evals.north_star_report.compute_write_path_stats` as
+    ``decay_correct``.
+
+    Adding this field does NOT perturb the corpus:
+    :meth:`ObservationStream.materialize` writes only ``obs.body`` (under a
+    filename derived from ``timestamp``/``uuid8``) and
+    :meth:`Corpus.fingerprint` digests PAGES, never observations — so a
+    materialised stream stays byte-identical and :data:`GENERATOR_VERSION`
+    does not bump. Asserted, not assumed, in
+    ``tests/evals/test_write_path_stats.py``.
     """
 
     uid: str
@@ -2252,6 +2274,7 @@ class Observation:
     body: str
     answer_tokens: tuple[str, ...] = ()
     retain: bool = True
+    expected_bucket: str = ""
 
     @property
     def filename(self) -> str:
@@ -2345,13 +2368,21 @@ def generate_page_observations(
 # a compiled page is unambiguous evidence of over-retention rather than a
 # coincidental word match.
 #
-# (page_uid, timestamp, uuid8, token, body)
-_TRANSIENT_OBSERVATIONS: tuple[tuple[str, str, str, str, str], ...] = (
+# Each entry also carries the decay bucket the fact SHOULD be filed under
+# (issue athenaeum#1841): an outage that clears before lunch and a status line
+# true only at 14:02 are ``daily`` facts; an instruction scoped to a backlog
+# pass outlives the day but not the week, so it is ``weekly``. Presence of
+# SOME short bucket is not the measurement — ``daily`` versus ``weekly`` is,
+# and only ground truth recorded here can tell them apart.
+#
+# (page_uid, timestamp, uuid8, token, expected_bucket, body)
+_TRANSIENT_OBSERVATIONS: tuple[tuple[str, str, str, str, str, str], ...] = (
     (
         "transient-portal-outage",
         "20260510T091500Z",
         "7f1a20c4",
         "Zephrandil",
+        "daily",
         "Client portal outage: the portal is returning 503s this morning and the "
         "incident is being tracked under the temporary reference Zephrandil. "
         "Expected to clear before lunch; nothing to action once it does.",
@@ -2361,6 +2392,7 @@ _TRANSIENT_OBSERVATIONS: tuple[tuple[str, str, str, str, str], ...] = (
         "20260511T143000Z",
         "c3b96d18",
         "Marrowglint",
+        "daily",
         "Status right now: the nightly export finished at 14:02 today under batch "
         "label Marrowglint and the queue is empty. This is a point-in-time "
         "status, not a standing fact.",
@@ -2370,6 +2402,7 @@ _TRANSIENT_OBSERVATIONS: tuple[tuple[str, str, str, str, str], ...] = (
         "20260512T101000Z",
         "9d40ae6b",
         "Ossivane",
+        "weekly",
         "For this task only: skip the archived rows and stage your working copy in "
         "the scratch sheet named Ossivane. Discard the instruction once the "
         "backlog pass is done.",
@@ -2386,6 +2419,12 @@ def generate_transient_observations() -> list["Observation"]:
     ``transient-*`` sentinel. Fixed values (no RNG) keep
     :func:`generate_core_observations` byte-deterministic for
     ``(GENERATOR_VERSION, seed)`` exactly as before.
+
+    Each observation also carries its :attr:`Observation.expected_bucket`
+    (issue athenaeum#1841) — the decay horizon a correct filing would pick.
+    That field is never written to disk (see :attr:`Observation.body` and
+    :meth:`ObservationStream.materialize`), so adding it left the emitted
+    stream byte-identical and :data:`GENERATOR_VERSION` unchanged.
     """
     return [
         Observation(
@@ -2397,8 +2436,9 @@ def generate_transient_observations() -> list["Observation"]:
             body=body,
             answer_tokens=(token,),
             retain=False,
+            expected_bucket=expected_bucket,
         )
-        for page_uid, timestamp, uuid8, token, body in _TRANSIENT_OBSERVATIONS
+        for page_uid, timestamp, uuid8, token, expected_bucket, body in _TRANSIENT_OBSERVATIONS
     ]
 
 

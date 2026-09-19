@@ -613,6 +613,11 @@ def load_phase2_results(
                         # Issue athenaeum#1830: same ``.get`` back-compat
                         # discipline for a row written before this field.
                         lost_token_ids=tuple(row.get("lost_token_ids", ())),
+                        # Issue athenaeum#1841: likewise, so a row appended
+                        # before decay correctness existed still loads and
+                        # renders as ``n/a``/0 rather than being skipped.
+                        decay_correct=row.get("decay_correct"),
+                        durable_overdecayed=row.get("durable_overdecayed", 0),
                     )
                 )
             elif kind == "write_cost":

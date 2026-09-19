@@ -10,7 +10,23 @@ plain ``{path: text}`` store mapping are enough to exercise every branch.
 
 from __future__ import annotations
 
-from tests.evals.corpus import Observation
+import hashlib
+from dataclasses import replace
+from pathlib import Path
+
+from tests.evals.corpus import (
+    GENERATOR_VERSION,
+    Observation,
+    ObservationStream,
+    build_corpus,
+    generate_core_observations,
+    generate_transient_observations,
+)
+from tests.evals.north_star_cli import (
+    _phase2_append_rows,
+    _write_path_stats_row,
+    load_phase2_results,
+)
 from tests.evals.north_star_report import (
     FilingLossStats,
     NorthStarReport,
@@ -29,6 +45,7 @@ def _obs(
     *,
     tokens: tuple[str, ...] = (),
     retain: bool = True,
+    expected_bucket: str = "",
 ) -> Observation:
     return Observation(
         uid=uid,
@@ -39,7 +56,21 @@ def _obs(
         body=body,
         answer_tokens=tokens,
         retain=retain,
+        expected_bucket=expected_bucket,
     )
+
+
+def _page(*, bucket: str = "", body: str, name: str = "note") -> str:
+    """A compiled page as it lands in a store: frontmatter plus body.
+
+    ``bucket=""`` omits the key entirely -- the shape a page with no decay
+    vocabulary at all has, which is what the native arm's memory files look
+    like to this scanner.
+    """
+    front = [f"name: {name}", "type: reference"]
+    if bucket:
+        front.append(f"bucket: {bucket}")
+    return "---\n" + "\n".join(front) + "\n---\n" + body + "\n"
 
 
 def test_all_tokens_retained_reports_full_counts() -> None:
@@ -151,8 +182,8 @@ def test_render_report_includes_write_path_table_when_stats_supplied() -> None:
     )
     rendered = render_report(_minimal_report(stats))
 
-    assert "| athenaeum | core | 2 | 2 | 2 | 2 | 0 | n/a | 3 | 2 | 0 |" in rendered
-    assert "| native | core | 2 | n/a | 0 | n/a | 0 | n/a | 3 | 0 | n/a |" in rendered
+    assert "| athenaeum | core | 2 | 2 | 2 | 2 | 0 | n/a | n/a | 0 | 3 | 2 | 0 |" in rendered
+    assert "| native | core | 2 | n/a | 0 | n/a | 0 | n/a | n/a | 0 | 3 | 0 | n/a |" in rendered
 
 
 # ---------------------------------------------------------------------------
@@ -233,7 +264,7 @@ def test_render_report_renders_the_transient_columns() -> None:
     rendered = render_report(_minimal_report(stats))
 
     assert "transient_total | transient_retained" in rendered
-    assert "| athenaeum | core | 1 | 1 | 1 | 1 | 3 | 1 | 2 | 1 | 0 |" in rendered
+    assert "| athenaeum | core | 1 | 1 | 1 | 1 | 3 | 1 | n/a | 0 | 2 | 1 | 0 |" in rendered
     assert "LOWER is better" in rendered
 
 
@@ -430,3 +461,401 @@ def test_transient_absent_from_every_page_still_grades_correct() -> None:
     ]
     stats = compute_write_path_stats("athenaeum", "core", observations, {"page.md": "unrelated"})
     assert stats.transient_retained == 0
+
+
+# ---------------------------------------------------------------------------
+# Decay CORRECTNESS (issue athenaeum#1841) -- `expected_bucket` ground truth,
+# `decay_correct`, `durable_overdecayed`, and the widened table.
+#
+# The athenaeum#1830 rule above is deliberately untouched: it still grades a
+# transient token correct as soon as SOME short decay was picked. These tests
+# pin the SECOND grading, which asks whether the RIGHT one was.
+# ---------------------------------------------------------------------------
+
+_TRANSIENT = _obs(
+    "obs-transient-portal-outage",
+    "transient-portal-outage",
+    "the portal is down this afternoon",
+    tokens=("Zephrandil",),
+    retain=False,
+    expected_bucket="daily",
+)
+
+
+def test_corpus_transients_carry_the_expected_decay_bucket() -> None:
+    """AC1's ground truth, read off the corpus itself rather than restated:
+    an outage and a point-in-time status are `daily` facts, a
+    backlog-pass-scoped instruction is `weekly`."""
+    by_token = {
+        token: obs.expected_bucket
+        for obs in generate_transient_observations()
+        for token in obs.answer_tokens
+    }
+
+    assert by_token == {
+        "Zephrandil": "daily",
+        "Marrowglint": "daily",
+        "Ossivane": "weekly",
+    }
+
+
+def test_durable_observations_record_no_bucket_expectation() -> None:
+    """A page-derived observation's correct filing is "retained", not
+    "decayed on some horizon" -- so it carries no expectation, and the
+    default must stay the empty string rather than a guessed bucket."""
+    corpus = build_corpus(scale="core", seed=20260908)
+    stream = generate_core_observations(corpus.pages, corpus.probes, seed=20260908, scale="core")
+
+    durable = [obs for obs in stream.observations if obs.retain]
+    assert durable, "core corpus must produce durable observations"
+    assert {obs.expected_bucket for obs in durable} == {""}
+
+
+def _tree_digest(root: Path) -> dict[str, str]:
+    return {
+        str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+def test_expected_bucket_never_reaches_the_materialised_stream(tmp_path: Path) -> None:
+    """AC2, asserted rather than assumed.
+
+    `ObservationStream.materialize` writes only `obs.body` under a
+    `timestamp`/`uuid8`-derived filename, so the new field cannot perturb a
+    byte of the emitted tree. Proved by materialising the real stream twice
+    -- once as generated, once with every `expected_bucket` stripped back to
+    the pre-athenaeum#1841 empty default -- and comparing file-for-file
+    digests. Both session sizes are covered because bundling changes which
+    observations share a file, not what is written from each.
+
+    Measured against develop fb69628 before the field existed: both trees
+    digest identically to the manifest captured there.
+    """
+    corpus = build_corpus(scale="core", seed=20260908)
+    stream = generate_core_observations(corpus.pages, corpus.probes, seed=20260908, scale="core")
+    stripped = ObservationStream(
+        observations=[replace(obs, expected_bucket="") for obs in stream.observations],
+        seed=stream.seed,
+        scale=stream.scale,
+    )
+    assert any(obs.expected_bucket for obs in stream.observations), (
+        "fixture must actually differ from the stripped stream, or this proves nothing"
+    )
+
+    for session_size in (1, 5):
+        with_field = tmp_path / f"with-{session_size}"
+        without_field = tmp_path / f"without-{session_size}"
+        stream.materialize(with_field, session_size=session_size)
+        stripped.materialize(without_field, session_size=session_size)
+
+        assert _tree_digest(with_field) == _tree_digest(without_field)
+
+
+def test_corpus_fingerprint_is_unchanged_and_generator_version_does_not_bump() -> None:
+    """AC2's other half: `Corpus.fingerprint` digests PAGES, never
+    observations, so widening an observation cannot move it -- and
+    `GENERATOR_VERSION` must therefore stay put.
+
+    The literal below was measured on develop fb69628 BEFORE
+    `expected_bucket` was added (`build_corpus(scale="core",
+    seed=20260908).fingerprint()`), which is what makes this a before/after
+    comparison rather than a restatement of current behaviour. It moves only
+    when a core page or `GENERATOR_VERSION` really does change -- see the
+    same pin's provenance comment in `tests/test_eval_corpus_generator.py`.
+    """
+    corpus = build_corpus(scale="core", seed=20260908)
+
+    assert corpus.fingerprint() == "95e86aee1fa1af38"
+    assert GENERATOR_VERSION == 4
+
+
+def test_decay_correct_counts_a_transient_filed_under_the_expected_bucket() -> None:
+    store = {"note.md": _page(bucket="daily", body="Zephrandil is down.")}
+
+    stats = compute_write_path_stats("athenaeum", "core", [_TRANSIENT], store)
+
+    assert stats.transient_total == 1
+    assert stats.decay_correct == 1
+    assert stats.transient_retained == 0
+
+
+def test_decay_correct_counter_example_weekly_when_daily_was_expected() -> None:
+    """The AC's own counter-example, and the one fixture that shows the two
+    columns DISAGREE: `weekly` is a reasonable decay, so the unchanged
+    athenaeum#1830 rule still grades this correct (`transient_retained == 0`)
+    -- but `daily` was expected, so it counts toward `transient_total` and
+    NOT toward `decay_correct`."""
+    store = {"note.md": _page(bucket="weekly", body="Zephrandil is down.")}
+
+    stats = compute_write_path_stats("athenaeum", "core", [_TRANSIENT], store)
+
+    assert stats.transient_total == 1
+    assert stats.decay_correct == 0, "weekly is not daily -- the decay is wrong"
+    assert stats.transient_retained == 0, (
+        "athenaeum#1830's rule is unchanged: a short bucket is still a reasonable decay"
+    )
+
+
+def test_decay_correct_requires_every_page_carrying_the_token_to_agree() -> None:
+    """One durable copy is still a durable filing -- the same all-pages rule
+    `_transient_token_handled_correctly` holds."""
+    store = {
+        "short.md": _page(bucket="daily", body="Zephrandil is down.", name="short"),
+        "long.md": _page(bucket="durable", body="Zephrandil is down.", name="long"),
+    }
+
+    stats = compute_write_path_stats("athenaeum", "core", [_TRANSIENT], store)
+
+    assert stats.decay_correct == 0
+
+
+def test_decay_correct_is_none_when_the_store_declares_no_bucket_vocabulary() -> None:
+    """The native arm: plain memory files with no frontmatter at all. There
+    is no decay to grade, so the column must read "not measurable", never a
+    fabricated 0 -- the same convention `transient_retained` holds."""
+    store = {"native-memory.md": "Some note mentioning Zephrandil."}
+
+    stats = compute_write_path_stats("native", "core", [_TRANSIENT], store)
+
+    assert stats.decay_correct is None
+    assert stats.transient_total == 1
+
+
+def test_decay_correct_is_none_when_no_transient_carries_an_expectation() -> None:
+    observations = [
+        _obs("obs-1", "transient-outage", "down today", tokens=("Zephrandil",), retain=False),
+    ]
+    store = {"note.md": _page(bucket="daily", body="Zephrandil is down.")}
+
+    stats = compute_write_path_stats("athenaeum", "core", observations, store)
+
+    assert stats.decay_correct is None
+
+
+def test_a_transient_with_no_expectation_is_never_counted_decay_correct() -> None:
+    """A mixed stream: one transient carries ground truth, one does not.
+    The un-expected token cannot be graded, so it must not be counted
+    correct just because it happens to sit on a short-bucket page -- that
+    would silently inflate the column against `transient_total`."""
+    ungraded = _obs(
+        "obs-2",
+        "transient-export-status",
+        "the nightly export finished",
+        tokens=("Marrowglint",),
+        retain=False,
+    )
+    store = {
+        "a.md": _page(bucket="daily", body="Zephrandil is down.", name="a"),
+        "b.md": _page(bucket="daily", body="Marrowglint batch finished.", name="b"),
+    }
+
+    stats = compute_write_path_stats("athenaeum", "core", [_TRANSIENT, ungraded], store)
+
+    assert stats.transient_total == 2
+    assert stats.decay_correct == 1
+
+
+def test_a_dropped_transient_is_not_decay_correct_but_is_still_handled_correctly() -> None:
+    """Absence is the athenaeum#1830 rule's best outcome and is scored by
+    `transient_retained`; it is not a CORRECT DECAY, because no decay was
+    picked at all. The two columns are reported side by side precisely so
+    this case is legible instead of being averaged away."""
+    store = {"unrelated.md": _page(bucket="durable", body="nothing planted here")}
+
+    stats = compute_write_path_stats("athenaeum", "core", [_TRANSIENT], store)
+
+    assert stats.transient_retained == 0
+    assert stats.decay_correct == 0
+
+
+def test_durable_token_on_a_daily_page_is_overdecayed() -> None:
+    """The AC's over-decay counter-example: the SAME durable token filed
+    `daily` is a fact the store has scheduled to forget; filed `durable` it
+    is not."""
+    observations = [_obs("obs-1", "page-a", "durable fact", tokens=("Cinderquill",))]
+
+    overdecayed = compute_write_path_stats(
+        "athenaeum",
+        "core",
+        observations,
+        {"page-a.md": _page(bucket="daily", body="Cinderquill is the policy owner.")},
+    )
+    assert overdecayed.durable_overdecayed == 1
+    assert overdecayed.answer_tokens_retained == 1, "over-decay is not loss -- it is still there"
+
+    filed_durable = compute_write_path_stats(
+        "athenaeum",
+        "core",
+        observations,
+        {"page-a.md": _page(bucket="durable", body="Cinderquill is the policy owner.")},
+    )
+    assert filed_durable.durable_overdecayed == 0
+
+
+def test_durable_overdecayed_ignores_pages_with_no_bucket_and_transient_tokens() -> None:
+    """A page with no decay vocabulary makes no decay claim, so it is not an
+    over-decay; and a TRANSIENT token on a `daily` page is the correct
+    filing, never an over-decay -- that column is durable-only."""
+    observations = [
+        _obs("obs-1", "page-a", "durable fact", tokens=("Cinderquill",)),
+        _TRANSIENT,
+    ]
+    store = {
+        "page-a.md": _page(body="Cinderquill is the policy owner.", name="page-a"),
+        "note.md": _page(bucket="daily", body="Zephrandil is down."),
+    }
+
+    stats = compute_write_path_stats("athenaeum", "core", observations, store)
+
+    assert stats.durable_overdecayed == 0
+    assert stats.decay_correct == 1
+
+
+def _write_path_table(rendered: str) -> tuple[str, str, str]:
+    """The header, separator and first data row of the Phase 2 write-path
+    table, located by the header's own first column rather than by index."""
+    lines = rendered.splitlines()
+    for i, line in enumerate(lines):
+        if line.startswith("| system | corpus_scale | pages_targeted |"):
+            return lines[i], lines[i + 1], lines[i + 2]
+    raise AssertionError("write-path table header not found in rendered report")
+
+
+def _cells(row: str) -> list[str]:
+    return [cell.strip() for cell in row.strip().strip("|").split("|")]
+
+
+def test_render_report_emits_the_decay_columns_and_explains_them() -> None:
+    stats = (
+        WritePathStats(
+            system="athenaeum",
+            corpus_scale="core",
+            pages_targeted=1,
+            pages_written=1,
+            answer_tokens_total=1,
+            answer_tokens_retained=1,
+            observations_total=2,
+            observations_measured=1,
+            observations_dropped=0,
+            transient_total=3,
+            transient_retained=1,
+            decay_correct=2,
+            durable_overdecayed=1,
+        ),
+    )
+    rendered = render_report(_minimal_report(stats))
+
+    assert "transient_retained | decay_correct | durable_overdecayed" in rendered
+    assert "| athenaeum | core | 1 | 1 | 1 | 1 | 3 | 1 | 2 | 1 | 2 | 1 | 0 |" in rendered
+    # The legend must name `durable_overdecayed` as the SECOND
+    # lower-is-better column, not leave a reader to infer its direction from
+    # the older `transient_retained` sentence.
+    assert "`durable_overdecayed` is the SECOND lower-is-better column" in rendered
+    assert "HIGHER is better" in rendered
+
+
+def test_render_report_renders_unmeasurable_decay_correct_as_na() -> None:
+    stats = (
+        WritePathStats(
+            system="native",
+            corpus_scale="core",
+            pages_targeted=1,
+            pages_written=1,
+            answer_tokens_total=1,
+            answer_tokens_retained=1,
+            observations_total=1,
+            observations_measured=1,
+            observations_dropped=0,
+            transient_total=3,
+            transient_retained=3,
+            decay_correct=None,
+            durable_overdecayed=0,
+        ),
+    )
+    rendered = render_report(_minimal_report(stats))
+
+    assert "| native | core | 1 | 1 | 1 | 1 | 3 | 3 | n/a | 0 | 1 | 1 | 0 |" in rendered
+
+
+def test_write_path_table_header_separator_and_row_have_the_same_cell_count() -> None:
+    """Widening the table by two columns means widening the `| --- |`
+    separator by two cells too -- a markdown table whose separator is short
+    renders as literal text, and no assertion on the ROW alone would catch
+    it."""
+    stats = (
+        WritePathStats(
+            system="athenaeum",
+            corpus_scale="core",
+            pages_targeted=1,
+            pages_written=1,
+            answer_tokens_total=1,
+            answer_tokens_retained=1,
+            observations_total=1,
+            observations_measured=1,
+            observations_dropped=0,
+            transient_total=1,
+            transient_retained=0,
+            decay_correct=1,
+            durable_overdecayed=0,
+        ),
+    )
+    header, separator, row = _write_path_table(render_report(_minimal_report(stats)))
+
+    assert _cells(header)[7:12] == [
+        "transient_retained",
+        "decay_correct",
+        "durable_overdecayed",
+        "observations_total",
+        "observations_measured",
+    ]
+    assert len(_cells(header)) == 15
+    assert len(_cells(separator)) == len(_cells(header))
+    assert len(_cells(row)) == len(_cells(header))
+    assert set(_cells(separator)) == {"---"}
+
+
+def test_decay_columns_survive_the_phase2_sibling_store_round_trip(tmp_path: Path) -> None:
+    """The report only ever sees a row that went through the Phase 2 sibling
+    JSONL, so a field the reader does not rebuild is a field the rendered
+    table can never show. A row written before athenaeum#1841 (no decay keys
+    at all) must still load, degrading to `n/a`/0 rather than being skipped.
+    """
+    store = tmp_path / "phase2.jsonl"
+    measured = WritePathStats(
+        system="athenaeum",
+        corpus_scale="medium",
+        pages_targeted=1,
+        pages_written=1,
+        answer_tokens_total=1,
+        answer_tokens_retained=1,
+        observations_total=2,
+        observations_measured=1,
+        observations_dropped=0,
+        transient_total=3,
+        transient_retained=0,
+        decay_correct=3,
+        durable_overdecayed=1,
+    )
+    legacy = {
+        "kind": "write_path",
+        "system": "native",
+        "corpus_scale": "medium",
+        "pages_targeted": 1,
+        "pages_written": 1,
+        "answer_tokens_total": 1,
+        "answer_tokens_retained": 1,
+        "observations_total": 1,
+        "observations_measured": 1,
+        "observations_dropped": 0,
+    }
+    _phase2_append_rows(store, [_write_path_stats_row(measured), legacy])
+
+    stats, _costs, _filing = load_phase2_results(store)
+    by_system = {row.system: row for row in stats}
+
+    assert by_system["athenaeum"].decay_correct == 3
+    assert by_system["athenaeum"].durable_overdecayed == 1
+    assert by_system["native"].decay_correct is None
+    assert by_system["native"].durable_overdecayed == 0
