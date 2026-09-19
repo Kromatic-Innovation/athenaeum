@@ -36,6 +36,8 @@ from tests.evals.north_star_report import (
     _delivered_uids,
     _is_abstention,
     _is_read_entity_tool,
+    _normalize_for_match,
+    _normalize_marker_for_match,
     _push_delivered_text,
     _read_entity_delivered_uids,
     append_rollout_row,
@@ -2364,3 +2366,168 @@ def test_report_stamps_the_grader_revision_beside_the_corpus_digest() -> None:
     assert f"- grader_revision: {GRADER_REVISION}" in text
     digest_index = text.index("- corpus_digest[")
     assert text.index("- grader_revision:") > digest_index
+
+
+# ---------------------------------------------------------------------------
+# Alternative answer_markers + scoped whitespace normalization (athenaeum#1843)
+# ---------------------------------------------------------------------------
+
+ANCHORLINE_PROBE_ID = "anchorline_retirement_rationale"
+
+
+def _anchorline_record(
+    *, answer: str, delivered_uids: tuple[str, ...], arm: Arm = Arm.PULL
+) -> RolloutRecord:
+    """An anchorline follow_through record whose transcript delivers exactly
+    *delivered_uids* -- the first through `recall`'s markdown, any others
+    through `read_entity`, the same two channels the real PULL arm uses."""
+    probe = _probe(ANCHORLINE_PROBE_ID)
+    transcript: list[dict[str, Any]] = []
+    for index, uid in enumerate(delivered_uids):
+        if index == 0:
+            transcript.extend(_recall_result_events(f"**Uid:** {uid}\n\nsnippet"))
+        else:
+            transcript.extend(_read_entity_events(uid=uid, call_id=f"toolu_read_{index}"))
+    return _record(
+        arm=arm,
+        probe_id=probe.id,
+        probe_class=probe.probe_class,
+        answer=answer,
+        transcript=transcript,
+    )
+
+
+def _anchorline_markers() -> tuple[str, str, str]:
+    """(original decision marker, alternative decision marker, successor
+    marker) read off the corpus rather than duplicated as literals."""
+    probe = _probe(ANCHORLINE_PROBE_ID)
+    decision = [m for uid, m in probe.answer_markers if uid == "decision-retire-anchorline"]
+    successor = [m for uid, m in probe.answer_markers if uid == "system-ledgerfax-successor"]
+    assert len(decision) == 2, decision
+    return decision[0], decision[1], successor[0]
+
+
+def test_grade_correctness_accepts_either_alternative_marker() -> None:
+    """AC (athenaeum#1843): a uid may plant several alternatives, and ANY
+    one of them satisfies clause (a).
+
+    Both answers deliver both pages and quote the successor page's only
+    marker; they differ ONLY in which of the decision page's two
+    alternatives they use, so a True on each is attributable to the
+    alternative and nothing else.
+    """
+    probe = _probe(ANCHORLINE_PROBE_ID)
+    original, alternative, successor = _anchorline_markers()
+    for decision_marker in (original, alternative):
+        record = _anchorline_record(
+            answer=f"Retired because of {decision_marker}; the replacement runs on a {successor}.",
+            delivered_uids=probe.expected_uids,
+        )
+        assert grade_correctness(record, probe, _CORPUS) is True, decision_marker
+
+
+def test_grade_correctness_matches_a_marker_the_answer_wrapped_across_lines() -> None:
+    """AC (athenaeum#1843): the marker comparison normalizes whitespace on
+    BOTH sides.
+
+    The alternative is the phrase that spans a line wrap in the page body;
+    here the ANSWER wraps it (and indents the continuation, as a model
+    formatting a bullet list does). Graded False before this issue --
+    the whole repair in one cell.
+    """
+    probe = _probe(ANCHORLINE_PROBE_ID)
+    _original, alternative, successor = _anchorline_markers()
+    head, _, tail = alternative.rpartition(" ")
+    assert head and tail, alternative
+    wrapped = f"- Retired because its {head}\n      {tail}.\n- Replacement: a {successor}."
+    assert alternative not in wrapped
+    record = _anchorline_record(answer=wrapped, delivered_uids=probe.expected_uids)
+    assert grade_correctness(record, probe, _CORPUS) is True
+
+
+def test_alternative_marker_without_delivery_still_grades_false() -> None:
+    """Counter-example (athenaeum#1843, gate intact): matching an
+    alternative is clause (a) only. A cell whose answer carries both
+    markers but whose decision page was never delivered still grades
+    False -- the leak guard is untouched by widening what counts as a
+    marker match.
+    """
+    probe = _probe(ANCHORLINE_PROBE_ID)
+    _original, alternative, successor = _anchorline_markers()
+    answer = f"Retired because of {alternative}; the replacement runs on a {successor}."
+    delivered = _anchorline_record(answer=answer, delivered_uids=probe.expected_uids)
+    assert grade_correctness(delivered, probe, _CORPUS) is True
+    undelivered = _anchorline_record(
+        answer=answer, delivered_uids=("system-ledgerfax-successor",)
+    )
+    assert set(_delivered_uids(undelivered, probe, _CORPUS)) == {"system-ledgerfax-successor"}
+    assert grade_correctness(undelivered, probe, _CORPUS) is False
+
+
+def test_marker_normalizer_is_scoped_and_shared_normalizer_is_unchanged() -> None:
+    """AC (athenaeum#1843): ``_normalize_for_match`` is NOT widened.
+
+    It is also read by ``_is_abstention``, ``tag_followed``, ``grade_harm``,
+    ``grade_coverage`` and ``grade_marker_resolution``; collapsing
+    whitespace there could flip a correct abstention to wrong. Pinned as a
+    behavioural difference on the same input, not as a source-text check.
+    """
+    wrapped = "Two   spaced\nWORDS"
+    assert _normalize_for_match(wrapped) == wrapped.lower()
+    assert "\n" in _normalize_for_match(wrapped)
+    assert _normalize_marker_for_match(wrapped) == "two spaced words"
+
+
+def test_abstention_grading_is_unmoved_by_the_marker_normalizer() -> None:
+    """Counter-example (athenaeum#1843, scope): a declining answer whose
+    phrasing spans a line wrap grades exactly as it did before -- the
+    abstention path never reaches the marker normalizer."""
+    abstention = next(p for p in _CORPUS.probes if p.probe_class == "abstention")
+    for answer in (
+        "I could not find anything about that.",
+        "I could not find\n   anything about that.",
+    ):
+        record = _record(
+            arm=Arm.PULL,
+            probe_id=abstention.id,
+            probe_class=abstention.probe_class,
+            answer=answer,
+        )
+        assert grade_correctness(record, abstention, _CORPUS) is True
+        assert marker_miss_with_delivery(record, abstention, _CORPUS) is None
+
+
+def test_marker_miss_with_delivery_uses_the_same_marker_normalizer() -> None:
+    """AC (athenaeum#1843): ``marker_miss_with_delivery`` splits
+    ``grade_correctness``'s clause (a) apart, so it must make the SAME
+    comparison.
+
+    A delivered cell whose answer wraps an alternative is not a marker miss;
+    a delivered cell that says neither alternative is. A normalizer mismatch
+    here would report a miss on a cell the grader scores correct, which is
+    exactly the contradiction the column exists to rule out.
+    """
+    probe = _probe(ANCHORLINE_PROBE_ID)
+    _original, alternative, successor = _anchorline_markers()
+    head, _, tail = alternative.rpartition(" ")
+    wrapped = _anchorline_record(
+        answer=f"Retired: its {head}\n{tail}. Replacement runs on a {successor}.",
+        delivered_uids=probe.expected_uids,
+    )
+    assert grade_correctness(wrapped, probe, _CORPUS) is True
+    assert marker_miss_with_delivery(wrapped, probe, _CORPUS) is False
+
+    paraphrased = _anchorline_record(
+        answer=f"Retired for security reasons. Replacement runs on a {successor}.",
+        delivered_uids=probe.expected_uids,
+    )
+    assert grade_correctness(paraphrased, probe, _CORPUS) is False
+    assert marker_miss_with_delivery(paraphrased, probe, _CORPUS) is True
+
+
+def test_grader_revision_names_this_issue() -> None:
+    """The stamp's own contract: bump ``GRADER_REVISION`` in the same commit
+    as any change to ``grade_correctness``. This issue changed how clause (a)
+    matches, so two report tables over the same stored rows -- one graded
+    before, one after -- must be distinguishable from their headers alone."""
+    assert GRADER_REVISION == "athenaeum#1843"

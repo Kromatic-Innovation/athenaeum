@@ -19,12 +19,15 @@ import pytest
 
 from tests.evals.corpus import (
     CONDITION_2_ENROLLED,
+    GENERATOR_VERSION,
     SCALES,
     Page,
     Probe,
     RelatedEdge,
     _body_wikilink_targets,
     _content_terms,
+    _marker_alternatives,
+    _normalize_marker_for_match,
     _shares_stemmed_term,
     build_corpus,
     load_core_pages,
@@ -1570,7 +1573,14 @@ def test_xlarge_scale_is_pinned() -> None:
     # this test's own docstring on why a GENERATOR_VERSION bump is expected
     # to move this pin), re-measured directly against
     # `build_corpus(scale="xlarge")` on this branch.
-    assert corpus.fingerprint() == "a110f2b328695f3a"
+    # athenaeum#1843: GENERATOR_VERSION bumped 3 -> 4, same shape as
+    # athenaeum#1831's -- `decision-retire-anchorline` gained an ALTERNATIVE
+    # `answer_markers` value and the marker comparison gained whitespace
+    # normalization, so grading ground truth moved with no page byte
+    # different. Re-derived (not copied from a failure message) by running
+    # `build_corpus(scale="xlarge").fingerprint()` in two separate
+    # processes on this branch, both yielding the literal below.
+    assert corpus.fingerprint() == "dea25fb979875839"
 
 
 def test_long_tier_tag_is_outside_the_recall_snippet() -> None:
@@ -1823,3 +1833,214 @@ def test_materialize_writes_a_readable_wiki_tree(tmp_path: Path) -> None:
     assert sample.startswith("---\n")
     assert "uid: person-rowan-wrenfield" in sample
     assert "type: person" in sample
+
+
+# ---------------------------------------------------------------------------
+# Alternative answer_markers + scoped whitespace normalization (athenaeum#1843)
+# ---------------------------------------------------------------------------
+
+
+def _alternatives_probe(
+    *, alternatives: tuple[str, ...], extra_pages: list[Page] | None = None
+) -> tuple[list[Page], Probe]:
+    """A minimal single-hop probe whose one answer-bearing page carries
+    *alternatives* as its ``answer_markers`` value, for the athenaeum#1843
+    alternative-set rules below.
+
+    The default page body plants both of the real repair's shapes: a phrase
+    that spans a LINE WRAP (so plantability depends on the new normalizer)
+    and a second, single-line phrase.
+    """
+    pages = [
+        Page(
+            uid="page-a",
+            type="note",
+            name="Page A",
+            body=(
+                "# Page A\n\n"
+                "Glimwald was retired after its vendor stopped shipping security\n"
+                "patches, and the crew judged the migration hazard acceptable.\n\n"
+                "Internal reference tag: Verdantholt."
+            ),
+            tier="core",
+        )
+    ]
+    pages.extend(extra_pages or [])
+    probe = Probe(
+        id="synthetic_alternatives",
+        probe_class="single_hop",
+        query="why was the reporting utility decommissioned?",
+        expected_uids=("page-a",),
+        answer_tokens=("Verdantholt",),
+        answer_markers=tuple(("page-a", marker) for marker in alternatives),
+    )
+    return pages, probe
+
+
+def test_answer_markers_value_may_be_a_string_or_a_list_of_alternatives() -> None:
+    """AC (athenaeum#1843): ``answer_markers`` accepts a string or a list of
+    strings per uid. A string is one alternative; a list is several, in
+    authored order."""
+    assert _marker_alternatives("one phrase") == ("one phrase",)
+    assert _marker_alternatives(["first", "second"]) == ("first", "second")
+    with pytest.raises(TypeError):
+        _marker_alternatives(17)
+
+
+def test_loader_flattens_alternatives_and_keeps_expected_uids_order() -> None:
+    """AC (athenaeum#1843): the loader keeps its ``expected_uids``-order
+    determinism with alternatives in play.
+
+    Two loads of the same yaml must produce the identical tuple (generation
+    determinism), the uids must appear in ``expected_uids`` order, and a uid
+    with alternatives must contribute CONSECUTIVE pairs rather than
+    interleaving with another uid's.
+    """
+    first = {probe.id: probe.answer_markers for probe in load_probes()}
+    second = {probe.id: probe.answer_markers for probe in load_probes()}
+    assert first == second
+    for probe in load_probes():
+        if not probe.answer_markers:
+            continue
+        uid_sequence = [uid for uid, _marker in probe.answer_markers]
+        # Consecutive: collapsing runs must leave no uid appearing twice.
+        runs = [uid for i, uid in enumerate(uid_sequence) if i == 0 or uid_sequence[i - 1] != uid]
+        assert len(runs) == len(set(runs)), (
+            f"probe {probe.id}: a uid's alternatives are not consecutive: {uid_sequence}"
+        )
+        expected_order = [uid for uid in probe.expected_uids if uid in set(uid_sequence)]
+        assert runs == expected_order, (
+            f"probe {probe.id}: answer_markers uid order {runs} does not follow "
+            f"expected_uids {expected_order}"
+        )
+
+
+def test_anchorline_alternative_is_plantable_only_under_the_new_normalizer() -> None:
+    """AC (athenaeum#1843): ``decision-retire-anchorline`` gains the
+    alternative "vendor stopped shipping security patches", and plantability
+    is verified under the new normalization.
+
+    The phrase spans a line wrap between "security" and "patches" in the page
+    body, so this is simultaneously the positive control for the normalizer
+    (a RAW substring test fails on the very phrase the repair adds) and the
+    proof the repair landed.
+    """
+    pages_by_uid = {page.uid: page for page in load_core_pages()}
+    body = pages_by_uid["decision-retire-anchorline"].body
+    alternative = "vendor stopped shipping security patches"
+    assert alternative not in body, (
+        "the alternative no longer spans a line wrap -- this test's premise, and the "
+        "reason validate_core needs the normalizer at its plantability check, is gone"
+    )
+    assert _normalize_marker_for_match(alternative) in _normalize_marker_for_match(body)
+    probe = next(p for p in load_probes() if p.id == "anchorline_retirement_rationale")
+    decision_markers = [m for uid, m in probe.answer_markers if uid == "decision-retire-anchorline"]
+    assert decision_markers == [
+        "running unpatched software another quarter",
+        alternative,
+    ]
+
+
+def test_validate_core_rejects_an_alternative_that_is_a_common_english_fragment() -> None:
+    """Counter-example (athenaeum#1843, "not a loosening"): an alternative
+    carrying fewer than two content terms is connective tissue, not a planted
+    fact, and would match almost any answer."""
+    pages, probe = _alternatives_probe(
+        alternatives=("vendor stopped shipping security patches", "the crew")
+    )
+    problems = validate_core(pages, [probe])
+    assert any("common English fragment" in problem for problem in problems), problems
+
+
+def test_validate_core_rejects_an_alternative_occurring_outside_expected_uids() -> None:
+    """Counter-example (athenaeum#1843, "not a loosening"): an alternative
+    that also occurs on a page the probe never expected to retrieve proves
+    nothing about which page was read, so it must be refused at load.
+
+    The decoy carries the phrase WRAPPED DIFFERENTLY from the expected page,
+    so the rule is checked under the same normalizer the grader matches with
+    -- a raw substring scan would miss it and let the alternative through.
+    """
+    decoy = Page(
+        uid="page-decoy",
+        type="note",
+        name="Decoy",
+        body="An unrelated note: the crew judged the migration     hazard acceptable here too.",
+        tier="core",
+    )
+    pages, probe = _alternatives_probe(
+        alternatives=(
+            "vendor stopped shipping security patches",
+            "crew judged the migration hazard acceptable",
+        ),
+        extra_pages=[decoy],
+    )
+    problems = validate_core(pages, [probe])
+    assert any(
+        "also occurs in page 'page-decoy'" in problem for problem in problems
+    ), problems
+
+
+def test_validate_core_applies_every_existing_marker_rule_to_each_alternative() -> None:
+    """AC (athenaeum#1843): every existing ``validate_core`` marker rule --
+    plantable, not a substring of the probe's own query, not colliding with
+    an ``answer_tokens`` value -- applies to each alternative, not just the
+    first.
+
+    Each case keeps a VALID first marker, so the reported problem is
+    attributable to the alternative and to nothing else.
+    """
+    valid = "vendor stopped shipping security patches"
+
+    unplantable_pages, unplantable = _alternatives_probe(
+        alternatives=(valid, "never written on this page anywhere")
+    )
+    unplantable_problems = validate_core(unplantable_pages, [unplantable])
+    assert any("it must be plantable" in problem for problem in unplantable_problems)
+
+    query_pages, query_echo = _alternatives_probe(
+        alternatives=(valid, "why was the reporting utility decommissioned?")
+    )
+    assert any(
+        "appears in the probe's own query" in problem
+        for problem in validate_core(query_pages, [query_echo])
+    )
+
+    tag_pages, tag_collision = _alternatives_probe(alternatives=(valid, "Verdantholt"))
+    assert any(
+        "'Internal reference tag:' token" in problem
+        for problem in validate_core(tag_pages, [tag_collision])
+    )
+
+
+def test_validate_core_accepts_a_distinctive_wrapped_alternative() -> None:
+    """Positive control for the two tests above: the alternative set the
+    anchorline repair actually ships -- distinctive, plantable only under the
+    normalizer -- is accepted with no ``answer_markers`` problem at all.
+
+    Filtered to marker problems because ``validate_core`` also reports
+    corpus-wide structural findings (unlinked clusters and the like) that a
+    two-page fixture cannot satisfy and this AC is not about.
+    """
+    pages, probe = _alternatives_probe(
+        alternatives=(
+            "vendor stopped shipping security patches",
+            "crew judged the migration hazard acceptable",
+        )
+    )
+    marker_problems = [
+        problem for problem in validate_core(pages, [probe]) if "answer_markers" in problem
+    ]
+    assert marker_problems == []
+
+
+def test_generator_version_is_bumped_for_the_marker_repair() -> None:
+    """AC (athenaeum#1843): ``GENERATOR_VERSION`` 3 -> 4.
+
+    Grading ground truth moved with no page byte different, so the version
+    constant is the only thing that can invalidate pooling against a table
+    recorded under version 3. Pinned here as well as through
+    ``test_xlarge_scale_is_pinned``'s digest so the intent -- not just the
+    resulting hash -- is reviewable.
+    """
+    assert GENERATOR_VERSION == 4

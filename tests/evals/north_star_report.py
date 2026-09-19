@@ -113,6 +113,7 @@ from athenaeum.text_overlap import (
 from tests.evals.containment import GridCell, ResultStore
 from tests.evals.corpus import Corpus, Observation, Probe, answer_bearing_uids, build_corpus
 from tests.evals.corpus import _content_terms as _content_terms
+from tests.evals.corpus import _normalize_marker_for_match as _normalize_marker_for_match
 from tests.evals.metrics import uids_from_recall_output
 from tests.evals.rollout import Arm, RolloutRecord
 
@@ -421,7 +422,17 @@ def _normalize_for_match(text: str) -> str:
     """Lowercased text for a normalized substring match. Deliberately
     minimal -- no stemming/punctuation-stripping -- because the tokens
     planted by the corpus are single invented words with no natural
-    inflection to normalize away."""
+    inflection to normalize away.
+
+    DO NOT widen this (issue athenaeum#1843). It is read by
+    :func:`_is_abstention`, :func:`tag_followed`, :func:`grade_harm`,
+    :func:`grade_coverage` and :func:`grade_marker_resolution` as well as by
+    :func:`grade_correctness`'s answer_tokens path; a looser match here can
+    flip a correct abstention to wrong. ``answer_markers`` comparisons use
+    :func:`tests.evals.corpus._normalize_marker_for_match` instead, which
+    additionally collapses whitespace and is scoped to exactly those
+    comparisons.
+    """
     return text.lower()
 
 
@@ -605,7 +616,7 @@ def _delivered_uids(record: RolloutRecord, probe: Probe, corpus: Corpus) -> tupl
 #: as any change to :func:`grade_correctness`, :func:`_delivered_uids` or
 #: anything they dispatch to; the value is the issue that last changed the
 #: rule, which is the most useful thing a reader can be handed.
-GRADER_REVISION = "athenaeum#1842"
+GRADER_REVISION = "athenaeum#1843"
 
 
 def tag_followed(record: RolloutRecord, probe: Probe) -> bool | None:
@@ -642,7 +653,9 @@ def marker_miss_with_delivery(
     apart -- every one of ``answer_bearing_uids``'s pages IS in
     :func:`_delivered_uids` for this arm/record (clause (b) satisfied), and
     at least one of those pages contributed none of its planted
-    ``answer_markers`` to the normalized answer (clause (a) violated). The
+    ``answer_markers`` values -- alternatives included -- to the answer under
+    the same scoped marker normalizer clause (a) uses (clause (a)
+    violated). The
     model was handed the page and still did not say the fact.
 
     This is the column that makes the NEXT grader gap self-evident. When the
@@ -684,9 +697,16 @@ def marker_miss_with_delivery(
     delivered = frozenset(_delivered_uids(record, probe, corpus))
     if any(uid not in delivered for uid in required_uids):
         return False
-    answer = _normalize_for_match(record.answer)
+    # The SAME comparison `grade_correctness`'s clause (a) makes, with the
+    # same scoped normalizer (issue athenaeum#1843) -- this column exists to
+    # split that conjunct apart, so a normalizer mismatch here would make it
+    # report marker misses on cells the grader scores correct.
+    marker_answer = _normalize_marker_for_match(record.answer)
     return any(
-        not any(_normalize_for_match(marker) in answer for marker in markers_by_uid[uid])
+        not any(
+            _normalize_marker_for_match(marker) in marker_answer
+            for marker in markers_by_uid[uid]
+        )
         for uid in required_uids
     )
 
@@ -711,8 +731,13 @@ def grade_correctness(record: RolloutRecord, probe: Probe, corpus: Corpus) -> bo
     here -- exactly as ``answer_tokens`` already excluded them), BOTH of the
     following must hold:
 
-    (a) at least one of that page's planted ``answer_markers`` -- the fact
-        itself, never the tag -- is present in the normalized answer, AND
+    (a) at least one of that page's planted ``answer_markers`` values -- the
+        fact itself, never the tag -- is present in the answer, compared
+        under :func:`tests.evals.corpus._normalize_marker_for_match`
+        (lowercase plus collapsed whitespace, issue athenaeum#1843) on BOTH
+        sides. A uid may plant several ALTERNATIVE markers; any one of them
+        satisfies this clause, which is how a marker the ceiling arm cannot
+        reproduce verbatim gets repaired without loosening the grader. AND
     (b) that page's uid is in :func:`_delivered_uids` for this arm/record
         (the transcript's own recall/read-entity/file-read/breadcrumb
         evidence -- never merely ``expected_uids``, so a guessed or leaked
@@ -734,7 +759,14 @@ def grade_correctness(record: RolloutRecord, probe: Probe, corpus: Corpus) -> bo
     tokens or markers AND uses recognizable declining language -- see the
     section docstring above.
     """
-    answer = _normalize_for_match(record.answer)
+    # The answer_markers conjunct gets its OWN normalized copy of the answer
+    # (issue athenaeum#1843), via the scoped marker normalizer rather than
+    # the shared `_normalize_for_match` this function used to bind here: that
+    # one is shared with the abstention/tag/harm/coverage graders and must
+    # stay lowercase-only, while a marker phrase has to survive a line wrap
+    # on either side. The old shared binding had no other reader left here,
+    # so it is gone rather than left dead.
+    marker_answer = _normalize_marker_for_match(record.answer)
     if probe.probe_class == "abstention":
         return _is_abstention(record.answer, probe, corpus)
     if not probe.answer_tokens:
@@ -763,7 +795,9 @@ def grade_correctness(record: RolloutRecord, probe: Probe, corpus: Corpus) -> bo
             return None
         if not content_only and uid not in delivered:
             return False
-        if not any(_normalize_for_match(marker) in answer for marker in markers):
+        if not any(
+            _normalize_marker_for_match(marker) in marker_answer for marker in markers
+        ):
             return False
     return True
 

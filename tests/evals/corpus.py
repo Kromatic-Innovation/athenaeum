@@ -161,6 +161,57 @@ _WORD_RE = re.compile(r"[a-z0-9]+")
 _INTERROGATIVE_DENYLIST: tuple[str, ...] = ("what", "who", "why did", "do we know")
 
 
+#: Runs of any whitespace, for :func:`_normalize_marker_for_match`.
+_MARKER_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def _normalize_marker_for_match(text: str) -> str:
+    """Lowercase *text* and collapse every run of whitespace to one space
+    (issue athenaeum#1843).
+
+    DELIBERATELY SEPARATE from
+    :func:`tests.evals.north_star_report._normalize_for_match`, which stays
+    ``.lower()`` only. That one is also read by ``_is_abstention``,
+    ``tag_followed``, ``grade_harm``, ``grade_coverage`` and
+    ``grade_marker_resolution``; widening it would, among other things, let
+    a wrapped phrase flip a correct abstention to wrong. This normalizer is
+    scoped to ``answer_markers`` comparisons ONLY -- the marker-match
+    conjunct of ``grade_correctness``, the same conjunct as reported by
+    ``marker_miss_with_delivery``, and :func:`validate_core`'s plantability
+    check.
+
+    Whitespace and nothing else. No stemming, no punctuation stripping, no
+    fuzzy match (issue athenaeum#1843 "Out of scope") -- the one real
+    mismatch it exists to fix is a marker phrase that spans a line wrap in
+    the page body it is planted in (``decision-retire-anchorline``'s
+    "vendor stopped shipping security\npatches"), or that a model re-wraps
+    differently in its own answer. Both sides of every comparison must be
+    passed through it, never just one.
+    """
+    return _MARKER_WHITESPACE_RE.sub(" ", text.lower()).strip()
+
+
+def _marker_alternatives(value: object) -> tuple[str, ...]:
+    """Normalize one authored ``answer_markers`` value into its tuple of
+    alternatives (issue athenaeum#1843).
+
+    A plain string stays a single-element tuple (every marker authored
+    before this issue); a list of strings becomes the alternatives in
+    authored order. Authored order is preserved rather than sorted so the
+    yaml reads as "the primary phrasing, then the accepted variants"; the
+    loader's own ``expected_uids`` ordering (see :func:`load_probes`) is
+    what makes the resulting tuple generation-deterministic, and a list
+    literal is already order-stable in yaml.
+    """
+    if isinstance(value, str):
+        return (value,)
+    if isinstance(value, (list, tuple)):
+        return tuple(str(item) for item in value)
+    raise TypeError(
+        f"answer_markers value must be a string or a list of strings, got {type(value)!r}"
+    )
+
+
 def _content_terms(text: str) -> set[str]:
     words = _WORD_RE.findall(text.lower())
     return {w for w in words if len(w) >= 3 and w not in _STOPWORDS}
@@ -236,7 +287,15 @@ def _body_wikilink_targets(body: str) -> list[str]:
 # it are not comparable") is otherwise unsatisfiable by construction. A
 # reader of a diff against this constant should NOT go looking for a page
 # content change; there isn't one.
-GENERATOR_VERSION = 3
+#
+# 3 -> 4 (issue athenaeum#1843): same shape again. `decision-retire-anchorline`
+# gained an ALTERNATIVE `answer_markers` value and the marker comparison
+# gained whitespace normalization (`_normalize_marker_for_match`), so a cell
+# that graded False before can grade True now with no page byte different.
+# Any floor/ceiling table recorded under version 3 -- including north-star
+# runs 35399179014 and 35407275511 -- therefore stops pooling with any run
+# recorded after this bump.
+GENERATOR_VERSION = 4
 
 CORPUS_ROOT = Path(__file__).parent / "data" / "corpus"
 CORE_DIR = CORPUS_ROOT / "core"
@@ -457,7 +516,19 @@ class Probe:
     entry is a ``(uid, marker)`` pair: *marker* is the planted FACT itself
     (a date, a number, a name -- never the ``Internal reference tag:``
     token, and never a substring of ``query``, both enforced by
-    :func:`validate_core`), occurring literally in *uid*'s page body. Only
+    :func:`validate_core`), occurring literally in *uid*'s page body --
+    "literally" up to :func:`_normalize_marker_for_match` (lowercase plus
+    whitespace collapsed), so a phrase that spans a line wrap in the body is
+    plantable (issue athenaeum#1843). A uid may carry SEVERAL alternative
+    markers: ``probes.yaml`` authors the value as either a string or a list
+    of strings, and the loader flattens a list into several consecutive
+    ``(uid, marker)`` pairs. ``grade_correctness`` groups by uid and needs
+    only ONE of a uid's alternatives present, which is what makes a marker
+    the ceiling arm cannot reproduce repairable without loosening the
+    grader. Every alternative is held to every rule a lone marker is, plus
+    two more :func:`validate_core` applies only to alternative sets (at
+    least two content terms; not occurring on any page outside
+    ``expected_uids``). Only
     ANSWER-BEARING expected pages need an entry -- a page that plants one of
     ``answer_tokens`` (see :func:`answer_bearing_uids`), NOT every
     ``expected_uids`` page: a ``disambiguation``/``distractor_robustness``
@@ -776,10 +847,17 @@ def load_probes() -> list[Probe]:
             # own order so two loads of the same yaml always produce the
             # same tuple -- generation determinism (module docstring) would
             # otherwise depend on the yaml library's dict-iteration order.
+            # Each value is a string OR a list of alternative strings
+            # (issue athenaeum#1843); `_marker_alternatives` flattens both
+            # into (uid, marker) pairs, so a uid with alternatives simply
+            # contributes several consecutive pairs. `grade_correctness`
+            # already groups by uid and matches with `any(...)`, so the
+            # grading shape is unchanged.
             answer_markers=tuple(
-                (uid, (raw.get("answer_markers") or {})[uid])
+                (uid, marker)
                 for uid in raw.get("expected_uids", ())
                 if uid in (raw.get("answer_markers") or {})
+                for marker in _marker_alternatives((raw.get("answer_markers") or {})[uid])
             ),
             forbidden_tokens=tuple(raw.get("forbidden_tokens", ())),
             note=raw.get("note", ""),
@@ -966,10 +1044,20 @@ def validate_core(pages: list[Page], probes: list[Probe]) -> list[str]:
                 )
             normalized_query = probe.query.lower()
             normalized_tag_tokens = {tok.lower() for tok in probe.answer_tokens}
+            markers_by_uid: dict[str, list[str]] = {}
+            for uid, marker in probe.answer_markers:
+                markers_by_uid.setdefault(uid, []).append(marker)
             for uid, marker in probe.answer_markers:
                 normalized_marker = marker.lower()
                 page = pages_by_uid.get(uid)
-                if page is not None and marker not in page.body:
+                # Plantability under the SAME normalizer `grade_correctness`
+                # matches with (issue athenaeum#1843) -- a raw substring test
+                # here would refuse a marker phrase that spans a line wrap in
+                # the page body, which is exactly the repair this issue makes
+                # to `decision-retire-anchorline`. Both sides normalized.
+                if page is not None and _normalize_marker_for_match(
+                    marker
+                ) not in _normalize_marker_for_match(page.body):
                     problems.append(
                         f"probe {probe.id!r}: answer_markers value {marker!r} does not occur "
                         f"in expected_uids page {uid!r}'s body -- it must be plantable"
@@ -990,6 +1078,48 @@ def validate_core(pages: list[Page], probes: list[Probe]) -> list[str]:
                             f"'Internal reference tag:' token {tag_token!r} -- a content "
                             "marker must be distinct from the citation tag"
                         )
+            # Issue athenaeum#1843, "not a loosening": allowing SEVERAL
+            # markers per uid widens what counts as a correct answer, so
+            # every marker of a uid that carries ALTERNATIVES must earn its
+            # distinctiveness. Scoped to alternative SETS, not to every
+            # marker in the corpus: the 14 single-marker values authored
+            # under athenaeum#1831 include deliberately short, shared facts
+            # ("two weeks", "9:30 AM", "500 GBP") that are unique ground
+            # truth for their probe but recur across the corpus, and
+            # re-litigating those is explicitly not this issue. Applying the
+            # rule to the whole alternative set rather than to "the second
+            # and later entries" keeps it independent of yaml ordering.
+            for uid, markers in markers_by_uid.items():
+                if len(markers) < 2:
+                    continue
+                for marker in markers:
+                    normalized_marker = _normalize_marker_for_match(marker)
+                    # (a) A COMMON ENGLISH FRAGMENT: a phrase carrying fewer
+                    # than two content terms is not a planted fact, it is
+                    # connective tissue, and would match almost any answer.
+                    if len(_content_terms(marker)) < 2:
+                        problems.append(
+                            f"probe {probe.id!r}: answer_markers alternative {marker!r} for "
+                            f"uid {uid!r} carries fewer than two content terms -- an "
+                            "alternative must be a distinctive planted fact, not a common "
+                            "English fragment"
+                        )
+                    # (b) NOT DISTINCTIVE TO THE EXPECTED PAGES: the phrase
+                    # also occurs somewhere the probe never expected to
+                    # retrieve, so matching it proves nothing about whether
+                    # the right page was read. This is also the operative
+                    # test for a genuinely common fragment -- a common
+                    # phrase recurs across the corpus by definition.
+                    for other in pages:
+                        if other.uid in expected_uid_set:
+                            continue
+                        if normalized_marker in _normalize_marker_for_match(other.body):
+                            problems.append(
+                                f"probe {probe.id!r}: answer_markers alternative {marker!r} "
+                                f"for uid {uid!r} also occurs in page {other.uid!r}, which is "
+                                "not in expected_uids -- an alternative must be distinctive "
+                                "to the pages the probe expects to retrieve"
+                            )
         if probe.probe_class == "follow_through":
             expected_pages = [
                 pages_by_uid[uid] for uid in probe.expected_uids if uid in pages_by_uid

@@ -483,7 +483,20 @@
   must_not_rank: [ops-client-reporting]
   distractor_terms: ["Anchorline", "retire", "reporting tool"]
   answer_tokens: ["Verdantholt", "Sablecroft"]
-  answer_markers: {decision-retire-anchorline: "running unpatched software another quarter", system-ledgerfax-successor: "nightly cadence"}
+  answer_markers:
+    # Two ALTERNATIVES for the decision page (issue athenaeum#1843). The
+    # first is the marker authored under athenaeum#1831; it is an
+    # ungrammatical slice of the body ("...lower than the risk of running
+    # unpatched software another quarter") that every arm paraphrases --
+    # including `oracle`, which is handed the page verbatim, so it was a
+    # broken marker rather than a retrieval loss. The second is the same
+    # page's other rationale clause, grammatical on its own, and it spans a
+    # line wrap in the body -- plantable only because validate_core and the
+    # grader now compare under `_normalize_marker_for_match`.
+    decision-retire-anchorline:
+      - "running unpatched software another quarter"
+      - "vendor stopped shipping security patches"
+    system-ledgerfax-successor: "nightly cadence"
   note: >-
     Decision use case (docs/use-cases.md §2.3). The decision page gives the
     security rationale but not how the replacement is consumed; only the
