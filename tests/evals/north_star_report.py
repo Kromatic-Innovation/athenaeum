@@ -2085,6 +2085,36 @@ class CostPerCorrect:
     (``write_tokens_amortized``/``write_tokens_raw``) are ``None`` when no
     :class:`WriteCost` was supplied for this group's ``(system,
     corpus_scale)``, which is the Phase-1-only case (AC3).
+
+    Shared-write accounting (athenaeum#1870, ruling athenaeum#1830): the
+    librarian is not a fact writer, it files what Claude's native memory
+    tool-calls already wrote -- so an Athenaeum arm's write cost is the
+    native writer's own amortised spend PLUS the librarian's filing spend,
+    not the filing spend alone. ``write_tokens_amortized``/
+    ``write_tokens_raw`` are therefore the COMBINED figure for a
+    non-native arm (native writer share + filing share) and the
+    unchanged, pass-through native figure for a native arm (nothing to
+    add -- the whole charge already is native).
+
+    ``write_tokens_native_share_amortized``/``write_tokens_native_share_raw``
+    carry the native-writer PORTION of that combined figure, isolated so
+    neither side of the split is hidden; the filing share is always
+    recoverable as the combined figure minus this one. Both are ``None``
+    in two DIFFERENT situations a reader must be able to tell apart:
+
+    - the arm is native (``arm in _NATIVE_ARM_VALUES``) -- there is no
+      separate share to report, the entire combined figure already is
+      native. Not ``0.0``: a share of zero would claim native contributed
+      nothing, which is false for a native arm.
+    - the arm is an Athenaeum arm but no ``("native", corpus_scale)``
+      :class:`WriteCost` was supplied at all (for example a Phase 2 run
+      dispatched with ``--phase2-systems athenaeum`` alone) -- the native
+      share could not be captured, so it is charged as filing-only
+      (reproducing the pre-athenaeum#1870 figure) rather than silently
+      invented. :func:`render_cost_per_correct_table` renders this case
+      with its own marker, distinct from the Phase-1 "n/a", so a reader
+      can tell "no native write cost was captured" from "this is a
+      native arm" from "there is no write-cost data at all".
     """
 
     probe_class: str
@@ -2099,9 +2129,17 @@ class CostPerCorrect:
     # write_tokens_amortized = write_cost.total_tokens / probe_count_at_scale
     # * this-cell's row count -- design doc §6's "amortised over the full
     # probe set at that scale". write_tokens_raw is the SAME WriteCost's
-    # total_tokens, unamortised, printed alongside per the design doc.
+    # total_tokens, unamortised, printed alongside per the design doc. For a
+    # non-native arm this is the COMBINED (native share + filing) figure --
+    # see the class docstring's "Shared-write accounting" (athenaeum#1870).
     write_tokens_amortized: float | None
     write_tokens_raw: int | None
+    # The native-writer PORTION of the two fields above, isolated so the
+    # split is never hidden (athenaeum#1870). None means either "this arm
+    # is native, there is no separate share" or "no native WriteCost was
+    # captured for this arm's Athenaeum charge" -- see the class docstring.
+    write_tokens_native_share_amortized: float | None
+    write_tokens_native_share_raw: int | None
     cost_per_correct: float | None
     undefined_reason: str | None
 
@@ -2118,24 +2156,36 @@ def compute_cost_per_correct(
     correct_n`` where ``read_tokens`` is the group's summed
     ``turn_tokens`` (input + output, across every row and every turn in the
     cell -- read cost only, Phase 1) and ``write_tokens_amortized`` is
-    ``0`` when no matching :class:`WriteCost` exists (Phase 1) or
-    ``write_cost.total_tokens / probe_count_at_scale * len(group)`` when
-    one does (Phase 2: the SAME per-probe amortised share this cell's rows
-    would draw from the whole probe set, design doc §6). ``None`` (never
-    ``inf``/``0``) when ``correct_n == 0`` -- a zero-correct cell has no
-    denominator to divide by, and that is a fact worth stating, not hiding
-    behind a fabricated number (issue athenaeum#1734 AC2).
+    ``0`` when no matching :class:`WriteCost` exists (Phase 1) or, when one
+    does (Phase 2), the SAME per-probe amortised share this cell's rows
+    would draw from the whole probe set (design doc §6): for the two
+    native arms that share is ``write_cost.total_tokens /
+    probe_count_at_scale * len(group)`` unchanged; for every other
+    (Athenaeum) arm it is that same formula applied to the ``"athenaeum"``
+    (filing) :class:`WriteCost` PLUS the native writer's own amortised
+    share, added before dividing by ``correct_n`` -- the shared-write
+    accounting athenaeum#1870 requires per the athenaeum#1830 ruling that
+    the librarian files what Claude's native memory tool-calls already
+    wrote, so the Athenaeum store's write cost was never the filing spend
+    alone. ``None`` (never ``inf``/``0``) when ``correct_n == 0`` -- a
+    zero-correct cell has no denominator to divide by, and that is a fact
+    worth stating, not hiding behind a fabricated number (issue
+    athenaeum#1734 AC2).
 
     *write_costs* maps a ``(system, corpus_scale)`` pair to its spend via
-    :func:`_system_for_arm` -- Athenaeum arms (everything but the two
-    native arms) draw on the ``"athenaeum"`` entry, ``native_index``/
-    ``native_grep`` draw on the ``"native"`` entry. *probe_counts*
-    overrides the probe-set size used for amortisation (keyed by
-    ``corpus_scale``) -- for unit tests that hand-build rows without
-    generating a real ``medium``/``large`` corpus; ``None`` (the default)
-    derives it from ``len(_corpus_for_scale(scale).probes)``, exact because
-    every rollout at a given scale was generated from the same corpus
-    (see :data:`_CORPUS_CACHE`'s own note).
+    :func:`_system_for_arm`. ``native_index``/``native_grep`` draw on the
+    ``"native"`` entry alone, unchanged. Every other arm draws on the
+    ``"athenaeum"`` entry (filing cost) and, when a ``("native",
+    corpus_scale)`` entry also exists, adds its amortised share too
+    (:class:`CostPerCorrect`'s "Shared-write accounting" docstring section
+    has the full ``None``-vs-``None`` disambiguation when that native
+    entry is absent). *probe_counts* overrides the probe-set size used for
+    amortisation (keyed by ``corpus_scale``) -- for unit tests that
+    hand-build rows without generating a real ``medium``/``large`` corpus;
+    ``None`` (the default) derives it from
+    ``len(_corpus_for_scale(scale).probes)``, exact because every rollout
+    at a given scale was generated from the same corpus (see
+    :data:`_CORPUS_CACHE`'s own note).
     """
     write_by_key = {(w.system, w.corpus_scale): w for w in write_costs}
     results: list[CostPerCorrect] = []
@@ -2152,17 +2202,40 @@ def compute_cost_per_correct(
             if grade_correctness(record, probe, corpus):
                 correct_n += 1
 
-        write_cost = write_by_key.get((_system_for_arm(arm), corpus_scale))
+        system = _system_for_arm(arm)
+        write_cost = write_by_key.get((system, corpus_scale))
         write_raw: int | None = None
         write_amortized: float | None = None
+        native_share_raw: int | None = None
+        native_share_amortized: float | None = None
         if write_cost is not None:
             if probe_counts is not None:
                 probe_count = probe_counts.get(corpus_scale, 0)
             else:
                 probe_count = len(_corpus_for_scale(corpus_scale).probes)
+
+            # Non-native arm only: the native writer's own amortised share,
+            # added on top of the filing cost (athenaeum#1870 / ruling
+            # athenaeum#1830). None when this arm IS native (nothing to
+            # add -- see CostPerCorrect's docstring) or when no ("native",
+            # corpus_scale) WriteCost was captured (degrade to filing-only,
+            # honestly, rather than inventing the missing share).
+            native_write_cost = (
+                write_by_key.get(("native", corpus_scale)) if system != "native" else None
+            )
+
             write_raw = write_cost.total_tokens
+            if native_write_cost is not None:
+                native_share_raw = native_write_cost.total_tokens
+                write_raw += native_share_raw
+
             if probe_count > 0:
                 write_amortized = (write_cost.total_tokens / probe_count) * len(group)
+                if native_write_cost is not None:
+                    native_share_amortized = (
+                        native_write_cost.total_tokens / probe_count
+                    ) * len(group)
+                    write_amortized += native_share_amortized
 
         total_tokens = read_input + read_output + (write_amortized or 0.0)
         if correct_n == 0:
@@ -2183,6 +2256,8 @@ def compute_cost_per_correct(
                 read_output_tokens=read_output,
                 write_tokens_amortized=write_amortized,
                 write_tokens_raw=write_raw,
+                write_tokens_native_share_amortized=native_share_amortized,
+                write_tokens_native_share_raw=native_share_raw,
                 cost_per_correct=cost_per_correct,
                 undefined_reason=undefined_reason,
             )
@@ -2731,25 +2806,57 @@ def compute_cutoff_scale(verdicts: Sequence[ScaleVerdict]) -> str:
     return "none"
 
 
+#: Marker for :func:`render_cost_per_correct_table`'s native-share columns
+#: when an Athenaeum arm has write-cost data but no ``("native",
+#: corpus_scale)`` :class:`WriteCost` was captured to add on top -- e.g. a
+#: Phase 2 run dispatched with ``--phase2-systems athenaeum`` alone
+#: (athenaeum#1870). Deliberately distinct from the plain ``"n/a"`` used
+#: for "no write data at all" and "this arm is native, no split applies":
+#: this cell has real filing data, it is just missing the native share
+#: that ought to be added to it, and a reader must be able to tell that
+#: apart from either of the other two.
+_NATIVE_SHARE_NOT_CAPTURED = "not-captured"
+
+
 def render_cost_per_correct_table(costs: Sequence[CostPerCorrect]) -> list[str]:
     """Render *costs* as a markdown table. Phase 2 (write-cost) columns are
     included only when at least one row carries write-cost data -- a
-    Phase-1-only store renders without them (issue athenaeum#1734 AC3)."""
+    Phase-1-only store renders without them (issue athenaeum#1734 AC3).
+
+    The write-cost columns show the combined amortised figure and raw sum
+    alongside the native-writer share isolated out of each (athenaeum#1870):
+    for a non-native arm the combined figure is the native writer's own
+    amortised spend plus the librarian's filing spend (ruling athenaeum#1830
+    -- the librarian files what Claude's native memory tool-calls already
+    wrote, so the Athenaeum store was never free of that cost). The filing
+    share is always the combined figure minus the printed native share.
+    """
     lines = ["## Cost per correct answer (athenaeum#1734)", ""]
     lines.append(
         "`cost_per_correct = (read_input_tokens + read_output_tokens + "
-        "write_tokens_amortized) / correct_n` -- read cost only in Phase 1; Phase 2 adds "
-        "write cost amortised over the full probe set at that scale (design doc §6), with "
-        "the raw (unamortised) write spend printed alongside. `undefined` (never `inf`/`0`) "
-        "means zero correct answers in the cell -- there is no denominator."
+        "write_tokens_amortized) / correct_n` -- read cost only in Phase 1. Phase 2 adds "
+        "write cost amortised over the full probe set at that scale (design doc §6); for a "
+        "non-native arm `write_tokens_amortized` is the native writer's own amortised share "
+        "PLUS the librarian's filing share (athenaeum#1870, ruling athenaeum#1830), never "
+        "the filing share alone -- `write_native_share_amortized` prints that native "
+        "portion separately so neither component is hidden, and the raw (unamortised) sum "
+        "is printed alongside. `n/a` in the native-share columns means either no write data "
+        "at all, or (for a native arm) that the whole combined figure already is native, so "
+        "there is no separate share to print; `" + _NATIVE_SHARE_NOT_CAPTURED + "` means an "
+        "Athenaeum arm's native share specifically was never captured, so the figure shown "
+        "is filing-only -- see the design doc. `undefined` (never `inf`/`0`) means zero "
+        "correct answers in the cell -- there is no denominator."
     )
     lines.append("")
     has_write = any(c.write_tokens_raw is not None for c in costs)
     header = "| probe_class | corpus_scale | arm | n | correct_n | read_tokens |"
     sep = "| --- | --- | --- | --- | --- | --- |"
     if has_write:
-        header += " write_tokens_amortized | write_tokens_raw |"
-        sep += " --- | --- |"
+        header += (
+            " write_native_share_amortized | write_filing_share_amortized "
+            "| write_tokens_amortized | write_tokens_raw |"
+        )
+        sep += " --- | --- | --- | --- |"
     header += " cost_per_correct |"
     sep += " --- |"
     lines.append(header)
@@ -2765,7 +2872,26 @@ def render_cost_per_correct_table(costs: Sequence[CostPerCorrect]) -> list[str]:
                 "n/a" if c.write_tokens_amortized is None else f"{c.write_tokens_amortized:.1f}"
             )
             raw = "n/a" if c.write_tokens_raw is None else str(c.write_tokens_raw)
-            row += f" {amortized} | {raw} |"
+            if c.write_tokens_amortized is None:
+                # No write data captured for this row at all (Phase-1-only
+                # cell in an otherwise-Phase-2 table).
+                native_share = "n/a"
+                filing_share = "n/a"
+            elif c.arm in _NATIVE_ARM_VALUES:
+                # The whole combined figure already IS native -- no split
+                # to show (see CostPerCorrect's docstring).
+                native_share = "n/a"
+                filing_share = "n/a"
+            elif c.write_tokens_native_share_amortized is None:
+                # Athenaeum arm, but no native WriteCost was captured to
+                # add -- the figure above is filing-only, honestly labelled.
+                native_share = _NATIVE_SHARE_NOT_CAPTURED
+                filing_share = f"{c.write_tokens_amortized:.1f}"
+            else:
+                native_share = f"{c.write_tokens_native_share_amortized:.1f}"
+                filing_amortized = c.write_tokens_amortized - c.write_tokens_native_share_amortized
+                filing_share = f"{filing_amortized:.1f}"
+            row += f" {native_share} | {filing_share} | {amortized} | {raw} |"
         cost = "undefined" if c.cost_per_correct is None else f"{c.cost_per_correct:.1f}"
         row += f" {cost} |"
         lines.append(row)
@@ -2894,11 +3020,34 @@ def render_decision_block(
     if report.write_costs:
         lines.append(
             "Phase 2: write cost is amortised over the full probe set at each scale it "
-            "applies to --"
+            "applies to. For a non-native arm the amortised (and raw) figure is the native "
+            "writer's own share PLUS the librarian's filing share, never the filing share "
+            "alone (athenaeum#1870, ruling athenaeum#1830: the librarian files what Claude's "
+            "native memory tool-calls already wrote, so the Athenaeum store was never free "
+            "of that cost) --"
         )
         for scale in sorted({wc.corpus_scale for wc in report.write_costs}):
             probe_count = len(_corpus_for_scale(scale).probes)
             lines.append(f"- write cost amortised over {probe_count} probes at `{scale}`.")
+        scales_missing_native = sorted(
+            {
+                wc.corpus_scale
+                for wc in report.write_costs
+                if wc.system == "athenaeum"
+                and not any(
+                    other.system == "native" and other.corpus_scale == wc.corpus_scale
+                    for other in report.write_costs
+                )
+            }
+        )
+        if scales_missing_native:
+            lines.append(
+                "- native write cost was **not captured** at "
+                + ", ".join(f"`{s}`" for s in scales_missing_native)
+                + " -- Athenaeum arms there are charged the filing cost only (marked "
+                f"`{_NATIVE_SHARE_NOT_CAPTURED}` in the cost table above, not silently "
+                "treated as the full combined cost)."
+            )
         lines.append("")
 
     if cutoff == "none":

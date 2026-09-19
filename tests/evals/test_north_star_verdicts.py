@@ -186,6 +186,8 @@ def _cost(probe_class: str, scale: str, arm: str, cost: float | None) -> CostPer
         read_output_tokens=0,
         write_tokens_amortized=None,
         write_tokens_raw=None,
+        write_tokens_native_share_amortized=None,
+        write_tokens_native_share_raw=None,
         cost_per_correct=cost,
         undefined_reason=None if cost is not None else "zero correct answers in this cell",
     )
@@ -429,6 +431,144 @@ def test_render_cost_per_correct_table_omits_write_columns_when_phase1_only() ->
     assert "| write_tokens_amortized |" not in rendered
     assert "write_tokens_raw |" not in rendered
     assert "cost_per_correct" in rendered
+
+
+# ---------------------------------------------------------------------------
+# Shared-write accounting (athenaeum#1870, ruling athenaeum#1830): an
+# Athenaeum arm's write cost is the native writer's own amortised share
+# PLUS the librarian's filing share, never the filing share alone. Native
+# arms are unchanged; an absent native WriteCost degrades honestly to
+# filing-only, distinguishable in the rendered table from both "no write
+# data at all" and "this arm is native".
+# ---------------------------------------------------------------------------
+
+
+def test_athenaeum_arm_combined_write_cost_is_native_share_plus_filing() -> None:
+    rows = [
+        _row(
+            _record(
+                arm=Arm.ORACLE,
+                probe_id=OTHER_PROBE_ID,
+                probe_class="single_hop",
+                answer=f"the allowance is {OTHER_ANSWER_MARKER}",
+                input_tokens=100,
+                output_tokens=50,
+            )
+        ),
+    ]
+    write_costs = [
+        WriteCost(
+            system="athenaeum", corpus_scale=CORPUS_SCALE, input_tokens=1000, output_tokens=500
+        ),
+        WriteCost(
+            system="native", corpus_scale=CORPUS_SCALE, input_tokens=6000, output_tokens=3000
+        ),
+    ]
+    costs = compute_cost_per_correct(
+        rows, write_costs=write_costs, probe_counts={CORPUS_SCALE: 10}
+    )
+    cell = costs[0]
+    # filing total = 1500, native total = 9000; each amortized over 10
+    # probes * 1 row in this cell -- 150.0 and 900.0.
+    assert cell.write_tokens_native_share_amortized == 900.0
+    assert cell.write_tokens_native_share_raw == 9000
+    assert cell.write_tokens_amortized == 150.0 + 900.0
+    assert cell.write_tokens_raw == 1500 + 9000
+    # (100 + 50 + 1050) / 1 correct
+    assert cell.cost_per_correct == 1200.0
+
+    rendered = "\n".join(render_cost_per_correct_table(costs))
+    assert "| write_native_share_amortized | write_filing_share_amortized " in rendered
+    assert "900.0" in rendered  # native share, isolated
+    assert "150.0" in rendered  # filing share, isolated
+    assert "1050.0" in rendered  # combined write_tokens_amortized
+    assert "10500" in rendered  # combined write_tokens_raw
+
+
+def test_native_arm_write_cost_unchanged_by_shared_write_accounting() -> None:
+    rows = [
+        _row(
+            _record(
+                arm=Arm.NATIVE_INDEX,
+                probe_id=OTHER_PROBE_ID,
+                probe_class="single_hop",
+                answer="no idea",  # correctness is irrelevant to this test
+            )
+        ),
+    ]
+    write_costs = [
+        WriteCost(
+            system="athenaeum", corpus_scale=CORPUS_SCALE, input_tokens=1000, output_tokens=500
+        ),
+        WriteCost(
+            system="native", corpus_scale=CORPUS_SCALE, input_tokens=6000, output_tokens=3000
+        ),
+    ]
+    costs = compute_cost_per_correct(
+        rows, write_costs=write_costs, probe_counts={CORPUS_SCALE: 10}
+    )
+    cell = costs[0]
+    # Native total = 9000, amortized over 10 probes * 1 row = 900.0 -- the
+    # athenaeum (filing) entry never enters a native arm's own figure, and
+    # there is no separate "share" to report (the whole figure already is
+    # native): both new fields are None, never 0.0.
+    assert cell.write_tokens_amortized == 900.0
+    assert cell.write_tokens_raw == 9000
+    assert cell.write_tokens_native_share_amortized is None
+    assert cell.write_tokens_native_share_raw is None
+
+    rendered = "\n".join(render_cost_per_correct_table(costs))
+    row_line = next(line for line in rendered.splitlines() if "native_index" in line)
+    cells = [c.strip() for c in row_line.strip("|").split("|")]
+    # probe_class | corpus_scale | arm | n | correct_n | read_tokens |
+    # write_native_share_amortized | write_filing_share_amortized |
+    # write_tokens_amortized | write_tokens_raw | cost_per_correct
+    assert cells[6] == "n/a"  # native share: no split for a native arm
+    assert cells[7] == "n/a"  # filing share: ditto
+    assert cells[8] == "900.0"
+    assert cells[9] == "9000"
+
+
+def test_athenaeum_arm_degrades_to_filing_only_when_native_write_cost_absent() -> None:
+    """No ("native", scale) WriteCost was captured at all -- e.g. a Phase 2
+    run dispatched with --phase2-systems athenaeum alone. The arm is
+    charged filing cost only (matching the pre-athenaeum#1870 figure), the
+    native-share fields stay None, and the rendered table marks the gap
+    with a distinct token rather than reusing the "n/a" a native arm gets."""
+    rows = [
+        _row(
+            _record(
+                arm=Arm.ORACLE,
+                probe_id=OTHER_PROBE_ID,
+                probe_class="single_hop",
+                answer=f"the allowance is {OTHER_ANSWER_MARKER}",
+                input_tokens=100,
+                output_tokens=50,
+            )
+        ),
+    ]
+    write_costs = [
+        WriteCost(
+            system="athenaeum", corpus_scale=CORPUS_SCALE, input_tokens=1000, output_tokens=500
+        ),
+        # No "native" WriteCost at this scale.
+    ]
+    costs = compute_cost_per_correct(
+        rows, write_costs=write_costs, probe_counts={CORPUS_SCALE: 10}
+    )
+    cell = costs[0]
+    assert cell.write_tokens_amortized == 150.0
+    assert cell.write_tokens_raw == 1500
+    assert cell.write_tokens_native_share_amortized is None
+    assert cell.write_tokens_native_share_raw is None
+
+    rendered = "\n".join(render_cost_per_correct_table(costs))
+    row_line = next(line for line in rendered.splitlines() if "oracle" in line)
+    cells = [c.strip() for c in row_line.strip("|").split("|")]
+    assert cells[6] == "not-captured"  # native share -- distinct from "n/a"
+    assert cells[7] == "150.0"  # filing share -- the figure IS filing-only
+    assert cells[8] == "150.0"  # combined amortized (filing-only)
+    assert cells[9] == "1500"
 
 
 def test_render_report_is_phase1_only_when_report_carries_no_write_costs() -> None:
