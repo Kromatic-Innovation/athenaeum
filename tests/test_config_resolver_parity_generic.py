@@ -107,6 +107,16 @@ resolver cannot silently join the exclusion set without this file changing):
   which calls it with real ``backend_name``/``unprompted`` combinations for
   both the yaml-key and the env-var channel.
 
+- ``resolve_decay_horizon_days`` (issue athenaeum#1840): its first parameter is
+  a REQUIRED ``bucket`` SELECTOR (``daily`` / ``weekly`` / anything else),
+  which picks WHICH of two independent knob families to resolve — the same
+  shape ``resolve_retention_policy``'s ``family`` has, except bucket-first.
+  The generic prober only ever calls ``fn(config)``, which would pass the
+  candidate config dict as the bucket and land on the no-horizon ``0``
+  branch for every candidate, reading identically to "never read the key".
+  Exercised directly, with real bucket names, in
+  ``TestDecayHorizonResolverDirect``.
+
 Every other resolver goes through the full generic check.
 """
 
@@ -164,6 +174,11 @@ _GENERIC_HELPER_SIGNATURE = frozenset(
         "resolve_retention_policy",
         "resolve_retention_max_bytes",
         "resolve_retention_destination",
+        # Issue athenaeum#1840: bucket-selected horizon families. `bucket` is a
+        # required FIRST positional the generic prober cannot supply, and
+        # every value it could supply falls to the no-horizon `0` branch.
+        # Exercised directly in TestDecayHorizonResolverDirect below.
+        "resolve_decay_horizon_days",
     }
 )
 _STRUCTURED_CONTAINER_VALUE = frozenset({"resolve_model_rates"})
@@ -661,6 +676,83 @@ class TestRetentionResolversDirect:
 
     def test_destination_default_when_unset(self) -> None:
         assert config_mod.resolve_retention_destination(None, "probe-family") == "in-repo"
+
+
+# ---------------------------------------------------------------------------
+# The bucket-selected decay horizons (issue athenaeum#1840), covered directly:
+# `bucket` is a required first positional the generic prober cannot supply.
+# Both channels (env + yaml) are asserted for BOTH bucket families, plus the
+# no-horizon branch that keeps `durable` from ever acquiring an expiry.
+# ---------------------------------------------------------------------------
+
+
+class TestDecayHorizonResolverDirect:
+    def test_daily_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("ATHENAEUM_DECAY_DAILY_HORIZON_DAYS", raising=False)
+        assert config_mod.resolve_decay_horizon_days("daily", None) == 1
+
+    def test_weekly_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("ATHENAEUM_DECAY_WEEKLY_HORIZON_DAYS", raising=False)
+        assert config_mod.resolve_decay_horizon_days("weekly", None) == 7
+
+    def test_daily_reads_its_yaml_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("ATHENAEUM_DECAY_DAILY_HORIZON_DAYS", raising=False)
+        cfg = {"decay": {"daily_horizon_days": 3}}
+        assert config_mod.resolve_decay_horizon_days("daily", cfg) == 3
+
+    def test_weekly_reads_its_yaml_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("ATHENAEUM_DECAY_WEEKLY_HORIZON_DAYS", raising=False)
+        cfg = {"decay": {"weekly_horizon_days": 14}}
+        assert config_mod.resolve_decay_horizon_days("weekly", cfg) == 14
+
+    def test_daily_env_beats_yaml(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ATHENAEUM_DECAY_DAILY_HORIZON_DAYS", "5")
+        cfg = {"decay": {"daily_horizon_days": 3}}
+        assert config_mod.resolve_decay_horizon_days("daily", cfg) == 5
+
+    def test_weekly_env_beats_yaml(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ATHENAEUM_DECAY_WEEKLY_HORIZON_DAYS", "21")
+        cfg = {"decay": {"weekly_horizon_days": 14}}
+        assert config_mod.resolve_decay_horizon_days("weekly", cfg) == 21
+
+    def test_the_two_families_are_independent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("ATHENAEUM_DECAY_DAILY_HORIZON_DAYS", raising=False)
+        monkeypatch.delenv("ATHENAEUM_DECAY_WEEKLY_HORIZON_DAYS", raising=False)
+        cfg = {"decay": {"daily_horizon_days": 3}}
+        assert config_mod.resolve_decay_horizon_days("daily", cfg) == 3
+        assert config_mod.resolve_decay_horizon_days("weekly", cfg) == 7
+
+    @pytest.mark.parametrize("bad", [0, -1, "x", True, None])
+    def test_malformed_yaml_falls_back_to_default(
+        self, bad: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("ATHENAEUM_DECAY_DAILY_HORIZON_DAYS", raising=False)
+        cfg = {"decay": {"daily_horizon_days": bad}}
+        assert config_mod.resolve_decay_horizon_days("daily", cfg) == 1
+
+    @pytest.mark.parametrize("bad", ["0", "-1", "not-a-number"])
+    def test_malformed_env_falls_back_to_default(
+        self, bad: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_DECAY_DAILY_HORIZON_DAYS", bad)
+        assert config_mod.resolve_decay_horizon_days("daily", None) == 1
+
+    @pytest.mark.parametrize("bucket", ["durable", "", "monthly"])
+    def test_no_horizon_for_every_other_bucket(
+        self, bucket: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`durable` must have no operator-settable horizon at all: no yaml
+        leaf and no env var can give it one."""
+        monkeypatch.setenv("ATHENAEUM_DECAY_DAILY_HORIZON_DAYS", "99")
+        monkeypatch.setenv("ATHENAEUM_DECAY_WEEKLY_HORIZON_DAYS", "99")
+        cfg = {"decay": {"daily_horizon_days": 99, "weekly_horizon_days": 99}}
+        assert config_mod.resolve_decay_horizon_days(bucket, cfg) == 0
+
+    def test_config_argument_is_optional(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("ATHENAEUM_DECAY_DAILY_HORIZON_DAYS", raising=False)
+        assert config_mod.resolve_decay_horizon_days("daily") == 1
 
 
 # ---------------------------------------------------------------------------

@@ -252,6 +252,12 @@ UNDECLARED: frozenset[str] = frozenset(
     {
         "claim_kind",
         "compiled_exempt",
+        # athenaeum#1837: structural mirror of ``claim_kind`` above, including
+        # its docstring shape — a "Layering note:" explaining why it is not a
+        # leaf despite sitting among the L0 primitives, rather than a
+        # transcribable "Layering: L<N>" declaration. Listed here for the
+        # same reason claim_kind is: undeclared, not guessed at.
+        "decay_bucket",
         "deploy_check",
         "do_not_email_divergence",
         "drain_advisor",

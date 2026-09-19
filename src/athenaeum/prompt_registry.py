@@ -38,7 +38,8 @@ load-bearing adjacency between a prompt and its parser (e.g.
 **Layering:** L3 service, but an unusual one — it ``importlib.import_module``s
 EVERY L4 module that owns a registered prompt (:mod:`athenaeum.tiers`,
 :mod:`athenaeum.contradictions`, :mod:`athenaeum.resolutions`,
-:mod:`athenaeum.claim_kind`, :mod:`athenaeum.query_topics`,
+:mod:`athenaeum.claim_kind`, :mod:`athenaeum.decay_bucket`,
+:mod:`athenaeum.query_topics`,
 :mod:`athenaeum.reasoning_tiers`, :mod:`athenaeum.rule_proposals`) at IMPORT TIME (module-scope
 :data:`PROMPTS` dict comprehension) to resolve the live constants. This is the
 one deliberate exception to "L3 does not import L4" in this file's
@@ -104,6 +105,14 @@ _META_ROWS: list[tuple[str, str, str, int, bool]] = [
     ("resolutions.resolve_system", "_RESOLVE_SYSTEM", "resolve", 8192, True),
     ("resolutions.freetext_edit_system", "_FREETEXT_EDIT_SYSTEM", "resolve", 8192, False),
     ("claim_kind.claim_kind_system", "CLAIM_KIND_SYSTEM", "classify", 64, False),
+    # athenaeum#1837: the decay-bucket classifier is a structural mirror of the
+    # claim_kind row directly above — same ``classify`` knob, same 64-token
+    # one-word-label budget, no cache_control breakpoint at the call site
+    # (``decay_bucket.classify_decay_bucket``). Its prompt text stays INLINE in
+    # its home module next to the parser that reads the ``{"bucket": ...}``
+    # shape, per ``policies/prompt-text-is-content.md``; this row only indexes
+    # it. See the in-place comment above ``DECAY_BUCKET_SYSTEM``.
+    ("decay_bucket.decay_bucket_system", "DECAY_BUCKET_SYSTEM", "classify", 64, False),
     ("query_topics.system_prompt", "_SYSTEM_PROMPT", "topic", 256, False),
     ("query_topics.user_template", "_USER_TEMPLATE", "topic", 256, False),
     ("reasoning_tiers.t1_system_prompt", "T1_SYSTEM_PROMPT", "reasoning_t1", 256, False),
