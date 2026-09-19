@@ -2791,8 +2791,16 @@ def resolve_recall_hybrid(config: dict[str, Any] | None) -> bool:
 #: value was picked on a mismatched stand-in/real-model instrument; see
 #: that issue and :data:`athenaeum.search._DEFAULT_HYBRID_GUARD_RANK`'s own
 #: comment) found ``guard_rank=1`` strictly reduces real-model failures
-#: (6 -> 5) with no regression on any other real-model-passing case and no
-#: movement in the default (offline stand-in) selection's pass/xfail set.
+#: (6 -> 5) with no regression on any other real-model-passing case.
+#: Re-measured on the athenaeum#1851-corrected, fully-offline default
+#: instrument (``scale_fixture``'s vector index build previously used the
+#: REAL model, hiding this knob's effect on the default suite entirely):
+#: ``guard_rank=1`` still wins on failure count alone (6 vs 7 at
+#: ``guard_rank=0``), but it is NOT a no-op there -- it clears
+#: ``medium/portal_design_reviewer`` and ``medium/spend_approver_named``
+#: while newly failing ``medium/regional_office_onboarding_lesson``. See
+#: :data:`athenaeum.search._DEFAULT_HYBRID_GUARD_RANK`'s own comment for
+#: the full accounting.
 #: The other two knobs stay at their pre-athenaeum#1800 no-op defaults --
 #: the re-sweep found no eligible combination that improved on them.
 RECALL_HYBRID_FTS5_WEIGHT_DEFAULT = 1.0
@@ -2880,8 +2888,11 @@ def resolve_recall_hybrid_guard_rank(config: dict[str, Any] | None) -> int:
     that issue's Motivation). Re-swept directly on the real embedder:
     ``guard_rank=1`` strictly reduces real-model failures relative to fully
     unguarded fusion, with no regression on any real-model case that
-    previously passed and no movement at all in the default (offline
-    stand-in) selection's pass/xfail set -- see
+    previously passed. The original "no movement in the default (offline
+    stand-in) selection's pass/xfail set" claim does NOT hold on the
+    athenaeum#1851-corrected default instrument: re-measured directly,
+    ``guard_rank=1`` still wins on failure count (6 vs 7 at
+    ``guard_rank=0``) but changes WHICH cells fail -- see
     :data:`athenaeum.config.RECALL_HYBRID_GUARD_RANK_DEFAULT`'s own comment
     and the committed sweep (``docs/measurements/
     recall-hybrid-fusion-sweep.md``) for the winner-selection detail.

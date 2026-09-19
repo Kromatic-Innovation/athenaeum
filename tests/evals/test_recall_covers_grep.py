@@ -107,7 +107,7 @@ import re
 import shutil
 import subprocess
 import uuid
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -485,6 +485,60 @@ class _ScaleFixture:
     name_collision_pages: int = 0
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _real_onnx_model_guard() -> Iterator[None]:
+    """Belt-and-suspenders guard (issue athenaeum#1851): for this module's
+    whole lifetime, replace chromadb's REAL ``ONNXMiniLM_L6_V2.__call__``
+    with one that raises ``AssertionError``, so a real-model embed during
+    index build OR query fails the run loudly instead of silently
+    attempting a network fetch of the ONNX model.
+
+    This module-scoped autouse fixture is instantiated before any
+    explicitly-requested fixture of the same scope -- including
+    ``scale_fixture``'s module-scoped index build below (pytest runs
+    autouse fixtures before other fixtures within the same scope; see
+    pytest's fixture-finalization-order docs) -- so it is active for the
+    whole build.
+
+    This is a SEPARATE mechanism from the two patches that actually redirect
+    embedding calls to the offline stand-in: ``tests/conftest.py``'s
+    ``_offline_embedding_function`` (function-scoped, swaps the module
+    attribute ``onnx_module.ONNXMiniLM_L6_V2`` for
+    ``tests.offline_embeddings.OfflineONNXMiniLMStub`` for query-time calls
+    inside a test body) and ``scale_fixture``'s own build-time patch below
+    (the same class-swap, applied locally around ``build_index``, following
+    ``tests/test_retrieval_golden_1420.py``'s ``golden_caches`` pattern).
+    Both of those swap the module attribute to a DIFFERENT class entirely,
+    so calls never reach the real ``ONNXMiniLM_L6_V2.__call__`` and this
+    guard stays dormant while either is active. It exists to catch the case
+    where NEITHER is: a future code path that re-imports and instantiates
+    ``ONNXMiniLM_L6_V2`` before either patch is installed, or a patch
+    accidentally dropped in a future edit.
+    """
+    if not _VECTOR_AVAILABLE:
+        yield
+        return
+
+    from chromadb.utils.embedding_functions.onnx_mini_lm_l6_v2 import (
+        ONNXMiniLM_L6_V2,
+    )
+
+    def _raise_on_real_call(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError(
+            "tests/evals/test_recall_covers_grep.py (athenaeum#1851): the "
+            "REAL ONNXMiniLM_L6_V2.__call__ was invoked during this "
+            "module's default (offline) run. Index build and queries must "
+            "both go through tests.offline_embeddings.OfflineONNXMiniLMStub."
+        )
+
+    guard = pytest.MonkeyPatch()
+    guard.setattr(ONNXMiniLM_L6_V2, "__call__", _raise_on_real_call)
+    try:
+        yield
+    finally:
+        guard.undo()
+
+
 @pytest.fixture(scope="module", params=_SCALES)
 def scale_fixture(
     request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory
@@ -512,7 +566,28 @@ def scale_fixture(
     vector_cache_dir: Path | None = None
     if _VECTOR_AVAILABLE:
         vector_cache_dir = fts5_cache_dir
-        get_backend("vector").build_index(wiki_root, vector_cache_dir)
+        # Issue athenaeum#1851: this fixture is module-scoped, but
+        # tests/conftest.py's offline-embedding stand-in
+        # (`_offline_embedding_function`) is function-scoped autouse --
+        # pytest instantiates a broader-scope fixture before the
+        # narrower-scope autouse fixtures of the first test that needs
+        # them, so the per-test patch is NOT active yet when this fixture
+        # body runs. Same fix as `tests/test_retrieval_golden_1420.py`'s
+        # `golden_caches` fixture (see that fixture's own docstring for the
+        # full mechanism): apply the SAME offline stand-in class directly
+        # for the duration of the build, then undo it -- every real
+        # `.query()` call happens inside a test body, where the per-test
+        # autouse patch IS already active.
+        import chromadb.utils.embedding_functions.onnx_mini_lm_l6_v2 as onnx_module
+
+        from tests.offline_embeddings import OfflineONNXMiniLMStub
+
+        build_patch = pytest.MonkeyPatch()
+        build_patch.setattr(onnx_module, "ONNXMiniLM_L6_V2", OfflineONNXMiniLMStub)
+        try:
+            get_backend("vector").build_index(wiki_root, vector_cache_dir)
+        finally:
+            build_patch.undo()
 
     hook_home = root / "hook-home"
     hook_ready = _hook_session_ready(root, hook_home)
@@ -649,16 +724,36 @@ _FTS5_XFAIL: frozenset[tuple[str, str]] = frozenset(
 #:
 #: IMPORTANT measurement note: under the default (offline) pytest suite,
 #: the vector backend's "semantic" ranking is NOT a real embedding model --
-#: ``tests/conftest.py``'s autouse ``_offline_embedding_function`` fixture
-#: (issue athenaeum#1091) replaces chromadb's real MiniLM model with
-#: ``tests.offline_embeddings.OfflineONNXMiniLMStub``, a deterministic
-#: hashing-trick BAG-OF-WORDS embedding -- lexical, like FTS5, just scored
-#: differently. Every number in this comment was measured THROUGH PYTEST
-#: (this stub); a standalone script importing ``athenaeum`` directly uses
-#: the REAL network-downloaded model instead and will show DIFFERENT,
-#: better-looking results that do not reflect what CI actually runs. This
-#: cost real time to discover (see the athenaeum#1789 PR body) -- verify
-#: any future change to this set through pytest, never a standalone script.
+#: for BOTH the index build and every query. ``tests/conftest.py``'s
+#: autouse ``_offline_embedding_function`` fixture (issue athenaeum#1091)
+#: replaces chromadb's real MiniLM model with
+#: ``tests.offline_embeddings.OfflineONNXMiniLMStub`` for query-time calls
+#: inside a test body, and this module's own ``scale_fixture`` (issue
+#: athenaeum#1851) applies the SAME stand-in directly around
+#: ``build_index``, following ``tests/test_retrieval_golden_1420.py``'s
+#: ``golden_caches`` pattern -- so index and query share one deterministic
+#: hashing-trick BAG-OF-WORDS embedding, lexical like FTS5, just scored
+#: differently.
+#:
+#: Before athenaeum#1851: ``scale_fixture`` is module-scoped, but the
+#: conftest patch above is function-scoped autouse -- pytest instantiates
+#: a broader-scope fixture before the narrower-scope autouse fixtures of
+#: the first test that needs them, so the index was built with the REAL
+#: model while every query used the stand-in. That mismatched instrument
+#: corrupted every number that used to live in this comment and, in a
+#: network-restricted environment, aborted the whole module outright
+#: (``httpx.ConnectError`` fetching the ONNX model during the build). All
+#: numbers below are re-measured on the corrected, fully-offline
+#: instrument (``pytest -rA`` over this module, issue athenaeum#1851: 25
+#: entries before -> 8 after -- 19 removed as ``XPASS(strict)``, 2 added as
+#: genuine misses not previously tracked, ``("core",
+#: "keelbridge_programme_scope")`` and ``("medium",
+#: "regional_office_onboarding_lesson")`` -- see the PR body for the full
+#: per-entry accounting). A standalone script importing ``athenaeum``
+#: directly still uses the REAL network-downloaded model and will show
+#: DIFFERENT results that do not reflect what CI actually runs -- verify
+#: any future change to this set through pytest, never a standalone
+#: script.
 #:
 #: athenaeum#1789 (FTS5 body-indexing) landed, then rebasing onto
 #: athenaeum#1792 exposed a cross-lane interaction: the fusion's FTS5 arm
@@ -715,121 +810,44 @@ _FTS5_XFAIL: frozenset[tuple[str, str]] = frozenset(
 #: the entries and their own notes below for exactly what changed.
 _VECTOR_XFAIL: frozenset[tuple[str, str]] = frozenset(
     {
-        ("core", "pto_allowance"),
-        ("core", "confidentiality_rule"),
-        ("core", "budget_threshold_current"),
-        ("core", "surname_is_ambiguous"),
+        # Issue athenaeum#1851: re-derived on the corrected (fully-offline
+        # build+query) instrument via `pytest -rA`. Every entry below is a
+        # genuine assertion failure on that run, not an `XPASS(strict)`
+        # carried over from the old mismatched-embedder measurement --
+        # the 19 `XPASS(strict)` cells the old set carried (all six
+        # `_content_terms`-heavy single-term probes plus most of the
+        # medium-scale corpus-shift entries) are removed outright, since a
+        # `strict=True` xfail on a probe that now passes is itself a
+        # failure.
         ("core", "former_client_not_current"),
-        #: athenaeum#1839: no longer xfailed here. Re-measured after
-        #: `core/16-redundancy.yaml`'s nine new core pages: both
-        #: `project-keelbridge` and `project-keelbridge-rollout` now rank in
-        #: the fused top 4 at `core`/vector (previously top 4 excluded one
-        #: half) -- the same "adding core pages shifts every OTHER probe's
-        #: real-embedding competition" mechanism this file's own
-        #: `_VECTOR_XFAIL`/`_FTS5_XFAIL` header comments document repeatedly
-        #: (e.g. the `thorncastle_first_contact` note a few entries below).
-        #: A `strict=True` xfail on a probe that now passes is itself a
-        #: failure (XPASS), confirmed via `pytest -rA` before removal, not
-        #: assumed from the corpus diff alone.
-        #: regression under the lexical-hash stand-in after the
-        #: athenaeum#1780 corpus additions; real-model status unknown. See
-        #: athenaeum#1800. NOTE this probe's own class -- fused vector/RRF
-        #: rank crowded out by other candidates, not a body-weight or
-        #: metadata_only effect (that knob is a no-op on this arm; see
-        #: ``FTS5Backend.query``'s ``metadata_only`` docstring) -- matches
-        #: the header comment's stronger, directly A/B'd account of the
-        #: SAME mechanism for the sibling regressions above
-        #: (``keelbridge_programme_scope`` et al.), which found these
-        #: PASS on develop and FAIL on this branch. Both attributions
-        #: point at the same cross-lane interaction; kept separate per the
-        #: PR athenaeum#1807 fix-lane's mandated wording rather than
-        #: merged into one, so a future re-measurement against the real
-        #: embedding model can settle which framing is load-bearing.
-        ("core", "ratecard_tooling_owner"),
-        ("medium", "pto_allowance"),
-        ("medium", "confidentiality_rule"),
-        #: Regression introduced by this issue -- passes on develop, fails
-        #: here (see the mechanism note above).
-        ("medium", "ratecard_tooling_owner"),
-        ("medium", "standup_time_current"),
-        ("medium", "budget_threshold_current"),
-        ("medium", "tamsin_ferro_role_change"),
-        #: Regression introduced by this issue -- passes on develop, fails
-        #: here (see the mechanism note above). NOT the disambiguation
-        #: guard (that's fixed at core scale, see RESULT above) -- this is
-        #: the coverage case at medium scale, a harder failure: one of two
-        #: expected pages (``project-pricing-review``) drops out of the
-        #: fused top 5 entirely, crowded out under the lexical embedding
-        #: stub (see the module-level note above on ``_offline_embedding_function``).
+        # Issue athenaeum#1851: genuine miss on the corrected instrument,
+        # not previously tracked (the pre-fix set never saw this cell fail
+        # on its own terms -- the old, mismatched-embedder build produced a
+        # different ranking here). `project-keelbridge-rollout` does not
+        # surface in the fused top 5 for this query at `core` scale; see
+        # the `medium`/vector entry below for the same probe pair crowding
+        # out the same way at the larger scale.
+        ("core", "keelbridge_programme_scope"),
+        # Coverage case at medium scale: one of two expected pages
+        # (``project-pricing-review``) drops out of the fused top 5
+        # entirely, crowded out under the lexical-hash stand-in (see the
+        # module-level measurement note above).
         ("medium", "person_not_repo"),
         ("medium", "surname_is_ambiguous"),
-        ("medium", "given_name_is_ambiguous"),
         ("medium", "former_client_not_current"),
-        #: Regression introduced by this issue -- passes on develop, fails
-        #: here (see the mechanism note above).
         ("medium", "keelbridge_programme_scope"),
-        ("medium", "callum_drews_last_contact"),
-        #: Regression introduced by this issue, same mechanism -- passes
-        #: on develop @ e2ee32ef (confirmed directly, not inferred),
-        #: fails here. ``lighthouse_migration_rollback`` was added by
-        #: athenaeum#1779's long_page tier; develop already has it and
-        #: passes it, so this is this issue's regression, not
-        #: corpus-shift collateral -- an earlier version of this comment
-        #: said otherwise and was wrong (Quine review of PR athenaeum#1807).
-        #: ``bramfield_retainer_renewal`` (also added by athenaeum#1779) was
-        #: paired with it here for the same reason, but athenaeum#1839's
-        #: corpus additions (`core/16-redundancy.yaml`, nine new core pages)
-        #: shifted it back to PASSING at this cell -- confirmed XPASS(strict)
-        #: via `pytest -rA`, not assumed -- so it is removed from this set;
-        #: `lighthouse_migration_rollback` alone remains.
-        ("medium", "lighthouse_migration_rollback"),
-        # athenaeum#1781 (item G): this PR's own contradiction shape (b)
-        # probe is a fresh measured miss at `medium`/vector -- the stale
-        # page's forbidden-token rewrite (Quine review: the token must be
-        # the stale fact's own name, not a bolt-on marker) legitimately
-        # shares more vocabulary with the query than before, and the
-        # retraction page's body, while grep-reachable, does not surface in
-        # vector recall's top 5 at this scale. `thorncastle_first_contact`
-        # also regressed transiently earlier in this PR's history (the
-        # corpus generator's fixed-seed PRNG stream shifts every OTHER
-        # probe's distractor/ballast placement whenever core pages are
-        # added) but passes again after this PR's final content, so no
-        # entry for it here.
+        # Issue athenaeum#1781 (item G): the stale page's forbidden-token
+        # rewrite (Quine review: the token must be the stale fact's own
+        # name, not a bolt-on marker) legitimately shares more vocabulary
+        # with the query than before, and the retraction page's body,
+        # while grep-reachable, does not surface in vector recall's top 5
+        # at this scale under the lexical-hash stand-in.
         ("medium", "invoicing_api_pagination_workaround"),
-        # athenaeum#1839: `thorncastle_first_contact` (temporal, unrelated
-        # to this issue's own `redundancy` probes) regresses again at this
-        # cell after `core/16-redundancy.yaml`'s nine new core pages --
-        # `client-thorncastle` drops out of the fused top 5, the same
-        # "adding core pages shifts every OTHER probe's real-embedding
-        # competition" mechanism the note directly above already names for
-        # this exact probe (it passed again after athenaeum#1781's final
-        # content; it does not after this issue's). Measured via
-        # `pytest -rA`, not inferred from the corpus diff.
-        ("medium", "thorncastle_first_contact"),
-        # athenaeum#1839: two of the three new `redundancy` probes this
-        # issue adds. Both pages of each pair rank cleanly in the fused top
-        # 5 at every OTHER (scale, backend) cell (including `core`/vector --
-        # see the removed `keelbridge_programme_scope` entry above for the
-        # same probe CLASS passing cleanly there); only `medium`/vector
-        # crowds one half out, the identical mechanism `keelbridge_programme_scope`
-        # itself is already xfailed for at this same cell a few entries
-        # above -- genuine content duplication puts two near-identical
-        # pages in direct competition for a fixed top-5 window under real
-        # embeddings + RRF fusion at this corpus size, not a data-quality
-        # defect in either page. Measured via `pytest -rA`.
-        ("medium", "driftgate_migration_funding"),
-        ("medium", "dual_signoff_threshold"),
-        # Stand-in-embedder ballast-placement shift after the
-        # contradiction/negative_knowledge corpus additions
-        # (athenaeum#1781); this set measures the lexical-hash stand-in,
-        # not the real model; real-model status for this module is
-        # tracked on athenaeum#1787.
-        ("medium", "office_address_current"),
-        # Stand-in-embedder ballast-placement shift after the
-        # unprompted_push corpus additions (athenaeum#1778); this set
-        # measures the lexical-hash stand-in, not the real model;
-        # real-model status for this module is tracked on athenaeum#1787.
-        ("medium", "relay_sync_fix"),
+        # Issue athenaeum#1851: genuine miss on the corrected instrument,
+        # not previously tracked -- the old, mismatched-embedder build
+        # produced a different ranking for this cell. Measured via
+        # `pytest -rA`, not inferred.
+        ("medium", "regional_office_onboarding_lesson"),
     }
 )
 
@@ -917,6 +935,61 @@ def test_recall_covers_grep_reachable_expected_pages_vector(
     _print_probe_table_row(measurement)
     missing = measurement.grep_reachable_expected - set(measurement.recall_ranked)
     assert not missing, _failure_message(measurement, missing)
+
+
+@pytest.mark.skipif(not _VECTOR_AVAILABLE, reason=_VECTOR_SKIP_REASON or "chromadb not installed")
+def test_vector_index_built_with_offline_stand_in(scale_fixture: _ScaleFixture) -> None:
+    """AC (issue athenaeum#1851): the vector index ``scale_fixture`` built
+    and a query issued in THIS test body both go through the same
+    embedder -- ``tests.offline_embeddings.OfflineONNXMiniLMStub``, applied
+    at build time by the local ``MonkeyPatch`` around ``build_index`` in
+    ``scale_fixture``, and at query time by ``tests/conftest.py``'s
+    function-scoped autouse ``_offline_embedding_function``.
+
+    Querying a stored document with its own text must return that document
+    at rank 1 with distance ~0 -- that only holds when index and query
+    share an embedder. A positive control queries with unrelated text and
+    asserts the distance is NOT near 0, so the rank-1/distance~0 assertion
+    above cannot be trivially true for any query.
+    """
+    import chromadb
+
+    from athenaeum.search import _VECTOR_COLLECTION, _VECTOR_DIR
+
+    fx = scale_fixture
+    assert fx.vector_cache_dir is not None  # guaranteed by the skipif above
+    client = chromadb.PersistentClient(path=str(fx.vector_cache_dir / _VECTOR_DIR))
+    collection = client.get_collection(_VECTOR_COLLECTION)
+
+    stored = collection.get(limit=1, include=["documents"])
+    assert stored["ids"], f"empty vector collection at scale={fx.corpus.scale!r}"
+    doc_id = stored["ids"][0]
+    doc_text = stored["documents"][0]
+
+    same = collection.query(query_texts=[doc_text], n_results=1)
+    assert same["ids"][0][0] == doc_id, (
+        f"scale={fx.corpus.scale!r}: querying the stored document's own "
+        f"text did not return it at rank 1 -- index build and query "
+        f"embedder must match (athenaeum#1851): got {same['ids'][0]!r}, "
+        f"expected {doc_id!r}"
+    )
+    same_distance = same["distances"][0][0]
+    assert same_distance == pytest.approx(0.0, abs=1e-4), (
+        f"scale={fx.corpus.scale!r}: same-text query distance "
+        f"{same_distance!r} is not near 0 -- index/query embedder mismatch"
+    )
+
+    # Positive control: unrelated query text must NOT come back near-zero
+    # distance, so the assertion above isn't vacuously true for any query.
+    unrelated = collection.query(
+        query_texts=["zzqv unrelated xx placeholder blorp unmatched filler token"],
+        n_results=1,
+    )
+    unrelated_distance = unrelated["distances"][0][0]
+    assert unrelated_distance > 1e-2, (
+        f"scale={fx.corpus.scale!r}: unrelated-text query distance "
+        f"{unrelated_distance!r} unexpectedly near 0 (positive control failed)"
+    )
 
 
 # ---------------------------------------------------------------------------
