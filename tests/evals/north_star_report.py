@@ -1657,6 +1657,33 @@ class WritePathStats:
     # field existed still loads.
     lost_token_ids: tuple[str, ...] = ()
 
+    # Issue athenaeum#1841: decay CORRECTNESS, not decay presence. The
+    # athenaeum#1830 rule above grades a transient token correct as soon as
+    # SOME short decay was picked, so it cannot tell ``daily`` from
+    # ``weekly`` and it is blind to the opposite failure -- a durable fact
+    # filed to expire. These two close both gaps, scored against the same
+    # ``transient_total`` / durable-token populations the columns above use.
+    #
+    # ``decay_correct`` counts the transient tokens filed under EXACTLY the
+    # bucket their observation's :attr:`~tests.evals.corpus.Observation.
+    # expected_bucket` names (higher is better, out of ``transient_total``).
+    # ``None`` -- never a fabricated 0, the same convention
+    # ``transient_retained`` holds -- when the measurement is not available
+    # at all: no transient token carries an expectation, or the store
+    # declares no decay-bucket frontmatter anywhere (the native arm, whose
+    # memory files have no frontmatter vocabulary to read). A store that
+    # DOES speak buckets and simply got them wrong reads 0, which is a
+    # measurement, not a fabrication.
+    #
+    # ``durable_overdecayed`` counts the ``retain=True`` answer tokens that
+    # landed on a page filed under a bucket that EXPIRES -- the over-decay
+    # failure the operator weights equally with under-decay. LOWER is
+    # better, and a plain ``int`` (not ``int | None``) because "no durable
+    # token was over-decayed" and "no durable token was measurable" are
+    # already told apart by ``answer_tokens_total``.
+    decay_correct: int | None = None
+    durable_overdecayed: int = 0
+
 
 #: Decay buckets (:data:`athenaeum.models.MEMORY_BUCKETS`) short enough that
 #: filing a transient observation under one is a REASONABLE decay, not a
@@ -1676,6 +1703,68 @@ _SHORT_MEMORY_BUCKETS: frozenset[str] = frozenset({"daily", "weekly"})
 #: still wide enough that an off-by-a-few-days ``valid_until`` is not
 #: penalised as if it were durable.
 _TRANSIENT_NEAR_TERM_DAYS = 14
+
+#: The one :data:`athenaeum.models.MEMORY_BUCKETS` member that does NOT
+#: expire (issue athenaeum#1841). Any other bucket on a page carrying a
+#: ``retain=True`` token is an over-decay: a durable fact filed to be swept.
+#: Named rather than inverted from :data:`_SHORT_MEMORY_BUCKETS` so the
+#: over-decay scan stays correct if the vocabulary grows a fourth, longer
+#: horizon -- a durable fact filed under it would still be wrong.
+_DURABLE_MEMORY_BUCKET = "durable"
+
+
+def _store_page_buckets(store_files: Mapping[str, str]) -> dict[str, str]:
+    """``{path: bucket}`` for every page in *store_files*, ``""`` where the
+    page declares none (issue athenaeum#1841).
+
+    The second pass the plan calls for: the durable-retention scan in
+    :func:`compute_write_path_stats` joins the store into one string and
+    never opens frontmatter, and :func:`_transient_token_handled_correctly`
+    re-parses per call. Parsing once here keeps the two new columns from
+    re-reading every page per token, and gives
+    :func:`compute_write_path_stats` the store-level "does this store speak
+    buckets at all" fact its ``None`` convention turns on.
+    """
+    return {path: parse_bucket(parse_frontmatter(text)[0]) for path, text in store_files.items()}
+
+
+def _transient_decay_bucket_correct(
+    token: str,
+    *,
+    expected_bucket: str,
+    store_files: Mapping[str, str],
+    page_buckets: Mapping[str, str],
+) -> bool:
+    """Grade one transient token's decay CORRECTNESS (issue athenaeum#1841).
+
+    Correct when the token is present on at least one compiled page and
+    EVERY page carrying it declares exactly *expected_bucket*. Deliberately
+    stricter than :func:`_transient_token_handled_correctly` in both
+    directions, and the difference is the point of the column:
+
+    * a token filed ``weekly`` when ``daily`` was expected grades correct
+      there (``weekly`` is a reasonable decay) and WRONG here;
+    * a token absent from the store entirely grades correct there (it was
+      discarded, which the athenaeum#1830 ruling calls a fine outcome) and
+      NOT correct here -- no decay was picked, so no decay can be right.
+      Absence is scored by ``transient_retained``, which is why both columns
+      are reported side by side rather than one replacing the other.
+
+    A token with no recorded expectation (``expected_bucket == ""``) is not
+    gradeable and never counts correct; the corpus records one for every
+    transient it plants (``tests/evals/corpus.py``), so this is a guard
+    against a hand-built stream, not a live case.
+    """
+    if not expected_bucket:
+        return False
+    found = False
+    for path, text in store_files.items():
+        if token not in text:
+            continue
+        found = True
+        if page_buckets.get(path, "") != expected_bucket:
+            return False
+    return found
 
 
 def _observation_timestamp(observation: Observation) -> datetime | None:
@@ -1778,8 +1867,17 @@ def compute_write_path_stats(
     half of this function reads *store_files* PER PAGE (for frontmatter)
     rather than joined into ``corpus_text`` like the durable half above,
     which never needed frontmatter at all.
+
+    Issue athenaeum#1841 adds decay CORRECTNESS on top of that ruling,
+    without changing it: ``decay_correct`` counts the transient tokens filed
+    under exactly their observation's ``expected_bucket``, and
+    ``durable_overdecayed`` counts the durable tokens filed under a bucket
+    that expires. Both read the per-page frontmatter parsed once into
+    :func:`_store_page_buckets`, a second pass over *store_files* that the
+    retention half above never needs.
     """
     corpus_text = "\n".join(store_files.values())
+    page_buckets = _store_page_buckets(store_files)
     token_bearing = [obs for obs in observations if obs.answer_tokens and obs.retain]
     transient_bearing = [obs for obs in observations if obs.answer_tokens and not obs.retain]
     transient_tokens = sorted({token for obs in transient_bearing for token in obs.answer_tokens})
@@ -1798,6 +1896,27 @@ def compute_write_path_stats(
             token, anchor=transient_anchor.get(token), store_files=store_files
         )
     }
+    # Issue athenaeum#1841: the bucket each transient token SHOULD carry.
+    # Same exact one-token-per-observation mapping ``transient_anchor``
+    # relies on, so no expectation is silently overwritten.
+    transient_expected: dict[str, str] = {}
+    for obs in transient_bearing:
+        for token in obs.answer_tokens:
+            transient_expected[token] = obs.expected_bucket
+    store_declares_bucket = any(page_buckets.values())
+    decay_correct: int | None = None
+    if any(transient_expected.values()) and store_declares_bucket:
+        decay_correct = sum(
+            1
+            for token in transient_tokens
+            if _transient_decay_bucket_correct(
+                token,
+                expected_bucket=transient_expected.get(token, ""),
+                store_files=store_files,
+                page_buckets=page_buckets,
+            )
+        )
+
     all_tokens = sorted({token for obs in token_bearing for token in obs.answer_tokens})
     retained_tokens = {token for token in all_tokens if token in corpus_text}
     lost_tokens = sorted(set(all_tokens) - retained_tokens)
@@ -1811,6 +1930,16 @@ def compute_write_path_stats(
     dropped = [
         obs for obs in token_bearing if not all(token in corpus_text for token in obs.answer_tokens)
     ]
+    # Issue athenaeum#1841 (over-decay): a DURABLE token that landed on a
+    # page filed under any bucket other than ``durable`` is a fact the store
+    # has scheduled to forget. Counted per distinct token, not per page, to
+    # stay on the same grain as ``answer_tokens_retained`` beside it.
+    overdecayed_pages = {
+        path for path, bucket in page_buckets.items() if bucket and bucket != _DURABLE_MEMORY_BUCKET
+    }
+    durable_overdecayed = sum(
+        1 for token in all_tokens if any(token in store_files[path] for path in overdecayed_pages)
+    )
 
     has_measurable_data = bool(token_bearing)
     return WritePathStats(
@@ -1826,6 +1955,8 @@ def compute_write_path_stats(
         transient_total=len(transient_tokens),
         transient_retained=len(transient_wrong) if transient_tokens else None,
         lost_token_ids=tuple(lost_tokens),
+        decay_correct=decay_correct,
+        durable_overdecayed=durable_overdecayed,
     )
 
 
@@ -3714,13 +3845,31 @@ def render_report(report: NorthStarReport) -> str:
         )
         lines.append("")
         lines.append(
+            "_`decay_correct` and `durable_overdecayed` (issue athenaeum#1841) grade decay "
+            "CORRECTNESS, not decay presence. `decay_correct` counts the transient tokens "
+            "filed under EXACTLY the bucket the observation expected (HIGHER is better, out "
+            "of `transient_total`); a token filed `weekly` when `daily` was expected still "
+            "grades correct under `transient_retained` -- a reasonable decay -- but is not "
+            "counted here, so the two columns can legitimately disagree. `n/a` means the "
+            "measurement was unavailable, never a fabricated 0: the store declares no decay "
+            "bucket anywhere (the native arm has no frontmatter vocabulary) or no transient "
+            "token carried an expectation. `durable_overdecayed` is the SECOND "
+            "lower-is-better column on this table, alongside `transient_retained`: it counts "
+            "DURABLE (`retain=True`) tokens filed on a page whose bucket expires -- a fact "
+            "the store has scheduled to forget, the over-decay failure weighted equally with "
+            "under-decay. 0 is the good result._"
+        )
+        lines.append("")
+        lines.append(
             "| system | corpus_scale | pages_targeted | pages_written | answer_tokens_total | "
-            "answer_tokens_retained | transient_total | transient_retained | "
+            "answer_tokens_retained | transient_total | transient_retained | decay_correct | "
+            "durable_overdecayed | "
             "observations_total | observations_measured | "
             "observations_dropped | lost_token_ids | partial |"
         )
         lines.append(
-            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- "
+            "| --- | --- | --- |"
         )
         for w in report.write_path_stats:
             partial = "yes" if (w.system, w.corpus_scale) in report.phase2_partial else "no"
@@ -3732,6 +3881,8 @@ def render_report(report: NorthStarReport) -> str:
                 f"{w.answer_tokens_retained if w.answer_tokens_retained is not None else 'n/a'} | "
                 f"{w.transient_total} | "
                 f"{w.transient_retained if w.transient_retained is not None else 'n/a'} | "
+                f"{w.decay_correct if w.decay_correct is not None else 'n/a'} | "
+                f"{w.durable_overdecayed} | "
                 f"{w.observations_total} | {w.observations_measured} | "
                 f"{w.observations_dropped if w.observations_dropped is not None else 'n/a'} | "
                 f"{lost} | {partial} |"
