@@ -51,6 +51,7 @@ Requires the ``mcp`` extra: ``pip install athenaeum[mcp]``
 
 from __future__ import annotations
 
+import importlib.resources
 import json
 import logging
 import re
@@ -222,6 +223,56 @@ _MAX_CONTENT_BYTES = 10 * 1024 * 1024  # 10 MB
 # `top_k` itself already bounds the floor for very small explicit `top_k`
 # calls (`max(top_k, ...)` below).
 _HYBRID_CANDIDATE_POOL = 15
+
+#: Issue athenaeum#1783: the overflow-breadcrumb prompt file's name, resolved
+#: via ``importlib.resources`` below -- same packaged-prompt convention
+#: ``athenaeum.tiers._load_name_resolution_confirm_prompt`` already
+#: established (``policies/prompt-text-is-content.md``: wording is content,
+#: not code, so it lives in a ``.md`` file next to the caller, not a string
+#: literal here).
+_RECALL_OVERFLOW_TEMPLATE_NAME = "recall_overflow_breadcrumb.md"
+
+
+def _load_recall_overflow_template() -> str:
+    """Read the overflow-breadcrumb template (issue athenaeum#1783).
+
+    Carries two placeholders, ``{count}`` and ``{types}`` -- see
+    :func:`_render_recall_overflow_line` for what each receives. Loaded
+    fresh on every call (the file is tiny and this is never a hot loop
+    relative to the recall it decorates) rather than cached at import
+    time, matching :func:`athenaeum.tiers._load_name_resolution_confirm_prompt`'s
+    own shape.
+    """
+    resource = importlib.resources.files("athenaeum.prompts").joinpath(
+        _RECALL_OVERFLOW_TEMPLATE_NAME
+    )
+    return resource.read_text(encoding="utf-8")
+
+
+def _render_recall_overflow_line(
+    withheld_by_type: dict[str, int], *, at_least: bool
+) -> str:
+    """Render the overflow breadcrumb line, or ``""`` when nothing was withheld.
+
+    Issue athenaeum#1783's "Overflow line shape" AC: exactly one line,
+    emitted only when *withheld_by_type* is non-empty (at least one
+    candidate inside the fetch window was withheld by the cap). *at_least*
+    marks the count as a LOWER BOUND (``"at least N"``) when the fetch
+    window itself was exhausted -- there may be more withheld candidates
+    this call never even fetched, so ``N`` alone would understate.
+
+    The rendered line never starts with ``-`` (the template's own wording
+    guarantees this; see ``src/athenaeum/prompts/recall_overflow_breadcrumb.md``)
+    so it can never be misread as a hook bullet by
+    ``tests/evals/test_recall_covers_grep.py``'s ``_HOOK_BULLET_RE``.
+    """
+    total = sum(withheld_by_type.values())
+    if total == 0:
+        return ""
+    count_str = f"at least {total}" if at_least else str(total)
+    types_str = ", ".join(f"{n} {t}" for t, n in sorted(withheld_by_type.items()))
+    template = _load_recall_overflow_template().strip("\n")
+    return template.format(count=count_str, types=types_str)
 
 
 def active_tool_use_id() -> str | None:
@@ -1297,6 +1348,7 @@ def _recall_via_backend(
     from athenaeum.push_metrics import estimate_tokens
     from athenaeum.search import (
         DegradedIndexError,
+        apply_relevance_cap,
         fts5_index_available,
         get_backend,
         meets_relevance_floor,
@@ -1311,11 +1363,22 @@ def _recall_via_backend(
 
     effective_cache = resolve_cache_dir(cache_dir)
 
+    # Issue athenaeum#1783: fetch a window WIDER than ``top_k`` so the
+    # relevance-bounded cap (applied below, after the reorders) has real
+    # withheld candidates to count instead of a backend query that already
+    # truncated them away. Same width the hybrid dispatch already widens to
+    # (``_HYBRID_CANDIDATE_POOL``) -- reused here rather than a second
+    # constant, so "how wide is a widened fetch" has one answer across both
+    # the non-hybrid and hybrid paths. ``top_k`` itself remains the cap
+    # function's *limit* (AC1: MCP ``recall_search`` keeps passing its
+    # caller's own ``top_k``, default 5, unaffected by this widening).
+    window = max(top_k, _HYBRID_CANDIDATE_POOL)
+
     try:
         hits = backend.query(
             query,
             effective_cache,
-            n=top_k,
+            n=window,
             wiki_root=wiki_root,
             caller_audience=caller_audience,
             type_filter=type_filter,
@@ -1350,7 +1413,7 @@ def _recall_via_backend(
             effective_cache,
             query,
             backend_name=backend_name,
-            top_k=top_k,
+            top_k=window,
             caller_audience=caller_audience,
             type_filter=type_filter,
         )
@@ -1360,7 +1423,7 @@ def _recall_via_backend(
                 (f"{_OFF_CORPUS_HIT_PREFIX}{filename}", name, score)
                 for filename, name, score in off_corpus_hits
             ]
-            hits = off_corpus.merge_ranked_hits(hits, tagged_off_corpus_hits, top_k)
+            hits = off_corpus.merge_ranked_hits(hits, tagged_off_corpus_hits, window)
     except off_corpus.OffCorpusConfigError as exc:
         # A misconfigured off_corpus (e.g. an adapter root inside the git
         # tree) must never fail an otherwise-good corpus recall — log and
@@ -1475,7 +1538,7 @@ def _recall_via_backend(
                 wide_vector_hits = backend.query(
                     query,
                     effective_cache,
-                    n=max(top_k, _HYBRID_CANDIDATE_POOL),
+                    n=window,
                     wiki_root=wiki_root,
                     caller_audience=caller_audience,
                     type_filter=type_filter,
@@ -1495,7 +1558,7 @@ def _recall_via_backend(
                 fts5_hits = get_backend("fts5").query(
                     query,
                     effective_cache,
-                    n=max(top_k, _HYBRID_CANDIDATE_POOL),
+                    n=window,
                     wiki_root=wiki_root,
                     caller_audience=caller_audience,
                     type_filter=type_filter,
@@ -1528,7 +1591,7 @@ def _recall_via_backend(
                 hits = reciprocal_rank_fusion(
                     wide_vector_hits,
                     fts5_hits,
-                    n=top_k,
+                    n=window,
                     k=resolve_recall_hybrid_k(config),
                     secondary_weight=resolve_recall_hybrid_fts5_weight(config),
                     guard_rank=resolve_recall_hybrid_guard_rank(config),
@@ -1559,6 +1622,44 @@ def _recall_via_backend(
             extra_roots=extra_roots,
             off_corpus_root=off_corpus_root,
         )
+
+    # Issue athenaeum#1783: the ONE relevance-bounded cap, applied AFTER the
+    # reorders above (so the KEPT order below is exactly what those
+    # reorders produced -- "the rendered order is unchanged") and BEFORE
+    # the render loop (so a withheld hit past ``top_k`` never pays that
+    # loop's frontmatter read/parse/snippet cost -- only ``_cap_type_of``
+    # below does, and only for the withheld tail). ``hits`` has already
+    # cleared the configured relevance floor (the floor block above, and --
+    # on the hybrid path -- each side's own floor applied before fusion).
+    #
+    # ``_window_exhausted``: the fetch above asked for ``window`` hits and
+    # got at least that many back, so there may be MORE beyond what this
+    # call ever fetched -- the withheld count below is then a LOWER BOUND,
+    # not exact (AC: "when the fetch window was exhausted, the count is
+    # marked as a lower bound").
+    _window_exhausted = len(hits) >= window
+
+    def _cap_type_of(hit: tuple[str, str, float]) -> str | None:
+        # Called ONLY for a hit past ``top_k`` (see
+        # ``apply_relevance_cap``'s docstring) -- a KEPT hit resolves its
+        # type in the render loop below exactly as it always has, never
+        # here, so this never duplicates that read for the common case.
+        page_path, _ = _resolve_hit_path(
+            hit[0], wiki_root, extra_roots, off_corpus_root=off_corpus_root
+        )
+        if page_path is None or not page_path.is_file():
+            return None
+        try:
+            text = page_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return None
+        fm, _ = parse_frontmatter(text)
+        return resolve_page_type(fm) or None
+
+    hits, _withheld_by_type = apply_relevance_cap(hits, top_k, type_of=_cap_type_of)
+    _overflow_line = _render_recall_overflow_line(
+        _withheld_by_type, at_least=_window_exhausted
+    )
 
     tokens = tokenize_keyword_query(query)
 
@@ -1934,7 +2035,14 @@ def _recall_via_backend(
     except Exception:  # recall must never fail over telemetry
         log.debug("push-metrics: push-record instrumentation failed", exc_info=True)
 
-    return "\n".join(parts) + unrecognized_note
+    # Issue athenaeum#1783: the overflow breadcrumb, appended after every
+    # rendered block -- computed once, above, from what the cap withheld
+    # (never re-derived here from ``blocks``/``_rows``, which only ever
+    # shrink further past the cap and would silently under-report).
+    result = "\n".join(parts) + unrecognized_note
+    if _overflow_line:
+        result = f"{result}\n\n{_overflow_line}"
+    return result
 
 
 def remember_write(
