@@ -897,9 +897,19 @@ class TestIngestAnswers:
     ) -> None:
         """Issue athenaeum#1804: a second summary line separates source files
         written, held blocks, and blocks archived with no write-back, by
-        class — printed AFTER the unchanged `Ingested N ...` line. When the
-        field-correction count is non-zero, the line also says the
-        corrections were not applied."""
+        class — printed AFTER the unchanged `Ingested N ...` line.
+
+        Issue athenaeum#1850: the same line now also reports ratified
+        field-correction applies/rejects, and the old "were not applied ...
+        re-submit" sentence is gone (a field-correction answer now IS
+        applied/rejected, never a permanent no-write-back class)."""
+        import json
+
+        from athenaeum.corrections import (
+            compute_correction_id,
+            render_correction_id_marker,
+        )
+
         wiki = tmp_path / "wiki"
         raw = tmp_path / "raw"
         wiki.mkdir()
@@ -911,25 +921,55 @@ class TestIngestAnswers:
             "**Description**: Conflicting info.\n"
             "\nNon-empty answer.\n"
         )
-        correction = (
-            '## [2026-04-20] Entity: "Correction Co" (from raw/corrections/batch.jsonl)\n'
-            "- [x] Ratify?\n"
-            "**Conflict type**: field-correction\n"
-            "**Description**: field correction.\n"
+        amendment = (
+            '## [2026-04-20] Entity: "Schema Co" (from raw/corrections/batch2.jsonl)\n'
+            "- [x] Ratify the proposed schema amendment?\n"
+            "**Conflict type**: schema-amendment\n"
+            "**Description**: Proposed a new `founded_quarter` field.\n"
             "\nratify\n"
         )
+        # Well-formed (parses, matches its own Correction ID) so the
+        # ratified-apply path reaches the answer-token dispatch — answered
+        # "reject", which needs no page/allowlist config to resolve.
+        target = {"uid": "person-a"}
+        cid = compute_correction_id(
+            schema_version=1,
+            target=target,
+            op="set",
+            field_name="current_title",
+            value="VP Engineering",
+        )
+        correction = (
+            '## [2026-04-20] Entity: "Correction Co" (from raw/corrections/batch.jsonl)\n'
+            "- [x] Reject the proposed field correction?\n"
+            "**Conflict type**: field-correction\n"
+            f"**Description**: Target: {json.dumps(target, sort_keys=True)}\n"
+            "Field: current_title\n"
+            "Op: set\n"
+            "Value: 'VP Engineering'\n"
+            "Source: api:enrichment-vendor\n"
+            "Reason: equal rank, undated\n"
+            f"{render_correction_id_marker(cid)}\n"
+            "\nreject\n"
+        )
         (wiki / "_pending_questions.md").write_text(
-            "# Pending Questions\n\n" + held + "\n---\n\n" + correction
+            "# Pending Questions\n\n"
+            + held
+            + "\n---\n\n"
+            + amendment
+            + "\n---\n\n"
+            + correction
         )
 
         rc = main(["ingest-answers", "--path", str(tmp_path)])
         assert rc == 0
         out = capsys.readouterr().out
-        assert "Ingested 1 answered question(s)." in out
+        assert "Ingested 2 answered question(s)." in out
         assert "1 held" in out
         assert "1 archived without write-back" in out
-        assert "field-correction: 1" in out
-        assert "not applied" in out
+        assert "schema-amendment: 1" in out
+        assert "not applied" not in out
+        assert "0 correction(s) applied, 1 rejected" in out
 
 
 class TestIngestMerges:
