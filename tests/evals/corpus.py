@@ -892,6 +892,78 @@ def answer_bearing_uids(probe: "Probe", pages_by_uid: dict[str, "Page"]) -> tupl
     )
 
 
+def deep_hop_uids(probe: "Probe", pages_by_uid: dict[str, "Page"]) -> tuple[str, ...]:
+    """*probe*'s ``expected_uids`` pages reachable as the TARGET of a
+    qualifying follow_through hop -- the deep page(s) an arm can only have
+    landed on by FOLLOWING a body ``[[wikilink]]``, never by a lexical match
+    on the query itself.
+
+    This is the exact predicate :func:`validate_core`'s ``follow_through``
+    block used to compute inline (issue athenaeum#1844), extracted so that
+    validator and :mod:`tests.evals.north_star_report`'s ``follow_hop_rate``
+    column can never drift apart on what "the deep page" means. A target
+    qualifies when ALL of:
+
+    * it is named by a body ``[[wikilink]]`` (:func:`_body_wikilink_targets`
+      -- never a frontmatter ``related``/``links`` edge; only the body link
+      is what a live ``recall`` hit actually renders) on a DIFFERENT
+      ``expected_uids`` page that itself shares a content term with the
+      query, so the source really is the breadcrumb a lexical match
+      surfaces;
+    * its body carries one of the probe's planted ``answer_tokens``, so the
+      hop lands somewhere that actually holds the answer rather than on a
+      clean-but-token-free page;
+    * its body, uid, name and tags share no content term with the query --
+      stemmed prefixes included (:func:`_shares_stemmed_term`) -- because a
+      native arm greps the whole page file (``<uid>.md``), not only its body
+      text, so the no-overlap assertion must hold for everything it would
+      match on.
+
+    Derived, never indexed: the answer is computed from the link graph and
+    the query, so it does not depend on WHERE the deep page sits in
+    ``expected_uids`` and no caller needs (or may use) ``expected_uids[1]``.
+    Returned in ``expected_uids`` order and deduplicated -- the same
+    ordering contract :func:`answer_bearing_uids` keeps.
+
+    Empty for a probe with no qualifying hop, which for a ``follow_through``
+    probe is precisely the corpus error :func:`validate_core` refuses to
+    ship; for any other probe class this function simply has no meaning and
+    callers should not read it.
+    """
+    expected_uid_set = set(probe.expected_uids)
+    query_terms = _content_terms(probe.query)
+    targets: set[str] = set()
+    for uid in probe.expected_uids:
+        page = pages_by_uid.get(uid)
+        if page is None:
+            continue
+        if not (_content_terms(page.body) & query_terms):
+            # This page shares no vocabulary with the query either -- it
+            # cannot be the breadcrumb a lexical match surfaces, so an edge
+            # leaving it would not demonstrate a real hop.
+            continue
+        for target_uid in _body_wikilink_targets(page.body):
+            if target_uid == page.uid or target_uid not in expected_uid_set:
+                continue
+            target = pages_by_uid.get(target_uid)
+            if target is None:
+                continue
+            if _content_terms(target.body) & query_terms:
+                continue
+            target_meta_terms = _content_terms(
+                f"{target.uid.replace('-', ' ')} {target.name} {' '.join(target.tags)}"
+            )
+            if _shares_stemmed_term(target_meta_terms, query_terms):
+                # The page itself is grep-reachable from the query via its
+                # uid/name/tags (a native arm's topic file is named
+                # `<uid>.md`) even though its body is clean.
+                continue
+            if not any(token in target.body for token in probe.answer_tokens):
+                continue
+            targets.add(target_uid)
+    return tuple(uid for uid in probe.expected_uids if uid in targets)
+
+
 def validate_core(pages: list[Page], probes: list[Probe]) -> list[str]:
     """Return human-readable problems with the hand-authored corpus.
 
@@ -1134,41 +1206,11 @@ def validate_core(pages: list[Page], probes: list[Probe]) -> list[str]:
                     f"probe {probe.id!r}: follow_through answer_tokens must be split across "
                     "at least two expected_uids pages, not concentrated on one"
                 )
-            expected_uid_set = set(probe.expected_uids)
-            query_terms = _content_terms(probe.query)
-            has_qualifying_hop = False
-            for page in expected_pages:
-                if not (_content_terms(page.body) & query_terms):
-                    # This page shares no vocabulary with the query either --
-                    # it cannot be the breadcrumb a lexical match surfaces, so
-                    # an edge leaving it would not demonstrate a real hop.
-                    continue
-                for target_uid in _body_wikilink_targets(page.body):
-                    if target_uid == page.uid or target_uid not in expected_uid_set:
-                        continue
-                    target = pages_by_uid.get(target_uid)
-                    if target is None:
-                        continue
-                    if _content_terms(target.body) & query_terms:
-                        continue
-                    target_meta_terms = _content_terms(
-                        f"{target.uid.replace('-', ' ')} {target.name} {' '.join(target.tags)}"
-                    )
-                    if _shares_stemmed_term(target_meta_terms, query_terms):
-                        # The page itself is grep-reachable from the query via
-                        # its uid/name/tags (a native arm's topic file is named
-                        # `<uid>.md`) even though its body is clean -- the
-                        # no-overlap assertion must hold for the whole page a
-                        # native arm would land on, not only its body text.
-                        continue
-                    if not any(token in target.body for token in probe.answer_tokens):
-                        # The hop must land somewhere that actually carries a
-                        # planted token -- an edge to a clean-but-token-free
-                        # page would satisfy the shape without ever reaching
-                        # the answer.
-                        continue
-                    has_qualifying_hop = True
-            if not has_qualifying_hop:
+            # Issue athenaeum#1844: the predicate this check used to inline
+            # now lives in `deep_hop_uids`, so the validator and the
+            # `follow_hop_rate` report column share ONE definition of "the
+            # deep page" and cannot diverge.
+            if not deep_hop_uids(probe, pages_by_uid):
                 problems.append(
                     f"probe {probe.id!r}: follow_through probes need a body [[wikilink]] "
                     "(not just a frontmatter related/links edge) from an expected_uids page "

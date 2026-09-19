@@ -9,14 +9,18 @@ rank is not a weaker result, it is a meaningless one.
 
 from __future__ import annotations
 
+import ast
+import itertools
 import os
 import subprocess
 import sys
 from collections import Counter
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
+import tests.evals.corpus as corpus_module
 from tests.evals.corpus import (
     CONDITION_2_ENROLLED,
     GENERATOR_VERSION,
@@ -30,6 +34,7 @@ from tests.evals.corpus import (
     _normalize_marker_for_match,
     _shares_stemmed_term,
     build_corpus,
+    deep_hop_uids,
     load_core_pages,
     load_probes,
     validate_core,
@@ -696,6 +701,222 @@ def test_follow_through_rejects_target_leaking_query_term_via_uid_or_name() -> N
     )
     problems = validate_core(pages, [probe])
     assert any("uid, name, and tags" in p for p in problems), problems
+
+
+# ---------------------------------------------------------------------------
+# deep_hop_uids extraction (issue athenaeum#1844)
+# ---------------------------------------------------------------------------
+
+
+def _pre_extraction_has_qualifying_hop(probe: Probe, pages_by_uid: dict[str, Page]) -> bool:
+    """The ``follow_through`` hop predicate EXACTLY as ``validate_core``
+    inlined it before issue athenaeum#1844 extracted it into
+    :func:`deep_hop_uids` -- transcribed verbatim from the pre-extraction
+    source, and deliberately kept as a separate second copy HERE (never in
+    the module) so the extraction has something independent to be pinned
+    against.
+    """
+    expected_pages = [pages_by_uid[uid] for uid in probe.expected_uids if uid in pages_by_uid]
+    expected_uid_set = set(probe.expected_uids)
+    query_terms = _content_terms(probe.query)
+    has_qualifying_hop = False
+    for page in expected_pages:
+        if not (_content_terms(page.body) & query_terms):
+            continue
+        for target_uid in _body_wikilink_targets(page.body):
+            if target_uid == page.uid or target_uid not in expected_uid_set:
+                continue
+            target = pages_by_uid.get(target_uid)
+            if target is None:
+                continue
+            if _content_terms(target.body) & query_terms:
+                continue
+            target_meta_terms = _content_terms(
+                f"{target.uid.replace('-', ' ')} {target.name} {' '.join(target.tags)}"
+            )
+            if _shares_stemmed_term(target_meta_terms, query_terms):
+                continue
+            if not any(token in target.body for token in probe.answer_tokens):
+                continue
+            has_qualifying_hop = True
+    return has_qualifying_hop
+
+
+def _follow_through_fixture_matrix() -> list[tuple[dict[str, bool], list[Page], Probe]]:
+    """Every combination of ``_two_page_follow_through``'s six knobs -- so
+    the pin below exercises each branch of the predicate in both directions,
+    not only the shapes the named tests above happen to build."""
+    knobs = (
+        "second_hop_shares_query_term",
+        "edge_between_expected_pages",
+        "source_shares_query_term",
+        "body_wikilink",
+        "frontmatter_edge",
+        "second_hop_carries_token",
+    )
+    cases = []
+    for values in itertools.product((False, True), repeat=len(knobs)):
+        params = dict(zip(knobs, values, strict=True))
+        pages, probe = _two_page_follow_through(**params)
+        cases.append((params, pages, probe))
+    return cases
+
+
+def test_validate_core_problem_list_is_identical_after_the_extraction() -> None:
+    """AC (issue athenaeum#1844): ``validate_core``'s follow_through block
+    now CALLS :func:`deep_hop_uids` instead of keeping a second copy of the
+    predicate, and the problem list it produces is unchanged by that.
+
+    Pinned by driving ``validate_core``'s decision off the verbatim
+    pre-extraction copy above (patched in place of the extracted function)
+    and asserting the two problem lists are equal element-for-element --
+    over the shipped corpus at every scale AND over all 64 synthetic
+    fixtures, which between them make the predicate answer both True and
+    False.
+    """
+    populations: list[tuple[str, list[Page], list[Probe]]] = [
+        ("core-hand-authored", load_core_pages(), load_probes()),
+    ]
+    for scale in SCALES:
+        corpus = build_corpus(scale=scale)
+        populations.append((f"built-{scale}", list(corpus.pages), list(corpus.probes)))
+    for params, pages, probe in _follow_through_fixture_matrix():
+        populations.append((f"synthetic-{params}", pages, [probe]))
+
+    def _legacy(probe: Probe, pages_by_uid: dict[str, Page]) -> tuple[str, ...]:
+        # `validate_core` only tests this for emptiness, so a truthy
+        # sentinel reproduces the pre-extraction `has_qualifying_hop` branch
+        # exactly while routing the DECISION through the verbatim old code.
+        return ("legacy-hop",) if _pre_extraction_has_qualifying_hop(probe, pages_by_uid) else ()
+
+    decided_both_ways = set()
+    for _label, pages, probes in populations:
+        pages_by_uid = {page.uid: page for page in pages}
+        for probe in probes:
+            if probe.probe_class == "follow_through":
+                decided_both_ways.add(_pre_extraction_has_qualifying_hop(probe, pages_by_uid))
+
+    # Positive control: a pin over a population that only ever answers one
+    # way would pass against a predicate stubbed to a constant.
+    assert decided_both_ways == {True, False}
+
+    for label, pages, probes in populations:
+        after = validate_core(pages, probes)
+        with mock.patch.object(corpus_module, "deep_hop_uids", _legacy):
+            before = validate_core(pages, probes)
+        assert before == after, label
+
+
+def test_deep_hop_uids_matches_the_extracted_predicate_page_for_page() -> None:
+    """The extracted function does not merely agree on "is there a hop?" --
+    it names the deep page, and only pages the old predicate would have
+    accepted as a hop TARGET."""
+    pages = load_core_pages()
+    pages_by_uid = {page.uid: page for page in pages}
+    follow_through = [p for p in load_probes() if p.probe_class == "follow_through"]
+    assert follow_through  # positive control
+
+    for probe in follow_through:
+        hops = deep_hop_uids(probe, pages_by_uid)
+        assert hops, probe.id
+        assert bool(hops) == _pre_extraction_has_qualifying_hop(probe, pages_by_uid), probe.id
+        for uid in hops:
+            assert uid in probe.expected_uids, (probe.id, uid)
+            target = pages_by_uid[uid]
+            query_terms = _content_terms(probe.query)
+            assert not (_content_terms(target.body) & query_terms), (probe.id, uid)
+            assert any(token in target.body for token in probe.answer_tokens), (probe.id, uid)
+        # Deduplicated and in `expected_uids` order -- the same ordering
+        # contract `answer_bearing_uids` keeps.
+        assert list(hops) == sorted(set(hops), key=probe.expected_uids.index)
+
+
+def test_deep_hop_uids_is_derived_not_indexed_by_expected_uids_position() -> None:
+    """AC counter-example (issue athenaeum#1844): a probe whose
+    ``expected_uids`` lists the DEEP page first yields the same
+    ``deep_hop_uids`` result -- so nothing may reach for
+    ``expected_uids[1]`` to find it."""
+    pages, probe = _two_page_follow_through(
+        second_hop_shares_query_term=False, edge_between_expected_pages=True
+    )
+    pages_by_uid = {page.uid: page for page in pages}
+    assert probe.expected_uids == ("page-a", "page-b")
+    natural_order = deep_hop_uids(probe, pages_by_uid)
+    assert natural_order == ("page-b",)
+
+    reversed_probe = Probe(
+        id=probe.id,
+        probe_class=probe.probe_class,
+        query=probe.query,
+        expected_uids=("page-b", "page-a"),
+        answer_tokens=probe.answer_tokens,
+        answer_markers=probe.answer_markers,
+    )
+    assert deep_hop_uids(reversed_probe, pages_by_uid) == natural_order
+
+    # Under this ordering the deep page has MOVED to position 0, so the
+    # naive positional read tuned to the natural ordering would now name the
+    # SOURCE page -- which is exactly the wrong answer.
+    assert reversed_probe.expected_uids.index("page-b") == 0
+    assert probe.expected_uids.index("page-b") == 1
+    assert "page-a" not in natural_order
+
+
+def _expected_uids_positional_reads(source: str, label: str) -> list[str]:
+    """Every ``<expr>.expected_uids[<int>]`` read in *source*, found through
+    the AST so a docstring or comment that merely NAMES the anti-pattern
+    (this file is full of them) is never mistaken for one."""
+    offenders = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Subscript):
+            continue
+        value = node.value
+        if not (isinstance(value, ast.Attribute) and value.attr == "expected_uids"):
+            continue
+        index = node.slice
+        if isinstance(index, ast.Constant) and isinstance(index.value, int):
+            offenders.append(f"{label}:{node.lineno}: expected_uids[{index.value}]")
+    return offenders
+
+
+def test_no_caller_reaches_for_expected_uids_index_one() -> None:
+    """AC (issue athenaeum#1844): "derive, don't index". The deep page is
+    whatever :func:`deep_hop_uids` names, never whatever happens to sit at
+    position 1 of ``expected_uids`` -- a positional read that silently
+    returns the WRONG page the moment a probe's ground truth is reordered
+    (see the counter-example above). Swept over the whole eval tree, tests
+    included, because a test helper that indexes position 1 is exactly the
+    habit this AC removes.
+
+    Position 0 reads are left alone: they are out of this AC's scope, and a
+    caller that wants the breadcrumb the query itself surfaces is not making
+    the claim about reachability that indexing the DEEP page makes.
+    """
+    roots = [Path(__file__).resolve().parent / "evals", Path(__file__).resolve()]
+    scanned = []
+    offenders = []
+    for root in roots:
+        paths = sorted(root.rglob("*.py")) if root.is_dir() else [root]
+        for path in paths:
+            scanned.append(path)
+            for hit in _expected_uids_positional_reads(
+                path.read_text(encoding="utf-8"), path.name
+            ):
+                if not hit.endswith("expected_uids[0]"):
+                    offenders.append(hit)
+    assert len(scanned) > 10  # positive control: the sweep read real files
+    assert not offenders, "derive the deep page, do not index it:\n  " + "\n  ".join(offenders)
+
+
+def test_the_expected_uids_index_sweep_actually_detects_the_pattern() -> None:
+    """Positive control for the sweep above -- a clean tree and a broken
+    detector look identical without this."""
+    assert _expected_uids_positional_reads("uid = probe.expected_uids[1]", "x.py") == [
+        "x.py:1: expected_uids[1]"
+    ]
+    # ...and prose naming it (the shape this file's own docstrings take) is
+    # not a hit.
+    assert _expected_uids_positional_reads('"""never expected_uids[1]."""', "x.py") == []
 
 
 def test_content_terms_strips_stopwords_and_tokens_under_three_chars() -> None:
