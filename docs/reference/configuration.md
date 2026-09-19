@@ -2983,8 +2983,11 @@ which was picked on a mismatched stand-in/real-model instrument (see
 that issue's Motivation). Re-swept directly on the real embedder:
 ``guard_rank=1`` strictly reduces real-model failures relative to fully
 unguarded fusion, with no regression on any real-model case that
-previously passed and no movement at all in the default (offline
-stand-in) selection's pass/xfail set -- see
+previously passed. The original "no movement in the default (offline
+stand-in) selection's pass/xfail set" claim does NOT hold on the
+-corrected default instrument: re-measured directly,
+``guard_rank=1`` still wins on failure count (6 vs 7 at
+``guard_rank=0``) but changes WHICH cells fail -- see
 `athenaeum.config.RECALL_HYBRID_GUARD_RANK_DEFAULT`'s own comment
 and the committed sweep (``docs/measurements/
 recall-hybrid-fusion-sweep.md``) for the winner-selection detail.

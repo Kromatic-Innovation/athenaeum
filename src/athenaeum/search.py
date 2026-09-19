@@ -3078,11 +3078,20 @@ _DEFAULT_HYBRID_FTS5_WEIGHT = RECALL_HYBRID_FTS5_WEIGHT_DEFAULT
 #: clearing ``medium/portal_design_reviewer`` -- a coverage crowd-out where
 #: protecting the expected page's own strong single-list rank was exactly
 #: what let it clear the fused top-5) with no regression on any
-#: real-model-passing case (winner rule (a)) and NO movement at all in the
-#: default (offline stand-in) selection's pass/xfail set (winner rule (b) --
-#: re-confirmed directly: two full runs of ``pytest tests/evals/
-#: test_recall_covers_grep.py``, with and without
-#: ``ATHENAEUM_RECALL_HYBRID_GUARD_RANK=1``, produced IDENTICAL totals).
+#: real-model-passing case (winner rule (a)). Winner rule (b) -- "no
+#: movement in the default (offline stand-in) selection's pass/xfail set"
+#: -- does NOT hold: that claim was re-confirmed on ``scale_fixture``'s
+#: OWN pre-athenaeum#1851 mismatched instrument (module-scoped fixture
+#: building the vector index with the REAL model while every query used
+#: the offline stand-in), which happened to hide this knob's effect too.
+#: Re-measured on the athenaeum#1851-corrected, fully-offline instrument
+#: (``guard_rank=0`` vs ``=1``, two full runs of ``pytest
+#: tests/evals/test_recall_covers_grep.py -k medium``): going from ``0`` to
+#: ``1`` clears ``medium/portal_design_reviewer`` and
+#: ``medium/spend_approver_named`` but newly fails
+#: ``medium/regional_office_onboarding_lesson`` -- net one FEWER default-
+#: selection failure at ``guard_rank=1`` (6 vs 7), so rule (a) still
+#: selects ``1`` on its own; rule (b) is simply not the reason anymore.
 #: ``guard_rank=2`` or ``3`` (the rest of the issue's swept grid) regress --
 #: newly crowds out the ``person_not_repo``/``repo_not_person``
 #: disambiguation guard at BOTH scales, the same protect-too-much mechanism

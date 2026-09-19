@@ -3,24 +3,31 @@
 
 ``tests/evals/test_recall_covers_grep.py`` -- this module's sibling -- proves
 its coverage and person/repo-disambiguation invariants against the
-``vector`` backend, but its ``scale_fixture`` is MODULE-scoped, so it is set
-up (real corpus embedded, real index built) before pytest resolves which
-embedding function this SUITE run should use. Under the default (offline)
-selection, ``tests/conftest.py``'s autouse ``_offline_embedding_function``
-fixture is FUNCTION-scoped and routes chromadb's embedder through a
-deterministic lexical-hash stand-in (``tests.offline_embeddings
-.OfflineONNXMiniLMStub``) for every test -- but that fixture's own gate,
-``_default_selection``, decides per NODE, off that node's markers. For the
-sibling module (no ``embedding`` mark anywhere), the module-scoped index
-build happens to land on the REAL model (nothing has patched
-``ONNXMiniLM_L6_V2`` yet at fixture-setup time) while every per-probe QUERY
-in a default-selection run goes through the stub -- so the sibling module's
-``_VECTOR_XFAIL``/measurement notes describe queries scored in stub-space
-against an index built in real-model space, which is not a measurement of
-the shipped path at all. See that module's own docstring and issue
-athenaeum#1800's body ("That instrument is not 'a stand-in'; it is
-mismatched") for the full mechanism and a per-call embedder-call count that
-confirms it directly.
+``vector`` backend. Its ``scale_fixture`` is MODULE-scoped, so it is set up
+before pytest resolves which embedding function this SUITE run should use;
+under the default (offline) selection, ``tests/conftest.py``'s autouse
+``_offline_embedding_function`` fixture is FUNCTION-scoped and routes
+chromadb's embedder through a deterministic lexical-hash stand-in
+(``tests.offline_embeddings.OfflineONNXMiniLMStub``) for every test, but
+that fixture's own gate, ``_default_selection``, decides per NODE, off that
+node's markers.
+
+Before issue athenaeum#1851, this ordering meant the sibling module's index
+build landed on the REAL model (nothing had patched ``ONNXMiniLM_L6_V2``
+yet at fixture-setup time) while every per-probe QUERY in a
+default-selection run went through the stub -- queries scored in
+stub-space against an index built in real-model space, which was not a
+measurement of the shipped path at all, and in a network-restricted
+environment could abort the whole module outright fetching the ONNX model.
+Issue athenaeum#1851 fixed it: the sibling module's ``scale_fixture`` now
+applies the SAME stand-in class directly around its own ``build_index``
+call (the same pattern ``tests/test_retrieval_golden_1420.py``'s
+``golden_caches`` uses), so its default (offline) run now measures index
+and query through ONE consistent embedder -- the lexical-hash stand-in,
+end to end. See that module's own module-level measurement note (above its
+``_VECTOR_XFAIL``) for the corrected numbers and issue athenaeum#1800's
+body for the original mismatch finding this module's own real-model
+measurement exists to keep separate from.
 
 This module is entirely different in ONE way that fixes the mismatch: it
 carries a module-level ``pytestmark = pytest.mark.embedding``. That marker
