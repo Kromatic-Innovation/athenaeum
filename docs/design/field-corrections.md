@@ -461,8 +461,15 @@ Retirement follows the existing raw-intake convention (`adapter-contract.md` §4
   now lives in ordinary intake and is that path's responsibility.
 - `escalated` and `held-schema-proposal` are terminal once the question or proposal is
   **recorded**. The correction does not wait for the human answer; the pending-questions
-  surface owns it from that point. Re-submitting is free (§5.1) if the submitter still
-  believes it.
+  surface owns it from that point. For `escalated`, the operator answers with a closed
+  token — `ratify` applies the correction to its target page, `reject` archives it with
+  no write — via `athenaeum ingest-answers` (§6.4). Anything the applier cannot act on
+  (an unrecognized answer, a block it cannot parse back into a correction, a target or
+  field that no longer resolves) stays in `_pending_questions.md` with a
+  `**Write-back**: held — <reason>` line rather than being silently archived; a later run
+  re-attempts it. Re-submitting the ORIGINAL correction as a fresh batch record is free
+  (§5.1) if the submitter still believes it, independent of how a prior escalation of the
+  same fact was answered.
 - A batch not retired because the run hit a bound (§10.2) carries over whole and is
   retried next run — that is the one case where re-reading is correct.
 
@@ -595,6 +602,48 @@ asks "which of these competing facts is true", which is the wrong question for a
 whose two error directions are not symmetric — failing to set one means continuing to act
 on known-bad information; failing to clear one means an action that does not happen.
 Every monotone apply is logged distinctly so the rule is auditable.
+
+### 6.4 Operator-ratified corrections
+
+An `escalated` correction is a `user:`-source question by construction — §6.2's whole
+point in raising it was that precedence alone could not settle the value. When the
+operator answers `ratify`, they ARE the settlement: the write is attributed to a
+synthesized `user:pending-question:<id>` source (rank 1, the highest tier), and
+`athenaeum.corrections.process_correction_record`'s ratified mode applies it without
+consulting §6.2 at all — there is no competing claim left to arbitrate once the highest
+-ranked source has spoken.
+
+Ratified mode narrows exactly one gate and skips exactly one:
+
+- **`writers` (§6.3) is narrowed, not dropped.** The `submitter not in writers` check is
+  skipped — the operator answering `ratify` is not a batch writer and was never going to
+  be on that list — but the attribute allowlist membership, and the shape/op checks, still
+  apply in full. `writers` bounds which ATTRIBUTES a correction may touch; it says nothing
+  about who may ratify one that already passed that bound.
+- **§6.2's precedence table is skipped entirely**, replaced by the delta gate alone
+  (`noop` iff the target already carries the ratified value, `apply` otherwise) — not a
+  ladder bypass in the §6.3 monotone sense, but the direct consequence of the operator
+  already occupying the ladder's top rank.
+- **A ratified correction never creates an entity.** A target that resolves to zero
+  existing entities is `raised-tier` in ratified mode even where an ordinary correction
+  would mint a page (§3.3, issue athenaeum#865) — the operator ratified a correction to an
+  EXISTING page's field, not a mandate to create one from a handle that no longer matches
+  anything.
+
+Everything else is unchanged: §7's sensitivity and schema-slot routing still runs, so a
+ratified value still lands on the surface the router — not the correction — decides; the
+§10.3 attribute allowlist still bounds which fields a ratified correction may touch;
+`usage_class`/`bucket`/`valid_until` are not carried on the escalated block's rendered
+description and are not re-applied by a ratified answer.
+
+The §12a trust boundary — "write access to `raw/` is fully trusted" — extends to
+`_pending_questions.md` write access the same way: anything that can edit that file can
+answer `ratify` with a fabricated correction id, exactly as anything with `raw/` write
+access can already forge a `source`. This introduces no new boundary, only a second
+surface the existing one already covers.
+
+`athenaeum ingest-answers` is the applier (`src/athenaeum/answers.py`); see §5.4 above for
+the answer grammar and the hold behavior when the applier cannot act.
 
 ---
 
@@ -1011,6 +1060,10 @@ steady-state one. Expected, not a defect.
   reconstructible and the store is git-versioned, but no tooling is specified.
 - **A deployment's sensitivity classification or attribute allowlist.** Configuration,
   never shipped in this repo.
+- **Re-applying `usage_class`/`bucket`/`valid_until` on a ratified correction.** §6.4's
+  applier does not re-read or re-apply these from the escalated block's rendered
+  description — they are not on it to begin with (§10 renders `Target`/`Field`/`Op`/
+  `Value`/`Source`/`Reason`/`Note`/`Correction ID` only).
 
 ---
 
