@@ -1801,7 +1801,26 @@ def test_xlarge_scale_is_pinned() -> None:
     # different. Re-derived (not copied from a failure message) by running
     # `build_corpus(scale="xlarge").fingerprint()` in two separate
     # processes on this branch, both yielding the literal below.
-    assert corpus.fingerprint() == "dea25fb979875839"
+    # athenaeum#1839: `core/16-redundancy.yaml` added nine new core pages
+    # (three duplicate-fact page pairs plus a negative control each) and
+    # `probes.yaml` gained three new `redundancy` probes -- new pages in
+    # `core/*.yaml` always shift `Corpus.fingerprint()` since it hashes
+    # every page's rendered markdown, same class of expected change as
+    # every entry in this comment above. GENERATOR_VERSION did NOT move --
+    # it was already bumped 3 -> 4 by athenaeum#1843, which landed on
+    # develop (commit 6cb75f15) before this branch was cut, so this issue's
+    # own GENERATOR_VERSION/marker-repair coordination note resolves to "a
+    # sibling already took the bump; re-pin only." Re-derived by running
+    # `build_corpus(scale="xlarge").fingerprint()` in two separate processes
+    # on this branch, both yielding the literal below. Re-derived a second
+    # time in the same PR after `person-mira-castellane`/
+    # `person-mira-castellane-directory` gained a "Rivencourt practice lead"
+    # alias and a `rivencourt` tag (Quine-shaped finding: the practice name
+    # lived only in body prose, which FTS5/vector do not weight the way
+    # name/alias/tags are weighted, so neither page ranked in
+    # `test_recall_covers_grep.py`'s top 5 at all -- same fix Keelbridge and
+    # Driftgate's own page names already apply).
+    assert corpus.fingerprint() == "72f8e70a26792709"
 
 
 def test_long_tier_tag_is_outside_the_recall_snippet() -> None:
@@ -2265,3 +2284,60 @@ def test_generator_version_is_bumped_for_the_marker_repair() -> None:
     resulting hash -- is reviewable.
     """
     assert GENERATOR_VERSION == 4
+
+
+# ---------------------------------------------------------------------------
+# Redundancy class widening (issue athenaeum#1839)
+# ---------------------------------------------------------------------------
+
+
+def test_validate_core_rejects_redundancy_probe_not_in_relatedness_yaml() -> None:
+    """Counter-example (athenaeum#1839): a ``redundancy`` probe's
+    ``expected_uids`` must match a registered cluster's ``merge`` set in
+    ``ground_truth/relatedness.yaml`` -- otherwise nothing ties the probe's
+    "these two pages are one entity written twice" claim back to a reviewed
+    cluster, and any two pages could be declared redundant by fiat.
+
+    This proves the corpus generator's redundancy check actually FIRES on a
+    violation, not merely that the shipped corpus happens to pass it --
+    ``test_core_corpus_is_internally_consistent`` already covers the
+    positive case for every real probe, Keelbridge included.
+    """
+    pages = [
+        Page(
+            uid="page-a",
+            type="note",
+            name="Page A",
+            body=(
+                "TokenOne sits here. Both pages state the same fact "
+                "independently.\n\nInternal reference tag: TokenOne."
+            ),
+            tier="core",
+        ),
+        Page(
+            uid="page-b",
+            type="note",
+            name="Page B",
+            body=(
+                "TokenTwo sits here. Both pages state the same fact "
+                "independently.\n\nInternal reference tag: TokenTwo."
+            ),
+            tier="core",
+        ),
+    ]
+    probe = Probe(
+        id="probe-fake-redundancy",
+        probe_class="redundancy",
+        query="what do page a and page b cover?",
+        expected_uids=("page-a", "page-b"),
+        answer_tokens=("TokenOne", "TokenTwo"),
+        answer_markers=(
+            ("page-a", "state the same fact independently"),
+            ("page-b", "state the same fact independently"),
+        ),
+    )
+    problems = validate_core(pages, [probe])
+    assert any(
+        "probe-fake-redundancy" in problem and "redundant cluster" in problem
+        for problem in problems
+    ), problems

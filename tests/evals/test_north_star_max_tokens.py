@@ -458,18 +458,17 @@ def test_the_full_grid_dry_run_prices_at_the_measured_mix(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Pins ``main``'s ``price_grid(per_cell=...)`` argument, which no other
-    test reaches: 2160 cells (45 probes -- athenaeum#1778's rebase onto
-    develop b8683e18 adds ``unprompted_push``'s 3 probes on top of
-    athenaeum#1780's ``aggregation`` and athenaeum#1781's
-    ``contradiction``/``negative_knowledge`` repins, 42 -> 45) at 4,300 in /
-    850 out on Haiku 4.5 ($1/$5 per MTok) is 2160 * $0.00855 = $18.468.
+    test reaches: 2304 cells (48 probes -- athenaeum#1839 adds the
+    `redundancy` class's three new probes on top of athenaeum#1778's
+    rebase onto develop b8683e18, 45 -> 48) at 4,300 in / 850 out on Haiku
+    4.5 ($1/$5 per MTok) is 2304 * $0.00855 = $19.6992.
     Cross-checked against :func:`expected_full_grid_cells`, derived from the
     live probe count, rather than trusted on the literal alone.
     ``--max-tokens`` stays at 20,000,000 (unchanged from athenaeum#1781):
-    projected tokens for 2160 cells is 11,124,000 (~5,150/cell estimate),
+    projected tokens for 2304 cells is 11,865,600 (~5,150/cell estimate),
     still comfortably under the ceiling -- no bump needed."""
     assert (
-        expected_full_grid_cells(len(north_star_cli.DEFAULT_PROBES)) == 2160
+        expected_full_grid_cells(len(north_star_cli.DEFAULT_PROBES)) == 2304
     ), "expected_full_grid_cells drifted from the pinned literal below -- update both together"
     assert (
         north_star_cli.main(
@@ -496,9 +495,9 @@ def test_the_full_grid_dry_run_prices_at_the_measured_mix(
         == 0
     )
     out = capsys.readouterr().out
-    assert "cells=2160" in out
+    assert "cells=2304" in out
     priced = float(out.split("estimated=$")[1].split()[0])
-    assert 18.42 < priced < 18.52, out
+    assert 19.65 < priced < 19.75, out
 
 
 def test_the_estimate_names_its_source_run() -> None:

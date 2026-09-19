@@ -1192,6 +1192,25 @@ def validate_core(pages: list[Page], probes: list[Probe]) -> list[str]:
                                 "not in expected_uids -- an alternative must be distinctive "
                                 "to the pages the probe expects to retrieve"
                             )
+        if probe.probe_class == "redundancy":
+            # Issue athenaeum#1839: a `redundancy` probe's `expected_uids` is
+            # a claim that those pages are ONE entity written down more than
+            # once -- ground truth for that claim lives in
+            # `ground_truth/relatedness.yaml`'s `redundant_clusters`, never
+            # in probes.yaml alone (the same "ground truth belongs in the
+            # reviewed file, not a field nobody reads twice" reasoning
+            # `report_only`'s CONDITION_2_ENROLLED check applies above).
+            # Without this, a probe could name any two pages "redundant"
+            # with nothing tying the claim back to a reviewed cluster.
+            if frozenset(probe.expected_uids) not in {
+                frozenset(cluster.merge) for cluster in load_redundant_clusters()
+            }:
+                problems.append(
+                    f"probe {probe.id!r}: redundancy probe's expected_uids "
+                    f"{sorted(probe.expected_uids)} do not match any redundant cluster's "
+                    "merge set in ground_truth/relatedness.yaml -- a redundancy probe's "
+                    "ground truth must be a registered cluster, not an ad-hoc pair"
+                )
         if probe.probe_class == "follow_through":
             expected_pages = [
                 pages_by_uid[uid] for uid in probe.expected_uids if uid in pages_by_uid

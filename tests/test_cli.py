@@ -751,6 +751,12 @@ class TestIngestAnswers:
         raw = tmp_path / "raw"
         wiki.mkdir()
         raw.mkdir()
+        # Issue athenaeum#1804: the source ref must resolve, or this
+        # non-empty-answer/detector-raised block is now HELD instead of
+        # archived — this test is about the CLI summary line, not the hold
+        # path, so give it a resolvable source.
+        (raw / "sessions").mkdir()
+        (raw / "sessions" / "test.md").write_text("Acme Corp notes.\n", encoding="utf-8")
         (wiki / "_pending_questions.md").write_text(
             "# Pending Questions\n\n"
             '## [2026-04-20] Entity: "Acme Corp" (from sessions/test.md)\n'
@@ -778,6 +784,11 @@ class TestIngestAnswers:
         raw = tmp_path / "raw"
         wiki.mkdir()
         raw.mkdir()
+        # Issue athenaeum#1804: the answered block's source ref must resolve
+        # so it archives (count-1) rather than being held — this fixture is
+        # about the malformed-block noise, not the hold path.
+        (raw / "sessions").mkdir()
+        (raw / "sessions" / "test.md").write_text("Acme Corp notes.\n", encoding="utf-8")
         answered = (
             '## [2026-04-20] Entity: "Acme Corp" (from sessions/test.md)\n'
             "- [x] Question about Acme?\n"
@@ -880,6 +891,45 @@ class TestIngestAnswers:
         out = capsys.readouterr().out
         assert "--quiet" in out
         assert "-q" in out
+
+    def test_second_summary_line_reports_held_and_no_writeback_counts(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Issue athenaeum#1804: a second summary line separates source files
+        written, held blocks, and blocks archived with no write-back, by
+        class — printed AFTER the unchanged `Ingested N ...` line. When the
+        field-correction count is non-zero, the line also says the
+        corrections were not applied."""
+        wiki = tmp_path / "wiki"
+        raw = tmp_path / "raw"
+        wiki.mkdir()
+        raw.mkdir()
+        held = (
+            '## [2026-04-20] Entity: "Held Co" (from sessions/never-resolves.md)\n'
+            "- [x] Question about Held Co?\n"
+            "**Conflict type**: principled\n"
+            "**Description**: Conflicting info.\n"
+            "\nNon-empty answer.\n"
+        )
+        correction = (
+            '## [2026-04-20] Entity: "Correction Co" (from raw/corrections/batch.jsonl)\n'
+            "- [x] Ratify?\n"
+            "**Conflict type**: field-correction\n"
+            "**Description**: field correction.\n"
+            "\nratify\n"
+        )
+        (wiki / "_pending_questions.md").write_text(
+            "# Pending Questions\n\n" + held + "\n---\n\n" + correction
+        )
+
+        rc = main(["ingest-answers", "--path", str(tmp_path)])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Ingested 1 answered question(s)." in out
+        assert "1 held" in out
+        assert "1 archived without write-back" in out
+        assert "field-correction: 1" in out
+        assert "not applied" in out
 
 
 class TestIngestMerges:

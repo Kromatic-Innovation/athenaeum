@@ -51,8 +51,17 @@ at all, or when it duplicates another page (duplicate detection is
 deterministic, in code — see :func:`_find_duplicate_reasons` — not a
 model judgment). Restating/summarizing a cited source is explicitly NOT a
 criterion, and a light source page (a source summary plus validity info)
-is never a candidate on that basis. The check and its parsing carry no
-source-type, adapter-name, or board-title string anywhere — see this module's own text below, and
+is never a candidate on that basis. Four sub-rules refine the no-claim
+trigger (issue athenaeum#1849): a person page holding only a name, or a name
+plus at most one affiliation line, is a placeholder awaiting enrichment
+and is never a candidate on that basis; a page recording a dated
+engagement or relationship outcome states a claim even alongside CRM /
+sales-pipeline metadata; a page whose only content beyond its name is
+CRM / sales-pipeline metadata or pipeline-list membership IS a candidate;
+and a page whose own text declares the entity itself spurious (for
+example an artifact of parsing a filename) IS a candidate. The check and
+its parsing carry no source-type, adapter-name, or board-title string
+anywhere — see this module's own text below, and
 ``tests/test_audit.py``'s ``git grep`` regression test. Out of scope
 (athenaeum#1624's own "Out of scope" section): this command never deletes or
 retires a page, and never fills ``subject`` (athenaeum#1244 / athenaeum#1615 own
@@ -131,7 +140,7 @@ log = logging.getLogger(__name__)
 #: page as ``audit_version:`` so a later pass can tell "audited under an old
 #: prompt" apart from "never audited" (the latter has no ``last_audited`` at
 #: all — see the module docstring).
-AUDIT_VERSION = "audit-v2"
+AUDIT_VERSION = "audit-v3"
 
 #: The kernel-dimension coordinate fields this pass may fill, DERIVED from
 #: the schema-migrations registry (issue athenaeum#1628 decision 3) — the
@@ -155,6 +164,11 @@ COORDINATE_FIELDS: tuple[str, ...] = tuple(
 
 _AUDIT_MAX_TOKENS = 1024
 
+#: Stays inline (never moved to a ``.md`` file) under this repo's registry
+#: convention — see the module docstring's "Where the prompt lives" note and
+#: `prompt_registry.py`'s ``("audit.audit_system", ...)`` entry; every edit
+#: here is regenerated into the golden and `docs/design/prompts.md` via
+#: ``python -m athenaeum.prompt_registry --write`` (issue athenaeum#1849).
 AUDIT_SYSTEM = """\
 You are auditing ONE knowledge-base page. Read only the page's own body and \
 its cited sources below — never guess, never use outside knowledge.
@@ -180,6 +194,22 @@ as undeterminable and name the excluded date class in the reason.
 least one of these two things is true:
    - it states no claim at all — no independent observation, judgment, or \
 synthesis, just a name/heading or nothing, or
+     - a person page whose body holds only a name, or a name plus a \
+single affiliation line, is a placeholder awaiting enrichment and is \
+NOT a candidate on that basis,
+     - a page recording a dated engagement or relationship outcome \
+states a claim and is NOT a candidate, even when it also carries CRM / \
+sales-pipeline metadata,
+     - a page whose only content beyond its name is CRM / \
+sales-pipeline metadata, or pipeline-list membership, states no claim \
+and IS a candidate, or
+     - a page whose own text says the entity itself is spurious — for \
+example, an artifact of parsing a filename — states no claim and IS a \
+candidate.
+   The placeholder rule above covers a name plus at most one affiliation \
+line; a person page whose only additional content is pipeline-stage, \
+deal-status, or similar CRM metadata falls under the pipeline-metadata \
+rule, not the placeholder rule.
    - its content duplicates another page.
    Restating or summarizing a cited source is NOT, on its own, a reason \
 to flag a page — a page that accurately summarizes and scopes its source \

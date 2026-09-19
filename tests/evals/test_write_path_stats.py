@@ -564,10 +564,24 @@ def test_corpus_fingerprint_is_unchanged_and_generator_version_does_not_bump() -
     comparison rather than a restatement of current behaviour. It moves only
     when a core page or `GENERATOR_VERSION` really does change -- see the
     same pin's provenance comment in `tests/test_eval_corpus_generator.py`.
+
+    Re-pinned under athenaeum#1839: `core/16-redundancy.yaml` added nine new
+    core pages (three redundancy probe pairs plus a negative control each),
+    which shifts `Corpus.fingerprint()` since it hashes every page's
+    rendered markdown -- same class of expected change as every prior core-
+    page addition. `GENERATOR_VERSION` did not move (still 4, bumped by the
+    already-landed athenaeum#1843); floor/stats tables recorded against the
+    prior literal are not comparable to runs against this one. Re-derived by
+    running `build_corpus(scale="core", seed=20260908).fingerprint()` in two
+    separate processes on this branch, both yielding the literal below.
+    Re-derived a second time in the same PR after the Rivencourt alias/tag
+    fix described in
+    `tests/test_eval_corpus_generator.py::test_xlarge_scale_is_pinned`'s own
+    provenance comment.
     """
     corpus = build_corpus(scale="core", seed=20260908)
 
-    assert corpus.fingerprint() == "95e86aee1fa1af38"
+    assert corpus.fingerprint() == "edcd8dd3286d0135"
     assert GENERATOR_VERSION == 4
 
 

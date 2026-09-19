@@ -1230,6 +1230,12 @@ class TestOversizeEscalationDedup:
         tier4_escalate([first], pending)
         assert pending.read_text().count("**Conflict type**: oversize_page") == 1
 
+        # Issue athenaeum#1804: the raw_ref ("sessions/one.md") must resolve, or
+        # this non-empty-answer/detector-raised block is now HELD instead of
+        # archived — this test is about dedup-on-answer, not the hold path.
+        (raw_root / "sessions").mkdir(parents=True, exist_ok=True)
+        (raw_root / "sessions" / "one.md").write_text("Kromatic notes.\n", encoding="utf-8")
+
         # Answer + archive the block (same mechanism a human answer takes,
         # via athenaeum.answers.ingest_answers -- the "existing archive-on-
         # resolve path" AC5 also reuses).
