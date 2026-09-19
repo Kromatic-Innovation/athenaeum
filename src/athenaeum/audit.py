@@ -1319,7 +1319,7 @@ def build_audit_report(
             # own docstring / issue athenaeum#1147): only the batch submit path
             # can leave outstanding server-side reservations uncounted by
             # `usage` alone. The per-page branch below omits it, matching
-            # every pre-#1147 / non-batch call site.
+            # every pre-athenaeum#1147 / non-batch call site.
             _ceiling = spend.ceiling_tripped(
                 usage, provider=resolved_provider, config=config, wiki_root=wiki_root
             )

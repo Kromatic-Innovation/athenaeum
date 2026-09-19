@@ -323,7 +323,7 @@ class TestSpendCeilingEnforcement:
         """Issue athenaeum#1147: outstanding batch reservations only exist on
         the batch submit path — ``ceiling_tripped``'s own docstring says
         *wiki_root* should be omitted everywhere else so behaviour matches
-        every pre-#1147 / non-batch caller byte-for-byte.
+        every pre-athenaeum#1147 / non-batch caller byte-for-byte.
         """
         self._three_pages(wiki)
         seen_wiki_roots: list[Any] = []
