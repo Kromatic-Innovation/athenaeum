@@ -409,8 +409,17 @@ def test_the_tags_recall_alone_cannot_deliver_split_into_two_mechanisms(tmp_path
                 bucket = truncated if f"**Uid:** {page.uid}" in response else unretrieved
                 bucket[probe.id] = len(page.body)
 
+    # Re-pinned under athenaeum#1839: `core/16-redundancy.yaml` added
+    # `driftgate_migration_funding` and `dual_signoff_threshold` to this
+    # bucket (each has a 400+-character expected page carrying its own
+    # `Internal reference tag:` line, same shape as `keelbridge_programme_scope`
+    # above). `mira_castellane_role`'s pages are both under 400 characters and
+    # land in `unretrieved` instead -- asserted separately below, not pinned
+    # by name.
     assert sorted(truncated) == [
         "bramfield_retainer_renewal",
+        "driftgate_migration_funding",
+        "dual_signoff_threshold",
         "keelbridge_programme_scope",
         "lighthouse_migration_rollback",
         "person_not_repo",

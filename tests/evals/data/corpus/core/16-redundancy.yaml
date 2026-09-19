@@ -1,0 +1,206 @@
+# Redundancy probe class widening (issue athenaeum#1839).
+#
+# Before this file the `redundancy` class carried exactly ONE probe
+# (`keelbridge_programme_scope`, `08-relatedness.yaml`) at every scale, so a
+# single model coin-flip decided design-doc SS7 condition 3 (operator ruling
+# on athenaeum#1736). The three clusters below add three more, one each over a
+# project, a policy, and a person page, so the class spans page types the way
+# every other enrolled class already does.
+#
+# Unlike Keelbridge -- which is an entity SPLIT (aim/scope/budget on one page,
+# phasing/training on the other, so a complete answer needs both HALVES --
+# these three clusters are genuine DUPLICATION: each pair states the exact
+# same planted fact independently, in its own words, because two different
+# sessions wrote the same thing down without knowing about each other. Both
+# shapes are "redundancy" in the sense the class measures (retrieval that
+# finds only one of the pages a complete answer needs), but this file's shape
+# is the one the class was missing.
+#
+# Each cluster also carries a negative control: a page sharing the cluster's
+# name or vocabulary that must NOT be folded in, same reasoning as
+# Keelbridge's `team-keelbridge-desk` (ground_truth/relatedness.yaml).
+#
+# Content policy (data/corpus/README.md): every name, term, and fact below is
+# invented outright.
+
+# --- Cluster: Driftgate migration funding (project) -------------------------
+
+- uid: project-driftgate-migration
+  type: project
+  name: Driftgate Migration
+  aliases: [Driftgate programme]
+  tags: [project, infrastructure]
+  source_ref: "session-2026-06-15"
+  created: 2026-06-15
+  body: |
+    # Driftgate Migration
+
+    Driftgate Migration moves the firm's document archive off the legacy
+    file server onto the managed object store. The programme is funded at
+    92 thousand GBP per quarter, reviewed by the infrastructure steering
+    group.
+
+    The cutover completes in two stages: read-only mirroring, then a hard
+    switch once every team confirms its own archive is reachable from the
+    new store.
+
+    Internal reference tag: Fenrivet.
+
+- uid: project-driftgate-migration-status
+  type: project
+  name: Driftgate Migration Status Note
+  aliases: [Driftgate status note]
+  tags: [project, status-note]
+  source_ref: "session-2026-07-02"
+  created: 2026-07-02
+  body: |
+    # Driftgate Migration Status Note
+
+    A status capture on the Driftgate Migration programme, written up
+    independently of the programme's own page. Funding stands at 92
+    thousand GBP per quarter, unchanged since the programme's kickoff.
+
+    Read-only mirroring is complete; the hard switch is scheduled once
+    every team confirms reachability from the new store.
+
+    Internal reference tag: Hollowcairn.
+
+- uid: team-driftgate-oncall
+  type: team
+  name: Driftgate On-Call Rota
+  aliases: [Driftgate rota]
+  tags: [rota, support]
+  source_ref: "session-2026-07-20"
+  created: 2026-07-20
+  body: |
+    # Driftgate On-Call Rota
+
+    The staffed rota that answers questions about the Driftgate object
+    store outside business hours. Two people on shift at a time, rotating
+    weekly, with a named escalation contact on call.
+
+    The rota is a standing staffing arrangement, not a phase of the
+    migration programme, and it continues after the cutover completes.
+
+# --- Cluster: the Harrowmere Protocol (policy) -------------------------------
+#
+# Named with an invented anchor word (same device Keelbridge and Driftgate
+# use above), not a plain English phrase: an earlier draft of this cluster
+# used "payment approval" as the shared vocabulary and lost the FTS5
+# coverage invariant (tests/evals/test_recall_covers_grep.py) -- generic
+# English words compete against both pre-existing policy pages and this
+# probe's OWN generated distractor tier (built from the same
+# distractor_terms), diluting the real pages' ranking. An invented proper
+# noun repeated across all three cluster pages is what makes Keelbridge's
+# and Driftgate's own clusters rank cleanly, so this cluster follows suit.
+
+- uid: policy-dual-signoff
+  type: principle
+  name: Harrowmere Protocol
+  aliases: [Harrowmere, dual sign-off threshold]
+  tags: [policy, finance]
+  source_ref: "session-2026-04-09"
+  created: 2026-04-09
+  body: |
+    # Harrowmere Protocol
+
+    The Harrowmere Protocol governs payment sign-off across the firm. Any
+    payment above 6400 GBP requires two independent approvers before it is
+    released under the Harrowmere Protocol; below that figure a single
+    approver's sign-off is sufficient.
+
+    The protocol applies to every payment run regardless of which client
+    account it is billed against.
+
+    Internal reference tag: Duskbriar.
+
+- uid: policy-dual-signoff-brief
+  type: principle
+  name: Harrowmere Protocol Brief
+  aliases: [Harrowmere brief]
+  tags: [policy, onboarding-note]
+  source_ref: "session-2026-05-30"
+  created: 2026-05-30
+  body: |
+    # Harrowmere Protocol Brief
+
+    A one-page brief circulated to new finance hires, written independently
+    of the firm's own Harrowmere Protocol page. Any payment above 6400 GBP
+    requires two independent approvers before release under the protocol; a
+    single approver suffices below that figure.
+
+    New hires confirm they have read the brief during their first week.
+
+    Internal reference tag: Emberwick.
+
+- uid: policy-payment-approval-legacy
+  type: principle
+  name: Legacy Payment Approval Rule (retired)
+  aliases: [old approval rule]
+  tags: [policy, retired]
+  source_ref: "session-2025-11-02"
+  created: 2025-11-02
+  body: |
+    # Legacy Payment Approval Rule (retired)
+
+    The retired single-approver payment rule the Harrowmere Protocol
+    replaced. Under the old rule, any payment above 3000 GBP needed the
+    finance partner's sign-off alone; no second approver was required.
+
+    Retained here for historical reference only; the Harrowmere Protocol
+    documents the current threshold and process separately.
+
+# --- Cluster: the Rivencourt practice (person) -------------------------------
+#
+# Same anchor-word fix as the Harrowmere cluster above: an earlier draft
+# used "vendor risk practice" and both expected pages dropped out of FTS5's
+# top 5 entirely, crowded out by unrelated pre-existing pages that also use
+# "vendor" (several `unprompted_push`/`decision` fixtures are vendor
+# decisions). "Rivencourt" is invented and appears nowhere else in the
+# corpus.
+
+- uid: person-mira-castellane
+  type: person
+  name: Mira Castellane
+  aliases: [Mira, Rivencourt practice lead]
+  tags: [person, delivery, rivencourt]
+  source_ref: "session-2026-03-18"
+  created: 2026-03-18
+  body: |
+    # Mira Castellane
+
+    Mira Castellane leads the Rivencourt practice, a role she has held
+    since March 2019. She reports directly to the managing partner and
+    chairs the practice's quarterly review.
+
+    Internal reference tag: Larkmantle.
+
+- uid: person-mira-castellane-directory
+  type: person
+  name: Mira Castellane -- Directory Entry
+  aliases: [Mira Castellane directory listing, Rivencourt practice lead]
+  tags: [person, directory, rivencourt]
+  source_ref: "session-2026-06-04"
+  created: 2026-06-04
+  body: |
+    # Mira Castellane -- Directory Entry
+
+    A directory listing captured independently of Mira Castellane's own
+    profile page. She leads the Rivencourt practice, a role she has held
+    since March 2019, and reports directly to the managing partner.
+
+    Internal reference tag: Thornwistle.
+
+- uid: company-castellane-group
+  type: company
+  name: Castellane Group
+  aliases: [Castellane]
+  tags: [company, prospect]
+  source_ref: "session-2026-06-10"
+  created: 2026-06-10
+  body: |
+    # Castellane Group
+
+    Castellane Group is a prospective client, unrelated to Mira Castellane
+    or the Rivencourt practice beyond sharing a surname. No engagement has
+    been signed.
