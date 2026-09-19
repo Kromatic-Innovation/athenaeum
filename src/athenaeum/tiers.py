@@ -52,7 +52,7 @@ import os
 import re
 import textwrap
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Protocol, Sequence
@@ -2470,7 +2470,7 @@ CLASSIFY_USER_TEMPLATE = """## Raw observation
 
 ## Valid access levels
 {valid_access}
-{observation_filter_section}
+{observation_filter_section}{person_candidates_section}
 ## Instructions
 Extract entities from the raw observation. Return a JSON array of objects:
 ```json
@@ -2487,6 +2487,59 @@ Extract entities from the raw observation. Return a JSON array of objects:
 
 If no entities worth creating, return `[]`.
 Return ONLY the JSON array, no other text."""
+
+
+def _load_person_hint_classify_prompt() -> str:
+    """Read the tier-0 person-hint classify instruction block (issue athenaeum#1866).
+
+    Prompt text is content, not code (see
+    ``policies/prompt-text-is-content.md``) — this multi-line instruction
+    lives in ``src/athenaeum/prompts/person_hint_classify.md`` and is loaded
+    via ``importlib.resources``, the same convention
+    :func:`_load_name_resolution_confirm_prompt` already established.
+    Called ONCE, at module import time (unlike that function's per-call lazy
+    load), and bound to :data:`PERSON_HINT_CLASSIFY_PROMPT` below so it can
+    be registered as an ordinary ``str`` prompt in
+    ``athenaeum.prompt_registry`` — a lazily-loaded function return value
+    cannot be (see that module's ``_resolve``, which requires a plain
+    module-level ``str`` attribute).
+    """
+    resource = importlib.resources.files("athenaeum.prompts").joinpath(
+        "person_hint_classify.md"
+    )
+    return resource.read_text(encoding="utf-8")
+
+
+#: The tier-0 person-hint instruction block (issue athenaeum#1866) — see
+#: :func:`_load_person_hint_classify_prompt`'s docstring for why this is a
+#: module-level constant rather than a lazy per-call load. Registered in
+#: ``athenaeum.prompt_registry`` as ``tiers.person_hint_classify_prompt``.
+PERSON_HINT_CLASSIFY_PROMPT = _load_person_hint_classify_prompt()
+
+
+def _render_person_candidates_section(
+    person_candidates: "list[dict[str, str]] | None",
+) -> str:
+    """Render the tier-2 prompt's ``{person_candidates_section}`` slot.
+
+    Empty string when *person_candidates* is falsy (``None`` or ``[]``), so
+    a call with no tier-0 hint candidates produces a prompt BYTE-IDENTICAL
+    to before issue athenaeum#1866 — pinned by
+    ``tests/test_prompt_goldens.py`` and by the acceptance criterion that a
+    hint-less request's bytes never move.
+    """
+    if not person_candidates:
+        return ""
+    lines = "\n".join(
+        f"- {c['uid']}: {c['name']}"
+        + (f" — {c['description']}" if c.get("description") else "")
+        for c in person_candidates
+    )
+    return (
+        "\n## Person hints (existing people this file may be about)\n"
+        f"{PERSON_HINT_CLASSIFY_PROMPT}\n"
+        f"Candidates:\n{lines}\n"
+    )
 
 
 # Issue athenaeum#476: Tier-2 classify output budget. The original 1024 truncated
@@ -2512,12 +2565,23 @@ def tier2_request_params(
     valid_access: list[str],
     wiki_root: Path | None = None,
     config: dict[str, Any] | None = None,
+    *,
+    person_candidates: "list[dict[str, str]] | None" = None,
 ) -> dict[str, Any]:
     """Build the Messages API kwargs for one Tier-2 classification call.
 
     Shared by the synchronous path (:func:`tier2_classify`) and the Batch
     API assembly (:mod:`athenaeum.batch`, issue athenaeum#236) so both transports
     produce byte-identical prompts.
+
+    *person_candidates* (issue athenaeum#1866, keyword-only, ``None``
+    default): the tier-0 person-registry consult's hint list — each item a
+    ``{"uid": ..., "name": ..., "description": ...}`` dict — rendered into
+    the ``{person_candidates_section}`` slot via
+    :func:`_render_person_candidates_section`. ``None``/``[]`` (every call
+    site before this issue, and every ordinary file with no hint) renders
+    an empty section, so the prompt stays byte-identical to before this
+    issue for the overwhelming majority of calls.
     """
     obs_filter = ""
     if wiki_root:
@@ -2532,6 +2596,7 @@ def tier2_request_params(
         valid_tags=", ".join(valid_tags),
         valid_access=", ".join(valid_access),
         observation_filter_section=obs_filter,
+        person_candidates_section=_render_person_candidates_section(person_candidates),
     )
     return {
         "model": _get_classify_model(config),
@@ -2576,11 +2641,17 @@ def tier2_classify(
     usage: TokenUsage | None = None,
     config: dict[str, Any] | None = None,
     stats: Tier2ParseStats | None = None,
+    *,
+    person_candidates: "list[dict[str, str]] | None" = None,
 ) -> list[ClassifiedEntity]:
     """Use a fast LLM to classify entities in the raw text.
 
-    Returns list of ClassifiedEntity with is_new=True (Tier 2 only finds new
-    entities).
+    Returns list of ClassifiedEntity, normally with ``is_new=True`` (Tier 2
+    extracting a NEW entity). Issue athenaeum#1866: when *person_candidates*
+    is supplied and the response affirms a claim about one of them (a
+    ``candidate_uid`` item — see :func:`parse_tier2_entities`), that item
+    instead comes back ``is_new=False, from_person_hint=True`` — an UPDATE
+    to an existing person page, not a new entity.
 
     athenaeum#472: when the first response cannot be parsed even after the
     control-character repair pass (``stats.degraded`` was incremented), the
@@ -2614,6 +2685,7 @@ def tier2_classify(
         valid_access,
         wiki_root=wiki_root,
         config=config,
+        person_candidates=person_candidates,
     )
 
     response = _timed_llm_call(
@@ -2651,6 +2723,7 @@ def tier2_classify(
         stats=stats,
         stop_reason=first_stop_reason,
         wiki_root=wiki_root,
+        person_candidates=person_candidates,
     )
     first_truncated = stats.truncated > truncated_before
     first_degraded = stats.degraded > degraded_before
@@ -2673,6 +2746,7 @@ def tier2_classify(
             usage=usage,
             config=config,
             owner=owner,
+            person_candidates=person_candidates,
         )
         if not retry_stats.degraded and not retry_stats.truncated:
             # Recovered — clear the truncation recorded on the first attempt so
@@ -2727,6 +2801,7 @@ def tier2_classify(
             stats=retry_stats,
             stop_reason=reported_stop_reason(retry_response, _capabilities(config)),
             wiki_root=wiki_root,
+            person_candidates=person_candidates,
         )
         if not retry_stats.degraded and not retry_stats.truncated:
             # Recovered — clear the degrade recorded on the first attempt so
@@ -2785,11 +2860,25 @@ class Tier2ParseStats:
     truncation (fixed by a bigger budget) is never conflated with a genuine
     parse failure (the athenaeum#472 mistake). Mutually exclusive with ``degraded`` for
     any single response.
+
+    ``hint_drops`` (issue athenaeum#1866) — one entry per person-hint
+    candidate uid :func:`parse_tier2_entities` dropped THIS response
+    (never overwritten across files sharing one accumulator: the caller,
+    ``athenaeum.librarian.process_one``, reads this off a per-file
+    ``Tier2ParseStats`` instance, not a run-wide one, unlike
+    ``degraded``/``truncated``/``repaired`` above). The value is the drop
+    reason, in the same closed vocabulary
+    ``athenaeum.models.ProcessingResult.person_hint_decisions`` uses:
+    ``"dropped"`` for an empty-claim item or a create-shaped item whose
+    name collides with a hinted candidate's name. A hallucinated
+    ``candidate_uid`` not in the hint set is logged but NOT recorded here —
+    it names no real candidate to attribute a decision to.
     """
 
     repaired: int = 0
     degraded: int = 0
     truncated: int = 0
+    hint_drops: dict[str, str] = field(default_factory=dict)
 
 
 def parse_tier2_entities(
@@ -2803,6 +2892,7 @@ def parse_tier2_entities(
     stop_reason: str | None = None,
     *,
     wiki_root: Path | None = None,
+    person_candidates: "list[dict[str, str]] | None" = None,
 ) -> list[ClassifiedEntity]:
     """Parse a Tier-2 classification response into entities.
 
@@ -2832,6 +2922,30 @@ def parse_tier2_entities(
     memory (e.g. ``user_*_family_relationships``) is routed to a standalone
     ``reference`` page rather than being classified as person-bio. Inert when
     *owner* is ``None``.
+
+    *person_candidates* (issue athenaeum#1866, keyword-only) is this file's
+    tier-0 hint-candidate list — the same list rendered into the request by
+    :func:`_render_person_candidates_section`. A response item carrying a
+    ``candidate_uid`` takes a SEPARATE path from ordinary create-shaped
+    items (see the loop below): it never carries ``name``, so it is
+    branched on BEFORE the ``item.get("name")`` check. Three drop rules
+    apply, each logged and (when *stats* is supplied) recorded in
+    ``stats.hint_drops``:
+
+    1. ``candidate_uid`` not in *person_candidates* — a hallucinated uid;
+       dropped, logged, NOT recorded in ``hint_drops`` (it names no real
+       candidate).
+    2. An empty/whitespace-only claim (``observations``) — dropped.
+    3. A create-shaped item (no ``candidate_uid``) whose ``name`` equals a
+       hinted candidate's name — the classifier should have used the
+       ``candidate_uid`` shape; dropped rather than minting a duplicate
+       person page.
+
+    A valid hint item becomes ``ClassifiedEntity(is_new=False,
+    existing_uid=uid, entity_type="person", observations=claim,
+    from_person_hint=True)`` — an UPDATE to the existing person page, never
+    the placeholder/type/access/owner-routing handling ordinary create-shaped
+    items go through below.
     """
     text = text.strip()
 
@@ -2908,9 +3022,63 @@ def parse_tier2_entities(
         items, call_site="tiers.parse_tier2_entities", wiki_root=wiki_root
     )
 
+    person_candidate_by_uid: dict[str, dict[str, str]] = {
+        c["uid"]: c
+        for c in (person_candidates or [])
+        if isinstance(c, dict) and c.get("uid")
+    }
+    person_candidate_names_lower = {
+        str(c.get("name", "")).strip().lower(): c["uid"]
+        for c in (person_candidates or [])
+        if isinstance(c, dict) and c.get("uid") and str(c.get("name", "")).strip()
+    }
+
     results: list[ClassifiedEntity] = []
     for item in items:
-        if not isinstance(item, dict) or not item.get("name"):
+        if not isinstance(item, dict):
+            continue
+
+        # Issue athenaeum#1866: a hint-shaped item (`candidate_uid` present)
+        # is an assertion about an EXISTING tier-0 hint candidate, not a new
+        # entity — it never carries `name`, so it is branched on here,
+        # before the ordinary `item.get("name")` check below would drop it.
+        if item.get("candidate_uid") is not None:
+            _hint_uid = str(item["candidate_uid"]).strip()
+            _candidate = person_candidate_by_uid.get(_hint_uid)
+            if _candidate is None:
+                log.warning(
+                    "tier2-classify-hint-invalid-uid ref=%s uid=%r — not in "
+                    "this file's hint candidate set, dropping",
+                    ref,
+                    _hint_uid,
+                )
+                continue
+            _claim = str(item.get("observations", "")).strip()
+            if not _claim:
+                log.warning(
+                    "tier2-classify-hint-empty-claim ref=%s uid=%s — empty "
+                    "claim text, dropping",
+                    ref,
+                    _hint_uid,
+                )
+                if stats is not None:
+                    stats.hint_drops[_hint_uid] = "dropped"
+                continue
+            results.append(
+                ClassifiedEntity(
+                    name=_candidate["name"],
+                    entity_type="person",
+                    tags=[],
+                    access="",
+                    is_new=False,
+                    existing_uid=_hint_uid,
+                    observations=_claim,
+                    from_person_hint=True,
+                )
+            )
+            continue
+
+        if not item.get("name"):
             continue
         if _PLACEHOLDER_LABEL_RE.match(str(item["name"]).strip()):
             log.warning(
@@ -2919,6 +3087,23 @@ def parse_tier2_entities(
                 item["name"],
                 ref,
             )
+            continue
+        # Issue athenaeum#1866: a create-shaped item (no `candidate_uid`)
+        # whose name equals a hinted candidate's name should have used the
+        # `candidate_uid` shape instead — drop it rather than mint a
+        # duplicate person page for someone already in the hint set.
+        _name_key = str(item["name"]).strip().lower()
+        if _name_key in person_candidate_names_lower:
+            log.warning(
+                "tier2-classify-hint-name-collision ref=%s name=%r — "
+                "matches a hinted candidate's name but carries no "
+                "candidate_uid, dropping rather than minting a duplicate "
+                "person page",
+                ref,
+                item["name"],
+            )
+            if stats is not None:
+                stats.hint_drops[person_candidate_names_lower[_name_key]] = "dropped"
             continue
         entity_type = item.get("entity_type", "reference")
         if entity_type not in valid_types:
@@ -2964,6 +3149,8 @@ def tier2_reclassify_larger_budget(
     usage: TokenUsage | None = None,
     config: dict[str, Any] | None = None,
     owner: dict[str, Any] | None = None,
+    *,
+    person_candidates: "list[dict[str, str]] | None" = None,
 ) -> tuple[list[ClassifiedEntity], Tier2ParseStats]:
     """Re-run one Tier-2 classify with the LARGER retry budget (issue athenaeum#476).
 
@@ -3007,6 +3194,7 @@ def tier2_reclassify_larger_budget(
         valid_access,
         wiki_root=wiki_root,
         config=config,
+        person_candidates=person_candidates,
     )
     params["max_tokens"] = resolve_max_tokens(
         "classify_retry",
@@ -3042,6 +3230,7 @@ def tier2_reclassify_larger_budget(
         stats=retry_stats,
         stop_reason=reported_stop_reason(response, caps),
         wiki_root=wiki_root,
+        person_candidates=person_candidates,
     )
     return entities, retry_stats
 
@@ -3833,6 +4022,30 @@ _MERGE_HEADINGLESS_SCOPING_NOTE = (
 )
 
 
+def _load_person_hint_verify_prompt() -> str:
+    """Read the hint-derived-merge subject-mismatch verify note (issue athenaeum#1866).
+
+    Prompt text is content, not code (see
+    ``policies/prompt-text-is-content.md``) -- lives in
+    ``src/athenaeum/prompts/person_hint_verify.md``, loaded via
+    ``importlib.resources`` and bound to :data:`PERSON_HINT_VERIFY_NOTE`
+    below at module import time, same convention
+    :func:`_load_person_hint_classify_prompt` established above (a
+    module-level ``str`` constant, not a lazy per-call load, so it can be
+    registered in ``athenaeum.prompt_registry``).
+    """
+    resource = importlib.resources.files("athenaeum.prompts").joinpath(
+        "person_hint_verify.md"
+    )
+    return resource.read_text(encoding="utf-8")
+
+
+#: Prepended to a hint-derived merge's ``scoping_note`` slot (issue
+#: athenaeum#1866) -- see :func:`tier3_merge_params`. Registered in
+#: ``athenaeum.prompt_registry`` as ``tiers.person_hint_verify_note``.
+PERSON_HINT_VERIFY_NOTE = _load_person_hint_verify_prompt()
+
+
 # The heading OUTLINE needs its own budget. On the real corpus it is not
 # always "lightweight": the largest oversized entity page carries 876
 # headings, and its outline alone is ~41,000 chars — twice the whole
@@ -4232,9 +4445,19 @@ def tier3_merge_params(
             defang=False,
         ),
         scoping_note=(
-            (_MERGE_SCOPING_NOTE if existing_sections else _MERGE_HEADINGLESS_SCOPING_NOTE)
-            if was_scoped
-            else ""
+            # Issue athenaeum#1866: prepended, independent of section
+            # scoping — this note is about VERIFYING the observation's
+            # subject, not about what portion of the page is visible.
+            (PERSON_HINT_VERIFY_NOTE if action.from_person_hint else "")
+            + (
+                (
+                    _MERGE_SCOPING_NOTE
+                    if existing_sections
+                    else _MERGE_HEADINGLESS_SCOPING_NOTE
+                )
+                if was_scoped
+                else ""
+            )
         ),
         source_ref=source_ref,
         observations=fence_untrusted(
@@ -4429,6 +4652,14 @@ def _append_source_citation(existing_body: str, source_ref: str) -> str:
 #: page title.
 MERGE_CITATION_ONLY_LOG_PREFIX = "tier3-merge-citation-only"
 
+#: Stable, greppable log prefix for the hint-derived subject-mismatch
+#: decision (issue athenaeum#1866): a merge verify for an
+#: ``EntityAction.from_person_hint`` action reported
+#: ``"subject_mismatch": true`` — the proposed observation was about a
+#: DIFFERENT person than the one this page describes (a name collision).
+#: The page is left byte-identical: no body edit, no citation.
+MERGE_SUBJECT_MISMATCH_LOG_PREFIX = "tier3-merge-subject-mismatch"
+
 #: Stable, greppable prefix for the WARNING each patch-mode → full-echo
 #: fallback emits (issue athenaeum#490, slice A). The full-page-echo fallback is a
 #: ~10x output-token cost multiplier that until now degraded silently; every
@@ -4495,6 +4726,16 @@ def parse_merge_ops_response(
     """Parse a patch-mode merge response and apply it to ``existing_body``.
 
     Issue athenaeum#469. Returns ``(updated_body, escalation_item, needs_fallback)``.
+
+    Issue athenaeum#1866: checked BEFORE ``adds_new_claim`` (and hence
+    before ``ops``) — a bare-boolean ``subject_mismatch: true`` short-circuits
+    to ``(None, None, False)``: the page is left byte-identical (no body
+    edit, no citation — UNLIKE ``adds_new_claim: false`` below, which still
+    appends a citation) and no full-echo fallback is attempted. Only
+    meaningful for a hint-derived action (:attr:`EntityAction.from_person_hint`,
+    the only case the merge prompt ever asks for this field — see
+    :func:`tier3_merge_params`'s scoping-note prepend); a no-op for every
+    other action, whose response never carries the key.
 
     Issue athenaeum#1463: before ``ops`` is even inspected, a bare-boolean
     ``adds_new_claim: false`` in the parsed JSON object short-circuits to
@@ -4586,6 +4827,28 @@ def parse_merge_ops_response(
             sub_cause = MERGE_PARSE_FAIL_AMBIGUOUS
 
     if obj is not None:
+        # Issue athenaeum#1866: read BEFORE the adds_new_claim check —
+        # ONLY meaningful for a hint-derived action (see
+        # `tier3_merge_params`'s scoping_note prepend, the only place a
+        # model is ever asked for this field), but checked unconditionally:
+        # an ordinary merge's response never carries this key, so the
+        # check is a no-op for it. A subject-mismatch verify leaves the
+        # page BYTE-IDENTICAL — no body edit, no citation, unlike the
+        # adds_new_claim:false path just below.
+        if obj.get("subject_mismatch") is True:
+            if usage is not None and action.from_person_hint and action.existing_uid:
+                usage.person_hint_decisions.append(
+                    (action.existing_uid, "write_merge", "subject_mismatch")
+                )
+            log.info(
+                "%s page=%s source=%s — hint-derived merge reported "
+                "subject_mismatch; leaving the page unchanged",
+                MERGE_SUBJECT_MISMATCH_LOG_PREFIX,
+                action.name,
+                source_ref,
+            )
+            return None, None, False
+
         # Issue athenaeum#1463: read BEFORE ops shape validation — when the
         # model says false, ops are never applied, so they need not even
         # parse cleanly. Only an exact JSON `false` (Python `False`) takes
@@ -4594,6 +4857,10 @@ def parse_merge_ops_response(
         if obj.get("adds_new_claim") is False:
             if usage is not None:
                 usage.citation_only_merges += 1
+                if action.from_person_hint and action.existing_uid:
+                    usage.person_hint_decisions.append(
+                        (action.existing_uid, "write_merge", "citation_only")
+                    )
             log.info(
                 "%s page=%s source=%s — model reported no new claim; "
                 "recording only the source citation, body otherwise "
@@ -4622,6 +4889,10 @@ def parse_merge_ops_response(
                 applied = apply_merge_ops(existing_body, ops)
                 if usage is not None:
                     usage.full_merges += 1
+                    if action.from_person_hint and action.existing_uid:
+                        usage.person_hint_decisions.append(
+                            (action.existing_uid, "write_merge", "merged")
+                        )
                 return applied, None, False
             except MergeOpsError as exc:
                 log.warning(
@@ -4697,7 +4968,25 @@ def tier3_merge(
     # Anchor safety (issue athenaeum#562 / audit M20): a body that would break the
     # <existing_page> fence cannot use the patch path — go straight to the
     # anchor-free full-echo fallback instead.
+    #
+    # Issue athenaeum#1866: EXCEPT for a hint-derived action — a person page
+    # a tier-0 name match merely proposed a claim for is never worth a
+    # ~10x-cost full-page echo. Drop and log instead, mirroring the
+    # needs_fallback drop below.
     if existing_body_needs_full_echo(existing_body):
+        if action.from_person_hint:
+            log.warning(
+                "tier3-merge-hint-dropped page=%s source=%s — existing body "
+                "needs the anchor-free full-echo path; dropping the "
+                "hint-derived action rather than full-echoing a person page",
+                action.name,
+                source_ref,
+            )
+            if usage is not None and action.existing_uid:
+                usage.person_hint_decisions.append(
+                    (action.existing_uid, "write_merge", "dropped")
+                )
+            return None, None
         return tier3_merge_full(
             action, existing_body, source_ref, client, usage=usage, config=config
         )
@@ -4741,6 +5030,23 @@ def tier3_merge(
     )
     if not needs_fallback:
         return body, escalation
+
+    # Issue athenaeum#1866: a hint-derived action that needs the full-echo
+    # fallback is DROPPED, never full-echoed — same rationale as the
+    # anchor-unsafe pre-check above.
+    if action.from_person_hint:
+        log.warning(
+            "tier3-merge-hint-dropped page=%s source=%s — patch-mode "
+            "response needed the full-echo fallback; dropping the "
+            "hint-derived action rather than full-echoing a person page",
+            action.name,
+            source_ref,
+        )
+        if usage is not None and action.existing_uid:
+            usage.person_hint_decisions.append(
+                (action.existing_uid, "write_merge", "dropped")
+            )
+        return None, None
 
     return tier3_merge_full(
         action, existing_body, source_ref, client, usage=usage, config=config

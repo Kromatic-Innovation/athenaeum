@@ -18,10 +18,16 @@ surface into a separate, consult-only registry:
   It can again; see that name's historical-note comment in
   ``athenaeum.models`` for why the demotion came out and what still keeps
   the tier-0 consult below running first regardless.
-- Intake can still resolve and attribute a person MENTION by consulting
-  :class:`PersonRegistry` directly — see
+- A raw file naming a known person is still resolved against
+  :class:`PersonRegistry` — see
   :func:`athenaeum.identity_resolution.resolve_person_mention` and
-  :func:`athenaeum.intake.attribute_person_observation`.
+  :func:`athenaeum.identity_resolution.match_person_mentions` — but the
+  match no longer writes anything itself (issue athenaeum#1866 removed
+  ``athenaeum.intake.attribute_person_observation``, the deterministic
+  whole-file claim it used to make). It becomes a bounded HINT
+  (``athenaeum.librarian.process_one``'s tier-0 block) the tier-2 classifier
+  decides whether to act on, and tier-3 ``tier3_merge`` verifies before
+  writing.
 - A person record accepts a structured field update through
   :func:`apply_person_field_update`, wired into the existing tier-0 no-LLM
   paths (:func:`athenaeum.intake.tier0_passthrough`,

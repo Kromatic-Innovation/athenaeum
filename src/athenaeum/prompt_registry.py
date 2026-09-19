@@ -89,6 +89,17 @@ class PromptMeta:
 _META_ROWS: list[tuple[str, str, str, int, bool]] = [
     ("tiers.classify_system", "CLASSIFY_SYSTEM", "classify", 4096, False),
     ("tiers.classify_user_template", "CLASSIFY_USER_TEMPLATE", "classify", 4096, False),
+    # Issue athenaeum#1866: the tier-0 person-hint instruction block folded
+    # into CLASSIFY_USER_TEMPLATE's {person_candidates_section} slot when a
+    # file carries hint candidates — same `classify` knob/budget as the
+    # template it renders into.
+    (
+        "tiers.person_hint_classify_prompt",
+        "PERSON_HINT_CLASSIFY_PROMPT",
+        "classify",
+        4096,
+        False,
+    ),
     # write-knob budgets re-baselined by issue athenaeum#578 (Sonnet-5-bound + adaptive
     # thinking headroom): create/merge_patch 2048 -> 6144, merge_full 8192 -> 12288.
     ("tiers.create_system", "CREATE_SYSTEM", "write", 6144, False),
@@ -97,6 +108,16 @@ _META_ROWS: list[tuple[str, str, str, int, bool]] = [
     ("tiers.merge_system_full", "MERGE_SYSTEM_FULL", "write", 12288, False),
     ("tiers.merge_template", "MERGE_TEMPLATE", "write", 6144, False),
     ("tiers.merge_template_full", "MERGE_TEMPLATE_FULL", "write", 12288, False),
+    # Issue athenaeum#1866: prepended to a hint-derived merge's scoping_note
+    # slot in MERGE_TEMPLATE — same `write`/merge_patch knob/budget as the
+    # template it renders into.
+    (
+        "tiers.person_hint_verify_note",
+        "PERSON_HINT_VERIFY_NOTE",
+        "write",
+        6144,
+        False,
+    ),
     # athenaeum#927: breakpoint REMOVED — 630 tokens against Haiku 4.5's 4,096-token
     # floor never engaged. See the call site in contradictions.py.
     ("contradictions.detect_system", "_DETECT_SYSTEM", "classify", 1024, False),
