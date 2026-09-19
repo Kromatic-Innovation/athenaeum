@@ -556,7 +556,8 @@ For a correction with source `S_in` against the incumbent attribution `S_cur` (f
 | `rank(S_in) > rank(S_cur)` | **Defer.** No write; recorded in the ledger with both sources named. Not an error — a script proposing over a user-stated fact losing is the system working. |
 | Equal rank, equal value | **No-op** (the delta gate catches it first). |
 | Equal rank, differing values, distinguishable dates | **Newer `observed_at` wins** — the taxonomy's own tie-break. |
-| Equal rank, differing values, undated | **Raise a tier.** Precedence cannot settle it, so reasoning does — exactly as it would for two prose claims. |
+| Equal rank, differing values, undated, or dated to the same calendar day | **Raise a tier.** Precedence cannot settle it, so reasoning does — exactly as it would for two prose claims. **Exception:** see the same-writer row below. |
+| Equal rank, differing values, same calendar day, incumbent attribution (`field_sources.<field>`, never the page-level `source:` fallback) and the incoming source parse to the same writer (equal `type` + `ref`) | **Apply.** No competing claim — the writer named by its own earlier per-field attribution is superseding its own value (issue athenaeum#1803). Any other same-day tie (different writers, an unparseable source, or an incumbent attributed only through the page-level `source:` fallback) keeps raising a tier per the row above. |
 | Incumbent is `user:` and the correction is not | **Defer**, always. A human-stated value is never machine-overwritten. |
 
 `op: add` is evaluated **per value**, against that value's own co-indexed attribution —
