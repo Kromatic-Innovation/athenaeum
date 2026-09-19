@@ -318,6 +318,10 @@ STRICT_CONTRACTS: frozenset[str] = frozenset(
 #: ``resolutions._VALID_ACTIONS``) by an equivalence test rather than an import,
 #: so this module never pulls a heavy module onto the recall hot path.
 _CLAIM_KINDS = ("decision", "definition", "fact", "observation", "opinion", "policy")
+#: athenaeum#1837: ``models.MEMORY_BUCKETS``, stated locally for the same reason
+#: as ``_CLAIM_KINDS`` above — this module must not pull a heavy module onto the
+#: recall hot path just to name a three-member closed vocabulary.
+_MEMORY_BUCKETS = ("daily", "durable", "weekly")
 _RESOLVER_ACTIONS = (
     "attribute_both",
     "correct_a",
@@ -377,6 +381,31 @@ class ClaimKindResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     claim_kind: Literal[_CLAIM_KINDS]  # type: ignore[valid-type]
+
+
+class DecayBucketResponse(BaseModel):
+    """``decay_bucket`` — ``{"bucket": <one of MEMORY_BUCKETS>}`` (``decay_bucket.py``).
+
+    The site rejects (→ unbucketed) any value outside MEMORY_BUCKETS, so an
+    out-of-vocabulary label is genuine drift → ``Literal`` over the set.
+
+    ``extra="allow"`` — this module's phase-1 default (see the module
+    docstring). Unlike its ``claim_kind`` sibling, this contract has NO
+    measured window at all: athenaeum#1837 is its first release, so an
+    ``extra="forbid"`` here would be a guess wearing a measurement's clothes,
+    exactly the reasoning :data:`STRICT_CONTRACTS` applies to ``resolutions``.
+    It is deliberately absent from both :data:`STRICT_CONTRACTS` and
+    :data:`INSTRUMENTED_CONTRACTS`: the former is a decided-from-measurement
+    registry, and the latter exists to surface a *genuinely unreached* contract
+    as an explicit no-data row — this one ships with a live nightly caller
+    (``librarian._stamp_unbucketed_auto_memory``), and
+    :func:`aggregate_observations` picks its records up via ``setdefault``
+    regardless. Revisit both once a representative window exists.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    bucket: Literal[_MEMORY_BUCKETS]  # type: ignore[valid-type]
 
 
 class ContradictionResponse(BaseModel):
@@ -958,6 +987,16 @@ def observe_query_topics(
 def observe_claim_kind(payload: Any, *, call_site: str, wiki_root: Path | None = None) -> None:
     observe(
         ClaimKindResponse, payload, contract="claim_kind", call_site=call_site, wiki_root=wiki_root
+    )
+
+
+def observe_decay_bucket(payload: Any, *, call_site: str, wiki_root: Path | None = None) -> None:
+    observe(
+        DecayBucketResponse,
+        payload,
+        contract="decay_bucket",
+        call_site=call_site,
+        wiki_root=wiki_root,
     )
 
 

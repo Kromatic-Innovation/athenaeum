@@ -39,6 +39,7 @@ src/athenaeum/cluster_comparator.py
 src/athenaeum/comparator.py
 src/athenaeum/comparator_instruments.py
 src/athenaeum/contradictions.py
+src/athenaeum/decay_bucket.py
 src/athenaeum/decay_sweep.py
 src/athenaeum/librarian.py
 src/athenaeum/merge.py
