@@ -27,6 +27,7 @@ from typing import Any
 import pytest
 
 from athenaeum import killswitch
+from athenaeum.config import resolve_recall_cap_ceiling
 from athenaeum.push_metrics import (
     _parse_ts,
     _query_hash,
@@ -807,10 +808,21 @@ class TestUserPromptRecall:
         assert result.returncode == 0, f"stderr: {result.stderr}"
         assert result.stdout, "expected hookSpecificOutput JSON on stdout"
 
-        assert _pushed_names(result) == set(TIER_MIX_PERSON_NAMES), (
-            "the hook must push the true BM25 top-3 (warm `person` pages), "
-            "not the hot `principle` substitutes the gate used to backfill "
-            f"with. context={result.stdout!r}"
+        # Issue athenaeum#1783: the fixed `head -3` this test was written
+        # against is gone — the relevance-bounded cap's ceiling (7 by
+        # default) now has room for the two `principle` pages too, and
+        # they ARE genuinely relevant (their `aliases` list also contains
+        # "sonderling"), so their presence alongside the person pages no
+        # longer signals the old tier-backfill bug on its own. What still
+        # WOULD signal that bug: a `principle` page pushed INSTEAD OF a
+        # `person` page — so the assertion narrows from set-equality to
+        # "every true BM25 top-3 `person` page is present", which the old
+        # hot-tier gate could never satisfy (it excluded person pages
+        # entirely in 10 of 12 sampled queries).
+        assert set(TIER_MIX_PERSON_NAMES) <= _pushed_names(result), (
+            "the hook must push the true BM25 top-3 (warm `person` pages) "
+            "— the hot `principle` substitutes the gate used to backfill "
+            f"with must never REPLACE them. context={result.stdout!r}"
         )
 
     def test_swapping_two_pages_memory_tier_does_not_change_the_push(
@@ -987,7 +999,13 @@ class TestUserPromptRecall:
         assert result.returncode == 0, f"stderr: {result.stderr}"
         context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
         assert "Sonderling Private Dossier" not in context
-        assert _pushed_names(result) == set(TIER_MIX_PERSON_NAMES), (
+        # Issue athenaeum#1783: subset, not set-equality -- see
+        # `test_gate_removal_returns_the_true_bm25_top3`'s own comment for
+        # why (the wider ceiling legitimately surfaces the two `principle`
+        # pages alongside the person pages now). What this assertion still
+        # catches: an over-applied exclusion silently dropping an ordinary
+        # `person` page, which is the failure mode this test exists for.
+        assert set(TIER_MIX_PERSON_NAMES) <= _pushed_names(result), (
             "ordinary pages must still be reachable, so this test can fail "
             f"if an exclusion is over-applied. context={context!r}"
         )
@@ -1860,6 +1878,193 @@ conn.close()
         context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
         assert "Boundary Page" in context, f"got: {context!r}"
 
+    # -- issue athenaeum#1783: relevance-bounded cap case tests -----------------
+    #
+    # Three cases, per the AC: floor-only (fewer hits clear the floor than
+    # the ceiling -- all emitted, no overflow line), ceiling-hit (more hits
+    # clear the floor than the ceiling -- exactly `ceiling` emitted plus one
+    # overflow line), and empty (nothing clears the floor -- nothing at
+    # all, no overflow line). These run the hook's VECTOR half (the only
+    # place the hook applies a floor at all, per AC) via the same
+    # `_vector_env`/`_set_stub_hits` fixture the floor tests above use. The
+    # ceiling-hit case is additionally pinned on the FTS5-only path below,
+    # which is also where AC4's "no Python interpreter spawned" is proven.
+
+    def test_cap_floor_only_vector_turn_all_hits_emitted_no_overflow(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """floor-only: fewer hits clear the floor than the ceiling.
+
+        All of them are emitted, and no overflow line appears.
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+        _require_hook_python(hook_env, "athenaeum.config")
+
+        ceiling = resolve_recall_cap_ceiling(None)
+        assert ceiling >= 3, "fixture assumes room for well under the ceiling"
+
+        knowledge = Path(hook_env["KNOWLEDGE_ROOT"])
+        (knowledge / "athenaeum.yaml").write_text(
+            "auto_recall: true\nsearch_backend: fts5\n"
+            "recall:\n  relevance_floor:\n    vector: 0.5\n"
+        )
+        vector_env, fake_pkg = self._vector_env(hook_env, tmp_path)
+        self._set_stub_hits(
+            fake_pkg,
+            [
+                ("floor-a.md", "Floor Only Page A", 0.1),
+                ("floor-b.md", "Floor Only Page B", 0.2),
+                ("floor-c.md", "Floor Only Page C", 0.9),  # below floor, dropped
+            ],
+        )
+
+        result = self._run_hook(vector_env, "zzznonmatchingzzz unrelated content")
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert result.stdout, "the clearing hits must surface"
+        context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+        assert "Floor Only Page A" in context
+        assert "Floor Only Page B" in context
+        assert "Floor Only Page C" not in context, "below-floor hit must be dropped"
+        assert "withheld" not in context.lower() and "relevance cap" not in context.lower(), (
+            f"no overflow line expected when nothing was withheld: {context!r}"
+        )
+
+    def test_cap_ceiling_hit_vector_turn_caps_and_adds_overflow_line(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """ceiling-hit: more hits clear the floor than the ceiling.
+
+        Exactly `ceiling` are emitted, plus one overflow line whose count
+        matches the withheld hits.
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+        _require_hook_python(hook_env, "athenaeum.config")
+
+        ceiling = resolve_recall_cap_ceiling(None)
+        surplus = 3
+        total = ceiling + surplus
+
+        knowledge = Path(hook_env["KNOWLEDGE_ROOT"])
+        (knowledge / "athenaeum.yaml").write_text("auto_recall: true\nsearch_backend: fts5\n")
+        vector_env, fake_pkg = self._vector_env(hook_env, tmp_path)
+        hits = [
+            (f"ceiling-hit-{i}.md", f"Ceiling Hit Page {i}", 0.1 + i * 0.001)
+            for i in range(total)
+        ]
+        self._set_stub_hits(fake_pkg, hits)
+
+        result = self._run_hook(vector_env, "zzznonmatchingzzz unrelated content")
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert result.stdout, "expected additionalContext with pushed pages"
+        context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+
+        pushed = sum(1 for i in range(total) if f"Ceiling Hit Page {i}" in context)
+        assert pushed == ceiling, (
+            f"expected exactly {ceiling} pushed hits, got {pushed}. context={context!r}"
+        )
+        assert str(surplus) in context, (
+            f"overflow line must name the withheld count ({surplus}): {context!r}"
+        )
+        overflow_lines = [
+            line for line in context.split("\\n") if line and not line.lstrip().startswith("-")
+        ]
+        assert any(str(surplus) in line for line in overflow_lines), (
+            f"the overflow line must never start with '-': {context!r}"
+        )
+
+    def test_cap_empty_vector_turn_no_hits_no_overflow_line(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """empty: nothing clears the floor. The hook emits nothing at all,
+        and — vacuously, since nothing is emitted — no overflow line."""
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+        _require_hook_python(hook_env, "athenaeum.config")
+
+        knowledge = Path(hook_env["KNOWLEDGE_ROOT"])
+        (knowledge / "athenaeum.yaml").write_text(
+            "auto_recall: true\nsearch_backend: fts5\n"
+            "recall:\n  relevance_floor:\n    vector: 0.1\n"
+        )
+        vector_env, fake_pkg = self._vector_env(hook_env, tmp_path)
+        self._set_stub_hits(fake_pkg, [("above.md", "Above Floor", 0.9)])
+
+        result = self._run_hook(vector_env, "zzznonmatchingzzz unrelated content")
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert not result.stdout, (
+            f"nothing cleared the floor -- expected no stdout at all: {result.stdout!r}"
+        )
+
+    def test_cap_ceiling_hit_fts5_only_path_caps_no_python_spawned(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """AC4: on the FTS5-only path (no vector index / `SEARCH_BACKEND=fts5`),
+        the ceiling cut and the withheld count run in SQL/awk -- no Python
+        interpreter is spawned to do it. Pinned together with the
+        ceiling-hit case itself: more FTS5 matches exist than the ceiling.
+
+        Proof of "no Python spawned": `ATHENAEUM_PYTHON` points at a shim
+        that writes a marker file if invoked at all. `SEARCH_BACKEND=fts5`
+        (this fixture's default, no vector dir) means the hook's only
+        Python invocation site (`"$PYTHON" -c ...`, inside the vector
+        block) is structurally unreached — the marker must not exist
+        afterward.
+        """
+        _require("bash")
+        _require("jq")
+        _require("sqlite3")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        ceiling = resolve_recall_cap_ceiling(None)
+        surplus = 2
+        total = ceiling + surplus
+
+        wiki = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
+        for i in range(total):
+            (wiki / f"fts5-ceiling-{i}.md").write_text(
+                "---\n"
+                f"name: Fts5 Ceiling Page {i}\n"
+                "type: person\n"
+                "tags: [zzzceilingzzz]\n"
+                "description: fts5-only ceiling fixture\n"
+                "---\n\nBody text is not indexed; matches come from frontmatter.\n"
+            )
+        self._seed_index(hook_env)
+
+        marker = tmp_path / "python-was-invoked"
+        fake_python = tmp_path / "fake-python3"
+        fake_python.write_text(
+            f"#!/bin/sh\ntouch {shlex.quote(str(marker))}\nexit 1\n"
+        )
+        fake_python.chmod(0o755)
+        env = dict(hook_env)
+        env["ATHENAEUM_PYTHON"] = str(fake_python)
+
+        result = self._run_hook(env, "zzzceilingzzz")
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert not marker.exists(), (
+            "the FTS5-only path must never spawn Python for the cap/withheld "
+            "computation -- the fake python3 shim was invoked"
+        )
+        assert result.stdout, "expected additionalContext with pushed pages"
+        context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+        pushed = sum(1 for i in range(total) if f"Fts5 Ceiling Page {i}" in context)
+        assert pushed == ceiling, (
+            f"expected exactly {ceiling} pushed hits on the FTS5-only path, "
+            f"got {pushed}. context={context!r}"
+        )
+        assert str(surplus) in context, (
+            f"overflow line must name the withheld count ({surplus}): {context!r}"
+        )
+
     # -- issue athenaeum#1761: the CLI's relevance-floor writer ----------------
     #
     # `tests.evals.north_star_cli.write_relevance_floor_config` is the CLI-side
@@ -2258,14 +2463,20 @@ conn.close()
 
         result = self._run_hook(hook_env, TIER_MIX_PROMPT)
         assert result.returncode == 0, f"stderr: {result.stderr}"
-        assert _pushed_names(result) == set(TIER_MIX_PERSON_NAMES)
+        # Issue athenaeum#1783: subset, not set-equality -- see
+        # `test_gate_removal_returns_the_true_bm25_top3`'s own comment.
+        assert set(TIER_MIX_PERSON_NAMES) <= _pushed_names(result)
 
         records = read_push_records(
             wiki_root=Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki",
             cache_dir=Path(hook_env["ATHENAEUM_CACHE_DIR"]),
         )
         items = [it for rec in records for it in rec["items"]]
-        assert len(items) == 3, f"expected the three person pages: {items}"
+        # Issue athenaeum#1783: at LEAST the three person pages -- the
+        # wider ceiling can legitimately also push the two `principle`
+        # pages now (same reasoning as the `_pushed_names` assertion
+        # above), so this is no longer an exact count.
+        assert len(items) >= 3, f"expected at least the three person pages: {items}"
         assert all("memory_tier" not in it for it in items), (
             f"the retired tier vocabulary is back in telemetry: {items}"
         )
