@@ -42,6 +42,8 @@ from typing import Any
 import pytest
 import yaml
 
+from athenaeum.audit import audit_page
+from athenaeum.config import DEFAULT_CLASSIFY_MODEL
 from athenaeum.contradictions import ContradictionResult, detect_contradictions
 from athenaeum.mcp_server import recall_search
 from athenaeum.models import AutoMemoryFile, EntityAction
@@ -54,6 +56,7 @@ from athenaeum.resolutions import (
 from athenaeum.tiers import tier3_create
 from tests.evals.harness import (
     EVAL_DATA_ROOT,
+    LAYER_AUDIT_RETIREMENT,
     LAYER_BACKFILL,
     LAYER_DETECTOR,
     LAYER_RECALL,
@@ -65,6 +68,9 @@ from tests.evals.harness import (
     prompt_hash,
     replay_client,
     save_recorded,
+)
+from tests.evals.test_audit_retirement_eval import (
+    _score_case as _score_audit_retirement_case,
 )
 from tests.evals.test_underdetermined_eval import (
     _score_case as _score_underdetermined_case,
@@ -95,6 +101,11 @@ _RECALL_IDS = _recorded_case_ids(LAYER_RECALL)
 # _EMPTY_LAYER_REASON rather than erroring the suite. Seeding it is a
 # tracked follow-up (an evals.yml record=true run with a live key).
 _UNDERDETERMINED_IDS = _recorded_case_ids(LAYER_UNDERDETERMINED)
+# Issue athenaeum#1869: same never-seeded posture as LAYER_UNDERDETERMINED
+# above — this lane had no live backend to record from either
+# (ANTHROPIC_API_KEY unset). Seeding it (an evals.yml record=true run
+# against the fixed audit-v4 prompt) is a tracked follow-up.
+_AUDIT_RETIREMENT_IDS = _recorded_case_ids(LAYER_AUDIT_RETIREMENT)
 
 _EMPTY_LAYER_REASON = (
     "no recorded fixtures — run evals.yml with record=true (or "
@@ -436,6 +447,59 @@ def test_underdetermined_replay(case_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Audit retirement-candidacy replay (issue athenaeum#1869)
+#
+# Same skip-cleanly-on-empty-fixture posture as the underdetermined layer
+# above: this lane had no live backend to record from, so
+# _AUDIT_RETIREMENT_IDS is empty, the layer is unlisted in
+# seeded-layers.yml, and the skipif/parametrize-with-placeholder pattern
+# makes both tests skip with an explicit reason rather than error —
+# regular CI stays green exactly as it does for every other never-seeded
+# layer. Once a live evals.yml run seeds
+# tests/fixtures/recorded/audit_retirement/, these replay for real using
+# the SAME boolean verdict compare the live eval uses
+# (tests/evals/test_audit_retirement_eval.py), against the same
+# prompt-hash staleness contract as every other replay test — so an
+# AUDIT_SYSTEM edit without a re-record fails here with the "re-run evals
+# with --record" message.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not _AUDIT_RETIREMENT_IDS, reason=_EMPTY_LAYER_REASON)
+@pytest.mark.parametrize("case_id", _params(_AUDIT_RETIREMENT_IDS) or ["_placeholder_"])
+def test_audit_retirement_replay(case_id: str) -> None:
+    golden = _load_golden(LAYER_AUDIT_RETIREMENT)
+    assert case_id in golden, (
+        f"recorded fixture {case_id!r} has no matching golden-set case "
+        f"in {LAYER_AUDIT_RETIREMENT}/cases.yaml — delete the stray fixture "
+        "or add the case."
+    )
+    case = golden[case_id]
+    meta = dict(case["meta"])
+    body = str(case["body"])
+
+    # replay_client enforces the staleness contract on messages.create — an
+    # AUDIT_SYSTEM edit without a re-record fails here with the "re-run
+    # evals with --record" message, exactly as it would for detector/
+    # resolver/underdetermined.
+    client = replay_client(LAYER_AUDIT_RETIREMENT, case_id)
+    verdict = audit_page(
+        client,
+        uid=str(meta["uid"]),
+        path=Path(f"/tmp/audit-retirement-replay/{case_id}.md"),
+        meta=meta,
+        body=body,
+        # Must match the model the live eval recorded with (DEFAULT_CLASSIFY_MODEL
+        # — see tests/evals/test_audit_retirement_eval.py), or the staleness
+        # contract's prompt_hash mismatches before this test can assert anything.
+        model=DEFAULT_CLASSIFY_MODEL,
+    )
+
+    passed, detail = _score_audit_retirement_case(case, verdict)
+    assert passed, f"audit_retirement replay {case_id}: {detail}"
+
+
+# ---------------------------------------------------------------------------
 # Staleness contract self-test — runs on every PR so the contract itself
 # stays green regardless of whether any recorded fixtures have been seeded.
 # ---------------------------------------------------------------------------
@@ -509,6 +573,7 @@ _ALL_KNOWN_LAYERS = (
     LAYER_RECALL,
     LAYER_BACKFILL,
     LAYER_UNDERDETERMINED,
+    LAYER_AUDIT_RETIREMENT,
 )
 
 
