@@ -1609,19 +1609,45 @@ def _recall_via_backend(
     # kind. Applied AFTER the currency reorder as a separate stable-partition
     # pass (see that function's docstring for why this stays two passes
     # instead of one combined predicate).
+    #
+    # Issue athenaeum#1783 regression fix: both reorders are stable partitions
+    # that sink a deprioritized hit to the END of whatever list they are
+    # given (see each function's own docstring: "never widens the candidate
+    # pool beyond what the caller asked for" / a partition "so a declared-
+    # superseded page sorts after every other hit"). Both were written, and
+    # tested (athenaeum#904, athenaeum#1493), against a ``hits`` that was
+    # ALWAYS exactly ``top_k``-wide — before this issue widened the fetch to
+    # ``window``, reordering the fetched set didn't need to distinguish "the
+    # top_k that will render" from "extra candidates fetched only to count
+    # overflow". Reordering the FULL widened ``hits`` sinks a superseded/
+    # stale hit to the end of the WIDE list rather than just below its own
+    # replacement -- past the ``top_k`` cut far more often than the pre-
+    # widening behavior did (measured: a page ranked #2 by raw score, demoted
+    # below its #1 replacement, used to still land inside a ``top_k``-wide
+    # reorder; inside a ``window``-wide reorder it can be sunk behind a dozen
+    # unrelated, non-deprioritized candidates instead and fall out of
+    # ``top_k`` entirely). Scoping both reorders to the ``top_k``-sized head
+    # of ``hits`` restores that pre-existing, tested invariant for the
+    # RENDERED set — the identical set a narrower ``n=top_k`` fetch would
+    # have reordered — while the untouched tail (``hits[top_k:]``, never
+    # rendered in relative order, only counted+typed by the cap below) needs
+    # no reordering at all.
     if not history:
-        hits = _reorder_hits_by_currency(
-            hits,
+        _reorder_head = hits[:top_k]
+        _reorder_tail = hits[top_k:]
+        _reorder_head = _reorder_hits_by_currency(
+            _reorder_head,
             wiki_root=wiki_root,
             extra_roots=extra_roots,
             off_corpus_root=off_corpus_root,
         )
-        hits = _reorder_hits_by_supersession(
-            hits,
+        _reorder_head = _reorder_hits_by_supersession(
+            _reorder_head,
             wiki_root=wiki_root,
             extra_roots=extra_roots,
             off_corpus_root=off_corpus_root,
         )
+        hits = _reorder_head + _reorder_tail
 
     # Issue athenaeum#1783: the ONE relevance-bounded cap, applied AFTER the
     # reorders above (so the KEPT order below is exactly what those
