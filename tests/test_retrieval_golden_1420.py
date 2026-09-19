@@ -276,6 +276,18 @@ class TestTypeFilterBackendParity:
 
 _SCORE_RE = re.compile(r"\(score: [0-9.eE+-]+\)")
 
+#: Issue athenaeum#1783: the trailing overflow-breadcrumb line
+#: ``recall_search`` appends (at most once, after every rendered hit) when
+#: candidates were withheld by the relevance cap -- see
+#: ``athenaeum.mcp_server._render_recall_overflow_line`` and the packaged
+#: template at ``src/athenaeum/prompts/recall_overflow_breadcrumb.md``.
+#: Matched precisely (not a loose wildcard) so this can only ever strip
+#: that specific line, never accidentally eat real hit content that merely
+#: contains the word "memory".
+_OVERFLOW_BREADCRUMB_RE = re.compile(
+    r"\n\nmemory has .+ withheld by the relevance cap — call `recall` to see them\.\Z"
+)
+
 
 def _first_hit_block(rendered: str) -> str:
     """Extract the ``### 1. ...`` hit block from a ``recall_search`` rendering,
@@ -287,10 +299,22 @@ def _first_hit_block(rendered: str) -> str:
     AC4 is about the RENDERING of a shared hit, not about the two backends
     returning identical result counts, so only the top hit's block is
     compared.
+
+    Issue athenaeum#1783: the same reasoning excludes the trailing overflow
+    breadcrumb -- it is a RESPONSE-level statement of how many candidates
+    were withheld, a direct function of how many the backend surfaced in
+    the first place, exactly the category the ``Found N`` sentence above
+    already rules out of scope. It is TRIMMED, not normalized like the
+    score: the line does not belong to a hit's render at all (unlike the
+    score, which is a real per-hit field whose VALUE is backend-specific
+    but whose PRESENCE is not), so substituting a placeholder would imply
+    an interesting-but-ignored field rather than "not part of this test's
+    subject." Absent entirely (a no-op sub) when nothing was withheld.
     """
     marker = "### 1. "
     idx = rendered.index(marker)
     block = rendered[idx + len(marker):]
+    block = _OVERFLOW_BREADCRUMB_RE.sub("", block)
     return _SCORE_RE.sub("(score: X)", block)
 
 

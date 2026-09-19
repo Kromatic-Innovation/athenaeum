@@ -113,6 +113,7 @@ from pathlib import Path
 
 import pytest
 
+from athenaeum.config import resolve_recall_cap_ceiling
 from athenaeum.mcp_server import recall_search
 from athenaeum.search import get_backend
 from tests.evals.corpus import Corpus, Probe, _content_terms, build_corpus
@@ -152,9 +153,13 @@ _SCALES: tuple[str, ...] = ("core", "medium")
 #: tool executor's `recall` call both use (`tests/evals/rollout.py`).
 _TOP_K = 5
 
-#: The shipped hook's own cap (`examples/claude-code/user-prompt-recall.sh`:
-#: `head -3`). Not this module's to change -- see the issue's "Out of scope".
-_HOOK_TOP_K = 3
+#: The shipped hook's own cap (issue athenaeum#1783: the resolved
+#: relevance-bounded cap ceiling, `athenaeum.config.resolve_recall_cap_ceiling`
+#: -- the old fixed `head -3` this constant used to name literally is gone;
+#: see `tests/test_recall_cap.py` for the two tests binding the ceiling
+#: value itself). Not this module's to pick a NUMBER for -- it reads the
+#: same resolver the hook and the derivation test do, never a literal.
+_HOOK_TOP_K = resolve_recall_cap_ceiling(None)
 
 #: Matches one rendered recall hit's own `**Uid:** <uid>` header line
 #: (`src/athenaeum/mcp_server.py`, `_recall_via_backend`'s per-hit block) --
@@ -1092,7 +1097,7 @@ def test_print_precision_contamination_tables_and_cap_signal(
     print(
         f"\nname_to_uid collisions (athenaeum#1790) -- scale={fx.corpus.scale}: "
         f"{fx.name_collision_names} colliding names, {fx.name_collision_pages} pages "
-        "excluded from the hook@3 columns below"
+        f"excluded from the hook@{_HOOK_TOP_K} columns below"
     )
 
     # grep and the hook are backend-independent (the hook always runs the
@@ -1128,8 +1133,9 @@ def test_print_precision_contamination_tables_and_cap_signal(
     # (issue athenaeum#1770 item 1) -- was computed and then discarded here
     # in the first draft.
     print(
-        f"hook@3 evidence -- scale={fx.corpus.scale}: {hook_real_count} probes via the real "
-        f"hook subprocess, {hook_fallback_count} via the fts5 n=3 fallback"
+        f"hook@{_HOOK_TOP_K} evidence -- scale={fx.corpus.scale}: {hook_real_count} probes via "
+        f"the real hook subprocess, {hook_fallback_count} via the fts5 "
+        f"n={_HOOK_TOP_K} fallback"
     )
 
     vector_hybrid_on_ranked: dict[str, list[str]] = {}
@@ -1179,7 +1185,7 @@ def test_print_precision_contamination_tables_and_cap_signal(
         print(f"\nPrecision/recall/contamination -- scale={fx.corpus.scale} variant={variant}")
         print(
             "| probe_class | probes | expected | grep R/P/C | recall@5 R/P/C | "
-            "hook@3 R/P/C | grep-miss@5 | grep-miss@hook3 | mnr n/a |"
+            f"hook@{_HOOK_TOP_K} R/P/C | grep-miss@5 | grep-miss@hook{_HOOK_TOP_K} | mnr n/a |"
         )
         pooled_all: dict[str, list[ProbeRelevance]] = {"grep": [], "recall@5": [], "hook@3": []}
         pooled_miss_all: dict[str, list[frozenset[str]]] = {"recall@5": [], "hook@3": []}
@@ -1218,9 +1224,11 @@ def test_print_precision_contamination_tables_and_cap_signal(
             precision_recall5=recall_pool.precision,
         )
         print(
-            f"cap signal -- scale={fx.corpus.scale} variant={variant} (eps={CAP_SIGNAL_EPS}): "
-            f"recall@hook3={fmt(hook_pool.recall)} recall@recall5={fmt(recall_pool.recall)}\n"
-            f"  precision@hook3={fmt(hook_pool.precision)} "
+            f"cap signal -- scale={fx.corpus.scale} variant={variant} (eps={CAP_SIGNAL_EPS}, "
+            f"ceiling={_HOOK_TOP_K}): "
+            f"recall@hook{_HOOK_TOP_K}={fmt(hook_pool.recall)} "
+            f"recall@recall5={fmt(recall_pool.recall)}\n"
+            f"  precision@hook{_HOOK_TOP_K}={fmt(hook_pool.precision)} "
             f"precision@recall5={fmt(recall_pool.precision)} -> {verdict!r}"
         )
 

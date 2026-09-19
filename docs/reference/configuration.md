@@ -2796,6 +2796,33 @@ through to the default. No seed in ``_DEFAULTS`` — mirrors
 
 ## `recall`
 
+### `resolve_recall_cap_ceiling`
+
+- **YAML path:** `recall.cap.ceiling`
+- **Environment variable:** `ATHENAEUM_RECALL_CAP_CEILING`
+- **CLI flag:** —
+- **Default:** `7`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the push-path relevance-bounded cap's ceiling.
+
+Precedence: ``ATHENAEUM_RECALL_CAP_CEILING`` env > ``recall.cap.ceiling``
+yaml > `RECALL_CAP_CEILING_DEFAULT`, mirroring
+`resolve_push_token_budget`'s own env > yaml > default shape. A
+malformed env value WARNs and falls through (see `_env_number`); a
+non-int / ``<= 0`` yaml value falls through to the default. YAML shape:
+```
+recall:
+  cap:
+    ceiling: 7
+```
+
+This is the PUSH-PATH ceiling only -- an explicit ``recall`` MCP call
+keeps passing its own ``top_k`` (default 5, unaffected by this
+resolver) as the cap function's limit; see
+`athenaeum.search.apply_relevance_cap`'s docstring for the shared
+mechanism both callers use.
+
 ### `resolve_index_globs (exclude_globs)`
 
 - **YAML path:** `recall.exclude_globs`

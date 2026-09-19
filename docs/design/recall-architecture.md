@@ -71,6 +71,24 @@ How the UserPromptSubmit hook surfaces wiki context — the hybrid FTS5 + vector
 > how the tier verdict came to be index-carried — that mechanism still
 > serves the render and the telemetry — with the filter itself struck.
 
+**Relevance-bounded cap (issue athenaeum#1783).** The fixed `head -3`/`LIMIT
+3` this section used to describe is also gone, replaced on both surfaces —
+this hook and the MCP `recall` tool — by one shared rule
+(`athenaeum.search.apply_relevance_cap`): emit every hit that already
+cleared the configured relevance floor, up to a hard ceiling
+(`athenaeum.config.resolve_recall_cap_ceiling`, derived from the largest
+`aggregation`-class answer set in the eval corpus rather than picked by
+argument), and when candidates fall past the ceiling, emit one overflow
+breadcrumb line naming how many were withheld and what entity types they
+were — never silently, and folding in any candidate the push-token budget
+above separately skipped. The overflow wording lives in a packaged prompt
+file (`src/athenaeum/prompts/recall_overflow_breadcrumb.md`), not in awk,
+per this workspace's prompt-text-is-content policy. On the FTS5-only path
+this hook documents a `<50ms` contract for, the ceiling cut and the
+withheld tally run entirely in SQL/awk — no Python interpreter is spawned
+to do it, exactly as the relevance floor above already does not apply
+there.
+
 Before this issue, `user-prompt-recall.sh` queried FTS5 directly and never
 called `recall_search` — so unprompted recall never saw the `hot`-tier
 filter or the `push_budget.tokens_per_turn` budget that issue athenaeum#718 /

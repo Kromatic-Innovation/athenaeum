@@ -2959,6 +2959,60 @@ def meets_relevance_floor(backend_name: str, score: float, floor: float | None) 
     )
 
 
+# Issue athenaeum#1783: the ONE cap rule, shared by the UserPromptSubmit hook
+# and the MCP ``recall`` tool -- see ``athenaeum.config.resolve_recall_cap_ceiling``
+# for the push path's derived ceiling and ``docs/design/recall-architecture.md``
+# for the wider design. Kept tiny and score-agnostic, matching
+# ``meets_relevance_floor``'s / ``reciprocal_rank_fusion``'s own shape: the
+# CALLER applies the relevance floor to *hits* BEFORE calling this (this
+# function never re-derives or re-checks a floor), and the caller decides
+# *limit* (the push-path ceiling for the hook, ``top_k`` for an explicit
+# ``recall`` call -- AC1). It never re-ranks: *hits* are sliced in the order
+# they arrive, so a caller's own relevance ordering is preserved exactly.
+def apply_relevance_cap(
+    hits: Sequence[tuple[str, str, float]],
+    limit: int,
+    *,
+    type_of: Callable[[tuple[str, str, float]], str | None] | None = None,
+) -> tuple[list[tuple[str, str, float]], dict[str, int]]:
+    """Slice *hits* to *limit*, and tally what was withheld by type.
+
+    Returns ``(kept, withheld_by_type)``:
+
+    * ``kept`` -- the first ``min(limit, len(hits))`` hits, in the same
+      order they were given. Never more than *limit*, and never re-ordered.
+    * ``withheld_by_type`` -- one entry per entity type name among the hits
+      BEYOND *limit*, mapping to how many of that type were withheld. A
+      withheld hit with no resolvable type counts as ``"page"`` (AC2) --
+      this is what *type_of* returning ``None`` (or not being supplied at
+      all) means, matching :func:`athenaeum.models.resolve_page_type`'s own
+      ``""``-for-untyped convention (an empty string is also folded to
+      ``"page"``).
+
+    *type_of* is called ONLY for hits past *limit* -- never for a kept hit,
+    and never for a hit that clears the floor but sits inside *limit*. This
+    is deliberate, not an incidental optimization: a caller whose "type" is
+    expensive to resolve (:mod:`athenaeum.mcp_server`'s caller reads a
+    page's on-disk frontmatter) only pays that cost for the withheld tail,
+    which is bounded by how far past *limit* the fetch window reached --
+    never for the corpus, and never for a hit that is about to be rendered
+    with its type resolved anyway. Omitting *type_of* entirely (the hook's
+    SQL/awk path, which has no Python type resolver to call at all) folds
+    every withheld hit to ``"page"``, which is still a correct (if
+    coarser) breakdown -- see ``examples/claude-code/user-prompt-recall.sh``,
+    which instead carries a real ``type`` column through its own SQL rows
+    and does its own withheld-by-type tally rather than calling this
+    Python function from shell.
+    """
+    kept = list(hits[:limit])
+    withheld_by_type: dict[str, int] = {}
+    for hit in hits[limit:]:
+        raw_type = type_of(hit) if type_of is not None else None
+        entity_type = raw_type or "page"
+        withheld_by_type[entity_type] = withheld_by_type.get(entity_type, 0) + 1
+    return kept, withheld_by_type
+
+
 # Issue athenaeum#1792: reciprocal rank fusion for the vector-backend hybrid
 # dispatch. Kept tiny and score-agnostic, matching ``meets_relevance_floor``'s
 # own "mechanism, not tuning" shape -- the CALLER (``athenaeum.mcp_server``'s
