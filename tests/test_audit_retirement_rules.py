@@ -92,7 +92,10 @@ class TestPromptStatesEachRule:
 
     def test_precedence_sentence_present(self) -> None:
         assert "at most one affiliation line" in AUDIT_SYSTEM
-        assert "falls under the pipeline-metadata trigger, not the placeholder exclusion" in AUDIT_SYSTEM
+        assert (
+            "falls under the pipeline-metadata trigger, not the placeholder exclusion"
+            in AUDIT_SYSTEM
+        )
 
 
 # --- The structural fix itself (issue athenaeum#1869) -----------------------
@@ -123,7 +126,9 @@ class TestPromptStructure:
         # reverse (a trigger, contradicted by a nested exemption).
         exclusions_start = AUDIT_SYSTEM.index("Three exclusions apply first")
         placeholder_exclusion = AUDIT_SYSTEM.index("is a placeholder awaiting enrichment")
-        triggers_start = AUDIT_SYSTEM.index("is a retirement candidate only when none of the exclusions")
+        triggers_start = AUDIT_SYSTEM.index(
+            "is a retirement candidate only when none of the exclusions"
+        )
         no_claim_trigger = AUDIT_SYSTEM.index("it states no claim at all")
         assert exclusions_start < placeholder_exclusion < triggers_start < no_claim_trigger
 
