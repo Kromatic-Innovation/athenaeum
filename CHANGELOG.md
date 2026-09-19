@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Validating north-star grid for the `follow_through` path-to-beat
+  (issue athenaeum#1854).** `docs/measurements/native-memory-baseline-2026-09-19.md`
+  records the reading from workflow run 35443944736 (768 rows, `develop`
+  @ `f7c00a0c`), dispatched after athenaeum#1842/#1843/#1844/#1845 landed; the
+  full rendered report is recorded verbatim beside it as
+  `docs/measurements/north-star-grid-2026-09-19-run-35443944736.md` because the
+  Actions artifact expires after 30 days. No `probe_class` regressed on the
+  verdict arm (`push_breadcrumb_pull`); `follow_hop_rate` reads 1.000 for it at
+  both scales. The run does not pool with runs 35399179014 / 35407275511 (the
+  athenaeum#1845 byte change and the athenaeum#1843 `GENERATOR_VERSION` 3 -> 4
+  bump; the corpus digests differ), so the comparison is recorded as a reading,
+  never as a gate.
+
 - **Wave-2 north-star measurement report (issue athenaeum#1788).**
   `docs/measurements/native-memory-baseline-2026-09-18.md` documents the
   sixth north-star grid (workflow run 35305241221, 2160 rows), the first to
