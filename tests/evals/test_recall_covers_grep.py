@@ -715,9 +715,17 @@ _VECTOR_XFAIL: frozenset[tuple[str, str]] = frozenset(
         ("core", "budget_threshold_current"),
         ("core", "surname_is_ambiguous"),
         ("core", "former_client_not_current"),
-        #: Regression introduced by this issue (see the mechanism note
-        #: above) -- passes on develop @ e2ee32ef, fails here.
-        ("core", "keelbridge_programme_scope"),
+        #: athenaeum#1839: no longer xfailed here. Re-measured after
+        #: `core/16-redundancy.yaml`'s nine new core pages: both
+        #: `project-keelbridge` and `project-keelbridge-rollout` now rank in
+        #: the fused top 4 at `core`/vector (previously top 4 excluded one
+        #: half) -- the same "adding core pages shifts every OTHER probe's
+        #: real-embedding competition" mechanism this file's own
+        #: `_VECTOR_XFAIL`/`_FTS5_XFAIL` header comments document repeatedly
+        #: (e.g. the `thorncastle_first_contact` note a few entries below).
+        #: A `strict=True` xfail on a probe that now passes is itself a
+        #: failure (XPASS), confirmed via `pytest -rA` before removal, not
+        #: assumed from the corpus diff alone.
         #: regression under the lexical-hash stand-in after the
         #: athenaeum#1780 corpus additions; real-model status unknown. See
         #: athenaeum#1800. NOTE this probe's own class -- fused vector/RRF
@@ -758,13 +766,17 @@ _VECTOR_XFAIL: frozenset[tuple[str, str]] = frozenset(
         ("medium", "callum_drews_last_contact"),
         #: Regression introduced by this issue, same mechanism -- passes
         #: on develop @ e2ee32ef (confirmed directly, not inferred),
-        #: fails here. ``bramfield_retainer_renewal``/
-        #: ``lighthouse_migration_rollback`` are probes added by
-        #: athenaeum#1779's long_page tier; develop already has them and
-        #: passes them, so this is this issue's regression, not
+        #: fails here. ``lighthouse_migration_rollback`` was added by
+        #: athenaeum#1779's long_page tier; develop already has it and
+        #: passes it, so this is this issue's regression, not
         #: corpus-shift collateral -- an earlier version of this comment
         #: said otherwise and was wrong (Quine review of PR athenaeum#1807).
-        ("medium", "bramfield_retainer_renewal"),
+        #: ``bramfield_retainer_renewal`` (also added by athenaeum#1779) was
+        #: paired with it here for the same reason, but athenaeum#1839's
+        #: corpus additions (`core/16-redundancy.yaml`, nine new core pages)
+        #: shifted it back to PASSING at this cell -- confirmed XPASS(strict)
+        #: via `pytest -rA`, not assumed -- so it is removed from this set;
+        #: `lighthouse_migration_rollback` alone remains.
         ("medium", "lighthouse_migration_rollback"),
         # athenaeum#1781 (item G): this PR's own contradiction shape (b)
         # probe is a fresh measured miss at `medium`/vector -- the stale
@@ -779,6 +791,29 @@ _VECTOR_XFAIL: frozenset[tuple[str, str]] = frozenset(
         # added) but passes again after this PR's final content, so no
         # entry for it here.
         ("medium", "invoicing_api_pagination_workaround"),
+        # athenaeum#1839: `thorncastle_first_contact` (temporal, unrelated
+        # to this issue's own `redundancy` probes) regresses again at this
+        # cell after `core/16-redundancy.yaml`'s nine new core pages --
+        # `client-thorncastle` drops out of the fused top 5, the same
+        # "adding core pages shifts every OTHER probe's real-embedding
+        # competition" mechanism the note directly above already names for
+        # this exact probe (it passed again after athenaeum#1781's final
+        # content; it does not after this issue's). Measured via
+        # `pytest -rA`, not inferred from the corpus diff.
+        ("medium", "thorncastle_first_contact"),
+        # athenaeum#1839: two of the three new `redundancy` probes this
+        # issue adds. Both pages of each pair rank cleanly in the fused top
+        # 5 at every OTHER (scale, backend) cell (including `core`/vector --
+        # see the removed `keelbridge_programme_scope` entry above for the
+        # same probe CLASS passing cleanly there); only `medium`/vector
+        # crowds one half out, the identical mechanism `keelbridge_programme_scope`
+        # itself is already xfailed for at this same cell a few entries
+        # above -- genuine content duplication puts two near-identical
+        # pages in direct competition for a fixed top-5 window under real
+        # embeddings + RRF fusion at this corpus size, not a data-quality
+        # defect in either page. Measured via `pytest -rA`.
+        ("medium", "driftgate_migration_funding"),
+        ("medium", "dual_signoff_threshold"),
         # Stand-in-embedder ballast-placement shift after the
         # contradiction/negative_knowledge corpus additions
         # (athenaeum#1781); this set measures the lexical-hash stand-in,
