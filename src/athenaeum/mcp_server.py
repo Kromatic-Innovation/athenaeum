@@ -691,6 +691,112 @@ def _extract_outbound_links(body: str) -> list[str]:
     return slugs
 
 
+class _LinkNameIndex:
+    """Lazy ``uid -> display name`` resolver for a recall call's outbound links.
+
+    Issue athenaeum#1845: a bare uid on a hit's ``**Links:**`` line gives a
+    reader nothing to judge relevance by, so a page that plausibly answers
+    the unanswered half of a question reads exactly like one that does not.
+    Rendering ``<uid> \u2014 <name>`` costs one short name per link and makes
+    the edge judgeable.
+
+    ONE instance per ``recall`` call, shared across every hit and built only
+    on first use -- the same "one index for the WHOLE call, loaded lazily on
+    its first lookup" shape the issue athenaeum#885 excluded-record indexes
+    already use in this render loop. A call whose hits carry no
+    ``[[wikilink]]`` at all never touches the filesystem here.
+
+    Resolution is scoped to ``wiki_root``, the same root a follow-up
+    ``read_entity`` resolves a uid against
+    (:class:`athenaeum.models.EntityIndex`), so the name shown on the link is
+    the name the follow-up read lands on. Anything this cannot resolve -- a
+    dangling link, a target outside the wiki root, a page carrying no
+    ``name:`` -- yields ``None``, and the caller renders the bare uid exactly
+    as it did before this existed. Never an empty dash, never a dropped link.
+    """
+
+    def __init__(self, wiki_root: Path) -> None:
+        self._wiki_root = wiki_root
+        self._stems: dict[str, Path] | None = None
+        self._names: dict[str, str | None] = {}
+
+    def _stem_paths(self) -> dict[str, Path]:
+        """``{filename stem: path}`` for the wiki root, listed ONCE per call.
+
+        Filenames are LISTED here, never read: the per-page frontmatter read
+        happens in :meth:`name_for`, only for the handful of targets a
+        rendered hit actually links to.
+        """
+        if self._stems is None:
+            try:
+                paths = sorted(self._wiki_root.glob("*.md"))
+            except OSError:
+                paths = []
+            stems: dict[str, Path] = {}
+            for path in paths:
+                stems.setdefault(path.stem, path)
+            self._stems = stems
+        return self._stems
+
+    def _candidates(self, uid: str) -> list[Path]:
+        """Pages whose filename could be *uid*'s, cheapest shape first."""
+        stems = self._stem_paths()
+        exact = stems.get(uid)
+        if exact is not None:
+            return [exact]
+        # A wiki page is written as ``<uid>-<slug>.md``
+        # (:meth:`athenaeum.models.WikiEntity.filename`), so a uid target
+        # matches by prefix there. The eval corpora write a flat
+        # ``<uid>.md``, which the exact hit above already covers.
+        prefix = f"{uid}-"
+        return [path for stem, path in stems.items() if stem.startswith(prefix)]
+
+    def name_for(self, uid: str) -> str | None:
+        """The target page's frontmatter ``name:``, or ``None`` if unresolved.
+
+        Memoized per uid for the life of the call, including the negative
+        result -- a corpus where the same dangling link appears on several
+        hits pays for one lookup, not one per hit.
+        """
+        if uid in self._names:
+            return self._names[uid]
+        resolved: str | None = None
+        for path in self._candidates(uid):
+            try:
+                meta, _ = parse_frontmatter(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError):
+                continue
+            # A ``<uid>-<slug>.md`` PREFIX match is only a candidate: uid
+            # ``person-dara`` prefixes ``person-dara-holt.md`` too. The
+            # page's own frontmatter uid is what settles it. An exact
+            # filename-stem hit IS the target by construction, so it is
+            # accepted whatever its frontmatter says.
+            if path.stem != uid and str(meta.get("uid") or "") != uid:
+                continue
+            name = meta.get("name")
+            if isinstance(name, str) and name.strip():
+                resolved = name.strip()
+            break
+        self._names[uid] = resolved
+        return resolved
+
+
+def _render_outbound_links(uids: list[str], names: "_LinkNameIndex") -> str:
+    """Render a hit's ``**Links:**`` line, or ``""`` when it has none.
+
+    Issue athenaeum#1845. Selection and ordering of the targets are
+    :func:`_extract_outbound_links`'s, untouched here: this function only
+    decides how each already-selected target is spelled.
+    """
+    if not uids:
+        return ""
+    rendered: list[str] = []
+    for uid in uids:
+        name = names.name_for(uid)
+        rendered.append(f"{uid} \u2014 {name}" if name else uid)
+    return f"**Links:** {', '.join(rendered)}\n"
+
+
 def _cited_marker_labels(snippet: str) -> list[str]:
     """Footnote labels the *snippet* cites, order-preserved, deduped (athenaeum#1730).
 
@@ -1480,6 +1586,11 @@ def _recall_via_backend(
     # loads lazily on its first lookup, so a class no hit resolves to costs
     # nothing, and a call with `with_pii` unset never touches this at all.
     excluded_indexes: dict[str, ExcludedRecordIndex] = {}
+    # Issue athenaeum#1845: same one-index-per-call discipline for the
+    # ``**Links:**`` line's uid -> name lookup. Constructed here, used only
+    # from inside the loop, and inert (no filesystem access at all) for a
+    # call whose hits carry no outbound links.
+    link_names = _LinkNameIndex(wiki_root)
     for filename, name, score in hits:
         page_path, display_prefix = _resolve_hit_path(
             filename,
@@ -1578,10 +1689,15 @@ def _recall_via_backend(
         # (inbound backlinks need a new index and are explicitly out of
         # scope). Omitted entirely when the page has none, so the hit renders
         # unchanged in that case (no empty "**Links:**" line).
-        links_line = ""
-        outbound = _extract_outbound_links(body) if body else []
-        if outbound:
-            links_line = f"**Links:** {', '.join(outbound)}\n"
+        # Issue athenaeum#1845: each target renders as `<uid> — <name>`,
+        # the name read from the TARGET page's own frontmatter, so a reader
+        # can judge whether an edge is worth following instead of guessing
+        # from an opaque uid. An unresolvable target keeps rendering as the
+        # bare uid. Which targets are rendered, and in what order, is
+        # unchanged -- this is spelling, not selection.
+        links_line = _render_outbound_links(
+            _extract_outbound_links(body) if body else [], link_names
+        )
         # Issue athenaeum#1730: resolve the footnote markers the SNIPPET
         # actually cites against the page's own footnote definitions, so a
         # caller reaching a sentence in a recall hit reaches that sentence's
@@ -2108,6 +2224,11 @@ def recall_tool_docstring(entity_classes_str: str) -> str:
         predicate. An ordinary query is unaffected; detection is deliberately
         conservative.
 
+        A hit's ``**Links:**`` line names the pages it links out to as
+        ``uid — Name``: when part of the question is still unanswered and
+        one of those names plausibly covers it, read that page (``read_entity``
+        by its uid, or another ``recall``) before answering "not found".
+
         Args:
             query: Search query string (keywords, names, topics — or natural
                 language for semantic recall under the vector backend).
@@ -2254,6 +2375,11 @@ def read_entity_tool_docstring() -> str:
         marker existed — provenance unknown). Storing and syncing a contact
         value is permitted for every class; using one to INITIATE contact is
         permitted only for ``observed``. ``unclassified`` is never usable.
+
+        When part of the question is still unanswered and this page links to
+        another page that plausibly covers it (a ``related`` edge, or a
+        ``[[wikilink]]`` in the body), read that page
+        before answering "not found".
 
         Args:
             uid: The entity's durable uid.
