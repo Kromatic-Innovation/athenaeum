@@ -222,6 +222,254 @@ class TestRecallTypeFilter:
 
 
 # ---------------------------------------------------------------------------
+# Outbound links render as `uid — Name` (issue athenaeum#1845)
+# ---------------------------------------------------------------------------
+
+
+def _links_line(result: str) -> str:
+    """The single ``**Links:**`` line in a rendered recall result, or ``""``."""
+    for line in result.splitlines():
+        if line.startswith("**Links:**"):
+            return line
+    return ""
+
+
+def _ranked_hits(result: str) -> list[str]:
+    """The hit identity + score lines of a rendered recall result, in order.
+
+    Everything this issue is forbidden to change: which pages came back, in
+    what order, with what scores. Deliberately excludes the ``**Links:**``
+    line, which is the one thing it IS allowed to change.
+    """
+    return [
+        line
+        for line in result.splitlines()
+        if line.startswith(("### ", "**Uid:**", "**Path:**")) or "(score:" in line
+    ]
+
+
+class TestOutboundLinkNames:
+    """Issue athenaeum#1845: a hit's outbound links render as ``uid — Name``,
+    the name resolved from the TARGET page's own frontmatter."""
+
+    def test_resolvable_target_renders_uid_and_name(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        (wiki / "person-alice.md").write_text(
+            "---\nuid: person-alice\ntype: person\nname: Alice\n---\n\n"
+            "Alice works with [[person-bob]].\n"
+        )
+        (wiki / "person-bob.md").write_text(
+            "---\nuid: person-bob\ntype: person\nname: Bob Stone\n---\n\n"
+            "Bob runs the retainer desk.\n"
+        )
+        result = recall_search(wiki, "Alice")
+        assert _links_line(result) == "**Links:** person-bob — Bob Stone"
+
+    def test_name_is_read_from_the_target_not_the_source(self, tmp_path: Path) -> None:
+        """The rendered name must come from the LINKED page's frontmatter --
+        a regression that echoed the source hit's own name would still
+        produce a well-formed ``uid — Name`` line."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        (wiki / "person-alice.md").write_text(
+            "---\nuid: person-alice\ntype: person\nname: Alice\n---\n\n"
+            "Alice works with [[person-bob]].\n"
+        )
+        (wiki / "person-bob.md").write_text(
+            "---\nuid: person-bob\ntype: person\nname: Bob Stone\n---\n\n"
+            "Bob runs the retainer desk.\n"
+        )
+        result = recall_search(wiki, "Alice")
+        assert "Bob Stone" in _links_line(result)
+        assert "Alice" not in _links_line(result)
+
+    def test_uid_slug_filename_resolves(self, tmp_path: Path) -> None:
+        """Real wiki pages are written ``<uid>-<slug>.md``
+        (``WikiEntity.filename``); the eval corpora write a flat
+        ``<uid>.md``. Both must resolve."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        (wiki / "person-alice.md").write_text(
+            "---\nuid: person-alice\ntype: person\nname: Alice\n---\n\n"
+            "Alice reports to [[c1d2]].\n"
+        )
+        (wiki / "c1d2-carol-vance.md").write_text(
+            "---\nuid: c1d2\ntype: person\nname: Carol Vance\n---\n\n"
+            "Carol chairs the board.\n"
+        )
+        result = recall_search(wiki, "Alice")
+        assert _links_line(result) == "**Links:** c1d2 — Carol Vance"
+
+    def test_prefix_candidate_with_a_different_uid_is_not_accepted(
+        self, tmp_path: Path
+    ) -> None:
+        """``person-dara`` prefixes ``person-dara-holt.md``, whose uid is
+        ``person-dara-holt`` -- a different entity. The page's own
+        frontmatter uid settles it, so the unrelated target falls back to the
+        bare uid rather than borrowing a wrong name."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        (wiki / "person-alice.md").write_text(
+            "---\nuid: person-alice\ntype: person\nname: Alice\n---\n\n"
+            "Alice mentions [[person-dara]].\n"
+        )
+        (wiki / "person-dara-holt.md").write_text(
+            "---\nuid: person-dara-holt\ntype: person\nname: Dara Holt\n---\n\n"
+            "Dara leads engagements.\n"
+        )
+        result = recall_search(wiki, "Alice")
+        assert _links_line(result) == "**Links:** person-dara"
+
+    def test_unresolvable_target_renders_the_bare_uid(self, tmp_path: Path) -> None:
+        """AC: never an empty dash, never a dropped link."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        (wiki / "person-alice.md").write_text(
+            "---\nuid: person-alice\ntype: person\nname: Alice\n---\n\n"
+            "Alice cites [[person-bob]] and [[no-such-page]].\n"
+        )
+        (wiki / "person-bob.md").write_text(
+            "---\nuid: person-bob\ntype: person\nname: Bob Stone\n---\n\n"
+            "Bob runs the retainer desk.\n"
+        )
+        result = recall_search(wiki, "Alice")
+        assert (
+            _links_line(result)
+            == "**Links:** person-bob — Bob Stone, no-such-page"
+        )
+
+    def test_target_without_a_name_renders_the_bare_uid(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        (wiki / "person-alice.md").write_text(
+            "---\nuid: person-alice\ntype: person\nname: Alice\n---\n\n"
+            "Alice cites [[thing-nameless]].\n"
+        )
+        (wiki / "thing-nameless.md").write_text(
+            "---\nuid: thing-nameless\ntype: note\n---\n\nNo name field here.\n"
+        )
+        result = recall_search(wiki, "Alice")
+        assert _links_line(result) == "**Links:** thing-nameless"
+        assert "—" not in _links_line(result)
+
+    def test_page_with_no_outbound_links_renders_no_links_line(
+        self, tmp_path: Path
+    ) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        (wiki / "person-alice.md").write_text(
+            "---\nuid: person-alice\ntype: person\nname: Alice\n---\n\n"
+            "Alice has no outbound links at all.\n"
+        )
+        (wiki / "person-bob.md").write_text(
+            "---\nuid: person-bob\ntype: person\nname: Bob Stone\n---\n\n"
+            "Bob runs the retainer desk.\n"
+        )
+        result = recall_search(wiki, "Alice")
+        assert "**Links:**" not in result
+
+    def test_alias_half_of_a_piped_wikilink_is_not_the_target(
+        self, tmp_path: Path
+    ) -> None:
+        """``[[slug|alias]]``'s alias is display text; the uid rendered is
+        still the slug, now carrying the TARGET's real name rather than the
+        author's alias."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        (wiki / "person-alice.md").write_text(
+            "---\nuid: person-alice\ntype: person\nname: Alice\n---\n\n"
+            "Alice cites [[person-bob|her colleague]].\n"
+        )
+        (wiki / "person-bob.md").write_text(
+            "---\nuid: person-bob\ntype: person\nname: Bob Stone\n---\n\n"
+            "Bob runs the retainer desk.\n"
+        )
+        result = recall_search(wiki, "Alice")
+        assert _links_line(result) == "**Links:** person-bob — Bob Stone"
+
+
+class TestOutboundLinkNamesDoNotAffectRanking:
+    """AC: ``must_not_rank`` and relevance-floor behaviour unchanged -- this
+    issue changes how a hit is SPELLED, never which hits are returned or in
+    what order.
+
+    The proof is an A/B over the one variable this issue introduces: whether
+    the link targets resolve to a name. Everything else -- corpus text,
+    query, backend -- is held identical, so any difference in the ranked-hit
+    lines would be attributable to this change alone.
+    """
+
+    @staticmethod
+    def _build(root: Path, *, resolvable: bool) -> Path:
+        wiki = root / "wiki"
+        wiki.mkdir(parents=True)
+        (wiki / "client-fenwick.md").write_text(
+            "---\nuid: client-fenwick\ntype: client\nname: Fenwick Systems\n---\n\n"
+            "Fenwick Systems is a retainer client. See [[person-dara]].\n"
+        )
+        (wiki / "client-corvale.md").write_text(
+            "---\nuid: client-corvale\ntype: client\nname: Corvale Holdings\n---\n\n"
+            "Corvale Holdings is a retainer client too. See [[person-milo]].\n"
+        )
+        # The link TARGETS, named so they are lexically unreachable from the
+        # query -- they must never enter the ranking on their own, resolvable
+        # or not.
+        target_stem = "person-dara" if resolvable else "zzz-unlinked-one"
+        other_stem = "person-milo" if resolvable else "zzz-unlinked-two"
+        (wiki / f"{target_stem}.md").write_text(
+            f"---\nuid: {target_stem}\ntype: person\nname: Dara Holt\n---\n\n"
+            "Quillbrook.\n"
+        )
+        (wiki / f"{other_stem}.md").write_text(
+            f"---\nuid: {other_stem}\ntype: person\nname: Milo Ashby\n---\n\n"
+            "Marrowfen.\n"
+        )
+        return wiki
+
+    def test_ranked_hits_are_identical_whether_or_not_links_resolve(
+        self, tmp_path: Path
+    ) -> None:
+        resolvable = recall_search(
+            self._build(tmp_path / "a", resolvable=True), "retainer client"
+        )
+        unresolvable = recall_search(
+            self._build(tmp_path / "b", resolvable=False), "retainer client"
+        )
+        assert _ranked_hits(resolvable) == _ranked_hits(unresolvable)
+        assert _ranked_hits(resolvable) != []
+
+    def test_only_the_links_line_differs(self, tmp_path: Path) -> None:
+        resolvable = recall_search(
+            self._build(tmp_path / "a", resolvable=True), "retainer client"
+        )
+        unresolvable = recall_search(
+            self._build(tmp_path / "b", resolvable=False), "retainer client"
+        )
+        assert resolvable != unresolvable
+        differing = [
+            (left, right)
+            for left, right in zip(
+                resolvable.splitlines(), unresolvable.splitlines(), strict=True
+            )
+            if left != right
+        ]
+        assert differing
+        assert all(left.startswith("**Links:**") for left, _ in differing)
+
+    def test_a_resolvable_link_target_does_not_enter_the_result_set(
+        self, tmp_path: Path
+    ) -> None:
+        """Resolving a target's NAME must not make that target rank -- the
+        ``must_not_rank`` half of the invariant."""
+        result = recall_search(
+            self._build(tmp_path / "a", resolvable=True), "retainer client"
+        )
+        assert "**Uid:** person-dara" not in result
+        assert "**Uid:** person-milo" not in result
+
+
+# ---------------------------------------------------------------------------
 # Recall provenance/context header (issue athenaeum#325)
 # ---------------------------------------------------------------------------
 
