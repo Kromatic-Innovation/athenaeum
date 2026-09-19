@@ -1,0 +1,24 @@
+{
+  "case_id": "adjacent_action_not_folded_into_role",
+  "content_blocks": [
+    {
+      "type": "thinking"
+    },
+    {
+      "text": "Description: A client-facing dashboard rollout project for Windrow, currently in design review with client sign-off on chart layouts.\n\n# Windrow Dashboard Rollout\n\nWindrow Dashboard Rollout is an active client project involving the design and delivery of a dashboard, including chart layouts and an accompanying user guide.[^1] During a design review, Priya Anand presented revised chart layouts to client stakeholders, who signed off on all three.[^1] A user guide for the dashboard is being updated and was to be proofed by a print vendor ahead of a training session scheduled for the following week.[^1]\n\n## Open Questions\n- [ ] What is the full scope and timeline of the Windrow Dashboard Rollout project beyond the design review and training session?\n- [ ] Who are the client stakeholders involved, and what organization does Priya Anand represent?\n- [ ] What is the identity and role of the print vendor in this project?\n\n[^1]: sessions/2026-04-15.md",
+      "type": "text"
+    }
+  ],
+  "layer": "underdetermined",
+  "model": "claude-sonnet-5",
+  "prompt_hash": "sha256:2bc6a6533eb2e2e4fe5c9c34d9eb4a6e584f1961dc5cacced3648acf692d41c6",
+  "recorded_at": "2026-09-19T04:54:55.699632+00:00",
+  "rederived": null,
+  "response_text": "Description: A client-facing dashboard rollout project for Windrow, currently in design review with client sign-off on chart layouts.\n\n# Windrow Dashboard Rollout\n\nWindrow Dashboard Rollout is an active client project involving the design and delivery of a dashboard, including chart layouts and an accompanying user guide.[^1] During a design review, Priya Anand presented revised chart layouts to client stakeholders, who signed off on all three.[^1] A user guide for the dashboard is being updated and was to be proofed by a print vendor ahead of a training session scheduled for the following week.[^1]\n\n## Open Questions\n- [ ] What is the full scope and timeline of the Windrow Dashboard Rollout project beyond the design review and training session?\n- [ ] Who are the client stakeholders involved, and what organization does Priya Anand represent?\n- [ ] What is the identity and role of the print vendor in this project?\n\n[^1]: sessions/2026-04-15.md",
+  "usage": {
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "input_tokens": 1021,
+    "output_tokens": 335
+  }
+}

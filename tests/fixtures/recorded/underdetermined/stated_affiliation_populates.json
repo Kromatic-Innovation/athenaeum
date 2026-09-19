@@ -1,0 +1,21 @@
+{
+  "case_id": "stated_affiliation_populates",
+  "content_blocks": [
+    {
+      "text": "Description: Bellcroft Onboarding is a client onboarding project that included a data-migration workstream coordinated with Thornhollow's project lead.\n\n# Bellcroft Onboarding\n\nBellcroft Onboarding is a project whose data-migration workstream was led by Renata Solis, a senior consultant at Fernbridge Analytics.[^1] Solis coordinated directly with Thornhollow's project lead throughout the workstream.[^1]\n\n## Open Questions\n- [ ] What is the full scope of the Bellcroft onboarding beyond the data-migration workstream?\n- [ ] What is Thornhollow's role or relationship to the project (e.g., client, vendor, partner)?\n- [ ] What is the current status of the project (active, completed, timeline)?\n\n[^1]: sessions/2026-05-10.md",
+      "type": "text"
+    }
+  ],
+  "layer": "underdetermined",
+  "model": "claude-sonnet-5",
+  "prompt_hash": "sha256:92217706593a0a33038cf1b8692c27c86834fb922d6c029e904a0b0a8e20e444",
+  "recorded_at": "2026-09-19T04:55:01.867747+00:00",
+  "rederived": null,
+  "response_text": "Description: Bellcroft Onboarding is a client onboarding project that included a data-migration workstream coordinated with Thornhollow's project lead.\n\n# Bellcroft Onboarding\n\nBellcroft Onboarding is a project whose data-migration workstream was led by Renata Solis, a senior consultant at Fernbridge Analytics.[^1] Solis coordinated directly with Thornhollow's project lead throughout the workstream.[^1]\n\n## Open Questions\n- [ ] What is the full scope of the Bellcroft onboarding beyond the data-migration workstream?\n- [ ] What is Thornhollow's role or relationship to the project (e.g., client, vendor, partner)?\n- [ ] What is the current status of the project (active, completed, timeline)?\n\n[^1]: sessions/2026-05-10.md",
+  "usage": {
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "input_tokens": 996,
+    "output_tokens": 275
+  }
+}

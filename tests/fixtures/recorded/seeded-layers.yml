@@ -41,6 +41,9 @@ seeded:
   classify:
     date: 2026-08-02
     run: https://github.com/Kromatic-Innovation/athenaeum/actions/runs/30760264305
+  underdetermined:
+    date: 2026-09-19
+    run: https://github.com/Kromatic-Innovation/athenaeum/actions/runs/35422372061
   detector:
     date: 2026-08-02
     run: https://github.com/Kromatic-Innovation/athenaeum/actions/runs/30760264305
