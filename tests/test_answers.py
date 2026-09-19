@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -882,12 +883,16 @@ class TestWritebackHold:
         assert pending_path.read_text() != original
         assert "**Write-back**: held" in pending_path.read_text()
 
-    def test_field_correction_never_writes_back_and_archive_is_stamped(
+    def test_field_correction_unparseable_block_holds_never_writes_back(
         self, pending_path: Path, raw_root: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """AC6: a field-correction block archives like today, never calls
-        ``_writeback_source`` (asserted by patching it), and its archive
-        entry carries a ``**Write-back**: none`` line naming the class."""
+        """Issue athenaeum#1850: a field-correction block whose description
+        carries none of the ``Target:``/``Field:``/``Op:``/``Value:``/
+        ``Correction ID:`` lines the escalation renderer emits cannot be
+        acted on (:func:`athenaeum.corrections.parse_escalated_correction`
+        fails) — it is HELD, exactly like an ordinary detector-raised block
+        whose source never resolves, and its ratified apply never calls
+        ``_writeback_source`` (asserted by patching it)."""
         import athenaeum.answers as answers_mod
 
         def _must_not_be_called(*_args: object, **_kwargs: object) -> int:
@@ -905,17 +910,21 @@ class TestWritebackHold:
             "\n"
             "ratify\n"
         )
-        pending_path.write_text("# Pending Questions\n\n" + block)
+        original = "# Pending Questions\n\n" + block
+        pending_path.write_text(original)
 
         count = ingest_answers(pending_path, raw_root)
-        assert count == 1
-        assert "Correction Co" not in pending_path.read_text()
+        assert count == 0
+        assert "Correction Co" in pending_path.read_text()
+        assert "**Write-back**: held" in pending_path.read_text()
+        assert not (pending_path.parent / "_pending_questions_archive.md").exists()
 
-        archive_text = (
-            pending_path.parent / "_pending_questions_archive.md"
-        ).read_text()
-        assert "**Write-back**: none" in archive_text
-        assert "field-correction" in archive_text
+        # Second run: nothing changed, byte-identical, no second stamp line.
+        held_text = pending_path.read_text()
+        count2 = ingest_answers(pending_path, raw_root)
+        assert count2 == 0
+        assert pending_path.read_text() == held_text
+        assert held_text.count("**Write-back**:") == 1
 
     def test_schema_amendment_never_writes_back_and_archive_is_stamped(
         self, pending_path: Path, raw_root: Path, monkeypatch: pytest.MonkeyPatch
@@ -1024,7 +1033,13 @@ class TestWritebackHold:
     ) -> None:
         """The optional ``report`` accumulator receives files written, held
         count, waived count, and archived-with-no-write-back counts by
-        class — without changing the plain ``int`` return value."""
+        class — without changing the plain ``int`` return value.
+
+        Issue athenaeum#1850: the ``field-correction`` fixture below carries
+        no ``Target:``/``Field:``/... lines, so its ratified-apply parse
+        fails and it now HOLDS (moved off the ``archived_no_writeback``
+        path, which is ``schema-amendment``-only now — see the sibling
+        schema-amendment test for that stamp)."""
         from athenaeum.answers import IngestAnswersReport
 
         held_block = _block(
@@ -1047,9 +1062,689 @@ class TestWritebackHold:
         report = IngestAnswersReport()
         count = ingest_answers(pending_path, raw_root, report=report)
 
-        assert count == 1  # only the field-correction block archived
-        assert report.held == 1
-        assert report.archived_no_writeback == {"field-correction": 1}
+        assert count == 0  # both blocks held, nothing archived
+        assert report.held == 2
+        assert report.archived_no_writeback == {}
+        assert report.corrections_applied == 0
+        assert report.corrections_rejected == 0
+
+
+class TestFieldCorrectionApply:
+    """Issue athenaeum#1850: ``ingest-answers`` applies an operator-ratified
+    field correction to its target page by re-driving
+    :func:`athenaeum.corrections.process_correction_record` in ratified
+    mode, rather than the permanent-hold stamp this class used to carry."""
+
+    @staticmethod
+    def _write_page(wiki: Path, filename: str, meta: dict) -> Path:
+        wiki.mkdir(parents=True, exist_ok=True)
+        page = wiki / filename
+        lines = ["---"]
+        for k, v in meta.items():
+            if isinstance(v, list):
+                lines.append(f"{k}:")
+                for item in v:
+                    lines.append(f"  - {item}")
+            else:
+                lines.append(f"{k}: {v}")
+        lines.append("---")
+        page.write_text(
+            "\n".join(lines) + f"\n\n# {meta.get('name')}\n\nBody.\n", encoding="utf-8"
+        )
+        return page
+
+    @staticmethod
+    def _correction_block(
+        *,
+        entity: str,
+        target: dict,
+        op: str,
+        field: str,
+        value: object,
+        raw_ref: str = "raw/corrections/batch.jsonl",
+        date: str = "2026-06-01",
+        source: str = "api:enrichment-vendor",
+        reason: str = "equal rank, undated — reasoning must settle it",
+        checkbox: str = "[ ]",
+        answer: str = "",
+        schema_version: int = 1,
+    ) -> tuple[str, str]:
+        """Build a synthetic escalation block matching
+        ``librarian._run_correction_phase._escalate_one``'s renderer.
+        Returns ``(block_text, correction_id)``."""
+        from athenaeum.corrections import (
+            compute_correction_id,
+            render_correction_id_marker,
+        )
+
+        cid = compute_correction_id(
+            schema_version=schema_version,
+            target=target,
+            op=op,
+            field_name=field,
+            value=value,
+        )
+        description_lines = [
+            f"Target: {json.dumps(target, sort_keys=True)}",
+            f"Field: {field}",
+            f"Op: {op}",
+            f"Value: {value!r}",
+            f"Source: {source}",
+            f"Reason: {reason}",
+            render_correction_id_marker(cid),
+        ]
+        description = "\n".join(description_lines)
+        block = (
+            f'## [{date}] Entity: "{entity}" (from {raw_ref})\n'
+            f"- {checkbox} Ratify the proposed field correction?\n"
+            "**Conflict type**: field-correction\n"
+            f"**Description**: {description}\n"
+        )
+        if answer:
+            block += f"\n{answer}\n"
+        return block, cid
+
+    @staticmethod
+    def _page_meta(path: Path) -> dict:
+        from athenaeum.models import parse_frontmatter
+
+        meta, _ = parse_frontmatter(path.read_text(encoding="utf-8"))
+        return meta
+
+    def test_ratify_applies_scalar_set(
+        self, pending_path: Path, raw_root: Path
+    ) -> None:
+        wiki = pending_path.parent
+        page = self._write_page(
+            wiki,
+            "person-a.md",
+            {"uid": "person-a", "type": "person", "name": "A", "current_title": "CTO"},
+        )
+        target = {"uid": "person-a"}
+        block, cid = self._correction_block(
+            entity="A",
+            target=target,
+            op="set",
+            field="current_title",
+            value="VP Engineering",
+            checkbox="[x]",
+            answer="ratify",
+        )
+        pending_path.write_text("# Pending Questions\n\n" + block)
+        [pq] = parse_pending_questions(pending_path)
+
+        config = {
+            "librarian": {
+                "corrections": {
+                    "fields": {"current_title": {"shape": "scalar", "writers": []}}
+                }
+            }
+        }
+        count = ingest_answers(pending_path, raw_root, config=config)
+        assert count == 1
+
+        meta = self._page_meta(page)
+        assert meta["current_title"] == "VP Engineering"
+        assert meta["field_sources"]["current_title"] == f"user:pending-question:{pq.id}"
+
+        archive_text = (
+            pending_path.parent / "_pending_questions_archive.md"
+        ).read_text()
+        assert "**Write-back**: applied" in archive_text
+        assert cid in archive_text
+
+    def test_ratify_applies_list_add_without_calling_decide_verdict(
+        self, pending_path: Path, raw_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import athenaeum.corrections as corrections_mod
+
+        def _must_not_be_called(**_kwargs: object) -> None:
+            raise AssertionError("decide_verdict must not be called in ratified mode")
+
+        monkeypatch.setattr(corrections_mod, "decide_verdict", _must_not_be_called)
+
+        wiki = pending_path.parent
+        page = self._write_page(
+            wiki,
+            "person-b.md",
+            {"uid": "person-b", "type": "person", "name": "B", "tags": ["alpha"]},
+        )
+        target = {"uid": "person-b"}
+        block, _cid = self._correction_block(
+            entity="B",
+            target=target,
+            op="add",
+            field="tags",
+            value="beta",
+            checkbox="[x]",
+            answer="ratify",
+        )
+        pending_path.write_text("# Pending Questions\n\n" + block)
+
+        config = {
+            "librarian": {
+                "corrections": {"fields": {"tags": {"shape": "list", "writers": []}}}
+            }
+        }
+        count = ingest_answers(pending_path, raw_root, config=config)
+        assert count == 1
+
+        meta = self._page_meta(page)
+        assert meta["tags"] == ["alpha", "beta"]
+
+    def test_ratify_applies_list_remove_without_calling_decide_verdict(
+        self, pending_path: Path, raw_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import athenaeum.corrections as corrections_mod
+
+        def _must_not_be_called(**_kwargs: object) -> None:
+            raise AssertionError("decide_verdict must not be called in ratified mode")
+
+        monkeypatch.setattr(corrections_mod, "decide_verdict", _must_not_be_called)
+
+        wiki = pending_path.parent
+        page = self._write_page(
+            wiki,
+            "person-c.md",
+            {
+                "uid": "person-c",
+                "type": "person",
+                "name": "C",
+                "tags": ["alpha", "beta"],
+                "field_sources": {"tags": [{"value": "beta", "source": "api:apollo"}]},
+            },
+        )
+        target = {"uid": "person-c"}
+        block, _cid = self._correction_block(
+            entity="C",
+            target=target,
+            op="remove",
+            field="tags",
+            value="beta",
+            checkbox="[x]",
+            answer="ratify",
+        )
+        pending_path.write_text("# Pending Questions\n\n" + block)
+
+        config = {
+            "librarian": {
+                "corrections": {"fields": {"tags": {"shape": "list", "writers": []}}}
+            }
+        }
+        count = ingest_answers(pending_path, raw_root, config=config)
+        assert count == 1
+
+        meta = self._page_meta(page)
+        assert meta["tags"] == ["alpha"]
+
+    def test_reject_archives_with_no_write(
+        self, pending_path: Path, raw_root: Path
+    ) -> None:
+        wiki = pending_path.parent
+        page = self._write_page(
+            wiki,
+            "person-d.md",
+            {"uid": "person-d", "type": "person", "name": "D", "current_title": "CTO"},
+        )
+        before = page.read_text()
+        target = {"uid": "person-d"}
+        block, cid = self._correction_block(
+            entity="D",
+            target=target,
+            op="set",
+            field="current_title",
+            value="VP Engineering",
+            checkbox="[x]",
+            answer="reject",
+        )
+        pending_path.write_text("# Pending Questions\n\n" + block)
+
+        config = {
+            "librarian": {
+                "corrections": {
+                    "fields": {"current_title": {"shape": "scalar", "writers": []}}
+                }
+            }
+        }
+        count = ingest_answers(pending_path, raw_root, config=config)
+        assert count == 1
+        assert page.read_text() == before
+
+        archive_text = (
+            pending_path.parent / "_pending_questions_archive.md"
+        ).read_text()
+        assert "**Write-back**: rejected" in archive_text
+        assert cid in archive_text
+
+    def test_held_unrecognized_answer_token(
+        self, pending_path: Path, raw_root: Path
+    ) -> None:
+        wiki = pending_path.parent
+        self._write_page(
+            wiki, "person-e.md", {"uid": "person-e", "type": "person", "name": "E"}
+        )
+        target = {"uid": "person-e"}
+        block, _cid = self._correction_block(
+            entity="E",
+            target=target,
+            op="set",
+            field="current_title",
+            value="VP Engineering",
+            checkbox="[x]",
+            answer="maybe",
+        )
+        pending_path.write_text("# Pending Questions\n\n" + block)
+
+        config = {
+            "librarian": {
+                "corrections": {
+                    "fields": {"current_title": {"shape": "scalar", "writers": []}}
+                }
+            }
+        }
+        count = ingest_answers(pending_path, raw_root, config=config)
+        assert count == 0
+        assert "**Write-back**: held" in pending_path.read_text()
+        assert not (
+            pending_path.parent / "_pending_questions_archive.md"
+        ).exists()
+
+    def test_held_empty_answer_body(self, pending_path: Path, raw_root: Path) -> None:
+        wiki = pending_path.parent
+        self._write_page(
+            wiki, "person-e2.md", {"uid": "person-e2", "type": "person", "name": "E2"}
+        )
+        target = {"uid": "person-e2"}
+        block, _cid = self._correction_block(
+            entity="E2",
+            target=target,
+            op="set",
+            field="current_title",
+            value="VP Engineering",
+            checkbox="[x]",
+            answer="",
+        )
+        pending_path.write_text("# Pending Questions\n\n" + block)
+
+        config = {
+            "librarian": {
+                "corrections": {
+                    "fields": {"current_title": {"shape": "scalar", "writers": []}}
+                }
+            }
+        }
+        count = ingest_answers(pending_path, raw_root, config=config)
+        assert count == 0
+        assert "**Write-back**: held" in pending_path.read_text()
+        assert not (
+            pending_path.parent / "_pending_questions_archive.md"
+        ).exists()
+
+    def test_held_block_missing_lines(self, pending_path: Path, raw_root: Path) -> None:
+        block = (
+            '## [2026-06-01] Entity: "F" (from raw/corrections/batch.jsonl)\n'
+            "- [x] Ratify the proposed field correction?\n"
+            "**Conflict type**: field-correction\n"
+            "**Description**: Target: {\"uid\": \"person-f\"}\nField: current_title\n"
+            "\nratify\n"
+        )
+        pending_path.write_text("# Pending Questions\n\n" + block)
+        count = ingest_answers(pending_path, raw_root)
+        assert count == 0
+        assert "**Write-back**: held" in pending_path.read_text()
+
+    def test_held_bad_value_literal(self, pending_path: Path, raw_root: Path) -> None:
+        wiki = pending_path.parent
+        self._write_page(
+            wiki, "person-g.md", {"uid": "person-g", "type": "person", "name": "G"}
+        )
+        target = {"uid": "person-g"}
+        block, cid = self._correction_block(
+            entity="G",
+            target=target,
+            op="set",
+            field="current_title",
+            value="VP Engineering",
+            checkbox="[x]",
+            answer="ratify",
+        )
+        # Corrupt the rendered Value: line into something ast.literal_eval rejects,
+        # while leaving the (now-mismatched) Correction ID line untouched —
+        # this also exercises the id-mismatch branch, since the corrupted
+        # value no longer hashes to cid.
+        block = block.replace("Value: 'VP Engineering'", "Value: not(a(literal", 1)
+        pending_path.write_text("# Pending Questions\n\n" + block)
+        count = ingest_answers(pending_path, raw_root)
+        assert count == 0
+        assert "**Write-back**: held" in pending_path.read_text()
+
+    def test_held_correction_id_mismatch(
+        self, pending_path: Path, raw_root: Path
+    ) -> None:
+        wiki = pending_path.parent
+        self._write_page(
+            wiki, "person-h.md", {"uid": "person-h", "type": "person", "name": "H"}
+        )
+        target = {"uid": "person-h"}
+        block, cid = self._correction_block(
+            entity="H",
+            target=target,
+            op="set",
+            field="current_title",
+            value="VP Engineering",
+            checkbox="[x]",
+            answer="ratify",
+        )
+        block = block.replace(cid, "0" * 16, 1)
+        pending_path.write_text("# Pending Questions\n\n" + block)
+        count = ingest_answers(pending_path, raw_root)
+        assert count == 0
+        assert "**Write-back**: held" in pending_path.read_text()
+
+    def test_held_target_does_not_resolve(
+        self, pending_path: Path, raw_root: Path
+    ) -> None:
+        # A handle-shaped target with zero registry/index matches resolves
+        # to "creatable" for an ORDINARY correction (issue athenaeum#865) —
+        # ratified mode must reject it instead (design doc §6.4: a ratified
+        # correction never creates an entity), which is the "target no
+        # longer resolves to an existing page" AC case.
+        target = {"handle": {"apollo_organization_id": "org-nope"}, "type": "organization"}
+        block, _cid = self._correction_block(
+            entity="Nope",
+            target=target,
+            op="set",
+            field="current_title",
+            value="VP Engineering",
+            checkbox="[x]",
+            answer="ratify",
+        )
+        pending_path.write_text("# Pending Questions\n\n" + block)
+        config = {
+            "librarian": {
+                "corrections": {
+                    "fields": {"current_title": {"shape": "scalar", "writers": []}}
+                }
+            }
+        }
+        count = ingest_answers(pending_path, raw_root, config=config)
+        assert count == 0
+        held_text = pending_path.read_text()
+        assert "**Write-back**: held" in held_text
+        assert "no longer resolves to an existing page" in held_text
+
+    def test_held_field_not_on_allowlist(
+        self, pending_path: Path, raw_root: Path
+    ) -> None:
+        wiki = pending_path.parent
+        self._write_page(
+            wiki, "person-i.md", {"uid": "person-i", "type": "person", "name": "I"}
+        )
+        target = {"uid": "person-i"}
+        block, _cid = self._correction_block(
+            entity="I",
+            target=target,
+            op="set",
+            field="current_title",
+            value="VP Engineering",
+            checkbox="[x]",
+            answer="ratify",
+        )
+        pending_path.write_text("# Pending Questions\n\n" + block)
+        # No config at all -> resolve_corrections_fields({}) is empty ->
+        # "current_title" is not on the allowlist.
+        count = ingest_answers(pending_path, raw_root, config={})
+        assert count == 0
+        assert "**Write-back**: held" in pending_path.read_text()
+
+    def test_held_second_run_byte_identical_no_duplicate_stamp(
+        self, pending_path: Path, raw_root: Path
+    ) -> None:
+        target = {"uid": "person-nope"}
+        block, _cid = self._correction_block(
+            entity="Nope",
+            target=target,
+            op="set",
+            field="current_title",
+            value="VP Engineering",
+            checkbox="[x]",
+            answer="ratify",
+        )
+        pending_path.write_text("# Pending Questions\n\n" + block)
+        config = {
+            "librarian": {
+                "corrections": {
+                    "fields": {"current_title": {"shape": "scalar", "writers": []}}
+                }
+            }
+        }
+        ingest_answers(pending_path, raw_root, config=config)
+        held_text = pending_path.read_text()
+        assert held_text.count("**Write-back**:") == 1
+
+        count2 = ingest_answers(pending_path, raw_root, config=config)
+        assert count2 == 0
+        assert pending_path.read_text() == held_text
+
+    def test_held_resolves_on_later_run_when_target_page_restored(
+        self, pending_path: Path, raw_root: Path
+    ) -> None:
+        wiki = pending_path.parent
+        target = {"uid": "person-j"}
+        block, _cid = self._correction_block(
+            entity="J",
+            target=target,
+            op="set",
+            field="current_title",
+            value="VP Engineering",
+            checkbox="[x]",
+            answer="ratify",
+        )
+        pending_path.write_text("# Pending Questions\n\n" + block)
+        config = {
+            "librarian": {
+                "corrections": {
+                    "fields": {"current_title": {"shape": "scalar", "writers": []}}
+                }
+            }
+        }
+        count1 = ingest_answers(pending_path, raw_root, config=config)
+        assert count1 == 0
+        assert "**Write-back**: held" in pending_path.read_text()
+
+        # The blocker clears: the target page shows up.
+        page = self._write_page(
+            wiki, "person-j.md", {"uid": "person-j", "type": "person", "name": "J"}
+        )
+        count2 = ingest_answers(pending_path, raw_root, config=config)
+        assert count2 == 1
+        assert "**Write-back**: held" not in pending_path.read_text()
+
+        archive_text = (
+            pending_path.parent / "_pending_questions_archive.md"
+        ).read_text()
+        assert "**Write-back**: applied" in archive_text
+        meta = self._page_meta(page)
+        assert meta["current_title"] == "VP Engineering"
+
+    def test_held_edit_to_reject_archives_with_no_write(
+        self, pending_path: Path, raw_root: Path
+    ) -> None:
+        wiki = pending_path.parent
+        page = self._write_page(
+            wiki, "person-k.md", {"uid": "person-k", "type": "person", "name": "K"}
+        )
+        before = page.read_text()
+        target = {"uid": "person-k"}
+        block, _cid = self._correction_block(
+            entity="K",
+            target=target,
+            op="set",
+            field="current_title",
+            value="VP Engineering",
+            checkbox="[x]",
+            answer="maybe",
+        )
+        pending_path.write_text("# Pending Questions\n\n" + block)
+        config = {
+            "librarian": {
+                "corrections": {
+                    "fields": {"current_title": {"shape": "scalar", "writers": []}}
+                }
+            }
+        }
+        ingest_answers(pending_path, raw_root, config=config)
+        assert "**Write-back**: held" in pending_path.read_text()
+
+        edited = pending_path.read_text().replace("maybe", "reject", 1)
+        pending_path.write_text(edited)
+        count2 = ingest_answers(pending_path, raw_root, config=config)
+        assert count2 == 1
+        assert page.read_text() == before
+
+        archive_text = (
+            pending_path.parent / "_pending_questions_archive.md"
+        ).read_text()
+        assert "**Write-back**: rejected" in archive_text
+
+    def test_held_edit_waived_archives_without_write(
+        self, pending_path: Path, raw_root: Path
+    ) -> None:
+        target = {"uid": "person-nope-2"}
+        block, _cid = self._correction_block(
+            entity="Nope2",
+            target=target,
+            op="set",
+            field="current_title",
+            value="VP Engineering",
+            checkbox="[x]",
+            answer="ratify",
+        )
+        pending_path.write_text("# Pending Questions\n\n" + block)
+        config = {
+            "librarian": {
+                "corrections": {
+                    "fields": {"current_title": {"shape": "scalar", "writers": []}}
+                }
+            }
+        }
+        ingest_answers(pending_path, raw_root, config=config)
+        waived_text = pending_path.read_text().replace(
+            "**Write-back**: held", "**Write-back**: waived", 1
+        )
+        pending_path.write_text(waived_text)
+
+        count2 = ingest_answers(pending_path, raw_root, config=config)
+        assert count2 == 1
+        archive_text = (
+            pending_path.parent / "_pending_questions_archive.md"
+        ).read_text()
+        assert "**Write-back**: waived" in archive_text
+
+    def test_second_ratify_is_noop(
+        self, pending_path: Path, raw_root: Path
+    ) -> None:
+        wiki = pending_path.parent
+        page = self._write_page(
+            wiki,
+            "person-l.md",
+            {"uid": "person-l", "type": "person", "name": "L", "current_title": "CTO"},
+        )
+        target = {"uid": "person-l"}
+        block, _cid = self._correction_block(
+            entity="L",
+            target=target,
+            op="set",
+            field="current_title",
+            value="VP Engineering",
+            checkbox="[x]",
+            answer="ratify",
+        )
+        pending_path.write_text("# Pending Questions\n\n" + block)
+        config = {
+            "librarian": {
+                "corrections": {
+                    "fields": {"current_title": {"shape": "scalar", "writers": []}}
+                }
+            }
+        }
+        ingest_answers(pending_path, raw_root, config=config)
+        page_after_first = page.read_text()
+
+        # A second, separately-answered block proposing the SAME already-
+        # applied value.
+        block2, _cid2 = self._correction_block(
+            entity="L",
+            target=target,
+            op="set",
+            field="current_title",
+            value="VP Engineering",
+            checkbox="[x]",
+            answer="ratify",
+            raw_ref="raw/corrections/batch2.jsonl",
+        )
+        pending_path.write_text("# Pending Questions\n\n" + block2)
+        count2 = ingest_answers(pending_path, raw_root, config=config)
+        assert count2 == 1
+        assert page.read_text() == page_after_first
+
+        archive_text = (
+            pending_path.parent / "_pending_questions_archive.md"
+        ).read_text()
+        assert "**Write-back**: applied — noop" in archive_text
+
+    def test_never_calls_writeback_source_or_freetext_proposer(
+        self,
+        pending_path: Path,
+        raw_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import athenaeum.answers as answers_mod
+        import athenaeum.resolutions as resolutions_mod
+
+        def _must_not_be_called(*_args: object, **_kwargs: object) -> int:
+            raise AssertionError("must not be called for a field-correction block")
+
+        monkeypatch.setattr(answers_mod, "_writeback_source", _must_not_be_called)
+        monkeypatch.setattr(
+            resolutions_mod, "propose_freetext_source_edits", _must_not_be_called
+        )
+
+        class _RaisingMessages:
+            def create(self, *_args: object, **_kwargs: object) -> object:
+                raise AssertionError("must never reach the LLM client")
+
+        class _FakeClient:
+            messages = _RaisingMessages()
+
+        wiki = pending_path.parent
+        self._write_page(
+            wiki,
+            "person-m.md",
+            {"uid": "person-m", "type": "person", "name": "M", "current_title": "CTO"},
+        )
+        target = {"uid": "person-m"}
+        block, _cid = self._correction_block(
+            entity="M",
+            target=target,
+            op="set",
+            field="current_title",
+            value="VP Engineering",
+            checkbox="[x]",
+            answer="ratify",
+        )
+        pending_path.write_text("# Pending Questions\n\n" + block)
+        config = {
+            "librarian": {
+                "corrections": {
+                    "fields": {"current_title": {"shape": "scalar", "writers": []}}
+                }
+            }
+        }
+        count = ingest_answers(
+            pending_path, raw_root, client=_FakeClient(), config=config
+        )
+        assert count == 1
 
 
 class TestSourceWriteBack:

@@ -736,6 +736,91 @@ class TestEscalationDedup:
         assert "1 suppressed" in summary_lines[0]
 
 
+class TestRatifiedApplyRoundTrip:
+    def test_ratified_answer_applies_a_real_escalated_correction(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue athenaeum#1850: binds `answers.parse_escalated_correction`
+        to the RENDERER `_escalate_one` actually writes, not a hand-typed
+        copy of it. Same undated-tie setup as
+        `TestEscalationDedup.test_already_open_correction_id_not_double_filed`
+        — but here the block is driven to a real `escalated` disposition by
+        `_run_correction_phase` fresh (no pre-seeded pending file), then
+        flipped to `- [x]` with `ratify` and fed to `ingest_answers` with
+        the SAME config the correction phase used. Without that config,
+        `resolve_corrections_fields` returns `{}` and the block holds
+        instead of applying."""
+        from athenaeum.answers import ingest_answers
+        from athenaeum.models import parse_frontmatter
+
+        wiki = tmp_path / "wiki"
+        wiki.mkdir(parents=True)
+        page = _write_page(wiki, "p.md", {"uid": "person-a", "type": "person", "name": "A"})
+        page.write_text(
+            page.read_text().replace(
+                "name: A",
+                "name: A\ncurrent_title: CTO\nfield_sources:\n  current_title: 'api:apollo'",
+            )
+        )
+
+        raw = tmp_path / "raw" / "enrichment-service"
+        raw.mkdir(parents=True)
+        (raw / "20260806T030000Z-1a2b3c4d.jsonl").write_text(
+            _batch(
+                {
+                    "record": "correction",
+                    "target": {"uid": "person-a"},
+                    "op": "set",
+                    "field": "current_title",
+                    "value": "VP Engineering",
+                    "source": "api:enrichment-vendor",
+                    # Equal rank (api:) against the api:apollo incumbent, and
+                    # the page carries no `updated:` — an undated tie, which
+                    # §6.2 raises a tier for rather than settling.
+                    "observed_at": "2026-08-06T05:58:40Z",
+                },
+                submitter="enrichment-service",
+            )
+        )
+        config = {
+            "librarian": {
+                "corrections": {
+                    "fields": {
+                        "current_title": {
+                            "shape": "scalar",
+                            "writers": ["enrichment-service"],
+                        }
+                    }
+                }
+            }
+        }
+        ctx = _make_ctx(tmp_path, config)
+        _run_correction_phase(ctx)
+
+        pending = wiki / "_pending_questions.md"
+        pending_text = pending.read_text()
+        assert "field-correction" in pending_text
+        assert "Target:" in pending_text
+        assert "Correction ID:" in pending_text
+
+        # Flip the ONE escalated block to answered/ratify.
+        answered = pending_text.replace("- [ ]", "- [x]", 1) + "\nratify\n"
+        pending.write_text(answered)
+
+        count = ingest_answers(pending, tmp_path / "raw", config=config)
+        assert count == 1
+        assert 'Entity: "A"' not in pending.read_text()
+
+        updated_meta, _ = parse_frontmatter(page.read_text(encoding="utf-8"))
+        assert updated_meta["current_title"] == "VP Engineering"
+        assert updated_meta["field_sources"]["current_title"].startswith(
+            "user:pending-question:"
+        )
+
+        archive_text = (wiki / "_pending_questions_archive.md").read_text()
+        assert "**Write-back**: applied" in archive_text
+
+
 class TestSchemaAmendmentProposal:
     def test_propose_amendment_reaches_pending_questions(self, tmp_path: Path) -> None:
         """§7.2/§5.4 regression: `held-schema-proposal` is "a schema

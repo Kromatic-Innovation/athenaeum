@@ -68,9 +68,9 @@ import logging
 import re
 import sys
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from athenaeum.models import TokenUsage
@@ -680,6 +680,17 @@ _HISTORICAL_VERDICTS: frozenset[str] = frozenset(
     ("archive", "deprecate", "supersede", "supersedes")
 )
 
+# Issue athenaeum#1850: the closed ratify/reject answer grammar for a
+# field-correction question — deliberately NOT added to _VERDICT_TOKENS,
+# which drives _writeback_source's enact/annotate machinery for the
+# unrelated "source" write-back class. See _parse_correction_answer.
+_RATIFY_TOKENS: frozenset[str] = frozenset(
+    ("ratify", "ratified", "approve", "approved", "accept", "apply", "yes")
+)
+_REJECT_TOKENS: frozenset[str] = frozenset(
+    ("reject", "rejected", "decline", "deny", "no")
+)
+
 # ``**Member paths**: a, b`` — explicit source paths carried on the block.
 _MEMBER_PATHS_RE = re.compile(
     r"^\s*\*\*Member paths\*\*:\s*(?P<payload>.+)$", re.MULTILINE
@@ -865,6 +876,33 @@ def _writeback_class(pq: PendingQuestion) -> str:
     return "source"
 
 
+def _parse_correction_answer(pq: PendingQuestion) -> str | None:
+    """Classify ``pq``'s answer as the closed ratify/reject token (issue
+    athenaeum#1850), or ``None`` when it is neither.
+
+    Takes the first non-blank line of :func:`_answer_body` (already strips
+    the ``**Write-back**:`` stamp line, ``**Member paths**:``, ``Members
+    involved:``, ``Passage N:``), splits off the first whitespace/colon
+    -delimited token, lowercases it, and strips a single trailing ``.``/``!``.
+    ``None`` covers an empty answer body and any unrecognized token — both
+    mean "hold", never "guess"; the caller
+    (:func:`_apply_field_correction`) never falls back to treating an
+    unrecognized token as either verdict.
+    """
+    body = _answer_body(pq)
+    for line in body.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        token = stripped.split(":", 1)[0].split()[0].strip().lower().rstrip(".!")
+        if token in _RATIFY_TOKENS:
+            return "ratify"
+        if token in _REJECT_TOKENS:
+            return "reject"
+        return None
+    return None
+
+
 def _writeback_source(
     pq: PendingQuestion,
     roots: list[Path],
@@ -1036,6 +1074,98 @@ def _writeback_source(
         return 0
 
 
+# ---------------------------------------------------------------------------
+# Field-correction ratified apply (issue athenaeum#1850)
+# ---------------------------------------------------------------------------
+#
+# An answered field-correction question is NOT a "source" write-back — its
+# `raw_ref` points at a `.jsonl` correction batch already retired by
+# `corrections.retire_batch` (docs/design/field-corrections.md §5.4), so there is no
+# source file left to edit. The block itself carries everything a
+# deterministic apply needs, on its `**Description**:` continuation lines
+# (`corrections.parse_escalated_correction`). Ratifying re-drives
+# `corrections.process_correction_record` in its ratified mode rather than
+# adding a second writer.
+
+
+def _apply_field_correction(
+    pq: PendingQuestion,
+    *,
+    wiki_root: Path,
+    knowledge_root: Path,
+    config: "dict | None",
+) -> tuple[str, str]:
+    """Ratify or reject one answered field-correction block.
+
+    Returns ``(outcome, detail)`` where ``outcome`` is ``"applied"``,
+    ``"rejected"`` or ``"held"``. Never calls :func:`_writeback_source` or
+    :mod:`athenaeum.resolutions`'s free-text proposer — this branch re-drives
+    :func:`athenaeum.corrections.process_correction_record` instead of the
+    source-annotation/enact machinery those serve, and never reaches the LLM.
+
+    An unrecognized/empty answer, or a block that does not parse as a
+    :class:`~athenaeum.corrections.EscalatedCorrection`
+    (:func:`athenaeum.corrections.parse_escalated_correction`), always
+    returns ``"held"`` — including for a ``reject`` answer, because a block
+    that cannot be trusted to BE the correction it claims to be cannot be
+    trusted to be safely dismissed either. A well-formed ``reject`` needs no
+    further validation: nothing is written either way.
+    """
+    from athenaeum import corrections
+    from athenaeum.models import EntityIndex
+
+    answer_token = _parse_correction_answer(pq)
+    if answer_token is None:
+        return "held", "answer is not a recognized ratify/reject token"
+
+    parsed = corrections.parse_escalated_correction(pq.description)
+    if isinstance(parsed, str):
+        return "held", parsed
+
+    if answer_token == "reject":
+        return "rejected", f"operator rejected correction {parsed.correction_id}; no write"
+
+    # answer_token == "ratify"
+    index = EntityIndex(wiki_root)
+    registry_entities = corrections.load_registry(knowledge_root)
+    # Issue athenaeum#1850: the ratified write is attributed to the OPERATOR,
+    # never to the original proposer's `Source:` text (kept only as
+    # provenance prose in the archive stamp below) — this is the exact
+    # in-repo minting pattern `repair.py:611` uses for a user-stated source.
+    # It parses to type=user (rank 1, precedence.py), and is what lets
+    # `process_correction_record`'s ratified mode skip §6.2 entirely: the
+    # operator IS the highest-precedence source, so there is nothing left
+    # to arbitrate.
+    ratified_source = f"user:pending-question:{pq.id}"
+    raw_record = {
+        "record": "correction",
+        "target": parsed.target,
+        "op": parsed.op,
+        "field": parsed.field,
+        "value": parsed.value,
+        "source": ratified_source,
+        "observed_at": date.today().isoformat(),
+    }
+    envelope: dict[str, Any] = {
+        "schema_version": parsed.schema_version,
+        "submitter": None,
+        "defaults": {},
+    }
+    result = corrections.process_correction_record(
+        raw_record,
+        envelope,
+        index=index,
+        knowledge_root=knowledge_root,
+        registry_entities=registry_entities,
+        config=config,
+        ratified_source=ratified_source,
+    )
+    if result.disposition in ("applied", "routed-elsewhere", "recorded-as-prose", "noop"):
+        page_name = result.entity_path.name if result.entity_path is not None else "?"
+        return "applied", f"{result.disposition} to {page_name} ({result.reason})"
+    return "held", result.reason
+
+
 @dataclass
 class IngestAnswersReport:
     """Optional accumulator threaded through :func:`ingest_answers` (issue athenaeum#1804).
@@ -1058,13 +1188,25 @@ class IngestAnswersReport:
         archived_no_writeback: Blocks archived this run whose class never
             calls :func:`_writeback_source` by design (see
             :data:`_NO_SOURCE_WRITEBACK_CONFLICT_TYPES`), keyed by class
-            name (``"field-correction"`` / ``"schema-amendment"``).
+            name. Issue athenaeum#1850: this is ``"schema-amendment"`` ONLY
+            now — a field-correction's ratified apply counts into
+            ``corrections_applied``/``corrections_rejected``/``held``
+            instead, since it now writes back (to its target page, not a
+            "source" file).
+        corrections_applied: Issue athenaeum#1850 — field-correction blocks
+            archived this run whose ratified apply reached the target page
+            (dispositions ``applied``/``routed-elsewhere``/
+            ``recorded-as-prose``/``noop``).
+        corrections_rejected: Issue athenaeum#1850 — field-correction blocks
+            archived this run whose answer was ``reject`` (no write).
     """
 
     files_written: int = 0
     held: int = 0
     waived: int = 0
     archived_no_writeback: dict[str, int] = field(default_factory=dict)
+    corrections_applied: int = 0
+    corrections_rejected: int = 0
 
 
 def ingest_answers(
@@ -1229,17 +1371,36 @@ def ingest_answers(
 
         will_hold = False
         hold_refs: list[str] = []
+        # Issue athenaeum#1850: (outcome, detail) from the ratified-apply
+        # attempt, computed here (before the provenance write below) so a
+        # field-correction block's hold/apply/reject status is known before
+        # deciding whether this run needs to write anything at all — the
+        # same early-evaluation shape the "source" class already uses for
+        # its own hold_refs resolution check just above.
+        field_correction_outcome: tuple[str, str] | None = None
         if writeback_class == "source" and existing_state != "waived":
             hold_body = _answer_body(pq)
             hold_refs = _block_source_refs(pq)
             if hold_body and not _resolve_source_files(hold_refs, source_roots):
                 will_hold = True
+        elif writeback_class == "field-correction" and existing_state != "waived":
+            field_correction_outcome = _apply_field_correction(
+                pq,
+                wiki_root=pending_path.parent,
+                knowledge_root=knowledge_root,
+                config=config,
+            )
+            if field_correction_outcome[0] == "held":
+                will_hold = True
 
         if will_hold and existing_state == "held":
-            # Still unresolved, nothing changed this run: no provenance
-            # rewrite, no fingerprint, no archive — leave the block
-            # byte-identical (AC2's "second run ... primary file is byte-
-            # identical").
+            # Still unresolved/unactionable, nothing changed this run: no
+            # provenance rewrite, no fingerprint, no archive — leave the
+            # block byte-identical (AC2's "second run ... primary file is
+            # byte-identical"; athenaeum#1850 reuses this exact machinery for a
+            # field-correction block that still cannot act, including
+            # keeping the FIRST held line even when this run's reason text
+            # differs from what produced it).
             unanswered.append(pq)
             if report is not None:
                 report.held += 1
@@ -1324,14 +1485,32 @@ def ingest_answers(
             else:
                 atomic_write_text(candidate, _render_answer_raw_file(pq, iso_ts))
 
-        # Issue athenaeum#1804: field-correction / schema-amendment blocks never
-        # call _writeback_source — the batch is retired by git rm once the
-        # question is recorded (see _NO_SOURCE_WRITEBACK_CONFLICT_TYPES); a
-        # waived block already had its (non-)write-back decided by the human
-        # editing held -> waived, so it is not re-attempted either.
+        # Issue athenaeum#1804/#1850: schema-amendment blocks never call
+        # _writeback_source — the batch is retired by git rm once the
+        # question is recorded (see _NO_SOURCE_WRITEBACK_CONFLICT_TYPES). A
+        # field-correction block ALSO never calls _writeback_source (same
+        # retired-batch reason) but, unlike schema-amendment, it now has its
+        # own ratified-apply write path (field_correction_outcome, computed
+        # above) instead of a permanent "none" stamp. A waived block already
+        # had its (non-)write-back decided by the human editing held ->
+        # waived, so it is not re-attempted either.
         skip_writeback = False
         archive_status_line: str | None = None
-        if writeback_class in _NO_SOURCE_WRITEBACK_CONFLICT_TYPES:
+        if writeback_class == "field-correction":
+            skip_writeback = True
+            if existing_state == "waived":
+                if report is not None:
+                    report.waived += 1
+            elif not will_hold:
+                assert field_correction_outcome is not None
+                outcome, detail = field_correction_outcome
+                archive_status_line = f"**Write-back**: {outcome} — {detail}"
+                if report is not None:
+                    if outcome == "applied":
+                        report.corrections_applied += 1
+                    else:
+                        report.corrections_rejected += 1
+        elif writeback_class == "schema-amendment":
             skip_writeback = True
             archive_status_line = (
                 f"**Write-back**: none — {writeback_class} blocks never write "
@@ -1350,11 +1529,20 @@ def ingest_answers(
         if will_hold:
             # First transition into hold this run (existing_state is None —
             # the still-held/still-unresolved case returned above).
-            held_line = (
-                "**Write-back**: held — no source ref resolved ("
-                + ", ".join(r for r in hold_refs if r.strip())
-                + f") as of {iso_ts}; restore the source or change \"held\" to "
-                '"waived" to archive without a write'
+            if writeback_class == "field-correction":
+                assert field_correction_outcome is not None
+                _, hold_detail = field_correction_outcome
+                held_line = (
+                    f"**Write-back**: held — {hold_detail} as of {iso_ts}; answer "
+                    '"ratify" or "reject", or change "held" to "waived" to '
+                    "archive without a write"
+                )
+            else:
+                held_line = (
+                    "**Write-back**: held — no source ref resolved ("
+                    + ", ".join(r for r in hold_refs if r.strip())
+                    + f") as of {iso_ts}; restore the source or change \"held\" to "
+                    '"waived" to archive without a write'
             )
             new_raw_block = pq.raw_block.rstrip("\n") + "\n\n" + held_line + "\n"
             unanswered.append(replace(pq, raw_block=new_raw_block))
