@@ -813,6 +813,56 @@ class TestDurableWritesNoValidUntil:
         assert "valid_until" not in rendered
         assert all("valid_until" not in src for src in entry.sources)
 
+    def test_durable_member_declaring_its_own_valid_until_still_gets_none(
+        self, tmp_path: Path
+    ) -> None:
+        """AC3 beats AC4 when the two collide on a durable member.
+
+        A member carrying BOTH ``bucket: durable`` and its own
+        ``valid_until:`` is the one case where "a declared bound is used
+        verbatim" and "durable writes no bound at any layer" point in
+        opposite directions. Durable wins at the PAGE layer: inheriting the
+        declared bound would hand a durable page an expiry and make it
+        sweepable, which is precisely what AC3 forbids. AC4's own subject --
+        the per-source record -- is untouched either way and is asserted by
+        ``TestDeclaredValidUntilIsNeverOverridden`` below; the two criteria
+        do not actually conflict, they apply at the layer each one names.
+
+        The ``daily`` twin is a positive control: it proves the declared
+        bound IS otherwise inherited, so the durable assertion is
+        discriminating rather than trivially true.
+        """
+        durable = _write_member(
+            tmp_path,
+            "20260510T120000Z-deadbeef.md",
+            bucket="durable",
+            valid_until="2027-06-30",
+        )
+        entry = merge_cluster_row(
+            _row("c-1840-h2", durable), extra_roots=[tmp_path], am_by_path={}
+        )
+        assert entry is not None
+        assert entry.bucket == "durable"
+        # The page acquires no bound at all -- neither declared nor derived.
+        assert entry.valid_until == ""
+        assert "valid_until" not in render_merged_entry(entry)
+        assert "2027-06-30" not in render_merged_entry(entry)
+
+        # Positive control: the identical member under ``daily`` DOES keep
+        # its declared bound, so the suppression above is the durable gate
+        # firing and not an inert assertion.
+        daily = _write_member(
+            tmp_path,
+            "20260510T120000Z-deadbeee.md",
+            bucket="daily",
+            valid_until="2027-06-30",
+        )
+        control = merge_cluster_row(
+            _row("c-1840-h3", daily), extra_roots=[tmp_path], am_by_path={}
+        )
+        assert control is not None
+        assert control.valid_until == "2027-06-30"
+
     def test_unbucketed_page_has_no_valid_until(self, tmp_path: Path) -> None:
         member = _write_member(tmp_path, "20260510T120000Z-deadbeef.md")
         entry = merge_cluster_row(

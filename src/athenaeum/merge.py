@@ -1152,11 +1152,19 @@ def _derive_page_valid_until(
     """
     if am is None or not am.bucket:
         return ""
-    if am.valid_until:
-        return am.valid_until
+    # The durable gate comes FIRST, before the only-fill-never-override branch
+    # below: a member carrying BOTH ``bucket: durable`` and its own
+    # ``valid_until:`` must still compile to a page with no bound at all.
+    # "No ``valid_until`` at any layer" is a property of the DURABLE bucket,
+    # not merely of the derivation — so inheriting a declared bound here would
+    # hand a durable page an expiry and make it sweepable. The per-source
+    # record keeps its declared bound byte-identical either way; only the
+    # page-level key is suppressed.
     horizon = resolve_decay_horizon_days(am.bucket, config)
     if horizon <= 0:
         return ""
+    if am.valid_until:
+        return am.valid_until
     return (_decay_anchor_date(am, today=today) + timedelta(days=horizon)).isoformat()
 
 
