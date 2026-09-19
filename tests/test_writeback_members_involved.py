@@ -132,6 +132,12 @@ def test_record_member_key_and_pair_text_from_full_block(tmp_path: Path) -> None
     wiki_root = tmp_path / "wiki"
     wiki_root.mkdir(parents=True, exist_ok=True)
     (raw_root).mkdir(parents=True, exist_ok=True)
+    # Issue athenaeum#1804: pq.source ("wiki/auto-foo.md") must resolve, or
+    # this non-empty-answer/detector-raised block is now HELD instead of
+    # archived — held blocks skip fingerprint recording entirely (it moves
+    # with the archive step), which this test is about, not the hold path.
+    (raw_root / "wiki").mkdir(parents=True, exist_ok=True)
+    (raw_root / "wiki" / "auto-foo.md").write_text("x notes.\n", encoding="utf-8")
     refs = ["-Users-x-Code/a.md", "-Users-x-Code/b.md"]
     pending = wiki_root / "_pending_questions.md"
     pending.write_text(

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -1404,6 +1405,116 @@ class TestMixedDispositionBatch:
         assert "current_title: VP Engineering" in (wiki / "p.md").read_text()
 
 
+class TestSameWriterSameDaySupersession:
+    """Issue athenaeum#1803: a batch from one writer that touches field A
+    (previously absent, no incumbent) then field B (existing, incumbent
+    attributed to that same writer via `field_sources`) on the SAME page in
+    the SAME run must not escalate field B merely because field A's apply
+    already bumped the page's `updated:` stamp to today."""
+
+    def _config(self) -> dict:
+        return _fields_config(
+            status={"shape": "scalar", "writers": ["enrichment-service"]},
+            current_title={"shape": "scalar", "writers": ["enrichment-service"]},
+        )
+
+    def _batch_path(self, tmp_path: Path, env: dict) -> Path:
+        batch_path = tmp_path / "raw" / "enrichment-service" / "b.jsonl"
+        batch_path.parent.mkdir(parents=True)
+        lines = [
+            json.dumps(env),
+            json.dumps(
+                {
+                    # Field A: previously absent -> applies outright (§4),
+                    # bumping the page's `updated:` to today.
+                    "record": "correction",
+                    "target": {"uid": "person-a"},
+                    "op": "set",
+                    "field": "status",
+                    "value": "active",
+                    "source": "api:enrichment-vendor",
+                    "observed_at": "2026-08-06T00:00:00Z",
+                }
+            ),
+            json.dumps(
+                {
+                    # Field B: existing incumbent, equal rank, same
+                    # calendar day as the (now-bumped) `updated:` stamp.
+                    "record": "correction",
+                    "target": {"uid": "person-a"},
+                    "op": "set",
+                    "field": "current_title",
+                    "value": "VP Engineering",
+                    "source": "api:enrichment-vendor",
+                    "observed_at": f"{date.today().isoformat()}T05:58:40Z",
+                }
+            ),
+        ]
+        batch_path.write_text("\n".join(lines) + "\n")
+        return batch_path
+
+    def test_same_writer_both_apply_no_pending_questions(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        _write_page(
+            wiki,
+            "p.md",
+            {
+                "uid": "person-a",
+                "type": "person",
+                "name": "A",
+                "current_title": "CTO",
+                "field_sources": {"current_title": "api:enrichment-vendor"},
+            },
+        )
+        env = _envelope(submitter="enrichment-service")
+        batch_path = self._batch_path(tmp_path, env)
+        index = EntityIndex(wiki)
+        outcome = process_batch_file(
+            batch_path,
+            env,
+            "enrichment-service",
+            index=index,
+            knowledge_root=tmp_path,
+            config=self._config(),
+        )
+        dispositions = [r.disposition for r in outcome.results]
+        assert dispositions == ["applied", "applied"]
+        assert "current_title: VP Engineering" in (wiki / "p.md").read_text()
+        assert not (wiki / "_pending_questions.md").exists()
+
+    def test_different_writer_field_b_escalates(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        _write_page(
+            wiki,
+            "p.md",
+            {
+                "uid": "person-a",
+                "type": "person",
+                "name": "A",
+                "current_title": "CTO",
+                # Same RANK (api:) but a DIFFERENT writer than the
+                # incoming field-B correction.
+                "field_sources": {"current_title": "api:other-vendor"},
+            },
+        )
+        env = _envelope(submitter="enrichment-service")
+        batch_path = self._batch_path(tmp_path, env)
+        index = EntityIndex(wiki)
+        outcome = process_batch_file(
+            batch_path,
+            env,
+            "enrichment-service",
+            index=index,
+            knowledge_root=tmp_path,
+            config=self._config(),
+        )
+        dispositions = [r.disposition for r in outcome.results]
+        assert dispositions == ["applied", "escalated"]
+        # The field-A write still applied; field B's incumbent value is
+        # untouched.
+        assert "current_title: CTO" in (wiki / "p.md").read_text()
+
+
 # ---------------------------------------------------------------------------
 # §4 add/remove list ops
 # ---------------------------------------------------------------------------
@@ -1677,6 +1788,113 @@ class TestDecideVerdictDatedTies:
             **self._kwargs(observed_at="2026-08-06", existing_updated="2026-08-06")
         )
         assert verdict == "escalate"
+
+    # -- issue athenaeum#1803: same-writer supersession at the
+    # indistinguishable-dates branch only --
+
+    def test_same_writer_same_day_applies(self) -> None:
+        verdict, reason = decide_verdict(
+            **self._kwargs(
+                existing_source="api:enrichment-vendor",
+                incoming_source="api:enrichment-vendor",
+                observed_at="2026-08-06",
+                existing_updated="2026-08-06",
+                incumbent_attributed=True,
+            )
+        )
+        assert verdict == "apply"
+        assert "same writer" in reason
+
+    def test_different_writer_same_day_still_escalates(self) -> None:
+        """The existing unmodified test above already covers this with
+        default (different) sources; this makes the "different writers"
+        case explicit even with incumbent_attributed=True."""
+        verdict, reason = decide_verdict(
+            **self._kwargs(
+                existing_source="api:vendor-a",
+                incoming_source="api:vendor-b",
+                observed_at="2026-08-06",
+                existing_updated="2026-08-06",
+                incumbent_attributed=True,
+            )
+        )
+        assert verdict == "escalate"
+
+    def test_same_writer_not_attributed_via_field_sources_still_escalates(self) -> None:
+        """Same writer on both sides, but the caller signals the incumbent
+        attribution came only from the page-level `source:` fallback
+        (incumbent_attributed=False, the default) -- must still escalate."""
+        verdict, reason = decide_verdict(
+            **self._kwargs(
+                existing_source="api:enrichment-vendor",
+                incoming_source="api:enrichment-vendor",
+                observed_at="2026-08-06",
+                existing_updated="2026-08-06",
+            )
+        )
+        assert verdict == "escalate"
+
+    def test_unsourced_both_sides_same_day_still_escalates(self) -> None:
+        """Two unsourced (rank 9) sides on the same day are never treated
+        as the same writer, even with incumbent_attributed=True."""
+        verdict, reason = decide_verdict(
+            **self._kwargs(
+                existing_source=None,
+                incoming_source=None,
+                observed_at="2026-08-06",
+                existing_updated="2026-08-06",
+                incumbent_attributed=True,
+            )
+        )
+        assert verdict == "escalate"
+
+    def test_same_writer_undated_branch_unchanged(self) -> None:
+        """The undated branch (either date missing) is not reachable by the
+        same-writer exception -- it returns exactly what it returns today
+        even when incumbent_attributed=True and both sides are the same
+        writer."""
+        verdict, reason = decide_verdict(
+            **self._kwargs(
+                existing_source="api:enrichment-vendor",
+                incoming_source="api:enrichment-vendor",
+                observed_at=None,
+                existing_updated="2026-08-06",
+                incumbent_attributed=True,
+            )
+        )
+        assert verdict == "escalate"
+        assert "undated" in reason
+
+    def test_same_writer_newer_observed_at_unchanged(self) -> None:
+        """The strictly-newer branch is unaffected by the same-writer
+        exception -- it already applies, for the same "newer" reason."""
+        verdict, reason = decide_verdict(
+            **self._kwargs(
+                existing_source="api:enrichment-vendor",
+                incoming_source="api:enrichment-vendor",
+                observed_at="2026-08-06",
+                existing_updated="2026-08-01",
+                incumbent_attributed=True,
+            )
+        )
+        assert verdict == "apply"
+        assert "newer" in reason
+
+    def test_same_writer_older_observed_at_unchanged(self) -> None:
+        """The strictly-older branch is unaffected by the same-writer
+        exception -- it already defers, for the same "existing is newer"
+        reason."""
+        verdict, reason = decide_verdict(
+            **self._kwargs(
+                existing_source="api:enrichment-vendor",
+                incoming_source="api:enrichment-vendor",
+                observed_at="2026-08-01",
+                existing_updated="2026-08-06",
+                incumbent_attributed=True,
+            )
+        )
+        assert verdict == "defer"
+        assert "newer" in reason
 
 
 # ---------------------------------------------------------------------------

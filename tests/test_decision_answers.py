@@ -296,6 +296,15 @@ class TestApplyQuestion:
         wiring) completes the write-back + archival — AC2's "next tick"."""
         from athenaeum.answers import ingest_answers
 
+        # Issue athenaeum#1804: the default block's source ref must resolve, or
+        # this non-empty-answer/detector-raised block is now HELD instead of
+        # archived — this test is about the decision-answer tick, not the
+        # hold path.
+        (raw_root / "sessions").mkdir(parents=True, exist_ok=True)
+        (raw_root / "sessions" / "20240406T120000Z-aabb0011.md").write_text(
+            "Acme Corp raw session notes.\n", encoding="utf-8"
+        )
+
         pending_path = wiki_root / "_pending_questions.md"
         qid = _write_question_block(pending_path)
         write_decision_answer(
@@ -881,6 +890,14 @@ class TestBatch:
         wiki.mkdir()
         raw = tmp_path / "raw"
         raw.mkdir()
+        # Issue athenaeum#1804: the default block's source ref must resolve, or
+        # this non-empty-answer/detector-raised block is now HELD instead of
+        # archived — this test is about the CLI end-to-end tick, not the
+        # hold path.
+        (raw / "sessions").mkdir()
+        (raw / "sessions" / "20240406T120000Z-aabb0011.md").write_text(
+            "Acme Corp raw session notes.\n", encoding="utf-8"
+        )
         pending_path = wiki / "_pending_questions.md"
         qid = _write_question_block(pending_path)
         write_decision_answer(

@@ -52,6 +52,16 @@ def pending_path(tmp_path: Path) -> Path:
 def raw_root(tmp_path: Path) -> Path:
     raw = tmp_path / "raw"
     raw.mkdir()
+    # Issue athenaeum#1804: the default `_block()` source ref must resolve so
+    # existing round-trip / idempotency / quiet-flag / dedup tests exercise
+    # their own intent instead of tripping the new "source class, non-empty
+    # answer, zero resolved refs" hold path this issue adds. A test that
+    # specifically wants an unresolvable ref uses a different `source=`.
+    sessions = raw / "sessions"
+    sessions.mkdir()
+    (sessions / "20240406T120000Z-aabb0011.md").write_text(
+        "Acme Corp raw session notes.\n", encoding="utf-8"
+    )
     return raw
 
 
@@ -516,6 +526,9 @@ class TestIngestAnswers:
     def test_collision_safe_filenames(self, pending_path: Path, raw_root: Path) -> None:
         # Two answered blocks for the same entity resolved in one run should
         # not clobber each other's raw files.
+        (raw_root / "sessions" / "other.md").write_text(
+            "Acme Co other session notes.\n", encoding="utf-8"
+        )
         a = _block(entity="Acme Co", checkbox="[x]", answer="first answer")
         b = _block(
             entity="Acme Co",
@@ -746,6 +759,299 @@ def _two_member_block(
     )
 
 
+class TestWritebackHold:
+    """Issue athenaeum#1804 — a detector-raised block whose authorized write-back
+    cannot happen (non-empty answer, zero resolved source refs) is HELD
+    instead of silently archived. Field-correction / schema-amendment /
+    agent-raised / empty-answer blocks keep archiving unconditionally.
+    """
+
+    def test_held_block_stays_pending_and_out_of_archive(
+        self, pending_path: Path, raw_root: Path
+    ) -> None:
+        """AC1: a plain free-text answer whose source never resolves stays
+        in the primary file, is absent from the archive, and gains exactly
+        one ``**Write-back**: held`` line naming the unresolved ref."""
+        block = _block(
+            source="sessions/never-resolves.md",
+            checkbox="[x]",
+            answer="They closed Series B in March 2026.",
+        )
+        pending_path.write_text("# Pending Questions\n\n" + block)
+
+        count = ingest_answers(pending_path, raw_root)
+        assert count == 0
+
+        primary_text = pending_path.read_text()
+        assert "Acme Corp" in primary_text
+        assert primary_text.count("**Write-back**: held") == 1
+        assert "sessions/never-resolves.md" in primary_text
+
+        archive_path = pending_path.parent / "_pending_questions_archive.md"
+        assert not archive_path.exists()
+
+        # Provenance IS written on the first run (the audit trail).
+        assert len(list((raw_root / "answers").glob("*.md"))) == 1
+
+    def test_held_block_resolves_on_source_restore(
+        self, pending_path: Path, raw_root: Path
+    ) -> None:
+        """AC3: once the missing source file is restored, the next run
+        performs the write-back and archives — with no second provenance
+        file."""
+        src_rel = "auto-memory/scope/reference_acme.md"
+        block = _source_block(source=src_rel, answer="correct_a\nSeries B is right.")
+        pending_path.write_text("# Pending Questions\n\n" + block)
+
+        first = ingest_answers(pending_path, raw_root)
+        assert first == 0
+        assert len(list((raw_root / "answers").glob("*.md"))) == 1
+        assert "**Write-back**: held" in pending_path.read_text()
+        assert not (pending_path.parent / "_pending_questions_archive.md").exists()
+
+        # Restore the source and re-run.
+        src = raw_root / src_rel
+        _write_source(src, "Acme is Series A as of 2024.\n")
+        second = ingest_answers(pending_path, raw_root)
+        assert second == 1
+
+        assert "Acme Corp" not in pending_path.read_text()
+        archive_text = (
+            pending_path.parent / "_pending_questions_archive.md"
+        ).read_text()
+        assert "Acme Corp" in archive_text
+        # No second provenance file.
+        assert len(list((raw_root / "answers").glob("*.md"))) == 1
+
+    def test_held_to_waived_archives_without_writeback(
+        self, pending_path: Path, raw_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC4: a human editing ``held`` to ``waived`` on the stamp line
+        archives the block on the next run WITHOUT ever calling
+        ``_writeback_source``."""
+        block = _block(
+            source="sessions/never-resolves.md",
+            checkbox="[x]",
+            answer="They closed Series B in March 2026.",
+        )
+        pending_path.write_text("# Pending Questions\n\n" + block)
+
+        first = ingest_answers(pending_path, raw_root)
+        assert first == 0
+
+        waived_text = pending_path.read_text().replace(
+            "**Write-back**: held", "**Write-back**: waived", 1
+        )
+        pending_path.write_text(waived_text)
+
+        import athenaeum.answers as answers_mod
+
+        def _must_not_be_called(*_args: object, **_kwargs: object) -> int:
+            raise AssertionError("_writeback_source must not be called for a waived block")
+
+        monkeypatch.setattr(answers_mod, "_writeback_source", _must_not_be_called)
+
+        second = ingest_answers(pending_path, raw_root)
+        assert second == 1
+        assert "Acme Corp" not in pending_path.read_text()
+        archive_text = (
+            pending_path.parent / "_pending_questions_archive.md"
+        ).read_text()
+        assert "**Write-back**: waived" in archive_text
+        # No second provenance file — it was written on the first (held) run.
+        assert len(list((raw_root / "answers").glob("*.md"))) == 1
+
+    def test_run_with_only_new_hold_still_rewrites_primary_file(
+        self, pending_path: Path, raw_root: Path
+    ) -> None:
+        """AC5: a run whose only change is a newly-held block still
+        rewrites ``_pending_questions.md`` (the old early-return skipped
+        this when ``ingested == 0``)."""
+        block = _block(
+            source="sessions/never-resolves.md",
+            checkbox="[x]",
+            answer="They closed Series B in March 2026.",
+        )
+        original = "# Pending Questions\n\n" + block
+        pending_path.write_text(original)
+
+        count = ingest_answers(pending_path, raw_root)
+        assert count == 0
+        # The file WAS rewritten — it now carries the held stamp, so it is
+        # provably not still the original bytes.
+        assert pending_path.read_text() != original
+        assert "**Write-back**: held" in pending_path.read_text()
+
+    def test_field_correction_never_writes_back_and_archive_is_stamped(
+        self, pending_path: Path, raw_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC6: a field-correction block archives like today, never calls
+        ``_writeback_source`` (asserted by patching it), and its archive
+        entry carries a ``**Write-back**: none`` line naming the class."""
+        import athenaeum.answers as answers_mod
+
+        def _must_not_be_called(*_args: object, **_kwargs: object) -> int:
+            raise AssertionError(
+                "_writeback_source must not be called for a field-correction block"
+            )
+
+        monkeypatch.setattr(answers_mod, "_writeback_source", _must_not_be_called)
+
+        block = (
+            '## [2026-06-01] Entity: "Correction Co" (from raw/corrections/batch.jsonl)\n'
+            "- [x] Ratify the proposed field correction?\n"
+            "**Conflict type**: field-correction\n"
+            "**Description**: Proposed correction to the `founded` field.\n"
+            "\n"
+            "ratify\n"
+        )
+        pending_path.write_text("# Pending Questions\n\n" + block)
+
+        count = ingest_answers(pending_path, raw_root)
+        assert count == 1
+        assert "Correction Co" not in pending_path.read_text()
+
+        archive_text = (
+            pending_path.parent / "_pending_questions_archive.md"
+        ).read_text()
+        assert "**Write-back**: none" in archive_text
+        assert "field-correction" in archive_text
+
+    def test_schema_amendment_never_writes_back_and_archive_is_stamped(
+        self, pending_path: Path, raw_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC6, schema-amendment sibling of the field-correction case above."""
+        import athenaeum.answers as answers_mod
+
+        def _must_not_be_called(*_args: object, **_kwargs: object) -> int:
+            raise AssertionError(
+                "_writeback_source must not be called for a schema-amendment block"
+            )
+
+        monkeypatch.setattr(answers_mod, "_writeback_source", _must_not_be_called)
+
+        block = (
+            '## [2026-06-01] Entity: "Schema Co" (from raw/corrections/batch2.jsonl)\n'
+            "- [x] Ratify the proposed schema amendment?\n"
+            "**Conflict type**: schema-amendment\n"
+            "**Description**: Proposed a new `founded_quarter` field.\n"
+            "\n"
+            "ratify\n"
+        )
+        pending_path.write_text("# Pending Questions\n\n" + block)
+
+        count = ingest_answers(pending_path, raw_root)
+        assert count == 1
+
+        archive_text = (
+            pending_path.parent / "_pending_questions_archive.md"
+        ).read_text()
+        assert "**Write-back**: none" in archive_text
+        assert "schema-amendment" in archive_text
+
+    def test_agent_raised_block_archives_even_with_unresolvable_source(
+        self, pending_path: Path, raw_root: Path
+    ) -> None:
+        """AC7 (agent-raised half): an answered agent-raised block archives
+        exactly as today, even though its source never resolves."""
+        from athenaeum.answers import raise_pending_question
+
+        raise_pending_question(
+            pending_path,
+            "Is Krobar still the primary venture?",
+            "Raised while reviewing the roadmap.",
+            entity="Tristan",
+        )
+        text = pending_path.read_text().replace("- [ ]", "- [x]", 1)
+        text += "\nNo, they are co-equal now.\n"
+        pending_path.write_text(text)
+
+        count = ingest_answers(pending_path, raw_root)
+        assert count == 1
+        assert "**Write-back**: held" not in (
+            pending_path.parent / "_pending_questions_archive.md"
+        ).read_text()
+        assert "Tristan" not in pending_path.read_text()
+
+    def test_empty_answer_body_archives_without_holding(
+        self, pending_path: Path, raw_root: Path
+    ) -> None:
+        """AC7 (empty-answer half): a detector-raised block answered with an
+        empty body archives exactly as today — nothing was authorized, so
+        there is nothing to hold."""
+        block = _block(source="sessions/never-resolves.md", checkbox="[x]")
+        pending_path.write_text("# Pending Questions\n\n" + block)
+
+        count = ingest_answers(pending_path, raw_root)
+        assert count == 1
+        archive_text = (
+            pending_path.parent / "_pending_questions_archive.md"
+        ).read_text()
+        assert "**Write-back**: held" not in archive_text
+        assert "**Write-back**: none" not in archive_text
+
+    def test_writeback_status_line_excluded_from_answer_body(self) -> None:
+        """AC8: the ``**Write-back**:`` stamp line must never reach the
+        answer body ``_writeback_source`` builds (so it can't masquerade as
+        part of the verdict or as free text for the proposer)."""
+        from athenaeum.answers import _answer_body
+
+        pq = PendingQuestion(
+            id="q1",
+            entity="Acme Corp",
+            source="sessions/x.md",
+            question="Which series?",
+            conflict_type="principled",
+            description="desc",
+            created_at="2026-04-20",
+            answered=True,
+            answer_lines=[
+                "correct_a",
+                "Series A is right.",
+                "**Write-back**: held — no source ref resolved (sessions/x.md) "
+                "as of 2026-04-20T00:00:00Z; restore the source or change "
+                '"held" to "waived" to archive without a write',
+            ],
+            raw_block="unused",
+        )
+        body = _answer_body(pq)
+        assert "Write-back" not in body
+        assert "correct_a" in body
+        assert "Series A is right." in body
+
+    def test_report_accumulator_counts(
+        self, pending_path: Path, raw_root: Path
+    ) -> None:
+        """The optional ``report`` accumulator receives files written, held
+        count, waived count, and archived-with-no-write-back counts by
+        class — without changing the plain ``int`` return value."""
+        from athenaeum.answers import IngestAnswersReport
+
+        held_block = _block(
+            entity="Held Co",
+            source="sessions/never-resolves.md",
+            checkbox="[x]",
+            answer="Non-empty answer.",
+        )
+        correction_block = (
+            '## [2026-06-01] Entity: "Correction Co" (from raw/corrections/batch.jsonl)\n'
+            "- [x] Ratify?\n"
+            "**Conflict type**: field-correction\n"
+            "**Description**: field correction.\n"
+            "\nratify\n"
+        )
+        pending_path.write_text(
+            "# Pending Questions\n\n" + held_block + "\n---\n\n" + correction_block
+        )
+
+        report = IngestAnswersReport()
+        count = ingest_answers(pending_path, raw_root, report=report)
+
+        assert count == 1  # only the field-correction block archived
+        assert report.held == 1
+        assert report.archived_no_writeback == {"field-correction": 1}
+
+
 class TestSourceWriteBack:
     def test_correct_deletes_wrong_member_file(
         self, pending_path: Path, raw_root: Path
@@ -889,11 +1195,14 @@ class TestSourceWriteBack:
         # Non-destructive: original passage preserved.
         assert "Acme is Series A as of 2024." in src_text
 
-    def test_provenance_still_written_when_source_missing(
+    def test_source_missing_holds_instead_of_archiving(
         self, pending_path: Path, raw_root: Path
     ) -> None:
-        # Source file does not exist on disk — write-back is a no-op but the
-        # audit trail must still be emitted.
+        # Issue athenaeum#1804: the source file does not exist on disk and the
+        # answer is non-empty (a real authorized write-back) — the block must
+        # be HELD, not silently archived with the write dropped. Provenance
+        # is still written (the audit trail), but the block stays in the
+        # primary file with a `**Write-back**: held` line.
         block = _source_block(
             source="auto-memory/scope/gone.md",
             answer="correct_a\nNew value.",
@@ -901,8 +1210,24 @@ class TestSourceWriteBack:
         pending_path.write_text("# Pending Questions\n\n" + block)
 
         count = ingest_answers(pending_path, raw_root)
-        assert count == 1
+        assert count == 0
         assert len(list((raw_root / "answers").glob("*.md"))) == 1
+
+        primary_text = pending_path.read_text()
+        assert "Acme Corp" in primary_text
+        assert "**Write-back**: held" in primary_text
+        assert "auto-memory/scope/gone.md" in primary_text
+
+        archive_path = pending_path.parent / "_pending_questions_archive.md"
+        assert not archive_path.exists()
+
+        # Second run: still unresolved — no additional provenance file, no
+        # second Write-back line, primary file byte-identical.
+        count2 = ingest_answers(pending_path, raw_root)
+        assert count2 == 0
+        assert len(list((raw_root / "answers").glob("*.md"))) == 1
+        assert pending_path.read_text() == primary_text
+        assert primary_text.count("**Write-back**:") == 1
 
 
 def _freetext_proposer_client(
