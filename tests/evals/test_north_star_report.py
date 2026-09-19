@@ -16,15 +16,18 @@ every other offline test under this directory.
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import json
 from pathlib import Path
 from typing import Any
+from unittest import mock
 from unittest.mock import MagicMock
 
 import pytest
 
+import tests.evals.north_star_report as nsr
 from tests.evals.containment import GridCell, ResultStore
-from tests.evals.corpus import build_corpus
+from tests.evals.corpus import Probe, build_corpus, deep_hop_uids
 from tests.evals.north_star_report import (
     GRADER_REVISION,
     SIZE_SCALE_ORDER,
@@ -41,7 +44,9 @@ from tests.evals.north_star_report import (
     append_rollout_row,
     build_report,
     compute_group_stats,
+    compute_verdicts,
     crossover_scales,
+    deep_hop_delivered,
     delivered_text_for_utilization,
     delivered_uids_for_utilization,
     distinctive_ngram_overlap,
@@ -1996,6 +2001,16 @@ def test_crossover_scale_prose_names_every_size_scale_including_xlarge() -> None
 FOLLOW_THROUGH_PROBE_ID = "fenwick_relationship_history"
 
 
+def _deep_hop_uid(probe: Probe) -> str:
+    """The page this probe's hop LANDS on -- derived from the link graph by
+    `corpus.deep_hop_uids`, never read off `expected_uids[1]` (issue
+    athenaeum#1844: a positional read returns the wrong page the moment a
+    probe's ground truth is reordered)."""
+    hops = deep_hop_uids(probe, {page.uid: page for page in _CORPUS.pages})
+    assert len(hops) == 1, (probe.id, hops)
+    return hops[0]
+
+
 def _read_entity_events(
     *,
     uid: str,
@@ -2165,7 +2180,7 @@ def test_read_entity_handles_both_tool_result_content_shapes() -> None:
     plain string or as a list of `{"type": "text", ...}` blocks. Both must
     decode, exactly as `_pull_delivered_text` already handles both."""
     probe = _probe(FOLLOW_THROUGH_PROBE_ID)
-    uid = probe.expected_uids[1]
+    uid = _deep_hop_uid(probe)
     body = json.dumps({"uid": uid, "body": "page body"})
 
     as_string = _follow_through_record(
@@ -2184,7 +2199,7 @@ def test_read_entity_pairing_is_order_independent_and_deduplicated() -> None:
     own call in the event list still pairs (the walk collects both sides
     before joining, never assuming transcript order)."""
     probe = _probe(FOLLOW_THROUGH_PROBE_ID)
-    uid = probe.expected_uids[1]
+    uid = _deep_hop_uid(probe)
     events = [
         *_read_entity_events(uid=uid, call_id="toolu_a"),
         *_read_entity_events(uid=uid, call_id="toolu_b"),
@@ -2205,7 +2220,7 @@ def test_read_entity_channel_is_scoped_to_the_arms_served_the_mcp_tools() -> Non
     a tool must not gain evidence from a transcript shape it could never
     have produced."""
     probe = _probe(FOLLOW_THROUGH_PROBE_ID)
-    uid = probe.expected_uids[1]
+    uid = _deep_hop_uid(probe)
     events = _read_entity_events(uid=uid)
 
     for arm in (Arm.PULL, Arm.PUSH_BREADCRUMB_PULL):
@@ -2227,7 +2242,7 @@ def test_delivered_uids_for_utilization_is_unchanged_by_the_read_entity_channel(
     the grader sees the page, the waste accounting does not.
     """
     probe = _probe(FOLLOW_THROUGH_PROBE_ID)
-    uid = probe.expected_uids[1]
+    uid = _deep_hop_uid(probe)
     for arm in (Arm.PULL, Arm.PUSH_BREADCRUMB_PULL):
         row = _row(
             _follow_through_record(arm=arm, answer="x", transcript=_read_entity_events(uid=uid))
@@ -2353,6 +2368,201 @@ def test_marker_miss_with_delivery_is_none_not_zero_for_an_ungradable_group() ->
     stats = compute_group_stats([row])
     assert stats[0].marker_miss_with_delivery is None
     assert "| n/a |" in render_report(build_report([row]))
+
+
+# ---------------------------------------------------------------------------
+# follow_hop_rate (issue athenaeum#1844, report_only)
+# ---------------------------------------------------------------------------
+
+
+def test_deep_hop_delivered_separates_no_hop_from_hopped_but_answer_wrong() -> None:
+    """The whole point of the column: two cells that both grade `False`,
+    told apart by whether the DEEP page (derived, not `expected_uids[1]`)
+    ever reached the arm."""
+    probe = _probe(FOLLOW_THROUGH_PROBE_ID)
+    first_uid, second_uid = probe.expected_uids
+    assert _deep_hop_uid(probe) == second_uid  # this corpus; derived, not assumed
+    (_uid1, marker1), (_uid2, _marker2) = probe.answer_markers
+
+    breadcrumb_only = _follow_through_record(
+        answer=f"Fenwick was {marker1}.",
+        transcript=_recall_result_events(f"**Uid:** {first_uid}\n\nsnippet"),
+    )
+    assert grade_correctness(breadcrumb_only, probe, _CORPUS) is False
+    assert deep_hop_delivered(breadcrumb_only, probe, _CORPUS) is False
+
+    hopped = _follow_through_record(
+        answer=f"Fenwick was {marker1}.",
+        transcript=[
+            *_recall_result_events(f"**Uid:** {first_uid}\n\nsnippet"),
+            *_read_entity_events(uid=second_uid),
+        ],
+    )
+    assert grade_correctness(hopped, probe, _CORPUS) is False
+    assert deep_hop_delivered(hopped, probe, _CORPUS) is True
+    # ...and that second cell is the marker-miss athenaeum#1842 counts, so the
+    # two report_only columns agree on the SAME cell.
+    assert marker_miss_with_delivery(hopped, probe, _CORPUS) is True
+    assert marker_miss_with_delivery(breadcrumb_only, probe, _CORPUS) is False
+
+    # A correct cell that hopped is a real True, never an absence.
+    correct = _follow_through_record(
+        answer=_both_markers_answer(),
+        transcript=[
+            *_recall_result_events(f"**Uid:** {first_uid}\n\nsnippet"),
+            *_read_entity_events(uid=second_uid),
+        ],
+    )
+    assert grade_correctness(correct, probe, _CORPUS) is True
+    assert deep_hop_delivered(correct, probe, _CORPUS) is True
+
+
+def test_deep_hop_delivered_is_none_for_every_non_follow_through_probe() -> None:
+    """`n/a`, never a counted zero: a probe class with no hop to follow has
+    nothing to report here, which is a different fact from "did not hop"."""
+    others = [p for p in _CORPUS.probes if p.probe_class != "follow_through"]
+    assert others  # positive control: the loop below grades something
+    for probe in others:
+        record = _record(
+            arm=Arm.ORACLE, probe_id=probe.id, probe_class=probe.probe_class, answer="x"
+        )
+        assert deep_hop_delivered(record, probe, _CORPUS) is None, probe.id
+
+    follow_through = [p for p in _CORPUS.probes if p.probe_class == "follow_through"]
+    assert follow_through
+    for probe in follow_through:
+        record = _record(
+            arm=Arm.ORACLE, probe_id=probe.id, probe_class=probe.probe_class, answer="x"
+        )
+        assert deep_hop_delivered(record, probe, _CORPUS) is not None, probe.id
+
+
+def test_follow_hop_rate_is_wired_into_group_stats_and_the_report() -> None:
+    """The column reaches `GroupStats` as a RATE over follow_through cells
+    and renders its own report_only section."""
+    probe = _probe(FOLLOW_THROUGH_PROBE_ID)
+    first_uid = probe.expected_uids[0]
+    second_uid = _deep_hop_uid(probe)
+    breadcrumb = _recall_result_events(f"**Uid:** {first_uid}\n\nsnippet")
+    rows = [
+        _row(_follow_through_record(answer="x", transcript=breadcrumb)),
+        _row(
+            _follow_through_record(
+                answer="x", transcript=[*breadcrumb, *_read_entity_events(uid=second_uid)]
+            ),
+            replicate=1,
+        ),
+    ]
+    stats = compute_group_stats(rows)
+    assert len(stats) == 1
+    assert stats[0].follow_hop_rate == 0.5
+
+    text = render_report(build_report(rows))
+    assert "## Follow-through hop delivered (issue athenaeum#1844, report_only)" in text
+    assert "| probe_class | corpus_scale | arm | n | follow_hop_rate |" in text
+    assert "report_only" in text
+
+
+def test_follow_hop_rate_renders_na_for_every_other_probe_class() -> None:
+    """AC: `n/a` for every non-follow_through probe_class -- checked as the
+    whole column over a report that carries both kinds of group, so a single
+    `n/a` elsewhere in the table cannot fake it."""
+    probe = _probe(FOLLOW_THROUGH_PROBE_ID)
+    other = _probe(PROBE_ID)
+    assert other.probe_class != "follow_through"
+    rows = [
+        _row(
+            _follow_through_record(
+                answer="x",
+                transcript=[
+                    *_recall_result_events(f"**Uid:** {probe.expected_uids[0]}\n\nsnippet"),
+                    *_read_entity_events(uid=_deep_hop_uid(probe)),
+                ],
+            )
+        ),
+        _row(
+            _record(
+                arm=Arm.PULL, probe_id=other.id, probe_class=other.probe_class, answer="x"
+            )
+        ),
+    ]
+    stats = {s.probe_class: s.follow_hop_rate for s in compute_group_stats(rows)}
+    assert stats == {"follow_through": 1.0, other.probe_class: None}
+
+    text = render_report(build_report(rows))
+    section = text.split("## Follow-through hop delivered")[1].split("\n### ")[0]
+    body_rows = [ln for ln in section.splitlines() if ln.startswith("| ") and "| --- |" not in ln]
+    rendered = {
+        ln.split(" | ")[0].removeprefix("| "): ln.split(" | ")[-1].removesuffix(" |")
+        for ln in body_rows
+        if not ln.startswith("| probe_class")
+    }
+    assert rendered["follow_through"] == "1.000"
+    assert rendered[other.probe_class] == "n/a"
+
+
+def test_follow_hop_rate_is_report_only_and_moves_no_verdict() -> None:
+    """AC (issue athenaeum#1844): the column feeds no §7 condition, no
+    cutoff, no win/loss field and no `compute_verdicts` input.
+
+    Proved behaviourally -- `compute_verdicts` (which does call
+    `compute_group_stats`, so the new predicate genuinely runs underneath
+    it) returns the identical verdicts however `deep_hop_delivered` answers
+    -- with a positive control on `grade_correctness`, which DOES move them,
+    so the invariance is not vacuous. Backed by a structural scan: neither
+    `compute_verdicts` nor `crossover_scales` mentions the column at all.
+    """
+    probe = _probe(FOLLOW_THROUGH_PROBE_ID)
+    first_uid = probe.expected_uids[0]
+    breadcrumb = _recall_result_events(f"**Uid:** {first_uid}\n\nsnippet")
+    rows = [
+        _row(
+            # `compute_verdicts` keeps only real recorded `vector` rows.
+            dataclasses.replace(
+                _follow_through_record(
+                    arm=arm,
+                    answer=_both_markers_answer(),
+                    # The verdict arm answers correctly (it was delivered
+                    # both pages), the others were handed the breadcrumb
+                    # only -- a spread the grader's positive control below
+                    # can actually move.
+                    transcript=(
+                        [*breadcrumb, *_read_entity_events(uid=_deep_hop_uid(probe))]
+                        if arm is Arm.PUSH_BREADCRUMB_PULL
+                        else breadcrumb
+                    ),
+                ),
+                search_backend="vector",
+            ),
+            replicate=index,
+        )
+        for index, arm in enumerate((Arm.PUSH_BREADCRUMB_PULL, Arm.NATIVE_GREP, Arm.NONE))
+    ]
+    kwargs = {"relationship_probe_ids": frozenset(), "report_only_classes": frozenset()}
+    baseline = compute_verdicts(rows, **kwargs)
+    assert baseline  # positive control: there is a verdict to move
+
+    for answer in (True, False, None):
+        with mock.patch.object(nsr, "deep_hop_delivered", lambda *a, _v=answer, **k: _v):
+            assert compute_verdicts(rows, **kwargs) == baseline, answer
+            assert {s.follow_hop_rate for s in compute_group_stats(rows)} != {None} or (
+                answer is None
+            )
+
+    # Positive control: a grader that DOES feed the verdicts moves them.
+    with mock.patch.object(nsr, "grade_correctness", lambda *a, **k: False):
+        assert compute_verdicts(rows, **kwargs) != baseline
+
+    for func in (compute_verdicts, crossover_scales):
+        source = inspect.getsource(func)
+        assert "follow_hop_rate" not in source, func.__name__
+        assert "deep_hop" not in source, func.__name__
+
+    # ...and it is not a win/loss field: GroupStats carries it purely as a
+    # report column, so replacing it changes nothing downstream.
+    stats = compute_group_stats(rows)
+    mutated = [dataclasses.replace(s, follow_hop_rate=0.123) for s in stats]
+    assert crossover_scales(mutated) == crossover_scales(stats)
 
 
 def test_report_stamps_the_grader_revision_beside_the_corpus_digest() -> None:
