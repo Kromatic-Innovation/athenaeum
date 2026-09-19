@@ -2784,9 +2784,19 @@ def resolve_recall_hybrid(config: dict[str, Any] | None) -> bool:
 #: athenaeum#1800 / athenaeum#1789). Defined HERE, not in
 #: :mod:`athenaeum.search`, because config is the lower layer: the search
 #: module aliases these as its ``_DEFAULT_HYBRID_*`` names and carries the
-#: measurement notes explaining why each is a no-op at its default.
+#: measurement notes explaining why each value was chosen.
+#:
+#: ``RECALL_HYBRID_GUARD_RANK_DEFAULT`` is ``1``, not the RRF-unguarded
+#: ``0`` -- the athenaeum#1800 re-sweep on the REAL embedder (the earlier
+#: value was picked on a mismatched stand-in/real-model instrument; see
+#: that issue and :data:`athenaeum.search._DEFAULT_HYBRID_GUARD_RANK`'s own
+#: comment) found ``guard_rank=1`` strictly reduces real-model failures
+#: (6 -> 5) with no regression on any other real-model-passing case and no
+#: movement in the default (offline stand-in) selection's pass/xfail set.
+#: The other two knobs stay at their pre-athenaeum#1800 no-op defaults --
+#: the re-sweep found no eligible combination that improved on them.
 RECALL_HYBRID_FTS5_WEIGHT_DEFAULT = 1.0
-RECALL_HYBRID_GUARD_RANK_DEFAULT = 0
+RECALL_HYBRID_GUARD_RANK_DEFAULT = 1
 RECALL_HYBRID_K_DEFAULT = 60
 
 
@@ -2812,6 +2822,16 @@ def resolve_recall_hybrid_fts5_weight(config: dict[str, Any] | None) -> float:
     (the athenaeum#1792 mechanism this whole feature exists for) long before
     it weakens the specific moderately-ranked-both-list hits causing the
     four regressions.
+
+    Re-swept directly on the real embedder for issue athenaeum#1800 (the
+    stand-in sweep above predates a real-model measurement existing at
+    all): at the now-shipped ``guard_rank=1``, every ``fts5_weight`` in the
+    issue's grid (``{0.5, 0.75, 1.0, 1.5, 2.0, 3.0}``) produced the SAME
+    real-model failure count -- this knob changes nothing at any swept
+    value once ``guard_rank`` is at its own winning default, so it stays at
+    ``1.0`` (closest to the tie-break's identity value) rather than moved.
+    See ``docs/measurements/recall-hybrid-fusion-sweep.md`` for the full
+    96-combination table.
 
     Precedence: ``ATHENAEUM_RECALL_HYBRID_FTS5_WEIGHT`` env (any float) >
     ``recall.hybrid.fts5_weight`` yaml (only read when ``recall.hybrid`` is
@@ -2854,13 +2874,24 @@ def resolve_recall_hybrid_guard_rank(config: dict[str, Any] | None) -> int:
     WITHIN that list, cannot be crowded out of the fused result by a hit
     both lists agree on only moderately.
 
-    Default :data:`athenaeum.config.RECALL_HYBRID_GUARD_RANK_DEFAULT` (``0``,
-    OFF) -- see that constant's own comment for the sweep: every value
-    tried either matched the unguarded baseline's four failures exactly
-    (a no-op at this corpus's rank distribution) or introduced new ones.
-    The root cause of the four regressions is in the FTS5 arm's own
-    ranking, not fusion weighting -- this knob is exposed for an operator
-    whose corpus shape it might genuinely help, not as this issue's fix.
+    Default :data:`athenaeum.config.RECALL_HYBRID_GUARD_RANK_DEFAULT` (``1``,
+    issue athenaeum#1800) -- superseding the earlier ``0`` (OFF) default,
+    which was picked on a mismatched stand-in/real-model instrument (see
+    that issue's Motivation). Re-swept directly on the real embedder:
+    ``guard_rank=1`` strictly reduces real-model failures relative to fully
+    unguarded fusion, with no regression on any real-model case that
+    previously passed and no movement at all in the default (offline
+    stand-in) selection's pass/xfail set -- see
+    :data:`athenaeum.config.RECALL_HYBRID_GUARD_RANK_DEFAULT`'s own comment
+    and the committed sweep (``docs/measurements/
+    recall-hybrid-fusion-sweep.md``) for the winner-selection detail.
+    Values above ``1`` were re-measured on the real embedder too (the
+    issue's own swept grid, ``{0, 1, 2, 3}``) and regress: ``guard_rank=2``
+    or ``3`` newly crowds out the ``person_not_repo`` disambiguation guard
+    at BOTH scales (ineligible under winner rule (a)) -- the same
+    protect-too-much failure mode the athenaeum#1789 cross-lane-regression
+    sweep found on the stand-in, now reproduced directly on the real
+    model.
 
     Precedence: ``ATHENAEUM_RECALL_HYBRID_GUARD_RANK`` env (a non-negative
     int; ``0`` explicitly disables guarding) > ``recall.hybrid.guard_rank``
@@ -2906,6 +2937,15 @@ def resolve_recall_hybrid_k(config: dict[str, Any] | None) -> int:
     the FTS5 arm's OWN ranking (or a page's absence from both candidate
     lists entirely), not to how fusion weighs two otherwise-good rankings
     -- no fusion parameter can fix that from this side.
+
+    Re-swept directly on the real embedder for issue athenaeum#1800: at the
+    now-shipped ``guard_rank=1``, every ``k`` in the issue's grid
+    (``{10, 20, 30, 60}``) produced the SAME real-model failure count -- a
+    four-way tie, resolved by the winner rule's tie-break (larger ``k``
+    preferred among ties) in favour of ``k=60``, which is also
+    :data:`athenaeum.search._DEFAULT_RRF_K` (the RRF-standard value). Kept
+    equal to it rather than moved. See ``docs/measurements/recall-hybrid-fusion-sweep.md`` for
+    the full 96-combination table.
 
     Precedence: ``ATHENAEUM_RECALL_HYBRID_K`` env (a positive int) >
     ``recall.hybrid.k`` yaml (only read when ``recall.hybrid`` is the dict
