@@ -16,6 +16,7 @@ every other offline test under this directory.
 from __future__ import annotations
 
 import dataclasses
+import json
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -25,14 +26,20 @@ import pytest
 from tests.evals.containment import GridCell, ResultStore
 from tests.evals.corpus import build_corpus
 from tests.evals.north_star_report import (
+    GRADER_REVISION,
     SIZE_SCALE_ORDER,
     GroupStats,
     NorthStarReport,
     RolloutRow,
     TurnCapCount,
     _all_answer_tokens,
+    _delivered_uids,
     _is_abstention,
+    _is_read_entity_tool,
+    _normalize_for_match,
+    _normalize_marker_for_match,
     _push_delivered_text,
+    _read_entity_delivered_uids,
     append_rollout_row,
     build_report,
     compute_group_stats,
@@ -45,6 +52,7 @@ from tests.evals.north_star_report import (
     grade_harm,
     lexical_overlap,
     load_rollout_rows,
+    marker_miss_with_delivery,
     render_report,
     tag_followed,
     uid_citation_rate,
@@ -1971,3 +1979,555 @@ def test_crossover_scale_prose_names_every_size_scale_including_xlarge() -> None
     text as a derived join makes that drift impossible to reintroduce."""
     text = render_report(build_report([]))
     assert " < ".join(f"`{s}`" for s in SIZE_SCALE_ORDER) in text
+
+
+# ---------------------------------------------------------------------------
+# read_entity as delivery evidence (issue athenaeum#1842)
+#
+# `_delivered_uids` could not see a page the model fetched with the
+# `read_entity` MCP tool, because that tool returns JSON while the extractor
+# parses `recall`'s `**Uid:**` markdown. Every fixture below pairs its
+# positive case with the leak guard the acceptance criteria name: a REQUEST
+# is not delivery, only a matching successful RESULT is.
+# ---------------------------------------------------------------------------
+
+# The real "core" corpus's two-hop follow_through probe: its ground truth is
+# split across two pages, each planting one marker -- exactly the shape whose
+# second hop `read_entity` exists to serve. Read off the corpus, never
+# duplicated as literals.
+FOLLOW_THROUGH_PROBE_ID = "fenwick_relationship_history"
+
+
+def _read_entity_events(
+    *,
+    uid: str,
+    call_id: str = "toolu_read_1",
+    tool_name: str = "mcp__athenaeum__read_entity",
+    payload: str | list[dict[str, Any]] | None = None,
+    is_error: bool | None = None,
+    include_result: bool = True,
+) -> list[dict[str, Any]]:
+    """The assistant `tool_use` / user `tool_result` PAIR one `read_entity`
+    hop produces in a real stream-json transcript.
+
+    *payload* defaults to the server's own success shape (a JSON STRING
+    carrying top-level ``uid`` and ``body``); pass a string to forge a
+    different body, a list to exercise the multi-block `content` shape, and
+    ``include_result=False`` to model a call whose result never arrived.
+    """
+    if payload is None:
+        payload = json.dumps({"uid": uid, "body": f"# {uid}\n\nbody text", "footnotes": []})
+    result_block: dict[str, Any] = {
+        "type": "tool_result",
+        "tool_use_id": call_id,
+        "content": payload,
+    }
+    if is_error is not None:
+        result_block["is_error"] = is_error
+    events: list[dict[str, Any]] = [
+        {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": call_id,
+                        "name": tool_name,
+                        "input": {"uid": uid, "entity_class": "client"},
+                    }
+                ]
+            },
+        }
+    ]
+    if include_result:
+        events.append({"type": "user", "message": {"content": [result_block]}})
+    return events
+
+
+def _recall_result_events(recall_text: str) -> list[dict[str, Any]]:
+    """A `recall` tool_result event carrying *recall_text* -- the `**Uid:**`
+    markdown channel that already worked before this issue."""
+    return [
+        {
+            "type": "user",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_recall_1",
+                        "content": [{"type": "text", "text": recall_text}],
+                    }
+                ]
+            },
+        }
+    ]
+
+
+def _follow_through_record(
+    *,
+    arm: Arm = Arm.PULL,
+    answer: str,
+    transcript: list[dict[str, Any]],
+) -> RolloutRecord:
+    probe = _probe(FOLLOW_THROUGH_PROBE_ID)
+    return _record(
+        arm=arm,
+        probe_id=probe.id,
+        probe_class=probe.probe_class,
+        answer=answer,
+        transcript=transcript,
+    )
+
+
+def _both_markers_answer() -> str:
+    probe = _probe(FOLLOW_THROUGH_PROBE_ID)
+    (_uid1, marker1), (_uid2, marker2) = probe.answer_markers
+    return f"Fenwick was {marker1}, and Dara flags it in the {marker2}."
+
+
+def test_read_entity_result_counts_as_delivery_evidence() -> None:
+    """AC1: a page fetched with `read_entity` IS delivered.
+
+    The first hop arrives through `recall`'s `**Uid:**` markdown; the second
+    through `read_entity`'s JSON. Before this issue only the first channel
+    existed, so this cell graded False with both markers quoted verbatim --
+    the dominant follow_through failure mode.
+    """
+    probe = _probe(FOLLOW_THROUGH_PROBE_ID)
+    first_uid, second_uid = probe.expected_uids
+    record = _follow_through_record(
+        answer=_both_markers_answer(),
+        transcript=[
+            *_recall_result_events(f"**Uid:** {first_uid}\n\nsnippet"),
+            *_read_entity_events(uid=second_uid),
+        ],
+    )
+    assert _read_entity_delivered_uids(record) == (second_uid,)
+    assert set(_delivered_uids(record, probe, _CORPUS)) == {first_uid, second_uid}
+    assert grade_correctness(record, probe, _CORPUS) is True
+
+
+def test_read_entity_request_without_a_result_is_not_delivery_evidence() -> None:
+    """AC2 (leak guard): an answer quoting a page's marker still grades False
+    when that page was never SUCCESSFULLY read.
+
+    Four ways a request fails to become delivery -- no result at all, an
+    `is_error` result, an empty `body`, and a payload naming a DIFFERENT uid
+    than the one requested (an alias redirect, not the page asked for). All
+    four carry the identical, fully-marker-bearing answer, so the False is
+    attributable to the delivery channel and nothing else.
+    """
+    probe = _probe(FOLLOW_THROUGH_PROBE_ID)
+    first_uid, second_uid = probe.expected_uids
+    answer = _both_markers_answer()
+    recall_events = _recall_result_events(f"**Uid:** {first_uid}\n\nsnippet")
+
+    failures = {
+        "no result": _read_entity_events(uid=second_uid, include_result=False),
+        "is_error": _read_entity_events(uid=second_uid, is_error=True),
+        "empty body": _read_entity_events(
+            uid=second_uid, payload=json.dumps({"uid": second_uid, "body": "   "})
+        ),
+        "uid mismatch": _read_entity_events(
+            uid=second_uid, payload=json.dumps({"uid": first_uid, "body": "other page"})
+        ),
+        "not json": _read_entity_events(uid=second_uid, payload="Error: entity not found"),
+    }
+    for label, events in failures.items():
+        record = _follow_through_record(answer=answer, transcript=[*recall_events, *events])
+        assert _read_entity_delivered_uids(record) == (), label
+        assert second_uid not in _delivered_uids(record, probe, _CORPUS), label
+        assert grade_correctness(record, probe, _CORPUS) is False, label
+
+    # Positive control: the SAME answer and the SAME first hop, with a
+    # SUCCESSFUL read of the second page, grades True -- so every False above
+    # is about delivery evidence, not about the answer text.
+    ok = _follow_through_record(
+        answer=answer,
+        transcript=[*recall_events, *_read_entity_events(uid=second_uid)],
+    )
+    assert grade_correctness(ok, probe, _CORPUS) is True
+
+
+def test_read_entity_tool_name_matched_on_its_namespaced_segment() -> None:
+    """The stored transcripts spell the tool `mcp__athenaeum__read_entity`,
+    so a bare equality would match nothing real -- but a loose substring scan
+    would swallow an unrelated tool whose result shape was never validated.
+    """
+    assert _is_read_entity_tool("mcp__athenaeum__read_entity") is True
+    assert _is_read_entity_tool("read_entity") is True
+    assert _is_read_entity_tool("mcp__athenaeum__recall") is False
+    assert _is_read_entity_tool("read_entity_batch") is False
+    assert _is_read_entity_tool("bulk_read_entity_v2") is False
+    assert _is_read_entity_tool(None) is False
+
+
+def test_read_entity_handles_both_tool_result_content_shapes() -> None:
+    """The stream-json format renders a tool_result's `content` either as a
+    plain string or as a list of `{"type": "text", ...}` blocks. Both must
+    decode, exactly as `_pull_delivered_text` already handles both."""
+    probe = _probe(FOLLOW_THROUGH_PROBE_ID)
+    uid = probe.expected_uids[1]
+    body = json.dumps({"uid": uid, "body": "page body"})
+
+    as_string = _follow_through_record(
+        answer="x", transcript=_read_entity_events(uid=uid, payload=body)
+    )
+    as_blocks = _follow_through_record(
+        answer="x",
+        transcript=_read_entity_events(uid=uid, payload=[{"type": "text", "text": body}]),
+    )
+    assert _read_entity_delivered_uids(as_string) == (uid,)
+    assert _read_entity_delivered_uids(as_blocks) == (uid,)
+
+
+def test_read_entity_pairing_is_order_independent_and_deduplicated() -> None:
+    """Two hops for the SAME page yield one uid; a result that precedes its
+    own call in the event list still pairs (the walk collects both sides
+    before joining, never assuming transcript order)."""
+    probe = _probe(FOLLOW_THROUGH_PROBE_ID)
+    uid = probe.expected_uids[1]
+    events = [
+        *_read_entity_events(uid=uid, call_id="toolu_a"),
+        *_read_entity_events(uid=uid, call_id="toolu_b"),
+    ]
+    assert _read_entity_delivered_uids(
+        _follow_through_record(answer="x", transcript=events)
+    ) == (uid,)
+    reversed_events = list(reversed(_read_entity_events(uid=uid)))
+    assert _read_entity_delivered_uids(
+        _follow_through_record(answer="x", transcript=reversed_events)
+    ) == (uid,)
+
+
+def test_read_entity_channel_is_scoped_to_the_arms_served_the_mcp_tools() -> None:
+    """Only PULL and PUSH_BREADCRUMB_PULL are served `read_entity` (see
+    `tests.evals.rollout`'s PULL_ALLOWED_TOOLS and the api-mode `tools=`
+    lists), so only those two arms read the channel. An arm that cannot call
+    a tool must not gain evidence from a transcript shape it could never
+    have produced."""
+    probe = _probe(FOLLOW_THROUGH_PROBE_ID)
+    uid = probe.expected_uids[1]
+    events = _read_entity_events(uid=uid)
+
+    for arm in (Arm.PULL, Arm.PUSH_BREADCRUMB_PULL):
+        record = _follow_through_record(arm=arm, answer="x", transcript=events)
+        assert uid in _delivered_uids(record, probe, _CORPUS), arm
+
+    for arm in (Arm.NONE, Arm.PUSH_BREADCRUMB, Arm.PUSH_PAGES_UPPER_BOUND):
+        record = _follow_through_record(arm=arm, answer="x", transcript=events)
+        assert _delivered_uids(record, probe, _CORPUS) == (), arm
+
+
+def test_delivered_uids_for_utilization_is_unchanged_by_the_read_entity_channel() -> None:
+    """AC3 (scope): `delivered_uids_for_utilization` -- the WASTE basis -- is
+    deliberately NOT the grader's dispatch and does not gain this channel.
+
+    A page the model fetched itself is not waste (it asked for it), so
+    counting it there would corrupt `uid_citation_rate` and every
+    `mean_wasted_*` figure. The two functions genuinely diverge on this row:
+    the grader sees the page, the waste accounting does not.
+    """
+    probe = _probe(FOLLOW_THROUGH_PROBE_ID)
+    uid = probe.expected_uids[1]
+    for arm in (Arm.PULL, Arm.PUSH_BREADCRUMB_PULL):
+        row = _row(
+            _follow_through_record(arm=arm, answer="x", transcript=_read_entity_events(uid=uid))
+        )
+        assert delivered_uids_for_utilization(row) == (), arm
+        assert uid_citation_rate(row.record, delivered_uids_for_utilization(row)) is None, arm
+        # ... while the grader's own dispatch DOES see it.
+        assert uid in _delivered_uids(row.record, probe, _CORPUS), arm
+
+
+# ---------------------------------------------------------------------------
+# marker_miss_with_delivery (issue athenaeum#1842, report_only)
+# ---------------------------------------------------------------------------
+
+
+def test_marker_miss_with_delivery_true_only_when_delivery_held_and_a_marker_missed() -> None:
+    """The column splits a False cell into its two causes: a DELIVERY gap
+    (0) versus a model/marker-matching miss on a page that WAS delivered
+    (1)."""
+    probe = _probe(FOLLOW_THROUGH_PROBE_ID)
+    first_uid, second_uid = probe.expected_uids
+    (_uid1, marker1), (_uid2, _marker2) = probe.answer_markers
+    both_delivered = [
+        *_recall_result_events(f"**Uid:** {first_uid}\n\nsnippet"),
+        *_read_entity_events(uid=second_uid),
+    ]
+
+    # Delivered both, quoted only the first marker -> the miss is the model's.
+    missed = _follow_through_record(
+        answer=f"Fenwick was {marker1}.", transcript=both_delivered
+    )
+    assert grade_correctness(missed, probe, _CORPUS) is False
+    assert marker_miss_with_delivery(missed, probe, _CORPUS) is True
+
+    # Same answer, but the second page was never delivered -> a delivery gap,
+    # NOT a marker miss. Both grade False; only this column tells them apart.
+    delivery_gap = _follow_through_record(
+        answer=f"Fenwick was {marker1}.",
+        transcript=_recall_result_events(f"**Uid:** {first_uid}\n\nsnippet"),
+    )
+    assert grade_correctness(delivery_gap, probe, _CORPUS) is False
+    assert marker_miss_with_delivery(delivery_gap, probe, _CORPUS) is False
+
+    # A correct cell is a real observation of this diagnostic (False), never
+    # an absence of one (None).
+    correct = _follow_through_record(
+        answer=_both_markers_answer(), transcript=both_delivered
+    )
+    assert grade_correctness(correct, probe, _CORPUS) is True
+    assert marker_miss_with_delivery(correct, probe, _CORPUS) is False
+
+
+def test_marker_miss_with_delivery_ungradable_population() -> None:
+    """Abstention is `None` here (no marker to miss) even though
+    `grade_correctness` DOES grade it -- the same exemption `tag_followed`
+    takes. Over every other probe the ungradable set matches
+    `grade_correctness`'s exactly, so on the rows where both columns report
+    they are read over the same population. Checked against the grader's own
+    verdict, never asserted independently.
+    """
+    abstention = _probe("abstain_unknown_client")
+    record = _record(
+        arm=Arm.PULL,
+        probe_id=abstention.id,
+        probe_class=abstention.probe_class,
+        answer="I could not find anything about that.",
+    )
+    assert grade_correctness(record, abstention, _CORPUS) is not None
+    assert marker_miss_with_delivery(record, abstention, _CORPUS) is None
+
+    non_abstention = [p for p in _CORPUS.probes if p.probe_class != "abstention"]
+    assert non_abstention  # positive control: the loop below grades something
+    for probe in non_abstention:
+        row_record = _record(
+            arm=Arm.ORACLE, probe_id=probe.id, probe_class=probe.probe_class, answer="x"
+        )
+        correctness_none = grade_correctness(row_record, probe, _CORPUS) is None
+        column_none = marker_miss_with_delivery(row_record, probe, _CORPUS) is None
+        assert correctness_none == column_none, probe.id
+
+
+def test_marker_miss_with_delivery_is_wired_into_group_stats_and_the_report() -> None:
+    """The column reaches `GroupStats` as a COUNT and renders its own
+    report_only section -- and, exactly as `tag_followed_rate` does not, it
+    feeds no win/loss field and no §7 verdict."""
+    probe = _probe(FOLLOW_THROUGH_PROBE_ID)
+    first_uid, second_uid = probe.expected_uids
+    (_uid1, marker1), (_uid2, _marker2) = probe.answer_markers
+    delivered = [
+        *_recall_result_events(f"**Uid:** {first_uid}\n\nsnippet"),
+        *_read_entity_events(uid=second_uid),
+    ]
+    rows = [
+        _row(_follow_through_record(answer=f"Fenwick was {marker1}.", transcript=delivered)),
+        _row(
+            _follow_through_record(answer=_both_markers_answer(), transcript=delivered),
+            replicate=1,
+        ),
+    ]
+    stats = compute_group_stats(rows)
+    assert len(stats) == 1
+    assert stats[0].marker_miss_with_delivery == 1
+
+    report = build_report(rows)
+    text = render_report(report)
+    assert "## Marker miss with delivery (issue athenaeum#1842, report_only)" in text
+    assert "| probe_class | corpus_scale | arm | n | marker_miss_with_delivery |" in text
+    assert "report_only" in text
+
+
+def test_marker_miss_with_delivery_is_none_not_zero_for_an_ungradable_group() -> None:
+    """`n/a`, never a counted zero: "nothing to count" is a different fact
+    from "counted, found none"."""
+    abstention = _probe("abstain_unknown_client")
+    row = _row(
+        _record(
+            arm=Arm.PULL,
+            probe_id=abstention.id,
+            probe_class=abstention.probe_class,
+            answer="I could not find anything about that.",
+        )
+    )
+    stats = compute_group_stats([row])
+    assert stats[0].marker_miss_with_delivery is None
+    assert "| n/a |" in render_report(build_report([row]))
+
+
+def test_report_stamps_the_grader_revision_beside_the_corpus_digest() -> None:
+    """`Corpus.fingerprint()` digests pages only, so it cannot move when the
+    GRADING RULE changes -- two tables over the same store under different
+    rules would otherwise be indistinguishable."""
+    row = _row(_follow_through_record(answer="x", transcript=[]))
+    text = render_report(build_report([row]))
+    assert f"- grader_revision: {GRADER_REVISION}" in text
+    digest_index = text.index("- corpus_digest[")
+    assert text.index("- grader_revision:") > digest_index
+
+
+# ---------------------------------------------------------------------------
+# Alternative answer_markers + scoped whitespace normalization (athenaeum#1843)
+# ---------------------------------------------------------------------------
+
+ANCHORLINE_PROBE_ID = "anchorline_retirement_rationale"
+
+
+def _anchorline_record(
+    *, answer: str, delivered_uids: tuple[str, ...], arm: Arm = Arm.PULL
+) -> RolloutRecord:
+    """An anchorline follow_through record whose transcript delivers exactly
+    *delivered_uids* -- the first through `recall`'s markdown, any others
+    through `read_entity`, the same two channels the real PULL arm uses."""
+    probe = _probe(ANCHORLINE_PROBE_ID)
+    transcript: list[dict[str, Any]] = []
+    for index, uid in enumerate(delivered_uids):
+        if index == 0:
+            transcript.extend(_recall_result_events(f"**Uid:** {uid}\n\nsnippet"))
+        else:
+            transcript.extend(_read_entity_events(uid=uid, call_id=f"toolu_read_{index}"))
+    return _record(
+        arm=arm,
+        probe_id=probe.id,
+        probe_class=probe.probe_class,
+        answer=answer,
+        transcript=transcript,
+    )
+
+
+def _anchorline_markers() -> tuple[str, str, str]:
+    """(original decision marker, alternative decision marker, successor
+    marker) read off the corpus rather than duplicated as literals."""
+    probe = _probe(ANCHORLINE_PROBE_ID)
+    decision = [m for uid, m in probe.answer_markers if uid == "decision-retire-anchorline"]
+    successor = [m for uid, m in probe.answer_markers if uid == "system-ledgerfax-successor"]
+    assert len(decision) == 2, decision
+    return decision[0], decision[1], successor[0]
+
+
+def test_grade_correctness_accepts_either_alternative_marker() -> None:
+    """AC (athenaeum#1843): a uid may plant several alternatives, and ANY
+    one of them satisfies clause (a).
+
+    Both answers deliver both pages and quote the successor page's only
+    marker; they differ ONLY in which of the decision page's two
+    alternatives they use, so a True on each is attributable to the
+    alternative and nothing else.
+    """
+    probe = _probe(ANCHORLINE_PROBE_ID)
+    original, alternative, successor = _anchorline_markers()
+    for decision_marker in (original, alternative):
+        record = _anchorline_record(
+            answer=f"Retired because of {decision_marker}; the replacement runs on a {successor}.",
+            delivered_uids=probe.expected_uids,
+        )
+        assert grade_correctness(record, probe, _CORPUS) is True, decision_marker
+
+
+def test_grade_correctness_matches_a_marker_the_answer_wrapped_across_lines() -> None:
+    """AC (athenaeum#1843): the marker comparison normalizes whitespace on
+    BOTH sides.
+
+    The alternative is the phrase that spans a line wrap in the page body;
+    here the ANSWER wraps it (and indents the continuation, as a model
+    formatting a bullet list does). Graded False before this issue --
+    the whole repair in one cell.
+    """
+    probe = _probe(ANCHORLINE_PROBE_ID)
+    _original, alternative, successor = _anchorline_markers()
+    head, _, tail = alternative.rpartition(" ")
+    assert head and tail, alternative
+    wrapped = f"- Retired because its {head}\n      {tail}.\n- Replacement: a {successor}."
+    assert alternative not in wrapped
+    record = _anchorline_record(answer=wrapped, delivered_uids=probe.expected_uids)
+    assert grade_correctness(record, probe, _CORPUS) is True
+
+
+def test_alternative_marker_without_delivery_still_grades_false() -> None:
+    """Counter-example (athenaeum#1843, gate intact): matching an
+    alternative is clause (a) only. A cell whose answer carries both
+    markers but whose decision page was never delivered still grades
+    False -- the leak guard is untouched by widening what counts as a
+    marker match.
+    """
+    probe = _probe(ANCHORLINE_PROBE_ID)
+    _original, alternative, successor = _anchorline_markers()
+    answer = f"Retired because of {alternative}; the replacement runs on a {successor}."
+    delivered = _anchorline_record(answer=answer, delivered_uids=probe.expected_uids)
+    assert grade_correctness(delivered, probe, _CORPUS) is True
+    undelivered = _anchorline_record(
+        answer=answer, delivered_uids=("system-ledgerfax-successor",)
+    )
+    assert set(_delivered_uids(undelivered, probe, _CORPUS)) == {"system-ledgerfax-successor"}
+    assert grade_correctness(undelivered, probe, _CORPUS) is False
+
+
+def test_marker_normalizer_is_scoped_and_shared_normalizer_is_unchanged() -> None:
+    """AC (athenaeum#1843): ``_normalize_for_match`` is NOT widened.
+
+    It is also read by ``_is_abstention``, ``tag_followed``, ``grade_harm``,
+    ``grade_coverage`` and ``grade_marker_resolution``; collapsing
+    whitespace there could flip a correct abstention to wrong. Pinned as a
+    behavioural difference on the same input, not as a source-text check.
+    """
+    wrapped = "Two   spaced\nWORDS"
+    assert _normalize_for_match(wrapped) == wrapped.lower()
+    assert "\n" in _normalize_for_match(wrapped)
+    assert _normalize_marker_for_match(wrapped) == "two spaced words"
+
+
+def test_abstention_grading_is_unmoved_by_the_marker_normalizer() -> None:
+    """Counter-example (athenaeum#1843, scope): a declining answer whose
+    phrasing spans a line wrap grades exactly as it did before -- the
+    abstention path never reaches the marker normalizer."""
+    abstention = next(p for p in _CORPUS.probes if p.probe_class == "abstention")
+    for answer in (
+        "I could not find anything about that.",
+        "I could not find\n   anything about that.",
+    ):
+        record = _record(
+            arm=Arm.PULL,
+            probe_id=abstention.id,
+            probe_class=abstention.probe_class,
+            answer=answer,
+        )
+        assert grade_correctness(record, abstention, _CORPUS) is True
+        assert marker_miss_with_delivery(record, abstention, _CORPUS) is None
+
+
+def test_marker_miss_with_delivery_uses_the_same_marker_normalizer() -> None:
+    """AC (athenaeum#1843): ``marker_miss_with_delivery`` splits
+    ``grade_correctness``'s clause (a) apart, so it must make the SAME
+    comparison.
+
+    A delivered cell whose answer wraps an alternative is not a marker miss;
+    a delivered cell that says neither alternative is. A normalizer mismatch
+    here would report a miss on a cell the grader scores correct, which is
+    exactly the contradiction the column exists to rule out.
+    """
+    probe = _probe(ANCHORLINE_PROBE_ID)
+    _original, alternative, successor = _anchorline_markers()
+    head, _, tail = alternative.rpartition(" ")
+    wrapped = _anchorline_record(
+        answer=f"Retired: its {head}\n{tail}. Replacement runs on a {successor}.",
+        delivered_uids=probe.expected_uids,
+    )
+    assert grade_correctness(wrapped, probe, _CORPUS) is True
+    assert marker_miss_with_delivery(wrapped, probe, _CORPUS) is False
+
+    paraphrased = _anchorline_record(
+        answer=f"Retired for security reasons. Replacement runs on a {successor}.",
+        delivered_uids=probe.expected_uids,
+    )
+    assert grade_correctness(paraphrased, probe, _CORPUS) is False
+    assert marker_miss_with_delivery(paraphrased, probe, _CORPUS) is True
+
+
+def test_grader_revision_names_this_issue() -> None:
+    """The stamp's own contract: bump ``GRADER_REVISION`` in the same commit
+    as any change to ``grade_correctness``. This issue changed how clause (a)
+    matches, so two report tables over the same stored rows -- one graded
+    before, one after -- must be distinguishable from their headers alone."""
+    assert GRADER_REVISION == "athenaeum#1843"

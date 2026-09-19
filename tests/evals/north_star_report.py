@@ -113,6 +113,7 @@ from athenaeum.text_overlap import (
 from tests.evals.containment import GridCell, ResultStore
 from tests.evals.corpus import Corpus, Observation, Probe, answer_bearing_uids, build_corpus
 from tests.evals.corpus import _content_terms as _content_terms
+from tests.evals.corpus import _normalize_marker_for_match as _normalize_marker_for_match
 from tests.evals.metrics import uids_from_recall_output
 from tests.evals.rollout import Arm, RolloutRecord
 
@@ -421,7 +422,17 @@ def _normalize_for_match(text: str) -> str:
     """Lowercased text for a normalized substring match. Deliberately
     minimal -- no stemming/punctuation-stripping -- because the tokens
     planted by the corpus are single invented words with no natural
-    inflection to normalize away."""
+    inflection to normalize away.
+
+    DO NOT widen this (issue athenaeum#1843). It is read by
+    :func:`_is_abstention`, :func:`tag_followed`, :func:`grade_harm`,
+    :func:`grade_coverage` and :func:`grade_marker_resolution` as well as by
+    :func:`grade_correctness`'s answer_tokens path; a looser match here can
+    flip a correct abstention to wrong. ``answer_markers`` comparisons use
+    :func:`tests.evals.corpus._normalize_marker_for_match` instead, which
+    additionally collapses whitespace and is scoped to exactly those
+    comparisons.
+    """
     return text.lower()
 
 
@@ -539,37 +550,73 @@ def _breadcrumb_delivered_uids(
 def _delivered_uids(record: RolloutRecord, probe: Probe, corpus: Corpus) -> tuple[str, ...]:
     """Uids of the pages actually delivered to *record*'s arm for this cell.
 
-    Shared arm-dispatch behind both :func:`delivered_uids_for_utilization`
-    (waste/utilization accounting, keyed off a :class:`RolloutRow`) and
-    :func:`grade_correctness`'s delivered-page-evidence rule (issue
-    athenaeum#1831, superseding athenaeum#1793's uid-citation-in-answer-text
-    rule), keyed off the bare ``record``/``probe``/``corpus`` triple every
-    existing caller and test already has in hand -- no ``RolloutRow``
-    required. See :func:`delivered_uids_for_utilization`'s own (prior)
-    docstring for the per-arm rendering-format rationale; unchanged here for
-    every arm it already covered. PUSH_BREADCRUMB and NATIVE_INDEX now have
-    real per-arm evidence too (issue athenaeum#1831 AC2) -- see
-    :func:`_breadcrumb_delivered_uids` and :func:`_native_loaded_uids`'s
-    docstrings. Only :attr:`Arm.NONE` still falls through to ``()`` -- it
-    delivers no context by design.
+    The GRADER's delivered-page-evidence rule (issue athenaeum#1831,
+    superseding athenaeum#1793's uid-citation-in-answer-text rule), keyed
+    off the bare ``record``/``probe``/``corpus`` triple every existing
+    caller and test already has in hand -- no ``RolloutRow`` required.
+
+    **Not** the dispatch behind :func:`delivered_uids_for_utilization`
+    (issue athenaeum#1842): that function carries its OWN arm dispatch, and
+    a prior version of this docstring claiming the two shared one was false
+    -- the two answer different questions and have deliberately diverged.
+    ``delivered_uids_for_utilization`` measures WASTE, so it counts only
+    pages a caller-assembled payload or a ``recall_search`` rendering PUT in
+    front of the model whether it wanted them or not; it covers four arms
+    and structurally returns ``()`` for the rest. This function measures
+    delivery EVIDENCE for correctness, so it also counts a page the model
+    reached by its own tool call. Changing one does not change the other,
+    and must not be assumed to.
+
+    Per-arm: PUSH_PAGES_UPPER_BOUND and PULL both read the ``**Uid:**``
+    marker out of the ``recall_search`` rendering they were served; ORACLE
+    is the ground-truth pages verbatim, so its ``expected_uids`` ARE what
+    was delivered. PUSH_BREADCRUMB and NATIVE_GREP/NATIVE_INDEX have real
+    per-arm evidence of their own (issue athenaeum#1831 AC2) -- see
+    :func:`_breadcrumb_delivered_uids` and :func:`_native_loaded_uids`.
+    The two arms served the athenaeum MCP tools (PULL and
+    PUSH_BREADCRUMB_PULL -- see ``tests.evals.rollout``'s
+    ``PULL_ALLOWED_TOOLS`` and the api-mode ``tools=`` lists, the only arms
+    that can call a tool at all) ALSO count pages fetched via
+    ``read_entity`` (issue athenaeum#1842, see
+    :func:`_read_entity_delivered_uids`) -- the deep hop ``recall``'s uid
+    marker exists to enable, previously invisible here because that tool
+    returns JSON rather than the recall markdown. Only :attr:`Arm.NONE`
+    falls through to ``()`` -- it delivers no context by design.
     """
     if record.arm is Arm.PUSH_PAGES_UPPER_BOUND:
         return tuple(uids_from_recall_output(_push_delivered_text(record)))
     if record.arm is Arm.ORACLE:
         return probe.expected_uids
     if record.arm is Arm.PULL:
-        return tuple(uids_from_recall_output(_pull_delivered_text(record)))
+        pulled = tuple(uids_from_recall_output(_pull_delivered_text(record)))
+        read = _read_entity_delivered_uids(record)
+        return tuple(dict.fromkeys((*pulled, *read)))
     if record.arm is Arm.PUSH_BREADCRUMB:
         return _breadcrumb_delivered_uids(record, probe, corpus)
     if record.arm is Arm.PUSH_BREADCRUMB_PULL:
         breadcrumb = _breadcrumb_delivered_uids(record, probe, corpus)
         pulled = tuple(uids_from_recall_output(_pull_delivered_text(record)))
-        return tuple(dict.fromkeys((*breadcrumb, *pulled)))
+        read = _read_entity_delivered_uids(record)
+        return tuple(dict.fromkeys((*breadcrumb, *pulled, *read)))
     if record.arm is Arm.NATIVE_GREP:
         return _native_loaded_uids(record)
     if record.arm is Arm.NATIVE_INDEX:
         return _native_loaded_uids(record)
     return ()
+
+
+#: Identifies the GRADING RULE this report was produced under, stamped into
+#: the report header beside ``corpus_digest`` (issue athenaeum#1842).
+#:
+#: ``Corpus.fingerprint()`` digests pages only -- it cannot move when the
+#: grader changes -- so without this stamp two report tables computed over
+#: the SAME stored rows under DIFFERENT grading rules are indistinguishable
+#: from each other, and a reader comparing them would read a rule change as
+#: a model regression (or improvement). Bump this string in the SAME commit
+#: as any change to :func:`grade_correctness`, :func:`_delivered_uids` or
+#: anything they dispatch to; the value is the issue that last changed the
+#: rule, which is the most useful thing a reader can be handed.
+GRADER_REVISION = "athenaeum#1843"
 
 
 def tag_followed(record: RolloutRecord, probe: Probe) -> bool | None:
@@ -596,6 +643,74 @@ def tag_followed(record: RolloutRecord, probe: Probe) -> bool | None:
     return all(_normalize_for_match(tok) in answer for tok in probe.answer_tokens)
 
 
+def marker_miss_with_delivery(
+    record: RolloutRecord, probe: Probe, corpus: Corpus
+) -> bool | None:
+    """Report-only diagnostic (issue athenaeum#1842): was this cell graded
+    ``False`` DESPITE every answer-bearing page having been delivered?
+
+    ``True`` when both of :func:`grade_correctness`'s two conjuncts split
+    apart -- every one of ``answer_bearing_uids``'s pages IS in
+    :func:`_delivered_uids` for this arm/record (clause (b) satisfied), and
+    at least one of those pages contributed none of its planted
+    ``answer_markers`` values -- alternatives included -- to the answer under
+    the same scoped marker normalizer clause (a) uses (clause (a)
+    violated). The
+    model was handed the page and still did not say the fact.
+
+    This is the column that makes the NEXT grader gap self-evident. When the
+    delivery channel is the thing that is broken, a cell grades ``False``
+    with this ``False`` too (nothing was delivered, so there is no
+    marker-miss to report); when delivery is sound and the count here is
+    what is left over, the residue is either a genuine model miss or a
+    marker-matching gap (whitespace, alternative phrasing) -- a distinction
+    a bare ``correctness_rate`` cannot express. ``False`` (not ``None``) for
+    a cell that graded correct: "delivered and the markers matched" is a
+    real observation of this diagnostic, not an absence of one.
+
+    ``report_only``, exactly as :func:`tag_followed` is: it feeds no
+    design-doc section 7 condition, no :func:`compute_verdicts` input and no
+    :class:`GroupStats` win/loss field -- only its own
+    ``marker_miss_with_delivery`` count column.
+
+    Returns ``None`` (never ``False``) for an abstention probe -- it plants
+    no marker to miss, and :func:`grade_correctness` grades it by declining
+    language instead, so there is no marker/delivery split to report; the
+    same exemption :func:`tag_followed` takes, for the same reason. Over
+    every NON-abstention probe the ``None`` population is exactly
+    :func:`grade_correctness`'s: a probe with no ``answer_tokens``, no
+    answer-bearing page, or an answer-bearing page with no
+    ``answer_markers`` entry -- so on the rows where both columns report,
+    "gradable cell" means the same thing in both.
+    """
+    if probe.probe_class == "abstention" or not probe.answer_tokens:
+        return None
+    pages_by_uid = {page.uid: page for page in corpus.pages}
+    required_uids = answer_bearing_uids(probe, pages_by_uid)
+    if not required_uids:
+        return None
+    markers_by_uid: dict[str, list[str]] = {}
+    for uid, marker in probe.answer_markers:
+        markers_by_uid.setdefault(uid, []).append(marker)
+    if any(not markers_by_uid.get(uid) for uid in required_uids):
+        return None
+    delivered = frozenset(_delivered_uids(record, probe, corpus))
+    if any(uid not in delivered for uid in required_uids):
+        return False
+    # The SAME comparison `grade_correctness`'s clause (a) makes, with the
+    # same scoped normalizer (issue athenaeum#1843) -- this column exists to
+    # split that conjunct apart, so a normalizer mismatch here would make it
+    # report marker misses on cells the grader scores correct.
+    marker_answer = _normalize_marker_for_match(record.answer)
+    return any(
+        not any(
+            _normalize_marker_for_match(marker) in marker_answer
+            for marker in markers_by_uid[uid]
+        )
+        for uid in required_uids
+    )
+
+
 def grade_correctness(record: RolloutRecord, probe: Probe, corpus: Corpus) -> bool | None:
     """Did *record*'s answer get *probe*'s ground truth right?
 
@@ -616,8 +731,13 @@ def grade_correctness(record: RolloutRecord, probe: Probe, corpus: Corpus) -> bo
     here -- exactly as ``answer_tokens`` already excluded them), BOTH of the
     following must hold:
 
-    (a) at least one of that page's planted ``answer_markers`` -- the fact
-        itself, never the tag -- is present in the normalized answer, AND
+    (a) at least one of that page's planted ``answer_markers`` values -- the
+        fact itself, never the tag -- is present in the answer, compared
+        under :func:`tests.evals.corpus._normalize_marker_for_match`
+        (lowercase plus collapsed whitespace, issue athenaeum#1843) on BOTH
+        sides. A uid may plant several ALTERNATIVE markers; any one of them
+        satisfies this clause, which is how a marker the ceiling arm cannot
+        reproduce verbatim gets repaired without loosening the grader. AND
     (b) that page's uid is in :func:`_delivered_uids` for this arm/record
         (the transcript's own recall/read-entity/file-read/breadcrumb
         evidence -- never merely ``expected_uids``, so a guessed or leaked
@@ -639,7 +759,14 @@ def grade_correctness(record: RolloutRecord, probe: Probe, corpus: Corpus) -> bo
     tokens or markers AND uses recognizable declining language -- see the
     section docstring above.
     """
-    answer = _normalize_for_match(record.answer)
+    # The answer_markers conjunct gets its OWN normalized copy of the answer
+    # (issue athenaeum#1843), via the scoped marker normalizer rather than
+    # the shared `_normalize_for_match` this function used to bind here: that
+    # one is shared with the abstention/tag/harm/coverage graders and must
+    # stay lowercase-only, while a marker phrase has to survive a line wrap
+    # on either side. The old shared binding had no other reader left here,
+    # so it is gone rather than left dead.
+    marker_answer = _normalize_marker_for_match(record.answer)
     if probe.probe_class == "abstention":
         return _is_abstention(record.answer, probe, corpus)
     if not probe.answer_tokens:
@@ -668,7 +795,9 @@ def grade_correctness(record: RolloutRecord, probe: Probe, corpus: Corpus) -> bo
             return None
         if not content_only and uid not in delivered:
             return False
-        if not any(_normalize_for_match(marker) in answer for marker in markers):
+        if not any(
+            _normalize_marker_for_match(marker) in marker_answer for marker in markers
+        ):
             return False
     return True
 
@@ -841,14 +970,147 @@ def _pull_delivered_text(record: RolloutRecord) -> str:
         for block in message.get("content") or []:
             if not isinstance(block, dict) or block.get("type") != "tool_result":
                 continue
-            content = block.get("content")
-            if isinstance(content, str):
-                parts.append(content)
-            elif isinstance(content, list):
-                for sub in content:
-                    if isinstance(sub, dict) and sub.get("type") == "text":
-                        parts.append(str(sub.get("text", "")))
+            text = _tool_result_content_text(block.get("content"))
+            if text:
+                parts.append(text)
     return "\n\n".join(parts)
+
+
+def _tool_result_content_text(content: object) -> str:
+    """The text payload of ONE ``tool_result`` block's ``content`` field.
+
+    Factored verbatim out of :func:`_pull_delivered_text` (issue
+    athenaeum#1842) so the ``read_entity`` pairing below decodes exactly
+    the same two shapes the Claude Code stream-json format uses -- a plain
+    string, or a list of ``{"type": "text", "text": ...}`` blocks -- rather
+    than a second, independently-drifting copy of that logic. Joining a
+    multi-block list with ``"\n\n"`` here reproduces the flat ``parts``
+    list the caller used to build: both flatten to the same
+    ``"\n\n"``-separated string. The ONE deliberate difference is that the
+    caller now skips a wholly-EMPTY result rather than contributing a blank
+    element to its own join (which used to widen the separator to
+    ``"\n\n\n\n"``). Inert on real data -- verified byte-identical
+    ``delivered_text_for_utilization`` output across all 1440 cells of the
+    two stored runs re-graded for athenaeum#1842 -- and strictly more
+    correct where it is not.
+
+    Returns ``""`` (never raises) for any other shape, including ``None``.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n\n".join(
+            str(sub.get("text", ""))
+            for sub in content
+            if isinstance(sub, dict) and sub.get("type") == "text"
+        )
+    return ""
+
+
+def _is_read_entity_tool(name: object) -> bool:
+    """Is *name* the athenaeum ``read_entity`` MCP tool?
+
+    The transcripts spell it namespaced -- ``mcp__athenaeum__read_entity``
+    (:data:`tests.evals.rollout.READ_ENTITY_TOOL_NAME`, which is how FastMCP
+    names it and how both the api-mode tool schema and the CLI arm's
+    ``--allowedTools`` list refer to it) -- so a bare ``== "read_entity"``
+    equality would match nothing in a real store. Matched on the LAST
+    ``__``-delimited segment rather than a loose ``"read_entity" in name``
+    substring scan: the segment test accepts both the namespaced spelling
+    and a bare ``read_entity`` (what a hand-built test transcript and any
+    future un-namespaced transport would carry), while still refusing a
+    DIFFERENT tool whose name merely contains the string (a hypothetical
+    ``read_entity_batch`` or ``bulk_read_entity_v2`` returns a shape this
+    function has never validated, and must not be silently counted as
+    delivery evidence).
+    """
+    if not isinstance(name, str):
+        return False
+    return name.rsplit("__", 1)[-1] == "read_entity"
+
+
+def _read_entity_delivered_uids(record: RolloutRecord) -> tuple[str, ...]:
+    """Uids of pages the model actually fetched with the ``read_entity`` MCP
+    tool in *record*'s transcript (issue athenaeum#1842).
+
+    ``read_entity`` is the tool ``recall``'s own ``**Uid:**`` field exists
+    to enable (``src/athenaeum/mcp_server.py``'s ``read_entity`` docstring),
+    so a hop taken through that designed path is the STRONGEST delivery
+    evidence in the suite -- but it returns a JSON object, not the
+    ``recall_search`` markdown :func:`~tests.evals.metrics.uids_from_recall_output`
+    parses, so before this issue such a page was invisible to
+    :func:`_delivered_uids` and the cell graded as if the second hop had
+    never happened.
+
+    Walks the SAME transcript shape :func:`_pull_delivered_text` does, and
+    PAIRS each call with its result: a ``tool_use`` block (``id``, ``name``,
+    ``input.uid``) in an assistant event against the ``tool_result`` block
+    whose ``tool_use_id`` matches, in a later user event. A uid is counted
+    only when ALL of the following hold, so a REQUEST alone is never
+    delivery evidence:
+
+    * the result is present and not ``is_error``;
+    * its content decodes as a JSON object;
+    * that object's own ``uid`` equals the uid that was requested (the
+      server resolves aliases, so a payload naming a DIFFERENT page is a
+      redirect, not delivery of the page asked for); and
+    * its ``body`` is a non-empty string -- an empty body delivered no
+      content to read a planted marker out of.
+
+    Order-independent (requests and results are collected in one pass, then
+    joined), deduplicated, and never raises: any transcript that does not
+    carry this shape yields ``()``, which is the common case for every
+    rollout that never called the tool.
+    """
+    requested: dict[str, str] = {}
+    results: dict[str, tuple[bool, str]] = {}
+    for event in record.transcript:
+        if not isinstance(event, dict):
+            continue
+        message = event.get("message")
+        if not isinstance(message, dict):
+            continue
+        for block in message.get("content") or []:
+            if not isinstance(block, dict):
+                continue
+            block_type = block.get("type")
+            if block_type == "tool_use":
+                if not _is_read_entity_tool(block.get("name")):
+                    continue
+                call_id = block.get("id")
+                tool_input = block.get("input")
+                if not isinstance(call_id, str) or not isinstance(tool_input, dict):
+                    continue
+                uid = tool_input.get("uid")
+                if isinstance(uid, str) and uid:
+                    requested[call_id] = uid
+            elif block_type == "tool_result":
+                call_id = block.get("tool_use_id")
+                if not isinstance(call_id, str):
+                    continue
+                results[call_id] = (
+                    bool(block.get("is_error")),
+                    _tool_result_content_text(block.get("content")),
+                )
+
+    delivered: list[str] = []
+    for call_id, uid in requested.items():
+        result = results.get(call_id)
+        if result is None:
+            continue
+        is_error, text = result
+        if is_error or not text:
+            continue
+        try:
+            payload = json.loads(text)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(payload, dict) or payload.get("uid") != uid:
+            continue
+        body = payload.get("body")
+        if isinstance(body, str) and body.strip():
+            delivered.append(uid)
+    return tuple(dict.fromkeys(delivered))
 
 
 def delivered_text_for_utilization(row: RolloutRow) -> str:
@@ -903,6 +1165,18 @@ def delivered_uids_for_utilization(row: RolloutRow) -> tuple[str, ...]:
     called recall, DOES carry uid markers in the pulled portion (the SAME
     ``recall_search`` rendering PULL gets), so its uids come from there --
     the breadcrumb portion contributes none, for the identical reason.
+
+    Deliberately NOT :func:`_delivered_uids` and deliberately not sharing a
+    dispatch with it (issue athenaeum#1842 -- a prior version of
+    ``_delivered_uids``'s docstring wrongly claimed otherwise). This
+    function answers "what was PUT in front of the model, paid for whether
+    wanted or not", which is what a WASTE figure must be computed over; the
+    grader's function answers "what evidence is there that a page reached
+    the model", which legitimately includes a page the model fetched itself
+    via ``read_entity``. Counting a self-fetched page as waste basis would
+    be wrong -- the model asked for it -- so athenaeum#1842's read_entity
+    channel was added to the grader ONLY, leaving every ``uid_citation_rate``
+    and ``mean_wasted_*`` figure byte-identical.
     """
     record = row.record
     if record.arm is Arm.PUSH_PAGES_UPPER_BOUND:
@@ -1037,6 +1311,17 @@ class GroupStats:
     # never this. None when no row in the group carries a gradable value.
     tag_followed_rate: float | None
 
+    # Marker miss with delivery (issue athenaeum#1842, report_only) -- the
+    # COUNT (not a rate: the absolute number is what a reader acts on) of
+    # gradable cells in the group where every answer-bearing page WAS
+    # delivered and at least one of them contributed no matching marker --
+    # see marker_miss_with_delivery. Feeds no section 7 condition and no
+    # win/loss field, exactly as tag_followed_rate above does not. None
+    # (never 0) when no row in the group is gradable at all -- "nothing to
+    # count" is a different fact from "counted, found none". Appended last
+    # so existing positional construction and sibling-lane merges stay safe.
+    marker_miss_with_delivery: int | None = None
+
 
 def _mean(values: list[float]) -> float | None:
     return sum(values) / len(values) if values else None
@@ -1065,6 +1350,7 @@ def compute_group_stats(rows: Sequence[RolloutRow]) -> list[GroupStats]:
         marker_resolutions: list[float] = []
         index_coverages: list[float] = []
         tag_followed_flags: list[float] = []
+        marker_miss_flags: list[float] = []
 
         for row in group:
             record = row.record
@@ -1120,6 +1406,10 @@ def compute_group_stats(rows: Sequence[RolloutRow]) -> list[GroupStats]:
             if followed is not None:
                 tag_followed_flags.append(1.0 if followed else 0.0)
 
+            marker_miss = marker_miss_with_delivery(record, probe, corpus)
+            if marker_miss is not None:
+                marker_miss_flags.append(1.0 if marker_miss else 0.0)
+
             if record.arm is Arm.NATIVE_INDEX:
                 coverage_value = _native_index_coverage_value(record)
                 if coverage_value is not None:
@@ -1151,6 +1441,9 @@ def compute_group_stats(rows: Sequence[RolloutRow]) -> list[GroupStats]:
                     _mean(index_coverages) if arm == Arm.NATIVE_INDEX.value else None
                 ),
                 tag_followed_rate=_mean(tag_followed_flags),
+                marker_miss_with_delivery=(
+                    int(sum(marker_miss_flags)) if marker_miss_flags else None
+                ),
             )
         )
     return stats
@@ -2877,6 +3170,15 @@ def render_report(report: NorthStarReport) -> str:
         lines.append(f"- phase2: {report.phase2_summary}")
     for scale in sorted(report.corpus_digests):
         lines.append(f"- corpus_digest[{scale}]: {report.corpus_digests[scale]}")
+    # issue athenaeum#1842: Corpus.fingerprint() digests PAGES only (see
+    # tests/evals/corpus.py's own note beside it), so a change to the GRADER
+    # -- which is what this issue shipped -- moves every correctness figure
+    # in this report while leaving corpus_digest byte-identical. Stamped
+    # beside the digest, unconditionally, so two reports over the same store
+    # are never silently assumed comparable: a reader comparing tables must
+    # be able to see that the rule changed, not infer it from a number
+    # moving.
+    lines.append(f"- grader_revision: {GRADER_REVISION}")
     lines.append(f"- total rollout rows: {len(report.rows)}")
     # issue athenaeum#1819: printed unconditionally -- 0 is a real, useful
     # value (this run had none), not something to hide by omission.
@@ -3211,6 +3513,32 @@ def render_report(report: NorthStarReport) -> str:
         lines.append(
             f"| {s.probe_class} | {s.corpus_scale} | {s.arm} | {s.n} | "
             f"{_fmt(s.tag_followed_rate)} |"
+        )
+    lines.append("")
+
+    lines.append("## Marker miss with delivery (issue athenaeum#1842, report_only)")
+    lines.append("")
+    lines.append(
+        "`marker_miss_with_delivery` is the COUNT of gradable cells in that group where "
+        "every answer-bearing page WAS delivered to the arm (`correctness_rate`'s "
+        "delivered-page-evidence clause held) and at least one of those pages still "
+        "contributed no matching `answer_markers` value to the answer -- see "
+        "`marker_miss_with_delivery`. It splits a `False` cell into its two causes: a "
+        "delivery gap (counted here as 0) versus a model miss or a marker-matching gap "
+        "(counted here as 1). `report_only`: this column feeds no §7 condition, no "
+        "`compute_verdicts` input and no win/loss field, exactly as `tag_followed_rate` "
+        "above does not. `n/a` means no row in that group is gradable at all (including "
+        "every abstention group) -- never a counted zero."
+    )
+    lines.append("")
+    lines.append("| probe_class | corpus_scale | arm | n | marker_miss_with_delivery |")
+    lines.append("| --- | --- | --- | --- | --- |")
+    for s in report.stats:
+        count_display = (
+            "n/a" if s.marker_miss_with_delivery is None else str(s.marker_miss_with_delivery)
+        )
+        lines.append(
+            f"| {s.probe_class} | {s.corpus_scale} | {s.arm} | {s.n} | {count_display} |"
         )
     lines.append("")
 
