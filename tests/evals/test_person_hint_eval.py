@@ -308,6 +308,9 @@ def test_person_hint_case(
         attribution=attribution,
         person_outcomes=outcomes,
         non_person_pointer_uids=pointers,
+        # Issue athenaeum#1866: attribution-only, per this field's docstring
+        # — never read by score_case below.
+        person_hint_decisions=tuple(getattr(result, "person_hint_decisions", ())),
     )
 
     passed, detail = score_case(case, delta, outcomes, pointer_uids=pointers, duplicated=duplicated)
@@ -336,27 +339,17 @@ def test_person_hint_case(
     )
 
 
-@pytest.mark.xfail(
-    strict=False,
-    raises=AssertionError,
-    reason=(
-        "athenaeum#1867: the person_hint layer is aspirationally RED until "
-        "the tier-0 routing change (athenaeum#1866) stops the person-registry "
-        "consult claiming every file that merely NAMES a known person. "
-        "NON-strict on purpose (athenaeum#1686): once the routing change "
-        "lands the score becomes a live-API measurement that varies run to "
-        "run around the floor, and a strict marker reds the job on a lucky "
-        "run rather than on a fix. Removing this marker needs several "
-        "consecutive at-or-above-floor runs alongside a routing change that "
-        "explains them, not one run."
-    ),
-)
 def test_person_hint_aggregate_floor(eval_session: Any, _live_ready: None) -> None:
     """Assert the person-hint layer meets the aggregate floor.
 
-    EXPECTED RED on the shipped librarian. The failure message is the layer's
-    product: it names which person pages are gaining claims they were never
-    given, and which files stopped being compiled as a result.
+    Issue athenaeum#1866: asserted STRICTLY, no ``xfail`` marker — the
+    tier-0 routing change this test was written ahead of (athenaeum#1867's
+    aspirational floor) has now landed, so the person-registry consult no
+    longer claims every file that merely names a known person and this
+    layer is expected to clear :data:`PERSON_HINT_FLOOR` on a real run. The
+    failure message, if it fires, names which person pages are gaining
+    claims they were never given, and which files stopped being compiled
+    as a result.
     """
     passed, total = eval_session.layer_score(LAYER_PERSON_HINT)
     assert total > 0, "person_hint eval collected no cases"
