@@ -6382,7 +6382,19 @@ def _run_correction_phase(ctx: RunContext) -> None:
     """
     pending_path = ctx.wiki_root / "_pending_questions.md"
     max_escalations = resolve_corrections_max_escalations_per_run(ctx.config)
-    open_ids = open_correction_ids(pending_path) if pending_path.exists() else set()
+    if pending_path.exists():
+        # Issue athenaeum#1850: the parse now happens HERE, not inside
+        # corrections.open_correction_ids — that function used to import
+        # athenaeum.answers itself, but answers now imports corrections
+        # (deferred, for the ratified-apply path), and the reverse edge
+        # would reopen the {answers, corrections} cycle athenaeum#545/#640
+        # dissolved. Deferred import, matching this module's existing
+        # cross-SCC-module call convention.
+        from athenaeum.answers import parse_pending_questions
+
+        open_ids = open_correction_ids(parse_pending_questions(pending_path))
+    else:
+        open_ids = set()
     escalated_this_run: set[str] = set()
     # issue athenaeum#797 §10.2: flood-guard summary line -- named per (submitter,
     # field) so the operator has an actionable target when the cap trips.

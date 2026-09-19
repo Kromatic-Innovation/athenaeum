@@ -83,12 +83,13 @@ not silently baked in — see the athenaeum#797 completion report for the full l
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import logging
 import subprocess
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from dataclasses import field as dc_field
 from datetime import date, datetime, timezone
@@ -1107,6 +1108,7 @@ def process_correction_record(
     config: dict[str, Any] | None,
     dry_run: bool = False,
     dry_run_pages: DryRunPageOverlay | None = None,
+    ratified_source: Any | None = None,
 ) -> CorrectionRecordResult:
     """Process one correction record against a target entity — the tier-0
     applier. Never raises for a non-conformant record; every failure mode
@@ -1120,6 +1122,27 @@ def process_correction_record(
     exactly today's behaviour: a dry-run create still previews correctly for
     a SINGLE record, it just cannot resolve a later record in the same
     batch to the page this one notionally created.
+
+    ``ratified_source`` (issue athenaeum#1850, keyword-only, ``None`` by
+    default so every existing caller is byte-identical): set by
+    :func:`athenaeum.answers._apply_field_correction` to re-drive a
+    synthesized record built from an operator-ratified escalation block.
+    The operator has already settled the §6.2 conflict, so ratified mode
+    changes exactly three things, each reachable ONLY through this
+    parameter:
+
+    1. It skips the ``submitter not in writers`` membership check (the
+       operator is not a batch writer). The allowlist membership check and
+       the shape/op checks still apply — ``writers`` still bounds which
+       ATTRIBUTES a ratified correction may touch, per §6.3's "blast-radius
+       bound, not a trust model".
+    2. A ``creatable`` target resolution is rejected rather than acted on —
+       a ratified correction never creates an entity (design doc §6.4).
+    3. In the scalar branch, the verdict against an existing incumbent is
+       decided by the delta gate alone (``noop`` iff the value already
+       matches, ``apply`` otherwise) — :func:`decide_verdict` is never
+       called, because the operator has already resolved the precedence
+       question §6.2 exists to answer.
     """
     schema_version = envelope.get("schema_version")
     submitter = envelope.get("submitter")
@@ -1193,7 +1216,13 @@ def process_correction_record(
     shape = field_def.get("shape")
     writers = field_def.get("writers")
     monotone = bool(field_def.get("monotone", False))
-    if not isinstance(writers, list) or submitter not in writers:
+    if not isinstance(writers, list):
+        return _raised(f"writer {submitter!r} not permitted for field {field_name!r}")
+    # athenaeum#1850: ratified mode skips ONLY this membership check — see
+    # the ratified_source docstring above. writers must still be a
+    # structurally valid list (a malformed config still rejects); the
+    # operator's own approval stands in for batch-writer membership.
+    if ratified_source is None and submitter not in writers:
         return _raised(f"writer {submitter!r} not permitted for field {field_name!r}")
     if shape == "scalar" and op != "set":
         return _raised(f"op {op!r} invalid for scalar attribute {field_name!r}")
@@ -1260,6 +1289,13 @@ def process_correction_record(
     )
     if resolution.kind == "unresolvable":
         return _raised("target resolves to zero or several entities")
+
+    if resolution.kind == "creatable" and ratified_source is not None:
+        # athenaeum#1850: a ratified correction never creates an entity
+        # (design doc §6.4) — the operator ratified a correction to an
+        # EXISTING page's field, not a mandate to mint a new one from a
+        # handle the target no longer resolves against.
+        return _raised("ratified correction target no longer resolves to an existing page")
 
     just_created = False
     if resolution.kind == "existing":
@@ -1488,6 +1524,15 @@ def process_correction_record(
             # human-stated value, and §6.3's `writers` allowlist still bounds
             # which attributes a given submitter may touch at all.
             verdict, reason = "apply", "no incumbent value for this field; not a conflict (§4)"
+        elif ratified_source is not None:
+            # athenaeum#1850 (c): the operator has already settled the §6.2
+            # precedence question that decide_verdict exists to answer — the
+            # only thing left to decide is the delta gate.
+            verdict, reason = (
+                ("noop", "identical value (delta gate)")
+                if existing_value == value
+                else ("apply", "operator-ratified correction")
+            )
         else:
             existing_fs = read_meta.get("field_sources")
             incumbent_attributed = (
@@ -2182,14 +2227,26 @@ def render_correction_id_marker(correction_id: str) -> str:
     return f"{_CORRECTION_ID_MARKER} {correction_id}"
 
 
-def open_correction_ids(pending_path: Path) -> set[str]:
+def open_correction_ids(pending_questions: Iterable[Any]) -> set[str]:
     """§8/§10.2: correction_ids already escalated and still OPEN (unanswered)
-    in `_pending_questions.md`, so a carried-over batch (or a later run)
-    cannot double-file the same question."""
-    from athenaeum.answers import parse_pending_questions
+    among ``pending_questions``, so a carried-over batch (or a later run)
+    cannot double-file the same question.
 
+    Issue athenaeum#1850: takes already-parsed
+    :class:`athenaeum.answers.PendingQuestion`-shaped objects (each exposing
+    ``.answered``/``.description``) rather than a ``pending_path`` it parses
+    itself. This module must not import :mod:`athenaeum.answers` at module
+    OR function scope — :func:`athenaeum.answers._apply_field_correction`
+    now imports THIS module (deferred, per the ratified-apply wiring), and
+    the reverse edge this function used to carry would reopen the very
+    {answers, corrections} import cycle athenaeum#545/#640 dissolved
+    (`tests/test_import_graph_acyclic.py` tracks function-local edges too,
+    so a deferred import here would have been caught exactly the same way).
+    The caller (`librarian._run_correction_phase`) parses
+    ``_pending_questions.md`` itself and passes the result in.
+    """
     ids: set[str] = set()
-    for pq in parse_pending_questions(pending_path):
+    for pq in pending_questions:
         if pq.answered:
             continue
         for line in pq.description.splitlines():
@@ -2197,6 +2254,126 @@ def open_correction_ids(pending_path: Path) -> set[str]:
             if stripped.startswith(_CORRECTION_ID_MARKER):
                 ids.add(stripped.removeprefix(_CORRECTION_ID_MARKER).strip())
     return ids
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1850 — parsing an escalated block back into a correction
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class EscalatedCorrection:
+    """A field-correction escalation block's description, decoded back into
+    the fields ``_run_correction_phase._escalate_one`` rendered it from.
+
+    ``source_text`` is the escalation's original ``Source:`` line, kept
+    verbatim as PROVENANCE TEXT ONLY (for the archive stamp) — the ratified
+    apply never reuses it as the write's actual ``source``; see
+    :func:`athenaeum.answers._apply_field_correction`, which mints its own
+    ``user:pending-question:<id>`` source instead. ``schema_version`` is
+    the :data:`KNOWN_SCHEMA_VERSIONS` member that reproduced the block's own
+    ``Correction ID:`` — passed back to :func:`process_correction_record`'s
+    ``envelope`` so its OWN recomputed correction_id agrees with the one
+    this parse just verified.
+    """
+
+    target: dict[str, Any]
+    op: str
+    field: str
+    value: Any
+    source_text: str
+    correction_id: str
+    schema_version: int
+
+
+def parse_escalated_correction(description: str) -> "EscalatedCorrection | str":
+    """Decode a field-correction escalation block's description.
+
+    Reads the line-anchored ``Target:``/``Field:``/``Op:``/``Value:``/
+    ``Source:``/``Correction ID:`` prefixes `_escalate_one` renders (see its
+    ``description_lines`` list) — the same lines :func:`open_correction_ids`
+    already reads ``Correction ID:`` from. ``Target:`` decodes with
+    ``json.loads`` (mirrors the renderer's ``json.dumps(..., sort_keys=True)``);
+    ``Value:`` decodes with ``ast.literal_eval`` (mirrors the renderer's
+    ``!r`` / ``repr()``) — never ``json.loads``, which would reject a value
+    JSON cannot represent unchanged (e.g. a tuple) even though ``repr``
+    round-trips it.
+
+    Returns the parsed :class:`EscalatedCorrection`, or a short
+    human-readable failure reason (``str``) when the block cannot be
+    trusted to be the correction it claims to be — a missing line, an
+    unparseable ``Value:``, or (the integrity check over the whole parse)
+    no :data:`KNOWN_SCHEMA_VERSIONS` member whose recomputed
+    :func:`compute_correction_id` matches the block's own ``Correction
+    ID:``. The caller (:func:`athenaeum.answers._apply_field_correction`)
+    treats a ``str`` return as "hold — cannot act on this", never as a
+    reason to guess.
+    """
+    lines = description.splitlines()
+
+    def _line(prefix: str) -> str | None:
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith(prefix):
+                return stripped[len(prefix) :].strip()
+        return None
+
+    target_text = _line("Target:")
+    field_text = _line("Field:")
+    op_text = _line("Op:")
+    value_text = _line("Value:")
+    cid_text = _line(_CORRECTION_ID_MARKER)
+
+    missing = [
+        label
+        for label, text in (
+            ("Target:", target_text),
+            ("Field:", field_text),
+            ("Op:", op_text),
+            ("Value:", value_text),
+            (_CORRECTION_ID_MARKER, cid_text),
+        )
+        if text is None
+    ]
+    if missing:
+        return f"block missing required line(s): {', '.join(missing)}"
+    assert target_text is not None
+    assert field_text is not None
+    assert op_text is not None
+    assert value_text is not None
+    assert cid_text is not None
+
+    try:
+        target = json.loads(target_text)
+    except (ValueError, TypeError):
+        return "Target: line is not valid JSON"
+    if not isinstance(target, dict) or not target:
+        return "Target: line must decode to a non-empty object"
+
+    try:
+        value = ast.literal_eval(value_text)
+    except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
+        return "Value: line could not be parsed"
+
+    for schema_version in sorted(KNOWN_SCHEMA_VERSIONS):
+        candidate_id = compute_correction_id(
+            schema_version=schema_version,
+            target=target,
+            op=op_text,
+            field_name=field_text,
+            value=value,
+        )
+        if candidate_id == cid_text:
+            return EscalatedCorrection(
+                target=target,
+                op=op_text,
+                field=field_text,
+                value=value,
+                source_text=_line("Source:") or "",
+                correction_id=cid_text,
+                schema_version=schema_version,
+            )
+    return "block fields do not match its Correction ID"
 
 
 # ---------------------------------------------------------------------------
