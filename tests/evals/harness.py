@@ -80,6 +80,14 @@ LAYER_ATTACHMENT = "attachment"
 # decides is whether the classify tier mints a NEW page for something an
 # existing sub-page already covers.
 LAYER_DECOMPOSITION = "decomposition"
+# Issue athenaeum#1867: the PERSON-HINT layer. ``LAYER_ATTACHMENT`` above runs
+# the same entry point (``librarian.process_one``) but passes no
+# ``person_registry=``, so tier 0's person-registry consult never engages and
+# that layer cannot see this decision at all. This layer passes one, which is
+# what puts the consult on the path: given a raw file that NAMES a known
+# person, does that person's page gain a claim only when the file actually
+# ASSERTS something about them -- and is the rest of the file still compiled?
+LAYER_PERSON_HINT = "person_hint"
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EVAL_DATA_ROOT = REPO_ROOT / "tests" / "evals" / "data"

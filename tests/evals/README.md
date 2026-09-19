@@ -60,16 +60,30 @@ Layers exercised end-to-end against a real Claude API call:
 | Classify  | Haiku (`ATHENAEUM_CLASSIFY_MODEL`) | 6 raw intakes   | ≥ 4/6  |
 | Merge     | Sonnet (`ATHENAEUM_WRITE_MODEL`)   | 4 merge cases   | ≥ 3/4  |
 | Attachment | the whole chain (Haiku + Sonnet)  | 5 routing cases | ≥ 4/5 **(expected RED)** |
+| Person-hint | the whole chain (Haiku + Sonnet), person registry ON | 5 person-mention cases | ≥ 4/5 **(expected RED)** |
 | Backfill  | deferred until athenaeum#328                | —               | —      |
 
-Attachment (issue athenaeum#1580) is the one layer whose floor is
-**aspirational rather than descriptive**. Every other floor above describes
-what the shipped librarian already scores; that layer's floor describes what a
-CORRECT librarian would score, and it is red today by design — see its module
-docstring and issue athenaeum#1580 AC3. Tuning it down to observed behaviour
-would make it a rubber stamp. It is also the only layer that runs the WHOLE
-tier chain (`librarian.process_one`) against a materialized wiki rather than
-one tier in isolation, which is why it has no single model in the table.
+Attachment (issue athenaeum#1580) and Person-hint (issue athenaeum#1867) are
+the two layers whose floors are **aspirational rather than descriptive**. Every
+other floor above describes what the shipped librarian already scores; these
+two describe what a CORRECT librarian would score, and both are red today by
+design — see their module docstrings, issue athenaeum#1580 AC3 and issue
+athenaeum#1867. Tuning either down to observed behaviour would make it a rubber
+stamp. They are also the only layers that run the WHOLE tier chain
+(`librarian.process_one`) against a materialized wiki rather than one tier in
+isolation, which is why neither has a single model in the table.
+
+The two are not variants of each other. Attachment passes **no**
+`person_registry=`, so tier 0's person-registry consult never engages and that
+layer cannot observe it at all; Person-hint passes one, which is what puts the
+consult on the path. Person-hint's question is narrower and its trap is
+sharper: on the shipped librarian the person page *does* change (it gains a
+dated Notes bullet), so a grader asking merely "did the page change" would pass
+every case. `tests/evals/person_hint.py` separates four outcomes instead
+(`unchanged`, `notes_bullet`, `citation_only`, `footnoted_claim`) and scores
+`notes_bullet` as a failure in every case. Its shipped-path baseline is
+`docs/measurements/person-hint-baseline-2026-09-19.md` — **0 of 5**, every case
+decided deterministically, with **zero** model calls.
 
 Classify and Merge (issue athenaeum#552) cover `tiers.py`'s Tier-2 CLASSIFY and
 Tier-3 WRITE/MERGE stages — see `docs/measurements/evals-inventory.md` for the full
@@ -188,6 +202,32 @@ append the key only once the fixture is committed alongside it. Update
 `docs/measurements/decomposition-baseline-2026-09-10.md` with Case D's
 observed result at the same time — the baseline's Case D row currently reads
 "not yet measured".
+
+### Seeding the `person_hint` layer (issue athenaeum#1867, not yet seeded)
+
+Same never-seeded state as `decomposition` above: the fixture directory ships
+absent and the layer is **not** a key in
+`tests/fixtures/recorded/seeded-layers.yml`, so the replay suite passes
+trivially (athenaeum#551) and zero-key CI stays green and honest.
+
+Seeding it is a metered operator action, and for this layer it is also
+**premature until athenaeum#1866 lands**. On the shipped librarian every case
+is claimed by tier 0 with zero model calls, so a `record=true` run would
+capture no responses at all — there is nothing to seed yet. Once the routing
+change lands and the cases reach tiers 1-3:
+
+```bash
+gh workflow run evals.yml -f record=true --repo Kromatic-Innovation/athenaeum
+```
+
+Then download the `recorded-fixtures` artifact, commit
+`tests/fixtures/recorded/person_hint/*.json`, and append to
+`seeded-layers.yml` in the same PR. A layer added to that manifest MUST keep a
+non-empty fixture directory, so append the key only once the fixtures are
+committed alongside it. Re-take
+`docs/measurements/person-hint-baseline-2026-09-19.md` LIVE at the same time —
+the offline instrument that produced it is only valid while the layer makes no
+model calls.
 
 ### Re-deriving instead of re-recording (no live key available)
 

@@ -123,6 +123,7 @@ Evidence, kept out of the reading path.
 - [`used` column heuristic accuracy — original substring rule](measurements/used-column-heuristic-accuracy-2026-09-10.md)
 - [Decomposition baseline](measurements/decomposition-baseline-2026-09-10.md)
 - [Attachment baseline](measurements/attachment-baseline-2026-09-15.md)
+- [Person-hint baseline](measurements/person-hint-baseline-2026-09-19.md) — whether a person page gains a claim only when the source asserts something about that person, and which tier decided.
 - [Relatedness baseline](measurements/relatedness-baseline-2026-09-15.md)
 - [Native-memory baseline — measurement report](measurements/native-memory-baseline-2026-09-17.md) — the read-path comparison against Claude Code auto memory.
 - [Native-memory baseline — wave-2 measurement report](measurements/native-memory-baseline-2026-09-18.md) — the sixth north-star grid, adding the report-only classes and the two-oracle gate.
