@@ -212,6 +212,27 @@ case "$BUDGET" in
   ''|*[!0-9]*) BUDGET=1200 ;;
   0) BUDGET=1200 ;;
 esac
+# Issue athenaeum#1783: same env>yaml-cache>default precedence as BUDGET
+# above, mirroring athenaeum.config.resolve_recall_cap_ceiling. The
+# fallback literal (7) is pinned equal to
+# athenaeum.config.RECALL_CAP_CEILING_DEFAULT by
+# tests/test_recall_cap.py -- it must never be hand-typed anywhere else in
+# this file, and this is the ONE place it is.
+CEILING="${ATHENAEUM_RECALL_CAP_CEILING:-${RECALL_CAP_CEILING:-7}}"
+case "$CEILING" in
+  ''|*[!0-9]*) CEILING=7 ;;
+  0) CEILING=7 ;;
+esac
+# The candidate-fetch window both backends widen to below -- same width as
+# `athenaeum.mcp_server._HYBRID_CANDIDATE_POOL`, reused here for the same
+# reason the MCP side reuses it: it needs to stay >= CEILING with room for
+# the cap to have real withheld candidates to count, and matching the MCP
+# side's own window keeps "how wide is a widened fetch" one answer across
+# both surfaces.
+WINDOW=15
+if [ "$CEILING" -gt "$WINDOW" ]; then
+  WINDOW="$CEILING"
+fi
 
 # ── Sidecar push telemetry setup (issue athenaeum#1343) ─────────────────
 # Every unprompted push this hook renders gets one JSONL row appended to
@@ -514,22 +535,27 @@ _pm_ensure_query_hash() {
 _pm_record_push() {
   [ "$PM_ENABLED" = true ] || return 0
 
-  local fname name rank audience backend description bullet cost
+  local fname name rank audience backend description entity_type bullet cost
   local _pm_id _pm_scope _pm_id_esc _pm_scope_esc _pm_backend_esc
   local _pm_cost _pm_relevance _pm_item
   local pm_items_json="" pm_total_cost=0 pm_item_count=0
 
   while IFS= read -r _PM_ROW_REST; do
     [ -n "$_PM_ROW_REST" ] || continue
-    # Eight TAB-delimited fields, split WITHOUT `read`'s IFS-whitespace
-    # field-squashing — see `_pm_shift_field` above for why that matters
-    # and for the verified counter-example.
+    # Nine TAB-delimited fields (issue athenaeum#1783 inserted `type` as a
+    # new field 7, shifting `bullet`/`cost` from 7/8 to 8/9), split
+    # WITHOUT `read`'s IFS-whitespace field-squashing — see
+    # `_pm_shift_field` above for why that matters and for the verified
+    # counter-example. `entity_type` is shifted out here to keep this
+    # loop's field count in step with `$RESULTS`'s real shape; it is not
+    # otherwise used by this telemetry row.
     _pm_shift_field; fname="$_PM_RET"
     _pm_shift_field; name="$_PM_RET"
     _pm_shift_field; rank="$_PM_RET"
     _pm_shift_field; audience="$_PM_RET"
     _pm_shift_field; backend="$_PM_RET"
     _pm_shift_field; description="$_PM_RET"
+    _pm_shift_field; entity_type="$_PM_RET"
     _pm_shift_field; bullet="$_PM_RET"
     _pm_shift_field; cost="$_PM_RET"
     [ -n "$fname" ] || continue
@@ -932,9 +958,11 @@ if [ -f "$DB_FILE" ]; then
   # retiring the vocabulary retired the column (schema v5), so there is
   # no longer anything to select or to record.
   #
-  # Issue athenaeum#1665: this raw query is UNFILTERED by design (relevance
-  # selection is `ORDER BY rank` / `LIMIT 3` alone, same as always) -- the
-  # relevance-floor filter for these rows, when it applies at all, runs
+  # Issue athenaeum#1665: this raw query is UNFILTERED by design (ordering
+  # is `ORDER BY rank` alone; the LIMIT below is the widened fetch window,
+  # not a selection cut -- issue athenaeum#1783 moved the actual selection
+  # cut to the merge-time ceiling+budget pass further down this file) --
+  # the relevance-floor filter for these rows, when it applies at all, runs
   # LATER, inside the vector half's Python invocation below, not here. It
   # does NOT apply here unconditionally: on a turn where the vector half
   # does not run at all (no vector index, or `SEARCH_BACKEND=fts5`), these
@@ -970,13 +998,20 @@ if [ -f "$DB_FILE" ]; then
   # `FTS5Backend.query`'s default (non-metadata_only) path now does, is
   # issue athenaeum#1798's scope, not this fix's -- this restores prior
   # behavior, it does not add the new capability.
+  # Issue athenaeum#1783: widened from `LIMIT 3` to `LIMIT $WINDOW`, and
+  # `type` (already indexed UNINDEXED, `src/athenaeum/search.py`'s
+  # `_CREATE_SQL`) added to the SELECT list -- one more column on this
+  # SAME query, no new lookup, matching the `audience`/`${DESC_COL}`
+  # precedent above. `type` feeds the withheld-by-type tally the merge
+  # step below computes; it plays no part in selection or ordering
+  # (`ORDER BY rank` alone, unchanged).
   FTS_RESULTS=$(sqlite3 -separator $'\t' "$DB_FILE" "
-    SELECT filename, name, rank, audience, 'fts5', ${DESC_COL}
+    SELECT filename, name, rank, audience, 'fts5', ${DESC_COL}, type
     FROM wiki
     WHERE wiki MATCH '{${FTS_MATCH_COLS}}: (${FTS_QUERY})'
     ${EXCLUDE}
     ORDER BY rank
-    LIMIT 3;
+    LIMIT ${WINDOW};
   " 2>/dev/null || echo "")
 fi
 
@@ -1132,11 +1167,16 @@ seen_file = sys.argv[2]
 if os.path.isfile(seen_file):
     with open(seen_file) as f:
         seen = set(l.strip() for l in f)
-for fname, name, score in query_vector_index(sys.argv[1], os.path.expanduser('~/.cache/athenaeum'), n=3, exclude=seen):
+# Issue athenaeum#1783: widened from a hardcoded n=3 to argv[5] (the same
+# $WINDOW the FTS5 LIMIT above widened to) -- passed as argv, not
+# interpolated into this heredoc, matching this file's own precedent for
+# every other per-call value threaded into this invocation.
+_vector_n = int(sys.argv[5]) if len(sys.argv) > 5 and sys.argv[5] else 3
+for fname, name, score in query_vector_index(sys.argv[1], os.path.expanduser('~/.cache/athenaeum'), n=_vector_n, exclude=seen):
     if floor_vector is not None and meets_relevance_floor is not None and not meets_relevance_floor('vector', score, floor_vector):
         continue
     print(f'{fname}\t{name}\t{score}')
-" "$VECTOR_QUERY" "$SEEN_FILE" "$FTS_RESULTS" "$KNOWLEDGE_ROOT" 2>"$_vector_tmp") || _vector_rc=$?
+" "$VECTOR_QUERY" "$SEEN_FILE" "$FTS_RESULTS" "$KNOWLEDGE_ROOT" "$WINDOW" 2>"$_vector_tmp") || _vector_rc=$?
   VECTOR_ERR=$(cat "$_vector_tmp" 2>/dev/null || echo "")
   rm -f "$_vector_tmp"
   if [ -n "$VECTOR_ERR" ] && [ "${ATHENAEUM_HOOK_DEBUG:-0}" = "1" ]; then
@@ -1265,8 +1305,12 @@ if [ -f "$DB_FILE" ] && [ -n "$VECTOR_RESULTS" ]; then
     # the projection along with the column itself (schema v5), which is
     # also what collapsed this site's two legacy/current branches into
     # the single query below.
+    # Issue athenaeum#1783: `type` added to this SAME bounded lookup, same
+    # reasoning as the FTS5 SELECT above -- feeds the withheld-by-type
+    # tally for a vector-sourced hit exactly as it now does for an
+    # FTS5-sourced one.
     VECTOR_META=$(sqlite3 -separator $'\t' "$DB_FILE" "
-      SELECT filename, audience, ${DESC_COL} FROM wiki
+      SELECT filename, audience, ${DESC_COL}, type FROM wiki
       WHERE filename IN (${_vector_in_list});
     " 2>/dev/null || echo "")
   fi
@@ -1314,7 +1358,9 @@ fi
 # no cleanup path, which matters on a per-turn critical path with a hard
 # wall-clock budget. Field semantics are unchanged: the join is still by
 # filename and the emitted row is still the same width as the FTS5
-# branch's (6 fields since issue athenaeum#1514 dropped `memory_tier`).
+# branch's (7 fields since issue athenaeum#1783 added `type` as the new
+# last one; 6 between issue athenaeum#1514 dropping `memory_tier` and
+# that).
 if [ -n "$VECTOR_RESULTS" ]; then
   VECTOR_RESULTS=$(printf '%s\n__ATHENAEUM_VECTOR_META_END__\n%s\n' "$VECTOR_META" "$VECTOR_RESULTS" | awk -F'\t' '
     BEGIN { inmeta = 1 }
@@ -1328,27 +1374,48 @@ if [ -n "$VECTOR_RESULTS" ]; then
       # `next` is load-bearing: a metadata row has a non-empty $1 and at
       # least 2 fields, so without it the emit rule below would fall
       # through and print metadata rows as though they were vector hits.
-      if ($0 != "") { aud[$1] = $2; desc[$1] = $3 }
+      if ($0 != "") { aud[$1] = $2; desc[$1] = $3; typ[$1] = $4 }
       next
     }
     NF >= 2 && $1 != "" {
       a = ($1 in aud) ? aud[$1] : "|"
       d = ($1 in desc) ? desc[$1] : ""
-      printf "%s\t%s\t\t%s\tvector\t%s\n", $1, $2, a, d
+      ty = ($1 in typ) ? typ[$1] : ""
+      printf "%s\t%s\t\t%s\tvector\t%s\t%s\n", $1, $2, a, d, ty
     }
   ')
 fi
 
-# Merge: FTS5 first (lexical precision), then vector, dedupe, cap 3. Rows
-# are 6 fields wide (issue athenaeum#1344 added `description` as the last
-# one, issue athenaeum#1514 removed `memory_tier` from the middle — see
-# the SELECT above); `NF >= 2` only ever checked that a row has at least
-# a filename and a name, so it has needed no change through either.
-RESULTS=$(printf '%s\n%s\n' "$FTS_RESULTS" "$VECTOR_RESULTS" \
-  | awk -F'\t' 'NF >= 2 && $1 != "" && !seen[$1]++' \
-  | head -3)
+# Merge: FTS5 first (lexical precision), then vector, dedupe. Rows are 7
+# fields wide (issue athenaeum#1344 added `description`, issue athenaeum#1514
+# removed `memory_tier` from the middle, issue athenaeum#1783 added `type`
+# as the new last field — see the SELECT above); `NF >= 2` only ever
+# checked that a row has at least a filename and a name, so it has needed
+# no change through any of the three. NOT cap-cut here any more (issue
+# athenaeum#1783 replaced the old `| head -3` with the combined
+# cap+budget+tally pass below) -- `MERGED` below carries every deduped
+# candidate inside the fetch window, in relevance order.
+MERGED=$(printf '%s\n%s\n' "$FTS_RESULTS" "$VECTOR_RESULTS" \
+  | awk -F'\t' 'NF >= 2 && $1 != "" && !seen[$1]++')
 
-# ── Enforce the push-token budget (issue athenaeum#1120) ────────────────
+# Issue athenaeum#1783: the overflow-breadcrumb template, cached by
+# session-start-recall.sh (`session-start-recall.sh`'s own
+# "recall_overflow_breadcrumb.md" copy step). Read as a plain single-line
+# value: `recall_overflow_breadcrumb.md` is authored as exactly one line
+# (`src/athenaeum/prompts/recall_overflow_breadcrumb.md`), but this guards
+# against a multi-line value tripping BWK awk's `-v` rejection anyway
+# (issue athenaeum#1516's hazard) -- fail OPEN to no overflow line, never
+# to a crashed hook. AC: "If the cache copy is missing, the hook emits no
+# overflow line and still succeeds."
+OVERFLOW_TMPL=""
+if [ -f "${CACHE_DIR}/recall_overflow_breadcrumb.md" ]; then
+  OVERFLOW_TMPL=$(cat "${CACHE_DIR}/recall_overflow_breadcrumb.md" 2>/dev/null || echo "")
+  case "$OVERFLOW_TMPL" in
+    *$'\n'*) OVERFLOW_TMPL="" ;;
+  esac
+fi
+
+# ── Enforce the ceiling, tally withheld-by-type, and enforce the push-token budget (issues athenaeum#1120, athenaeum#1783) ────────────────
 # Mirrors athenaeum.context._apply_budget's greedy-pack behaviour over the
 # merged, deduped, rank-ordered candidates above: a candidate is included
 # and its token cost added to the running total ONLY if doing so keeps the
@@ -1404,27 +1471,99 @@ RESULTS=$(printf '%s\n%s\n' "$FTS_RESULTS" "$VECTOR_RESULTS" \
 #     value non-numeric and it is replaced by the integer default, so by
 #     the time it reaches here it is a string of ASCII digits.
 PREAMBLE=$(printf '[Knowledge context] Wiki pages relevant to this message (use `recall` MCP tool for full details):\n')
-RESULTS=$(printf '%s' "$RESULTS" | awk -F'\t' -v preamble="$PREAMBLE" -v budget="$BUDGET" '
-  BEGIN { total = int(length(preamble) / 4) }
+# Issue athenaeum#1783: ONE awk pass now does what used to be two separate
+# steps (`head -3` then a budget-only pack): apply the ceiling to `$MERGED`
+# (every candidate past position `ceiling`, in relevance order, is
+# withheld), THEN greedy-pack the survivors into the token budget exactly
+# as before (a candidate that would exceed it is withheld too — "budget
+# drops are counted, not silent"). Both withholding reasons tally into the
+# SAME `wtype[]` map, by field 7 (`type`, defaulting to "page" — same
+# convention `athenaeum.search.apply_relevance_cap` uses for the MCP
+# surface), because the AC does not distinguish WHY a candidate was
+# withheld, only that it was. `idx` reaching `window` at END means the
+# widened fetch itself was exhausted -- there may be more withheld
+# candidates this turn never even fetched, so the emitted count is then a
+# LOWER BOUND ("at least N").
+#
+# `-v` safety (issue athenaeum#1516's hazard, audited the same way the
+# VECTOR_META join above is): `preamble`/`budget`/`ceiling`/`window` are
+# all single-line by construction (same reasoning as before this issue);
+# `tmpl` is guarded above (falls back to "" on any embedded newline) so it
+# can never trip BWK awk's "newline in string" rejection either.
+RESULTS=$(printf '%s' "$MERGED" | awk -F'\t' -v preamble="$PREAMBLE" -v budget="$BUDGET" -v ceiling="$CEILING" -v window="$WINDOW" -v tmpl="$OVERFLOW_TMPL" '
+  BEGIN { total = int(length(preamble) / 4); idx = 0; withheld = 0 }
   {
+    idx++
+    typ = ($7 != "") ? $7 : "page"
+    if (idx > ceiling) {
+      withheld++
+      wtype[typ]++
+      next
+    }
     name = $2
     desc = $6
     bullet = (desc != "") ? name " — " desc : name
     block = "  - " bullet "\n"
     cost = int(length(block) / 4)
-    if (total + cost > budget) next
+    if (total + cost > budget) {
+      withheld++
+      wtype[typ]++
+      next
+    }
     total += cost
-    # Issue athenaeum#1343/#1344: append the rendered `bullet` (7th field)
-    # and this candidate'"'"'s own token cost (8th field) — the telemetry
-    # row built below REUSES `cost` verbatim (per-item and, summed, in
-    # aggregate) rather than recomputing the estimate a second way, and
-    # the output loop below REUSES `bullet` verbatim rather than
-    # re-deriving it from `name` alone.
+    # Issue athenaeum#1343/#1344/#1783: append the rendered `bullet` (8th
+    # field, shifted from 7th by the new `type` field) and this
+    # candidate'"'"'s own token cost (9th field) — the telemetry row built
+    # below REUSES `cost` verbatim (per-item and, summed, in aggregate)
+    # rather than recomputing the estimate a second way, and the output
+    # loop below REUSES `bullet` verbatim rather than re-deriving it from
+    # `name` alone.
     print $0 "\t" bullet "\t" cost
+  }
+  END {
+    if (withheld > 0 && tmpl != "") {
+      n = 0
+      for (t in wtype) { order[n] = t; n++ }
+      for (i = 1; i < n; i++) {
+        key = order[i]; j = i - 1
+        while (j >= 0 && order[j] > key) { order[j + 1] = order[j]; j-- }
+        order[j + 1] = key
+      }
+      types = ""
+      for (i = 0; i < n; i++) {
+        t = order[i]
+        if (types != "") types = types ", "
+        types = types wtype[t] " " t
+      }
+      count_str = (idx >= window) ? ("at least " withheld) : withheld
+      line = tmpl
+      gsub(/\{count\}/, count_str, line)
+      gsub(/\{types\}/, types, line)
+      print "\n__ATHENAEUM_OVERFLOW__" line
+    }
   }
 ')
 
-[ -n "$RESULTS" ] || exit 0
+# Split the overflow sentinel (if any -- see the `withheld > 0` guard
+# above) off the END of `$RESULTS` before anything downstream reads it as
+# a stream of candidate rows. Always the LAST line when present (`END`
+# runs after every candidate row has already been printed), so a suffix
+# match is exact, never a substring collision with a real row (no indexed
+# filename can equal this sentinel).
+OVERFLOW_LINE=""
+case "$RESULTS" in
+  *$'\n'"__ATHENAEUM_OVERFLOW__"*)
+    OVERFLOW_LINE="${RESULTS##*$'\n'__ATHENAEUM_OVERFLOW__}"
+    RESULTS="${RESULTS%$'\n'__ATHENAEUM_OVERFLOW__*}"
+    ;;
+esac
+
+if [ -z "$RESULTS" ]; then
+  # Issue athenaeum#1783 AC "empty": nothing survived the cap/budget pass
+  # -- the hook emits nothing at all, including no overflow line, exactly
+  # as the pre-existing `exit 0` did.
+  exit 0
+fi
 
 # Issue athenaeum#1344 — narrow `$RESULTS` down to just `filename\tbullet`
 # pairs BEFORE the render loop touches it, via awk (not bash `read`). This
@@ -1433,9 +1572,9 @@ RESULTS=$(printf '%s' "$RESULTS" | awk -F'\t' -v preamble="$PREAMBLE" -v budget=
 # silently SQUASHES the empty middle field and shifts `c` into `$b` —
 # verified directly against this box's bash 5.2; non-whitespace IFS
 # characters like `,` do not do this, but tab is special-cased regardless
-# of the IFS value). `audience` (field 4 of the 8-field row) is genuinely
+# of the IFS value). `audience` (field 4 of the 9-field row) is genuinely
 # empty for a page carrying no `audience:` frontmatter — and reading a
-# `read -r` variable list deep enough to reach `bullet` (field 7) over
+# `read -r` variable list deep enough to reach `bullet` (field 8) over
 # such a row would silently
 # swallow it into an earlier field, corrupting the very text this loop
 # exists to render (the render loop has none of `_pm_record_push`'s
@@ -1445,7 +1584,9 @@ RESULTS=$(printf '%s' "$RESULTS" | awk -F'\t' -v preamble="$PREAMBLE" -v budget=
 # every OTHER awk pass in this file) — extracting just the two fields the
 # render loop needs, in awk, sidesteps the hazard entirely rather than
 # working around it.
-MATCH_LINES=$(printf '%s\n' "$RESULTS" | awk -F'\t' '{ print $1 "\t" $7 }')
+# Issue athenaeum#1783: field 8, not 7 -- `type` (new field 7) shifted
+# `bullet` one position to the right.
+MATCH_LINES=$(printf '%s\n' "$RESULTS" | awk -F'\t' '{ print $1 "\t" $8 }')
 
 # ── Format output ───────────────────────────────────────────────────────
 # Must be wrapped in hookSpecificOutput.hookEventName — Claude Code
@@ -1487,6 +1628,16 @@ while IFS=$'\t' read -r fname bullet; do
   MATCHES="${MATCHES}  - ${_PM_RET}\n"
   echo "$fname" >> "$SEEN_FILE"
 done <<< "$MATCH_LINES"
+
+# Issue athenaeum#1783: the overflow breadcrumb, appended AFTER every
+# bullet above -- same JSON-escape call, same `\n`-joined shape, so it
+# renders as one more line in the SAME `additionalContext` string. Never
+# written when `$OVERFLOW_LINE` is empty (AC: no overflow line at all when
+# nothing was withheld, or when the cached template was missing/unusable).
+if [ -n "$OVERFLOW_LINE" ]; then
+  _pm_json_escape "$OVERFLOW_LINE"
+  MATCHES="${MATCHES}${_PM_RET}\n"
+fi
 
 # Sidecar push telemetry (issue athenaeum#1343): exactly one call, and the
 # ONLY thing standing between a failure inside `_pm_record_push` and this

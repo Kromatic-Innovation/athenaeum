@@ -91,7 +91,9 @@ if cfg_path and os.path.isfile(cfg_path):
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     load_config = mod.load_config
+    cap_ceiling_default = mod.RECALL_CAP_CEILING_DEFAULT
 else:
+    from athenaeum.config import RECALL_CAP_CEILING_DEFAULT as cap_ceiling_default
     from athenaeum.config import load_config
 cfg = load_config(sys.argv[1] if len(sys.argv) > 1 else None)
 env_path = sys.argv[2]
@@ -119,6 +121,26 @@ with open(env_path, 'w') as f:
         if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
             tokens_per_turn = raw
     f.write(f'PUSH_TOKEN_BUDGET={tokens_per_turn}\n')
+    # Issue athenaeum#1783: cache the yaml-configured push-path relevance-
+    # bounded cap ceiling so the per-turn hook can read it without a Python
+    # import -- same hook-local-name reasoning as PUSH_TOKEN_BUDGET above
+    # (RECALL_CAP_CEILING, not ATHENAEUM_RECALL_CAP_CEILING, so this cached
+    # value can never shadow athenaeum.config.resolve_recall_cap_ceiling's
+    # own env>yaml precedence for a downstream Python caller). Only the
+    # yaml value is resolved here; the env override is applied at per-turn-
+    # hook runtime, not baked in at session start. cap_ceiling_default
+    # (bound above, from the SAME athenaeum.config module load_config came
+    # from) is the single source of truth for the fallback -- never a
+    # second hardcoded literal here.
+    cap_ceiling = cap_ceiling_default
+    recall_cfg = cfg.get('recall')
+    if isinstance(recall_cfg, dict):
+        cap_cfg = recall_cfg.get('cap')
+        if isinstance(cap_cfg, dict):
+            raw = cap_cfg.get('ceiling')
+            if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
+                cap_ceiling = raw
+    f.write(f'RECALL_CAP_CEILING={cap_ceiling}\n')
     # Issue athenaeum#1343 (D10): cache the yaml-configured push-metrics
     # enable flag so the per-turn hook's telemetry append can honour
     # \`push_metrics.enabled\` without a Python import — SAME shape as
@@ -152,25 +174,41 @@ if [ "$_read_config_ok" = false ]; then
   # Issue athenaeum#1343 (D10): same yaml-only resolution, same
   # hook-local-name reasoning, as PUSH_TOKEN_BUDGET above.
   _push_metrics_enabled="true"
+  # Issue athenaeum#1783: same yaml-only resolution, same hook-local-name
+  # reasoning -- but `recall.cap.ceiling` nests one level deeper than
+  # `push_budget.tokens_per_turn`, so this needs its own `_in_recall` /
+  # `_in_recall_cap` pair rather than reusing the single-level pattern the
+  # other sections above use. Last-resort literal (no `athenaeum.config`
+  # import is reachable in this branch at all): matches
+  # `athenaeum.config.RECALL_CAP_CEILING_DEFAULT` today (see that
+  # constant's own comment for the derivation test that pins it).
+  _recall_cap_ceiling="7"
   if [ -f "$CONFIG_YAML" ]; then
     _in_vector=false
     _in_push_budget=false
     _in_push_metrics=false
+    _in_recall=false
+    _in_recall_cap=false
     while IFS= read -r line; do
       line="${line%%#*}"
       case "$line" in
-        auto_recall:*)    _auto_recall="$(echo "${line#auto_recall:}" | tr -d ' ')"; _in_vector=false; _in_push_budget=false; _in_push_metrics=false ;;
-        search_backend:*) _search_backend="$(echo "${line#search_backend:}" | tr -d ' ')"; _in_vector=false; _in_push_budget=false; _in_push_metrics=false ;;
-        vector:*)         _in_vector=true; _in_push_budget=false; _in_push_metrics=false ;;
-        push_budget:*)    _in_push_budget=true; _in_vector=false; _in_push_metrics=false ;;
-        push_metrics:*)   _in_push_metrics=true; _in_vector=false; _in_push_budget=false ;;
+        auto_recall:*)    _auto_recall="$(echo "${line#auto_recall:}" | tr -d ' ')"; _in_vector=false; _in_push_budget=false; _in_push_metrics=false; _in_recall=false; _in_recall_cap=false ;;
+        search_backend:*) _search_backend="$(echo "${line#search_backend:}" | tr -d ' ')"; _in_vector=false; _in_push_budget=false; _in_push_metrics=false; _in_recall=false; _in_recall_cap=false ;;
+        vector:*)         _in_vector=true; _in_push_budget=false; _in_push_metrics=false; _in_recall=false; _in_recall_cap=false ;;
+        push_budget:*)    _in_push_budget=true; _in_vector=false; _in_push_metrics=false; _in_recall=false; _in_recall_cap=false ;;
+        push_metrics:*)   _in_push_metrics=true; _in_vector=false; _in_push_budget=false; _in_recall=false; _in_recall_cap=false ;;
+        recall:*)         _in_recall=true; _in_recall_cap=false; _in_vector=false; _in_push_budget=false; _in_push_metrics=false ;;
         "  provider:"*|"    provider:"*)
           [ "$_in_vector" = true ] && _vector_provider="$(echo "${line#*provider:}" | tr -d ' ')" ;;
         "  tokens_per_turn:"*|"    tokens_per_turn:"*)
           [ "$_in_push_budget" = true ] && _push_budget="$(echo "${line#*tokens_per_turn:}" | tr -d ' ')" ;;
         "  enabled:"*|"    enabled:"*)
           [ "$_in_push_metrics" = true ] && _push_metrics_enabled="$(echo "${line#*enabled:}" | tr -d ' ')" ;;
-        *) case "$line" in "  "*|"	"*) ;; ?*) _in_vector=false; _in_push_budget=false; _in_push_metrics=false ;; esac ;;
+        "  cap:"*|"    cap:"*)
+          [ "$_in_recall" = true ] && _in_recall_cap=true ;;
+        "    ceiling:"*|"      ceiling:"*)
+          [ "$_in_recall_cap" = true ] && _recall_cap_ceiling="$(echo "${line#*ceiling:}" | tr -d ' ')" ;;
+        *) case "$line" in "  "*|"	"*) ;; ?*) _in_vector=false; _in_push_budget=false; _in_push_metrics=false; _in_recall=false; _in_recall_cap=false ;; esac ;;
       esac
     done < "$CONFIG_YAML"
   fi
@@ -179,6 +217,11 @@ if [ "$_read_config_ok" = false ]; then
   case "$_push_budget" in
     ''|*[!0-9]*) _push_budget="1200" ;;
     0) _push_budget="1200" ;;
+  esac
+  # Same fallthrough guard, mirroring athenaeum.config.resolve_recall_cap_ceiling.
+  case "$_recall_cap_ceiling" in
+    ''|*[!0-9]*) _recall_cap_ceiling="7" ;;
+    0) _recall_cap_ceiling="7" ;;
   esac
   # Normalize to the same lowercase true/false shape the python branch's
   # str(bool).lower() writes, same falsey-token set the per-turn hook
@@ -195,6 +238,7 @@ if [ "$_read_config_ok" = false ]; then
     echo "VECTOR_PROVIDER=${_vector_provider}"
     echo "PUSH_TOKEN_BUDGET=${_push_budget}"
     echo "PUSH_METRICS_ENABLED=${_push_metrics_enabled}"
+    echo "RECALL_CAP_CEILING=${_recall_cap_ceiling}"
   } > "$CONFIG_ENV"
 fi
 
@@ -265,6 +309,31 @@ print('\n'.join(STOPWORDS))
   mv "$_stopwords_tmp" "${CACHE_DIR}/stopwords.txt"
 else
   rm -f "$_stopwords_tmp"
+fi
+
+# Cache the overflow-breadcrumb template once per session (issue athenaeum#1783),
+# same "cache once here, read the cached copy per turn" shape the stopword
+# list above established -- the per-turn hook reads this cached file
+# directly rather than paying an `importlib.resources` lookup on the hot
+# per-turn path. Prompt text is content, not code
+# (`policies/prompt-text-is-content.md`): the wording lives in
+# `src/athenaeum/prompts/recall_overflow_breadcrumb.md`, never inlined into
+# this script or into the hook's awk. AC: "If the cache copy is missing,
+# the hook emits no overflow line and still succeeds" -- so a failure here
+# is silent, exactly like the stopwords copy above.
+_overflow_tmp=$(mktemp "${CACHE_DIR}/recall_overflow_breadcrumb.md.XXXXXX")
+if "$PYTHON" -c "
+import sys, os
+src = os.environ.get('ATHENAEUM_SRC', '')
+if src:
+    sys.path.insert(0, os.path.join(src, 'src'))
+import importlib.resources
+resource = importlib.resources.files('athenaeum.prompts').joinpath('recall_overflow_breadcrumb.md')
+sys.stdout.write(resource.read_text(encoding='utf-8'))
+" > "$_overflow_tmp" 2>/dev/null && [ -s "$_overflow_tmp" ]; then
+  mv "$_overflow_tmp" "${CACHE_DIR}/recall_overflow_breadcrumb.md"
+else
+  rm -f "$_overflow_tmp"
 fi
 
 if [ "${SEARCH_BACKEND:-vector}" = "vector" ]; then
