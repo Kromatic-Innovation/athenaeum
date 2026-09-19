@@ -162,7 +162,7 @@ def cmd_ingest_answers(args: argparse.Namespace) -> int:
     ``finally`` so this process-level side effect never leaks past this
     function.
     """
-    from athenaeum.answers import ingest_answers
+    from athenaeum.answers import IngestAnswersReport, ingest_answers
     from athenaeum.config import load_config
     from athenaeum.decision_answers import apply_decision_answers
     from athenaeum.provider import ProviderConfigError, build_llm_client
@@ -235,6 +235,7 @@ def cmd_ingest_answers(args: argparse.Namespace) -> int:
         prior_level = answers_logger.level
         if quiet:
             answers_logger.setLevel(logging.ERROR)
+        report = IngestAnswersReport()  # issue athenaeum#1804
         try:
             count = ingest_answers(
                 pending_path,
@@ -242,6 +243,7 @@ def cmd_ingest_answers(args: argparse.Namespace) -> int:
                 client=anthropic_client,
                 config=cfg,
                 quiet=quiet,
+                report=report,
             )
         finally:
             if quiet:
@@ -261,6 +263,27 @@ def cmd_ingest_answers(args: argparse.Namespace) -> int:
             f"{decision_report.skipped} skipped (see log)."
         )
     print(f"Ingested {count} answered question(s).")
+
+    # Issue athenaeum#1804: a second summary line separating source files
+    # written, held blocks (a write-back authorized but not yet possible),
+    # and blocks archived with no write-back attempted, by class.
+    no_writeback_total = sum(report.archived_no_writeback.values())
+    no_writeback_parts = ", ".join(
+        f"{cls}: {n}" for cls, n in sorted(report.archived_no_writeback.items())
+    )
+    summary = (
+        f"Write-back: {report.files_written} source file(s) written, "
+        f"{report.held} held, {no_writeback_total} archived without write-back"
+    )
+    if no_writeback_parts:
+        summary += f" ({no_writeback_parts})"
+    summary += "."
+    if report.archived_no_writeback.get("field-correction", 0) > 0:
+        summary += (
+            " Field-correction answers were not applied to their target page "
+            "— re-submit the ratified change through its own applier."
+        )
+    print(summary)
     return 0
 
 

@@ -22,12 +22,27 @@ Running ``athenaeum ingest-answers`` then:
   ``raw/answers/{ISO-TS}-{entity-slug}.md`` with frontmatter naming the
   original source.
 - Appends the processed block to ``_pending_questions_archive.md``
-  (newest-first, append-only, never deleted).
+  (newest-first, append-only, never deleted) — UNLESS the block's class
+  expects a write-back that could not happen (see below), in which case it
+  is held instead.
 - Leaves unanswered ``[ ]`` blocks in place.
 
 Re-running with no new ``[x]`` blocks is a no-op. Malformed blocks are
 skipped with a warning on stderr and a log entry; the rest of the file is
 still processed.
+
+Issue athenaeum#1804 — held write-backs: archiving an answered block whose
+authorized write-back could not happen (no source ref resolved) destroys
+the signal that something needs fixing. A detector-raised block (not
+agent-raised, not a field-correction/schema-amendment — the latter's source
+ref is unresolvable BY DESIGN, its batch retired by ``git rm`` once the
+question is recorded) with a non-empty answer and zero resolved source refs
+is instead left in ``_pending_questions.md`` with a
+``**Write-back**: held — ...`` line naming the unresolved refs; the
+provenance file under ``raw/answers/`` is still written once. A later run
+either completes the write-back once the source resolves, or archives
+without ever calling it once a human edits ``held`` to ``waived`` on that
+line.
 
 Defensive recovery: a block missing its ``- [ ]`` checkbox line (e.g. from
 a stray or legacy escalation writer that didn't route through
@@ -52,7 +67,7 @@ import hashlib
 import logging
 import re
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -580,13 +595,22 @@ def _slugify(name: str) -> str:
     return slug or "entity"
 
 
-def _render_archive_block(pq: PendingQuestion, archived_at: str) -> str:
+def _render_archive_block(
+    pq: PendingQuestion, archived_at: str, *, status_line: str | None = None
+) -> str:
     """Render an archive entry for an answered block.
 
     Includes the original raw block verbatim plus a trailer noting when the
     answer was ingested. Newest-first is handled by the caller.
+
+    Issue athenaeum#1804: *status_line*, when given, is inserted between the raw
+    block and the ``**Archived**:`` trailer — used to stamp a no-write-back
+    class (field-correction / schema-amendment) so the archive entry itself
+    records that no source edit was attempted. Keyword-only; defaults to
+    ``None`` so every existing caller renders byte-identically.
     """
-    return f"{pq.raw_block}\n\n" f"**Archived**: {archived_at}\n"
+    stamp = f"{status_line}\n\n" if status_line else ""
+    return f"{pq.raw_block}\n\n" f"{stamp}" f"**Archived**: {archived_at}\n"
 
 
 def _render_answer_raw_file(
@@ -670,6 +694,27 @@ _MEMBERS_INVOLVED_RE = re.compile(
 )
 # ``Passage A: <text>`` / ``Passage 1: <text>`` inside the description.
 _PASSAGE_RE = re.compile(r"^\s*Passage\s+\S+:\s*(?P<text>.+)$", re.MULTILINE)
+
+# ``**Write-back**: held`` / ``**Write-back**: waived`` / ``**Write-back**:
+# none`` — the stamp this module (issue athenaeum#1804) appends to a block whose
+# write-back was held or skipped. Only the leading status token is captured;
+# the rest of the line is free text (refs, a timestamp, a class name).
+_WRITEBACK_STATUS_RE = re.compile(
+    r"^\s*\*\*Write-back\*\*:\s*(?P<state>\S+)", re.MULTILINE
+)
+
+# Issue athenaeum#1804: conflict-type classes whose source ref can NEVER resolve at
+# answer time by design. `librarian._run_correction_phase` escalates a
+# field-correction/schema-amendment question with `raw_ref` pointing at the
+# originating `.jsonl` correction batch (librarian.py:6262-6266), and
+# `docs/design/field-corrections.md` Section 5.4 makes the question terminal
+# once recorded — the batch is then retired by `git rm`
+# (`corrections.retire_batch`). Write-back must never be attempted for these
+# classes: if a batch ever DID resolve, `_writeback_source` would annotate or
+# LLM-rewrite a raw `.jsonl` batch as if it were a memory file.
+_NO_SOURCE_WRITEBACK_CONFLICT_TYPES: frozenset[str] = frozenset(
+    ("field-correction", "schema-amendment")
+)
 
 
 def _parse_verdict(answer_body: str) -> tuple[str | None, str]:
@@ -765,6 +810,61 @@ def _resolve_source_files(refs: list[str], roots: list[Path]) -> list[Path]:
     return out
 
 
+def _answer_body(pq: PendingQuestion) -> str:
+    """Return ``pq``'s answer text with block-metadata lines stripped.
+
+    Lifted out of :func:`_writeback_source` (issue athenaeum#1804) so
+    :func:`ingest_answers` can classify a block (empty vs. non-empty answer)
+    with the exact same filtering the write-back path uses. ``**Member
+    paths**:``, ``Members involved:``, and ``Passage N:`` lines are block
+    metadata the parser routes into ``answer_lines`` (none of them are
+    recognized keys); the ``**Write-back**:`` stamp line this module appends
+    is metadata too, added athenaeum#1804 — none of the four may masquerade as
+    part of the user's answer.
+    """
+    return "\n".join(
+        line
+        for line in pq.answer_lines
+        if not _MEMBER_PATHS_RE.match(line)
+        and not _MEMBERS_INVOLVED_RE.match(line)
+        and not _PASSAGE_RE.match(line)
+        and not _WRITEBACK_STATUS_RE.match(line)
+    ).strip()
+
+
+def _block_source_refs(pq: PendingQuestion) -> list[str]:
+    """Return the source refs ``pq``'s write-back would resolve against.
+
+    Lifted out of :func:`_writeback_source` (issue athenaeum#1804): resolver
+    a/b order — ``pq.source`` is side a; ``**Member paths**:`` refs are the
+    additional members the block involves (also-affects), side b onward;
+    ``Members involved:`` (issue athenaeum#210 follow-up) covers the
+    auto-memory-contradiction detector's own attribution line.
+    """
+    return [
+        pq.source,
+        *_extract_member_path_refs(pq.raw_block),
+        *_extract_members_involved_refs(pq.raw_block),
+    ]
+
+
+def _writeback_class(pq: PendingQuestion) -> str:
+    """Classify ``pq`` by whether this path ever expects a write-back.
+
+    Returns ``"agent"`` for an agent-raised block (:func:`raise_pending_question`
+    — the answer is consumed by whoever reads the archive, not written back
+    to a source), ``"field-correction"`` / ``"schema-amendment"`` for a block
+    whose source ref is unresolvable by design (see
+    :data:`_NO_SOURCE_WRITEBACK_CONFLICT_TYPES`), or ``"source"`` for every
+    ordinary detector-raised block, where a write-back IS expected.
+    """
+    if pq.raised_by == "agent":
+        return "agent"
+    if pq.conflict_type in _NO_SOURCE_WRITEBACK_CONFLICT_TYPES:
+        return pq.conflict_type
+    return "source"
+
+
 def _writeback_source(
     pq: PendingQuestion,
     roots: list[Path],
@@ -805,27 +905,15 @@ def _writeback_source(
             enact_resolution,
         )
 
-        # ``**Member paths**:`` is block metadata that the block parser routes
-        # into answer_lines (it is not a recognized key). Strip it (and any
-        # stray ``Passage N:`` line) so it can't masquerade as the answer body.
-        answer_body = "\n".join(
-            line
-            for line in pq.answer_lines
-            if not _MEMBER_PATHS_RE.match(line)
-            and not _MEMBERS_INVOLVED_RE.match(line)
-            and not _PASSAGE_RE.match(line)
-        ).strip()
+        # Issue athenaeum#1804: filtering + ref-list construction moved to
+        # module-level helpers so `ingest_answers` can classify a block with
+        # the exact same rules before deciding whether to call this
+        # function at all.
+        answer_body = _answer_body(pq)
         if not answer_body:
             return 0
 
-        # Resolver a/b order: pq.source is side a; ``**Member paths**:`` refs
-        # are the additional members the block involves (also-affects), side b
-        # onward.
-        refs = [
-            pq.source,
-            *_extract_member_path_refs(pq.raw_block),
-            *_extract_members_involved_refs(pq.raw_block),
-        ]
+        refs = _block_source_refs(pq)
         member_paths = _resolve_source_files(refs, roots)
         if not member_paths:
             return 0
@@ -948,6 +1036,37 @@ def _writeback_source(
         return 0
 
 
+@dataclass
+class IngestAnswersReport:
+    """Optional accumulator threaded through :func:`ingest_answers` (issue athenaeum#1804).
+
+    Populated in place when a caller passes ``report=IngestAnswersReport()``;
+    ``ingest_answers`` itself keeps returning a plain ``int`` (answers moved
+    to the archive this run) for full back-compat with every existing call
+    site. Every field defaults to 0/empty so an accumulator is usable
+    standalone before a run.
+
+    Attributes:
+        files_written: Source memory files actually edited by
+            :func:`_writeback_source` this run (summed across every call —
+            the CLI's "source files written" line).
+        held: Blocks that ended this run in ``held`` status — newly held
+            plus still-held-and-still-unresolved. Not archived.
+        waived: Blocks archived this run whose status line already said
+            ``waived`` (write-back was skipped by human waiver, not
+            attempted).
+        archived_no_writeback: Blocks archived this run whose class never
+            calls :func:`_writeback_source` by design (see
+            :data:`_NO_SOURCE_WRITEBACK_CONFLICT_TYPES`), keyed by class
+            name (``"field-correction"`` / ``"schema-amendment"``).
+    """
+
+    files_written: int = 0
+    held: int = 0
+    waived: int = 0
+    archived_no_writeback: dict[str, int] = field(default_factory=dict)
+
+
 def ingest_answers(
     pending_path: Path,
     raw_root: Path,
@@ -955,6 +1074,7 @@ def ingest_answers(
     client: "LLMBackend | None" = None,
     config: "dict | None" = None,
     quiet: bool = False,
+    report: IngestAnswersReport | None = None,
 ) -> int:
     """Parse resolved items from ``pending_path``, write raw intake, archive.
 
@@ -965,6 +1085,19 @@ def ingest_answers(
 
     Idempotent: calling again with no new ``[x]`` blocks is a no-op.
     Malformed blocks emit a warning and are skipped.
+
+    Issue athenaeum#1804 — held write-backs: a detector-raised (not agent-raised,
+    not field-correction/schema-amendment) block with a non-empty answer
+    whose source refs ALL fail to resolve is NOT archived. It stays in
+    ``pending_path`` and gains a ``**Write-back**: held — ...`` line naming
+    the unresolved refs; the provenance file under ``raw/answers/`` is still
+    written (once). A later run either completes the write-back (the source
+    came back) or, if a human edits ``held`` to ``waived`` on that line,
+    archives without ever calling the write-back. Field-correction /
+    schema-amendment blocks — whose source ref is unresolvable by design,
+    see :data:`_NO_SOURCE_WRITEBACK_CONFLICT_TYPES` — and agent-raised /
+    empty-answer blocks keep archiving unconditionally (never held); the
+    former two are stamped ``**Write-back**: none`` in their archive entry.
 
     Args:
         pending_path: Path to ``_pending_questions.md``.
@@ -985,9 +1118,14 @@ def ingest_answers(
             Keyword-only; defaults to ``False`` so every existing caller is
             unaffected and the unflagged CLI path is byte-for-byte
             unchanged.
+        report: Issue athenaeum#1804 — optional :class:`IngestAnswersReport`
+            accumulator, updated in place. Keyword-only; defaults to
+            ``None`` so every existing caller is unaffected. The function's
+            return value stays a plain ``int`` regardless.
 
     Returns:
-        Count of answers ingested on this run.
+        Count of answers moved to the archive on this run (a held block is
+        NOT counted — it stays in ``pending_path``).
     """
     if not pending_path.exists():
         return 0
@@ -1038,6 +1176,10 @@ def ingest_answers(
     _archived_entities: list[str] = []
     _archived_raw_blocks: list[str] = []
     ingested = 0
+    # Issue athenaeum#1804: a run whose only change is a newly-held block still
+    # rewrites `pending_path` even though nothing was archived (`ingested`
+    # stays 0) — see the early-return check below.
+    primary_dirty = False
 
     now = datetime.now(timezone.utc)
     iso_ts = now_iso(now)
@@ -1073,81 +1215,153 @@ def ingest_answers(
             unanswered.append(pq)
             continue
 
+        # --- Issue athenaeum#1804: classify before archiving -----------------
+        # A detector-raised ("source" class) block whose answer authorizes a
+        # write-back that cannot happen right now (non-empty answer, zero
+        # resolved refs) is HELD rather than archived — see
+        # `_writeback_class`/`_NO_SOURCE_WRITEBACK_CONFLICT_TYPES` above and
+        # the function docstring. `existing_state` recovers a status this
+        # function stamped on a PRIOR run, off the block's own raw text (the
+        # only place that survives a checkbox-preserving rewrite).
+        writeback_class = _writeback_class(pq)
+        status_match = _WRITEBACK_STATUS_RE.search(pq.raw_block)
+        existing_state = status_match.group("state").lower() if status_match else None
+
+        will_hold = False
+        hold_refs: list[str] = []
+        if writeback_class == "source" and existing_state != "waived":
+            hold_body = _answer_body(pq)
+            hold_refs = _block_source_refs(pq)
+            if hold_body and not _resolve_source_files(hold_refs, source_roots):
+                will_hold = True
+
+        if will_hold and existing_state == "held":
+            # Still unresolved, nothing changed this run: no provenance
+            # rewrite, no fingerprint, no archive — leave the block
+            # byte-identical (AC2's "second run ... primary file is byte-
+            # identical").
+            unanswered.append(pq)
+            if report is not None:
+                report.held += 1
+            continue
+
         # Write raw intake file — retry with a counter if the slug collides
         # within the same second (two answers resolved in the same run).
-        answers_dir.mkdir(parents=True, exist_ok=True)
-        slug = _slugify(pq.entity)
-        answer_filename = f"{filename_ts}-{slug}.md"
-        candidate = answers_dir / answer_filename
-        counter = 1
-        while candidate.exists():
-            answer_filename = f"{filename_ts}-{slug}-{counter}.md"
+        # Skipped when provenance was already written on an earlier run
+        # (existing_state is "held" [refs now resolve] or "waived").
+        if existing_state is None:
+            answers_dir.mkdir(parents=True, exist_ok=True)
+            slug = _slugify(pq.entity)
+            answer_filename = f"{filename_ts}-{slug}.md"
             candidate = answers_dir / answer_filename
-            counter += 1
+            counter = 1
+            while candidate.exists():
+                answer_filename = f"{filename_ts}-{slug}-{counter}.md"
+                candidate = answers_dir / answer_filename
+                counter += 1
 
-        # Issue athenaeum#1116 AC2: classify by PROVENANCE, never re-guess from
-        # content — a question raised against off-corpus-recalled content
-        # (``pq.source`` shaped ``recall-offcorpus:<ref>``, issue athenaeum#985 AC5)
-        # means the ratified answer re-ingests that same off-corpus lineage.
-        from athenaeum.erasure import classify_by_provenance, off_corpus_recall_source
-        from athenaeum.provenance import parse_source
+            # Issue athenaeum#1116 AC2: classify by PROVENANCE, never re-guess from
+            # content — a question raised against off-corpus-recalled content
+            # (``pq.source`` shaped ``recall-offcorpus:<ref>``, issue athenaeum#985 AC5)
+            # means the ratified answer re-ingests that same off-corpus lineage.
+            from athenaeum.erasure import classify_by_provenance, off_corpus_recall_source
+            from athenaeum.provenance import parse_source
 
-        recall_ref: str | None = None
-        try:
-            # ``pq.source`` is usually a bare file path (the pending-question
-            # header's "(from <ref>)" — see ``_HEADER_RE``), not a
-            # ``"<type>:<ref>"`` provenance scalar; ``parse_source`` raises
-            # ValueError on that legacy/non-scalar shape rather than
-            # returning None (issue athenaeum#97's retired bare-slug form).
-            # That is exactly the common case here, so it is caught and
-            # treated as "not provenance-taintable" — never re-guessed from
-            # content, just not classifiable by provenance at all.
-            if classify_by_provenance(pq.source):
-                parsed_source = parse_source(pq.source)
-                if parsed_source is not None:
-                    recall_ref = parsed_source.ref
-        except ValueError:
-            recall_ref = None
+            recall_ref: str | None = None
+            try:
+                # ``pq.source`` is usually a bare file path (the pending-question
+                # header's "(from <ref>)" — see ``_HEADER_RE``), not a
+                # ``"<type>:<ref>"`` provenance scalar; ``parse_source`` raises
+                # ValueError on that legacy/non-scalar shape rather than
+                # returning None (issue athenaeum#97's retired bare-slug form).
+                # That is exactly the common case here, so it is caught and
+                # treated as "not provenance-taintable" — never re-guessed from
+                # content, just not classifiable by provenance at all.
+                if classify_by_provenance(pq.source):
+                    parsed_source = parse_source(pq.source)
+                    if parsed_source is not None:
+                        recall_ref = parsed_source.ref
+            except ValueError:
+                recall_ref = None
 
-        if recall_ref is not None:
-            raw_text = _render_answer_raw_file(
-                pq, iso_ts, source_field=off_corpus_recall_source(recall_ref)
-            )
-            # Reversible default (issue athenaeum#1116, matching AC1's posture):
-            # when an off-corpus surface IS configured, the re-ingested answer
-            # is routed there instead of the ordinary raw intake tree. When it
-            # is NOT configured, there is nothing to route to — the answer
-            # still lands in the ordinary raw intake tree exactly as before
-            # this wiring (breaking every deployment that has not configured
-            # off-corpus would be worse than the gap this issue closes), but a
-            # structured, greppable WARNING names the taint and the file.
-            from athenaeum.off_corpus import off_corpus_adapter, off_corpus_store
-            from athenaeum.store import StoreKey
-
-            store = off_corpus_store(config, knowledge_root)
-            if store is not None:
-                adapter = off_corpus_adapter(config)
-                assert adapter is not None  # off_corpus_store already returned non-None
-                relpath = f"answers/{answer_filename}"
-                store.put(StoreKey(surface=adapter.name, key=relpath), raw_text.encode("utf-8"))
-                log.info(
-                    "answers: routed re-ingested off-corpus recall %s off-corpus "
-                    "(athenaeum#1116 AC2, source=%s)",
-                    relpath,
-                    pq.source,
+            if recall_ref is not None:
+                raw_text = _render_answer_raw_file(
+                    pq, iso_ts, source_field=off_corpus_recall_source(recall_ref)
                 )
+                # Reversible default (issue athenaeum#1116, matching AC1's posture):
+                # when an off-corpus surface IS configured, the re-ingested answer
+                # is routed there instead of the ordinary raw intake tree. When it
+                # is NOT configured, there is nothing to route to — the answer
+                # still lands in the ordinary raw intake tree exactly as before
+                # this wiring (breaking every deployment that has not configured
+                # off-corpus would be worse than the gap this issue closes), but a
+                # structured, greppable WARNING names the taint and the file.
+                from athenaeum.off_corpus import off_corpus_adapter, off_corpus_store
+                from athenaeum.store import StoreKey
+
+                store = off_corpus_store(config, knowledge_root)
+                if store is not None:
+                    adapter = off_corpus_adapter(config)
+                    assert adapter is not None  # off_corpus_store already returned non-None
+                    relpath = f"answers/{answer_filename}"
+                    store.put(StoreKey(surface=adapter.name, key=relpath), raw_text.encode("utf-8"))
+                    log.info(
+                        "answers: routed re-ingested off-corpus recall %s off-corpus "
+                        "(athenaeum#1116 AC2, source=%s)",
+                        relpath,
+                        pq.source,
+                    )
+                else:
+                    log.warning(
+                        "erasure-taint-not-routed: answer for entity=%s re-ingests an "
+                        "off-corpus recall (source=%s) but no off-corpus surface is "
+                        "configured (off_corpus.enabled=false) - writing to the "
+                        "ordinary raw intake corpus (athenaeum#1116)",
+                        pq.entity,
+                        pq.source,
+                    )
+                    atomic_write_text(candidate, raw_text)
             else:
-                log.warning(
-                    "erasure-taint-not-routed: answer for entity=%s re-ingests an "
-                    "off-corpus recall (source=%s) but no off-corpus surface is "
-                    "configured (off_corpus.enabled=false) - writing to the "
-                    "ordinary raw intake corpus (athenaeum#1116)",
-                    pq.entity,
-                    pq.source,
+                atomic_write_text(candidate, _render_answer_raw_file(pq, iso_ts))
+
+        # Issue athenaeum#1804: field-correction / schema-amendment blocks never
+        # call _writeback_source — the batch is retired by git rm once the
+        # question is recorded (see _NO_SOURCE_WRITEBACK_CONFLICT_TYPES); a
+        # waived block already had its (non-)write-back decided by the human
+        # editing held -> waived, so it is not re-attempted either.
+        skip_writeback = False
+        archive_status_line: str | None = None
+        if writeback_class in _NO_SOURCE_WRITEBACK_CONFLICT_TYPES:
+            skip_writeback = True
+            archive_status_line = (
+                f"**Write-back**: none — {writeback_class} blocks never write "
+                "back to source; the batch is retired once recorded (see "
+                "athenaeum#1804) — re-submit the ratified change through its own applier"
+            )
+            if report is not None:
+                report.archived_no_writeback[writeback_class] = (
+                    report.archived_no_writeback.get(writeback_class, 0) + 1
                 )
-                atomic_write_text(candidate, raw_text)
-        else:
-            atomic_write_text(candidate, _render_answer_raw_file(pq, iso_ts))
+        elif existing_state == "waived":
+            skip_writeback = True
+            if report is not None:
+                report.waived += 1
+
+        if will_hold:
+            # First transition into hold this run (existing_state is None —
+            # the still-held/still-unresolved case returned above).
+            held_line = (
+                "**Write-back**: held — no source ref resolved ("
+                + ", ".join(r for r in hold_refs if r.strip())
+                + f") as of {iso_ts}; restore the source or change \"held\" to "
+                '"waived" to archive without a write'
+            )
+            new_raw_block = pq.raw_block.rstrip("\n") + "\n\n" + held_line + "\n"
+            unanswered.append(replace(pq, raw_block=new_raw_block))
+            primary_dirty = True
+            if report is not None:
+                report.held += 1
+            continue
 
         # Issue athenaeum#197/#210: apply the ratified verdict to the source memory
         # file(s). The provenance doc above is the audit trail and is ALWAYS
@@ -1156,9 +1370,14 @@ def ingest_answers(
         # _writeback_source so the audit/archive path is never blocked.
         # Issue athenaeum#210: thread client/config so free-text answers can use the
         # LLM-backed proposer to enact source edits instead of annotating only.
-        edited = _writeback_source(
-            pq, source_roots, client=client, config=config, usage=usage
-        )
+        if skip_writeback:
+            edited = 0
+        else:
+            edited = _writeback_source(
+                pq, source_roots, client=client, config=config, usage=usage
+            )
+            if report is not None:
+                report.files_written += edited
         if edited:
             log.info(
                 "answers: wrote ratified verdict back to %d source file(s) "
@@ -1223,7 +1442,9 @@ def ingest_answers(
                 pair_text=_answer_pair_text,
             )
 
-        archived_new.append(_render_archive_block(pq, iso_ts))
+        archived_new.append(
+            _render_archive_block(pq, iso_ts, status_line=archive_status_line)
+        )
         _archived_entities.append(pq.entity)
         _archived_raw_blocks.append(pq.raw_block)
         ingested += 1
@@ -1270,7 +1491,12 @@ def ingest_answers(
         wiki_root=pending_path.parent,
     )
 
-    if ingested == 0:
+    # Issue athenaeum#1804: previously this returned whenever `ingested == 0`,
+    # which also skipped the rewrite for a run whose ONLY change was a block
+    # newly transitioning to held (never archived, so `ingested` stays 0
+    # for it) — that block's `**Write-back**: held` stamp would be silently
+    # dropped on the floor. `primary_dirty` covers exactly that case.
+    if ingested == 0 and not primary_dirty:
         return 0
 
     # Rewrite the primary file — keep the header, keep unanswered blocks.
@@ -1279,6 +1505,12 @@ def ingest_answers(
         primary_parts.append(pq.raw_block)
     primary_body = "\n\n---\n\n".join(primary_parts) + "\n"
     atomic_write_text(pending_path, primary_body)
+
+    if ingested == 0:
+        # Only a newly-held block changed this run — the primary file was
+        # rewritten above to persist its stamp, but there is nothing new to
+        # archive.
+        return 0
 
     # Append to archive, newest-first.
     archive_path = pending_path.parent / "_pending_questions_archive.md"
