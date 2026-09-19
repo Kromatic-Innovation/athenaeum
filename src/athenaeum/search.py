@@ -2987,32 +2987,28 @@ def fts5_index_available(cache_dir: Path) -> bool:
 
 #: Default weight applied to the ``secondary`` list's contribution in
 #: :func:`reciprocal_rank_fusion` (issue athenaeum#1800 / athenaeum#1789
-#: cross-lane regression) -- kept at ``1.0`` (a no-op) DELIBERATELY. A
-#: uniform down-weight was tried first and rejected: several of
-#: athenaeum#1792's ORIGINAL passing cases rely on a ``secondary``-only hit
-#: (the expected page absent from ``primary`` entirely) reaching the fused
-#: top-k on FTS5's full-weight rank alone -- with `_HYBRID_CANDIDATE_POOL`
-#: typically populated by 5-14 OTHER `primary`-only hits each occupying a
-#: full-weight ``1/(k+rank)`` slot, ANY uniform reduction below `1.0`
-#: immediately pushes a `secondary`-only hit below that entire block,
-#: regardless of how strongly `secondary` itself ranked it.
+#: cross-lane regression) -- kept at ``1.0`` (a no-op).
 #:
-#: MEASURED against the four athenaeum#1789 cross-lane regressions
-#: (``core/person_not_repo``'s ``must_not_rank`` guard,
-#: ``core/ratecard_tooling_owner``, ``core/keelbridge_programme_scope``,
-#: ``medium/callum_drews_last_contact``), sweeping the full offline
-#: recall-covers-grep suite at each value: ``1.0`` (default, byte-identical
-#: to no knob existing) -- 4 failures, the baseline. ``0.9`` through
-#: ``0.4`` -- 32 failures each (identical failure SET at every value in
-#: that range, confirming a step-function threshold rather than a gradient:
-#: this down-weighting broke 28 ADDITIONAL, previously-passing cases
-#: without fixing any of the original four). No weight in ``[0, 1]``
-#: improves on the ``1.0`` baseline -- kept at ``1.0`` (a no-op) rather
-#: than tuned, and exposed only as an independent lever for an operator
-#: with a different corpus shape to reach for. The VALUE lives in
-#: :data:`athenaeum.config.RECALL_HYBRID_FTS5_WEIGHT_DEFAULT` so the
-#: config resolver (a lower layer) never imports this module; this alias
-#: keeps the search-side name the sweep notes above refer to.
+#: The measurement notes that used to live on these three constants (a
+#: sweep against four athenaeum#1789 cross-lane regressions, "MEASURED
+#: against the four...") were taken through pytest's DEFAULT (offline)
+#: selection, where the module-scoped corpus/index fixture in
+#: ``tests/evals/test_recall_covers_grep.py`` is built against the REAL
+#: embedder while the per-probe queries it measured ran through the
+#: function-scoped offline lexical-hash stand-in -- a mismatched
+#: instrument, not a stand-in for the real model (issue athenaeum#1800's
+#: Motivation has the full mechanism, including a per-call embedder-call
+#: count that confirms it directly). Those tables are SUPERSEDED by a
+#: real-embedder re-sweep (``scripts/sweep_recall_hybrid_fusion.py``,
+#: committed output at ``docs/measurements/recall-hybrid-fusion-sweep.md``,
+#: run via ``tests/evals/test_recall_covers_grep_real_embedder.py``'s own
+#: correctly-gated fixture): this knob stays at ``1.0`` because no value in
+#: the issue's swept grid (``{0.5, 0.75, 1.0, 1.5, 2.0, 3.0}``) changed the
+#: real-model failure count once :data:`_DEFAULT_HYBRID_GUARD_RANK` was at
+#: its own winning value -- see that sweep table for the full grid. The
+#: VALUE lives in :data:`athenaeum.config.RECALL_HYBRID_FTS5_WEIGHT_DEFAULT`
+#: so the config resolver (a lower layer) never imports this module; this
+#: alias keeps the search-side name the sweep notes above refer to.
 _DEFAULT_HYBRID_FTS5_WEIGHT = RECALL_HYBRID_FTS5_WEIGHT_DEFAULT
 
 #: Default own-list-rank threshold (1-indexed, inclusive) below which a
@@ -3021,20 +3017,24 @@ _DEFAULT_HYBRID_FTS5_WEIGHT = RECALL_HYBRID_FTS5_WEIGHT_DEFAULT
 #: / athenaeum#1789 cross-lane regression). See that function's docstring
 #: for the mechanism.
 #:
-#: MEASURED against the same four regressions: ``guard_rank=1`` or ``2``
-#: -- 4 failures, IDENTICAL to the unguarded baseline (a no-op at this
-#: corpus's actual rank distribution -- none of the four regressions
-#: involve a single-list hit ranked 1 or 2 in its own list). ``guard_rank=3``
-#: -- 9 failures (6 NEW regressions: ``core/pto_allowance``,
-#: ``core/portal_design_reviewer``, ``core/pinemarsh_goal_rationale``,
-#: ``core/anchorline_retirement_rationale``, ``medium/thorncastle_first_contact``,
-#: ``medium/tamsin_ferro_role_change`` -- previously-passing single-list-rank-3
-#: hits now wrongly protected ahead of genuinely-relevant both-list hits --
-#: while STILL not clearing ``core/person_not_repo`` or
-#: ``medium/callum_drews_last_contact``). ``guard_rank=4`` through ``8``
-#: -- 13-14 failures, monotonically worse. No guard value clears more than
-#: the unguarded baseline already didn't fail on; kept OFF (``0``) by
-#: default. Value lives in
+#: ``1`` (issue athenaeum#1800) -- see :data:`_DEFAULT_HYBRID_FTS5_WEIGHT`'s
+#: comment for why the PRE-athenaeum#1800 measurement notes this constant
+#: used to carry are superseded. Re-swept directly on the real embedder:
+#: ``guard_rank=1`` strictly reduces the real-model failure count (6 -> 5,
+#: clearing ``medium/portal_design_reviewer`` -- a coverage crowd-out where
+#: protecting the expected page's own strong single-list rank was exactly
+#: what let it clear the fused top-5) with no regression on any
+#: real-model-passing case (winner rule (a)) and NO movement at all in the
+#: default (offline stand-in) selection's pass/xfail set (winner rule (b) --
+#: re-confirmed directly: two full runs of ``pytest tests/evals/
+#: test_recall_covers_grep.py``, with and without
+#: ``ATHENAEUM_RECALL_HYBRID_GUARD_RANK=1``, produced IDENTICAL totals).
+#: ``guard_rank=2`` or ``3`` (the rest of the issue's swept grid) regress --
+#: newly crowds out the ``person_not_repo``/``repo_not_person``
+#: disambiguation guard at BOTH scales, the same protect-too-much mechanism
+#: the athenaeum#1789 stand-in sweep found, now reproduced on the real
+#: model. See ``docs/measurements/recall-hybrid-fusion-sweep.md`` for the
+#: full table. Value lives in
 #: :data:`athenaeum.config.RECALL_HYBRID_GUARD_RANK_DEFAULT` (layering).
 _DEFAULT_HYBRID_GUARD_RANK = RECALL_HYBRID_GUARD_RANK_DEFAULT
 
@@ -3043,33 +3043,18 @@ _DEFAULT_HYBRID_GUARD_RANK = RECALL_HYBRID_GUARD_RANK_DEFAULT
 #: (``60``, kept as :func:`reciprocal_rank_fusion`'s own default so any
 #: OTHER direct caller/test stays byte-identical).
 #:
-#: MEASURED against the same four regressions, guard disabled: ``k=60``
-#: (this default) -- 4 failures, the baseline. ``k=2`` through ``30`` --
-#: 4 failures each, IDENTICAL failure set to the baseline (no improvement
-#: at any of these values). ``k=1`` -- 3 failures: fixes
-#: ``core/person_not_repo``'s guard, but NOT the other three, and
-#: introduces its own problem -- at ``k=1``, ``1/(1+rank)`` makes exact
-#: score TIES common (two different single-list hits, each rank 3 in
-#: DIFFERENT lists, score identically), so which one survives into the top
-#: k is decided by dict-insertion order (primary before secondary, an
-#: implementation detail, not a ranking signal) rather than genuine
-#: relevance -- not shippable as a default. Combining ``k=1`` with any
-#: nonzero ``guard_rank`` made things WORSE, not better (``guard_rank=1``:
-#: 3 failures, same as ``k=1`` alone -- ``guard_rank>=2``: 4-11 failures).
-#:
-#: Root cause, confirmed by inspecting the actual candidate lists for all
-#: four regressions: this is NOT a fusion-weighting problem. In every case
-#: FTS5's OWN ranking (or the absence of a page from BOTH backends' lists
-#: entirely -- ``core/ratecard_tooling_owner``'s second expected page,
-#: ``tool-buildpipe``, is in neither list's top 15) is what puts the wrong
-#: page ahead, or the right page nowhere reachable at all -- no fusion
-#: parameter can invent an ordering neither input list produced. See
-#: issue athenaeum#1800's PR-body comment for the full per-probe mechanism
-#: table. Kept at the RRF-standard ``60`` (a no-op) pending a fix in the
-#: FTS5 arm's own ranking (athenaeum#1789's seam). Value lives in
-#: :data:`athenaeum.config.RECALL_HYBRID_K_DEFAULT` (layering); it is
-#: asserted equal to :data:`_DEFAULT_RRF_K` so the two never drift apart
-#: silently.
+#: See :data:`_DEFAULT_HYBRID_FTS5_WEIGHT`'s comment for why the
+#: PRE-athenaeum#1800 measurement notes this constant used to carry are
+#: superseded. Re-swept directly on the real embedder, at the now-shipped
+#: ``guard_rank=1``: every ``k`` in the issue's grid
+#: (``{10, 20, 30, 60}``) produced the SAME real-model failure count --
+#: kept at the RRF-standard ``60`` (this issue's winner-rule tie-break
+#: prefers larger ``k`` among ties, and ``60`` is both the largest swept
+#: value and :func:`reciprocal_rank_fusion`'s own default) rather than
+#: moved. See ``docs/measurements/recall-hybrid-fusion-sweep.md`` for the
+#: full table. Value lives in :data:`athenaeum.config.RECALL_HYBRID_K_DEFAULT`
+#: (layering); it is asserted equal to :data:`_DEFAULT_RRF_K` so the two
+#: never drift apart silently.
 _DEFAULT_HYBRID_K = RECALL_HYBRID_K_DEFAULT
 assert _DEFAULT_HYBRID_K == _DEFAULT_RRF_K
 
