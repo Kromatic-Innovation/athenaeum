@@ -3626,7 +3626,7 @@ auto-applying tier from the one loop meant to catch it being wrong.
 | `ATHENAEUM_CLAIM_KIND_MAX_TOKENS` | `src/athenaeum/claim_kind.py` |
 | `ATHENAEUM_CLAIM_KIND_THINKING` | `src/athenaeum/claim_kind.py` |
 | `ATHENAEUM_CLASSIFY_MAX_TOKENS` | `src/athenaeum/memory_class_backfill.py`, `src/athenaeum/page_description.py`, `src/athenaeum/tiers.py` |
-| `ATHENAEUM_CLASSIFY_MODEL` | `src/athenaeum/_cmd_audit.py`, `src/athenaeum/claim_kind.py`, `src/athenaeum/comparator.py`, `src/athenaeum/config.py`, `src/athenaeum/contradictions.py`, `src/athenaeum/librarian.py`, `src/athenaeum/memory_class_backfill.py`, `src/athenaeum/page_description.py`, `src/athenaeum/tiers.py` |
+| `ATHENAEUM_CLASSIFY_MODEL` | `src/athenaeum/_cmd_audit.py`, `src/athenaeum/claim_kind.py`, `src/athenaeum/comparator.py`, `src/athenaeum/config.py`, `src/athenaeum/contradictions.py`, `src/athenaeum/decay_bucket.py`, `src/athenaeum/librarian.py`, `src/athenaeum/memory_class_backfill.py`, `src/athenaeum/page_description.py`, `src/athenaeum/tiers.py` |
 | `ATHENAEUM_CLASSIFY_RETRY_MAX_TOKENS` | `src/athenaeum/tiers.py` |
 | `ATHENAEUM_CLASSIFY_THINKING` | `src/athenaeum/memory_class_backfill.py`, `src/athenaeum/page_description.py`, `src/athenaeum/tiers.py` |
 | `ATHENAEUM_CLAUDE_CLI_BIN` | `src/athenaeum/provider.py` |
@@ -3637,6 +3637,8 @@ auto-applying tier from the one loop meant to catch it being wrong.
 | `ATHENAEUM_CONTRADICTION_DETECT_THINKING` | `src/athenaeum/contradictions.py` |
 | `ATHENAEUM_CREATE_NAME_VARIANT_DECISION_MAX_TOKENS` | `src/athenaeum/tiers.py` |
 | `ATHENAEUM_CROSS_SCOPE_MODE` | `src/athenaeum/config.py`, `src/athenaeum/cross_scope.py`, `src/athenaeum/merge.py` |
+| `ATHENAEUM_DECAY_BUCKET_MAX_TOKENS` | `src/athenaeum/decay_bucket.py` |
+| `ATHENAEUM_DECAY_BUCKET_THINKING` | `src/athenaeum/decay_bucket.py` |
 | `ATHENAEUM_DISABLED` | `src/athenaeum/context.py`, `src/athenaeum/killswitch.py` |
 | `ATHENAEUM_ENTITY_RUNTIME_SHARE` | `src/athenaeum/librarian.py` |
 | `ATHENAEUM_FREETEXT_EDIT_MAX_TOKENS` | `src/athenaeum/resolutions.py` |
