@@ -8400,6 +8400,87 @@ def _stamp_unclassified_claim_kinds(
         )
 
 
+def _stamp_unbucketed_auto_memory(
+    auto_memory_files: list[AutoMemoryFile],
+    client: Any,
+    config: dict[str, object] | None,
+    usage: TokenUsage | None,
+    *,
+    wiki_root: Path | None = None,
+) -> None:
+    """Stamp ``bucket:`` onto each not-yet-bucketed auto-memory file (athenaeum#1837).
+
+    Structural mirror of :func:`_stamp_unclassified_claim_kinds` directly
+    above, and deliberately a SECOND pass rather than a widened first one:
+    :func:`athenaeum.claim_kind.stamp_claim_kind` short-circuits on a file that
+    already carries ``claim_kind:``, and memory files written per the
+    operator's conventions already carry it — so folding decay into that
+    prompt would skip exactly the files that need buckets. Two prompts, two
+    independent idempotence gates.
+
+    Runs from :func:`_run_auto_memory_phase` right AFTER the claim_kind stamp
+    and still before the C2 cluster pass, so a freshly-stamped ``bucket`` is
+    visible to clustering and the C3 compile in the SAME run it was stamped —
+    which is the whole point, since intake already reads ``bucket``
+    (``intake.py``'s ``parse_bucket(meta_for_markers)``) and, before this
+    function existed, nothing ever wrote it.
+
+    ``stamp_decay_bucket`` is itself idempotent and fail-open (see
+    ``decay_bucket.py``): a file that already carries a valid ``bucket:`` is
+    skipped with NO LLM call (an author-supplied value is never overwritten),
+    and a classification failure leaves the file unstamped rather than raising
+    — and never falls back to ``durable``, because the stamp is permanent and
+    ``durable`` is already indistinguishable from unset for the sweep. This
+    wrapper additionally short-circuits on ``am.bucket`` (already populated by
+    :func:`discover_auto_memory_files` from the on-disk frontmatter) so an
+    already-bucketed file costs not even a frontmatter re-read.
+
+    On a successful stamp, updates ``am.bucket`` on the (mutable) in-memory
+    :class:`AutoMemoryFile` record directly — cheaper than re-running
+    discovery, and the in-memory record is what the rest of this run consumes.
+
+    No-op when ``client`` is ``None`` (dry-run / keyless run) or the list is
+    empty. Never raises: a per-file stamp failure is logged by
+    ``stamp_decay_bucket`` itself and simply leaves that file unbucketed.
+    ``getattr(am, "bucket"/"path", ...)`` (rather than direct attribute
+    access) tolerates the ``SimpleNamespace(origin_scope=...)`` doubles
+    several pre-existing budget/deadline tests substitute for
+    ``discover_auto_memory_files`` — those tests exercise unrelated run-loop
+    machinery and never intended to opt into bucket stamping; a bare double is
+    treated the same as an already-bucketed/unpathed record (skipped, no call,
+    no crash).
+    """
+    if client is None or not auto_memory_files:
+        return
+    # Lazy import (issue athenaeum#1837 AC): keeps the decay_bucket classifier —
+    # and the athenaeum.llm_schemas / pydantic weight it pulls in via
+    # observe_decay_bucket — off every import path that does not reach this
+    # run-loop phase, exactly as the claim_kind sibling above does. In
+    # particular this must NEVER be imported at athenaeum.librarian module
+    # scope, since librarian is reachable (indirectly) from CLI startup and
+    # from the ~3s recall hot path.
+    from athenaeum.decay_bucket import stamp_decay_bucket
+
+    stamped = 0
+    for am in auto_memory_files:
+        if getattr(am, "bucket", ""):
+            continue
+        path = getattr(am, "path", None)
+        if path is None:
+            continue
+        bucket = stamp_decay_bucket(
+            path, client, config=config, usage=usage, wiki_root=wiki_root
+        )
+        if bucket:
+            am.bucket = bucket
+            stamped += 1
+    if stamped:
+        log.info(
+            "decay_bucket: stamped %d previously-unbucketed auto-memory file(s)",
+            stamped,
+        )
+
+
 def _run_auto_memory_phase(ctx: RunContext) -> int | None:
     """The auto-memory block: C1 discover + C2 cluster / C3 merge / C4
     detect, the post-compile deadline check, retire, and athenaeum#188 reresolve.
@@ -8496,6 +8577,19 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
         # — mirrors every other LLM-bearing step in this phase, which is
         # already skipped above for dry-run.
         _stamp_unclassified_claim_kinds(
+            auto_memory_files,
+            ctx.classify_client,
+            ctx.config,
+            ctx.usage,
+            wiki_root=ctx.wiki_root,
+        )
+        # Issue athenaeum#1837: then stamp the decay ``bucket`` on every
+        # not-yet-bucketed member, on the SAME classify-knob client. A second
+        # pass rather than a widened first one, because stamp_claim_kind
+        # skips files that already declare claim_kind: — which is most of
+        # them — and those are exactly the files that need a bucket. Also
+        # a no-op with no LLM call when the run has no client.
+        _stamp_unbucketed_auto_memory(
             auto_memory_files,
             ctx.classify_client,
             ctx.config,

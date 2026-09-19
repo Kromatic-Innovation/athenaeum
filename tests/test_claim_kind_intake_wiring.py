@@ -554,7 +554,17 @@ class TestRunAutoMemoryPhaseInvokesStamping:
 
         librarian._run_auto_memory_phase(ctx)
 
-        client.messages.create.assert_called_once()
+        # Exactly ONE claim_kind call. Counted by system prompt rather than by
+        # total call count because athenaeum#1837 added a sibling pass
+        # (``_stamp_unbucketed_auto_memory``) that shares this very client —
+        # so a bare ``assert_called_once`` would now be counting both
+        # contracts and would stop being a claim_kind assertion at all.
+        claim_kind_calls = [
+            call
+            for call in client.messages.create.call_args_list
+            if "EPISTEMIC KIND" in call.kwargs.get("system", "")
+        ]
+        assert len(claim_kind_calls) == 1
         meta, _ = parse_frontmatter(
             (scope / "feedback_x.md").read_text(encoding="utf-8")
         )
