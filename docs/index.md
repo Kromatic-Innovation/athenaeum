@@ -118,6 +118,7 @@ Evidence, kept out of the reading path.
 - [Reasoning-tier measurements](measurements/reasoning-tier-measurements.md)
 - [Retrieval entry-point measurements](measurements/retrieval-entry-point-measurements.md)
 - [Recall relevance floor sweep](measurements/recall-relevance-floor-sweep.md)
+- [Recall hybrid RRF fusion — real-embedder sweep](measurements/recall-hybrid-fusion-sweep.md)
 - [`used` column heuristic accuracy (synthetic)](measurements/used-column-heuristic-accuracy-2026-09-15.md)
 - [`used` column heuristic accuracy — original substring rule](measurements/used-column-heuristic-accuracy-2026-09-10.md)
 - [Decomposition baseline](measurements/decomposition-baseline-2026-09-10.md)
