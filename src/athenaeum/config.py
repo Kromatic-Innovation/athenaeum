@@ -2525,6 +2525,58 @@ def resolve_push_token_budget(config: dict[str, Any] | None) -> int:
     return 1200
 
 
+# Issue athenaeum#1783: the push-path relevance-bounded cap's hard CEILING --
+# the most hits the UserPromptSubmit hook emits after the configured
+# relevance floor has already narrowed the candidates (``resolve_recall_
+# relevance_floor`` above; the ceiling and the floor are independent knobs,
+# never conflated). DERIVED, never hand-picked (operator ruling on
+# athenaeum#1736, 2026-09-17: "the cap is not a human decision, it falls out
+# of the evals") -- ``tests/test_recall_cap.py`` parses
+# ``tests/evals/data/corpus/probes/probes.yaml`` directly and asserts this
+# constant equals ``max(len(expected_uids))`` over the probes whose
+# ``probe_class`` is ``aggregation`` (today: 7, over three probes sized 6/7/7
+# -- see that file's "aggregation" section). A second test in the same module
+# parses the hook's own fallback literal and asserts it equals this same
+# value. Neither test may hardcode the number 7 -- see
+# ``docs/design/recall-architecture.md``'s "Push-token budget" section for
+# why a hard top-k cap cannot return a set this size in one call, which is
+# exactly the class this ceiling is sized against.
+RECALL_CAP_CEILING_DEFAULT = 7
+
+
+def resolve_recall_cap_ceiling(config: dict[str, Any] | None) -> int:
+    """Resolve the push-path relevance-bounded cap's ceiling (issue athenaeum#1783).
+
+    Precedence: ``ATHENAEUM_RECALL_CAP_CEILING`` env > ``recall.cap.ceiling``
+    yaml > :data:`RECALL_CAP_CEILING_DEFAULT`, mirroring
+    :func:`resolve_push_token_budget`'s own env > yaml > default shape. A
+    malformed env value WARNs and falls through (see :func:`_env_number`); a
+    non-int / ``<= 0`` yaml value falls through to the default. YAML shape::
+
+        recall:
+          cap:
+            ceiling: 7
+
+    This is the PUSH-PATH ceiling only -- an explicit ``recall`` MCP call
+    keeps passing its own ``top_k`` (default 5, unaffected by this
+    resolver) as the cap function's limit; see
+    :func:`athenaeum.search.apply_relevance_cap`'s docstring for the shared
+    mechanism both callers use.
+    """
+    value = _env_number("ATHENAEUM_RECALL_CAP_CEILING", int)
+    if value is not None and value > 0:
+        return value
+    if isinstance(config, dict):
+        recall_cfg = config.get("recall")
+        if isinstance(recall_cfg, dict):
+            cap_cfg = recall_cfg.get("cap")
+            if isinstance(cap_cfg, dict):
+                raw = cap_cfg.get("ceiling")
+                if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
+                    return raw
+    return RECALL_CAP_CEILING_DEFAULT
+
+
 # Issue athenaeum#1492 -- kept as a tight, self-contained block (this dispatch's
 # other lane, athenaeum#1418, is the primary editor of the rest of this module):
 # the relevance-floor MECHANISM only. Selecting a production threshold is
