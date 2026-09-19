@@ -140,7 +140,7 @@ log = logging.getLogger(__name__)
 #: page as ``audit_version:`` so a later pass can tell "audited under an old
 #: prompt" apart from "never audited" (the latter has no ``last_audited`` at
 #: all — see the module docstring).
-AUDIT_VERSION = "audit-v3"
+AUDIT_VERSION = "audit-v4"
 
 #: The kernel-dimension coordinate fields this pass may fill, DERIVED from
 #: the schema-migrations registry (issue athenaeum#1628 decision 3) — the
@@ -190,34 +190,34 @@ meeting date, a note date, an updated-timestamp, or any ingestion/import \
 date. When the only dates available are of that kind, report the field \
 as undeterminable and name the excluded date class in the reason.
 
-2. RETIREMENT CANDIDACY. A page is a retirement candidate ONLY when at \
-least one of these two things is true:
-   - it states no claim at all — no independent observation, judgment, or \
-synthesis, just a name/heading or nothing, or
-     - a person page whose body holds only a name, or a name plus a \
-single affiliation line, is a placeholder awaiting enrichment and is \
-NOT a candidate on that basis,
-     - a page recording a dated engagement or relationship outcome \
-states a claim and is NOT a candidate, even when it also carries CRM / \
-sales-pipeline metadata,
-     - a page whose only content beyond its name is CRM / \
-sales-pipeline metadata, or pipeline-list membership, states no claim \
-and IS a candidate, or
-     - a page whose own text says the entity itself is spurious — for \
-example, an artifact of parsing a filename — states no claim and IS a \
-candidate.
-   The placeholder rule above covers a name plus at most one affiliation \
-line; a person page whose only additional content is pipeline-stage, \
-deal-status, or similar CRM metadata falls under the pipeline-metadata \
-rule, not the placeholder rule.
-   - its content duplicates another page.
-   Restating or summarizing a cited source is NOT, on its own, a reason \
-to flag a page — a page that accurately summarizes and scopes its source \
-still adds value by making that source findable. A page whose entire \
-content is a summary of a source it names (for example a whiteboard or \
-board source page) is light BY DESIGN, not by deficiency: it asserts the \
-source of truth and the chain of evidence another page relies on. Never \
+2. RETIREMENT CANDIDACY. Three exclusions apply first — a page matching \
+any of these is NEVER a retirement candidate, regardless of anything \
+below:
+   - a person page whose body holds only a name, or a name plus a single \
+affiliation line, is a placeholder awaiting enrichment,
+   - a page recording a dated engagement or relationship outcome states a \
+claim and is NOT a candidate, even when it also carries CRM / \
+sales-pipeline metadata, or
+   - a page whose entire content is a summary of a source it names (for \
+example a whiteboard or board source page) is light BY DESIGN, not by \
+deficiency: it asserts the source of truth and the chain of evidence \
+another page relies on. Restating or summarizing a cited source is NOT, on \
+its own, a reason to flag a page — a page that accurately summarizes and \
+scopes its source still adds value by making that source findable. Never \
 flag such a page for retirement merely for being light.
+   A page is a retirement candidate only when none of the exclusions above \
+applies, and at least one of these is true:
+   - it states no claim at all — no independent observation, judgment, or \
+synthesis,
+   - its only content beyond its name is CRM / sales-pipeline metadata, or \
+pipeline-list membership,
+   - its own text says the entity itself is spurious — for example, an \
+artifact of parsing a filename, or
+   - its content duplicates another page.
+   The placeholder exclusion above covers a name plus at most one \
+affiliation line; a person page whose only additional content is \
+pipeline-stage, deal-status, or similar CRM metadata falls under the \
+pipeline-metadata trigger, not the placeholder exclusion.
 
 3. SOURCE SUMMARY. Only when this page's own type is a source page: \
 decide whether it gives a summary of the source it names (a summary, not \
@@ -234,8 +234,8 @@ applies):
 {
   "<field>": {"value": "<determined value>"},
   "<field>": {"undeterminable": "<one-line reason>"},
-  "retirement_candidate": true,
-  "retirement_reason": "<one-line reason, empty string when false>",
+  "retirement_candidate": false,
+  "retirement_reason": "",
   "source_summary_missing": "<one-line reason, omit key when not applicable>"
 }\
 """
@@ -947,6 +947,43 @@ def _find_duplicate_reasons(
     return reasons
 
 
+def _is_bare_person_stub(meta: dict[str, Any], body: str) -> bool:
+    """Whether *meta*/*body* is a ``type: person`` page whose body is
+    nothing but its own H1 heading (issue athenaeum#1869).
+
+    Deterministic override for the retirement-candidacy verdict — like
+    :func:`_find_duplicate_reasons` above, never a model judgment. A live
+    50-page dry run on 2026-09-19 against the ``audit-v3`` prompt flagged
+    7 of 7 bare name-only person stubs as retirement candidates despite
+    the prompt's OWN placeholder exemption (the exemption sat nested
+    under the contradicting trigger it was meant to carve out of). The
+    lane that rewrote the prompt into ``audit-v4`` (this same change) has
+    no live LLM backend available to re-measure the rewrite against that
+    specific failure mode. Given a measured 7/7 failure and no way to
+    re-check, shipping this deterministic, reversible code-side rule
+    alongside the prompt rewrite is the safe choice: even if the
+    rewritten prompt alone does not hold for this case, a bare person
+    stub can never be listed for retirement.
+
+    "Only its H1 heading" is narrow on purpose: after discarding blank
+    lines, the remaining non-blank lines must be zero, or exactly one
+    line starting with ``#``. A name plus a single affiliation line is
+    TWO non-blank lines and is therefore NOT covered here — that case
+    stays the prompt's job (see ``AUDIT_SYSTEM`` section 2's placeholder
+    exclusion).
+
+    *body* is assumed already stripped of YAML frontmatter — the same
+    contract :func:`~athenaeum.models.parse_frontmatter` returns and
+    every caller of this function already holds.
+    """
+    if meta.get("type") != "person":
+        return False
+    lines = [line for line in (body or "").splitlines() if line.strip()]
+    if not lines:
+        return True
+    return len(lines) == 1 and lines[0].strip().startswith("#")
+
+
 # --------------------------------------------------------------------------- #
 # Transitory-class decay stamping (issue athenaeum#1713)
 # --------------------------------------------------------------------------- #
@@ -1163,6 +1200,7 @@ class AuditReport:
             f"scanned: {self.scanned}",
             f"audited: {len(self.audited)}",
             f"failed: {len(self.failed)}",
+            f"skipped: {len(self.skipped)}",
             f"retirement candidates: {len(self.retirement_candidates)}",
             f"llm calls: {self.llm_calls}",
         ]
@@ -1178,6 +1216,12 @@ class AuditReport:
             if v.retirement_candidate:
                 bits.append(f"retirement_candidate ({v.retirement_reason})")
             lines.append(f"  {v.path.name}: " + (", ".join(bits) if bits else "no change"))
+        # Issue athenaeum#1869: a page skipped mid-run (for example a spend
+        # ceiling trip) must be visible in the SAME summary a normal
+        # audited/failed page is, not only in `to_dict()`'s JSON — this is
+        # how the report says WHERE the run stopped.
+        for skip_path, reason in self.skipped:
+            lines.append(f"  {skip_path.name}: SKIPPED {reason}")
         lines.append(
             f"totals: {self.total_input_tokens} in / {self.total_output_tokens} out "
             f"tokens, ${self.total_cost_usd:.4f}"
@@ -1230,9 +1274,17 @@ def build_audit_report(
                     meta.get("cluster_id") if isinstance(meta.get("cluster_id"), str) else None
                 ),
             )
+        # Precedence (issue athenaeum#1869): the duplicate override wins when
+        # both apply. It is an orthogonal, evidenced reason that already
+        # shipped (issue athenaeum#1667); the bare-stub override below only
+        # ever forces False, so checking it first would just get overwritten
+        # by a True duplicate verdict anyway — this `elif` makes that
+        # ordering explicit instead of relying on write order.
         dup_reason = duplicate_reasons.get(verdict.uid)
         if dup_reason is not None:
             verdict = replace(verdict, retirement_candidate=True, retirement_reason=dup_reason)
+        elif _is_bare_person_stub(meta, body):
+            verdict = replace(verdict, retirement_candidate=False, retirement_reason="")
         verdict = _apply_transitory_class(verdict, meta, body, config)
         return verdict
 
@@ -1244,6 +1296,18 @@ def build_audit_report(
 
     usage = run_usage if run_usage is not None else TokenUsage()
 
+    # Issue athenaeum#1869: ``spend.max_usd_per_run`` / ``max_usd_per_day``
+    # (and the subscription-path token equivalents) were recorded to the
+    # ledger by this function but never enforced — a full-corpus run
+    # projected to ~$19.5 against a $20 per-run cap with nothing to stop
+    # it. Mirrors ``merge.py``'s C4-phase guard: resolve the provider once,
+    # check ``spend.ceiling_tripped`` before each unit of further LLM work,
+    # and degrade to a recorded skip (never an exception) on a trip.
+    from athenaeum import spend
+    from athenaeum.provider import resolve_provider
+
+    resolved_provider = resolve_provider(config, knob="classify")
+
     if use_batch:
         pages = [
             (identity_key(path, meta, wiki_root), path, meta, body)
@@ -1251,21 +1315,42 @@ def build_audit_report(
         ]
         meta_by_identity = {identity: (meta, body) for identity, _p, meta, body in pages}
         if pages:
-            verdicts = audit_pages_via_batch(
-                client,
-                pages,
-                model=model,
-                max_tokens=max_tokens,
-                audit_version=audit_version,
-                now=now,
-                usage=usage,
-                date_fill=date_fill,
+            # wiki_root is passed here (batch path only, per ceiling_tripped's
+            # own docstring / issue athenaeum#1147): only the batch submit path
+            # can leave outstanding server-side reservations uncounted by
+            # `usage` alone. The per-page branch below omits it, matching
+            # every pre-athenaeum#1147 / non-batch call site.
+            _ceiling = spend.ceiling_tripped(
+                usage, provider=resolved_provider, config=config, wiki_root=wiki_root
             )
-            verdicts = [_finalize(v, *meta_by_identity[v.uid]) for v in verdicts]
-            report.verdicts.extend(verdicts)
-            report.llm_calls += len(pages)
+            if _ceiling is not None:
+                log.error(
+                    "Spend ceiling reached (%s) — stopping before batch submit", _ceiling
+                )
+                for path, _meta, _body in candidates:
+                    report.skipped.append((path, f"spend ceiling reached ({_ceiling})"))
+            else:
+                verdicts = audit_pages_via_batch(
+                    client,
+                    pages,
+                    model=model,
+                    max_tokens=max_tokens,
+                    audit_version=audit_version,
+                    now=now,
+                    usage=usage,
+                    date_fill=date_fill,
+                )
+                verdicts = [_finalize(v, *meta_by_identity[v.uid]) for v in verdicts]
+                report.verdicts.extend(verdicts)
+                report.llm_calls += len(pages)
     else:
-        for path, meta, body in candidates:
+        for idx, (path, meta, body) in enumerate(candidates):
+            _ceiling = spend.ceiling_tripped(usage, provider=resolved_provider, config=config)
+            if _ceiling is not None:
+                log.error("Spend ceiling reached (%s) — stopping early", _ceiling)
+                for skip_path, _meta, _body in candidates[idx:]:
+                    report.skipped.append((skip_path, f"spend ceiling reached ({_ceiling})"))
+                break
             verdict = audit_page(
                 client,
                 uid=identity_key(path, meta, wiki_root),
@@ -1289,13 +1374,10 @@ def build_audit_report(
             )
 
     if usage.api_calls or usage.billable_tokens:
-        from athenaeum import spend
-        from athenaeum.provider import resolve_provider
-
         spend.record_spend(
             usage,
             run_type=spend.RUN_TYPE_AUDIT,
-            provider=resolve_provider(config, knob="classify"),
+            provider=resolved_provider,
             files_processed=len(report.audited),
             config=config,
             wiki_root=wiki_root,

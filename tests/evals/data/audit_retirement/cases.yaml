@@ -1,0 +1,109 @@
+# Audit retirement-candidacy golden set (issue athenaeum#1869)
+#
+# Synthetic scenario: a small invented consultancy ("Hallowbrook Advisory")
+# and its invented counterparties. Every fixture is invented — no real
+# person, company, or project name, no real corpus content, no reuse of any
+# other layer's fictional register (ph-person-oakmoor / Carrowfen /
+# Pelloway / Selmire / Vantry / Keelbridge belong to tests/evals/data/
+# person_hint/ and must not appear here).
+#
+# Each case feeds ONE already-parsed (meta, body) pair straight into
+# athenaeum.audit.audit_page() -- no wiki tree, no librarian pipeline. This
+# grades ONLY AUDIT_SYSTEM's own retirement-candidacy judgment (section 2)
+# against the real model; the module-level code override in
+# athenaeum.audit._is_bare_person_stub (also issue athenaeum#1869) is
+# deliberately NOT exercised here -- audit_page returns the model's raw
+# verdict, unmodified by build_audit_report's _finalize closure. See
+# tests/evals/test_audit_retirement_eval.py's module docstring for why that
+# split is the point, and tests/test_audit_1869.py for the code-override's
+# own coverage.
+#
+# The six cases mirror athenaeum#1869's acceptance criteria one-for-one:
+#   1. name_only_person_stub            -> NOT a candidate
+#   2. name_plus_one_affiliation_line   -> NOT a candidate
+#   3. pipeline_metadata_only           -> IS a candidate
+#   4. dated_engagement_with_pipeline_metadata -> NOT a candidate
+#   5. self_declared_filename_artifact  -> IS a candidate
+#   6. light_source_summary             -> NOT a candidate
+#
+# Scoring (tests/evals/test_audit_retirement_eval.py): a single boolean
+# compare against verdict.retirement_candidate -- there is no shape/substring
+# judgment call to make here, unlike the prose-scoring layers, because the
+# prompt's own output field IS the thing under test.
+
+- id: name_only_person_stub
+  outcome_class: not_a_candidate
+  meta:
+    uid: ar-person-rowan-ashcombe
+    type: person
+    name: Rowan Ashcombe
+  body: |
+    # Rowan Ashcombe
+  expected:
+    retirement_candidate: false
+
+- id: name_plus_one_affiliation_line
+  outcome_class: not_a_candidate
+  meta:
+    uid: ar-person-mireille-thackery
+    type: person
+    name: Mireille Thackery
+  body: |
+    # Mireille Thackery
+    Works at Brackfen Systems.
+  expected:
+    retirement_candidate: false
+
+- id: pipeline_metadata_only
+  outcome_class: candidate
+  meta:
+    uid: ar-person-dana-colverth
+    type: person
+    name: Dana Colverth
+    pipeline_stage: qualifying
+  body: |
+    # Dana Colverth
+    Appears in the Q2 outreach list.
+  expected:
+    retirement_candidate: true
+
+- id: dated_engagement_with_pipeline_metadata
+  outcome_class: not_a_candidate
+  meta:
+    uid: ar-company-marrowgate-fabrication
+    type: company
+    name: Marrowgate Fabrication
+    pipeline_stage: closed-lost
+    deal_status: dormant
+  body: |
+    Engagement with Marrowgate Fabrication ended without a signed contract
+    in 2019-11, after first contact in 2019-08.
+  expected:
+    retirement_candidate: false
+
+- id: self_declared_filename_artifact
+  outcome_class: candidate
+  meta:
+    uid: ar-artifact-untitled-88-draft-v2
+    type: company
+    name: Untitled-88-Draft-v2
+  body: |
+    # Untitled-88-Draft-v2
+    This entry was created by mis-parsing an imported filename and does
+    not correspond to a real organization.
+  expected:
+    retirement_candidate: true
+
+- id: light_source_summary
+  outcome_class: not_a_candidate
+  meta:
+    uid: ar-source-hallowbrook-board-notes-2026-q1
+    type: source
+    name: Hallowbrook Board Notes -- 2026 Q1
+  body: |
+    Summarizes the source document "Hallowbrook Board Notes -- 2026 Q1.md",
+    covering a Q1 budget review and a facilities update. Carries no
+    independent claims beyond what the source states; treat the source
+    document itself as authoritative for exact figures.
+  expected:
+    retirement_candidate: false

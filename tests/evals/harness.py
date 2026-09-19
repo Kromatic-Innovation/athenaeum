@@ -88,6 +88,17 @@ LAYER_DECOMPOSITION = "decomposition"
 # person, does that person's page gain a claim only when the file actually
 # ASSERTS something about them -- and is the rest of the file still compiled?
 LAYER_PERSON_HINT = "person_hint"
+# Issue athenaeum#1869: the AUDIT-RETIREMENT layer. Grades
+# athenaeum.audit.AUDIT_SYSTEM's own retirement-candidacy judgment (section
+# 2) against a real model call via athenaeum.audit.audit_page -- not
+# build_audit_report, so the module-level code-side bare-stub override
+# (also added by athenaeum#1869) cannot mask a prompt regression; that
+# override has its own, separate unit-test coverage
+# (tests/test_audit_1869.py). Exists because athenaeum#1849's
+# TestPromptStatesEachRule only pinned SUBSTRINGS of the prompt text, which
+# cannot show the model actually follows the rule -- a live 50-page dry run
+# against that shipped prompt flagged 7 of 7 bare name-only person stubs.
+LAYER_AUDIT_RETIREMENT = "audit_retirement"
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EVAL_DATA_ROOT = REPO_ROOT / "tests" / "evals" / "data"
@@ -613,6 +624,7 @@ class EvalSession:
                         LAYER_UNDERDETERMINED,
                         LAYER_ATTACHMENT,
                         LAYER_DECOMPOSITION,
+                        LAYER_AUDIT_RETIREMENT,
                     )
                 )
                 if total
