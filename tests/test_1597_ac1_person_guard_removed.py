@@ -24,8 +24,8 @@ entity pages" section for that follow-on change). Tier 2 classifies this
 mention as a NEW ``type: person`` entity (no ``existing_uid``), and Tier 3's
 create path is reached — this is the one path the guard removal alone
 unblocks, as distinct from an ALREADY-KNOWN person (which the tier-0
-``resolve_person_mention`` / ``attribute_person_observation`` step claims
-whole and never reaches Tier 3 at all — see ``tests/test_person_registry.py::
+``resolve_person_mention`` step turns into a HINT candidate for tier 2/3
+rather than a create — see ``tests/test_person_registry.py::
 TestProductionRoundTrip``, unaffected by this change and still passing).
 
 Before the fix: ``tier3_create`` raises ``PersonNeverLLMRewriteError`` before

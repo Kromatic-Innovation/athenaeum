@@ -34,6 +34,7 @@ from athenaeum.tiers import (
     MERGE_PARSE_FAIL_AMBIGUOUS,
     MERGE_PARSE_FAIL_NO_JSON,
     MERGE_PARSE_FAIL_SHAPE,
+    MERGE_SUBJECT_MISMATCH_LOG_PREFIX,
     MERGE_SYSTEM,
     MERGE_SYSTEM_FULL,
     TIER2_DEGRADED_MARKER,
@@ -43,8 +44,10 @@ from athenaeum.tiers import (
     Tier2ParseStats,
     _append_source_citation,
     _merge_full_response_is_plausible_echo,
+    _render_person_candidates_section,
     _timed_llm_call,
     apply_merge_ops,
+    existing_body_needs_full_echo,
     parse_merge_ops_response,
     parse_tier2_entities,
     parse_tier3_merge,
@@ -3015,6 +3018,391 @@ class TestTier3MergeAddsNewClaim:
             ]
         )
         assert not re.search(r"mural|board", new_code, re.IGNORECASE)
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1866 — tier-0 person-registry hints, not whole-file claims
+# ---------------------------------------------------------------------------
+
+
+class TestPersonHintClassifyPrompt:
+    """AC3: the classify request's ``{person_candidates_section}`` slot."""
+
+    def test_no_candidates_renders_empty_section(self) -> None:
+        assert _render_person_candidates_section(None) == ""
+        assert _render_person_candidates_section([]) == ""
+
+    def test_hintless_request_is_byte_identical_to_no_slot_at_all(self) -> None:
+        """AC3: a file with no hint candidates renders the SAME bytes as if
+        the ``{person_candidates_section}`` slot did not exist."""
+        params_no_kw = tier2_request_params(
+            _make_raw("Ordinary raw text, no person mentioned."),
+            [],
+            ["person"],
+            ["active"],
+            ["internal"],
+        )
+        params_explicit_none = tier2_request_params(
+            _make_raw("Ordinary raw text, no person mentioned."),
+            [],
+            ["person"],
+            ["active"],
+            ["internal"],
+            person_candidates=None,
+        )
+        assert (
+            params_no_kw["messages"][0]["content"]
+            == params_explicit_none["messages"][0]["content"]
+        )
+        assert "Person hints" not in params_no_kw["messages"][0]["content"]
+
+    def test_candidates_render_uid_name_and_bounded_description(self) -> None:
+        section = _render_person_candidates_section(
+            [
+                {"uid": "person1a", "name": "Alice Zhang", "description": "Product lead."},
+                {"uid": "person2b", "name": "Bob Diaz", "description": ""},
+            ]
+        )
+        assert "person1a" in section
+        assert "Alice Zhang" in section
+        assert "Product lead." in section
+        assert "person2b" in section
+        assert "Bob Diaz" in section
+
+    def test_request_with_candidates_lists_them_and_stays_a_single_json_array(
+        self,
+    ) -> None:
+        params = tier2_request_params(
+            _make_raw("Caught up with Alice Zhang today."),
+            [],
+            ["person"],
+            ["active"],
+            ["internal"],
+            person_candidates=[
+                {"uid": "person1a", "name": "Alice Zhang", "description": "Product lead."}
+            ],
+        )
+        content = params["messages"][0]["content"]
+        assert "person1a" in content
+        assert "candidate_uid" in content
+        assert "Return a JSON array" in content  # the ordinary instructions survive
+
+
+class TestPersonHintClassifyParsing:
+    """AC4: a ``candidate_uid`` response item and its three drop rules."""
+
+    _CANDIDATES = [
+        {"uid": "person1a", "name": "Alice Zhang", "description": "Product lead."}
+    ]
+
+    def test_valid_candidate_becomes_a_from_person_hint_update(self) -> None:
+        text = json.dumps(
+            [{"candidate_uid": "person1a", "observations": "Now leads the platform team."}]
+        )
+        entities = parse_tier2_entities(
+            text,
+            "sessions/x.md",
+            ["person"],
+            ["active"],
+            ["internal"],
+            person_candidates=self._CANDIDATES,
+        )
+        assert len(entities) == 1
+        e = entities[0]
+        assert e.is_new is False
+        assert e.existing_uid == "person1a"
+        assert e.from_person_hint is True
+        assert e.observations == "Now leads the platform team."
+        assert e.name == "Alice Zhang"
+
+    def test_hallucinated_uid_is_dropped_and_logged(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        text = json.dumps(
+            [{"candidate_uid": "not-a-real-uid", "observations": "Some claim."}]
+        )
+        with caplog.at_level(logging.WARNING):
+            entities = parse_tier2_entities(
+                text,
+                "sessions/x.md",
+                ["person"],
+                ["active"],
+                ["internal"],
+                person_candidates=self._CANDIDATES,
+            )
+        assert entities == []
+        assert "hint-invalid-uid" in caplog.text
+
+    def test_empty_claim_is_dropped_and_recorded_in_stats(self) -> None:
+        text = json.dumps([{"candidate_uid": "person1a", "observations": "   "}])
+        stats = Tier2ParseStats()
+        entities = parse_tier2_entities(
+            text,
+            "sessions/x.md",
+            ["person"],
+            ["active"],
+            ["internal"],
+            stats=stats,
+            person_candidates=self._CANDIDATES,
+        )
+        assert entities == []
+        assert stats.hint_drops == {"person1a": "dropped"}
+
+    def test_create_shaped_item_matching_a_hint_name_is_dropped(self) -> None:
+        """A create-shaped item (no ``candidate_uid``) whose name equals a
+        hinted candidate's must not mint a duplicate person page."""
+        text = json.dumps(
+            [
+                {
+                    "name": "Alice Zhang",
+                    "entity_type": "person",
+                    "tags": [],
+                    "access": "internal",
+                    "observations": "Some claim about Alice.",
+                }
+            ]
+        )
+        stats = Tier2ParseStats()
+        entities = parse_tier2_entities(
+            text,
+            "sessions/x.md",
+            ["person"],
+            ["active"],
+            ["internal"],
+            stats=stats,
+            person_candidates=self._CANDIDATES,
+        )
+        assert entities == []
+        assert stats.hint_drops == {"person1a": "dropped"}
+
+    def test_create_shaped_item_with_a_different_name_is_unaffected(self) -> None:
+        """Sanity converse: an ordinary create for someone NOT in the hint
+        set is unaffected by any of the above."""
+        text = json.dumps(
+            [
+                {
+                    "name": "Someone Else",
+                    "entity_type": "person",
+                    "tags": [],
+                    "access": "internal",
+                    "observations": "A brand new person.",
+                }
+            ]
+        )
+        entities = parse_tier2_entities(
+            text,
+            "sessions/x.md",
+            ["person"],
+            ["active"],
+            ["internal"],
+            person_candidates=self._CANDIDATES,
+        )
+        assert len(entities) == 1
+        assert entities[0].name == "Someone Else"
+        assert entities[0].is_new is True
+        assert entities[0].from_person_hint is False
+
+    def test_no_candidates_leaves_ordinary_parsing_unchanged(self) -> None:
+        """Byte-for-byte the pre-athenaeum#1866 code path when
+        ``person_candidates`` is omitted."""
+        text = json.dumps(
+            [
+                {
+                    "name": "Someone Else",
+                    "entity_type": "person",
+                    "tags": [],
+                    "access": "internal",
+                    "observations": "A brand new person.",
+                }
+            ]
+        )
+        entities = parse_tier2_entities(
+            text, "sessions/x.md", ["person"], ["active"], ["internal"]
+        )
+        assert len(entities) == 1
+        assert entities[0].from_person_hint is False
+
+
+class TestPersonHintMerge:
+    """AC7 (subject_mismatch) and the "never full-echo a hint" failure class."""
+
+    _HINT_ACTION = EntityAction(
+        kind="update",
+        name="Alice Zhang",
+        entity_type="",
+        tags=[],
+        access="",
+        existing_uid="person1a",
+        observations="Now leads the platform team.",
+        from_person_hint=True,
+    )
+    _EXISTING_BODY = "# Alice Zhang\n\n## Notes\n\n- 2026-01-01: Joined as product lead."
+
+    def test_subject_mismatch_leaves_body_untouched_no_citation_no_fallback(
+        self,
+    ) -> None:
+        response = json.dumps(
+            {"ops": [], "adds_new_claim": False, "subject_mismatch": True}
+        )
+        usage = TokenUsage()
+
+        body, esc, needs_fallback = parse_merge_ops_response(
+            response,
+            self._HINT_ACTION,
+            "sessions/new.md",
+            self._EXISTING_BODY,
+            usage=usage,
+        )
+
+        assert body is None  # nothing to write — page stays byte-identical
+        assert esc is None
+        assert needs_fallback is False
+        assert usage.citation_only_merges == 0
+        assert usage.person_hint_decisions == [
+            ("person1a", "write_merge", "subject_mismatch")
+        ]
+
+    def test_subject_mismatch_is_logged(self, caplog: pytest.LogCaptureFixture) -> None:
+        response = json.dumps(
+            {"ops": [], "adds_new_claim": False, "subject_mismatch": True}
+        )
+        with caplog.at_level(logging.INFO):
+            parse_merge_ops_response(
+                response, self._HINT_ACTION, "sessions/new.md", self._EXISTING_BODY
+            )
+        assert MERGE_SUBJECT_MISMATCH_LOG_PREFIX in caplog.text
+
+    def test_subject_mismatch_ignored_for_a_non_hint_action(self) -> None:
+        """The field is only meaningful for a hint-derived action — an
+        ordinary merge's response should never carry it, but if it somehow
+        does, nothing here should special-case it away from the ordinary
+        ``adds_new_claim`` handling."""
+        ordinary_action = EntityAction(
+            kind="update",
+            name="Acme Corp",
+            entity_type="",
+            tags=[],
+            access="",
+            existing_uid="acme",
+            observations="Some claim.",
+        )
+        response = json.dumps(
+            {"ops": [], "adds_new_claim": False, "subject_mismatch": True}
+        )
+        body, esc, needs_fallback = parse_merge_ops_response(
+            response, ordinary_action, "sessions/new.md", "# Acme Corp\n\nBody."
+        )
+        # subject_mismatch is generic (checked before from_person_hint), so
+        # it still short-circuits — but with no usage/existing_uid tie-in
+        # for a non-hint action, nothing records a hint decision.
+        assert body is None
+        assert needs_fallback is False
+
+    def test_valid_claim_records_merged_verdict(self) -> None:
+        response = json.dumps(
+            {
+                "ops": [{"op": "append_section", "text": "New claim.[^2]"}],
+                "adds_new_claim": True,
+            }
+        )
+        usage = TokenUsage()
+        body, esc, needs_fallback = parse_merge_ops_response(
+            response,
+            self._HINT_ACTION,
+            "sessions/new.md",
+            self._EXISTING_BODY,
+            usage=usage,
+        )
+        assert needs_fallback is False
+        assert body is not None
+        assert "New claim." in body
+        assert usage.person_hint_decisions == [("person1a", "write_merge", "merged")]
+
+    def test_citation_only_records_citation_only_verdict(self) -> None:
+        response = json.dumps({"ops": [], "adds_new_claim": False})
+        usage = TokenUsage()
+        body, esc, needs_fallback = parse_merge_ops_response(
+            response,
+            self._HINT_ACTION,
+            "sessions/new.md",
+            self._EXISTING_BODY,
+            usage=usage,
+        )
+        assert needs_fallback is False
+        assert body == self._EXISTING_BODY + "\n\n[^1]: sessions/new.md"
+        assert usage.person_hint_decisions == [
+            ("person1a", "write_merge", "citation_only")
+        ]
+
+    def test_anchor_unsafe_body_drops_hint_action_instead_of_full_echoing(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        anchor_unsafe_body = "# Alice Zhang\n\nSome text <existing_page> more text."
+        assert existing_body_needs_full_echo(anchor_unsafe_body) is True
+        client = _mock_client("SHOULD NOT BE CALLED")
+        usage = TokenUsage()
+
+        with caplog.at_level(logging.WARNING):
+            body, esc = tier3_merge(
+                self._HINT_ACTION,
+                anchor_unsafe_body,
+                "sessions/new.md",
+                client,
+                usage=usage,
+            )
+
+        assert body is None
+        assert esc is None
+        client.messages.create.assert_not_called()
+        assert "tier3-merge-hint-dropped" in caplog.text
+        assert usage.person_hint_decisions == [("person1a", "write_merge", "dropped")]
+
+    def test_needs_fallback_drops_hint_action_instead_of_full_echoing(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A hint-derived action whose patch-mode response is unparseable
+        must be DROPPED, never sent through the ~10x-cost full-echo path —
+        the sync client here has only ONE response queued, so a second call
+        (the full-echo fallback) would raise if it were ever attempted."""
+        client = _mock_client("not json at all, and no ESCALATE: prefix either")
+        usage = TokenUsage()
+
+        with caplog.at_level(logging.WARNING):
+            body, esc = tier3_merge(
+                self._HINT_ACTION,
+                self._EXISTING_BODY,
+                "sessions/new.md",
+                client,
+                usage=usage,
+            )
+
+        assert body is None
+        assert esc is None
+        assert client.messages.create.call_count == 1
+        assert "tier3-merge-hint-dropped" in caplog.text
+        assert usage.person_hint_decisions == [("person1a", "write_merge", "dropped")]
+
+    def test_ordinary_action_still_full_echoes_on_needs_fallback(self) -> None:
+        """Sanity converse: an ordinary (non-hint) action's unparseable
+        patch-mode response still falls back to full-echo, unchanged."""
+        ordinary_action = EntityAction(
+            kind="update",
+            name="Acme Corp",
+            entity_type="",
+            tags=[],
+            access="",
+            existing_uid="acme",
+            observations="Some claim.",
+        )
+        client = _sequenced_client(
+            ["not json at all", "ADDS_NEW_CLAIM: true\n# Acme Corp\n\nRewritten body."]
+        )
+        body, esc = tier3_merge(
+            ordinary_action, "# Acme Corp\n\nOld body.", "sessions/new.md", client
+        )
+        assert client.messages.create.call_count == 2
+        assert body is not None
+        assert "Rewritten body." in body
 
 
 class TestTier3MergePatchOps:

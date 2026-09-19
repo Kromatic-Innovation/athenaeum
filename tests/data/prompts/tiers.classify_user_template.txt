@@ -16,7 +16,7 @@
 
 ## Valid access levels
 {valid_access}
-{observation_filter_section}
+{observation_filter_section}{person_candidates_section}
 ## Instructions
 Extract entities from the raw observation. Return a JSON array of objects:
 ```json

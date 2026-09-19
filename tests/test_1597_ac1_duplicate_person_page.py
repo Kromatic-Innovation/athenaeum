@@ -19,12 +19,18 @@ pipeline:
 
 1. ``TestExactNameMatchIsHandledButNotByTier1`` — a CLEAN, exact-name
    mention of an existing person with no decoration on either side.
-   Passes today. But the run log shows WHY it passes: the tier-0
-   ``resolve_person_mention``/``attribute_person_observation`` consult
+   Passes today. Historically (before issue athenaeum#1866) the run log
+   showed WHY it passed: the tier-0 ``resolve_person_mention`` consult
    (unaffected by the demotion the whole time — it was never gated by
-   ``DEMOTED_NAME_MATCH_TYPES``) claims the file first, zero LLM calls,
-   and tier1 never gets a chance to run at all (``matched == 0`` in the
-   run summary). Restoring tier1 gets ZERO credit for this case.
+   ``DEMOTED_NAME_MATCH_TYPES``) claimed the file first with a
+   deterministic, LLM-free write, and tier1 never got a chance to run at
+   all. Restoring tier1 got ZERO credit for this case. athenaeum#1866
+   removed that deterministic write: the tier-0 consult now only builds a
+   HINT candidate, and tier1's own match on the same uid is dropped in
+   favor of it (see ``librarian.process_one``'s tier-0 block) — so tier1
+   still gets no credit here, but for a different reason, and the file now
+   genuinely reaches tier 2/3 (this test drives both calls with canned
+   responses).
 
 2. ``TestDecoratedNameMismatchStillDuplicates`` — the real shape sampled
    from the live corpus (see the PR body's "Duplicate entity pages"
@@ -71,6 +77,7 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -90,10 +97,22 @@ def _seed_root(tmp_path: Path, *, existing_name_field: str, mention_text: str) -
         "# Access\n\n| Level |\n|-------|\n| internal |\n"
     )
 
+    # `last_audited` stamped to "now" (computed here, never a hardcoded
+    # literal -- see `test_person_registry.py::TestProductionRoundTrip
+    # ._seed_knowledge_root`'s identical comment) so
+    # `librarian.RunContext.build_audit_hook`'s pre-merge re-audit (issue
+    # athenaeum#1627) skips this page as fresh rather than spending a THIRD
+    # `messages.create` call these tests' mocked side_effect lists don't
+    # supply.
+    # Quoted: an unquoted ISO-8601-shaped scalar is auto-typed to a YAML
+    # `!!timestamp` (a real `datetime`) by the frontmatter loader, which
+    # `_is_fresh` rejects outright (`isinstance(raw, str)`) -- silently
+    # defeating the freshness skip this comment exists to trigger.
+    last_audited = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     existing = wiki / "aaaaaaaa-bill-lennan.md"
     existing.write_text(
         f"---\nuid: aaaaaaaa\ntype: person\nname: {existing_name_field}\n"
-        "access: internal\n---\n\n"
+        f'access: internal\nlast_audited: "{last_audited}"\n---\n\n'
         "# Bill Lennan\n\n## Notes\n\n- 2026-01-01: Founder of 40 Percent Better.\n",
         encoding="utf-8",
     )
@@ -126,10 +145,17 @@ class TestExactNameMatchIsHandledButNotByTier1:
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
+        """Issue athenaeum#1866: the tier-0 registry consult no longer claims
+        this file whole -- the exact-name match becomes a HINT candidate
+        tier 2 must affirm before anything reaches the page, so this test
+        now drives both the classify and merge calls with canned responses
+        (dropping the pre-athenaeum#1866 zero-call and ``matched == 0``
+        assertions, per that issue's plan) and keeps only the no-duplicate
+        assertion this test exists to prove.
+        """
         import anthropic as anthropic_mod
 
         from athenaeum.librarian import run
-        from athenaeum.run_summary_log import parse_run_summary_text
 
         root = _seed_root(
             tmp_path,
@@ -137,9 +163,42 @@ class TestExactNameMatchIsHandledButNotByTier1:
             mention_text="Bill Lennan",  # exact match
         )
 
-        # No classify/merge call should even be needed -- the tier-0 registry
-        # consult should claim this file whole before either LLM tier runs.
+        classify_response = MagicMock()
+        classify_response.content = [
+            MagicMock(
+                text=json.dumps(
+                    [
+                        {
+                            "candidate_uid": "aaaaaaaa",
+                            "observations": "Launching a new coaching program.",
+                        }
+                    ]
+                )
+            )
+        ]
+        classify_response.stop_reason = "end_turn"
+
+        merge_response = MagicMock()
+        merge_response.content = [
+            MagicMock(
+                text=json.dumps(
+                    {
+                        "ops": [
+                            {
+                                "op": "append_section",
+                                "text": "- Launching a new coaching program. "
+                                "(source: sessions/20260910T090000Z-aa11bb22)",
+                            }
+                        ],
+                        "adds_new_claim": True,
+                    }
+                )
+            )
+        ]
+        merge_response.stop_reason = "end_turn"
+
         mock_client = MagicMock()
+        mock_client.messages.create.side_effect = [classify_response, merge_response]
         monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kwargs: mock_client)
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
         caplog.set_level(logging.INFO, logger="athenaeum")
@@ -153,15 +212,6 @@ class TestExactNameMatchIsHandledButNotByTier1:
 
         assert exit_code == 0
         assert len(_person_pages(root)) == 1, "a clean exact-name mention must not duplicate"
-        mock_client.messages.create.assert_not_called()
-
-        records = parse_run_summary_text(caplog.text)
-        entity = records[-1].phases["entity"]
-        assert int(entity["matched"]) == 0, (
-            "tier1 never got a chance to run -- the tier-0 registry consult "
-            "claimed the file first (see this file's module docstring); "
-            "restoring tier1 person-matching gets zero credit for this case"
-        )
 
 
 class TestDecoratedNameMismatchStillDuplicates:

@@ -339,21 +339,37 @@ class PersonHintObservation:
     Carries the file-level ``decided_by`` label alongside EVERY graded person
     page's outcome, because neither alone answers the layer's question: the
     tier label says what it cost, the outcomes say what it did.
+
+    ``person_hint_decisions`` (issue athenaeum#1866) is
+    ``ProcessingResult.person_hint_decisions`` — one ``(uid, tier, verdict)``
+    per tier-0 hint candidate, e.g. ``write_merge:merged`` vs.
+    ``classify:not_asserted``. Reported alongside the tier/outcome pair
+    purely as ATTRIBUTION (which stage decided each candidate, in the
+    routing change's own vocabulary) — it is never read by
+    :func:`score_case`, which grades ONLY the page-delta outcomes above.
+    Defaults to ``()`` so a caller pre-dating athenaeum#1866 (or a synthetic
+    ``ProcessingResult`` double with no such field) constructs unchanged.
     """
 
     case_id: str
     attribution: TierAttribution
     person_outcomes: Mapping[str, str]
     non_person_pointer_uids: frozenset[str]
+    person_hint_decisions: tuple[tuple[str, str, str], ...] = ()
 
     def describe(self) -> str:
         outcomes = " ".join(
             f"{uid}={self.person_outcomes[uid]}" for uid in sorted(self.person_outcomes)
         )
+        decisions = ",".join(
+            f"{uid}:{tier}:{verdict}"
+            for uid, tier, verdict in sorted(self.person_hint_decisions)
+        )
         return (
             f"decided_by={self.attribution.decided_by} "
             f"person_outcomes[{outcomes}] "
-            f"non_person_pointers={sorted(self.non_person_pointer_uids)}"
+            f"non_person_pointers={sorted(self.non_person_pointer_uids)} "
+            f"person_hint_decisions[{decisions}]"
         )
 
 

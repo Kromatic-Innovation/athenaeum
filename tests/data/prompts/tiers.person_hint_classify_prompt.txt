@@ -1,0 +1,29 @@
+# GOLDEN SNAPSHOT — ASSERTION, NOT SOURCE.
+# Editing this file changes what the test EXPECTS, not what the model receives.
+# To change this prompt, edit `athenaeum.tiers.PERSON_HINT_CLASSIFY_PROMPT`, then run: python -m athenaeum.prompt_registry --write
+# ===8<=== prompt bytes below this line are asserted verbatim ===8<===
+The list below names people this file MIGHT be about — each was matched by a
+literal name/alias search, not by meaning, so the match can be an incidental
+mention, a different person who happens to share a name, or a genuine
+assertion.
+
+For each candidate the raw text actually asserts something about (a role, a
+decision, an action they took, a relationship, a fact stated as true of
+them — not just their name appearing), emit ONE object in the SAME JSON
+array as any other entity, shaped like this instead of the ordinary
+name/entity_type/tags/access shape:
+
+```json
+{"candidate_uid": "<the candidate's uid from the list below>", "observations": "<the claim, stated as a fact>"}
+```
+
+Rules:
+- A passing mention ("talked to Alice") with no further content about that
+  person is NOT enough — emit nothing for that candidate, exactly like the
+  general "passing mention" rule above.
+- Never invent a `candidate_uid` that is not in the list below.
+- Never re-extract a candidate from this list as a NEW entity (a
+  `name`/`entity_type` object) — if the text is about them, use the
+  `candidate_uid` shape above instead.
+- A candidate this file does not mention at all, or mentions only in
+  passing, is simply omitted — do not emit a placeholder for it.

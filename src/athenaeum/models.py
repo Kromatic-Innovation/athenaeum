@@ -1769,6 +1769,15 @@ class ClassifiedEntity:
     is_new: bool
     existing_uid: str | None = None
     observations: str = ""
+    # Issue athenaeum#1866: True when this classification came from a
+    # tier-0 person-registry hint candidate the tier-2 classifier affirmed
+    # (a ``candidate_uid`` response item), rather than an ordinary
+    # freshly-classified entity. Downstream (``librarian.process_one``'s
+    # action-building loop) this both selects the ``EntityAction`` that
+    # inherits it (see :attr:`EntityAction.from_person_hint`) and gates the
+    # ``raw.content[:2000]`` fallback: a hint-derived item's ``observations``
+    # is always the classifier's stated claim, never a whole-file paste.
+    from_person_hint: bool = False
 
 
 @dataclass
@@ -1782,6 +1791,13 @@ class EntityAction:
     access: str
     existing_uid: str | None
     observations: str
+    # Issue athenaeum#1866: True when this action was derived from a tier-0
+    # person-registry hint the tier-2 classifier affirmed (see
+    # :attr:`ClassifiedEntity.from_person_hint`). ``tiers.tier3_merge_params``
+    # reads this to prepend the person-hint subject-mismatch verify note to
+    # the merge prompt; ``tiers.tier3_merge`` reads it to drop (never
+    # full-echo) an action that needs the full-echo fallback.
+    from_person_hint: bool = False
 
 
 @dataclass
@@ -2418,6 +2434,26 @@ class TokenUsage:
     # ``librarian-run-summary`` only when non-zero.
     citation_only_merges: int = 0
     full_merges: int = 0
+    # Per-hinted-candidate decisions (issue athenaeum#1866). Each tuple is
+    # ``(uid, tier, verdict)``: ``uid`` is a person-registry uid the tier-0
+    # consult passed to tier 2 as a hint candidate; ``tier`` is whichever
+    # stage made the FINAL call for that candidate this file (``"classify"``
+    # when tier 2 never proposed a claim, or dropped one before it reached
+    # tier 3; ``"write_merge"`` when a proposed claim reached
+    # ``tiers.tier3_merge``); ``verdict`` is one of ``not_asserted`` /
+    # ``merged`` / ``citation_only`` / ``subject_mismatch`` / ``dropped``
+    # (see ``athenaeum.models.ProcessingResult.person_hint_decisions`` for
+    # the per-file view this accumulates from). Appended directly inside
+    # ``tiers.parse_merge_ops_response``/``tiers.tier3_merge`` for the
+    # write-merge tier, mirroring the ``citation_only_merges``/
+    # ``full_merges`` out-param convention immediately above — no separate
+    # per-transport accumulator, since this field is populated ONLY on the
+    # synchronous entity-phase path the person-hint step runs on (batch.py
+    # does not run the person-registry step — see athenaeum#1866's "out of
+    # scope"). Excluded from ``repr`` to keep run-summary logging concise.
+    person_hint_decisions: list[tuple[str, str, str]] = field(
+        default_factory=list, repr=False
+    )
 
     def record_attempt(self) -> None:
         """Record ONE call about to be dispatched, before its outcome is known.
@@ -3074,6 +3110,21 @@ class ProcessingResult:
     #: as ``field_constraint_rejected=N`` in the run summary, mirroring the
     #: ``type_rejected`` convention above.
     field_constraint_rejected: int = 0
+    #: One decision per tier-0 person-registry hint candidate this file's
+    #: consult surfaced (issue athenaeum#1866): ``(uid, tier, verdict)``.
+    #: ``tier`` is ``"classify"`` when tier 2 never proposed a claim for the
+    #: candidate (default) or dropped one before it reached tier 3
+    #: (an invalid claim, an empty claim, or the fan-out cap), and
+    #: ``"write_merge"`` when a proposed claim reached
+    #: :func:`athenaeum.tiers.tier3_merge`. ``verdict`` is one of
+    #: ``not_asserted`` / ``merged`` / ``citation_only`` /
+    #: ``subject_mismatch`` / ``dropped``. Built by
+    #: ``athenaeum.librarian.process_one`` from the hint candidate set plus
+    #: ``usage.person_hint_decisions`` (the write-merge stage's own
+    #: out-param) — never a pass/fail signal for grading (see
+    #: ``tests/evals/person_hint.py``, which reports it purely as
+    #: attribution alongside the page-delta grade).
+    person_hint_decisions: list[tuple[str, str, str]] = field(default_factory=list)
 
 
 # --- Schema loading ---

@@ -161,7 +161,6 @@ from athenaeum.intake import (  # noqa: F401 — AUTO_MEMORY_FILE_RE/RAW_FILE_RE
     AUTO_MEMORY_FILE_RE,
     PERSON_OBSERVATION_MAX_FANOUT,
     RAW_FILE_RE,
-    attribute_person_observation,
     check_raw_retention,
     discover_auto_memory_files,
     discover_raw_files,
@@ -203,7 +202,7 @@ from athenaeum.never_ingest import (
     check_and_refuse,
     filter_never_ingest,
 )
-from athenaeum.person_registry import PERSON_TYPE, PersonRegistry
+from athenaeum.person_registry import PERSON_TYPE, PersonRegistry, PersonRegistryEntry
 from athenaeum.pii import (
     DoNotEmailFact,
     ExcludedRecordIndex,
@@ -1804,6 +1803,58 @@ def _apply_tier3_results(
         )
 
 
+#: Hard cap, per raw file, on how many tier-0 person-registry hits become
+#: HINT candidates in the tier-2 classify prompt (issue athenaeum#1866).
+#: Deliberately LARGER than :data:`~athenaeum.intake.PERSON_OBSERVATION_MAX_FANOUT`
+#: (the cap on how many hint-derived ACTIONS get built from the
+#: classifier's response): a candidate costs only a few hundred prompt
+#: tokens (uid + name + a bounded description) on a call tier 2 already
+#: makes, so it is cheap to let the classifier SEE more people than the
+#: file could plausibly end up writing to. The narrower fan-out cap still
+#: bounds what actually lands on disk. Logged (never silently dropped) when
+#: a file's hit count exceeds this.
+PERSON_HINT_MAX_CANDIDATES = 12
+
+#: Hard cap, in characters, on the one-line description built for each
+#: tier-2 person-hint candidate (issue athenaeum#1866's acceptance
+#: criteria). Sourced from the candidate page's frontmatter ``description:``
+#: or its first body line (mirroring ``decisions.source_info``'s gist
+#: convention), truncated with an ellipsis — a hint is there to help the
+#: classifier tell two same-named people apart, not to re-paste the page.
+PERSON_HINT_DESCRIPTION_MAX_CHARS = 200
+
+
+def _person_hint_description(entry: "PersonRegistryEntry") -> str:
+    """One bounded line describing *entry* for a tier-2 hint candidate.
+
+    Prefers the person page's frontmatter ``description:``; falls back to
+    its first non-blank, non-heading body line. Returns ``""`` (never
+    raises) when the page is unreadable or carries neither — an empty
+    description still renders as a valid, if less useful, hint line.
+    """
+    try:
+        text = entry.path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ""
+    meta, body = parse_frontmatter(text)
+    desc = ""
+    if isinstance(meta, dict):
+        raw_desc = meta.get("description")
+        if isinstance(raw_desc, str) and raw_desc.strip():
+            desc = raw_desc.strip()
+    if not desc:
+        for line in body.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            desc = stripped
+            break
+    collapsed = " ".join(desc.split())
+    if len(collapsed) > PERSON_HINT_DESCRIPTION_MAX_CHARS:
+        return collapsed[: PERSON_HINT_DESCRIPTION_MAX_CHARS - 1].rstrip() + "…"
+    return collapsed
+
+
 def process_one(
     raw: RawFile,
     index: EntityIndex,
@@ -2090,9 +2141,9 @@ def process_one(
             )
         return result
 
-    # --- Tier 0 (person-registry consult): resolve + attribute a mention of
-    # an EXISTING type: person record via the consult-only registry,
-    # LLM-free (issue athenaeum#1183 AC2/AC3).
+    # --- Tier 0 (person-registry consult): resolve a mention of an
+    # EXISTING type: person record via the consult-only registry into a
+    # HINT for the reasoning tiers, LLM-free (issue athenaeum#1866).
     #
     # Reassessed for athenaeum#1597 AC1's follow-on (tier1 restored to
     # matching persons -- DEMOTED_NAME_MATCH_TYPES removed). This step's
@@ -2104,79 +2155,99 @@ def process_one(
     # match against the SAME underlying data (a person page's `name`/
     # `aliases` fields), using the identical literal-substring mechanism
     # (:func:`athenaeum.identity_resolution.match_person_mentions` here,
-    # :func:`athenaeum.tiers.tier1_programmatic_match` there). Measured
-    # directly against the live corpus's 305 held `PersonNeverLLMRewriteError`
-    # entries (athenaeum#1597's PR body): tier1, with the demotion removed,
-    # matched a `type: person` entry for 0 of 305 -- because every one of
-    # those 305 had ALREADY failed this exact step's equivalent-strength
-    # match test (that is WHY each became a `create` action in the first
-    # place). Since both steps require the same literal name/alias
-    # substring, tier1 restoration cannot succeed anywhere this step
-    # doesn't already, and this step is cheaper (zero LLM calls vs. a real
-    # `tier3_merge` call) for every case where it DOES succeed. Removing it
-    # would only add cost, not coverage, GIVEN today's corpus shape.
+    # :func:`athenaeum.tiers.tier1_programmatic_match` there), so running
+    # this step first and folding its hit into a hint (rather than letting
+    # tier1 re-discover the identical uid moments later) costs nothing —
+    # see the filtering of `matched` immediately below, which is what keeps
+    # tier1 from double-dispatching the same uid as an unconditional
+    # `raw.content[:2000]` update.
     # Revisit if either changes: athenaeum#1247 relocates person pages out
     # of `wiki_root` (this step's `person_registry` root and tier1's
     # `EntityIndex` root would then diverge), or a caller ever runs the
     # entity pipeline with `person_registry=None` (this step never engages,
     # and tier1 restoration becomes the only remaining match path).
     #
-    # Early-returns on a match, exactly like the tier-0 steps above --
-    # deliberately, not incidentally: this is what lets the process_one-level
-    # round-trip test assert ZERO provider calls for an ordinary raw file
-    # that mentions a known person. The trade-off this accepts (same one the
-    # do-not-email/handle-upsert steps above already accept for their own
-    # shapes) is that any OTHER, non-person entity also mentioned in the
-    # SAME raw file is not tier1/2/3-processed on this run -- a raw file
-    # this deterministic path claims is claimed whole.
+    # Issue athenaeum#1866: this step used to attribute a bounded excerpt to
+    # the matched page directly and RETURN — a raw file it claimed was
+    # claimed whole, and no other entity that same file mentioned was ever
+    # tier1/2/3-processed on that run. It now builds a HINT list and falls
+    # through: the tier-2 classifier (which already reads the whole file on
+    # the classify model, per issue athenaeum#1866's motivation) decides,
+    # per candidate, whether the file actually asserts anything about that
+    # person; tier-3 `tiers.tier3_merge` verifies and writes an affirmed
+    # claim. The rest of the file is processed exactly as any other raw
+    # file — no more single-entity claiming.
     # Issue athenaeum#1684: a `.jsonl` shaped as structured machine records
     # (the contact-sync `semantic.jsonl` shape that polluted 950 person
-    # pages) is excluded from person attribution ENTIRELY, before
+    # pages) is excluded from person hinting ENTIRELY, before
     # `match_person_mentions` ever scans its content — see
     # `athenaeum.intake.is_structured_jsonl_raw_file`'s docstring for the
     # exact shape test and its conservative failure defaults.
-    # Issue athenaeum#1716: `match_person_mentions` can resolve one raw file
-    # against many person pages at once (e.g. a memo naming a whole team) —
-    # `PERSON_OBSERVATION_MAX_CHARS` (athenaeum#1684) bounds the SIZE of each
-    # resulting bullet but not how many pages receive one. Cap fan-out to
-    # the top `PERSON_OBSERVATION_MAX_FANOUT` hits, in the order
-    # `match_person_mentions` already returns them (its own registry-key
-    # order — no independent relevance ranking exists to prefer), and log
-    # the rest as skipped rather than silently dropping them. Chosen over
-    # skipping attribution for the whole file: it changes zero control flow
-    # in the existing attribute/log/return block below (only the input list
-    # is truncated before it), where a skip-the-whole-file alternative would
-    # need a new branch around that entire block.
+    # Issue athenaeum#1716 (moved, athenaeum#1866): `match_person_mentions`
+    # can resolve one raw file against many person pages at once (e.g. a
+    # memo naming a whole team). Two independent caps now apply, at two
+    # different points in the pipeline, deliberately not conflated: this
+    # block caps how many hits become CANDIDATES in the tier-2 prompt
+    # (`PERSON_HINT_MAX_CANDIDATES`, larger — a candidate is cheap, just a
+    # few hundred prompt tokens on a call already made); the action-building
+    # step near the end of this function caps how many hint-derived ACTIONS
+    # actually get built from the classifier's response
+    # (`PERSON_OBSERVATION_MAX_FANOUT`, the pre-existing, narrower cap —
+    # see that constant's docstring in `athenaeum.intake`). Both log
+    # anything over their cap rather than dropping it silently.
+    person_hints: list[dict[str, str]] = []
+    hint_uids: set[str] = set()
     if person_registry is not None and not is_structured_jsonl_raw_file(raw):
         person_hits = match_person_mentions(raw, wiki_root, index, person_registry)
-        if len(person_hits) > PERSON_OBSERVATION_MAX_FANOUT:
-            skipped_hits = person_hits[PERSON_OBSERVATION_MAX_FANOUT:]
-            person_hits = person_hits[:PERSON_OBSERVATION_MAX_FANOUT]
+        if len(person_hits) > PERSON_HINT_MAX_CANDIDATES:
+            skipped_hits = person_hits[PERSON_HINT_MAX_CANDIDATES:]
+            person_hits = person_hits[:PERSON_HINT_MAX_CANDIDATES]
             log.warning(
-                "  T0 person-registry consult: fan-out cap %d reached for %s "
-                "— skipping %d additional match(es): %s",
-                PERSON_OBSERVATION_MAX_FANOUT,
+                "  T0 person-registry consult: hint-candidate cap %d reached "
+                "for %s — skipping %d additional match(es): %s",
+                PERSON_HINT_MAX_CANDIDATES,
                 raw.ref,
                 len(skipped_hits),
                 [hit.uid for hit in skipped_hits],
             )
-        attributed_uids = [
-            hit.uid
-            for hit in person_hits
-            if attribute_person_observation(raw, hit, dry_run=dry_run)
-        ]
-        if attributed_uids:
-            log.info(
-                "  T0 person-registry consult: attributed observation to %s",
-                attributed_uids,
+        for hit in person_hits:
+            hint_uids.add(hit.uid)
+            person_hints.append(
+                {
+                    "uid": hit.uid,
+                    "name": hit.name,
+                    "description": _person_hint_description(hit),
+                }
             )
-            result.updated.extend(attributed_uids)
-            return result
+        if person_hints:
+            log.info(
+                "  T0 person-registry consult: %d hint candidate(s) for %s: %s",
+                len(person_hints),
+                raw.ref,
+                [h["uid"] for h in person_hints],
+            )
 
     # --- Tier 1: Programmatic matching ---
     # Issue athenaeum#662: pass config so junk-name matches (here/get/main/reach/lane a
     # and operator-tuned stopwords) are filtered before they cost a tier-3 call.
     matched = tier1_programmatic_match(raw, index, config=config)
+    # Issue athenaeum#1866: a uid this file's tier-0 person-registry consult
+    # already turned into a hint candidate must not ALSO become a tier1
+    # match — matched_names below feeds the "already matched (skip these)"
+    # list tier 2 sees, and the unconditional `raw.content[:2000]` update
+    # tier1 hits build near the end of this function. Both would bypass the
+    # classify-then-verify path this issue exists to enforce. Dropped
+    # BEFORE `matched_names` is built (not filtered out later) so neither
+    # list-mode ever sees the uid.
+    if hint_uids:
+        _hint_shadowed = [m for m in matched if m[1] in hint_uids]
+        matched = [m for m in matched if m[1] not in hint_uids]
+        if _hint_shadowed:
+            log.info(
+                "  T1 match dropped (issue athenaeum#1866, now a person "
+                "hint instead): %s",
+                [name for name, _uid, _fpath in _hint_shadowed],
+            )
     matched_names = [name for name, _, _ in matched]
     # Issue athenaeum#1184: the fan-out driver — how many existing entities this
     # ONE file's index-key hits dispatched a merge decision for. Recorded on
@@ -2231,10 +2302,21 @@ def process_one(
         usage=usage,
         config=config,
         stats=t2_stats,
+        person_candidates=person_hints or None,
     )
     result.degraded += t2_stats.degraded
     result.truncated += t2_stats.truncated  # issue athenaeum#476
     log.info("  T2 classified %d new entities", len(classified))
+    # Issue athenaeum#1866: one decision per hinted candidate, defaulting to
+    # "the classifier never asserted anything about this person" — every
+    # branch below (a dropped item, a fan-out-capped action, a write-merge
+    # verdict) OVERWRITES this default; a candidate that never appears in
+    # any of them genuinely was not asserted.
+    hint_decisions: dict[str, tuple[str, str]] = {
+        uid: ("classify", "not_asserted") for uid in hint_uids
+    }
+    for _uid, _reason in t2_stats.hint_drops.items():
+        hint_decisions[_uid] = ("classify", _reason)
 
     # Enforce the sticky intake access (issue athenaeum#320 §5) on every NEW entity the
     # LLM created from this raw: the screener's label is authoritative and is
@@ -2334,7 +2416,45 @@ def process_one(
 
     # Build actions
     actions: list[EntityAction] = []
+    # Issue athenaeum#1866: hint-derived actions (a candidate the tier-2
+    # classifier affirmed a claim for) are capped SEPARATELY from ordinary
+    # classify/tier1 actions, at the pre-existing, narrower
+    # `PERSON_OBSERVATION_MAX_FANOUT` — see that constant's docstring in
+    # `athenaeum.intake` for why this cap moved here rather than being
+    # removed.
+    _hint_action_count = 0
     for c in classified:
+        if c.from_person_hint:
+            if _hint_action_count >= PERSON_OBSERVATION_MAX_FANOUT:
+                log.warning(
+                    "  T2/T3 person-hint action cap %d reached for %s — "
+                    "dropping additional hint-derived claim for uid=%s",
+                    PERSON_OBSERVATION_MAX_FANOUT,
+                    raw.ref,
+                    c.existing_uid,
+                )
+                if c.existing_uid:
+                    hint_decisions[c.existing_uid] = ("classify", "dropped")
+                continue
+            _hint_action_count += 1
+            actions.append(
+                EntityAction(
+                    kind="update",
+                    name=c.name,
+                    entity_type="",
+                    tags=[],
+                    access="",
+                    existing_uid=c.existing_uid,
+                    # Issue athenaeum#1866 AC4: never the raw.content[:2000]
+                    # fallback — a hint-derived item's observations is
+                    # always the classifier's stated claim (parse_tier2_entities
+                    # drops any item whose claim text is empty before it
+                    # ever reaches here).
+                    observations=c.observations,
+                    from_person_hint=True,
+                )
+            )
+            continue
         actions.append(
             EntityAction(
                 kind="create" if c.is_new else "update",
@@ -2363,6 +2483,13 @@ def process_one(
 
     if not actions:
         log.info("  No actions needed for %s", raw.ref)
+        # Issue athenaeum#1866: no hint-derived action was built at all (every
+        # hinted candidate is either unasserted or was dropped at classify
+        # time), so `hint_decisions` is already final — no write-merge stage
+        # runs on this early-return path.
+        result.person_hint_decisions = sorted(
+            (uid, tier, verdict) for uid, (tier, verdict) in hint_decisions.items()
+        )
         if address_escalations or incoming_handles:
             # Issue athenaeum#1126: the raw file is unlinked after this run
             # regardless of outcome (below, on the write path) — if the ONLY
@@ -2400,6 +2527,11 @@ def process_one(
     # docstring); caught below, that partial progress is written durably
     # before re-raising, rather than discarded.
     assert effective_write_client is not None, "write client required for non-dry-run"
+    # Issue athenaeum#1866: snapshot BEFORE the call — `usage.person_hint_decisions`
+    # is a run-wide accumulator (mirrors `usage.api_calls`'s own
+    # `calls_before_file` snapshot immediately below), not per-file, so only
+    # entries appended from THIS index onward belong to this file's hints.
+    _hint_decisions_before = len(usage.person_hint_decisions) if usage is not None else 0
     try:
         new_entities, pending_updates, updated_uids, escalations = tier3_derive_actions(
             raw,
@@ -2443,6 +2575,22 @@ def process_one(
             raw=raw,
         )
         raise
+
+    # Issue athenaeum#1866: fold in the write-merge stage's own verdicts —
+    # `tiers.tier3_merge`/`tiers.parse_merge_ops_response` append directly
+    # to `usage.person_hint_decisions` for every hint-derived action this
+    # file's tier3_derive_actions call just ran, mirroring the
+    # `citation_only_merges`/`full_merges` out-param convention. These
+    # OVERWRITE the "classify" default recorded above — a candidate that
+    # reached write-merge has a more specific, final verdict than
+    # "not_asserted".
+    if usage is not None:
+        for _uid, _tier, _verdict in usage.person_hint_decisions[_hint_decisions_before:]:
+            if _uid in hint_decisions:
+                hint_decisions[_uid] = (_tier, _verdict)
+    result.person_hint_decisions = sorted(
+        (uid, tier, verdict) for uid, (tier, verdict) in hint_decisions.items()
+    )
 
     # All LLM calls succeeded AND this file is within its per-file budget.
     _apply_tier3_results(
@@ -4767,6 +4915,15 @@ class RunContext:
     #: oversize_log_demoted's docstrings.
     total_oversize_split: int = 0
     total_oversize_log_demoted: int = 0
+
+    #: Issue athenaeum#1866: run-wide counts of tier-0 person-hint verdicts,
+    #: keyed by the same closed vocabulary as
+    #: ``ProcessingResult.person_hint_decisions`` (``not_asserted`` /
+    #: ``merged`` / ``citation_only`` / ``subject_mismatch`` / ``dropped``).
+    #: Summed the same way ``total_degraded``/``total_matched`` are, below —
+    #: synchronous entity-loop only (the batch transport does not run the
+    #: person-registry step at all — see athenaeum#1866's "out of scope").
+    total_person_hint_verdicts: dict[str, int] = field(default_factory=dict)
 
     # Issue athenaeum#1627 (audit-on-touch): one counters accumulator shared
     # across every touch point this run makes (the entity/tier-3 phase, the
@@ -7834,6 +7991,14 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                         # above (a double predating this issue has no ``matched``
                         # attribute).
                         ctx.total_matched += getattr(result, "matched", 0)
+                        # Issue athenaeum#1866: same getattr-tolerance rationale as
+                        # degraded/truncated/matched above.
+                        for _uid, _tier, _verdict in getattr(
+                            result, "person_hint_decisions", []
+                        ):
+                            ctx.total_person_hint_verdicts[_verdict] = (
+                                ctx.total_person_hint_verdicts.get(_verdict, 0) + 1
+                            )
                         # Issue athenaeum#1182: same getattr-tolerance rationale as
                         # degraded/truncated/matched above.
                         ctx.total_oversize_suppressed += getattr(
@@ -8229,6 +8394,24 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     **(
                         {"oversize_log_demoted": ctx.total_oversize_log_demoted}
                         if ctx.total_oversize_log_demoted
+                        else {}
+                    ),
+                    # Issue athenaeum#1866: per-verdict counts for the tier-0
+                    # person-hint pipeline, one comma-joined ``verdict:count``
+                    # token — mirrors the ``reconciled=`` convention above.
+                    # Rendered only when at least one hinted candidate was
+                    # seen this run, so a run that never hits the
+                    # person-registry consult has an unchanged summary line.
+                    **(
+                        {
+                            "person_hints": ",".join(
+                                f"{verdict}:{count}"
+                                for verdict, count in sorted(
+                                    ctx.total_person_hint_verdicts.items()
+                                )
+                            )
+                        }
+                        if ctx.total_person_hint_verdicts
                         else {}
                     ),
                     # athenaeum#1171: tier-3 create responses whose leading

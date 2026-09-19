@@ -19,19 +19,25 @@ have since been withdrawn by operator ruling, both under athenaeum#1597 AC1:
 
 1. Every name/uid-ADDRESSED lookup keeps finding a ``type: person`` page
    exactly as it always has, unaffected by either withdrawal.
-2. :func:`~athenaeum.identity_resolution.resolve_person_mention` +
-   :func:`~athenaeum.intake.attribute_person_observation` resolve and
-   attribute a person mention via the registry when the entity index has no
-   entry for it.
+2. :func:`~athenaeum.identity_resolution.resolve_person_mention` resolves a
+   person mention via the registry when the entity index has no entry for
+   it. Issue athenaeum#1866 removed the deterministic attribution write that
+   used to follow (``athenaeum.intake.attribute_person_observation``): a
+   resolved mention now becomes a bounded HINT passed to the tier-2
+   classifier, which decides whether the file actually asserts anything
+   about that person; a claim it affirms is then verified (and written) by
+   ``tiers.tier3_merge``, never by tier 0 directly.
 3. :func:`~athenaeum.intake.tier0_passthrough` /
    :func:`~athenaeum.librarian.tier0_handle_upsert` apply structured field
-   updates to a registry person record with ZERO LLM provider calls.
+   updates to a registry person record with ZERO LLM provider calls — this
+   is a SEPARATE tier-0 path (structured, frontmatter-driven field updates,
+   never free-text) and is unaffected by athenaeum#1866.
 
 ``TestProductionRoundTrip`` drives an ordinary free-text raw file mentioning
 an EXISTING ``type: person`` page through the real ``athenaeum.librarian.run()``
 dispatch cascade (not just ``process_one`` directly) and proves the mention
-resolves, the observation is captured durably, zero provider calls are made,
-and the file never lands on the stuck-file ledger.
+reaches tier 2 as a hint, and the classifier-affirmed claim is captured
+durably on the existing page with a source citation.
 
 All fixtures are synthetic — no client data lives in this public repo.
 """
@@ -41,25 +47,17 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
 from athenaeum.identity_resolution import resolve_person_mention
-from athenaeum.intake import (
-    PERSON_OBSERVATION_MAX_FANOUT,
-    PERSON_OBSERVATION_UNLOCATED_MARKER,
-    attribute_person_observation,
-    tier0_passthrough,
-)
+from athenaeum.intake import tier0_passthrough
 from athenaeum.librarian import process_one, tier0_handle_upsert
-from athenaeum.models import EntityIndex, RawFile, parse_frontmatter
-from athenaeum.person_registry import (
-    PersonRegistry,
-    PersonRegistryEntry,
-    apply_person_field_update,
-)
+from athenaeum.models import EntityIndex, RawFile
+from athenaeum.person_registry import PersonRegistry, apply_person_field_update
 from athenaeum.tiers import tier1_programmatic_match
 
 # ---------------------------------------------------------------------------
@@ -259,146 +257,6 @@ class TestAC2RegistryConsult:
             "Nobody At All", wiki_root=wiki, entity_index=index, registry=registry
         )
         assert entry is None
-
-    def test_attribute_person_observation_prepends_dated_bullet_under_notes(
-        self, tmp_path: Path
-    ) -> None:
-        registry_root = tmp_path / "registry"
-        page = _write_person(
-            registry_root,
-            uid="person1a",
-            name="Alice Zhang",
-            body="# Alice Zhang\n\n## Notes\n\n- 2026-01-01: old note\n",
-        )
-        entry = PersonRegistryEntry(uid="person1a", path=page, name="Alice Zhang")
-        raw = _make_raw("Alice mentioned she's now leading the platform team.")
-
-        changed = attribute_person_observation(raw, entry)
-        assert changed is True
-        text = page.read_text(encoding="utf-8")
-        assert "leading the platform team" in text
-        assert "old note" in text  # not clobbered
-
-    def test_attribute_person_observation_creates_notes_section_if_absent(
-        self, tmp_path: Path
-    ) -> None:
-        registry_root = tmp_path / "registry"
-        page = _write_person(registry_root, uid="person1a", name="Alice Zhang")  # no ## Notes
-        entry = PersonRegistryEntry(uid="person1a", path=page, name="Alice Zhang")
-        raw = _make_raw("First observation about Alice.")
-
-        assert attribute_person_observation(raw, entry) is True
-        assert "## Notes" in page.read_text(encoding="utf-8")
-        assert "First observation about Alice." in page.read_text(encoding="utf-8")
-
-    def test_attribute_person_observation_noop_on_empty_body(self, tmp_path: Path) -> None:
-        registry_root = tmp_path / "registry"
-        page = _write_person(registry_root, uid="person1a", name="Alice Zhang")
-        entry = PersonRegistryEntry(uid="person1a", path=page, name="Alice Zhang")
-        raw = _make_raw("---\nsource: manual\n---\n\n   \n")
-        assert attribute_person_observation(raw, entry) is False
-
-
-# ---------------------------------------------------------------------------
-# Issue athenaeum#1716 — fan-out cap, unlocated-excerpt marker, no `updated` stamp
-# ---------------------------------------------------------------------------
-
-
-class TestAthenaeum1716FanOutAndMarking:
-    def test_attribute_person_observation_does_not_stamp_updated(
-        self, tmp_path: Path
-    ) -> None:
-        """AC3: an attribution-only edit must not make the page look
-        freshly, substantively edited to staleness/decay logic reading
-        `updated`."""
-        registry_root = tmp_path / "registry"
-        page = _write_person(
-            registry_root,
-            uid="person1a",
-            name="Alice Zhang",
-            extra_fm="updated: 2020-01-01\n",
-        )
-        entry = PersonRegistryEntry(uid="person1a", path=page, name="Alice Zhang")
-        raw = _make_raw("Alice mentioned she's now leading the platform team.")
-
-        assert attribute_person_observation(raw, entry) is True
-        meta, _ = parse_frontmatter(page.read_text(encoding="utf-8"))
-        assert str(meta["updated"]) == "2020-01-01"  # unchanged, not bumped to today
-
-    def test_attribute_person_observation_marks_unlocated_fallback_excerpt(
-        self, tmp_path: Path
-    ) -> None:
-        """AC2: when the resolved name/alias is not found verbatim in the
-        raw body (the match came from elsewhere, e.g. frontmatter that
-        `parse_frontmatter` already stripped), the excerpt must not read as
-        if it were found near the person's mention."""
-        registry_root = tmp_path / "registry"
-        page = _write_person(registry_root, uid="person1a", name="Alice Zhang")
-        # "Alice Zhang" appears nowhere in the stripped body below, so
-        # `_bounded_person_excerpt` cannot locate it and falls back to the
-        # start-of-body anchor.
-        entry = PersonRegistryEntry(uid="person1a", path=page, name="Alice Zhang")
-        raw = _make_raw("This body never mentions the resolved person by name.")
-
-        assert attribute_person_observation(raw, entry) is True
-        text = page.read_text(encoding="utf-8")
-        assert PERSON_OBSERVATION_UNLOCATED_MARKER.strip() in text
-
-    def test_attribute_person_observation_no_marker_when_name_located(
-        self, tmp_path: Path
-    ) -> None:
-        """Sanity converse of the marker test: an ordinary, located mention
-        must NOT carry the unlocated marker."""
-        registry_root = tmp_path / "registry"
-        page = _write_person(registry_root, uid="person1a", name="Alice Zhang")
-        entry = PersonRegistryEntry(uid="person1a", path=page, name="Alice Zhang")
-        raw = _make_raw("Alice Zhang shipped the new onboarding flow this week.")
-
-        assert attribute_person_observation(raw, entry) is True
-        text = page.read_text(encoding="utf-8")
-        assert PERSON_OBSERVATION_UNLOCATED_MARKER.strip() not in text
-
-    def test_process_one_caps_person_attribution_fanout_and_logs_skips(
-        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """AC1: a raw file resolving more person matches than the fan-out
-        cap attributes to no more than the cap, with the rest logged as
-        skipped rather than silently dropped."""
-        wiki = tmp_path / "wiki"
-        wiki.mkdir()
-        registry_root = tmp_path / "registry"
-        index = EntityIndex(wiki)
-
-        fanout_plus_one = PERSON_OBSERVATION_MAX_FANOUT + 1
-        pages = {}
-        mentions = []
-        for i in range(fanout_plus_one):
-            uid = f"person{i:02d}"
-            name = f"Zeta Testperson{i:02d}"
-            pages[uid] = _write_person(registry_root, uid=uid, name=name)
-            mentions.append(f"{name} joined the call.")
-        registry = PersonRegistry(registry_root)
-
-        raw_dir = tmp_path / "raw" / "sessions"
-        raw_dir.mkdir(parents=True)
-        raw_path = raw_dir / "20240410T120000Z-aabbccdd.md"
-        raw_path.write_text(" ".join(mentions) + "\n", encoding="utf-8")
-        raw = RawFile(path=raw_path, source="sessions", timestamp="", uuid8="")
-
-        caplog.set_level(logging.WARNING, logger="athenaeum")
-        client = _FakeClient()
-        process_one(
-            raw, index, wiki, client, ["person"], [], ["internal"], person_registry=registry
-        )
-
-        attributed = [
-            uid for uid, page in pages.items() if "joined the call" in page.read_text()
-        ]
-        assert len(attributed) == PERSON_OBSERVATION_MAX_FANOUT
-        assert any(
-            "fan-out cap" in rec.message and str(PERSON_OBSERVATION_MAX_FANOUT) in rec.message
-            for rec in caplog.records
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -634,14 +492,20 @@ class TestProductionRoundTrip:
     page, driven through the real `athenaeum.librarian.run()` pipeline
     (issue athenaeum#1183 AC2/AC3, required before merge per Occam).
 
-    Before `resolve_person_mention` / `attribute_person_observation` were
-    wired into `process_one`'s dispatch cascade, this exact scenario was
-    broken: `EntityIndex.items()` withholds `type: person` (AC1), so
-    `tier1_programmatic_match` never matches the mention; tier2 then
-    classifies it as a NEW entity (no `existing_uid`); nothing captured the
-    observation against the existing page -- the observation is lost
-    forever and the file is stuck on this corpus permanently. This class
-    proves that no longer happens.
+    Before `resolve_person_mention` was wired into `process_one`'s dispatch
+    cascade, this exact scenario was broken: `EntityIndex.items()` withholds
+    `type: person` (AC1), so `tier1_programmatic_match` never matches the
+    mention; tier2 then classifies it as a NEW entity (no `existing_uid`);
+    nothing captured the observation against the existing page -- the
+    observation is lost forever and the file is stuck on this corpus
+    permanently. This class proves that no longer happens.
+
+    Issue athenaeum#1866: the mention no longer short-circuits tier 0 into a
+    deterministic, LLM-free attribution write. It becomes a HINT candidate
+    tier 2 classifies (a `candidate_uid` response item) and tier 3 verifies
+    before writing -- so this test now drives BOTH LLM calls with canned
+    responses and asserts the reasoning tiers actually ran, not that they
+    were skipped.
     """
 
     def _seed_knowledge_root(self, tmp_path: Path) -> Path:
@@ -663,10 +527,27 @@ class TestProductionRoundTrip:
         # An EXISTING person page -- the on-disk shape an UNMIGRATED corpus
         # has today: still physically under wiki/, same as every other
         # entity page, exactly what athenaeum#1183 does NOT change.
+        #
+        # `last_audited` stamped to "now" (computed at fixture-build time,
+        # never a hardcoded literal -- a stale hardcoded stamp would drift
+        # out of the audit-on-touch freshness window and start costing a
+        # real, unmocked third LLM call) so `librarian.RunContext
+        # .build_audit_hook`'s pre-merge re-audit (issue athenaeum#1627)
+        # skips this page as fresh rather than spending a THIRD
+        # `messages.create` call this test's two-item mock doesn't supply.
         _write_person(
             wiki,
             uid="person1a",
             name="Alice Zhang",
+            # Quoted: an unquoted ISO-8601-shaped scalar is auto-typed to a
+            # YAML `!!timestamp` (a real `datetime`) by the frontmatter
+            # loader, which `_is_fresh` rejects outright (`isinstance(raw,
+            # str)`) -- silently defeating the freshness skip this comment
+            # exists to trigger.
+            extra_fm=(
+                'last_audited: "'
+                f"{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}\"\n"
+            ),
             body="# Alice Zhang\n\n## Notes\n\n- 2026-01-01: Joined as product lead.\n",
         )
 
@@ -692,7 +573,7 @@ class TestProductionRoundTrip:
         )
         return root
 
-    def test_ordinary_mention_of_existing_person_round_trips_with_no_llm(
+    def test_ordinary_mention_of_existing_person_reaches_tier2_and_merges(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -706,16 +587,54 @@ class TestProductionRoundTrip:
         person_page = root / "wiki" / "person1a-alice-zhang.md"
         before = person_page.read_text(encoding="utf-8")
 
-        # A client that RECORDS any call made to it (via Mock's own call
-        # tracking, asserted below) rather than raising -- if the mention is
-        # not intercepted by the tier-0 registry consult, tier2_classify is
-        # the very next thing that would call this, and letting it return a
-        # harmless canned response keeps the rest of the run's error
-        # handling from masking the real signal.
+        # Issue athenaeum#1866: the mention is now a HINT candidate, not a
+        # whole-file claim -- tier 2 sees it and must AFFIRM a claim via a
+        # `candidate_uid` response item before anything reaches the page.
         classify_response = MagicMock()
-        classify_response.content = [MagicMock(text=json.dumps([]))]
+        classify_response.content = [
+            MagicMock(
+                text=json.dumps(
+                    [
+                        {
+                            "candidate_uid": "person1a",
+                            "observations": (
+                                "She's now running the platform team and "
+                                "shipped the new onboarding flow."
+                            ),
+                        }
+                    ]
+                )
+            )
+        ]
+        classify_response.stop_reason = "end_turn"
+
+        # tier3_merge's patch-mode verify call: affirms the claim with a
+        # real anchored edit op (see `tiers.apply_merge_ops`).
+        merge_response = MagicMock()
+        merge_response.content = [
+            MagicMock(
+                text=json.dumps(
+                    {
+                        "ops": [
+                            {
+                                "op": "append_section",
+                                "text": (
+                                    "- She's now running the platform team "
+                                    "and shipped the new onboarding flow. "
+                                    "(source: sessions/20240410T120000Z-"
+                                    "aabbccdd)"
+                                ),
+                            }
+                        ],
+                        "adds_new_claim": True,
+                    }
+                )
+            )
+        ]
+        merge_response.stop_reason = "end_turn"
+
         mock_client = MagicMock()
-        mock_client.messages.create.return_value = classify_response
+        mock_client.messages.create.side_effect = [classify_response, merge_response]
         monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kwargs: mock_client)
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
         caplog.set_level(logging.INFO, logger="athenaeum")
@@ -727,11 +646,12 @@ class TestProductionRoundTrip:
             max_api_calls=10,
         )
 
-        # (b) zero provider calls.
-        mock_client.messages.create.assert_not_called()
+        # (b) the mention REACHED tier 2 -- no longer a zero-provider-call
+        # short-circuit (the whole point of athenaeum#1866).
+        assert mock_client.messages.create.call_count == 2
 
-        # (a) the observation is captured/attributed somewhere durable: the
-        # EXISTING person page's body, on disk.
+        # (a) the classifier-affirmed claim landed on the EXISTING page,
+        # with the prior note not clobbered.
         after = person_page.read_text(encoding="utf-8")
         assert after != before
         assert "platform team" in after

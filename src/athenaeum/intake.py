@@ -1358,100 +1358,27 @@ def tier0_passthrough(
     return entity
 
 
-#: Hard cap, in characters, on the text :func:`attribute_person_observation`
-#: ever attaches to a person page (issue athenaeum#1684). This is the fix for
-#: the concrete defect that polluted 950 live pages: the whole raw body,
-#: however large, was pasted verbatim as one bullet. The value is a
-#: deliberately TIGHT, conservative ceiling — a Notes bullet is a pointer
-#: back to the source raw file, not a copy of it — and is a plain module
-#: constant specifically so it is trivially tunable without touching the
-#: excerpting logic below. Includes the appended ``(source: ...)`` reference,
-#: so the final bullet text is NEVER larger than this, not just the excerpt
-#: portion of it.
-PERSON_OBSERVATION_MAX_CHARS = 500
-
-#: Hard cap, per raw file per run, on how many DISTINCT person pages
-#: :func:`attribute_person_observation` may be invoked for (issue
-#: athenaeum#1716). athenaeum#1684 bounded the SIZE of one bullet; it left
-#: fan-out unbounded, so a single memo mentioning many people still fanned
-#: out to every matched page — the live sweep that filed this issue found
-#: the same duplicated-excerpt signature across thousands of pages, just at
-#: the smaller per-bullet size. The call site
-#: (``athenaeum.librarian.process_one``) attributes to the first N hits
-#: :func:`athenaeum.identity_resolution.match_person_mentions` returns (that
-#: function's own registry-key order — no independent relevance ranking
-#: exists to prefer) and logs the rest as skipped, rather than dropping them
-#: silently. A plain module constant, like :data:`PERSON_OBSERVATION_MAX_CHARS`
-#: beside it, so it stays trivially tunable.
+#: Hard cap, per raw file per run, on how many hint-derived
+#: :class:`~athenaeum.models.EntityAction` (``from_person_hint=True``) the
+#: entity phase's action-building step may build (issue athenaeum#1866).
+#:
+#: Originally (issue athenaeum#1716) this bounded how many DISTINCT person
+#: pages the now-removed ``attribute_person_observation`` deterministic
+#: write could touch per file — that LLM-free path prepended a bounded
+#: excerpt straight to a person page's ``## Notes`` with no reasoning tier
+#: in the loop at all. athenaeum#1866 deleted that path entirely: a tier-0
+#: person-registry hit is now a CANDIDATE passed to the tier-2 classifier
+#: (see ``athenaeum.librarian.process_one``'s tier-0 block, which builds and
+#: caps the candidate list itself against a separate, larger
+#: ``PERSON_HINT_MAX_CANDIDATES``), and only a candidate the classifier
+#: affirms with a claim becomes an action at all. This constant's JOB
+#: carries over unchanged even though its call site moved: still the same
+#: "one memo can name a whole team" fan-out bound (issue athenaeum#1716),
+#: now applied to the built ACTIONS (``athenaeum.librarian.process_one``'s
+#: action-building loop) rather than to raw excerpt writes, and logging
+#: anything over the cap instead of dropping it silently, exactly as
+#: before.
 PERSON_OBSERVATION_MAX_FANOUT = 5
-
-#: How many characters of context :func:`_bounded_person_excerpt` keeps on
-#: EACH side of the matched mention (issue athenaeum#1684), before the
-#: :data:`PERSON_OBSERVATION_MAX_CHARS` hard cap (which also has to fit the
-#: ellipsis markers and the source reference) is re-applied as a final
-#: safety net. ``2 * this`` is deliberately well under the hard cap, leaving
-#: headroom for that suffix rather than relying on the safety net to do
-#: routine work.
-PERSON_OBSERVATION_EXCERPT_RADIUS_CHARS = 175
-
-#: Leading marker :func:`_bounded_person_excerpt` prepends when it could not
-#: locate *entry*'s name/alias verbatim in the raw body and fell back to the
-#: start-of-body anchor (issue athenaeum#1716). Without this, every page that
-#: hits the fallback in the same run gets the IDENTICAL opening excerpt,
-#: reading as if it were found near that person's name when it was not
-#: located at all. Kept as part of the excerpt text (not a separate return
-#: value) so the caller's existing char-budget trimming in
-#: :func:`attribute_person_observation` applies uniformly.
-PERSON_OBSERVATION_UNLOCATED_MARKER = "[name not located in excerpt] "
-
-
-def _bounded_person_excerpt(raw_body: str, entry: PersonRegistryEntry) -> str | None:
-    """A bounded excerpt of *raw_body* around the first mention of *entry*
-    (issue athenaeum#1684) — never the whole body.
-
-    Searches for the earliest case-insensitive occurrence of *entry*'s name
-    or any of its aliases and keeps
-    :data:`PERSON_OBSERVATION_EXCERPT_RADIUS_CHARS` characters of context on
-    each side. When no exact form is found verbatim in *raw_body* (the
-    match that resolved *entry* may have come from a regex word-boundary hit
-    on a differently-cased form, or from content outside the stripped body
-    entirely — e.g. frontmatter), falls back to the START of the body as the
-    anchor — still bounded by the same radius, never unbounded — and the
-    returned excerpt is prefixed with :data:`PERSON_OBSERVATION_UNLOCATED_MARKER`
-    (issue athenaeum#1716) so it is never mistaken for text found near the
-    person's actual mention.
-
-    Returns ``None`` when *raw_body* is empty/whitespace-only, preserving
-    the pre-existing "no-op on empty raw" contract (issue athenaeum#1183).
-    """
-    if not raw_body.strip():
-        return None
-
-    lowered = raw_body.lower()
-    match_start: int | None = None
-    match_len = 0
-    for candidate in (entry.name, *entry.aliases):
-        candidate = candidate.strip()
-        if not candidate:
-            continue
-        idx = lowered.find(candidate.lower())
-        if idx != -1 and (match_start is None or idx < match_start):
-            match_start, match_len = idx, len(candidate)
-    located = match_start is not None
-    if match_start is None:
-        match_start, match_len = 0, 0
-
-    radius = PERSON_OBSERVATION_EXCERPT_RADIUS_CHARS
-    start = max(0, match_start - radius)
-    end = min(len(raw_body), match_start + match_len + radius)
-    excerpt = raw_body[start:end].strip()
-    if start > 0:
-        excerpt = "…" + excerpt
-    if end < len(raw_body):
-        excerpt = excerpt + "…"
-    if not located:
-        excerpt = PERSON_OBSERVATION_UNLOCATED_MARKER + excerpt
-    return excerpt
 
 
 #: How many non-blank lines :func:`is_structured_jsonl_raw_file` reads
@@ -1510,85 +1437,4 @@ def is_structured_jsonl_raw_file(raw: RawFile) -> bool:
         json.loads(stripped)
     except (json.JSONDecodeError, ValueError):
         return False
-    return True
-
-
-def attribute_person_observation(
-    raw: RawFile,
-    entry: PersonRegistryEntry,
-    *,
-    dry_run: bool = False,
-) -> bool:
-    """Attribute a BOUNDED excerpt of a raw observation to a person-registry
-    record it was resolved against, LLM-free (issue athenaeum#1183 AC2).
-
-    Companion to :func:`athenaeum.identity_resolution.resolve_person_mention`:
-    once that function resolves a raw-text mention to a
-    :class:`~athenaeum.person_registry.PersonRegistryEntry`, this is the
-    no-LLM write that records the observation on the matched record —
-    cheaper than, and (on today's unmigrated corpus) reaching the same
-    outcome as, a tier1 match feeding a real `tier3_merge` LLM call (see
-    the historical note on :data:`athenaeum.models.DEMOTED_NAME_MATCH_TYPES`'s
-    removal, athenaeum#1597 AC1 follow-on, for why this step still runs
-    first even though tier1 can match a person page again): a bounded
-    excerpt of *raw*'s body around *entry*'s mention (see
-    :func:`_bounded_person_excerpt`), plus a ``(source: ...)`` reference back
-    to *raw* (:attr:`athenaeum.models.RawFile.ref`), is prepended as a dated
-    bullet immediately under the page's ``## Notes`` heading
-    (most-recent-first; the heading is created, at the end of the body, only
-    when there is a non-empty bullet to put under it — never speculatively).
-    Never the whole raw body (issue athenaeum#1684 — see
-    :data:`PERSON_OBSERVATION_MAX_CHARS`), and never a full-page LLM
-    rewrite — this function does not import an LLM client/provider module at
-    all, so no call chain through it can reach one.
-
-    Returns ``True`` when the page was (or, under *dry_run*, would be)
-    changed; ``False`` when *raw* carries no observation body to attribute
-    (an empty/whitespace-only raw is a no-op, not an error — and, per issue
-    athenaeum#1684 AC4, never creates an empty ``## Notes`` heading).
-    """
-    _, raw_body = parse_frontmatter(raw.content)
-    excerpt = _bounded_person_excerpt(raw_body, entry)
-    if excerpt is None:
-        return False
-
-    observation = f"{excerpt} (source: {raw.ref})"
-    if len(observation) > PERSON_OBSERVATION_MAX_CHARS:
-        # Final safety net (issue athenaeum#1684): the excerpt radius is
-        # sized to make this rare, but a long `raw.ref` or an unusually wide
-        # multi-byte excerpt could still push the assembled bullet over the
-        # hard cap. Trim the EXCERPT (never the source reference — losing
-        # that defeats the whole "pointer back to source" replacement for
-        # the pasted body) until the whole bullet fits.
-        overflow = len(observation) - PERSON_OBSERVATION_MAX_CHARS
-        excerpt = excerpt[: max(0, len(excerpt) - overflow - 1)].rstrip() + "…"
-        observation = f"{excerpt} (source: {raw.ref})"
-
-    text = entry.path.read_text(encoding="utf-8")
-    meta, body = parse_frontmatter(text)
-    today = date.today().isoformat()
-    bullet = f"- {today}: {observation}"
-
-    heading = "## Notes"
-    if heading in body:
-        new_body = body.replace(heading, f"{heading}\n\n{bullet}", 1)
-    else:
-        new_body = body.rstrip("\n") + f"\n\n{heading}\n\n{bullet}\n"
-
-    # Issue athenaeum#1716: deliberately NOT stamping `meta["updated"]` here.
-    # This path only appends a dated Notes bullet pointing back to *raw* — it
-    # is not a substantive edit to the page's own claims. Before this fix,
-    # every attributed page got `updated` bumped to today regardless of
-    # fan-out, so a single wide memo mentioning many people could make
-    # hundreds of pages look freshly reviewed/edited to any staleness/decay
-    # logic that reads that field. Leaving `updated` untouched keeps it
-    # tracking genuine substantive edits (the intake/merge paths that do set
-    # it); the dated bullet itself already records exactly when this
-    # attribution happened, so no information is lost by omission.
-    validate_wiki_meta(meta)
-
-    if dry_run:
-        return True
-
-    atomic_write_text(entry.path, render_frontmatter(meta) + "\n" + new_body)
     return True
