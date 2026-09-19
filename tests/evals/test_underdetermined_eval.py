@@ -84,9 +84,24 @@ def _make_action(case: dict[str, Any]) -> EntityAction:
 
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+|\n+")
 
+# Inline footnote reference markers (``[^1]``, and consecutive ones like
+# ``[^1][^2]``) that the librarian writes immediately after the sentence
+# terminator (athenaeum#1730: ``...approved all three layouts.[^1] Separately,
+# ...``). They carry no attribution meaning of their own, but sitting between
+# the ``.`` and the following whitespace defeats ``_SENTENCE_SPLIT``'s
+# lookbehind, which requires whitespace immediately after ``[.!?]`` — so two
+# sentences silently score as one and same-sentence co-occurrence checks fire
+# on facts that were never in the same sentence. Stripping the markers before
+# splitting fixes this without touching footnote DEFINITION lines
+# (``[^1]: sessions/...``): those are already isolated onto their own
+# sentence by the surrounding blank line (``\n+``), independent of whether
+# the leading marker itself is stripped.
+_FOOTNOTE_MARKER = re.compile(r"\[\^[^\]\s]+\]")
+
 
 def _sentences(text: str) -> list[str]:
-    return [s for s in _SENTENCE_SPLIT.split(text) if s.strip()]
+    stripped = _FOOTNOTE_MARKER.sub("", text)
+    return [s for s in _SENTENCE_SPLIT.split(stripped) if s.strip()]
 
 
 def _co_occurs_same_sentence(body: str, a: str, b: str) -> bool:
