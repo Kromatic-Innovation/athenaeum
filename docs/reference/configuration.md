@@ -402,6 +402,45 @@ configures. No seed in ``_DEFAULTS``. This default
 DEFAULT_FRESHNESS_HOURS` — kept as a separate literal rather than an
 import since this module (L2) may not import that one (L4, layering).
 
+## `decay`
+
+### `resolve_decay_horizon_days`
+
+- **YAML path:** `decay.daily_horizon_days` / `decay.weekly_horizon_days` (one leaf per bucket; see docstring)
+- **Environment variable:** per-bucket (`ATHENAEUM_DECAY_DAILY_HORIZON_DAYS` / `ATHENAEUM_DECAY_WEEKLY_HORIZON_DAYS`)
+- **CLI flag:** —
+- **Default:** `1` day for `daily`, `7` days for `weekly`, `0` (no horizon, so no derived `valid_until`) for `durable` and for an unset/unknown bucket
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the decay horizon, in days, for a memory *bucket*.
+
+Precedence per bucket, mirroring
+`resolve_audit_transitory_horizon_days` exactly — env > yaml >
+code default:
+
+- ``daily`` => ``ATHENAEUM_DECAY_DAILY_HORIZON_DAYS`` env >
+ ``decay.daily_horizon_days`` yaml > `DEFAULT_DECAY_DAILY_HORIZON_DAYS`
+- ``weekly`` => ``ATHENAEUM_DECAY_WEEKLY_HORIZON_DAYS`` env >
+ ``decay.weekly_horizon_days`` yaml > `DEFAULT_DECAY_WEEKLY_HORIZON_DAYS`
+
+Every OTHER value — ``durable``, the unset ``""``, or anything outside
+`athenaeum.models.MEMORY_BUCKETS` — resolves to ``0``, which callers
+read as "this bucket has NO horizon; derive no ``valid_until`` at all".
+``durable`` is the load-bearing case: a durable page must never acquire a
+derived expiry, so there is deliberately no ``decay.durable_horizon_days``
+knob for an operator to set one with.
+
+A non-positive, non-numeric, or ``bool`` override (env or yaml) falls back
+to the default rather than producing a zero-or-negative (i.e.
+immediately-expired) window — same posture as
+`resolve_audit_transitory_horizon_days`, and the reason this
+resolver can never turn a live page into an already-expired one by
+accident.
+
+``bucket``-first signature: the bucket is the knob SELECTOR (which of the
+two horizon families to resolve), not a value read out of *config* — the
+same shape `resolve_retention_policy` uses for its retention family.
+
 ## `entity_resolution`
 
 ### `resolve_name_similarity_threshold`
@@ -3639,6 +3678,8 @@ auto-applying tier from the one loop meant to catch it being wrong.
 | `ATHENAEUM_CROSS_SCOPE_MODE` | `src/athenaeum/config.py`, `src/athenaeum/cross_scope.py`, `src/athenaeum/merge.py` |
 | `ATHENAEUM_DECAY_BUCKET_MAX_TOKENS` | `src/athenaeum/decay_bucket.py` |
 | `ATHENAEUM_DECAY_BUCKET_THINKING` | `src/athenaeum/decay_bucket.py` |
+| `ATHENAEUM_DECAY_DAILY_HORIZON_DAYS` | `src/athenaeum/config.py` |
+| `ATHENAEUM_DECAY_WEEKLY_HORIZON_DAYS` | `src/athenaeum/config.py` |
 | `ATHENAEUM_DISABLED` | `src/athenaeum/context.py`, `src/athenaeum/killswitch.py` |
 | `ATHENAEUM_ENTITY_RUNTIME_SHARE` | `src/athenaeum/librarian.py` |
 | `ATHENAEUM_FREETEXT_EDIT_MAX_TOKENS` | `src/athenaeum/resolutions.py` |

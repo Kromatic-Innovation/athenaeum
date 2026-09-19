@@ -86,7 +86,7 @@ import re
 import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, cast
 
@@ -99,6 +99,7 @@ from athenaeum.atomic_io import atomic_write_text
 from athenaeum.clusters import resolve_cluster_output_path, resolve_cluster_threshold
 from athenaeum.config import (
     load_config,
+    resolve_decay_horizon_days,
     resolve_ephemeral_scopes,
     resolve_extra_intake_roots,
     resolve_heartbeat_interval,
@@ -131,7 +132,7 @@ from athenaeum.fingerprint import (
     resolve_not_a_conflict_ttl_days,
 )
 from athenaeum.footnote_markers import attach_markers, marker_label
-from athenaeum.intake import discover_auto_memory_files
+from athenaeum.intake import RAW_FILE_RE, discover_auto_memory_files
 from athenaeum.merge_type_gate import (
     _merge_proposal_suppression_reason,
     build_cite_proposal,
@@ -524,10 +525,23 @@ class MergedWikiEntry:
     # ``_stamp_member_validity``), ``bucket`` is a per-PAGE decay policy: a
     # compiled page is either "daily churn" or it isn't, not per-citation.
     # Computed by :func:`merge_cluster_row` from the ACTIVE resolved members
-    # (first non-empty wins, deterministic member order — the same
-    # first-wins convention this module already uses for citation merges;
-    # see the comment on that rule near ``dedupe_sources``).
+    # by a MOST-DURABLE-WINS fold (issue athenaeum#1840, superseding athenaeum#904's
+    # first-non-empty-member-wins rule — see :func:`_fold_bucket` for why the
+    # direction matters); ties keep the first member at the winning level, so
+    # a cluster whose members all agree is unaffected.
     bucket: str = ""
+    # Issue athenaeum#1840: page-level ``valid_until`` DERIVED from
+    # :attr:`bucket` (never a second validity concept — the value lands in
+    # the same ``valid_until:`` key ``athenaeum.models.valid_until_expired``
+    # has always read, which is what lets ``athenaeum.decay_sweep`` and
+    # ``mcp_server._is_deprioritized_for_currency`` act on a compiled page at
+    # all). ``""`` (unset) for a ``durable``/unbucketed page, and for a
+    # bucketed one whose winning member declares no window and yields no
+    # anchor. Computed by :func:`merge_cluster_row` from the SAME member that
+    # won the bucket fold, so the bucket and its horizon can never come from
+    # two different members. Rendered next to ``bucket`` by
+    # :func:`render_merged_entry`, omitted entirely at the default.
+    valid_until: str = ""
     # Resolved :class:`AutoMemoryFile` records backing this cluster. Populated
     # by :func:`merge_cluster_row` so the outer orchestrator does not need to
     # re-resolve filesystem paths to run the C4 contradiction detector.
@@ -1022,6 +1036,138 @@ def _collect_am_by_path(
     return by_path
 
 
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1840: bucket -> page-level ``valid_until``
+# ---------------------------------------------------------------------------
+
+#: Durability ORDER over :data:`athenaeum.models.MEMORY_BUCKETS`, least to
+#: most durable. Used ONLY to fold a cluster's members down to one page-level
+#: bucket (:func:`_fold_bucket`); it is not a validity concept and nothing
+#: outside this module reads it.
+#:
+#: ``daily`` < ``weekly`` < ``durable`` is the ordering the bucket names
+#: already imply, and most-durable-wins is the only safe direction: the fold
+#: decides how long the COMPILED page lives, so a single transient member
+#: must not be able to put an expiry on a cluster that also holds a durable
+#: claim (the pre-athenaeum#1840 first-non-empty-member-wins fold could, purely
+#: as an artifact of cluster-row member order). The converse direction is
+#: harmless — an over-long horizon only means the sweep looks at the page
+#: later, whereas an over-short one deletes a durable fact.
+_BUCKET_DURABILITY: dict[str, int] = {"daily": 1, "weekly": 2, "durable": 3}
+
+
+def _fold_bucket(members: list[tuple[str, AutoMemoryFile]]) -> AutoMemoryFile | None:
+    """Return the member whose ``bucket`` wins the cluster fold, or ``None``.
+
+    Most-durable-wins over :data:`_BUCKET_DURABILITY` (issue athenaeum#1840),
+    replacing the first-non-empty-member-wins rule athenaeum#904 shipped.
+    Ties are broken by member order — the STRICT ``>`` below keeps the first
+    member at the winning durability level, so a cluster whose members all
+    agree folds to exactly the member the old rule picked and every
+    single-bucket cluster's output is unchanged.
+
+    Returns the winning MEMBER (not just its bucket string) because the
+    page's derived ``valid_until`` must be anchored on the SAME member that
+    supplied the bucket — otherwise a ``{daily, weekly}`` cluster could take
+    ``weekly`` from one member and a 7-day horizon from another member's
+    date. Members with no bucket at all are skipped; ``None`` means the
+    cluster is unbucketed, exactly as before this issue.
+    """
+    winner: AutoMemoryFile | None = None
+    for _mp, am in members:
+        if not am.bucket:
+            continue
+        if winner is None or _BUCKET_DURABILITY.get(am.bucket, 0) > _BUCKET_DURABILITY.get(
+            winner.bucket, 0
+        ):
+            winner = am
+    return winner
+
+
+def _raw_filename_anchor_date(path: Path) -> date | None:
+    """The ``YYYYMMDD`` half of a raw-intake filename stamp, or ``None``.
+
+    Raw intake is named ``<YYYYMMDDTHHMMSSZ>-<uuid8>.md``
+    (:data:`athenaeum.intake.RAW_FILE_RE`), so the file's own name records
+    when the memory was written. Any other naming convention (auto-memory's
+    ``<type>_<slug>.md``, a hand-written page) returns ``None`` and falls
+    through to the next anchor.
+    """
+    m = RAW_FILE_RE.match(path.name)
+    if m is None:
+        return None
+    try:
+        return datetime.strptime(m.group(1)[:8], "%Y%m%d").date()
+    except ValueError:
+        # RAW_FILE_RE pins EIGHT DIGITS, not a valid calendar date, so a
+        # hand-renamed ``20261399T...`` file reaches here. Fall through to
+        # the next anchor rather than raising — one malformed filename must
+        # not abort a whole nightly compile.
+        return None
+
+
+def _decay_anchor_date(am: AutoMemoryFile, *, today: date | None = None) -> date:
+    """The date a member's decay horizon is measured FROM (issue athenaeum#1840).
+
+    Precedence: the member's declared ``valid_from`` > its raw-filename
+    stamp (:func:`_raw_filename_anchor_date`) > *today*. Anchoring on the
+    memory's OWN date rather than the compile date is the whole point: a
+    ``daily`` memory written on 2026-05-10 expired on 2026-05-11, and a
+    compile run in September must derive exactly that, not tomorrow — a
+    today-anchored horizon would silently renew every transient page on
+    every nightly run and it could never expire.
+    """
+    if am.valid_from:
+        try:
+            return date.fromisoformat(am.valid_from)
+        except ValueError:
+            pass
+    stamped = _raw_filename_anchor_date(am.path)
+    if stamped is not None:
+        return stamped
+    return today if today is not None else date.today()
+
+
+def _derive_page_valid_until(
+    am: AutoMemoryFile | None,
+    *,
+    config: dict[str, Any] | None = None,
+    today: date | None = None,
+) -> str:
+    """Page-level ``valid_until`` for the fold-winning member *am*, or ``""``.
+
+    ``""`` — i.e. NO ``valid_until`` key at any layer — whenever:
+
+    - there is no bucketed member (*am* is ``None``), or
+    - the winning bucket is ``durable``. A durable page must never acquire a
+      derived expiry, and :func:`athenaeum.config.resolve_decay_horizon_days`
+      has no knob that could give it one (it returns ``0`` for every bucket
+      but ``daily``/``weekly``), so this is enforced in two places rather
+      than one.
+
+    Only-fill-never-override: a member that ALREADY declares ``valid_until``
+    keeps its own bound verbatim — the derivation fills an absent bound and
+    never rewrites a declared one, the same posture
+    :func:`_stamp_member_validity` takes at the per-source layer.
+    """
+    if am is None or not am.bucket:
+        return ""
+    # The durable gate comes FIRST, before the only-fill-never-override branch
+    # below: a member carrying BOTH ``bucket: durable`` and its own
+    # ``valid_until:`` must still compile to a page with no bound at all.
+    # "No ``valid_until`` at any layer" is a property of the DURABLE bucket,
+    # not merely of the derivation — so inheriting a declared bound here would
+    # hand a durable page an expiry and make it sweepable. The per-source
+    # record keeps its declared bound byte-identical either way; only the
+    # page-level key is suppressed.
+    horizon = resolve_decay_horizon_days(am.bucket, config)
+    if horizon <= 0:
+        return ""
+    if am.valid_until:
+        return am.valid_until
+    return (_decay_anchor_date(am, today=today) + timedelta(days=horizon)).isoformat()
+
+
 def merge_cluster_row(
     row: dict[str, Any],
     *,
@@ -1030,6 +1176,7 @@ def merge_cluster_row(
     ephemeral_scopes: list[str] | None = None,
     operational_markers: list[str] | None = None,
     as_of: date | None = None,
+    config: dict[str, Any] | None = None,
 ) -> MergedWikiEntry | None:
     """Build one :class:`MergedWikiEntry` from a cluster JSONL row.
 
@@ -1045,6 +1192,12 @@ def merge_cluster_row(
     matching the live compile. This is VALID-time, not transaction-time:
     a member ingested after ``as_of`` but whose validity window covers
     ``as_of`` is still blended (see :func:`compile_as_of`).
+
+    ``config`` (issue athenaeum#1840) is read for ONE thing only: the
+    operator-adjustable decay horizons behind the derived page-level
+    ``valid_until`` (:func:`athenaeum.config.resolve_decay_horizon_days`).
+    Left ``None`` the code defaults apply, so every existing caller's output
+    is unchanged.
 
     C4 (athenaeum#198): contradiction detection is NOT performed here — the caller
     (:func:`merge_clusters_to_wiki`) runs it against the resolved member
@@ -1212,16 +1365,17 @@ def merge_cluster_row(
         if am.origin_scope not in origin_scopes_set:
             origin_scopes_set.append(am.origin_scope)
 
-    # Issue athenaeum#904: page-level decay bucket, first non-empty ACTIVE member
-    # wins (deterministic — ``members`` is already filtered to active-only,
-    # in cluster-row order). Members disagreeing on bucket is not validated
-    # here — the rare case an operator's own rules would need to reconcile,
-    # not something this compile step should escalate or silently average.
-    bucket = ""
-    for _mp, am in members:
-        if am.bucket:
-            bucket = am.bucket
-            break
+    # Issue athenaeum#904 / athenaeum#1840: page-level decay bucket, folded
+    # MOST-DURABLE-WINS over the ACTIVE members (deterministic — ``members``
+    # is already filtered to active-only, in cluster-row order; ties keep the
+    # first member at the winning level). athenaeum#904 shipped
+    # first-non-empty-member-wins, which let one transient member mark a
+    # cluster that also holds a durable claim ``daily`` purely by being
+    # earlier in the row. The page-level ``valid_until`` is derived from the
+    # SAME winning member so bucket and horizon can never disagree.
+    bucket_member = _fold_bucket(members)
+    bucket = bucket_member.bucket if bucket_member is not None else ""
+    valid_until = _derive_page_valid_until(bucket_member, config=config, today=as_of)
 
     # Sources: parse each member's sources[] from frontmatter (source of
     # truth), plus a synthetic entry from originSessionId/turn when a
@@ -1309,6 +1463,7 @@ def merge_cluster_row(
         member_paths=resolved_member_paths,
         resolved_members=[am for _mp, am in members],
         bucket=bucket,
+        valid_until=valid_until,
     )
 
 
@@ -1463,6 +1618,15 @@ def render_merged_entry(entry: MergedWikiEntry) -> str:
     # omit-at-default rule every optional field in this dict follows.
     if entry.bucket:
         meta["bucket"] = entry.bucket
+    # Issue athenaeum#1840: the bucket's DERIVED horizon, rendered immediately
+    # next to the bucket it came from. This is the existing athenaeum#308
+    # ``valid_until`` key, not a parallel one — which is precisely what makes
+    # the compiled page legible to ``athenaeum.decay_sweep`` and to
+    # ``mcp_server._is_deprioritized_for_currency``, both of which already
+    # key on ``models.valid_until_expired``. Omitted entirely when unset
+    # (always, for a ``durable`` or unbucketed page).
+    if entry.valid_until:
+        meta["valid_until"] = entry.valid_until
     # Issue athenaeum#260: append origin-traced source footnotes to the BODY (sources
     # already render to frontmatter above; the footnotes give the human-
     # readable, ultimate-source citation the worked example used).
@@ -1860,6 +2024,7 @@ def merge_clusters_to_wiki(
             ephemeral_scopes=ephemeral_scopes,
             operational_markers=operational_markers,
             as_of=as_of,
+            config=resolved_config,
         )
         if entry is None:
             continue

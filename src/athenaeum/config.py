@@ -3264,6 +3264,88 @@ def resolve_audit_transitory_horizon_days(config: dict[str, Any] | None) -> int:
     return DEFAULT_AUDIT_TRANSITORY_HORIZON_DAYS
 
 
+#: Default decay horizon, in days, for a ``bucket: daily`` page whose own
+#: frontmatter declares no ``valid_until`` (issue athenaeum#1840). One day is
+#: the literal meaning of the bucket name — a daily-churn page written today
+#: is still current tomorrow and no longer current the day after.
+#: OPERATOR-ADJUSTABLE (env or yaml, see :func:`resolve_decay_horizon_days`).
+DEFAULT_DECAY_DAILY_HORIZON_DAYS = 1
+
+#: Default decay horizon, in days, for a ``bucket: weekly`` page whose own
+#: frontmatter declares no ``valid_until`` (issue athenaeum#1840). Seven days,
+#: for the same reason the daily default is one.
+#: OPERATOR-ADJUSTABLE (env or yaml, see :func:`resolve_decay_horizon_days`).
+DEFAULT_DECAY_WEEKLY_HORIZON_DAYS = 7
+
+
+def resolve_decay_horizon_days(bucket: str, config: dict[str, Any] | None = None) -> int:
+    """Resolve the decay horizon, in days, for a memory *bucket* (issue athenaeum#1840).
+
+    Precedence per bucket, mirroring
+    :func:`resolve_audit_transitory_horizon_days` exactly — env > yaml >
+    code default:
+
+    - ``daily``  => ``ATHENAEUM_DECAY_DAILY_HORIZON_DAYS`` env >
+      ``decay.daily_horizon_days`` yaml > :data:`DEFAULT_DECAY_DAILY_HORIZON_DAYS`
+    - ``weekly`` => ``ATHENAEUM_DECAY_WEEKLY_HORIZON_DAYS`` env >
+      ``decay.weekly_horizon_days`` yaml > :data:`DEFAULT_DECAY_WEEKLY_HORIZON_DAYS`
+
+    Every OTHER value — ``durable``, the unset ``""``, or anything outside
+    :data:`athenaeum.models.MEMORY_BUCKETS` — resolves to ``0``, which callers
+    read as "this bucket has NO horizon; derive no ``valid_until`` at all".
+    ``durable`` is the load-bearing case: a durable page must never acquire a
+    derived expiry, so there is deliberately no ``decay.durable_horizon_days``
+    knob for an operator to set one with.
+
+    A non-positive, non-numeric, or ``bool`` override (env or yaml) falls back
+    to the default rather than producing a zero-or-negative (i.e.
+    immediately-expired) window — same posture as
+    :func:`resolve_audit_transitory_horizon_days`, and the reason this
+    resolver can never turn a live page into an already-expired one by
+    accident.
+
+    ``bucket``-first signature: the bucket is the knob SELECTOR (which of the
+    two horizon families to resolve), not a value read out of *config* — the
+    same shape :func:`resolve_retention_policy` uses for its retention family.
+    """
+    if bucket == "daily":
+        return _resolve_decay_horizon_knob(
+            config, "daily_horizon_days", "ATHENAEUM_DECAY_DAILY_HORIZON_DAYS",
+            DEFAULT_DECAY_DAILY_HORIZON_DAYS,
+        )
+    if bucket == "weekly":
+        return _resolve_decay_horizon_knob(
+            config, "weekly_horizon_days", "ATHENAEUM_DECAY_WEEKLY_HORIZON_DAYS",
+            DEFAULT_DECAY_WEEKLY_HORIZON_DAYS,
+        )
+    return 0
+
+
+def _resolve_decay_horizon_knob(
+    config: dict[str, Any] | None, yaml_key: str, env_var: str, default: int
+) -> int:
+    """One bucket's ``decay.<yaml_key>`` knob: env > yaml > *default*.
+
+    Factored out so :func:`resolve_decay_horizon_days`' two branches cannot
+    drift apart in precedence or in malformed-value posture.
+    """
+    env_value = _env_number(env_var, int)
+    if env_value is not None and env_value > 0:
+        return env_value
+    if isinstance(config, dict):
+        cfg = config.get("decay")
+        if isinstance(cfg, dict):
+            raw = cfg.get(yaml_key)
+            if raw is not None and not isinstance(raw, bool):
+                try:
+                    value = int(raw)
+                except (TypeError, ValueError):
+                    value = None
+                if value is not None and value > 0:
+                    return value
+    return default
+
+
 def resolve_audit_nightly_max_pages(config: dict[str, Any] | None) -> int | None:
     """Resolve the nightly re-audit drain's per-run page cap (issue athenaeum#1630).
 

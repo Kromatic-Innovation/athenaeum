@@ -344,6 +344,21 @@ _CURATED: dict[str, dict[str, str]] = {
         "default": "caller-supplied",
         "precedence": "environment variable > `athenaeum.yaml` > caller-supplied default",
     },
+    "resolve_decay_horizon_days": {
+        "yaml_path": "`decay.daily_horizon_days` / `decay.weekly_horizon_days` "
+        "(one leaf per bucket; see docstring)",
+        "env_var": "per-bucket (`ATHENAEUM_DECAY_DAILY_HORIZON_DAYS` / "
+        "`ATHENAEUM_DECAY_WEEKLY_HORIZON_DAYS`)",
+        "cli_flag": "—",
+        "default": "`1` day for `daily`, `7` days for `weekly`, `0` (no horizon, so no "
+        "derived `valid_until`) for `durable` and for an unset/unknown bucket",
+        "precedence": "environment variable > `athenaeum.yaml` > code default",
+        # Generic invocation is `fn(None)`, which passes None as the BUCKET
+        # (the required first positional) and so reports the no-horizon
+        # sentinel `0` as "the" default — meaningless for a resolver whose
+        # default is per-bucket, the same shape problem `resolve_model` and
+        # the retention-family resolvers have.
+    },
     "resolve_recall_relevance_floor": {
         "yaml_path": "`recall.relevance_floor.<backend>` (see docstring — the `unprompted` "
         "call path resolves a sibling, push-specific key)",

@@ -259,6 +259,7 @@ class TestCuratedSetIsClosed:
     def test_curated_membership(self) -> None:
         assert set(gen_config_reference._CURATED.keys()) == {
             "resolve_cache_dir",
+            "resolve_decay_horizon_days",
             "resolve_model",
             "resolve_recall_relevance_floor",
             "resolve_retention_policy",
