@@ -267,6 +267,9 @@ def cmd_ingest_answers(args: argparse.Namespace) -> int:
     # Issue athenaeum#1804: a second summary line separating source files
     # written, held blocks (a write-back authorized but not yet possible),
     # and blocks archived with no write-back attempted, by class.
+    # Issue athenaeum#1850: same line also reports ratified field-correction
+    # applies/rejects — the "were not applied ... re-submit" sentence this
+    # line used to append is gone; a field-correction answer now IS applied.
     no_writeback_total = sum(report.archived_no_writeback.values())
     no_writeback_parts = ", ".join(
         f"{cls}: {n}" for cls, n in sorted(report.archived_no_writeback.items())
@@ -277,12 +280,10 @@ def cmd_ingest_answers(args: argparse.Namespace) -> int:
     )
     if no_writeback_parts:
         summary += f" ({no_writeback_parts})"
-    summary += "."
-    if report.archived_no_writeback.get("field-correction", 0) > 0:
-        summary += (
-            " Field-correction answers were not applied to their target page "
-            "— re-submit the ratified change through its own applier."
-        )
+    summary += (
+        f", {report.corrections_applied} correction(s) applied, "
+        f"{report.corrections_rejected} rejected."
+    )
     print(summary)
     return 0
 
