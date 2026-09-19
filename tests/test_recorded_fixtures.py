@@ -557,13 +557,16 @@ def test_guard_passes_for_unlisted_empty_layer() -> None:
 
 
 def test_manifest_records_the_610_seeding() -> None:
-    """The manifest names the layers athenaeum#610 seeded (it shipped empty under athenaeum#551).
+    """The manifest names the layers athenaeum#610 and athenaeum#1558 seeded (it shipped
+    empty under athenaeum#551).
 
     This replaces `test_shipped_manifest_is_empty`, whose whole purpose was to
     pin the pre-seeding state until athenaeum#610 ran. Now that it has, the assertion
     that carries weight is the opposite one: every layer recorded by run
-    30760264305 must stay listed, so that losing a layer's fixtures trips
-    `test_seeded_manifest_layers_are_populated` instead of passing trivially.
+    30760264305 (athenaeum#610) or run 35422372061 (athenaeum#1558, the
+    `underdetermined` layer) must stay listed, so that losing a layer's
+    fixtures trips `test_seeded_manifest_layers_are_populated` instead of
+    passing trivially.
     """
     assert _seeded_layers() == {
         "classify",
@@ -571,4 +574,5 @@ def test_manifest_records_the_610_seeding() -> None:
         "merge",
         "recall",
         "resolver",
+        "underdetermined",
     }
