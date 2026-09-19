@@ -186,6 +186,8 @@ def _cost(probe_class: str, scale: str, arm: str, cost: float | None) -> CostPer
         read_output_tokens=0,
         write_tokens_amortized=None,
         write_tokens_raw=None,
+        write_tokens_native_share_amortized=None,
+        write_tokens_native_share_raw=None,
         cost_per_correct=cost,
         undefined_reason=None if cost is not None else "zero correct answers in this cell",
     )
