@@ -210,6 +210,13 @@ class TestRoundTrip:
         # Now ingest — the [x] block should be archived and a raw answer
         # file should be written.
         raw_root = tmp_path / "raw"
+        # Issue athenaeum#1804: the source ref must resolve, or this non-empty
+        # -answer/detector-raised block is now HELD instead of archived —
+        # this test is about the auto-resolve round trip, not the hold path.
+        (raw_root / "wiki").mkdir(parents=True)
+        (raw_root / "wiki" / "tristan.md").write_text(
+            "Tristan is German.\n", encoding="utf-8"
+        )
         n = ingest_answers(pending, raw_root)
         assert n == 1
 

@@ -375,6 +375,68 @@
     corpus's current (wrong) state so a consolidation change has something to
     move. grep-reachable via: keelbridge, programme.
 
+# Issue athenaeum#1839: three more redundancy probes so the class stops
+# deciding design-doc SS7 condition 3 on Keelbridge alone (n=1 -> n=4 per
+# scale). Unlike Keelbridge (a SPLIT entity), each pair below is genuine
+# DUPLICATION -- both pages state the exact same planted fact, written up
+# independently -- so every `answer_markers` entry below names a real
+# expected page, not just the answer-bearing one. Ground truth for all three
+# lives alongside Keelbridge in `ground_truth/relatedness.yaml`'s
+# `redundant_clusters`.
+
+- id: driftgate_migration_funding
+  probe_class: redundancy
+  query: "what is the Driftgate migration's quarterly funding?"
+  expected_uids: [project-driftgate-migration, project-driftgate-migration-status]
+  must_not_rank: [team-driftgate-oncall]
+  distractor_terms: ["Driftgate", "migration", "quarterly funding"]
+  answer_tokens: ["Fenrivet", "Hollowcairn"]
+  answer_markers:
+    project-driftgate-migration: "92 thousand GBP per quarter"
+    project-driftgate-migration-status: "92 thousand GBP per quarter"
+  note: >-
+    Redundancy probe (duplication shape, not a split): the programme page and
+    an independently written status note both plant the same quarterly
+    funding figure verbatim, so both earn their own answer_markers entry.
+    must_not_rank (negative control): the on-call rota shares the Driftgate
+    name but is a standing staffing arrangement, not a phase of the
+    migration. grep-reachable via: driftgate, migration.
+
+- id: dual_signoff_threshold
+  probe_class: redundancy
+  query: "what does the Harrowmere Protocol require for payment sign-off?"
+  expected_uids: [policy-dual-signoff, policy-dual-signoff-brief]
+  must_not_rank: [policy-payment-approval-legacy]
+  distractor_terms: ["Harrowmere Protocol", "payment sign-off", "independent approvers"]
+  answer_tokens: ["Duskbriar", "Emberwick"]
+  answer_markers:
+    policy-dual-signoff: "6400 GBP requires two independent approvers"
+    policy-dual-signoff-brief: "6400 GBP requires two independent approvers"
+  note: >-
+    Redundancy probe (duplication shape): the firm's own Harrowmere Protocol
+    page and a new-hire brief were written up independently and both state
+    the same 6400 GBP threshold verbatim. must_not_rank (negative control):
+    the retired single-approver rule shares "Harrowmere Protocol" vocabulary
+    (it names the protocol that replaced it) but names a different,
+    superseded threshold. grep-reachable via: harrowmere, protocol.
+
+- id: mira_castellane_role
+  probe_class: redundancy
+  query: "who leads the Rivencourt practice, and since when?"
+  expected_uids: [person-mira-castellane, person-mira-castellane-directory]
+  must_not_rank: [company-castellane-group]
+  distractor_terms: ["Rivencourt practice", "practice lead", "Castellane"]
+  answer_tokens: ["Larkmantle", "Thornwistle"]
+  answer_markers:
+    person-mira-castellane: "a role she has held since March 2019"
+    person-mira-castellane-directory: "a role she has held since March 2019"
+  note: >-
+    Redundancy probe (duplication shape): Mira Castellane's own profile and a
+    directory listing captured independently both state the same practice
+    and start date verbatim. must_not_rank (negative control): Castellane
+    Group shares only the surname -- a different entity a name-only merge
+    would wrongly swallow. grep-reachable via: rivencourt, castellane.
+
 # --- follow-through ----------------------------------------------------------
 #
 # Issue athenaeum#1737. The class a plain grep cannot pass by accident: the

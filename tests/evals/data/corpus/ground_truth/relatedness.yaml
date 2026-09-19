@@ -84,3 +84,49 @@ redundant_clusters:
     negative_control:
       - team-keelbridge-desk
     probe: keelbridge_programme_scope
+
+  - id: driftgate-migration-funding
+    note: >-
+      Issue athenaeum#1839. Unlike Keelbridge above (an entity SPLIT), this is
+      genuine DUPLICATION: the programme's own page and an independently
+      written status note both state the same quarterly funding figure. The
+      on-call rota shares the Driftgate name but is a standing staffing
+      arrangement, not a phase of the migration -- the NEGATIVE CONTROL, same
+      reasoning as Keelbridge's team page.
+    merge:
+      - project-driftgate-migration
+      - project-driftgate-migration-status
+    negative_control:
+      - team-driftgate-oncall
+    probe: driftgate_migration_funding
+
+  - id: dual-signoff-threshold
+    note: >-
+      Issue athenaeum#1839. The firm's own Harrowmere Protocol page and a
+      new-hire brief were written up independently and both state the same
+      6400 GBP dual-approval threshold. The retired single-approver rule
+      shares "Harrowmere Protocol" vocabulary (it names the protocol that
+      replaced it) but names a DIFFERENT, superseded threshold -- the
+      NEGATIVE CONTROL: a consolidation pass that swallows it would fold a
+      dead rule into the live one.
+    merge:
+      - policy-dual-signoff
+      - policy-dual-signoff-brief
+    negative_control:
+      - policy-payment-approval-legacy
+    probe: dual_signoff_threshold
+
+  - id: mira-castellane-role
+    note: >-
+      Issue athenaeum#1839. Mira Castellane's own profile and a directory
+      listing captured independently both state the same Rivencourt practice
+      and start date. Castellane Group shares only the surname -- a
+      different entity entirely -- and is the NEGATIVE CONTROL: a
+      consolidation pass that swallows it has matched on name alone, not on
+      identity.
+    merge:
+      - person-mira-castellane
+      - person-mira-castellane-directory
+    negative_control:
+      - company-castellane-group
+    probe: mira_castellane_role
