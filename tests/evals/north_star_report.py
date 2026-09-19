@@ -111,7 +111,14 @@ from athenaeum.text_overlap import (
     ngrams,
 )
 from tests.evals.containment import GridCell, ResultStore
-from tests.evals.corpus import Corpus, Observation, Probe, answer_bearing_uids, build_corpus
+from tests.evals.corpus import (
+    Corpus,
+    Observation,
+    Probe,
+    answer_bearing_uids,
+    build_corpus,
+    deep_hop_uids,
+)
 from tests.evals.corpus import _content_terms as _content_terms
 from tests.evals.corpus import _normalize_marker_for_match as _normalize_marker_for_match
 from tests.evals.metrics import uids_from_recall_output
@@ -709,6 +716,51 @@ def marker_miss_with_delivery(
         )
         for uid in required_uids
     )
+
+
+def deep_hop_delivered(
+    record: RolloutRecord, probe: Probe, corpus: Corpus
+) -> bool | None:
+    """Report-only diagnostic (issue athenaeum#1844): did every page that
+    can ONLY be reached by following the follow_through hop actually get
+    delivered to this arm?
+
+    The deep page(s) are named by
+    :func:`tests.evals.corpus.deep_hop_uids` -- the SAME predicate
+    :func:`tests.evals.corpus.validate_core` shipped the probe against, so
+    "the deep page" means one thing in the corpus validator and one thing in
+    this report. Delivery is :func:`_delivered_uids`, the grader's own
+    dispatch, so this column and ``correctness_rate`` read the same
+    evidence.
+
+    This is what separates the two failure modes a bare ``correctness_rate``
+    conflates on a follow_through cell: the arm never reached the second
+    page (``False`` here), versus it reached the page and the answer still
+    did not carry the fact (``True`` here, with the cell graded ``False``).
+    The first says fix instrumentation or the delivery channel; the second
+    says fix the corpus or read it as a genuine model miss.
+
+    Returns ``None`` for every non-``follow_through`` probe -- there is no
+    hop to have followed, which is a different fact from not having followed
+    one, so those groups render ``n/a`` rather than a counted zero. Also
+    ``None`` for a follow_through probe with no derivable deep hop, which is
+    exactly the corpus error ``validate_core`` refuses to ship: absent
+    ground truth, not a negative observation.
+
+    ``report_only``, exactly as :func:`tag_followed` and
+    :func:`marker_miss_with_delivery` are: it feeds no design-doc section 7
+    condition, no :func:`compute_verdicts` input, no cutoff and no
+    :class:`GroupStats` win/loss field -- only its own ``follow_hop_rate``
+    column.
+    """
+    if probe.probe_class != "follow_through":
+        return None
+    pages_by_uid = {page.uid: page for page in corpus.pages}
+    hop_uids = deep_hop_uids(probe, pages_by_uid)
+    if not hop_uids:
+        return None
+    delivered = frozenset(_delivered_uids(record, probe, corpus))
+    return all(uid in delivered for uid in hop_uids)
 
 
 def grade_correctness(record: RolloutRecord, probe: Probe, corpus: Corpus) -> bool | None:
@@ -1322,6 +1374,17 @@ class GroupStats:
     # so existing positional construction and sibling-lane merges stay safe.
     marker_miss_with_delivery: int | None = None
 
+    # Follow-through hop delivered (issue athenaeum#1844, report_only) --
+    # among follow_through cells, the fraction where every page named by
+    # `corpus.deep_hop_uids` was delivered to the arm; see
+    # deep_hop_delivered. None (rendered `n/a`) for every other probe_class,
+    # which has no hop to have followed -- a different fact from a rate of
+    # zero. Feeds no section 7 condition, no cutoff and no win/loss field,
+    # exactly as tag_followed_rate and marker_miss_with_delivery above do
+    # not. Appended last so existing positional construction and
+    # sibling-lane merges stay safe.
+    follow_hop_rate: float | None = None
+
 
 def _mean(values: list[float]) -> float | None:
     return sum(values) / len(values) if values else None
@@ -1351,6 +1414,7 @@ def compute_group_stats(rows: Sequence[RolloutRow]) -> list[GroupStats]:
         index_coverages: list[float] = []
         tag_followed_flags: list[float] = []
         marker_miss_flags: list[float] = []
+        follow_hop_flags: list[float] = []
 
         for row in group:
             record = row.record
@@ -1410,6 +1474,10 @@ def compute_group_stats(rows: Sequence[RolloutRow]) -> list[GroupStats]:
             if marker_miss is not None:
                 marker_miss_flags.append(1.0 if marker_miss else 0.0)
 
+            hop_delivered = deep_hop_delivered(record, probe, corpus)
+            if hop_delivered is not None:
+                follow_hop_flags.append(1.0 if hop_delivered else 0.0)
+
             if record.arm is Arm.NATIVE_INDEX:
                 coverage_value = _native_index_coverage_value(record)
                 if coverage_value is not None:
@@ -1444,6 +1512,7 @@ def compute_group_stats(rows: Sequence[RolloutRow]) -> list[GroupStats]:
                 marker_miss_with_delivery=(
                     int(sum(marker_miss_flags)) if marker_miss_flags else None
                 ),
+                follow_hop_rate=_mean(follow_hop_flags),
             )
         )
     return stats
@@ -3539,6 +3608,33 @@ def render_report(report: NorthStarReport) -> str:
         )
         lines.append(
             f"| {s.probe_class} | {s.corpus_scale} | {s.arm} | {s.n} | {count_display} |"
+        )
+    lines.append("")
+
+    lines.append("## Follow-through hop delivered (issue athenaeum#1844, report_only)")
+    lines.append("")
+    lines.append(
+        "`follow_hop_rate` is the share of `follow_through` cells in that group where every "
+        "page named by `corpus.deep_hop_uids` -- the page an arm can only have landed on by "
+        "FOLLOWING the body `[[wikilink]]`, never by a lexical match on the query -- was "
+        "delivered to the arm, read from `_delivered_uids` (the grader's own dispatch). It "
+        "separates the two causes a `False` `correctness_rate` conflates on this class: the "
+        "arm never reached the second page (counted here as 0) versus it reached the page "
+        "and the answer still did not carry the fact (counted here as 1, alongside a "
+        "`marker_miss_with_delivery` of 1). The deep page is DERIVED from the link graph, "
+        "never read off a fixed `expected_uids` position. `report_only`: this column feeds "
+        "no §7 condition, no cutoff, no `compute_verdicts` input and no win/loss field, "
+        "exactly as `marker_miss_with_delivery` above does not. `n/a` for every non-"
+        "`follow_through` group -- no hop to have followed is a different fact from a rate "
+        "of zero."
+    )
+    lines.append("")
+    lines.append("| probe_class | corpus_scale | arm | n | follow_hop_rate |")
+    lines.append("| --- | --- | --- | --- | --- |")
+    for s in report.stats:
+        lines.append(
+            f"| {s.probe_class} | {s.corpus_scale} | {s.arm} | {s.n} | "
+            f"{_fmt(s.follow_hop_rate)} |"
         )
     lines.append("")
 
