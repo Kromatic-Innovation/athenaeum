@@ -3036,11 +3036,11 @@ lists entirely), not to how fusion weighs two otherwise-good rankings
 
 Re-swept directly on the real embedder for: at the
 now-shipped ``guard_rank=1``, every ``k`` in the issue's grid
-(``{10, 20, 30, 60}``) produced the SAME real-model failure count except
-``k=60`` itself, which is what the winner-rule tie-break (larger ``k``
-preferred among ties) selects -- kept equal to
-`athenaeum.search._DEFAULT_RRF_K` (the RRF-standard value) rather
-than moved. See ``docs/measurements/recall-hybrid-fusion-sweep.md`` for
+(``{10, 20, 30, 60}``) produced the SAME real-model failure count -- a
+four-way tie, resolved by the winner rule's tie-break (larger ``k``
+preferred among ties) in favour of ``k=60``, which is also
+`athenaeum.search._DEFAULT_RRF_K` (the RRF-standard value). Kept
+equal to it rather than moved. See ``docs/measurements/recall-hybrid-fusion-sweep.md`` for
 the full 96-combination table.
 
 Precedence: ``ATHENAEUM_RECALL_HYBRID_K`` env (a positive int) >
