@@ -55,6 +55,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`AUDIT_SYSTEM` section 2 reverted to its `audit-v3` wording, shipped as
+  `audit-v5` (issue athenaeum#1877).** athenaeum#1869 rewrote the
+  retirement-candidacy section into `audit-v4` to stop the prompt flagging
+  name-only person stubs, but shipped the rewrite unmeasured — that lane had no
+  live model backend. Measured afterwards (athenaeum#1871; four `evals.yml`
+  `workflow_dispatch` runs on `claude-haiku-4-5-20251001`, two samples per arm,
+  graded on `tests/evals/data/audit_retirement/cases.yaml` against
+  `AUDIT_RETIREMENT_FLOOR = 5`), `audit-v4` is a regression: 2/6 and 3/6 versus
+  5/6 in both `audit-v3` samples. It did not fix the case it was written for —
+  `name_only_person_stub` is flagged under both wordings — and it introduced two
+  false positives reproducible across both samples that `audit-v3` does not have,
+  `name_plus_one_affiliation_line` and `dated_engagement_with_pipeline_metadata`.
+  Neither is covered by a code-side override, so on `develop` `athenaeum audit`
+  was listing person pages carrying an affiliation line and pages recording a
+  dated engagement outcome — real content — as retirement candidates, and
+  `athenaeum audit --apply` would have acted on that list. `AUDIT_SYSTEM` is now
+  byte-equal to its pre-athenaeum#1869 state (output-shape example included, so
+  the shipped prompt is exactly the arm that measured 5/6) and `AUDIT_VERSION` is
+  `audit-v5` — a new string rather than a reuse of `audit-v3`, so recorded
+  artifacts stay unambiguous about which route the text arrived by. The
+  deterministic `audit._is_bare_person_stub` override athenaeum#1869 also shipped
+  is KEPT: no prompt version measured so far passes `name_only_person_stub` on
+  its own, and that override is what keeps a bare stub off the live retirement
+  list.
+
 - **The cross-lane regression athenaeum#1789's FTS5 body-indexing caused in
   athenaeum#1792's hybrid fusion (`recall.hybrid.{fts5_weight,guard_rank,k}`),
   addressed on the FTS5 seam (issue athenaeum#1789, Quine review of PR

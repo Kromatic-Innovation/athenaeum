@@ -41,7 +41,9 @@ is unlisted in ``tests/fixtures/recorded/seeded-layers.yml``, so
 ``tests/test_recorded_fixtures.py``'s replay tests skip cleanly with an
 explicit reason rather than erroring the suite, exactly like every other
 never-seeded layer). Seeding it (an ``evals.yml`` ``record=true`` run
-against the fixed ``audit-v4`` prompt) is a tracked follow-up.
+against the ``audit-v5`` prompt, which athenaeum#1877 restored to the
+``audit-v3`` wording measured at 5/6) is a tracked follow-up —
+athenaeum#1871.
 
 Marker: ``pytest.mark.eval`` — deselected by default (see pyproject).
 """
@@ -73,9 +75,11 @@ pytestmark = pytest.mark.eval
 # no subjective shape judgment the way CLASSIFY_FLOOR's entity-extraction
 # cases have — so a one-case slack over an all-pass expectation (matching
 # MERGE_FLOOR / UNDERDETERMINED_FLOOR's ~75% ratio) absorbs ordinary Haiku
-# nondeterminism without hiding a systemic miss (e.g. the placeholder
-# exclusion regressing back to matching the no-claim trigger, as it did
-# under audit-v3).
+# nondeterminism without hiding a systemic miss. The floor has already
+# earned its keep: athenaeum#1877 measured the ``audit-v4`` rewrite of
+# section 2 at 2/6 and 3/6 against this set, versus 5/6 twice for the
+# ``audit-v3`` wording it replaced, which is why ``audit-v5`` restores
+# that wording.
 AUDIT_RETIREMENT_FLOOR = 5  # >= 5/6
 
 
