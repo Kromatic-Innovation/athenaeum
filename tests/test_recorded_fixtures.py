@@ -104,7 +104,10 @@ _UNDERDETERMINED_IDS = _recorded_case_ids(LAYER_UNDERDETERMINED)
 # Issue athenaeum#1869: same never-seeded posture as LAYER_UNDERDETERMINED
 # above — this lane had no live backend to record from either
 # (ANTHROPIC_API_KEY unset). Seeding it (an evals.yml record=true run
-# against the fixed audit-v4 prompt) is a tracked follow-up.
+# against the audit-v5 prompt, which athenaeum#1877 restored to the
+# audit-v3 wording measured at 5/6) is a tracked follow-up —
+# athenaeum#1871. Do NOT seed from the audit-v4 record=true artifact: it
+# recorded a 2/6 run.
 _AUDIT_RETIREMENT_IDS = _recorded_case_ids(LAYER_AUDIT_RETIREMENT)
 
 _EMPTY_LAYER_REASON = (

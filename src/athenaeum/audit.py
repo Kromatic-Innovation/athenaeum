@@ -140,7 +140,7 @@ log = logging.getLogger(__name__)
 #: page as ``audit_version:`` so a later pass can tell "audited under an old
 #: prompt" apart from "never audited" (the latter has no ``last_audited`` at
 #: all — see the module docstring).
-AUDIT_VERSION = "audit-v4"
+AUDIT_VERSION = "audit-v5"
 
 #: The kernel-dimension coordinate fields this pass may fill, DERIVED from
 #: the schema-migrations registry (issue athenaeum#1628 decision 3) — the
@@ -190,34 +190,34 @@ meeting date, a note date, an updated-timestamp, or any ingestion/import \
 date. When the only dates available are of that kind, report the field \
 as undeterminable and name the excluded date class in the reason.
 
-2. RETIREMENT CANDIDACY. Three exclusions apply first — a page matching \
-any of these is NEVER a retirement candidate, regardless of anything \
-below:
-   - a person page whose body holds only a name, or a name plus a single \
-affiliation line, is a placeholder awaiting enrichment,
-   - a page recording a dated engagement or relationship outcome states a \
-claim and is NOT a candidate, even when it also carries CRM / \
-sales-pipeline metadata, or
-   - a page whose entire content is a summary of a source it names (for \
-example a whiteboard or board source page) is light BY DESIGN, not by \
-deficiency: it asserts the source of truth and the chain of evidence \
-another page relies on. Restating or summarizing a cited source is NOT, on \
-its own, a reason to flag a page — a page that accurately summarizes and \
-scopes its source still adds value by making that source findable. Never \
-flag such a page for retirement merely for being light.
-   A page is a retirement candidate only when none of the exclusions above \
-applies, and at least one of these is true:
+2. RETIREMENT CANDIDACY. A page is a retirement candidate ONLY when at \
+least one of these two things is true:
    - it states no claim at all — no independent observation, judgment, or \
-synthesis,
-   - its only content beyond its name is CRM / sales-pipeline metadata, or \
-pipeline-list membership,
-   - its own text says the entity itself is spurious — for example, an \
-artifact of parsing a filename, or
+synthesis, just a name/heading or nothing, or
+     - a person page whose body holds only a name, or a name plus a \
+single affiliation line, is a placeholder awaiting enrichment and is \
+NOT a candidate on that basis,
+     - a page recording a dated engagement or relationship outcome \
+states a claim and is NOT a candidate, even when it also carries CRM / \
+sales-pipeline metadata,
+     - a page whose only content beyond its name is CRM / \
+sales-pipeline metadata, or pipeline-list membership, states no claim \
+and IS a candidate, or
+     - a page whose own text says the entity itself is spurious — for \
+example, an artifact of parsing a filename — states no claim and IS a \
+candidate.
+   The placeholder rule above covers a name plus at most one affiliation \
+line; a person page whose only additional content is pipeline-stage, \
+deal-status, or similar CRM metadata falls under the pipeline-metadata \
+rule, not the placeholder rule.
    - its content duplicates another page.
-   The placeholder exclusion above covers a name plus at most one \
-affiliation line; a person page whose only additional content is \
-pipeline-stage, deal-status, or similar CRM metadata falls under the \
-pipeline-metadata trigger, not the placeholder exclusion.
+   Restating or summarizing a cited source is NOT, on its own, a reason \
+to flag a page — a page that accurately summarizes and scopes its source \
+still adds value by making that source findable. A page whose entire \
+content is a summary of a source it names (for example a whiteboard or \
+board source page) is light BY DESIGN, not by deficiency: it asserts the \
+source of truth and the chain of evidence another page relies on. Never \
+flag such a page for retirement merely for being light.
 
 3. SOURCE SUMMARY. Only when this page's own type is a source page: \
 decide whether it gives a summary of the source it names (a summary, not \
@@ -234,8 +234,8 @@ applies):
 {
   "<field>": {"value": "<determined value>"},
   "<field>": {"undeterminable": "<one-line reason>"},
-  "retirement_candidate": false,
-  "retirement_reason": "",
+  "retirement_candidate": true,
+  "retirement_reason": "<one-line reason, empty string when false>",
   "source_summary_missing": "<one-line reason, omit key when not applicable>"
 }\
 """
@@ -955,22 +955,23 @@ def _is_bare_person_stub(meta: dict[str, Any], body: str) -> bool:
     :func:`_find_duplicate_reasons` above, never a model judgment. A live
     50-page dry run on 2026-09-19 against the ``audit-v3`` prompt flagged
     7 of 7 bare name-only person stubs as retirement candidates despite
-    the prompt's OWN placeholder exemption (the exemption sat nested
-    under the contradicting trigger it was meant to carve out of). The
-    lane that rewrote the prompt into ``audit-v4`` (this same change) has
-    no live LLM backend available to re-measure the rewrite against that
-    specific failure mode. Given a measured 7/7 failure and no way to
-    re-check, shipping this deterministic, reversible code-side rule
-    alongside the prompt rewrite is the safe choice: even if the
-    rewritten prompt alone does not hold for this case, a bare person
-    stub can never be listed for retirement.
+    the prompt's OWN placeholder exemption. athenaeum#1869 read that as a
+    structural defect in the wording and rewrote the section into
+    ``audit-v4``, unmeasured. The measurement (athenaeum#1871, four
+    ``evals.yml`` runs, two samples per arm) showed the rewrite did NOT
+    fix this case — a bare stub is flagged under BOTH wordings — while
+    regressing two other cases, so athenaeum#1877 reverted the wording
+    and kept this override. That history is why the override stays load
+    bearing rather than belt-and-braces: no prompt version measured so
+    far passes this case on its own, and this rule is what keeps a bare
+    person stub off the retirement list on the live path.
 
     "Only its H1 heading" is narrow on purpose: after discarding blank
     lines, the remaining non-blank lines must be zero, or exactly one
     line starting with ``#``. A name plus a single affiliation line is
     TWO non-blank lines and is therefore NOT covered here — that case
     stays the prompt's job (see ``AUDIT_SYSTEM`` section 2's placeholder
-    exclusion).
+    rule, which the two-sample A/B measured as correct on that case).
 
     *body* is assumed already stripped of YAML frontmatter — the same
     contract :func:`~athenaeum.models.parse_frontmatter` returns and
