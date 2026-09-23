@@ -46,6 +46,7 @@ from athenaeum import zero_yield
 from athenaeum.config import resolve_cache_dir
 from athenaeum.librarian import (
     DEFAULT_ZERO_YIELD_ALERT_THRESHOLD,
+    DEGRADED_NO_API_KEY_PREFIX,
     EXIT_GRACEFUL_PARTIAL,
     ZERO_YIELD_ALERT_PREFIX,
     ZERO_YIELD_PREFIX,
@@ -434,6 +435,66 @@ class TestAutoMemoryReason:
         default, not a KeyError."""
         assert _auto_memory_reason({}) == "completed"
 
+    def test_no_client_configured_is_not_all_calls_failed(self) -> None:
+        """Issue athenaeum#1738: ``haiku_calls``/``resolve_calls`` count
+        INTENTS -- incremented before the client is consulted -- so a
+        keyless run reports attempts it could never have MADE. Reporting
+        that as ``all-calls-failed`` emits the credits-exhausted incident
+        signature for an unexported environment variable."""
+        assert (
+            _auto_memory_reason(
+                {
+                    "haiku_calls": 16,
+                    "haiku_calls_succeeded": 0,
+                    "resolve_calls": 0,
+                    "resolve_calls_succeeded": 0,
+                    "llm_client_configured": False,
+                }
+            )
+            == "no-client-configured"
+        )
+
+    def test_all_calls_failed_survives_when_a_client_did_exist(self) -> None:
+        """Issue athenaeum#1738 narrows ``all-calls-failed``, it does not
+        retire it: a client WAS configured, calls were genuinely made, and
+        every one of them errored -- still the athenaeum#1177 signature."""
+        assert (
+            _auto_memory_reason(
+                {
+                    "haiku_calls": 20,
+                    "haiku_calls_succeeded": 0,
+                    "resolve_calls": 0,
+                    "resolve_calls_succeeded": 0,
+                    "llm_client_configured": True,
+                }
+            )
+            == "all-calls-failed"
+        )
+
+    def test_absent_client_flag_keeps_pre_1738_classification(self) -> None:
+        """A stats dict from a caller that never populated the athenaeum#1738
+        key (any older/partial out_stats) classifies exactly as it did
+        before -- absence is not read as "no client"."""
+        assert (
+            _auto_memory_reason({"haiku_calls": 3, "haiku_calls_succeeded": 0})
+            == "all-calls-failed"
+        )
+
+    def test_no_client_flag_does_not_mask_a_genuine_completion(self) -> None:
+        """The flag only ever refines the attempted>0/succeeded==0 branch:
+        a keyless run that made no attempts at all is still an
+        unremarkable completion, not a degraded-phase report."""
+        assert (
+            _auto_memory_reason(
+                {
+                    "haiku_calls": 0,
+                    "resolve_calls": 0,
+                    "llm_client_configured": False,
+                }
+            )
+            == "completed"
+        )
+
 
 # ---------------------------------------------------------------------------
 # End-to-end regression test (issue athenaeum#1177's mandatory AC): a run
@@ -534,3 +595,187 @@ class TestAllCallsFailedRegression:
             if r.levelno == logging.WARNING and ZERO_YIELD_PREFIX in r.getMessage()
         ]
         assert len(warning_lines) == 1
+
+
+# ---------------------------------------------------------------------------
+# End-to-end regression test (issue athenaeum#1738): a KEYLESS dry run must
+# announce itself instead of emitting degraded phases that read as findings
+# about the corpus.
+# ---------------------------------------------------------------------------
+
+
+class TestKeylessDryRunAnnouncesItself:
+    """Issue athenaeum#1738's mandatory AC: drive a REAL ``run(dry_run=True)``
+    with no resolvable ``ANTHROPIC_API_KEY`` and assert both halves of the
+    fix at once -- the single up-front WARNING (AC1/AC5) and the phase
+    reason that no longer borrows athenaeum#1177's credits-exhausted
+    signature (AC3/AC5) -- while the run still exits 0 and still does its
+    non-LLM work (AC2).
+
+    Drives the real entry point rather than ``_run_preconditions`` alone
+    because the silent shape this guards against was a property of the
+    whole run's OUTPUT, not of the gate in isolation.
+    """
+
+    def test_keyless_dry_run_warns_once_exits_zero_and_avoids_all_calls_failed(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        from tests.test_librarian_deadline import _seed_knowledge_root
+
+        root = _seed_knowledge_root(tmp_path, n_files=2)
+        # The real condition: the key simply is not exported into this
+        # shell -- the normal state of any shell that has not sourced the
+        # operator's config.env.
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("ATHENAEUM_MAX_API_CALLS", raising=False)
+
+        caplog.clear()
+        caplog.set_level(logging.INFO, logger="athenaeum")
+        rc = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            dry_run=True,
+            max_api_calls=100,
+            max_runtime=1000,
+        )
+
+        # AC2: the dry-run exemption is intact -- the run is still allowed,
+        # still exits 0, and still performed its non-LLM phases (it got far
+        # enough to emit a summary at all).
+        assert rc == 0
+
+        # AC1: exactly ONE warning names the run as degraded, and it names
+        # both the variable and the phases the reader must discount. The
+        # prefix is what makes "exactly one" assertable -- the per-cluster
+        # contradiction detector warns about the same missing key too.
+        degraded = [
+            r.getMessage()
+            for r in caplog.records
+            if r.levelno == logging.WARNING
+            and DEGRADED_NO_API_KEY_PREFIX in r.getMessage()
+        ]
+        assert len(degraded) == 1
+        assert "ANTHROPIC_API_KEY" in degraded[0]
+
+        summary_lines = [
+            r.getMessage()
+            for r in caplog.records
+            if r.getMessage().startswith("librarian-run-summary")
+        ]
+        assert len(summary_lines) == 1
+
+        # ...and it precedes every phase's output, which is the point: a
+        # reader hits it before the first degraded line, not after.
+        warn_index = next(
+            i
+            for i, r in enumerate(caplog.records)
+            if DEGRADED_NO_API_KEY_PREFIX in r.getMessage()
+        )
+        summary_indices = [
+            i
+            for i, r in enumerate(caplog.records)
+            if r.getMessage().startswith("librarian-run-summary")
+        ]
+        assert summary_indices, "run emitted no summary line to order against"
+        assert warn_index < summary_indices[0]
+
+        # AC3: no phase on this run may borrow athenaeum#1177's
+        # credits-exhausted signature for a missing environment variable.
+        # (The positive assertion -- that the auto-memory phase reports
+        # ``no-client-configured`` -- needs a corpus with a cluster in it;
+        # see ``test_keyless_merge_only_dry_run_reports_no_client_configured``
+        # below, which drives the same ``run()`` down the merge_only path.)
+        assert "reason=all-calls-failed" not in summary_lines[0]
+
+    def test_keyless_merge_only_dry_run_reports_no_client_configured(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Issue athenaeum#1738 AC3/AC5, end to end and POSITIVELY: a keyless
+        dry run over a corpus that actually has a multi-member cluster
+        reaches the C4 detector, counts the intent, lands nothing -- and
+        the run summary's auto-memory phase must say WHY.
+
+        ``merge_only`` is the cheapest real ``run()`` that gets there: it
+        reads a cluster JSONL that already exists instead of recomputing
+        embeddings, which is orthogonal to what this issue changed."""
+        from tests.test_librarian_deadline import _seed_knowledge_root
+        from tests.test_librarian_run_summary import (
+            _write_am_file,
+            _write_cluster_jsonl,
+            _write_config,
+        )
+
+        root = _seed_knowledge_root(tmp_path, n_files=0)
+        scope = root / "raw" / "auto-memory" / "-Users-tristankromer-Code"
+        _write_am_file(
+            scope,
+            "feedback_v1.md",
+            frontmatter_name="v1",
+            origin_session_id="s-111",
+            origin_turn=1,
+            sources=[
+                {"session": "s-111", "turn": 1, "date": "2026-04-10", "excerpt": "x"}
+            ],
+            body="Commit prior-session debris directly to develop.",
+        )
+        _write_am_file(
+            scope,
+            "feedback_v2.md",
+            frontmatter_name="v2",
+            origin_session_id="s-222",
+            origin_turn=2,
+            sources=[
+                {"session": "s-222", "turn": 2, "date": "2026-04-11", "excerpt": "y"}
+            ],
+            body="Park prior-session debris on a WIP branch.",
+        )
+        _write_cluster_jsonl(
+            root,
+            [
+                {
+                    "cluster_id": "code-0001",
+                    "member_paths": [
+                        "-Users-tristankromer-Code/feedback_v1.md",
+                        "-Users-tristankromer-Code/feedback_v2.md",
+                    ],
+                    "centroid_score": 0.62,
+                    "rationale": "cosine >= 0.55",
+                }
+            ],
+        )
+        _write_config(root)
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("ATHENAEUM_MAX_API_CALLS", raising=False)
+
+        caplog.clear()
+        caplog.set_level(logging.INFO, logger="athenaeum")
+        rc = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            dry_run=True,
+            merge_only=True,
+            max_api_calls=100,
+            max_runtime=1000,
+        )
+        assert rc == 0
+
+        summary_lines = [
+            r.getMessage()
+            for r in caplog.records
+            if r.getMessage().startswith("librarian-run-summary")
+        ]
+        assert len(summary_lines) == 1
+        auto_memory_segment = summary_lines[0].split("| auto-memory ")[1].split(" | ")[0]
+        # The detector intent WAS counted -- this is the exact shape that
+        # used to read as the credits-exhausted incident signature.
+        assert "detector_haiku=1" in auto_memory_segment
+        assert "reason=no-client-configured" in auto_memory_segment
+        assert "reason=all-calls-failed" not in auto_memory_segment

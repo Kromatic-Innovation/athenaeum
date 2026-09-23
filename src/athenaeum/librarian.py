@@ -5519,6 +5519,41 @@ _LIBRARIAN_ROUTED_KNOBS = (
     "reasoning_t2",
 )
 
+#: Stable, greppable prefix on the athenaeum#1738 degraded-dry-run WARNING.
+#: Mirrors ``ZERO_YIELD_PREFIX``/``ZERO_YIELD_ALERT_PREFIX``: the message
+#: text is free to be reworded, log readers and tests key on this. It is
+#: needed as a distinct marker because ``contradictions.detect_contradictions``
+#: ALSO warns about a missing key -- once per cluster -- so "the warning
+#: that names the whole run as degraded" cannot be identified by the
+#: variable name alone.
+DEGRADED_NO_API_KEY_PREFIX = "degraded-run-no-api-key"
+
+#: Reader-facing name of the work each ``_LIBRARIAN_ROUTED_KNOBS`` entry
+#: serves, used ONLY to name what a keyless run will NOT do in the
+#: athenaeum#1738 degraded-dry-run warning below. Every knob in that tuple
+#: resolves its client through ``ctx.api_key``, so on the ``api`` backend
+#: with no key EVERY one of them is ``None``
+#: (:func:`athenaeum.provider._construct_client` returns ``None`` rather
+#: than raising) and its phase silently degrades to a deterministic
+#: fallback. Kept as an explicit literal, keyed by knob, so a sixth routed
+#: knob added above without a label fails loudly in
+#: ``tests/test_librarian_run_phases.py`` instead of quietly dropping a
+#: phase from the warning that exists to enumerate them.
+_ROUTED_KNOB_PHASE_LABELS: dict[str, str] = {
+    "classify": "tier-1 classification / contradiction detection",
+    "write": "entity tier-2/3 create+merge",
+    "resolve": "contradiction resolution",
+    "reasoning_t1": "reasoning tier 1",
+    "reasoning_t2": "reasoning tier 2",
+}
+
+
+def _degraded_phases_without_key() -> str:
+    """The comma-joined phase labels the athenaeum#1738 warning names, in
+    ``_LIBRARIAN_ROUTED_KNOBS`` order (not dict order) so the message reads
+    in pipeline order and is stable to assert on."""
+    return ", ".join(_ROUTED_KNOB_PHASE_LABELS[knob] for knob in _LIBRARIAN_ROUTED_KNOBS)
+
 
 def _run_preconditions(ctx: RunContext) -> int | None:
     """Git/config preconditions gate: provider resolution + preflight, the
@@ -5585,14 +5620,32 @@ def _run_preconditions(ctx: RunContext) -> int | None:
     # The ANTHROPIC_API_KEY requirement applies ONLY to the ``api`` backend.
     # The ``claude-cli`` backend authenticates via the operator's ambient
     # Claude Code subscription login and needs no key (issue athenaeum#330).
-    if (
-        ctx.provider == "api"
-        and not ctx.api_key
-        and not ctx.dry_run
-        and not ctx.skip_entity_tiers
-    ):
-        log.error("ANTHROPIC_API_KEY not set (required unless dry_run=True)")
-        return 1
+    if ctx.provider == "api" and not ctx.api_key and not ctx.skip_entity_tiers:
+        if not ctx.dry_run:
+            log.error("ANTHROPIC_API_KEY not set (required unless dry_run=True)")
+            return 1
+        # Issue athenaeum#1738: the dry-run exemption STAYS -- a keyless dry run
+        # must still be allowed, and must still run its non-LLM phases -- but
+        # it must announce itself. Without this, every LLM-backed phase
+        # degrades to its deterministic fallback and the run emits output
+        # that reads as a DIAGNOSIS of the corpus: `retire` holds each
+        # cluster with rationale ``llm-unavailable``, and the run summary
+        # labels the auto-memory phase ``all-calls-failed`` -- a real
+        # credits-exhausted incident signature -- for what is only an
+        # unexported environment variable. One WARNING, emitted here in
+        # ``_run_preconditions`` (before any phase runs, and exactly once per
+        # run because this gate is), naming the variable and the phases the
+        # reader must therefore discount.
+        log.warning(
+            "%s: ANTHROPIC_API_KEY not set — this dry run is DEGRADED. "
+            "No LLM client is configured, so %s will be SKIPPED, and the "
+            "deterministic fallbacks they degrade to are NOT findings "
+            "about the corpus. Export the key, or set llm.provider to a "
+            "backend that needs none, for a run whose LLM-backed output "
+            "means anything.",
+            DEGRADED_NO_API_KEY_PREFIX,
+            _degraded_phases_without_key(),
+        )
 
     if not ctx.wiki_root.exists() and not ctx.skip_entity_tiers:
         log.error("Wiki root does not exist: %s", ctx.wiki_root)
@@ -6775,6 +6828,20 @@ def _auto_memory_reason(merge_stats: dict) -> str:
     genuine, unremarkable completion, not a failure — same distinction
     ``_zero_yield_tripped``'s ``attempted_calls`` check draws.
 
+    A phase that attempted calls it could never have MADE is a third case,
+    and issue athenaeum#1738 is where it was found: ``haiku_calls`` and
+    ``resolve_calls`` count INTENTS -- both are incremented before the
+    client is consulted -- so a keyless ``--dry-run`` (no client built at
+    all; see :func:`athenaeum.provider._construct_client`) reported
+    ``detector_haiku=16 ... reason=all-calls-failed``, emitting this
+    function's most precise signal for an unexported environment variable.
+    ``merge_clusters_to_wiki`` now records whether a client existed as
+    ``llm_client_configured``; when it is explicitly ``False`` the reason
+    is ``no-client-configured`` instead. The key is absent from any older
+    caller's stats dict, and absence defaults to the pre-athenaeum#1738
+    classification -- this narrows what ``all-calls-failed`` claims, it
+    does not widen it.
+
     Deliberately does not name the underlying exception class the way
     ``_entity_exit_reason``'s ``all-calls-failed:<class>`` does:
     :class:`~athenaeum.contradictions.ContradictionResult`'s
@@ -6788,6 +6855,10 @@ def _auto_memory_reason(merge_stats: dict) -> str:
         "resolve_calls_succeeded", 0
     )
     if attempted > 0 and succeeded == 0:
+        # Issue athenaeum#1738: zero successes out of zero POSSIBLE calls is
+        # not a failure signature, it is a missing credential.
+        if merge_stats.get("llm_client_configured", True) is False:
+            return "no-client-configured"
         return "all-calls-failed"
     return "completed"
 
