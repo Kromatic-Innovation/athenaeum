@@ -31,14 +31,18 @@ import pytest
 
 from athenaeum.decisions import list_pending_decisions
 from athenaeum.librarian import (
+    _LIBRARIAN_ROUTED_KNOBS,
+    _ROUTED_KNOB_PHASE_LABELS,
     BATCHABLE_KNOBS,
     DEFAULT_MAX_API_CALLS,
     DEFAULT_MAX_FILES,
     DEFAULT_MAX_RUNTIME,
+    DEGRADED_NO_API_KEY_PREFIX,
     EXIT_GRACEFUL_PARTIAL,
     RunContext,
     _arm_run_deadline,
     _comparator_dual_source,
+    _degraded_phases_without_key,
     _resolve_run_config,
     _run_git_vcs_io,
     _run_intake_audit_phase,
@@ -282,6 +286,9 @@ class TestRunPreconditions:
             assert _run_preconditions(ctx) == 1
 
     def test_missing_api_key_ok_on_dry_run(self, tmp_path: Path) -> None:
+        """Issue athenaeum#1738 AC2: the dry-run exemption is NOT removed --
+        a keyless dry run still passes preconditions and goes on to run
+        its non-LLM phases."""
         knowledge_root = tmp_path / "knowledge"
         wiki_root = knowledge_root / "wiki"
         wiki_root.mkdir(parents=True)
@@ -294,6 +301,132 @@ class TestRunPreconditions:
             patch("athenaeum.librarian.preflight_provider", return_value=None),
         ):
             assert _run_preconditions(ctx) is None
+
+    def test_missing_api_key_on_dry_run_warns_once_naming_key_and_phases(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Issue athenaeum#1738 AC1: the keyless dry run announces itself --
+        exactly ONE warning, emitted from the preconditions gate (i.e.
+        before any phase runs), naming both the environment variable and
+        every phase that will therefore be skipped. Before this, the run
+        produced a full report whose degraded phases were indistinguishable
+        from real findings about the corpus."""
+        knowledge_root = tmp_path / "knowledge"
+        wiki_root = knowledge_root / "wiki"
+        wiki_root.mkdir(parents=True)
+        ctx = _make_ctx(
+            tmp_path, knowledge_root=knowledge_root, wiki_root=wiki_root, dry_run=True
+        )
+        ctx.api_key = None
+        caplog.clear()
+        caplog.set_level(logging.WARNING, logger="athenaeum")
+        with (
+            patch("athenaeum.librarian.resolve_provider", return_value="api"),
+            patch("athenaeum.librarian.preflight_provider", return_value=None),
+        ):
+            assert _run_preconditions(ctx) is None
+
+        warnings = [
+            r.getMessage()
+            for r in caplog.records
+            if r.levelno == logging.WARNING
+            and DEGRADED_NO_API_KEY_PREFIX in r.getMessage()
+        ]
+        assert len(warnings) == 1
+        assert "ANTHROPIC_API_KEY" in warnings[0]
+        # Every routed knob's phase is named, so the reader knows exactly
+        # which parts of the report to discount.
+        for label in _ROUTED_KNOB_PHASE_LABELS.values():
+            assert label in warnings[0]
+
+    def test_dry_run_with_key_is_unchanged_and_silent(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Issue athenaeum#1738 AC4: a dry run WITH a resolvable key gains no
+        new warning -- the athenaeum#1738 branch is reached only when the key
+        is actually missing."""
+        knowledge_root = tmp_path / "knowledge"
+        wiki_root = knowledge_root / "wiki"
+        wiki_root.mkdir(parents=True)
+        ctx = _make_ctx(
+            tmp_path, knowledge_root=knowledge_root, wiki_root=wiki_root, dry_run=True
+        )
+        ctx.api_key = "sk-test"
+        caplog.clear()
+        caplog.set_level(logging.WARNING, logger="athenaeum")
+        with (
+            patch("athenaeum.librarian.resolve_provider", return_value="api"),
+            patch("athenaeum.librarian.preflight_provider", return_value=None),
+        ):
+            assert _run_preconditions(ctx) is None
+        assert not [
+            r
+            for r in caplog.records
+            if DEGRADED_NO_API_KEY_PREFIX in r.getMessage()
+        ]
+
+    def test_claude_cli_dry_run_without_key_is_not_degraded(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The ``claude-cli`` backend authenticates via the ambient Claude
+        Code login and needs no key (issue athenaeum#330) -- so a keyless dry
+        run on it is not degraded and must not be warned about. Same
+        ``provider == "api"`` condition the pre-athenaeum#1738 error branch
+        already carried."""
+        knowledge_root = tmp_path / "knowledge"
+        wiki_root = knowledge_root / "wiki"
+        wiki_root.mkdir(parents=True)
+        ctx = _make_ctx(
+            tmp_path, knowledge_root=knowledge_root, wiki_root=wiki_root, dry_run=True
+        )
+        ctx.api_key = None
+        caplog.clear()
+        caplog.set_level(logging.WARNING, logger="athenaeum")
+        with (
+            patch("athenaeum.librarian.resolve_provider", return_value="claude-cli"),
+            patch("athenaeum.librarian.preflight_provider", return_value=None),
+        ):
+            assert _run_preconditions(ctx) is None
+        assert not [
+            r
+            for r in caplog.records
+            if DEGRADED_NO_API_KEY_PREFIX in r.getMessage()
+        ]
+
+    def test_warning_does_not_emit_the_budget_trip_marker(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The bare token ``DEGRADED`` is already this codebase's greppable
+        marker for a BUDGET trip (``Done (DEGRADED — budget exhausted)``),
+        and ``tests/test_budget_deferred.py``'s negative controls are
+        literally "no message contains DEGRADED". A missing credential is a
+        different condition and must stay separately greppable, so the
+        athenaeum#1738 warning must never emit that token."""
+        knowledge_root = tmp_path / "knowledge"
+        wiki_root = knowledge_root / "wiki"
+        wiki_root.mkdir(parents=True)
+        ctx = _make_ctx(
+            tmp_path, knowledge_root=knowledge_root, wiki_root=wiki_root, dry_run=True
+        )
+        ctx.api_key = None
+        caplog.clear()
+        caplog.set_level(logging.WARNING, logger="athenaeum")
+        with (
+            patch("athenaeum.librarian.resolve_provider", return_value="api"),
+            patch("athenaeum.librarian.preflight_provider", return_value=None),
+        ):
+            assert _run_preconditions(ctx) is None
+        assert not any("DEGRADED" in r.getMessage() for r in caplog.records)
+
+    def test_degraded_phase_labels_cover_every_routed_knob(self) -> None:
+        """Issue athenaeum#1738: a sixth routed knob added without a label
+        must fail HERE rather than silently dropping a phase from the
+        warning whose whole job is to enumerate them."""
+        assert set(_ROUTED_KNOB_PHASE_LABELS) == set(_LIBRARIAN_ROUTED_KNOBS)
+        # ...and the rendered message lists them in pipeline order.
+        assert _degraded_phases_without_key() == ", ".join(
+            _ROUTED_KNOB_PHASE_LABELS[knob] for knob in _LIBRARIAN_ROUTED_KNOBS
+        )
 
     def test_missing_wiki_root_returns_1(self, tmp_path: Path) -> None:
         knowledge_root = tmp_path / "knowledge"

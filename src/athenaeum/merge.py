@@ -2102,6 +2102,12 @@ def merge_clusters_to_wiki(
     cluster_size_cap = resolve_cluster_size_cap(resolved_config)
     similarity_threshold = resolve_similarity_threshold(resolved_config)
 
+    # Issue athenaeum#1738: whether ANY client the two counters below could
+    # have called was configured at all, surfaced via ``out_stats``. Read
+    # AFTER the ``resolve_client``-defaults-to-``client`` fallback near the
+    # top of this function, and neither name is reassigned again below, so
+    # this is the final state both call sites see.
+    _llm_client_configured = client is not None or resolve_client is not None
     haiku_calls = 0
     # Issue athenaeum#1177 (AC4): ATTEMPTED (``haiku_calls`` above, unchanged)
     # vs SUCCEEDED, tracked separately so a run where the detector's calls
@@ -3004,6 +3010,9 @@ def merge_clusters_to_wiki(
                     # report "20 detections" that the token ledger shows
                     # zero tokens for.
                     "haiku_calls_succeeded": haiku_calls_succeeded,
+                    # Issue athenaeum#1738: see the identical key on the
+                    # non-dry-run update below.
+                    "llm_client_configured": _llm_client_configured,
                     "resolve_calls": resolve_calls,
                     "resolve_calls_succeeded": resolve_calls_succeeded,
                     "chunks_run": chunks_run,
@@ -3040,6 +3049,19 @@ def merge_clusters_to_wiki(
                 "haiku_calls": haiku_calls,
                 # Issue athenaeum#1177 (AC4): see the dry-run branch above's comment.
                 "haiku_calls_succeeded": haiku_calls_succeeded,
+                # Issue athenaeum#1738: ``haiku_calls``/``resolve_calls`` count
+                # INTENTS -- both are incremented before the client is
+                # consulted, so a run with no client at all still reports
+                # "20 detector calls, 0 succeeded", which athenaeum#1177's
+                # ``librarian._auto_memory_reason`` read as the
+                # ``all-calls-failed`` incident signature. This flag is the
+                # fact that distinguishes the two, recorded HERE because
+                # this is the only place that knows whether a client the
+                # detector/resolver could actually have called existed.
+                # ``reasoning_t1_client``/``reasoning_t2_client`` are
+                # deliberately not consulted: neither feeds the two
+                # counters that classification reads.
+                "llm_client_configured": _llm_client_configured,
                 "resolve_calls": resolve_calls,
                 "resolve_calls_succeeded": resolve_calls_succeeded,
                 "chunks_run": chunks_run,

@@ -37,7 +37,12 @@ from unittest.mock import MagicMock
 import pytest
 
 from athenaeum.config import resolve_cache_dir
-from athenaeum.librarian import EXIT_GRACEFUL_PARTIAL, _render_run_summary, run
+from athenaeum.librarian import (
+    EXIT_GRACEFUL_PARTIAL,
+    _auto_memory_reason,
+    _render_run_summary,
+    run,
+)
 from athenaeum.merge import RunDeadlineExceeded, merge_clusters_to_wiki
 from athenaeum.models import TokenUsage
 from athenaeum.run_summary_log import (
@@ -915,6 +920,120 @@ class TestMergeOutStatsThreading:
         # (attempted), not 0. attempted_calls/succeeded_calls above are the
         # NEW, semantically-consistent counters this issue adds.
         assert usage.api_calls == 1
+
+    def test_keyless_run_reports_no_client_configured_not_all_calls_failed(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue athenaeum#1738: the whole reporting path for a keyless run,
+        end to end -- the same two-member cluster as the tests above, but
+        with NO client at all (what ``provider._construct_client`` returns
+        on the ``api`` backend when ``ANTHROPIC_API_KEY`` is unset).
+
+        The detector INTENT is still counted (``haiku_calls == 1``) because
+        the counter is incremented before the client is consulted, and no
+        call can possibly succeed -- which is precisely the shape
+        ``_auto_memory_reason`` used to label ``all-calls-failed``, the
+        signature athenaeum#1177 reserved for a real credits-exhausted
+        incident. ``merge_clusters_to_wiki`` now records that no client
+        existed, and the classification reads the two apart."""
+        knowledge_root = tmp_path / "knowledge"
+        scope = knowledge_root / "raw" / "auto-memory" / "-Users-tristankromer-Code"
+        _write_am_file(
+            scope,
+            "feedback_v1.md",
+            frontmatter_name="v1",
+            origin_session_id="s-111",
+            origin_turn=1,
+            sources=[
+                {"session": "s-111", "turn": 1, "date": "2026-04-10", "excerpt": "x"}
+            ],
+            body="Commit prior-session debris directly to develop.",
+        )
+        _write_am_file(
+            scope,
+            "feedback_v2.md",
+            frontmatter_name="v2",
+            origin_session_id="s-222",
+            origin_turn=2,
+            sources=[
+                {"session": "s-222", "turn": 2, "date": "2026-04-11", "excerpt": "y"}
+            ],
+            body="Park prior-session debris on a WIP branch.",
+        )
+        _write_cluster_jsonl(
+            knowledge_root,
+            [
+                {
+                    "cluster_id": "code-0001",
+                    "member_paths": [
+                        "-Users-tristankromer-Code/feedback_v1.md",
+                        "-Users-tristankromer-Code/feedback_v2.md",
+                    ],
+                    "centroid_score": 0.62,
+                    "rationale": "cosine >= 0.55",
+                }
+            ],
+        )
+        _write_config(knowledge_root)
+
+        out_stats: dict = {}
+        usage = TokenUsage()
+        entries = merge_clusters_to_wiki(
+            knowledge_root,
+            dry_run=True,
+            client=None,
+            resolve_client=None,
+            usage=usage,
+            out_stats=out_stats,
+        )
+
+        assert len(entries) == 1  # C3 merge still runs -- AC2's "non-LLM phases"
+        # The intent was counted, but nothing was ever put on the wire.
+        assert out_stats["haiku_calls"] == 1
+        assert out_stats["haiku_calls_succeeded"] == 0
+        assert usage.attempted_calls == 0
+        assert usage.succeeded_calls == 0
+        assert out_stats["llm_client_configured"] is False
+        # AC3: the reason the run summary prints for this phase.
+        assert _auto_memory_reason(out_stats) == "no-client-configured"
+        assert _auto_memory_reason(out_stats) != "all-calls-failed"
+
+    def test_configured_client_reports_llm_client_configured_true(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue athenaeum#1738 AC4: the flag is a faithful report of what was
+        passed in, so a run WITH a client classifies exactly as before."""
+        knowledge_root = tmp_path / "knowledge"
+        scope = knowledge_root / "raw" / "auto-memory" / "-Users-tristan-Code-proj"
+        _write_am_file(
+            scope,
+            "note_one.md",
+            frontmatter_name="note one",
+            origin_session_id="s-aaa",
+            origin_turn=1,
+            sources=[
+                {"session": "s-aaa", "turn": 1, "date": "2026-07-01", "excerpt": "x"}
+            ],
+            body="A standalone note.",
+        )
+        _write_cluster_jsonl(
+            knowledge_root,
+            [
+                {
+                    "cluster_id": "proj-0001",
+                    "member_paths": ["-Users-tristan-Code-proj/note_one.md"],
+                    "centroid_score": 1.0,
+                    "rationale": "singleton",
+                }
+            ],
+        )
+        _write_config(knowledge_root)
+
+        out_stats: dict = {}
+        merge_clusters_to_wiki(
+            knowledge_root, dry_run=True, client=MagicMock(), out_stats=out_stats
+        )
+        assert out_stats["llm_client_configured"] is True
 
     def test_default_out_stats_none_is_backward_compatible(
         self, tmp_path: Path
