@@ -5519,13 +5519,21 @@ _LIBRARIAN_ROUTED_KNOBS = (
     "reasoning_t2",
 )
 
-#: Stable, greppable prefix on the athenaeum#1738 degraded-dry-run WARNING.
+#: Stable, greppable prefix on the athenaeum#1738 no-LLM-client WARNING.
 #: Mirrors ``ZERO_YIELD_PREFIX``/``ZERO_YIELD_ALERT_PREFIX``: the message
 #: text is free to be reworded, log readers and tests key on this. It is
 #: needed as a distinct marker because ``contradictions.detect_contradictions``
 #: ALSO warns about a missing key -- once per cluster -- so "the warning
-#: that names the whole run as degraded" cannot be identified by the
+#: that names the whole RUN as degraded" cannot be identified by the
 #: variable name alone.
+#:
+#: Note the deliberate lowercase: the bare token ``DEGRADED`` is already
+#: this codebase's greppable marker for a BUDGET trip
+#: (``Done (DEGRADED — budget exhausted)``, whose negative control in
+#: ``tests/test_budget_deferred.py`` is "no message contains DEGRADED").
+#: A missing credential and an exhausted budget are different conditions
+#: and must stay separately greppable, so this warning never emits that
+#: token.
 DEGRADED_NO_API_KEY_PREFIX = "degraded-run-no-api-key"
 
 #: Reader-facing name of the work each ``_LIBRARIAN_ROUTED_KNOBS`` entry
@@ -5637,12 +5645,11 @@ def _run_preconditions(ctx: RunContext) -> int | None:
         # run because this gate is), naming the variable and the phases the
         # reader must therefore discount.
         log.warning(
-            "%s: ANTHROPIC_API_KEY not set — this dry run is DEGRADED. "
-            "No LLM client is configured, so %s will be SKIPPED, and the "
-            "deterministic fallbacks they degrade to are NOT findings "
-            "about the corpus. Export the key, or set llm.provider to a "
-            "backend that needs none, for a run whose LLM-backed output "
-            "means anything.",
+            "%s: ANTHROPIC_API_KEY not set — no LLM client is configured "
+            "for this dry run, so %s will be SKIPPED. The deterministic "
+            "fallbacks those phases degrade to are NOT findings about the "
+            "corpus. Export the key, or set llm.provider to a backend that "
+            "needs none, for a run whose LLM-backed output means anything.",
             DEGRADED_NO_API_KEY_PREFIX,
             _degraded_phases_without_key(),
         )

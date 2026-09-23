@@ -393,6 +393,31 @@ class TestRunPreconditions:
             if DEGRADED_NO_API_KEY_PREFIX in r.getMessage()
         ]
 
+    def test_warning_does_not_emit_the_budget_trip_marker(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The bare token ``DEGRADED`` is already this codebase's greppable
+        marker for a BUDGET trip (``Done (DEGRADED — budget exhausted)``),
+        and ``tests/test_budget_deferred.py``'s negative controls are
+        literally "no message contains DEGRADED". A missing credential is a
+        different condition and must stay separately greppable, so the
+        athenaeum#1738 warning must never emit that token."""
+        knowledge_root = tmp_path / "knowledge"
+        wiki_root = knowledge_root / "wiki"
+        wiki_root.mkdir(parents=True)
+        ctx = _make_ctx(
+            tmp_path, knowledge_root=knowledge_root, wiki_root=wiki_root, dry_run=True
+        )
+        ctx.api_key = None
+        caplog.clear()
+        caplog.set_level(logging.WARNING, logger="athenaeum")
+        with (
+            patch("athenaeum.librarian.resolve_provider", return_value="api"),
+            patch("athenaeum.librarian.preflight_provider", return_value=None),
+        ):
+            assert _run_preconditions(ctx) is None
+        assert not any("DEGRADED" in r.getMessage() for r in caplog.records)
+
     def test_degraded_phase_labels_cover_every_routed_knob(self) -> None:
         """Issue athenaeum#1738: a sixth routed knob added without a label
         must fail HERE rather than silently dropping a phase from the
