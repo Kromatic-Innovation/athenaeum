@@ -73,6 +73,7 @@ Every subcommand is registered top-level on one `parser.add_subparsers()` in `cl
 - [`athenaeum merges revalidate`](#athenaeum-merges-revalidate) (command) — Re-validate existing unresolved merge proposals against the CURRENT suppression gate and archive stale ones. Dry-run by default; pass --apply to write.
 - [`athenaeum merges scrub-pii`](#athenaeum-merges-scrub-pii) (command) — Redact contact data out of merge-proposal bodies in place. The zero-LLM purge path for a stale `draft_merged_body` left behind by `storage migrate-pii`: it clears the values without approving, rejecting or withdrawing the merge. Dry-run by default; --apply writes.
 - [`athenaeum outbound-lint`](#athenaeum-outbound-lint) (command) — Scan outbound-destined text for PII (emails/phones) before it ships; flag findings (default) or --redact them. Offline, deterministic.
+- [`athenaeum paste-cleanup`](#athenaeum-paste-cleanup) (command) — Tier-0 attributed-paste cleanup pass over person pages' ## Notes bullets: a cheap-model proposer classifies keep/rewrite/remove, a stronger model verifies a sample. Dry-run by default; --apply writes.
 - [`athenaeum pii-restore`](#athenaeum-pii-restore) (command) — Anchored PII-restore: recover non-PII tokens a [contact redacted -> excluded surface] marker replaced, via rename-following and retro-filename history lookup. Default is dry-run; pass --apply to write fixes.
 - [`athenaeum push-metrics`](#athenaeum-push-metrics) (group) — Push-precision + coverage baseline: compute/record the precision snapshot, sample sessions for a human-reviewed coverage-audit worksheet, record a single hook-path push, and stream the documented NDJSON tail contract over the ledgers.
 - [`athenaeum push-metrics baseline`](#athenaeum-push-metrics-baseline) (command) — Compute precision + coverage over a window; write the dated snapshot to docs/measurements/memory-model-measurements.md. Refuses to write (exit 1) when the window has zero reference-determination records. See --dry-run to inspect without writing.
@@ -882,6 +883,26 @@ Scan outbound-destined text for PII (emails/phones) before it ships; flag findin
 | `--json` | `False` | — | Emit machine-readable JSON findings instead of plain text (ignored in --redact mode). |
 | `--redact` | `False` | — | Strip mode: print the text with each finding replaced by a redaction placeholder (to stdout) instead of reporting findings. |
 | `--text` | — | — | Text to scan, given inline. Mutually exclusive with --file; if neither is given, text is read from stdin. |
+
+## `athenaeum paste-cleanup`
+
+Tier-0 attributed-paste cleanup pass over person pages' ## Notes bullets: a cheap-model proposer classifies keep/rewrite/remove, a stronger model verifies a sample. Dry-run by default; --apply writes.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--apply` | `False` | — | Write remove/rewrite verdicts. Without this flag the command is a dry-run. |
+| `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--limit` | — | — | Consider at most N pages this pass. |
+| `--mechanical-dry-run` | `False` | — | Skip building an LLM client entirely. For CI/offline smoke checks only. |
+| `--model` | — | — | Override the proposer model (default: the 'classify' knob's resolved model). |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+| `--sample` | — | — | Consider a stratified random sample of N pages instead of the whole corpus. Combine with --seed for reproducibility. |
+| `--seed` | `0` | — | Seed for --sample (default: 0). |
+| `--uids` | — | — | Path to a file listing one page uid per line; consider exactly those pages. |
+| `--verify-model` | — | — | Override the verifier model (default: the 'verify' knob's resolved model). |
+| `--verify-rule` | `sampled` | sampled, all | 'sampled' verifies every low-confidence proposal plus a fixed 10%% stable sample of the rest; 'all' verifies every proposal ('s own AC: use 'all' when measured agreement is below 90%%). |
+| `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 
 ## `athenaeum pii-restore`
 

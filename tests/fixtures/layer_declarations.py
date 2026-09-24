@@ -158,6 +158,7 @@ MODULE_LAYER: dict[str, int] = {
     "comparator": 4,
     "comparator_instruments": 4,
     "decay_sweep": 4,
+    "paste_cleanup": 4,
     "decision_answers": 4,
     "decisions": 4,
     "dedupe": 4,
@@ -196,6 +197,7 @@ MODULE_LAYER: dict[str, int] = {
     # L5 -- presentation (CLI).
     "_cli_shared": 5,
     "_cmd_audit": 5,
+    "_cmd_paste_cleanup": 5,
     "_cmd_authority": 5,
     "_cmd_axiom": 5,
     "_cmd_bounce_contract": 5,
