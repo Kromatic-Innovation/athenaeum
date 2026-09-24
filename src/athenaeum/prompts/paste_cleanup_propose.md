@@ -14,7 +14,14 @@ no prose outside it:
 
 - `verdict` is exactly one of `"keep"`, `"rewrite"`, `"remove"`.
   - `keep`: the paste states a genuine, on-topic fact about the page's
-    subject, worth keeping as-is.
+    subject, worth keeping as-is. A short trailing `Source:` / provenance
+    line (naming the adapter, pipeline, or fact table that produced the
+    claim above it) is NORMAL and does not by itself make a paste
+    off-topic — judge the substantive claim that PRECEDES it, not the
+    footer. A contact-bio fact ("X is currently <role> at <company>,
+    based in <place>" or similar role/company/location/relationship
+    statement about the subject), even when short or terse, is a `keep`
+    even if the rest of the paste is a bare data-processing footer.
   - `rewrite`: the paste has a genuine fact buried in it, but the fact needs
     tightening into a short claim, or the paste got a name/detail wrong that
     you can correct from context.
@@ -22,6 +29,9 @@ no prose outside it:
     off-topic content (an internal engineering/ops note, a deploy note, a
     session retrospective, a workshop/mural board prepared for but never
     used, a meeting-history dump) that only mentions their name in passing.
+    Do not mark `remove` just because a paste CITES a data pipeline,
+    extraction job, or fact table as its source — that citation describes
+    provenance, not subject matter. Read the claim it supports first.
 - `claim`: for `rewrite` only, the corrected short claim text to use in
   place of the paste (end it with a `(source: ...)` reference clause if the
   paste names a source). Empty string for `keep`/`remove`.
