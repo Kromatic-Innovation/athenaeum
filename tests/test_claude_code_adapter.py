@@ -679,7 +679,7 @@ class TestSearchBackendPassthrough:
 # athenaeum#1361 replay finding — the adapter must forward the shell hook's
 # recall-cap ceiling (default 7), not the core's own n=3 default.
 #
-# The 2026-09-15 operator replay on #1361 only sampled hit IDENTITY on a
+# The 2026-09-15 operator replay on athenaeum#1361 only sampled hit IDENTITY on a
 # 3-candidate render and missed this: the shell hook
 # (examples/claude-code/user-prompt-recall.sh) resolves
 # ATHENAEUM_RECALL_CAP_CEILING / RECALL_CAP_CEILING (yaml-cached into
