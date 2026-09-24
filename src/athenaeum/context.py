@@ -218,6 +218,22 @@ class Candidate:
 class _Schema:
     has_description: bool
 
+    @property
+    def fts_match_columns(self) -> str:
+        """The FTS5 column-filter list the per-turn MATCH is scoped to.
+
+        Issue athenaeum#1361 (parity with the shell hook's ``FTS_MATCH_COLS``,
+        athenaeum#1789): schema v6 added an indexed ``body`` column, and an
+        unscoped ``wiki MATCH ?`` spreads bm25 ``rank`` over it, so long-body
+        pages outrank name/tags/aliases/description hits. ``body`` is
+        deliberately excluded; ``description`` is named only when the probe
+        found it, since FTS5 rejects an unknown column in a filter.
+        """
+        cols = ["filename", "name", "tags", "aliases"]
+        if self.has_description:
+            cols.append("description")
+        return " ".join(cols)
+
 
 def _open_ro(db_file: Path) -> sqlite3.Connection:
     """Open the index read-only, with a busy timeout.
@@ -277,7 +293,12 @@ def _query_fts5(
         f"SELECT filename, name, rank, audience, {desc_col} "
         f"FROM wiki WHERE wiki MATCH ? {exclude_clause} ORDER BY rank LIMIT ?"
     )
-    params: list[Any] = [fts_query, *exclude_list, n]
+    # Parenthesised: an FTS5 column filter binds only to the single
+    # phrase/group after the colon, so `{cols}: "a" OR "b"` would leave
+    # `"b"` unscoped (see `athenaeum.search.FTS5Backend.query`'s
+    # `metadata_only`, which hit that exact bug).
+    scoped_query = f"{{{schema.fts_match_columns}}}: ({fts_query})"
+    params: list[Any] = [scoped_query, *exclude_list, n]
     try:
         rows = conn.execute(sql, params).fetchall()
     except sqlite3.OperationalError as exc:

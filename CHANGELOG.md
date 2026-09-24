@@ -55,6 +55,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Per-turn context core no longer matches page bodies (issue athenaeum#1361).**
+  `athenaeum.context`'s FTS5 query ran an unscoped `wiki MATCH`, so after the
+  index gained an indexed `body` column, bm25 rank spread over long bodies and
+  outranked name/tags/aliases/description hits. The query is now scoped to
+  `{filename name tags aliases description}` (parenthesised), matching the
+  shell hook's `FTS_MATCH_COLS` (athenaeum#1789); a test binds the two column
+  lists by membership. With extracted topics pinned, the packaged Claude Code
+  adapter now returns the same ordered bullets as the shell hook on a 12-query
+  replay (was 0/12).
+
 - **`AUDIT_SYSTEM` section 2 reverted to its `audit-v3` wording, shipped as
   `audit-v5` (issue athenaeum#1877).** athenaeum#1869 rewrote the
   retirement-candidacy section into `audit-v4` to stop the prompt flagging
