@@ -131,6 +131,7 @@ Evidence, kept out of the reading path.
 - [North-star grid — rendered report, run 35443944736](measurements/north-star-grid-2026-09-19-run-35443944736.md) — the full rendered report that reading was taken from, recorded in-tree because the Actions artifact expires.
 - [Write-path retention — per-gate diagnosis](measurements/write-path-retention-2026-09-18.md) — why the Phase 2 smoke compile retained 5 of 36 planted facts, the gate that did it, and the transient-observation ground truth.
 - [Deploy SHA stamp](measurements/deploy-sha-stamp.md)
+- [Session shapes — merged ledger](measurements/session-shapes-2026-09-24.md) — the athenaeum#1593 AC4 both/hook-only/pull-only/unknown-only split against the live push-records ledger.
 - [LLM provider cost audit](measurements/audits/2026-08-06-llm-provider-cost-audit.md)
 
 ---
