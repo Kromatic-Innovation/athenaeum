@@ -3518,6 +3518,12 @@ def resolve_audit_nightly_spend_share(config: dict[str, Any] | None) -> float:
 #: audit M8). ``config`` is a low leaf every reader can depend on acyclically.
 DEFAULT_CLASSIFY_MODEL = "claude-haiku-4-5-20251001"
 
+#: Code default for the verify-model knob (issue athenaeum#1717's proposer/
+#: verifier split): a stronger model re-checks a sample of the cheap
+#: classify-knob model's proposals. Same env>yaml>literal resolution via
+#: :func:`resolve_model`, knob name ``"verify"``.
+DEFAULT_VERIFY_MODEL = "claude-sonnet-5"
+
 
 def resolve_model(
     knob: str,

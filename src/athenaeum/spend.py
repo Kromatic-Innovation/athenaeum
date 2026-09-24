@@ -168,6 +168,8 @@ RUN_TYPE_LIBRARIAN = "librarian"
 RUN_TYPE_LIBRARIAN_NIGHTLY = "librarian-nightly"
 RUN_TYPE_ANSWERS = "answers"
 RUN_TYPE_QUERY_TOPICS = "query-topics"
+#: The tier-0 attributed-paste cleanup proposer/verifier pass (issue athenaeum#1717).
+RUN_TYPE_PASTE_CLEANUP = "paste-cleanup"
 RUN_TYPE_MEMORY_CLASS_BACKFILL = "memory-class-backfill"
 RUN_TYPE_DESCRIPTION_BACKFILL = "description-backfill"
 RUN_TYPE_AUDIT = "audit"
