@@ -132,6 +132,7 @@ Evidence, kept out of the reading path.
 - [Write-path retention — per-gate diagnosis](measurements/write-path-retention-2026-09-18.md) — why the Phase 2 smoke compile retained 5 of 36 planted facts, the gate that did it, and the transient-observation ground truth.
 - [Deploy SHA stamp](measurements/deploy-sha-stamp.md)
 - [LLM provider cost audit](measurements/audits/2026-08-06-llm-provider-cost-audit.md)
+- [Tier-0 attributed-paste cleanup — proposer agreement](measurements/tier0-paste-cleanup-2026-09-24.md)
 
 ---
 
