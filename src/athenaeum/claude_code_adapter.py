@@ -10,9 +10,10 @@ and push telemetry included, so this adapter can never independently drift
 from that CLI's output or side effects — and prints one line of Claude
 Code hook-output JSON wrapping the envelope's rendered text.
 
-**Shell-hook parity (issue athenaeum#1661).** The athenaeum#1361 cutover was refused
+**Shell-hook parity (issue athenaeum#1661, plus one point closed directly by
+the athenaeum#1361 lane).** The athenaeum#1361 cutover was refused
 because this adapter drifted from the live shell hook
-(``examples/claude-code/user-prompt-recall.sh``) on five points, closed
+(``examples/claude-code/user-prompt-recall.sh``) on six points, closed
 here:
 
 1. **``config.env`` loading.** :func:`_load_config_env` loads
@@ -47,6 +48,17 @@ here:
    ``user-prompt-recall.sh:1213`` byte-for-byte (the preamble text itself is
    single-sourced from :data:`athenaeum.context.PREAMBLE`, so the two
    callers of that constant can never drift independently).
+6. **Recall-cap ceiling.** :func:`_resolve_recall_cap_ceiling` mirrors the
+   shell hook's
+   ``CEILING="${ATHENAEUM_RECALL_CAP_CEILING:-${RECALL_CAP_CEILING:-7}}"``
+   plus its non-numeric/non-positive-value guard, and the result is now
+   forwarded to :func:`~athenaeum.context.build_context_for_turn` as its
+   ``n`` argument. Found by the athenaeum#1361 lane's own re-replay, not by
+   athenaeum#1661: the adapter previously never passed ``n`` at all, so it
+   silently rode the core's own ``n=3`` CLI-convenience default — a much
+   larger drift than the LLM-topic regression athenaeum#1661 closed, since
+   it lost bullets 4 through the ceiling (7 by default) on **every** turn,
+   not just LLM-scored ones.
 
 **No SQL, no ranking, no budget arithmetic lives here** (issue athenaeum#1621
 AC2; enforced by ``tests/test_claude_code_adapter.py``'s source-level scan).
@@ -102,7 +114,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from athenaeum.config import resolve_cache_dir
+from athenaeum.config import RECALL_CAP_CEILING_DEFAULT, resolve_cache_dir
 
 
 def _load_config_env(cache_dir: Path) -> None:
@@ -143,6 +155,36 @@ def _load_config_env(cache_dir: Path) -> None:
         if not key or key in os.environ:
             continue
         os.environ[key] = value.strip()
+
+
+def _resolve_recall_cap_ceiling() -> int:
+    """Mirrors the shell hook's ``CEILING`` resolution (issue athenaeum#1361
+    replay finding, closing the parity gap athenaeum#1661 did not cover):
+    ``user-prompt-recall.sh``'s
+    ``CEILING="${ATHENAEUM_RECALL_CAP_CEILING:-${RECALL_CAP_CEILING:-7}}"``
+    plus its ``case ''|*[!0-9]*) CEILING=7 ;; 0) CEILING=7 ;;`` guard against
+    a non-numeric or non-positive override. ``RECALL_CAP_CEILING`` (no
+    ``ATHENAEUM_`` prefix) is the name ``session-start-recall.sh`` caches
+    ``recall.cap.ceiling`` into ``config.env`` under, mirroring
+    ``PUSH_TOKEN_BUDGET``'s own cached-name shape; ``ATHENAEUM_RECALL_CAP_CEILING``
+    is the explicit env override and always wins. Must run AFTER
+    :func:`_load_config_env`, same as :func:`_auto_recall_enabled`, so a
+    ceiling cached in ``config.env`` is honoured the same as one set
+    directly in the launcher's environment.
+
+    The core's own ``n`` default (3, see ``_cmd_context.py``) is a CLI
+    convenience unrelated to this ceiling — this adapter must never fall
+    back to it, or every turn silently loses whatever the shell hook would
+    have rendered past the third bullet.
+    """
+    raw = os.environ.get("ATHENAEUM_RECALL_CAP_CEILING") or os.environ.get("RECALL_CAP_CEILING")
+    if not raw:
+        return RECALL_CAP_CEILING_DEFAULT
+    try:
+        value = int(raw)
+    except ValueError:
+        return RECALL_CAP_CEILING_DEFAULT
+    return value if value > 0 else RECALL_CAP_CEILING_DEFAULT
 
 
 def _auto_recall_enabled() -> bool:
@@ -214,6 +256,7 @@ def main(argv: list[str] | None = None) -> int:
             session_id,
             cache_dir=cache_dir,
             search_backend=os.environ.get("SEARCH_BACKEND", "vector"),
+            n=_resolve_recall_cap_ceiling(),
         )
         text = envelope["render"]["text"]
         if text:
