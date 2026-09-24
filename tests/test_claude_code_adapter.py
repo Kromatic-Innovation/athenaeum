@@ -676,6 +676,217 @@ class TestSearchBackendPassthrough:
 
 
 # ---------------------------------------------------------------------------
+# athenaeum#1361 replay finding — the adapter must forward the shell hook's
+# recall-cap ceiling (default 7), not the core's own n=3 default.
+#
+# The 2026-09-15 operator replay on #1361 only sampled hit IDENTITY on a
+# 3-candidate render and missed this: the shell hook
+# (examples/claude-code/user-prompt-recall.sh) resolves
+# ATHENAEUM_RECALL_CAP_CEILING / RECALL_CAP_CEILING (yaml-cached into
+# config.env by session-start-recall.sh) with a default of
+# athenaeum.config.RECALL_CAP_CEILING_DEFAULT (7) and renders that many
+# bullets. The adapter never called build_context_for_turn with an ``n=``
+# at all, so it silently rode the core's own ``n=3`` default — every turn
+# lost whatever the shell hook would have rendered as bullets 4-7, on
+# every query, independent of the athenaeum#1661 config.env/LLM fix.
+# ---------------------------------------------------------------------------
+
+
+class TestRecallCapCeilingPassthrough:
+    """Counter-example this defeats: an adapter that never resolves the
+    ceiling and always calls the core with its n=3 default, so pages the
+    shell hook would have surfaced (bullets 4 through the ceiling) become
+    silently unreachable through the adapter."""
+
+    def test_default_ceiling_is_forwarded_as_n(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        imported_adapter: tuple[object, object],
+    ) -> None:
+        adapter, context_mod = imported_adapter
+        captured: dict[str, object] = {}
+
+        def _fake_build_context_for_turn(prompt, session_id, *, cache_dir, **kwargs):
+            captured["n"] = kwargs.get("n")
+            return {"render": {"text": "", "preamble": "x"}, "candidates": []}
+
+        monkeypatch.setattr(context_mod, "build_context_for_turn", _fake_build_context_for_turn)
+        monkeypatch.delenv("ATHENAEUM_RECALL_CAP_CEILING", raising=False)
+        monkeypatch.delenv("RECALL_CAP_CEILING", raising=False)
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(tmp_path))
+        monkeypatch.setattr(
+            sys,
+            "stdin",
+            io.StringIO(
+                json.dumps({"prompt": "a sufficiently long test prompt", "session_id": "s"})
+            ),
+        )
+
+        rc = adapter.main()
+
+        assert rc == 0
+        assert captured.get("n") == 7  # athenaeum.config.RECALL_CAP_CEILING_DEFAULT
+
+    def test_atheneaum_recall_cap_ceiling_env_override_is_forwarded(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        imported_adapter: tuple[object, object],
+    ) -> None:
+        adapter, context_mod = imported_adapter
+        captured: dict[str, object] = {}
+
+        def _fake_build_context_for_turn(prompt, session_id, *, cache_dir, **kwargs):
+            captured["n"] = kwargs.get("n")
+            return {"render": {"text": "", "preamble": "x"}, "candidates": []}
+
+        monkeypatch.setattr(context_mod, "build_context_for_turn", _fake_build_context_for_turn)
+        monkeypatch.setenv("ATHENAEUM_RECALL_CAP_CEILING", "4")
+        monkeypatch.delenv("RECALL_CAP_CEILING", raising=False)
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(tmp_path))
+        monkeypatch.setattr(
+            sys,
+            "stdin",
+            io.StringIO(
+                json.dumps({"prompt": "a sufficiently long test prompt", "session_id": "s"})
+            ),
+        )
+
+        rc = adapter.main()
+
+        assert rc == 0
+        assert captured.get("n") == 4
+
+    def test_yaml_cached_recall_cap_ceiling_env_is_forwarded(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        imported_adapter: tuple[object, object],
+    ) -> None:
+        """``RECALL_CAP_CEILING`` (no ``ATHENAEUM_`` prefix) is the name
+        ``session-start-recall.sh`` caches ``recall.cap.ceiling`` into
+        ``config.env`` under — mirrors the shell hook's own
+        ``${ATHENAEUM_RECALL_CAP_CEILING:-${RECALL_CAP_CEILING:-7}}``
+        two-tier fallback."""
+        adapter, context_mod = imported_adapter
+        captured: dict[str, object] = {}
+
+        def _fake_build_context_for_turn(prompt, session_id, *, cache_dir, **kwargs):
+            captured["n"] = kwargs.get("n")
+            return {"render": {"text": "", "preamble": "x"}, "candidates": []}
+
+        monkeypatch.setattr(context_mod, "build_context_for_turn", _fake_build_context_for_turn)
+        monkeypatch.delenv("ATHENAEUM_RECALL_CAP_CEILING", raising=False)
+        monkeypatch.setenv("RECALL_CAP_CEILING", "5")
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(tmp_path))
+        monkeypatch.setattr(
+            sys,
+            "stdin",
+            io.StringIO(
+                json.dumps({"prompt": "a sufficiently long test prompt", "session_id": "s"})
+            ),
+        )
+
+        rc = adapter.main()
+
+        assert rc == 0
+        assert captured.get("n") == 5
+
+    def test_atheneaum_prefixed_env_wins_over_yaml_cached(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        imported_adapter: tuple[object, object],
+    ) -> None:
+        adapter, context_mod = imported_adapter
+        captured: dict[str, object] = {}
+
+        def _fake_build_context_for_turn(prompt, session_id, *, cache_dir, **kwargs):
+            captured["n"] = kwargs.get("n")
+            return {"render": {"text": "", "preamble": "x"}, "candidates": []}
+
+        monkeypatch.setattr(context_mod, "build_context_for_turn", _fake_build_context_for_turn)
+        monkeypatch.setenv("ATHENAEUM_RECALL_CAP_CEILING", "3")
+        monkeypatch.setenv("RECALL_CAP_CEILING", "9")
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(tmp_path))
+        monkeypatch.setattr(
+            sys,
+            "stdin",
+            io.StringIO(
+                json.dumps({"prompt": "a sufficiently long test prompt", "session_id": "s"})
+            ),
+        )
+
+        rc = adapter.main()
+
+        assert rc == 0
+        assert captured.get("n") == 3
+
+    @pytest.mark.parametrize("bad_value", ["0", "-3", "not-a-number", ""])
+    def test_malformed_ceiling_env_falls_back_to_default(
+        self,
+        bad_value: str,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        imported_adapter: tuple[object, object],
+    ) -> None:
+        """Mirrors the shell hook's own ``case ''|*[!0-9]*) CEILING=7 ;; 0) CEILING=7 ;;``
+        guard: a non-numeric or non-positive override must not reach the
+        core as ``n``."""
+        adapter, context_mod = imported_adapter
+        captured: dict[str, object] = {}
+
+        def _fake_build_context_for_turn(prompt, session_id, *, cache_dir, **kwargs):
+            captured["n"] = kwargs.get("n")
+            return {"render": {"text": "", "preamble": "x"}, "candidates": []}
+
+        monkeypatch.setattr(context_mod, "build_context_for_turn", _fake_build_context_for_turn)
+        monkeypatch.setenv("ATHENAEUM_RECALL_CAP_CEILING", bad_value)
+        monkeypatch.delenv("RECALL_CAP_CEILING", raising=False)
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(tmp_path))
+        monkeypatch.setattr(
+            sys,
+            "stdin",
+            io.StringIO(
+                json.dumps({"prompt": "a sufficiently long test prompt", "session_id": "s"})
+            ),
+        )
+
+        rc = adapter.main()
+
+        assert rc == 0
+        assert captured.get("n") == 7
+
+    def test_ceiling_actually_bounds_end_to_end_render_count(self, tmp_path: Path) -> None:
+        """End-to-end (subprocess, real fixture index, no mocking): with a
+        ceiling of 5 and 10 matching pages available, the rendered bullet
+        count must be 5, not the core's own n=3 default."""
+        _build_index(tmp_path / "wiki-index.db", 10)
+        stdin_payload = json.dumps(
+            {"prompt": "filler page description records", "session_id": "s"}
+        )
+
+        result = _run_adapter(
+            stdin_payload,
+            cache_dir=tmp_path,
+            extra_env={"ATHENAEUM_RECALL_CAP_CEILING": "5"},
+        )
+
+        assert result.returncode == 0
+        payload = json.loads(result.stdout)
+        bullets = [
+            line
+            for line in payload["hookSpecificOutput"]["additionalContext"].splitlines()
+            if line.strip().startswith("-")
+        ]
+        assert len(bullets) == 5, (
+            f"expected 5 rendered bullets (the configured ceiling), got {len(bullets)} "
+            "— the adapter is still capping at the core's n=3 default"
+        )
+
+
+# ---------------------------------------------------------------------------
 # athenaeum#1661 AC — prompts shorter than 8 characters produce no output
 # ---------------------------------------------------------------------------
 
