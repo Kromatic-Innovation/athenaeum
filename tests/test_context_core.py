@@ -1005,3 +1005,71 @@ class TestVectorMetadataJoin:
         assert len(candidates) == 1
         assert candidates[0].audience == ""
 
+
+
+# ---------------------------------------------------------------------------
+# FTS5 column scope (issue athenaeum#1361; shell-hook parity, athenaeum#1789)
+# ---------------------------------------------------------------------------
+
+SHELL_HOOK = (
+    Path(__file__).resolve().parent.parent / "examples" / "claude-code" / "user-prompt-recall.sh"
+)
+
+
+def _build_body_index(path: Path) -> Path:
+    """Schema-v6 shape: an indexed ``body`` column alongside the metadata
+    columns. ``_build_index`` above has no ``body``, which is why the
+    unscoped-MATCH drift from the shell hook went uncaught."""
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE VIRTUAL TABLE wiki USING fts5(filename, name, tags, aliases, "
+        'description, body, audience UNINDEXED, type UNINDEXED, tokenize="porter unicode61")'
+    )
+    rows = [
+        # Term 1 ("widget") only in name.
+        ("name-hit.md", "Widget Notes", "", "", "short", "unrelated text", "|", "reference"),
+        # Term 2 ("gadget") only in a long body, repeated: an unscoped MATCH
+        # ranks this first; a scoped one must not return it at all.
+        ("body-only.md", "Something Else", "", "", "short", "gadget " * 200, "|", "reference"),
+    ]
+    conn.executemany("INSERT INTO wiki VALUES (?,?,?,?,?,?,?,?)", rows)
+    conn.commit()
+    conn.close()
+    return path
+
+
+def test_fts5_match_is_scoped_away_from_body(tmp_path: Path) -> None:
+    # Counter-example: `wiki MATCH '"widget" OR "gadget"'` over every indexed
+    # column returns body-only.md (bm25 spread over the body). And the
+    # unparenthesised `{cols}: "widget" OR "gadget"` scopes only "widget",
+    # leaving "gadget" to match body — so term 2 is the body-only one here.
+    sys.path.insert(0, SRC)
+    from athenaeum.context import _probe_schema, _query_fts5, build_fts_query
+
+    db = _build_body_index(tmp_path / "wiki-index.db")
+    conn = sqlite3.connect(db)
+    try:
+        schema = _probe_schema(conn)
+        hits = _query_fts5(
+            conn, schema, build_fts_query(["widget", "gadget"]), n=7, exclude=frozenset()
+        )
+    finally:
+        conn.close()
+    assert [c.filename for c in hits] == ["name-hit.md"]
+
+
+def _shell_fts_match_cols() -> set[frozenset[str]]:
+    values = re.findall(r'^\s*FTS_MATCH_COLS="([^"]*)"', SHELL_HOOK.read_text(), re.M)
+    assert values, "FTS_MATCH_COLS assignments not found in the shell hook"
+    return {frozenset(v.split()) for v in values}
+
+
+def test_fts5_match_columns_match_the_shell_hook() -> None:
+    # Drift guard, by membership: the shell hook assigns FTS_MATCH_COLS once
+    # without and once with `description`; the core's two schema shapes must
+    # produce exactly those two column sets.
+    sys.path.insert(0, SRC)
+    from athenaeum.context import _Schema
+
+    core = {frozenset(_Schema(has_description=d).fts_match_columns.split()) for d in (False, True)}
+    assert core == _shell_fts_match_cols()
