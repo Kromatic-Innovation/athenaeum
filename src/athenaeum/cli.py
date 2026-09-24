@@ -162,6 +162,7 @@ _SUBCOMMAND_LOADERS: dict[str, tuple[str, str]] = {
     "ingest": ("athenaeum._cmd_index", "add_index_subparsers"),
     "session-end": ("athenaeum._cmd_index", "add_index_subparsers"),
     "audit": ("athenaeum._cmd_audit", "add_audit_subparser"),
+    "paste-cleanup": ("athenaeum._cmd_paste_cleanup", "add_paste_cleanup_subparser"),
     "schema": ("athenaeum._cmd_schema", "add_schema_subparser"),
 }
 
@@ -195,6 +196,7 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_memory_class import add_memory_class_subparser
     from athenaeum._cmd_merges import add_merges_subparser
     from athenaeum._cmd_outbound import add_outbound_subparser
+    from athenaeum._cmd_paste_cleanup import add_paste_cleanup_subparser
     from athenaeum._cmd_pending import add_pending_subparsers
     from athenaeum._cmd_pii_restore import add_pii_restore_subparser
     from athenaeum._cmd_push_metrics import add_push_metrics_subparser
@@ -241,6 +243,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_merges_subparser(subparsers)  # merges
     add_decisions_subparser(subparsers)  # decisions
     add_audit_subparser(subparsers)  # audit (issue athenaeum#1624)
+    add_paste_cleanup_subparser(subparsers)  # paste-cleanup (issue athenaeum#1717)
     add_schema_subparser(subparsers)  # schema migrate (issue athenaeum#1628)
     add_authority_subparser(subparsers)  # authority
     add_axiom_subparser(subparsers)  # axiom

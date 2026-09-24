@@ -133,6 +133,7 @@ Evidence, kept out of the reading path.
 - [Deploy SHA stamp](measurements/deploy-sha-stamp.md)
 - [Session shapes — merged ledger](measurements/session-shapes-2026-09-24.md) — the both/hook-only/pull-only/unknown-only session split against the live push-records ledger, before/after a split date.
 - [LLM provider cost audit](measurements/audits/2026-08-06-llm-provider-cost-audit.md)
+- [Tier-0 attributed-paste cleanup — proposer agreement](measurements/tier0-paste-cleanup-2026-09-24.md)
 
 ---
 
