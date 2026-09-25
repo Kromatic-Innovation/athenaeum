@@ -198,17 +198,19 @@ def _materialise_members(
 
 
 # ---------------------------------------------------------------------------
-# Golden-set cases under adjudication (issue athenaeum#737)
+# Golden-set cases under adjudication (issues athenaeum#737, athenaeum#1871)
 # ---------------------------------------------------------------------------
 #
-# The first live recording (athenaeum#610, run 30760264305) surfaced two cases where
-# the model's answer disagrees with the golden set's stored expectation. On
-# inspection the model's answer is at least as defensible as the golden's in
-# both, so neither side is being silently rewritten here: the cases are marked
-# strict-xfail and adjudicated in athenaeum#737. `strict=True` means that if either
-# side changes so the case starts passing, THIS test goes red and the mark has
-# to be removed deliberately — an xfail that quietly starts passing is how a
-# quarantine becomes permanent.
+# Cases a live recording surfaced where the model's answer disagrees with the
+# golden set's stored expectation, and the model's answer is at least as
+# defensible as the golden's — so neither side is silently rewritten. Each
+# entry names the seeding run it came from and the issue adjudicating it:
+# athenaeum#737 for the two the first recording surfaced (athenaeum#610, run
+# 30760264305), athenaeum#1871 for the audit_retirement layer's one miss (run
+# 36099358949). `strict=True` means that if either side changes so a case
+# starts passing, THIS test goes red and the mark has to be removed
+# deliberately — an xfail that quietly starts passing is how a quarantine
+# becomes permanent.
 _DISPUTED: dict[str, str] = {
     # athenaeum#737 adjudicated `tool_choice_editor`: the golden was corrected
     # to conflict_type 'factual' (the model's answer), so it is no longer
