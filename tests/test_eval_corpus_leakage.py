@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 from functools import lru_cache
 from pathlib import Path
 
@@ -90,7 +91,7 @@ _COMMON_WORDS = frozenset(
     first format forward funnel future growth handbook hiring
     holiday impact income index insight intake invoice issue journey launch
     layout leave ledger legal lifecycle margin market meeting memory metric
-    mission model month notes object offsite onboarding
+    migration mission model month notes object offsite onboarding
     office allowance cadence threshold current former address standup
     output overview owner partner payment payroll pipeline planning playbook
     pricing principle priority process product profile program project
@@ -256,10 +257,16 @@ def _corpus_blobs() -> dict[str, str]:
     # Only .gitignore stood between that file and the path lint that exists to
     # catch exactly it, and a lint that cannot see the likeliest offender is
     # not covering the case it claims to.
+    # .py and .jsonl included (athenaeum#1879): three committed fixtures --
+    # probe_subject_scope_containment.py and the two rollout/*.jsonl stream
+    # captures -- sat outside the original four-suffix set and were never
+    # scanned. Widening the suffix set, rather than enumerating those three
+    # paths, means a fourth such fixture is covered on arrival instead of
+    # reopening this issue.
     blobs = {
         str(path.relative_to(EVAL_DATA_ROOT)): path.read_text(encoding="utf-8")
         for path in sorted(EVAL_DATA_ROOT.rglob("*"))
-        if path.is_file() and path.suffix in {".yaml", ".yml", ".md", ".txt"}
+        if path.is_file() and path.suffix in {".yaml", ".yml", ".md", ".txt", ".py", ".jsonl"}
     }
     generated = build_corpus(scale="small")
     blobs["<generated:small>"] = "\n".join(
@@ -406,6 +413,18 @@ def test_structurally_central_corpus_names_are_absent_from_the_real_tree() -> No
     central = {t for t, n in counts.items() if n >= 3} - _COMMON_WORDS
     if not central:
         pytest.skip("no structurally central names to check")
+
+    # athenaeum#1879: this check failed on a live host tree with
+    # ``['migration']`` -- an ordinary English word, not a real identity, so
+    # the failure taught nothing about a leak. Of the two remedies the issue
+    # offered, chosen: restrict the check by folding "migration" into
+    # ``_COMMON_WORDS`` (the mechanism that already exists for precisely this
+    # false-positive class -- see its docstring, and "retention"'s original
+    # entry). Rejected: skip the whole check whenever a host tree is present.
+    # A populated ``~/knowledge`` is the NORMAL case on a maintainer's
+    # machine, not the exception the existing "no host tree" skip above
+    # covers -- skipping on it would blind this check every day it could
+    # actually catch something, to silence one word.
 
     # Matched against the NAME TOKENS OF REAL ENTITY PAGES, not every word in
     # the tree. A 25k-page tree contains nearly every English word, so a
@@ -590,6 +609,71 @@ class TestNegativeControlWidenedGuardActuallyFires:
         assert self._PRE_FIX_RESOLVER_EXCERPT not in resolver_text
         assert self._POST_FIX_DETECTOR_EXCERPT in detector_text
         assert self._POST_FIX_RESOLVER_EXCERPT in resolver_text
+
+
+class TestNegativeControlWidenedSuffixSetActuallyFires:
+    """Proves this issue's fix (athenaeum#1879): before the suffix set was
+    widened, ``_corpus_blobs()`` filtered to
+    ``{".yaml", ".yml", ".md", ".txt"}``, so a committed ``.py`` or
+    ``.jsonl`` fixture under ``tests/evals/data/`` was invisible to every
+    check in this module -- exactly how
+    ``probe_subject_scope_containment.py`` and the two ``rollout/*.jsonl``
+    stream captures sat unscanned.
+
+    Unlike :class:`TestNegativeControlWidenedGuardActuallyFires` above (which
+    hand-builds a ``{label: blob}`` mapping to exercise the shared scan
+    logic), this control exercises the REAL ``_corpus_blobs()`` against a
+    monkeypatched ``EVAL_DATA_ROOT``/``RECORDED_ROOT`` pointed at a throwaway
+    tree holding one ``.py`` and one ``.jsonl`` fixture, each seeded with a
+    known real brand name. That is the only way to prove the SUFFIX FILTER
+    itself -- not just the matching regex -- now admits these two suffixes:
+    asserting the allowed-suffix set contains ``".py"``/``".jsonl"`` would
+    pin an implementation detail, not the behaviour the issue asks for, and
+    would not fail if the filter admitted the right extensions but something
+    else in the walk still dropped them (e.g. a later ``if`` re-excluding
+    ``rollout/``). Feeding the real return value through the SAME production
+    :func:`_scan_blobs_for_leaks` the two checks above call, then asserting
+    the seeded name is caught, closes that gap.
+    """
+
+    _SEEDED_BRAND = "Heroku"
+
+    def test_py_and_jsonl_fixtures_are_scanned_and_leaks_are_caught(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        eval_root = tmp_path / "eval_data"
+        (eval_root / "rollout").mkdir(parents=True)
+        recorded_root = tmp_path / "recorded"
+        recorded_root.mkdir()
+
+        py_fixture = eval_root / "probe_subject_scope_containment.py"
+        py_fixture.write_text(
+            f'"""Seeded probe fixture."""\nCLIENT_NOTE = "Runs on {self._SEEDED_BRAND}."\n',
+            encoding="utf-8",
+        )
+        jsonl_fixture = eval_root / "rollout" / "pull_stream_spike.jsonl"
+        jsonl_fixture.write_text(
+            f'{{"type": "result", "result": "Runs on {self._SEEDED_BRAND}."}}\n',
+            encoding="utf-8",
+        )
+
+        this_module = sys.modules[__name__]
+        monkeypatch.setattr(this_module, "EVAL_DATA_ROOT", eval_root)
+        monkeypatch.setattr(this_module, "RECORDED_ROOT", recorded_root)
+
+        blobs = _corpus_blobs()
+
+        # The suffix filter really admitted them -- not an assertion about
+        # the filter's contents, but about what the production function
+        # actually returned when pointed at these two fixture paths.
+        assert "probe_subject_scope_containment.py" in blobs
+        assert "rollout/pull_stream_spike.jsonl" in blobs
+
+        hits = _scan_blobs_for_leaks(blobs, brands=_REAL_BRANDS)
+        joined = " ".join(hits)
+        assert "probe_subject_scope_containment.py" in joined, hits
+        assert "rollout/pull_stream_spike.jsonl" in joined, hits
+        assert "heroku" in joined, hits
 
 
 def test_materialized_eval_corpus_carries_no_contact_data(tmp_path: Path) -> None:
