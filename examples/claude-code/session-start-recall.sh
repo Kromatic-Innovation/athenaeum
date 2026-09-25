@@ -79,6 +79,31 @@ mkdir -p "$CACHE_DIR"
 chmod 700 "$CACHE_DIR"
 umask 077
 
+# ── Preserve a cached ANTHROPIC_API_KEY across the rewrite below ───────────
+# Issue athenaeum#1886: both config.env writers below (the python path and
+# the bash fallback) truncate the file from scratch and neither carries the
+# key forward -- only a *fresh* `op read`, later in this script, re-adds it.
+# Any run where that fetch fails or is skipped (expired `op` session, no
+# `op` on PATH, a non-interactive spawn, or the variable already being
+# exported so the fetch branch never runs) was silently dropping the key.
+# Capture whatever is cached on disk now, before either writer runs, so it
+# can be restored unless a fresh fetch supersedes it.
+_cached_api_key_line=""
+if [ -f "$CONFIG_ENV" ]; then
+  _cached_api_key_line="$(grep '^ANTHROPIC_API_KEY=' "$CONFIG_ENV" 2>/dev/null | tail -n 1 || true)"
+fi
+
+# Same issue, plan step 2: if the caller's own process already exported
+# ANTHROPIC_API_KEY, that value is scoped to this process, not to the
+# cache -- remember it so it can be restored after `source "$CONFIG_ENV"`
+# below, which would otherwise silently overwrite it with whatever the
+# cached line above says (stale, or empty).
+_had_live_api_key=false
+_live_api_key="${ANTHROPIC_API_KEY:-}"
+if [ -n "$_live_api_key" ]; then
+  _had_live_api_key=true
+fi
+
 # ── Read config ────────────────────────────────────────────────────────────
 _read_config_ok=false
 
@@ -242,6 +267,15 @@ if [ "$_read_config_ok" = false ]; then
   } > "$CONFIG_ENV"
 fi
 
+# Restore the cached key both writers above just truncated away. A fresh
+# `op read` below supersedes this by rewriting the line itself; if that
+# fetch fails or is skipped, this cached line is what stops the hook from
+# silently degrading every downstream recall to regex-only extraction
+# (athenaeum#1886).
+if [ -n "$_cached_api_key_line" ]; then
+  printf '%s\n' "$_cached_api_key_line" >> "$CONFIG_ENV"
+fi
+
 # Re-assert the file mode explicitly (athenaeum#1179): `umask 077` above only
 # governs permissions at file *creation*. Both writers above use `open(...,
 # 'w')` / shell `>` redirection, which TRUNCATE rather than recreate an
@@ -255,14 +289,33 @@ chmod 600 "$CONFIG_ENV"
 # shellcheck disable=SC1090
 source "$CONFIG_ENV"
 
+# Restore the caller's own exported value if it had one: `source` above
+# just assigned ANTHROPIC_API_KEY from config.env's cached/restored line
+# (or unset it, if there was none), which must not clobber a value that
+# belongs to this process rather than the cache (athenaeum#1886 plan step 2).
+if [ "$_had_live_api_key" = true ]; then
+  ANTHROPIC_API_KEY="$_live_api_key"
+fi
+
 # ── Optional: bootstrap ANTHROPIC_API_KEY from 1Password ────────────────
 # Claude Code authenticates with CLAUDE_CODE_OAUTH_TOKEN, which the
 # general Messages API rejects (401). The LLM topic extractor in
 # user-prompt-recall.sh needs a real console key. When `op` is signed
 # in and ANTHROPIC_API_KEY isn't already set, fetch + cache it.
-# Override path via ATHENAEUM_OP_KEY_PATH. Silent on any failure.
+# Override path via ATHENAEUM_OP_KEY_PATH. Silent on any failure -- when
+# ANTHROPIC_API_KEY is already exported (fetch branch skipped, athenaeum#1886
+# plan step 2) or `op` is missing/fails, the cached line restored above is
+# left as-is; that cached value belongs to the file, not to this process's
+# already-exported one.
+#
+# Gates on `_had_live_api_key` (captured before config.env was even read),
+# NOT on `${ANTHROPIC_API_KEY:-}` here -- the cache-restore above just
+# sourced a cached/preserved line into that same variable, so testing it
+# directly would make a run that ever cached a key skip every future fetch
+# forever, permanently defeating "a fresh `op read` still replaces the
+# cached value" (athenaeum#1886 AC2).
 _KEY_PATH="${ATHENAEUM_OP_KEY_PATH:-op://Agent Tools/Anthropic API Key/credential}"
-if [ -z "${ANTHROPIC_API_KEY:-}" ] && command -v op >/dev/null 2>&1; then
+if [ "$_had_live_api_key" = false ] && command -v op >/dev/null 2>&1; then
   if _fetched_key="$(op read "$_KEY_PATH" 2>/dev/null)" && [ -n "$_fetched_key" ]; then
     # mktemp inside the (already-restricted) cache dir — gives us an
     # unpredictable path mode 600 atomically, closing the window where
@@ -278,6 +331,20 @@ if [ -z "${ANTHROPIC_API_KEY:-}" ] && command -v op >/dev/null 2>&1; then
     mv "$tmp_env" "$CONFIG_ENV"
   fi
 fi
+
+# Issue athenaeum#1886 (plan step 3): make the degrade visible. Every
+# recall hook that wants the LLM topic extractor reads this cache, not the
+# live fetch, so a run that ends with no key here is a silent quality drop
+# everywhere else until someone notices "generic-looking recall names".
+# Exactly one line, and only in the no-key case -- a run that ends with a
+# key (cached, restored, or freshly fetched) prints nothing new.
+_final_api_key_line="$(grep '^ANTHROPIC_API_KEY=' "$CONFIG_ENV" 2>/dev/null | tail -n 1 || true)"
+case "$_final_api_key_line" in
+  ANTHROPIC_API_KEY=?*) ;;
+  *)
+    echo "[Knowledge] No ANTHROPIC_API_KEY cached — LLM topic extraction will fall back to regex-only extraction until a fetch succeeds." >&2
+    ;;
+esac
 
 # ── Build search index ─────────────────────────────────────────────────────
 # Always build FTS5 — it's cheap (~1s for 3k pages) and rescues short-query
