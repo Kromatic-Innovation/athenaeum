@@ -217,7 +217,7 @@ def classify_claim_kind(
         # stage runs disabled today; the helper is text-block-equivalent for a
         # text-only response and keeps the site robust if the posture changes).
         raw_text = response_text(response)
-    except (AttributeError, IndexError):
+    except (AttributeError, IndexError, ValueError):
         log.warning("claim_kind: malformed classify response; unclassified")
         # Count the parse failure (athenaeum#724): this early return is ABOVE
         # observe_claim_kind, so a malformed response was previously uncounted.

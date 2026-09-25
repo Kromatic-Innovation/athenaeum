@@ -766,7 +766,7 @@ def content_relation(
 
     try:
         text = response_text(response)
-    except (AttributeError, IndexError) as exc:
+    except (AttributeError, IndexError, ValueError) as exc:
         log.warning("comparator: Gate 2 response malformed (%s)", exc)
         return ContentRelationResult(
             relation=ContentRelation.UNAVAILABLE, rationale="detector-malformed-response"

@@ -534,7 +534,7 @@ def detect_contradictions(
         # stage runs disabled today; the helper is text-block-equivalent for a
         # text-only response and keeps the site robust if the posture changes).
         text = response_text(response)
-    except (AttributeError, IndexError) as exc:
+    except (AttributeError, IndexError, ValueError) as exc:
         log.warning(
             "contradictions: detector response malformed (%s)",
             exc,

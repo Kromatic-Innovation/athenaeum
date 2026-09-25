@@ -943,6 +943,94 @@ class TestRealSDKShapeConformance:
 
 
 # ---------------------------------------------------------------------------
+# response_text block-type coverage (athenaeum#1889)
+#
+# The athenaeum#1717 cleanup lane crashed with
+# ``AttributeError: 'ThinkingBlock' object has no attribute 'text'`` from
+# ``response_text``'s fallback ``return response.content[0].text`` when a
+# response's content was ALL thinking blocks (no ``type == "text"`` block at
+# all — e.g. truncated by max_tokens before any text was emitted). Separately,
+# an answer legitimately split across more than one adjacent ``TextBlock``
+# (citations) was silently truncated to just the first block. These tests
+# cover both fixes against the real anthropic SDK block types.
+# ---------------------------------------------------------------------------
+
+
+class TestResponseTextBlockTypes:
+    @staticmethod
+    def _message(content):
+        import anthropic.types as t
+
+        return t.Message(
+            id="msg_01",
+            content=content,
+            model="claude-sonnet-4-6",
+            role="assistant",
+            stop_reason="end_turn",
+            stop_sequence=None,
+            type="message",
+            usage=t.Usage(
+                input_tokens=10,
+                output_tokens=5,
+                cache_creation_input_tokens=None,
+                cache_read_input_tokens=None,
+            ),
+        )
+
+    def test_thinking_block_then_text_block(self):
+        import anthropic.types as t
+
+        msg = self._message(
+            [
+                t.ThinkingBlock(type="thinking", thinking="reasoning...", signature="sig"),
+                t.TextBlock(type="text", text="hello", citations=None),
+            ]
+        )
+        assert response_text(msg) == "hello"
+
+    def test_redacted_thinking_block_then_text_block(self):
+        import anthropic.types as t
+
+        msg = self._message(
+            [
+                t.RedactedThinkingBlock(type="redacted_thinking", data="opaque"),
+                t.TextBlock(type="text", text="hello", citations=None),
+            ]
+        )
+        assert response_text(msg) == "hello"
+
+    def test_two_text_blocks_are_joined(self):
+        import anthropic.types as t
+
+        msg = self._message(
+            [
+                t.TextBlock(type="text", text="hello ", citations=None),
+                t.TextBlock(type="text", text="world", citations=None),
+            ]
+        )
+        assert response_text(msg) == "hello world"
+
+    def test_no_text_block_raises_value_error_naming_block_types(self):
+        import anthropic.types as t
+
+        msg = self._message(
+            [
+                t.ThinkingBlock(type="thinking", thinking="reasoning...", signature="sig"),
+                t.RedactedThinkingBlock(type="redacted_thinking", data="opaque"),
+            ]
+        )
+        with pytest.raises(ValueError, match="thinking.*redacted_thinking"):
+            response_text(msg)
+
+    def test_legacy_no_type_fake_still_falls_back(self):
+        # Pre-existing fakes (e.g. TestBackendParity above) carry no ``.type``
+        # attribute at all — response_text must still read ``.text`` off the
+        # single block rather than raising.
+        msg = SimpleNamespace(content=[SimpleNamespace(text="legacy")])
+        assert response_text(msg) == "legacy"
+
+
+# ---------------------------------------------------------------------------
 # Batch hand-off boundary adapter — ``AnthropicBatchClientBackend`` (athenaeum#778)
 #
 # ``batch.py``'s 3 hand-off sites pass a concrete ``anthropic.Anthropic`` into

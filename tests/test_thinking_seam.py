@@ -582,11 +582,12 @@ class TestResponseTextSkipsThinkingBlocks:
 
     def test_no_text_block_falls_back_and_raises_on_thinking_only(self) -> None:
         # Degenerate: a response with ONLY a thinking block (no text answer at
-        # all) falls back to content[0].text, surfacing the same AttributeError
-        # the call sites already catch — the fallback preserves the existing
-        # malformed-response error contract rather than masking it.
+        # all — e.g. truncated by max_tokens before any text was emitted)
+        # raises a clear ValueError naming the block types encountered,
+        # rather than the opaque AttributeError from a bare
+        # `content[0].text` (issue athenaeum#1889).
         resp = SimpleNamespace(content=[_sdk_thinking_block("only thinking")])
-        with pytest.raises(AttributeError):
+        with pytest.raises(ValueError, match="thinking"):
             response_text(resp)
 
 

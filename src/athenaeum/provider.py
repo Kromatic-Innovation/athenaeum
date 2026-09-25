@@ -583,21 +583,37 @@ def response_text(response: Any) -> str:
     * the ``claude-cli`` backend's constructed :class:`_CliResponse`, whose
       single :class:`_CliTextBlock` already carries ``type == "text"``.
 
-    If no ``type == "text"`` block is found (a block with no ``.type``, or a
-    genuinely text-less response), it falls back to ``response.content[0].text``
-    — preserving today's exact behavior for single-block / text-only responses
-    and letting the same ``AttributeError`` / ``IndexError`` the call sites
-    already catch surface unchanged on a truly malformed response.
+    An answer legitimately split across more than one adjacent ``type ==
+    "text"`` block (for example citations) is JOINED, not truncated to the
+    first block.
+
+    If no ``type == "text"`` block is found: a first block that still exposes
+    a usable ``.text`` (a legacy fake predating this ``.type`` narrowing, or a
+    test double such as ``MagicMock`` that auto-creates any attribute) falls
+    back to reading ``.text`` directly off ``response.content[0]``,
+    preserving today's exact behavior for those shapes. Otherwise — content
+    made up entirely of thinking/redacted-thinking blocks, which genuinely
+    carry no ``.text`` attribute at all, e.g. a response truncated by
+    ``max_tokens`` before any text was emitted (issue athenaeum#1889) — this
+    raises a ``ValueError`` naming the block types encountered, rather than
+    letting ``response.content[0].text`` raise an opaque ``AttributeError``.
     """
     content = getattr(response, "content", None)
     if content:
-        for block in content:
-            if getattr(block, "type", None) == "text":
-                return block.text
-    # No text-typed block found (or empty/absent content): fall back to the
-    # historical extraction so single-block and text-only responses — and the
-    # malformed-response error paths the call sites already handle — are
-    # byte-for-byte unchanged.
+        texts = [block.text for block in content if getattr(block, "type", None) == "text"]
+        if texts:
+            return "".join(texts)
+        first = content[0]
+        if hasattr(first, "text"):
+            # No block carried `type == "text"` (no `.type` at all, or a
+            # mock/legacy shape) but the first block still has a usable
+            # `.text` — preserve the historical single-block fallback.
+            return first.text
+        block_types = [getattr(block, "type", type(block).__name__) for block in content]
+        raise ValueError(
+            f"response_text: no text block found among {len(content)} "
+            f"content block(s); block types were {block_types!r}"
+        )
     return response.content[0].text
 
 

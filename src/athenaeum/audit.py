@@ -554,7 +554,7 @@ def _verdict_from_response(
     cost = _cost_usd(input_tokens, output_tokens, model=model, is_batch=is_batch)
     try:
         text = response_text(response)
-    except (AttributeError, IndexError) as exc:
+    except (AttributeError, IndexError, ValueError) as exc:
         return AuditVerdict(
             uid=uid,
             path=path,
