@@ -234,7 +234,7 @@ def classify_decay_bucket(
         # disabled today; the helper is text-block-equivalent for a text-only
         # response and keeps the site robust if the posture changes).
         raw_text = response_text(response)
-    except (AttributeError, IndexError):
+    except (AttributeError, IndexError, ValueError):
         log.warning("decay_bucket: malformed classify response; unbucketed")
         # Count the parse failure: this early return is ABOVE
         # observe_decay_bucket, so a malformed response would otherwise be

@@ -1887,7 +1887,7 @@ def propose_resolution(
             # thinking block BEFORE the text block on Opus 4.7 / Sonnet 4.6 —
             # response_text skips it and returns the text answer.
             text = response_text(response)
-        except (AttributeError, IndexError) as exc:
+        except (AttributeError, IndexError, ValueError) as exc:
             log.warning("resolutions: resolver response malformed (%s)", exc)
             return _fallback("resolver-malformed-response")
 
@@ -2931,7 +2931,7 @@ def propose_freetext_source_edits(
         # Issue athenaeum#578: freetext_edit enables adaptive thinking — skip any
         # leading thinking block and read the text answer.
         text = response_text(response)
-    except (AttributeError, IndexError):
+    except (AttributeError, IndexError, ValueError):
         log.warning(
             "resolutions: propose_freetext_source_edits — malformed response; "
             "falling back to annotation"

@@ -241,7 +241,7 @@ def extract_topics(
         # text-block-equivalent for a text-only response and keeps the site
         # robust if the posture changes).
         text = response_text(response).strip()
-    except (AttributeError, IndexError, TypeError):
+    except (AttributeError, IndexError, TypeError, ValueError):
         return []
 
     # M16 (athenaeum#607): route the topic array through the shared balanced scanner

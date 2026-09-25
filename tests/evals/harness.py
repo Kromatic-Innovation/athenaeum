@@ -381,7 +381,7 @@ class _RecordingMessages:
             # read the wrong block on a thinking-enabled stage (resolver).
             try:
                 text = provider_response_text(response)
-            except (AttributeError, IndexError) as exc:
+            except (AttributeError, IndexError, ValueError) as exc:
                 raise EmptyRecordingError(
                     f"record run captured no text block for "
                     f"{layer}/{case_id} (model {params.get('model', '')!r}); "
