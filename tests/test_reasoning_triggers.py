@@ -21,12 +21,13 @@ full-sweep coverage (AC5/AC6) lives in ``tests/test_contradiction_sweep.py``.
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
 from athenaeum.intake import discover_raw_backlog_bytes
+from athenaeum.quiesce import QuiesceState
 from athenaeum.reasoning_triggers import TriggerDecision, evaluate_triggers
 
 # ---------------------------------------------------------------------------
@@ -407,3 +408,78 @@ class TestEvaluateTriggers:
             config=_NO_TRIGGERS_CFG,
         )
         assert decision == TriggerDecision(fired=False, reason="none")
+
+
+# ---------------------------------------------------------------------------
+# evaluate_triggers(quiesce=...) — the operator quiesce sentinel (issue
+# athenaeum#1898, AC1/AC2/AC3). QuiesceState is a plain frozen dataclass with
+# no behavior of its own (all its I/O lives in :mod:`athenaeum.quiesce`), so
+# constructing one directly here for the "present" branch needs no real
+# sentinel file on disk.
+# ---------------------------------------------------------------------------
+
+_ACTIVE_QUIESCE = QuiesceState(
+    holder="alice@laptop",
+    reason="backfilling person pages",
+    created_at=datetime(2026, 9, 25, 12, 0, 0, tzinfo=timezone.utc),
+    expires_at=datetime(2026, 9, 25, 14, 0, 0, tzinfo=timezone.utc),
+)
+
+
+class TestEvaluateTriggersQuiesce:
+    def test_quiesce_present_suppresses_a_trigger_that_would_otherwise_fire(
+        self,
+    ) -> None:
+        # AC1: an active quiesce blocks the scheduler even when a configured
+        # trigger's threshold is clearly met.
+        cfg = {"librarian": {"reasoning_triggers": {"backlog_files": 1}}}
+        decision = evaluate_triggers(
+            backlog_files=1000,
+            backlog_bytes=0,
+            since_last_run=timedelta(days=1),
+            on_demand=False,
+            config=cfg,
+            quiesce=_ACTIVE_QUIESCE,
+        )
+        assert decision == TriggerDecision(fired=False, reason="quiesced")
+
+    def test_quiesce_present_suppresses_the_nightly_backstop_too(self) -> None:
+        decision = evaluate_triggers(
+            backlog_files=0,
+            backlog_bytes=0,
+            since_last_run=None,  # infinitely overdue -- would otherwise backstop-fire
+            on_demand=False,
+            config=_NO_TRIGGERS_CFG,
+            quiesce=_ACTIVE_QUIESCE,
+        )
+        assert decision == TriggerDecision(fired=False, reason="quiesced")
+
+    def test_on_demand_wins_over_an_active_quiesce(self) -> None:
+        # AC3: a direct operator run (on_demand=True, i.e. `athenaeum ingest`
+        # with no --if-triggered) is unaffected by the sentinel -- on_demand
+        # is checked BEFORE quiesce.
+        decision = evaluate_triggers(
+            backlog_files=0,
+            backlog_bytes=0,
+            since_last_run=timedelta(hours=1),
+            on_demand=True,
+            config=_NO_TRIGGERS_CFG,
+            quiesce=_ACTIVE_QUIESCE,
+        )
+        assert decision == TriggerDecision(fired=True, reason="on-demand")
+
+    def test_quiesce_none_is_the_default_and_behaves_as_before(self) -> None:
+        # AC2 (release/expiry branch): the caller passes quiesce=None once
+        # the sentinel is released or has expired (see
+        # `athenaeum.quiesce.read_quiesce_state`'s "expired == absent" rule)
+        # -- evaluation then proceeds exactly like every pre-athenaeum#1898 test
+        # above, which is what makes leaving `quiesce` off those calls valid.
+        decision = evaluate_triggers(
+            backlog_files=0,
+            backlog_bytes=0,
+            since_last_run=timedelta(hours=24),
+            on_demand=False,
+            config=_NO_TRIGGERS_CFG,
+            quiesce=None,
+        )
+        assert decision == TriggerDecision(fired=True, reason="nightly-backstop")

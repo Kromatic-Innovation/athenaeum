@@ -30,6 +30,7 @@ from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT, resolve_cache_dir
 from athenaeum.logconf import configure_logging
 
 if TYPE_CHECKING:
+    from athenaeum.quiesce import QuiesceState
     from athenaeum.reasoning_triggers import TriggerDecision
     from athenaeum.runlock import RunLock
 
@@ -633,6 +634,7 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     any of the ``--if-triggered``/``--full`` validation.
     """
     import json
+    import logging
 
     from athenaeum.config import load_config
     from athenaeum.librarian import DEFAULT_KNOWLEDGE_ROOT, ingest
@@ -679,14 +681,25 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     # Issue athenaeum#909: on-demand (no --if-triggered, the pre-existing default
     # behaviour, UNCHANGED) always compiles. With --if-triggered, evaluate the
     # configured triggers against LIVE state FIRST — cheap (one directory
-    # listing + one small stamp read), side-effect-free, and deliberately
-    # BEFORE the lock-acquire below so a "nothing fired" evaluation never
-    # contends for the run lock at all.
+    # listing + one small stamp read + one quiesce-sentinel read, issue
+    # athenaeum#1898), side-effect-free, and deliberately BEFORE the
+    # lock-acquire below so a "nothing fired" evaluation never contends for
+    # the run lock at all.
     trigger_reason = "on-demand"
     if getattr(args, "if_triggered", False):
-        decision = _evaluate_ingest_trigger(raw_root, cfg, args.cache_dir)
+        decision, quiesce_state = _evaluate_ingest_trigger(
+            knowledge_root, raw_root, cfg, args.cache_dir
+        )
         trigger_reason = decision.reason
         if not decision.fired:
+            # Issue athenaeum#1898: `trigger_reason` used to be redundant here —
+            # `evaluate_triggers` had exactly one non-firing reason ("none"),
+            # so a hardcoded literal and the variable always agreed. Now that
+            # "quiesced" is a second non-firing reason, the literal would go
+            # silently dishonest for that case; use the variable so
+            # `"trigger"` always names the REAL reason (still "none" for the
+            # ordinary no-trigger-configured case — this summary shape is
+            # otherwise byte-for-byte unchanged).
             noop_summary: dict[str, object] = {
                 "command": "ingest",
                 "mode": "incremental" if incremental else "full",
@@ -695,8 +708,19 @@ def cmd_ingest(args: argparse.Namespace) -> int:
                 "noop": True,
                 "duration_ms": 0,
                 "exit_code": 0,
-                "trigger": "none",
+                "trigger": trigger_reason,
             }
+            if trigger_reason == "quiesced" and quiesce_state is not None:
+                from athenaeum.store import now_iso
+
+                expires_at_iso = now_iso(quiesce_state.expires_at)
+                noop_summary["quiesce_holder"] = quiesce_state.holder
+                noop_summary["quiesce_expires_at"] = expires_at_iso
+                logging.getLogger(__name__).info(
+                    "ingest --if-triggered quiesced: holder=%s expires_at=%s",
+                    quiesce_state.holder,
+                    expires_at_iso,
+                )
             if args.session is not None:
                 noop_summary["session"] = args.session
             print(json.dumps(noop_summary))
@@ -762,26 +786,36 @@ def cmd_ingest(args: argparse.Namespace) -> int:
 
 
 def _evaluate_ingest_trigger(
-    raw_root: Path, config: dict[str, Any], cache_dir: Path | None
-) -> "TriggerDecision":
+    knowledge_root: Path, raw_root: Path, config: dict[str, Any], cache_dir: Path | None
+) -> "tuple[TriggerDecision, QuiesceState | None]":
     """Gather live state and evaluate the reasoning-tier triggers (issue athenaeum#909).
 
     The ONLY I/O :func:`athenaeum.reasoning_triggers.evaluate_triggers` itself
     never performs: a raw-intake backlog scan (file count + byte size, both
-    via :mod:`athenaeum.intake`) and a read of the last-completed-triggered-
-    run stamp. Cheap (one directory listing, one small JSON file) and
-    read-only — safe to call before the run lock is even considered.
-    ``cache_dir`` MUST be the same ``--cache-dir`` value the real ingest call
-    (and :func:`_record_ingest_trigger_completion`) uses, or this reads a
-    stamp from the wrong location and evaluates against a stale/empty
-    baseline every time.
+    via :mod:`athenaeum.intake`), a read of the last-completed-triggered-run
+    stamp, and (issue athenaeum#1898) a read of the operator quiesce sentinel
+    (:func:`athenaeum.quiesce.read_quiesce_state`). Cheap (one directory
+    listing, two small JSON files at most) and read-only — safe to call
+    before the run lock is even considered. ``cache_dir`` MUST be the same
+    ``--cache-dir`` value the real ingest call (and
+    :func:`_record_ingest_trigger_completion`) uses, or this reads a stamp
+    from the wrong location and evaluates against a stale/empty baseline
+    every time.
+
+    Returns the :class:`~athenaeum.reasoning_triggers.TriggerDecision`
+    together with the raw :class:`~athenaeum.quiesce.QuiesceState` this call
+    read (``None`` when nothing is quiesced) — the decision alone only names
+    the reason ``"quiesced"``, not who holds the sentinel or when it expires,
+    and :func:`cmd_ingest`'s no-op summary (and its log line) needs both.
     """
     from datetime import datetime, timezone
 
     from athenaeum.intake import discover_raw_backlog_bytes, discover_raw_files
     from athenaeum.librarian import REASONING_TRIGGER_STAMP_NAME, _load_timestamp_stamp
+    from athenaeum.quiesce import read_quiesce_state
     from athenaeum.reasoning_triggers import evaluate_triggers
 
+    quiesce_state = read_quiesce_state(knowledge_root)
     backlog_files = len(discover_raw_files(raw_root, config))
     backlog_bytes = discover_raw_backlog_bytes(raw_root, config)
     stamp_path = resolve_cache_dir(cache_dir) / REASONING_TRIGGER_STAMP_NAME
@@ -789,13 +823,15 @@ def _evaluate_ingest_trigger(
     since_last_run = (
         None if last_run is None else datetime.now(timezone.utc) - last_run
     )
-    return evaluate_triggers(
+    decision = evaluate_triggers(
         backlog_files=backlog_files,
         backlog_bytes=backlog_bytes,
         since_last_run=since_last_run,
         on_demand=False,
         config=config,
+        quiesce=quiesce_state,
     )
+    return decision, quiesce_state
 
 
 def _cmd_ingest_evaluate_only(
@@ -840,7 +876,13 @@ def _cmd_ingest_evaluate_only(
 
     try:
         cfg = load_config(knowledge_root)
-        decision = _evaluate_ingest_trigger(raw_root, cfg, args.cache_dir)
+        # The QuiesceState half is intentionally discarded here: this mode's
+        # JSON payload only ever reports `decision.reason` (already
+        # "quiesced" when applicable, issue athenaeum#1898), never
+        # holder/expiry detail — see this function's own docstring.
+        decision, _quiesce_state = _evaluate_ingest_trigger(
+            knowledge_root, raw_root, cfg, args.cache_dir
+        )
     except Exception as exc:  # noqa: BLE001 — surface a clean JSON error line
         print(
             json.dumps(

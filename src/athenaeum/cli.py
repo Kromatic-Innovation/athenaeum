@@ -164,6 +164,7 @@ _SUBCOMMAND_LOADERS: dict[str, tuple[str, str]] = {
     "audit": ("athenaeum._cmd_audit", "add_audit_subparser"),
     "paste-cleanup": ("athenaeum._cmd_paste_cleanup", "add_paste_cleanup_subparser"),
     "schema": ("athenaeum._cmd_schema", "add_schema_subparser"),
+    "quiesce": ("athenaeum._cmd_quiesce", "add_quiesce_subparser"),
 }
 
 
@@ -202,6 +203,7 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_push_metrics import add_push_metrics_subparser
     from athenaeum._cmd_query import add_query_subparsers
     from athenaeum._cmd_questions import add_questions_subparser
+    from athenaeum._cmd_quiesce import add_quiesce_subparser
     from athenaeum._cmd_reconcile import add_reconcile_subparser
     from athenaeum._cmd_recovery_yield import add_recovery_yield_subparser
     from athenaeum._cmd_repair import add_repair_subparser
@@ -275,6 +277,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_index_subparsers(
         subparsers
     )  # reindex/rebuild-index, compile, registry, ingest, session-end
+    add_quiesce_subparser(subparsers)  # quiesce (issue athenaeum#1898)
 
     return parser
 

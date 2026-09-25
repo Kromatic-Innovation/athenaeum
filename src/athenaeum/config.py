@@ -1611,6 +1611,44 @@ def resolve_reasoning_trigger_nightly_backstop_hours(
 
 
 # ---------------------------------------------------------------------------
+# Operator quiesce sentinel (issue athenaeum#1898): the config half of
+# `athenaeum quiesce` / :mod:`athenaeum.quiesce`. One knob — the ceiling a
+# `--for` request may not exceed — so a crashed or forgotten corpus-write
+# lane can never pause the `--if-triggered` scheduler indefinitely by
+# minting an enormous duration. Everything else the sentinel needs
+# (holder/reason/created_at/expires_at) is supplied per-invocation on the
+# CLI, not configured here.
+# ---------------------------------------------------------------------------
+
+
+def resolve_quiesce_max_hours(config: dict[str, Any] | None) -> int:
+    """Resolve the quiesce sentinel's maximum ``--for`` duration in hours
+    (issue athenaeum#1898, default 6) from ``librarian.quiesce.max_hours``.
+
+    ``athenaeum quiesce --for <duration>`` (:mod:`athenaeum.quiesce`) rejects
+    a request whose duration exceeds this many hours — see
+    :func:`athenaeum.quiesce.write_quiesce`, which raises
+    ``athenaeum.quiesce.QuiesceDurationExceeded`` rather than silently
+    clamping. Like :func:`resolve_reasoning_trigger_nightly_backstop_hours`,
+    this resolver is always ON — there is no "unset means unlimited" escape
+    hatch, because an unbounded quiesce window would let one crashed lane's
+    forgotten sentinel silently pause the scheduler forever, exactly the
+    ``launchctl bootout`` fragility issue athenaeum#1898 replaces. ``bool``
+    and non-positive / non-int values fall through to the default.
+    """
+    default = 6
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            quiesce_cfg = cfg.get("quiesce")
+            if isinstance(quiesce_cfg, dict):
+                raw = quiesce_cfg.get("max_hours")
+                if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
+                    return raw
+    return default
+
+
+# ---------------------------------------------------------------------------
 # Raw-intake retention limits (issue athenaeum#1269): configurable per-file and
 # per-source-tree aggregate size ceilings on `raw/<source>/`. The knowledge
 # root is a git repository -- its value is being small, diffable and

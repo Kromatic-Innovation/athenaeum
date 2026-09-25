@@ -863,6 +863,191 @@ class TestIngestIfTriggeredCLI:
 
 
 # ---------------------------------------------------------------------------
+# --if-triggered + the operator quiesce sentinel (issue athenaeum#1898, AC1).
+# Trigger LOGIC for the "quiesced" reason (precedence, on-demand exemption)
+# is covered purely in ``tests/test_reasoning_triggers.py``; these tests
+# cover the CLI-level wiring: an active sentinel suppresses even a firing
+# trigger WITHOUT taking the run lock, reports holder/expiry in the summary,
+# and a released/expired sentinel behaves exactly like today.
+# ---------------------------------------------------------------------------
+
+
+class TestIngestIfTriggeredQuiesceCLI:
+    def test_active_quiesce_exits_zero_without_the_run_lock_and_reports_holder(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from datetime import timedelta
+
+        from athenaeum.quiesce import write_quiesce
+        from athenaeum.runlock import RunLock
+
+        root = _seed_knowledge_root(tmp_path)
+        # A trigger that WOULD fire if not quiesced.
+        (root / "athenaeum.yaml").write_text(
+            "librarian:\n  reasoning_triggers:\n    backlog_files: 1\n"
+        )
+        _write_tier0_raw(root, "p-0001", "Alice", "20240410T120000Z", "aabbccdd")
+        write_quiesce(
+            root, holder="alice@laptop", reason="backfilling", for_duration=timedelta(hours=2)
+        )
+
+        with RunLock(root):  # held for the whole call -- must never be contended
+            rc = main(
+                [
+                    "ingest",
+                    "--if-triggered",
+                    "--path",
+                    str(root),
+                    "--cache-dir",
+                    str(tmp_path / "cache"),
+                ]
+            )
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert payload["trigger"] == "quiesced"
+        assert payload["noop"] is True
+        assert payload["compiled"] == 0
+        assert payload["quiesce_holder"] == "alice@laptop"
+        assert isinstance(payload["quiesce_expires_at"], str)
+
+    def test_active_quiesce_logs_holder_and_expiry(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        import logging
+        from datetime import timedelta
+
+        from athenaeum.quiesce import write_quiesce
+
+        root = _seed_knowledge_root(tmp_path)
+        write_quiesce(
+            root, holder="alice@laptop", reason="backfilling", for_duration=timedelta(hours=2)
+        )
+
+        with caplog.at_level(logging.INFO):
+            rc = main(
+                [
+                    "ingest",
+                    "--if-triggered",
+                    "--path",
+                    str(root),
+                    "--cache-dir",
+                    str(tmp_path / "cache"),
+                ]
+            )
+        assert rc == 0
+        capsys.readouterr()
+        messages = " ".join(r.message for r in caplog.records)
+        assert "alice@laptop" in messages
+
+    def test_released_quiesce_behaves_exactly_as_today(
+        self,
+        tmp_path: Path,
+        mock_anthropic: MagicMock,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # AC2: after `athenaeum quiesce --release`, the next
+        # `ingest --if-triggered` behaves exactly as before the sentinel
+        # ever existed.
+        from datetime import timedelta
+
+        from athenaeum.quiesce import release_quiesce, write_quiesce
+
+        root = _seed_knowledge_root(tmp_path)
+        (root / "athenaeum.yaml").write_text(
+            "librarian:\n  reasoning_triggers:\n    backlog_files: 1\n"
+        )
+        _write_tier0_raw(root, "p-0001", "Alice", "20240410T120000Z", "aabbccdd")
+
+        write_quiesce(root, holder="a", reason="r", for_duration=timedelta(hours=1))
+        assert release_quiesce(root) is True
+
+        rc = main(
+            [
+                "ingest",
+                "--if-triggered",
+                "--path",
+                str(root),
+                "--cache-dir",
+                str(tmp_path / "cache"),
+            ]
+        )
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert payload["trigger"] == "backlog-files"
+        assert payload["compiled"] == 1
+        assert "quiesce_holder" not in payload
+
+    def test_expired_quiesce_behaves_exactly_as_today(
+        self,
+        tmp_path: Path,
+        mock_anthropic: MagicMock,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # AC2, the expiry half: no explicit --release needed once expires_at
+        # has passed.
+        from datetime import datetime, timedelta, timezone
+
+        from athenaeum.quiesce import write_quiesce
+
+        root = _seed_knowledge_root(tmp_path)
+        (root / "athenaeum.yaml").write_text(
+            "librarian:\n  reasoning_triggers:\n    backlog_files: 1\n"
+        )
+        _write_tier0_raw(root, "p-0001", "Alice", "20240410T120000Z", "aabbccdd")
+
+        already_past = datetime.now(timezone.utc) - timedelta(hours=5)
+        write_quiesce(
+            root,
+            holder="a",
+            reason="r",
+            for_duration=timedelta(hours=1),
+            now=already_past,
+        )
+
+        rc = main(
+            [
+                "ingest",
+                "--if-triggered",
+                "--path",
+                str(root),
+                "--cache-dir",
+                str(tmp_path / "cache"),
+            ]
+        )
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert payload["trigger"] == "backlog-files"
+        assert payload["compiled"] == 1
+
+    def test_quiesce_never_affects_ingest_without_the_flag(
+        self,
+        tmp_path: Path,
+        mock_anthropic: MagicMock,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # AC3: a direct operator run (no --if-triggered) is unaffected by an
+        # active sentinel.
+        from datetime import timedelta
+
+        from athenaeum.quiesce import write_quiesce
+
+        root = _seed_knowledge_root(tmp_path)
+        _write_tier0_raw(root, "p-0001", "Alice", "20240410T120000Z", "aabbccdd")
+        write_quiesce(root, holder="a", reason="r", for_duration=timedelta(hours=1))
+
+        rc = main(["ingest", "--path", str(root), "--cache-dir", str(tmp_path / "cache")])
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert "trigger" not in payload
+        assert payload["compiled"] == 1
+
+
+# ---------------------------------------------------------------------------
 # --evaluate-only (issue athenaeum#1001) — the lock-free PUBLIC
 # trigger-evaluation mode. Unlike --if-triggered, this never calls
 # ``ingest()`` (the only thing in this module that touches git), so its
