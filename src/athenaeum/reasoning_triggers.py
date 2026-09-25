@@ -25,21 +25,23 @@ full recompile. See :mod:`athenaeum._cmd_index`'s ``--if-triggered`` flag on
 state and, on a fire, runs the ingest; this module contains no I/O at all.
 
 This module is deliberately pure and side-effect-free: it takes already-
-gathered facts (backlog counts, elapsed time, an on-demand flag, config) and
-returns a :class:`TriggerDecision` naming whether and why a run should
-happen. All I/O — discovering the backlog
+gathered facts (backlog counts, elapsed time, an on-demand flag, config, an
+already-read quiesce sentinel) and returns a :class:`TriggerDecision` naming
+whether and why a run should happen. All I/O — discovering the backlog
 (:func:`athenaeum.intake.discover_raw_files` /
 :func:`athenaeum.intake.discover_raw_backlog_bytes`), reading the last-
-triggered-run stamp, acquiring the run lock, actually invoking the ingest —
-lives in the CLI caller. That split is what makes the trigger LOGIC
-trivially unit-testable without a knowledge git repo, chromadb, or an LLM.
+triggered-run stamp, reading the operator quiesce sentinel
+(:mod:`athenaeum.quiesce`, issue athenaeum#1898), acquiring the run lock,
+actually invoking the ingest — lives in the CLI caller. That split is what
+makes the trigger LOGIC trivially unit-testable without a knowledge git
+repo, chromadb, or an LLM.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from athenaeum.config import (
     resolve_reasoning_trigger_backlog_bytes,
@@ -48,13 +50,25 @@ from athenaeum.config import (
     resolve_reasoning_trigger_nightly_backstop_hours,
 )
 
+if TYPE_CHECKING:
+    # Type-only: keeps this module's real (runtime) import list at zero I/O,
+    # per its own "no I/O at all" docstring paragraph — see
+    # :mod:`athenaeum.quiesce`'s module docstring for the split this mirrors
+    # (the sibling ``_cli_shared.py`` does the identical
+    # ``if TYPE_CHECKING: from athenaeum.runlock import RunLock`` trick for
+    # the same reason).
+    from athenaeum.quiesce import QuiesceState
+
 #: Which trigger fired this evaluation, or ``"none"`` when nothing fired.
+#: ``"quiesced"`` (issue athenaeum#1898) is the other non-firing reason — see
+#: :func:`evaluate_triggers`'s ``quiesce`` parameter.
 TriggerReason = Literal[
     "backlog-files",
     "backlog-bytes",
     "interval",
     "on-demand",
     "nightly-backstop",
+    "quiesced",
     "none",
 ]
 
@@ -64,9 +78,12 @@ class TriggerDecision:
     """The outcome of one :func:`evaluate_triggers` call.
 
     ``fired`` is ``True`` iff a reasoning run should happen now; ``reason``
-    names WHICH trigger fired. ``fired is False`` always pairs with
-    ``reason == "none"`` and vice versa — :func:`evaluate_triggers` is the
-    only constructor call site and maintains that invariant; it is not
+    names WHICH trigger fired. ``fired is False`` pairs with ``reason`` in
+    ``{"none", "quiesced"}`` and vice versa — never any other reason value —
+    while ``fired is True`` pairs with every other reason (issue athenaeum#1898
+    added the second non-firing reason; before it, ``fired is False`` paired
+    with ``reason == "none"`` alone). :func:`evaluate_triggers` is the only
+    constructor call site and maintains that invariant; it is not
     re-validated here (this dataclass is otherwise a plain, immutable
     value — no behavior of its own).
     """
@@ -82,30 +99,46 @@ def evaluate_triggers(
     since_last_run: timedelta | None,
     on_demand: bool,
     config: dict[str, Any] | None,
+    quiesce: "QuiesceState | None" = None,
 ) -> TriggerDecision:
     """Decide whether a triggered reasoning run should happen now.
 
     Pure and side-effect-free: every input is an already-gathered fact
-    (a backlog count, an elapsed duration, a flag), never a live
-    filesystem/clock read — the caller gathers those and passes them in.
-    Evaluation order (first match wins, so a run triggered by more than one
-    condition reports the highest-priority one):
+    (a backlog count, an elapsed duration, a flag, an already-read quiesce
+    sentinel), never a live filesystem/clock read — the caller gathers those
+    and passes them in. Evaluation order (first match wins, so a run
+    triggered by more than one condition reports the highest-priority one):
 
-    1. ``on_demand`` — an explicit ask always fires, unconditionally.
-    2. Backlog-by-file-count vs ``librarian.reasoning_triggers.backlog_files``
+    1. ``on_demand`` — an explicit ask always fires, unconditionally, and is
+       checked BEFORE quiesce below — see that step for why.
+    2. ``quiesce`` (issue athenaeum#1898) — when not ``None`` (the caller already
+       determined the sentinel exists and has not expired — see
+       :func:`athenaeum.quiesce.read_quiesce_state`), returns a non-firing
+       ``"quiesced"`` verdict UNCONDITIONALLY, before any threshold below is
+       even consulted. This sits directly after ``on_demand`` and before
+       every other check because a quiesce sentinel is an operator asking to
+       pause the SCHEDULER specifically — ``athenaeum ingest --if-triggered``
+       (:func:`athenaeum._cmd_index._evaluate_ingest_trigger`) always calls
+       this with ``on_demand=False``, so on-demand runs (a direct
+       ``athenaeum ingest`` with no ``--if-triggered``, or any future caller
+       that legitimately sets ``on_demand=True``) are structurally
+       unaffected by a sentinel that suppresses only the scheduler's own
+       backlog/interval/backstop checks — the ``on_demand`` check above
+       already returned before this one is reached.
+    3. Backlog-by-file-count vs ``librarian.reasoning_triggers.backlog_files``
        (:func:`athenaeum.config.resolve_reasoning_trigger_backlog_files`;
        ``None`` — the default, key unset — disables this trigger).
-    3. Backlog-by-bytes vs ``librarian.reasoning_triggers.backlog_bytes``
+    4. Backlog-by-bytes vs ``librarian.reasoning_triggers.backlog_bytes``
        (:func:`athenaeum.config.resolve_reasoning_trigger_backlog_bytes`;
        ``None`` disables). Literal on-disk bytes, not a cost estimate — see
        :func:`athenaeum.intake.discover_raw_backlog_bytes`.
-    4. Elapsed interval vs ``librarian.reasoning_triggers.interval_hours``
+    5. Elapsed interval vs ``librarian.reasoning_triggers.interval_hours``
        (:func:`athenaeum.config.resolve_reasoning_trigger_interval_hours`;
        ``None`` disables this trigger entirely).
-    5. Nightly backstop vs
+    6. Nightly backstop vs
        ``librarian.reasoning_triggers.nightly_backstop_hours`` (default 24,
        :func:`athenaeum.config.resolve_reasoning_trigger_nightly_backstop_hours`)
-       — ONLY reached when none of 1-4 fired. This is AC7's literal wording
+       — ONLY reached when none of 1-5 fired. This is AC7's literal wording
        ("the nightly schedule still runs as a backstop when no other trigger
        has fired") encoded directly as evaluation order: the backstop check
        is physically the last ``if`` in this function, so it is structurally
@@ -128,6 +161,9 @@ def evaluate_triggers(
     """
     if on_demand:
         return TriggerDecision(fired=True, reason="on-demand")
+
+    if quiesce is not None:
+        return TriggerDecision(fired=False, reason="quiesced")
 
     backlog_files_threshold = resolve_reasoning_trigger_backlog_files(config)
     if (

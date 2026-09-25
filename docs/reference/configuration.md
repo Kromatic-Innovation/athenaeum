@@ -1778,6 +1778,28 @@ docstring for the measured populations). AC2 pins
 "queued, never auto-applied" as an invariant, so the knob that could
 break it does not exist rather than defaulting off.
 
+### `resolve_quiesce_max_hours`
+
+- **YAML path:** `librarian.quiesce.max_hours`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `6`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve the quiesce sentinel's maximum ``--for`` duration in hours
+(default 6) from ``librarian.quiesce.max_hours``.
+
+``athenaeum quiesce --for <duration>`` (`athenaeum.quiesce`) rejects
+a request whose duration exceeds this many hours — see
+`athenaeum.quiesce.write_quiesce`, which raises
+``athenaeum.quiesce.QuiesceDurationExceeded`` rather than silently
+clamping. Like `resolve_reasoning_trigger_nightly_backstop_hours`,
+this resolver is always ON — there is no "unset means unlimited" escape
+hatch, because an unbounded quiesce window would let one crashed lane's
+forgotten sentinel silently pause the scheduler forever, exactly the
+``launchctl bootout`` fragility replaces. ``bool``
+and non-positive / non-int values fall through to the default.
+
 ### `resolve_raw_file_max_api_calls`
 
 - **YAML path:** `librarian.raw_file_max_api_calls`
