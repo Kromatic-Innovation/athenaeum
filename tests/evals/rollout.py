@@ -1091,8 +1091,16 @@ def build_hook_index(
         _HOOK_INDEX_CACHE[key] = None
 
 
-def _user_prompt_hook_argv(hook_path: Path) -> list[str]:
+def user_prompt_hook_argv(hook_path: Path) -> list[str]:
     """Build the subprocess argv for *hook_path* (issue athenaeum#1887).
+
+    Public so every caller that spawns the resolved ``UserPromptSubmit``
+    hook -- not just :func:`query_hook` -- can follow the SAME
+    default-adapter/``ATHENAEUM_EVAL_HOOK=shell``-escape-hatch shape rather
+    than each hand-rolling its own ``["bash", ...]`` argv (the exact drift
+    that left ``tests/evals/test_recall_covers_grep.py`` spawning ``bash``
+    against a Python console script until this issue's follow-up fixed it).
+    Typical call shape: ``user_prompt_hook_argv(resolve_user_prompt_hook())``.
 
     :data:`SHELL_USER_PROMPT_HOOK` (and any other ``.sh`` path -- the
     ``ATHENAEUM_EVAL_HOOK=shell`` escape hatch) needs an explicit ``bash``
@@ -1136,7 +1144,7 @@ def query_hook(
     stdin_payload = json.dumps(
         {"prompt": query, "session_id": session_id or f"rollout-{uuid.uuid4().hex}"}
     )
-    argv = _user_prompt_hook_argv(resolve_user_prompt_hook())
+    argv = user_prompt_hook_argv(resolve_user_prompt_hook())
     try:
         result = subprocess.run(
             argv,

@@ -129,8 +129,9 @@ from tests.evals.relevance_metrics import (
 )
 from tests.evals.rollout import (
     SESSION_START_HOOK,
-    USER_PROMPT_HOOK,
     build_breadcrumb_hook_env,
+    resolve_user_prompt_hook,
+    user_prompt_hook_argv,
 )
 
 try:
@@ -289,17 +290,39 @@ def _hook_session_ready(knowledge_root: Path, hook_home: Path) -> bool:
 def _hook_breadcrumb_names(knowledge_root: Path, hook_home: Path, query: str) -> list[str]:
     """One query against the already-built hook session -- the page NAMES
     (not uids; see this module's docstring) the hook's own top-3 breadcrumb
-    output names, in the hook's own order."""
+    output names, in the hook's own order.
+
+    Spawns the harness's resolved default hook -- the packaged adapter, or
+    the shell script under ``ATHENAEUM_EVAL_HOOK=shell`` -- the same
+    resolution every other live-hook caller in this suite follows (issue
+    athenaeum#1887), rather than a hardcoded ``["bash", ...]`` argv that
+    silently drifted out of sync with which hook is actually live.
+    """
     env = build_breadcrumb_hook_env(knowledge_root, hook_home)
+    argv = user_prompt_hook_argv(resolve_user_prompt_hook())
     result = subprocess.run(
-        ["bash", str(USER_PROMPT_HOOK)],
+        argv,
         input=json.dumps({"prompt": query, "session_id": f"cov-{uuid.uuid4().hex}"}),
         env=env,
         capture_output=True,
         text=True,
         timeout=30.0,
     )
-    if result.returncode != 0 or not result.stdout.strip():
+    # Issue athenaeum#1887: a nonzero exit is never the hook's own "declined
+    # to inject anything" contract -- both the packaged adapter and the
+    # shell script are documented to always exit 0 (see
+    # tests.evals.rollout.query_hook's docstring: "mirroring the hook's own
+    # 'exit 0, no output' behaviour"). Silently folding a genuine subprocess
+    # failure (wrong interpreter, crash, missing binary) into "no
+    # breadcrumbs" would turn a misconfigured spawn into a quiet, wrong
+    # measurement -- exactly the silent-fidelity failure this issue exists
+    # to end. Only a clean exit with empty stdout is a legitimate decline.
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"user-prompt hook spawn failed (argv={argv!r}, "
+            f"returncode={result.returncode}): {result.stderr.strip()[-500:]!r}"
+        )
+    if not result.stdout.strip():
         return []
     payload = json.loads(result.stdout)
     text = str(payload.get("hookSpecificOutput", {}).get("additionalContext", ""))
