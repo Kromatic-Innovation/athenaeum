@@ -86,6 +86,7 @@ Every subcommand is registered top-level on one `parser.add_subparsers()` in `cl
 - [`athenaeum questions count`](#athenaeum-questions-count) (command) — Print `N unresolved (oldest: <iso-date>)`.
 - [`athenaeum questions list`](#athenaeum-questions-list) (command) — List all unresolved questions.
 - [`athenaeum questions next`](#athenaeum-questions-next) (command) — Show the oldest unresolved question (single block).
+- [`athenaeum quiesce`](#athenaeum-quiesce) (command) — Pause `ingest --if-triggered` without touching the run lock: --for/--reason sets a sentinel, --release clears it, --status reads it. A cooperative alternative to `launchctl bootout` for corpus write lanes.
 - [`athenaeum rebuild-index`](#athenaeum-rebuild-index) (command)
 - [`athenaeum recall`](#athenaeum-recall) (command) — Search the wiki from the shell (one tab-separated hit per line)
 - [`athenaeum reconcile`](#athenaeum-reconcile) (command) — Retire pending raw-intake files whose content is already materialized in the wiki (dual-write cleanup). Default is dry-run; pass --apply to remove.
@@ -1050,6 +1051,19 @@ Show the oldest unresolved question (single block).
 | `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--with-proposal` | `False` | — | Include the (optional) `**Proposed resolution**` block from the resolver. |
+
+## `athenaeum quiesce`
+
+Pause `ingest --if-triggered` without touching the run lock: --for/--reason sets a sentinel, --release clears it, --status reads it. A cooperative alternative to `launchctl bootout` for corpus write lanes.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--for` | — | — | How long to quiesce, as <number>[h\|m\|s] (default unit hours), e.g. 2h, 90m, 3600s. Capped at the configured maximum (librarian.quiesce.max_hours, default 6h) — a longer request is rejected with a clear error, never silently clamped. Required (together with --reason) unless --release or --status is given. |
+| `--holder` | — | — | Who/what is holding the quiesce, recorded in the sentinel. Default: '<user>@<hostname>' (see _default_holder) — pass this explicitly for a lane that wants a more specific self-identification (e.g. a hestia lane name) than the OS user. |
+| `--path` | — | — | Knowledge directory the sentinel lives next to the run lock under (default: ~/knowledge). |
+| `--reason` | — | — | Free-text reason recorded in the sentinel, for `--status` and for the log line `ingest --if-triggered` emits when it finds an active quiesce. Required (together with --for) unless --release or --status is given. |
+| `--release` | `False` | — | Remove the quiesce sentinel, if present. Idempotent — a no-op, not an error, when nothing is quiesced. Mutually exclusive with --status and with --for/--reason. |
+| `--status` | `False` | — | Read-only: report whether a sentinel is currently active (and its holder/reason/expiry if so). Never writes anything, always exits 0. Mutually exclusive with --release and with --for/--reason. |
 
 ## `athenaeum rebuild-index`
 
