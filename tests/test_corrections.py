@@ -14,6 +14,7 @@ import pytest
 from pydantic import BaseModel
 from pydantic import ValidationError as PydanticValidationError
 
+from athenaeum import pii
 from athenaeum.corrections import (
     BatchOutcome,
     CorrectionRecordResult,
@@ -2740,3 +2741,195 @@ class TestVolumeBounds:
         page_b = (wiki / "q.md").read_text()
         assert "company-b" in page_a
         assert "company-c" not in page_b
+
+
+# ---------------------------------------------------------------------------
+# athenaeum#1884: `process_correction_record` dropped `knowledge_root`/`config`
+# on its `resolve_target_for_apply` call, so an `email`-keyed target always
+# saw `knowledge_root=None` inside `_resolve_email_handle` and read as
+# unresolvable -- the athenaeum#884 `email -> contact record -> uid -> page` join
+# was dead code on the apply path. These tests pin the fixed shape end to
+# end through the real production entry points, and pin AC2's specific
+# `email-handle-*` reason surfacing.
+# ---------------------------------------------------------------------------
+
+
+def _write_contact_record(
+    knowledge_root: Path, config: dict, filename: str, *, uid: str, emails: list[str]
+) -> Path:
+    root = pii.contacts_surface_root(knowledge_root, config)
+    root.mkdir(parents=True, exist_ok=True)
+    listed = "".join(f"  - {address}\n" for address in emails)
+    path = root / filename
+    path.write_text(
+        f"---\nuid: {uid}\npii: true\nemails:\n{listed}---\n\nArchival data.\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+class TestEmailKeyedApply:
+    """AC1's shape: submit an email-keyed correction against a fixture
+    contact record + entity page, through `run_correction_phase`'s real
+    batch pipeline (not a hand-rolled `resolve_target`/`_resolve_email_handle`
+    call), and land `applied` with no §8.1 handoff note."""
+
+    def _config(self) -> dict:
+        return {
+            "storage": {"mapping": {"pii": "excluded"}},
+            "librarian": {
+                "corrections": {
+                    "fields": {
+                        "gmail_last_message_date": {
+                            "shape": "scalar",
+                            "writers": ["voltaire"],
+                        }
+                    }
+                }
+            },
+        }
+
+    def test_email_keyed_correction_applies_with_no_handoff(self, tmp_path: Path) -> None:
+        _git_init(tmp_path)
+        wiki = tmp_path / "wiki"
+        page = _write_page(
+            wiki, "corr-1.md", {"uid": "corr-1", "type": "person", "name": "Correspondent"}
+        )
+        config = self._config()
+        _write_contact_record(
+            tmp_path,
+            config,
+            "corr-1-contact.md",
+            uid="corr-1",
+            emails=["correspondent@example.org"],
+        )
+
+        raw = tmp_path / "raw" / "voltaire"
+        raw.mkdir(parents=True)
+        batch = raw / "20260924T024000Z-db5e853b.jsonl"
+        batch.write_text(
+            _corrections_batch(
+                {
+                    "record": "correction",
+                    "target": {
+                        "type": "person",
+                        "handle": {"email": "correspondent@example.org"},
+                    },
+                    "op": "set",
+                    "field": "gmail_last_message_date",
+                    "value": "2026-09-24T12:00:00Z",
+                    "source": "email:msg-1",
+                    "observed_at": "2026-09-24T12:00:00Z",
+                },
+                submitter="voltaire",
+                batch_id="20260924T024000Z-db5e853b",
+            )
+        )
+
+        def _fail_escalate(result: object, outcome: object) -> bool:
+            raise AssertionError("no record in this batch should escalate/raise a tier")
+
+        summary = run_correction_phase(
+            raw_root=tmp_path / "raw",
+            wiki_root=wiki,
+            knowledge_root=tmp_path,
+            index=EntityIndex(wiki),
+            config=config,
+            escalate_one=_fail_escalate,
+        )
+
+        assert summary["dispositions"] == {"applied": 1}
+        written = page.read_text()
+        assert "gmail_last_message_date" in written
+        assert "2026-09-24T12:00:00Z" in written
+        # No §8.1 handoff note for this batch -- nothing was raised.
+        assert list(raw.glob("*.md")) == []
+        assert not batch.exists()  # applied + terminal -> retired
+
+
+class TestEmailHandleRaisedReasonInHandoff:
+    """AC2: a raised email-handle correction's handoff note names the
+    specific `email-handle-*` reason, and an ordinary (non-email-handle)
+    unresolvable target keeps the pre-existing generic wording verbatim."""
+
+    def _config(self) -> dict:
+        return {
+            "storage": {"mapping": {"pii": "excluded"}},
+            "librarian": {
+                "corrections": {
+                    "fields": {
+                        "gmail_last_message_date": {
+                            "shape": "scalar",
+                            "writers": ["voltaire"],
+                        }
+                    }
+                }
+            },
+        }
+
+    def test_orphan_uid_reason_is_specific_not_generic(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir(parents=True)
+        index = EntityIndex(wiki)
+        config = self._config()
+        # A contact record carrying a uid with NO corresponding entity page
+        # -- `_resolve_email_handle`'s orphan-uid branch, a store-consistency
+        # problem its own comment says must be named, not folded into the
+        # generic zero-match wording.
+        _write_contact_record(
+            tmp_path,
+            config,
+            "orphan-contact.md",
+            uid="ghost-uid",
+            emails=["orphan@example.org"],
+        )
+
+        record = {
+            "record": "correction",
+            "target": {"type": "person", "handle": {"email": "orphan@example.org"}},
+            "op": "set",
+            "field": "gmail_last_message_date",
+            "value": "2026-09-24T12:00:00Z",
+            "source": "email:msg-2",
+            "observed_at": "2026-09-24T12:00:00Z",
+        }
+        result = process_correction_record(
+            record,
+            _envelope(submitter="voltaire"),
+            index=index,
+            knowledge_root=tmp_path,
+            registry_entities={},
+            config=config,
+        )
+
+        assert result.disposition == "raised-tier"
+        assert "email-handle-orphan-uid" in result.reason
+        assert result.reason != "target resolves to zero or several entities"
+
+    def test_ordinary_zero_match_keeps_the_generic_reason(self, tmp_path: Path) -> None:
+        """A non-email-handle unresolvable target must not regress: its
+        `TargetResolution.reason` is `None`, so the generic wording that
+        predates athenaeum#1884 still fires verbatim."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        index = EntityIndex(wiki)
+        config = _fields_config(current_title={"shape": "scalar", "writers": ["voltaire"]})
+        result = process_correction_record(
+            {
+                "record": "correction",
+                "target": {"uid": "does-not-exist"},
+                "op": "set",
+                "field": "current_title",
+                "value": "VP Engineering",
+                "source": "api:enrichment-vendor",
+                "observed_at": "2026-08-06T05:58:40Z",
+            },
+            _envelope(submitter="voltaire"),
+            index=index,
+            knowledge_root=tmp_path,
+            registry_entities={},
+            config=config,
+        )
+
+        assert result.disposition == "raised-tier"
+        assert result.reason == "target resolves to zero or several entities"

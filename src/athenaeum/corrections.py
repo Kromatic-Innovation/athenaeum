@@ -1285,9 +1285,19 @@ def process_correction_record(
         target,
         index=index,
         registry_entities=registry_entities,
+        knowledge_root=knowledge_root,
+        config=config,
         dry_run_pages=dry_run_pages,
     )
     if resolution.kind == "unresolvable":
+        # athenaeum#1884: an email-handle target carries the specific
+        # `EmailHandleResolution.reason` (e.g. "email-handle-orphan-uid") on
+        # `resolution.reason` -- surface it so the handoff note names the
+        # actual cause instead of the generic zero-or-several wording, which
+        # stays exactly as-is for every non-email-handle unresolvable case
+        # (resolution.reason is None there).
+        if resolution.reason:
+            return _raised(f"target unresolvable: {resolution.reason}")
         return _raised("target resolves to zero or several entities")
 
     if resolution.kind == "creatable" and ratified_source is not None:
