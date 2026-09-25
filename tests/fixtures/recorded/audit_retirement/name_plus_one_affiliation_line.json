@@ -1,0 +1,21 @@
+{
+  "case_id": "name_plus_one_affiliation_line",
+  "content_blocks": [
+    {
+      "text": "```json\n{\n  \"valid_from\": {\"undeterminable\": \"No stated role, event, or effective date provided\"},\n  \"valid_until\": {\"undeterminable\": \"No stated role, event, or effective date provided\"},\n  \"claimed_scope\": {\"value\": \"Works at Brackfen Systems\"},\n  \"retirement_candidate\": false,\n  \"retirement_reason\": \"\"\n}\n```",
+      "type": "text"
+    }
+  ],
+  "layer": "audit_retirement",
+  "model": "claude-haiku-4-5-20251001",
+  "prompt_hash": "sha256:7c8b20c1d813623fad20b9bb99c97a8b15c4511c81f8c3ad90d9566fe2329b2a",
+  "recorded_at": "2026-09-25T05:40:43.674069+00:00",
+  "rederived": null,
+  "response_text": "```json\n{\n  \"valid_from\": {\"undeterminable\": \"No stated role, event, or effective date provided\"},\n  \"valid_until\": {\"undeterminable\": \"No stated role, event, or effective date provided\"},\n  \"claimed_scope\": {\"value\": \"Works at Brackfen Systems\"},\n  \"retirement_candidate\": false,\n  \"retirement_reason\": \"\"\n}\n```",
+  "usage": {
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "input_tokens": 925,
+    "output_tokens": 96
+  }
+}

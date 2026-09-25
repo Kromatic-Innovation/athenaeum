@@ -101,13 +101,13 @@ _RECALL_IDS = _recorded_case_ids(LAYER_RECALL)
 # _EMPTY_LAYER_REASON rather than erroring the suite. Seeding it is a
 # tracked follow-up (an evals.yml record=true run with a live key).
 _UNDERDETERMINED_IDS = _recorded_case_ids(LAYER_UNDERDETERMINED)
-# Issue athenaeum#1869: same never-seeded posture as LAYER_UNDERDETERMINED
-# above — this lane had no live backend to record from either
-# (ANTHROPIC_API_KEY unset). Seeding it (an evals.yml record=true run
-# against the audit-v5 prompt, which athenaeum#1877 restored to the
-# audit-v3 wording measured at 5/6) is a tracked follow-up —
-# athenaeum#1871. Do NOT seed from the audit-v4 record=true artifact: it
-# recorded a 2/6 run.
+# Issue athenaeum#1869, seeded 2026-09-25 by athenaeum#1871 from
+# evals.yml run 36099358949 (record=true at develop, audit-v5):
+# https://github.com/Kromatic-Innovation/athenaeum/actions/runs/36099358949
+# That run scored the layer 5/6 against a floor of 5, with
+# name_only_person_stub the only miss — pinned as a strict xfail in
+# _DISPUTED below rather than silently dropped. Do NOT re-seed from the
+# audit-v4 record=true artifact (run 35466590979): it recorded a 2/6 run.
 _AUDIT_RETIREMENT_IDS = _recorded_case_ids(LAYER_AUDIT_RETIREMENT)
 
 _EMPTY_LAYER_REASON = (
@@ -226,6 +226,29 @@ _DISPUTED: dict[str, str] = {
         "a May Fly.io cutover — temporal supersession, not a live contradiction "
         "with a winner to pick. Kept per athenaeum#760; removed by athenaeum#715 "
         "(needs a re-record)."
+    ),
+    # athenaeum#1871 (audit_retirement layer, seeded at audit-v5): the golden
+    # expects retirement_candidate False for a bare name-only person stub; the
+    # model returns True. Measured 4 misses in 4 samples across BOTH prompt
+    # wordings — the two audit-v3 probes (runs 35466583517 and 35467394981)
+    # and the two audit-v4 runs (35466590979 and 35467028369) — so this is the
+    # prompt's settled behavior, not sampling noise, and athenaeum#1877 left it
+    # in place when it reverted section 2 to the audit-v3 wording as audit-v5.
+    # On the LIVE path the case is covered by the deterministic
+    # athenaeum.audit._is_bare_person_stub override in build_audit_report; this
+    # layer deliberately grades audit_page and bypasses that override, so the
+    # miss surfaces here and nowhere else. strict=True makes this pin the
+    # layer's standing case-level anti-vacuity signal: if a future re-record
+    # starts passing the case, THIS test goes red and the mark has to be
+    # removed on purpose.
+    "name_only_person_stub": (
+        "athenaeum#1871: golden expects retirement_candidate False for a bare "
+        "name-only person stub; the model returns True in 4 of 4 measured "
+        "samples across both the audit-v3 and audit-v4 wordings. Covered on the "
+        "live path by athenaeum.audit._is_bare_person_stub, which this layer "
+        "bypasses by design (it grades audit_page, not build_audit_report). "
+        "Kept per athenaeum#1877, which reverted section 2 to the audit-v3 "
+        "wording as audit-v5 without changing this case's behavior."
     ),
 }
 
@@ -625,18 +648,20 @@ def test_guard_passes_for_unlisted_empty_layer() -> None:
 
 
 def test_manifest_records_the_610_seeding() -> None:
-    """The manifest names the layers athenaeum#610 and athenaeum#1558 seeded (it shipped
-    empty under athenaeum#551).
+    """The manifest names the layers athenaeum#610, athenaeum#1558 and
+    athenaeum#1871 seeded (it shipped empty under athenaeum#551).
 
     This replaces `test_shipped_manifest_is_empty`, whose whole purpose was to
     pin the pre-seeding state until athenaeum#610 ran. Now that it has, the assertion
     that carries weight is the opposite one: every layer recorded by run
-    30760264305 (athenaeum#610) or run 35422372061 (athenaeum#1558, the
-    `underdetermined` layer) must stay listed, so that losing a layer's
-    fixtures trips `test_seeded_manifest_layers_are_populated` instead of
-    passing trivially.
+    30760264305 (athenaeum#610), run 35422372061 (athenaeum#1558, the
+    `underdetermined` layer) or run 36099358949 (athenaeum#1871, the
+    `audit_retirement` layer at audit-v5) must stay listed, so that losing a
+    layer's fixtures trips `test_seeded_manifest_layers_are_populated` instead
+    of passing trivially.
     """
     assert _seeded_layers() == {
+        "audit_retirement",
         "classify",
         "detector",
         "merge",

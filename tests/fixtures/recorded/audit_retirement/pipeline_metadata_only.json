@@ -1,0 +1,21 @@
+{
+  "case_id": "pipeline_metadata_only",
+  "content_blocks": [
+    {
+      "text": "```json\n{\n  \"valid_from\": {\"undeterminable\": \"No stated role, event, or effective date provided; only CRM outreach-list membership mentioned\"},\n  \"valid_until\": {\"undeterminable\": \"No stated role, event, or effective date provided; only CRM outreach-list membership mentioned\"},\n  \"claimed_scope\": {\"undeterminable\": \"No role, affiliation, or scope claim stated in page body\"},\n  \"retirement_candidate\": true,\n  \"retirement_reason\": \"Page body states no claim beyond a name and single CRM pipeline-list reference; placeholder without enrichment\"\n}\n```",
+      "type": "text"
+    }
+  ],
+  "layer": "audit_retirement",
+  "model": "claude-haiku-4-5-20251001",
+  "prompt_hash": "sha256:d1bc28c611f291965304eae4d8759e6892d28f3ef752eaf91e38eb6ace1857ee",
+  "recorded_at": "2026-09-25T05:40:45.384330+00:00",
+  "rederived": null,
+  "response_text": "```json\n{\n  \"valid_from\": {\"undeterminable\": \"No stated role, event, or effective date provided; only CRM outreach-list membership mentioned\"},\n  \"valid_until\": {\"undeterminable\": \"No stated role, event, or effective date provided; only CRM outreach-list membership mentioned\"},\n  \"claimed_scope\": {\"undeterminable\": \"No role, affiliation, or scope claim stated in page body\"},\n  \"retirement_candidate\": true,\n  \"retirement_reason\": \"Page body states no claim beyond a name and single CRM pipeline-list reference; placeholder without enrichment\"\n}\n```",
+  "usage": {
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "input_tokens": 923,
+    "output_tokens": 148
+  }
+}

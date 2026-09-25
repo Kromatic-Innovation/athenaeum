@@ -56,3 +56,6 @@ seeded:
   resolver:
     date: 2026-08-02
     run: https://github.com/Kromatic-Innovation/athenaeum/actions/runs/30760264305
+  audit_retirement:
+    date: 2026-09-25
+    run: https://github.com/Kromatic-Innovation/athenaeum/actions/runs/36099358949

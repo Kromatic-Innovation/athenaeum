@@ -1,0 +1,21 @@
+{
+  "case_id": "self_declared_filename_artifact",
+  "content_blocks": [
+    {
+      "text": "```json\n{\n  \"valid_from\": {\"undeterminable\": \"page states entity is spurious artifact of filename parsing, no actual role or event to establish date\"},\n  \"valid_until\": {\"undeterminable\": \"page states entity is spurious artifact of filename parsing, no actual role or event to establish date\"},\n  \"claimed_scope\": {\"undeterminable\": \"page states entity is spurious artifact of filename parsing, no scope claim made\"},\n  \"retirement_candidate\": true,\n  \"retirement_reason\": \"page explicitly states the entity itself is spurious \u2014 an artifact of parsing a filename \u2014 and makes no claim\"\n}\n```",
+      "type": "text"
+    }
+  ],
+  "layer": "audit_retirement",
+  "model": "claude-haiku-4-5-20251001",
+  "prompt_hash": "sha256:fdc08dc614c5ddf5fea30b987d923fd3f32b182e0b55f2ba3e3fe302ba61213e",
+  "recorded_at": "2026-09-25T05:40:48.187775+00:00",
+  "rederived": null,
+  "response_text": "```json\n{\n  \"valid_from\": {\"undeterminable\": \"page states entity is spurious artifact of filename parsing, no actual role or event to establish date\"},\n  \"valid_until\": {\"undeterminable\": \"page states entity is spurious artifact of filename parsing, no actual role or event to establish date\"},\n  \"claimed_scope\": {\"undeterminable\": \"page states entity is spurious artifact of filename parsing, no scope claim made\"},\n  \"retirement_candidate\": true,\n  \"retirement_reason\": \"page explicitly states the entity itself is spurious \u2014 an artifact of parsing a filename \u2014 and makes no claim\"\n}\n```",
+  "usage": {
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "input_tokens": 943,
+    "output_tokens": 148
+  }
+}

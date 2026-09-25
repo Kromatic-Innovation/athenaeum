@@ -34,16 +34,21 @@ Per-case outcomes are appended to the session accumulator; the aggregate
 pass floor is asserted in :func:`test_audit_retirement_aggregate_floor` —
 a single miss does not flake main, but a systemic regression does.
 
-**Never seeded.** No live LLM backend was reachable from the lane that
-built this layer (``ANTHROPIC_API_KEY`` unset) — see the PR body and
-``tests/fixtures/recorded/audit_retirement/`` (absent by design; the layer
-is unlisted in ``tests/fixtures/recorded/seeded-layers.yml``, so
-``tests/test_recorded_fixtures.py``'s replay tests skip cleanly with an
-explicit reason rather than erroring the suite, exactly like every other
-never-seeded layer). Seeding it (an ``evals.yml`` ``record=true`` run
-against the ``audit-v5`` prompt, which athenaeum#1877 restored to the
-``audit-v3`` wording measured at 5/6) is a tracked follow-up —
-athenaeum#1871.
+**Seeded 2026-09-25 at audit-v5**, by athenaeum#1871, from ``evals.yml``
+run 36099358949
+(https://github.com/Kromatic-Innovation/athenaeum/actions/runs/36099358949)
+— a ``record=true`` dispatch at ``develop``, whose ``AUDIT_SYSTEM``
+athenaeum#1877 had restored to the ``audit-v3`` wording measured at 5/6.
+That run scored this layer 5/6 against a floor of 5.
+``tests/fixtures/recorded/audit_retirement/`` now holds one fixture per
+case and the layer is listed in
+``tests/fixtures/recorded/seeded-layers.yml``, so
+``tests/test_recorded_fixtures.py``'s replay test replays real recorded
+verdicts with zero network instead of skipping. Its one miss,
+``name_only_person_stub``, is pinned there as a **strict** xfail rather
+than dropped — see that module's ``_DISPUTED`` entry. Do NOT re-seed from
+the ``audit-v4`` ``record=true`` artifact (run 35466590979): it recorded a
+2/6 run.
 
 Marker: ``pytest.mark.eval`` — deselected by default (see pyproject).
 """
