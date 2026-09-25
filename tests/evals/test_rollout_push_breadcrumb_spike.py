@@ -49,7 +49,7 @@ import pytest
 from tests.evals.corpus import build_corpus
 from tests.evals.rollout import (
     SESSION_START_HOOK,
-    USER_PROMPT_HOOK,
+    SHELL_USER_PROMPT_HOOK,
     build_push_breadcrumb_context,
 )
 
@@ -109,7 +109,7 @@ def _run_hook_directly(knowledge_root: Path, home: Path, query: str, session_id:
     assert start.returncode == 0, f"session-start-recall.sh failed: {start.stderr}"
 
     result = subprocess.run(
-        ["bash", str(USER_PROMPT_HOOK)],
+        ["bash", str(SHELL_USER_PROMPT_HOOK)],
         input=json.dumps({"prompt": query, "session_id": session_id}),
         env=env,
         capture_output=True,
@@ -122,14 +122,23 @@ def _run_hook_directly(knowledge_root: Path, home: Path, query: str, session_id:
     return str(payload["hookSpecificOutput"]["additionalContext"])
 
 
-def test_push_breadcrumb_arm_is_byte_equivalent_to_the_real_hook(tmp_path: Path) -> None:
+def test_push_breadcrumb_arm_is_byte_equivalent_to_the_real_hook(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """AC1: runs the REAL shipped hook against the REAL materialized
     rollout corpus (``tests.evals.corpus.build_corpus``), and separately
     calls :func:`build_push_breadcrumb_context` — the exact function
     :func:`tests.evals.rollout.run_push_breadcrumb` uses to assemble its
     context — against the SAME corpus and query, then asserts the two
     strings are byte-identical.
+
+    Issue athenaeum#1887 pinned ``ATHENAEUM_EVAL_HOOK=shell``: this AC is
+    specifically about the shell hook's own ranking/clamp/budget logic, so
+    it must keep exercising that implementation regardless of which hook
+    the harness spawns by default now (the packaged adapter — a DIFFERENT
+    implementation this AC says nothing about).
     """
+    monkeypatch.setenv("ATHENAEUM_EVAL_HOOK", "shell")
     _require("bash")
     _require("jq")
     _require_fts5_sqlite()
@@ -162,14 +171,18 @@ def test_push_breadcrumb_arm_is_byte_equivalent_to_the_real_hook(tmp_path: Path)
 
 
 def test_push_breadcrumb_arm_matches_the_real_hook_across_multiple_probes(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The same proof as above, repeated over several probes so the
     byte-equivalence claim is not an artifact of one lucky query — a
     ranking/clamp divergence that only shows up on ties, on a
     description-bearing page, or on zero-hit queries would otherwise slip
     through a single-probe test.
+
+    Issue athenaeum#1887: same ``ATHENAEUM_EVAL_HOOK=shell`` pin as the
+    single-probe test above, and for the same reason.
     """
+    monkeypatch.setenv("ATHENAEUM_EVAL_HOOK", "shell")
     _require("bash")
     _require("jq")
     _require_fts5_sqlite()

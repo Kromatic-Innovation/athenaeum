@@ -412,6 +412,21 @@ The arms split unevenly on purpose:
   (`--tools ""` / unscoped `--strict-mcp-config`, athenaeum#906/#775) is
   untouched — this is a sibling argv builder, not a parameterization of it.
 
+**`ATHENAEUM_EVAL_HOOK` — which `UserPromptSubmit` hook the PUSH_BREADCRUMB
+arms spawn.** `run_push_breadcrumb`/`run_push_breadcrumb_pull` build their
+context by actually running a real hook subprocess
+(`build_push_breadcrumb_context` → `query_hook` →
+`tests.evals.rollout.resolve_user_prompt_hook`), never a Python
+reimplementation of its ranking/clamp/budget logic. By default that hook is
+the packaged adapter console script (`athenaeum-claude-hook`,
+`src/athenaeum/claude_code_adapter.py`) — the live path since the
+athenaeum#1361 cutover, resolved from the active environment (`PATH`, or a
+sibling of the running interpreter), never a hardcoded path. Set
+`ATHENAEUM_EVAL_HOOK=shell` to fall back to the retired
+`examples/claude-code/user-prompt-recall.sh` instead — a one-release escape
+hatch so the two paths can still be compared side by side in this harness;
+it does not resurrect the shell implementation as a shipped default.
+
 The PULL spike (proving the subprocess actually reaches the scoped MCP
 server and that `stream-json` records the call) is reproduced as a test —
 `tests/evals/test_rollout_pull_spike.py` — split into an unauthenticated
