@@ -1764,6 +1764,66 @@ _VECTOR_CLIENT_LOCK = threading.Lock()
 # degraded/None-yielding results from the pinned old handle.
 _VECTOR_GENERATION = ".generation"
 
+# Issue athenaeum#1899: onnxruntime ships with Microsoft's 1DS telemetry client
+# enabled by default. On the operator host this produced two observed effects:
+# outbound HTTP calls from athenaeum processes, and — the crashing one — at
+# interpreter shutdown the telemetry client's own worker thread races the main
+# thread's C++ `TelemetrySystem` teardown, locks an already-destroyed
+# `std::recursive_mutex`, and the process dies with SIGABRT (exit 134) *after
+# all Python work has already completed*. Two macOS crash reports carry the
+# identical faulting stack on onnxruntime 1.29.0 and 1.30.0, so this is not a
+# single-release regression. Any wrapper that reads the exit code (launchd,
+# `timeout`, a lane's shell) then sees a finished run as failed.
+# True once we have tried to disable telemetry (even on failure) — see
+# `_disable_onnxruntime_telemetry`'s docstring for why this must run once,
+# early, and tolerate every failure mode.
+_ORT_TELEMETRY_DISABLED: bool = False
+
+
+def _disable_onnxruntime_telemetry() -> None:
+    """Best-effort, once-per-process ``onnxruntime.disable_telemetry_events()`` (athenaeum#1899).
+
+    **Why here, and why "once."** The crash this guards against is a race in
+    onnxruntime's C++ telemetry worker thread at interpreter shutdown — it only
+    exists once that thread has started, which happens when onnxruntime opens
+    its first ``InferenceSession``, not at plain ``import onnxruntime`` (import
+    alone starts no session, no thread). Neither does ``import chromadb``
+    import onnxruntime on our behalf: chromadb defers that to its default
+    embedding function, touched only on first embed/query. :meth:`VectorBackend._get_chromadb`
+    is called at backend-open time, strictly before any embedding/query call
+    can occur — so importing onnxruntime a little early, right here, and
+    disabling its telemetry immediately, is the earliest point that is both
+    reachable and guaranteed to land before the first inference. Guarded by
+    :data:`_ORT_TELEMETRY_DISABLED` (mirroring the ``_EF``/``_EF_LOADED``
+    memoized-once-per-process shape below in the embedding helpers section) so
+    the import + call happens at most once per process rather than on every
+    backend open.
+
+    **Why tolerant of everything.** Wrapped in a bare ``except Exception`` —
+    the same fallback posture as :func:`VectorBackend._embedding_function` —
+    so a missing ``[vector]`` extra, a renamed/removed API in a future
+    onnxruntime release, or any other import-time surprise never blocks the
+    vector backend. Logged at DEBUG rather than WARNING: failure here only
+    means the telemetry mitigation doesn't apply this run, not that anything
+    the caller asked for failed.
+    """
+    global _ORT_TELEMETRY_DISABLED
+    if _ORT_TELEMETRY_DISABLED:
+        return
+    _ORT_TELEMETRY_DISABLED = True
+    try:
+        import onnxruntime
+
+        onnxruntime.disable_telemetry_events()
+    except Exception as exc:  # noqa: BLE001 — best-effort mitigation, never fatal
+        import logging
+
+        logging.getLogger(__name__).debug(
+            "search: onnxruntime telemetry disable skipped (%s: %s) — issue athenaeum#1899",
+            type(exc).__name__,
+            exc,
+        )
+
 
 class DegradedIndexError(RuntimeError):
     """The vector index returned a degenerate (non-ranked) result set (athenaeum#489).
@@ -1988,9 +2048,20 @@ class VectorBackend:
         self._seen_generation = generation
 
     def _get_chromadb(self) -> Any:
+        """Import and return the ``chromadb`` module, raising a friendly error if absent.
+
+        Also disables onnxruntime's telemetry client (issue athenaeum#1899) —
+        see :func:`_disable_onnxruntime_telemetry` for why this is the correct
+        place to do it and why it must run before returning: every other
+        ``VectorBackend`` method that touches embeddings or queries goes
+        through this method first to get its ``chromadb`` handle, so this is
+        the one choke point guaranteed to run before onnxruntime's first
+        inference on every backend-open path.
+        """
         try:
             import chromadb
 
+            _disable_onnxruntime_telemetry()
             return chromadb
         except ImportError as exc:
             raise ImportError(

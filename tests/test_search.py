@@ -448,6 +448,70 @@ class TestVectorQueryChromadbMissing:
         assert len(results) > 0
 
 
+class TestOnnxruntimeTelemetryDisable:
+    """Issue athenaeum#1899: onnxruntime's 1DS telemetry client races its own
+    worker thread against interpreter shutdown and aborts a finished process
+    with SIGABRT. ``_get_chromadb()`` must call
+    ``onnxruntime.disable_telemetry_events()`` early, exactly once per
+    process, and must never let a missing/renamed onnxruntime API raise out
+    of the vector backend. These tests patch a stub ``onnxruntime`` module
+    (or remove it) rather than depending on the real package being
+    installed -- same posture as :class:`TestVectorQueryChromadbMissing`
+    above for ``chromadb`` itself.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_ort_telemetry_memo(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``_ORT_TELEMETRY_DISABLED`` is process-global module state -- reset
+        it before every test in this class so one test's memoized call can't
+        mask another's call-count assertion (mirrors ``_reset_ef_memo`` for
+        the ``_EF``/``_EF_LOADED`` pair above)."""
+        monkeypatch.setattr(search_module, "_ORT_TELEMETRY_DISABLED", False)
+
+    @pytest.fixture(autouse=True)
+    def _require_chromadb(self) -> None:
+        pytest.importorskip("chromadb")
+
+    def test_get_chromadb_disables_telemetry_once_across_two_calls(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[None] = []
+
+        class _StubOrt:
+            @staticmethod
+            def disable_telemetry_events() -> None:
+                calls.append(None)
+
+        monkeypatch.setitem(sys.modules, "onnxruntime", _StubOrt())
+
+        backend = VectorBackend()
+        backend._get_chromadb()
+        backend._get_chromadb()
+
+        assert len(calls) == 1
+
+    def test_get_chromadb_tolerates_onnxruntime_import_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setitem(sys.modules, "onnxruntime", None)
+
+        chromadb_module = VectorBackend()._get_chromadb()
+
+        assert chromadb_module.__name__ == "chromadb"
+
+    def test_get_chromadb_tolerates_disable_telemetry_events_attribute_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class _StubOrtMissingApi:
+            pass  # no disable_telemetry_events attribute
+
+        monkeypatch.setitem(sys.modules, "onnxruntime", _StubOrtMissingApi())
+
+        chromadb_module = VectorBackend()._get_chromadb()
+
+        assert chromadb_module.__name__ == "chromadb"
+
+
 class TestHitsFromQueryResults:
     """athenaeum#489 AC3/AC4: hardened parsing of a chromadb query result — no crash on
     a None metadata, and a degenerate flat-score set surfaces explicitly.

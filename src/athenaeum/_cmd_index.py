@@ -55,7 +55,10 @@ def add_index_subparsers(subparsers: argparse._SubParsersAction) -> None:
         "--incremental run does not otherwise touch. Only --full re-parses "
         "every page from scratch and refills them. To check the result, run "
         "`SELECT COUNT(*) FROM wiki WHERE aliases != ''` against "
-        "cache-dir/wiki-index.db (swap in tags for the other column).",
+        "cache-dir/wiki-index.db (swap in tags for the other column). The "
+        "vector backend disables onnxruntime's telemetry client at import, "
+        "before it can start its background worker thread, to prevent a "
+        "shutdown-time crash in that thread (athenaeum#1899).",
     )
     rebuild_parser.add_argument(
         "--path",
