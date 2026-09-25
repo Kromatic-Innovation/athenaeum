@@ -1,0 +1,21 @@
+{
+  "case_id": "name_only_person_stub",
+  "content_blocks": [
+    {
+      "text": "```json\n{\n  \"valid_from\": {\"undeterminable\": \"no stated role, event, or effective date in page body or cited sources\"},\n  \"valid_until\": {\"undeterminable\": \"no stated role, event, or effective date in page body or cited sources\"},\n  \"claimed_scope\": {\"undeterminable\": \"page contains only a name with no claim, affiliation, or scope statement\"},\n  \"retirement_candidate\": true,\n  \"retirement_reason\": \"page body holds only a name with no independent observation, judgment, synthesis, or affiliation\"\n}\n```",
+      "type": "text"
+    }
+  ],
+  "layer": "audit_retirement",
+  "model": "claude-haiku-4-5-20251001",
+  "prompt_hash": "sha256:64b77d1630baf08d3e6a011cf0b987feed947455dcef270c7fb351bf0321e3bd",
+  "recorded_at": "2026-09-25T05:40:42.418266+00:00",
+  "rederived": null,
+  "response_text": "```json\n{\n  \"valid_from\": {\"undeterminable\": \"no stated role, event, or effective date in page body or cited sources\"},\n  \"valid_until\": {\"undeterminable\": \"no stated role, event, or effective date in page body or cited sources\"},\n  \"claimed_scope\": {\"undeterminable\": \"page contains only a name with no claim, affiliation, or scope statement\"},\n  \"retirement_candidate\": true,\n  \"retirement_reason\": \"page body holds only a name with no independent observation, judgment, synthesis, or affiliation\"\n}\n```",
+  "usage": {
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "input_tokens": 915,
+    "output_tokens": 137
+  }
+}

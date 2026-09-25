@@ -1,0 +1,21 @@
+{
+  "case_id": "dated_engagement_with_pipeline_metadata",
+  "content_blocks": [
+    {
+      "text": "```json\n{\n  \"valid_from\": {\"value\": \"2019-08\"},\n  \"valid_until\": {\"value\": \"2019-11\"},\n  \"claimed_scope\": {\"undeterminable\": \"page body states an engagement outcome but does not describe the scope of products, services, or business activity\"},\n  \"retirement_candidate\": false,\n  \"retirement_reason\": \"\"\n}\n```",
+      "type": "text"
+    }
+  ],
+  "layer": "audit_retirement",
+  "model": "claude-haiku-4-5-20251001",
+  "prompt_hash": "sha256:92c9dbaff0b0a7fc7eee00377046200a358d2a6c443270bab3f35286b45745d6",
+  "recorded_at": "2026-09-25T05:40:46.660453+00:00",
+  "rederived": null,
+  "response_text": "```json\n{\n  \"valid_from\": {\"value\": \"2019-08\"},\n  \"valid_until\": {\"value\": \"2019-11\"},\n  \"claimed_scope\": {\"undeterminable\": \"page body states an engagement outcome but does not describe the scope of products, services, or business activity\"},\n  \"retirement_candidate\": false,\n  \"retirement_reason\": \"\"\n}\n```",
+  "usage": {
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "input_tokens": 940,
+    "output_tokens": 95
+  }
+}
