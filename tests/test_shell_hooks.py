@@ -52,6 +52,36 @@ def _require(tool: str) -> None:
         pytest.skip(f"{tool} not available on this runner")
 
 
+def _env_without_op(base_env: dict[str, str]) -> dict[str, str]:
+    """*base_env* with every PATH entry that provides an `op` binary removed.
+
+    athenaeum#1886's "fetch fails or is skipped" cases need `op` provably
+    absent — filtering PATH here (rather than trusting the runner's ambient
+    state) keeps those tests hermetic even on a machine that happens to have
+    the real 1Password CLI installed.
+    """
+    env = dict(base_env)
+    dirs = [d for d in env.get("PATH", "").split(os.pathsep) if d]
+    safe_dirs = [d for d in dirs if not os.path.isfile(os.path.join(d, "op"))]
+    env["PATH"] = os.pathsep.join(safe_dirs)
+    return env
+
+
+def _write_fake_op(tmp_path: Path, fetched_key: str) -> Path:
+    """A stub `op` binary that ignores its arguments and echoes *fetched_key*.
+
+    Used to exercise the "fresh `op read` succeeds" path without touching a
+    real 1Password session — `fetched_key` is always an obvious synthetic
+    sentinel, never a real-looking credential.
+    """
+    bin_dir = tmp_path / "fake-op-bin"
+    bin_dir.mkdir(exist_ok=True)
+    op_stub = bin_dir / "op"
+    op_stub.write_text(f"#!/usr/bin/env bash\necho {shlex.quote(fetched_key)}\n")
+    op_stub.chmod(0o755)
+    return bin_dir
+
+
 def _write_shadow_athenaeum_package(tmp_path: Path) -> Path:
     """athenaeum#1826: a directory holding a SHADOW ``athenaeum`` package
     whose ``__init__.py`` unconditionally raises ``ImportError`` -- put
@@ -508,6 +538,109 @@ class TestSessionStartRecall:
             timeout=10,
         )
         assert result.returncode == 0
+
+    def test_cached_key_preserved_when_op_fetch_fails(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """athenaeum#1886 AC1: a cached ANTHROPIC_API_KEY line must survive
+        a run where the fetch fails (here, `op` is absent from PATH
+        entirely) — the config.env writers both truncate the file, and only
+        the restore this issue adds carries the line forward."""
+        _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        cache_dir = tmp_path / ".cache" / "athenaeum"
+        cache_dir.mkdir(parents=True)
+        (cache_dir / "config.env").write_text(
+            "AUTO_RECALL=true\n"
+            "SEARCH_BACKEND=fts5\n"
+            "ANTHROPIC_API_KEY=synthetic-cached-key-preserved\n"
+        )
+
+        env = _env_without_op(hook_env)
+        assert shutil.which("op", path=env["PATH"]) is None, (
+            "test setup bug: `op` still reachable on the filtered PATH"
+        )
+
+        result = subprocess.run(
+            ["bash", str(SESSION_START)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+
+        body = (cache_dir / "config.env").read_text()
+        key_lines = [line for line in body.splitlines() if line.startswith("ANTHROPIC_API_KEY=")]
+        assert key_lines == ["ANTHROPIC_API_KEY=synthetic-cached-key-preserved"]
+        assert "No ANTHROPIC_API_KEY cached" not in result.stderr
+
+    def test_fresh_op_fetch_replaces_cached_key(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """athenaeum#1886 AC2: a fresh successful `op read` must still
+        replace the cached value, not just preserve it."""
+        _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        cache_dir = tmp_path / ".cache" / "athenaeum"
+        cache_dir.mkdir(parents=True)
+        (cache_dir / "config.env").write_text(
+            "AUTO_RECALL=true\n"
+            "SEARCH_BACKEND=fts5\n"
+            "ANTHROPIC_API_KEY=synthetic-cached-key-stale\n"
+        )
+
+        env = _env_without_op(hook_env)
+        fake_op_dir = _write_fake_op(tmp_path, "synthetic-fresh-key-from-op")
+        env["PATH"] = f"{fake_op_dir}{os.pathsep}{env['PATH']}"
+        assert shutil.which("op", path=env["PATH"]) == str(fake_op_dir / "op")
+
+        result = subprocess.run(
+            ["bash", str(SESSION_START)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+
+        body = (cache_dir / "config.env").read_text()
+        key_lines = [line for line in body.splitlines() if line.startswith("ANTHROPIC_API_KEY=")]
+        assert key_lines == ["ANTHROPIC_API_KEY=synthetic-fresh-key-from-op"]
+        assert "No ANTHROPIC_API_KEY cached" not in result.stderr
+
+    def test_no_cached_key_and_op_failing_warns_once_on_stderr(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """athenaeum#1886 AC3: a run that ends with no key at all (nothing
+        cached, and the fetch fails because `op` is absent) must print
+        exactly one clear warning to stderr, so the degrade is visible
+        instead of silent."""
+        _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        env = _env_without_op(hook_env)
+        assert shutil.which("op", path=env["PATH"]) is None, (
+            "test setup bug: `op` still reachable on the filtered PATH"
+        )
+
+        result = subprocess.run(
+            ["bash", str(SESSION_START)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+
+        cache_dir = tmp_path / ".cache" / "athenaeum"
+        body = (cache_dir / "config.env").read_text()
+        assert "ANTHROPIC_API_KEY=" not in body
+        assert result.stderr.count("No ANTHROPIC_API_KEY cached") == 1, (
+            f"expected exactly one warning line, got stderr: {result.stderr!r}"
+        )
 
 
 class TestUserPromptRecall:
