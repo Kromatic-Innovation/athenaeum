@@ -1137,8 +1137,10 @@ def query_hook(
     Returns ``""`` when the hook itself declines to inject anything -- a
     too-short prompt, no FTS match -- mirroring the hook's own "exit 0, no
     output" behaviour. Raises :class:`HookIndexBuildError` on a subprocess
-    timeout or nonzero exit, same exception type :func:`build_hook_index`
-    raises, so callers need only one ``except`` clause.
+    timeout, or on a resolved hook that cannot be spawned at all (issue
+    athenaeum#1887 -- argv[0] is the hook itself now, not ``bash``), same
+    exception type :func:`build_hook_index` raises, so callers need only one
+    ``except`` clause.
     """
     env = build_breadcrumb_hook_env(knowledge_root, hook_home, athenaeum_src=athenaeum_src)
     stdin_payload = json.dumps(
@@ -1156,6 +1158,21 @@ def query_hook(
         )
     except subprocess.TimeoutExpired as exc:
         raise HookIndexBuildError(_describe_hook_subprocess_error(exc)) from exc
+    except FileNotFoundError as exc:
+        # ``argv[0]`` is now the RESOLVED hook rather than the always-present
+        # ``bash`` this function spawned before issue athenaeum#1887, so a
+        # hook that is not on disk at all is newly reachable: it is exactly
+        # the documented fallback ``_resolve_adapter_console_script`` returns
+        # (the bare command name) when the packaged console script is neither
+        # on ``PATH`` nor beside ``sys.executable``. That fallback's own
+        # docstring promises the spawn attempt surfaces as a
+        # :class:`HookIndexBuildError`/``RolloutRecord.harness_failure``, and
+        # only this wrap makes that true -- a bare ``FileNotFoundError``
+        # passes straight through :func:`_safe_assemble_breadcrumb` and
+        # aborts the whole rollout instead of failing the one cell.
+        raise HookIndexBuildError(
+            f"FileNotFoundError: {exc} -- hook argv: {argv!r}"
+        ) from exc
     if not result.stdout.strip():
         return ""
     payload = json.loads(result.stdout)
