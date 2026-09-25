@@ -32,15 +32,21 @@ never raise on an empty tool call list, and ``RolloutRecord.recall_called``
 is simply ``False``.
 
 **PUSH means breadcrumbs (issue athenaeum#1574's operator decision).** The
-shipped hook (``examples/claude-code/user-prompt-recall.sh``) injects at
-most three 200-character-clamped ``name — description`` bullets, not five
-full pages. :func:`run_push_breadcrumb` and :func:`run_push_breadcrumb_pull`
-match that shape by ACTUALLY RUNNING the shipped hook
-(:func:`build_push_breadcrumb_context`) rather than reimplementing its
-SQL ranking / awk budget-and-clamp pass — see that function's docstring.
-The original five-full-page arm survives, renamed to
-:attr:`Arm.PUSH_PAGES_UPPER_BOUND` (:func:`run_push_pages_upper_bound`),
-explicitly labelled an upper bound rather than the shipped configuration.
+live ``UserPromptSubmit`` hook injects at most three 200-character-clamped
+``name — description`` bullets, not five full pages. :func:`run_push_breadcrumb`
+and :func:`run_push_breadcrumb_pull` match that shape by ACTUALLY RUNNING
+the hook (:func:`build_push_breadcrumb_context`) rather than reimplementing
+its ranking/budget/clamp pass in Python — see that function's docstring.
+**Which hook is "the hook" is itself resolved, not hardcoded** (issue
+athenaeum#1887): by default this is the packaged adapter console script
+(``athenaeum-claude-hook``, :mod:`athenaeum.claude_code_adapter`), the live
+path since the athenaeum#1361 cutover; ``ATHENAEUM_EVAL_HOOK=shell`` is a
+one-release escape hatch back to the retired
+``examples/claude-code/user-prompt-recall.sh`` (see
+:func:`resolve_user_prompt_hook`). The original five-full-page arm survives,
+renamed to :attr:`Arm.PUSH_PAGES_UPPER_BOUND`
+(:func:`run_push_pages_upper_bound`), explicitly labelled an upper bound
+rather than the shipped configuration.
 
 Reuse, not reimplementation:
 
@@ -49,9 +55,11 @@ Reuse, not reimplementation:
   ``tests/test_retrieval_golden_1420.py:132``).
 * PUSH_PAGES_UPPER_BOUND delivery: mirrors ``athenaeum.mcp_server.recall_search``
   directly — same function, same default top_k.
-* PUSH_BREADCRUMB / PUSH_BREADCRUMB_PULL delivery: the shipped hook itself,
-  spawned as a subprocess exactly as Claude Code would invoke it — never a
-  second implementation of its ranking/clamp/budget logic.
+* PUSH_BREADCRUMB / PUSH_BREADCRUMB_PULL delivery: the live hook itself
+  (the packaged adapter by default, the shell script under
+  ``ATHENAEUM_EVAL_HOOK=shell``), spawned as a subprocess exactly as Claude
+  Code would invoke it — never a second implementation of its
+  ranking/clamp/budget logic.
 * Grading: intentionally NOT called here. ``tests/evals/metrics.py``'s
   ladder grades a *push* (ranked uids vs. ground truth); this module's job
   ends at capturing a :class:`RolloutRecord` with enough fidelity for a
@@ -788,7 +796,75 @@ def run_push_pages_upper_bound(
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _HOOKS_DIR = _REPO_ROOT / "examples" / "claude-code"
 SESSION_START_HOOK = _HOOKS_DIR / "session-start-recall.sh"
-USER_PROMPT_HOOK = _HOOKS_DIR / "user-prompt-recall.sh"
+
+#: The retired shell ``UserPromptSubmit`` hook, unconditionally — never
+#: resolved by env flag. Kept as a named constant (rather than an inline
+#: ``_HOOKS_DIR / "..."`` literal) for the one caller that must always
+#: exercise the real shipped script regardless of which hook
+#: :data:`USER_PROMPT_HOOK` currently resolves to: a byte-equivalence proof
+#: comparing the shell hook against itself would be vacuous, so
+#: ``test_rollout_push_breadcrumb_spike.py`` imports THIS name, not
+#: :data:`USER_PROMPT_HOOK` (issue athenaeum#1887).
+SHELL_USER_PROMPT_HOOK = _HOOKS_DIR / "user-prompt-recall.sh"
+
+
+def _resolve_adapter_console_script() -> Path:
+    """Resolve the packaged ``athenaeum-claude-hook`` console script
+    (:mod:`athenaeum.claude_code_adapter`, ``[project.scripts]`` in
+    ``pyproject.toml``) from the ACTIVE environment (issue athenaeum#1887) —
+    never a hardcoded absolute path, and never a literal that could embed a
+    developer's home directory (``public-safe-lint.sh`` forbids exactly
+    that).
+
+    Tries :func:`shutil.which` first (the console script's own installed
+    location, wherever the active venv's ``PATH`` entry puts it), then falls
+    back to a sibling of the running interpreter (``sys.executable``'s own
+    directory) — where a venv's console scripts and its ``python`` binary
+    always live side by side, even on a ``PATH`` that does not include the
+    venv's ``bin/`` directly. If neither resolves, returns the bare command
+    name so a spawn attempt fails loudly (surfaced as a
+    :class:`HookIndexBuildError`/``RolloutRecord.harness_failure`` by
+    :func:`query_hook`'s caller) instead of silently pointing at a path that
+    can never exist.
+    """
+    found = shutil.which("athenaeum-claude-hook")
+    if found:
+        return Path(found)
+    sibling = Path(sys.executable).parent / "athenaeum-claude-hook"
+    if sibling.exists():
+        return sibling
+    return Path("athenaeum-claude-hook")
+
+
+def resolve_user_prompt_hook() -> Path:
+    """Resolve which ``UserPromptSubmit`` hook :func:`query_hook` spawns for
+    the PUSH_BREADCRUMB/PUSH_BREADCRUMB_PULL arms (issue athenaeum#1887).
+
+    Defaults to the packaged adapter console script
+    (:func:`_resolve_adapter_console_script`) — the live path since the
+    athenaeum#1361 cutover, so the eval measures the hook that actually runs
+    on the operator's host. Set ``ATHENAEUM_EVAL_HOOK=shell`` to select
+    :data:`SHELL_USER_PROMPT_HOOK` instead — a one-release escape hatch so
+    the two paths can still be compared side by side in this harness; NOT a
+    request to delete the shell implementation (that is issue athenaeum#1363,
+    explicitly out of scope here).
+
+    Re-resolved on every call (never cached at import) so a test's
+    ``monkeypatch.setenv("ATHENAEUM_EVAL_HOOK", ...)`` takes effect
+    immediately, including after this module has already been imported.
+    """
+    if os.environ.get("ATHENAEUM_EVAL_HOOK") == "shell":
+        return SHELL_USER_PROMPT_HOOK
+    return _resolve_adapter_console_script()
+
+
+#: The default hook :func:`query_hook` spawns, resolved once at import for
+#: callers that just need "what does the default currently point at"
+#: (see ``tests/evals/test_eval_hook_resolution_1887.py``'s AC3 unit test).
+#: :func:`query_hook` itself calls :func:`resolve_user_prompt_hook` fresh on
+#: every invocation rather than reading this constant, so a later
+#: ``ATHENAEUM_EVAL_HOOK`` override still takes effect within one process.
+USER_PROMPT_HOOK = resolve_user_prompt_hook()
 
 
 def build_breadcrumb_hook_env(
@@ -1015,6 +1091,30 @@ def build_hook_index(
         _HOOK_INDEX_CACHE[key] = None
 
 
+def user_prompt_hook_argv(hook_path: Path) -> list[str]:
+    """Build the subprocess argv for *hook_path* (issue athenaeum#1887).
+
+    Public so every caller that spawns the resolved ``UserPromptSubmit``
+    hook -- not just :func:`query_hook` -- can follow the SAME
+    default-adapter/``ATHENAEUM_EVAL_HOOK=shell``-escape-hatch shape rather
+    than each hand-rolling its own ``["bash", ...]`` argv (the exact drift
+    that left ``tests/evals/test_recall_covers_grep.py`` spawning ``bash``
+    against a Python console script until this issue's follow-up fixed it).
+    Typical call shape: ``user_prompt_hook_argv(resolve_user_prompt_hook())``.
+
+    :data:`SHELL_USER_PROMPT_HOOK` (and any other ``.sh`` path -- the
+    ``ATHENAEUM_EVAL_HOOK=shell`` escape hatch) needs an explicit ``bash``
+    interpreter, same as :data:`SESSION_START_HOOK` (unaffected by this
+    issue -- the index build always shells the ``.sh`` sibling). The default
+    packaged adapter console script is its own executable -- installed with
+    a real shebang by ``[project.scripts]`` -- and is run directly, with no
+    interpreter prefix.
+    """
+    if hook_path.suffix == ".sh":
+        return ["bash", str(hook_path)]
+    return [str(hook_path)]
+
+
 def query_hook(
     knowledge_root: Path,
     hook_home: Path,
@@ -1024,7 +1124,9 @@ def query_hook(
     athenaeum_src: Path | None = None,
     timeout: float = HOOK_QUERY_TIMEOUT_SECONDS,
 ) -> str:
-    """Run :data:`USER_PROMPT_HOOK` for *query* against the index
+    """Run the resolved ``UserPromptSubmit`` hook (:func:`resolve_user_prompt_hook`
+    -- the packaged adapter by default, :data:`SHELL_USER_PROMPT_HOOK` under
+    ``ATHENAEUM_EVAL_HOOK=shell``) for *query* against the index
     :func:`build_hook_index` already built under *hook_home*, and return
     ``hookSpecificOutput.additionalContext`` verbatim -- the ``query_hook``
     half of what ``build_push_breadcrumb_context`` used to do in one call
@@ -1035,16 +1137,19 @@ def query_hook(
     Returns ``""`` when the hook itself declines to inject anything -- a
     too-short prompt, no FTS match -- mirroring the hook's own "exit 0, no
     output" behaviour. Raises :class:`HookIndexBuildError` on a subprocess
-    timeout or nonzero exit, same exception type :func:`build_hook_index`
-    raises, so callers need only one ``except`` clause.
+    timeout, or on a resolved hook that cannot be spawned at all (issue
+    athenaeum#1887 -- argv[0] is the hook itself now, not ``bash``), same
+    exception type :func:`build_hook_index` raises, so callers need only one
+    ``except`` clause.
     """
     env = build_breadcrumb_hook_env(knowledge_root, hook_home, athenaeum_src=athenaeum_src)
     stdin_payload = json.dumps(
         {"prompt": query, "session_id": session_id or f"rollout-{uuid.uuid4().hex}"}
     )
+    argv = user_prompt_hook_argv(resolve_user_prompt_hook())
     try:
         result = subprocess.run(
-            ["bash", str(USER_PROMPT_HOOK)],
+            argv,
             input=stdin_payload,
             env=env,
             capture_output=True,
@@ -1053,6 +1158,21 @@ def query_hook(
         )
     except subprocess.TimeoutExpired as exc:
         raise HookIndexBuildError(_describe_hook_subprocess_error(exc)) from exc
+    except FileNotFoundError as exc:
+        # ``argv[0]`` is now the RESOLVED hook rather than the always-present
+        # ``bash`` this function spawned before issue athenaeum#1887, so a
+        # hook that is not on disk at all is newly reachable: it is exactly
+        # the documented fallback ``_resolve_adapter_console_script`` returns
+        # (the bare command name) when the packaged console script is neither
+        # on ``PATH`` nor beside ``sys.executable``. That fallback's own
+        # docstring promises the spawn attempt surfaces as a
+        # :class:`HookIndexBuildError`/``RolloutRecord.harness_failure``, and
+        # only this wrap makes that true -- a bare ``FileNotFoundError``
+        # passes straight through :func:`_safe_assemble_breadcrumb` and
+        # aborts the whole rollout instead of failing the one cell.
+        raise HookIndexBuildError(
+            f"FileNotFoundError: {exc} -- hook argv: {argv!r}"
+        ) from exc
     if not result.stdout.strip():
         return ""
     payload = json.loads(result.stdout)

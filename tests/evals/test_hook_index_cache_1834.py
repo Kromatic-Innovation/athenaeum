@@ -69,12 +69,17 @@ def _fake_subprocess_run(calls: list[list[str]]):
 
     def _run(argv: list[str], *, env: dict[str, str], **kwargs: Any) -> subprocess.CompletedProcess:
         calls.append(list(argv))
-        if argv[1] == str(SESSION_START_HOOK):
+        # Issue athenaeum#1887: USER_PROMPT_HOOK's default argv is now
+        # ``[adapter_path]`` (no ``bash`` prefix, no fixed argv[1]), so the
+        # discriminator below matches on the LAST argv element -- correct
+        # for both the two-element ``["bash", path]`` shell shape and the
+        # one-element adapter shape.
+        if argv[-1] == str(SESSION_START_HOOK):
             cache_dir = Path(env["HOME"]) / ".cache" / "athenaeum"
             cache_dir.mkdir(parents=True, exist_ok=True)
             (cache_dir / "wiki-index.db").write_text("fake fts5 index", encoding="utf-8")
             return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
-        assert argv[1] == str(USER_PROMPT_HOOK)
+        assert argv[-1] == str(USER_PROMPT_HOOK)
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
     return _run
@@ -97,7 +102,7 @@ def test_build_hook_index_spawns_session_start_hook_once_per_knowledge_root(
     build_hook_index(knowledge_root, hook_home)
     build_hook_index(knowledge_root, hook_home)
 
-    session_start_calls = [c for c in calls if c[1] == str(SESSION_START_HOOK)]
+    session_start_calls = [c for c in calls if c[-1] == str(SESSION_START_HOOK)]
     assert len(session_start_calls) == 1
 
 
@@ -120,8 +125,8 @@ def test_two_probes_at_one_scale_spawn_exactly_one_session_start_hook(
     build_push_breadcrumb_context(knowledge_root, hook_home, "first probe's query")
     build_push_breadcrumb_context(knowledge_root, hook_home, "second, different probe's query")
 
-    session_start_calls = [c for c in calls if c[1] == str(SESSION_START_HOOK)]
-    user_prompt_calls = [c for c in calls if c[1] == str(USER_PROMPT_HOOK)]
+    session_start_calls = [c for c in calls if c[-1] == str(SESSION_START_HOOK)]
+    user_prompt_calls = [c for c in calls if c[-1] == str(USER_PROMPT_HOOK)]
     assert len(session_start_calls) == 1
     # The per-cell call still runs USER_PROMPT_HOOK for EVERY probe -- only
     # the one-time index build is shared.
@@ -145,7 +150,7 @@ def test_build_hook_index_rebuilds_when_a_different_hook_home_has_no_index(
     build_hook_index(knowledge_root, tmp_path / "hook_home_one")
     build_hook_index(knowledge_root, tmp_path / "hook_home_two")
 
-    session_start_calls = [c for c in calls if c[1] == str(SESSION_START_HOOK)]
+    session_start_calls = [c for c in calls if c[-1] == str(SESSION_START_HOOK)]
     assert len(session_start_calls) == 2
 
 
