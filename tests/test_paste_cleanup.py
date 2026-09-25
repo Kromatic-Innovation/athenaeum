@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from athenaeum import spend
 from athenaeum.paste_cleanup import (
     ProposalVerdict,
     apply_paste_cleanup_report,
@@ -48,6 +50,27 @@ def wiki(tmp_path: Path) -> Path:
     root = tmp_path / "knowledge" / "wiki"
     root.mkdir(parents=True)
     return root
+
+
+@pytest.fixture
+def ledger(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A spend ledger path isolated to tmp via ATHENAEUM_SPEND_LEDGER
+    (mirrors ``tests/test_spend.py``'s ``ledger`` fixture) -- without this,
+    ``spend.record_spend``/``spend.ceiling_tripped`` resolve to the real
+    ``~/.cache/athenaeum/spend.jsonl``."""
+    path = tmp_path / "cache" / "spend.jsonl"
+    monkeypatch.setenv("ATHENAEUM_SPEND_LEDGER", str(path))
+    for var in (
+        "ATHENAEUM_SPEND_MAX_TOKENS_PER_RUN",
+        "ATHENAEUM_SPEND_MAX_TOKENS_PER_DAY",
+        "ATHENAEUM_SPEND_MAX_USD_PER_RUN",
+        "ATHENAEUM_SPEND_MAX_USD_PER_DAY",
+        "ATHENAEUM_SPEND_LEDGER_ENABLED",
+        "ATHENAEUM_SPEND_WEEKLY_TOKEN_LIMIT",
+        "ATHENAEUM_SPEND_MAX_PCT_PER_DAY",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    return path
 
 
 # --- extraction ----------------------------------------------------------
@@ -237,6 +260,33 @@ class TestProposePage:
         )
         assert verdict.verdict == "error"
         assert "network down" in verdict.error
+
+    def test_thinking_only_response_becomes_error_not_crash(self, tmp_path: Path) -> None:
+        """Issue athenaeum#1717: the 2026-09-25 slice-1 dry-run crash.
+        ``response_text()`` deliberately falls back to
+        ``response.content[0].text`` when no ``type == "text"`` block is
+        found, which raises ``AttributeError`` on a thinking-only response
+        (an SDK ``ThinkingBlock`` has no ``.text``). That must become this
+        bullet's error verdict, not an uncaught exception."""
+        response = SimpleNamespace(
+            content=[SimpleNamespace(type="thinking", thinking="internal reasoning only")],
+            usage=make_llm_usage(input_tokens=12, output_tokens=3),
+        )
+        client = FakeLLMClient(response=response)
+        content = "A short paste."
+        verdict = propose_page(
+            client,
+            uid="u5",
+            path=tmp_path / "p.md",
+            date="2026-01-01",
+            raw_chunk=f"- 2026-01-01: {content}",
+            meta={},
+            content=content,
+            model="claude-haiku-4-5-20251001",
+        )
+        assert verdict.verdict == "error"
+        assert verdict.error is not None
+        assert "parse error" in verdict.error
 
 
 class TestVerifyPage:
@@ -530,3 +580,177 @@ class TestBuildAndApplyReport:
         )
         changed = apply_paste_cleanup_report(report, wiki)
         assert changed == 0
+
+
+# --- spend wiring (issue athenaeum#1717 AC4) -------------------------------
+
+
+class TestSpendWiring:
+    def test_thinking_only_response_does_not_kill_the_pass(
+        self, wiki: Path, ledger: Path
+    ) -> None:
+        """A text-less response on one page becomes that page's error verdict
+        and the pass continues to process the next page (regression for the
+        2026-09-25 slice-1 dry-run crash)."""
+        content1 = "Off-topic internal retro content unrelated to the subject." * 5
+        content2 = "A different off-topic paste about another person entirely." * 5
+        _page(
+            wiki,
+            "person1.md",
+            "uid: person1\nname: Person One\n",
+            f"## Notes\n\n- 2026-01-01: {content1}\n",
+        )
+        _page(
+            wiki,
+            "person2.md",
+            "uid: person2\nname: Person Two\n",
+            f"## Notes\n\n- 2026-01-02: {content2}\n",
+        )
+
+        calls = {"n": 0}
+
+        def _responder(**_kwargs: object) -> SimpleNamespace:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                # Thinking-only: no type == "text" block anywhere.
+                return SimpleNamespace(
+                    content=[SimpleNamespace(type="thinking", thinking="internal")],
+                    usage=make_llm_usage(input_tokens=12, output_tokens=3),
+                )
+            if calls["n"] == 2:
+                return make_llm_response(
+                    json.dumps(
+                        {"verdict": "keep", "claim": "", "reason": "fine", "confidence": "high"}
+                    ),
+                    usage=make_llm_usage(input_tokens=50, output_tokens=10),
+                )
+            # Any verify-pass call: agree.
+            return make_llm_response(
+                json.dumps({"verdict": "keep", "claim": "", "reason": "ok", "agree": True}),
+                usage=make_llm_usage(input_tokens=20, output_tokens=5),
+            )
+
+        client = FakeLLMClient(responder=_responder)
+        report = build_paste_cleanup_report(
+            wiki,
+            client=client,
+            verify_client=client,
+            model="claude-haiku-4-5-20251001",
+            verify_model="claude-sonnet-5",
+            verify_rule="all",
+            length_threshold=10,
+        )
+
+        assert len(report.proposed) == 2
+        first, second = report.proposed
+        assert first.verdict == "error"
+        assert first.error is not None and "parse error" in first.error
+        assert second.verdict == "keep"
+        assert second.error is None
+        assert report.ceiling_reason is None
+
+    def test_spend_recorded_under_run_type_paste_cleanup(
+        self, wiki: Path, ledger: Path
+    ) -> None:
+        content = "A short on-topic paste about the subject here for testing." * 3
+        _page(
+            wiki,
+            "person1.md",
+            "uid: person1\nname: Person One\n",
+            f"## Notes\n\n- 2026-01-01: {content}\n",
+        )
+        client = FakeLLMClient(
+            response=make_llm_response(
+                json.dumps(
+                    {"verdict": "keep", "claim": "", "reason": "fine", "confidence": "high"}
+                ),
+                usage=make_llm_usage(input_tokens=100, output_tokens=20),
+            )
+        )
+        build_paste_cleanup_report(
+            wiki,
+            client=client,
+            verify_client=client,
+            model="claude-haiku-4-5-20251001",
+            verify_model="claude-sonnet-5",
+            verify_rule="sampled",
+            length_threshold=10,
+        )
+
+        assert ledger.is_file()
+        lines = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()]
+        assert len(lines) == 1
+        assert lines[0]["run_type"] == spend.RUN_TYPE_PASTE_CLEANUP
+        assert lines[0]["run_type"] == "paste-cleanup"
+        assert lines[0]["input_tokens"] >= 100
+        assert lines[0]["api_calls"] >= 1
+
+    def test_tripped_ceiling_stops_the_pass_cleanly(
+        self, wiki: Path, ledger: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Any single successful call costs far more than this at the blended
+        # fallback rate ($1.50/M input + $7.50/M output), so the ceiling trips
+        # on the check BEFORE the second candidate, not the first.
+        monkeypatch.setenv("ATHENAEUM_SPEND_MAX_USD_PER_RUN", "0.0000001")
+        for i in range(1, 4):
+            content = f"An on-topic paste number {i} about the subject here for testing." * 3
+            _page(
+                wiki,
+                f"person{i}.md",
+                f"uid: person{i}\nname: Person {i}\n",
+                f"## Notes\n\n- 2026-01-0{i}: {content}\n",
+            )
+        client = FakeLLMClient(
+            response=make_llm_response(
+                json.dumps(
+                    {"verdict": "keep", "claim": "", "reason": "fine", "confidence": "high"}
+                ),
+                usage=make_llm_usage(input_tokens=100, output_tokens=20),
+            )
+        )
+        verify_client = FakeLLMClient(raises=AssertionError("verify must not be called"))
+
+        report = build_paste_cleanup_report(
+            wiki,
+            client=client,
+            verify_client=verify_client,
+            model="claude-haiku-4-5-20251001",
+            verify_model="claude-sonnet-5",
+            verify_rule="all",
+            length_threshold=10,
+        )
+
+        assert report.ceiling_reason is not None
+        assert "ceiling" in report.ceiling_reason
+        # First candidate processed before the trip; the rest left alone.
+        assert len(report.proposed) == 1
+        assert len(verify_client.calls) == 0
+        assert "stopped early" in report.render_text()
+
+        # What was actually spent (the one successful call) is still recorded.
+        assert ledger.is_file()
+        lines = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()]
+        assert len(lines) == 1
+        assert lines[0]["run_type"] == spend.RUN_TYPE_PASTE_CLEANUP
+
+    def test_mechanical_dry_run_records_no_spend(self, wiki: Path, ledger: Path) -> None:
+        content = "A short on-topic paste about the subject here for testing." * 3
+        _page(
+            wiki,
+            "person1.md",
+            "uid: person1\nname: Person One\n",
+            f"## Notes\n\n- 2026-01-01: {content}\n",
+        )
+        report = build_paste_cleanup_report(
+            wiki,
+            client=None,
+            verify_client=None,
+            model="claude-haiku-4-5-20251001",
+            verify_model="claude-sonnet-5",
+            verify_rule="sampled",
+            length_threshold=10,
+        )
+
+        assert report.scanned == 1
+        assert report.ceiling_reason is None
+        assert not ledger.exists()
