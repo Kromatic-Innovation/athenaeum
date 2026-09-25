@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import random
 import re
 from dataclasses import dataclass, field
@@ -35,6 +36,8 @@ from pathlib import Path
 from typing import Any
 
 from athenaeum.models import TokenUsage, parse_frontmatter, render_frontmatter
+
+log = logging.getLogger(__name__)
 
 PASTE_CLEANUP_VERSION = "paste-cleanup-v1"
 
@@ -317,10 +320,21 @@ def propose_page(
     content: str,
     model: str,
     max_tokens: int = 512,
+    usage: TokenUsage | None = None,
 ) -> ProposalVerdict:
     """Extract + classify ONE bullet. Never raises -- a per-page failure
     becomes an ``"error"`` verdict, matching ``audit_page``'s isolation
-    guarantee (one bad page must not kill the run)."""
+    guarantee (one bad page must not kill the run).
+
+    *usage* (issue athenaeum#1717 AC4), when given, is credited with this
+    call's own token delta -- via :meth:`TokenUsage.add`, which also counts
+    the call -- immediately after a response is obtained, before the parse
+    step below. A real API call bills tokens whether or not the response
+    parses, so the credit must not be conditioned on parse success; the
+    caller uses the same accumulator across every proposer/verifier call in
+    the run for both ``spend.ceiling_tripped`` and the single end-of-run
+    ``spend.record_spend``.
+    """
     paste_text, _remainder, status = extract_paste_span(content)
     verdict = ProposalVerdict(
         uid=uid,
@@ -355,10 +369,19 @@ def propose_page(
     input_tokens, output_tokens, _cache_w, _cache_r = cache_usage_counts(response)
     verdict.input_tokens = input_tokens
     verdict.output_tokens = output_tokens
+    if usage is not None:
+        usage.add(input_tokens, output_tokens, model=model, knob="classify")
 
     try:
         parsed = parse_propose_response(response_text(response))
-    except (ValueError, json.JSONDecodeError) as exc:
+    except (ValueError, json.JSONDecodeError, AttributeError, IndexError) as exc:
+        # AttributeError/IndexError (issue athenaeum#1717): response_text()
+        # deliberately falls back to response.content[0].text when no
+        # type == "text" block is found (see its docstring), which can
+        # raise either on a thinking-only response. That is a live crash
+        # (2026-09-25 slice-1 dry run) this call site must isolate as one
+        # bullet's error, not let escape and kill the whole pass -- same
+        # isolation guarantee as the JSON-parse-error branch above.
         verdict.error = f"parse error: {exc}"
         return verdict
 
@@ -376,8 +399,14 @@ def verify_page(
     meta: dict[str, Any],
     model: str,
     max_tokens: int = 512,
+    usage: TokenUsage | None = None,
 ) -> ProposalVerdict:
-    """Re-check *verdict* with a stronger model. Mutates and returns *verdict*."""
+    """Re-check *verdict* with a stronger model. Mutates and returns *verdict*.
+
+    *usage*: see :func:`propose_page` -- same contract, credited with this
+    call's own token delta (not *verdict*'s cumulative totals, which already
+    include the proposer call's tokens) on the ``verify`` knob.
+    """
     from athenaeum.provider import response_text
 
     proposed = {
@@ -403,10 +432,15 @@ def verify_page(
     input_tokens, output_tokens, _cache_w, _cache_r = cache_usage_counts(response)
     verdict.input_tokens += input_tokens
     verdict.output_tokens += output_tokens
+    if usage is not None:
+        usage.add(input_tokens, output_tokens, model=model, knob="verify")
 
     try:
         parsed = parse_verify_response(response_text(response))
-    except (ValueError, json.JSONDecodeError) as exc:
+    except (ValueError, json.JSONDecodeError, AttributeError, IndexError) as exc:
+        # See the matching branch in propose_page (issue athenaeum#1717):
+        # response_text()'s intentional thinking-block fallback can raise
+        # AttributeError/IndexError, and it must not escape this call site.
         verdict.error = f"verify parse error: {exc}"
         return verdict
 
@@ -544,6 +578,12 @@ class PasteCleanupReport:
     model: str = ""
     verify_model: str = ""
     usage: TokenUsage = field(default_factory=TokenUsage)
+    #: Set (issue athenaeum#1717 AC4) when ``spend.ceiling_tripped`` stopped
+    #: the pass before every candidate bullet was processed -- the human
+    #: reason string it returned, e.g. "per-run API dollar ceiling reached
+    #: (...)". ``None`` when the pass ran to completion (including every
+    #: ``--mechanical-dry-run`` run, which never checks the ceiling).
+    ceiling_reason: str | None = None
 
     def by_final_verdict(self) -> dict[str, int]:
         counts: dict[str, int] = {}
@@ -561,6 +601,7 @@ class PasteCleanupReport:
             "verify_model": self.verify_model,
             "by_final_verdict": self.by_final_verdict(),
             "proposed": [v.to_dict() for v in self.proposed],
+            "ceiling_reason": self.ceiling_reason,
         }
 
     def render_text(self) -> str:
@@ -570,6 +611,8 @@ class PasteCleanupReport:
         ]
         for verdict, count in sorted(self.by_final_verdict().items()):
             lines.append(f"  {verdict}: {count}")
+        if self.ceiling_reason is not None:
+            lines.append(f"stopped early: spend ceiling reached ({self.ceiling_reason})")
         return "\n".join(lines)
 
 
@@ -588,7 +631,20 @@ def build_paste_cleanup_report(
     uids: list[str] | None = None,
     config: dict[str, Any] | None = None,
 ) -> PasteCleanupReport:
-    """Dry-run scan + proposer + verifier pass. Never writes to *wiki_root*."""
+    """Dry-run scan + proposer + verifier pass. Never writes to *wiki_root*.
+
+    Issue athenaeum#1717 (AC4): when *client* is given (i.e. not a
+    ``--mechanical-dry-run``), ``spend.ceiling_tripped`` is checked before
+    each further proposer/verifier call against one run-scoped
+    :class:`TokenUsage` accumulator, mirroring ``audit.py``'s per-item
+    ceiling check; a trip stops the pass early -- recorded on
+    ``report.ceiling_reason``, never raised -- and one
+    ``spend.record_spend`` row under ``spend.RUN_TYPE_PASTE_CLEANUP`` is
+    written for the run's accrued usage at the end, mirroring ``audit.py``'s
+    single end-of-run call (never a per-batch row). *client* being ``None``
+    skips both entirely: a mechanical dry run makes no LLM call, so there is
+    nothing to record and no ceiling to check.
+    """
     report = PasteCleanupReport(model=model, verify_model=verify_model, verify_rule=verify_rule)
     pages = discover_wiki_pages(wiki_root)
     if uids:
@@ -613,8 +669,31 @@ def build_paste_cleanup_report(
             report.bullets_found += 1
             candidates.append((path, meta, date, content, raw_chunk, uid))  # type: ignore[arg-type]
 
+    # Issue athenaeum#1717 (AC4): resolved once, only when there is a client to
+    # spend against -- `resolved_provider` stays a plain `str` (never
+    # `None`) either way, but is only ever passed to `spend.*` inside a
+    # `client is not None` guard, so the placeholder value is never used.
+    resolved_provider = ""
+    run_usage = TokenUsage()
+    if client is not None:
+        from athenaeum import spend
+        from athenaeum.provider import resolve_provider
+
+        resolved_provider = resolve_provider(config, knob="classify")
+
     proposals: list[ProposalVerdict] = []
     for path, meta, date, content, raw_chunk, uid in candidates:  # type: ignore[misc]
+        if client is not None:
+            _ceiling = spend.ceiling_tripped(run_usage, provider=resolved_provider, config=config)
+            if _ceiling is not None:
+                report.ceiling_reason = _ceiling
+                log.error(
+                    "paste-cleanup: spend ceiling reached (%s) -- stopping "
+                    "proposer pass early, %d bullet(s) left unprocessed",
+                    _ceiling,
+                    len(candidates) - len(proposals),
+                )
+                break
         verdict = propose_page(
             client,
             uid=uid,
@@ -624,19 +703,50 @@ def build_paste_cleanup_report(
             meta=meta,
             content=content,
             model=model,
+            usage=run_usage if client is not None else None,
         )
         proposals.append(verdict)
 
-    verify_indices = select_verify_sample(proposals, rule=verify_rule)
-    for i in verify_indices:
-        v = proposals[i]
-        meta, _ = split_frontmatter(_read(v.path) or "")
-        verify_page(verify_client, v, meta=meta, model=verify_model)
+    if report.ceiling_reason is None:
+        verify_indices = sorted(select_verify_sample(proposals, rule=verify_rule))
+        for i in verify_indices:
+            if client is not None:
+                _ceiling = spend.ceiling_tripped(
+                    run_usage, provider=resolved_provider, config=config
+                )
+                if _ceiling is not None:
+                    report.ceiling_reason = _ceiling
+                    log.error(
+                        "paste-cleanup: spend ceiling reached (%s) -- "
+                        "stopping verifier pass early",
+                        _ceiling,
+                    )
+                    break
+            v = proposals[i]
+            meta, _ = split_frontmatter(_read(v.path) or "")
+            verify_page(
+                verify_client,
+                v,
+                meta=meta,
+                model=verify_model,
+                usage=run_usage if client is not None else None,
+            )
 
     for v in proposals:
         report.usage.add_tokens(v.input_tokens, v.output_tokens, model=v.model)
 
     report.proposed = proposals
+
+    if client is not None:
+        spend.record_spend(
+            run_usage,
+            run_type=spend.RUN_TYPE_PASTE_CLEANUP,
+            provider=resolved_provider,
+            files_processed=len(proposals),
+            config=config,
+            wiki_root=wiki_root,
+        )
+
     return report
 
 
