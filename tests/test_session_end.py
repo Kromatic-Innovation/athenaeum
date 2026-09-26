@@ -1932,7 +1932,7 @@ class TestSessionEndQuiesceGuard:
     """`session-end` must be a no-op while `athenaeum quiesce` is active
     (issue athenaeum#1908, building on the athenaeum#1898 sentinel): a
     SessionEnd-triggered ingest running inside a write lane's writer-lock
-    hold is the same contention #1898 closed off for the SCHEDULED
+    hold is the same contention athenaeum#1898 closed off for the SCHEDULED
     ``ingest --if-triggered`` path -- this closes the identical gap for the
     hook-triggered path. Mirrors `test_kill_switch.py::TestSessionEndGuard`'s
     shape for the sibling (kill-switch) gate.
