@@ -277,10 +277,25 @@ class ProposalVerdict:
     verifier_reason: str = ""
     verifier_claim: str = ""
     error: str | None = None
+    #: Set by :func:`verify_page` the moment it is called for this verdict
+    #: (before its own try/except), regardless of whether the verifier call
+    #: succeeds -- issue athenaeum#1903 step 1. Lets :meth:`final_verdict`
+    #: (and any report/replay consumer) distinguish "never selected for
+    #: verification under ``sampled``" (``verify_attempted is False``, a
+    #: ``keep`` proposal is unaffected) from "verifier was attempted and
+    #: errored" (``verify_attempted is True`` and :attr:`error` is set).
+    verify_attempted: bool = False
 
     def final_verdict(self) -> str:
         if self.verified and self.verifier_verdict is not None:
             return self.verifier_verdict
+        if self.error is not None:
+            # Issue athenaeum#1903: a proposer-side error (never reached the
+            # verifier) or a verifier-side error (attempted, but the call
+            # raised or returned unparseable output) must never fall
+            # through to a classification nothing actually confirmed --
+            # hold for a human, don't write it.
+            return "hold"
         return self.verdict
 
     def final_claim(self) -> str:
@@ -296,17 +311,50 @@ class ProposalVerdict:
             "uid": self.uid,
             "path": str(self.path),
             "date": self.date,
+            "raw_chunk": self.raw_chunk,
             "extraction_status": self.extraction_status,
             "verdict": self.verdict,
+            "claim": self.claim,
             "confidence": self.confidence,
             "reason": self.reason,
             "model": self.model,
             "verified": self.verified,
             "verifier_verdict": self.verifier_verdict,
             "verifier_agree": self.verifier_agree,
+            "verifier_claim": self.verifier_claim,
+            "verifier_reason": self.verifier_reason,
+            "verify_attempted": self.verify_attempted,
             "final_verdict": self.final_verdict(),
             "error": self.error,
         }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "ProposalVerdict":
+        """Reconstruct from :meth:`to_dict`'s shape -- the ``--from-report``
+        replay path (issue athenaeum#1903 step 3). ``paste_text`` is not
+        round-tripped (never written by ``to_dict``): replay never calls the
+        LLM, so nothing reads it; :func:`apply_paste_cleanup_report` only
+        needs ``raw_chunk``."""
+        return cls(
+            uid=d["uid"],
+            path=Path(d["path"]),
+            date=d.get("date", ""),
+            raw_chunk=d.get("raw_chunk", ""),
+            paste_text="",
+            extraction_status=d.get("extraction_status", ""),
+            verdict=d["verdict"],
+            claim=d.get("claim", ""),
+            reason=d.get("reason", ""),
+            confidence=d.get("confidence"),
+            model=d.get("model", ""),
+            verified=d.get("verified", False),
+            verifier_verdict=d.get("verifier_verdict"),
+            verifier_agree=d.get("verifier_agree"),
+            verifier_reason=d.get("verifier_reason", ""),
+            verifier_claim=d.get("verifier_claim", ""),
+            error=d.get("error"),
+            verify_attempted=d.get("verify_attempted", False),
+        )
 
 
 def propose_page(
@@ -319,7 +367,7 @@ def propose_page(
     meta: dict[str, Any],
     content: str,
     model: str,
-    max_tokens: int = 512,
+    max_tokens: int = 1024,
     usage: TokenUsage | None = None,
 ) -> ProposalVerdict:
     """Extract + classify ONE bullet. Never raises -- a per-page failure
@@ -398,7 +446,7 @@ def verify_page(
     *,
     meta: dict[str, Any],
     model: str,
-    max_tokens: int = 512,
+    max_tokens: int = 1024,
     usage: TokenUsage | None = None,
 ) -> ProposalVerdict:
     """Re-check *verdict* with a stronger model. Mutates and returns *verdict*.
@@ -407,6 +455,12 @@ def verify_page(
     call's own token delta (not *verdict*'s cumulative totals, which already
     include the proposer call's tokens) on the ``verify`` knob.
     """
+    # Issue athenaeum#1903 step 1: mark the attempt BEFORE the try/except
+    # below -- unconditionally, whether the call succeeds, raises, or
+    # returns unparseable output -- so ``final_verdict`` (and any
+    # report/replay consumer) can tell "attempted and errored" apart from
+    # "never selected for verification".
+    verdict.verify_attempted = True
     from athenaeum.provider import response_text
 
     proposed = {
@@ -603,6 +657,31 @@ class PasteCleanupReport:
             "proposed": [v.to_dict() for v in self.proposed],
             "ceiling_reason": self.ceiling_reason,
         }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "PasteCleanupReport":
+        """Reconstruct from :meth:`to_dict`'s shape -- the ``--from-report``
+        replay path (issue athenaeum#1903 step 3). Raises :class:`ValueError`
+        on a version mismatch; a report from a different
+        :data:`PASTE_CLEANUP_VERSION` may not carry the fields the current
+        :func:`apply_paste_cleanup_report` relies on, so replaying it is
+        refused rather than guessed at.
+        """
+        version = d.get("version")
+        if version != PASTE_CLEANUP_VERSION:
+            raise ValueError(
+                f"--from-report version mismatch: report is {version!r}, "
+                f"this athenaeum build is {PASTE_CLEANUP_VERSION!r}"
+            )
+        return cls(
+            scanned=d.get("scanned", 0),
+            bullets_found=d.get("bullets_found", 0),
+            proposed=[ProposalVerdict.from_dict(v) for v in d.get("proposed", [])],
+            verify_rule=d.get("verify_rule", "sampled"),
+            model=d.get("model", ""),
+            verify_model=d.get("verify_model", ""),
+            ceiling_reason=d.get("ceiling_reason"),
+        )
 
     def render_text(self) -> str:
         lines = [

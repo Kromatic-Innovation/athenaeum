@@ -73,7 +73,7 @@ Every subcommand is registered top-level on one `parser.add_subparsers()` in `cl
 - [`athenaeum merges revalidate`](#athenaeum-merges-revalidate) (command) — Re-validate existing unresolved merge proposals against the CURRENT suppression gate and archive stale ones. Dry-run by default; pass --apply to write.
 - [`athenaeum merges scrub-pii`](#athenaeum-merges-scrub-pii) (command) — Redact contact data out of merge-proposal bodies in place. The zero-LLM purge path for a stale `draft_merged_body` left behind by `storage migrate-pii`: it clears the values without approving, rejecting or withdrawing the merge. Dry-run by default; --apply writes.
 - [`athenaeum outbound-lint`](#athenaeum-outbound-lint) (command) — Scan outbound-destined text for PII (emails/phones) before it ships; flag findings (default) or --redact them. Offline, deterministic.
-- [`athenaeum paste-cleanup`](#athenaeum-paste-cleanup) (command) — Tier-0 attributed-paste cleanup pass over person pages' ## Notes bullets: a cheap-model proposer classifies keep/rewrite/remove, a stronger model verifies a sample. Dry-run by default; --apply writes.
+- [`athenaeum paste-cleanup`](#athenaeum-paste-cleanup) (command) — Tier-0 attributed-paste cleanup pass over person pages' ## Notes bullets: a cheap-model proposer classifies keep/rewrite/remove, a stronger model verifies a sample. A proposal whose proposer OR verifier call errors (raises, or returns unparseable output) resolves to hold, never the unverified proposer verdict. Dry-run by default; --apply writes.
 - [`athenaeum pii-restore`](#athenaeum-pii-restore) (command) — Anchored PII-restore: recover non-PII tokens a [contact redacted -> excluded surface] marker replaced, via rename-following and retro-filename history lookup. Default is dry-run; pass --apply to write fixes.
 - [`athenaeum push-metrics`](#athenaeum-push-metrics) (group) — Push-precision + coverage baseline: compute/record the precision snapshot, sample sessions for a human-reviewed coverage-audit worksheet, record a single hook-path push, and stream the documented NDJSON tail contract over the ledgers.
 - [`athenaeum push-metrics baseline`](#athenaeum-push-metrics-baseline) (command) — Compute precision + coverage over a window; write the dated snapshot to docs/measurements/memory-model-measurements.md. Refuses to write (exit 1) when the window has zero reference-determination records. See --dry-run to inspect without writing.
@@ -887,12 +887,13 @@ Scan outbound-destined text for PII (emails/phones) before it ships; flag findin
 
 ## `athenaeum paste-cleanup`
 
-Tier-0 attributed-paste cleanup pass over person pages' ## Notes bullets: a cheap-model proposer classifies keep/rewrite/remove, a stronger model verifies a sample. Dry-run by default; --apply writes.
+Tier-0 attributed-paste cleanup pass over person pages' ## Notes bullets: a cheap-model proposer classifies keep/rewrite/remove, a stronger model verifies a sample. A proposal whose proposer OR verifier call errors (raises, or returns unparseable output) resolves to hold, never the unverified proposer verdict. Dry-run by default; --apply writes.
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
 | `--apply` | `False` | — | Write remove/rewrite verdicts. Without this flag the command is a dry-run. |
 | `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--from-report` | — | — | Replay a prior --json report's verdicts instead of running a fresh proposer/verifier pass -- no LLM client is built. Mutually exclusive with --model/--verify-model/--verify-rule/--sample/--limit. --uids further restricts the replayed set. The report's version must match this build's PASTE_CLEANUP_VERSION. Without --apply, prints the replay summary and writes nothing. |
 | `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
 | `--limit` | — | — | Consider at most N pages this pass. |
 | `--mechanical-dry-run` | `False` | — | Skip building an LLM client entirely. For CI/offline smoke checks only. |
