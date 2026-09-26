@@ -105,6 +105,42 @@ covered what leaves the process on that path and what comes back.
   deliberate: on the `api` backend the requests carry no `tools` key at all, so
   there is nothing to pin — the subprocess is the one path whose answer would
   otherwise come from a default this repository does not control.
+- **The `claude-cli` subprocess inherits no operator hooks either, asserted
+  rather than inherited (athenaeum#1908).** The tools/MCP pin above is
+  necessary but not sufficient: a bare `claude -p` spawn is otherwise a normal,
+  hook-eligible Claude Code session on the operator's own user-level config,
+  and on the operator host every call fired `SessionStart`, `UserPromptSubmit`
+  and `SessionEnd` — 20-30s of added latency per short reply, plus the
+  `SessionEnd` hook specifically, which can invoke `athenaeum session-end` (an
+  ingest) while a write lane holds the corpus run lock, the same
+  writer-lock-contention class the kill switch already guards for the
+  scheduled ingest path. `provider.ClaudeCliClient._create`'s subprocess `env=`
+  merge — not `_build_argv`, which only ever carried argv-level flags — now
+  sets `CLAUDE_CODE_SAFE_MODE=1`. Safe mode drops ALL user/project Claude Code
+  customizations for the subprocess (hooks, `CLAUDE.md`, skills, plugins,
+  custom commands/agents) while leaving auth, model selection and built-in
+  tools normal — orthogonal to, and layered on top of, the `--tools ""` /
+  `--strict-mcp-config` pin above. Set as an environment variable rather than
+  an equivalent `--safe-mode` argv flag, and the athenaeum#906 paragraph's own
+  argument inverts here rather than repeating: that paragraph treats a CLI old
+  enough to lack a flag failing loudly with `unknown option` as a *virtue* —
+  fail loud rather than silently fall back to tools-enabled. For hooks, failing
+  loud would mean the provider stops working *entirely* on an older CLI just to
+  avoid a latency/contention problem, which is a worse trade than the one it
+  fixes; an unrecognized env var is inert, so the provider degrades to
+  "hooks still fire" on an old CLI instead of "does not run at all." Verified
+  against CLI **2.1.267** with a credential-free positive control: hooks fire
+  during session hydration, before the (auth-gated) model turn, so all three
+  sentinels appear on the unsuppressed argv and none with the env var set —
+  confirmed both under an isolated `CLAUDE_CONFIG_DIR` and an operator-shaped
+  `$HOME/.claude/settings.json`. Regression-pinned by
+  `tests/test_provider.py::TestHermeticSpawnSuppressesOperatorHooks`, which
+  spawns the real binary rather than asserting an argv/env token in isolation —
+  it pins that a spawn inherits *nothing* from the operator's Claude Code
+  config, the property none of the three prior leaks (athenaeum#906,
+  athenaeum#775, athenaeum#377) asserted, so the next config surface Claude
+  Code adds fails this test on its own instead of being found on an operator
+  host by `ps` a hundred minutes into a run.
 - **L5 — response logging is redacted.** The one response-logging site that
   embedded raw model output in an error (`provider._parse_envelope`) now runs it
   through `redact_outbound_text` first, matching the sibling site in `tiers.py`.
