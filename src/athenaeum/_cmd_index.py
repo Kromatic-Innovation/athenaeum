@@ -1047,6 +1047,38 @@ def cmd_session_end(args: argparse.Namespace) -> int:
         sys.stdout.flush()
         return 0
 
+    # Quiesce (athenaeum#1898, gated here per athenaeum#1908): an operator-held
+    # quiesce sentinel is about writer-lock contention, so it must sit AFTER
+    # the references-only short-circuit above (references-only takes no lock
+    # and mutates only its own reference ledger — a quiesce gate would
+    # suppress a computation it was never meant to guard) but, like the kill
+    # switch, BEFORE `load_config`/the run lock/`--dry-run`: a quiesced host
+    # must not pay for any of that setup just to discover it is a no-op, and
+    # `--dry-run` mutates nothing either way so it gets no exemption here.
+    # `read_quiesce_state` is a tolerant, side-effect-free read (`None` for
+    # absent/malformed/expired — expiry is read-time, so a stale sentinel
+    # never wedges session-end); imported function-local to match
+    # `_evaluate_ingest_trigger`'s existing import of the same function.
+    from athenaeum.quiesce import read_quiesce_state
+
+    quiesce_state = read_quiesce_state(knowledge_root)
+    if quiesce_state is not None:
+        from athenaeum.store import now_iso
+
+        print(
+            json.dumps(
+                {
+                    "command": "session-end",
+                    "noop": True,
+                    "reason": "quiesced",
+                    "holder": quiesce_state.holder,
+                    "expires_at": now_iso(quiesce_state.expires_at),
+                }
+            )
+        )
+        sys.stdout.flush()
+        return 0
+
     cfg = load_config(knowledge_root)
 
     # Issue athenaeum#309 single-flight: the compile + reindex both mutate on-disk state
