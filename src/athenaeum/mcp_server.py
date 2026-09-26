@@ -51,7 +51,6 @@ Requires the ``mcp`` extra: ``pip install athenaeum[mcp]``
 
 from __future__ import annotations
 
-import importlib.resources
 import json
 import logging
 import re
@@ -99,6 +98,11 @@ from athenaeum.models import (
 )
 from athenaeum.person_registry import PersonRegistry
 from athenaeum.provenance import resolve_remember_extras, resolve_remember_sources
+from athenaeum.recall_overflow import (
+    OVERFLOW_TEMPLATE_NAME,
+    load_overflow_template,
+    render_overflow_line,
+)
 from athenaeum.search import score_keyword_page, tokenize_keyword_query
 from athenaeum.storage import (
     is_excluded,
@@ -224,55 +228,28 @@ _MAX_CONTENT_BYTES = 10 * 1024 * 1024  # 10 MB
 # calls (`max(top_k, ...)` below).
 _HYBRID_CANDIDATE_POOL = 15
 
-#: Issue athenaeum#1783: the overflow-breadcrumb prompt file's name, resolved
-#: via ``importlib.resources`` below -- same packaged-prompt convention
-#: ``athenaeum.tiers._load_name_resolution_confirm_prompt`` already
-#: established (``policies/prompt-text-is-content.md``: wording is content,
-#: not code, so it lives in a ``.md`` file next to the caller, not a string
-#: literal here).
-_RECALL_OVERFLOW_TEMPLATE_NAME = "recall_overflow_breadcrumb.md"
+#: Issue athenaeum#1783: the overflow-breadcrumb prompt file's name.
+#: Issue athenaeum#1905 moved the loader and the renderer into
+#: :mod:`athenaeum.recall_overflow` so the per-turn push path
+#: (:mod:`athenaeum.context`, which cannot afford to import this module)
+#: renders the SAME line from the SAME template; this alias is kept so
+#: nothing that already reads it has to learn a new name.
+_RECALL_OVERFLOW_TEMPLATE_NAME = OVERFLOW_TEMPLATE_NAME
 
 
 def _load_recall_overflow_template() -> str:
-    """Read the overflow-breadcrumb template (issue athenaeum#1783).
-
-    Carries two placeholders, ``{count}`` and ``{types}`` -- see
-    :func:`_render_recall_overflow_line` for what each receives. Loaded
-    fresh on every call (the file is tiny and this is never a hot loop
-    relative to the recall it decorates) rather than cached at import
-    time, matching :func:`athenaeum.tiers._load_name_resolution_confirm_prompt`'s
-    own shape.
-    """
-    resource = importlib.resources.files("athenaeum.prompts").joinpath(
-        _RECALL_OVERFLOW_TEMPLATE_NAME
-    )
-    return resource.read_text(encoding="utf-8")
+    """Thin alias for :func:`athenaeum.recall_overflow.load_overflow_template`
+    (issue athenaeum#1905) -- see that module's docstring for why the body
+    moved out of this one."""
+    return load_overflow_template()
 
 
-def _render_recall_overflow_line(
-    withheld_by_type: dict[str, int], *, at_least: bool
-) -> str:
-    """Render the overflow breadcrumb line, or ``""`` when nothing was withheld.
-
-    Issue athenaeum#1783's "Overflow line shape" AC: exactly one line,
-    emitted only when *withheld_by_type* is non-empty (at least one
-    candidate inside the fetch window was withheld by the cap). *at_least*
-    marks the count as a LOWER BOUND (``"at least N"``) when the fetch
-    window itself was exhausted -- there may be more withheld candidates
-    this call never even fetched, so ``N`` alone would understate.
-
-    The rendered line never starts with ``-`` (the template's own wording
-    guarantees this; see ``src/athenaeum/prompts/recall_overflow_breadcrumb.md``)
-    so it can never be misread as a hook bullet by
-    ``tests/evals/test_recall_covers_grep.py``'s ``_HOOK_BULLET_RE``.
-    """
-    total = sum(withheld_by_type.values())
-    if total == 0:
-        return ""
-    count_str = f"at least {total}" if at_least else str(total)
-    types_str = ", ".join(f"{n} {t}" for t, n in sorted(withheld_by_type.items()))
-    template = _load_recall_overflow_template().strip("\n")
-    return template.format(count=count_str, types=types_str)
+def _render_recall_overflow_line(withheld_by_type: dict[str, int], *, at_least: bool) -> str:
+    """Thin alias for :func:`athenaeum.recall_overflow.render_overflow_line`
+    (issue athenaeum#1905). The behaviour is unchanged and is now shared with
+    :func:`athenaeum.context.build_context`'s per-turn push path, which is
+    where athenaeum#1894 measured the notice going missing."""
+    return render_overflow_line(withheld_by_type, at_least=at_least)
 
 
 def active_tool_use_id() -> str | None:

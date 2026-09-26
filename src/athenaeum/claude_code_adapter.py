@@ -60,6 +60,25 @@ here:
    it lost bullets 4 through the ceiling (7 by default) on **every** turn,
    not just LLM-scored ones.
 
+7. **Relevance-cap overflow notice (issue athenaeum#1905).** The shell
+   hook's awk ``END`` block appends one line — "memory has N more matching
+   results (...) that were withheld by the relevance cap — call ``recall``
+   to see them." — whenever candidates fell past the ceiling or the
+   push-token budget (``user-prompt-recall.sh``'s ``$OVERFLOW_TMPL``
+   render). This adapter emitted no such line, and athenaeum#1894 measured
+   the cost: ``push_breadcrumb_pull`` 80.0% -> 70.5% against the
+   2026-09-19 shell-hook reading. **The fix is deliberately NOT in this
+   module** — counting what a cap withheld is ranking-and-budget
+   arithmetic, which AC2 below forbids here. It lives in
+   :func:`~athenaeum.context.build_context`, which widens each backend's
+   fetch past the ceiling, tallies the withheld candidates by entity type,
+   and renders the line (through :mod:`athenaeum.recall_overflow`, shared
+   with the MCP ``recall`` surface) into the same
+   ``envelope["render"]["text"]`` this module already wraps. So this
+   adapter needed no code change at all for point 7 — which is the point:
+   a Tier-1 adapter that reads a value the core rendered cannot drift from
+   the core, and it is precisely the awk *re*-implementation that drifted.
+
 **No SQL, no ranking, no budget arithmetic lives here** (issue athenaeum#1621
 AC2; enforced by ``tests/test_claude_code_adapter.py``'s source-level scan).
 Every ranking/dedup/budget decision already happened inside

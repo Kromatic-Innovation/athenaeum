@@ -89,6 +89,39 @@ withheld tally run entirely in SQL/awk — no Python interpreter is spawned
 to do it, exactly as the relevance floor above already does not apply
 there.
 
+**The packaged adapter carries it too, from one Python renderer (issue
+athenaeum#1905).** The paragraph above described two implementations of one
+rule: a Python one behind `recall`, and an awk one inside
+`user-prompt-recall.sh`. Issues athenaeum#1361/athenaeum#1887 then made
+`athenaeum.claude_code_adapter` the shipped `UserPromptSubmit` hook, the awk
+half stopped running, and the per-turn push path lost the overflow line
+without anything failing — athenaeum#1894 measured it as
+`push_breadcrumb_pull` dropping from 80.0% to 70.5% against the 2026-09-19
+shell-hook reading. The notice now comes from `athenaeum.context`, the
+agent-neutral core both the adapter and `athenaeum context` call, which
+widens each backend's fetch to `CANDIDATE_WINDOW` (15, the same width as
+`athenaeum.mcp_server._HYBRID_CANDIDATE_POOL` and the shell hook's own
+`WINDOW`), caps back to the ceiling, tallies cap-withheld and
+budget-withheld candidates into one `{type: count}` map, and renders the
+line through `athenaeum.recall_overflow` — the module the MCP surface now
+also renders through, so the wording and the ordering have exactly one
+implementation instead of three.
+
+Three differences between the adapter's breadcrumb and the retired shell
+hook's are known, intended, and out of athenaeum#1905's scope; they are
+stated here rather than left to be rediscovered as bugs. The shell hook's
+`additionalContext` always ends with a trailing newline (its `$MATCHES`
+accumulator terminates every bullet) and the adapter's does not. The shell
+hook emits a bare `  - ` line ahead of the notice, because splitting the
+`__ATHENAEUM_OVERFLOW__` sentinel off `$RESULTS` leaves a trailing newline
+its render loop then reads as one more (empty) record — a defect in a hook
+whose removal is athenaeum#1363's, not behaviour worth reproducing. And the
+shell hook applies a relevance floor (issue athenaeum#1665) the core does
+not, so on some probes the two surface different pages and therefore
+withhold different ones. `tests/evals/test_adapter_overflow_breadcrumb_1905.py`
+pins what follows from that: wherever the two hooks render the same bullets,
+they must render the same notice, byte for byte.
+
 Before this issue, `user-prompt-recall.sh` queried FTS5 directly and never
 called `recall_search` — so unprompted recall never saw the `hot`-tier
 filter or the `push_budget.tokens_per_turn` budget that issue athenaeum#718 /

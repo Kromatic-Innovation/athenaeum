@@ -40,9 +40,31 @@ removed the field from the envelope entirely (schema v2), so the invariant is
 now structural rather than merely observed — there is no tier value left to
 appear in a ``WHERE``/``ORDER BY`` clause or to adjust a score.
 
+**The relevance-cap overflow breadcrumb lives here (issue athenaeum#1905).**
+:func:`build_context` fetches each backend past the ceiling, to
+:data:`CANDIDATE_WINDOW`, so it can count what the cap and the push-token
+budget withheld and append one line saying so — "memory has N more matching
+results (...) that were withheld by the relevance cap — call ``recall`` to
+see them." The extra rows are counted and discarded; they are never
+rendered, never scored, and never reordered, so athenaeum#1345's
+relevance-alone invariant above is untouched.
+
+Why the core and not the adapter: athenaeum#1783 put this line on the MCP
+``recall`` surface (Python) and on the shell hook (awk) at once, and when
+athenaeum#1361/athenaeum#1887 made :mod:`athenaeum.claude_code_adapter` the
+shipped ``UserPromptSubmit`` hook the awk copy simply stopped running —
+silently, since nothing asserted it. athenaeum#1894 priced the silence at
+9.5 points of ``push_breadcrumb_pull``. Rendering it here, through
+:mod:`athenaeum.recall_overflow` (which the MCP surface also renders
+through), means every Tier-1 caller gets it by reading the value this
+module already hands them, rather than by carrying a fourth copy of the
+rule.
+
 Layering: L3 service, same tier as :mod:`athenaeum.search` and
 :mod:`athenaeum.push_metrics`, which this module deliberately does not
 import at module scope (see the import-weight contract above).
+:mod:`athenaeum.recall_overflow` IS imported at module scope, and is L1 and
+stdlib-only precisely so it can be.
 """
 
 from __future__ import annotations
@@ -58,6 +80,7 @@ from pathlib import Path
 from typing import Any
 
 from athenaeum.context_schema import SCHEMA_VERSION
+from athenaeum.recall_overflow import render_overflow_line
 
 log = logging.getLogger(__name__)
 
@@ -197,6 +220,15 @@ class Candidate:
     relevance: float | None  # BM25 rank for fts5; None for vector (different scale)
     audience: str
     token_cost: int = 0
+    #: Issue athenaeum#1905: the page's entity ``type``, used ONLY to break
+    #: the overflow breadcrumb's withheld tally down by type. Deliberately
+    #: absent from :meth:`to_dict` (and therefore from the envelope's
+    #: ``candidates[]``): the envelope schema is versioned, and this field
+    #: is an input to one rendered line, not a new published candidate
+    #: attribute. An empty value folds to ``"page"`` at tally time, the
+    #: same convention :func:`athenaeum.search.apply_relevance_cap` and the
+    #: shell hook's awk tally both use.
+    page_type: str = ""
 
     @property
     def bullet(self) -> str:
@@ -217,6 +249,10 @@ class Candidate:
 @dataclass
 class _Schema:
     has_description: bool
+    #: Issue athenaeum#1905: schema v6's ``type`` column, probed for the
+    #: same legacy-DB reason ``has_description`` is. A DB without it simply
+    #: tallies every withheld candidate as ``"page"``.
+    has_type: bool = False
 
     @property
     def fts_match_columns(self) -> str:
@@ -268,7 +304,7 @@ def _probe_schema(conn: sqlite3.Connection) -> _Schema:
     degrades to a working, if narrower, push instead.
     """
     cols = {row[1] for row in conn.execute("PRAGMA table_info(wiki)").fetchall()}
-    return _Schema(has_description="description" in cols)
+    return _Schema(has_description="description" in cols, has_type="type" in cols)
 
 
 def _query_fts5(
@@ -280,6 +316,12 @@ def _query_fts5(
     exclude: frozenset[str],
 ) -> list[Candidate]:
     desc_col = _DESC_EXPR if schema.has_description else "''"
+    # Issue athenaeum#1905: `type` joins the SAME select list, no new
+    # lookup — mirroring the shell hook's own athenaeum#1783 widening
+    # (`examples/claude-code/user-prompt-recall.sh`'s FTS5 SELECT). It
+    # feeds the withheld-by-type tally only; it plays no part in selection
+    # or ordering (`ORDER BY rank` alone, unchanged).
+    type_col = "type" if schema.has_type else "''"
     # One query, no per-row follow-up lookup — the counter-example this
     # issue's wall-clock criterion names explicitly ("an implementation
     # that re-spawns a query per result rather than selecting `description`
@@ -290,7 +332,7 @@ def _query_fts5(
     placeholders = ",".join("?" for _ in exclude_list)
     exclude_clause = f"AND filename NOT IN ({placeholders})" if exclude_list else ""
     sql = (
-        f"SELECT filename, name, rank, audience, {desc_col} "
+        f"SELECT filename, name, rank, audience, {desc_col}, {type_col} "
         f"FROM wiki WHERE wiki MATCH ? {exclude_clause} ORDER BY rank LIMIT ?"
     )
     # Parenthesised: an FTS5 column filter binds only to the single
@@ -314,7 +356,7 @@ def _query_fts5(
         log.warning("FTS5 query failed, degrading to no candidates: %s", exc)
         return []
     out: list[Candidate] = []
-    for filename, name, rank, audience, description in rows:
+    for filename, name, rank, audience, description, page_type in rows:
         out.append(
             Candidate(
                 filename=filename,
@@ -323,6 +365,7 @@ def _query_fts5(
                 backend="fts5",
                 relevance=float(rank) if rank is not None else None,
                 audience=audience or "",
+                page_type=page_type or "",
             )
         )
     return out
@@ -358,22 +401,27 @@ def _query_vector(
         return []
     out: list[Candidate] = []
     filenames = [h[0] for h in hits if h[0]]
-    meta: dict[str, tuple[str, str]] = {}
+    meta: dict[str, tuple[str, str, str]] = {}
     if conn is not None and schema is not None and filenames:
         desc_col = _DESC_EXPR if schema.has_description else "''"
+        # Issue athenaeum#1905: `type` added to this SAME bounded lookup,
+        # same reasoning as the FTS5 SELECT above — it feeds the
+        # withheld-by-type tally and nothing else. Mirrors the shell hook's
+        # own `VECTOR_META` query, which carries the identical extra column.
+        type_col = "type" if schema.has_type else "''"
         placeholders = ",".join("?" for _ in filenames)
         try:
             rows = conn.execute(
-                f"SELECT filename, audience, {desc_col} "
+                f"SELECT filename, audience, {desc_col}, {type_col} "
                 f"FROM wiki WHERE filename IN ({placeholders})",
                 filenames,
             ).fetchall()
-            meta = {r[0]: (r[1] or "", r[2] or "") for r in rows}
+            meta = {r[0]: (r[1] or "", r[2] or "", r[3] or "") for r in rows}
         except sqlite3.OperationalError as exc:
             log.warning("vector-hit metadata lookup failed, degrading to name-only: %s", exc)
             meta = {}
     for filename, name, _score in hits:
-        audience, description = meta.get(filename, ("", ""))
+        audience, description, page_type = meta.get(filename, ("", "", ""))
         out.append(
             Candidate(
                 filename=filename,
@@ -388,12 +436,23 @@ def _query_vector(
                 # the shell hook it replaces).
                 relevance=None,
                 audience=audience,
+                page_type=page_type,
             )
         )
     return out
 
 
-def _dedupe(candidates: list[Candidate], n: int) -> list[Candidate]:
+def _dedupe(candidates: list[Candidate]) -> list[Candidate]:
+    """Drop blank and repeat filenames, preserving relevance order.
+
+    Issue athenaeum#1905 removed this function's own ``n`` cut-off: the
+    cap is now applied by :func:`_apply_cap` one step later, so the
+    candidates BEYOND it survive long enough to be counted into the
+    overflow breadcrumb's withheld tally instead of vanishing here. Same
+    predicate the shell hook's merge step uses
+    (``!seen[$1]++`` over a non-empty ``$1``), which likewise dedupes the
+    whole widened window and caps afterwards.
+    """
     seen: set[str] = set()
     out: list[Candidate] = []
     for c in candidates:
@@ -401,9 +460,31 @@ def _dedupe(candidates: list[Candidate], n: int) -> list[Candidate]:
             continue
         seen.add(c.filename)
         out.append(c)
-        if len(out) >= n:
-            break
     return out
+
+
+def _tally_withheld(withheld: list[Candidate], into: dict[str, int]) -> None:
+    """Add *withheld* to the ``{type: count}`` map *into*, in place.
+
+    A candidate with no resolvable type counts as ``"page"`` -- the same
+    convention :func:`athenaeum.search.apply_relevance_cap` documents and
+    the shell hook's awk tally applies (``typ = ($7 != "") ? $7 : "page"``).
+    Cap-withheld and budget-withheld candidates go into the SAME map, again
+    matching the shell hook: the breadcrumb says how many results the caller
+    is not seeing, not why each one was dropped.
+    """
+    for c in withheld:
+        key = c.page_type or "page"
+        into[key] = into.get(key, 0) + 1
+
+
+def _apply_cap(
+    candidates: list[Candidate], ceiling: int, withheld_by_type: dict[str, int]
+) -> list[Candidate]:
+    """Keep the first *ceiling* candidates; tally the rest into
+    *withheld_by_type* (issue athenaeum#1905). Never re-orders."""
+    _tally_withheld(candidates[ceiling:], withheld_by_type)
+    return candidates[:ceiling]
 
 
 def _extract_terms(
@@ -465,12 +546,24 @@ def render_text(candidates: list[Candidate]) -> str:
     return "\n".join(lines)
 
 
-def _apply_budget(candidates: list[Candidate], budget: int, preamble: str) -> list[Candidate]:
+def _apply_budget(
+    candidates: list[Candidate],
+    budget: int,
+    preamble: str,
+    withheld_by_type: dict[str, int] | None = None,
+) -> list[Candidate]:
     """Greedy pack over already relevance-ordered, deduped candidates: a
     candidate is included, and its cost added to the running total, ONLY if
     doing so keeps the total within budget. A candidate that would exceed
     it is SKIPPED (never truncated) — later, smaller candidates are still
     considered.
+
+    Issue athenaeum#1905: a skipped candidate is now tallied into
+    *withheld_by_type* when one is supplied, so a budget drop shows up in
+    the overflow breadcrumb exactly as a cap drop does ("budget drops are
+    counted, not silent" -- the shell hook's own wording for the same
+    behaviour). Passing ``None`` keeps the pre-athenaeum#1905 contract for
+    a caller that only wants the packing.
     """
     total = estimate_tokens(preamble)
     out: list[Candidate] = []
@@ -478,6 +571,8 @@ def _apply_budget(candidates: list[Candidate], budget: int, preamble: str) -> li
         block = f"  - {c.bullet}\n"
         cost = estimate_tokens(block)
         if total + cost > budget:
+            if withheld_by_type is not None:
+                _tally_withheld([c], withheld_by_type)
             continue
         total += cost
         c.token_cost = cost
@@ -489,6 +584,15 @@ PREAMBLE = (
     "[Knowledge context] Wiki pages relevant to this message "
     "(use `recall` MCP tool for full details):"
 )
+
+#: Issue athenaeum#1905: how far past the cap each backend fetches, so the
+#: cap has real withheld candidates to count. Same width as
+#: ``athenaeum.mcp_server._HYBRID_CANDIDATE_POOL`` and the shell hook's own
+#: ``WINDOW``, reused here for the same reason both of those give: "how wide
+#: is a widened fetch" should be ONE answer across every surface. Widened to
+#: ``n`` when a caller asks for a ceiling above it, so the window can never
+#: be narrower than what the caller actually wants rendered.
+CANDIDATE_WINDOW = 15
 
 
 def build_context(
@@ -535,6 +639,13 @@ def build_context(
         prompt, timeout=llm_timeout, stopwords=stopwords, config=config, use_llm=use_llm
     )
 
+    # Issue athenaeum#1905: both legs fetch to the WINDOW, not to `n`. The
+    # extra rows are never rendered — `_apply_cap` below cuts back to `n`
+    # immediately — they exist so the overflow breadcrumb can say how many
+    # relevant pages the caller is NOT being shown. Same two-step
+    # (widen-then-cap) the shell hook has done since athenaeum#1783.
+    window = max(CANDIDATE_WINDOW, n)
+
     fts_candidates: list[Candidate] = []
     vector_candidates: list[Candidate] = []
     conn: sqlite3.Connection | None = None
@@ -545,14 +656,14 @@ def build_context(
         try:
             schema = _probe_schema(conn)
             fts_query = build_fts_query(terms)
-            fts_candidates = _query_fts5(conn, schema, fts_query, n=n, exclude=exclude)
+            fts_candidates = _query_fts5(conn, schema, fts_query, n=window, exclude=exclude)
 
             if search_backend == "vector":
                 vector_query = " ".join(terms) or prompt
                 vector_candidates = _query_vector(
                     cache_dir,
                     vector_query,
-                    n=n,
+                    n=window,
                     exclude=exclude,
                     conn=conn,
                     schema=schema,
@@ -562,16 +673,29 @@ def build_context(
     elif terms and search_backend == "vector" and (cache_dir / "wiki-vectors").is_dir():
         vector_query = " ".join(terms) or prompt
         vector_candidates = _query_vector(
-            cache_dir, vector_query, n=n, exclude=exclude, conn=None, schema=None
+            cache_dir, vector_query, n=window, exclude=exclude, conn=None, schema=None
         )
 
     # Merge: FTS5 first (lexical precision), then vector, dedupe, cap n.
     # Selection/ordering are relevance-alone here (issue athenaeum#1345's
-    # invariant; see module docstring).
-    merged = _dedupe([*fts_candidates, *vector_candidates], n)
-    packed = _apply_budget(merged, budget, PREAMBLE)
+    # invariant; see module docstring) — the athenaeum#1905 widening below
+    # changes neither: it fetches FURTHER down the same relevance order and
+    # throws the extra rows away after counting them.
+    merged = _dedupe([*fts_candidates, *vector_candidates])
 
-    return _make_envelope(prompt, session_id, budget, search_backend, packed, t0)
+    # Issue athenaeum#1905: cap and budget both feed ONE withheld tally, and
+    # the count is a LOWER BOUND ("at least N") when the widened fetch was
+    # itself exhausted — past `window` deduped candidates there may be more
+    # this turn never fetched at all. Identical rule to the shell hook's
+    # `count_str = (idx >= window) ? "at least " withheld : withheld`.
+    withheld_by_type: dict[str, int] = {}
+    capped = _apply_cap(merged, n, withheld_by_type)
+    packed = _apply_budget(capped, budget, PREAMBLE, withheld_by_type)
+    overflow = render_overflow_line(withheld_by_type, at_least=len(merged) >= window)
+
+    return _make_envelope(
+        prompt, session_id, budget, search_backend, packed, t0, overflow=overflow
+    )
 
 
 def _make_envelope(
@@ -581,7 +705,30 @@ def _make_envelope(
     search_backend: str,
     candidates: list[Candidate],
     t0: float,
+    *,
+    overflow: str = "",
 ) -> dict[str, Any]:
+    """Assemble the envelope. *overflow* is the rendered overflow-breadcrumb
+    line (issue athenaeum#1905), or ``""``.
+
+It rides inside ``render.text``, appended after the last
+    bullet, rather than arriving as a sibling ``render`` key: ``text`` is
+    the string every Tier-1 caller actually injects (the packaged adapter
+    renders ``preamble + "\n" + text`` verbatim), and the envelope's field
+    set is pinned exactly — ``tests/test_sidecar_envelope_schema.py``'s
+    ``test_golden_envelope_field_set_matches_schema`` exists to catch the
+    core growing an undocumented key, and a new one here would mean a
+    ``SCHEMA_VERSION`` bump and a migration note for a line that has a
+    perfectly good home in the field that already carries the render.
+
+    Never emitted without bullets to decorate: a turn that renders nothing
+    stays silent, overflow included — the shell hook's own "empty"
+    behaviour (``exit 0``, no output at all, even when candidates were
+    withheld).
+    """
+    text = render_text(candidates)
+    if text and overflow:
+        text = f"{text}\n{overflow}"
     return {
         "v": ENVELOPE_VERSION,
         "query": prompt,
@@ -592,7 +739,7 @@ def _make_envelope(
             "used": sum(c.token_cost for c in candidates),
         },
         "render": {
-            "text": render_text(candidates),
+            "text": text,
             "preamble": PREAMBLE,
         },
         "backend": search_backend,
