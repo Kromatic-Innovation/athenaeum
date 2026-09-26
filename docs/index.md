@@ -129,6 +129,7 @@ Evidence, kept out of the reading path.
 - [Native-memory baseline — wave-2 measurement report](measurements/native-memory-baseline-2026-09-18.md) — the sixth north-star grid, adding the report-only classes and the two-oracle gate.
 - [Native-memory baseline — validating grid for the `follow_through` path-to-beat](measurements/native-memory-baseline-2026-09-19.md) — the reading taken after the four `follow_through` path-to-beat changes landed: no class regressed on the verdict arm, and §7 passes at `medium` for the first time.
 - [North-star grid — rendered report, run 35443944736](measurements/north-star-grid-2026-09-19-run-35443944736.md) — the full rendered report that reading was taken from, recorded in-tree because the Actions artifact expires.
+- [Rollout eval layer — packaged adapter vs. the shell hook](measurements/rollout-eval-adapter-cutover-2026-09-26.md) — the score against the packaged `athenaeum-claude-hook` adapter, next to the last shell-hook run; `push_breadcrumb_pull` reads below the recorded floor.
 - [Write-path retention — per-gate diagnosis](measurements/write-path-retention-2026-09-18.md) — why the Phase 2 smoke compile retained 5 of 36 planted facts, the gate that did it, and the transient-observation ground truth.
 - [Deploy SHA stamp](measurements/deploy-sha-stamp.md)
 - [Session shapes — merged ledger](measurements/session-shapes-2026-09-24.md) — the both/hook-only/pull-only/unknown-only session split against the live push-records ledger, before/after a split date.
