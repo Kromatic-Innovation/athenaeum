@@ -6,51 +6,64 @@ between the harness and the SHELL hook, under an explicit
 ``ATHENAEUM_EVAL_HOOK=shell`` pin. Nothing pinned the DEFAULT hook — the
 packaged adapter (:mod:`athenaeum.claude_code_adapter`) that athenaeum#1361/#1887
 made the shipped ``UserPromptSubmit`` command — against the shell hook it
-replaced, and a whole behaviour went missing in that gap: the awk
-``END``-block overflow notice at
-``examples/claude-code/user-prompt-recall.sh``'s ``$OVERFLOW_TMPL`` render.
-athenaeum#1894 measured the cost (``push_breadcrumb_pull`` 80.0% -> 70.5%);
-a zero-model-call byte-diff over all 48 ``core`` probes found the notice was
-the only consistent difference in the breadcrumb text.
+replaced, and a whole behaviour went missing in that gap: the awk ``END``-block
+overflow notice at ``examples/claude-code/user-prompt-recall.sh``'s
+``$OVERFLOW_TMPL`` render. athenaeum#1894 measured the cost
+(``push_breadcrumb_pull`` 80.0% -> 70.5%); a zero-model-call byte-diff over all
+48 ``core`` probes found the notice was the only consistent difference in the
+breadcrumb text.
 
-This module runs BOTH hooks against the same materialized corpus and
-compares. It is deliberately not a full byte-equivalence assertion, because
-three differences remain that athenaeum#1905 does not close and should not
-silently paper over:
+**What this module asserts, and what it deliberately does not.** It runs BOTH
+hooks against the same materialized corpus and pins the thing that actually
+regressed: **where the shell hook says candidates were withheld, the adapter
+must say so too, in the shared template's own words.** It does NOT assert the
+two notices carry the same NUMBERS, and that restraint is measured rather than
+assumed — see difference 3 below. The exact arithmetic (which candidates are
+withheld, by which rule, and how the count and the type breakdown render) is
+pinned deterministically and in-process by
+``tests/test_context_overflow_1905.py``; this module's job is the end-to-end
+one that only a real subprocess can do.
+
+Four differences from the shell hook remain. athenaeum#1905 closes none of
+them, and they are stated here rather than left to be rediscovered as bugs:
 
 1. **The shell hook's trailing newline.** Its ``$MATCHES`` accumulator ends
    every bullet with a ``\\n``, so its ``additionalContext`` always ends with
    one; the adapter renders ``preamble + "\\n" + text`` with no trailing
    separator. Present on every probe, overflow or not.
-2. **The shell hook's spurious empty bullet before the notice.** Splitting
-   the ``__ATHENAEUM_OVERFLOW__`` sentinel off ``$RESULTS`` leaves a trailing
-   newline behind, so the render loop reads one extra empty record and emits
-   a bare ``  - `` line ahead of the notice. It is a defect in a retired
-   hook (athenaeum#1363 owns that hook's removal), not behaviour to
-   reproduce.
-3. **Candidate selection can still differ.** The shell hook applies a
-   relevance floor (athenaeum#1665) the core does not, so on some probes the
-   two render different pages — and therefore legitimately withhold
-   different ones. That gap is real, and out of athenaeum#1905's scope (this
-   issue is about the notice, which athenaeum#1894 isolated as the
-   *consistent* difference).
-
-So the comparison below is conditioned on what it can honestly assert:
-**where the two hooks rendered the same bullets, they must render the same
-notice, byte for byte** — same candidates in, same candidates withheld, same
-sentence out. Plus two vacuity guards, because a conditional assertion that
-never fires proves nothing.
+2. **The shell hook's spurious empty bullet before the notice.** Splitting the
+   ``__ATHENAEUM_OVERFLOW__`` sentinel off ``$RESULTS`` leaves a trailing
+   newline behind, so the render loop reads one extra empty record and emits a
+   bare ``  - `` line ahead of the notice. A defect in a retired hook
+   (athenaeum#1363 owns that hook's removal), not behaviour to reproduce.
+3. **The two candidate windows can differ below the rendered top-N.** Each hook
+   builds its own query terms and runs its own vector leg, so two hooks that
+   render an IDENTICAL bullet list can still have fetched different tails — and
+   therefore withheld different candidates. Measured on GitHub Actions
+   (2026-09-26, where the vector backend is live, unlike a typical local run):
+   probe ``confidentiality_rule`` rendered the same seven bullets on both sides
+   while the shell reported ``at least 18`` withheld ``(2 client, 6 company,
+   1 concept, 1 meeting, 3 note, 2 person, 2 principle, 1 project)`` and the
+   adapter ``at least 19`` ``(2 client, 8 company, 1 concept, 1 meeting, 1 note,
+   3 person, 2 principle, 1 project)``. Identical top-N does not imply an
+   identical tail; an assertion that the counts match would be pinning a
+   coincidence.
+4. **The shell hook applies a relevance floor** (athenaeum#1665) the core does
+   not. Inactive by default — ``resolve_recall_relevance_floor`` returns
+   ``None`` for both backends on the default config, so it is not what
+   difference 3 measured — but a configured floor would widen that gap further.
 
 Requires ``bash``, ``jq`` and a real FTS5-capable ``sqlite3`` CLI; skips
-cleanly otherwise, the same idiom the spike test above uses. No API client,
-no ``claude`` binary, no token spend — NOT ``rollout``-marked, so it runs in
-the default selection.
+cleanly otherwise, the same idiom the spike test above uses. No API client, no
+``claude`` binary, no token spend — NOT ``rollout``-marked, so it runs in the
+default selection.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -59,6 +72,7 @@ from pathlib import Path
 
 import pytest
 
+from athenaeum.recall_overflow import render_overflow_line
 from tests.evals.corpus import build_corpus
 from tests.evals.rollout import (
     SESSION_START_HOOK,
@@ -71,10 +85,19 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 #: How many ``core`` probes to compare. The full 48 is what athenaeum#1894's
 #: offline diagnostic swept; this test pays a real ``session-start-recall.sh``
-#: index build per probe on the shell side, so it takes a representative
-#: prefix and leaves the exhaustive sweep to that (zero-cost, on-demand)
-#: diagnostic.
+#: index build on each side, so it takes a representative prefix and leaves the
+#: exhaustive sweep to that (zero-cost, on-demand) diagnostic.
 PROBE_COUNT = 6
+
+#: Parses a rendered notice back into its ``(at_least, {type: count})`` inputs,
+#: so :func:`_rerender` can prove the string came out of the shared renderer.
+#: Anchored at both ends: a notice with anything extra around it does not match,
+#: which is the point.
+_NOTICE_RE = re.compile(
+    r"^memory has (?P<at_least>at least )?(?P<total>\d+) more matching results "
+    r"\((?P<types>[^)]*)\) that were withheld by the relevance cap "
+    r"— call `recall` to see them\.$"
+)
 
 
 def _require(tool: str) -> None:
@@ -95,9 +118,9 @@ def _require_fts5_sqlite() -> None:
 
 
 def _require_adapter_is_the_default_hook() -> None:
-    """Vacuity guard 1: if the default resolution ever points back at a
-    ``.sh``, this whole module silently degrades to comparing the shell hook
-    with itself — which passes unconditionally and proves nothing about the
+    """Vacuity guard: if the default resolution ever points back at a ``.sh``,
+    this whole module silently degrades to comparing the shell hook with
+    itself — which passes unconditionally and proves nothing about the
     adapter."""
     resolved = resolve_user_prompt_hook()
     if resolved.suffix == ".sh":
@@ -107,8 +130,8 @@ def _require_adapter_is_the_default_hook() -> None:
 def _hook_env(knowledge_root: Path, home: Path) -> dict[str, str]:
     """Isolated env for the shell hook, built here rather than borrowed from
     ``tests.evals.rollout.build_breadcrumb_hook_env`` — the adapter side goes
-    through that helper, so a bug in it must not be able to move both sides
-    of the comparison in the same direction."""
+    through that helper, so a bug in it must not be able to move both sides of
+    the comparison in the same direction."""
     return {
         "HOME": str(home),
         "ATHENAEUM_CACHE_DIR": str(home / ".cache" / "athenaeum"),
@@ -151,13 +174,13 @@ def _run_shell_hook(knowledge_root: Path, home: Path, query: str, session_id: st
 def _split(additional_context: str) -> tuple[list[str], str]:
     """Separate rendered bullets from the (at most one) overflow notice.
 
-    The notice is identifiable without pattern-matching its wording: it is
-    the only non-empty line that does not carry the ``  - `` bullet prefix,
-    which the template guarantees by construction (see
-    :func:`athenaeum.recall_overflow.render_overflow_line`). The shell
-    hook's bare ``  - `` artifact line (difference 2 in this module's
-    docstring) is dropped here so the bullet comparison is about pages, not
-    about that defect.
+    The notice is identifiable without pattern-matching its wording: it is the
+    only non-empty line that does not carry the ``  - `` bullet prefix, which
+    the template guarantees by construction (see
+    :func:`athenaeum.recall_overflow.render_overflow_line`). The shell hook's
+    bare ``  - `` artifact line (difference 2 in this module's docstring) is
+    dropped here so the bullet comparison is about pages, not about that
+    defect.
     """
     bullets: list[str] = []
     notice = ""
@@ -172,6 +195,24 @@ def _split(additional_context: str) -> tuple[list[str], str]:
     return bullets, notice
 
 
+def _rerender(notice: str) -> str:
+    """Re-render *notice* from its own parsed inputs through the shared
+    renderer. Equal output proves the string is exactly what
+    :mod:`athenaeum.recall_overflow` produces from the packaged template —
+    same wording, same separators, same ASCII-sorted type order — rather than
+    a hand-built look-alike that merely reads right."""
+    m = _NOTICE_RE.match(notice)
+    assert m, f"notice does not match the packaged template's shape: {notice!r}"
+    counts: dict[str, int] = {}
+    for part in m.group("types").split(", "):
+        n, _, name = part.partition(" ")
+        counts[name] = int(n)
+    assert sum(counts.values()) == int(m.group("total")), (
+        f"the type breakdown does not sum to the stated total: {notice!r}"
+    )
+    return render_overflow_line(counts, at_least=bool(m.group("at_least")))
+
+
 @pytest.fixture(scope="module")
 def _corpus_root(tmp_path_factory: pytest.TempPathFactory) -> Path:
     root = tmp_path_factory.mktemp("overflow-1905") / "knowledge"
@@ -179,107 +220,93 @@ def _corpus_root(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return root
 
 
-def _compare(corpus_root: Path, tmp_path: Path) -> list[tuple[str, list[str], str, list[str], str]]:
-    """Run both hooks over the first :data:`PROBE_COUNT` ``core`` probes.
+@pytest.fixture(scope="module")
+def _comparison(_corpus_root: Path, tmp_path_factory: pytest.TempPathFactory) -> list[tuple]:
+    """Both hooks over the first :data:`PROBE_COUNT` ``core`` probes, as
+    ``(probe_id, shell_bullets, shell_notice, adapter_bullets, adapter_notice)``.
 
-    Each side gets its own ``HOME`` (reused across probes — the hooks key
-    their session-dedup file by ``session_id``, which is fresh per call) so
-    the expensive index build is paid once per side rather than once per
-    probe.
+    Module-scoped: each side pays one real index build rather than one per
+    probe. Each side keeps its own ``HOME``, and every query gets a fresh
+    ``session_id`` (the hooks key their session-dedup file by it), so reusing a
+    home across probes cannot bias a later call.
     """
-    probes = build_corpus("core").probes[:PROBE_COUNT]
-    assert probes, "test setup bug: core corpus has no probes"
-
+    homes = tmp_path_factory.mktemp("homes")
     rows = []
-    for probe in probes:
+    for probe in build_corpus("core").probes[:PROBE_COUNT]:
         shell = _run_shell_hook(
-            corpus_root,
-            tmp_path / "shell-home",
-            probe.query,
-            f"shell-{uuid.uuid4().hex}",
+            _corpus_root, homes / "shell", probe.query, f"shell-{uuid.uuid4().hex}"
         )
         adapter = build_push_breadcrumb_context(
-            corpus_root,
-            tmp_path / "adapter-home",
+            _corpus_root,
+            homes / "adapter",
             probe.query,
             session_id=f"adapter-{uuid.uuid4().hex}",
         )
         shell_bullets, shell_notice = _split(shell)
         adapter_bullets, adapter_notice = _split(adapter)
         rows.append((probe.id, shell_bullets, shell_notice, adapter_bullets, adapter_notice))
+    assert rows, "test setup bug: core corpus has no probes"
     return rows
 
 
-def test_adapter_renders_the_same_overflow_notice_as_the_shell_hook(
-    _corpus_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """AC1/AC2: the notice athenaeum#1894 found missing is back, and it is the
-    SAME sentence the shell hook renders whenever the two hooks saw the same
-    candidates.
-
-    Counter-example this defeats, exactly as measured on 2026-09-26: the
-    adapter's breadcrumb ends at its last bullet while the shell hook's goes
-    on to say "N more matching results ... call ``recall`` to see them."
-    """
+@pytest.fixture(autouse=True)
+def _default_hook(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("ATHENAEUM_EVAL_HOOK", raising=False)
     _require("bash")
     _require("jq")
     _require_fts5_sqlite()
     _require_adapter_is_the_default_hook()
 
-    rows = _compare(_corpus_root, tmp_path)
 
-    # Vacuity guard 2: at least one probe must actually overflow, or every
-    # assertion below is a comparison of two empty strings.
-    assert any(notice for _id, _sb, notice, _ab, _an in rows), (
-        "test setup bug: no core probe in this prefix withheld any candidate, "
-        "so this module proved nothing about the overflow notice"
+def test_adapter_says_candidates_were_withheld_wherever_the_shell_hook_does(
+    _comparison: list[tuple],
+) -> None:
+    """AC1/AC2, and the athenaeum#1894 regression itself: the adapter's
+    breadcrumb used to stop at its last bullet while the shell hook's went on
+    to say "N more matching results ... call ``recall`` to see them."
+
+    Conditioned on the shell hook, not on a hardcoded probe id, so the pin
+    follows the corpus rather than a snapshot of it.
+    """
+    withholding = [
+        (probe_id, adapter_bullets, adapter_notice)
+        for probe_id, _sb, shell_notice, adapter_bullets, adapter_notice in _comparison
+        if shell_notice
+    ]
+    assert withholding, (
+        "test setup bug: no core probe in this prefix withheld any candidate on the "
+        "shell hook, so this module proved nothing about the overflow notice"
     )
 
-    compared = 0
-    for probe_id, shell_bullets, shell_notice, adapter_bullets, adapter_notice in rows:
-        if shell_bullets != adapter_bullets:
-            # Difference 3 in the module docstring: different candidates in,
-            # so a different withheld set out. Not this issue's subject.
-            continue
-        compared += 1
-        assert adapter_notice == shell_notice, (
-            f"probe {probe_id!r}: the two hooks rendered identical bullets but "
-            f"different overflow notices\n  shell:   {shell_notice!r}\n"
-            f"  adapter: {adapter_notice!r}"
+    for probe_id, adapter_bullets, adapter_notice in withholding:
+        assert adapter_bullets, f"probe {probe_id!r}: adapter rendered no breadcrumb at all"
+        assert adapter_notice, (
+            f"probe {probe_id!r}: the shell hook reported withheld candidates and the "
+            "adapter's breadcrumb ended at its last bullet — the athenaeum#1894 defect"
         )
 
-    assert compared, (
-        "no probe in this prefix produced identical bullets on both hooks, so the "
-        "notice comparison never ran — widen PROBE_COUNT or fix candidate selection"
-    )
 
-
-def test_the_adapter_never_ends_a_capped_breadcrumb_without_the_notice(
-    _corpus_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_the_adapter_notice_is_the_shared_template_verbatim(
+    _comparison: list[tuple],
 ) -> None:
-    """The regression in its own right, independent of the shell hook: on a
-    probe where the SHELL hook says candidates were withheld and both hooks
-    rendered the same pages, an adapter breadcrumb that stops at its last
-    bullet is the athenaeum#1894 defect, whatever the shell hook is doing."""
-    monkeypatch.delenv("ATHENAEUM_EVAL_HOOK", raising=False)
-    _require("bash")
-    _require("jq")
-    _require_fts5_sqlite()
-    _require_adapter_is_the_default_hook()
+    """athenaeum#1905's actual fix is single-sourcing, not a second copy of the
+    sentence: the string the real adapter subprocess emitted must be exactly
+    what :mod:`athenaeum.recall_overflow` renders from the packaged template.
 
-    rows = _compare(_corpus_root, tmp_path)
-    overflowing = [
+    A reimplementation that merely read right — a different separator, an
+    unsorted type list, a hardcoded literal drifting from
+    ``src/athenaeum/prompts/recall_overflow_breadcrumb.md`` — fails here.
+    """
+    notices = [
         (probe_id, adapter_notice)
-        for probe_id, shell_bullets, shell_notice, adapter_bullets, adapter_notice in rows
-        if shell_notice and shell_bullets == adapter_bullets
+        for probe_id, _sb, _sn, _ab, adapter_notice in _comparison
+        if adapter_notice
     ]
-    assert overflowing, "test setup bug: no comparable probe withheld any candidate"
+    assert notices, "test setup bug: the adapter rendered no overflow notice on any probe"
 
-    for probe_id, adapter_notice in overflowing:
-        assert adapter_notice, f"probe {probe_id!r}: adapter dropped the overflow notice"
-        assert "call `recall` to see them." in adapter_notice
-        assert not adapter_notice.startswith("-"), (
-            f"probe {probe_id!r}: the notice acquired a bullet prefix, which would "
-            "inflate every breadcrumb page count by one phantom page"
+    for probe_id, notice in notices:
+        assert notice == _rerender(notice), f"probe {probe_id!r}: notice is not template-rendered"
+        assert not notice.startswith("-"), (
+            f"probe {probe_id!r}: the notice acquired a bullet prefix, which would inflate "
+            "every breadcrumb page count by one phantom page"
         )

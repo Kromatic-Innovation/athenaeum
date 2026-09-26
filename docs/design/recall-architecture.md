@@ -107,20 +107,37 @@ line through `athenaeum.recall_overflow` — the module the MCP surface now
 also renders through, so the wording and the ordering have exactly one
 implementation instead of three.
 
-Three differences between the adapter's breadcrumb and the retired shell
+Four differences between the adapter's breadcrumb and the retired shell
 hook's are known, intended, and out of athenaeum#1905's scope; they are
-stated here rather than left to be rediscovered as bugs. The shell hook's
-`additionalContext` always ends with a trailing newline (its `$MATCHES`
-accumulator terminates every bullet) and the adapter's does not. The shell
-hook emits a bare `  - ` line ahead of the notice, because splitting the
-`__ATHENAEUM_OVERFLOW__` sentinel off `$RESULTS` leaves a trailing newline
-its render loop then reads as one more (empty) record — a defect in a hook
-whose removal is athenaeum#1363's, not behaviour worth reproducing. And the
-shell hook applies a relevance floor (issue athenaeum#1665) the core does
-not, so on some probes the two surface different pages and therefore
-withhold different ones. `tests/evals/test_adapter_overflow_breadcrumb_1905.py`
-pins what follows from that: wherever the two hooks render the same bullets,
-they must render the same notice, byte for byte.
+stated here rather than left to be rediscovered as bugs.
+
+1. The shell hook's `additionalContext` always ends with a trailing newline
+   (its `$MATCHES` accumulator terminates every bullet); the adapter's does
+   not. Present on every probe, overflow or not.
+2. The shell hook emits a bare `  - ` line ahead of the notice, because
+   splitting the `__ATHENAEUM_OVERFLOW__` sentinel off `$RESULTS` leaves a
+   trailing newline its render loop then reads as one more (empty) record —
+   a defect in a hook whose removal is athenaeum#1363's, not behaviour worth
+   reproducing.
+3. The two candidate WINDOWS can differ below the rendered top-N. Each hook
+   builds its own query terms and runs its own vector leg, so two hooks that
+   render an identical bullet list can still have fetched different tails,
+   and therefore withheld different candidates. Measured on GitHub Actions
+   (2026-09-26, vector backend live): probe `confidentiality_rule` rendered
+   the same seven bullets on both sides while the shell reported `at least
+   18` withheld and the adapter `at least 19`, with a different type mix.
+4. The shell hook applies a relevance floor (issue athenaeum#1665) the core
+   does not. Inactive on the default config — `resolve_recall_relevance_floor`
+   returns `None` for both backends, so it is not what difference 3 measured
+   — but a configured floor would widen that gap further.
+
+`tests/evals/test_adapter_overflow_breadcrumb_1905.py` therefore pins what
+can honestly be pinned end to end: wherever the shell hook says candidates
+were withheld, the adapter must say so too, and the string it emits must be
+byte-identical to what `athenaeum.recall_overflow` renders from the packaged
+template. The arithmetic itself — which candidates are withheld, by which
+rule, and how the count and breakdown render — is pinned deterministically
+and in-process by `tests/test_context_overflow_1905.py`.
 
 Before this issue, `user-prompt-recall.sh` queried FTS5 directly and never
 called `recall_search` — so unprompted recall never saw the `hot`-tier
