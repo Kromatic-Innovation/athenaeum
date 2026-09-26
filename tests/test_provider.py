@@ -7,7 +7,11 @@ here shells out to a real ``claude``; there is no live API or network.
 
 from __future__ import annotations
 
+import json
+import os
+import shutil
 import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -590,6 +594,44 @@ class TestClaudeCliCreate:
         # inherited environment is preserved, not replaced.
         assert env["PATH"] == "/sentinel/bin"
 
+    def test_suppresses_operator_hooks_via_safe_mode_env(self, monkeypatch):
+        # athenaeum#1908: every spawn must carry CLAUDE_CODE_SAFE_MODE=1 so
+        # the operator's user-level SessionStart/UserPromptSubmit/SessionEnd
+        # hooks never fire for a programmatic ``claude -p`` call (20-30s of
+        # added latency per call, plus a SessionEnd-triggered `athenaeum
+        # session-end` ingest that can run while a write lane holds the
+        # writer lock). Implemented as an env var, not a CLI flag, so an
+        # older `claude` CLI that predates the flag is unaffected rather than
+        # hard-failing (see the neighboring comment in provider.py).
+        cap = {}
+        _stub_run(monkeypatch, stdout=_envelope(), capture=cap)
+        client = ClaudeCliClient()
+        client.messages.create(
+            model="m-1",
+            system="s",
+            messages=[{"role": "user", "content": "u"}],
+        )
+        env = cap["kwargs"]["env"]
+        assert env["CLAUDE_CODE_SAFE_MODE"] == "1"
+        # The merge must not have displaced the neighboring athenaeum#377 flag.
+        assert env["CLAUDE_SUPPRESS_NOTIFY"] == "1"
+
+    def test_safe_mode_env_overrides_ambient_value(self, monkeypatch):
+        # athenaeum#1908: the subprocess env is built as
+        # ``{**os.environ, ..., "CLAUDE_CODE_SAFE_MODE": "1"}`` — placed
+        # AFTER the ``**os.environ`` splat so it always wins over whatever
+        # an operator's own shell/profile happens to export.
+        monkeypatch.setenv("CLAUDE_CODE_SAFE_MODE", "0")
+        cap = {}
+        _stub_run(monkeypatch, stdout=_envelope(), capture=cap)
+        client = ClaudeCliClient()
+        client.messages.create(
+            model="m-1",
+            system="s",
+            messages=[{"role": "user", "content": "u"}],
+        )
+        assert cap["kwargs"]["env"]["CLAUDE_CODE_SAFE_MODE"] == "1"
+
     def test_cache_control_stripped_from_cli_path(self, monkeypatch):
         cap = {}
         _stub_run(monkeypatch, stdout=_envelope(), capture=cap)
@@ -640,6 +682,131 @@ class TestClaudeCliCreate:
         )
         obj = extract_json_object(resp.content[0].text)
         assert obj == {"detected": True}
+
+
+# ---------------------------------------------------------------------------
+# Hermetic-spawn contract (athenaeum#1908) — pin the PROPERTY, not the flag
+# ---------------------------------------------------------------------------
+
+
+class TestHermeticSpawnSuppressesOperatorHooks:
+    """A ``ClaudeCliClient`` spawn must inherit NOTHING from the operator's
+    user-level Claude Code config.
+
+    Three prior leaks (athenaeum#906 tools, athenaeum#775 MCP config,
+    athenaeum#377 the Stop-hook desktop notification) each got an
+    exact-argv-token or exact-env-key assertion — the tests above this class
+    and in ``TestClaudeCliCreate``. None of them asserted that a spawn
+    inherits nothing at all from the operator's own config; the
+    SessionStart/UserPromptSubmit/SessionEnd hook leak athenaeum#1908 tracks
+    is the fourth instance of that same gap. This test spawns the REAL
+    ``claude`` binary under a throwaway ``CLAUDE_CONFIG_DIR`` whose
+    ``settings.json`` registers all three hooks against sentinel files, so
+    the next config surface Claude Code adds (plugins, project ``.claude/``,
+    whatever comes after hooks) fails this test on its own rather than being
+    found on an operator host by ``ps`` a hundred minutes into a run.
+
+    Carries ``pytest.mark.rollout`` (spawns the real ``claude`` binary —
+    deselected by default alongside ``eval``/``embedding``, see
+    ``pyproject.toml``) on top of the ``skipif`` below: the marker keeps it
+    out of a default full-suite run, the ``skipif`` is what actually makes
+    the skip legible (a visible "no claude binary" reason rather than a
+    silent deselection) on any host/container that DOES try to run it.
+    """
+
+    @pytest.mark.rollout
+    @pytest.mark.skipif(
+        shutil.which("claude") is None,
+        reason=(
+            "claude CLI binary not found on PATH -- this test spawns the "
+            "real binary and needs one present. This is a visible SKIP, not "
+            "a pass: CI carries no `claude` binary (and deselects the "
+            "`rollout` marker by default regardless); run on a host or "
+            "container with `claude` installed to actually exercise this "
+            "test."
+        ),
+    )
+    def test_provider_spawn_fires_no_operator_hook_sentinel(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config_dir = tmp_path / "claude-config"
+        config_dir.mkdir()
+        spawn_cwd = tmp_path / "cwd"
+        spawn_cwd.mkdir()
+
+        sentinels = {
+            "SessionStart": tmp_path / "sentinel-session-start",
+            "UserPromptSubmit": tmp_path / "sentinel-user-prompt-submit",
+            "SessionEnd": tmp_path / "sentinel-session-end",
+        }
+        settings = {
+            "hooks": {
+                event: [
+                    {"hooks": [{"type": "command", "command": f"touch {sentinel}"}]}
+                ]
+                for event, sentinel in sentinels.items()
+            }
+        }
+        (config_dir / "settings.json").write_text(
+            json.dumps(settings), encoding="utf-8"
+        )
+        # No identity/credential material -- an empty user config, mirroring
+        # tests/evals/rollout.py's seed_native_claude_config for a container
+        # with no prior Claude Code state.
+        (config_dir / ".claude.json").write_text("{}", encoding="utf-8")
+
+        # Derive argv from the client's OWN builder -- never hand-write an
+        # argv literal, or this test stops tracking the provider.
+        client = ClaudeCliClient(cwd=str(spawn_cwd), timeout=30.0)
+        argv = client._build_argv("claude-haiku-4-5", "hermetic-spawn-contract probe")
+
+        base_env = {**os.environ, "CLAUDE_CONFIG_DIR": str(config_dir)}
+
+        # --- Positive control: the SAME argv, with no suppression env at
+        # all. The sentinels MUST appear here, or the suppressed arm below
+        # would be green by absence (e.g. this container's `claude` ignoring
+        # hooks entirely, proving nothing about the fix).
+        control_env = dict(base_env)
+        control_env.pop("CLAUDE_CODE_SAFE_MODE", None)
+        subprocess.run(
+            argv,
+            input="control probe",
+            capture_output=True,
+            text=True,
+            timeout=30.0,
+            cwd=str(spawn_cwd),
+            env=control_env,
+            check=False,
+        )
+        missing = [event for event, path in sentinels.items() if not path.exists()]
+        assert not missing, (
+            f"positive control: {missing} hook(s) did not fire (sentinel "
+            "file missing) -- the fixture itself is broken (or this "
+            "container's claude does not honor user-level hooks at all), "
+            "not the provider; the suppressed arm below would prove nothing"
+        )
+        for path in sentinels.values():
+            path.unlink()
+
+        # --- Suppressed arm: drive it through the REAL provider call (not
+        # a hand-built env) so what's asserted is what the provider actually
+        # does. Auth fails in this container (no login) -- that is fine and
+        # expected; only the sentinels are asserted, never reply/exit/cost.
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+        try:
+            client.messages.create(
+                model="claude-haiku-4-5",
+                system="hermetic-spawn-contract probe",
+                messages=[{"role": "user", "content": "suppressed probe"}],
+            )
+        except Exception:  # noqa: BLE001 -- auth failure is expected/fine here
+            pass
+
+        fired = [event for event, path in sentinels.items() if path.exists()]
+        assert not fired, (
+            f"suppressed arm: {fired} hook(s) fired anyway (sentinel file "
+            "present) -- CLAUDE_CODE_SAFE_MODE did not suppress them"
+        )
 
 
 # ---------------------------------------------------------------------------
