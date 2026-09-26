@@ -497,7 +497,7 @@ class TestProposalVerdictRoundTrip:
             PasteCleanupReport.from_dict(payload)
 
     def test_report_from_dict_rejects_pre_1903_shape_missing_raw_chunk(self) -> None:
-        """Sentry Seer finding on PR #1904: a report shaped like the OLD
+        """Sentry Seer finding on athenaeum#1904: a report shaped like the OLD
         ``to_dict()`` (no ``raw_chunk``/``claim``/etc.) must never reach
         ``ProposalVerdict.from_dict``'s field construction with a
         silently-defaulted ``raw_chunk`` -- that empty string would match

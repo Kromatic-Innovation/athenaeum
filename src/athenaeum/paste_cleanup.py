@@ -48,7 +48,7 @@ log = logging.getLogger(__name__)
 #: which :func:`apply_paste_cleanup_report` would then match against every
 #: occurrence of ``""`` in a page body, corrupting it. Bumping the version
 #: makes a v1 report fail the check loudly instead (Sentry Seer finding on
-#: PR #1904).
+#: athenaeum#1904).
 PASTE_CLEANUP_VERSION = "paste-cleanup-v2"
 
 #: Bullet shape emitted by pre-athenaeum#1684 intake (see ``athenaeum.intake`` history
@@ -349,7 +349,7 @@ class ProposalVerdict:
         ``raw_chunk`` is required, not defaulted: :func:`apply_paste_cleanup_report`
         matches it verbatim against the live page body, so a silently-defaulted
         ``""`` would match every position in the body and corrupt it on
-        write (Sentry Seer finding on PR #1904). The version-mismatch check
+        write (Sentry Seer finding on athenaeum#1904). The version-mismatch check
         in :meth:`PasteCleanupReport.from_dict` is the primary guard against
         feeding this a pre-athenaeum#1903 report that lacks the key; this
         ``KeyError`` is the defense-in-depth backstop.
