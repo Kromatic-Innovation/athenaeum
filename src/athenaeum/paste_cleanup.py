@@ -39,7 +39,17 @@ from athenaeum.models import TokenUsage, parse_frontmatter, render_frontmatter
 
 log = logging.getLogger(__name__)
 
-PASTE_CLEANUP_VERSION = "paste-cleanup-v1"
+#: Bumped v1 -> v2 for issue athenaeum#1903: ``to_dict()`` started emitting
+#: ``raw_chunk``/``claim``/``verifier_claim``/``verifier_reason``/
+#: ``verify_attempted`` (needed for ``--from-report`` replay). A v1 report
+#: predates all five and, without this bump, would pass the version check
+#: in :meth:`PasteCleanupReport.from_dict` and then silently default the
+#: missing ``raw_chunk`` to ``""`` in :meth:`ProposalVerdict.from_dict` --
+#: which :func:`apply_paste_cleanup_report` would then match against every
+#: occurrence of ``""`` in a page body, corrupting it. Bumping the version
+#: makes a v1 report fail the check loudly instead (Sentry Seer finding on
+#: PR #1904).
+PASTE_CLEANUP_VERSION = "paste-cleanup-v2"
 
 #: Bullet shape emitted by pre-athenaeum#1684 intake (see ``athenaeum.intake`` history
 #: cited on athenaeum#1717): ``- {YYYY-MM-DD}: {raw_body.strip()}``, bullets
@@ -334,12 +344,21 @@ class ProposalVerdict:
         replay path (issue athenaeum#1903 step 3). ``paste_text`` is not
         round-tripped (never written by ``to_dict``): replay never calls the
         LLM, so nothing reads it; :func:`apply_paste_cleanup_report` only
-        needs ``raw_chunk``."""
+        needs ``raw_chunk``.
+
+        ``raw_chunk`` is required, not defaulted: :func:`apply_paste_cleanup_report`
+        matches it verbatim against the live page body, so a silently-defaulted
+        ``""`` would match every position in the body and corrupt it on
+        write (Sentry Seer finding on PR #1904). The version-mismatch check
+        in :meth:`PasteCleanupReport.from_dict` is the primary guard against
+        feeding this a pre-athenaeum#1903 report that lacks the key; this
+        ``KeyError`` is the defense-in-depth backstop.
+        """
         return cls(
             uid=d["uid"],
             path=Path(d["path"]),
             date=d.get("date", ""),
-            raw_chunk=d.get("raw_chunk", ""),
+            raw_chunk=d["raw_chunk"],
             paste_text="",
             extraction_status=d.get("extraction_status", ""),
             verdict=d["verdict"],

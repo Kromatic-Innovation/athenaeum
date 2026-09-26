@@ -496,6 +496,36 @@ class TestProposalVerdictRoundTrip:
         with pytest.raises(ValueError, match="version mismatch"):
             PasteCleanupReport.from_dict(payload)
 
+    def test_report_from_dict_rejects_pre_1903_shape_missing_raw_chunk(self) -> None:
+        """Sentry Seer finding on PR #1904: a report shaped like the OLD
+        ``to_dict()`` (no ``raw_chunk``/``claim``/etc.) must never reach
+        ``ProposalVerdict.from_dict``'s field construction with a
+        silently-defaulted ``raw_chunk`` -- that empty string would match
+        every position in a live page body and corrupt it on apply. The
+        version bump (v1 -> v2) is the primary guard; this asserts the
+        version check actually fires for an old-shaped payload that still
+        claims the CURRENT version (the case a stale/hand-edited caller
+        could produce)."""
+        old_shaped_verdict = {
+            "uid": "person1",
+            "path": "person1.md",
+            "date": "2026-01-01",
+            "extraction_status": "clean",
+            "verdict": "remove",
+            "confidence": "high",
+            "reason": "off-topic",
+            "model": "claude-haiku-4-5-20251001",
+            "verified": False,
+            "verifier_verdict": None,
+            "verifier_agree": None,
+            "final_verdict": "remove",
+            "error": None,
+            # No raw_chunk/claim/verifier_claim/verifier_reason/verify_attempted --
+            # exactly the pre-athenaeum#1903 to_dict() shape.
+        }
+        with pytest.raises(KeyError):
+            ProposalVerdict.from_dict(old_shaped_verdict)
+
     def test_report_round_trip_and_apply_writes_only_verified_rows(self, wiki: Path) -> None:
         content = "Off-topic internal retro content unrelated to the subject." * 10
         _page(
