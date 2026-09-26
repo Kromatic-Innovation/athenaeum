@@ -1923,6 +1923,201 @@ class TestSessionEndReferencesOnly:
         assert len(rows) == 1
 
 
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1908 (AC2) — `session-end` is a no-op while quiesced
+# ---------------------------------------------------------------------------
+
+
+class TestSessionEndQuiesceGuard:
+    """`session-end` must be a no-op while `athenaeum quiesce` is active
+    (issue athenaeum#1908, building on the athenaeum#1898 sentinel): a
+    SessionEnd-triggered ingest running inside a write lane's writer-lock
+    hold is the same contention athenaeum#1898 closed off for the SCHEDULED
+    ``ingest --if-triggered`` path -- this closes the identical gap for the
+    hook-triggered path. Mirrors `test_kill_switch.py::TestSessionEndGuard`'s
+    shape for the sibling (kill-switch) gate.
+    """
+
+    def test_noop_when_quiesce_active(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from datetime import timedelta
+
+        import athenaeum._cmd_index as cmd_index
+        import athenaeum.librarian as lib
+        from athenaeum import quiesce
+        from athenaeum.store import now_iso
+
+        root = tmp_path / "kb"
+        root.mkdir()
+        cache = tmp_path / "cache"
+        state = quiesce.write_quiesce(
+            root,
+            holder="tristan@laptop",
+            reason="backfilling person pages, hold the scheduler off",
+            for_duration=timedelta(hours=1),
+        )
+
+        def _fail_session_end(*_a: object, **_k: object) -> None:
+            raise AssertionError(
+                "athenaeum.librarian.session_end must not run while quiesced"
+            )
+
+        monkeypatch.setattr(lib, "session_end", _fail_session_end)
+
+        def _fail_acquire(*_a: object, **_k: object) -> None:
+            raise AssertionError("the run lock must not be acquired while quiesced")
+
+        monkeypatch.setattr(cmd_index, "_acquire_or_exit", _fail_acquire)
+
+        rc = main(
+            [
+                "session-end",
+                "--path",
+                str(root),
+                "--cache-dir",
+                str(cache),
+            ]
+        )
+
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert payload["command"] == "session-end"
+        assert payload["noop"] is True
+        assert payload["reason"] == "quiesced"
+        assert payload["holder"] == "tristan@laptop"
+        assert payload["expires_at"] == now_iso(state.expires_at)
+
+    def test_normal_path_when_no_sentinel(
+        self,
+        tmp_path: Path,
+        mock_anthropic: MagicMock,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """No sentinel present -- the quiesce gate must not fire. The full
+        normal-path behavior (ingest + reindex composition, budgets, etc.)
+        is already covered by `TestSessionEndCLI` and
+        `TestSessionEndCLIDerivedBudgets`; this only pins that the NEW gate
+        stays silent when nothing is quiesced."""
+        root = _seed_knowledge_root(tmp_path)
+        _write_tier0_raw(root, "p-0001", "Alice", "20240410T120000Z", "aabbccdd")
+        cache = tmp_path / "cache"
+
+        rc = main(
+            [
+                "session-end",
+                "--path",
+                str(root),
+                "--cache-dir",
+                str(cache),
+                "--backend",
+                "fts5",
+            ]
+        )
+
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert payload.get("reason") != "quiesced"
+        assert payload["command"] == "session-end"
+        assert payload["mode"] == "incremental"
+
+    def test_expired_sentinel_is_not_a_noop(
+        self,
+        tmp_path: Path,
+        mock_anthropic: MagicMock,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Expiry is read-time (`read_quiesce_state`), so a stale sentinel
+        left on disk by a crashed or forgotten lane must never wedge
+        session-end forever."""
+        from datetime import datetime, timedelta, timezone
+
+        from athenaeum import quiesce
+
+        root = _seed_knowledge_root(tmp_path)
+        _write_tier0_raw(root, "p-0001", "Alice", "20240410T120000Z", "aabbccdd")
+        cache = tmp_path / "cache"
+
+        long_ago = datetime.now(timezone.utc) - timedelta(hours=5)
+        quiesce.write_quiesce(
+            root,
+            holder="tristan@laptop",
+            reason="stale sentinel from a crashed lane",
+            for_duration=timedelta(hours=1),
+            now=long_ago,
+        )
+
+        rc = main(
+            [
+                "session-end",
+                "--path",
+                str(root),
+                "--cache-dir",
+                str(cache),
+                "--backend",
+                "fts5",
+            ]
+        )
+
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert payload.get("reason") != "quiesced"
+        assert payload["command"] == "session-end"
+        assert payload["mode"] == "incremental"
+
+    def test_references_only_still_runs_while_quiesced(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """`--references-only` is exempt from BOTH the kill switch and the
+        quiesce gate (issue athenaeum#1566's rationale applies identically
+        here): it takes no lock and mutates only its own reference ledger,
+        so an operator's writer-lock-contention quiesce must not suppress
+        it either."""
+        from datetime import timedelta
+
+        from athenaeum import push_metrics, quiesce
+
+        root = _seed_knowledge_root(tmp_path)
+        cache = TestSessionEndReferencesOnly._seed_push_and_transcript(
+            tmp_path,
+            monkeypatch,
+            "sess-quiesced-a",
+            "uidqsc001",
+            transcript="uidqsc001 was useful",
+        )
+        quiesce.write_quiesce(
+            root,
+            holder="tristan@laptop",
+            reason="unrelated backfill",
+            for_duration=timedelta(hours=1),
+        )
+
+        rc = main(
+            [
+                "session-end",
+                "--references-only",
+                "sess-quiesced-a",
+                "--path",
+                str(root),
+                "--cache-dir",
+                str(cache),
+            ]
+        )
+
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert payload["command"] == "session-end"
+        assert payload["mode"] == "references-only"
+        assert payload["outcome"] == push_metrics.REFERENCE_DETERMINED
+        assert payload["referenced_count"] == 1
+
+
 class TestSessionEndLiveness:
     """issue athenaeum#1422: `session_end` is the chosen automatic path for
     the post-merge push-telemetry liveness assertion — it is invoked by the

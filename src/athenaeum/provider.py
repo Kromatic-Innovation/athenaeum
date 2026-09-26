@@ -1133,7 +1133,37 @@ class ClaudeCliClient:
                 # for these programmatic ``claude -p`` calls (athenaeum#377). Merged on
                 # top of the inherited environment so PATH/HOME/ambient auth
                 # still reach the subprocess.
-                env={**os.environ, "CLAUDE_SUPPRESS_NOTIFY": "1"},
+                #
+                # ``CLAUDE_CODE_SAFE_MODE`` (athenaeum#1908): every spawn here
+                # is otherwise a normal, hook-eligible Claude Code session on
+                # the operator's own user-level config — on the operator host
+                # each call fired ``SessionStart``, ``UserPromptSubmit`` and
+                # ``SessionEnd`` (the last of which can run ``athenaeum
+                # session-end`` — an ingest — while a write lane holds the
+                # corpus run lock), plus 10-30s of added wall time per call.
+                # Safe mode disables ALL user/project Claude Code
+                # customizations for the subprocess — hooks, ``CLAUDE.md``,
+                # skills, plugins, custom commands/agents — while leaving
+                # auth, model selection and built-in tools untouched (the
+                # ``--tools ""``/``--strict-mcp-config`` flags above already
+                # own the tools/MCP surface independently). Set as an env var
+                # rather than the equivalent ``--safe-mode`` argv flag: an
+                # unrecognized flag is a hard failure on a ``claude`` CLI
+                # older than the one this was verified against (the other
+                # flags here are pinned to 2.1.226+), whereas an unrecognized
+                # env var is inert, so this can never newly break the
+                # provider on a host running an older CLI. Also deliberately
+                # NOT ``--bare``/``CLAUDE_CODE_SIMPLE``: that forces
+                # ``ANTHROPIC_API_KEY``-only auth and never reads OAuth/
+                # keychain, defeating the whole point of the subscription
+                # route this provider exists for. Placed after the
+                # ``**os.environ`` splat so it always overrides any ambient
+                # value the operator's own shell/profile might set.
+                env={
+                    **os.environ,
+                    "CLAUDE_SUPPRESS_NOTIFY": "1",
+                    "CLAUDE_CODE_SAFE_MODE": "1",
+                },
             )
         except subprocess.TimeoutExpired as exc:
             # A timeout is transient — surface it as TransientAPIError so it is
