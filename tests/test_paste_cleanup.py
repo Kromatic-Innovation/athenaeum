@@ -22,6 +22,7 @@ import pytest
 
 from athenaeum import spend
 from athenaeum.paste_cleanup import (
+    PasteCleanupReport,
     ProposalVerdict,
     apply_paste_cleanup_report,
     build_paste_cleanup_report,
@@ -338,6 +339,220 @@ class TestVerifyPage:
         verify_page(client, verdict, meta={}, model="claude-sonnet-5")
         assert verdict.final_verdict() == "rewrite"
         assert verdict.final_claim() == "Corrected claim (source: x)."
+
+    def test_verifier_transport_error_holds_instead_of_proposer_verdict(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue athenaeum#1903 AC1: a proposer ``remove`` whose verifier
+        call raises must not fall through to the unverified proposer
+        verdict -- it must hold for a human."""
+        verdict = ProposalVerdict(
+            uid="u1",
+            path=tmp_path / "p.md",
+            date="2026-01-01",
+            raw_chunk="- 2026-01-01: A paste.",
+            paste_text="A paste.",
+            extraction_status="clean",
+            verdict="remove",
+            reason="off-topic",
+            confidence="low",
+            model="claude-haiku-4-5-20251001",
+        )
+        client = FakeLLMClient(raises=RuntimeError("network down"))
+        verify_page(client, verdict, meta={}, model="claude-sonnet-5")
+        assert verdict.verify_attempted is True
+        assert verdict.error is not None
+        assert verdict.final_verdict() == "hold"
+
+    def test_verifier_unparseable_response_holds_instead_of_proposer_verdict(
+        self, tmp_path: Path
+    ) -> None:
+        """Same AC1, the thinking-only-response variant (athenaeum#1889's
+        ``response_text()`` fallback raising) hitting the VERIFIER call
+        instead of the proposer call."""
+        verdict = ProposalVerdict(
+            uid="u1",
+            path=tmp_path / "p.md",
+            date="2026-01-01",
+            raw_chunk="- 2026-01-01: A paste.",
+            paste_text="A paste.",
+            extraction_status="clean",
+            verdict="remove",
+            reason="off-topic",
+            confidence="low",
+            model="claude-haiku-4-5-20251001",
+        )
+        response = SimpleNamespace(
+            content=[SimpleNamespace(type="thinking", thinking="internal reasoning only")],
+            usage=make_llm_usage(input_tokens=12, output_tokens=3),
+        )
+        client = FakeLLMClient(response=response)
+        verify_page(client, verdict, meta={}, model="claude-sonnet-5")
+        assert verdict.verify_attempted is True
+        assert verdict.error is not None
+        assert verdict.final_verdict() == "hold"
+
+    def test_keep_never_selected_for_verification_is_unaffected(self) -> None:
+        """A ``keep`` proposal never passed to :func:`verify_page` at all
+        (the common ``sampled``-rule case) keeps ``verify_attempted is
+        False`` and its own verdict as final -- the flag must not itself
+        change behavior for the untouched majority."""
+        verdict = ProposalVerdict(
+            uid="u1",
+            path=Path("p.md"),
+            date="2026-01-01",
+            raw_chunk="",
+            paste_text="A paste.",
+            extraction_status="clean",
+            verdict="keep",
+            reason="genuine fact",
+            confidence="high",
+        )
+        assert verdict.verify_attempted is False
+        assert verdict.error is None
+        assert verdict.final_verdict() == "keep"
+
+
+class TestMaxTokensDefaults:
+    """Issue athenaeum#1903 AC2: the 2026-09-25 slice-1 dry run's 5.4%
+    verifier-error rate (20 thinking-only, 44 truncated JSON) traced to the
+    512-token budget on both calls; raise the default to 1024."""
+
+    def test_propose_page_default_max_tokens_is_1024(self, tmp_path: Path) -> None:
+        client = FakeLLMClient(
+            text=json.dumps(
+                {"verdict": "keep", "claim": "", "reason": "fine", "confidence": "high"}
+            )
+        )
+        content = "A short on-topic paste about the subject."
+        propose_page(
+            client,
+            uid="u1",
+            path=tmp_path / "p.md",
+            date="2026-01-01",
+            raw_chunk=f"- 2026-01-01: {content}",
+            meta={},
+            content=content,
+            model="claude-haiku-4-5-20251001",
+        )
+        assert client.calls[0]["max_tokens"] == 1024
+
+    def test_verify_page_default_max_tokens_is_1024(self, tmp_path: Path) -> None:
+        verdict = ProposalVerdict(
+            uid="u1",
+            path=tmp_path / "p.md",
+            date="2026-01-01",
+            raw_chunk="",
+            paste_text="A paste.",
+            extraction_status="clean",
+            verdict="remove",
+            reason="off-topic",
+            confidence="low",
+        )
+        client = FakeLLMClient(
+            text=json.dumps(
+                {"verdict": "remove", "claim": "", "reason": "confirmed", "agree": True}
+            )
+        )
+        verify_page(client, verdict, meta={}, model="claude-sonnet-5")
+        assert client.calls[0]["max_tokens"] == 1024
+
+
+class TestProposalVerdictRoundTrip:
+    """Issue athenaeum#1903 AC3: ``--from-report`` reconstructs
+    ``ProposalVerdict``/``PasteCleanupReport`` from a prior ``--json``
+    report; ``from_dict(to_dict(v))`` must carry everything
+    ``apply_paste_cleanup_report`` and ``final_claim`` need."""
+
+    def test_to_dict_from_dict_round_trip_preserves_apply_fields(self, tmp_path: Path) -> None:
+        verdict = ProposalVerdict(
+            uid="u1",
+            path=tmp_path / "p.md",
+            date="2026-01-01",
+            raw_chunk="- 2026-01-01: A verifier-corrected paste.",
+            paste_text="A verifier-corrected paste.",
+            extraction_status="clean",
+            verdict="remove",
+            claim="",
+            reason="off-topic",
+            confidence="low",
+            model="claude-haiku-4-5-20251001",
+            verified=True,
+            verifier_verdict="rewrite",
+            verifier_agree=False,
+            verifier_reason="actually on-topic",
+            verifier_claim="Corrected claim (source: x).",
+            verify_attempted=True,
+        )
+        restored = ProposalVerdict.from_dict(verdict.to_dict())
+        assert restored.uid == verdict.uid
+        assert restored.path == verdict.path
+        assert restored.raw_chunk == verdict.raw_chunk
+        assert restored.final_verdict() == verdict.final_verdict() == "rewrite"
+        assert restored.final_claim() == verdict.final_claim() == "Corrected claim (source: x)."
+
+    def test_report_from_dict_rejects_version_mismatch(self) -> None:
+        payload = {"version": "paste-cleanup-v0-does-not-exist", "proposed": []}
+        with pytest.raises(ValueError, match="version mismatch"):
+            PasteCleanupReport.from_dict(payload)
+
+    def test_report_from_dict_rejects_pre_1903_shape_missing_raw_chunk(self) -> None:
+        """Sentry Seer finding on athenaeum#1904: a report shaped like the OLD
+        ``to_dict()`` (no ``raw_chunk``/``claim``/etc.) must never reach
+        ``ProposalVerdict.from_dict``'s field construction with a
+        silently-defaulted ``raw_chunk`` -- that empty string would match
+        every position in a live page body and corrupt it on apply. The
+        version bump (v1 -> v2) is the primary guard; this asserts the
+        version check actually fires for an old-shaped payload that still
+        claims the CURRENT version (the case a stale/hand-edited caller
+        could produce)."""
+        old_shaped_verdict = {
+            "uid": "person1",
+            "path": "person1.md",
+            "date": "2026-01-01",
+            "extraction_status": "clean",
+            "verdict": "remove",
+            "confidence": "high",
+            "reason": "off-topic",
+            "model": "claude-haiku-4-5-20251001",
+            "verified": False,
+            "verifier_verdict": None,
+            "verifier_agree": None,
+            "final_verdict": "remove",
+            "error": None,
+            # No raw_chunk/claim/verifier_claim/verifier_reason/verify_attempted --
+            # exactly the pre-athenaeum#1903 to_dict() shape.
+        }
+        with pytest.raises(KeyError):
+            ProposalVerdict.from_dict(old_shaped_verdict)
+
+    def test_report_round_trip_and_apply_writes_only_verified_rows(self, wiki: Path) -> None:
+        content = "Off-topic internal retro content unrelated to the subject." * 10
+        _page(
+            wiki,
+            "person1.md",
+            "uid: person1\nname: Person One\n",
+            f"## Notes\n\n- 2026-01-01: {content}\n",
+        )
+        client = FakeLLMClient(
+            text=json.dumps(
+                {"verdict": "remove", "claim": "", "reason": "off-topic", "confidence": "high"}
+            )
+        )
+        report = build_paste_cleanup_report(
+            wiki,
+            client=client,
+            verify_client=client,
+            model="claude-haiku-4-5-20251001",
+            verify_model="claude-sonnet-5",
+            verify_rule="all",
+            length_threshold=10,
+        )
+        replayed = PasteCleanupReport.from_dict(json.loads(json.dumps(report.to_dict())))
+        changed = apply_paste_cleanup_report(replayed, wiki)
+        assert changed == 1
+        after = (wiki / "person1.md").read_text(encoding="utf-8")
+        assert content not in after
 
 
 # --- verify-sample selection -------------------------------------------
