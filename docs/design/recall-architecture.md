@@ -89,6 +89,56 @@ withheld tally run entirely in SQL/awk — no Python interpreter is spawned
 to do it, exactly as the relevance floor above already does not apply
 there.
 
+**The packaged adapter carries it too, from one Python renderer (issue
+athenaeum#1905).** The paragraph above described two implementations of one
+rule: a Python one behind `recall`, and an awk one inside
+`user-prompt-recall.sh`. Issues athenaeum#1361/athenaeum#1887 then made
+`athenaeum.claude_code_adapter` the shipped `UserPromptSubmit` hook, the awk
+half stopped running, and the per-turn push path lost the overflow line
+without anything failing — athenaeum#1894 measured it as
+`push_breadcrumb_pull` dropping from 80.0% to 70.5% against the 2026-09-19
+shell-hook reading. The notice now comes from `athenaeum.context`, the
+agent-neutral core both the adapter and `athenaeum context` call, which
+widens each backend's fetch to `CANDIDATE_WINDOW` (15, the same width as
+`athenaeum.mcp_server._HYBRID_CANDIDATE_POOL` and the shell hook's own
+`WINDOW`), caps back to the ceiling, tallies cap-withheld and
+budget-withheld candidates into one `{type: count}` map, and renders the
+line through `athenaeum.recall_overflow` — the module the MCP surface now
+also renders through, so the wording and the ordering have exactly one
+implementation instead of three.
+
+Four differences between the adapter's breadcrumb and the retired shell
+hook's are known, intended, and out of athenaeum#1905's scope; they are
+stated here rather than left to be rediscovered as bugs.
+
+1. The shell hook's `additionalContext` always ends with a trailing newline
+   (its `$MATCHES` accumulator terminates every bullet); the adapter's does
+   not. Present on every probe, overflow or not.
+2. The shell hook emits a bare `  - ` line ahead of the notice, because
+   splitting the `__ATHENAEUM_OVERFLOW__` sentinel off `$RESULTS` leaves a
+   trailing newline its render loop then reads as one more (empty) record —
+   a defect in a hook whose removal is athenaeum#1363's, not behaviour worth
+   reproducing.
+3. The two candidate WINDOWS can differ below the rendered top-N. Each hook
+   builds its own query terms and runs its own vector leg, so two hooks that
+   render an identical bullet list can still have fetched different tails,
+   and therefore withheld different candidates. Measured on GitHub Actions
+   (2026-09-26, vector backend live): probe `confidentiality_rule` rendered
+   the same seven bullets on both sides while the shell reported `at least
+   18` withheld and the adapter `at least 19`, with a different type mix.
+4. The shell hook applies a relevance floor (issue athenaeum#1665) the core
+   does not. Inactive on the default config — `resolve_recall_relevance_floor`
+   returns `None` for both backends, so it is not what difference 3 measured
+   — but a configured floor would widen that gap further.
+
+`tests/evals/test_adapter_overflow_breadcrumb_1905.py` therefore pins what
+can honestly be pinned end to end: wherever the shell hook says candidates
+were withheld, the adapter must say so too, and the string it emits must be
+byte-identical to what `athenaeum.recall_overflow` renders from the packaged
+template. The arithmetic itself — which candidates are withheld, by which
+rule, and how the count and breakdown render — is pinned deterministically
+and in-process by `tests/test_context_overflow_1905.py`.
+
 Before this issue, `user-prompt-recall.sh` queried FTS5 directly and never
 called `recall_search` — so unprompted recall never saw the `hot`-tier
 filter or the `push_budget.tokens_per_turn` budget that issue athenaeum#718 /
