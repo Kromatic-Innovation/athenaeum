@@ -19,6 +19,8 @@ the spend but does not itself state a dollar figure.
 ## Run command
 
 ```bash
+python3.13 -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev,vector]"   # [vector] is required: plain .[dev] omits chromadb
 export ANTHROPIC_API_KEY=...   # from ~/.cache/athenaeum/config.env, exported only into this subshell
 python -m tests.evals.north_star_cli \
   --mode api --scale full --corpus-scales core --replicates 0 \
@@ -46,11 +48,25 @@ python -m tests.evals.north_star_cli \
 - Actual wall clock: **~6.5 minutes** (`store-adapter.jsonl.planned.json`
   written at 15:09:59, `store-adapter.jsonl` last written at 15:16:32),
   against the `--dry-run` projection of 1:12:00 for the full 384-cell grid.
-  376 of 384 cells still completed in that window — the per-cell cost was
-  roughly 10x cheaper/faster than the dry-run's ~45s/cell estimate, not that
-  the grid was cut short before it could run. A future dispatch sizing a
-  `timeout` around the `--dry-run` projection alone would badly
-  over-provision for this recipe.
+  376 of 384 cells still completed in that window — each cell ran far
+  faster than the dry-run's ~45s/cell wall-clock estimate, though NOT
+  cheaper: actual tokens (2,730,135) ran about 38% over the dry-run's
+  projected 1,977,600, which is why the ceiling still tripped at 376/384
+  cells (same partial-run shape as 2026-09-26) despite the run finishing in
+  minutes rather than over an hour. That token overshoot, not a deliberate
+  early stop, is also the source of the 44-vs-45 gradable-denominator
+  mismatch against the 2026-09-19 baseline noted below. A future dispatch
+  sizing a `timeout` around the `--dry-run` wall-clock projection alone
+  would badly over-provision on time while still needing the same token
+  margin.
+- **Environment requirement not stated in the 2026-09-26 record:** this
+  recipe needs Python >=3.13 (this repo's `pyproject.toml` requirement; the
+  host's `pyenv` default was 3.11) and `pip install -e ".[dev,vector]"` —
+  plain `.[dev]` omits the `chromadb` dependency the `--search-backend
+  vector` grid cells need, and the same gap silently undercounts the
+  overflow notice on *both* hooks in the zero-cost diagnostic below (both
+  the adapter's and the shell hook's own session-start index build use
+  `chromadb` when available).
 
 ## Byte-diff against the actual paid run's own context (no extra spend)
 
@@ -177,17 +193,19 @@ At n=44-45 gradable probes, a one-cell flip is roughly a 2.2-2.3-point swing.
 The standard error of the *difference* between two independent proportions
 at these sample sizes (sqrt(p1(1-p1)/n1 + p2(1-p2)/n2)) is approximately
 **8.8 points** comparing 2026-09-19 (80.0%, n=45) against 2026-09-29 (75.0%,
-n=44), and approximately 9.1 points comparing 2026-09-19 against the
-pre-fix 2026-09-26 reading (70.5%, n=44). By that measure, both the original
-9.5-point drop and this run's 5.0-6.8-point residual gap are each under 1 SE
-of sampling noise alone. Read the `push_breadcrumb_pull` trajectory as a
-partial, direction-consistent recovery (+4.5 pts vs. the pre-fix reading,
-the same direction the athenaeum#1905 fix predicted), not as proof the fix
-fully closes the gap: **the adapter has not recovered to the 80.0%
-shell-hook floor**, and the sample is small enough that this single re-run
-cannot distinguish "a smaller residual real effect" from "noise alone" — if
-anything, the noise-band reading makes the case for treating both readings
-as broadly consistent with each other stronger, not weaker.
+n=44), and approximately **9.1 points** comparing 2026-09-19 against the
+pre-fix 2026-09-26 reading (70.5%, n=44). By that measure, the original
+9.5-point drop is approximately **1.0 SE** (9.5 / 9.1) — right at the edge of
+what sampling noise alone would produce — and this run's 5.0-6.8-point
+residual gap is approximately **0.6-0.8 SE** (5.0 / 8.8 and 6.8 / 8.8),
+smaller than the original drop relative to noise. Read the
+`push_breadcrumb_pull` trajectory as a partial, direction-consistent
+recovery (+4.5 pts vs. the pre-fix reading, the same direction the
+athenaeum#1905 fix predicted), not as proof the fix fully closes the gap:
+**the adapter has not recovered to the 80.0% shell-hook floor**, and the
+sample is small enough that this single re-run cannot cleanly distinguish
+"a smaller residual real effect" from "noise alone" — though the residual
+gap sits closer to the noise floor than the original drop did.
 
 ## Disposition
 
