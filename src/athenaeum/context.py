@@ -166,10 +166,17 @@ def _resolve_stopwords(cache_dir: Path) -> frozenset[str]:
     """
     try:
         raw = (cache_dir / _STOPWORDS_CACHE_FILE).read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeDecodeError):
+        # UnicodeDecodeError as well as OSError: a truncated or non-UTF-8
+        # cache file is a decode failure, not an I/O one, and it must not be
+        # allowed to escape. Nothing above this call has a try/except, so an
+        # exception here would abort the whole retrieval -- and the packaged
+        # adapter would swallow it (its own fail-safe), leaving the turn with
+        # no context at all rather than a degraded one.
         return _FALLBACK_STOPWORDS
     words = frozenset(line.strip() for line in raw.splitlines() if line.strip())
     return words or _FALLBACK_STOPWORDS
+
 
 # The single-query description render (issue athenaeum#1344, carried
 # forward per athenaeum#1358's scope note): collapses any embedded
