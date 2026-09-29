@@ -910,6 +910,27 @@ def build_breadcrumb_hook_env(
         # own (the only model call PUSH_BREADCRUMB/PUSH_BREADCRUMB_PULL make
         # is their own single-shot / claude -p turn, already accounted for).
         "ATHENAEUM_CLI": str(hook_home / "no-such-athenaeum-binary"),
+        # Issue athenaeum#1912: the ADAPTER's twin of the ATHENAEUM_CLI trap
+        # above, which it does not share. The packaged adapter never shells
+        # out to the athenaeum CLI -- it calls
+        # `athenaeum.query_topics.extract_topics` in process -- so that trap
+        # misses it entirely, and `claude_code_adapter._load_config_env`
+        # sources the hook home's own `config.env`, which
+        # `session-start-recall.sh` can `op read` an ANTHROPIC_API_KEY into.
+        # Five sampled hook homes from the 2026-09-29 paid run carried no key
+        # line, so this never fired there; nothing prevented it.
+        #
+        # Both names are PRE-OCCUPIED here rather than scrubbed afterwards
+        # because `_load_config_env` never overwrites a key already in the
+        # environment (its own documented rule), which makes an empty value a
+        # durable veto: `provider._build_client` treats a falsy
+        # ANTHROPIC_API_KEY as "no client" and returns None, and
+        # `extract_topics` collapses that to the regex fallback without
+        # issuing a request. Pinning the provider alongside it stops a
+        # `claude-cli`-flavoured config.env routing the same call at a
+        # `claude` subprocess instead.
+        "ANTHROPIC_API_KEY": "",
+        "ATHENAEUM_LLM_PROVIDER": "api",
     }
 
 

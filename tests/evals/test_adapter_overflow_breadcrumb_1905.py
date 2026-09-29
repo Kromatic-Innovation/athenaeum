@@ -17,15 +17,20 @@ breadcrumb text.
 hooks against the same materialized corpus and pins the thing that actually
 regressed: **where the shell hook says candidates were withheld, the adapter
 must say so too, in the shared template's own words.** It does NOT assert the
-two notices carry the same NUMBERS, and that restraint is measured rather than
-assumed — see difference 3 below. The exact arithmetic (which candidates are
-withheld, by which rule, and how the count and the type breakdown render) is
-pinned deterministically and in-process by
+two notices carry the same NUMBERS. That restraint is no longer a statement
+about what is unknowable — issue athenaeum#1912 found the mechanism behind the
+differing tallies and fixed it — it is a division of labour: the notice TEXT is
+now compared byte for byte, over all 48 ``core`` probes on ONE shared hook
+index, by ``tests/evals/test_hook_byte_equivalence_1912.py``, and this module
+deliberately does not duplicate that assertion. The exact arithmetic (which
+candidates are withheld, by which rule, and how the count and the type
+breakdown render) is pinned deterministically and in-process by
 ``tests/test_context_overflow_1905.py``; this module's job is the end-to-end
 one that only a real subprocess can do.
 
-Four differences from the shell hook remain. athenaeum#1905 closes none of
-them, and they are stated here rather than left to be rediscovered as bugs:
+Four differences from the shell hook were recorded here. athenaeum#1905 closed
+none of them; athenaeum#1912 has since closed difference 3. They are stated
+here rather than left to be rediscovered as bugs:
 
 1. **The shell hook's trailing newline.** Its ``$MATCHES`` accumulator ends
    every bullet with a ``\\n``, so its ``additionalContext`` always ends with
@@ -36,18 +41,37 @@ them, and they are stated here rather than left to be rediscovered as bugs:
    newline behind, so the render loop reads one extra empty record and emits a
    bare ``  - `` line ahead of the notice. A defect in a retired hook
    (athenaeum#1363 owns that hook's removal), not behaviour to reproduce.
-3. **The two candidate windows can differ below the rendered top-N.** Each hook
-   builds its own query terms and runs its own vector leg, so two hooks that
-   render an IDENTICAL bullet list can still have fetched different tails — and
-   therefore withheld different candidates. Measured on GitHub Actions
-   (2026-09-26, where the vector backend is live, unlike a typical local run):
-   probe ``confidentiality_rule`` rendered the same seven bullets on both sides
-   while the shell reported ``at least 18`` withheld ``(2 client, 6 company,
-   1 concept, 1 meeting, 3 note, 2 person, 2 principle, 1 project)`` and the
-   adapter ``at least 19`` ``(2 client, 8 company, 1 concept, 1 meeting, 1 note,
-   3 person, 2 principle, 1 project)``. Identical top-N does not imply an
-   identical tail; an assertion that the counts match would be pinning a
-   coincidence.
+3. **CLOSED by athenaeum#1912 — the two hooks built different query terms.**
+   This paragraph used to say only that "each hook builds its own query terms",
+   treat the resulting divergence as irreducible, and conclude that an
+   assertion the withheld counts match would be pinning a coincidence. The
+   observation was right and the conclusion was wrong: the terms differed for a
+   specific, fixable reason, and fixing it collapsed the difference.
+
+   The mechanism was **query-term construction**, on the regex branch both
+   hooks take when no topic extractor is reachable. ``user-prompt-recall.sh``
+   filtered with the canonical ``athenaeum.search.STOPWORDS`` list
+   ``session-start-recall.sh`` caches at ``${CACHE_DIR}/stopwords.txt``, then
+   applied ``sort -u | head -8``. ``athenaeum.context`` filtered with a
+   roughly thirty-word baked-in fallback and kept the first eight tokens in
+   PROMPT order. Both halves bite: canonical stopwords survived as FTS5 ``OR``
+   terms and vector-query words on the adapter side only, and past eight
+   candidate terms the two truncation rules keep different SETS — so the two
+   hooks queried for different things, which changes the tail below the
+   rendered top-N (and, on prompts with more than eight terms, the top-N
+   itself). The observed effect: on a shared hook index over the 48 ``core``
+   probes, 18 of 48 rendered a different bullet list before the fix and 0 of 48
+   after it, with an adapter-vs-adapter noise floor of 0 of 48 across two
+   separately built indexes.
+
+   ``athenaeum.context._canonical_terms`` now applies the shell's
+   ``sort -u | head -8`` on both branches and ``_resolve_stopwords`` reads the
+   same cached canonical file, and the byte-for-byte proof — bullet list AND
+   notice text — lives in ``tests/evals/test_hook_byte_equivalence_1912.py``.
+   The 2026-09-26 ``confidentiality_rule`` reading this paragraph used to cite
+   (``at least 18`` versus ``at least 19`` withheld, with a different type
+   breakdown) is kept in the history rather than here; it was a symptom of the
+   term divergence, not of an unknowable tail.
 4. **The shell hook applies a relevance floor** (athenaeum#1665) the core does
    not. Inactive by default — ``resolve_recall_relevance_floor`` returns
    ``None`` for both backends on the default config, so it is not what
@@ -296,6 +320,17 @@ def test_the_adapter_notice_is_the_shared_template_verbatim(
     A reimplementation that merely read right — a different separator, an
     unsorted type list, a hardcoded literal drifting from
     ``src/athenaeum/prompts/recall_overflow_breadcrumb.md`` — fails here.
+
+    Count-agnostic ON PURPOSE, and delegated rather than merely omitted: this
+    asserts the notice came out of the shared renderer, and
+    ``tests/evals/test_hook_byte_equivalence_1912.py::test_no_unexplained_divergence``
+    asserts the adapter's notice TEXT — numbers and type breakdown included —
+    equals the shell hook's byte for byte, on a shared index, over every
+    ``core`` probe rather than this module's six-probe prefix. Tightening the
+    comparison here too would duplicate that assertion at eight times the
+    subprocess cost while proving strictly less (this module builds each side
+    its own index, so a failure here could not distinguish a term-rule
+    regression from index-build noise).
     """
     notices = [
         (probe_id, adapter_notice)
