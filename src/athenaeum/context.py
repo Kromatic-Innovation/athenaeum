@@ -125,6 +125,52 @@ _FALLBACK_STOPWORDS = frozenset(
 
 _TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
 
+#: Filename ``session-start-recall.sh`` caches the canonical stopword list
+#: under, once per session (see that script's ``stopwords.txt`` mktemp+mv
+#: block). Named here rather than inlined so the reader of
+#: :func:`_resolve_stopwords` can see it is the shell hook's own file, not a
+#: second convention invented for the core.
+_STOPWORDS_CACHE_FILE = "stopwords.txt"
+
+#: How many query terms survive truncation. ``head -8`` on BOTH of the shell
+#: hook's branches (``user-prompt-recall.sh``'s LLM branch and its regex
+#: branch); the core applies it after the same ``sort -u``.
+_MAX_TERMS = 8
+
+#: Shortest token either hook keeps — the shell's ``grep -E '.{3,}'``.
+_MIN_TERM_LENGTH = 3
+
+
+def _resolve_stopwords(cache_dir: Path) -> frozenset[str]:
+    """The stopword list this call should filter with (issue athenaeum#1912).
+
+    Mirrors ``user-prompt-recall.sh``'s own rule exactly: read the canonical
+    list ``session-start-recall.sh`` caches at
+    ``${CACHE_DIR}/stopwords.txt`` — written from
+    ``athenaeum.search.STOPWORDS``, and rewritten every session so list
+    updates propagate — and fall back to :data:`_FALLBACK_STOPWORDS` only
+    when that file is missing or EMPTY (the shell's ``[ -s ... ]``).
+
+    Reading the cached FILE is what lets this module apply the canonical list
+    without importing :mod:`athenaeum.search`, whose own chain
+    (``athenaeum.store`` / ``athenaeum.pii`` / ``athenaeum.authority``) this
+    module's import-weight contract (see :data:`_FALLBACK_STOPWORDS`) forbids
+    on the per-turn path. The cost is one ``read_text`` of a ~1 KB file
+    already in the page cache, inside the same ``cache_dir`` this call is
+    about to open an SQLite index in.
+
+    Never raises: an unreadable file degrades to the fallback, the same way
+    every other best-effort read on this path does. Returning the fallback is
+    always a valid answer — it is what the shell does under the identical
+    condition — so there is nothing here a caller could handle better.
+    """
+    try:
+        raw = (cache_dir / _STOPWORDS_CACHE_FILE).read_text(encoding="utf-8")
+    except OSError:
+        return _FALLBACK_STOPWORDS
+    words = frozenset(line.strip() for line in raw.splitlines() if line.strip())
+    return words or _FALLBACK_STOPWORDS
+
 # The single-query description render (issue athenaeum#1344, carried
 # forward per athenaeum#1358's scope note): collapses any embedded
 # tab/newline/CR to a space BEFORE the value leaves SQL, and clamps to 200
@@ -508,27 +554,40 @@ def _extract_terms(
             raw_terms = extract_topics(prompt, timeout=timeout, config=config)
         except Exception:  # noqa: BLE001 — LLM path is best-effort
             raw_terms = []
-        seen: set[str] = set()
-        for t in raw_terms:
-            for tok in _TOKEN_RE.findall(t.lower()):
-                if len(tok) >= 3 and tok not in seen:
-                    seen.add(tok)
-                    terms.append(tok)
-        terms = terms[:8]
+        # No stopword filter on this branch, deliberately: the shell applies
+        # its own only on the regex branch below, so an extractor that
+        # returns "the Return Path" keeps every token of it on both sides.
+        terms = _canonical_terms(raw_terms)
 
     if terms:
         return terms
 
-    seen = set()
-    fallback: list[str] = []
-    for tok in _TOKEN_RE.findall(prompt.lower()):
-        if len(tok) < 3 or tok in stopwords or tok in seen:
-            continue
-        seen.add(tok)
-        fallback.append(tok)
-        if len(fallback) >= 8:
-            break
-    return fallback
+    return _canonical_terms([prompt], stopwords=stopwords)
+
+
+def _canonical_terms(sources: list[str], *, stopwords: frozenset[str] = frozenset()) -> list[str]:
+    """``sort -u | head -8`` over the alphanumeric tokens of *sources*
+    (issue athenaeum#1912).
+
+    The shell hook pipes BOTH of its branches through
+    ``tr '[:upper:]' '[:lower:]' | tr -cs '[:alnum:]' '\\n' | grep -E '.{3,}'
+    | sort -u | head -8``; this is that pipeline. The core used to keep the
+    first eight tokens in PROMPT order instead, which changes two things at
+    once: the vector query is the space-joined term list on both sides, so a
+    different order is a different embedding query — and past eight candidate
+    terms the two rules truncate to different SETS, so the FTS5 ``OR`` query
+    differs too.
+
+    Sorting is plain codepoint order (:func:`sorted` over lowercase
+    alphanumeric tokens), which is what ``sort`` yields under ``LC_ALL=C``.
+    """
+    tokens = {
+        tok
+        for source in sources
+        for tok in _TOKEN_RE.findall(source.lower())
+        if len(tok) >= _MIN_TERM_LENGTH and tok not in stopwords
+    }
+    return sorted(tokens)[:_MAX_TERMS]
 
 
 def build_fts_query(terms: list[str]) -> str:
@@ -633,7 +692,12 @@ def build_context(
         return _empty_envelope(prompt, session_id, budget, search_backend, t0)
 
     db_file = cache_dir / "wiki-index.db"
-    stopwords = stopwords if stopwords is not None else _FALLBACK_STOPWORDS
+    # Issue athenaeum#1912: an explicit `stopwords=` still wins (the CLI and
+    # the unit tests pass one), but the DEFAULT is now the canonical list the
+    # SessionStart hook caches beside this very index — not the baked-in
+    # fallback, which left roughly a hundred canonical stopwords alive as
+    # FTS5 OR terms and vector-query words on the adapter side only.
+    stopwords = stopwords if stopwords is not None else _resolve_stopwords(cache_dir)
 
     terms = _extract_terms(
         prompt, timeout=llm_timeout, stopwords=stopwords, config=config, use_llm=use_llm

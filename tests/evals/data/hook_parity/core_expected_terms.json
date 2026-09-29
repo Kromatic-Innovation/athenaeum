@@ -1,0 +1,343 @@
+{
+  "pto_allowance": [
+    "allowance",
+    "firm",
+    "pto"
+  ],
+  "confidentiality_rule": [
+    "another",
+    "client",
+    "details",
+    "engagement",
+    "share"
+  ],
+  "bluewater_terms": [
+    "bluewater",
+    "quote",
+    "retainer",
+    "terms",
+    "verbatim"
+  ],
+  "onboarding_length": [
+    "client",
+    "onboarding",
+    "retainer"
+  ],
+  "spend_approver_named": [
+    "500",
+    "alone",
+    "clear",
+    "conversation",
+    "direct",
+    "discretionary",
+    "email",
+    "first"
+  ],
+  "portal_design_reviewer": [
+    "before",
+    "client",
+    "facing",
+    "happen",
+    "launch",
+    "once",
+    "portal",
+    "project"
+  ],
+  "ratecard_tooling_owner": [
+    "behind",
+    "card",
+    "generates",
+    "looped",
+    "rate",
+    "repository",
+    "stopped",
+    "system"
+  ],
+  "office_address_current": [
+    "office"
+  ],
+  "standup_time_current": [
+    "delivery",
+    "standup"
+  ],
+  "budget_threshold_current": [
+    "approval",
+    "ceiling",
+    "client",
+    "lead"
+  ],
+  "callum_drews_last_contact": [
+    "callum",
+    "drews",
+    "speak"
+  ],
+  "thorncastle_first_contact": [
+    "first",
+    "thorncastle",
+    "working"
+  ],
+  "tamsin_ferro_role_change": [
+    "change",
+    "ferro",
+    "role",
+    "tamsin"
+  ],
+  "person_not_repo": [
+    "decide",
+    "pricing",
+    "rowan",
+    "wrenfield"
+  ],
+  "repo_not_person": [
+    "maintainers",
+    "repository",
+    "rowanwrenfield"
+  ],
+  "surname_is_ambiguous": [
+    "wrenfield"
+  ],
+  "given_name_is_ambiguous": [
+    "rowan"
+  ],
+  "abstain_unknown_client": [
+    "harrowgate",
+    "industrial",
+    "payment",
+    "terms"
+  ],
+  "abstain_unknown_policy": [
+    "firm",
+    "leave",
+    "parental",
+    "policy"
+  ],
+  "abstain_unknown_person": [
+    "adeyemi",
+    "responsible",
+    "yusuf"
+  ],
+  "acme_billing_exception": [
+    "acme",
+    "billed"
+  ],
+  "former_client_not_current": [
+    "clients",
+    "retainer"
+  ],
+  "keelbridge_programme_scope": [
+    "cover",
+    "keelbridge",
+    "programme"
+  ],
+  "driftgate_migration_funding": [
+    "driftgate",
+    "funding",
+    "migration",
+    "quarterly"
+  ],
+  "dual_signoff_threshold": [
+    "harrowmere",
+    "off",
+    "payment",
+    "protocol",
+    "require",
+    "sign"
+  ],
+  "mira_castellane_role": [
+    "leads",
+    "practice",
+    "rivencourt"
+  ],
+  "fenwick_relationship_history": [
+    "account",
+    "change",
+    "checkpoint",
+    "fenwick",
+    "recurring",
+    "relationship",
+    "systems",
+    "terms"
+  ],
+  "corvale_holdings_history": [
+    "against",
+    "any",
+    "corvale",
+    "gone",
+    "history",
+    "holdings",
+    "plan"
+  ],
+  "pinemarsh_goal_rationale": [
+    "any",
+    "because",
+    "behind",
+    "constraint",
+    "goal",
+    "imposed",
+    "initiative",
+    "past"
+  ],
+  "gilcrest_vendor_decision": [
+    "against",
+    "arrangement",
+    "changes",
+    "choose",
+    "cost",
+    "gilcrest",
+    "guard",
+    "road"
+  ],
+  "anchorline_retirement_rationale": [
+    "anchorline",
+    "anyone",
+    "expect",
+    "getting",
+    "instead",
+    "pushed",
+    "querying",
+    "regularly"
+  ],
+  "subsidiary_onboarding_lesson": [
+    "any",
+    "client",
+    "expose",
+    "gap",
+    "handle",
+    "multiple",
+    "onboarded",
+    "paperwork"
+  ],
+  "bramfield_retainer_renewal": [
+    "bramfield",
+    "contract",
+    "crestwood",
+    "renewal",
+    "retainer",
+    "timeline"
+  ],
+  "remote_equipment_stipend_cap": [
+    "employees",
+    "equipment",
+    "policy",
+    "remote",
+    "stipend"
+  ],
+  "lighthouse_migration_rollback": [
+    "lighthouse",
+    "migration",
+    "plan",
+    "platform",
+    "project",
+    "rollback"
+  ],
+  "triform_vendor_consolidation": [
+    "agreement",
+    "consolidate",
+    "master",
+    "triform",
+    "vendors",
+    "why"
+  ],
+  "aggregation_delivery_roles": [
+    "delivery",
+    "facing",
+    "role",
+    "team",
+    "works"
+  ],
+  "aggregation_retainer_clients": [
+    "clients",
+    "off",
+    "project",
+    "retainer",
+    "standing"
+  ],
+  "aggregation_inhouse_tools": [
+    "build",
+    "buying",
+    "firm",
+    "internal",
+    "itself",
+    "opposed",
+    "run",
+    "software"
+  ],
+  "expense_approval_limit_manager": [
+    "approval",
+    "expense",
+    "limit",
+    "manager"
+  ],
+  "overtime_request_approver": [
+    "approves",
+    "delivery",
+    "overtime",
+    "requests",
+    "team"
+  ],
+  "invoicing_api_pagination_workaround": [
+    "api",
+    "around",
+    "error",
+    "fails",
+    "invoicing",
+    "pagination",
+    "reporting",
+    "sync"
+  ],
+  "regional_office_onboarding_lesson": [
+    "another",
+    "client",
+    "offices",
+    "onboard",
+    "regional",
+    "several",
+    "wrong"
+  ],
+  "vendor_migration_rerun_lesson": [
+    "migration",
+    "overnight",
+    "run",
+    "script",
+    "vendor",
+    "wrong"
+  ],
+  "junior_analyst_ramp_lesson": [
+    "analyst",
+    "junior",
+    "onboard",
+    "plan",
+    "ramp",
+    "wrong"
+  ],
+  "relay_sync_fix": [
+    "adjust",
+    "appearing",
+    "concurrent",
+    "dispatch",
+    "duplicate",
+    "entries",
+    "fulfillment",
+    "implementation"
+  ],
+  "nightly_job_drop": [
+    "already",
+    "clean",
+    "covers",
+    "crontab",
+    "data",
+    "drop",
+    "entry",
+    "hourly"
+  ],
+  "invoiceref_rename": [
+    "api",
+    "billing",
+    "change",
+    "client",
+    "consistency",
+    "field",
+    "invoicenumber",
+    "invoiceref"
+  ]
+}
