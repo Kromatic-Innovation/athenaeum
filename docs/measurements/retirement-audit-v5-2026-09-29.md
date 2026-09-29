@@ -1,8 +1,8 @@
 # Retirement audit-v5 follow-through — retire counts (athenaeum#1888)
 
-The full-corpus audit (#1631, `audit-v5`, completed 2026-09-24) flagged **2,616**
+The full-corpus audit (athenaeum#1631, `audit-v5`, completed 2026-09-24) flagged **2,616**
 unique pages as retirement candidates — about 10% of the corpus at the time.
-Retiring a page is a destructive corpus change, so #1631 reserved the actual
+Retiring a page is a destructive corpus change, so athenaeum#1631 reserved the actual
 retire step for this follow-up: a sampled precision measurement first, then an
 operator-set retire policy per type, then a behind-a-tag retire run.
 

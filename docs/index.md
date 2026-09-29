@@ -135,7 +135,7 @@ Evidence, kept out of the reading path.
 - [Session shapes — merged ledger](measurements/session-shapes-2026-09-24.md) — the both/hook-only/pull-only/unknown-only session split against the live push-records ledger, before/after a split date.
 - [LLM provider cost audit](measurements/audits/2026-08-06-llm-provider-cost-audit.md)
 - [Tier-0 attributed-paste cleanup — proposer agreement](measurements/tier0-paste-cleanup-2026-09-24.md)
-- [Retirement audit-v5 follow-through — retire counts](measurements/retirement-audit-v5-2026-09-29.md) — the #1631 candidate list's sampled precision, the operator's per-type retire policy, and the retire/keep counts from the behind-a-tag retire run.
+- [Retirement audit-v5 follow-through — retire counts](measurements/retirement-audit-v5-2026-09-29.md) — the full-corpus audit's candidate list's sampled precision, the operator's per-type retire policy, and the retire/keep counts from the behind-a-tag retire run.
 
 ---
 
