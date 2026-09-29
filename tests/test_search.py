@@ -512,6 +512,46 @@ class TestOnnxruntimeTelemetryDisable:
         assert chromadb_module.__name__ == "chromadb"
 
 
+class TestOrtTelemetryEnvDefault:
+    """Issue athenaeum#1899 (reopened): the effective mitigation is
+    ``ORT_DISABLE_TELEMETRY=1`` in the environment before onnxruntime loads.
+    The package root sets it with ``setdefault``. Checked in a subprocess,
+    because this test process has already imported ``athenaeum``."""
+
+    @staticmethod
+    def _env_after_import(env_value: str | None) -> str:
+        import os
+        import subprocess
+
+        env = {k: v for k, v in os.environ.items() if k != "ORT_DISABLE_TELEMETRY"}
+        if env_value is not None:
+            env["ORT_DISABLE_TELEMETRY"] = env_value
+        out = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import os, athenaeum.search; "
+                "print(os.environ.get('ORT_DISABLE_TELEMETRY', '<unset>'))",
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return out.stdout.strip()
+
+    def test_package_import_sets_default(self) -> None:
+        assert self._env_after_import(None) == "1"
+
+    def test_operator_value_is_not_overridden(self) -> None:
+        assert self._env_after_import("0") == "0"
+
+    def test_package_root_does_not_leak_os(self) -> None:
+        import athenaeum
+
+        assert "os" not in dir(athenaeum)
+
+
 class TestHitsFromQueryResults:
     """athenaeum#489 AC3/AC4: hardened parsing of a chromadb query result — no crash on
     a None metadata, and a degenerate flat-score set surfaces explicitly.
