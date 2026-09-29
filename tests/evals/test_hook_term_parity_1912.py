@@ -287,8 +287,13 @@ def _run_adapter_with_spy(
     """Spawn the packaged adapter console script under the spy, with a
     ``config.env`` in *cache_dir* carrying a stub ``ANTHROPIC_API_KEY``."""
     cache_dir.mkdir(parents=True, exist_ok=True)
+    # Deliberately NOT shaped like a real Anthropic key: nothing on the path
+    # under test validates the value's FORMAT -- `provider._build_client` only
+    # checks that it is truthy -- so a realistic-looking literal would buy
+    # nothing and would trip the repository's secret scanners on every commit.
     (cache_dir / "config.env").write_text(
-        "ANTHROPIC_API_KEY=sk-ant-not-a-real-key-athenaeum-1912\n", encoding="utf-8"
+        "ANTHROPIC_API_KEY=placeholder-value-for-the-athenaeum-1912-guard\n",
+        encoding="utf-8",
     )
     spawn_env = dict(env)
     spawn_env["PYTHONPATH"] = os.pathsep.join(
