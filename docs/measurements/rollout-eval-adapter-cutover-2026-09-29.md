@@ -43,44 +43,59 @@ python -m tests.evals.north_star_cli \
   never a `~/knowledge`-rooted default — and by pointing
   `--materialize-root`/`--store`/`--out-dir` all at a scratch directory
   outside this repo and outside `~/knowledge` for this run.
-- Actual wall clock: this run completed in a few minutes, well under the
-  `--dry-run` projection of 1:12:00 for the full 384-cell grid — the ceiling
-  tripped early (see below), so the grid never ran anywhere near its
-  projected length. A future dispatch sizing a `timeout` around the
-  `--dry-run` projection alone would over-provision for this recipe.
+- Actual wall clock: **~6.5 minutes** (`store-adapter.jsonl.planned.json`
+  written at 15:09:59, `store-adapter.jsonl` last written at 15:16:32),
+  against the `--dry-run` projection of 1:12:00 for the full 384-cell grid.
+  376 of 384 cells still completed in that window — the per-cell cost was
+  roughly 10x cheaper/faster than the dry-run's ~45s/cell estimate, not that
+  the grid was cut short before it could run. A future dispatch sizing a
+  `timeout` around the `--dry-run` projection alone would badly
+  over-provision for this recipe.
 
-## Zero-cost diagnostic run first (no spend, no LLM calls)
+## Byte-diff against the actual paid run's own context (no extra spend)
 
-Before any paid call, `build_push_breadcrumb_context` was run against
-`build_corpus("core")`'s 48 probes with the hook env unset (adapter) and
-with `ATHENAEUM_EVAL_HOOK=shell` (shell), same diagnostic the 2026-09-26
-record ran before the athenaeum#1905 fix, with a fresh `hook_home` directory
-per probe per side (avoiding the shared-`SEEN_FILE`/session-dedup bias the
-byte-equivalence spike test's own docstring warns a reused home can
-introduce):
+Before any paid call, a preliminary `build_push_breadcrumb_context` pass was
+run against `build_corpus("core")`'s 48 probes with fresh `hook_home`
+directories per probe per side (avoiding the shared-`SEEN_FILE`/session-dedup
+bias the byte-equivalence spike test's own docstring warns a reused home can
+introduce). That preliminary pass ran in an environment without the
+`chromadb` package installed and produced inconsistent, lower notice counts
+than the paid run itself — it is **not** used as the record's evidence below,
+since the paid run's own transcripts are strictly better ground truth and
+were already sitting in the result store at zero extra cost.
 
-- **Overflow-notice presence now agrees on every probe.** Across all 48
-  probes, there is no case where one side carries the notice and the other
-  does not (`notice_only_adapter: 0`, `notice_only_shell: 0`). Before the
-  fix (2026-09-26 record), the adapter carried the notice on 0/48 probes
-  while the shell hook carried it on more than that — the gap athenaeum#1905
-  diagnosed is closed by presence/absence.
-- The two context strings are still not byte-identical on any of the 48
+Each `push_breadcrumb`/`push_breadcrumb_pull` cell's transcript in the paid
+run's result store carries the exact `pushed_context` string the model was
+given (`RolloutRecord.transcript[0]['pushed_context']`). That was extracted
+for all 47 persisted `push_breadcrumb_pull`/`core` cells and diffed against a
+fresh `ATHENAEUM_EVAL_HOOK=shell` run of `build_push_breadcrumb_context`
+for the same 47 probes, same materialized corpus, same query — this time
+with `chromadb` installed, matching the paid run's own environment:
+
+- **Overflow-notice presence agrees on all 47 probes actually run** (47/47
+  adapter, 47/47 shell hook both carry the notice; `notice_only_adapter: 0`,
+  `notice_only_shell: 0`). Before the fix (2026-09-26 record), the adapter
+  carried the notice on 0/48 probes. The presence/absence gap athenaeum#1905
+  diagnosed is closed.
+- The two context strings are still not byte-identical on any of the 47
   probes. Classified into buckets:
-  - **30/48 — the bullet list itself differs** (page names and/or order
+  - **29/47 — the bullet list itself differs** (page names and/or order
     differ between adapter and shell hook, independent of the overflow
     notice).
-  - **18/48 — both sides carry the notice, but its text differs** (e.g. the
+  - **18/47 — both sides carry the notice, but its text differs** (e.g. the
     withheld-count or category breakdown differs between the two hooks'
     computations).
-  - **0/48 — notice present on only one side.**
-  - **0/48 — whitespace-only difference.**
-  - **0/48 — byte-identical.**
+  - **0/47 — whitespace-only difference; 0/47 byte-identical.**
+- `git show 0e504b6051 --stat`: athenaeum#1910 touched
+  `src/athenaeum/context.py` (187 lines) and `src/athenaeum/mcp_server.py`
+  (71 lines) in addition to the adapter's own overflow-notice rendering —
+  plausible surface for a ranking-adjacent side effect, though this record
+  does not trace the bullet-list divergence to a specific line.
 - Reading: the athenaeum#1905 fix closed the specific gap it targeted (the
   notice's presence/absence), but two other, separate divergences remain
   between the adapter and shell-hook context assembly — the bullet-list
-  content/ordering (30/48 probes) and the notice's own text when both sides
-  emit one (18/48 probes). Neither was diagnosed or fixed by athenaeum#1905;
+  content/ordering (29/47 probes) and the notice's own text when both sides
+  emit one (18/47 probes). Neither was diagnosed or fixed by athenaeum#1905;
   both are candidate mechanisms for the residual score gap below, and are
   carried into the defect issue this record's disposition files.
 
@@ -144,40 +159,48 @@ Deltas for `push_breadcrumb_pull`, the verdict/shipped arm:
 - **vs. the 2026-09-26 pre-fix adapter reading (70.5%): +4.5 pts.** The
   score moved in the direction the athenaeum#1905 fix predicted.
 - **vs. the 2026-09-19 shell-hook reading (80.0%): -5.0 pts** (full
-  denominators, 44 vs. 45). **Restricted to the 44 probes graded on both the
-  2026-09-19 and 2026-09-29 runs** (same probe set, controlling for the
-  different partial-run denominators): 2026-09-19 scores 36/44 (81.8%) on
-  that set, 2026-09-29 scores 33/44 (75.0%) — a **-6.8 pt** delta on the
+  denominators, 44 vs. 45; this is the residual gap, not a further
+  recovery). **Restricted to the 44 probes graded on both the 2026-09-19 and
+  2026-09-29 runs** (same probe set, controlling for the different
+  partial-run denominators): 2026-09-19 scores 36/44 (81.8%) on that set,
+  2026-09-29 scores 33/44 (75.0%) — a **-6.8 pt** residual gap on the
   identical probe set. The adapter still reads below the recorded shell-hook
-  floor either way.
+  floor either way; the only positive number in this record is the +4.5 pt
+  move relative to the pre-fix 2026-09-26 reading above.
 
 `push_breadcrumb` itself is unchanged (0% across all three runs), carrying
 no signal either way, same as both prior records note.
 
 ## Reading this against sampling noise
 
-At n=44-45 gradable probes, a one-cell flip is roughly a 2.2-2.3-point swing;
-a rough binomial-proportion standard error at these sample sizes and
-observed rates is on the order of ±6-7 points. The original 9.5-point drop
-(80.0% -> 70.5%) was itself within roughly 1.5 SE of noise, and this run's
-4.5-6.8-point recovery (depending on denominator choice above) is within
-roughly 1 SE. Read the `push_breadcrumb_pull` trajectory as a partial,
-direction-consistent recovery, not as proof the athenaeum#1905 fix fully
-closes the gap: **the adapter has not recovered to the 80.0% shell-hook
-floor**, and the residual gap is large enough, and the sample small enough,
-that a single re-run cannot distinguish "a smaller residual real effect"
-from "noise alone."
+At n=44-45 gradable probes, a one-cell flip is roughly a 2.2-2.3-point swing.
+The standard error of the *difference* between two independent proportions
+at these sample sizes (sqrt(p1(1-p1)/n1 + p2(1-p2)/n2)) is approximately
+**8.8 points** comparing 2026-09-19 (80.0%, n=45) against 2026-09-29 (75.0%,
+n=44), and approximately 9.1 points comparing 2026-09-19 against the
+pre-fix 2026-09-26 reading (70.5%, n=44). By that measure, both the original
+9.5-point drop and this run's 5.0-6.8-point residual gap are each under 1 SE
+of sampling noise alone. Read the `push_breadcrumb_pull` trajectory as a
+partial, direction-consistent recovery (+4.5 pts vs. the pre-fix reading,
+the same direction the athenaeum#1905 fix predicted), not as proof the fix
+fully closes the gap: **the adapter has not recovered to the 80.0%
+shell-hook floor**, and the sample is small enough that this single re-run
+cannot distinguish "a smaller residual real effect" from "noise alone" — if
+anything, the noise-band reading makes the case for treating both readings
+as broadly consistent with each other stronger, not weaker.
 
 ## Disposition
 
 - The athenaeum#1905 fix is confirmed present in the code this run executed,
-  and confirmed to close the specific presence/absence gap it targeted
-  (0/48 probes now show the notice on only one side). The shipped verdict
-  arm's score moved toward the shell-hook floor (+4.5 to +6.8 pts depending
-  on denominator) but did not reach it (-5.0 to -6.8 pts vs. 80.0%).
+  and confirmed (against the paid run's own transcripts) to close the
+  specific presence/absence gap it targeted (0/47 probes actually run show
+  the notice on only one side; both sides carry it on all 47). The shipped
+  verdict arm's score moved toward the shell-hook floor by +4.5 pts vs. the
+  pre-fix reading, but the residual gap to the shell-hook floor itself is
+  -5.0 pts (full denominators) to -6.8 pts (same-probe-set comparison).
 - Two other divergences between the adapter and shell-hook context strings
   remain unexplained by athenaeum#1905: the bullet list itself differs on
-  30/48 probes, and the overflow notice's own text differs on 18/48 probes
+  29/47 probes, and the overflow notice's own text differs on 18/47 probes
   where both sides emit one. Per this issue's acceptance criteria, since the
   score has not recovered to the 80.0% shell-hook floor, a separate defect
   issue (athenaeum#1912) names these as the next suspected mechanisms.
