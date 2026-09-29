@@ -1774,6 +1774,12 @@ _VECTOR_GENERATION = ".generation"
 # identical faulting stack on onnxruntime 1.29.0 and 1.30.0, so this is not a
 # single-release regression. Any wrapper that reads the exit code (launchd,
 # `timeout`, a lane's shell) then sees a finished run as failed.
+#
+# The primary fix is `ORT_DISABLE_TELEMETRY=1`, set in the package root
+# (`athenaeum/__init__.py`) before anything can import onnxruntime. The call
+# below is only a secondary guard: measured on 1.30.0, the client starts when
+# the module loads and `disable_telemetry_events()` does NOT stop its uploads,
+# so this call alone left the crash in place.
 # True once we have tried to disable telemetry (even on failure) — see
 # `_disable_onnxruntime_telemetry`'s docstring for why this must run once,
 # early, and tolerate every failure mode.
@@ -1782,6 +1788,12 @@ _ORT_TELEMETRY_DISABLED: bool = False
 
 def _disable_onnxruntime_telemetry() -> None:
     """Best-effort, once-per-process ``onnxruntime.disable_telemetry_events()`` (athenaeum#1899).
+
+    **Secondary guard only.** This call does not stop the telemetry client's
+    uploads, so it does not prevent the shutdown race on its own. The effective
+    fix is ``ORT_DISABLE_TELEMETRY=1`` in the package root; see the module
+    comment above. The premise below, that the client only starts at the first
+    ``InferenceSession``, was measured to be wrong.
 
     **Why here, and why "once."** The crash this guards against is a race in
     onnxruntime's C++ telemetry worker thread at interpreter shutdown — it only

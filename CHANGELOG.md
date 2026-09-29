@@ -55,6 +55,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **onnxruntime telemetry no longer aborts finished processes (issue
+  athenaeum#1899, reopened).** The earlier fix called
+  `onnxruntime.disable_telemetry_events()`, which does not stop onnxruntime's
+  1DS telemetry uploads, so the SIGABRT at interpreter shutdown kept recurring.
+  The package root now sets `ORT_DISABLE_TELEMETRY=1` (via `setdefault`, so an
+  explicit operator value wins) before anything can import onnxruntime. That is
+  the only switch measured to stop the upload.
+
 - **Per-turn context core no longer matches page bodies (issue athenaeum#1361).**
   `athenaeum.context`'s FTS5 query ran an unscoped `wiki MATCH`, so after the
   index gained an indexed `body` column, bm25 rank spread over long bodies and

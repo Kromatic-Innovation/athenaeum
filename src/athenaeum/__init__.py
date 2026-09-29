@@ -79,7 +79,20 @@ public surface in one namespace.
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING, Any
+
+# Issue athenaeum#1899 -- the one piece of behaviour this file carries, because
+# it only works if it runs before anything imports onnxruntime, and every
+# athenaeum submodule import executes this package root first. onnxruntime's
+# 1DS telemetry client starts when the module loads; at interpreter shutdown
+# its upload thread races the client's own teardown and SIGABRTs a process
+# whose work already finished. `onnxruntime.disable_telemetry_events()` does
+# not stop that client (measured: it still uploads), and the env var is read
+# once, at load time, so setting it after the import is also a no-op.
+# `setdefault` leaves an operator's explicit value alone.
+os.environ.setdefault("ORT_DISABLE_TELEMETRY", "1")
+del os  # keep `dir(athenaeum)` to the advertised surface
 
 if TYPE_CHECKING:
     # Re-stated for type checkers and IDEs only: these names resolve at runtime
