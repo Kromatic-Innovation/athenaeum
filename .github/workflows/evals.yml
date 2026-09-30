@@ -128,12 +128,26 @@ on:
   push:
     branches: [main]
 
-# Stacked main-pushes must not accumulate spend — cancel any in-flight
-# run when a newer commit lands. Dispatch runs share the group so an
-# accidental double-dispatch also collapses to one run.
-concurrency:
-  group: evals-${{ github.ref }}
-  cancel-in-progress: true
+# CONCURRENCY IS SCOPED TO THE TOKEN-SPENDING JOBS, NOT THE WORKFLOW.
+#
+# The guard's whole purpose is spend: stacked dispatches must not accumulate
+# Anthropic API cost, so `eval` and `north-star` each carry their own
+# `concurrency` block below and collapse to one in-flight run per ref.
+#
+# It deliberately does NOT cover `embedding-suite`. That job is token-free
+# (real MiniLM cosines, no Anthropic key — athenaeum#1091) and is the ONLY job
+# a push to `main` runs, both token-spending jobs being gated to
+# `workflow_dispatch` by their own `if:` since the 2026-09-16 operator
+# decision. A workflow-level `cancel-in-progress: true` therefore bought no
+# spend protection on a push while actively causing harm: two `push` events
+# for the SAME `main` sha 31 seconds apart (promotion writes the ref, then a
+# second ref update lands on the identical commit) put two runs in one group,
+# and the second cancelled the first mid-pytest. That `cancelled` conclusion
+# is indistinguishable from a real red to the weekly CI sweep, which filed it
+# as a failing-check chore (athenaeum#1918) even though the very next run
+# proved the same sha green. Leaving `embedding-suite` out of any group means
+# every main sha is verified on its own, and a `cancelled` conclusion on it
+# can only ever mean a genuine cancellation.
 
 permissions:
   contents: read
@@ -174,6 +188,12 @@ jobs:
     # Manual dispatch only — a push to `main` runs `embedding-suite` above
     # and nothing that spends tokens (operator decision 2026-09-16).
     if: github.event_name == 'workflow_dispatch'
+    # Spend guard (athenaeum#1918): an accidental double-dispatch collapses to
+    # one in-flight run per ref rather than billing twice. Job-scoped, never
+    # workflow-scoped, so it cannot reach the token-free `embedding-suite`.
+    concurrency:
+      group: evals-eval-${{ github.ref }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -239,6 +259,12 @@ jobs:
     # north_star input -- issue athenaeum#1733. Never on push (there is no
     # `push` branch on this job's `if:` at all, matching `eval`'s own gate).
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.north_star == 'true'
+    # Spend guard (athenaeum#1918) — same rationale as `eval` above, and its
+    # own group so a north-star dispatch and an eval dispatch never cancel
+    # each other.
+    concurrency:
+      group: evals-north-star-${{ github.ref }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     # Issue athenaeum#1751: 60 minutes could not hold the full grid even
     # concurrently -- `--scale full --dry-run` projects 1392 cells, and at
