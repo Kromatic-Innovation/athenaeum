@@ -41,12 +41,19 @@ def cmd_paste_cleanup(args: argparse.Namespace) -> int:
         PasteCleanupReport,
         apply_paste_cleanup_report,
         build_paste_cleanup_report,
+        resume_verification,
     )
 
     knowledge_root = _resolve_knowledge_root(args)
     wiki_root = knowledge_root / "wiki"
     if not wiki_root.is_dir():
         print(f"error: no wiki directory at {wiki_root}", file=sys.stderr)
+        return 1
+
+    # Issue athenaeum#1923: --resume-verification only means anything against
+    # a prior report -- there is no in-memory report to resume otherwise.
+    if args.resume_verification and args.from_report is None:
+        print("error: --resume-verification requires --from-report", file=sys.stderr)
         return 1
 
     uids: list[str] | None = None
@@ -72,7 +79,11 @@ def cmd_paste_cleanup(args: argparse.Namespace) -> int:
         conflicting = []
         if args.model is not None:
             conflicting.append("--model")
-        if args.verify_model is not None:
+        if args.verify_model is not None and not args.resume_verification:
+            # Issue athenaeum#1923: --resume-verification is the one
+            # proposer/verifier knob this replay path legitimately accepts
+            # -- it overrides report.verify_model for the resumed verifier
+            # calls only, never a fresh proposer pass.
             conflicting.append("--verify-model")
         if args.verify_rule != "sampled":
             conflicting.append("--verify-rule")
@@ -109,6 +120,24 @@ def cmd_paste_cleanup(args: argparse.Namespace) -> int:
                 for v in report.proposed
                 if v.uid in wanted or any(v.uid.startswith(u) for u in wanted)
             ]
+
+        if args.resume_verification:
+            # Issue athenaeum#1923: builds only the 'verify' knob's client --
+            # this path makes no proposer calls, so no 'classify' client is
+            # needed. Mirrors the fresh-pass branch's classify-knob error
+            # wording below, naming 'verify' instead.
+            from athenaeum.provider import build_llm_client
+
+            verify_client = build_llm_client(config, knob="verify") or build_llm_client(
+                config, knob="classify"
+            )
+            if verify_client is None:
+                print(
+                    "error: no LLM client is configured for the 'verify' knob "
+                    "(check llm.provider / ANTHROPIC_API_KEY)",
+                    file=sys.stderr,
+                )
+                return 1
     else:
         from athenaeum.config import (
             DEFAULT_CLASSIFY_MODEL,
@@ -158,6 +187,18 @@ def cmd_paste_cleanup(args: argparse.Namespace) -> int:
                 uids=uids,
                 config=config,
             )
+        elif args.resume_verification:
+            # Issue athenaeum#1923: resume BEFORE apply, so a single
+            # `--from-report --resume-verification --apply` invocation
+            # resumes verification then applies the now-more-complete
+            # report in one pass.
+            resume_verification(
+                report,
+                wiki_root,
+                verify_client=verify_client,
+                verify_model=args.verify_model,
+                config=config,
+            )
 
         changed = apply_paste_cleanup_report(report, wiki_root) if args.apply else 0
 
@@ -166,12 +207,15 @@ def cmd_paste_cleanup(args: argparse.Namespace) -> int:
             payload["applied"] = args.apply
             payload["files_changed"] = changed
             payload["from_report"] = str(args.from_report) if args.from_report else None
+            payload["resume_verification"] = bool(args.resume_verification)
             sys.stdout.write(json.dumps(payload) + "\n")
             return 0
 
         mode = "APPLY" if args.apply else "DRY RUN"
         if args.from_report is not None:
             mode = f"REPLAY {mode}"
+            if args.resume_verification:
+                mode = f"RESUME {mode}"
         print(f"=== athenaeum paste-cleanup ({mode}, {PASTE_CLEANUP_VERSION}) ===")
         print(report.render_text())
         print(
@@ -264,10 +308,24 @@ def add_paste_cleanup_subparser(subparsers: argparse._SubParsersAction) -> None:
         dest="from_report",
         help="Replay a prior --json report's verdicts instead of running a "
         "fresh proposer/verifier pass -- no LLM client is built. Mutually "
-        "exclusive with --model/--verify-model/--verify-rule/--sample/"
-        "--limit. --uids further restricts the replayed set. The report's "
-        "version must match this build's PASTE_CLEANUP_VERSION. Without "
-        "--apply, prints the replay summary and writes nothing.",
+        "exclusive with --model/--verify-rule/--sample/--limit (--verify-model "
+        "is allowed together with --resume-verification). --uids further "
+        "restricts the replayed set. The report's version must match this "
+        "build's PASTE_CLEANUP_VERSION. Without --apply, prints the replay "
+        "summary and writes nothing. Combine with --resume-verification to "
+        "finish verifying bullets a spend ceiling left pending instead of "
+        "just replaying as-is.",
+    )
+    parser.add_argument(
+        "--resume-verification",
+        action="store_true",
+        dest="resume_verification",
+        help="Requires --from-report. Resumes the verifier pass over the "
+        "loaded report's bullets that a spend ceiling left "
+        "verify_attempted=False, WITHOUT re-running the proposer pass -- "
+        "builds only the 'verify' LLM client (issue athenaeum#1923). Runs "
+        "before --apply, so --from-report --resume-verification --apply "
+        "resumes then applies in one invocation.",
     )
     parser.add_argument(
         "--mechanical-dry-run",

@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from athenaeum.cli import build_parser
-from athenaeum.paste_cleanup import build_paste_cleanup_report
+from athenaeum.paste_cleanup import PasteCleanupReport, ProposalVerdict, build_paste_cleanup_report
 from tests.conftest import FakeLLMClient
 
 
@@ -70,6 +70,44 @@ def _build_report_file(knowledge_root: Path, tmp_path: Path) -> Path:
         length_threshold=10,
     )
     report_path = tmp_path / "report.json"
+    report_path.write_text(json.dumps(report.to_dict()), encoding="utf-8")
+    return report_path
+
+
+def _build_pending_report_file(knowledge_root: Path, tmp_path: Path) -> Path:
+    """A v2 report, shaped like real ``--json`` output, with ONE proposed
+    verdict left ``verify_attempted=False`` -- as if a spend ceiling had
+    stopped the verifier pass before reaching it (issue athenaeum#1923). This
+    is the actual fixture shape ``--resume-verification`` exists to act on,
+    unlike :func:`_build_report_file`'s fully-verified report above.
+    """
+    content = "Off-topic internal retro content unrelated to the subject." * 10
+    page = _page(
+        knowledge_root / "wiki",
+        "person1.md",
+        "uid: person1\nname: Person One\n",
+        f"## Notes\n\n- 2026-01-01: {content}\n",
+    )
+    report = PasteCleanupReport(
+        proposed=[
+            ProposalVerdict(
+                uid="person1",
+                path=page,
+                date="2026-01-01",
+                raw_chunk=f"- 2026-01-01: {content}",
+                paste_text=content,
+                extraction_status="clean",
+                verdict="remove",
+                reason="off-topic",
+                confidence="high",
+                model="claude-haiku-4-5-20251001",
+            )
+        ],
+        verify_rule="all",
+        model="claude-haiku-4-5-20251001",
+        verify_model="claude-sonnet-5",
+    )
+    report_path = tmp_path / "pending_report.json"
     report_path.write_text(json.dumps(report.to_dict()), encoding="utf-8")
     return report_path
 
@@ -154,3 +192,138 @@ class TestFromReportReplay:
         args = parser.parse_args(["--path", str(knowledge_root), "--from-report", str(report_path)])
         rc = args.func(args)
         assert rc == 1
+
+
+class TestResumeVerificationCli:
+    """``--resume-verification`` surface (issue athenaeum#1923)."""
+
+    def test_without_from_report_exits_1_naming_both_flags(
+        self, knowledge_root: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        parser = _paste_cleanup_parser()
+        args = parser.parse_args(["--path", str(knowledge_root), "--resume-verification"])
+        rc = args.func(args)
+        assert rc == 1
+        _out, err = capsys.readouterr()
+        assert "--resume-verification" in err
+        assert "--from-report" in err
+
+    def test_verify_model_alone_still_conflicts_with_from_report(
+        self, knowledge_root: Path, tmp_path: Path
+    ) -> None:
+        report_path = _build_report_file(knowledge_root, tmp_path)
+        parser = _paste_cleanup_parser()
+        args = parser.parse_args(
+            [
+                "--path",
+                str(knowledge_root),
+                "--from-report",
+                str(report_path),
+                "--verify-model",
+                "some-other-model",
+            ]
+        )
+        rc = args.func(args)
+        assert rc == 1
+
+    def test_resume_verification_allows_verify_model_override(
+        self, knowledge_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        report_path = _build_pending_report_file(knowledge_root, tmp_path)
+        fake_verify_client = FakeLLMClient(
+            text=json.dumps(
+                {"verdict": "remove", "claim": "", "reason": "confirmed", "agree": True}
+            )
+        )
+
+        def _fake_build_llm_client(config: object, *, knob: str | None = None, **kwargs: object):
+            assert knob == "verify"
+            return fake_verify_client
+
+        monkeypatch.setattr("athenaeum.provider.build_llm_client", _fake_build_llm_client)
+
+        parser = _paste_cleanup_parser()
+        args = parser.parse_args(
+            [
+                "--path",
+                str(knowledge_root),
+                "--from-report",
+                str(report_path),
+                "--resume-verification",
+                "--verify-model",
+                "some-other-model",
+                "--json",
+            ]
+        )
+        rc = args.func(args)
+        assert rc == 0
+        assert len(fake_verify_client.calls) == 1
+        assert fake_verify_client.calls[0]["model"] == "some-other-model"
+
+    def test_end_to_end_resume_emits_resume_flag_and_verifies(
+        self,
+        knowledge_root: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        report_path = _build_pending_report_file(knowledge_root, tmp_path)
+        fake_verify_client = FakeLLMClient(
+            text=json.dumps(
+                {"verdict": "remove", "claim": "", "reason": "confirmed", "agree": True}
+            )
+        )
+
+        def _fake_build_llm_client(config: object, *, knob: str | None = None, **kwargs: object):
+            return fake_verify_client if knob == "verify" else None
+
+        monkeypatch.setattr("athenaeum.provider.build_llm_client", _fake_build_llm_client)
+
+        parser = _paste_cleanup_parser()
+        args = parser.parse_args(
+            [
+                "--path",
+                str(knowledge_root),
+                "--from-report",
+                str(report_path),
+                "--resume-verification",
+                "--json",
+            ]
+        )
+        rc = args.func(args)
+        assert rc == 0
+        out, _ = capsys.readouterr()
+        payload = json.loads(out)
+        assert payload["resume_verification"] is True
+        rows = payload["proposed"]
+        assert len(rows) == 1
+        assert rows[0]["verify_attempted"] is True
+        assert rows[0]["final_verdict"] == "remove"
+
+    def test_exits_1_when_verify_knob_has_no_client(
+        self,
+        knowledge_root: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        report_path = _build_pending_report_file(knowledge_root, tmp_path)
+        monkeypatch.setattr(
+            "athenaeum.provider.build_llm_client",
+            lambda config, *, knob=None, **kwargs: None,
+        )
+
+        parser = _paste_cleanup_parser()
+        args = parser.parse_args(
+            [
+                "--path",
+                str(knowledge_root),
+                "--from-report",
+                str(report_path),
+                "--resume-verification",
+            ]
+        )
+        rc = args.func(args)
+        assert rc == 1
+        _out, err = capsys.readouterr()
+        assert "verify" in err

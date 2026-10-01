@@ -49,6 +49,15 @@ log = logging.getLogger(__name__)
 #: occurrence of ``""`` in a page body, corrupting it. Bumping the version
 #: makes a v1 report fail the check loudly instead (Sentry Seer finding on
 #: athenaeum#1904).
+#:
+#: NOT bumped again for issue athenaeum#1923 (verifier-resume): every field
+#: ``to_dict()``/``from_dict()`` grew for that issue (``proposer_truncated``
+#: on write and read, ``verify_pending`` write-only) is read with a default
+#: in :meth:`PasteCleanupReport.from_dict`, and the one guard the version
+#: exists for -- a silently-defaulted ``raw_chunk`` -- is untouched. A v2
+#: report therefore stays replayable, and resuming an EXISTING v2 report
+#: (not just one produced by a post-fix build) is the whole point of the
+#: issue.
 PASTE_CLEANUP_VERSION = "paste-cleanup-v2"
 
 #: Bullet shape emitted by pre-athenaeum#1684 intake (see ``athenaeum.intake`` history
@@ -560,6 +569,21 @@ def select_verify_sample(
     return selected
 
 
+def _pending_verify_indices(proposals: list[ProposalVerdict], rule: str) -> list[int]:
+    """Sorted indices into *proposals* that :func:`select_verify_sample`
+    selects under *rule* but whose verdict has ``verify_attempted is
+    False`` -- the single predicate shared by
+    :meth:`PasteCleanupReport.pending_verification`, the verifier loop in
+    :func:`build_paste_cleanup_report`, and :func:`resume_verification`, so
+    the three cannot drift (issue athenaeum#1923). On a fresh pass nothing
+    has been verified yet, so this returns exactly
+    ``sorted(select_verify_sample(...))`` -- the pre-athenaeum#1923 behavior,
+    unchanged.
+    """
+    selected = select_verify_sample(proposals, rule=rule)
+    return sorted(i for i in selected if not proposals[i].verify_attempted)
+
+
 def choose_verify_rule(agreement_rate: float, *, threshold: float = 0.90) -> str:
     """The issue's own AC: verify low-confidence + a fixed 10% sample when
     measured agreement is at least *threshold*; verify everything otherwise."""
@@ -657,12 +681,44 @@ class PasteCleanupReport:
     #: (...)". ``None`` when the pass ran to completion (including every
     #: ``--mechanical-dry-run`` run, which never checks the ceiling).
     ceiling_reason: str | None = None
+    #: Set (issue athenaeum#1923) when the PROPOSER loop broke on a ceiling
+    #: trip, leaving one or more candidate bullets never extracted/proposed
+    #: at all. This is distinct from "the verifier pass has pending work"
+    #: (:meth:`pending_verification`, non-empty whenever a verifier-pass
+    #: trip or a proposer-pass skip left a proposed bullet unverified): a
+    #: resume can finish verifying bullets that WERE proposed, at zero new
+    #: proposer calls, but it can never conjure a proposal for a bullet the
+    #: proposer loop never reached -- that needs a fresh pass over those
+    #: pages. ``False`` for every run that completed its proposer loop
+    #: (including every ``--mechanical-dry-run``, which never trips).
+    proposer_truncated: bool = False
 
     def by_final_verdict(self) -> dict[str, int]:
         counts: dict[str, int] = {}
         for v in self.proposed:
             counts[v.final_verdict()] = counts.get(v.final_verdict(), 0) + 1
         return counts
+
+    def pending_verification(self) -> list[int]:
+        """Sorted indices into :attr:`proposed` that :func:`select_verify_sample`
+        (applied with :attr:`verify_rule`) selects but whose verdict has not
+        been verify_attempted -- the ceiling-trip casualties
+        :func:`resume_verification` can resolve with no new proposer calls
+        (issue athenaeum#1923).
+
+        Derived, not stored: both inputs (:attr:`proposed`'s
+        ``verify_attempted`` flags and :attr:`verify_rule`) already
+        round-trip through :meth:`to_dict`/:meth:`from_dict`, so a replayed
+        report computes the identical set a freshly-built one would.
+
+        A bullet :func:`select_verify_sample` never selected in the first
+        place (e.g. a ``high``-confidence ``keep`` under the ``sampled``
+        rule's stable-sample miss) is NOT pending -- it is correctly
+        unverified by rule, not a ceiling casualty. That is the precise
+        reading of the issue's AC2: no bullet is left unverified *solely
+        because of a ceiling trip*.
+        """
+        return _pending_verify_indices(self.proposed, self.verify_rule)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -675,6 +731,11 @@ class PasteCleanupReport:
             "by_final_verdict": self.by_final_verdict(),
             "proposed": [v.to_dict() for v in self.proposed],
             "ceiling_reason": self.ceiling_reason,
+            "proposer_truncated": self.proposer_truncated,
+            # Derived from `proposed`/`verify_rule` above -- NOT read back in
+            # from_dict (issue athenaeum#1923): it would just be stale the
+            # moment a resume mutates verify_attempted flags in place.
+            "verify_pending": len(self.pending_verification()),
         }
 
     @classmethod
@@ -700,6 +761,7 @@ class PasteCleanupReport:
             model=d.get("model", ""),
             verify_model=d.get("verify_model", ""),
             ceiling_reason=d.get("ceiling_reason"),
+            proposer_truncated=d.get("proposer_truncated", False),
         )
 
     def render_text(self) -> str:
@@ -711,6 +773,12 @@ class PasteCleanupReport:
             lines.append(f"  {verdict}: {count}")
         if self.ceiling_reason is not None:
             lines.append(f"stopped early: spend ceiling reached ({self.ceiling_reason})")
+        pending = self.pending_verification()
+        if pending:
+            lines.append(
+                f"verification pending: {len(pending)} bullet(s) -- resume with "
+                "--from-report --resume-verification"
+            )
         return "\n".join(lines)
 
 
@@ -785,6 +853,12 @@ def build_paste_cleanup_report(
             _ceiling = spend.ceiling_tripped(run_usage, provider=resolved_provider, config=config)
             if _ceiling is not None:
                 report.ceiling_reason = _ceiling
+                # Issue athenaeum#1923: these bullets were never even
+                # extracted/proposed -- distinct from "proposed but not yet
+                # verified" (report.pending_verification()). A resume can
+                # never fix this; only a fresh pass over the remaining pages
+                # can. See PasteCleanupReport.proposer_truncated.
+                report.proposer_truncated = True
                 log.error(
                     "paste-cleanup: spend ceiling reached (%s) -- stopping "
                     "proposer pass early, %d bullet(s) left unprocessed",
@@ -805,30 +879,40 @@ def build_paste_cleanup_report(
         )
         proposals.append(verdict)
 
-    if report.ceiling_reason is None:
-        verify_indices = sorted(select_verify_sample(proposals, rule=verify_rule))
-        for i in verify_indices:
-            if client is not None:
-                _ceiling = spend.ceiling_tripped(
-                    run_usage, provider=resolved_provider, config=config
+    # Issue athenaeum#1923 (the literal fix for the issue title): the
+    # verifier pass used to be skipped ENTIRELY whenever the proposer loop
+    # above had already tripped the ceiling (`if report.ceiling_reason is
+    # None:`), leaving every proposal `verify_attempted: False` with no way
+    # to finish short of re-running the whole pass. That guard is gone.
+    # The verifier loop now ALWAYS runs; its own per-iteration
+    # `spend.ceiling_tripped` check below makes a STILL-tripped ceiling
+    # cost exactly zero API calls (it breaks before the first `verify_page`
+    # call, identical to the old short-circuit in net effect), while a
+    # ceiling that CLEARED between the two passes -- a per-day/weekly token
+    # window rolling over mid-run -- now gets the verifier pass it was
+    # previously denied for no reason tied to its own budget.
+    verify_indices = _pending_verify_indices(proposals, verify_rule)
+    for _position, i in enumerate(verify_indices):
+        if client is not None:
+            _ceiling = spend.ceiling_tripped(run_usage, provider=resolved_provider, config=config)
+            if _ceiling is not None:
+                report.ceiling_reason = _ceiling
+                log.error(
+                    "paste-cleanup: spend ceiling reached (%s) -- "
+                    "stopping verifier pass early, %d bullet(s) left pending",
+                    _ceiling,
+                    len(verify_indices) - _position,
                 )
-                if _ceiling is not None:
-                    report.ceiling_reason = _ceiling
-                    log.error(
-                        "paste-cleanup: spend ceiling reached (%s) -- "
-                        "stopping verifier pass early",
-                        _ceiling,
-                    )
-                    break
-            v = proposals[i]
-            meta, _ = split_frontmatter(_read(v.path) or "")
-            verify_page(
-                verify_client,
-                v,
-                meta=meta,
-                model=verify_model,
-                usage=run_usage if client is not None else None,
-            )
+                break
+        v = proposals[i]
+        meta, _ = split_frontmatter(_read(v.path) or "")
+        verify_page(
+            verify_client,
+            v,
+            meta=meta,
+            model=verify_model,
+            usage=run_usage if client is not None else None,
+        )
 
     for v in proposals:
         report.usage.add_tokens(v.input_tokens, v.output_tokens, model=v.model)
@@ -844,6 +928,162 @@ def build_paste_cleanup_report(
             config=config,
             wiki_root=wiki_root,
         )
+
+    return report
+
+
+def _paste_text_for_resume(verdict: ProposalVerdict) -> str | None:
+    """Re-derive the paste text :func:`resume_verification` must hand to
+    :func:`verify_page` when *verdict* came from a replayed report (issue
+    athenaeum#1923).
+
+    :meth:`ProposalVerdict.to_dict` never writes ``paste_text`` (and
+    :meth:`ProposalVerdict.from_dict` never reads it back) because the
+    ``--from-report`` replay path never calls the LLM, so nothing used to
+    read it. :func:`resume_verification` is the first consumer that both
+    resumes from a replayed report AND calls the LLM -- it renders its
+    prompt from ``verdict.paste_text``, so verifying a round-tripped
+    verdict without this step would silently verify an EMPTY paste.
+
+    Fixes this WITHOUT adding a new serialized field: ``raw_chunk`` is
+    already serialized verbatim (the one field ``from_dict`` requires, not
+    defaults) and contains the full original bullet text, head included.
+    This strips the ``- YYYY-MM-DD: `` head with :data:`_BULLET_HEAD_RE`
+    and runs the remainder back through :func:`extract_paste_span` -- the
+    exact same deterministic extraction the proposer pass used the first
+    time, so this adds no new data to the report, only recomputes what the
+    build pass already derived once.
+
+    Returns *verdict.paste_text* unchanged when it is already non-empty (an
+    in-memory verdict from the SAME run, never round-tripped). Returns
+    ``None`` when ``raw_chunk``'s head does not match -- a malformed chunk
+    the caller must skip rather than verify an empty/wrong paste for.
+    """
+    if verdict.paste_text:
+        return verdict.paste_text
+    m = _BULLET_HEAD_RE.match(verdict.raw_chunk)
+    if not m:
+        return None
+    content = verdict.raw_chunk[m.end() :]
+    paste_text, _remainder, _status = extract_paste_span(content)
+    return paste_text
+
+
+def resume_verification(
+    report: PasteCleanupReport,
+    wiki_root: Path,
+    *,
+    verify_client: Any,
+    verify_model: str | None = None,
+    config: dict[str, Any] | None = None,
+) -> PasteCleanupReport:
+    """Resume the verifier pass over *report*'s pending bullets (issue
+    athenaeum#1923): those :meth:`PasteCleanupReport.pending_verification`
+    reports as selected-but-not-yet-``verify_attempted``, typically because
+    an earlier verifier-pass ceiling trip left them that way. Makes NO
+    proposer calls -- this is a verifier-only resume, mirroring
+    :func:`build_paste_cleanup_report`'s own two-knob split. Mutates and
+    returns *report*.
+
+    *verify_model* overrides *report.verify_model*; at least one of the two
+    must be non-empty, or there is nothing to tell the verifier knob to
+    serve -- raises :class:`ValueError` rather than silently calling with an
+    empty model string.
+
+    A no-op resume (nothing pending) returns immediately WITHOUT building a
+    provider, checking a ceiling, or recording spend -- it must cost
+    nothing and must not write a ledger row (the issue's own AC2 reading:
+    a bullet correctly left unverified by rule is not a ceiling casualty,
+    and resuming a fully-verified or rule-complete report must be inert).
+    """
+    model = verify_model or report.verify_model
+    if not model:
+        raise ValueError(
+            "resume_verification: no verify model given (neither verify_model "
+            "nor report.verify_model is set)"
+        )
+
+    pending = _pending_verify_indices(report.proposed, report.verify_rule)
+    if not pending:
+        return report
+
+    from athenaeum import spend
+    from athenaeum.provider import resolve_provider
+
+    run_usage = TokenUsage()
+    # knob="verify", NOT "classify": this resume only ever makes verifier
+    # calls (issue athenaeum#1923) -- mirroring build_paste_cleanup_report's
+    # own knob split, just for the one knob this path uses.
+    resolved_provider = resolve_provider(config, knob="verify")
+
+    verified_count = 0
+    for i in pending:
+        _ceiling = spend.ceiling_tripped(run_usage, provider=resolved_provider, config=config)
+        if _ceiling is not None:
+            report.ceiling_reason = _ceiling
+            log.error(
+                "paste-cleanup: spend ceiling reached (%s) -- stopping "
+                "verifier resume early, %d bullet(s) still pending",
+                _ceiling,
+                len(pending) - verified_count,
+            )
+            break
+        v = report.proposed[i]
+        paste_text = _paste_text_for_resume(v)
+        if paste_text is None:
+            # Mark the attempt even though no API call is made (Sentry Seer
+            # finding on athenaeum#1927). ``verify_attempted`` means "the
+            # verifier was reached for this verdict, whether or not the call
+            # succeeded" -- that is exactly the athenaeum#1903 contract
+            # ``verify_page`` implements by setting the flag BEFORE its own
+            # try/except. A malformed ``raw_chunk`` is a pre-call failure of
+            # the same kind, so leaving the flag False would be wrong twice
+            # over: it claims the bullet was never reached, and it keeps the
+            # bullet in ``pending_verification()`` forever -- so
+            # ``ceiling_reason`` could never clear and every later resume
+            # would re-attempt a bullet that can never succeed, making no
+            # progress. The ``error`` below still routes ``final_verdict()``
+            # to ``hold``, so a malformed bullet is never written by apply.
+            v.verify_attempted = True
+            v.error = f"resume: could not re-derive paste text from raw_chunk for uid {v.uid!r}"
+            continue
+        v.paste_text = paste_text
+        meta, _ = split_frontmatter(_read(v.path) or "")
+        # Capture before/after so only THIS call's own token delta is added
+        # to report.usage below -- verify_page accumulates onto v's
+        # cumulative input_tokens/output_tokens (already counting any prior
+        # proposer/verifier call on this same verdict), so adding the FULL
+        # post-call totals here would double-count whatever a previous
+        # pass already folded into report.usage.
+        before_in, before_out = v.input_tokens, v.output_tokens
+        verify_page(verify_client, v, meta=meta, model=model, usage=run_usage)
+        report.usage.add_tokens(
+            v.input_tokens - before_in, v.output_tokens - before_out, model=model
+        )
+        verified_count += 1
+
+    # Issue athenaeum#1923: only clear the "stopped early" banner when the
+    # run is now GENUINELY complete -- no bullet still pending AND the
+    # proposer loop itself was never truncated. When proposer_truncated is
+    # True, candidate bullets were never proposed at all; a resume cannot
+    # fix that (it only ever touches already-proposed bullets), so
+    # ceiling_reason must stay set rather than falsely claim completion.
+    if not _pending_verify_indices(report.proposed, report.verify_rule) and not (
+        report.proposer_truncated
+    ):
+        report.ceiling_reason = None
+
+    # One end-of-resume row, mirroring build_paste_cleanup_report's single
+    # end-of-run row (never a per-bullet row). Best-effort / no-ops on an
+    # empty usage -- see spend.record_spend's own docstring.
+    spend.record_spend(
+        run_usage,
+        run_type=spend.RUN_TYPE_PASTE_CLEANUP,
+        provider=resolved_provider,
+        files_processed=verified_count,
+        config=config,
+        wiki_root=wiki_root,
+    )
 
     return report
 
@@ -906,6 +1146,7 @@ __all__ = [
     "propose_page",
     "render_propose_prompt",
     "render_verify_prompt",
+    "resume_verification",
     "select_verify_sample",
     "split_frontmatter",
     "verify_page",

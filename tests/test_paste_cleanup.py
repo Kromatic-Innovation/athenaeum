@@ -33,6 +33,7 @@ from athenaeum.paste_cleanup import (
     parse_propose_response,
     parse_verify_response,
     propose_page,
+    resume_verification,
     select_verify_sample,
     verify_page,
 )
@@ -969,3 +970,441 @@ class TestSpendWiring:
         assert report.scanned == 1
         assert report.ceiling_reason is None
         assert not ledger.exists()
+
+
+# --- verifier-pass resume (issue athenaeum#1923) ---------------------------
+
+
+def _three_candidate_pages(wiki: Path) -> None:
+    for i in range(1, 4):
+        content = f"An on-topic paste number {i} about the subject here for testing." * 3
+        _page(
+            wiki,
+            f"person{i}.md",
+            f"uid: person{i}\nname: Person {i}\n",
+            f"## Notes\n\n- 2026-01-0{i}: {content}\n",
+        )
+
+
+_PROPOSE_MODEL = "claude-haiku-4-5-20251001"  # matches rate prefix (1.0, 5.0) $/MTok
+_VERIFY_MODEL = "claude-sonnet-5"  # matches rate (3.0, 15.0) $/MTok
+
+
+class TestVerifierResume:
+    """Issue athenaeum#1923: a verifier-pass ceiling trip must RESUME
+    verification instead of leaving bullets ``verify_attempted: False``
+    forever (AC1), and a trip during the PROPOSER pass must no longer skip
+    the verifier pass entirely (AC2). Every test uses the ``ledger``
+    fixture -- ``resume_verification`` calls ``spend.ceiling_tripped``/
+    ``spend.record_spend`` exactly like ``build_paste_cleanup_report`` does.
+    """
+
+    def test_ceiling_trip_mid_verifier_batch_resumes_cleanly(
+        self, wiki: Path, ledger: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC1, the headline: a ceiling trips mid-verifier-batch (3 bullets,
+        ``verify_rule="all"``); some are left unattempted; clearing the
+        ceiling and resuming verifies every selected bullet exactly once,
+        with no re-verification of the one already done."""
+        _three_candidate_pages(wiki)
+        propose_client = FakeLLMClient(
+            response=make_llm_response(
+                json.dumps(
+                    {"verdict": "keep", "claim": "", "reason": "fine", "confidence": "high"}
+                ),
+                usage=make_llm_usage(input_tokens=1000, output_tokens=0),
+            )
+        )
+        verify_client = FakeLLMClient(
+            response=make_llm_response(
+                json.dumps({"verdict": "keep", "claim": "", "reason": "ok", "agree": True}),
+                usage=make_llm_usage(input_tokens=1000, output_tokens=0),
+            )
+        )
+        # 3 proposer calls @ $0.001 each = $0.003, then verify calls @
+        # $0.003 each: the 1st verify call brings the running total to
+        # $0.006 -- past this $0.005 cap -- so the 2nd verify call's
+        # pre-check trips before it is made.
+        monkeypatch.setenv("ATHENAEUM_SPEND_MAX_USD_PER_RUN", "0.005")
+
+        report = build_paste_cleanup_report(
+            wiki,
+            client=propose_client,
+            verify_client=verify_client,
+            model=_PROPOSE_MODEL,
+            verify_model=_VERIFY_MODEL,
+            verify_rule="all",
+            length_threshold=10,
+        )
+
+        assert report.proposer_truncated is False
+        assert len(report.proposed) == 3
+        assert report.ceiling_reason is not None
+        pending_before = report.pending_verification()
+        assert pending_before == [1, 2]
+        assert len(verify_client.calls) == 1
+
+        monkeypatch.delenv("ATHENAEUM_SPEND_MAX_USD_PER_RUN", raising=False)
+        resume_verification(report, wiki, verify_client=verify_client, config=None)
+
+        assert report.pending_verification() == []
+        assert all(v.verify_attempted for v in report.proposed)
+        assert len(verify_client.calls) == 1 + len(pending_before)
+
+    def test_proposer_trip_no_longer_skips_the_verifier_pass(
+        self, wiki: Path, ledger: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC2 / the issue title: a ceiling trip during the PROPOSER pass
+        leaves ``proposer_truncated`` True and ``ceiling_reason`` set, but
+        resuming still verifies the ONE proposal that WAS made -- and
+        ``ceiling_reason`` stays set afterward because candidates 2 and 3
+        were never proposed at all; a resume cannot fix that."""
+        monkeypatch.setenv("ATHENAEUM_SPEND_MAX_USD_PER_RUN", "0.0000001")
+        _three_candidate_pages(wiki)
+        propose_client = FakeLLMClient(
+            response=make_llm_response(
+                json.dumps(
+                    {"verdict": "keep", "claim": "", "reason": "fine", "confidence": "high"}
+                ),
+                usage=make_llm_usage(input_tokens=100, output_tokens=20),
+            )
+        )
+        verify_client = FakeLLMClient(raises=AssertionError("verify must not be called"))
+
+        report = build_paste_cleanup_report(
+            wiki,
+            client=propose_client,
+            verify_client=verify_client,
+            model=_PROPOSE_MODEL,
+            verify_model=_VERIFY_MODEL,
+            verify_rule="all",
+            length_threshold=10,
+        )
+
+        assert report.proposer_truncated is True
+        assert len(report.proposed) == 1
+        assert report.ceiling_reason is not None
+        assert len(verify_client.calls) == 0
+        assert report.pending_verification() == [0]
+
+        monkeypatch.delenv("ATHENAEUM_SPEND_MAX_USD_PER_RUN", raising=False)
+        resumed_verify_client = FakeLLMClient(
+            response=make_llm_response(
+                json.dumps({"verdict": "keep", "claim": "", "reason": "ok", "agree": True}),
+                usage=make_llm_usage(input_tokens=100, output_tokens=20),
+            )
+        )
+        resume_verification(report, wiki, verify_client=resumed_verify_client, config=None)
+
+        assert report.pending_verification() == []
+        assert len(resumed_verify_client.calls) == 1
+        assert report.ceiling_reason is not None
+
+    def test_resume_clears_ceiling_reason_when_proposer_was_not_truncated(
+        self, wiki: Path, ledger: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A complete resume (no bullet left pending) clears
+        ``ceiling_reason`` when the proposer loop ran to completion -- the
+        "stopped early" banner must stop lying once the run is genuinely
+        done."""
+        _three_candidate_pages(wiki)
+        propose_client = FakeLLMClient(
+            response=make_llm_response(
+                json.dumps(
+                    {"verdict": "keep", "claim": "", "reason": "fine", "confidence": "high"}
+                ),
+                usage=make_llm_usage(input_tokens=1000, output_tokens=0),
+            )
+        )
+        verify_client = FakeLLMClient(
+            response=make_llm_response(
+                json.dumps({"verdict": "keep", "claim": "", "reason": "ok", "agree": True}),
+                usage=make_llm_usage(input_tokens=1000, output_tokens=0),
+            )
+        )
+        monkeypatch.setenv("ATHENAEUM_SPEND_MAX_USD_PER_RUN", "0.005")
+
+        report = build_paste_cleanup_report(
+            wiki,
+            client=propose_client,
+            verify_client=verify_client,
+            model=_PROPOSE_MODEL,
+            verify_model=_VERIFY_MODEL,
+            verify_rule="all",
+            length_threshold=10,
+        )
+        assert report.proposer_truncated is False
+        assert report.ceiling_reason is not None
+
+        monkeypatch.delenv("ATHENAEUM_SPEND_MAX_USD_PER_RUN", raising=False)
+        resume_verification(report, wiki, verify_client=verify_client, config=None)
+
+        assert report.pending_verification() == []
+        assert report.ceiling_reason is None
+
+    def test_round_trip_resume_recovers_paste_text_for_the_prompt(
+        self, tmp_path: Path, ledger: Path
+    ) -> None:
+        """The real ``--from-report`` shape: ``paste_text`` is lost on the
+        ``to_dict``/``from_dict`` round trip. Without
+        ``_paste_text_for_resume`` the resumed verify call would render its
+        prompt with an EMPTY paste -- assert the paste text the fake client
+        actually received, and that the bullet ends verified."""
+        content = "An attributed paste about the subject that is reasonably long for testing."
+        verdict = ProposalVerdict(
+            uid="person1",
+            path=tmp_path / "person1.md",
+            date="2026-01-01",
+            raw_chunk=f"- 2026-01-01: {content}",
+            paste_text=content,
+            extraction_status="clean",
+            verdict="keep",
+            reason="on-topic",
+            confidence="high",
+            model=_PROPOSE_MODEL,
+        )
+        report = PasteCleanupReport(
+            proposed=[verdict], verify_rule="all", model=_PROPOSE_MODEL, verify_model=_VERIFY_MODEL
+        )
+        replayed = PasteCleanupReport.from_dict(json.loads(json.dumps(report.to_dict())))
+        assert replayed.proposed[0].paste_text == ""  # lost on the round trip, as expected
+        assert replayed.pending_verification() == [0]
+
+        verify_client = FakeLLMClient(
+            text=json.dumps({"verdict": "keep", "claim": "", "reason": "ok", "agree": True})
+        )
+        resume_verification(replayed, tmp_path, verify_client=verify_client, config=None)
+
+        assert replayed.pending_verification() == []
+        assert replayed.proposed[0].verify_attempted is True
+        prompt = verify_client.calls[0]["messages"][0]["content"]
+        assert content in prompt
+
+    def test_no_op_resume_makes_no_calls_and_writes_no_ledger_row(
+        self, tmp_path: Path, ledger: Path
+    ) -> None:
+        verdict = ProposalVerdict(
+            uid="person1",
+            path=tmp_path / "person1.md",
+            date="2026-01-01",
+            raw_chunk="- 2026-01-01: On-topic paste text here.",
+            paste_text="On-topic paste text here.",
+            extraction_status="clean",
+            verdict="keep",
+            confidence="high",
+            verify_attempted=True,
+            verified=True,
+            verifier_verdict="keep",
+            verifier_agree=True,
+        )
+        report = PasteCleanupReport(
+            proposed=[verdict], verify_rule="all", verify_model=_VERIFY_MODEL
+        )
+        assert report.pending_verification() == []
+
+        client = FakeLLMClient(raises=AssertionError("must not be called on a no-op resume"))
+        result = resume_verification(report, tmp_path, verify_client=client, config=None)
+
+        assert result is report
+        assert len(client.calls) == 0
+        assert not ledger.exists()
+
+    def test_resume_records_one_ledger_row_and_grows_usage_by_its_own_tokens_only(
+        self, tmp_path: Path, ledger: Path
+    ) -> None:
+        verdict0 = ProposalVerdict(
+            uid="person1",
+            path=tmp_path / "person1.md",
+            date="2026-01-01",
+            raw_chunk="- 2026-01-01: Already fully verified paste text here.",
+            paste_text="Already fully verified paste text here.",
+            extraction_status="clean",
+            verdict="keep",
+            confidence="high",
+            model=_PROPOSE_MODEL,
+            input_tokens=50,
+            output_tokens=10,
+            verify_attempted=True,
+            verified=True,
+            verifier_verdict="keep",
+            verifier_agree=True,
+        )
+        verdict1 = ProposalVerdict(
+            uid="person2",
+            path=tmp_path / "person2.md",
+            date="2026-01-02",
+            raw_chunk="- 2026-01-02: Still-pending paste text here for the resume.",
+            paste_text="Still-pending paste text here for the resume.",
+            extraction_status="clean",
+            verdict="remove",
+            confidence="high",
+            model=_PROPOSE_MODEL,
+            input_tokens=30,
+            output_tokens=5,
+            verify_attempted=False,
+        )
+        report = PasteCleanupReport(
+            proposed=[verdict0, verdict1], verify_rule="all", verify_model=_VERIFY_MODEL
+        )
+        report.usage.add_tokens(verdict0.input_tokens, verdict0.output_tokens, model=verdict0.model)
+        report.usage.add_tokens(verdict1.input_tokens, verdict1.output_tokens, model=verdict1.model)
+        assert report.pending_verification() == [1]
+
+        verify_client = FakeLLMClient(
+            response=make_llm_response(
+                json.dumps(
+                    {"verdict": "remove", "claim": "", "reason": "confirmed", "agree": True}
+                ),
+                usage=make_llm_usage(input_tokens=20, output_tokens=4),
+            )
+        )
+        resume_verification(report, tmp_path, verify_client=verify_client, config=None)
+
+        assert report.pending_verification() == []
+        assert report.usage.input_tokens == 50 + 30 + 20
+        assert report.usage.output_tokens == 10 + 5 + 4
+
+        assert ledger.is_file()
+        lines = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()]
+        assert len(lines) == 1
+        assert lines[0]["run_type"] == spend.RUN_TYPE_PASTE_CLEANUP
+
+    def test_bullet_rule_never_selected_is_not_pending_and_not_verified_by_resume(
+        self, tmp_path: Path, ledger: Path
+    ) -> None:
+        """A bullet :func:`select_verify_sample` never selects under the
+        ``sampled`` rule is correctly unverified BY RULE -- not a ceiling
+        casualty -- so it is never in ``pending_verification()`` and a
+        resume must never verify it."""
+        selected_verdict = ProposalVerdict(
+            uid="low1",
+            path=tmp_path / "low1.md",
+            date="2026-01-01",
+            raw_chunk="- 2026-01-01: A low-confidence paste that is always sampled.",
+            paste_text="A low-confidence paste that is always sampled.",
+            extraction_status="clean",
+            verdict="keep",
+            confidence="low",
+        )
+        # Confirmed offline: _stable_sample_fraction("high_not_selected:2026-01-01", 0.10)
+        # is False -- this uid falls outside the stable 10% sample.
+        not_selected_verdict = ProposalVerdict(
+            uid="high_not_selected",
+            path=tmp_path / "high_not_selected.md",
+            date="2026-01-01",
+            raw_chunk="- 2026-01-01: A high-confidence paste that the sample rule skips.",
+            paste_text="A high-confidence paste that the sample rule skips.",
+            extraction_status="clean",
+            verdict="keep",
+            confidence="high",
+        )
+        report = PasteCleanupReport(
+            proposed=[selected_verdict, not_selected_verdict],
+            verify_rule="sampled",
+            verify_model=_VERIFY_MODEL,
+        )
+        assert report.pending_verification() == [0]
+
+        verify_client = FakeLLMClient(
+            response=make_llm_response(
+                json.dumps({"verdict": "keep", "claim": "", "reason": "ok", "agree": True}),
+                usage=make_llm_usage(input_tokens=10, output_tokens=2),
+            )
+        )
+        resume_verification(report, tmp_path, verify_client=verify_client, config=None)
+
+        assert selected_verdict.verify_attempted is True
+        assert not_selected_verdict.verify_attempted is False
+        assert len(verify_client.calls) == 1
+
+    def test_pending_verification_survives_round_trip(self, tmp_path: Path) -> None:
+        pending_verdict = ProposalVerdict(
+            uid="p1",
+            path=tmp_path / "p1.md",
+            date="2026-01-01",
+            raw_chunk="- 2026-01-01: Pending paste text.",
+            paste_text="Pending paste text.",
+            extraction_status="clean",
+            verdict="keep",
+            confidence="low",
+        )
+        done_verdict = ProposalVerdict(
+            uid="p2",
+            path=tmp_path / "p2.md",
+            date="2026-01-01",
+            raw_chunk="- 2026-01-01: Already-verified paste text.",
+            paste_text="Already-verified paste text.",
+            extraction_status="clean",
+            verdict="keep",
+            confidence="low",
+            verify_attempted=True,
+            verified=True,
+            verifier_verdict="keep",
+            verifier_agree=True,
+        )
+        report = PasteCleanupReport(proposed=[pending_verdict, done_verdict], verify_rule="sampled")
+        before = report.pending_verification()
+        replayed = PasteCleanupReport.from_dict(json.loads(json.dumps(report.to_dict())))
+        after = replayed.pending_verification()
+        assert before == [0]
+        assert after == [0]
+
+    def test_resume_with_empty_model_raises(self, tmp_path: Path, ledger: Path) -> None:
+        verdict = ProposalVerdict(
+            uid="p1",
+            path=tmp_path / "p1.md",
+            date="2026-01-01",
+            raw_chunk="- 2026-01-01: Some paste text.",
+            paste_text="Some paste text.",
+            extraction_status="clean",
+            verdict="keep",
+            confidence="low",
+        )
+        report = PasteCleanupReport(proposed=[verdict], verify_rule="sampled", verify_model="")
+        client = FakeLLMClient(raises=AssertionError("must not be called"))
+        with pytest.raises(ValueError):
+            resume_verification(report, tmp_path, verify_client=client, config=None)
+        assert len(client.calls) == 0
+
+    def test_malformed_raw_chunk_is_marked_attempted_and_does_not_stay_pending(
+        self, tmp_path: Path, ledger: Path
+    ) -> None:
+        """A ``raw_chunk`` whose ``- YYYY-MM-DD: `` head does not parse cannot
+        have its paste text re-derived, so no verifier call can be made for it
+        (Sentry Seer finding on athenaeum#1927). It must still be marked
+        ``verify_attempted`` -- the athenaeum#1903 meaning of that flag is "the
+        verifier was reached for this verdict", which it was. Leaving it False
+        would keep the bullet in ``pending_verification()`` forever, so
+        ``ceiling_reason`` could never clear and every later resume would
+        re-attempt a bullet that can never succeed. The recorded ``error``
+        still routes ``final_verdict()`` to ``hold``, so apply never writes it.
+        """
+        verdict = ProposalVerdict(
+            uid="broken1",
+            path=tmp_path / "broken1.md",
+            date="2026-01-01",
+            raw_chunk="this chunk has no dated bullet head at all",
+            paste_text="",
+            extraction_status="clean",
+            verdict="remove",
+            confidence="low",
+        )
+        report = PasteCleanupReport(
+            proposed=[verdict], verify_rule="all", verify_model=_VERIFY_MODEL
+        )
+        report.ceiling_reason = "per-day token ceiling reached (fixture)"
+        assert report.pending_verification() == [0]
+
+        client = FakeLLMClient(raises=AssertionError("no verifier call is possible"))
+        resume_verification(report, tmp_path, verify_client=client, config=None)
+
+        assert len(client.calls) == 0
+        assert verdict.verify_attempted is True
+        assert verdict.error is not None and verdict.error.startswith("resume:")
+        assert verdict.final_verdict() == "hold"
+        # The whole point: it is no longer pending, so the run can complete and
+        # a second resume does not re-attempt it.
+        assert report.pending_verification() == []
+        assert report.ceiling_reason is None
+        resume_verification(report, tmp_path, verify_client=client, config=None)
+        assert len(client.calls) == 0
