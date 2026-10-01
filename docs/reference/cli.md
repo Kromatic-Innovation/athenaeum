@@ -893,12 +893,13 @@ Tier-0 attributed-paste cleanup pass over person pages' ## Notes bullets: a chea
 |---|---|---|---|
 | `--apply` | `False` | — | Write remove/rewrite verdicts. Without this flag the command is a dry-run. |
 | `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
-| `--from-report` | — | — | Replay a prior --json report's verdicts instead of running a fresh proposer/verifier pass -- no LLM client is built. Mutually exclusive with --model/--verify-model/--verify-rule/--sample/--limit. --uids further restricts the replayed set. The report's version must match this build's PASTE_CLEANUP_VERSION. Without --apply, prints the replay summary and writes nothing. |
+| `--from-report` | — | — | Replay a prior --json report's verdicts instead of running a fresh proposer/verifier pass -- no LLM client is built. Mutually exclusive with --model/--verify-rule/--sample/--limit (--verify-model is allowed together with --resume-verification). --uids further restricts the replayed set. The report's version must match this build's PASTE_CLEANUP_VERSION. Without --apply, prints the replay summary and writes nothing. Combine with --resume-verification to finish verifying bullets a spend ceiling left pending instead of just replaying as-is. |
 | `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
 | `--limit` | — | — | Consider at most N pages this pass. |
 | `--mechanical-dry-run` | `False` | — | Skip building an LLM client entirely. For CI/offline smoke checks only. |
 | `--model` | — | — | Override the proposer model (default: the 'classify' knob's resolved model). |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+| `--resume-verification` | `False` | — | Requires --from-report. Resumes the verifier pass over the loaded report's bullets that a spend ceiling left verify_attempted=False, WITHOUT re-running the proposer pass -- builds only the 'verify' LLM client. Runs before --apply, so --from-report --resume-verification --apply resumes then applies in one invocation. |
 | `--sample` | — | — | Consider a stratified random sample of N pages instead of the whole corpus. Combine with --seed for reproducibility. |
 | `--seed` | `0` | — | Seed for --sample (default: 0). |
 | `--uids` | — | — | Path to a file listing one page uid per line; consider exactly those pages. |
