@@ -1365,3 +1365,46 @@ class TestVerifierResume:
         with pytest.raises(ValueError):
             resume_verification(report, tmp_path, verify_client=client, config=None)
         assert len(client.calls) == 0
+
+    def test_malformed_raw_chunk_is_marked_attempted_and_does_not_stay_pending(
+        self, tmp_path: Path, ledger: Path
+    ) -> None:
+        """A ``raw_chunk`` whose ``- YYYY-MM-DD: `` head does not parse cannot
+        have its paste text re-derived, so no verifier call can be made for it
+        (Sentry Seer finding on athenaeum#1927). It must still be marked
+        ``verify_attempted`` -- the athenaeum#1903 meaning of that flag is "the
+        verifier was reached for this verdict", which it was. Leaving it False
+        would keep the bullet in ``pending_verification()`` forever, so
+        ``ceiling_reason`` could never clear and every later resume would
+        re-attempt a bullet that can never succeed. The recorded ``error``
+        still routes ``final_verdict()`` to ``hold``, so apply never writes it.
+        """
+        verdict = ProposalVerdict(
+            uid="broken1",
+            path=tmp_path / "broken1.md",
+            date="2026-01-01",
+            raw_chunk="this chunk has no dated bullet head at all",
+            paste_text="",
+            extraction_status="clean",
+            verdict="remove",
+            confidence="low",
+        )
+        report = PasteCleanupReport(
+            proposed=[verdict], verify_rule="all", verify_model=_VERIFY_MODEL
+        )
+        report.ceiling_reason = "per-day token ceiling reached (fixture)"
+        assert report.pending_verification() == [0]
+
+        client = FakeLLMClient(raises=AssertionError("no verifier call is possible"))
+        resume_verification(report, tmp_path, verify_client=client, config=None)
+
+        assert len(client.calls) == 0
+        assert verdict.verify_attempted is True
+        assert verdict.error is not None and verdict.error.startswith("resume:")
+        assert verdict.final_verdict() == "hold"
+        # The whole point: it is no longer pending, so the run can complete and
+        # a second resume does not re-attempt it.
+        assert report.pending_verification() == []
+        assert report.ceiling_reason is None
+        resume_verification(report, tmp_path, verify_client=client, config=None)
+        assert len(client.calls) == 0

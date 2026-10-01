@@ -1031,6 +1031,20 @@ def resume_verification(
         v = report.proposed[i]
         paste_text = _paste_text_for_resume(v)
         if paste_text is None:
+            # Mark the attempt even though no API call is made (Sentry Seer
+            # finding on athenaeum#1927). ``verify_attempted`` means "the
+            # verifier was reached for this verdict, whether or not the call
+            # succeeded" -- that is exactly the athenaeum#1903 contract
+            # ``verify_page`` implements by setting the flag BEFORE its own
+            # try/except. A malformed ``raw_chunk`` is a pre-call failure of
+            # the same kind, so leaving the flag False would be wrong twice
+            # over: it claims the bullet was never reached, and it keeps the
+            # bullet in ``pending_verification()`` forever -- so
+            # ``ceiling_reason`` could never clear and every later resume
+            # would re-attempt a bullet that can never succeed, making no
+            # progress. The ``error`` below still routes ``final_verdict()``
+            # to ``hold``, so a malformed bullet is never written by apply.
+            v.verify_attempted = True
             v.error = f"resume: could not re-derive paste text from raw_chunk for uid {v.uid!r}"
             continue
         v.paste_text = paste_text
