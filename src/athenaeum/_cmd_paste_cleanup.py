@@ -206,6 +206,12 @@ def cmd_paste_cleanup(args: argparse.Namespace) -> int:
             payload = report.to_dict()
             payload["applied"] = args.apply
             payload["files_changed"] = changed
+            # Issue athenaeum#1924: already carried by report.to_dict() above
+            # (report.apply_skips, populated by apply_paste_cleanup_report
+            # just before this), but set explicitly here too so it reads as
+            # a deliberate part of THIS payload's apply-result fields,
+            # alongside applied/files_changed rather than only implicitly.
+            payload["apply_skips"] = report.apply_skips
             payload["from_report"] = str(args.from_report) if args.from_report else None
             payload["resume_verification"] = bool(args.resume_verification)
             sys.stdout.write(json.dumps(payload) + "\n")
@@ -217,6 +223,12 @@ def cmd_paste_cleanup(args: argparse.Namespace) -> int:
             if args.resume_verification:
                 mode = f"RESUME {mode}"
         print(f"=== athenaeum paste-cleanup ({mode}, {PASTE_CLEANUP_VERSION}) ===")
+        # Deliberately UNCHANGED order (summary, then the applied/dry-run
+        # confirmation): every existing invocation, --apply or not, keeps
+        # byte-identical output to its pre-athenaeum#1924 self unless an
+        # apply actually populated report.apply_skips. The new skip tally
+        # rides inside render_text() rather than being hand-rendered a
+        # second time here, so there is one formatter for it, not two.
         print(report.render_text())
         print(
             f"applied: {changed} file(s) written"
@@ -314,7 +326,10 @@ def add_paste_cleanup_subparser(subparsers: argparse._SubParsersAction) -> None:
         "build's PASTE_CLEANUP_VERSION. Without --apply, prints the replay "
         "summary and writes nothing. Combine with --resume-verification to "
         "finish verifying bullets a spend ceiling left pending instead of "
-        "just replaying as-is.",
+        "just replaying as-is. A report entry's operator_claim, when "
+        "present, is written verbatim by --apply in preference to the "
+        "model's own claim AND verdict (issue athenaeum#1924) -- there is "
+        "no separate flag for this; edit the report JSON directly.",
     )
     parser.add_argument(
         "--resume-verification",
