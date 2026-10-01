@@ -27,6 +27,7 @@ from athenaeum.paste_cleanup import (
     apply_paste_cleanup_report,
     build_paste_cleanup_report,
     choose_verify_rule,
+    chunk_identity_hash,
     extract_notes_bullets,
     extract_paste_span,
     measure_agreement,
@@ -798,6 +799,528 @@ class TestBuildAndApplyReport:
         assert changed == 0
 
 
+# --- operator-corrected claim override (issue athenaeum#1924) -------------
+
+
+def _page_with_bullet(
+    wiki: Path, name: str, content: str, *, date: str = "2026-01-01"
+) -> tuple[Path, str]:
+    """A one-bullet page plus the exact ``raw_chunk`` apply must re-locate --
+    the minimal fixture shape every test below builds a :class:`ProposalVerdict`
+    against (mirrors ``_page``, but also hands back ``raw_chunk`` so a test
+    never has to reconstruct the ``- date: content`` head itself)."""
+    page = _page(wiki, name, f"uid: {name}\nname: Test\n", f"## Notes\n\n- {date}: {content}\n")
+    return page, f"- {date}: {content}"
+
+
+class TestOperatorClaimOverride:
+    """Issue athenaeum#1924: an operator's hand-corrected claim, carried on
+    a report entry, must be written VERBATIM by ``--apply`` in preference
+    to the model's own claim AND verdict (AC1) -- including over a `remove`
+    verdict that would otherwise delete the bullet outright, the literal
+    defect observed twice on athenaeum#1717 (phases B1 and B2). AC2 (no
+    override fields present -> no behaviour change) is its own explicit
+    regression test below, not just an absence of failures elsewhere.
+    """
+
+    def test_override_wins_over_model_rewrite(self, wiki: Path) -> None:
+        content = "A messy paste with a fact buried in it about the subject." * 3
+        page, raw_chunk = _page_with_bullet(wiki, "person1.md", content)
+        v = ProposalVerdict(
+            uid="person1",
+            path=page,
+            date="2026-01-01",
+            raw_chunk=raw_chunk,
+            paste_text=content,
+            extraction_status="clean",
+            verdict="rewrite",
+            claim="Model's own tightened claim.",
+            operator_claim="Operator's corrected claim text.",
+        )
+        report = PasteCleanupReport(proposed=[v])
+        changed = apply_paste_cleanup_report(report, wiki)
+        assert changed == 1
+        after = (wiki / "person1.md").read_text(encoding="utf-8")
+        assert "Operator's corrected claim text." in after
+        assert "Model's own tightened claim." not in after
+
+    def test_override_wins_over_model_remove_the_headline_regression(self, wiki: Path) -> None:
+        """Without the override this `remove` verdict would delete the
+        bullet outright -- the exact silent-discard defect athenaeum#1924
+        exists to fix. With it, the bullet survives, rewritten to the
+        operator's own wording."""
+        content = "Off-topic internal retro content unrelated to the subject." * 3
+        page, raw_chunk = _page_with_bullet(wiki, "person2.md", content)
+        v = ProposalVerdict(
+            uid="person2",
+            path=page,
+            date="2026-01-01",
+            raw_chunk=raw_chunk,
+            paste_text=content,
+            extraction_status="clean",
+            verdict="remove",
+            operator_claim="Operator's corrected claim text.",
+        )
+        report = PasteCleanupReport(proposed=[v])
+        assert v.final_verdict() == "rewrite"  # not "remove"
+        changed = apply_paste_cleanup_report(report, wiki)
+        assert changed == 1
+        after = (wiki / "person2.md").read_text(encoding="utf-8")
+        assert content not in after
+        assert "- 2026-01-01: Operator's corrected claim text." in after
+
+    def test_override_wins_over_model_keep(self, wiki: Path) -> None:
+        content = "A genuinely on-topic short paste about the subject here." * 3
+        page, raw_chunk = _page_with_bullet(wiki, "person3.md", content)
+        v = ProposalVerdict(
+            uid="person3",
+            path=page,
+            date="2026-01-01",
+            raw_chunk=raw_chunk,
+            paste_text=content,
+            extraction_status="clean",
+            verdict="keep",
+            operator_claim="Operator's corrected claim text.",
+        )
+        report = PasteCleanupReport(proposed=[v])
+        assert v.final_verdict() == "rewrite"
+        changed = apply_paste_cleanup_report(report, wiki)
+        assert changed == 1
+        after = (wiki / "person3.md").read_text(encoding="utf-8")
+        assert "Operator's corrected claim text." in after
+        assert content not in after
+
+    def test_override_wins_over_verifier_override(self, wiki: Path) -> None:
+        content = "A paste that needs correction about the subject here for testing." * 2
+        page, raw_chunk = _page_with_bullet(wiki, "person4.md", content)
+        v = ProposalVerdict(
+            uid="person4",
+            path=page,
+            date="2026-01-01",
+            raw_chunk=raw_chunk,
+            paste_text=content,
+            extraction_status="clean",
+            verdict="remove",
+            verified=True,
+            verifier_verdict="rewrite",
+            verifier_agree=False,
+            verifier_claim="Verifier's own corrected claim.",
+            operator_claim="Operator's corrected claim text.",
+        )
+        report = PasteCleanupReport(proposed=[v])
+        assert v.final_claim() == "Operator's corrected claim text."
+        changed = apply_paste_cleanup_report(report, wiki)
+        assert changed == 1
+        after = (wiki / "person4.md").read_text(encoding="utf-8")
+        assert "Operator's corrected claim text." in after
+        assert "Verifier's own corrected claim." not in after
+
+    def test_override_wins_over_error_hold(self, wiki: Path) -> None:
+        """An ``error``-bearing verdict would otherwise hold for a human
+        (:meth:`ProposalVerdict.final_verdict`'s own ``error is not None``
+        branch) -- the operator override must still win over it."""
+        content = "A paste that needs correction about the subject here for testing." * 2
+        page, raw_chunk = _page_with_bullet(wiki, "person5.md", content)
+        v = ProposalVerdict(
+            uid="person5",
+            path=page,
+            date="2026-01-01",
+            raw_chunk=raw_chunk,
+            paste_text=content,
+            extraction_status="clean",
+            verdict="remove",
+            error="network down",
+            operator_claim="Operator's corrected claim text.",
+        )
+        assert v.final_verdict() == "rewrite"  # not "hold"
+        report = PasteCleanupReport(proposed=[v])
+        changed = apply_paste_cleanup_report(report, wiki)
+        assert changed == 1
+        after = (wiki / "person5.md").read_text(encoding="utf-8")
+        assert "Operator's corrected claim text." in after
+
+    def test_override_written_verbatim_no_normalisation(self, wiki: Path) -> None:
+        """Pins "no silent normalisation": leading/trailing whitespace and
+        internal double spaces in the override survive into the written
+        bullet EXACTLY, asserted against the full post-apply body."""
+        content = "A messy paste with a fact buried in it about the subject." * 3
+        page, raw_chunk = _page_with_bullet(wiki, "person6.md", content)
+        messy_claim = "  Leading and trailing  space,   double   internal space.  "
+        v = ProposalVerdict(
+            uid="person6",
+            path=page,
+            date="2026-01-01",
+            raw_chunk=raw_chunk,
+            paste_text=content,
+            extraction_status="clean",
+            verdict="rewrite",
+            claim="Model's own claim.",
+            operator_claim=messy_claim,
+        )
+        report = PasteCleanupReport(proposed=[v])
+        changed = apply_paste_cleanup_report(report, wiki)
+        assert changed == 1
+        after = (wiki / "person6.md").read_text(encoding="utf-8")
+        expected = (
+            f"---\nuid: person6.md\nname: Test\n---\n\n## Notes\n\n- 2026-01-01: {messy_claim}\n"
+        )
+        assert after == expected
+
+    def test_ac2_no_override_fields_is_byte_identical_to_pre_1924_behaviour(
+        self, wiki: Path
+    ) -> None:
+        """AC2, the hard back-compat requirement: a verdict with every new
+        field at its default (absent, in report terms) must resolve and
+        apply EXACTLY as it did before this issue -- same final_verdict,
+        same final_claim, same written body."""
+        content = "Off-topic internal retro content unrelated to the subject." * 3
+        page, raw_chunk = _page_with_bullet(wiki, "person7.md", content)
+        v = ProposalVerdict(
+            uid="person7",
+            path=page,
+            date="2026-01-01",
+            raw_chunk=raw_chunk,
+            paste_text=content,
+            extraction_status="clean",
+            verdict="remove",
+            reason="off-topic",
+            confidence="high",
+        )
+        assert v.operator_override_active() is False
+        assert v.final_verdict() == "remove"
+        assert v.final_claim() == ""
+        report = PasteCleanupReport(proposed=[v])
+        changed = apply_paste_cleanup_report(report, wiki)
+        assert changed == 1
+        after = (wiki / "person7.md").read_text(encoding="utf-8")
+        assert content not in after
+        assert after == "---\nuid: person7.md\nname: Test\n---\n\n## Notes\n"
+
+    def test_hash_mismatch_refuses_override_and_tallies_skip(self, wiki: Path) -> None:
+        content = "A genuinely on-topic short paste about the subject here." * 3
+        page, raw_chunk = _page_with_bullet(wiki, "person8.md", content)
+        real_hash = chunk_identity_hash(raw_chunk)
+        wrong_hash = ("0" if real_hash[0] != "0" else "1") + real_hash[1:]
+        assert wrong_hash != real_hash
+        v = ProposalVerdict(
+            uid="person8",
+            path=page,
+            date="2026-01-01",
+            raw_chunk=raw_chunk,
+            paste_text=content,
+            extraction_status="clean",
+            verdict="keep",
+            chunk_hash=real_hash,
+            operator_claim="Operator's claim labelled against the wrong run.",
+            operator_claim_chunk_hash=wrong_hash,
+        )
+        assert v.operator_override_active() is False
+        assert v.final_verdict() == "keep"  # falls back to the model's own verdict
+        report = PasteCleanupReport(proposed=[v])
+        changed = apply_paste_cleanup_report(report, wiki)
+        assert changed == 0
+        after = (wiki / "person8.md").read_text(encoding="utf-8")
+        assert content in after  # untouched -- the refused override wrote nothing
+        assert report.apply_skips["override_hash_mismatch"] == 1
+
+    def test_hash_match_applies_override(self, wiki: Path) -> None:
+        content = "A genuinely on-topic short paste about the subject here." * 3
+        page, raw_chunk = _page_with_bullet(wiki, "person9.md", content)
+        real_hash = chunk_identity_hash(raw_chunk)
+        v = ProposalVerdict(
+            uid="person9",
+            path=page,
+            date="2026-01-01",
+            raw_chunk=raw_chunk,
+            paste_text=content,
+            extraction_status="clean",
+            verdict="keep",
+            chunk_hash=real_hash,
+            operator_claim="Operator's claim, correctly keyed.",
+            operator_claim_chunk_hash=real_hash,
+        )
+        assert v.operator_override_active() is True
+        assert v.final_verdict() == "rewrite"
+        report = PasteCleanupReport(proposed=[v])
+        changed = apply_paste_cleanup_report(report, wiki)
+        assert changed == 1
+        after = (wiki / "person9.md").read_text(encoding="utf-8")
+        assert "Operator's claim, correctly keyed." in after
+        assert report.apply_skips.get("override_hash_mismatch", 0) == 0
+
+    def test_extraction_hold_still_refuses_override(self, wiki: Path) -> None:
+        """The fusion-boundary hold is a BOUNDARY-safety hold, not a verdict
+        preference (see :meth:`ProposalVerdict.final_verdict`'s own
+        comment) -- an operator override must not unstick it either."""
+        content = "A fusion-suspect paste that extraction could not cleanly split." * 3
+        page, raw_chunk = _page_with_bullet(wiki, "person10.md", content)
+        v = ProposalVerdict(
+            uid="person10",
+            path=page,
+            date="2026-01-01",
+            raw_chunk=raw_chunk,
+            paste_text=content,
+            extraction_status="hold",
+            verdict="hold",
+            operator_claim="An override that must still be refused.",
+        )
+        assert v.final_verdict() == "hold"
+        report = PasteCleanupReport(proposed=[v])
+        changed = apply_paste_cleanup_report(report, wiki)
+        assert changed == 0
+        after = (wiki / "person10.md").read_text(encoding="utf-8")
+        assert content in after
+        assert report.apply_skips["extraction_hold"] == 1
+
+    def test_round_trip_preserves_new_fields_and_override_active_agrees(
+        self, tmp_path: Path
+    ) -> None:
+        v = ProposalVerdict(
+            uid="p1",
+            path=tmp_path / "p1.md",
+            date="2026-01-01",
+            raw_chunk="- 2026-01-01: Some content here.",
+            paste_text="Some content here.",
+            extraction_status="clean",
+            verdict="keep",
+            chunk_hash=chunk_identity_hash("- 2026-01-01: Some content here."),
+            operator_claim="Operator's claim.",
+            operator_claim_chunk_hash=chunk_identity_hash("- 2026-01-01: Some content here."),
+            operator_reason="Model missed a correction the operator caught.",
+        )
+        before_active = v.operator_override_active()
+        restored = ProposalVerdict.from_dict(json.loads(json.dumps(v.to_dict())))
+        assert restored.chunk_hash == v.chunk_hash
+        assert restored.operator_claim == v.operator_claim
+        assert restored.operator_claim_chunk_hash == v.operator_claim_chunk_hash
+        assert restored.operator_reason == v.operator_reason
+        assert restored.operator_override_active() == before_active is True
+
+    def test_chunk_hash_and_ordinal_populated_by_a_real_build_pass(self, wiki: Path) -> None:
+        c1 = "First bullet content long enough to pass threshold here for sure." * 2
+        c2 = "Second bullet content long enough to pass threshold here for sure." * 2
+        c3 = "Third bullet content long enough to pass threshold here for sure." * 2
+        _page(
+            wiki,
+            "person11.md",
+            "uid: person11\nname: Person Eleven\n",
+            "## Notes\n\n"
+            f"- 2026-01-01: {c1}\n\n"
+            f"- 2026-01-02: {c2}\n\n"
+            f"- 2026-01-03: {c3}\n",
+        )
+        client = FakeLLMClient(
+            response=make_llm_response(
+                json.dumps(
+                    {"verdict": "keep", "claim": "", "reason": "fine", "confidence": "high"}
+                ),
+                usage=make_llm_usage(input_tokens=10, output_tokens=2),
+            )
+        )
+        report = build_paste_cleanup_report(
+            wiki,
+            client=client,
+            verify_client=client,
+            model="claude-haiku-4-5-20251001",
+            verify_model="claude-sonnet-5",
+            verify_rule="sampled",
+            length_threshold=10,
+        )
+        assert len(report.proposed) == 3
+        for v in report.proposed:
+            assert v.chunk_hash == chunk_identity_hash(v.raw_chunk)
+        assert sorted(v.ordinal for v in report.proposed) == [0, 1, 2]
+
+    def test_skip_tally_exact_mix_and_reset_not_accumulated(self, wiki: Path) -> None:
+        content_keep = "A genuinely on-topic short paste about the subject here." * 3
+        content_rewrite = "A messy paste with a fact buried in it about the subject." * 3
+        content_cnf = "Off-topic internal retro content unrelated to the subject." * 3
+
+        page_keep, raw_keep = _page_with_bullet(wiki, "keep.md", content_keep)
+        page_rewrite, raw_rewrite = _page_with_bullet(wiki, "rewrite.md", content_rewrite)
+        page_cnf, raw_cnf = _page_with_bullet(wiki, "cnf.md", content_cnf)
+        # Simulate a concurrent writer changing this page between scan and
+        # apply -- raw_cnf will no longer be found in the live body.
+        page_cnf.write_text(
+            "---\nuid: cnf.md\nname: Test\n---\n## Notes\n\n- 2026-01-01: Something else.\n",
+            encoding="utf-8",
+        )
+
+        v_missing = ProposalVerdict(
+            uid="ghost",
+            path=wiki / "ghost.md",  # never written -- unreadable at apply time
+            date="2026-01-01",
+            raw_chunk="- 2026-01-01: ghost content",
+            paste_text="ghost content",
+            extraction_status="clean",
+            verdict="remove",
+        )
+        v_cnf = ProposalVerdict(
+            uid="cnf",
+            path=page_cnf,
+            date="2026-01-01",
+            raw_chunk=raw_cnf,
+            paste_text=content_cnf,
+            extraction_status="clean",
+            verdict="remove",
+        )
+        v_keep = ProposalVerdict(
+            uid="keep",
+            path=page_keep,
+            date="2026-01-01",
+            raw_chunk=raw_keep,
+            paste_text=content_keep,
+            extraction_status="clean",
+            verdict="keep",
+        )
+        v_rewrite = ProposalVerdict(
+            uid="rewrite",
+            path=page_rewrite,
+            date="2026-01-01",
+            raw_chunk=raw_rewrite,
+            paste_text=content_rewrite,
+            extraction_status="clean",
+            verdict="rewrite",
+            claim="Tightened claim.",
+        )
+        report = PasteCleanupReport(proposed=[v_missing, v_cnf, v_keep, v_rewrite])
+
+        changed = apply_paste_cleanup_report(report, wiki)
+        assert changed == 1
+        assert report.apply_skips == {
+            "missing_page": 1,
+            "chunk_not_found": 1,
+            "not_writable_verdict": 1,
+        }
+
+        # Reset-not-accumulated: poke a sentinel reason onto the report as
+        # if it were a leftover from some earlier call, then apply again --
+        # a fresh call must start from {} every time, never carry a prior
+        # call's tally forward.
+        report.apply_skips["sentinel_from_a_different_call"] = 1
+        apply_paste_cleanup_report(report, wiki)
+        assert "sentinel_from_a_different_call" not in report.apply_skips
+
+    def test_three_bullet_page_with_duplicate_chunk_pins_actual_replace_behaviour(
+        self, wiki: Path
+    ) -> None:
+        """Retro #3: every pre-athenaeum#1924 apply test built a page with ONE
+        bullet; the 2026-10-01 apply hit a 3-bullet page with a duplicate
+        chunk and one rewrite silently skipped. This pins (does NOT fix --
+        that is a separate issue) ``apply_paste_cleanup_report``'s actual
+        ``body.replace(..., 1)`` behaviour on a page with two
+        BYTE-IDENTICAL bullets (same date, same content) and a distinct
+        middle bullet, under mixed verdicts remove/rewrite/keep.
+
+        The real (verified, not guessed) behaviour is surprising and, by
+        this author's reading, WRONG: the first bullet's ``remove`` is
+        implemented as two sequential ``body.replace(needle, "", 1)``
+        calls -- one targeting ``"\\n\\n" + raw_chunk`` (removes bullet 1
+        whole, including its own leading blank line), one targeting the
+        bare ``raw_chunk`` text as a safety net for a bullet with no
+        leading ``"\\n\\n"``. Because bullet 3's raw_chunk is a byte-for-byte
+        duplicate of bullet 1's, that SECOND plain-text replace -- having
+        already found and consumed bullet 1's own occurrence via the first
+        call -- matches and deletes bullet 3's occurrence of the text
+        instead (the only one left), as collateral damage of bullet 1's
+        removal. Bullet 3's own verdict is ``keep`` -- it should never have
+        been touched at all. It is left with no detectable chunk afterward,
+        so the loop reports it as ``chunk_not_found`` (a page-changed-since-
+        scan symptom) rather than anything describing what actually
+        happened to it (silently deleted by a sibling bullet's apply).
+        """
+        dup_content = (
+            "Duplicate paste content shared across two bullets for testing fidelity here."
+        )
+        mid_content = "A distinct middle bullet with its own unique content here for testing."
+        page = _page(
+            wiki,
+            "person12.md",
+            "uid: person12\nname: Person Twelve\n",
+            "## Notes\n\n"
+            f"- 2026-01-01: {dup_content}\n\n"
+            f"- 2026-01-02: {mid_content}\n\n"
+            f"- 2026-01-01: {dup_content}\n",
+        )
+        raw_dup = f"- 2026-01-01: {dup_content}"
+        raw_mid = f"- 2026-01-02: {mid_content}"
+
+        v_remove = ProposalVerdict(
+            uid="person12",
+            path=page,
+            date="2026-01-01",
+            raw_chunk=raw_dup,
+            paste_text=dup_content,
+            extraction_status="clean",
+            verdict="remove",
+        )
+        v_rewrite = ProposalVerdict(
+            uid="person12",
+            path=page,
+            date="2026-01-02",
+            raw_chunk=raw_mid,
+            paste_text=mid_content,
+            extraction_status="clean",
+            verdict="rewrite",
+            claim="Tightened middle claim.",
+        )
+        v_keep = ProposalVerdict(
+            uid="person12",
+            path=page,
+            date="2026-01-01",
+            raw_chunk=raw_dup,
+            paste_text=dup_content,
+            extraction_status="clean",
+            verdict="keep",
+        )
+        report = PasteCleanupReport(proposed=[v_remove, v_rewrite, v_keep])
+
+        changed = apply_paste_cleanup_report(report, wiki)
+
+        assert changed == 1
+        # The "keep" bullet's own text is gone -- NOT preserved, despite its
+        # verdict -- pinning the collateral-damage behaviour described above.
+        after = page.read_text(encoding="utf-8")
+        expected = (
+            "---\nuid: person12\nname: Person Twelve\n---\n\n"
+            "## Notes\n\n- 2026-01-02: Tightened middle claim.\n\n\n"
+        )
+        assert after == expected
+        assert dup_content not in after
+        # Tallied under the ordinary "nothing to write" bucket, because a
+        # `keep` verdict never reaches the chunk-presence check at all --
+        # so NOTHING in the tally names, or could name, the true cause
+        # (deleted by a sibling bullet's own remove). That blind spot is
+        # the point of the xfail test below.
+        assert report.apply_skips == {"not_writable_verdict": 1}
+
+    def test_render_text_includes_skip_tally_when_present_and_omits_when_empty(
+        self, wiki: Path
+    ) -> None:
+        content = "Off-topic internal retro content unrelated to the subject." * 3
+        page, raw_chunk = _page_with_bullet(wiki, "person13.md", content)
+
+        # Empty case: a dry-run-shaped report with no apply ever run.
+        empty_report = PasteCleanupReport(scanned=1, bullets_found=1)
+        assert "apply skips:" not in empty_report.render_text()
+
+        # Non-empty case: a real apply with one skip.
+        v_ghost = ProposalVerdict(
+            uid="ghost",
+            path=wiki / "does-not-exist.md",
+            date="2026-01-01",
+            raw_chunk="- 2026-01-01: ghost",
+            paste_text="ghost",
+            extraction_status="clean",
+            verdict="remove",
+        )
+        report = PasteCleanupReport(proposed=[v_ghost])
+        apply_paste_cleanup_report(report, wiki)
+        text = report.render_text()
+        assert "apply skips:" in text
+        assert "  missing_page: 1" in text
+
+
 # --- spend wiring (issue athenaeum#1717 AC4) -------------------------------
 
 
@@ -1408,3 +1931,75 @@ class TestVerifierResume:
         assert report.ceiling_reason is None
         resume_verification(report, tmp_path, verify_client=client, config=None)
         assert len(client.calls) == 0
+
+class TestDuplicateChunkCollateralDeletion:
+    """The defect the retro #3 fixture above UNCOVERED, recorded as a defect
+    rather than only pinned (see
+    ``TestOperatorClaimOverride.test_three_bullet_page_with_duplicate_chunk_pins_actual_replace_behaviour``
+    for the pinning test, which asserts today's exact bytes).
+
+    ``apply_paste_cleanup_report``'s ``remove`` branch runs BOTH of its
+    replaces unconditionally::
+
+        body = body.replace(f"\\n\\n{v.raw_chunk}", "", 1)
+        body = body.replace(v.raw_chunk, "", 1)
+
+    The second is meant as a fallback for a bullet with no leading blank
+    line, but it fires even when the first already succeeded -- so on a page
+    with two byte-identical bullets it deletes the OTHER one too, whatever
+    that bullet's own verdict says. Verified reproducible on the pre-athenaeum#1923
+    base commit, so this is long-standing and not introduced by athenaeum#1923/athenaeum#1924.
+
+    Marked ``xfail(strict=True)`` deliberately: it asserts the CORRECT
+    invariant, so it reports as XFAIL while the defect stands and turns into
+    a hard FAILURE the moment someone fixes it -- which is the signal to
+    delete the mark and keep the assertion. Pinning the broken bytes alone
+    would have quietly blessed data loss as intended behaviour.
+    """
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="athenaeum#1924 finding: a remove verdict's unconditional second "
+        "body.replace() deletes a byte-identical sibling bullet regardless of "
+        "that sibling's own verdict. Filed separately; fix flips this to pass.",
+    )
+    def test_a_keep_bullet_survives_an_identical_siblings_remove(self, wiki: Path) -> None:
+        dup = "Duplicate paste content shared across two bullets for testing fidelity here."
+        other = "A distinct middle bullet with its own unique content here for testing."
+        page = _page(
+            wiki,
+            "person_dup.md",
+            "uid: person_dup\nname: Person Dup\n",
+            "## Notes\n\n"
+            f"- 2026-01-01: {dup}\n\n"
+            f"- 2026-01-02: {other}\n\n"
+            f"- 2026-01-01: {dup}\n",
+        )
+
+        def _v(date: str, content: str, verdict: str) -> ProposalVerdict:
+            return ProposalVerdict(
+                uid="person_dup",
+                path=page,
+                date=date,
+                raw_chunk=f"- {date}: {content}",
+                paste_text=content,
+                extraction_status="clean",
+                verdict=verdict,
+            )
+
+        report = PasteCleanupReport(
+            proposed=[
+                _v("2026-01-01", dup, "remove"),
+                _v("2026-01-02", other, "keep"),
+                _v("2026-01-01", dup, "keep"),
+            ]
+        )
+        apply_paste_cleanup_report(report, wiki)
+        after = page.read_text(encoding="utf-8")
+
+        # Exactly ONE of the two identical bullets was marked `remove`, so
+        # exactly ONE must be gone and one must remain.
+        assert after.count(f"- 2026-01-01: {dup}") == 1, (
+            "a `keep` bullet was deleted as collateral damage of a byte-identical "
+            "sibling's `remove`"
+        )

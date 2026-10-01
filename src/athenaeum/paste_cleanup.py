@@ -22,6 +22,15 @@ Mirrors ``audit.py``'s dry-run/apply split and page-identity discipline:
 :func:`build_paste_cleanup_report` never writes; :func:`apply_paste_cleanup_report`
 re-reads each page at write time and re-locates the exact bullet chunk
 before touching it, never trusting the scan.
+
+Issue athenaeum#1924 adds a channel for an OPERATOR's hand-corrected claim
+(:attr:`ProposalVerdict.operator_claim`), carried inside a replayed
+report's JSON and written verbatim in preference to the model's own
+claim/verdict -- see :meth:`ProposalVerdict.final_verdict`/:meth:`final_claim`.
+Without it, the model's own text was the only thing ``--apply`` could ever
+write: an operator correction had nowhere to go, and on a ``remove``
+verdict the bullet it corrected was deleted outright (observed twice on
+athenaeum#1717, phases B1 and B2, each needing a manual follow-up commit).
 """
 
 from __future__ import annotations
@@ -58,6 +67,16 @@ log = logging.getLogger(__name__)
 #: report therefore stays replayable, and resuming an EXISTING v2 report
 #: (not just one produced by a post-fix build) is the whole point of the
 #: issue.
+#:
+#: NOT bumped a third time for issue athenaeum#1924 (operator-corrected
+#: claim): every field it adds -- ``chunk_hash``/``ordinal`` on
+#: :class:`ProposalVerdict`, ``operator_claim``/``operator_claim_chunk_hash``/
+#: ``operator_reason``, and ``apply_skips`` write-only on
+#: :class:`PasteCleanupReport` -- is read with a default in ``from_dict``,
+#: and the ``raw_chunk`` guard this version exists for is, again, untouched.
+#: Applying an operator's hand-corrected claim onto an EXISTING v2 report
+#: (not just one produced by a post-fix build) is the whole point of the
+#: issue -- bumping the version would make every such report unreplayable.
 PASTE_CLEANUP_VERSION = "paste-cleanup-v2"
 
 #: Bullet shape emitted by pre-athenaeum#1684 intake (see ``athenaeum.intake`` history
@@ -273,6 +292,25 @@ def parse_verify_response(text: str) -> dict[str, Any]:
     }
 
 
+def chunk_identity_hash(raw_chunk: str) -> str:
+    """Short, stable identity for one bullet's exact text (issue
+    athenaeum#1924 retro #1).
+
+    The operator's eval sheet used to key rows by paste length, which
+    collided on 6 of 32 rows on a busy page (two bullets the same length,
+    or close enough that a manual lookup picked the wrong one). Hashing the
+    FULL ``raw_chunk`` -- head (``- YYYY-MM-DD: ``) included, same string
+    :func:`apply_paste_cleanup_report` matches verbatim -- gives a stable
+    key an eval sheet can carry in one column. It does not by itself
+    disambiguate two byte-identical bullets on the same page (see
+    :attr:`ProposalVerdict.ordinal` for that); it only has to be cheap and
+    stable, not globally unique. First 12 hex chars of sha256: short enough
+    for a spreadsheet column, long enough that an accidental collision
+    across one page's handful of bullets is not a live risk.
+    """
+    return hashlib.sha256(raw_chunk.encode("utf-8")).hexdigest()[:12]
+
+
 @dataclass
 class ProposalVerdict:
     """One proposer-pass result for one extracted paste."""
@@ -304,8 +342,82 @@ class ProposalVerdict:
     #: ``keep`` proposal is unaffected) from "verifier was attempted and
     #: errored" (``verify_attempted is True`` and :attr:`error` is set).
     verify_attempted: bool = False
+    #: :func:`chunk_identity_hash` of :attr:`raw_chunk` -- set by
+    #: :func:`propose_page` for every verdict it constructs (issue
+    #: athenaeum#1924), so every producer gets it with no second call site
+    #: to keep in sync. ``""`` on any verdict built by hand (most test
+    #: fixtures) or round-tripped from a pre-athenaeum#1924 report.
+    chunk_hash: str = ""
+    #: This bullet's 0-based position within its OWN PAGE among the
+    #: candidate bullets the pass considered (i.e. post length-threshold
+    #: filter) -- set by :func:`build_paste_cleanup_report` (issue
+    #: athenaeum#1924 retro #1), since only the caller walking a page's
+    #: bullets in order knows this; :func:`propose_page` does not. ``-1``
+    #: means "not recorded" -- every report produced before this issue, and
+    #: any verdict built directly for a test.
+    ordinal: int = -1
+    #: The operator's hand-corrected claim text (issue athenaeum#1924).
+    #: Arrives inside a replayed report's JSON (there is no CLI flag for
+    #: it -- the issue's own "Proposed fix" is a report field an operator
+    #: eval sheet writes into before ``--from-report --apply``). Written
+    #: VERBATIM by :meth:`final_claim` in preference to the model's own
+    #: claim -- see :meth:`operator_override_active`.
+    operator_claim: str = ""
+    #: OPTIONAL integrity key: when non-empty, must equal this verdict's
+    #: own :attr:`chunk_hash` or the override in :attr:`operator_claim` is
+    #: REFUSED rather than applied (issue athenaeum#1924 retro #2) -- the
+    #: 2026-09-25 eval sheet's rows no longer matched 13 of 26 checkable
+    #: bullets against the 2026-09-30/10-01 runs it was meant to correct,
+    #: and a mismatched key is exactly that stale-labelling case caught
+    #: instead of silently writing a correction onto the wrong bullet. Left
+    #: empty, the override is trusted unconditionally (back-compatible with
+    #: an eval sheet authored before this field existed).
+    operator_claim_chunk_hash: str = ""
+    #: Free-text note on why the operator overrode the model (issue
+    #: athenaeum#1924). Serialized for the audit trail; never consulted by
+    #: any logic here.
+    operator_reason: str = ""
+
+    def operator_override_active(self) -> bool:
+        """True when :attr:`operator_claim` should win over the model's own
+        claim/verdict (issue athenaeum#1924 ACs 1/2): the claim text is
+        non-empty AND either no integrity key was supplied
+        (:attr:`operator_claim_chunk_hash` empty -- trusted, back-compat)
+        or the key matches this verdict's own :attr:`chunk_hash` exactly.
+        A non-empty key that does NOT match means the override was authored
+        against a different run's bullet -- refused, not applied; see the
+        field's own docstring above for the 13-of-26 stale-match history
+        this guards against.
+        """
+        if not self.operator_claim:
+            return False
+        if not self.operator_claim_chunk_hash:
+            return True
+        return self.operator_claim_chunk_hash == self.chunk_hash
 
     def final_verdict(self) -> str:
+        # Issue athenaeum#1924: a fusion-boundary hold (extraction_status ==
+        # "hold") is not a model OPINION the operator can override -- it
+        # means extraction never found a clean paste/legitimate-content
+        # boundary, so the module does not even know what text an override
+        # would replace. The class docstring's own words ("never split,
+        # never removed, never rewritten ... only a human clears it")
+        # describe that boundary safety hold, not a verdict preference, so
+        # this check sits AHEAD of the operator-override check below and
+        # wins over it unconditionally.
+        if self.extraction_status == "hold":
+            return "hold"
+        # An operator who supplied corrected text has made the decision.
+        # This must sit ahead of EVERY remaining branch -- the verifier's
+        # own override AND the error->hold safety branch included -- or a
+        # hand-corrected claim could be silently discarded underneath a
+        # model `remove`/`keep`/`error`. That silent discard (observed
+        # twice on athenaeum#1717, phases B1 and B2, each needing a manual
+        # follow-up commit) is the literal defect this issue fixes: the
+        # only channel for a correction used to be final_claim(), which
+        # never even ran when the final verdict was `remove`.
+        if self.operator_override_active():
+            return "rewrite"
         if self.verified and self.verifier_verdict is not None:
             return self.verifier_verdict
         if self.error is not None:
@@ -318,9 +430,21 @@ class ProposalVerdict:
         return self.verdict
 
     def final_claim(self) -> str:
-        """The claim text to write on ``rewrite``: the verifier's own claim
-        when it overrode the proposer (``verified and not verifier_agree``),
-        else the proposer's claim."""
+        """The claim text to write on ``rewrite``.
+
+        Precedence (issue athenaeum#1924 AC1): the operator's own
+        correction, written VERBATIM -- no ``.strip()``, no normalisation,
+        no reflow, since AC1 says "verbatim" and even a strip is a silent
+        edit -- when :meth:`operator_override_active` is True; else the
+        verifier's own claim when it overrode the proposer (``verified and
+        not verifier_agree``); else the proposer's claim. The
+        ``extraction_status != "hold"`` guard mirrors :meth:`final_verdict`
+        (which already refuses ``rewrite`` on a hold) so this method stays
+        self-consistent for any caller that reads it without first checking
+        ``final_verdict()``.
+        """
+        if self.extraction_status != "hold" and self.operator_override_active():
+            return self.operator_claim
         if self.verified and self.verifier_agree is False and self.verifier_claim:
             return self.verifier_claim
         return self.claim
@@ -343,6 +467,11 @@ class ProposalVerdict:
             "verifier_claim": self.verifier_claim,
             "verifier_reason": self.verifier_reason,
             "verify_attempted": self.verify_attempted,
+            "chunk_hash": self.chunk_hash,
+            "ordinal": self.ordinal,
+            "operator_claim": self.operator_claim,
+            "operator_claim_chunk_hash": self.operator_claim_chunk_hash,
+            "operator_reason": self.operator_reason,
             "final_verdict": self.final_verdict(),
             "error": self.error,
         }
@@ -362,6 +491,13 @@ class ProposalVerdict:
         in :meth:`PasteCleanupReport.from_dict` is the primary guard against
         feeding this a pre-athenaeum#1903 report that lacks the key; this
         ``KeyError`` is the defense-in-depth backstop.
+
+        ``chunk_hash``/``ordinal``/``operator_claim``/
+        ``operator_claim_chunk_hash``/``operator_reason`` (issue
+        athenaeum#1924) are all read with defaults -- a report predating
+        this issue lacks every one of them, and AC2 requires that report to
+        replay with byte-identical behaviour, which a missing-key
+        ``KeyError`` here would break.
         """
         return cls(
             uid=d["uid"],
@@ -382,6 +518,11 @@ class ProposalVerdict:
             verifier_claim=d.get("verifier_claim", ""),
             error=d.get("error"),
             verify_attempted=d.get("verify_attempted", False),
+            chunk_hash=d.get("chunk_hash", ""),
+            ordinal=d.get("ordinal", -1),
+            operator_claim=d.get("operator_claim", ""),
+            operator_claim_chunk_hash=d.get("operator_claim_chunk_hash", ""),
+            operator_reason=d.get("operator_reason", ""),
         )
 
 
@@ -397,6 +538,7 @@ def propose_page(
     model: str,
     max_tokens: int = 1024,
     usage: TokenUsage | None = None,
+    ordinal: int = -1,
 ) -> ProposalVerdict:
     """Extract + classify ONE bullet. Never raises -- a per-page failure
     becomes an ``"error"`` verdict, matching ``audit_page``'s isolation
@@ -410,6 +552,13 @@ def propose_page(
     caller uses the same accumulator across every proposer/verifier call in
     the run for both ``spend.ceiling_tripped`` and the single end-of-run
     ``spend.record_spend``.
+
+    *ordinal* (issue athenaeum#1924): the caller's 0-based position of this
+    bullet within its page, or ``-1`` (the default) when the caller does
+    not track it. This is the ONE construction site for :class:`ProposalVerdict`
+    shared by every producer, so :attr:`ProposalVerdict.chunk_hash` is
+    always derived from *raw_chunk* here -- no second call site to keep in
+    sync.
     """
     paste_text, _remainder, status = extract_paste_span(content)
     verdict = ProposalVerdict(
@@ -421,6 +570,8 @@ def propose_page(
         extraction_status=status,
         verdict="hold" if status == "hold" else "error",
         model=model,
+        chunk_hash=chunk_identity_hash(raw_chunk),
+        ordinal=ordinal,
     )
     if status == "hold":
         verdict.reason = "extraction boundary ambiguous: fusion suspected, not attempted"
@@ -692,6 +843,40 @@ class PasteCleanupReport:
     #: pages. ``False`` for every run that completed its proposer loop
     #: (including every ``--mechanical-dry-run``, which never trips).
     proposer_truncated: bool = False
+    #: Per-reason tally of bullets THIS call to :func:`apply_paste_cleanup_report`
+    #: declined to write (issue athenaeum#1924 retro #4). Reset to ``{}`` at
+    #: the start of every :func:`apply_paste_cleanup_report` call -- it
+    #: describes that one apply, never a cumulative total across calls.
+    #: Reason keys, exactly these strings:
+    #:
+    #: - ``missing_page``: the verdict's own page could not be read at
+    #:   apply time. Incremented once per VERDICT on that page (not once
+    #:   per page), so this tally sums to the number of verdicts
+    #:   considered on it.
+    #: - ``chunk_not_found``: the page read fine, but ``raw_chunk`` no
+    #:   longer appears verbatim in its body -- a concurrent writer changed
+    #:   the page between scan and apply.
+    #: - ``extraction_hold``: a fusion-boundary hold
+    #:   (``extraction_status == "hold"``) carrying an operator override.
+    #:   The override is refused -- not because its hash mismatched, but
+    #:   because a hold bullet is never rewritten by anyone, operator
+    #:   included (see :meth:`ProposalVerdict.final_verdict`).
+    #: - ``override_hash_mismatch``: ``operator_claim_chunk_hash`` was
+    #:   supplied and did not match the verdict's own ``chunk_hash`` -- the
+    #:   override is refused and ``final_verdict()`` falls back to the
+    #:   model's own verdict (which may itself still be writable or not).
+    #:   This one is a DIAGNOSTIC count, not a member of the partition
+    #:   below it: a refused override is worth recording whatever the
+    #:   fallback verdict then does, so the same bullet can also appear
+    #:   under ``not_writable_verdict`` or ``chunk_not_found``. The other
+    #:   four keys are mutually exclusive per bullet.
+    #: - ``not_writable_verdict``: the ordinary case -- ``final_verdict()``
+    #:   resolved to ``keep``/``hold``/``error`` with no operator override
+    #:   in play. This is the DOMINANT reason in practice; its count is the
+    #:   "nothing to do" denominator the 2026-10-01 apply had no way to
+    #:   distinguish from 108 stale candidate uids and 13 concurrently
+    #:   dirtied pages.
+    apply_skips: dict[str, int] = field(default_factory=dict)
 
     def by_final_verdict(self) -> dict[str, int]:
         counts: dict[str, int] = {}
@@ -736,6 +921,11 @@ class PasteCleanupReport:
             # from_dict (issue athenaeum#1923): it would just be stale the
             # moment a resume mutates verify_attempted flags in place.
             "verify_pending": len(self.pending_verification()),
+            # Issue athenaeum#1924: also NOT read back in from_dict -- this
+            # describes an APPLY, not a dry run. A replayed report's tally
+            # is whatever its OWN apply call produces, not whatever the
+            # report that produced this JSON happened to carry.
+            "apply_skips": self.apply_skips,
         }
 
     @classmethod
@@ -779,6 +969,10 @@ class PasteCleanupReport:
                 f"verification pending: {len(pending)} bullet(s) -- resume with "
                 "--from-report --resume-verification"
             )
+        if self.apply_skips:
+            lines.append("apply skips:")
+            for reason, count in sorted(self.apply_skips.items()):
+                lines.append(f"  {reason}: {count}")
         return "\n".join(lines)
 
 
@@ -829,11 +1023,18 @@ def build_paste_cleanup_report(
         report.scanned += 1
         meta, body = split_frontmatter(text)
         uid = meta.get("uid") or path.stem
+        # Issue athenaeum#1924: 0-based position among THIS page's own
+        # candidate bullets (post length_threshold filter) -- only this
+        # loop knows that ordering; propose_page does not.
+        page_ordinal = 0
         for date, content, raw_chunk in extract_notes_bullets(body):
             if len(content) <= length_threshold:
                 continue
             report.bullets_found += 1
-            candidates.append((path, meta, date, content, raw_chunk, uid))  # type: ignore[arg-type]
+            candidates.append(
+                (path, meta, date, content, raw_chunk, uid, page_ordinal)  # type: ignore[arg-type]
+            )
+            page_ordinal += 1
 
     # Issue athenaeum#1717 (AC4): resolved once, only when there is a client to
     # spend against -- `resolved_provider` stays a plain `str` (never
@@ -848,7 +1049,7 @@ def build_paste_cleanup_report(
         resolved_provider = resolve_provider(config, knob="classify")
 
     proposals: list[ProposalVerdict] = []
-    for path, meta, date, content, raw_chunk, uid in candidates:  # type: ignore[misc]
+    for path, meta, date, content, raw_chunk, uid, ordinal in candidates:  # type: ignore[misc]
         if client is not None:
             _ceiling = spend.ceiling_tripped(run_usage, provider=resolved_provider, config=config)
             if _ceiling is not None:
@@ -876,6 +1077,7 @@ def build_paste_cleanup_report(
             content=content,
             model=model,
             usage=run_usage if client is not None else None,
+            ordinal=ordinal,
         )
         proposals.append(verdict)
 
@@ -1090,13 +1292,35 @@ def resume_verification(
 
 def apply_paste_cleanup_report(report: PasteCleanupReport, wiki_root: Path) -> int:
     """Write every ``remove``/``rewrite`` final verdict in *report*. Returns
-    files-changed count.
+    files-changed count (the return type stays ``int`` -- existing callers
+    must not break; the full skip breakdown rides on ``report.apply_skips``
+    instead, see below).
 
     Re-reads each page and re-locates the exact ``raw_chunk`` before writing
     -- never trusts the scan (same discipline as ``apply_audit_report``).
-    ``keep``/``hold``/``error`` verdicts are never written.
+    ``keep``/``hold``/``error`` verdicts are never written, and an
+    operator-corrected claim (issue athenaeum#1924, see
+    :meth:`ProposalVerdict.final_claim`) is written VERBATIM in preference
+    to the model's own claim/verdict when :meth:`ProposalVerdict.final_verdict`
+    says so.
+
+    ``report.apply_skips`` (issue athenaeum#1924 retro #4) is RESET to
+    ``{}`` here at entry -- it is the result of THIS call, not a cumulative
+    total across repeated applies -- then populated with a per-reason tally
+    of every bullet this call declined to write (see the field's own
+    docstring on :class:`PasteCleanupReport` for the exact reason keys).
+    Before this, a missing page, a stale chunk, and the ordinary "nothing
+    to do" case were all the same silent ``continue`` -- during the
+    2026-10-01 apply, 108 stale candidate uids and 13 pages a concurrent
+    adapter writer had dirtied were indistinguishable from each other or
+    from "nothing needed changing".
     """
     from athenaeum.atomic_io import atomic_write_text
+
+    report.apply_skips = {}
+
+    def _skip(reason: str) -> None:
+        report.apply_skips[reason] = report.apply_skips.get(reason, 0) + 1
 
     changed_paths: set[Path] = set()
     by_path: dict[Path, list[ProposalVerdict]] = {}
@@ -1106,15 +1330,50 @@ def apply_paste_cleanup_report(report: PasteCleanupReport, wiki_root: Path) -> i
     for path, verdicts in by_path.items():
         text = _read(path)
         if text is None:
+            # Issue athenaeum#1924: tally once per VERDICT on this
+            # unreadable page, not once per page, so apply_skips sums to
+            # the number of verdicts considered.
+            for _v in verdicts:
+                _skip("missing_page")
             continue
         meta, body = split_frontmatter(text)
         original_body = body
         for v in verdicts:
+            if v.extraction_status == "hold" and v.operator_override_active():
+                # Issue athenaeum#1924: v.final_verdict() already refuses
+                # "rewrite" here (fusion-boundary holds win over an
+                # operator override -- see its own comment), but this is
+                # the PRECISE reason, distinct from the generic
+                # not_writable_verdict bucket below.
+                _skip("extraction_hold")
+                continue
+            if (
+                v.operator_claim
+                and v.operator_claim_chunk_hash
+                and v.operator_claim_chunk_hash != v.chunk_hash
+            ):
+                # Issue athenaeum#1924 retro #2: the override's integrity
+                # key did not match -- it is refused (operator_override_active()
+                # is already False in this case), and final_verdict() below
+                # falls back to the model's own verdict. Tally the refusal
+                # regardless of what that fallback verdict turns out to be.
+                _skip("override_hash_mismatch")
             final = v.final_verdict()
+            # Order matters for the TALLY, not for what gets written (both
+            # conditions must pass either way). Writability is checked
+            # FIRST so `chunk_not_found` counts only bullets this apply
+            # actually wanted to write and could not -- which is the signal
+            # retro #4 asked for. Checking chunk presence first would file
+            # every `keep` bullet on a concurrently-dirtied page under
+            # `chunk_not_found`, and since `keep` is the dominant verdict
+            # that would bury the 108-stale-uid signal in exactly the
+            # "nothing to do" noise the tally exists to separate it from.
             if final not in ("remove", "rewrite"):
+                _skip("not_writable_verdict")
                 continue
             if v.raw_chunk not in body:
                 # Page changed since the scan; skip rather than guess.
+                _skip("chunk_not_found")
                 continue
             if final == "remove":
                 body = body.replace(f"\n\n{v.raw_chunk}", "", 1)
@@ -1126,7 +1385,19 @@ def apply_paste_cleanup_report(report: PasteCleanupReport, wiki_root: Path) -> i
             atomic_write_text(path, render_frontmatter(meta) + "\n" + body)
             changed_paths.add(path)
 
-    return len(changed_paths)
+    changed = len(changed_paths)
+    if report.apply_skips:
+        skip_summary = ", ".join(
+            f"{reason}={count}" for reason, count in sorted(report.apply_skips.items()) if count
+        )
+    else:
+        skip_summary = "none"
+    log.info(
+        "paste-cleanup apply: %d file(s) changed; skips: %s",
+        changed,
+        skip_summary,
+    )
+    return changed
 
 
 __all__ = [
@@ -1137,6 +1408,7 @@ __all__ = [
     "apply_paste_cleanup_report",
     "build_paste_cleanup_report",
     "choose_verify_rule",
+    "chunk_identity_hash",
     "discover_wiki_pages",
     "extract_notes_bullets",
     "extract_paste_span",

@@ -327,3 +327,137 @@ class TestResumeVerificationCli:
         assert rc == 1
         _out, err = capsys.readouterr()
         assert "verify" in err
+
+
+# --- operator-corrected claim override + apply-skip tally (issue athenaeum#1924) --
+
+
+def _build_mixed_apply_skip_report_file(knowledge_root: Path, tmp_path: Path) -> Path:
+    """A v2-shaped report with two proposed verdicts -- one on a page that
+    genuinely exists but resolves to a non-writable ``keep``, one whose
+    page was never written at all -- so ``--apply`` has something to tally
+    into both ``not_writable_verdict`` and ``missing_page`` (issue
+    athenaeum#1924)."""
+    wiki = knowledge_root / "wiki"
+    content = "A genuinely on-topic short paste about the subject here." * 3
+    page = _page(
+        wiki,
+        "person1.md",
+        "uid: person1\nname: Person One\n",
+        f"## Notes\n\n- 2026-01-01: {content}\n",
+    )
+    report = PasteCleanupReport(
+        proposed=[
+            ProposalVerdict(
+                uid="person1",
+                path=page,
+                date="2026-01-01",
+                raw_chunk=f"- 2026-01-01: {content}",
+                paste_text=content,
+                extraction_status="clean",
+                verdict="keep",
+            ),
+            ProposalVerdict(
+                uid="ghost",
+                path=wiki / "ghost.md",  # never written -- unreadable at apply time
+                date="2026-01-01",
+                raw_chunk="- 2026-01-01: ghost content",
+                paste_text="ghost content",
+                extraction_status="clean",
+                verdict="remove",
+            ),
+        ],
+        verify_rule="all",
+        model="claude-haiku-4-5-20251001",
+        verify_model="claude-sonnet-5",
+    )
+    report_path = tmp_path / "skip_report.json"
+    report_path.write_text(json.dumps(report.to_dict()), encoding="utf-8")
+    return report_path
+
+
+def _build_operator_override_report_file(knowledge_root: Path, tmp_path: Path) -> tuple[Path, Path]:
+    """A v2-shaped report whose single verdict is a model ``remove`` with an
+    ``operator_claim`` override on top -- the headline AC1 regression
+    (issue athenaeum#1924), exercised through ``--from-report --apply``
+    rather than calling :func:`apply_paste_cleanup_report` directly."""
+    wiki = knowledge_root / "wiki"
+    content = "Off-topic internal retro content unrelated to the subject." * 3
+    page = _page(
+        wiki,
+        "person2.md",
+        "uid: person2\nname: Person Two\n",
+        f"## Notes\n\n- 2026-01-01: {content}\n",
+    )
+    report = PasteCleanupReport(
+        proposed=[
+            ProposalVerdict(
+                uid="person2",
+                path=page,
+                date="2026-01-01",
+                raw_chunk=f"- 2026-01-01: {content}",
+                paste_text=content,
+                extraction_status="clean",
+                verdict="remove",
+                operator_claim="Operator's corrected claim text.",
+            )
+        ],
+        verify_rule="all",
+        model="claude-haiku-4-5-20251001",
+        verify_model="claude-sonnet-5",
+    )
+    report_path = tmp_path / "override_report.json"
+    report_path.write_text(json.dumps(report.to_dict()), encoding="utf-8")
+    return report_path, page
+
+
+class TestOperatorClaimOverrideCli:
+    """Issue athenaeum#1924's operator-claim-override channel and apply-skip
+    tally, exercised through the REAL CLI path (argument parsing,
+    ``--from-report`` replay, ``--apply``, ``--json``) -- not just the
+    library functions directly, which ``tests/test_paste_cleanup.py``
+    already covers in depth."""
+
+    def test_apply_emits_apply_skips_with_expected_shape(
+        self, knowledge_root: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        report_path = _build_mixed_apply_skip_report_file(knowledge_root, tmp_path)
+        parser = _paste_cleanup_parser()
+        args = parser.parse_args(
+            [
+                "--path",
+                str(knowledge_root),
+                "--from-report",
+                str(report_path),
+                "--apply",
+                "--json",
+            ]
+        )
+        rc = args.func(args)
+        assert rc == 0
+
+        out, _ = capsys.readouterr()
+        payload = json.loads(out)
+        assert payload["files_changed"] == 0
+        assert payload["apply_skips"] == {"missing_page": 1, "not_writable_verdict": 1}
+
+    def test_operator_claim_applied_verbatim_through_real_cli_path(
+        self, knowledge_root: Path, tmp_path: Path
+    ) -> None:
+        report_path, page = _build_operator_override_report_file(knowledge_root, tmp_path)
+        parser = _paste_cleanup_parser()
+        args = parser.parse_args(
+            [
+                "--path",
+                str(knowledge_root),
+                "--from-report",
+                str(report_path),
+                "--apply",
+            ]
+        )
+        rc = args.func(args)
+        assert rc == 0
+
+        after = page.read_text(encoding="utf-8")
+        assert "Operator's corrected claim text." in after
+        assert "Off-topic internal retro content" not in after
