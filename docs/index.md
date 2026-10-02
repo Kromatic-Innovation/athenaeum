@@ -139,6 +139,7 @@ Evidence, kept out of the reading path.
 - [Tier-0 attributed-paste cleanup — proposer agreement](measurements/tier0-paste-cleanup-2026-09-24.md)
 - [Tier-0 attributed-paste cleanup — apply run](measurements/tier0-paste-cleanup-apply-2026-10-01.md) — the three reading passes, both destructive apply passes, eval-sheet results, and the two mechanism-limitation follow-ups.
 - [Retirement audit-v5 follow-through — retire counts](measurements/retirement-audit-v5-2026-09-29.md) — the full-corpus audit's candidate list's sampled precision, the operator's per-type retire policy, and the retire/keep counts from the behind-a-tag retire run.
+- [Page-decompose host apply — Streak CRM tool page](measurements/page-decompose-streak-2026-10-02.md) — bullet/disposition counts, operator rulings, and the before/after tool-page size from the behind-a-tag `decompose-page` apply.
 
 ---
 
