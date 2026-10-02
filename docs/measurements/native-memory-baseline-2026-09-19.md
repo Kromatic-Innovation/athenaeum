@@ -291,3 +291,63 @@ decision it feeds is athenaeum#1736's, not this issue's.
 **Phase 2 ran** (`scales=medium`, `systems=athenaeum,native`) and its write-path
 and filing-loss tables are in the recorded report; this document does not
 re-read them.
+
+## Addendum (2026-10-01, athenaeum#1915): what "no-hop" means for `follow_through`, and where this run's failure actually sits
+
+A wiki page recording a `follow_through` probe eval observation was retired
+under the athenaeum#1888 corpus-cleanup policy on 2026-09-29 (misfiled: its
+title did not match its content). athenaeum#1915 carried the observation
+forward — "a single no-hop failure case, occurring once per scale tested,"
+judged a genuine model limitation rather than a grader-blindness artifact —
+and left one question open: what "no-hop failure" means in this probe's
+grading rubric. This addendum answers that question from the code and checks
+the observation's shape against this run's own `follow_through` tables above.
+
+**What "no-hop" means in the code.** A `follow_through` probe's ground truth
+names a "deep" target page reachable only by following a body `[[wikilink]]`
+on a *different* `expected_uids` page that itself lexically matches the
+query — never by a lexical match on the query itself. That target is
+`deep_hop_uids` (`tests/evals/corpus.py:895-964`), the one predicate shared by
+the corpus validator and the report's delivery diagnostic so neither can drift
+on what "the deep page" means. Per rollout, `deep_hop_delivered`
+(`tests/evals/north_star_report.py:721-763`) reports whether every page
+`deep_hop_uids` names was actually delivered to the arm (read from
+`_delivered_uids`, the grader's own delivery evidence — the same evidence
+`correctness_rate` reads). **No-hop**, in the code's own vocabulary, is the
+`False` case of `deep_hop_delivered`: the arm never reached the deep page at
+all. The test that names the two outcomes this column exists to tell apart is
+explicit about which is which —
+`test_deep_hop_delivered_separates_no_hop_from_hopped_but_answer_wrong`
+(`tests/evals/test_north_star_report.py:2380-2384`): `deep_hop_delivered is
+False` is the no-hop case, `deep_hop_delivered is True` with the cell still
+graded `False` is "hopped but answer wrong," counted separately by
+`marker_miss_with_delivery`. The aggregate `follow_hop_rate` column (field at
+`tests/evals/north_star_report.py:1377-1386`, rendered at
+`tests/evals/north_star_report.py:3894-3912`) is the share of a group's
+`follow_through` cells where the hop *was* followed — a true no-hop failure
+shows up there as less than 1.000 on an arm that is expected to deliver the
+deep page.
+
+**Checking the observation's shape against this run.** The `deep_hop_delivered`
+docstring (`tests/evals/north_star_report.py:736-741`) is explicit that the two
+failure modes point in different directions: a no-hop cell (`False`) "says fix
+instrumentation or the delivery channel," while a hopped-but-wrong cell
+(`True`, graded incorrect) "says fix the corpus or read it as a genuine model
+miss." In this run's own `follow_hop_rate` table above, the only cell below
+1.000 on a page-delivering arm is `follow_through`/core/`native_grep` at
+0.800 (1 of 5) — a single real no-hop failure, but at `core` only; the
+`medium`-scale `native_grep` cell is 1.000. The `marker_miss_with_delivery`
+table above, by contrast, shows exactly one hopped-but-wrong cell per scale —
+`follow_through`/core/`native_index` = 1 and `follow_through`/medium/`pull` =
+1 — which is the "once per scale tested" shape athenaeum#1915 describes.
+
+So on this run's data, the once-per-scale profile the retired page described
+matches the code's hopped-but-wrong case (`marker_miss_with_delivery`), not
+the literal no-hop case (`deep_hop_delivered is False`) — and the code's own
+docstring attributes a true no-hop cell to a possible delivery-channel gap,
+not a model limitation, where it attributes the hopped-but-wrong cell to a
+model miss. This does not contradict athenaeum#1915's "genuine model
+limitation" judgment; it suggests the retired page's "no-hop" label was used
+loosely for what the code calls hopped-but-wrong. Exactly as athenaeum#1915
+already flagged, the label needs confirming against the specific rollout
+behind the original observation before it can inform a fix.
