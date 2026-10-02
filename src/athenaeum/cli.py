@@ -20,6 +20,7 @@ registry/ingest/session-end), ``_cmd_query`` (recall/query-topics/
 stopwords/test-mcp), ``_cmd_pending`` (ingest-answers/ingest-merges/
 reresolve-questions), ``_cmd_curate`` (dedupe/claims/auto-memory),
 ``_cmd_decay`` (decay-sweep, issue athenaeum#904),
+``_cmd_decompose_page`` (decompose-page, issue athenaeum#1914),
 ``_cmd_reconcile`` (reconcile, issue athenaeum#1143), ``_cmd_repair`` (repair),
 ``_cmd_questions``, ``_cmd_merges``,
 ``_cmd_decisions``, ``_cmd_authority``, ``_cmd_axiom``, ``_cmd_calibration``,
@@ -120,6 +121,10 @@ _SUBCOMMAND_LOADERS: dict[str, tuple[str, str]] = {
     "claims": ("athenaeum._cmd_curate", "add_curate_subparsers"),
     "auto-memory": ("athenaeum._cmd_curate", "add_curate_subparsers"),
     "decay-sweep": ("athenaeum._cmd_decay", "add_decay_subparser"),
+    "decompose-page": (
+        "athenaeum._cmd_decompose_page",
+        "add_decompose_page_subparser",
+    ),
     "retire-pages": ("athenaeum._cmd_retire", "add_retire_subparser"),
     "reconcile": ("athenaeum._cmd_reconcile", "add_reconcile_subparser"),
     "repair": ("athenaeum._cmd_repair", "add_repair_subparser"),
@@ -185,6 +190,7 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_curate import add_curate_subparsers
     from athenaeum._cmd_decay import add_decay_subparser
     from athenaeum._cmd_decisions import add_decisions_subparser
+    from athenaeum._cmd_decompose_page import add_decompose_page_subparser
     from athenaeum._cmd_demo import add_demo_subparser
     from athenaeum._cmd_description import add_description_subparser
     from athenaeum._cmd_dimensions import add_dimensions_subparser
@@ -237,6 +243,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_curate_subparsers(subparsers)  # dedupe, claims, auto-memory
     add_decay_subparser(subparsers)  # decay-sweep
     add_retire_subparser(subparsers)  # retire-pages (issue athenaeum#1625)
+    add_decompose_page_subparser(subparsers)  # decompose-page (issue athenaeum#1914)
     add_reconcile_subparser(subparsers)  # reconcile (issue athenaeum#1143)
     add_recovery_yield_subparser(subparsers)  # recovery-yield (issue athenaeum#1453)
     add_repair_subparser(subparsers)  # repair
