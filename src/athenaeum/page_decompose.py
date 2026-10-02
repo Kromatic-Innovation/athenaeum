@@ -68,6 +68,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import date
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.entity_resolution import normalize_name
 from athenaeum.footnote_markers import FOOTNOTE_DEF_RE, INLINE_MARKER_RE
@@ -605,6 +607,17 @@ def _insert_fact(target_body: str, bullet_line: str, definition_line: str) -> st
     return "\n".join(lines)
 
 
+def _validation_error_shape(exc: ValidationError) -> str:
+    """A content-free description of *exc*: field path + error type only.
+
+    Never ``str(exc)`` — pydantic embeds the offending ``input_value`` in its
+    own message, which for frontmatter would leak corpus content into a CLI
+    error or exception string.
+    """
+    shapes = [f"{'.'.join(str(p) for p in e['loc'])}: {e['type']}" for e in exc.errors()]
+    return ", ".join(shapes) or "invalid frontmatter"
+
+
 def _bump_and_render(meta: dict[str, object], body: str, today: str) -> str:
     """Validate *meta*, bump ``updated``, and render the whole page."""
     meta["updated"] = today
@@ -628,12 +641,6 @@ def _attach_to_target(
         label="", text=definition_text, drive_path=drive.group(0) if drive else ""
     )
     if already_present(plan.raw, definition, body):
-        return False
-    stripped = INLINE_MARKER_RE.sub("", plan.raw).rstrip()
-    if stripped and stripped in INLINE_MARKER_RE.sub("", body):
-        # The fact is on the page already under a different label — the
-        # already-present conjunction above cannot see it when the bullet
-        # carries no quoted span, and re-attaching would duplicate it.
         return False
 
     label = _next_numeric_label(body)
@@ -724,11 +731,52 @@ def apply_report(
             problems.append(f"{bullet.id}: ruled to uid {uid}, which names no wiki page")
             continue
         plans.append((bullet, target_path))
+
+    source_path = idx.get_by_uid(report.source_uid)
+    if source_path is None:
+        problems.append(f"{report.source_uid}: no wiki page carries this uid")
+
+    # Pre-pass: validate every page this apply would write, BEFORE any write
+    # happens. apply_report -> _attach_to_target -> _bump_and_render ->
+    # validate_wiki_meta can otherwise raise pydantic.ValidationError mid-run,
+    # after some targets are already written — this makes the whole apply
+    # all-or-nothing per run instead of partially-applied. The report names
+    # each failing page and its error SHAPE only (field path + pydantic error
+    # type) — never ``str(exc)``, whose ``input_value=`` dump would echo the
+    # page's own frontmatter content into a CLI error / exception message.
+    invalid_pages: list[str] = []
+    checked_targets: set[Path] = set()
+    for _, target_path in plans:
+        if target_path in checked_targets:
+            continue
+        checked_targets.add(target_path)
+        target_meta, _ = _read_page(target_path)
+        try:
+            _bump_and_render(dict(target_meta), "", stamp)
+        except ValidationError as exc:
+            invalid_pages.append(f"{target_path.name} ({_validation_error_shape(exc)})")
+    if source_path is not None:
+        source_meta, _ = _read_page(source_path)
+        rewritten_meta = dict(source_meta)
+        rewritten_meta["description"] = description
+        try:
+            _bump_and_render(rewritten_meta, rewrite_body, stamp)
+        except ValidationError as exc:
+            invalid_pages.append(f"{source_path.name} ({_validation_error_shape(exc)})")
+    if invalid_pages:
+        problems.append(
+            f"{len(invalid_pages)} page(s) would fail frontmatter validation: "
+            + "; ".join(invalid_pages)
+        )
+
     if problems:
         raise DecomposeError("; ".join(problems))
 
     result = ApplyResult(
-        dropped=sum(1 for v in resolutions.values() if v == "drop"),
+        # Count only resolutions for bullets in THIS report: a resolutions
+        # file re-run against an already-decomposed page (empty bullets)
+        # must not double-count drops a previous apply already resolved.
+        dropped=sum(1 for b in report.bullets if resolutions.get(b.id) == "drop"),
         skipped_already_present=sum(
             1
             for b in report.bullets
@@ -742,8 +790,7 @@ def apply_report(
         else:
             result.skipped_already_present += 1
 
-    source_path = idx.get_by_uid(report.source_uid)
-    if source_path is None:  # pragma: no cover - build_report already proved it exists
+    if source_path is None:  # pragma: no cover - proved not None in the pre-pass above
         raise DecomposeError(f"{report.source_uid}: no wiki page carries this uid")
     meta, _ = _read_page(source_path)
     rewritten = dict(meta)

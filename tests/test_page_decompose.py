@@ -36,10 +36,12 @@ import pytest
 from athenaeum import runlock
 from athenaeum.cli import EXIT_LOCK_HELD, main
 from athenaeum.footnote_markers import FOOTNOTE_DEF_RE, INLINE_MARKER_RE
-from athenaeum.models import EntityIndex, IndexEntry, parse_frontmatter
+from athenaeum.models import EntityIndex, IndexEntry, parse_frontmatter, render_frontmatter
 from athenaeum.page_decompose import (
     DISPOSITIONS,
+    BulletPlan,
     DecomposeError,
+    _attach_to_target,
     apply_report,
     build_report,
     bullet_id,
@@ -408,6 +410,28 @@ class TestApply:
         assert '- X Labs reached the pilot stage, logging "one intro email".[^2]' in body
         assert "[^2]: **Source:** `drive/d004-x-labs.md`" in body
 
+    def test_dropped_count_is_not_stale_on_a_second_apply(self, applied: Path) -> None:
+        # Sentry LOW finding (athenaeum#1914): re-running apply on an
+        # already-decomposed page (its source now has zero bullets) must
+        # not double-count the SAME resolutions-file "drop" rulings as new
+        # drops. dropped must reflect only bullets present in THIS report.
+        index = EntityIndex(applied / "wiki")
+        report2 = build_report(
+            applied / "wiki", SOURCE_UID, subject_until=SUBJECT_UNTIL, index=index
+        )
+        assert report2.bullets == []
+        resolutions = load_resolutions(applied / "resolutions.json")
+        rewrite_body = (applied / "rewrite_body.md").read_text(encoding="utf-8")
+        result2 = apply_report(
+            report2,
+            applied / "wiki",
+            resolutions=resolutions,
+            rewrite_body=rewrite_body,
+            description=DESCRIPTION,
+            index=index,
+        )
+        assert result2.dropped == 0
+
     def test_a_dropped_bullet_lands_nowhere(self, applied: Path) -> None:
         for page in sorted((applied / "wiki").glob("*.md")):
             if page.name == SOURCE_PAGE:
@@ -460,6 +484,92 @@ class TestApply:
         before = _digests(applied / "wiki")
         assert main(_apply_argv(applied)) == 0
         assert _digests(applied / "wiki") == before
+
+
+class TestAttachNoSubstringFallback:
+    """Sentry HIGH finding (athenaeum#1914): ``_attach_to_target``'s old
+    duplicate-detection fallback compared the bullet's stripped text as a
+    bare substring of the WHOLE target body, so a new fact that happened to
+    be a substring of a longer, unrelated existing bullet was silently
+    skipped. The only duplicate test now is ``already_present`` — the
+    source-citation-AND-quoted-span conjunction the issue specifies.
+    """
+
+    def test_a_fact_that_is_a_substring_of_a_longer_bullet_still_attaches(
+        self, tmp_path: Path
+    ) -> None:
+        target = tmp_path / "target.md"
+        target.write_text(
+            "---\n"
+            "uid: tgt-substr\n"
+            "type: company\n"
+            "name: Substr Co\n"
+            "created: 2026-01-01\n"
+            "updated: 2026-01-01\n"
+            "---\n\n"
+            "## Notes\n\n"
+            "- Substr Co reached the pilot stage after a long engagement.[^1]\n\n"
+            "[^1]: **Source:** `drive/d900-substr-co.md`\n",
+            encoding="utf-8",
+        )
+        # This bullet's stripped text ("- Substr Co reached the pilot
+        # stage") is a literal substring of the existing bullet above, but
+        # it cites a DIFFERENT drive source and carries no quoted span the
+        # target already has — already_present() correctly says "not
+        # present", so it must attach.
+        plan = BulletPlan(
+            ordinal=1,
+            id="1-deadbeefcafe",
+            raw="- Substr Co reached the pilot stage[^9]",
+            subject="Substr Co",
+            refs=["9"],
+            disposition="attached",
+        )
+        # definition_text is the footnote TEXT only, no "[^label]: " prefix
+        # — _attach_to_target builds that prefix itself (see the X Labs
+        # assertion in TestApply for the same shape).
+        wrote = _attach_to_target(
+            target, plan, "**Source:** `drive/d901-other-source.md`", "2026-10-02"
+        )
+        assert wrote is True
+        body = parse_frontmatter(target.read_text(encoding="utf-8"))[1]
+        assert "- Substr Co reached the pilot stage[^2]" in body
+        assert "drive/d901-other-source.md" in body
+
+
+class TestApplyAllOrNothing:
+    """Sentry HIGH finding (athenaeum#1914): apply_report -> _attach_to_target
+    -> _bump_and_render -> validate_wiki_meta could raise an uncaught
+    pydantic.ValidationError mid-run, leaving the wiki partially modified.
+    apply_report now validates every target's rendered frontmatter in a
+    pre-pass before any write, so a failure refuses the whole apply.
+    """
+
+    def test_a_second_target_failing_validation_leaves_the_first_untouched(
+        self, workspace: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Bullet order on the fixture page attaches to tgt00001 (Acme Corp)
+        # first and tgt00004 (X) second. Corrupt tgt00004's ``field_sources``
+        # (schema requires a dict; EntityIndex never reads this field at
+        # all) so the page still resolves by uid — the refusal must come
+        # from the frontmatter-validation pre-pass, not from an uid lookup
+        # failure. Then assert the apply refuses and tgt00001 is
+        # byte-identical to its state BEFORE the apply ran — not just
+        # "unwritten by this bullet", but never touched at all.
+        target4 = workspace / "wiki" / "tgt00004-x.md"
+        meta, body = parse_frontmatter(target4.read_text(encoding="utf-8"))
+        meta["field_sources"] = ["not-a-dict"]
+        target4.write_text(render_frontmatter(meta) + "\n" + body, encoding="utf-8")
+        assert EntityIndex(workspace / "wiki").get_by_uid("tgt00004") is not None
+
+        before = _digests(workspace / "wiki")
+        rc = main(_apply_argv(workspace))
+        assert rc == 1
+        assert _digests(workspace / "wiki") == before
+        stderr = capsys.readouterr().err
+        assert "frontmatter validation" in stderr
+        assert "tgt00004-x.md" in stderr
+        assert "not-a-dict" not in stderr
 
 
 class TestRewriteValidation:
