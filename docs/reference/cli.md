@@ -36,6 +36,7 @@ Every subcommand is registered top-level on one `parser.add_subparsers()` in `cl
 - [`athenaeum decisions next`](#athenaeum-decisions-next) (command) — Show the oldest pending decision (single block).
 - [`athenaeum decisions raise-confirmation`](#athenaeum-decisions-raise-confirmation) (command) — File a NEW agent-raised 'implemented X without Y, confirm?' item into the pending-decisions queue — the CLI counterpart of the MCP raise_decision tool's kind="confirmation" path.
 - [`athenaeum decisions scan-retractions`](#athenaeum-decisions-scan-retractions) (command) — Flag any completed merge that relied on a now-retracted source for human review. Idempotent; never unmerges.
+- [`athenaeum decompose-page`](#athenaeum-decompose-page) (command) — Redistribute an aggregate page's per-entity facts onto the company/person pages they concern, then rewrite the page itself. Default is dry-run: it writes a JSON report to --report and changes nothing. --apply attaches the facts and rewrites the source page, and refuses outright while any bullet is unresolved, sourceless or ambiguously sourced without a ruling in --resolutions. Makes no LLM call.
 - [`athenaeum dedup-oversize-escalations`](#athenaeum-dedup-oversize-escalations) (command) — Collapse duplicate oversize-page-family escalations in _pending_questions.md to one unanswered block per entity
 - [`athenaeum dedupe`](#athenaeum-dedupe) (group) — Find or merge duplicate wiki entries.
 - [`athenaeum dedupe persons`](#athenaeum-dedupe-persons) (command) — Person-wiki dedupe (HIGH-confidence apollo_id / linkedin / exact-name match). Default --find prints a YAML report; --apply consumes the report and merges.
@@ -420,6 +421,26 @@ Flag any completed merge that relied on a now-retracted source for human review.
 |---|---|---|---|
 | `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+
+## `athenaeum decompose-page`
+
+Redistribute an aggregate page's per-entity facts onto the company/person pages they concern, then rewrite the page itself. Default is dry-run: it writes a JSON report to --report and changes nothing. --apply attaches the facts and rewrites the source page, and refuses outright while any bullet is unresolved, sourceless or ambiguously sourced without a ruling in --resolutions. Makes no LLM call.
+
+**Positional arguments:**
+
+- `uid` — uid of the aggregate page to decompose.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--apply` | `False` | — | Attach the facts and rewrite the source page. Without this flag the command writes nothing but the report. |
+| `--description` | — | — | New frontmatter description: for the source page. Required with --apply, and subject to the same no-subject-names check as the body (the current description is itself a list of companies). |
+| `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+| `--report` | — | — | Write the JSON report here. The report names subjects and page filenames and is never printed to stdout. |
+| `--resolutions` | — | — | JSON object of bullet-id -> uid \| 'drop', ruling on the bullets the dry run could not place. A ruling whose id no longer matches its bullet's text is refused. --apply only. |
+| `--rewrite-body` | — | — | Markdown body the source page is rewritten to. Required with --apply. Refused if it exceeds 2 KB, links to a page that does not exist, or still names any decomposed subject. |
+| `--subject-until` | — | — | Regex marking the end of each bullet's subject. The subject is the bullet's leading span up to the first match; a bullet the regex does not match is reported unresolved rather than guessed at. Supplied at run time so a page's sentence template never has to be recorded in this repo. |
+| `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 
 ## `athenaeum dedup-oversize-escalations`
 
