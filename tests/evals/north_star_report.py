@@ -623,7 +623,16 @@ def _delivered_uids(record: RolloutRecord, probe: Probe, corpus: Corpus) -> tupl
 #: as any change to :func:`grade_correctness`, :func:`_delivered_uids` or
 #: anything they dispatch to; the value is the issue that last changed the
 #: rule, which is the most useful thing a reader can be handed.
-GRADER_REVISION = "athenaeum#1843"
+#:
+#: Bump it for a change to the ``answer_markers`` GROUND TRUTH too, not only
+#: for a change to the grading code (issue athenaeum#1935). ``grade_correctness``
+#: grades clause (a) against ``probes.yaml``'s markers, and ``probes.yaml`` is
+#: digested by neither this stamp's neighbour ``corpus_digest`` (pages only,
+#: per the paragraph above) nor anything else in the report header -- so a
+#: marker repair moves the same stored rows' verdicts with NO other header
+#: field moving. That is precisely the indistinguishability this stamp exists
+#: to prevent.
+GRADER_REVISION = "athenaeum#1935"
 
 
 def tag_followed(record: RolloutRecord, probe: Probe) -> bool | None:

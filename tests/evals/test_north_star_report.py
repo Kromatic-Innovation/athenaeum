@@ -2737,10 +2737,14 @@ def test_marker_miss_with_delivery_uses_the_same_marker_normalizer() -> None:
 
 def test_grader_revision_names_this_issue() -> None:
     """The stamp's own contract: bump ``GRADER_REVISION`` in the same commit
-    as any change to ``grade_correctness``. This issue changed how clause (a)
-    matches, so two report tables over the same stored rows -- one graded
-    before, one after -- must be distinguishable from their headers alone."""
-    assert GRADER_REVISION == "athenaeum#1843"
+    as any change to ``grade_correctness`` OR to the ``answer_markers`` ground
+    truth it grades clause (a) against. athenaeum#1843 changed how clause (a)
+    matches; athenaeum#1935 changed WHAT it matches, by adding marker
+    alternatives to eight probes. Either way two report tables over the same
+    stored rows -- one graded before, one after -- must be distinguishable
+    from their headers alone, and ``corpus_digest`` cannot carry that for a
+    ``probes.yaml``-only change because it digests pages only."""
+    assert GRADER_REVISION == "athenaeum#1935"
 
 
 def _synthetic_marker_probe(marker: str) -> tuple[Probe, Corpus]:
