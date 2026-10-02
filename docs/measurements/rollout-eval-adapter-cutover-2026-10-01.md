@@ -84,36 +84,38 @@ result this time, with no partial-run denominator mismatch against the
   probe/answer detail this record intentionally omits).
 - **Harness failures: 4** (`turn_cap`: 2 `native_grep`, 1 `pull`, 1
   `push_breadcrumb_pull`). The `push_breadcrumb_pull` failure is probe
-  `abstain_unknown_person`, inside the `abstention` probe class (see taxonomy
-  note below) — it does not fall inside the 45-probe set this record's
+  `abstain_unknown_person`, one of the probe ids inside the `abstention`
+  probe class — it does not fall inside the 45-probe set this record's
   headline score is computed over, so it does not create an
   included-vs-excluded ambiguity for the headline number (see "Harness
   failure accounting" below).
 
-## A probe-class taxonomy change landed between 2026-09-29 and this run (unrelated to athenaeum#1912)
+## Correction to earlier records
 
-The three earlier records' correctness tables carried separate
+The 2026-09-26 and 2026-09-29 records both cite the 2026-09-19 shell-hook
+floor as `push_breadcrumb_pull` 36/45 (80.0%). Re-summing the 2026-09-19
+report's own per-probe-class correctness rows for `push_breadcrumb_pull`,
+`core` scale, excluding the `abstention` class the same way those records
+do, gives **37/45 (82.2%)**, not 36/45 (80.0%) — the 36 was not independently
+derived from the 2026-09-19 source; it originated in the 2026-09-26 record
+and was copied forward into the 2026-09-29 record and the first draft of
+this one. This record uses the correct 37/45 (82.2%) figure throughout.
+Neither the 2026-09-26 nor the 2026-09-29 record is edited to fix this.
+
+An earlier draft of this record also claimed a probe-class taxonomy change
+had landed between 2026-09-29 and this run (separate `abstain_unknown_*`
+classes merging into one `abstention` class). That claim was wrong:
 `abstain_unknown_client` / `abstain_unknown_person` / `abstain_unknown_policy`
-probe classes, each graded `n/a` for every arm (no plain yes/no grading
-existed for them) and excluded from the headline score. This run's report
-instead carries one unified `abstention` probe class, graded via the
-"declining-language rule for abstention probes" the report's own correctness
-section describes, producing a numeric `correctness_rate` rather than `n/a`.
+are PROBE IDS, not probe classes, in every one of the four reports including
+the 2026-09-19 baseline — all three belong to the one `abstention` class
+throughout, and no cell moved between classes. No taxonomy change occurred.
 
-The `corpus_digest[core]` is identical across all four readings
-(`edcd8dd3286d0135`), so the underlying 48 probes are the same set — only the
-report's class taxonomy and the abstention grading mechanism changed,
-somewhere in `develop` between the 2026-09-29 run's commit (`0e504b605122`)
-and this run's (`3303548b9167`). That range was not audited for the specific
-commit, since it is orthogonal to athenaeum#1912's scope and does not change
-which probes exist, only how three of them are labeled and graded.
-
-**To keep this record comparable to the prior three**, the headline score
-below excludes the `abstention` class the same way the prior records excluded
-`abstain_unknown_*` — landing on the same 45 non-abstention core probes
-(48 total minus 3 abstention probes) that the 2026-09-19 shell-hook run and
-this run both graded in full. The `abstention` class's own count is reported
-separately, not folded into the headline.
+The headline score below still excludes the `abstention` class, for the same
+reason the 2026-09-19, 2026-09-26, and 2026-09-29 records already do:
+landing on the same 45 non-abstention core probes (48 total minus the 3
+`abstention`-class probes) that all four readings grade in full. The
+`abstention` class's own count is reported separately, not folded into the
+headline.
 
 ## Zero-spend retrieval-parity check on this tree (no additional spend)
 
@@ -143,7 +145,11 @@ non-abstention probe class, same denominator convention as the 2026-09-19,
 | arm | shell hook (2026-09-19) | adapter, pre-fix (2026-09-26) | adapter, overflow-fix (2026-09-29) | adapter, term-parity-fix (2026-10-01) |
 | --- | --- | --- | --- | --- |
 | `push_breadcrumb` | 0/45 (0.0%) | 0/44 (0.0%) | 0/44 (0.0%) | 0/45 (0.0%) |
-| `push_breadcrumb_pull` (**verdict arm**) | 36/45 (**80.0%**) | 31/44 (**70.5%**) | 33/44 (**75.0%**) | **31/45 (68.9%)** |
+| `push_breadcrumb_pull` (**verdict arm**) | 37/45 (**82.2%**) | 31/44 (**70.5%**) | 33/44 (**75.0%**) | **31/45 (68.9%)** |
+
+The shell-hook figure above (37/45, 82.2%) corrects the 36/45 (80.0%) cited
+by the 2026-09-26 and 2026-09-29 records — see "Correction to earlier
+records" above.
 
 `push_breadcrumb` itself remains unchanged (0% across all four runs),
 carrying no signal either way, same as all three prior records note.
@@ -152,8 +158,8 @@ carrying no signal either way, same as all three prior records note.
 
 The only `push_breadcrumb_pull`/`core` harness failure this run (probe
 `abstain_unknown_person`) falls inside the `abstention` class, which the
-headline 45-probe set above already excludes for comparability (see taxonomy
-note). **The headline 68.9% figure is therefore identical whether the
+headline 45-probe set above already excludes for comparability (see
+"Correction to earlier records" above). **The headline 68.9% figure is therefore identical whether the
 harness failure is counted as incorrect or excluded** — unlike the
 2026-09-29 run, where the one `push_breadcrumb_pull` harness failure
 (`ratecard_tooling_owner`) fell inside a scored class and changed the
@@ -165,11 +171,10 @@ incorrect, or **33/47 (70.2%)** excluding it as ungraded.
 
 ### Deltas for `push_breadcrumb_pull`, the verdict/shipped arm
 
-- **vs. the 2026-09-19 shell-hook floor (80.0%, n=45): -11.1 pts.** Larger
-  than the original 2026-09-26 drop (-9.5 pts) and larger than the
-  2026-09-29 residual gap (-5.0 to -6.8 pts). This run does not recover
-  toward the floor — it reads further below it than any prior adapter
-  measurement.
+- **vs. the corrected 2026-09-19 shell-hook floor (82.2%, n=45): -13.3 pts.**
+  This run does not recover toward the floor — it reads further below it
+  than either prior adapter reading did against this same corrected floor
+  (2026-09-26: 82.2 - 70.5 = -11.7 pts; 2026-09-29: 82.2 - 75.0 = -7.2 pts).
 - **vs. the 2026-09-29 overflow-fix reading (75.0%, n=44): -6.1 pts.**
 - **vs. the 2026-09-26 pre-fix reading (70.5%, n=44): -1.6 pts.**
 
@@ -185,21 +190,21 @@ Two-sample standard error of the difference between independent proportions,
 
 | comparison | SE (pts) | delta (pts) | delta / SE |
 | --- | --- | --- | --- |
-| 2026-09-19 (80.0%, n=45) vs. this run (68.9%, n=45) | 9.1 | 11.1 | **1.22** |
+| 2026-09-19, corrected (82.2%, n=45) vs. this run (68.9%, n=45) | 9.0 | 13.3 | **1.49** |
 | 2026-09-29 (75.0%, n=44) vs. this run (68.9%, n=45) | 9.5 | 6.1 | 0.64 |
-| 2026-09-26 (70.5%, n=44) vs. this run (68.9%, n=45) | 9.7 | 1.6 | 0.17 |
+| 2026-09-26 (70.5%, n=44) vs. this run (68.9%, n=45) | 9.7 | 1.6 | 0.16 |
 
-The residual gap to the shell-hook floor (1.22 SE) is now the LARGEST of any
-reading taken so far — larger than the original drop the 2026-09-26 record
-found (1.04 SE against the same floor) and larger than the 2026-09-29
-reading's residual (0.55-0.78 SE, computed in that record). The move vs. the
-2026-09-29 reading itself (0.64 SE) and vs. the 2026-09-26 reading (0.17 SE)
-are both within a single SE and could be sampling noise alone at this
-sample size — but the trend across all four readings (80.0% -> 70.5% ->
-75.0% -> 68.9%) is not monotonically recovering, and this reading's gap to
-the floor is the widest one recorded. **Read this as: the gap has not
-closed, is not clearly within noise of the floor, and did not narrow after
-athenaeum#1912's fix.**
+The residual gap to the corrected shell-hook floor (1.49 SE) is the largest
+of any reading taken so far on this arm. The move vs. the 2026-09-29 reading
+itself (0.64 SE) and vs. the 2026-09-26 reading (0.16 SE) are both within a
+single SE and could be sampling noise alone at this sample size — but the
+trend across all four readings (82.2% -> 70.5% -> 75.0% -> 68.9%) is not
+monotonically recovering, and this reading's gap to the floor, at ~1.5 SE,
+is the strongest evidence yet that the gap is more than noise. **Read this
+as: the gap has not closed, reads as more than noise alone at this sample
+size, and did not narrow after athenaeum#1912's fix.** (The 2026-09-26 and
+2026-09-29 records' own internal SE statements against the floor used the
+uncorrected 36/45 figure and are not restated here; they are not edited.)
 
 ## Did the retrieval-parity proof translate into score? No.
 
@@ -251,15 +256,15 @@ their own re-measurements, carried into a new defect issue: athenaeum#1932.
 
 ## Disposition
 
-- The score has NOT recovered to the 80.0% shell-hook floor. The residual
-  gap (-11.1 pts, 1.22 SE) is the largest recorded across all four readings
-  on this arm, and the 2026-09-19/2026-10-01 comparison uses the full
-  45-probe set on both sides — not a partial-run restriction.
+- The score has NOT recovered to the corrected 82.2% shell-hook floor. The
+  residual gap (-13.3 pts, ~1.49 SE) is the largest recorded across all four
+  readings on this arm, and the 2026-09-19/2026-10-01 comparison uses the
+  full 45-probe set on both sides — not a partial-run restriction.
 - athenaeum#1912's retrieval-parity fix is confirmed present and re-verified
   byte-identical on this exact tree (48/48 core probes). It did not
   translate into a score improvement; if anything the score moved further
   from the floor than the pre-fix 2026-09-26 reading (68.9% vs. 70.5%,
-  though this delta alone, 0.17 SE, is well within noise).
+  though this delta alone, 0.16 SE, is well within noise).
 - Per this issue's acceptance criteria, a new defect issue is filed naming
   the next suspected mechanism grounded in this run's own transcripts:
   athenaeum#1932, built on the `marker_miss_with_delivery` counts above
