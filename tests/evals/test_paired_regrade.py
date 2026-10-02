@@ -14,10 +14,17 @@ No model call, no live rollout, no paid store.
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 from tests.evals.containment import GridCell, ResultStore
-from tests.evals.corpus import Corpus, Page, Probe
+from tests.evals.corpus import (
+    Corpus,
+    Page,
+    Probe,
+    _normalize_marker_for_match,
+    build_corpus,
+)
 from tests.evals.north_star_report import append_rollout_row
 from tests.evals.paired_regrade import (
     discordant_pairs,
@@ -419,3 +426,279 @@ def test_input_equality_pushed_context_and_recall_results(tmp_path: Path) -> Non
     # recall: one shared input, equal once scores are stripped.
     assert eq.recall_pairs_total == 1
     assert eq.recall_pairs_equal == 1
+
+
+# ---------------------------------------------------------------------------
+# athenaeum#1935: the eight repaired probes, re-graded through this module
+# ---------------------------------------------------------------------------
+#
+# athenaeum#1932 classified the `push_breadcrumb_pull`/`core` marker-miss
+# cells blind and found most of the residual gap was a GRADING artefact:
+# the asked fact was in the answer, reworded or reformatted past the
+# authored `answer_markers` substring. athenaeum#1935 repaired those probes
+# by ADDING marker alternatives, and this section re-grades the repair
+# through `grade_store`/`summarize`/`discordant_pairs` -- the same module,
+# the same unchanged `grade_correctness`.
+#
+# The fixture is synthetic in the one sense that matters: every answer
+# string below is INVENTED for this test. None is a line from a paid result
+# store, and no paid store is read (the stores the classification came from
+# live on the operator host and are not in this repository at all). The
+# probe and marker text IS the real `probes.yaml` ground truth, because the
+# repair under test is a change to that ground truth -- a synthetic probe
+# could not show it.
+
+#: The authored (pre-athenaeum#1935) marker for each repaired uid, pinned
+#: literally rather than derived, so a yaml reordering that put an
+#: alternative first -- silently turning the negative control below into a
+#: no-op -- fails here instead of passing vacuously.
+AUTHORED_MARKERS_1935: dict[str, dict[str, str]] = {
+    "person_not_repo": {"person-rowan-wrenfield": "pricing committee"},
+    "former_client_not_current": {"client-alderway": "12-person strategy consultancy"},
+    "driftgate_migration_funding": {
+        "project-driftgate-migration": "92 thousand GBP per quarter",
+        "project-driftgate-migration-status": "92 thousand GBP per quarter",
+    },
+    "dual_signoff_threshold": {
+        "policy-dual-signoff": "6400 GBP requires two independent approvers",
+        "policy-dual-signoff-brief": "6400 GBP requires two independent approvers",
+    },
+    "mira_castellane_role": {
+        "person-mira-castellane": "a role she has held since March 2019",
+        "person-mira-castellane-directory": "a role she has held since March 2019",
+    },
+    "lighthouse_migration_rollback": {
+        "project-lighthouse-migration": "unresolved data-integrity tickets"
+    },
+    "aggregation_retainer_clients": {
+        "client-alderway": "12-person strategy consultancy",
+        "client-bluewater": "coastal logistics operator",
+        "client-atlas": "haulage operator",
+        "client-larchmoor": "fabric wholesaler",
+        "client-dunmere": "data-services firm",
+        "client-hollowick": "structurally identical to Atlas Freight's arrangement",
+        "client-castleford": "board-level advisory",
+    },
+    "aggregation_inhouse_tools": {
+        "tool-buildpipe": "before anything ships",
+        "tool-ledgerscribe": "invoicing tool",
+        "tool-shiftboard": "spreadsheet-based rota",
+        "tool-formready": "own templates",
+        "tool-auditline": "which client record and when",
+        "tool-rosterkeep": "worked which engagement over time",
+    },
+}
+
+#: One INVENTED answer per repaired probe, written to state the fact the
+#: probe's own `query` asks for in a voicing the authored marker above does
+#: not contain. Each is the shape athenaeum#1932's blind labeller called
+#: `marker_broken_fact_present`: right answer, wrong substring.
+REWORDED_ANSWERS_1935: dict[str, str] = {
+    # Authored marker names the committee Rowan sits on; the query asks what
+    # he DECIDED. This answer gives the decision and never says "committee".
+    "person_not_repo": (
+        "Rowan Wrenfield's call on pricing was to hold the day rate flat for the 2026 "
+        "financial year and absorb the indirect-cost rise rather than bill it on to "
+        "retainer accounts."
+    ),
+    # Authored marker is Alderway's headcount and sector -- a detail the
+    # query ("which clients are currently on retainer?") never asks for.
+    "former_client_not_current": (
+        "Currently on retainer: Alderway Advisory, which is the firm's largest retainer "
+        "client by revenue, plus Bluewater Marine and Atlas Freight. Verity and Solent "
+        "are former engagements, not current ones."
+    ),
+    # Reports the figure, then the cadence in the query's own words, so the
+    # authored "... per quarter" run does not appear contiguously.
+    "driftgate_migration_funding": (
+        "Driftgate Migration is funded at 92 thousand GBP each quarter. Both the "
+        "programme page and the independently written status note give that figure."
+    ),
+    # States the requirement before the threshold, and writes the threshold
+    # with a thousands separator and a currency symbol.
+    "dual_signoff_threshold": (
+        "The Harrowmere Protocol requires two independent approvers before any payment "
+        "above GBP 6,400 is released; a single approver suffices below that figure."
+    ),
+    # Re-voices the body's appositive ("a role she has held") as a verb.
+    "mira_castellane_role": (
+        "Mira Castellane has led the Rivencourt practice since March 2019, reporting "
+        "directly to the managing partner."
+    ),
+    # Answers the rollback question itself; the authored marker is the
+    # decommission gate, and is hyphenated where an answer need not be.
+    "lighthouse_migration_rollback": (
+        "If a rollback is triggered during cutover, reads move back to the legacy system "
+        "immediately and the new stack is treated as the system under investigation. The "
+        "team budgets four hours from trigger to full fail back."
+    ),
+    # Answers "which clients" with the clients' names -- which is what the
+    # query asks -- and none of the seven authored descriptors.
+    "aggregation_retainer_clients": (
+        "The clients on a standing retainer are Alderway Advisory, Bluewater Marine, "
+        "Atlas Freight, Larchmoor Textiles, Dunmere Analytics, Hollowick Freight and "
+        "Castleford Group."
+    ),
+    # Names each tool and what it IS. "invoicing tool" is Ledgerscribe's
+    # authored marker and is deliberately still here: athenaeum#1935 left
+    # that one page unrepaired because its marker was already minimal.
+    "aggregation_inhouse_tools": (
+        "Six tools are built and run in house: buildpipe, the firm's internal build and "
+        "release pipeline; Ledgerscribe, its in-house invoicing tool; Shiftboard, a "
+        "staffing and scheduling tool; Formready, an in-house proposal generator; "
+        "Auditline, which records who accessed which client record; and Rosterkeep, "
+        "which tracks who has worked which engagement."
+    ),
+}
+
+
+def _core_corpus() -> Corpus:
+    return build_corpus(scale="core")
+
+
+def _authored_only(corpus: Corpus) -> Corpus:
+    """*corpus* with every athenaeum#1935 alternative stripped back to the
+    authored marker -- the pre-repair ground truth, used as the negative
+    control. Built by filtering against :data:`AUTHORED_MARKERS_1935` rather
+    than by "keep the first entry", so it cannot silently degrade into a
+    no-op if the yaml is reordered."""
+    probes = []
+    for probe in corpus.probes:
+        authored = AUTHORED_MARKERS_1935.get(probe.id)
+        if authored is None:
+            probes.append(probe)
+            continue
+        kept = tuple(
+            (uid, marker) for uid, marker in probe.answer_markers if authored.get(uid) == marker
+        )
+        assert set(dict(kept)) == set(authored), (
+            f"{probe.id}: authored markers no longer present in probes.yaml -- "
+            "AUTHORED_MARKERS_1935 is stale, so the negative control would be a no-op"
+        )
+        probes.append(dataclasses.replace(probe, answer_markers=kept))
+    return dataclasses.replace(corpus, probes=tuple(probes))
+
+
+def _repaired_record(probe: Probe, answer: str) -> RolloutRecord:
+    """A ``PUSH_BREADCRUMB_PULL`` cell for *probe* whose every expected page
+    is DELIVERED (so clause (b) is satisfied and the only thing under test is
+    the marker conjunct, clause (a)), carrying *answer*.
+
+    Delivery rides the PULL half, via the ``**Uid:**`` field
+    ``uids_from_recall_output`` parses -- not the breadcrumb, whose real hook
+    emits at most three bullets and so cannot deliver a seven-page
+    aggregation probe at all."""
+    recall_text = "\n".join(f"**Uid:** {uid}" for uid in probe.expected_uids)
+    return RolloutRecord(
+        arm=Arm.PUSH_BREADCRUMB_PULL,
+        probe_id=probe.id,
+        probe_class=probe.probe_class,
+        corpus_scale="core",
+        answer=answer,
+        turn_tokens=[TurnTokenUsage(turn=1, input_tokens=10, output_tokens=10)],
+        turn_count=1,
+        transcript=[
+            {"pushed_context": ""},
+            {
+                "type": "user",
+                "message": {"content": [{"type": "tool_result", "content": recall_text}]},
+            },
+        ],
+    )
+
+
+def _reworded_store(tmp_path: Path, corpus: Corpus) -> Path:
+    probes_by_id = {p.id: p for p in corpus.probes}
+    rows = [
+        _repaired_record(probes_by_id[pid], answer)
+        for pid, answer in sorted(REWORDED_ANSWERS_1935.items())
+    ]
+    path = tmp_path / "reworded-1935.jsonl"
+    _write_store(path, rows)
+    return path
+
+
+def test_reworded_answers_miss_the_authored_markers_athenaeum_1935() -> None:
+    """The negative control, asserted directly on the strings: each invented
+    answer must NOT contain the authored marker it is meant to miss.
+
+    Without this the main test below could pass because the answers happen to
+    quote the authored marker anyway, proving nothing about the alternatives
+    (the "recorded negative control that is a no-op" failure). Ledgerscribe's
+    marker is the one deliberate exception -- athenaeum#1935 left that page
+    unrepaired, so its authored marker is expected to be present."""
+    for pid, answer in REWORDED_ANSWERS_1935.items():
+        normalized = _normalize_marker_for_match(answer)
+        for uid, marker in AUTHORED_MARKERS_1935[pid].items():
+            if uid == "tool-ledgerscribe":
+                assert _normalize_marker_for_match(marker) in normalized
+                continue
+            assert _normalize_marker_for_match(marker) not in normalized, (
+                f"{pid}/{uid}: the reworded answer still contains the authored marker "
+                f"{marker!r}, so it is not a test of the athenaeum#1935 alternative"
+            )
+
+
+def test_repaired_probes_grade_correct_under_the_repair_athenaeum_1935(tmp_path: Path) -> None:
+    """The eight repaired probes grade CORRECT on the reworded answers under
+    today's `probes.yaml`, and INCORRECT under the pre-repair marker set --
+    re-graded by this module over one synthetic store and two corpora.
+
+    This is the paired re-grade athenaeum#1935 asks for, with the pairing on
+    the GRADING RULE rather than on the run: identical stored rows, graded
+    before and after the marker repair, which is exactly the comparison
+    ``GRADER_REVISION`` exists to keep legible (`corpus_digest` digests pages
+    only, so a probes.yaml-only change moves no other header field)."""
+    repaired_corpus = _core_corpus()
+    control_corpus = _authored_only(repaired_corpus)
+    store = _reworded_store(tmp_path, repaired_corpus)
+
+    before = grade_store(store, control_corpus)
+    after = grade_store(store, repaired_corpus)
+
+    expected = set(REWORDED_ANSWERS_1935)
+    assert set(before) == expected
+    assert set(after) == expected
+
+    # Pinned counts. Before the repair every one of the eight is a
+    # marker-miss-with-delivery -- delivered, fact present, substring
+    # missed. After it, every one grades correct and no miss is left.
+    before_summary = summarize(before)
+    assert (
+        before_summary.n_graded,
+        before_summary.correct,
+        before_summary.marker_miss_with_delivery,
+        before_summary.delivery_gap,
+    ) == (8, 0, 8, 0)
+    after_summary = summarize(after)
+    assert (
+        after_summary.n_graded,
+        after_summary.correct,
+        after_summary.marker_miss_with_delivery,
+        after_summary.delivery_gap,
+    ) == (8, 8, 0, 0)
+
+    # Paired: all eight flip incorrect-to-correct, none the other way.
+    discord = discordant_pairs(before, after)
+    assert discord.paired_n == 8
+    assert discord.correct_to_incorrect == ()
+    assert set(discord.incorrect_to_correct) == expected
+
+    # And the classification scope empties out: there is no marker-miss cell
+    # left on the repaired side to classify.
+    assert set(miss_and_discordant_cells(before, after)) == expected
+    assert {pid for pid, c in after.items() if c.marker_miss_with_delivery} == set()
+
+
+def test_remote_equipment_stipend_cap_is_left_unrepaired_athenaeum_1935() -> None:
+    """athenaeum#1935 deliberately did NOT repair this probe: athenaeum#1932's
+    two independent blind passes disagree about whether its 2026-09-19 answer
+    carried the asked fact (`genuine_omission` from the five-way classifier,
+    "asked fact present" from the separate asked-fact pass). A repair chosen
+    while the ground truth is contested would be a guess, so the probe keeps
+    its single authored marker until the disagreement is settled."""
+    corpus = _core_corpus()
+    probe = next(p for p in corpus.probes if p.id == "remote_equipment_stipend_cap")
+    assert probe.answer_markers == (
+        ("policy-remote-equipment-stipend", "visible to each employee in the expense system"),
+    )

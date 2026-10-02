@@ -247,7 +247,18 @@
   must_not_rank: [repo-rowanwrenfield]
   distractor_terms: ["Rowan Wrenfield", "rowanwrenfield", "pricing"]
   answer_tokens: ["Ashcaldera"]
-  answer_markers: {person-rowan-wrenfield: "pricing committee"}
+  answer_markers:
+    # Two ALTERNATIVES (issue athenaeum#1935, repairing the
+    # marker_broken_fact_present classification athenaeum#1932 recorded for
+    # this probe). The first is the marker authored under athenaeum#1831; it
+    # names the committee Rowan sits on rather than the decision the query
+    # asks about, so any answer that states the decision without reciting
+    # the committee membership graded wrong. The second is the decision
+    # itself, sliced to the clause with no punctuation or inflected opening
+    # verb for a paraphrase to break on.
+    person-rowan-wrenfield:
+      - "pricing committee"
+      - "day rate flat"
   note: >-
     A decision is made by a PERSON. The eponymous repository shares almost all
     of the query's vocabulary and must not outrank the person page.
@@ -341,7 +352,18 @@
   must_not_rank: [client-verity, client-solent]
   distractor_terms: ["retainer", "client"]
   answer_tokens: ["Trevanquil"]
-  answer_markers: {client-alderway: "12-person strategy consultancy"}
+  answer_markers:
+    # Two ALTERNATIVES (issue athenaeum#1935, repairing the
+    # marker_incidental_detail classification athenaeum#1932 recorded for
+    # this probe). The first is the marker authored under athenaeum#1831: it
+    # encodes Alderway's headcount and sector, which this probe's query --
+    # "which clients are currently on retainer?" -- never asks for. The
+    # second is the same page's own assertion of the retainer status the
+    # query DOES ask about. The incidental marker is kept, not removed, so
+    # no answer that graded correct before grades wrong now.
+    client-alderway:
+      - "12-person strategy consultancy"
+      - "largest retainer client by revenue"
   note: >-
     Verity is a former client and Solent only a prospect. grep-reachable via:
     client-verity: retainer; client-solent: client (stemmed, "clients" vs
@@ -392,8 +414,19 @@
   distractor_terms: ["Driftgate", "migration", "quarterly funding"]
   answer_tokens: ["Fenrivet", "Hollowcairn"]
   answer_markers:
-    project-driftgate-migration: "92 thousand GBP per quarter"
-    project-driftgate-migration-status: "92 thousand GBP per quarter"
+    # Two ALTERNATIVES per page (issue athenaeum#1935, repairing the
+    # marker_broken_fact_present classification athenaeum#1932 recorded for
+    # this probe). The authored marker carries the "per quarter" cadence
+    # inline, so an answer that reports the figure and the cadence in the
+    # query's own phrasing ("quarterly funding of 92 thousand GBP") missed
+    # it. The alternative is the figure alone -- still the planted fact,
+    # since the cadence is what the query supplies.
+    project-driftgate-migration:
+      - "92 thousand GBP per quarter"
+      - "92 thousand GBP"
+    project-driftgate-migration-status:
+      - "92 thousand GBP per quarter"
+      - "92 thousand GBP"
   note: >-
     Redundancy probe (duplication shape, not a split): the programme page and
     an independently written status note both plant the same quarterly
@@ -410,8 +443,20 @@
   distractor_terms: ["Harrowmere Protocol", "payment sign-off", "independent approvers"]
   answer_tokens: ["Duskbriar", "Emberwick"]
   answer_markers:
-    policy-dual-signoff: "6400 GBP requires two independent approvers"
-    policy-dual-signoff-brief: "6400 GBP requires two independent approvers"
+    # Two ALTERNATIVES per page (issue athenaeum#1935, repairing the
+    # marker_broken_fact_present classification athenaeum#1932 recorded for
+    # this probe). The authored marker spans the threshold figure AND the
+    # requirement in one unbroken run, so it breaks on a thousands separator
+    # ("6,400"), on a currency symbol, and on any answer that states the
+    # requirement before the threshold. The alternative is the requirement
+    # clause the query asks for ("what does the Harrowmere Protocol require
+    # for payment sign-off?"), which carries no digits to reformat.
+    policy-dual-signoff:
+      - "6400 GBP requires two independent approvers"
+      - "two independent approvers"
+    policy-dual-signoff-brief:
+      - "6400 GBP requires two independent approvers"
+      - "two independent approvers"
   note: >-
     Redundancy probe (duplication shape): the firm's own Harrowmere Protocol
     page and a new-hire brief were written up independently and both state
@@ -428,8 +473,21 @@
   distractor_terms: ["Rivencourt practice", "practice lead", "Castellane"]
   answer_tokens: ["Larkmantle", "Thornwistle"]
   answer_markers:
-    person-mira-castellane: "a role she has held since March 2019"
-    person-mira-castellane-directory: "a role she has held since March 2019"
+    # Two ALTERNATIVES per page (issue athenaeum#1935, repairing the
+    # marker_broken_fact_present classification athenaeum#1932 recorded for
+    # this probe). The authored marker opens with the body's own appositive
+    # ("a role she has held"), which an answer that re-voices the same fact
+    # as "she has led the Rivencourt practice since March 2019" does not
+    # reproduce. The alternative is the "since when" half the query asks
+    # for; the "who" half cannot be a marker at all, because
+    # "the Rivencourt practice" is a substring of this probe's own query and
+    # validate_core refuses a marker drawn from the query's vocabulary.
+    person-mira-castellane:
+      - "a role she has held since March 2019"
+      - "since March 2019"
+    person-mira-castellane-directory:
+      - "a role she has held since March 2019"
+      - "since March 2019"
   note: >-
     Redundancy probe (duplication shape): Mira Castellane's own profile and a
     directory listing captured independently both state the same practice
@@ -646,7 +704,18 @@
   must_not_rank: [project-portal-hosting]
   distractor_terms: ["Lighthouse migration", "rollback plan", "platform migration"]
   answer_tokens: ["Ambervost"]
-  answer_markers: {project-lighthouse-migration: "unresolved data-integrity tickets"}
+  answer_markers:
+    # Two ALTERNATIVES (issue athenaeum#1935, repairing the
+    # marker_broken_fact_present classification athenaeum#1932 recorded for
+    # this probe). The authored marker is hyphenated ("data-integrity") and
+    # the marker normalizer collapses whitespace only (athenaeum#1843), so
+    # an answer writing "data integrity tickets" missed it; it also states
+    # the decommission gate rather than the rollback plan the query asks
+    # for. The alternative is the page's own one-sentence statement of what
+    # a triggered rollback does, and carries no punctuation to reformat.
+    project-lighthouse-migration:
+      - "unresolved data-integrity tickets"
+      - "reads move back to the legacy system"
   note: >-
     Long-page tier (athenaeum#1779). Same shape as the two probes above.
     must_not_rank (athenaeum#1777): Portal hosting migration shares
@@ -772,15 +841,39 @@
       Ashenglow,
     ]
   answer_markers:
-    {
-      client-alderway: "12-person strategy consultancy",
-      client-bluewater: "coastal logistics operator",
-      client-atlas: "haulage operator",
-      client-larchmoor: "fabric wholesaler",
-      client-dunmere: "data-services firm",
-      client-hollowick: "structurally identical to Atlas Freight's arrangement",
-      client-castleford: "board-level advisory",
-    }
+    # Two ALTERNATIVES per page (issue athenaeum#1935, repairing the
+    # marker_broken_fact_present classification athenaeum#1932 recorded for
+    # this probe -- the one it saw on BOTH the 2026-09-19 and 2026-10-01
+    # readings, so not run-specific). `grade_correctness` requires EVERY
+    # answer-bearing page's marker, so this probe needed all seven authored
+    # descriptors reproduced verbatim: a hyphenated headcount
+    # ("12-person"), a hyphenated sector ("data-services"), a possessive
+    # cross-reference ("Atlas Freight's arrangement"). The alternative on
+    # each page is the client's own NAME, which is what this probe's query
+    # -- "which clients are on a standing retainer?" -- actually asks for,
+    # and which validate_core confirms occurs on no page outside
+    # expected_uids.
+    client-alderway:
+      - "12-person strategy consultancy"
+      - "Alderway Advisory"
+    client-bluewater:
+      - "coastal logistics operator"
+      - "Bluewater Marine"
+    client-atlas:
+      - "haulage operator"
+      - "Atlas Freight"
+    client-larchmoor:
+      - "fabric wholesaler"
+      - "Larchmoor Textiles"
+    client-dunmere:
+      - "data-services firm"
+      - "Dunmere Analytics"
+    client-hollowick:
+      - "structurally identical to Atlas Freight's arrangement"
+      - "Hollowick Freight"
+    client-castleford:
+      - "board-level advisory"
+      - "Castleford Group"
   report_only: true
   note: >-
     Correct set size: 7 clients. Three (Alderway, Bluewater, Atlas) are
@@ -827,14 +920,39 @@
   answer_tokens:
     [Fennorack, Larkwhistle, Nettlebriar, Palewick, Quietmarrow, Silvermoss]
   answer_markers:
-    {
-      tool-buildpipe: "before anything ships",
-      tool-ledgerscribe: "invoicing tool",
-      tool-shiftboard: "spreadsheet-based rota",
-      tool-formready: "own templates",
-      tool-auditline: "which client record and when",
-      tool-rosterkeep: "worked which engagement over time",
-    }
+    # ALTERNATIVES on five of the six pages (issue athenaeum#1935, repairing
+    # the marker_broken_fact_present classification athenaeum#1932 recorded
+    # for this probe). As with the retainer aggregation above,
+    # `grade_correctness` requires every page's marker, and four of the
+    # authored six are connective fragments of their sentence rather than
+    # the tool's own identity ("before anything ships", "own templates",
+    # "which client record and when", "worked which engagement over time") --
+    # exactly what an aggregate answer re-voices. Each alternative is that
+    # page's own description of what the tool IS, which is what the query
+    # asks for. A tool's bare name cannot be the alternative here (unlike
+    # the client names above): every one is a single content term, and
+    # validate_core requires at least two.
+    #
+    # tool-ledgerscribe is deliberately left with its single authored
+    # marker: "invoicing tool" is already that page's minimal statement of
+    # the tool's identity, so an alternative would either repeat it as a
+    # superset or loosen the probe for nothing.
+    tool-buildpipe:
+      - "before anything ships"
+      - "internal build and release pipeline"
+    tool-ledgerscribe: "invoicing tool"
+    tool-shiftboard:
+      - "spreadsheet-based rota"
+      - "staffing and scheduling tool"
+    tool-formready:
+      - "own templates"
+      - "in-house proposal generator"
+    tool-auditline:
+      - "which client record and when"
+      - "who accessed which client record"
+    tool-rosterkeep:
+      - "worked which engagement over time"
+      - "worked which engagement"
   report_only: true
   note: >-
     Correct set size: 6 tools. tool-buildpipe is pre-existing
