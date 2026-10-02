@@ -27,7 +27,7 @@ import pytest
 
 import tests.evals.north_star_report as nsr
 from tests.evals.containment import GridCell, ResultStore
-from tests.evals.corpus import Probe, build_corpus, deep_hop_uids
+from tests.evals.corpus import Corpus, Page, Probe, build_corpus, deep_hop_uids
 from tests.evals.north_star_report import (
     GRADER_REVISION,
     SIZE_SCALE_ORDER,
@@ -2741,3 +2741,73 @@ def test_grader_revision_names_this_issue() -> None:
     matches, so two report tables over the same stored rows -- one graded
     before, one after -- must be distinguishable from their headers alone."""
     assert GRADER_REVISION == "athenaeum#1843"
+
+
+def _synthetic_marker_probe(marker: str) -> tuple[Probe, Corpus]:
+    """A standalone (probe, corpus) pair with ONE page planting *marker* --
+    invented text, never a real ``probes.yaml`` marker or answer (issue
+    athenaeum#1932 acceptance criterion: a grader test must use synthetic
+    answer strings only, never transcript or probe text)."""
+    uid = "synth-marker-page"
+    page = Page(
+        uid=uid,
+        type="note",
+        name="Synthetic Marker Page",
+        body=f"This synthetic page plants the fact: Zalqor9. {marker}",
+        tier="core",
+    )
+    probe = Probe(
+        id="synth_marker_probe",
+        probe_class="single_hop",
+        query="synthetic query",
+        expected_uids=(uid,),
+        answer_tokens=("Zalqor9",),
+        answer_markers=((uid, marker),),
+    )
+    corpus = Corpus(pages=[page], probes=[probe], scale="synthetic-1932-grader")
+    return probe, corpus
+
+
+def _synthetic_marker_record(answer: str) -> RolloutRecord:
+    return _record(
+        arm=Arm.ORACLE,
+        probe_id="synth_marker_probe",
+        probe_class="single_hop",
+        answer=answer,
+    )
+
+
+def test_marker_acceptance_pins_todays_grader_revision_athenaeum_1932() -> None:
+    """Pins today's ``grade_correctness`` marker-matching behaviour (issue
+    athenaeum#1932 acceptance criterion): a repair to ``answer_markers`` or a
+    widened normalizer must show up here as a deliberate edit, never a
+    silent pass. Uses synthetic answer strings only -- never a real
+    transcript or probe answer.
+
+    ``GRADER_REVISION`` guards the SAME contract this test pins; a future
+    repair bumping that constant (issue athenaeum#1932's proposed follow-up)
+    is expected to also touch this test.
+    """
+    # A thousands separator inside a figure marker: punctuation is not
+    # normalized, so "4,500" does not match a marker of "4500".
+    probe, corpus = _synthetic_marker_probe("the budget line is 4500 per seat")
+    record = _synthetic_marker_record("The budget line is 4,500 per seat.")
+    assert grade_correctness(record, probe, corpus) is False
+
+    # A parenthetical inserted inside the marker phrase.
+    probe, corpus = _synthetic_marker_probe("pricing committee")
+    record = _synthetic_marker_record("It went to the pricing (internal) committee.")
+    assert grade_correctness(record, probe, corpus) is False
+
+    # A shortened clause that keeps only the key figure.
+    probe, corpus = _synthetic_marker_probe("within a couple of seconds of submission")
+    record = _synthetic_marker_record("It resolves within seconds.")
+    assert grade_correctness(record, probe, corpus) is False
+
+    # A marker split across a line wrap grades correct -- whitespace is the
+    # one thing the marker normalizer does collapse (issue athenaeum#1843).
+    probe, corpus = _synthetic_marker_probe("vendor stopped shipping security patches")
+    record = _synthetic_marker_record(
+        "The vendor stopped shipping security\npatches, per the decision record."
+    )
+    assert grade_correctness(record, probe, corpus) is True
