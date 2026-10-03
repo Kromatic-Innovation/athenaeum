@@ -4531,6 +4531,232 @@ def tier3_merge_full_params(
     }
 
 
+#: A markdown list-item line: indent, marker, and the whitespace separating
+#: the marker from the item's text. Not ``^``-anchored on purpose — callers
+#: ``.match()`` it at a known line start, and a ``^`` without ``re.MULTILINE``
+#: would only ever match at offset 0. Issue athenaeum#1942 reads all three
+#: groups so a synthesized sibling item inherits the list's own style instead
+#: of imposing one.
+_LIST_ITEM_LINE_RE = re.compile(r"(\s*)([-*+]|\d+[.)])(\s+)")
+
+#: ANY footnote label occurrence — an inline reference (``[^2]``) or a
+#: definition (``[^2]:``). Deliberately broader than :data:`_FOOTNOTE_DEF_RE`
+#: below, which matches definitions only: deciding whether a label is already
+#: SPENT on a page has to count one that is merely referenced and never
+#: defined, because handing that number to a new fact would silently adopt the
+#: page's dangling reference as that fact's provenance (issue athenaeum#1942).
+_FOOTNOTE_LABEL_RE = re.compile(r"\[\^([^\]\s]+)\]")
+
+#: A footnote DEFINITION inside one op's ``text``. Line-anchored with
+#: ``re.MULTILINE`` rather than at offset 0, because op text is a FRAGMENT: a
+#: model routinely emits ``"Beta.[^1]\\n\\n[^1]: src/b.md"`` in a single op, where
+#: the definition starts after a newline rather than at the string's head.
+_FOOTNOTE_OP_DEF_RE = re.compile(r"^[ \t]*\[\^([^\]\s]+)\]:", re.MULTILINE)
+
+
+def _is_label_definition(text: str, start: int, end: int) -> bool:
+    """True when the label match at ``[start, end)`` in *text* is a definition.
+
+    A definition is ``[^L]:`` with nothing but whitespace between it and the
+    start of its line; everything else is an inline reference. Mirrors
+    :data:`_FOOTNOTE_OP_DEF_RE`, but answers the question for one already-found
+    :data:`_FOOTNOTE_LABEL_RE` match rather than re-scanning.
+    """
+    if end >= len(text) or text[end] != ":":
+        return False
+    line_start = text.rfind("\n", 0, start) + 1
+    return not text[line_start:start].strip()
+
+
+def _list_item_block(body: str, pos: int) -> tuple[int, str, str, str] | None:
+    """Locate the list item containing *pos*, or ``None`` if there is none.
+
+    Returns ``(block_end, indent, marker, separator)`` where ``block_end`` is
+    the offset just past the item's last character — the item's own line plus
+    any continuation lines and nested list beneath it, so a sibling inserted
+    there lands AFTER the whole item rather than between an item and its own
+    continuation. ``None`` means *pos* is on a line that is not a list item
+    (a heading, a prose paragraph, a footnote definition), where the
+    pre-athenaeum#1942 character-splice behaviour is correct and is kept.
+    """
+    line_start = body.rfind("\n", 0, pos) + 1
+    line_end = body.find("\n", line_start)
+    if line_end == -1:
+        line_end = len(body)
+    match = _LIST_ITEM_LINE_RE.match(body, line_start, line_end)
+    if match is None:
+        return None
+    indent, marker, separator = match.group(1), match.group(2), match.group(3)
+    end = line_end
+    while end < len(body):
+        next_start = end + 1
+        next_end = body.find("\n", next_start)
+        if next_end == -1:
+            next_end = len(body)
+        line = body[next_start:next_end]
+        if not line.strip():
+            break
+        if len(line) - len(line.lstrip()) <= len(indent):
+            break
+        end = next_end
+    return end, indent, marker, separator
+
+
+def _as_sibling_list_item(text: str, indent: str, marker: str, separator: str) -> str:
+    """Render *text* as sibling list item(s) of a ``indent + marker`` item.
+
+    Text the model already wrote as a list item keeps its own markers (only
+    its indentation is raised, never lowered, so a sibling of a nested item
+    cannot escape to the top level). Text that is NOT list-shaped — the
+    common case, and the one that used to be concatenated onto the preceding
+    item's sentence — is given this list's marker, with any further lines
+    indented to the item's content column so they read as that item's
+    continuation rather than as a new one.
+    """
+    stripped = text.strip("\n")
+    if not stripped.strip():
+        return ""
+    lines = stripped.split("\n")
+    first = lines[0]
+    if _LIST_ITEM_LINE_RE.match(first):
+        own_indent = first[: len(first) - len(first.lstrip())]
+        if len(own_indent) >= len(indent):
+            return stripped
+        pad = indent[len(own_indent) :]
+        return "\n".join(pad + line if line.strip() else line for line in lines)
+    continuation = " " * len(indent + marker + separator)
+    rendered = [indent + marker + separator + first.strip()]
+    for line in lines[1:]:
+        rendered.append(continuation + line.strip() if line.strip() else "")
+    return "\n".join(rendered)
+
+
+def _reallocate_op_footnote_labels(
+    existing_body: str, op_texts: list[str], consumed: list[tuple[int, int]]
+) -> list[str]:
+    """Give every footnote label an op batch DEFINES one that is actually free.
+
+    Issue athenaeum#1942. The patch-mode merge prompt shows the model a
+    SELECTED WINDOW of the page (:func:`_select_merge_section`, issue
+    athenaeum#1181), so it cannot see which labels the rest of the page already
+    spends and numbers its citations from ``[^1]`` every time. Nothing
+    renumbered them, so on an aggregate page receiving many merges every
+    merge's citation collided with the last one's and provenance for each fact
+    became ambiguous — 16 labels reused across unrelated subjects on the page
+    this issue was filed from. This is the allocation discipline
+    :func:`_append_source_citation` already applies on the citation-only path,
+    extended to the op applier.
+
+    Only labels this batch DEFINES are candidates. A label the batch merely
+    REFERENCES points at a definition the page already carries, so renumbering
+    it would dangle the reference — the opposite defect.
+
+    *consumed* is the spans of *existing_body* that ``replace`` ops are about
+    to delete. A label occurring only inside one of them is being RE-STATED,
+    not collided with (a ``replace`` that rewrites ``[^1]: src/a.md`` to
+    ``[^1]: src/a-corrected.md`` must keep its label, or the page's own inline
+    ``[^1]`` is left pointing at nothing), so it keeps its label even though
+    the page still references it.
+
+    Fresh labels continue from the highest number already spent anywhere on
+    the page — matching :func:`_append_source_citation`, and never recycling a
+    number a human may have retired.
+
+    **Labels bind BATCH-LOCALLY, and that is a decided ambiguity.** When one
+    op references ``[^1]`` and another op in the same batch DEFINES ``[^1]``,
+    the reference binds to the batch's own definition even on a page that
+    already defines ``[^1]`` — the two readings are textually identical and
+    something has to be picked. Batch-local is picked because it is the shape
+    nearly every real merge has: the model emits one op inserting the cited
+    clause and a second appending that clause's definition, numbered from
+    ``[^1]`` because the page's footnote block was outside its window. Binding
+    page-first instead would be strictly worse on exactly that input — the new
+    clause would cite the page's older source AND the batch's own definition
+    would land orphaned, two defects where this direction has one. Refusing
+    the batch (degrading to the ~10x-cost full echo) would reject the dominant
+    correct shape, so it is not an option either. A batch that references a
+    label without defining it anywhere is unambiguous and is never touched.
+    """
+    definitions_per_op = [
+        [m.group(1) for m in _FOOTNOTE_OP_DEF_RE.finditer(text)] for text in op_texts
+    ]
+    if not any(definitions_per_op):
+        return list(op_texts)
+
+    surviving = existing_body
+    for start, end in sorted(consumed, reverse=True):
+        surviving = surviving[:start] + surviving[end:]
+    spent = set(_FOOTNOTE_LABEL_RE.findall(surviving))
+    restated = {
+        label
+        for start, end in consumed
+        for label in _FOOTNOTE_LABEL_RE.findall(existing_body[start:end])
+    }
+
+    numeric = {int(label) for label in spent | restated if label.isdigit()}
+    next_number = (max(numeric) + 1) if numeric else 1
+
+    def allocate() -> str:
+        nonlocal next_number
+        label = str(next_number)
+        next_number += 1
+        return label
+
+    # One target per (label, k-th definition of it in this batch). Two ops
+    # defining the same label mean two DIFFERENT sources, so they cannot share
+    # a target -- collapsing them is the very reuse this function exists to
+    # prevent.
+    targets: dict[str, list[str]] = {}
+    taken: set[str] = set()
+    for op_definitions in definitions_per_op:
+        for label in op_definitions:
+            assigned = targets.setdefault(label, [])
+            keep = (
+                not assigned
+                and label not in taken
+                and (label in restated or label not in spent)
+            )
+            if keep:
+                assigned.append(label)
+                taken.add(label)
+                if label.isdigit():
+                    next_number = max(next_number, int(label) + 1)
+            else:
+                fresh = allocate()
+                assigned.append(fresh)
+                taken.add(fresh)
+
+    rewritten: list[str] = []
+    seen_definitions: dict[str, int] = {}
+    for index, text in enumerate(op_texts):
+        own = set(definitions_per_op[index])
+        # A reference anywhere in an op that also defines the label binds to
+        # THAT op's definition, even when the reference is written first --
+        # which is the ordinary shape: one op inserts the cited clause and a
+        # second appends its definition.
+        base = {label: seen_definitions.get(label, 0) for label in own}
+        emitted = dict.fromkeys(own, 0)
+
+        def substitute(match: "re.Match[str]", _text: str = text) -> str:
+            label = match.group(1)
+            assigned = targets.get(label)
+            if not assigned:
+                return match.group(0)
+            if _is_label_definition(_text, match.start(), match.end()):
+                position = base.get(label, 0) + emitted.get(label, 0)
+                emitted[label] = emitted.get(label, 0) + 1
+            elif label in own:
+                position = base[label]
+            else:
+                position = max(seen_definitions.get(label, 0) - 1, 0)
+            return f"[^{assigned[min(position, len(assigned) - 1)]}]"
+
+        rewritten.append(_FOOTNOTE_LABEL_RE.sub(substitute, text))
+        for label in definitions_per_op[index]:
+            seen_definitions[label] = seen_definitions.get(label, 0) + 1
+    return rewritten
+
+
 class MergeOpsError(Exception):
     """A patch-mode merge could not be applied deterministically (issue athenaeum#469).
 
@@ -4551,14 +4777,41 @@ def apply_merge_ops(existing_body: str, ops: list[dict[str, Any]]) -> str:
 
     An empty ``ops`` list is a valid no-op (issue athenaeum#297 dedup): the body is
     returned unchanged.
+
+    Issue athenaeum#1942 added the two structural disciplines this applier
+    was missing, after a real aggregate page was found holding ~271 cited
+    clauses in two run-on list items with 16 reused footnote labels:
+
+    * **A merge never writes INTO an existing list item.** An
+      ``insert_after`` whose anchor lands on a list-item line is relocated to
+      just past that whole item and its text rendered as a new sibling item
+      (:func:`_list_item_block`, :func:`_as_sibling_list_item`). A raw splice
+      at ``anchor_end`` concatenated each night's new clause onto the bullet
+      the model had anchored on — the prompt asks for the smallest verbatim
+      anchor, so anchoring inside a bullet is the NORMAL case, and one bullet
+      accumulated hundreds of clauses. The discipline is scoped to list items:
+      an inline amendment to a PROSE line (``HQ: SF.`` ->
+      ``HQ: SF. (moved 2024)``) is a legitimate, intended use and is
+      unchanged.
+    * **Every label the batch defines is allocated against the whole page**
+      (:func:`_reallocate_op_footnote_labels`), the same discipline
+      :func:`_append_source_citation` already applied on the citation-only
+      path.
+
+    Both run before the spans are built, so the overlap check and the
+    single-pass application see the final text.
     """
     if not isinstance(ops, list):
         raise MergeOpsError(f"ops must be a list, got {type(ops).__name__}")
     if not ops:
         return existing_body
 
-    edits: list[tuple[int, int, str]] = []  # (start, end, replacement)
-    appends: list[str] = []
+    # Validate every op and locate its anchor against the ORIGINAL body
+    # first, so a batch that cannot apply raises before any text is derived
+    # from it.
+    kinds: list[str] = []
+    texts: list[str] = []
+    anchor_spans: list[tuple[int, int]] = []
     for i, op in enumerate(ops):
         if not isinstance(op, dict):
             raise MergeOpsError(f"op {i} is not an object")
@@ -4567,7 +4820,9 @@ def apply_merge_ops(existing_body: str, ops: list[dict[str, Any]]) -> str:
         if kind == "append_section":
             if not isinstance(text, str):
                 raise MergeOpsError(f"op {i} (append_section) missing text")
-            appends.append(text)
+            kinds.append(kind)
+            texts.append(text)
+            anchor_spans.append((-1, -1))
             continue
         if kind not in ("replace", "insert_after"):
             raise MergeOpsError(f"op {i} has unknown op kind {kind!r}")
@@ -4581,11 +4836,38 @@ def apply_merge_ops(existing_body: str, ops: list[dict[str, Any]]) -> str:
             raise MergeOpsError(f"op {i} anchor not found: {anchor!r}")
         if existing_body.find(anchor, first + 1) != -1:
             raise MergeOpsError(f"op {i} anchor is not unique: {anchor!r}")
-        if kind == "replace":
-            edits.append((first, first + len(anchor), text))
-        else:  # insert_after — a zero-width edit at the anchor's end
-            pos = first + len(anchor)
-            edits.append((pos, pos, text))
+        kinds.append(kind)
+        texts.append(text)
+        anchor_spans.append((first, first + len(anchor)))
+
+    # Issue athenaeum#1942: fresh footnote labels, decided against the page
+    # MINUS the spans the replaces are about to consume.
+    texts = _reallocate_op_footnote_labels(
+        existing_body,
+        texts,
+        [span for kind, span in zip(kinds, anchor_spans) if kind == "replace"],
+    )
+
+    edits: list[tuple[int, int, str]] = []  # (start, end, replacement)
+    appends: list[str] = []
+    for kind, (anchor_start, anchor_end), text in zip(kinds, anchor_spans, texts):
+        if kind == "append_section":
+            appends.append(text)
+        elif kind == "replace":
+            edits.append((anchor_start, anchor_end, text))
+        else:
+            # insert_after — a zero-width edit at the anchor's end, EXCEPT on
+            # a list-item line, where it is relocated past the whole item and
+            # written as a new sibling (issue athenaeum#1942).
+            block = _list_item_block(existing_body, anchor_end)
+            if block is None:
+                edits.append((anchor_end, anchor_end, text))
+                continue
+            block_end, indent, marker, separator = block
+            sibling = _as_sibling_list_item(text, indent, marker, separator)
+            edits.append(
+                (block_end, block_end, f"\n{sibling}" if sibling else "")
+            )
 
     # Reject genuinely overlapping consumed spans (a zero-width insert that
     # merely touches a boundary is allowed; two edits that consume the same
