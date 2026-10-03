@@ -4661,6 +4661,21 @@ def _reallocate_op_footnote_labels(
     Fresh labels continue from the highest number already spent anywhere on
     the page — matching :func:`_append_source_citation`, and never recycling a
     number a human may have retired.
+
+    **Labels bind BATCH-LOCALLY, and that is a decided ambiguity.** When one
+    op references ``[^1]`` and another op in the same batch DEFINES ``[^1]``,
+    the reference binds to the batch's own definition even on a page that
+    already defines ``[^1]`` — the two readings are textually identical and
+    something has to be picked. Batch-local is picked because it is the shape
+    nearly every real merge has: the model emits one op inserting the cited
+    clause and a second appending that clause's definition, numbered from
+    ``[^1]`` because the page's footnote block was outside its window. Binding
+    page-first instead would be strictly worse on exactly that input — the new
+    clause would cite the page's older source AND the batch's own definition
+    would land orphaned, two defects where this direction has one. Refusing
+    the batch (degrading to the ~10x-cost full echo) would reject the dominant
+    correct shape, so it is not an option either. A batch that references a
+    label without defining it anywhere is unambiguous and is never touched.
     """
     definitions_per_op = [
         [m.group(1) for m in _FOOTNOTE_OP_DEF_RE.finditer(text)] for text in op_texts

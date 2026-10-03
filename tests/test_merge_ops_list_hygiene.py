@@ -399,3 +399,59 @@ class TestFootnoteLabelAllocation:
         )
         assert "[^2]: src/b.md" in body
         assert "Beta.[^2]" in body
+
+
+class TestBatchLocalLabelBinding:
+    """The one genuinely ambiguous shape, and why it resolves this way.
+
+    A bare reference to ``[^1]`` in one op, with another op in the same batch
+    defining ``[^1]`` as a NEW source, is textually identical whether the model
+    meant the page's existing ``[^1]`` or its own. ``apply_merge_ops`` binds
+    batch-locally; these tests pin that choice and the properties that make it
+    the better of the two readings — see
+    ``_reallocate_op_footnote_labels``'s docstring for the full argument.
+    """
+
+    _PAGE = "# T\n\nAlpha.[^1]\n\n[^1]: src/a.md\n"
+
+    def _ambiguous_batch(self) -> str:
+        return apply_merge_ops(
+            self._PAGE,
+            [
+                {"op": "insert_after", "anchor": "Alpha.[^1]", "text": " Beta.[^1]"},
+                {"op": "append_section", "text": "[^1]: src/b.md"},
+            ],
+        )
+
+    def test_the_new_clause_binds_to_the_batchs_own_definition(self) -> None:
+        body = self._ambiguous_batch()
+        assert "Beta.[^2]" in body
+        assert "[^2]: src/b.md" in body
+
+    def test_the_pages_own_citation_is_left_untouched(self) -> None:
+        """Whatever the batch does, the page's existing provenance survives."""
+        body = self._ambiguous_batch()
+        assert "Alpha.[^1]" in body
+        assert "[^1]: src/a.md" in body
+
+    def test_neither_reading_is_allowed_to_reuse_or_dangle(self) -> None:
+        """The property that holds under EITHER intent, and is the point.
+
+        The pre-athenaeum#1942 applier produced two definitions of ``[^1]``
+        here. Binding page-first instead would have left the batch's own
+        definition orphaned. This direction does neither.
+        """
+        body = self._ambiguous_batch()
+        assert _reused_labels(body) == []
+        assert _dangling_refs(body) == set()
+        assert _orphan_defs(body) == set()
+
+    def test_a_batch_that_defines_nothing_stays_unambiguous(self) -> None:
+        """The converse, for contrast: no definition in the batch means the
+        reference can only mean the page's own, and is never rewritten."""
+        body = apply_merge_ops(
+            self._PAGE,
+            [{"op": "insert_after", "anchor": "Alpha.[^1]", "text": " Beta.[^1]"}],
+        )
+        assert "Beta.[^1]" in body
+        assert _DEF_RE.findall(body) == ["1"]
