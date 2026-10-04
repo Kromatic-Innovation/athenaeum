@@ -103,13 +103,17 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
-from collections.abc import Sequence
-from dataclasses import dataclass
+import sys
+import tempfile
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from athenaeum._retry import TransientAPIError, TransientError
+from athenaeum.cli_tool_bridge import ToolBridgeHost
 from athenaeum.models import adaptive_thinking_supported
 from athenaeum.outbound_pii import redact_outbound_text
 
@@ -1020,6 +1024,108 @@ def _looks_retryable(*blobs: str) -> bool:
     return any(marker in haystack for marker in _RETRYABLE_MARKERS)
 
 
+# ---------------------------------------------------------------------------
+# Opt-in eval-only tool passthrough (issue athenaeum#1951)
+# ---------------------------------------------------------------------------
+
+
+class CliToolBridgeError(RuntimeError):
+    """A config/protocol fault in the ``claude -p`` tool-passthrough path --
+    the bridge never connected, the subprocess never reported
+    ``apiKeySource: "none"``, an operator hook fired, or the stream carried
+    no init event at all. Never retried: these are the exact athenaeum#1936
+    class of mistake (a grid running hundreds of cells on a silently broken
+    configuration) and must stop the run, not look like an ordinary model
+    answer or a transient failure."""
+
+
+@dataclass(frozen=True)
+class CliToolLoopResult:
+    """Everything :meth:`ClaudeCliClient.run_tool_loop` observed for one
+    ``claude -p`` tool-passthrough spawn."""
+
+    #: Every stream-json event in order, with ``tool_use.name`` mapped back
+    #: from Claude Code's model-visible name to the spec name the caller
+    #: passed in (see :func:`_resolve_tool_naming`).
+    events: list[dict[str, Any]] = field(default_factory=list)
+    turns_exhausted: bool = False
+    #: The final ``result`` stream-json event (``subtype``/``usage``/etc).
+    result: dict[str, Any] = field(default_factory=dict)
+
+
+#: Matches the FastMCP-style namespacing :data:`tests.evals.rollout.RECALL_TOOL_NAME`
+#: already uses (``mcp__<server>__<tool>``) -- one non-greedy server segment,
+#: then the tool name (which may itself contain further ``__``).
+_MCP_NAME_RE = re.compile(r"^mcp__([A-Za-z0-9_-]+?)__(.+)$")
+
+
+def _resolve_tool_naming(
+    tool_names: Sequence[str],
+) -> tuple[str, dict[str, str], dict[str, str]]:
+    """Resolve the bridge's MCP server name and the two name mappings
+    :meth:`ClaudeCliClient.run_tool_loop` needs (section 3 of the athenaeum#1951 design).
+
+    Returns ``(server_name, served_by_spec, model_visible_by_spec)``:
+
+    * ``server_name``: the MCP server name the bridge child registers under.
+    * ``served_by_spec``: spec name -> the BARE name the child's
+      ``list_tools`` exposes it under.
+    * ``model_visible_by_spec``: spec name -> the exact name Claude Code
+      shows the model for it (what a ``tool_use`` stream event's ``name``
+      carries) -- used to build ``--allowedTools`` in spec order, and
+      (inverted by the caller) to map :class:`CliToolLoopResult` events back
+      to spec names so the transport's own namespacing never leaks out.
+
+    Raises ``ValueError`` when *tool_names* mixes ``mcp__<server>__*``-shaped
+    names with bare ones, or names more than one distinct server segment --
+    both are configuration mistakes this bridge cannot resolve silently.
+    """
+    prefixed: list[str] = []
+    bare: list[str] = []
+    servers: set[str] = set()
+    for name in tool_names:
+        match = _MCP_NAME_RE.match(name)
+        if match:
+            prefixed.append(name)
+            servers.add(match.group(1))
+        else:
+            bare.append(name)
+
+    if prefixed and bare:
+        raise ValueError(
+            f"mixed tool naming: {prefixed!r} look like MCP-namespaced "
+            f"('mcp__<server>__...') names but {bare!r} do not -- every "
+            "tool spec passed to run_tool_loop must either all carry that "
+            "prefix (one common server) or none may"
+        )
+    if prefixed:
+        if len(servers) != 1:
+            raise ValueError(
+                f"tool specs name more than one MCP server segment: "
+                f"{sorted(servers)!r} -- run_tool_loop serves exactly one "
+                "bridge server per call"
+            )
+        server_name = next(iter(servers))
+        served_by_spec: dict[str, str] = {}
+        model_visible_by_spec: dict[str, str] = {}
+        for name in prefixed:
+            match = _MCP_NAME_RE.match(name)
+            assert match is not None  # already matched above
+            served_by_spec[name] = match.group(2)
+            model_visible_by_spec[name] = name
+        return server_name, served_by_spec, model_visible_by_spec
+
+    # No ``mcp__`` prefix anywhere: the native-arm shape (bare ``grep`` /
+    # ``read``). Claude Code still namespaces whatever the bridge server
+    # serves, so the model-visible name becomes ``mcp__harness__<name>`` --
+    # a documented residual (see docs/modules/provider.md), not something
+    # this bridge can make byte-identical to the bare name.
+    server_name = "harness"
+    served_by_spec = {name: name for name in bare}
+    model_visible_by_spec = {name: f"mcp__harness__{name}" for name in bare}
+    return server_name, served_by_spec, model_visible_by_spec
+
+
 class _CliMessages:
     """The ``client.messages`` facade for the CLI backend."""
 
@@ -1047,6 +1153,7 @@ class ClaudeCliClient:
         binary: str | None = None,
         timeout: float | None = None,
         cwd: str | None = None,
+        tool_passthrough: bool = False,
     ) -> None:
         self.binary = binary or os.environ.get("ATHENAEUM_CLAUDE_CLI_BIN") or "claude"
         if timeout is None:
@@ -1062,6 +1169,15 @@ class ClaudeCliClient:
         # prompt`` already replaces the default agent persona.
         self.cwd = cwd or os.environ.get("TMPDIR") or "/tmp"
         self.messages = _CliMessages(self)
+        # Issue athenaeum#1951: opt-in eval-only tool passthrough. Defaults to
+        # ``False`` and NOTHING in this module ever sets it to ``True`` on a
+        # caller's behalf -- no env var, no config key, no call from
+        # ``_construct_client``/``build_llm_client``. The librarian (every
+        # production ``messages.create`` call site) therefore can never
+        # reach a tool-passthrough-enabled client; only a caller that passes
+        # the keyword argument explicitly at construction time
+        # (``tests.evals.harness.build_live_client``) can.
+        self.tool_passthrough = tool_passthrough
 
     def _build_argv(self, model: str, system_text: str) -> list[str]:
         # Issue athenaeum#543 (L4): the USER prompt is passed on STDIN (see ``_create``),
@@ -1105,6 +1221,23 @@ class ClaudeCliClient:
         return argv
 
     def _create(self, **params: Any) -> _CliResponse:
+        # Issue athenaeum#1951: the text-only path (this method, reached via
+        # ``messages.create``) must fail LOUD, not silently drop ``tools=``
+        # the way it did before this issue -- that silent drop is exactly
+        # what made athenaeum#1936's 384-cell grid record zero tool calls
+        # with no error. Checked FIRST, before the binary-presence check and
+        # before anything touches ``subprocess`` -- this applies regardless
+        # of ``self.tool_passthrough``: the text-only argv this method
+        # builds is never parameterized by it, and the opt-in surface this
+        # issue adds is the separate :meth:`run_tool_loop` method, never
+        # this one.
+        if params.get("tools"):
+            raise ValueError(
+                "ClaudeCliClient.messages.create() does not support tools= -- "
+                "the claude-cli text-only path silently dropped it before "
+                "issue athenaeum#1951. Use ClaudeCliClient.run_tool_loop() "
+                "instead (opt-in, eval-only tool passthrough)."
+            )
         model = params.get("model", "") or ""
         system_text = _text_from_system(params.get("system"))
         user_text = _text_from_messages(params.get("messages"))
@@ -1258,6 +1391,280 @@ class ClaudeCliClient:
             stop_reason=stop_reason,
             model=model or str(envelope.get("model") or ""),
         )
+
+    def _build_tool_argv(
+        self,
+        model: str,
+        system_text: str,
+        mcp_config_path: str,
+        allowed_tools: Sequence[str],
+        max_turns: int,
+    ) -> list[str]:
+        """Golden argv for the opt-in tool-passthrough path (issue
+        athenaeum#1951, design section 3; flag order matches the evidence
+        table's row 7). Unlike :meth:`_build_argv`, this is never reached
+        from :meth:`_create` -- only from :meth:`run_tool_loop`, and only
+        when ``self.tool_passthrough`` is set.
+        """
+        argv = [
+            self.binary,
+            "-p",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--include-hook-events",
+        ]
+        if model:
+            argv += ["--model", model]
+        if system_text:
+            argv += ["--system-prompt", system_text]
+        # ``--setting-sources ""`` REPLACES ``CLAUDE_CODE_SAFE_MODE`` on this
+        # path only (section 3/5 of the design): safe mode disables
+        # ``--mcp-config`` servers entirely (evidence row 1), which would
+        # defeat the whole point of this bridge. ``--setting-sources ""`` +
+        # ``--strict-mcp-config`` + the fresh ``cwd`` this call runs from
+        # keep the SAME no-operator-hooks/no-user-config guarantee
+        # athenaeum#1908 relies on, verified at runtime by the
+        # ``hook_started`` guard below.
+        argv += ["--setting-sources", ""]
+        argv.append("--no-session-persistence")
+        argv += ["--max-turns", str(max_turns)]
+        # ``--tools ""`` disables Claude Code's BUILT-IN tools only -- MCP
+        # tools survive it (evidence row 2) -- so the bridge server below is
+        # the model's only tool surface.
+        argv += ["--tools", ""]
+        argv += ["--mcp-config", mcp_config_path]
+        argv.append("--strict-mcp-config")
+        # Variadic and LAST: nothing follows it to be swallowed.
+        argv += ["--allowedTools", *allowed_tools]
+        return argv
+
+    def run_tool_loop(
+        self,
+        *,
+        model: str,
+        system: str,
+        user_prompt: str,
+        tools: list[dict[str, Any]],
+        tool_executor: Callable[[str, dict[str, Any]], str],
+        max_turns: int,
+    ) -> CliToolLoopResult:
+        """Opt-in, eval-only tool passthrough (issue athenaeum#1951).
+
+        Drives *tool_executor* (never raising out of this method -- an
+        executor exception becomes the same api-mode error string
+        :func:`tests.evals.rollout.run_api_tool_loop` produces, via
+        :class:`athenaeum.cli_tool_bridge.ToolBridgeHost`) through a per-call
+        MCP bridge server over a private Unix socket, and normalizes the
+        resulting ``--output-format stream-json`` events into a
+        :class:`CliToolLoopResult`.
+
+        Raises ``RuntimeError`` immediately, without spawning anything, when
+        this client's opt-in flag is not set -- see ``__init__``'s own
+        docstring for why nothing in this module can set that flag for a
+        caller.
+        """
+        if not self.tool_passthrough:
+            raise RuntimeError(
+                "ClaudeCliClient.run_tool_loop() requires the opt-in "
+                "tool-passthrough flag to be set at client construction "
+                "time (issue athenaeum#1951) -- this client was not built "
+                "that way"
+            )
+
+        tool_names = [str(t["name"]) for t in tools]
+        server_name, served_by_spec, model_visible_by_spec = _resolve_tool_naming(tool_names)
+        spec_by_model_visible = {v: k for k, v in model_visible_by_spec.items()}
+
+        if shutil.which(self.binary) is None and not os.path.exists(self.binary):
+            raise RuntimeError(
+                f"claude CLI not found on PATH as {self.binary!r}; the "
+                "claude-cli provider requires an installed, logged-in Claude "
+                "Code (set ATHENAEUM_CLAUDE_CLI_BIN to override the binary)"
+            )
+
+        tmpdir = tempfile.mkdtemp(prefix="ath-tb-")
+        try:
+            socket_path = os.path.join(tmpdir, "bridge.sock")
+            # macOS `sun_path` is 104 bytes including the NUL terminator;
+            # fall back to ``/tmp`` (shorter on every observed macOS host)
+            # once the path would leave no real margin (design section 3).
+            if len(socket_path.encode("utf-8")) > 100:
+                shutil.rmtree(tmpdir, ignore_errors=True)
+                tmpdir = tempfile.mkdtemp(prefix="ath-tb-", dir="/tmp")
+                socket_path = os.path.join(tmpdir, "bridge.sock")
+            os.chmod(tmpdir, 0o700)
+
+            tools_path = os.path.join(tmpdir, "tools.json")
+            tools_payload = [
+                {
+                    "served_name": served_by_spec[str(t["name"])],
+                    "spec_name": str(t["name"]),
+                    "description": t.get("description", ""),
+                    "input_schema": t.get("input_schema") or {},
+                }
+                for t in tools
+            ]
+            with open(tools_path, "w", encoding="utf-8") as f:
+                json.dump(tools_payload, f)
+
+            mcp_config_path = os.path.join(tmpdir, "mcp.json")
+            mcp_config = {
+                "mcpServers": {
+                    server_name: {
+                        "type": "stdio",
+                        "command": sys.executable,
+                        "args": [
+                            "-m",
+                            "athenaeum.cli_tool_bridge",
+                            "--socket",
+                            socket_path,
+                            "--tools",
+                            tools_path,
+                            "--server-name",
+                            server_name,
+                        ],
+                        "env": {},
+                    }
+                }
+            }
+            with open(mcp_config_path, "w", encoding="utf-8") as f:
+                json.dump(mcp_config, f)
+
+            allowed_tools = [model_visible_by_spec[name] for name in tool_names]
+            argv = self._build_tool_argv(
+                model, system, mcp_config_path, allowed_tools, max_turns
+            )
+
+            # Dropped by KEY, never read/logged (design section 3): an
+            # ambient safe-mode flag would silently disable the bridge
+            # (evidence row 1) and an ambient API key would silently switch
+            # this subprocess to metered auth -- both guarded again at
+            # runtime below, independent of this env strip.
+            env = {
+                k: v
+                for k, v in os.environ.items()
+                if k not in ("CLAUDE_CODE_SAFE_MODE", "ANTHROPIC_API_KEY")
+            }
+            env["CLAUDE_SUPPRESS_NOTIFY"] = "1"
+            env["MAX_THINKING_TOKENS"] = "0"
+
+            with ToolBridgeHost(socket_path, tool_executor):
+                try:
+                    proc = subprocess.run(
+                        argv,
+                        input=user_prompt,
+                        capture_output=True,
+                        text=True,
+                        timeout=self.timeout,
+                        cwd=tmpdir,
+                        env=env,
+                        check=False,
+                    )
+                except subprocess.TimeoutExpired as exc:
+                    raise TransientAPIError(1, exc) from exc
+                except OSError as exc:
+                    raise RuntimeError(f"failed to invoke claude CLI: {exc}") from exc
+
+            events: list[dict[str, Any]] = []
+            for raw_line in (proc.stdout or "").splitlines():
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    redacted_prefix, _findings = redact_outbound_text(line[:200])
+                    raise RuntimeError(
+                        "claude CLI tool-passthrough stream carried an "
+                        f"unparseable line: {exc}; first 200 chars: "
+                        f"{redacted_prefix!r}"
+                    ) from exc
+                if not isinstance(event, dict):
+                    continue
+                message = event.get("message")
+                if isinstance(message, dict):
+                    content = message.get("content")
+                    if isinstance(content, list):
+                        for block in content:
+                            if isinstance(block, dict) and block.get("type") == "tool_use":
+                                visible = str(block.get("name", ""))
+                                block["name"] = spec_by_model_visible.get(visible, visible)
+                events.append(event)
+
+            init_event = next(
+                (
+                    e
+                    for e in events
+                    if e.get("type") == "system" and e.get("subtype") == "init"
+                ),
+                None,
+            )
+            if init_event is None:
+                raise CliToolBridgeError(
+                    "claude CLI tool-passthrough stream carried no "
+                    "system/init event -- cannot verify the bridge connected"
+                )
+            mcp_servers = init_event.get("mcp_servers") or []
+            connected = any(
+                isinstance(entry, dict)
+                and entry.get("name") == server_name
+                and entry.get("status") == "connected"
+                for entry in mcp_servers
+            )
+            if not connected:
+                raise CliToolBridgeError(
+                    f"claude CLI tool-passthrough bridge server "
+                    f"{server_name!r} never reported status 'connected' in "
+                    f"the init event (mcp_servers={mcp_servers!r})"
+                )
+            api_key_source = init_event.get("apiKeySource")
+            if api_key_source != "none":
+                raise CliToolBridgeError(
+                    "claude CLI tool-passthrough reported apiKeySource="
+                    f"{api_key_source!r}, expected 'none' (subscription "
+                    "login) -- refusing to run on what may be metered auth"
+                )
+            if any(e.get("subtype") == "hook_started" for e in events):
+                raise CliToolBridgeError(
+                    "claude CLI tool-passthrough fired a hook_started event "
+                    "-- operator hooks must never run on this path "
+                    '(--setting-sources "" should have disabled them)'
+                )
+
+            result_event = next(
+                (e for e in reversed(events) if e.get("type") == "result"), None
+            )
+            if result_event is not None and result_event.get("subtype") == "error_max_turns":
+                return CliToolLoopResult(
+                    events=events, turns_exhausted=True, result=result_event
+                )
+            if (
+                result_event is not None
+                and result_event.get("subtype") == "success"
+                and not result_event.get("is_error")
+            ):
+                return CliToolLoopResult(
+                    events=events, turns_exhausted=False, result=result_event
+                )
+
+            stderr = (proc.stderr or "").strip()
+            detail = (
+                (result_event or {}).get("result")
+                or (result_event or {}).get("subtype")
+                or stderr
+                or "unknown error"
+            )
+            if _looks_retryable(str(detail), stderr, proc.stdout or ""):
+                raise TransientError(
+                    f"claude CLI tool-passthrough reported transient error: {detail}"
+                )
+            raise RuntimeError(
+                f"claude CLI tool-passthrough exited {proc.returncode} "
+                f"({(result_event or {}).get('subtype')}): {detail}"
+            )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 if TYPE_CHECKING:

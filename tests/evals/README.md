@@ -356,6 +356,32 @@ is never run in CI.
    cells (or the whole spot-check) rather than trusting a report with a
    non-zero harness-failure count.
 
+### Opt-in tool passthrough on the subscription backend (issue athenaeum#1951)
+
+`--mode api` on `ATHENAEUM_LLM_PROVIDER=claude-cli` requires `--cli-tool-passthrough`
+(preflight-refused at exit code 2, before any cell runs, otherwise) -- the subscription
+backend's `ClaudeCliClient` cannot run a tool-using arm without it (this is the
+athenaeum#1936 root cause: the backend used to silently drop `tools=` and record zero tool
+calls with no error). `--mode cli` is unaffected -- it already spawns `claude -p` with a
+scoped MCP config, so there is nothing for this flag to opt into.
+
+```sh
+ATHENAEUM_LLM_PROVIDER=claude-cli python -m tests.evals.north_star_cli \
+  --mode api --cli-tool-passthrough --scale smoke --corpus-scales medium \
+  --probes pto_allowance --claude-binary claude
+```
+
+- **No env fallback** -- always pass the flag explicitly; there is no
+  `ATHENAEUM_CLI_TOOL_PASSTHROUGH` equivalent of `ATHENAEUM_EVAL_MODE`.
+- **Refused together with `--phase2`** (exit code 2, same preflight): Phase 2's writer arm
+  mutates its materialized store and is out of scope for this transport.
+- **Residuals** (see `docs/modules/provider.md`'s "tool passthrough (eval-only)" section
+  for the full list and the golden argv): the MCP tool-description truncation at 2048
+  characters, and the native arms' tools showing up to the model as `mcp__harness__grep` /
+  `mcp__harness__read` rather than the bare name the `api` backend's own tool schema uses.
+  Neither is fixed by this flag; both are recorded so a report comparing this arm against
+  the `api` backend can account for them.
+
 ### What `rollout` means (issue athenaeum#1742)
 
 `rollout` means **this test costs tokens** — it constructs a live LLM

@@ -76,6 +76,25 @@ Layering: sits under ``tests/evals/`` (test-only), like
 ``tests/evals/containment.py`` — no ``src/athenaeum/*.py`` module is added,
 so no ``tests/fixtures/layer_declarations.py`` entry is needed.
 
+**Transport/shaping boundary (issue athenaeum#1951).** The opt-in,
+eval-only tool passthrough that lets the four api-mode arms
+(:func:`run_pull_api`, :func:`run_push_breadcrumb_pull_api`,
+:func:`run_native_index_api`, :func:`run_native_grep_api`) run on the
+``claude-cli`` subscription backend DOES add a ``src/athenaeum/`` module
+(``athenaeum.cli_tool_bridge``, declared L2) and a new method on
+``ClaudeCliClient`` (``run_tool_loop``) — but the split stays the same as
+the pre-existing precedent above: ``provider.py`` owns TRANSPORT only
+(spawn, the per-call MCP bridge, stream capture, error mapping), and this
+module owns SHAPING — :func:`_run_cli_tool_loop` normalizes a
+``CliToolLoopResult`` into the exact ``(answer, tool_calls, turn_tokens,
+turn_count, transcript)`` tuple :func:`run_api_tool_loop` already returns
+for the api backend, so the five call sites need no change beyond the
+one-line dispatch at the top of :func:`run_api_tool_loop` itself. The
+text-only librarian path through ``ClaudeCliClient`` is unaffected and
+stays byte-identical; see ``docs/modules/provider.md``'s "tool passthrough
+(eval-only)" section for the golden argv and the residuals this transport
+cannot resolve (MCP tool-description truncation, native-arm tool naming).
+
 **cli-mode config isolation (issue athenaeum#1819 defect 3).** Every
 ``claude -p`` spawn in this module (PULL, PUSH_BREADCRUMB_PULL, and the two
 native arms) must run under an isolated ``CLAUDE_CONFIG_DIR`` — never the
@@ -115,6 +134,7 @@ import uuid
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from enum import Enum
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from athenaeum.config import DEFAULT_CLASSIFY_MODEL, load_config
@@ -127,6 +147,7 @@ from athenaeum.mcp_server import (
     recall_search,
     recall_tool_docstring,
 )
+from athenaeum.provider import ClaudeCliClient
 from athenaeum.provider import response_text as provider_response_text
 from athenaeum.push_metrics import estimate_tokens
 from athenaeum.search import _DB_NAME as _HOOK_FTS5_DB_NAME
@@ -556,6 +577,17 @@ class RolloutRecord:
     #: PUSH_PAGES_UPPER_BOUND, PUSH_BREADCRUMB, ORACLE, and every cli-mode
     #: record) -- none of those has a turn cap this field could describe.
     turns_exhausted: bool = False
+    #: Issue athenaeum#1951: which LLM backend actually produced this record
+    #: -- ``"claude-cli"`` when the client ``run_probe_all_arms`` resolved
+    #: was a :class:`~athenaeum.provider.ClaudeCliClient` (the subscription
+    #: backend), else ``"api"``. Distinct from ``mode`` (api-mode-loop
+    #: SEMANTICS vs. cli-mode-spawn semantics) -- an ``api``-mode record can
+    #: now be produced by EITHER backend, since the opt-in tool passthrough
+    #: runs the same api-loop shaping over a ``claude -p`` transport.
+    #: ``None`` is the conservative default and decode for every row
+    #: persisted before this field existed, matching this dataclass's own
+    #: back-compat discipline for ``mode``/``search_backend``/etc.
+    llm_provider: str | None = None
 
     @property
     def total_input_tokens(self) -> int:
@@ -601,6 +633,7 @@ class RolloutRecord:
             "harness_failure": self.harness_failure,
             "config_isolated": self.config_isolated,
             "turns_exhausted": self.turns_exhausted,
+            "llm_provider": self.llm_provider,
         }
 
     @classmethod
@@ -654,6 +687,10 @@ class RolloutRecord:
             # hit the turn cap", the same conservative meaning it carries
             # for a freshly-constructed record.
             turns_exhausted=payload.get("turns_exhausted", False),
+            # Issue athenaeum#1951: absent on every row persisted before this
+            # field existed -- ``None`` decodes as "unknown backend", the
+            # same meaning it carries for a freshly-constructed record.
+            llm_provider=payload.get("llm_provider"),
         )
 
 
@@ -2799,6 +2836,169 @@ def _api_response_blocks(response: Any) -> list[dict[str, Any]]:
     return blocks
 
 
+def _run_cli_tool_loop(
+    *,
+    user_prompt: str,
+    system: str,
+    tools: list[dict[str, Any]],
+    tool_executor: Callable[[str, dict[str, Any]], str],
+    client: ClaudeCliClient,
+    session: EvalSession,
+    model: str,
+    max_turns: int,
+) -> tuple[str, list[ToolCall], list[TurnTokenUsage], int, list[dict[str, Any]]]:
+    """``ClaudeCliClient`` dispatch target for :func:`run_api_tool_loop`
+    (issue athenaeum#1951, design section 4).
+
+    Drives ``client.run_tool_loop(...)`` and shapes its
+    :class:`~athenaeum.provider.CliToolLoopResult` into EXACTLY the tuple
+    :func:`run_api_tool_loop` returns for the api backend -- one
+    ``assistant`` transcript entry per distinct ``message.id`` (merging
+    every stream event that shares one, e.g. two parallel ``tool_use``
+    blocks emitted as two events), one ``user`` entry per turn that made a
+    tool call (merging that turn's consecutive ``tool_result`` events into
+    one content list), ``tool_calls``/``answer`` built the same way
+    :func:`run_api_tool_loop` builds them from its own blocks. Token rows
+    come from the stream's per-event ``usage`` (a start-of-message
+    snapshot, per the design's own observed-evidence note -- max-combined
+    per id, not summed), topped up on the LAST turn by whatever the
+    envelope's own ``result.usage.output_tokens`` says is still missing, so
+    per-cell totals equal the envelope's.
+    """
+    loop_result = client.run_tool_loop(
+        model=model,
+        system=system,
+        user_prompt=user_prompt,
+        tools=tools,
+        tool_executor=tool_executor,
+        max_turns=max_turns,
+    )
+
+    transcript: list[dict[str, Any]] = [
+        {"type": "user", "message": {"content": [{"type": "text", "text": user_prompt}]}}
+    ]
+    tool_calls: list[ToolCall] = []
+    turn_tokens: list[TurnTokenUsage] = []
+    answer = ""
+
+    zero_usage = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+    }
+    turn_order: list[str] = []
+    turn_index_by_id: dict[str, int] = {}
+    turn_blocks: list[list[dict[str, Any]]] = []
+    turn_usage: list[dict[str, int]] = []
+    turn_tool_results: list[list[dict[str, Any]]] = []
+
+    for event in loop_result.events:
+        etype = event.get("type")
+        if etype == "assistant":
+            message = event.get("message") or {}
+            msg_id = str(message.get("id") or "")
+            if msg_id not in turn_index_by_id:
+                turn_index_by_id[msg_id] = len(turn_order)
+                turn_order.append(msg_id)
+                turn_blocks.append([])
+                turn_usage.append(dict(zero_usage))
+                turn_tool_results.append([])
+            idx = turn_index_by_id[msg_id]
+            for block in message.get("content") or []:
+                if isinstance(block, dict) and block.get("type") in ("text", "tool_use"):
+                    turn_blocks[idx].append(block)
+            usage = message.get("usage")
+            if isinstance(usage, dict):
+                bucket = turn_usage[idx]
+                for key in bucket:
+                    raw = usage.get(key)
+                    if isinstance(raw, int) and not isinstance(raw, bool):
+                        bucket[key] = max(bucket[key], raw)
+        elif etype == "user" and turn_order:
+            message = event.get("message") or {}
+            content = message.get("content") or []
+            results = [
+                block
+                for block in content
+                if isinstance(block, dict) and block.get("type") == "tool_result"
+            ]
+            if results:
+                # Stream order guarantees a turn's own tool_result events
+                # arrive before the NEXT assistant event -- attach to the
+                # most recently opened turn.
+                turn_tool_results[-1].extend(results)
+
+    turn_count = len(turn_order)
+    for i in range(turn_count):
+        counts = turn_usage[i]
+        usage_obj = SimpleNamespace(**counts)
+        observed = _observe_turn(session, model, SimpleNamespace(usage=usage_obj), turn=i + 1)
+        turn_tokens.append(observed)
+
+        blocks = turn_blocks[i]
+        last_assistant_transcript_idx = len(transcript)
+        transcript.append(
+            {
+                "type": "assistant",
+                "message": {
+                    "content": blocks,
+                    "usage": {
+                        "input_tokens": observed.input_tokens,
+                        "output_tokens": observed.output_tokens,
+                    },
+                },
+            }
+        )
+        text_blocks = [b["text"] for b in blocks if b.get("type") == "text" and b.get("text")]
+        if text_blocks:
+            answer = text_blocks[-1]
+        for block in blocks:
+            if block.get("type") != "tool_use":
+                continue
+            name = str(block.get("name", ""))
+            tool_input = block.get("input") or {}
+            query = str(tool_input.get("query", tool_input))
+            tool_calls.append(ToolCall(name=name, query=query))
+
+        if turn_tool_results[i]:
+            transcript.append({"type": "user", "message": {"content": turn_tool_results[i]}})
+
+    result_usage = loop_result.result.get("usage") or {}
+    total_output = result_usage.get("output_tokens")
+    if turn_tokens and isinstance(total_output, int) and not isinstance(total_output, bool):
+        shortfall = total_output - sum(t.output_tokens for t in turn_tokens)
+        if shortfall > 0:
+            topup = _observe_turn(
+                session,
+                model,
+                SimpleNamespace(
+                    usage=SimpleNamespace(
+                        input_tokens=0,
+                        output_tokens=shortfall,
+                        cache_creation_input_tokens=0,
+                        cache_read_input_tokens=0,
+                    )
+                ),
+                turn=turn_count,
+            )
+            last = turn_tokens[-1]
+            turn_tokens[-1] = TurnTokenUsage(
+                turn=last.turn,
+                input_tokens=last.input_tokens,
+                output_tokens=last.output_tokens + topup.output_tokens,
+            )
+            # Keep the transcript's recorded usage in sync with the
+            # topped-up turn_tokens entry -- both must report the same
+            # per-turn total, matching what a real api-mode response
+            # (which never needs a topup) would have recorded directly.
+            transcript[last_assistant_transcript_idx]["message"]["usage"]["output_tokens"] = (
+                turn_tokens[-1].output_tokens
+            )
+
+    return answer, tool_calls, turn_tokens, turn_count, transcript
+
+
 def run_api_tool_loop(
     *,
     user_prompt: str,
@@ -2838,7 +3038,25 @@ def run_api_tool_loop(
     recorded outcome, same as :func:`parse_pull_stream`), nor on one that
     exhausts *max_turns* without a final text answer (returns whatever text
     was last seen, possibly "").
+
+    Issue athenaeum#1951: when *client* is a :class:`~athenaeum.provider.ClaudeCliClient`
+    (the subscription backend, opted into tool passthrough), this dispatches
+    to :func:`_run_cli_tool_loop` instead -- same contract, same return
+    shape, transport is ``claude -p`` over the bridge in ``provider.py``
+    rather than a direct API call. Checked first, before anything else in
+    this function touches *client*.
     """
+    if isinstance(client, ClaudeCliClient):
+        return _run_cli_tool_loop(
+            user_prompt=user_prompt,
+            system=system,
+            tools=tools,
+            tool_executor=tool_executor,
+            client=client,
+            session=session,
+            model=model,
+            max_turns=max_turns,
+        )
     messages: list[dict[str, Any]] = [{"role": "user", "content": user_prompt}]
     transcript: list[dict[str, Any]] = [
         {"type": "user", "message": {"content": [{"type": "text", "text": user_prompt}]}}
@@ -4155,5 +4373,13 @@ def run_probe_all_arms(
                 )
         record.retrieval_hit_scores = retrieval_hit_scores
         record.search_backend = search_backend
+        # Issue athenaeum#1951: stamped here, not inside any arm function --
+        # same "no opinion inside the per-arm runner" pattern the two
+        # fields above already use. ``resolved_client`` is built once per
+        # probe above (``client`` if given, else ``build_live_client()``)
+        # and is the SAME client every api-mode/mixed arm just ran against.
+        record.llm_provider = (
+            "claude-cli" if isinstance(resolved_client, ClaudeCliClient) else "api"
+        )
         records[arm.value] = record
     return records
