@@ -1106,6 +1106,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--claude-binary", default="claude")
+    parser.add_argument(
+        "--cli-tool-passthrough",
+        action="store_true",
+        default=False,
+        help=(
+            "issue athenaeum#1951: opt into the subscription (claude-cli) backend's "
+            "eval-only tool passthrough for --mode api. Required whenever the "
+            "resolved provider is claude-cli and --mode is api (refused with exit "
+            "code 2 otherwise, before any cell runs); refused together with "
+            "--phase2 (its writer arm is out of scope for this transport). No env "
+            "fallback -- always explicit."
+        ),
+    )
     parser.add_argument("--store", type=Path, default=None, help="append-only JSONL result path")
     parser.add_argument(
         "--out-dir", type=Path, default=DEFAULT_MEASUREMENTS_DIR, help="report output directory"
@@ -1329,6 +1342,7 @@ def _run_cells(
     token_ceiling: int | None = None,
     relevance_floor_vector: float | None = None,
     relevance_floor_fts5: float | None = None,
+    cli_tool_passthrough: bool = False,
 ) -> None:
     """Group *cells* by (probe, corpus_scale, replicate) and run each
     not-yet-complete group through :func:`run_probe_all_arms` exactly once
@@ -1415,6 +1429,19 @@ def _run_cells(
                 relevance_floor_fts5=relevance_floor_fts5,
                 search_backend=search_backend,
             )
+            # Issue athenaeum#1951: built per group (cheap -- no connection,
+            # just subprocess-spawn config), rather than threading a single
+            # shared client through run_probe_all_arms's existing
+            # client=None default, so a --cli-tool-passthrough dispatch
+            # actually reaches the client every api-mode arm in this group
+            # runs against. ``mode != "api"`` or the flag being off builds
+            # nothing extra -- run_probe_all_arms falls back to its own
+            # build_live_client() default exactly as before this issue.
+            group_kwargs: dict[str, Any] = {}
+            if mode == "api" and cli_tool_passthrough:
+                group_kwargs["client"] = build_live_client(
+                    cli_tool_passthrough=cli_tool_passthrough
+                )
             records = run_probe_all_arms(
                 probe_id,
                 corpus_scale,
@@ -1426,6 +1453,7 @@ def _run_cells(
                 replicate=replicate,
                 mode=mode,
                 should_stop=stop.is_set,
+                **group_kwargs,
             )
         finally:
             slots.put(slot)
@@ -1547,6 +1575,32 @@ def _format_abort_reason(exc: BaseException) -> str:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
+    # Issue athenaeum#1951: preflight refusals, exit code 2, before ANY
+    # cell or spend -- checked even before the --floor-scan short-circuit
+    # below (floor-scan never spends either, but these two are config
+    # mistakes this driver can catch unconditionally, not "nothing to
+    # validate against a scan" exemptions).
+    from athenaeum.provider import resolve_provider
+
+    resolved_provider = resolve_provider(None)
+    if resolved_provider == "claude-cli" and args.mode == "api" and not args.cli_tool_passthrough:
+        print(
+            "provider claude-cli + --mode api requires --cli-tool-passthrough "
+            "(issue athenaeum#1951): the subscription backend cannot run a "
+            "tool-using arm without opting into the eval-only tool passthrough. "
+            "Refusing to start -- zero cells run, zero spend.",
+            file=sys.stderr,
+        )
+        return 2
+    if args.cli_tool_passthrough and args.phase2:
+        print(
+            "--cli-tool-passthrough --phase2 is refused (issue athenaeum#1951): "
+            "Phase 2's writer arm mutates its materialized store and is out of "
+            "scope for this transport. Refusing to start -- zero cells run, "
+            "zero spend.",
+            file=sys.stderr,
+        )
+        return 2
     # Issue athenaeum#1761 item 4: a pure read of an existing store, zero
     # paid calls, zero cells run -- checked first, before any grid-sizing
     # or spend validation below, none of which applies to a scan.
@@ -1759,6 +1813,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             token_ceiling=token_ceiling,
             relevance_floor_vector=args.relevance_floor_vector,
             relevance_floor_fts5=args.relevance_floor_fts5,
+            cli_tool_passthrough=args.cli_tool_passthrough,
         )
         assert_rollout_ceiling(session, ceiling=token_ceiling)
     except (Exception, KeyboardInterrupt) as exc:  # noqa: BLE001 -- see below

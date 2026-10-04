@@ -647,7 +647,7 @@ class EvalSession:
 # ---------------------------------------------------------------------------
 
 
-def build_live_client() -> Any:
+def build_live_client(*, cli_tool_passthrough: bool = False) -> Any:
     """Construct the LLM client for eval runs (issue athenaeum#331 provider seam).
 
     Routes through :func:`athenaeum.provider.build_llm_client` so the
@@ -655,8 +655,15 @@ def build_live_client() -> Any:
     subscription-covered ($0 metered) — the same seam athenaeum#330 wired for the
     production call sites. CI (``evals.yml``) runs on the ``api`` backend
     with ``ANTHROPIC_API_KEY`` sourced from 1Password.
+
+    *cli_tool_passthrough* (issue athenaeum#1951, default ``False``): when
+    the resolved client is a :class:`~athenaeum.provider.ClaudeCliClient`
+    and this is set, returns a FRESH client built with the opt-in
+    tool-passthrough flag on, carrying over the resolved client's own
+    ``binary``/``timeout`` -- never flips the flag on the ``api`` backend
+    (it has no such flag) or on a caller that left this ``False``.
     """
-    from athenaeum.provider import build_llm_client
+    from athenaeum.provider import ClaudeCliClient, build_llm_client
 
     client = build_llm_client(None)
     if client is None:
@@ -664,6 +671,8 @@ def build_live_client() -> Any:
             "no LLM backend available — set ANTHROPIC_API_KEY (api backend) "
             "or ATHENAEUM_LLM_PROVIDER=claude-cli (subscription backend)"
         )
+    if cli_tool_passthrough and isinstance(client, ClaudeCliClient):
+        return ClaudeCliClient(binary=client.binary, timeout=client.timeout, tool_passthrough=True)
     return client
 
 
