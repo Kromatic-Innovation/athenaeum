@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""``athenaeum measure {shadow-linkage,backlog-price,ordinary-night,shadow-parity}``
-— issues athenaeum#713 and athenaeum#1333.
+"""``athenaeum measure {shadow-linkage,backlog-price,ordinary-night,
+shadow-parity,coordinate-coverage}`` — issues athenaeum#713, athenaeum#1333,
+athenaeum#1944.
 
-Four read-only measurement-pack subcommands. The first three are one per
+Five read-only measurement-pack subcommands. The first three are one per
 artifact the v6 comparator slice (child of athenaeum#709) is gated on:
 
 - ``shadow-linkage``    :mod:`athenaeum.shadow_linkage` — shadow-mode
@@ -30,6 +31,21 @@ athenaeum#1256), so it does not go through :func:`_add_common`:
                          ``measurements/``, not ``docs/``. Unless ``--dry-run``
                          is passed, it makes real paid LLM calls (both lanes),
                          so it also takes ``--max-usd``.
+
+The fifth is also a different shape (issue athenaeum#1944, the athenaeum#1256
+coverage gate's zero-spend measurement): it writes nothing (no
+``docs/measurements/`` snapshot, no ``measurements/`` report) and always
+builds no LLM client:
+
+- ``coordinate-coverage`` :mod:`athenaeum.coordinate_coverage` — per-type
+                         ``subject``/``claimed_scope``/``valid_from``/
+                         ``valid_until`` coverage counts over ``--path/wiki``,
+                         plus an optional Gate 1 ``subject`` relation
+                         distribution over a subject-population report's
+                         pairs (``--pairs-from-report``) and/or a raw
+                         auto-memory clusters file's within-cluster pairs
+                         (``--clusters``). Output is counts only — no page
+                         names or uids.
 
 Factoring rule (L5 presentation): mirrors :mod:`athenaeum._cmd_push_metrics`'s
 shape exactly — one ``_cmd_measure.py`` for the whole small command family,
@@ -379,13 +395,78 @@ def cmd_shadow_parity(args: argparse.Namespace) -> int:
     return 1 if report.aborted else 0
 
 
+def cmd_coordinate_coverage(args: argparse.Namespace) -> int:
+    """``athenaeum measure coordinate-coverage`` (issue athenaeum#1944).
+
+    Read-only, zero-spend, builds no LLM client. Per-type dimension
+    coverage over ``--path/wiki`` always; the two Gate 1 ``subject``
+    relation-distribution measurements are each computed only when their
+    own flag is passed (``--pairs-from-report`` / ``--clusters``).
+    """
+    from athenaeum.coordinate_coverage import (
+        measure_coordinate_coverage,
+        subject_relation_counts_from_clusters,
+        subject_relation_counts_from_report,
+    )
+
+    knowledge_root = args.path.expanduser().resolve()
+    wiki_root = knowledge_root / "wiki"
+
+    report = measure_coordinate_coverage(wiki_root)
+
+    if args.pairs_from_report is not None:
+        report.pair_relation_counts = subject_relation_counts_from_report(
+            wiki_root, args.pairs_from_report.expanduser().resolve()
+        )
+
+    if args.clusters is not False:
+        clusters_path = (
+            args.clusters.expanduser().resolve()
+            if isinstance(args.clusters, Path)
+            else None
+        )
+        report.cluster_relation_counts = subject_relation_counts_from_clusters(
+            knowledge_root, clusters_path
+        )
+
+    if args.json:
+        sys.stdout.write(json.dumps(report.to_dict()) + "\n")
+    else:
+        totals = report.all_pages_total()
+        print(f"all: {totals.pages} page(s)")
+        print(
+            f"  subject: real={totals.subject_real} "
+            f"undeterminable={totals.subject_undeterminable} "
+            f"absent={totals.subject_absent}"
+        )
+        print(
+            f"  claimed_scope={totals.claimed_scope} "
+            f"valid_from={totals.valid_from} valid_until={totals.valid_until}"
+        )
+        print(f"no_frontmatter: {report.no_frontmatter}")
+        for type_name in sorted(report.by_type):
+            cov = report.by_type[type_name]
+            print(
+                f"{type_name}: {cov.pages} page(s), subject real="
+                f"{cov.subject_real} undeterminable={cov.subject_undeterminable} "
+                f"absent={cov.subject_absent}, claimed_scope={cov.claimed_scope}, "
+                f"valid_from={cov.valid_from}, valid_until={cov.valid_until}"
+            )
+        if report.pair_relation_counts is not None:
+            print(f"pair_relation_counts (subject): {report.pair_relation_counts}")
+        if report.cluster_relation_counts is not None:
+            print(f"cluster_relation_counts (subject): {report.cluster_relation_counts}")
+    return 0
+
+
 def add_measure_subparser(subparsers: argparse._SubParsersAction) -> None:
-    """Register ``athenaeum measure`` and its four subcommands on ``subparsers``."""
+    """Register ``athenaeum measure`` and its five subcommands on ``subparsers``."""
     m_parser = subparsers.add_parser(
         "measure",
-        help="v6 memory-model measurement pack (issues athenaeum#713, athenaeum#1333): "
-        "shadow-mode complete-linkage population, backlog price sheet, "
-        "ordinary-night steady-state table, C4-vs-comparator shadow parity.",
+        help="v6 memory-model measurement pack (issues athenaeum#713, athenaeum#1333, "
+        "athenaeum#1944): shadow-mode complete-linkage population, backlog price "
+        "sheet, ordinary-night steady-state table, C4-vs-comparator shadow "
+        "parity, coordinate-coverage.",
     )
     m_parser.set_defaults(func=lambda args: _dispatch(args))
     m_sub = m_parser.add_subparsers(dest="measure_target")
@@ -574,11 +655,57 @@ def add_measure_subparser(subparsers: argparse._SubParsersAction) -> None:
     )
     parity_p.set_defaults(func=cmd_shadow_parity)
 
+    coverage_p = m_sub.add_parser(
+        "coordinate-coverage",
+        help="Read-only, zero-spend per-type dimension-coverage counts "
+        "(subject/claimed_scope/valid_from/valid_until), plus an optional "
+        "Gate 1 subject relation distribution over a subject-population "
+        "report's pairs and/or a raw auto-memory clusters file's "
+        "within-cluster pairs (issue athenaeum#1944). Builds no LLM client.",
+    )
+    coverage_p.add_argument(
+        "--path",
+        type=Path,
+        default=DEFAULT_KNOWLEDGE_ROOT,
+        help="Knowledge directory (default: ~/knowledge).",
+    )
+    coverage_p.add_argument(
+        "--pairs-from-report",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="A subject-population JSONL report (see `athenaeum "
+        "subject-population`). When given, also reports the Gate 1 "
+        "subject relation distribution (EQUAL/UNKNOWN/DISJOINT) over the "
+        "report's (candidate, top-k) pairs, against CURRENT page "
+        "frontmatter.",
+    )
+    coverage_p.add_argument(
+        "--clusters",
+        type=Path,
+        nargs="?",
+        default=False,
+        const=None,
+        metavar="PATH",
+        help="Also report the Gate 1 subject relation distribution over "
+        "one raw auto-memory clusters JSONL file's within-cluster member "
+        "pairs. With no PATH, uses the newest "
+        "raw/_librarian-clusters-*.jsonl under --path.",
+    )
+    coverage_p.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON instead of plain text. Counts "
+        "only -- no page names or uids in either format.",
+    )
+    coverage_p.set_defaults(func=cmd_coordinate_coverage)
+
 
 def _dispatch(args: argparse.Namespace) -> int:
     print(
         "usage: athenaeum measure "
-        "{shadow-linkage,backlog-price,ordinary-night,shadow-parity} [...]",
+        "{shadow-linkage,backlog-price,ordinary-night,shadow-parity,"
+        "coordinate-coverage} [...]",
         file=sys.stderr,
     )
     return 2

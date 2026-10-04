@@ -1438,6 +1438,72 @@ class FilesystemStore:
         ).stdout.strip()
         return sha
 
+    def uncommitted_paths(self, paths: Sequence[Path]) -> list[Path]:
+        """Return the subset of *paths* ``git status --porcelain`` reports as
+        having any local change (modified, staged, or untracked) under
+        ``knowledge_root`` (issue athenaeum#1944).
+
+        Sibling of :meth:`snapshot` — same ``git status --porcelain``
+        primitive this class already owns, scoped to specific paths rather
+        than the whole tree, for a caller (``athenaeum subject-population
+        --apply``) that must refuse to write a page with uncommitted local
+        changes rather than silently mixing its own edit into them. Returns
+        every element of *paths* unchanged (fails CLOSED, never silently
+        clean) when ``knowledge_root`` is not a git repository, or the
+        ``git`` invocation itself fails to run at all.
+        """
+        knowledge_root = self._knowledge_root
+        existing = [p for p in paths if Path(p).exists()]
+        if not existing:
+            return []
+        if not (knowledge_root / ".git").exists():
+            return list(existing)
+
+        try:
+            result = subprocess.run(
+                ["git", "status", "--porcelain", "-z", "--", *[str(p) for p in existing]],
+                cwd=str(knowledge_root),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError:
+            return list(existing)
+        if result.returncode != 0:
+            return list(existing)
+
+        dirty: set[Path] = set()
+        # Porcelain v1 with ``-z``: NUL-separated records, each "XY " + path,
+        # and a rename/copy emits the ORIGINAL path as its own following
+        # record (destination first, which is the one that matters here).
+        #
+        # ``-z`` rather than the newline format on purpose. Under the default
+        # ``core.quotePath=true``, plain ``--porcelain`` renders any path with
+        # non-ASCII bytes or shell-special characters as a C-quoted,
+        # backslash-escaped literal (``"caf\303\251.md"``). That literal does
+        # not match the real filename, so a dirty page would read CLEAN and
+        # this guard would fail OPEN -- the exact opposite of the fail-closed
+        # contract the docstring above states, on precisely the accented and
+        # punctuated page names a knowledge wiki is full of. ``-z`` never
+        # quotes or escapes, so there is nothing to unescape and no
+        # ``core.quotePath`` dependency. It also removes the newline format's
+        # other ambiguity: a filename may legitimately begin or end with a
+        # space, which the old ``.strip()`` silently corrupted.
+        records = result.stdout.split("\0")
+        index = 0
+        while index < len(records):
+            record = records[index]
+            index += 1
+            if not record:
+                continue
+            status, rel = record[:2], record[3:]
+            if "R" in status or "C" in status:
+                index += 1  # skip the rename/copy source path record
+            if not rel:
+                continue
+            dirty.add((knowledge_root / rel).resolve())
+        return [p for p in existing if Path(p).resolve() in dirty]
+
     def lease(
         self, name: str, ttl_seconds: float, *, force: bool = False
     ) -> AbstractContextManager[Lease]:

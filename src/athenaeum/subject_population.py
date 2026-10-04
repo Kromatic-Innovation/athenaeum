@@ -76,22 +76,58 @@ wiki-page comparator's own candidate pool. ``cluster_comparator.py`` itself
 has no eligibility predicate over wiki pages at all — its domain is
 auto-memory clusters, a different input entirely.
 
-**CLI surface: deliberately none.** ``tests/test_subject_backfill.py``
-forbids exactly two things: a top-level ``subject`` CLI subcommand, and any
-``--apply`` invocation through it succeeding. This module adds neither — it
-is library-only, with no ``_cmd_*`` module and no ``cli.py`` wiring, so
-there is no CLI surface for that regression test's assertions to even
-reach. A future issue that wants an operator-facing entry point should pick
-a name that is not ``subject`` (the regression test only pins that literal
-string absent from the top-level subcommand choices), but this issue does
-not need one: its own deliverable is the dry-run report, exercised directly
-by :func:`run_subject_population` from tests.
+**CLI surface: ``athenaeum subject-population``, added by athenaeum#1944.**
+This module stayed library-only through athenaeum#1714/athenaeum#1944's
+Specify pass — see each function's own docstring above for the algorithm —
+and the operator-facing entry point athenaeum#1944 adds lives in a SEPARATE
+module, :mod:`athenaeum._cmd_subject_population`, registered as
+``add_subject_population_subparser`` in ``cli.py``. Its name is
+``subject-population``, never ``subject``: ``tests/test_subject_backfill.py``
+still forbids exactly two things — a top-level ``subject`` CLI subcommand,
+and any ``--apply`` invocation through it succeeding (the athenaeum#1656
+regression this module's own first docstring paragraph names) — and
+``subject-population`` is a different literal string, so that test's
+assertions are unaffected. The CLI module is dry-run by default (streams a
+JSONL report via the ``on_decision`` hook below) and applies, when asked,
+only by replaying a previously-collected report (``--from-report PATH
+--apply``) at zero LLM spend — never inline with collection. See
+:mod:`athenaeum._cmd_subject_population`'s own module docstring for the
+full command contract (spend ceiling, provider fail-closed check,
+resume/checkpoint, git-repo/RunLock/uncommitted-changes guards on apply).
 
 Layering: L4 (domain/pipeline). Imports :mod:`athenaeum.answers`,
 :mod:`athenaeum.entity_resolution`, :mod:`athenaeum.wiki_dedupe` (all L4),
-:mod:`athenaeum.models` (L1), :mod:`athenaeum.atomic_io` (L0), and
-:mod:`athenaeum.search` (L3, for the default embedder) — all at or below
-this module's own layer.
+:mod:`athenaeum.models` (L1), :mod:`athenaeum.atomic_io` (L0),
+:mod:`athenaeum.dimensions` (L2, for the shared ``UNDETERMINABLE`` sentinel
+— issue athenaeum#1944), and :mod:`athenaeum.search` (L3, for the default
+embedder) — all at or below this module's own layer.
+
+**athenaeum#1944 additions (operator CLI precondition work):** an
+``athenaeum subject-population`` command (``_cmd_subject_population.py``)
+now wraps this module for the operator-facing dry-run/resume/apply pass the
+"CLI surface" note above says a future issue should add — note that its
+name is NOT ``subject`` (``tests/test_subject_backfill.py`` still pins that
+literal token absent from the top-level subcommand choices; this is a
+different string). This module itself gained three purely-additive hooks so
+the CLI's streaming report, checkpoint/resume, and ratification-evidence
+fields never require a second, re-implemented copy of the loop that
+actually runs: :func:`build_subject_population_report` grew ``on_decision``
+(fires once, synchronously, right after each NEW decision is appended),
+``prior_decisions`` (resume: replays previously-decided uids verbatim
+instead of re-resolving them, in the exact same page order the original
+pass would have reached them, so a killed-and-resumed run's final
+``report.decisions`` is byte-identical to an uninterrupted one — see
+``tests/test_subject_population.py::TestResume``), ``types``/``limit``
+(optional scope narrowing), and ``ceiling_check`` (an injected
+"should I stop before the next confirmer attempt" probe; the CLI wires it to
+:func:`athenaeum.spend.ceiling_tripped`). :class:`PageDecision` grew
+``confirmer_ran``/``top_k_uids`` (what :func:`_resolve_with_degradation_tracking`
+already observes per page, now carried through to the report so a later
+ratification pass can tell a tier-2-confirmed subject from a below-threshold
+mint without re-running the LLM). :class:`SubjectRegistry` grew a
+``confirmer_ran`` map (subject id -> bool), additive on disk — a registry
+file written before this change has no such key and :meth:`SubjectRegistry.
+load` still reads it, defaulting every subject to ``False``.
 """
 
 from __future__ import annotations
@@ -101,12 +137,13 @@ import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Sequence
 
 import yaml
 
 from athenaeum.answers import raise_pending_question
 from athenaeum.atomic_io import atomic_write_text
+from athenaeum.dimensions import UNDETERMINABLE_SUBJECT
 from athenaeum.entity_resolution import (
     DEFAULT_TOP_K,
     Ambiguous,
@@ -128,8 +165,15 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 #: The literal recorded for an Ambiguous result or a degraded resolver run
-#: (issue Plan steps 4/6). Never a guessed subject.
-UNDETERMINABLE = "undeterminable"
+#: (issue Plan steps 4/6). Never a guessed subject. Re-exported from
+#: :mod:`athenaeum.dimensions` (issue athenaeum#1944) rather than redeclared —
+#: that module's ``parsed_coordinate`` must read this exact sentinel to treat
+#: it as absent, and it sits below this module in the layering, so the
+#: single definition lives there. This name is kept so every existing
+#: ``from athenaeum.subject_population import UNDETERMINABLE`` call site
+#: (and ``subject_population.UNDETERMINABLE`` attribute access) is
+#: unaffected.
+UNDETERMINABLE = UNDETERMINABLE_SUBJECT
 
 #: Registry sidecar filename, one per wiki root — "a small subject
 #: registry" (operator decision 1). JSON, not YAML/frontmatter: it is not
@@ -142,6 +186,12 @@ SUBJECT_REGISTRY_FILENAME = "_subject_registry.json"
 #: regex) rather than a new shared import.
 _FRONTMATTER_RE = re.compile(r"^---\s*\r?\n(.*?)\r?\n---\s*\r?\n", re.DOTALL)
 
+#: Parses the numeric suffix back out of a minted id (``"subject-000007"``
+#: -> ``7``) -- the inverse of :meth:`SubjectRegistry.mint`'s
+#: ``f"subject-{self.next_id:06d}"`` format, used by
+#: :meth:`SubjectRegistry.seed_minted` (issue athenaeum#1944, resume).
+_SUBJECT_ID_RE = re.compile(r"^subject-(\d+)$")
+
 
 @dataclass
 class SubjectRegistry:
@@ -150,26 +200,59 @@ class SubjectRegistry:
     ``subjects`` maps a minted id (``"subject-000001"``, ...) to the list of
     uids currently carrying it. Deliberately tiny — no schema beyond the
     counter and that one mapping (issue: "keep it small and obvious").
+
+    ``confirmer_ran`` (issue athenaeum#1944, "durable ratification evidence",
+    additive): maps the same subject id to whether ANY decision that joined
+    a member to it ran the tier-2 LLM confirmer (as opposed to a below-
+    threshold mint/match with no confirmer call). A registry file written
+    before this field existed has no ``confirmer_ran`` key at all —
+    :meth:`load` treats that exactly like an empty mapping, so every
+    pre-existing id defaults to ``False`` rather than erroring.
     """
 
     subjects: dict[str, list[str]] = field(default_factory=dict)
     next_id: int = 1
+    confirmer_ran: dict[str, bool] = field(default_factory=dict)
 
-    def mint(self, uid: str) -> str:
+    def mint(self, uid: str, *, confirmer_ran: bool = False) -> str:
         """Allocate a brand-new subject id and register *uid* as its first member."""
         subject_id = f"subject-{self.next_id:06d}"
         self.next_id += 1
         self.subjects[subject_id] = [uid]
+        self.confirmer_ran[subject_id] = confirmer_ran
         return subject_id
 
-    def record_match(self, subject_id: str, uid: str) -> None:
+    def record_match(self, subject_id: str, uid: str, *, confirmer_ran: bool = False) -> None:
         """Add *uid* as an additional member of an already-minted *subject_id*."""
         members = self.subjects.setdefault(subject_id, [])
         if uid not in members:
             members.append(uid)
+        if confirmer_ran:
+            self.confirmer_ran[subject_id] = True
+        else:
+            self.confirmer_ran.setdefault(subject_id, False)
+
+    def seed_minted(self, subject_id: str, uid: str, *, confirmer_ran: bool = False) -> None:
+        """Replay a PRIOR mint of a known *subject_id* (issue athenaeum#1944, resume).
+
+        Unlike :meth:`mint`, this never allocates a new id — *subject_id* is
+        whatever a prior (possibly interrupted) run already decided. Also
+        advances ``next_id`` past *subject_id*'s own numeric suffix when
+        needed, so a genuinely NEW mint later in this same run can never
+        collide with — or reuse a smaller number than — an id a resumed run
+        already knows about.
+        """
+        self.record_match(subject_id, uid, confirmer_ran=confirmer_ran)
+        match = _SUBJECT_ID_RE.match(subject_id)
+        if match:
+            self.next_id = max(self.next_id, int(match.group(1)) + 1)
 
     def to_dict(self) -> dict[str, Any]:
-        return {"next_id": self.next_id, "subjects": self.subjects}
+        return {
+            "next_id": self.next_id,
+            "subjects": self.subjects,
+            "confirmer_ran": self.confirmer_ran,
+        }
 
     @classmethod
     def load(cls, path: Path) -> "SubjectRegistry":
@@ -194,7 +277,16 @@ class SubjectRegistry:
             next_id = int(raw.get("next_id", 1)) if isinstance(raw, dict) else 1
         except (TypeError, ValueError):
             next_id = 1
-        return cls(subjects=subjects, next_id=max(next_id, 1))
+        # Additive (issue athenaeum#1944): absent in every pre-existing
+        # registry file -- defaults to {} so every subject id reads
+        # confirmer_ran=False via .get() rather than this load erroring.
+        confirmer_raw = raw.get("confirmer_ran") if isinstance(raw, dict) else None
+        confirmer_ran = (
+            {str(k): bool(v) for k, v in confirmer_raw.items()}
+            if isinstance(confirmer_raw, dict)
+            else {}
+        )
+        return cls(subjects=subjects, next_id=max(next_id, 1), confirmer_ran=confirmer_ran)
 
     def save(self, path: Path) -> None:
         atomic_write_text(path, json.dumps(self.to_dict(), indent=2, sort_keys=True) + "\n")
@@ -208,6 +300,14 @@ class PageDecision:
     either a real minted/matched subject id, or the literal
     :data:`UNDETERMINABLE`. ``reason`` is a closed vocabulary: ``"matched"``,
     ``"minted"``, ``"undeterminable-ambiguous"``, ``"undeterminable-degraded"``.
+
+    ``confirmer_ran``/``top_k_uids`` (issue athenaeum#1944, "durable
+    ratification evidence"): whether the tier-2 LLM confirmer actually ran
+    for this decision, and the (up to top-k) candidate uids it was shown —
+    both ``False``/``()`` for a page minted or matched below the embedding
+    threshold with no confirmer call at all. Populated by
+    :func:`_resolve_with_degradation_tracking`; a later ratification pass
+    can key off ``confirmer_ran`` without re-spending an LLM call.
     """
 
     uid: str
@@ -217,14 +317,30 @@ class PageDecision:
     subject: str
     reason: str
     matched_uid: str | None = None
+    confirmer_ran: bool = False
+    top_k_uids: tuple[str, ...] = ()
 
 
 @dataclass
 class SubjectPopulationReport:
-    """Counts + per-page decisions for one dry-run or apply pass."""
+    """Counts + per-page decisions for one dry-run or apply pass.
+
+    ``stopped_reason``/``stopped_due_to_ceiling`` (issue athenaeum#1944):
+    ``None`` for a run that reached the end of its (possibly ``--limit``- or
+    ``--types``-narrowed) scope normally. A non-``None`` ``stopped_reason``
+    means the run stopped EARLY, before every eligible page got a decision
+    — ``stopped_due_to_ceiling=True`` when a spend ceiling tripped (the CLI
+    exits non-zero for this case), ``False`` for a plain ``--limit`` stop
+    (a deliberate, zero-error pause — the CLI exits 0). Either way the
+    report up to that point is resumable: every decision already in
+    ``decisions`` was written to the streaming report, so ``--resume``
+    picks up exactly where this run left off.
+    """
 
     scanned: int = 0
     decisions: list[PageDecision] = field(default_factory=list)
+    stopped_reason: str | None = None
+    stopped_due_to_ceiling: bool = False
 
     @property
     def matched(self) -> list[PageDecision]:
@@ -281,6 +397,21 @@ def build_tier2_confirm(
     return confirm
 
 
+@dataclass(frozen=True)
+class _ResolutionOutcome:
+    """Everything one page's resolution attempt observed (issue athenaeum#1944).
+
+    Bundled into one return value (rather than a growing tuple) because
+    :func:`build_subject_population_report` needs all four fields together
+    to build one :class:`PageDecision`.
+    """
+
+    result: ResolutionResult
+    degraded: bool
+    confirmer_ran: bool
+    top_k_uids: tuple[str, ...]
+
+
 def _resolve_with_degradation_tracking(
     candidate: SubjectPage,
     existing_pages: Sequence[SubjectPage],
@@ -289,7 +420,7 @@ def _resolve_with_degradation_tracking(
     confirm: ConfirmFn | None,
     config: dict[str, Any] | None,
     top_k: int,
-) -> tuple[ResolutionResult, bool]:
+) -> _ResolutionOutcome:
     """Call :func:`resolve_same_subject`, additionally reporting degradation.
 
     ``resolve_same_subject``'s return type alone cannot distinguish a
@@ -297,12 +428,16 @@ def _resolve_with_degradation_tracking(
     confirmer, confirmer error, or confirmer naming a uid outside its own
     candidate set — see its docstring). This wraps *embedder*/*confirm* so
     THIS call site observes which branch actually fired, without changing
-    ``resolve_same_subject`` itself.
+    ``resolve_same_subject`` itself. Issue athenaeum#1944 additionally
+    reports, per call, whether the confirmer actually ran and the top-k
+    candidate uids it was shown (or would have been shown, had one been
+    wired) — durable ratification evidence for the report/registry.
 
-    Returns ``(result, False)`` untouched when *existing_pages* is empty:
-    ``resolve_same_subject``'s own empty-pool short-circuit never calls
-    either callable, so there is nothing to degrade — a genuinely first
-    page of its kind, not a degraded run.
+    Returns degraded=``False``/confirmer_ran=``False``/top_k_uids=``()``
+    untouched when *existing_pages* is empty: ``resolve_same_subject``'s own
+    empty-pool short-circuit never calls either callable, so there is
+    nothing to degrade — a genuinely first page of its kind, not a degraded
+    run.
     """
     if not existing_pages:
         result = resolve_same_subject(
@@ -313,9 +448,11 @@ def _resolve_with_degradation_tracking(
             config=config,
             top_k=top_k,
         )
-        return result, False
+        return _ResolutionOutcome(result, False, False, ())
 
     degraded = False
+    confirmer_ran = False
+    top_k_uids: tuple[str, ...] = ()
     real_embed = embedder if embedder is not None else embed_texts
 
     def tracking_embed(texts: list[str]) -> "list[list[float]] | None":
@@ -330,7 +467,12 @@ def _resolve_with_degradation_tracking(
     def tracking_confirm(
         cand: SubjectPage, top: Sequence[tuple[SubjectPage, float]]
     ) -> ResolutionResult:
-        nonlocal degraded
+        nonlocal degraded, confirmer_ran, top_k_uids
+        # Reaching this call at all means embedding similarity already
+        # surfaced at least one above-threshold candidate -- record what
+        # the confirm step (real or absent) was shown, regardless of which
+        # branch below fires.
+        top_k_uids = tuple(p.uid for p, _ in top if p.uid is not None)
         if real_confirm is None:
             # No confirmer wired at all. resolve_same_subject only reaches
             # this call when embedding similarity already surfaced at
@@ -340,6 +482,7 @@ def _resolve_with_degradation_tracking(
             # act on it rather than only log it.
             degraded = True
             return NoMatch()
+        confirmer_ran = True
         try:
             result = real_confirm(cand, top)
         except Exception:
@@ -364,7 +507,7 @@ def _resolve_with_degradation_tracking(
         config=config,
         top_k=top_k,
     )
-    return result, degraded
+    return _ResolutionOutcome(result, degraded, confirmer_ran, top_k_uids)
 
 
 def _read_existing_subject(path: Path) -> str | None:
@@ -389,6 +532,11 @@ def build_subject_population_report(
     config: dict[str, Any] | None = None,
     top_k: int = DEFAULT_TOP_K,
     registry: SubjectRegistry | None = None,
+    types: Sequence[str] | None = None,
+    limit: int | None = None,
+    on_decision: Callable[[PageDecision], None] | None = None,
+    prior_decisions: Sequence[PageDecision] | None = None,
+    ceiling_check: Callable[[], str | None] | None = None,
 ) -> SubjectPopulationReport:
     """Pure dry-run pass: decide every comparator-eligible page's subject.
 
@@ -398,16 +546,53 @@ def build_subject_population_report(
     caller that goes on to apply the report can persist the same ids this
     report already decided; pass a fresh :class:`SubjectRegistry` (the
     default) for a pure preview that never needs to match a prior run.
+
+    Five additive parameters (issue athenaeum#1944), all optional and each a
+    no-op at its default so every pre-existing call keeps its exact
+    behaviour:
+
+    - *types*: restrict the pass to this subset of
+      :data:`athenaeum.wiki_dedupe.DEDUPE_CANDIDATE_TYPES` (default: all
+      three, in the same sorted order).
+    - *limit*: stop after this many NEWLY-decided pages (never counts a
+      replayed *prior_decisions* row — see below) — a deliberate,
+      zero-error pause (``report.stopped_reason`` set,
+      ``stopped_due_to_ceiling`` left ``False``).
+    - *on_decision*: called once, synchronously, immediately after each NEW
+      decision is appended to ``report.decisions`` — never for a replayed
+      *prior_decisions* row (the CLI's streaming-JSONL writer; a replay's
+      row already exists on disk).
+    - *prior_decisions*: resume. Every uid in here is skipped by the
+      resolver entirely and its decision is replayed verbatim into
+      ``report.decisions`` at the exact point in iteration order the
+      original pass would have reached it (type-sorted, then
+      :meth:`~athenaeum.models.EntityIndex.pages_of_type` order) — a
+      ``matched``/``minted`` replay also rejoins the pool exactly as it did
+      originally, so every page decided AFTER the resume point sees the
+      identical pool an uninterrupted run would have. This is what makes a
+      killed-and-resumed run byte-identical to an uninterrupted one.
+    - *ceiling_check*: called once before each NEW (non-replayed) page's
+      resolution attempt; a non-``None`` return stops the run immediately
+      (``report.stopped_reason`` = that value,
+      ``stopped_due_to_ceiling=True``), before the resolver -- and so
+      before any confirmer call -- runs for that page.
     """
     if registry is None:
         registry = SubjectRegistry()
+
+    prior_by_uid: dict[str, PageDecision] = {d.uid: d for d in (prior_decisions or ())}
 
     index = EntityIndex(wiki_root)
     eligible_paths = {c.path for c in discover_wiki_dedupe_candidates(wiki_root, config=config)}
 
     report = SubjectPopulationReport()
+    entity_types = sorted(types) if types is not None else sorted(DEDUPE_CANDIDATE_TYPES)
+    new_decisions = 0
+    stopped = False
 
-    for entity_type in sorted(DEDUPE_CANDIDATE_TYPES):
+    for entity_type in entity_types:
+        if stopped:
+            break
         type_pages = [
             (uid, name, path)
             for uid, name, path in index.pages_of_type(entity_type)
@@ -428,9 +613,41 @@ def build_subject_population_report(
                 unresolved.append((uid, name, path))
 
         for uid, name, path in unresolved:
+            prior = prior_by_uid.get(uid)
+            if prior is not None:
+                # Resume: replay a previously-made decision verbatim, in
+                # the SAME iteration slot the original pass decided it in
+                # -- never re-resolved, never re-reported (its row already
+                # lives in the resumed report file), zero LLM spend.
+                report.scanned += 1
+                report.decisions.append(prior)
+                if prior.reason in ("matched", "minted"):
+                    resolved_pool.append(
+                        SubjectPage(uid=uid, name=name, type=entity_type, path=path)
+                    )
+                    pool_subjects[uid] = prior.subject
+                    registry.seed_minted(
+                        prior.subject, uid, confirmer_ran=prior.confirmer_ran
+                    )
+                continue
+
+            if ceiling_check is not None:
+                trip_reason = ceiling_check()
+                if trip_reason is not None:
+                    report.stopped_reason = trip_reason
+                    report.stopped_due_to_ceiling = True
+                    stopped = True
+                    break
+
+            if limit is not None and new_decisions >= limit:
+                report.stopped_reason = f"limit reached: {limit} new decision(s) this run"
+                stopped = True
+                break
+
             report.scanned += 1
+            new_decisions += 1
             candidate = SubjectPage(uid=uid, name=name, type=entity_type, path=path)
-            result, degraded = _resolve_with_degradation_tracking(
+            outcome = _resolve_with_degradation_tracking(
                 candidate,
                 resolved_pool,
                 embedder=embedder,
@@ -438,21 +655,38 @@ def build_subject_population_report(
                 config=config,
                 top_k=top_k,
             )
+            result = outcome.result
 
-            if degraded:
-                report.decisions.append(
-                    PageDecision(
-                        uid, name, entity_type, path, UNDETERMINABLE, "undeterminable-degraded"
-                    )
+            if outcome.degraded:
+                decision = PageDecision(
+                    uid,
+                    name,
+                    entity_type,
+                    path,
+                    UNDETERMINABLE,
+                    "undeterminable-degraded",
+                    confirmer_ran=outcome.confirmer_ran,
+                    top_k_uids=outcome.top_k_uids,
                 )
+                report.decisions.append(decision)
+                if on_decision is not None:
+                    on_decision(decision)
                 continue
 
             if isinstance(result, Ambiguous):
-                report.decisions.append(
-                    PageDecision(
-                        uid, name, entity_type, path, UNDETERMINABLE, "undeterminable-ambiguous"
-                    )
+                decision = PageDecision(
+                    uid,
+                    name,
+                    entity_type,
+                    path,
+                    UNDETERMINABLE,
+                    "undeterminable-ambiguous",
+                    confirmer_ran=outcome.confirmer_ran,
+                    top_k_uids=outcome.top_k_uids,
                 )
+                report.decisions.append(decision)
+                if on_decision is not None:
+                    on_decision(decision)
                 continue
 
             if isinstance(result, Match):
@@ -463,32 +697,116 @@ def build_subject_population_report(
                     # its own docstring); every pool member this loop adds
                     # is keyed in pool_subjects at the same time. Treat an
                     # inconsistency as undeterminable rather than guess.
-                    report.decisions.append(
-                        PageDecision(
-                            uid, name, entity_type, path, UNDETERMINABLE, "undeterminable-degraded"
-                        )
+                    decision = PageDecision(
+                        uid,
+                        name,
+                        entity_type,
+                        path,
+                        UNDETERMINABLE,
+                        "undeterminable-degraded",
+                        confirmer_ran=outcome.confirmer_ran,
+                        top_k_uids=outcome.top_k_uids,
                     )
+                    report.decisions.append(decision)
+                    if on_decision is not None:
+                        on_decision(decision)
                     continue
-                report.decisions.append(
-                    PageDecision(
-                        uid, name, entity_type, path, subject_id, "matched", matched_uid=result.uid
-                    )
+                decision = PageDecision(
+                    uid,
+                    name,
+                    entity_type,
+                    path,
+                    subject_id,
+                    "matched",
+                    matched_uid=result.uid,
+                    confirmer_ran=outcome.confirmer_ran,
+                    top_k_uids=outcome.top_k_uids,
                 )
+                report.decisions.append(decision)
                 resolved_pool.append(candidate)
                 pool_subjects[uid] = subject_id
-                registry.record_match(subject_id, uid)
+                registry.record_match(subject_id, uid, confirmer_ran=outcome.confirmer_ran)
+                if on_decision is not None:
+                    on_decision(decision)
                 continue
 
             # Genuine NoMatch (not degraded, including the legitimate
             # empty-pool first-of-its-kind case): mint.
-            subject_id = registry.mint(uid)
-            report.decisions.append(
-                PageDecision(uid, name, entity_type, path, subject_id, "minted")
+            subject_id = registry.mint(uid, confirmer_ran=outcome.confirmer_ran)
+            decision = PageDecision(
+                uid,
+                name,
+                entity_type,
+                path,
+                subject_id,
+                "minted",
+                confirmer_ran=outcome.confirmer_ran,
+                top_k_uids=outcome.top_k_uids,
             )
+            report.decisions.append(decision)
             resolved_pool.append(candidate)
             pool_subjects[uid] = subject_id
+            if on_decision is not None:
+                on_decision(decision)
 
     return report
+
+
+def decision_to_row(decision: PageDecision) -> dict[str, Any]:
+    """One JSONL report row's fields (issue athenaeum#1944's Plan: "uid,
+    type, reason, subject id, matched_uid, confirmer_ran, top-k candidate
+    uids"), plus ``name``/``path`` -- structurally required to replay
+    (resume) or apply a decision, not merely to describe it.
+
+    The single source of truth for the report's on-disk shape: both
+    :mod:`athenaeum._cmd_subject_population` (the CLI that writes/reads it)
+    and :mod:`athenaeum.coordinate_coverage` (the ``measure
+    coordinate-coverage --pairs-from-report`` reader) import this and
+    :func:`decision_from_row` rather than each parsing the format
+    independently.
+    """
+    return {
+        "uid": decision.uid,
+        "name": decision.name,
+        "type": decision.type,
+        "path": str(decision.path),
+        "subject": decision.subject,
+        "reason": decision.reason,
+        "matched_uid": decision.matched_uid,
+        "confirmer_ran": decision.confirmer_ran,
+        "top_k_uids": list(decision.top_k_uids),
+    }
+
+
+def decision_from_row(row: dict[str, Any]) -> PageDecision:
+    """Inverse of :func:`decision_to_row`."""
+    return PageDecision(
+        uid=row["uid"],
+        name=row["name"],
+        type=row["type"],
+        path=Path(row["path"]),
+        subject=row["subject"],
+        reason=row["reason"],
+        matched_uid=row.get("matched_uid"),
+        confirmer_ran=bool(row.get("confirmer_ran", False)),
+        top_k_uids=tuple(row.get("top_k_uids") or ()),
+    )
+
+
+def read_decision_report(path: Path) -> list[PageDecision]:
+    """Read a JSONL decision report (one :func:`decision_to_row` row per
+    line) back into :class:`PageDecision` objects, in file order. Returns
+    ``[]`` when *path* does not exist -- a fresh ``--resume`` target, or a
+    report that genuinely has no decisions, are not errors here."""
+    if not path.is_file():
+        return []
+    decisions: list[PageDecision] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        decisions.append(decision_from_row(json.loads(stripped)))
+    return decisions
 
 
 def insert_subject(text: str, subject: str) -> str | None:
@@ -610,6 +928,9 @@ __all__ = [
     "apply_subject_population",
     "build_subject_population_report",
     "build_tier2_confirm",
+    "decision_from_row",
+    "decision_to_row",
     "insert_subject",
+    "read_decision_report",
     "run_subject_population",
 ]

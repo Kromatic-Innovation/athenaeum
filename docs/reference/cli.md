@@ -57,8 +57,9 @@ Every subcommand is registered top-level on one `parser.add_subparsers()` in `cl
 - [`athenaeum ingest-answers`](#athenaeum-ingest-answers) (command) — Ingest answered pending questions from _pending_questions.md
 - [`athenaeum ingest-merges`](#athenaeum-ingest-merges) (command) — Archive resolved pending merges from wiki/_pending_merges.md
 - [`athenaeum init`](#athenaeum-init) (command) — Initialize a new knowledge directory
-- [`athenaeum measure`](#athenaeum-measure) (group) — v6 memory-model measurement pack: shadow-mode complete-linkage population, backlog price sheet, ordinary-night steady-state table, C4-vs-comparator shadow parity.
+- [`athenaeum measure`](#athenaeum-measure) (group) — v6 memory-model measurement pack: shadow-mode complete-linkage population, backlog price sheet, ordinary-night steady-state table, C4-vs-comparator shadow parity, coordinate-coverage.
 - [`athenaeum measure backlog-price`](#athenaeum-measure-backlog-price) (command) — Backlog price sheet with a decision-inflow sensitivity table.
+- [`athenaeum measure coordinate-coverage`](#athenaeum-measure-coordinate-coverage) (command) — Read-only, zero-spend per-type dimension-coverage counts (subject/claimed_scope/valid_from/valid_until), plus an optional Gate 1 subject relation distribution over a subject-population report's pairs and/or a raw auto-memory clusters file's within-cluster pairs. Builds no LLM client.
 - [`athenaeum measure ordinary-night`](#athenaeum-measure-ordinary-night) (command) — Ordinary-night steady-state table: measured load + amortized comparator-regime assumptions vs the nightly call/wall-clock budgets.
 - [`athenaeum measure shadow-linkage`](#athenaeum-measure-shadow-linkage) (command) — Shadow-mode complete-linkage cluster population over the live wiki store: embeddings only, zero LLM calls, read-only.
 - [`athenaeum measure shadow-parity`](#athenaeum-measure-shadow-parity) (command) — Run the C4 detector and the cluster comparator over the SAME corpus and report their verdict agreement matrix + call multiplier (; the live-corpus route is).
@@ -111,6 +112,7 @@ Every subcommand is registered top-level on one `parser.add_subparsers()` in `cl
 - [`athenaeum storage lint-pii`](#athenaeum-storage-lint-pii) (command) — Corpus-wide PII gate: scan EVERY file under wiki/ (queue/index/archive/_-prefixed and.bak files included) for an inline email/phone; exit non-zero on any finding. Also reports raw/ retention as a separate, non-gating count.
 - [`athenaeum storage migrate-pii`](#athenaeum-storage-migrate-pii) (command) — Move archival contact data (emails/phones) off entity pages to the excluded surface, leaving durable identifiers only. Single page (--page) or bulk (--all / --glob).
 - [`athenaeum storage prune-dispositions`](#athenaeum-storage-prune-dispositions) (command) — One-time prune of wiki/_shape_rule_dispositions.jsonl to its positive-disposition records only (AC3/AC4). Dry-run by default: reports the disposition histogram and projected size. --apply writes.
+- [`athenaeum subject-population`](#athenaeum-subject-population) (command) — Meaning-based subject: population over the comparator-eligible wiki pages (concept/reference/principle) -- the operator CLI over athenaeum.subject_population. Default is dry run (streams a JSONL report); apply happens separately, from that report, via --from-report PATH --apply.
 - [`athenaeum surface-divergence`](#athenaeum-surface-divergence) (command) — Report the two-surface divergence for a REGISTERED field (wiki frontmatter vs. the contacts/excluded surface) and, by default, exit non-zero when it exceeds the field's declared allowance. Generalizes bounce-divergence / do-not-email-divergence into one per-field guard. Read-only; output is safe to paste publicly.
 - [`athenaeum test-mcp`](#athenaeum-test-mcp) (command) — Smoke-test MCP remember/recall against a synthetic knowledge dir
 - [`athenaeum usage-report`](#athenaeum-usage-report) (command) — Per-claim usage report (pushed / referenced / last-referenced) computed from the push-metrics ledgers — ids-only, no content.
@@ -690,11 +692,12 @@ Initialize a new knowledge directory
 
 ## `athenaeum measure`
 
-v6 memory-model measurement pack: shadow-mode complete-linkage population, backlog price sheet, ordinary-night steady-state table, C4-vs-comparator shadow parity.
+v6 memory-model measurement pack: shadow-mode complete-linkage population, backlog price sheet, ordinary-night steady-state table, C4-vs-comparator shadow parity, coordinate-coverage.
 
 Subcommands:
 
 - `athenaeum measure backlog-price` — Backlog price sheet with a decision-inflow sensitivity table.
+- `athenaeum measure coordinate-coverage` — Read-only, zero-spend per-type dimension-coverage counts (subject/claimed_scope/valid_from/valid_until), plus an optional Gate 1 subject relation distribution over a subject-population report's pairs and/or a raw auto-memory clusters file's within-cluster pairs. Builds no LLM client.
 - `athenaeum measure ordinary-night` — Ordinary-night steady-state table: measured load + amortized comparator-regime assumptions vs the nightly call/wall-clock budgets.
 - `athenaeum measure shadow-linkage` — Shadow-mode complete-linkage cluster population over the live wiki store: embeddings only, zero LLM calls, read-only.
 - `athenaeum measure shadow-parity` — Run the C4 detector and the cluster comparator over the SAME corpus and report their verdict agreement matrix + call multiplier (; the live-corpus route is).
@@ -717,6 +720,17 @@ Backlog price sheet with a decision-inflow sensitivity table.
 | `--six-month-days` | `182` | — | Day count marking the 6-month horizon a sensitivity row can breach (default: 182). |
 | `--summary-log` | — | — | Path to a nightly log file containing 'librarian-run-summary' lines, used to derive wall-clock/file. Omit to report wall-clock figures as not-yet-measurable (no fabricated figure). |
 | `--wall-clock-per-file-seconds` | — | — | Operator-supplied override for wall-clock/file (AC3(c)). Omit to re-derive it from --summary-log (default). When supplied, the snapshot records wall_clock_source=operator-supplied. |
+
+## `athenaeum measure coordinate-coverage`
+
+Read-only, zero-spend per-type dimension-coverage counts (subject/claimed_scope/valid_from/valid_until), plus an optional Gate 1 subject relation distribution over a subject-population report's pairs and/or a raw auto-memory clusters file's within-cluster pairs. Builds no LLM client.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--clusters` | `False` | — | Also report the Gate 1 subject relation distribution over one raw auto-memory clusters JSONL file's within-cluster member pairs. With no PATH, uses the newest raw/_librarian-clusters-*.jsonl under --path. |
+| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. Counts only -- no page names or uids in either format. |
+| `--pairs-from-report` | — | — | A subject-population JSONL report (see `athenaeum subject-population`). When given, also reports the Gate 1 subject relation distribution (EQUAL/UNKNOWN/DISJOINT) over the report's (candidate, top-k) pairs, against CURRENT page frontmatter. |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge). |
 
 ## `athenaeum measure ordinary-night`
 
@@ -1397,6 +1411,24 @@ One-time prune of wiki/_shape_rule_dispositions.jsonl to its positive-dispositio
 | `--apply` | `False` | — | Write the pruned ledger (atomic replace). Without this flag the command is a dry-run that prints the histogram and projected size and writes nothing. Refuses to write (exit 1, nothing written) if a re-parse of the constructed output does not carry exactly the positive-row count the scan pass promised. |
 | `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
 | `--path` | `~/knowledge` | — | Knowledge root (default: ~/knowledge). |
+| `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
+
+## `athenaeum subject-population`
+
+Meaning-based subject: population over the comparator-eligible wiki pages (concept/reference/principle) -- the operator CLI over athenaeum.subject_population. Default is dry run (streams a JSONL report); apply happens separately, from that report, via --from-report PATH --apply.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--apply` | `False` | — | Apply a report's decisions to the wiki. Requires --from-report; refused otherwise. Never used with a fresh collection run -- apply always replays a report, at zero LLM spend. |
+| `--cache-dir` | — | — | Cache directory holding the spend ledger consulted for the per-day ceiling (default: ATHENAEUM_CACHE_DIR env or ~/.cache/athenaeum). Collection mode only. |
+| `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--from-report` | — | — | Replay PATH's decisions (zero LLM spend, no LLM client constructed). Requires --apply; refused otherwise. Refuses unless --path is a git repository, the run lock can be acquired, and no target page has uncommitted changes. Warns (does not refuse) when no `athenaeum quiesce` sentinel is active. Never commits -- the operator commits. |
+| `--json` | `False` | — | Emit a machine-readable JSON summary instead of plain text. |
+| `--limit` | — | — | Stop after this many NEWLY-decided pages this run (a deliberate, zero-error pause -- never counts a replayed --resume row). |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge). |
+| `--report` | — | — | Where to stream the JSONL decision report (default: ~/.cache/athenaeum/1944/subject-population-<UTC timestamp>.jsonl). Ignored when --resume is given (the resumed path IS the report path). |
+| `--resume` | — | — | Resume a previously-interrupted collection run: read PATH's existing decision rows, skip those uids, and append new decisions to the SAME file. Produces a report identical to an uninterrupted run given the same embedder/confirmer answers. |
+| `--types` | — | concept, principle, reference | Restrict the pass to this subset of comparator-eligible types (default: all three). |
 | `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 
 ## `athenaeum surface-divergence`

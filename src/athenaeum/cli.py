@@ -170,6 +170,10 @@ _SUBCOMMAND_LOADERS: dict[str, tuple[str, str]] = {
     "paste-cleanup": ("athenaeum._cmd_paste_cleanup", "add_paste_cleanup_subparser"),
     "schema": ("athenaeum._cmd_schema", "add_schema_subparser"),
     "quiesce": ("athenaeum._cmd_quiesce", "add_quiesce_subparser"),
+    "subject-population": (
+        "athenaeum._cmd_subject_population",
+        "add_subject_population_subparser",
+    ),
 }
 
 
@@ -218,6 +222,7 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_schema import add_schema_subparser
     from athenaeum._cmd_serve import add_serve_subparser
     from athenaeum._cmd_storage import add_storage_subparser
+    from athenaeum._cmd_subject_population import add_subject_population_subparser
     from athenaeum._cmd_surface_divergence import add_surface_divergence_subparser
     from athenaeum._cmd_usage_report import add_usage_report_subparser
     from athenaeum._cmd_verdicts import add_verdicts_subparser
@@ -279,8 +284,11 @@ def build_parser() -> argparse.ArgumentParser:
     # `subject` (subject backfill) removed (issue athenaeum#1656): the
     # operator rejected deriving `subject:` from a page's own uid, as the
     # parent issue's AC3 (athenaeum#1244 re-scope) — no code path may
-    # write that derivation any more. `subject` populated by meaning
-    # remains athenaeum#1244's open scope, blocked on athenaeum#1615.
+    # write that derivation any more. `subject` populated by meaning is
+    # `subject-population` below (issue athenaeum#1944) — a DIFFERENT name,
+    # never `subject` (tests/test_subject_backfill.py still pins that
+    # literal token absent from the top-level choices).
+    add_subject_population_subparser(subparsers)  # subject-population (issue athenaeum#1944)
     add_index_subparsers(
         subparsers
     )  # reindex/rebuild-index, compile, registry, ingest, session-end
