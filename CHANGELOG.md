@@ -55,6 +55,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`mcp` can no longer silently resolve to a major `cli_tool_bridge.py`
+  doesn't support (issue athenaeum#1953).** `cli_tool_bridge.py`
+  (athenaeum#1951) imports `mcp.server.lowlevel.Server` and uses the
+  pre-2.0 `list_tools`/`call_tool` decorator API. The previously declared
+  `fastmcp>=2.0.0,<5.0` range let two installers land on incompatible `mcp`
+  majors: one resolved `fastmcp-slim==3.4.5` / `mcp<2.0` and worked, another
+  resolved `fastmcp==4.0.8` / `mcp==2.2.0` and crashed the bridge child with
+  `AttributeError: 'Server' object has no attribute 'list_tools'`. `fastmcp`
+  is now capped at `<4.0` and `mcp` is pinned explicitly to `>=1.24,<2.0`,
+  with a new guard test that fails loudly on drift. Porting the bridge to
+  the `mcp` 2.x API is tracked separately (athenaeum#1954).
+
 - **onnxruntime telemetry no longer aborts finished processes (issue
   athenaeum#1899, reopened).** The earlier fix called
   `onnxruntime.disable_telemetry_events()`, which does not stop onnxruntime's
