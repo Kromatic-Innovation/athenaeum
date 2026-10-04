@@ -10,9 +10,14 @@ Two tests bind the ceiling value (never a typed literal in either):
   asserts :data:`athenaeum.config.RECALL_CAP_CEILING_DEFAULT` equals
   ``max(len(expected_uids))`` over the probes whose ``probe_class`` is
   ``aggregation``.
-* :func:`test_hook_fallback_literal_matches_derived_ceiling` parses
-  ``examples/claude-code/user-prompt-recall.sh`` and asserts its own
-  shell-level fallback literal equals the SAME value.
+* :func:`test_sidecar_ceiling_matches_derived_ceiling` asserts the
+  sidecar path resolves the SAME value -- and that the shipped hook example
+  carries no ceiling literal of its own to drift. Until issue athenaeum#1363
+  this parsed a ``${RECALL_CAP_CEILING:-7}`` literal out of
+  ``examples/claude-code/user-prompt-recall.sh``; that hook is now a thin
+  launcher for :mod:`athenaeum.claude_code_adapter`, which reads
+  :data:`athenaeum.config.RECALL_CAP_CEILING_DEFAULT` directly, so there is
+  no second copy of the number left to compare.
 
 The rest of this module unit-tests :func:`athenaeum.search.apply_relevance_cap`
 and :func:`athenaeum.config.resolve_recall_cap_ceiling` directly, then proves
@@ -25,7 +30,6 @@ rather than duplicating them here.
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import yaml
@@ -67,30 +71,27 @@ def test_ceiling_equals_max_aggregation_expected_uids() -> None:
     assert resolve_recall_cap_ceiling(None) == derived_ceiling
 
 
-def test_hook_fallback_literal_matches_derived_ceiling() -> None:
-    """AC: the hook's own shell-level fallback literal for ``CEILING``
-    equals the SAME derived value -- parsed out of the shipped hook script,
-    never hand-typed here either.
-    """
-    text = USER_PROMPT_HOOK.read_text(encoding="utf-8")
-    match = re.search(r"RECALL_CAP_CEILING:-(\d+)\}\}", text)
-    assert match, (
-        "could not find the hook's CEILING env>yaml-cache>default fallback "
-        "literal (expected a `${RECALL_CAP_CEILING:-<digits>}}` pattern) -- "
-        "the hook may have been refactored; update this regex to match"
-    )
-    hook_literal = int(match.group(1))
-    assert hook_literal == resolve_recall_cap_ceiling(None), (
-        f"the hook's fallback literal ({hook_literal}) has drifted from the "
-        f"derived ceiling ({resolve_recall_cap_ceiling(None)})"
-    )
+def test_sidecar_ceiling_matches_derived_ceiling() -> None:
+    """AC: the per-turn sidecar path resolves the SAME derived ceiling, and
+    the shipped hook example holds no copy of the number.
 
-    # Belt-and-braces: the `case` guard's own fallback-on-malformed-value
-    # literal must agree too (`''|*[!0-9]*) CEILING=7 ;;`).
-    case_matches = set(re.findall(r"CEILING=(\d+)\s*;;", text))
-    assert case_matches == {str(hook_literal)}, (
-        f"the hook's `case` fallback literal(s) {case_matches} must all equal "
-        f"the same derived ceiling ({hook_literal})"
+    The adapter reads :data:`RECALL_CAP_CEILING_DEFAULT` rather than a
+    literal of its own, so this is a one-source check by construction now --
+    which is the point of issue athenaeum#1363's de-forking, and why the
+    old shell-literal regex this test used to run has no referent.
+    """
+    from athenaeum.claude_code_adapter import _resolve_recall_cap_ceiling
+
+    assert _resolve_recall_cap_ceiling() == resolve_recall_cap_ceiling(None)
+
+    text = USER_PROMPT_HOOK.read_text(encoding="utf-8")
+    code = "\n".join(
+        ln for ln in text.splitlines() if not ln.lstrip().startswith("#")
+    )
+    assert "CEILING" not in code, (
+        "the shipped hook example must not resolve the recall cap ceiling "
+        "itself -- that is the adapter's job, and a second copy of the "
+        "number is exactly what drifted before"
     )
 
 

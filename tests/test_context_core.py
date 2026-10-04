@@ -1058,18 +1058,27 @@ def test_fts5_match_is_scoped_away_from_body(tmp_path: Path) -> None:
     assert [c.filename for c in hits] == ["name-hit.md"]
 
 
-def _shell_fts_match_cols() -> set[frozenset[str]]:
-    values = re.findall(r'^\s*FTS_MATCH_COLS="([^"]*)"', SHELL_HOOK.read_text(), re.M)
-    assert values, "FTS_MATCH_COLS assignments not found in the shell hook"
-    return {frozenset(v.split()) for v in values}
+#: The two column sets the retired shell hook assigned to its own
+#: ``FTS_MATCH_COLS`` -- once without ``description`` (a pre-migration index)
+#: and once with. Until issue athenaeum#1363 the test below parsed these two
+#: literals out of ``examples/claude-code/user-prompt-recall.sh`` and
+#: compared the core against them, because the hook was a second
+#: implementation that could drift. It is a thin launcher now, so there is
+#: nothing left to compare against and these are kept as a VALUE pin: the
+#: audited sets, transcribed once, so a change to the core's match scope
+#: still has to be deliberate rather than silent.
+_AUDITED_FTS_MATCH_COLS: set[frozenset[str]] = {
+    frozenset({"filename", "name", "tags", "aliases"}),
+    frozenset({"filename", "name", "tags", "aliases", "description"}),
+}
 
 
-def test_fts5_match_columns_match_the_shell_hook() -> None:
-    # Drift guard, by membership: the shell hook assigns FTS_MATCH_COLS once
-    # without and once with `description`; the core's two schema shapes must
-    # produce exactly those two column sets.
+def test_fts5_match_columns_are_the_audited_sets() -> None:
     sys.path.insert(0, SRC)
     from athenaeum.context import _Schema
 
     core = {frozenset(_Schema(has_description=d).fts_match_columns.split()) for d in (False, True)}
-    assert core == _shell_fts_match_cols()
+    assert core == _AUDITED_FTS_MATCH_COLS
+
+    # And the shipped hook example holds no column list of its own to drift.
+    assert "FTS_MATCH_COLS" not in SHELL_HOOK.read_text()

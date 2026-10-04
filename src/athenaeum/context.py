@@ -27,8 +27,9 @@ wrapper keys for its per-turn hook payload — Claude Code's included. It
 returns one plain dict (:func:`build_context`'s return value, "the
 envelope" — schema owned and versioned by athenaeum#1359, not here).
 Wrapping that envelope for a specific host is an ADAPTER's job
-(``examples/claude-code/user-prompt-recall.sh`` today; the athenaeum#1361
-cutover script tomorrow) — never this module's. (Deliberately not named
+(:mod:`athenaeum.claude_code_adapter`, since the athenaeum#1361 cutover;
+``examples/claude-code/user-prompt-recall.sh`` is a thin launcher for it and
+wraps nothing itself — athenaeum#1363) — never this module's. (Deliberately not named
 literally here: a `grep` of this file for either of the two forbidden
 wrapper-key strings must return nothing — see this issue's own acceptance
 criteria and ``tests/test_context_core.py``'s literal-grep guard.)
@@ -845,8 +846,9 @@ def record_context_push(
     landed).
 
     Re-homes the push-telemetry requirement issue athenaeum#1343 shipped as a
-    ~430-line bash reimplementation (``examples/claude-code/user-prompt-recall.sh``,
-    a file no hook invokes) into the converged core, by calling the SAME
+    bash reimplementation in ``examples/claude-code/user-prompt-recall.sh``
+    (retired by athenaeum#1363; that file is now a thin launcher for
+    :mod:`athenaeum.claude_code_adapter`) into the converged core, by calling the SAME
     :func:`athenaeum.push_metrics.record_push` / :class:`PushRecord` /
     :class:`PushedItem` the MCP ``recall`` path already writes through — so
     the two paths can never drift onto independently-shaped ledger rows.

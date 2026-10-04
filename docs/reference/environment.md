@@ -38,13 +38,20 @@ yaml key, and CLI flag with its code default and precedence chain — lives in
 | `ATHENAEUM_PYTHON` | No | Python interpreter used by the example hooks (default: `python3`) |
 | `AUTO_RECALL` | No | Per-turn recall on/off (hook shell env; overrides `athenaeum.yaml`'s `auto_recall`). Default: `true` |
 | `SEARCH_BACKEND` | No | `fts5` or `vector` (hook shell env; overrides `athenaeum.yaml`'s `search_backend`). Default: `fts5` |
-| `ATHENAEUM_HOOK_DEBUG` | No | Set to `1` to log vector-backend errors from `user-prompt-recall.sh` to stderr |
 
 **Shell-env overrides.** `AUTO_RECALL` and `SEARCH_BACKEND` are read from the
 shell environment after the hook sources `~/.cache/athenaeum/config.env`, so
 exports in your shell profile beat the cached config. Intentional (lets you
 A/B-test a backend without editing `athenaeum.yaml`), but it's the first
 thing to check when the hook "ignores" a config change.
+
+**Debugging the per-turn hook.** `user-prompt-recall.sh` is a thin launcher
+for the packaged `athenaeum.claude_code_adapter`, and that adapter is
+fail-silent by design — a recall failure, a missing index, or no matching
+pages all exit `0` with nothing printed, rather than surfacing hook noise.
+`ATHENAEUM_HOOK_DEBUG` is no longer read by anything in that path. To see
+the error instead of the silence, run the same per-turn sequence directly:
+`athenaeum context --stdin-json` with the hook's stdin JSON on stdin.
 
 **Claude Code auth caveat.** Claude Code's own `CLAUDE_CODE_OAUTH_TOKEN` is
 scoped to its inference endpoint, and the Anthropic Messages API rejects it

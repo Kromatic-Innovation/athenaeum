@@ -154,6 +154,24 @@ enforcement, not a thin-CLI wrapper.** Measured on a representative box:
 EVERY turn of EVERY session — an ~8-10x regression against this hook's
 documented `<50ms` FTS5-only contract. Rejected on that measurement.
 
+> **SUPERSEDED 2026-10 (athenaeum#1361 cutover, athenaeum#1363
+> de-forking).** The thin-wrapper shape this paragraph argued against is
+> what shipped: `user-prompt-recall.sh` is now a 13-line executable-shell
+> launcher that `exec`s the packaged `athenaeum.claude_code_adapter`
+> (console script `athenaeum-claude-hook`, falling back to `python3 -m
+> athenaeum.claude_code_adapter`), which is now the per-turn path. The
+> Python-startup-cost measurement above was not wrong — the per-turn path
+> now pays it on every turn — it was simply outweighed by the cost of two
+> hand-maintained implementations drifting (see the breadcrumb-parity
+> discussion above). The shell-native budget-enforcement half of the
+> rejected decision did **not** get carried over by shipping the
+> thin-CLI shape either: the adapter never passes `budget=` into the
+> core, so `ATHENAEUM_PUSH_TOKEN_BUDGET` / `push_budget.tokens_per_turn`
+> are inert on the per-turn sidecar path today. That gap is open and
+> pinned strict-xfail by
+> `tests/test_shell_hooks.py::TestRetiredShellParityGaps`, not silently
+> dropped.
+
 **Duplication is minimized deliberately, and stated plainly rather than
 hidden:**
 
@@ -203,8 +221,10 @@ build path now inserts.
 unaffected (AC2).** It writes stderr diagnostics only and emits no
 `hookSpecificOutput`/`additionalContext` at all, so it is not an
 unprompted-push path — it is the writer for the FTS5 index and for
-`PUSH_TOKEN_BUDGET` in `config.env`, both of which
-`user-prompt-recall.sh` reads.
+`PUSH_TOKEN_BUDGET` in `config.env`. The FTS5 index is still read on the
+per-turn path (today, by the packaged adapter `user-prompt-recall.sh`
+launches); `PUSH_TOKEN_BUDGET` is written but, per the SUPERSEDED note
+above (athenaeum#1363), no longer read by that path.
 
 ## Why hybrid — and why both layers are load-bearing
 
@@ -800,5 +820,5 @@ invariant.
 
 ## References
 
-- Reference implementation: `examples/claude-code/user-prompt-recall.sh` — the recall-on-turn hook shipped with this repo.
+- Shipped recall-on-turn hook: `examples/claude-code/user-prompt-recall.sh` — a thin launcher that execs the packaged `athenaeum.claude_code_adapter` (athenaeum#1363); the adapter, not this file, is the reference implementation.
 - Related PRs: athenaeum athenaeum#40 (JSON shape), athenaeum#42 (query-topics CLI)

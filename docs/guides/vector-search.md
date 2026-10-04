@@ -65,7 +65,11 @@ unavailable.
 |---|---|
 | `SEARCH_BACKEND` | `fts5` or `vector`, hook shell env (default: `fts5`) |
 | `ATHENAEUM_TOPIC_MODEL` | Override the query-topic model (default: `claude-haiku-4-5-20251001`) |
-| `ATHENAEUM_HOOK_DEBUG` | Set to `1` to log vector-backend errors from the recall hook to stderr |
+
+The per-turn hook is fail-silent: a vector-backend error leaves the turn
+with no injected context rather than stderr noise. To see the error, pipe
+the hook's stdin JSON into `athenaeum context --stdin-json`, which runs the
+same sequence in the foreground.
 
 Full list with precedence chains: [reference/configuration.md](../reference/configuration.md).
 

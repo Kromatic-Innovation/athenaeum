@@ -40,10 +40,10 @@ its ranking/budget/clamp pass in Python — see that function's docstring.
 **Which hook is "the hook" is itself resolved, not hardcoded** (issue
 athenaeum#1887): by default this is the packaged adapter console script
 (``athenaeum-claude-hook``, :mod:`athenaeum.claude_code_adapter`), the live
-path since the athenaeum#1361 cutover; ``ATHENAEUM_EVAL_HOOK=shell`` is a
-one-release escape hatch back to the retired
-``examples/claude-code/user-prompt-recall.sh`` (see
-:func:`resolve_user_prompt_hook`). The original five-full-page arm survives,
+path since the athenaeum#1361 cutover; ``ATHENAEUM_EVAL_HOOK=shell`` selects the shipped
+``examples/claude-code/user-prompt-recall.sh`` launcher, which since issue
+athenaeum#1363 execs that same adapter rather than implementing anything
+(see :func:`resolve_user_prompt_hook`). The original five-full-page arm survives,
 renamed to :attr:`Arm.PUSH_PAGES_UPPER_BOUND`
 (:func:`run_push_pages_upper_bound`), explicitly labelled an upper bound
 rather than the shipped configuration.
@@ -797,14 +797,20 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _HOOKS_DIR = _REPO_ROOT / "examples" / "claude-code"
 SESSION_START_HOOK = _HOOKS_DIR / "session-start-recall.sh"
 
-#: The retired shell ``UserPromptSubmit`` hook, unconditionally — never
-#: resolved by env flag. Kept as a named constant (rather than an inline
-#: ``_HOOKS_DIR / "..."`` literal) for the one caller that must always
-#: exercise the real shipped script regardless of which hook
-#: :data:`USER_PROMPT_HOOK` currently resolves to: a byte-equivalence proof
-#: comparing the shell hook against itself would be vacuous, so
-#: ``test_rollout_push_breadcrumb_spike.py`` imports THIS name, not
-#: :data:`USER_PROMPT_HOOK` (issue athenaeum#1887).
+#: The shipped shell ``UserPromptSubmit`` hook example, unconditionally —
+#: never resolved by env flag. Kept as a named constant (rather than an
+#: inline ``_HOOKS_DIR / "..."`` literal) for the one caller that must
+#: always exercise the real shipped script regardless of which hook
+#: :data:`USER_PROMPT_HOOK` currently resolves to
+#: (``test_rollout_push_breadcrumb_spike.py`` imports THIS name, not
+#: :data:`USER_PROMPT_HOOK` — issue athenaeum#1887).
+#:
+#: Since issue athenaeum#1363 this script is a thin launcher that execs the
+#: packaged adapter, so spawning it and spawning
+#: :func:`_resolve_adapter_console_script`'s console script now run the SAME
+#: implementation, one process apart. Measuring through this constant is
+#: therefore no longer an independent reading — it is a check that the
+#: shipped launcher still delivers the adapter's output.
 SHELL_USER_PROMPT_HOOK = _HOOKS_DIR / "user-prompt-recall.sh"
 
 
@@ -844,10 +850,12 @@ def resolve_user_prompt_hook() -> Path:
     (:func:`_resolve_adapter_console_script`) — the live path since the
     athenaeum#1361 cutover, so the eval measures the hook that actually runs
     on the operator's host. Set ``ATHENAEUM_EVAL_HOOK=shell`` to select
-    :data:`SHELL_USER_PROMPT_HOOK` instead — a one-release escape hatch so
-    the two paths can still be compared side by side in this harness; NOT a
-    request to delete the shell implementation (that is issue athenaeum#1363,
-    explicitly out of scope here).
+    :data:`SHELL_USER_PROMPT_HOOK` instead. That was a one-release escape
+    hatch for comparing two implementations side by side; issue
+    athenaeum#1363 retired the shell implementation, so the flag now selects
+    a thin launcher for the same adapter and the two readings differ only by
+    one process spawn. It is kept because the launcher is still shipped and
+    still worth exercising — not because it reaches a second implementation.
 
     Re-resolved on every call (never cached at import) so a test's
     ``monkeypatch.setenv("ATHENAEUM_EVAL_HOOK", ...)`` takes effect

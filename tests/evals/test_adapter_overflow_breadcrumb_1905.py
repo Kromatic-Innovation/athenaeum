@@ -1,6 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 """The packaged adapter emits the shell hook's overflow notice (issue athenaeum#1905).
 
+**Historical, as of issue athenaeum#1363.** Everything below was written
+while two implementations existed. The shell hook is now a thin launcher
+that execs the adapter, so "both hooks" below reach the same code and the
+two shell-side differences this module documents and normalises away can no
+longer be produced at all. The module is kept, and still runs, because what
+it pins — the adapter emitting the overflow notice in the shared template's
+words — is a real property of the surviving implementation; the
+normalisations are now no-ops guarding against nothing, left in place
+rather than removed so this file keeps reading as the record of why the
+notice has a test at all.
+
 ``tests/evals/test_rollout_push_breadcrumb_spike.py`` proves byte-equivalence
 between the harness and the SHELL hook, under an explicit
 ``ATHENAEUM_EVAL_HOOK=shell`` pin. Nothing pinned the DEFAULT hook — the
