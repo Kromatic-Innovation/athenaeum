@@ -1461,7 +1461,7 @@ class FilesystemStore:
 
         try:
             result = subprocess.run(
-                ["git", "status", "--porcelain", "--", *[str(p) for p in existing]],
+                ["git", "status", "--porcelain", "-z", "--", *[str(p) for p in existing]],
                 cwd=str(knowledge_root),
                 capture_output=True,
                 text=True,
@@ -1473,16 +1473,35 @@ class FilesystemStore:
             return list(existing)
 
         dirty: set[Path] = set()
-        for line in result.stdout.splitlines():
-            if not line.strip():
+        # Porcelain v1 with ``-z``: NUL-separated records, each "XY " + path,
+        # and a rename/copy emits the ORIGINAL path as its own following
+        # record (destination first, which is the one that matters here).
+        #
+        # ``-z`` rather than the newline format on purpose. Under the default
+        # ``core.quotePath=true``, plain ``--porcelain`` renders any path with
+        # non-ASCII bytes or shell-special characters as a C-quoted,
+        # backslash-escaped literal (``"caf\303\251.md"``). That literal does
+        # not match the real filename, so a dirty page would read CLEAN and
+        # this guard would fail OPEN -- the exact opposite of the fail-closed
+        # contract the docstring above states, on precisely the accented and
+        # punctuated page names a knowledge wiki is full of. ``-z`` never
+        # quotes or escapes, so there is nothing to unescape and no
+        # ``core.quotePath`` dependency. It also removes the newline format's
+        # other ambiguity: a filename may legitimately begin or end with a
+        # space, which the old ``.strip()`` silently corrupted.
+        records = result.stdout.split("\0")
+        index = 0
+        while index < len(records):
+            record = records[index]
+            index += 1
+            if not record:
                 continue
-            # Porcelain v1 short format: two status chars, a space, then the
-            # path (rename entries use "orig -> new"; the destination is
-            # what matters here, and it always follows "-> ").
-            rel = line[3:]
-            if " -> " in rel:
-                rel = rel.split(" -> ", 1)[1]
-            dirty.add((knowledge_root / rel.strip()).resolve())
+            status, rel = record[:2], record[3:]
+            if "R" in status or "C" in status:
+                index += 1  # skip the rename/copy source path record
+            if not rel:
+                continue
+            dirty.add((knowledge_root / rel).resolve())
         return [p for p in existing if Path(p).resolve() in dirty]
 
     def lease(
