@@ -47,20 +47,25 @@ Seven example hook scripts ship in `examples/claude-code/`:
 |---|---|---|
 | `session-start-recall.sh` | Start of each session | Builds the FTS5 (and optional vector) index, caches config |
 | `wiki-context-inject.sh` | Start of each session | Cheap cwd-keyword grep — surfaces wiki pages relevant to the project being opened |
-| `user-prompt-recall.sh` | Each user turn | Hybrid FTS5+vector search, injects the top matching wiki page names |
+| `user-prompt-recall.sh` | Each user turn | Thin launcher that execs the packaged Claude Code adapter, which runs the hybrid FTS5+vector search and injects the top matching wiki page names |
 | `pre-compact-save.sh` | Before compaction | Reminds the model to call `remember` on anything load-bearing |
 | `pending-questions-surface.sh` | Start of each session | Surfaces unresolved `_pending_questions.md` entries with a snooze cache |
 | `rebuild-index.sh` | SessionEnd (optional) | Out-of-band index rebuild with atomic dir lock — wire when a synchronous SessionStart rebuild becomes painful |
 | `stop-hook-validate.sh` | Stop (optional) | Warns when auto-memory frontmatter is missing citation fields — see [Claude Code auto-memory integration](claude-code.md) |
 
-## I want the packaged Claude Code adapter instead of the shell hook
+## I want to point the hook straight at the console script
 
-`user-prompt-recall.sh` (above) is a full reimplementation — its own SQL,
-its own ranking, its own budget packing. Athenaeum also ships a thin
-`UserPromptSubmit` adapter that calls the same core `athenaeum context`
-uses, so the two never independently drift. Installing the Python package
-installs it as a console script (no extra copy/chmod step, unlike the
-shell hooks above):
+There is one implementation of per-turn recall: the packaged
+`athenaeum.claude_code_adapter`, which calls the same core that
+`athenaeum context` uses. `user-prompt-recall.sh` (above) is a thin launcher in
+front of it — it contains no search logic of its own and just `exec`s the
+adapter. It stays shipped for the copy-the-kit install flow above, and
+for a venv whose `bin/` directory is not on the `PATH` Claude Code's hook
+subprocess inherits. Naming the console script directly in
+`settings.json` skips that extra process hop.
+
+Installing the Python package puts it on the `PATH` as a console script
+(no extra copy/chmod step, unlike the shell hooks above):
 
 ```bash
 pip install athenaeum   # or: pip install -e . from a source checkout
@@ -96,12 +101,11 @@ and its cache directory from `ATHENAEUM_CACHE_DIR` (or the same
 blocks a turn: a recall failure, a missing index, or no matching pages all
 exit `0` with nothing printed, rather than surfacing hook noise.
 
-**Rollback.** Replace the `command` value with the previous entry — either
-the `user-prompt-recall.sh` line from the settings snippet above, or
-remove the `UserPromptSubmit` hook block entirely to turn off per-turn
-recall. No other file changes are needed; the adapter and the shell hook
-are independent, so switching back does not require reinstalling or
-rebuilding anything.
+**Rollback.** Turning off per-turn recall means removing the
+`UserPromptSubmit` hook block (or setting `AUTO_RECALL=false`) — there is
+no second live implementation to switch back to. The previous
+shell-only implementation is recoverable from this repo's git history if
+it is ever needed again.
 
 ## I want to understand why `remember` didn't make something recallable
 

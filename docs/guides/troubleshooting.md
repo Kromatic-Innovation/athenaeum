@@ -11,8 +11,8 @@ A symptom-first index. Find what you're seeing, then follow the link.
 | Session message shows `0 wiki pages` | `$KNOWLEDGE_ROOT/wiki/` is empty or unreadable — if `raw/` has files, run `athenaeum run` |
 | `remember` saves but `recall` finds nothing | Raw observations only compile to wiki when `athenaeum run` (or `ingest`/`session-end`) fires. Check `ls ~/knowledge/raw/` for pending files, then run `athenaeum run --path ~/knowledge`. See [Daily operation](daily-operation.md). |
 | No context injected on user turns | Run `sqlite3 ~/.cache/athenaeum/wiki-index.db 'select count(*) from wiki'` — should be > 0 |
-| Vector backend silent | Re-run with `ATHENAEUM_HOOK_DEBUG=1` — usually `pip install 'athenaeum[vector]'` is missing. See [Vector search](vector-search.md). |
-| `query-topics` not returning topics | Under the default Anthropic provider: `cat ~/.cache/athenaeum/config.env` — should contain `ANTHROPIC_API_KEY=...`. Under `llm.provider: claude-cli`, no key is needed — re-run with `ATHENAEUM_HOOK_DEBUG=1` instead. |
+| Vector backend silent | The per-turn hook is fail-silent by design; pipe the hook's stdin JSON into `athenaeum context --stdin-json` to see the real error — usually `pip install 'athenaeum[vector]'` is missing. See [Vector search](vector-search.md). |
+| `query-topics` not returning topics | Under the default Anthropic provider: `cat ~/.cache/athenaeum/config.env` — should contain `ANTHROPIC_API_KEY=...`. Under `llm.provider: claude-cli`, no key is needed — run `athenaeum context --stdin-json` directly to see the real error instead. |
 | Hook ran "green" but recall never fires | Check the settings snippet was merged correctly: `grep UserPromptSubmit ~/.claude/settings.json`. See [Passive recall via hooks](sidecar.md). |
 | A hook seems to ignore an `athenaeum.yaml` change | `AUTO_RECALL` / `SEARCH_BACKEND` exports in your shell profile beat the cached config — check your shell environment before the yaml. |
 

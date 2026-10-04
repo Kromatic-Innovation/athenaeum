@@ -1,5 +1,21 @@
 # Hook Drift Audit (cwc → athenaeum)
 
+> **Update 2026-10 (athenaeum#1363).** The fork this audit catalogues is
+> resolved. The `knowledge-recall-on-turn.sh` row below is historical: per
+> the record on athenaeum#1363, the cwc side stopped carrying an
+> implementation of its own (cwc#3229, 2026-09-09) and the operator's live
+> `UserPromptSubmit` hook now runs the packaged `athenaeum-claude-hook`
+> console script; this repo's example is itself a thin launcher for the
+> same packaged `athenaeum.claude_code_adapter` rather than a shell
+> reimplementation. (Neither statement about the cwc side is verifiable
+> from inside this repo — both are quoted from that issue, not re-checked
+> here.)
+> There is one implementation left to drift, not two, and
+> `scripts/check_hook_examples.py` (`tests/test_hook_examples_guard.py`)
+> now fails CI if a shipped hook example re-grows recall SQL or stops
+> delegating to the adapter — so a re-fork of this specific hook is meant
+> to be mechanically impossible, not just re-caught by the next audit.
+
 Snapshot 2026-05-10. Closes athenaeum#129.
 
 Athenaeum's `examples/claude-code/` ships an installable hook kit. The

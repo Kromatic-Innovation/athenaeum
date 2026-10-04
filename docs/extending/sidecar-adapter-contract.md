@@ -9,15 +9,16 @@ versioned schema, and states what an adapter (the host-specific layer that
 turns that envelope into something a specific agent runtime consumes) may
 and may not do with it.
 
-Two separate artifacts implement this contract today, and diverged before it
-was written down: the live host hook
-(`$WORKSPACE_CONFIG_DIR/scripts/hooks/knowledge-recall-on-turn.sh`) and
-athenaeum's own reference implementation
-(`examples/claude-code/user-prompt-recall.sh`). Converging them onto the
-core this document describes is issue athenaeum#1347's whole point; the
-cutover itself is athenaeum#1361, and de-forking is athenaeum#1363. **This
-document does not change either script** — it defines the interface the
-cutover will build against.
+A host hook (`$WORKSPACE_CONFIG_DIR/scripts/hooks/knowledge-recall-on-turn.sh`)
+and athenaeum's own example (`examples/claude-code/user-prompt-recall.sh`)
+diverged into two separate implementations of this contract before it was
+written down. Converging them onto the core this document describes was
+issue athenaeum#1347's whole point; the cutover was athenaeum#1361, and
+de-forking was athenaeum#1363. Both are done: the host hook no longer
+carries an implementation of its own (cwc#3229), and athenaeum's example
+is a thin launcher for the packaged `athenaeum.claude_code_adapter` —
+one implementation, not two. **This document does not change either
+script** — it defines the interface both build against.
 
 ---
 
@@ -334,7 +335,7 @@ strip or hash `query` first, per §1.1.
   (§1.1's `query`-naming finding), that is reported here as a finding, not
   fixed here as a change — see athenaeum#1358 and athenaeum#1359's own
   "Out of scope" sections.
-- **Deleting either forked hook.** Both
-  `examples/claude-code/user-prompt-recall.sh` and
-  `$WORKSPACE_CONFIG_DIR/scripts/hooks/knowledge-recall-on-turn.sh` stay in
-  place until the athenaeum#1361 cutover proves out.
+- **Deleting either forked hook.** Moot: the athenaeum#1361 cutover
+  proved out and athenaeum#1363 retired the shell implementation in
+  `examples/claude-code/user-prompt-recall.sh`, leaving a thin launcher
+  for the packaged adapter. There is no remaining fork to delete.

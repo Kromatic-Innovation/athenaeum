@@ -10,7 +10,7 @@ that couldn't be ported to another agent runtime.
 |--------------------------|----------------------|------------------------------------------------------------------|
 | `session-start-recall.sh`| Start of each session| Builds the FTS5 (and optional vector) index, caches config       |
 | `wiki-context-inject.sh` | Start of each session| Cheap cwd-keyword grep — surfaces wiki pages relevant to the project being opened, before any prompt is submitted |
-| `user-prompt-recall.sh`  | Each user turn       | Hybrid FTS5+vector search, injects top-3 wiki page names         |
+| `user-prompt-recall.sh`  | Each user turn       | Thin launcher that execs the packaged Claude Code adapter, which runs the hybrid FTS5+vector search and injects top-matching wiki page names |
 | `pre-compact-save.sh`    | Before compaction    | Reminds the model to call `remember` on anything load-bearing    |
 | `pending-questions-surface.sh` | Start of each session | Surfaces unresolved `_pending_questions.md` entries with a snooze cache |
 | `rebuild-index.sh`       | SessionEnd (optional)| Out-of-band index rebuild with atomic dir lock — wire when synchronous SessionStart rebuild becomes painful (large wikis, vector backend) |
@@ -120,7 +120,6 @@ pages or the index hasn't been built — check `~/.cache/athenaeum/`.
 | `ATHENAEUM_PYTHON`       | `python3`                         | Python interpreter with athenaeum deps                         |
 | `ATHENAEUM_SRC`          | —                                 | Source checkout path (skips `pip install`, runs from source)   |
 | `ATHENAEUM_OP_KEY_PATH`  | `op://Agent Tools/Anthropic API Key/credential` | 1Password secret reference for `ANTHROPIC_API_KEY` |
-| `ATHENAEUM_HOOK_DEBUG`   | `0`                               | Set to `1` to log vector-backend errors to stderr              |
 | `ATHENAEUM_FORCE_REBUILD` | `0`                              | Set to `1` to force a vector-index rebuild even if the existing one is fresher than the wiki |
 | `ATHENAEUM_INJECT_SKIP_WORDS` | `Code|Users|home|workspace|src|lib|app|var|tmp|usr` | Pipe-separated cwd path segments to ignore in `wiki-context-inject.sh` |
 | `ATHENAEUM_INJECT_MAX_RESULTS` | `3`                          | Max wiki pages to surface from `wiki-context-inject.sh`         |
@@ -212,6 +211,6 @@ athenaeum questions list --with-proposal --limit 5  # all unresolved (capped)
 | Session message shows `0 wiki pages`            | `$KNOWLEDGE_ROOT/wiki/` is empty or unreadable — if `raw/` has files, run `athenaeum run`       |
 | `remember` saves but `recall` finds nothing     | Raw observations compile to wiki only when `athenaeum run` fires. Check `ls ~/knowledge/raw/` for pending files, then run `athenaeum run --path ~/knowledge` |
 | No `[Knowledge context]` on user turns          | Run `sqlite3 ~/.cache/athenaeum/wiki-index.db 'select count(*) from wiki'` — should be > 0     |
-| Vector backend silent                           | Re-run with `ATHENAEUM_HOOK_DEBUG=1` — usually `pip install 'athenaeum[vector]'` missing         |
-| `query-topics` not returning topics             | Under the default Anthropic provider: `cat ~/.cache/athenaeum/config.env` — should contain `ANTHROPIC_API_KEY=...`. Under `llm.provider: claude-cli`, no key is needed — re-run with `ATHENAEUM_HOOK_DEBUG=1` instead |
+| Vector backend silent                           | `user-prompt-recall.sh` is fail-silent by design; pipe the hook's stdin JSON into `athenaeum context --stdin-json` instead to see the real error — usually `pip install 'athenaeum[vector]'` missing |
+| `query-topics` not returning topics             | Under the default Anthropic provider: `cat ~/.cache/athenaeum/config.env` — should contain `ANTHROPIC_API_KEY=...`. Under `llm.provider: claude-cli`, no key is needed — run `athenaeum context --stdin-json` directly to see the real error instead |
 | Hook ran "green" but recall never fires         | Check the settings-snippet was merged correctly: `grep UserPromptSubmit ~/.claude/settings.json`|
