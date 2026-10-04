@@ -91,6 +91,7 @@ MODULE_LAYER: dict[str, int] = {
     "transcript_verify": 1,  # "L0/L1-boundary primitive" -> upper bound
     # L2 -- primitives/utilities/services one tier up.
     "bounce_contract": 2,  # "L2-ish" -> upper (non-boundary) bound stated
+    "cli_tool_bridge": 2,  # athenaeum#1951: module docstring states "Layering: L2"
     "config": 2,
     "corrections": 2,
     "declared_relationships": 2,  # "L1/L2 boundary primitive" -> upper bound
