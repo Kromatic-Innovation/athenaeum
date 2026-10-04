@@ -76,16 +76,24 @@ wiki-page comparator's own candidate pool. ``cluster_comparator.py`` itself
 has no eligibility predicate over wiki pages at all — its domain is
 auto-memory clusters, a different input entirely.
 
-**CLI surface: deliberately none.** ``tests/test_subject_backfill.py``
-forbids exactly two things: a top-level ``subject`` CLI subcommand, and any
-``--apply`` invocation through it succeeding. This module adds neither — it
-is library-only, with no ``_cmd_*`` module and no ``cli.py`` wiring, so
-there is no CLI surface for that regression test's assertions to even
-reach. A future issue that wants an operator-facing entry point should pick
-a name that is not ``subject`` (the regression test only pins that literal
-string absent from the top-level subcommand choices), but this issue does
-not need one: its own deliverable is the dry-run report, exercised directly
-by :func:`run_subject_population` from tests.
+**CLI surface: ``athenaeum subject-population``, added by athenaeum#1944.**
+This module stayed library-only through athenaeum#1714/athenaeum#1944's
+Specify pass — see each function's own docstring above for the algorithm —
+and the operator-facing entry point athenaeum#1944 adds lives in a SEPARATE
+module, :mod:`athenaeum._cmd_subject_population`, registered as
+``add_subject_population_subparser`` in ``cli.py``. Its name is
+``subject-population``, never ``subject``: ``tests/test_subject_backfill.py``
+still forbids exactly two things — a top-level ``subject`` CLI subcommand,
+and any ``--apply`` invocation through it succeeding (the athenaeum#1656
+regression this module's own first docstring paragraph names) — and
+``subject-population`` is a different literal string, so that test's
+assertions are unaffected. The CLI module is dry-run by default (streams a
+JSONL report via the ``on_decision`` hook below) and applies, when asked,
+only by replaying a previously-collected report (``--from-report PATH
+--apply``) at zero LLM spend — never inline with collection. See
+:mod:`athenaeum._cmd_subject_population`'s own module docstring for the
+full command contract (spend ceiling, provider fail-closed check,
+resume/checkpoint, git-repo/RunLock/uncommitted-changes guards on apply).
 
 Layering: L4 (domain/pipeline). Imports :mod:`athenaeum.answers`,
 :mod:`athenaeum.entity_resolution`, :mod:`athenaeum.wiki_dedupe` (all L4),

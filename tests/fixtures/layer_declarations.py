@@ -241,6 +241,7 @@ MODULE_LAYER: dict[str, int] = {
     "_cmd_schema": 5,
     "_cmd_serve": 5,
     "_cmd_storage": 5,
+    "_cmd_subject_population": 5,
     "_cmd_surface_divergence": 5,
     "_cmd_usage_report": 5,
     "_cmd_verdicts": 5,
