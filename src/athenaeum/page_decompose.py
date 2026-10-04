@@ -29,9 +29,26 @@ pass in the shape the librarian already uses for
 a report, and only under ``--apply`` write through
 :func:`athenaeum.atomic_io.atomic_write_text`. It is athenaeum code acting AS
 the librarian under the run lock, not a source writing the store, so the
-one-way-in ingress invariant holds. **It makes no LLM call**: every bullet is
-already one fact per line with the subject as its leading span, so there is
-nothing to split and nothing to classify.
+one-way-in ingress invariant holds. **It makes no LLM call**: by default every
+bullet is already one fact per line with the subject as its leading span, so
+there is nothing to split and nothing to classify beyond the whole item.
+
+**Clause mode (``split_clauses``, issue athenaeum#1947).** Some aggregate
+pages do not hold that invariant: one top-level list item can carry many
+footnote-cited facts run together with no line break between them (the
+athenaeum#1942 merge-writer interleave is one way this happens). Passing
+``split_clauses=True`` to :func:`build_report` (CLI: ``--split-clauses``)
+turns such a run-on item into one candidate per cited clause before
+classification, deterministically: a clause ends at a run of inline footnote
+markers, optionally followed by one of ``.``/``;``/``,`` and then whitespace
+or the end of the item (see :func:`split_into_clauses`). An item is only
+split when that rule yields 2+ clauses AND ``--subject-until`` matches it 2+
+times; otherwise it is kept whole, exactly as today. A clause where
+``--subject-until`` matches more than once, or not at all, is ``malformed``
+— reported ``unresolved`` with an empty subject rather than re-cut by a
+second heuristic. This still makes no LLM call: the clause boundary is pure
+text arithmetic over the same two regexes the rest of this module already
+uses.
 
 **What it refuses to guess.** Three separate failure classes each get their
 own disposition and each needs an explicit operator ruling before ``--apply``
@@ -81,6 +98,12 @@ log = logging.getLogger(__name__)
 #: Report schema version. Bump when a consumer-visible field changes shape.
 DECOMPOSE_REPORT_VERSION = 1
 
+#: The ``--split-clauses`` report shape (issue athenaeum#1947): a strict
+#: superset of version 1 (see :class:`DecomposeReport`). ``build_report``
+#: without ``split_clauses=True`` still always produces
+#: :data:`DECOMPOSE_REPORT_VERSION`.
+DECOMPOSE_REPORT_VERSION_2 = 2
+
 #: The only page types a bullet subject may resolve to. A bullet is about a
 #: company or a person; resolving one to a `tool` or `concept` page would be
 #: the aggregate-page mistake this pass exists to undo.
@@ -124,6 +147,29 @@ MD_LINK_RE = re.compile(r"\]\(([^)\s]+\.md)\)")
 #: point of the rewrite is that the page stops being an aggregate.
 MAX_REWRITE_BODY_BYTES = 2048
 
+#: A run of one or more inline footnote markers with nothing between them --
+#: ``[^a][^b]``, never ``[^a] [^b]``. The clause terminator (issue
+#: athenaeum#1947, see :func:`split_into_clauses`) is built on this: a marker
+#: run that is NOT followed by whitespace/end-of-item (optionally through one
+#: of ``.``/``;``/``,``) is not a terminator at all, which is exactly how an
+#: athenaeum#1942 interleave (a marker glued directly to the next clause's
+#: text) produces one malformed clause instead of a silent mis-split.
+CLAUSE_MARKER_RUN_RE = re.compile(r"(?:\[\^[^\]\s]+\](?!:))+")
+
+#: The three punctuation characters a clause terminator may optionally
+#: consume right after its marker run, before the whitespace/end-of-item that
+#: the terminator itself requires.
+_CLAUSE_TERMINATOR_PUNCT = ".;,"
+
+#: Clause shapes a bullet (whole item or split clause) can carry under
+#: ``split_clauses`` (issue athenaeum#1947). ``"item"`` — the version 1 shape,
+#: used both when ``split_clauses`` is off and when an eligible item was not
+#: split. ``"clause"`` — a well-formed split clause (``--subject-until``
+#: matched exactly once). ``"malformed"`` — a split clause the terminator
+#: rule produced but the template did not match exactly once; always
+#: ``unresolved`` with an empty subject.
+CLAUSE_SHAPES: tuple[str, ...] = ("item", "clause", "malformed")
+
 
 class DecomposeError(Exception):
     """A refusal that must abort ``--apply`` before anything is written."""
@@ -154,6 +200,25 @@ class Definition:
         return rest if sep else ""
 
 
+#: Field names a version 1 bullet dict carries, in order. Fixed, not derived
+#: from ``BulletPlan``'s dataclass fields, so a FUTURE field added to
+#: ``BulletPlan`` defaults to invisible on a version 1 report instead of
+#: silently widening it -- see ``DecomposeReport._bullet_dict``.
+_V1_BULLET_FIELDS: tuple[str, ...] = (
+    "ordinal",
+    "id",
+    "raw",
+    "subject",
+    "refs",
+    "disposition",
+    "uid",
+    "target",
+    "source",
+    "source_drive_path",
+    "note",
+)
+
+
 @dataclass
 class BulletPlan:
     """One source bullet and everything decided about it."""
@@ -179,6 +244,19 @@ class BulletPlan:
     source_drive_path: str = ""
     #: Why a bullet landed on a non-``attached`` disposition, for the operator.
     note: str = ""
+    #: ``split_clauses`` fields (issue athenaeum#1947). Appended last, and
+    #: never serialized for a version 1 report (see
+    #: ``DecomposeReport._bullet_dict``), so they cannot perturb the
+    #: backwards-compatible default-path byte shape.
+    #: 1-based position of the ENCLOSING list item -- equals ``ordinal`` for
+    #: every bullet, whole item or clause alike, which is what lets a clause
+    #: and its siblings be grouped back under one item.
+    item_ordinal: int = 0
+    #: 1-based position of this clause within its item; ``0`` for a whole
+    #: item (``clause_shape == "item"``).
+    clause_index: int = 0
+    #: One of :data:`CLAUSE_SHAPES`.
+    clause_shape: str = "item"
 
 
 @dataclass
@@ -195,6 +273,19 @@ class DecomposeReport:
     #: Distinct labels carrying two or more conflicting definitions.
     conflicting_labels: int = 0
     version: int = DECOMPOSE_REPORT_VERSION
+    #: ``split_clauses`` top-level fields (issue athenaeum#1947) -- a version
+    #: 1 report leaves these at their defaults and never serializes them
+    #: (see ``to_dict``). ``items`` is the top-level list-item count (every
+    #: version 1 ``bullet_count`` was this, back when an item WAS a bullet).
+    items: int = 0
+    #: Items the terminator + ``--subject-until`` eligibility rule actually
+    #: split into 2+ clauses.
+    items_split: int = 0
+    #: Total clause units emitted across every split item (well-formed and
+    #: malformed alike).
+    clauses: int = 0
+    #: Of ``clauses``, how many were ``malformed``.
+    malformed: int = 0
 
     @property
     def counts(self) -> dict[str, int]:
@@ -218,8 +309,23 @@ class DecomposeReport:
     def subjects_unresolved(self) -> int:
         return len(self.bullets) - self.subjects_resolved
 
+    def _bullet_dict(self, bullet: BulletPlan) -> dict[str, object]:
+        """*bullet* as a dict, version 1 shape unless this report is v2+.
+
+        Built by filtering ``asdict(bullet)`` down to
+        :data:`_V1_BULLET_FIELDS` (preserving their declaration order)
+        rather than hand-listing them again, so the two can never drift
+        apart field-for-field.
+        """
+        rendered = {k: v for k, v in asdict(bullet).items() if k in _V1_BULLET_FIELDS}
+        if self.version >= DECOMPOSE_REPORT_VERSION_2:
+            rendered["item_ordinal"] = bullet.item_ordinal
+            rendered["clause_index"] = bullet.clause_index
+            rendered["clause_shape"] = bullet.clause_shape
+        return rendered
+
     def to_dict(self) -> dict[str, object]:
-        return {
+        out: dict[str, object] = {
             "version": self.version,
             "source_uid": self.source_uid,
             "source_name": self.source_name,
@@ -233,8 +339,16 @@ class DecomposeReport:
                 "resolved": self.subjects_resolved,
                 "unresolved": self.subjects_unresolved,
             },
-            "bullets": [asdict(b) for b in self.bullets],
         }
+        if self.version >= DECOMPOSE_REPORT_VERSION_2:
+            out["items"] = self.items
+            out["clause_split"] = {
+                "items_split": self.items_split,
+                "clauses": self.clauses,
+                "malformed": self.malformed,
+            }
+        out["bullets"] = [self._bullet_dict(b) for b in self.bullets]
+        return out
 
 
 @dataclass
@@ -262,6 +376,21 @@ def bullet_id(ordinal: int, raw: str) -> str:
     """
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
     return f"{ordinal}-{digest}"
+
+
+def clause_id(item_ordinal: int, clause_index: int, raw: str) -> str:
+    """The stable id for a split clause (issue athenaeum#1947).
+
+    ``<item_ordinal>.<clause_index>-<first 12 hex of sha256(raw)>`` -- the
+    dot is deliberate: a version 1 id (:func:`bullet_id`) is always
+    ``<int>-<hex>`` with no dot in its first segment, so a clause id can
+    never collide with one. *raw* is the clause's own text (with its ``- ``
+    prefix, matching :func:`bullet_id`'s convention), so editing one
+    character of the clause invalidates any ruling that names it, exactly
+    like a version 1 bullet.
+    """
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
+    return f"{item_ordinal}.{clause_index}-{digest}"
 
 
 def parse_definitions(body: str) -> dict[str, list[Definition]]:
@@ -321,6 +450,53 @@ def extract_subject(raw: str, subject_until: re.Pattern[str]) -> str:
     return text[: boundary.start()].strip()
 
 
+def split_into_clauses(text: str) -> list[str]:
+    """Split one list item's *text* into clauses by the terminator rule
+    (issue athenaeum#1947).
+
+    *text* is the item's text with its leading ``- `` already stripped (as
+    returned by :data:`BULLET_RE`'s capture group).
+
+    A terminator is a run of one or more inline footnote markers
+    (:data:`CLAUSE_MARKER_RUN_RE`), optionally followed by one of
+    ``.``/``;``/``,``, and then either whitespace or the end of *text*. A
+    marker run that does NOT satisfy that -- most commonly one glued
+    directly to the next clause's text with no separator at all, the
+    athenaeum#1942 interleave shape -- is not a terminator and is simply
+    swallowed into whichever clause eventually closes; this is what turns
+    an interleave into one ``malformed`` clause spanning two subjects rather
+    than a silent mis-split.
+
+    A clause is the span from the end of the previous terminator up to and
+    including THIS marker run; the optional trailing punctuation and the
+    whitespace after it are the separator and belong to neither clause.
+    Text after the last terminator becomes a final clause (which may carry
+    no marker at all).
+
+    Always returns at least one clause (the whole of *text*, when it
+    contains no terminator). The caller decides eligibility -- this
+    function does not: it draws the boundaries the rule defines and nothing
+    more.
+    """
+    clauses: list[str] = []
+    prev_end = 0
+    for match in CLAUSE_MARKER_RUN_RE.finditer(text):
+        run_end = match.end()
+        after = run_end
+        if after < len(text) and text[after] in _CLAUSE_TERMINATOR_PUNCT:
+            after += 1
+        if after < len(text) and not text[after].isspace():
+            continue  # not a terminator -- this run stays inside its clause
+        clauses.append(text[prev_end:run_end])
+        sep_end = after
+        while sep_end < len(text) and text[sep_end].isspace():
+            sep_end += 1
+        prev_end = sep_end
+    if prev_end < len(text) or not clauses:
+        clauses.append(text[prev_end:])
+    return clauses
+
+
 # --- resolution ----------------------------------------------------------
 
 
@@ -362,7 +538,11 @@ def resolve_subject(subject: str, index: EntityIndex, self_uid: str) -> tuple[st
 
 
 def select_definition(
-    refs: list[str], subject: str, definitions: dict[str, list[Definition]]
+    refs: list[str],
+    subject: str,
+    definitions: dict[str, list[Definition]],
+    *,
+    collision_subjects: dict[str, frozenset[str]] | None = None,
 ) -> tuple[Definition | None, str]:
     """Pick the ONE definition a bullet's fact should carry with it.
 
@@ -372,6 +552,18 @@ def select_definition(
     only if exactly one does. Anything else returns ``(None, reason)`` so the
     caller can mark the bullet ``ambiguous-source`` rather than attach a fact
     under a source that may belong to a different company.
+
+    *collision_subjects* is the ``--split-clauses``-only guard (issue
+    athenaeum#1947): ``{label: {subjects referencing it page-wide}}``, built
+    by the caller over every emitted unit's OWN subject (never the whole
+    item's). ``None`` (the default, and always the case for a version 1
+    report) disables the guard entirely, so a caller that never passes it
+    gets exactly today's behaviour. When supplied, a label whose set has 2+
+    DISTINCT subjects is no longer taken as-is even with a single
+    definition: that definition is accepted only when its drive slug equals
+    THIS clause's own subject slug. A label with 0 or 1 subjects (every
+    legacy case; a label used only within one item) is unaffected, because
+    the collision the guard exists to catch has not happened.
     """
     candidates: list[Definition] = []
     for label in refs:
@@ -379,7 +571,17 @@ def select_definition(
     if not candidates:
         return None, "no definition for this bullet's label(s)"
     if len(candidates) == 1:
-        return candidates[0], ""
+        definition = candidates[0]
+        if collision_subjects is not None:
+            subjects = collision_subjects.get(definition.label, frozenset())
+            if len(subjects) > 1:
+                wanted = slugify(subject)
+                if not wanted or definition.slug != wanted:
+                    return None, (
+                        f"{len(subjects)} subjects share label {definition.label!r} "
+                        "page-wide; this clause's drive slug does not match"
+                    )
+        return definition, ""
 
     wanted = slugify(subject)
     matched = [d for d in candidates if wanted and d.slug == wanted]
@@ -421,14 +623,107 @@ def _read_page(path: Path) -> tuple[dict[str, object], str]:
     return parse_frontmatter(path.read_text(encoding="utf-8"))
 
 
+def _classify_unit(
+    *,
+    raw: str,
+    subject: str,
+    refs: list[str],
+    definitions: dict[str, list[Definition]],
+    idx: EntityIndex,
+    source_uid: str,
+    collision_subjects: dict[str, frozenset[str]] | None = None,
+) -> tuple[str, str, str, str, str, str]:
+    """Classify one unit -- a whole item or a well-formed clause.
+
+    Pulled out of the original per-bullet loop so the version 1 whole-item
+    path (called with ``collision_subjects=None``) and the
+    ``split_clauses`` paths (an unsplit item, or a well-formed clause) all
+    decide a disposition the exact same way. Deliberately does not touch
+    ``ordinal``/``id``/``item_ordinal``/``clause_index``/``clause_shape`` --
+    the caller owns those, since they differ by which of the three callers
+    this is. A ``malformed`` clause never reaches this function at all: it
+    is forced ``unresolved`` with an empty subject by its caller directly.
+
+    Returns ``(disposition, uid, target, source, source_drive_path, note)``.
+    """
+    uid, target, resolve_note = resolve_subject(subject, idx, source_uid)
+
+    # Order matters and is deliberate: a bullet with no source can never
+    # be attached whatever its subject resolves to, so `no-source` is
+    # decided first; a bullet whose source cannot be picked cannot be
+    # compared against a target either, so `ambiguous-source` precedes
+    # the already-present check.
+    # The definition is selected even when the subject did NOT resolve:
+    # an `unresolved` bullet the operator later rules to a uid must still
+    # carry its own footnote across, so the selection cannot wait on the
+    # subject. It is recorded on the plan either way.
+    definition, why = (
+        (None, "")
+        if not refs
+        else select_definition(refs, subject, definitions, collision_subjects=collision_subjects)
+    )
+    source = definition.text if definition is not None else ""
+    source_drive_path = definition.drive_path if definition is not None else ""
+
+    if not refs:
+        note = "bullet carries no footnote reference"
+        return "no-source", uid, target, source, source_drive_path, note
+    if not uid:
+        return "unresolved", uid, target, source, source_drive_path, resolve_note
+    if definition is None:
+        return "ambiguous-source", uid, target, source, source_drive_path, why
+    target_path = idx.get_by_uid(uid)
+    target_body = _read_page(target_path)[1] if target_path else ""
+    if already_present(raw, definition, target_body):
+        note = "target already cites this source and carries its quoted span(s)"
+        return "already-present", uid, target, source, source_drive_path, note
+    return "attached", uid, target, source, source_drive_path, ""
+
+
+@dataclass
+class _PendingUnit:
+    """One ``split_clauses`` unit after pass 1, before definition selection.
+
+    Internal to :func:`build_report`'s split path -- never returned to a
+    caller. Split out of pass 1 (subjects, shapes, eligibility) from pass 3
+    (disposition) because pass 2 (:func:`build_report`'s
+    ``collision_subjects`` map) must see every unit's subject before ANY
+    unit selects a definition.
+    """
+
+    ordinal: int
+    raw: str
+    subject: str
+    refs: list[str]
+    item_ordinal: int
+    clause_index: int
+    clause_shape: str
+    id: str
+    #: Only meaningful when ``clause_shape == "malformed"``.
+    malformed_matches: int = 0
+
+
 def build_report(
     wiki_root: Path,
     source_uid: str,
     *,
     subject_until: str,
     index: EntityIndex | None = None,
+    split_clauses: bool = False,
 ) -> DecomposeReport:
-    """Classify every bullet on the page *source_uid* names. Writes nothing."""
+    """Classify every bullet on the page *source_uid* names. Writes nothing.
+
+    Without ``split_clauses`` (the default), this is exactly version 1:
+    one unit per top-level list item, and the report is
+    :data:`DECOMPOSE_REPORT_VERSION`.
+
+    With ``split_clauses=True`` (issue athenaeum#1947), an item eligible
+    under :func:`split_into_clauses`'s rule (2+ clauses AND 2+
+    ``subject_until`` matches) is split into one unit per clause; an
+    ineligible item is still emitted whole, with its version 1 id, exactly
+    as it would be without the flag. The report is
+    :data:`DECOMPOSE_REPORT_VERSION_2`.
+    """
     idx = index if index is not None else EntityIndex(wiki_root)
     source_path = idx.get_by_uid(source_uid)
     if source_path is None:
@@ -445,53 +740,156 @@ def build_report(
         subject_until=subject_until,
         orphan_definitions=sum(1 for label in definitions if label not in referenced),
         conflicting_labels=sum(1 for defs in definitions.values() if len(defs) > 1),
+        version=DECOMPOSE_REPORT_VERSION_2 if split_clauses else DECOMPOSE_REPORT_VERSION,
     )
 
-    for ordinal, raw, refs in raw_bullets:
-        subject = extract_subject(raw, pattern)
-        plan = BulletPlan(
-            ordinal=ordinal,
-            id=bullet_id(ordinal, raw),
-            raw=raw,
-            subject=subject,
-            refs=list(refs),
-            disposition="unresolved",
+    if not split_clauses:
+        for ordinal, raw, refs in raw_bullets:
+            subject = extract_subject(raw, pattern)
+            disposition, uid, target, source, source_drive_path, note = _classify_unit(
+                raw=raw,
+                subject=subject,
+                refs=refs,
+                definitions=definitions,
+                idx=idx,
+                source_uid=source_uid,
+            )
+            report.bullets.append(
+                BulletPlan(
+                    ordinal=ordinal,
+                    id=bullet_id(ordinal, raw),
+                    raw=raw,
+                    subject=subject,
+                    refs=list(refs),
+                    disposition=disposition,
+                    uid=uid,
+                    target=target,
+                    source=source,
+                    source_drive_path=source_drive_path,
+                    note=note,
+                )
+            )
+        return report
+
+    report.items = len(raw_bullets)
+
+    # Pass 1: decide, per item, whether it splits -- and if so, every
+    # clause's own text/subject/refs/shape.
+    pending: list[_PendingUnit] = []
+    for ordinal, raw, item_refs in raw_bullets:
+        item_match = BULLET_RE.match(raw)
+        item_text = item_match.group(1) if item_match else raw
+        clause_texts = split_into_clauses(item_text)
+        item_matches = len(pattern.findall(item_text))
+        if len(clause_texts) < 2 or item_matches < 2:
+            pending.append(
+                _PendingUnit(
+                    ordinal=ordinal,
+                    raw=raw,
+                    subject=extract_subject(raw, pattern),
+                    refs=list(item_refs),
+                    item_ordinal=ordinal,
+                    clause_index=0,
+                    clause_shape="item",
+                    id=bullet_id(ordinal, raw),
+                )
+            )
+            continue
+        report.items_split += 1
+        for clause_index, clause_text in enumerate(clause_texts, start=1):
+            report.clauses += 1
+            clause_raw = f"- {clause_text}"
+            matches = len(pattern.findall(clause_text))
+            clause_refs = INLINE_MARKER_RE.findall(clause_text)
+            if matches != 1:
+                report.malformed += 1
+                pending.append(
+                    _PendingUnit(
+                        ordinal=ordinal,
+                        raw=clause_raw,
+                        subject="",
+                        refs=clause_refs,
+                        item_ordinal=ordinal,
+                        clause_index=clause_index,
+                        clause_shape="malformed",
+                        id=clause_id(ordinal, clause_index, clause_raw),
+                        malformed_matches=matches,
+                    )
+                )
+                continue
+            pending.append(
+                _PendingUnit(
+                    ordinal=ordinal,
+                    raw=clause_raw,
+                    subject=extract_subject(clause_raw, pattern),
+                    refs=clause_refs,
+                    item_ordinal=ordinal,
+                    clause_index=clause_index,
+                    clause_shape="clause",
+                    id=clause_id(ordinal, clause_index, clause_raw),
+                )
+            )
+
+    # Pass 2: the page-wide label -> {subjects} map the collision guard in
+    # `select_definition` needs (see its docstring). A unit with no subject
+    # (malformed) contributes nothing -- it never carries a selectable
+    # source regardless.
+    label_subjects: dict[str, set[str]] = {}
+    for unit in pending:
+        if not unit.subject:
+            continue
+        for label in unit.refs:
+            label_subjects.setdefault(label, set()).add(unit.subject)
+    collision_subjects = {k: frozenset(v) for k, v in label_subjects.items()}
+
+    # Pass 3: classify every unit now that collision_subjects is complete.
+    for unit in pending:
+        if unit.clause_shape == "malformed":
+            report.bullets.append(
+                BulletPlan(
+                    ordinal=unit.ordinal,
+                    id=unit.id,
+                    raw=unit.raw,
+                    subject="",
+                    refs=unit.refs,
+                    disposition="unresolved",
+                    note=(
+                        "malformed clause: --subject-until matched "
+                        f"{unit.malformed_matches} time(s)"
+                    ),
+                    item_ordinal=unit.item_ordinal,
+                    clause_index=unit.clause_index,
+                    clause_shape="malformed",
+                )
+            )
+            continue
+        disposition, uid, target, source, source_drive_path, note = _classify_unit(
+            raw=unit.raw,
+            subject=unit.subject,
+            refs=unit.refs,
+            definitions=definitions,
+            idx=idx,
+            source_uid=source_uid,
+            collision_subjects=collision_subjects,
         )
-        uid, target, resolve_note = resolve_subject(subject, idx, source_uid)
-        plan.uid, plan.target = uid, target
-
-        # Order matters and is deliberate: a bullet with no source can never
-        # be attached whatever its subject resolves to, so `no-source` is
-        # decided first; a bullet whose source cannot be picked cannot be
-        # compared against a target either, so `ambiguous-source` precedes
-        # the already-present check.
-        # The definition is selected even when the subject did NOT resolve:
-        # an `unresolved` bullet the operator later rules to a uid must still
-        # carry its own footnote across, so the selection cannot wait on the
-        # subject. It is recorded on the plan either way.
-        definition, why = (None, "") if not refs else select_definition(refs, subject, definitions)
-        if definition is not None:
-            plan.source = definition.text
-            plan.source_drive_path = definition.drive_path
-
-        if not refs:
-            plan.disposition = "no-source"
-            plan.note = "bullet carries no footnote reference"
-        elif not uid:
-            plan.disposition = "unresolved"
-            plan.note = resolve_note
-        elif definition is None:
-            plan.disposition = "ambiguous-source"
-            plan.note = why
-        else:
-            target_path = idx.get_by_uid(uid)
-            target_body = _read_page(target_path)[1] if target_path else ""
-            if already_present(raw, definition, target_body):
-                plan.disposition = "already-present"
-                plan.note = "target already cites this source and carries its quoted span(s)"
-            else:
-                plan.disposition = "attached"
-        report.bullets.append(plan)
+        report.bullets.append(
+            BulletPlan(
+                ordinal=unit.ordinal,
+                id=unit.id,
+                raw=unit.raw,
+                subject=unit.subject,
+                refs=list(unit.refs),
+                disposition=disposition,
+                uid=uid,
+                target=target,
+                source=source,
+                source_drive_path=source_drive_path,
+                note=note,
+                item_ordinal=unit.item_ordinal,
+                clause_index=unit.clause_index,
+                clause_shape=unit.clause_shape,
+            )
+        )
 
     return report
 
@@ -813,7 +1211,10 @@ def apply_report(
 
 __all__ = [
     "BLOCKING_DISPOSITIONS",
+    "CLAUSE_MARKER_RUN_RE",
+    "CLAUSE_SHAPES",
     "DECOMPOSE_REPORT_VERSION",
+    "DECOMPOSE_REPORT_VERSION_2",
     "DISPOSITIONS",
     "MAX_REWRITE_BODY_BYTES",
     "RESOLVABLE_TYPES",
@@ -827,12 +1228,14 @@ __all__ = [
     "build_report",
     "bullet_id",
     "check_resolutions",
+    "clause_id",
     "extract_subject",
     "load_resolutions",
     "parse_bullets",
     "parse_definitions",
     "resolve_subject",
     "select_definition",
+    "split_into_clauses",
     "validate_rewrite",
     "write_report",
 ]
