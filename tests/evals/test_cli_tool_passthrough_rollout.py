@@ -9,9 +9,11 @@ spend) or nothing at all (every other test here stubs
 
 from __future__ import annotations
 
+import json
 import stat
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -385,6 +387,23 @@ def test_run_probe_all_arms_stamps_llm_provider_by_client_type(
         assert record.llm_provider == "api"
 
     cli_client = ClaudeCliClient(tool_passthrough=True)
+    # The four single-shot arms (NONE / PUSH_PAGES_UPPER_BOUND /
+    # PUSH_BREADCRUMB / ORACLE) call ``client.messages.create(...)`` --
+    # i.e. ``_create`` -- directly, never ``run_tool_loop``. Stub the
+    # subprocess boundary the same way ``tests/test_provider.py`` does, so
+    # this test exercises the stamping logic without needing a real
+    # ``claude`` binary on PATH (absent in CI).
+    monkeypatch.setattr("athenaeum.provider.shutil.which", lambda _b: "/usr/bin/claude")
+    monkeypatch.setattr(
+        "athenaeum.provider.subprocess.run",
+        lambda *_a, **_k: SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {"subtype": "success", "is_error": False, "result": "ok", "usage": {}}
+            ),
+            stderr="",
+        ),
+    )
     monkeypatch.setattr(
         cli_client,
         "run_tool_loop",
