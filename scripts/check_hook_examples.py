@@ -160,6 +160,19 @@ def count_code_lines(text: str) -> int:
     return len(strip_full_line_comments(text))
 
 
+def delegates(text: str) -> bool:
+    """Whether *text* actually invokes the packaged adapter.
+
+    Searches the COMMENT-STRIPPED body, not the raw file. A thin launcher's
+    header necessarily names the adapter in prose to explain what it
+    delegates to, so a raw search would accept a hook whose only remaining
+    mention of it is a commented-out ``# exec athenaeum-claude-hook`` — the
+    exact "temporarily" edit Rule B exists to catch.
+    """
+    body = "\n".join(line for _, line in strip_full_line_comments(text))
+    return bool(DELEGATION_PATTERN.search(body))
+
+
 def check_hook(path: Path) -> list[Violation]:
     """Apply both rules to one hook example."""
     text = path.read_text(encoding="utf-8")
@@ -182,15 +195,16 @@ def check_hook(path: Path) -> list[Violation]:
         )
 
     if path.name in DELEGATING_HOOKS:
-        if not DELEGATION_PATTERN.search(text):
+        if not delegates(text):
             violations.append(
                 Violation(
                     path=path,
                     rule="must-delegate",
                     detail=(
                         "this hook's job is covered by the packaged adapter, but it "
-                        "never invokes it. Expected a reference to "
-                        "athenaeum-claude-hook or athenaeum.claude_code_adapter."
+                        "never invokes it. Expected a call to "
+                        "athenaeum-claude-hook or athenaeum.claude_code_adapter in "
+                        "executable shell — a mention in a comment does not count."
                     ),
                 )
             )

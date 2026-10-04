@@ -69,8 +69,9 @@ def test_main_returns_zero_on_current_tree(capsys: pytest.CaptureFixture[str]) -
 
 def test_shipped_recall_hook_delegates() -> None:
     # The negative rule (no SQL) is satisfiable by an empty file. This is the
-    # positive half: the shipped hook must actually reach the adapter.
-    assert guard.DELEGATION_PATTERN.search(_RECALL_HOOK.read_text(encoding="utf-8"))
+    # positive half: the shipped hook must actually reach the adapter, in
+    # executable shell rather than in its own prose.
+    assert guard.delegates(_RECALL_HOOK.read_text(encoding="utf-8"))
 
 
 def test_shipped_recall_hook_is_thin() -> None:
@@ -138,6 +139,21 @@ def test_catches_recall_sql_in_a_non_delegating_hook(tmp_path: Path) -> None:
 
 def test_catches_a_delegating_hook_that_stops_delegating(tmp_path: Path) -> None:
     body = "#!/usr/bin/env bash\nset -uo pipefail\nexit 0\n"
+    violations = guard.check_hook(_write_hook(tmp_path, body))
+    assert [v.rule for v in violations] == ["must-delegate"]
+
+
+def test_catches_a_delegation_that_is_only_a_comment(tmp_path: Path) -> None:
+    # A thin launcher's header names the adapter in prose, so the delegation
+    # check has to read executable shell only — otherwise commenting out the
+    # one line that matters leaves the guard satisfied by the explanation of
+    # what was commented out. (Found in review of the guard itself.)
+    body = (
+        "#!/usr/bin/env bash\n"
+        "# This launcher execs athenaeum-claude-hook, the packaged adapter.\n"
+        "# exec athenaeum-claude-hook\n"
+        "exit 0\n"
+    )
     violations = guard.check_hook(_write_hook(tmp_path, body))
     assert [v.rule for v in violations] == ["must-delegate"]
 
