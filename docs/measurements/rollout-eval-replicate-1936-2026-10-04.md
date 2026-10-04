@@ -186,7 +186,7 @@ chi-squared = 1.0, p = 0.317). Both are far above 0.05.
 **Verdict: within noise.** McNemar p >= 0.05 and mean gap <= 6 points both hold;
 neither condition for "real adapter regression at the aggregate level" is met.
 
-### Per-probe rule — the 3 residual probes named in #1932
+### Per-probe rule — the 3 residual probes named in athenaeum#1932
 
 Counting pairs discordant in the regression direction only (shell correct /
 adapter incorrect — `discordance.correct_to_incorrect` in `paired_regrade.py`'s
@@ -202,7 +202,7 @@ All three probes named in the pre-registered rule score **within noise**: none
 reaches the 2-of-4 ("inconclusive") or 3-/4-of-4 ("real adapter regression")
 thresholds.
 
-### Input equality (zero-spend diagnostic, same as #1932)
+### Input equality (zero-spend diagnostic, same as athenaeum#1932)
 
 Every `pushed_context` pair (48 of 48 in every one of the 4 replicate pairs) and
 every paired `recall` tool-call input (14, 19, 15, 14 pairs across r1-r4, all
@@ -217,9 +217,9 @@ across turns, not to a divergence between the two hooks' delivered content.
 this paired-replicate reading.** The single-reading 13.3-point gap that opened this
 issue does not reproduce under replication: the 4-replicate mean gap is 1.0 points
 in the adapter's favor, McNemar is non-significant (p = 0.45), the shell-hook floor
-holds, and none of the three probes singled out by #1932 shows a discordance
+holds, and none of the three probes singled out by athenaeum#1932 shows a discordance
 pattern consistent with a reproducible shell-vs-adapter difference. This reading is
-consistent with the #1932 finding (3/43 adapter-vs-adapter flip rate at zero spend)
+consistent with the athenaeum#1932 finding (3/43 adapter-vs-adapter flip rate at zero spend)
 that run-to-run model noise, not the adapter cutover, explains the earlier single
 readings' spread.
 
@@ -242,7 +242,7 @@ in this file family):
   it reaches the result store, so this residual never reaches the persisted rows
   used for grading above — it is a model-visible-name difference only).
 
-Neither residual is fixed by athenaeum#1951/#1953; both are recorded here per the
+Neither residual is fixed by athenaeum#1951/athenaeum#1953; both are recorded here per the
 lane's instructions so a reader comparing this run against an `api`-backend reading
 can account for them.
 
