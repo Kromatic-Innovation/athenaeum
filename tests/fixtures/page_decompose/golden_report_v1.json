@@ -1,0 +1,96 @@
+{
+  "version": 1,
+  "source_uid": "src00001",
+  "source_name": "Fixture Pipeline Tool",
+  "source_path": "src00001-fixture-pipeline-tool.md",
+  "subject_until": " reached the ",
+  "bullet_count": 5,
+  "orphan_definitions": 1,
+  "conflicting_labels": 2,
+  "counts": {
+    "attached": 1,
+    "already-present": 1,
+    "unresolved": 1,
+    "no-source": 1,
+    "ambiguous-source": 1
+  },
+  "subjects": {
+    "resolved": 4,
+    "unresolved": 1
+  },
+  "bullets": [
+    {
+      "ordinal": 1,
+      "id": "1-d1d818a08e36",
+      "raw": "- Acme Corp reached the pilot stage, logging \"two discovery calls\".[^a]",
+      "subject": "Acme Corp",
+      "refs": [
+        "a"
+      ],
+      "disposition": "attached",
+      "uid": "tgt00001",
+      "target": "tgt00001-acme-corp.md",
+      "source": "**Source:** `drive/d001-acme-corp.md`",
+      "source_drive_path": "drive/d001-acme-corp.md",
+      "note": ""
+    },
+    {
+      "ordinal": 2,
+      "id": "2-7b85baa1d74b",
+      "raw": "- Beacon Labs reached the trial stage, logging \"a scoping workshop\".[^b]",
+      "subject": "Beacon Labs",
+      "refs": [
+        "b"
+      ],
+      "disposition": "already-present",
+      "uid": "tgt00002",
+      "target": "tgt00002-beacon-labs.md",
+      "source": "**Source:** `drive/d003-beacon-labs.md`",
+      "source_drive_path": "drive/d003-beacon-labs.md",
+      "note": "target already cites this source and carries its quoted span(s)"
+    },
+    {
+      "ordinal": 3,
+      "id": "3-e39919731d80",
+      "raw": "- X Labs reached the pilot stage, logging \"one intro email\".[^c]",
+      "subject": "X Labs",
+      "refs": [
+        "c"
+      ],
+      "disposition": "unresolved",
+      "uid": "",
+      "target": "",
+      "source": "**Source:** `drive/d004-x-labs.md`",
+      "source_drive_path": "drive/d004-x-labs.md",
+      "note": "no company/person page matches this subject"
+    },
+    {
+      "ordinal": 4,
+      "id": "4-2c4b0db6231a",
+      "raw": "- Delta Freight reached the closed stage, logging \"a renewal review\".",
+      "subject": "Delta Freight",
+      "refs": [],
+      "disposition": "no-source",
+      "uid": "tgt00005",
+      "target": "tgt00005-delta-freight.md",
+      "source": "",
+      "source_drive_path": "",
+      "note": "bullet carries no footnote reference"
+    },
+    {
+      "ordinal": 5,
+      "id": "5-71861906935d",
+      "raw": "- Cinder Works reached the trial stage, logging \"a pricing call\".[^e]",
+      "subject": "Cinder Works",
+      "refs": [
+        "e"
+      ],
+      "disposition": "ambiguous-source",
+      "uid": "tgt00003",
+      "target": "tgt00003-cinder-works.md",
+      "source": "",
+      "source_drive_path": "",
+      "note": "2 conflicting definitions; no drive slug matches the subject"
+    }
+  ]
+}
