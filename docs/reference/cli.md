@@ -57,8 +57,9 @@ Every subcommand is registered top-level on one `parser.add_subparsers()` in `cl
 - [`athenaeum ingest-answers`](#athenaeum-ingest-answers) (command) — Ingest answered pending questions from _pending_questions.md
 - [`athenaeum ingest-merges`](#athenaeum-ingest-merges) (command) — Archive resolved pending merges from wiki/_pending_merges.md
 - [`athenaeum init`](#athenaeum-init) (command) — Initialize a new knowledge directory
-- [`athenaeum measure`](#athenaeum-measure) (group) — v6 memory-model measurement pack: shadow-mode complete-linkage population, backlog price sheet, ordinary-night steady-state table, C4-vs-comparator shadow parity.
+- [`athenaeum measure`](#athenaeum-measure) (group) — v6 memory-model measurement pack: shadow-mode complete-linkage population, backlog price sheet, ordinary-night steady-state table, C4-vs-comparator shadow parity, coordinate-coverage.
 - [`athenaeum measure backlog-price`](#athenaeum-measure-backlog-price) (command) — Backlog price sheet with a decision-inflow sensitivity table.
+- [`athenaeum measure coordinate-coverage`](#athenaeum-measure-coordinate-coverage) (command) — Read-only, zero-spend per-type dimension-coverage counts (subject/claimed_scope/valid_from/valid_until), plus an optional Gate 1 subject relation distribution over a subject-population report's pairs and/or a raw auto-memory clusters file's within-cluster pairs. Builds no LLM client.
 - [`athenaeum measure ordinary-night`](#athenaeum-measure-ordinary-night) (command) — Ordinary-night steady-state table: measured load + amortized comparator-regime assumptions vs the nightly call/wall-clock budgets.
 - [`athenaeum measure shadow-linkage`](#athenaeum-measure-shadow-linkage) (command) — Shadow-mode complete-linkage cluster population over the live wiki store: embeddings only, zero LLM calls, read-only.
 - [`athenaeum measure shadow-parity`](#athenaeum-measure-shadow-parity) (command) — Run the C4 detector and the cluster comparator over the SAME corpus and report their verdict agreement matrix + call multiplier (; the live-corpus route is).
@@ -690,11 +691,12 @@ Initialize a new knowledge directory
 
 ## `athenaeum measure`
 
-v6 memory-model measurement pack: shadow-mode complete-linkage population, backlog price sheet, ordinary-night steady-state table, C4-vs-comparator shadow parity.
+v6 memory-model measurement pack: shadow-mode complete-linkage population, backlog price sheet, ordinary-night steady-state table, C4-vs-comparator shadow parity, coordinate-coverage.
 
 Subcommands:
 
 - `athenaeum measure backlog-price` — Backlog price sheet with a decision-inflow sensitivity table.
+- `athenaeum measure coordinate-coverage` — Read-only, zero-spend per-type dimension-coverage counts (subject/claimed_scope/valid_from/valid_until), plus an optional Gate 1 subject relation distribution over a subject-population report's pairs and/or a raw auto-memory clusters file's within-cluster pairs. Builds no LLM client.
 - `athenaeum measure ordinary-night` — Ordinary-night steady-state table: measured load + amortized comparator-regime assumptions vs the nightly call/wall-clock budgets.
 - `athenaeum measure shadow-linkage` — Shadow-mode complete-linkage cluster population over the live wiki store: embeddings only, zero LLM calls, read-only.
 - `athenaeum measure shadow-parity` — Run the C4 detector and the cluster comparator over the SAME corpus and report their verdict agreement matrix + call multiplier (; the live-corpus route is).
@@ -717,6 +719,17 @@ Backlog price sheet with a decision-inflow sensitivity table.
 | `--six-month-days` | `182` | — | Day count marking the 6-month horizon a sensitivity row can breach (default: 182). |
 | `--summary-log` | — | — | Path to a nightly log file containing 'librarian-run-summary' lines, used to derive wall-clock/file. Omit to report wall-clock figures as not-yet-measurable (no fabricated figure). |
 | `--wall-clock-per-file-seconds` | — | — | Operator-supplied override for wall-clock/file (AC3(c)). Omit to re-derive it from --summary-log (default). When supplied, the snapshot records wall_clock_source=operator-supplied. |
+
+## `athenaeum measure coordinate-coverage`
+
+Read-only, zero-spend per-type dimension-coverage counts (subject/claimed_scope/valid_from/valid_until), plus an optional Gate 1 subject relation distribution over a subject-population report's pairs and/or a raw auto-memory clusters file's within-cluster pairs. Builds no LLM client.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--clusters` | `False` | — | Also report the Gate 1 subject relation distribution over one raw auto-memory clusters JSONL file's within-cluster member pairs. With no PATH, uses the newest raw/_librarian-clusters-*.jsonl under --path. |
+| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. Counts only -- no page names or uids in either format. |
+| `--pairs-from-report` | — | — | A subject-population JSONL report (see `athenaeum subject-population`). When given, also reports the Gate 1 subject relation distribution (EQUAL/UNKNOWN/DISJOINT) over the report's (candidate, top-k) pairs, against CURRENT page frontmatter. |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge). |
 
 ## `athenaeum measure ordinary-night`
 

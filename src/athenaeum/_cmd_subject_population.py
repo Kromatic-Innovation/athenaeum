@@ -80,50 +80,17 @@ def _resolve_knowledge_root(args: argparse.Namespace) -> Path:
     return (getattr(args, "path", None) or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
 
 
-def _decision_to_row(decision: "PageDecision") -> dict[str, Any]:
-    """One JSONL row's fields (issue athenaeum#1944's Plan: "uid, type,
-    reason, subject id, matched_uid, confirmer_ran, top-k candidate uids"),
-    plus ``name``/``path`` -- structurally required to replay (``--resume``)
-    or apply (``--from-report``) a decision, not merely to describe it."""
-    return {
-        "uid": decision.uid,
-        "name": decision.name,
-        "type": decision.type,
-        "path": str(decision.path),
-        "subject": decision.subject,
-        "reason": decision.reason,
-        "matched_uid": decision.matched_uid,
-        "confirmer_ran": decision.confirmer_ran,
-        "top_k_uids": list(decision.top_k_uids),
-    }
-
-
-def _row_to_decision(row: dict[str, Any]) -> "PageDecision":
-    from athenaeum.subject_population import PageDecision
-
-    return PageDecision(
-        uid=row["uid"],
-        name=row["name"],
-        type=row["type"],
-        path=Path(row["path"]),
-        subject=row["subject"],
-        reason=row["reason"],
-        matched_uid=row.get("matched_uid"),
-        confirmer_ran=bool(row.get("confirmer_ran", False)),
-        top_k_uids=tuple(row.get("top_k_uids") or ()),
-    )
-
-
 def _read_report_rows(path: Path) -> list["PageDecision"]:
-    if not path.is_file():
-        return []
-    decisions: list[PageDecision] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        decisions.append(_row_to_decision(json.loads(stripped)))
-    return decisions
+    """Thin re-export of :func:`athenaeum.subject_population.
+    read_decision_report` under this module's existing private name --
+    that module owns the JSONL row shape (:func:`~athenaeum.
+    subject_population.decision_to_row` / ``decision_from_row``) as the
+    single source of truth, shared with
+    :mod:`athenaeum.coordinate_coverage`'s ``--pairs-from-report`` reader.
+    """
+    from athenaeum.subject_population import read_decision_report
+
+    return read_decision_report(path)
 
 
 def _git_uncommitted_targets(knowledge_root: Path, paths: list[Path]) -> list[Path]:
@@ -229,6 +196,7 @@ def _cmd_collect(args: argparse.Namespace) -> int:
         SubjectRegistry,
         build_subject_population_report,
         build_tier2_confirm,
+        decision_to_row,
     )
 
     usage = TokenUsage()
@@ -274,7 +242,7 @@ def _cmd_collect(args: argparse.Namespace) -> int:
     with report_path.open(write_mode, encoding="utf-8") as fh:
 
         def on_decision(decision: "PageDecision") -> None:
-            fh.write(json.dumps(_decision_to_row(decision)) + "\n")
+            fh.write(json.dumps(decision_to_row(decision)) + "\n")
             fh.flush()
 
         report = build_subject_population_report(

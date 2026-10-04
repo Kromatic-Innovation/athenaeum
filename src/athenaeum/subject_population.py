@@ -752,6 +752,63 @@ def build_subject_population_report(
     return report
 
 
+def decision_to_row(decision: PageDecision) -> dict[str, Any]:
+    """One JSONL report row's fields (issue athenaeum#1944's Plan: "uid,
+    type, reason, subject id, matched_uid, confirmer_ran, top-k candidate
+    uids"), plus ``name``/``path`` -- structurally required to replay
+    (resume) or apply a decision, not merely to describe it.
+
+    The single source of truth for the report's on-disk shape: both
+    :mod:`athenaeum._cmd_subject_population` (the CLI that writes/reads it)
+    and :mod:`athenaeum.coordinate_coverage` (the ``measure
+    coordinate-coverage --pairs-from-report`` reader) import this and
+    :func:`decision_from_row` rather than each parsing the format
+    independently.
+    """
+    return {
+        "uid": decision.uid,
+        "name": decision.name,
+        "type": decision.type,
+        "path": str(decision.path),
+        "subject": decision.subject,
+        "reason": decision.reason,
+        "matched_uid": decision.matched_uid,
+        "confirmer_ran": decision.confirmer_ran,
+        "top_k_uids": list(decision.top_k_uids),
+    }
+
+
+def decision_from_row(row: dict[str, Any]) -> PageDecision:
+    """Inverse of :func:`decision_to_row`."""
+    return PageDecision(
+        uid=row["uid"],
+        name=row["name"],
+        type=row["type"],
+        path=Path(row["path"]),
+        subject=row["subject"],
+        reason=row["reason"],
+        matched_uid=row.get("matched_uid"),
+        confirmer_ran=bool(row.get("confirmer_ran", False)),
+        top_k_uids=tuple(row.get("top_k_uids") or ()),
+    )
+
+
+def read_decision_report(path: Path) -> list[PageDecision]:
+    """Read a JSONL decision report (one :func:`decision_to_row` row per
+    line) back into :class:`PageDecision` objects, in file order. Returns
+    ``[]`` when *path* does not exist -- a fresh ``--resume`` target, or a
+    report that genuinely has no decisions, are not errors here."""
+    if not path.is_file():
+        return []
+    decisions: list[PageDecision] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        decisions.append(decision_from_row(json.loads(stripped)))
+    return decisions
+
+
 def insert_subject(text: str, subject: str) -> str | None:
     """Return *text* with a ``subject:`` line appended to its frontmatter.
 
@@ -871,6 +928,9 @@ __all__ = [
     "apply_subject_population",
     "build_subject_population_report",
     "build_tier2_confirm",
+    "decision_from_row",
+    "decision_to_row",
     "insert_subject",
+    "read_decision_report",
     "run_subject_population",
 ]
