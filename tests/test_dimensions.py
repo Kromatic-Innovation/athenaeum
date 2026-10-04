@@ -643,6 +643,55 @@ class TestCoordinateValueAndParsing:
         assert parsed_coordinate(VALID_TIME, {}) is None
 
 
+class TestUndeterminableSubjectReadsAsAbsent:
+    """Issue athenaeum#1944: ``subject: undeterminable`` must read as absent,
+    never as a literal identity value -- otherwise two degraded/ambiguous
+    pages would compare EQUAL, laundering "we could not tell" into "these
+    are the same real-world thing" (exactly what ``_null_relation``'s
+    docstring forbids for ``null_means=unknown``)."""
+
+    def test_both_sides_undeterminable_give_unknown(self) -> None:
+        from athenaeum.dimensions import parsed_coordinate
+
+        meta_a = {"subject": "undeterminable"}
+        meta_b = {"subject": "undeterminable"}
+        a = parsed_coordinate(SUBJECT, meta_a)
+        b = parsed_coordinate(SUBJECT, meta_b)
+        assert a is None
+        assert b is None
+        assert compare_identity(a, b, null_means=SUBJECT.null_means) == Relation.UNKNOWN
+
+    def test_one_real_id_one_undeterminable_gives_unknown(self) -> None:
+        from athenaeum.dimensions import parsed_coordinate
+
+        a = parsed_coordinate(SUBJECT, {"subject": "subject-000001"})
+        b = parsed_coordinate(SUBJECT, {"subject": "undeterminable"})
+        assert a == "subject-000001"
+        assert b is None
+        assert compare_identity(a, b, null_means=SUBJECT.null_means) == Relation.UNKNOWN
+
+    def test_two_equal_real_ids_still_give_equal(self) -> None:
+        from athenaeum.dimensions import parsed_coordinate
+
+        a = parsed_coordinate(SUBJECT, {"subject": "subject-000001"})
+        b = parsed_coordinate(SUBJECT, {"subject": "subject-000001"})
+        assert compare_identity(a, b, null_means=SUBJECT.null_means) == Relation.EQUAL
+
+    def test_undeterminable_sentinel_only_special_cased_for_identity_kind(self) -> None:
+        # A HIERARCHY/ENUM dimension that happens to carry the literal
+        # string "undeterminable" as a real coordinate value is unaffected
+        # -- the sentinel-as-absent rule is specific to IDENTITY.
+        from athenaeum.dimensions import parsed_coordinate
+
+        assert parsed_coordinate(SCOPE, {"claimed_scope": "undeterminable"}) == "undeterminable"
+
+    def test_subject_population_reexports_the_same_sentinel(self) -> None:
+        from athenaeum.dimensions import UNDETERMINABLE_SUBJECT
+        from athenaeum.subject_population import UNDETERMINABLE
+
+        assert UNDETERMINABLE is UNDETERMINABLE_SUBJECT
+
+
 class TestOriginScopeNeverPopulatesClaimedScope:
     def test_provenance_scope_never_populates_claimed_scope(self) -> None:
         """Regression test (issue athenaeum#714 AC): constructing a WikiEntity with

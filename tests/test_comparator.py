@@ -631,6 +631,23 @@ class TestAC10Underdetermined:
         assert outcome.separator == []
         assert outcome.assumed == []
 
+    def test_both_sides_undeterminable_subject_yields_underdetermined_not_contradiction(
+        self,
+    ) -> None:
+        """Issue athenaeum#1944: two ``subject: undeterminable`` pages must
+        read as UNKNOWN on the subject dimension (not EQUAL), so a
+        CONFLICTING content relation routes to UNDERDETERMINED -- never
+        falls through to CONTRADICTION, which would happen if the sentinel
+        were read as a real, matching identity value."""
+        page_a = _page("alpha", subject="undeterminable", body="claim A")
+        page_b = _page("beta", subject="undeterminable", body="claim B")
+        client = _fake_client(
+            _content_payload(ContentRelation.CONFLICTING, passages=["claim A", "claim B"])
+        )
+        outcome = compare_pages(page_a, page_b, client=client)
+        assert outcome.verdict == VERDICT_UNDERDETERMINED
+        assert "subject" in outcome.missing
+
     def test_underdetermined_creates_no_merge_proposal_or_conflict_flag(
         self, tmp_path: Path
     ) -> None:

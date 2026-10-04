@@ -432,6 +432,16 @@ SUBJECT = Dimension(
     separates=True,
     origin="builtin",
 )
+
+#: The sentinel :mod:`athenaeum.subject_population` (L4) writes for a
+#: degraded or ambiguous ``subject`` decision (issue athenaeum#1944). Declared
+#: HERE rather than in that module because :func:`parsed_coordinate` below
+#: must read it: this module is L2 and ``subject_population`` is L4, so an
+#: import in the other direction would invert the documented layering (see
+#: this module's own docstring). ``subject_population.UNDETERMINABLE``
+#: imports and re-exports this exact object rather than retyping the
+#: literal, so the two never drift.
+UNDETERMINABLE_SUBJECT = "undeterminable"
 #: Issue athenaeum#972 disposition (2026-08-20, PR review comment on athenaeum#714):
 #: ships at ``backfill`` — post-mechanical + classifier-pass coverage is real
 #: but thin for ``decision``/``procedure`` — never ``enforced`` at ship. A
@@ -842,7 +852,20 @@ def parsed_coordinate(dimension: Dimension, meta: Mapping[str, Any] | None) -> A
         return (d, d + timedelta(days=1)) if d is not None else None
     if dimension.kind in (DimensionKind.HIERARCHY, DimensionKind.ENUM, DimensionKind.IDENTITY):
         raw = coordinate_value(dimension, meta)
-        return str(raw) if raw is not None else None
+        if raw is None:
+            return None
+        # Issue athenaeum#1944: ``subject: undeterminable`` is the recorded
+        # OUTCOME of a degraded/ambiguous resolver run
+        # (:mod:`athenaeum.subject_population`), never an asserted identity.
+        # Reading it as the literal string would reach compare_identity as
+        # a real value and compare EQUAL to another undeterminable page --
+        # laundering "we could not tell" into "these are the same thing",
+        # exactly what ``_null_relation``'s docstring (above) forbids for
+        # ``null_means=unknown``. Treat it as absent here, at the coordinate
+        # boundary, so every downstream comparator branch is unaffected.
+        if dimension.kind == DimensionKind.IDENTITY and raw == UNDETERMINABLE_SUBJECT:
+            return None
+        return str(raw)
     return None
 
 
@@ -1108,6 +1131,7 @@ __all__ = [
     "RECORDED_TIME",
     "SCOPE",
     "SUBJECT",
+    "UNDETERMINABLE_SUBJECT",
     "UNIVERSAL_MARKER",
     "VALID_TIME",
     "Dimension",

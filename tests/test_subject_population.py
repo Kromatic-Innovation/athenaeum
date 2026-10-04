@@ -18,6 +18,7 @@ from athenaeum.entity_resolution import Ambiguous, Match, NoMatch, SubjectPage
 from athenaeum.models import parse_frontmatter
 from athenaeum.subject_population import (
     UNDETERMINABLE,
+    PageDecision,
     SubjectRegistry,
     build_subject_population_report,
     build_tier2_confirm,
@@ -400,3 +401,294 @@ class TestBuildTier2Confirm:
 
         assert result == Match("u1")
         assert calls == [(cand, top, sentinel_client, {"x": 1}, None)]
+
+
+# ---------------------------------------------------------------------------
+# athenaeum#1944 — CLI-precondition hooks added to this module directly
+# ---------------------------------------------------------------------------
+
+
+class TestConfirmerRanAndTopKUids:
+    def test_empty_pool_mint_never_runs_confirmer(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        _page(wiki, "a.md", uid="u1", name="Alpha")
+
+        report = build_subject_population_report(
+            wiki,
+            embedder=lambda texts: None,
+            confirm=lambda cand, top: Match(top[0][0].uid),
+        )
+        decision = report.decisions[0]
+        assert decision.reason == "minted"
+        assert decision.confirmer_ran is False
+        assert decision.top_k_uids == ()
+
+    def test_matched_decision_records_confirmer_ran_and_top_k_uids(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        _page(wiki, "a.md", uid="u1", name="Alpha")
+        _page(wiki, "b.md", uid="u2", name="Alpha Prime")
+
+        embed = _stub_embedder({"alpha": [1.0, 0.0], "alpha prime": [1.0, 0.0]})
+        report = build_subject_population_report(
+            wiki, embedder=embed, confirm=lambda cand, top: Match(top[0][0].uid)
+        )
+        decisions = {d.uid: d for d in report.decisions}
+        assert decisions["u2"].confirmer_ran is True
+        assert decisions["u2"].top_k_uids == ("u1",)
+
+    def test_below_threshold_mint_never_runs_confirmer(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        _page(wiki, "a.md", uid="u1", name="Alpha")
+        _page(wiki, "b.md", uid="u2", name="Zzz Totally Different")
+
+        embed = _stub_embedder(
+            {"alpha": [1.0, 0.0], "zzz totally different": [0.0, 1.0]}
+        )
+        report = build_subject_population_report(
+            wiki, embedder=embed, confirm=lambda cand, top: Match(top[0][0].uid)
+        )
+        decisions = {d.uid: d for d in report.decisions}
+        assert decisions["u2"].reason == "minted"
+        assert decisions["u2"].confirmer_ran is False
+        assert decisions["u2"].top_k_uids == ()
+
+    def test_ambiguous_decision_records_confirmer_ran(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        _page(wiki, "a.md", uid="u1", name="Casey Rivera")
+        _page(wiki, "b.md", uid="u2", name="Casey Rivera Jr")
+
+        embed = _stub_embedder(
+            {"casey rivera": [1.0, 0.0], "casey rivera jr": [1.0, 0.0]}
+        )
+        report = build_subject_population_report(
+            wiki, embedder=embed, confirm=lambda cand, top: Ambiguous(("u1",))
+        )
+        decisions = {d.uid: d for d in report.decisions}
+        assert decisions["u2"].reason == "undeterminable-ambiguous"
+        assert decisions["u2"].confirmer_ran is True
+        assert decisions["u2"].top_k_uids == ("u1",)
+
+
+class TestOnDecisionHook:
+    def test_fires_once_per_new_decision_in_order(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        _page(wiki, "a.md", uid="u1", name="Alpha")
+        _page(wiki, "b.md", uid="u2", name="Beta")
+
+        seen: list[PageDecision] = []
+        build_subject_population_report(
+            wiki, embedder=lambda texts: None, on_decision=seen.append
+        )
+        assert [d.uid for d in seen] == ["u1", "u2"]
+
+    def test_never_fires_for_a_replayed_prior_decision(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        _page(wiki, "a.md", uid="u1", name="Alpha")
+        _page(wiki, "b.md", uid="u2", name="Beta")
+
+        full = build_subject_population_report(wiki, embedder=lambda texts: None)
+        seen: list[PageDecision] = []
+        build_subject_population_report(
+            wiki,
+            embedder=lambda texts: None,
+            prior_decisions=full.decisions[:1],
+            on_decision=seen.append,
+        )
+        assert [d.uid for d in seen] == ["u2"]
+
+
+class TestResume:
+    def _build_wiki(self, tmp_path: Path) -> Path:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        _page(wiki, "a.md", uid="u1", name="Alpha")
+        _page(wiki, "b.md", uid="u2", name="Beta")
+        _page(wiki, "c.md", uid="u3", name="Alpha Two")
+        _page(wiki, "d.md", uid="u4", name="Gamma")
+        return wiki
+
+    def _embedder(self):
+        return _stub_embedder(
+            {
+                "alpha": [1.0, 0.0],
+                "beta": [0.0, 1.0],
+                "alpha two": [1.0, 0.0],
+                "gamma": [0.0, 1.0],
+            }
+        )
+
+    def _confirm(self):
+        def confirm(cand: SubjectPage, top: list[tuple[SubjectPage, float]]):
+            return Match(top[0][0].uid)
+
+        return confirm
+
+    def test_resume_after_kill_matches_an_uninterrupted_run(self, tmp_path: Path) -> None:
+        wiki = self._build_wiki(tmp_path)
+
+        full_report = build_subject_population_report(
+            wiki, embedder=self._embedder(), confirm=self._confirm()
+        )
+        assert [d.uid for d in full_report.decisions] == ["u1", "u2", "u3", "u4"]
+
+        # Simulate killing the run after 2 decisions: resume from exactly
+        # those two rows, re-reading the same (untouched -- dry run writes
+        # nothing) wiki.
+        prior = full_report.decisions[:2]
+        resumed_new: list[PageDecision] = []
+        resumed_report = build_subject_population_report(
+            wiki,
+            embedder=self._embedder(),
+            confirm=self._confirm(),
+            prior_decisions=prior,
+            on_decision=resumed_new.append,
+        )
+
+        assert resumed_report.decisions == full_report.decisions
+        assert resumed_report.scanned == full_report.scanned
+        # on_decision only fires for the genuinely NEW decisions.
+        assert [d.uid for d in resumed_new] == ["u3", "u4"]
+
+    def test_resume_reproduces_identical_minted_subject_ids(self, tmp_path: Path) -> None:
+        wiki = self._build_wiki(tmp_path)
+        full_report = build_subject_population_report(
+            wiki, embedder=self._embedder(), confirm=self._confirm()
+        )
+        prior = full_report.decisions[:2]
+        resumed_report = build_subject_population_report(
+            wiki, embedder=self._embedder(), confirm=self._confirm(), prior_decisions=prior
+        )
+        full_by_uid = {d.uid: d.subject for d in full_report.decisions}
+        resumed_by_uid = {d.uid: d.subject for d in resumed_report.decisions}
+        assert full_by_uid == resumed_by_uid
+
+
+class TestLimitAndTypesFilters:
+    def test_limit_stops_after_n_new_decisions_without_error(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        _page(wiki, "a.md", uid="u1", name="Alpha")
+        _page(wiki, "b.md", uid="u2", name="Beta")
+        _page(wiki, "c.md", uid="u3", name="Gamma")
+
+        report = build_subject_population_report(
+            wiki, embedder=lambda texts: None, limit=2
+        )
+        assert [d.uid for d in report.decisions] == ["u1", "u2"]
+        assert report.stopped_reason is not None
+        assert report.stopped_due_to_ceiling is False
+
+    def test_types_filter_narrows_scope(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        _page(wiki, "a.md", uid="u1", name="Alpha", type_="concept")
+        _page(wiki, "b.md", uid="u2", name="Beta", type_="reference")
+
+        report = build_subject_population_report(
+            wiki, embedder=lambda texts: None, types=["concept"]
+        )
+        assert [d.uid for d in report.decisions] == ["u1"]
+
+
+class TestCeilingCheck:
+    def test_trip_stops_before_the_next_page_resolves_and_is_resumable(
+        self, tmp_path: Path
+    ) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        _page(wiki, "a.md", uid="u1", name="Alpha")
+        _page(wiki, "b.md", uid="u2", name="Alpha Prime")
+        _page(wiki, "c.md", uid="u3", name="Alpha Tertiary")
+
+        embed = _stub_embedder(
+            {
+                "alpha": [1.0, 0.0],
+                "alpha prime": [1.0, 0.0],
+                "alpha tertiary": [1.0, 0.0],
+            }
+        )
+        confirmer_calls: list[str] = []
+
+        def confirm(cand: SubjectPage, top: list[tuple[SubjectPage, float]]):
+            confirmer_calls.append(cand.uid)
+            return Match(top[0][0].uid)
+
+        trips = iter([None, "spend ceiling: per-run token cap reached"])
+
+        def ceiling_check() -> str | None:
+            return next(trips)
+
+        report = build_subject_population_report(
+            wiki, embedder=embed, confirm=confirm, ceiling_check=ceiling_check
+        )
+
+        # u1 (empty pool) mints with zero confirmer cost; the ceiling trips
+        # on the check before u2 is ever resolved, so u2/u3 never reach the
+        # confirmer and never get a decision.
+        assert [d.uid for d in report.decisions] == ["u1"]
+        assert confirmer_calls == []
+        assert report.stopped_due_to_ceiling is True
+        assert report.stopped_reason == "spend ceiling: per-run token cap reached"
+
+    def test_never_consulted_once_a_page_is_a_replayed_prior_decision(
+        self, tmp_path: Path
+    ) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        _page(wiki, "a.md", uid="u1", name="Alpha")
+        _page(wiki, "b.md", uid="u2", name="Beta")
+
+        full = build_subject_population_report(wiki, embedder=lambda texts: None)
+
+        def ceiling_check() -> str | None:
+            raise AssertionError("must never be consulted for a replayed decision")
+
+        report = build_subject_population_report(
+            wiki,
+            embedder=lambda texts: None,
+            prior_decisions=full.decisions,
+            ceiling_check=ceiling_check,
+        )
+        assert [d.uid for d in report.decisions] == ["u1", "u2"]
+
+
+class TestSubjectRegistryConfirmerRan:
+    def test_mint_and_match_track_confirmer_ran_round_trip(self, tmp_path: Path) -> None:
+        registry = SubjectRegistry()
+        sid = registry.mint("u1", confirmer_ran=False)
+        registry.record_match(sid, "u2", confirmer_ran=True)
+        assert registry.confirmer_ran[sid] is True
+
+        path = tmp_path / "_subject_registry.json"
+        registry.save(path)
+        loaded = SubjectRegistry.load(path)
+        assert loaded.confirmer_ran[sid] is True
+
+    def test_load_reads_a_pre_existing_registry_file_with_no_confirmer_ran_key(
+        self, tmp_path: Path
+    ) -> None:
+        import json
+
+        path = tmp_path / "_subject_registry.json"
+        path.write_text(
+            json.dumps({"next_id": 3, "subjects": {"subject-000001": ["u1", "u2"]}}),
+            encoding="utf-8",
+        )
+        loaded = SubjectRegistry.load(path)
+        assert loaded.subjects == {"subject-000001": ["u1", "u2"]}
+        assert loaded.next_id == 3
+        assert loaded.confirmer_ran == {}
+
+    def test_seed_minted_advances_next_id_past_a_replayed_subject(self) -> None:
+        registry = SubjectRegistry()
+        registry.seed_minted("subject-000005", "u1")
+        assert registry.next_id == 6
+        assert registry.subjects["subject-000005"] == ["u1"]
+        new_id = registry.mint("u2")
+        assert new_id == "subject-000006"
