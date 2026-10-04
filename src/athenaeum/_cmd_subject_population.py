@@ -53,7 +53,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -68,12 +67,19 @@ if TYPE_CHECKING:
 
 
 def _default_report_path() -> Path:
-    """``~/.cache/athenaeum/1944/subject-population-<UTC ts>.jsonl`` (the
-    issue's own default — host-side, never committed, one file per run)."""
+    """``<cache_dir>/1944/subject-population-<UTC ts>.jsonl`` (the issue's
+    own default — host-side, never committed, one file per run).
+
+    ``<cache_dir>`` is :func:`athenaeum.config.resolve_cache_dir`'s result
+    (``~/.cache/athenaeum`` unless overridden) — that function is the ONE
+    place the ``~/.cache/athenaeum`` literal is constructed
+    (``tests/test_cache_dir_resolver.py`` pins this), so this helper routes
+    through it rather than reconstructing the literal itself.
+    """
+    from athenaeum.config import resolve_cache_dir
+
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    return (
-        Path.home() / ".cache" / "athenaeum" / "1944" / f"subject-population-{ts}.jsonl"
-    )
+    return resolve_cache_dir(None) / "1944" / f"subject-population-{ts}.jsonl"
 
 
 def _resolve_knowledge_root(args: argparse.Namespace) -> Path:
@@ -94,39 +100,23 @@ def _read_report_rows(path: Path) -> list["PageDecision"]:
 
 
 def _git_uncommitted_targets(knowledge_root: Path, paths: list[Path]) -> list[Path]:
-    """Return the subset of *paths* ``git status --porcelain`` reports as
-    having any local change (modified, staged, or untracked) under
-    *knowledge_root*. A ``git`` invocation failure (missing binary, not a
-    repo) fails CLOSED -- every existing path is reported dirty, never
-    silently treated as clean.
+    """Return the subset of *paths* with any local git change under
+    *knowledge_root*.
+
+    Routes through :meth:`athenaeum.store.FilesystemStore.uncommitted_paths`
+    rather than shelling out to ``git`` directly here --
+    ``tests/test_no_git_shelling_outside_store.py`` pins the set of modules
+    allowed their own git-argv call sites, and this command is not one of
+    them; the store already owns ``git status --porcelain`` for
+    :meth:`~athenaeum.store.FilesystemStore.snapshot`, so this is a sibling
+    method on the SAME primitive rather than a second, duplicated call
+    site. ``roots={}`` is correct: this call never touches any
+    ``StoreKey``-addressed surface, only the git-argv helper.
     """
-    existing = [p for p in paths if p.exists()]
-    if not existing:
-        return []
-    try:
-        result = subprocess.run(
-            ["git", "status", "--porcelain", "--", *[str(p) for p in existing]],
-            cwd=str(knowledge_root),
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except OSError:
-        return list(existing)
-    if result.returncode != 0:
-        return list(existing)
-    dirty: set[Path] = set()
-    for line in result.stdout.splitlines():
-        if not line.strip():
-            continue
-        # Porcelain v1 short format: two status chars, a space, then the
-        # path (rename entries use "orig -> new"; the destination is what
-        # matters here, and it is always the text after "-> ").
-        rel = line[3:]
-        if " -> " in rel:
-            rel = rel.split(" -> ", 1)[1]
-        dirty.add((knowledge_root / rel.strip()).resolve())
-    return [p for p in existing if p.resolve() in dirty]
+    from athenaeum.store import FilesystemStore
+
+    store = FilesystemStore(knowledge_root, roots={})
+    return store.uncommitted_paths(paths)
 
 
 def cmd_subject_population(args: argparse.Namespace) -> int:

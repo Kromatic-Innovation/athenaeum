@@ -1438,6 +1438,53 @@ class FilesystemStore:
         ).stdout.strip()
         return sha
 
+    def uncommitted_paths(self, paths: Sequence[Path]) -> list[Path]:
+        """Return the subset of *paths* ``git status --porcelain`` reports as
+        having any local change (modified, staged, or untracked) under
+        ``knowledge_root`` (issue athenaeum#1944).
+
+        Sibling of :meth:`snapshot` — same ``git status --porcelain``
+        primitive this class already owns, scoped to specific paths rather
+        than the whole tree, for a caller (``athenaeum subject-population
+        --apply``) that must refuse to write a page with uncommitted local
+        changes rather than silently mixing its own edit into them. Returns
+        every element of *paths* unchanged (fails CLOSED, never silently
+        clean) when ``knowledge_root`` is not a git repository, or the
+        ``git`` invocation itself fails to run at all.
+        """
+        knowledge_root = self._knowledge_root
+        existing = [p for p in paths if Path(p).exists()]
+        if not existing:
+            return []
+        if not (knowledge_root / ".git").exists():
+            return list(existing)
+
+        try:
+            result = subprocess.run(
+                ["git", "status", "--porcelain", "--", *[str(p) for p in existing]],
+                cwd=str(knowledge_root),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError:
+            return list(existing)
+        if result.returncode != 0:
+            return list(existing)
+
+        dirty: set[Path] = set()
+        for line in result.stdout.splitlines():
+            if not line.strip():
+                continue
+            # Porcelain v1 short format: two status chars, a space, then the
+            # path (rename entries use "orig -> new"; the destination is
+            # what matters here, and it always follows "-> ").
+            rel = line[3:]
+            if " -> " in rel:
+                rel = rel.split(" -> ", 1)[1]
+            dirty.add((knowledge_root / rel.strip()).resolve())
+        return [p for p in existing if Path(p).resolve() in dirty]
+
     def lease(
         self, name: str, ttl_seconds: float, *, force: bool = False
     ) -> AbstractContextManager[Lease]:
