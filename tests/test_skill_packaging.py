@@ -150,6 +150,72 @@ def test_built_wheel_contains_claude_code_hook_kit() -> None:
         )
 
 
+def test_built_wheel_ships_no_recall_logic_in_a_hook_example() -> None:
+    """The SHIPPED hook examples carry no recall implementation (issue
+    athenaeum#1363).
+
+    ``examples/`` is force-included, so a hook example is shipped code and
+    ``scripts/check_hook_examples.py`` guards the working tree against a
+    re-fork. This runs that same guard against the files as they exist
+    INSIDE a freshly built wheel, which is where the issue asks for the
+    confirmation: the force-include is a separate mechanism from the git
+    checkout, and "no SQL in the repo" would not by itself prove "no SQL in
+    the artifact a `pip install` delivers".
+    """
+    pytest.importorskip("build", reason="`build` not installed; `pip install athenaeum[dev]`")
+
+    import importlib.util
+    import tempfile
+
+    spec = importlib.util.spec_from_file_location(
+        "check_hook_examples", _REPO_ROOT / "scripts" / "check_hook_examples.py"
+    )
+    assert spec and spec.loader
+    guard = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(guard)
+
+    with tempfile.TemporaryDirectory() as outdir:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "build",
+                "--wheel",
+                "--no-isolation",
+                "--outdir",
+                outdir,
+                str(_REPO_ROOT),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, (
+            f"wheel build failed:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        )
+        wheels = list(Path(outdir).glob("*.whl"))
+        assert len(wheels) == 1, f"expected one wheel, got {wheels}"
+
+        unpacked = Path(outdir) / "unpacked"
+        with zipfile.ZipFile(wheels[0]) as zf:
+            shipped = [
+                n
+                for n in zf.namelist()
+                if n.endswith(".sh") and "examples/claude-code/" in n
+            ]
+            zf.extractall(unpacked)
+        assert shipped, "no shipped hook examples in the wheel at all — force-include broke"
+
+        hooks_dir = unpacked / "athenaeum" / "examples" / "claude-code"
+        violations, scanned = guard.check_dir(hooks_dir)
+        assert scanned == len(shipped), (
+            f"scanned {scanned} of {len(shipped)} shipped hook examples"
+        )
+        assert not violations, (
+            "the wheel ships a hook example that reimplements recall:\n"
+            + "\n".join(v.render(unpacked) for v in violations)
+        )
+
+
 def _split_frontmatter(text: str) -> tuple[dict, str]:
     import yaml
 
