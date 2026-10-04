@@ -75,6 +75,25 @@ def add_decompose_page_subparser(subparsers: argparse._SubParsersAction) -> None
         "flag the command writes nothing but the report.",
     )
     parser.add_argument(
+        "--split-clauses",
+        action="store_true",
+        help="Split a run-on list item into one candidate per footnote-cited "
+        "clause before classification (issue athenaeum#1947), instead of "
+        "treating the whole item as one fact. A clause ends at a run of "
+        "inline footnote markers, optionally followed by '.'/';'/',' and "
+        "then whitespace or the end of the item; an item is only split "
+        "when that yields 2+ clauses AND --subject-until matches it 2+ "
+        "times, so a single fact with two mid-sentence citations is never "
+        "cut. A clause --subject-until does not match exactly once is "
+        "'malformed' -- reported unresolved with an empty subject rather "
+        "than re-cut by a second heuristic; only a 'drop' ruling can "
+        "resolve it. Off by default: without this flag the report is the "
+        "version 1 shape, byte-identical to today's. With it, the report "
+        "is version 2, a strict superset (adds 'items', 'clause_split', "
+        "and per-bullet 'item_ordinal'/'clause_index'/'clause_shape'). "
+        "Makes no LLM call either way.",
+    )
+    parser.add_argument(
         "--resolutions",
         type=Path,
         default=None,
@@ -154,7 +173,12 @@ def cmd_decompose_page(args: argparse.Namespace) -> int:
             return 1
 
     try:
-        report = build_report(wiki_root, args.uid, subject_until=args.subject_until)
+        report = build_report(
+            wiki_root,
+            args.uid,
+            subject_until=args.subject_until,
+            split_clauses=args.split_clauses,
+        )
     except DecomposeError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -179,6 +203,12 @@ def cmd_decompose_page(args: argparse.Namespace) -> int:
     print(f"  subjects unresolved:  {report.subjects_unresolved}")
     print(f"  conflicting labels:   {report.conflicting_labels}")
     print(f"  orphan definitions:   {report.orphan_definitions}")
+    if args.split_clauses:
+        # Counts only, same rule as everything above: no subject, uid or
+        # filename ever reaches stdout.
+        print(f"  items split:          {report.items_split}")
+        print(f"  clauses:              {report.clauses}")
+        print(f"  malformed:            {report.malformed}")
     print(f"  report:               {args.report}")
 
     if not args.apply:
