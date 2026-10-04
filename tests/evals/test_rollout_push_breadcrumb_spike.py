@@ -5,14 +5,22 @@ AC1).
 AC1 is deliberately the sharp one: "A breadcrumb PUSH arm delivers
 byte-equivalent context to what ``examples/claude-code/user-prompt-recall.sh``
 injects for the same query on the same materialized corpus, pinned by a
-test that RUNS THE REAL HOOK against the corpus and DIFFS." That means this
-module must not reimplement the hook's SQL ranking / awk 200-character
-clamp / ``LIMIT 3`` in Python and compare against its own reimplementation
-— it must invoke the real, shipped, byte-unchanged
-``examples/claude-code/user-prompt-recall.sh`` (after
-``session-start-recall.sh`` builds its index) and diff against
+test that RUNS THE REAL HOOK against the corpus and DIFFS." So this module
+invokes the real, shipped ``examples/claude-code/user-prompt-recall.sh``
+(after ``session-start-recall.sh`` builds its index) and diffs against
 :func:`tests.evals.rollout.build_push_breadcrumb_context`'s own output for
 the identical query on the identical materialized corpus.
+
+**What the diff proves, after issue athenaeum#1363.** AC1's "must not
+reimplement the hook's SQL ranking / awk 200-character clamp / ``LIMIT 3``
+in Python" is satisfied structurally now rather than by vigilance: the hook
+has no SQL, no awk and no slot cap of its own — it is a thin launcher for
+:mod:`athenaeum.claude_code_adapter`, and
+:func:`~tests.evals.rollout.build_push_breadcrumb_context` reaches the same
+core. What this test still pins is therefore worth keeping and worth
+stating precisely: that the eval harness's context builder and the SHIPPED
+launcher agree byte-for-byte, so the arm measures what a user's hook
+actually injects rather than something only the harness can produce.
 
 The two hook invocations below are constructed INDEPENDENTLY (this module
 builds its own env dict, mirroring ``tests/test_shell_hooks.py``'s
@@ -26,10 +34,11 @@ session; reusing one across the two invocations would trip the hook's own
 session-dedup ``SEEN_FILE`` logic and bias the SECOND call's results,
 which is not what "same query on the same corpus" means).
 
-Requires ``bash``, ``jq`` and a REAL ``sqlite3`` CLI **built with FTS5** —
-skips cleanly (never fails) when any is absent, same idiom
-``tests/test_shell_hooks.py`` uses throughout (that module is unmarked and
-already runs in the default job, so this dependency is already CI-proven).
+Requires ``bash`` and a SQLite build with FTS5 (probed through the
+``sqlite3`` module, which is what builds the index — the hook example runs
+no SQL of its own since issue athenaeum#1363) — skips cleanly (never
+fails) when either is absent, same idiom ``tests/test_shell_hooks.py``
+uses throughout.
 No API client, no ``claude`` binary, no token spend — NOT ``rollout``-marked
 (issue athenaeum#1742); runs in the default selection.
 """
@@ -60,19 +69,25 @@ def _require(tool: str) -> None:
 
 
 def _require_fts5_sqlite() -> None:
-    """A ``sqlite3`` binary can exist without FTS5 compiled in — the hook's
-    own index build (and this test's corpus) both need the real extension,
-    not just the CLI. Skip cleanly rather than fail on a stripped-down
-    build."""
-    _require("sqlite3")
-    probe = subprocess.run(
-        ["sqlite3", ":memory:", "CREATE VIRTUAL TABLE t USING fts5(a);"],
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
-    if probe.returncode != 0:
-        pytest.skip(f"sqlite3 CLI lacks FTS5: {probe.stderr.strip()}")
+    """A SQLite build can exist without FTS5 compiled in — the index build
+    and this test's corpus both need the real extension. Skip cleanly
+    rather than fail on a stripped-down build.
+
+    Probes the ``sqlite3`` MODULE, not the CLI (issue athenaeum#1363): the
+    index is built by ``athenaeum.search.build_fts5_index`` and the hook
+    example no longer runs any SQL of its own, so the CLI's presence proves
+    nothing about this path — and requiring it would skip the whole test on
+    a runner that can in fact run it.
+    """
+    import sqlite3 as _sqlite3
+
+    conn = _sqlite3.connect(":memory:")
+    try:
+        conn.execute("CREATE VIRTUAL TABLE t USING fts5(a);")
+    except _sqlite3.OperationalError as exc:  # pragma: no cover - env-dependent
+        pytest.skip(f"sqlite3 module lacks FTS5: {exc}")
+    finally:
+        conn.close()
 
 
 def _hand_built_hook_env(knowledge_root: Path, home: Path) -> dict[str, str]:
@@ -140,7 +155,6 @@ def test_push_breadcrumb_arm_is_byte_equivalent_to_the_real_hook(
     """
     monkeypatch.setenv("ATHENAEUM_EVAL_HOOK", "shell")
     _require("bash")
-    _require("jq")
     _require_fts5_sqlite()
 
     corpus = build_corpus("core")
@@ -184,7 +198,6 @@ def test_push_breadcrumb_arm_matches_the_real_hook_across_multiple_probes(
     """
     monkeypatch.setenv("ATHENAEUM_EVAL_HOOK", "shell")
     _require("bash")
-    _require("jq")
     _require_fts5_sqlite()
 
     corpus = build_corpus("core")

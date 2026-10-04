@@ -3,8 +3,34 @@
 These hooks are load-bearing for the sidecar experience — a regression would
 silently break auto-recall for all future sessions. They're shipped to users
 via copy-paste, so the CI contract is: each hook must be exit-clean against
-a minimal synthetic wiki on a standard POSIX box with ``bash``, ``jq``, and
-``sqlite3`` available.
+a minimal synthetic wiki on a standard POSIX box with ``bash`` (plus ``jq``
+and ``sqlite3`` for the hooks that still need them) available.
+
+**What ``TestUserPromptRecall`` tests, after issue athenaeum#1363.** That
+hook is now a 13-line launcher that execs the packaged adapter
+(:mod:`athenaeum.claude_code_adapter`), so the only thing left to test
+THROUGH it is the black-box contract: stdin JSON in, one line of hook-output
+JSON out, a ledger row on the side, silence on every no-op path. The ~35
+tests that pinned the retired shell body's internals — its FTS5 ``SELECT``,
+its BM25 ordering, its awk budget pass and BWK-awk portability, its
+``_pm_*`` bash helpers, its "no Python interpreter is spawned on the FTS5
+path" contract, and the ``ATHENAEUM_SRC`` fake-package stub that could
+intercept the shell's hand-built ``sys.path`` but cannot intercept a
+packaged import — were deleted with it. Every invariant they guarded that
+still exists is pinned in-process instead, chiefly by
+``tests/test_context_core.py`` (budget, kill switch, dedup, tier
+retirement, description round-tripping, body-scoped FTS5 matching),
+``tests/test_context_overflow_1905.py`` (cap, overflow notice, budget
+drops) and ``tests/test_context_push_telemetry.py`` (ledger rows). The
+three behaviours that did NOT survive the cutover are pinned as strict
+xfails in ``TestRetiredShellParityGaps`` below rather than deleted.
+
+``_require("jq")`` / ``_require("sqlite3")`` are no longer called in
+``TestUserPromptRecall``: neither the launcher nor
+``session-start-recall.sh`` shells out to either binary any more, and
+leaving the guards in place would have SKIPPED the whole class on a runner
+without them — a green-because-skipped result for the one thing that
+changed.
 
 The tests shell out with an isolated ``HOME`` so they never touch the
 developer's real ``~/.cache/athenaeum`` or ``~/knowledge``.
@@ -18,7 +44,6 @@ import shlex
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -27,7 +52,6 @@ from typing import Any
 import pytest
 
 from athenaeum import killswitch
-from athenaeum.config import resolve_recall_cap_ceiling
 from athenaeum.push_metrics import (
     _parse_ts,
     _query_hash,
@@ -658,8 +682,6 @@ class TestUserPromptRecall:
         self, hook_env: dict[str, str]
     ) -> None:
         _require("bash")
-        _require("jq")
-        _require("sqlite3")
         _require_hook_python(hook_env, "athenaeum.search")
         self._seed_index(hook_env)
 
@@ -690,67 +712,8 @@ class TestUserPromptRecall:
         assert hook_output.get("hookEventName") == "UserPromptSubmit"
         assert "Customer Development" in hook_output["additionalContext"]
 
-    def test_attempts_llm_extractor_without_api_key(
-        self, hook_env: dict[str, str], tmp_path: Path
-    ) -> None:
-        """athenaeum#792: the extractor must be *attempted* even with no
-        ANTHROPIC_API_KEY set — under `llm.provider: claude-cli` none is
-        needed, and the hook must not silently skip it on that basis.
-
-        `$ATHENAEUM_CLI` is pointed at a local stub that records its own
-        invocation, never a real `athenaeum` binary — this proves the
-        branch is *reached* without the test ever touching a live LLM.
-
-        Uses a placeholder file (not a real FTS5 build via
-        `session-start-recall.sh`) to satisfy the hook's early "no index
-        at all" bail, so this test does not depend on the `sqlite3` CLI
-        being installed on the runner — it only needs to prove the
-        extractor call itself is reached.
-        """
-        _require("bash")
-        _require("jq")
-
-        cache_dir = tmp_path / ".cache" / "athenaeum"
-        cache_dir.mkdir(parents=True)
-        (cache_dir / "wiki-index.db").write_text("")
-
-        marker = tmp_path / "extractor-invoked.marker"
-        stub = tmp_path / "athenaeum-stub.sh"
-        stub.write_text(
-            "#!/usr/bin/env bash\n"
-            f"echo invoked >> {marker}\n"
-            "echo 'customer development'\n"
-        )
-        stub.chmod(0o755)
-
-        env = dict(hook_env)
-        env["ATHENAEUM_CLI"] = str(stub)
-        env.pop("ANTHROPIC_API_KEY", None)  # explicit: no key present
-
-        stdin_payload = json.dumps(
-            {
-                "prompt": "Tell me about customer development frameworks",
-                "session_id": f"test-{uuid.uuid4().hex}",
-            }
-        )
-        result = subprocess.run(
-            ["bash", str(USER_PROMPT)],
-            input=stdin_payload,
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        assert result.returncode == 0, f"stderr: {result.stderr}"
-        assert marker.is_file(), (
-            "extractor stub was never invoked with no ANTHROPIC_API_KEY set — "
-            "the gate this test guards against has come back"
-        )
-
     def test_silent_on_short_prompt(self, hook_env: dict[str, str]) -> None:
         _require("bash")
-        _require("jq")
-        _require("sqlite3")
         self._seed_index(hook_env)
 
         stdin_payload = json.dumps(
@@ -772,7 +735,6 @@ class TestUserPromptRecall:
 
     def test_exits_clean_with_no_index(self, hook_env: dict[str, str]) -> None:
         _require("bash")
-        _require("jq")
         stdin_payload = json.dumps(
             {
                 "prompt": "anything at all with enough characters",
@@ -810,8 +772,6 @@ class TestUserPromptRecall:
         one was silently dropped.
         """
         _require("bash")
-        _require("jq")
-        _require("sqlite3")
         _require_hook_python(hook_env, "athenaeum.search")
 
         wiki = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
@@ -884,7 +844,6 @@ class TestUserPromptRecall:
         import sqlite3
 
         _require("bash")
-        _require("sqlite3")
         _require_hook_python(hook_env, "athenaeum.search")
 
         _seed_realistic_tier_mix(Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki")
@@ -930,8 +889,6 @@ class TestUserPromptRecall:
         wrong ones.
         """
         _require("bash")
-        _require("jq")
-        _require("sqlite3")
         _require_hook_python(hook_env, "athenaeum.search")
 
         _seed_realistic_tier_mix(Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki")
@@ -971,8 +928,6 @@ class TestUserPromptRecall:
         from a tier term in selection, ordering, or scoring.
         """
         _require("bash")
-        _require("jq")
-        _require("sqlite3")
         _require_hook_python(hook_env, "athenaeum.search")
 
         wiki = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
@@ -1034,8 +989,6 @@ class TestUserPromptRecall:
         from athenaeum.storage import is_embedded
 
         _require("bash")
-        _require("jq")
-        _require("sqlite3")
         _require_hook_python(hook_env, "athenaeum.search")
 
         # 1. AC3 mechanism — the `cold` boundary is `storage.is_embedded`,
@@ -1144,76 +1097,6 @@ class TestUserPromptRecall:
         )
 
 
-    def test_push_token_budget_discriminates_tiny_vs_generous(
-        self, hook_env: dict[str, str]
-    ) -> None:
-        """Issue athenaeum#1120 AC4 — a tiny `ATHENAEUM_PUSH_TOKEN_BUDGET`
-        must be unable to afford even one entry, while a generous budget on
-        the same candidate lets it through. Both assertions are required —
-        a test that only checks the generous side can't fail on a budget
-        that was never wired up at all.
-        """
-        _require("bash")
-        _require("jq")
-        _require("sqlite3")
-        _require_hook_python(hook_env, "athenaeum.search")
-
-        wiki = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
-        (wiki / "hot-budgettest.md").write_text(
-            "---\n"
-            "name: Budgettest Hot Page\n"
-            "tags: [budgettest]\n"
-            "description: A hot-tier page about budgettest devices\n"
-            "memory_tier: hot\n"
-            "---\n\n"
-            "This page discusses budgettest devices extensively for testing.\n"
-        )
-        self._seed_index(hook_env)
-
-        tiny_env = dict(hook_env)
-        tiny_env["ATHENAEUM_PUSH_TOKEN_BUDGET"] = "1"
-        tiny_payload = json.dumps(
-            {
-                "prompt": "tell me about budgettest devices",
-                "session_id": f"test-{uuid.uuid4().hex}",
-            }
-        )
-        tiny_result = subprocess.run(
-            ["bash", str(USER_PROMPT)],
-            input=tiny_payload,
-            env=tiny_env,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        assert tiny_result.returncode == 0, f"stderr: {tiny_result.stderr}"
-        assert tiny_result.stdout == "", (
-            "a 1-token budget must not be able to afford any entry — "
-            f"got: {tiny_result.stdout!r}"
-        )
-
-        generous_env = dict(hook_env)
-        generous_env["ATHENAEUM_PUSH_TOKEN_BUDGET"] = "10000"
-        generous_payload = json.dumps(
-            {
-                "prompt": "tell me about budgettest devices",
-                "session_id": f"test-{uuid.uuid4().hex}",
-            }
-        )
-        generous_result = subprocess.run(
-            ["bash", str(USER_PROMPT)],
-            input=generous_payload,
-            env=generous_env,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        assert generous_result.returncode == 0, f"stderr: {generous_result.stderr}"
-        assert generous_result.stdout, "expected output with a generous budget"
-        payload = json.loads(generous_result.stdout)
-        context = payload["hookSpecificOutput"]["additionalContext"]
-        assert "Budgettest Hot Page" in context
-
     def test_legacy_db_without_memory_tier_column_degrades_to_unfiltered(
         self, hook_env: dict[str, str], tmp_path: Path
     ) -> None:
@@ -1226,8 +1109,6 @@ class TestUserPromptRecall:
         legacy index still surfaces results.
         """
         _require("bash")
-        _require("jq")
-        _require("sqlite3")
 
         cache_dir = tmp_path / ".cache" / "athenaeum"
         cache_dir.mkdir(parents=True)
@@ -1292,172 +1173,6 @@ conn.close()
         payload = json.loads(result.stdout)
         context = payload["hookSpecificOutput"]["additionalContext"]
         assert "Legacy Recall Target" in context
-
-    def test_vector_backend_surfaces_every_page_and_records_no_tier(
-        self, hook_env: dict[str, str], tmp_path: Path
-    ) -> None:
-        """Issues athenaeum#1345 / athenaeum#1513 -- the inversion of the
-        old `test_vector_backend_hot_tier_filter_drops_non_hot_hit`, and
-        the surface that MATTERS: live traffic is 100% `backend:
-        "vector"` (32 of 32 sampled sidecar pushes), so a fix that
-        removed only the FTS5 `WHERE` would have changed nothing
-        observable while looking green. athenaeum#1420 was closed
-        precisely because retrieval tests never exercised this backend.
-
-        Both fixture pages must surface through the vector path (the two
-        are pinned to the old `hot`/`warm` frontmatter values purely so
-        this test keeps exercising what used to be the discriminating
-        case -- proving the change is not a no-op that eats every vector
-        hit). Issue athenaeum#1514 additionally retired the vocabulary, so
-        `VECTOR_META` no longer carries a tier and vector telemetry
-        records no `memory_tier` key at all -- pinned below, since a
-        vector-sourced row is exactly where a reintroduced tier join would
-        show up first.
-
-        chromadb's real embedder can't run in this container (the ONNX
-        weights host is blocked), so `query_vector_index` is stubbed via
-        `ATHENAEUM_SRC` pointing at a fake `src/athenaeum/search.py` that
-        returns a fixed row -- the hook's own inline python snippet
-        already supports loading an arbitrary `search.py` by path (its
-        `importlib.util.spec_from_file_location` branch), so no real
-        embedding is needed to prove the SHELL-SIDE filter works.
-        """
-        _require("bash")
-        _require("jq")
-        _require("sqlite3")
-        _require_hook_python(hook_env, "athenaeum.search")
-
-        wiki = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
-        # Issue athenaeum#1789: FTS5 now indexes page body, so this text must
-        # not literally contain any of the probe query's own words (the
-        # query below has "unrelated" in it too -- the prior wording of
-        # this disclaimer ironically collided with the very probe it
-        # claimed not to match, which was invisible while FTS5 indexed only
-        # frontmatter and became a real, spurious FTS5 hit once body joined
-        # the index).
-        (wiki / "hot-vectester.md").write_text(
-            "---\n"
-            "name: Vectester Hot Page\n"
-            "tags: [vectester]\n"
-            "memory_tier: hot\n"
-            "---\n\n"
-            "Filler prose sharing no vocabulary with the probe sent below.\n"
-        )
-        (wiki / "warm-vectester.md").write_text(
-            "---\n"
-            "name: Vectester Warm Page\n"
-            "tags: [vectester]\n"
-            "memory_tier: warm\n"
-            "---\n\n"
-            "Filler prose sharing no vocabulary with the probe sent below.\n"
-        )
-        self._seed_index(hook_env)
-
-        cache_dir = Path(hook_env["ATHENAEUM_CACHE_DIR"])
-        (cache_dir / "wiki-vectors").mkdir(parents=True, exist_ok=True)
-        config_env = cache_dir / "config.env"
-        config_env.write_text(
-            config_env.read_text().replace(
-                "SEARCH_BACKEND=fts5", "SEARCH_BACKEND=vector"
-            )
-        )
-
-        # Fake search.py module: query_vector_index ignores the query text
-        # entirely and returns a FIXED row -- deterministic, no embedder.
-        fake_pkg = tmp_path / "fake-vector-src" / "src" / "athenaeum"
-        fake_pkg.mkdir(parents=True)
-        vector_env = dict(hook_env)
-        vector_env["ATHENAEUM_SRC"] = str(fake_pkg.parent.parent)
-
-        def _set_stub_hit(filename: str, name: str) -> None:
-            (fake_pkg / "search.py").write_text(
-                "def query_vector_index(query, cache_dir, n=3, exclude=None):\n"
-                "    exclude = exclude or set()\n"
-                f"    hits = [({filename!r}, {name!r}, 0.9)]\n"
-                "    return [h for h in hits if h[0] not in exclude][:n]\n"
-            )
-
-        # A prompt whose terms appear in neither page's body/frontmatter --
-        # isolates the assertion to the vector path; FTS5 contributes
-        # nothing, so a leak can only come from the vector branch.
-        probe_prompt = "zzznonmatchingzzz term completely unrelated content"
-
-        _set_stub_hit("warm-vectester.md", "Vectester Warm Page")
-        warm_result = subprocess.run(
-            ["bash", str(USER_PROMPT)],
-            input=json.dumps(
-                {"prompt": probe_prompt, "session_id": f"test-{uuid.uuid4().hex}"}
-            ),
-            env=vector_env,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        assert warm_result.returncode == 0, f"stderr: {warm_result.stderr}"
-        assert warm_result.stdout, (
-            "a warm-pinned vector hit must surface -- the vector "
-            "enforcement surface (the hot-only VECTOR_META lookup and the "
-            "awk keep-filter it fed) is removed (athenaeum#1345, "
-            "athenaeum#1513)"
-        )
-        warm_context = json.loads(warm_result.stdout)["hookSpecificOutput"][
-            "additionalContext"
-        ]
-        assert "Vectester Warm Page" in warm_context, f"got: {warm_context!r}"
-
-        # Telemetry: `VECTOR_META` is still the metadata join (audience
-        # and description), but issue athenaeum#1514 dropped the tier
-        # column from it along with the vocabulary, so a vector-sourced
-        # item carries NO `memory_tier` key. This is the narrowest place
-        # the join's width is observable end to end, which is why the
-        # assertion lives here rather than only in the FTS5 tests.
-        warm_records = read_push_records(
-            wiki_root=Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki",
-            cache_dir=Path(hook_env["ATHENAEUM_CACHE_DIR"]),
-        )
-        assert warm_records, "expected a sidecar push record for the warm hit"
-        warm_items = [it for rec in warm_records for it in rec["items"]]
-        assert warm_items and all(it["backend"] == "vector" for it in warm_items)
-        assert all("memory_tier" not in it for it in warm_items), (
-            f"the retired tier vocabulary is back in vector telemetry: {warm_items}"
-        )
-        # The join itself must still be intact — a `VECTOR_META` lookup
-        # that silently returned nothing would also satisfy the assertion
-        # above. `scope` is derived from the joined `audience` column.
-        assert all(it["scope"] for it in warm_items), (
-            f"VECTOR_META's audience join must still populate scope: {warm_items}"
-        )
-
-        # Same stub, the hot-pinned page instead -- proves the change
-        # isn't a no-op that happens to eat every vector hit.
-        _set_stub_hit("hot-vectester.md", "Vectester Hot Page")
-        hot_result = subprocess.run(
-            ["bash", str(USER_PROMPT)],
-            input=json.dumps(
-                {"prompt": probe_prompt, "session_id": f"test-{uuid.uuid4().hex}"}
-            ),
-            env=vector_env,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        assert hot_result.returncode == 0, f"stderr: {hot_result.stderr}"
-        assert hot_result.stdout, "expected the hot-pinned vector hit to surface"
-        payload = json.loads(hot_result.stdout)
-        context = payload["hookSpecificOutput"]["additionalContext"]
-        assert "Vectester Hot Page" in context
-
-    # -- issue athenaeum#1665: vector-half relevance floor -------------------
-    #
-    # Before this issue the vector half printed every hit
-    # `query_vector_index` returned, unfiltered -- `recall.relevance_floor.
-    # vector` (athenaeum#1571) had no effect on this hook even when an
-    # operator configured it, because the hook never called
-    # `meets_relevance_floor` / `resolve_recall_relevance_floor` at all.
-    # These tests pin the fix directly against the real hook and the real
-    # library floor functions (not a reimplementation): a below-floor hit is
-    # dropped, an above-floor hit is retained, and the unset-floor case is
-    # byte-for-byte the pre-existing unfiltered behaviour.
 
     def _set_stub_hits(
         self, fake_pkg: Path, hits: list[tuple[str, str, float]]
@@ -1555,718 +1270,6 @@ conn.close()
         )
         return vector_env, fake_pkg
 
-    def test_vector_relevance_floor_drops_below_floor_keeps_above_floor(
-        self, hook_env: dict[str, str], tmp_path: Path
-    ) -> None:
-        """AC: a below-floor hit is dropped, an above-floor hit is retained.
-
-        `meets_relevance_floor("vector", ...)` is lower-is-better (chromadb
-        cosine distance): a score AT OR BELOW the configured floor clears it.
-        `recall.relevance_floor.vector: 0.5` here means 0.1 clears it (kept)
-        and 0.9 does not (dropped) -- the direction this test would catch
-        inverted, since an inverted comparison would keep the wrong one of
-        the two, not just keep or drop both.
-        """
-        _require("bash")
-        _require("jq")
-        _require("sqlite3")
-        _require_hook_python(hook_env, "athenaeum.search")
-        _require_hook_python(hook_env, "athenaeum.config")
-
-        knowledge = Path(hook_env["KNOWLEDGE_ROOT"])
-        (knowledge / "athenaeum.yaml").write_text(
-            "auto_recall: true\n"
-            "search_backend: fts5\n"
-            "recall:\n"
-            "  relevance_floor:\n"
-            "    vector: 0.5\n"
-        )
-
-        vector_env, fake_pkg = self._vector_env(hook_env, tmp_path)
-        self._set_stub_hits(
-            fake_pkg,
-            [
-                ("above-floor.md", "Above Floor Page", 0.1),
-                ("below-floor.md", "Below Floor Page", 0.9),
-            ],
-        )
-
-        probe_prompt = "zzznonmatchingzzz term completely unrelated content"
-        result = subprocess.run(
-            ["bash", str(USER_PROMPT)],
-            input=json.dumps(
-                {"prompt": probe_prompt, "session_id": f"test-{uuid.uuid4().hex}"}
-            ),
-            env=vector_env,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        assert result.returncode == 0, f"stderr: {result.stderr}"
-        assert result.stdout, "the above-floor hit must still surface"
-        context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
-        assert "Above Floor Page" in context, f"got: {context!r}"
-        assert "Below Floor Page" not in context, (
-            f"a below-floor vector hit was not filtered: {context!r}"
-        )
-
-    def test_vector_relevance_floor_unset_behavior_unchanged(
-        self, hook_env: dict[str, str], tmp_path: Path
-    ) -> None:
-        """AC: with no floor configured, behaviour is unchanged (unfiltered).
-
-        No `recall.relevance_floor` key at all in `athenaeum.yaml` (the
-        `hook_env` fixture's default) -- `resolve_recall_relevance_floor`
-        must resolve `None`, and a hit that would fail any plausible floor
-        (a large cosine distance) must still surface, exactly as before this
-        issue.
-        """
-        _require("bash")
-        _require("jq")
-        _require("sqlite3")
-        _require_hook_python(hook_env, "athenaeum.search")
-        _require_hook_python(hook_env, "athenaeum.config")
-
-        vector_env, fake_pkg = self._vector_env(hook_env, tmp_path)
-        self._set_stub_hits(
-            fake_pkg, [("no-floor-set.md", "No Floor Set Page", 0.9)]
-        )
-
-        probe_prompt = "zzznonmatchingzzz term completely unrelated content"
-        result = subprocess.run(
-            ["bash", str(USER_PROMPT)],
-            input=json.dumps(
-                {"prompt": probe_prompt, "session_id": f"test-{uuid.uuid4().hex}"}
-            ),
-            env=vector_env,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        assert result.returncode == 0, f"stderr: {result.stderr}"
-        assert result.stdout, "no floor configured must not suppress the hit"
-        context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
-        assert "No Floor Set Page" in context, f"got: {context!r}"
-
-    def test_fts5_rows_filtered_by_fts5_floor_on_vector_turn(
-        self, hook_env: dict[str, str], tmp_path: Path
-    ) -> None:
-        """MUST 1 (Quine review of athenaeum#1665): FTS5 is not a cold path.
-
-        The FTS5 sqlite3 query runs on EVERY turn regardless of
-        `SEARCH_BACKEND` -- its rows are merged with the vector rows
-        before `head -3`, so it is not a minority path a live deployment
-        can afford to leave unfiltered. On a turn where the vector half
-        runs (Python already paid), the FTS5 rows must be filtered by
-        `recall.relevance_floor.fts5` too, inside that SAME invocation.
-
-        `recall.relevance_floor.fts5: -999.0` is set deliberately extreme
-        (BM25 rank on this tiny fixture never approaches -999) so this
-        asserts the MECHANISM -- a real FTS5 hit dropped -- without
-        depending on the exact rank value the query happens to produce.
-        "Customer Development" is one of `hook_env`'s own default seeded
-        wiki pages (`memory_tier: hot`, matched by the same prompt
-        `test_returns_wiki_match_as_additional_context` already uses), so
-        no extra wiki page needs seeding here.
-        """
-        _require("bash")
-        _require("jq")
-        _require("sqlite3")
-        _require_hook_python(hook_env, "athenaeum.search")
-        _require_hook_python(hook_env, "athenaeum.config")
-
-        knowledge = Path(hook_env["KNOWLEDGE_ROOT"])
-        (knowledge / "athenaeum.yaml").write_text(
-            "auto_recall: true\n"
-            "search_backend: fts5\n"
-            "recall:\n"
-            "  relevance_floor:\n"
-            "    fts5: -999.0\n"
-        )
-
-        vector_env, fake_pkg = self._vector_env(hook_env, tmp_path)
-        self._set_stub_hits(
-            fake_pkg, [("vector-stub.md", "Vector Stub Page", 0.1)]
-        )
-
-        result = subprocess.run(
-            ["bash", str(USER_PROMPT)],
-            input=json.dumps(
-                {
-                    "prompt": "Tell me about customer development frameworks",
-                    "session_id": f"test-{uuid.uuid4().hex}",
-                }
-            ),
-            env=vector_env,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        assert result.returncode == 0, f"stderr: {result.stderr}"
-        assert result.stdout, "the vector hit must still surface"
-        context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
-        assert "Vector Stub Page" in context, f"got: {context!r}"
-        assert "Customer Development" not in context, (
-            f"an FTS5 hit below the fts5 floor was not filtered on a "
-            f"vector turn: {context!r}"
-        )
-
-    def test_fts5_and_vector_hits_both_surface_on_vector_turn_with_no_fts5_floor(
-        self, hook_env: dict[str, str], tmp_path: Path
-    ) -> None:
-        """MUST 1 (Quine RE-review of athenaeum#1665): positive control.
-
-        Every other test in this class is negative-only -- it asserts a
-        below-floor hit is ABSENT. A hook that dropped EVERY FTS5 row on a
-        vector turn unconditionally (a broken sentinel split, an inverted
-        guard, a stray `continue`) would pass that whole class vacuously,
-        because "the bad hit is gone" is also true when everything is gone.
-        The live deployment shape is `SEARCH_BACKEND=vector`, so that
-        regression would silently halve recall with a fully green suite.
-
-        No `recall.relevance_floor.fts5` is configured here (the default
-        `hook_env` fixture's plain `athenaeum.yaml`, untouched) -- both the
-        real FTS5 hit ("Customer Development", one of the fixture's own
-        default seeded wiki pages) and the stubbed vector hit must appear
-        TOGETHER in the same push.
-        """
-        _require("bash")
-        _require("jq")
-        _require("sqlite3")
-        _require_hook_python(hook_env, "athenaeum.search")
-
-        vector_env, fake_pkg = self._vector_env(hook_env, tmp_path)
-        self._set_stub_hits(
-            fake_pkg, [("vector-positive.md", "Vector Positive Page", 0.1)]
-        )
-
-        result = subprocess.run(
-            ["bash", str(USER_PROMPT)],
-            input=json.dumps(
-                {
-                    "prompt": "Tell me about customer development frameworks",
-                    "session_id": f"test-{uuid.uuid4().hex}",
-                }
-            ),
-            env=vector_env,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        assert result.returncode == 0, f"stderr: {result.stderr}"
-        assert result.stdout, "both hits must surface with no floor configured"
-        context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
-        assert "Customer Development" in context, (
-            f"the real FTS5 hit was dropped with no floor configured: {context!r}"
-        )
-        assert "Vector Positive Page" in context, (
-            f"the vector hit was dropped with no floor configured: {context!r}"
-        )
-
-    def test_relevance_floor_import_failure_logs_debug_line_and_fails_open(
-        self, hook_env: dict[str, str], tmp_path: Path
-    ) -> None:
-        """MUST 2 (Quine review of athenaeum#1665): the floor's except was silent.
-
-        A broken/unimportable `athenaeum.config` used to degrade to
-        `floor=None` with NO signal at any level -- indistinguishable from
-        "no floor configured". This forces that import to fail
-        deterministically (a fake `athenaeum` package on `PYTHONPATH`
-        whose `config.py` raises on import, taking priority over any
-        real installation via normal `sys.path` ordering) and asserts:
-        (1) the debug line appears under `ATHENAEUM_HOOK_DEBUG=1`, and
-        (2) the vector hit still surfaces -- a floor problem degrades to
-        unfiltered, never to a hard recall outage.
-        """
-        _require("bash")
-        _require("jq")
-        _require("sqlite3")
-        _require_hook_python(hook_env, "athenaeum.search")
-
-        vector_env, fake_pkg = self._vector_env(hook_env, tmp_path)
-        self._set_stub_hits(
-            fake_pkg, [("failure-stub.md", "Failure Stub Page", 0.9)]
-        )
-
-        fake_broken_root = tmp_path / "fake-broken-config-src"
-        (fake_broken_root / "athenaeum").mkdir(parents=True)
-        (fake_broken_root / "athenaeum" / "__init__.py").write_text("")
-        (fake_broken_root / "athenaeum" / "config.py").write_text(
-            "raise RuntimeError('simulated config import failure for test')\n"
-        )
-        # Deliberately REPLACES (not prepends to) the real-checkout
-        # PYTHONPATH `_vector_env` set up -- this fake package must be the
-        # ONLY thing satisfying `import athenaeum.config`, or the real one
-        # could shadow it depending on path order.
-        vector_env["PYTHONPATH"] = str(fake_broken_root)
-        vector_env["ATHENAEUM_HOOK_DEBUG"] = "1"
-
-        result = subprocess.run(
-            ["bash", str(USER_PROMPT)],
-            input=json.dumps(
-                {
-                    "prompt": "zzznonmatchingzzz term completely unrelated content",
-                    "session_id": f"test-{uuid.uuid4().hex}",
-                }
-            ),
-            env=vector_env,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        assert result.returncode == 0, f"stderr: {result.stderr}"
-        assert "athenaeum recall: relevance floor inactive:" in result.stderr, (
-            f"expected the floor-inactive debug line, got stderr: "
-            f"{result.stderr!r}"
-        )
-        assert result.stdout, "a floor-resolution failure must not suppress the hit"
-        context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
-        assert "Failure Stub Page" in context, f"got: {context!r}"
-
-    def test_relevance_floor_respects_knowledge_root_env_override(
-        self, hook_env: dict[str, str], tmp_path: Path
-    ) -> None:
-        """SHOULD 3 (Quine review of athenaeum#1665): `load_config()` used to ignore
-        `KNOWLEDGE_ROOT` entirely and always read `Path.home() / "knowledge"`
-        -- invisible in every OTHER test in this file, because `hook_env`
-        happens to set `KNOWLEDGE_ROOT` to exactly `$HOME/knowledge`, so the
-        two coincide. This test deliberately points `KNOWLEDGE_ROOT` at a
-        SEPARATE directory whose `athenaeum.yaml` carries a floor the
-        default-location yaml does not, so the assertion can only pass if
-        the hook actually reads config from the overridden location.
-
-        SHOULD 4 (Quine RE-review): a second stub hit that CLEARS the
-        alt-root floor is asserted present, not just the failing hit
-        absent -- negative-only assertions can't distinguish "the floor
-        correctly dropped one hit" from "the hook silently dropped
-        everything" (e.g. died, or read `KNOWLEDGE_ROOT` but then failed to
-        parse it).
-        """
-        _require("bash")
-        _require("jq")
-        _require("sqlite3")
-        _require_hook_python(hook_env, "athenaeum.search")
-        _require_hook_python(hook_env, "athenaeum.config")
-
-        # The default-location yaml (still $HOME/knowledge, used to seed the
-        # FTS5/vector index) carries NO floor at all.
-        default_knowledge = Path(hook_env["KNOWLEDGE_ROOT"])
-        (default_knowledge / "athenaeum.yaml").write_text(
-            "auto_recall: true\nsearch_backend: fts5\n"
-        )
-
-        vector_env, fake_pkg = self._vector_env(hook_env, tmp_path)
-        self._set_stub_hits(
-            fake_pkg,
-            [
-                ("alt-root-stub.md", "Alt Root Stub Page", 0.3),
-                ("alt-root-clears.md", "Alt Root Clears Page", 0.1),
-            ],
-        )
-
-        alt_knowledge = tmp_path / "alt-knowledge"
-        alt_knowledge.mkdir()
-        (alt_knowledge / "athenaeum.yaml").write_text(
-            "recall:\n  relevance_floor:\n    vector: 0.2\n"
-        )
-        vector_env["KNOWLEDGE_ROOT"] = str(alt_knowledge)
-
-        result = subprocess.run(
-            ["bash", str(USER_PROMPT)],
-            input=json.dumps(
-                {
-                    "prompt": "zzznonmatchingzzz term completely unrelated content",
-                    "session_id": f"test-{uuid.uuid4().hex}",
-                }
-            ),
-            env=vector_env,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        assert result.returncode == 0, f"stderr: {result.stderr}"
-        assert result.stdout, "the clearing hit must still surface"
-        context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
-        assert "Alt Root Stub Page" not in context, (
-            f"KNOWLEDGE_ROOT override was ignored -- the hit should have "
-            f"been dropped by the alt-root yaml's floor: {context!r}"
-        )
-        assert "Alt Root Clears Page" in context, (
-            f"a hit that clears the alt-root floor was dropped too -- the "
-            f"hook may have failed open (or closed) rather than actually "
-            f"applying the override: {context!r}"
-        )
-
-    def test_vector_relevance_floor_prefers_push_scoped_over_base(
-        self, hook_env: dict[str, str], tmp_path: Path
-    ) -> None:
-        """SHOULD 4 (Quine review of athenaeum#1665): this hook IS the unprompted
-        push path, so `recall.relevance_floor.push.vector` must be resolved
-        BEFORE the plain `recall.relevance_floor.vector` -- never the
-        reverse. A hit at 0.3 clears the loose base floor (0.9) but not the
-        strict push floor (0.2); if the base floor won, the hit would
-        survive. The companion "unset floor" and "drops/keeps" tests above
-        already cover the fall-back-to-base case (no `push:` section at
-        all), so between the two, both orderings are exercised.
-
-        SHOULD 4 (Quine RE-review): a second stub hit that clears the
-        push-scoped floor too is asserted present -- proves the drop above
-        is the floor doing its job, not the hook failing outright.
-        """
-        _require("bash")
-        _require("jq")
-        _require("sqlite3")
-        _require_hook_python(hook_env, "athenaeum.search")
-        _require_hook_python(hook_env, "athenaeum.config")
-
-        knowledge = Path(hook_env["KNOWLEDGE_ROOT"])
-        (knowledge / "athenaeum.yaml").write_text(
-            "auto_recall: true\n"
-            "search_backend: fts5\n"
-            "recall:\n"
-            "  relevance_floor:\n"
-            "    vector: 0.9\n"
-            "    push:\n"
-            "      vector: 0.2\n"
-        )
-
-        vector_env, fake_pkg = self._vector_env(hook_env, tmp_path)
-        self._set_stub_hits(
-            fake_pkg,
-            [
-                ("push-scoped.md", "Push Scoped Page", 0.3),
-                ("push-scoped-clears.md", "Push Scoped Clears Page", 0.1),
-            ],
-        )
-
-        result = subprocess.run(
-            ["bash", str(USER_PROMPT)],
-            input=json.dumps(
-                {
-                    "prompt": "zzznonmatchingzzz term completely unrelated content",
-                    "session_id": f"test-{uuid.uuid4().hex}",
-                }
-            ),
-            env=vector_env,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        assert result.returncode == 0, f"stderr: {result.stderr}"
-        assert result.stdout, "the clearing hit must still surface"
-        context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
-        assert "Push Scoped Page" not in context, (
-            f"the push-scoped floor (0.2) should have been preferred over "
-            f"the looser base floor (0.9) and dropped this hit: {context!r}"
-        )
-        assert "Push Scoped Clears Page" in context, (
-            f"a hit that clears the push-scoped floor was dropped too -- "
-            f"the resolution order may be failing closed rather than just "
-            f"preferring push-scoped: {context!r}"
-        )
-
-    def test_vector_relevance_floor_boundary_score_equal_floor_is_kept(
-        self, hook_env: dict[str, str], tmp_path: Path
-    ) -> None:
-        """SHOULD 5 (Quine review of athenaeum#1665): `meets_relevance_floor` is an
-        inclusive `<=` comparison for `"vector"` -- a hit whose score is
-        EXACTLY the configured floor clears it and must be kept, not
-        dropped.
-        """
-        _require("bash")
-        _require("jq")
-        _require("sqlite3")
-        _require_hook_python(hook_env, "athenaeum.search")
-        _require_hook_python(hook_env, "athenaeum.config")
-
-        knowledge = Path(hook_env["KNOWLEDGE_ROOT"])
-        (knowledge / "athenaeum.yaml").write_text(
-            "auto_recall: true\n"
-            "search_backend: fts5\n"
-            "recall:\n"
-            "  relevance_floor:\n"
-            "    vector: 0.5\n"
-        )
-
-        vector_env, fake_pkg = self._vector_env(hook_env, tmp_path)
-        self._set_stub_hits(
-            fake_pkg, [("boundary.md", "Boundary Page", 0.5)]
-        )
-
-        result = subprocess.run(
-            ["bash", str(USER_PROMPT)],
-            input=json.dumps(
-                {
-                    "prompt": "zzznonmatchingzzz term completely unrelated content",
-                    "session_id": f"test-{uuid.uuid4().hex}",
-                }
-            ),
-            env=vector_env,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        assert result.returncode == 0, f"stderr: {result.stderr}"
-        assert result.stdout, "a hit at exactly the floor must be kept"
-        context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
-        assert "Boundary Page" in context, f"got: {context!r}"
-
-    # -- issue athenaeum#1783: relevance-bounded cap case tests -----------------
-    #
-    # Three cases, per the AC: floor-only (fewer hits clear the floor than
-    # the ceiling -- all emitted, no overflow line), ceiling-hit (more hits
-    # clear the floor than the ceiling -- exactly `ceiling` emitted plus one
-    # overflow line), and empty (nothing clears the floor -- nothing at
-    # all, no overflow line). These run the hook's VECTOR half (the only
-    # place the hook applies a floor at all, per AC) via the same
-    # `_vector_env`/`_set_stub_hits` fixture the floor tests above use. The
-    # ceiling-hit case is additionally pinned on the FTS5-only path below,
-    # which is also where AC4's "no Python interpreter spawned" is proven.
-
-    def test_cap_floor_only_vector_turn_all_hits_emitted_no_overflow(
-        self, hook_env: dict[str, str], tmp_path: Path
-    ) -> None:
-        """floor-only: fewer hits clear the floor than the ceiling.
-
-        All of them are emitted, and no overflow line appears.
-        """
-        _require("bash")
-        _require("jq")
-        _require("sqlite3")
-        _require_hook_python(hook_env, "athenaeum.search")
-        _require_hook_python(hook_env, "athenaeum.config")
-
-        ceiling = resolve_recall_cap_ceiling(None)
-        assert ceiling >= 3, "fixture assumes room for well under the ceiling"
-
-        knowledge = Path(hook_env["KNOWLEDGE_ROOT"])
-        (knowledge / "athenaeum.yaml").write_text(
-            "auto_recall: true\nsearch_backend: fts5\n"
-            "recall:\n  relevance_floor:\n    vector: 0.5\n"
-        )
-        vector_env, fake_pkg = self._vector_env(hook_env, tmp_path)
-        self._set_stub_hits(
-            fake_pkg,
-            [
-                ("floor-a.md", "Floor Only Page A", 0.1),
-                ("floor-b.md", "Floor Only Page B", 0.2),
-                ("floor-c.md", "Floor Only Page C", 0.9),  # below floor, dropped
-            ],
-        )
-
-        result = self._run_hook(vector_env, "zzznonmatchingzzz unrelated content")
-        assert result.returncode == 0, f"stderr: {result.stderr}"
-        assert result.stdout, "the clearing hits must surface"
-        context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
-        assert "Floor Only Page A" in context
-        assert "Floor Only Page B" in context
-        assert "Floor Only Page C" not in context, "below-floor hit must be dropped"
-        assert "withheld" not in context.lower() and "relevance cap" not in context.lower(), (
-            f"no overflow line expected when nothing was withheld: {context!r}"
-        )
-
-    def test_cap_ceiling_hit_vector_turn_caps_and_adds_overflow_line(
-        self, hook_env: dict[str, str], tmp_path: Path
-    ) -> None:
-        """ceiling-hit: more hits clear the floor than the ceiling.
-
-        Exactly `ceiling` are emitted, plus one overflow line whose count
-        matches the withheld hits.
-        """
-        _require("bash")
-        _require("jq")
-        _require("sqlite3")
-        _require_hook_python(hook_env, "athenaeum.search")
-        _require_hook_python(hook_env, "athenaeum.config")
-
-        ceiling = resolve_recall_cap_ceiling(None)
-        surplus = 3
-        total = ceiling + surplus
-
-        knowledge = Path(hook_env["KNOWLEDGE_ROOT"])
-        (knowledge / "athenaeum.yaml").write_text("auto_recall: true\nsearch_backend: fts5\n")
-        vector_env, fake_pkg = self._vector_env(hook_env, tmp_path)
-        hits = [
-            (f"ceiling-hit-{i}.md", f"Ceiling Hit Page {i}", 0.1 + i * 0.001)
-            for i in range(total)
-        ]
-        self._set_stub_hits(fake_pkg, hits)
-
-        result = self._run_hook(vector_env, "zzznonmatchingzzz unrelated content")
-        assert result.returncode == 0, f"stderr: {result.stderr}"
-        assert result.stdout, "expected additionalContext with pushed pages"
-        context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
-
-        pushed = sum(1 for i in range(total) if f"Ceiling Hit Page {i}" in context)
-        assert pushed == ceiling, (
-            f"expected exactly {ceiling} pushed hits, got {pushed}. context={context!r}"
-        )
-        assert str(surplus) in context, (
-            f"overflow line must name the withheld count ({surplus}): {context!r}"
-        )
-        overflow_lines = [
-            line for line in context.split("\\n") if line and not line.lstrip().startswith("-")
-        ]
-        assert any(str(surplus) in line for line in overflow_lines), (
-            f"the overflow line must never start with '-': {context!r}"
-        )
-
-    def test_cap_empty_vector_turn_no_hits_no_overflow_line(
-        self, hook_env: dict[str, str], tmp_path: Path
-    ) -> None:
-        """empty: nothing clears the floor. The hook emits nothing at all,
-        and — vacuously, since nothing is emitted — no overflow line."""
-        _require("bash")
-        _require("jq")
-        _require("sqlite3")
-        _require_hook_python(hook_env, "athenaeum.search")
-        _require_hook_python(hook_env, "athenaeum.config")
-
-        knowledge = Path(hook_env["KNOWLEDGE_ROOT"])
-        (knowledge / "athenaeum.yaml").write_text(
-            "auto_recall: true\nsearch_backend: fts5\n"
-            "recall:\n  relevance_floor:\n    vector: 0.1\n"
-        )
-        vector_env, fake_pkg = self._vector_env(hook_env, tmp_path)
-        self._set_stub_hits(fake_pkg, [("above.md", "Above Floor", 0.9)])
-
-        result = self._run_hook(vector_env, "zzznonmatchingzzz unrelated content")
-        assert result.returncode == 0, f"stderr: {result.stderr}"
-        assert not result.stdout, (
-            f"nothing cleared the floor -- expected no stdout at all: {result.stdout!r}"
-        )
-
-    def test_cap_ceiling_hit_fts5_only_path_caps_no_python_spawned(
-        self, hook_env: dict[str, str], tmp_path: Path
-    ) -> None:
-        """AC4: on the FTS5-only path (no vector index / `SEARCH_BACKEND=fts5`),
-        the ceiling cut and the withheld count run in SQL/awk -- no Python
-        interpreter is spawned to do it. Pinned together with the
-        ceiling-hit case itself: more FTS5 matches exist than the ceiling.
-
-        Proof of "no Python spawned": `ATHENAEUM_PYTHON` points at a shim
-        that writes a marker file if invoked at all. `SEARCH_BACKEND=fts5`
-        (this fixture's default, no vector dir) means the hook's only
-        Python invocation site (`"$PYTHON" -c ...`, inside the vector
-        block) is structurally unreached — the marker must not exist
-        afterward.
-        """
-        _require("bash")
-        _require("jq")
-        _require("sqlite3")
-        _require_hook_python(hook_env, "athenaeum.search")
-
-        ceiling = resolve_recall_cap_ceiling(None)
-        surplus = 2
-        total = ceiling + surplus
-
-        wiki = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
-        for i in range(total):
-            (wiki / f"fts5-ceiling-{i}.md").write_text(
-                "---\n"
-                f"name: Fts5 Ceiling Page {i}\n"
-                "type: person\n"
-                "tags: [zzzceilingzzz]\n"
-                "description: fts5-only ceiling fixture\n"
-                "---\n\nBody text is not indexed; matches come from frontmatter.\n"
-            )
-        self._seed_index(hook_env)
-
-        marker = tmp_path / "python-was-invoked"
-        fake_python = tmp_path / "fake-python3"
-        fake_python.write_text(
-            f"#!/bin/sh\ntouch {shlex.quote(str(marker))}\nexit 1\n"
-        )
-        fake_python.chmod(0o755)
-        env = dict(hook_env)
-        env["ATHENAEUM_PYTHON"] = str(fake_python)
-
-        result = self._run_hook(env, "zzzceilingzzz")
-        assert result.returncode == 0, f"stderr: {result.stderr}"
-        assert not marker.exists(), (
-            "the FTS5-only path must never spawn Python for the cap/withheld "
-            "computation -- the fake python3 shim was invoked"
-        )
-        assert result.stdout, "expected additionalContext with pushed pages"
-        context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
-        pushed = sum(1 for i in range(total) if f"Fts5 Ceiling Page {i}" in context)
-        assert pushed == ceiling, (
-            f"expected exactly {ceiling} pushed hits on the FTS5-only path, "
-            f"got {pushed}. context={context!r}"
-        )
-        assert str(surplus) in context, (
-            f"overflow line must name the withheld count ({surplus}): {context!r}"
-        )
-
-    # -- issue athenaeum#1761: the CLI's relevance-floor writer ----------------
-    #
-    # `tests.evals.north_star_cli.write_relevance_floor_config` is the CLI-side
-    # writer a floor-on north-star dispatch uses to put `athenaeum.yaml` into
-    # a materialized knowledge root. These two tests pin that the SHIPPED
-    # breadcrumb hook actually honours a file written that way -- reusing
-    # this class's own `_vector_env`/`_set_stub_hits` fixture pattern
-    # (athenaeum#1665) rather than hand-writing yaml text, so a drift between
-    # the writer's shape and what the hook actually reads is caught here.
-
-    def test_breadcrumb_hook_honours_a_vector_floor_written_by_the_cli(
-        self, hook_env: dict[str, str], tmp_path: Path
-    ) -> None:
-        """AC (issue athenaeum#1761): the shipped hook applies a vector floor
-        set via `write_relevance_floor_config`, exactly as it would one
-        hand-authored into `athenaeum.yaml` directly (the tests above this
-        one already pin that mechanism). The writer also stamps
-        `search_backend: vector` -- required for the hook's vector half to
-        run at all (`SEARCH_BACKEND` is cached from that SAME key by
-        `session-start-recall.sh`) -- so this test is also the one place
-        that stamp is pinned.
-        """
-        from tests.evals.north_star_cli import write_relevance_floor_config
-
-        _require("bash")
-        _require("jq")
-        _require("sqlite3")
-        _require_hook_python(hook_env, "athenaeum.search")
-        _require_hook_python(hook_env, "athenaeum.config")
-
-        knowledge = Path(hook_env["KNOWLEDGE_ROOT"])
-        write_relevance_floor_config(
-            knowledge,
-            relevance_floor_vector=0.5,
-            relevance_floor_fts5=None,
-            search_backend="vector",
-        )
-
-        vector_env, fake_pkg = self._vector_env(hook_env, tmp_path)
-        self._set_stub_hits(
-            fake_pkg,
-            [
-                ("above-floor.md", "Above Floor Page", 0.1),
-                ("below-floor.md", "Below Floor Page", 0.9),
-            ],
-        )
-
-        result = subprocess.run(
-            ["bash", str(USER_PROMPT)],
-            input=json.dumps(
-                {
-                    "prompt": "zzznonmatchingzzz term completely unrelated content",
-                    "session_id": f"test-{uuid.uuid4().hex}",
-                }
-            ),
-            env=vector_env,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        assert result.returncode == 0, f"stderr: {result.stderr}"
-        assert result.stdout, "the above-floor hit must still surface"
-        context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
-        assert "Above Floor Page" in context, f"got: {context!r}"
-        assert "Below Floor Page" not in context, (
-            f"a below-floor vector hit written via write_relevance_floor_config "
-            f"was not filtered: {context!r}"
-        )
-
     def test_relevance_floor_config_writer_is_a_noop_with_no_floors(
         self, hook_env: dict[str, str], tmp_path: Path
     ) -> None:
@@ -2282,127 +1285,6 @@ conn.close()
             knowledge, relevance_floor_vector=None, relevance_floor_fts5=None, search_backend="fts5"
         )
         assert not knowledge.exists()
-
-    def test_fts5_survives_unfiltered_when_search_py_import_raises(
-        self, hook_env: dict[str, str], tmp_path: Path
-    ) -> None:
-        """SHOULD 2a (Quine RE-review of athenaeum#1665): sentinel-absent path.
-
-        A fake `search.py` that raises at IMPORT time (before
-        `query_vector_index` is even defined, let alone called) crashes the
-        whole Python invocation before it prints anything at all -- no
-        floor-filtered FTS5 rows, no sentinel. `recall.relevance_floor.fts5:
-        -999.0` is configured (extreme enough to drop the real FTS5 hit if
-        it were ever applied) specifically so this test can tell "crashed,
-        fell back to the ORIGINAL raw fts5 rows" apart from "ran fine, floor
-        just didn't fire" -- the hit surviving here proves the fallback, not
-        a no-op floor.
-        """
-        _require("bash")
-        _require("jq")
-        _require("sqlite3")
-        _require_hook_python(hook_env, "athenaeum.search")
-
-        knowledge = Path(hook_env["KNOWLEDGE_ROOT"])
-        (knowledge / "athenaeum.yaml").write_text(
-            "auto_recall: true\n"
-            "search_backend: fts5\n"
-            "recall:\n"
-            "  relevance_floor:\n"
-            "    fts5: -999.0\n"
-        )
-
-        vector_env, fake_pkg = self._vector_env(hook_env, tmp_path)
-        (fake_pkg / "search.py").write_text(
-            "raise RuntimeError('simulated search.py import failure for test')\n"
-        )
-
-        result = subprocess.run(
-            ["bash", str(USER_PROMPT)],
-            input=json.dumps(
-                {
-                    "prompt": "Tell me about customer development frameworks",
-                    "session_id": f"test-{uuid.uuid4().hex}",
-                }
-            ),
-            env=vector_env,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        assert result.returncode == 0, f"stderr: {result.stderr}"
-        assert result.stdout, "an import crash must not suppress the FTS5 hit"
-        context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
-        assert "Customer Development" in context, (
-            f"a search.py import crash should fail open to the raw, "
-            f"unfiltered FTS5 rows, not drop them: {context!r}"
-        )
-
-    def test_fts5_stays_filtered_and_vector_is_empty_when_query_vector_index_raises_after_sentinel(
-        self, hook_env: dict[str, str], tmp_path: Path
-    ) -> None:
-        """SHOULD 2b (Quine RE-review of athenaeum#1665): sentinel-PRESENT
-        crash path.
-
-        Here `query_vector_index` raises when CALLED -- after the FTS5
-        filter-and-print-sentinel pass has already completed successfully
-        (CPython flushes stdout on an unhandled exception even when piped,
-        verified directly, so that pass's output is not lost). The
-        three-way guard must recognize the sentinel's presence as proof the
-        FTS5 pass finished and use its (floor-filtered) output rather than
-        falling all the way back to raw -- so with the same extreme
-        `recall.relevance_floor.fts5: -999.0`, the FTS5 hit must still be
-        DROPPED here (filtering genuinely ran), unlike the import-crash
-        case above where it survives. Distinguishes "correctly filtered,
-        then the vector half separately failed" from a guard that
-        over-corrects and discards the FTS5 filtering result too.
-        """
-        _require("bash")
-        _require("jq")
-        _require("sqlite3")
-        _require_hook_python(hook_env, "athenaeum.search")
-
-        knowledge = Path(hook_env["KNOWLEDGE_ROOT"])
-        (knowledge / "athenaeum.yaml").write_text(
-            "auto_recall: true\n"
-            "search_backend: fts5\n"
-            "recall:\n"
-            "  relevance_floor:\n"
-            "    fts5: -999.0\n"
-        )
-
-        vector_env, fake_pkg = self._vector_env(hook_env, tmp_path)
-        (fake_pkg / "search.py").write_text(
-            "def query_vector_index(query, cache_dir, n=3, exclude=None):\n"
-            "    raise RuntimeError('simulated query_vector_index failure for test')\n"
-        )
-
-        result = subprocess.run(
-            ["bash", str(USER_PROMPT)],
-            input=json.dumps(
-                {
-                    "prompt": "Tell me about customer development frameworks",
-                    "session_id": f"test-{uuid.uuid4().hex}",
-                }
-            ),
-            env=vector_env,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        assert result.returncode == 0, f"stderr: {result.stderr}"
-        context = ""
-        if result.stdout:
-            context = json.loads(result.stdout)["hookSpecificOutput"][
-                "additionalContext"
-            ]
-        assert "Customer Development" not in context, (
-            f"the FTS5 pass completed and printed its sentinel before the "
-            f"vector crash -- its floor-filtered result should still be "
-            f"used, not reverted to raw: {context!r}"
-        )
-
-    # -- issue athenaeum#1343: sidecar push telemetry -----------------------
 
     def _run_hook(
         self, env: dict[str, str], prompt: str, session_id: str | None = None
@@ -2440,8 +1322,6 @@ conn.close()
         one that used to record zero.
         """
         _require("bash")
-        _require("jq")
-        _require("sqlite3")
         _require_hook_python(hook_env, "athenaeum.search")
 
         wiki = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
@@ -2506,8 +1386,6 @@ conn.close()
         off 3.5% hot.
         """
         _require("bash")
-        _require("jq")
-        _require("sqlite3")
         _require_hook_python(hook_env, "athenaeum.search")
         self._seed_index(hook_env)
 
@@ -2548,8 +1426,14 @@ conn.close()
             assert item["tier"] == "internal"
             assert isinstance(item["scope"], str)
             assert isinstance(item["token_cost"], int)
-            assert isinstance(item["relevance"], float)
-            assert item["backend"] == "fts5"
+            # `relevance` and a per-item `backend` are ABSENT, and that is
+            # the canonical shape rather than a loss: the retired shell hook
+            # hand-wrote both as extra keys, but
+            # `athenaeum.push_metrics.PushedItem` has only ever carried
+            # id/tier/scope/token_cost, and the backend is a record-level
+            # field (asserted above). Issue athenaeum#1363.
+            assert "relevance" not in item
+            assert "backend" not in item
             # Issue athenaeum#1514 retired the retrieval-cost vocabulary, so a
             # hook-written row carries NO `memory_tier` key at all. Absence is
             # the contract, not an empty string: `athenaeum.push_metrics` reads
@@ -2587,8 +1471,6 @@ conn.close()
         stopped pushing anything at all.
         """
         _require("bash")
-        _require("jq")
-        _require("sqlite3")
         _require_hook_python(hook_env, "athenaeum.search")
 
         _seed_realistic_tier_mix(Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki")
@@ -2624,8 +1506,6 @@ conn.close()
         full filename, matching `opaque_push_id`'s Python fallback.
         """
         _require("bash")
-        _require("jq")
-        _require("sqlite3")
         _require_hook_python(hook_env, "athenaeum.search")
 
         # The FTS5 `wiki` table indexes filename/name/tags/aliases/
@@ -2678,8 +1558,6 @@ conn.close()
         `rec.get("source") == "sidecar"` (D1).
         """
         _require("bash")
-        _require("jq")
-        _require("sqlite3")
         _require_hook_python(hook_env, "athenaeum.search")
 
         wiki = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
@@ -2724,8 +1602,6 @@ conn.close()
         prompt text is never written to the ledger.
         """
         _require("bash")
-        _require("jq")
-        _require("sqlite3")
         _require_hook_python(hook_env, "athenaeum.search")
         self._seed_index(hook_env)
 
@@ -2743,24 +1619,6 @@ conn.close()
         raw_line = durable_push_records_path(wiki_root, cache_dir=cache_dir).read_text()
         assert probe not in raw_line
 
-    def test_hook_never_names_a_wiki_root_ledger_path(self) -> None:
-        """Issue athenaeum#1591, mechanical guard on the LIVE producer. This
-        hook resolves the ledger path in bash, independently of
-        `push_metrics.durable_push_records_path`, and it is what actually
-        migrated the operator's deployment into the corpus. A future edit that
-        reintroduces a wiki-root branch here would be invisible to every
-        Python-side test, so assert on the script text itself.
-        """
-        text = USER_PROMPT.read_text(encoding="utf-8")
-        offenders = [
-            line
-            for line in text.splitlines()
-            if "_push_records.jsonl" in line
-            and not line.lstrip().startswith("#")
-            and "PM_CACHE_DIR" not in line
-        ]
-        assert offenders == [], f"ledger path must resolve under the cache dir only: {offenders}"
-
     def test_ledger_path_legacy_branch_when_only_legacy_populated(
         self, hook_env: dict[str, str]
     ) -> None:
@@ -2768,8 +1626,6 @@ conn.close()
         with no `<wiki_root>` file -- both the hook and
         `durable_push_records_path` must resolve LEGACY."""
         _require("bash")
-        _require("jq")
-        _require("sqlite3")
         _require_hook_python(hook_env, "athenaeum.search")
         self._seed_index(hook_env)
 
@@ -2807,8 +1663,6 @@ conn.close()
         that case alone would pass vacuously and prove nothing.
         """
         _require("bash")
-        _require("jq")
-        _require("sqlite3")
         _require_hook_python(hook_env, "athenaeum.search")
         self._seed_index(hook_env)
 
@@ -2840,8 +1694,6 @@ conn.close()
         `[Knowledge context]` push itself is unaffected.
         """
         _require("bash")
-        _require("jq")
-        _require("sqlite3")
         _require_hook_python(hook_env, "athenaeum.search")
         self._seed_index(hook_env)
 
@@ -2897,8 +1749,6 @@ conn.close()
         is still emitted unchanged and the hook exits 0.
         """
         _require("bash")
-        _require("jq")
-        _require("sqlite3")
         _require_hook_python(hook_env, "athenaeum.search")
         # Seed the index against the NORMAL wiki root first -- only the
         # subsequent hook invocation's ledger-path resolution is broken,
@@ -2925,8 +1775,6 @@ conn.close()
         `record_push`'s own `if not record.session_id or not
         record.items: return False`)."""
         _require("bash")
-        _require("jq")
-        _require("sqlite3")
         _require_hook_python(hook_env, "athenaeum.search")
         self._seed_index(hook_env)
 
@@ -2940,51 +1788,6 @@ conn.close()
         assert not (wiki_root / "_push_records.jsonl").exists()
         assert not (cache_dir / "_push_records.jsonl").exists()
 
-    def test_fts5_path_starts_no_python_interpreter(
-        self, hook_env: dict[str, str]
-    ) -> None:
-        """Issue athenaeum#1343 AC: "No Python interpreter start is added to
-        the FTS5 path."
-
-        The wall-clock half of that criterion is hardware-bound and cannot
-        be asserted from a CI container (whose absolute floor already sits
-        above the hook's own <50ms header contract, before AND after this
-        change). The *structural* half can be, permanently and on every
-        machine: point `$ATHENAEUM_PYTHON` at a recording stub and assert
-        the FTS5 path never invokes it. That is the invariant the latency
-        contract actually rests on — a Python interpreter start measured
-        360-450ms warm / ~1090ms cold on the author's box (see this hook's
-        header), i.e. two orders of magnitude above the telemetry append's
-        own cost.
-        """
-        _require("bash")
-        _require("jq")
-        _require("sqlite3")
-        _require_hook_python(hook_env, "athenaeum.search")
-        self._seed_index(hook_env)
-
-        # Seed AFTER the index build (which legitimately uses Python) so
-        # the stub only observes the per-turn hook.
-        tmp = Path(hook_env["HOME"])
-        marker = tmp / "python-was-started"
-        stub = tmp / "python-stub"
-        stub.write_text(f'#!/usr/bin/env bash\necho started >> {marker}\nexit 1\n')
-        stub.chmod(0o755)
-
-        env = dict(hook_env)
-        env["ATHENAEUM_PYTHON"] = str(stub)
-
-        result = self._run_hook(env, "tell me about customer development frameworks")
-
-        assert result.returncode == 0, f"stderr: {result.stderr}"
-        assert result.stdout, "expected the push to still be emitted"
-        assert not marker.exists(), (
-            "the FTS5 path must not start a Python interpreter — the "
-            "telemetry append added by issue athenaeum#1343 is shell/awk plus at "
-            f"most one sha256 subprocess. Stub invocations: "
-            f"{marker.read_text() if marker.exists() else ''!r}"
-        )
-
     def test_concurrent_hook_runs_never_interleave_a_partial_line(
         self, hook_env: dict[str, str]
     ) -> None:
@@ -2996,8 +1799,6 @@ conn.close()
         complete JSON and the line count matches N.
         """
         _require("bash")
-        _require("jq")
-        _require("sqlite3")
         _require_hook_python(hook_env, "athenaeum.search")
         self._seed_index(hook_env)
 
@@ -3039,8 +1840,6 @@ conn.close()
         """AC (D9): `_parse_ts` accepts the hook's emitted `ts` — second
         resolution, Z-suffixed, no microseconds."""
         _require("bash")
-        _require("jq")
-        _require("sqlite3")
         _require_hook_python(hook_env, "athenaeum.search")
         self._seed_index(hook_env)
 
@@ -3079,8 +1878,6 @@ conn.close()
         `description` field is required to survive too.
         """
         _require("bash")
-        _require("jq")
-        _require("sqlite3")
         _require_hook_python(hook_env, "athenaeum.search")
 
         wiki = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
@@ -3103,109 +1900,6 @@ conn.close()
         assert payload["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
         assert payload["hookSpecificOutput"]["additionalContext"]
 
-    def test_degenerate_relevance_field_still_writes_valid_json(
-        self, hook_env: dict[str, str]
-    ) -> None:
-        """Defect 3: `relevance` must never be interpolated unquoted when
-        it could be empty or non-numeric -- `"relevance":,` is malformed
-        JSON `read_push_records` cannot parse (the exact "reads as zero
-        forever" hazard this issue exists to prevent). Reuses the same
-        tab-shifted-field trigger as the defect-1 test (a real repro, not
-        a synthetic one) but asserts a DIFFERENT thing: that whatever
-        ledger line results is still syntactically valid JSON, and that
-        the corrupted (non-numeric) `rank` value the shift produces is
-        guarded down to a JSON `null` rather than emitted raw.
-        """
-        _require("bash")
-        _require("jq")
-        _require("sqlite3")
-        _require_hook_python(hook_env, "athenaeum.search")
-
-        wiki = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
-        (wiki / "tab-page.md").write_text(
-            "---\n"
-            'name: "Tab\tHere Page"\n'
-            "tags: [tabtest]\n"
-            "description: A page about tabbrokentest for regression testing\n"
-            "memory_tier: hot\n"
-            "---\n\n"
-            "Body text, not indexed.\n"
-        )
-        self._seed_index(hook_env)
-
-        result = self._run_hook(hook_env, "tell me about tabbrokentest")
-        assert result.returncode == 0, f"stderr: {result.stderr}"
-
-        wiki_root = wiki
-        cache_dir = Path(hook_env["ATHENAEUM_CACHE_DIR"])
-        ledger_path = durable_push_records_path(wiki_root, cache_dir=cache_dir)
-        assert ledger_path.is_file()
-        lines = ledger_path.read_text().strip().splitlines()
-        assert len(lines) == 1
-        row = json.loads(lines[0])  # raises if malformed -- e.g. "relevance":,
-        assert row["items"][0]["relevance"] is None
-
-    def test_pm_is_number_rejects_non_numeric_and_accepts_scientific_notation(
-        self,
-    ) -> None:
-        """Defect 3 (unit-level): the numeric guard used before ANY value
-        reaches bash arithmetic or unquoted JSON interpolation. Sourced
-        directly from the shipped hook (not reimplemented here) so this
-        test tracks the real function, not a copy that could drift.
-        Sqlite's FTS5 `rank` legitimately produces scientific notation
-        (e.g. `-1.0e-06`) -- that must be ACCEPTED, not rejected as
-        "non-numeric".
-        """
-        _require("bash")
-        extracted = subprocess.run(
-            ["sed", "-n", "/^_pm_is_number() {/,/^}/p", str(USER_PROMPT)],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=True,
-        ).stdout
-        assert extracted.strip(), "could not extract _pm_is_number from the hook"
-
-        def _check(value: str) -> bool:
-            script = f"{extracted}\n_pm_is_number {value!r} && echo yes || echo no\n"
-            proc = subprocess.run(
-                ["bash", "-c", script],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            assert proc.returncode == 0, f"stderr: {proc.stderr}"
-            return proc.stdout.strip() == "yes"
-
-        assert _check("12") is True
-        assert _check("-3.64558386950812e-06") is True
-        assert _check("-1.0e-06") is True
-        assert _check("0") is True
-        assert _check("") is False
-        assert _check("fts5") is False
-        assert _check("fts5\t12") is False
-        assert _check("12abc") is False
-
-    def test_scope_from_audience_has_no_bash4_only_array_syntax(self) -> None:
-        """Defect 2 (structural guard): `#!/usr/bin/env bash` on stock
-        macOS resolves to `/bin/bash`, GNU bash 3.2.57 (Apple never
-        shipped a newer bash after the GPLv3 relicense) -- and this repo
-        already has precedent (athenaeum#1104) for removing a bash-4-only
-        construct (`mapfile`) from `scripts/public-safe-lint-gate.sh` for
-        exactly this reason. Under bash 3.2 with `set -u`, referencing an
-        empty array can raise "unbound variable"; `_pm_scope_from_audience`
-        used to reach exactly that state on a public-marker-only audience
-        (a normal public page). This asserts no bash array syntax
-        (`local -a` / `declare -a` / `+=(` array-append) survives
-        anywhere in the hook, not just in that one function -- a
-        regression here is a silent bash-3.2 landmine, not a test
-        failure on THIS box (which runs bash 5.2).
-        """
-        text = USER_PROMPT.read_text()
-        assert "local -a" not in text
-        assert "declare -a" not in text
-        assert "+=(" not in text
-
     def test_scope_from_audience_public_marker_only_resolves_open(
         self, hook_env: dict[str, str]
     ) -> None:
@@ -3215,8 +1909,6 @@ conn.close()
         the array-free rewrite is still correct, not just array-free.
         """
         _require("bash")
-        _require("jq")
-        _require("sqlite3")
         _require_hook_python(hook_env, "athenaeum.search")
 
         wiki = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
@@ -3253,8 +1945,6 @@ conn.close()
         dangling ` — ` separator.
         """
         _require("bash")
-        _require("jq")
-        _require("sqlite3")
         _require_hook_python(hook_env, "athenaeum.search")
 
         wiki = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
@@ -3274,7 +1964,12 @@ conn.close()
 
         payload = json.loads(result.stdout)
         context = payload["hookSpecificOutput"]["additionalContext"]
-        assert "  - Nodescriptiontest Page\n" in context
+        # Matched as a whole line rather than with a trailing "\n": the
+        # retired shell hook appended a newline after EVERY bullet including
+        # the last (a known defect of that hook -- see
+        # tests/evals/test_adapter_overflow_breadcrumb_1905.py); the packaged
+        # renderer joins bullets instead. Issue athenaeum#1363.
+        assert "  - Nodescriptiontest Page" in context.splitlines()
         assert "—" not in context
 
     def test_long_description_clamped_not_pushed_in_full(
@@ -3291,8 +1986,6 @@ conn.close()
         visible characters -- this test catches either.
         """
         _require("bash")
-        _require("jq")
-        _require("sqlite3")
         _require_hook_python(hook_env, "athenaeum.search")
 
         long_desc = "é" * 5000
@@ -3319,8 +2012,10 @@ conn.close()
         )
         marker = "Longdesctest Page — "
         assert marker in context
-        start = context.index(marker) + len(marker)
-        rendered_desc = context[start : context.index("\n", start)]
+        # Take the bullet as a LINE: the last bullet has no trailing newline
+        # to index to any more (see the dangling-separator test above for why).
+        bullet = next(ln for ln in context.splitlines() if marker in ln)
+        rendered_desc = bullet[bullet.index(marker) + len(marker) :]
         assert rendered_desc == "é" * 200, (
             f"expected exactly 200 clamped characters, got {len(rendered_desc)}"
         )
@@ -3344,8 +2039,6 @@ conn.close()
         raw-SQL-built fixture below instead.
         """
         _require("bash")
-        _require("jq")
-        _require("sqlite3")
         _require_hook_python(hook_env, "athenaeum.search")
 
         wiki = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
@@ -3378,7 +2071,8 @@ conn.close()
         item = records[0]["items"][0]
         assert isinstance(item["token_cost"], int)
         assert item["token_cost"] > 0
-        assert item["backend"] == "fts5"
+        # Record-level, not per-item: see the item-shape pin below.
+        assert records[0]["backend"] == "fts5"
 
     def test_description_with_quote_backslash_newline_still_yields_valid_json(
         self, hook_env: dict[str, str]
@@ -3406,8 +2100,6 @@ conn.close()
         test) -- the escaping is load-bearing, not redundant.
         """
         _require("bash")
-        _require("jq")
-        _require("sqlite3")
 
         cache_dir = Path(hook_env["ATHENAEUM_CACHE_DIR"])
         cache_dir.mkdir(parents=True, exist_ok=True)
@@ -3479,8 +2171,6 @@ conn.close()
         otherwise swallow into a silent empty push).
         """
         _require("bash")
-        _require("jq")
-        _require("sqlite3")
 
         cache_dir = Path(hook_env["ATHENAEUM_CACHE_DIR"])
         cache_dir.mkdir(parents=True, exist_ok=True)
@@ -3528,118 +2218,6 @@ conn.close()
         context = payload["hookSpecificOutput"]["additionalContext"]
         assert "Nodesccolumntest Page" in context
         assert "—" not in context, "no column to render a description from"
-
-    def test_vector_backend_renders_description_not_bare_name(
-        self, hook_env: dict[str, str], tmp_path: Path
-    ) -> None:
-        """AC 'the vector branch renders identically' / required test 6:
-        a hit surfaced under `SEARCH_BACKEND=vector` must get the SAME
-        `name — description` bullet an FTS5 hit would, resolved from the
-        SAME bounded `VECTOR_META` lookup that already carries
-        `audience`/`memory_tier` through for a vector-sourced item (issue
-        athenaeum#1343). Counter-example this guards against: a bare name
-        here (no ` — `) would mean the vector branch fell back to an
-        empty description while the FTS5 branch renders enriched
-        bullets -- the two backends silently disagreeing.
-        """
-        _require("bash")
-        _require("jq")
-        _require("sqlite3")
-        _require_hook_python(hook_env, "athenaeum.search")
-
-        wiki = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
-        (wiki / "hot-vecdesctest.md").write_text(
-            "---\n"
-            "name: Vecdesctest Hot Page\n"
-            "tags: [vecdesctest]\n"
-            "description: A vector-sourced hot page about vecdesctest devices\n"
-            "memory_tier: hot\n"
-            "---\n\n"
-            "Unrelated body text, not matched by the probe query below.\n"
-        )
-        self._seed_index(hook_env)
-
-        cache_dir = Path(hook_env["ATHENAEUM_CACHE_DIR"])
-        (cache_dir / "wiki-vectors").mkdir(parents=True, exist_ok=True)
-        config_env = cache_dir / "config.env"
-        config_env.write_text(
-            config_env.read_text().replace(
-                "SEARCH_BACKEND=fts5", "SEARCH_BACKEND=vector"
-            )
-        )
-
-        fake_pkg = tmp_path / "fake-vector-src" / "src" / "athenaeum"
-        fake_pkg.mkdir(parents=True)
-        vector_env = dict(hook_env)
-        vector_env["ATHENAEUM_SRC"] = str(fake_pkg.parent.parent)
-        (fake_pkg / "search.py").write_text(
-            "def query_vector_index(query, cache_dir, n=3, exclude=None):\n"
-            "    exclude = exclude or set()\n"
-            "    hits = [('hot-vecdesctest.md', 'Vecdesctest Hot Page', 0.9)]\n"
-            "    return [h for h in hits if h[0] not in exclude][:n]\n"
-        )
-
-        probe_prompt = "zzznonmatchingzzz term completely unrelated content"
-        result = subprocess.run(
-            ["bash", str(USER_PROMPT)],
-            input=json.dumps(
-                {"prompt": probe_prompt, "session_id": f"test-{uuid.uuid4().hex}"}
-            ),
-            env=vector_env,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        assert result.returncode == 0, f"stderr: {result.stderr}"
-        assert result.stdout, "expected a vector hit to surface"
-        payload = json.loads(result.stdout)
-        context = payload["hookSpecificOutput"]["additionalContext"]
-        assert (
-            "Vecdesctest Hot Page — A vector-sourced hot page about "
-            "vecdesctest devices" in context
-        )
-
-    # ── issue athenaeum#1516: multi-line `-v` is a hard recall outage ──
-    #
-    # `VECTOR_META` is one tab-separated row per matched filename. The
-    # hook used to hand it to awk as `-v meta="$VECTOR_META"`. BWK awk
-    # (`/usr/bin/awk` on macOS -- the deployed interpreter) REJECTS a
-    # `-v` assignment containing a newline outright, exits 2, and emits
-    # nothing; gawk accepts it. So the bug was invisible on a gnu-awk CI
-    # runner AND invisible in production for as long as the hot-tier gate
-    # existed, because at ~3.5% hot a vector query almost never returned
-    # two or more *hot* metadata rows -- `meta` was empty or exactly one
-    # line, the one shape that works under both awks. Removing the gate
-    # (athenaeum#1513) unmasked it.
-    #
-    # Hence the two properties every test below is built around:
-    #   1. MULTI-ROW metadata. A zero- or one-row fixture is exactly the
-    #      shape that passed for the gate's entire lifetime and cannot
-    #      reproduce this.
-    #   2. BWK-AWK SEMANTICS. `_awk_shim_dir` supplies them on any
-    #      runner, so the guard does not quietly evaporate on a box where
-    #      `awk` is gawk.
-
-    _MULTI_ROW_PAGES = (
-        (
-            "multirowawk-alpha.md",
-            "Multirowawk Alpha",
-            "First of three multirowawk metadata rows",
-            "hot",
-        ),
-        (
-            "multirowawk-beta.md",
-            "Multirowawk Beta",
-            "Second of three multirowawk metadata rows",
-            "warm",
-        ),
-        (
-            "multirowawk-gamma.md",
-            "Multirowawk Gamma",
-            "Third of three multirowawk metadata rows",
-            "cold",
-        ),
-    )
 
     def _seed_multi_row_vector(
         self, hook_env: dict[str, str], tmp_path: Path
@@ -3786,77 +2364,6 @@ exec "$REAL_AWK" "$@"
                 f"expected the joined bullet for {name!r} in: {context!r}"
             )
 
-    def test_multi_row_vector_metadata_still_injects_context(
-        self, hook_env: dict[str, str], tmp_path: Path
-    ) -> None:
-        """athenaeum#1516 regression: three vector hits => a three-line
-        ``VECTOR_META`` => the hook must STILL emit a context block with
-        all three ``name — description`` bullets joined in.
-
-        This runs under whatever ``awk`` the box provides. On macOS (BWK
-        awk) it fails outright against the pre-fix ``-v meta=`` form. On
-        a gawk box it passes either way -- which is precisely why the
-        shim variant below exists; this test is the natural-environment
-        half, not the guarantee.
-        """
-        _require("bash")
-        _require("jq")
-        _require("sqlite3")
-        _require_hook_python(hook_env, "athenaeum.search")
-
-        vector_env = self._seed_multi_row_vector(hook_env, tmp_path)
-        result = self._run_hook(
-            vector_env, "zzznonmatchingzzz term completely unrelated content"
-        )
-        self._assert_all_multi_row_bullets(result)
-
-    def test_multi_row_vector_metadata_survives_bwk_awk_semantics(
-        self, hook_env: dict[str, str], tmp_path: Path
-    ) -> None:
-        """The same assertion, forced onto the DEPLOYED awk's semantics on
-        every runner via a PATH-prepended shim that refuses a multi-line
-        ``-v`` exactly as BWK awk does.
-
-        This is the test that actually holds the line. Without it the
-        guard above is vacuous on CI's gnu-awk box -- the same blind spot
-        that let athenaeum#1516 ship.
-        """
-        _require("bash")
-        _require("jq")
-        _require("sqlite3")
-        _require_hook_python(hook_env, "athenaeum.search")
-
-        vector_env = self._seed_multi_row_vector(hook_env, tmp_path)
-        shim_dir = self._awk_shim_dir(tmp_path)
-        vector_env["PATH"] = f"{shim_dir}{os.pathsep}{vector_env['PATH']}"
-
-        result = self._run_hook(
-            vector_env, "zzznonmatchingzzz term completely unrelated content"
-        )
-        assert "newline in string" not in result.stderr, (
-            "the hook still hands a multi-line value to `awk -v` "
-            f"(athenaeum#1516): {result.stderr!r}"
-        )
-        self._assert_all_multi_row_bullets(result)
-
-    def test_vector_meta_is_never_passed_through_awk_dash_v(self) -> None:
-        """Source guard: ``VECTOR_META`` is multi-line by nature, so it may
-        never travel through ``-v`` again (athenaeum#1516). Cheap and
-        interpreter-independent -- it holds even on a runner where both
-        behavioural tests above skip for a missing ``sqlite3``/``jq``.
-        """
-        source = USER_PROMPT.read_text()
-        assert "-v meta=" not in source, (
-            "VECTOR_META must reach awk through awk's own input stream, "
-            "not a `-v` assignment: BWK awk rejects a multi-line `-v` "
-            "outright and emits nothing (athenaeum#1516)"
-        )
-        assert '-v preamble="$PREAMBLE" -v budget="$BUDGET"' in source, (
-            "the budget pass's two `-v` values are audited single-line "
-            "(a static literal and a digits-validated integer); if this "
-            "call site changes shape, re-audit it against athenaeum#1516"
-        )
-
     def test_token_cost_increases_with_description(
         self, hook_env: dict[str, str]
     ) -> None:
@@ -3867,8 +2374,6 @@ exec "$REAL_AWK" "$@"
         about).
         """
         _require("bash")
-        _require("jq")
-        _require("sqlite3")
         _require_hook_python(hook_env, "athenaeum.search")
 
         wiki = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
@@ -3909,147 +2414,6 @@ exec "$REAL_AWK" "$@"
         assert rich_cost > bare_cost, (
             f"description must increase token_cost: bare={bare_cost} rich={rich_cost}"
         )
-
-    def test_over_budget_description_set_is_skipped_not_truncated(
-        self, hook_env: dict[str, str]
-    ) -> None:
-        """AC: 'a deliberately over-long set is truncated by the budget
-        rather than pushed' -- with descriptions in play, a budget sized
-        to afford fewer than all matching candidates must SKIP the excess
-        candidate(s) (the existing greedy-pack behaviour, unchanged by
-        this issue), not truncate a candidate's bullet text to fit. A
-        name-only control over the SAME budget proves the skip is caused
-        by the wider, description-priced bullet specifically.
-        """
-        _require("bash")
-        _require("jq")
-        _require("sqlite3")
-        _require_hook_python(hook_env, "athenaeum.search")
-
-        wiki = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
-        long_desc = "A " + ("substantially " * 12) + "long description for budgetdesctest devices"
-        for i in range(3):
-            (wiki / f"budgetdesctest-{i}.md").write_text(
-                "---\n"
-                f"name: Budgetdesctest Page {i}\n"
-                "tags: [budgetdesctest]\n"
-                f"description: {long_desc}\n"
-                "memory_tier: hot\n"
-                "---\n\n"
-                "Body text about budgetdesctest, not indexed.\n"
-            )
-        for i in range(3):
-            (wiki / f"budgetctrltest-{i}.md").write_text(
-                "---\n"
-                f"name: Budgetctrltest Page {i}\n"
-                "tags: [budgetctrltest]\n"
-                "memory_tier: hot\n"
-                "---\n\n"
-                "Body text about budgetctrltest, not indexed.\n"
-            )
-        self._seed_index(hook_env)
-
-        env = dict(hook_env)
-        env["ATHENAEUM_PUSH_TOKEN_BUDGET"] = "70"
-
-        desc_sid = f"desc-{uuid.uuid4().hex}"
-        ctrl_sid = f"ctrl-{uuid.uuid4().hex}"
-        desc_result = self._run_hook(env, "tell me about budgetdesctest", desc_sid)
-        ctrl_result = self._run_hook(env, "tell me about budgetctrltest", ctrl_sid)
-        assert desc_result.returncode == 0, f"stderr: {desc_result.stderr}"
-        assert ctrl_result.returncode == 0, f"stderr: {ctrl_result.stderr}"
-
-        wiki_root = wiki
-        cache_dir = Path(hook_env["ATHENAEUM_CACHE_DIR"])
-        records = read_push_records(wiki_root=wiki_root, cache_dir=cache_dir)
-        by_session = {r["session_id"]: r for r in records}
-        desc_pushed = by_session[desc_sid]["pushed_count"] if desc_sid in by_session else 0
-        ctrl_pushed = by_session[ctrl_sid]["pushed_count"] if ctrl_sid in by_session else 0
-
-        assert desc_pushed < 3, (
-            "a budget sized below all-3-candidates-with-descriptions must "
-            f"skip at least one candidate rather than push all 3 -- got {desc_pushed}"
-        )
-        assert ctrl_pushed > desc_pushed, (
-            "the SAME budget over a name-only control must afford strictly "
-            f"more candidates than the description-bearing set: "
-            f"control={ctrl_pushed} description={desc_pushed}"
-        )
-
-    def test_no_tier_ranking_term_introduced(self) -> None:
-        """AC 'ordering and selection are by relevance alone': every
-        `ORDER BY` clause in the hook must be exactly `ORDER BY rank`
-        (BM25) -- a structural guard (mirroring
-        `test_scope_from_audience_has_no_bash4_only_array_syntax`'s
-        approach of asserting directly against the shipped source) so a
-        future edit that slips a tier/type term into the ordering, or
-        adds a second ranking expression, fails this test even if no
-        fixture happens to exercise the difference.
-
-        There is ONE such clause since issue athenaeum#1514 collapsed the
-        hook's tier/no-tier query branches into a single query (the tier
-        column it chose between no longer exists).
-        """
-        # Whole-line matches only (the actual SQL clauses each sit alone
-        # on their own line inside the heredocs) -- excludes prose
-        # mentions of "ORDER BY rank" in surrounding `#` comments, which
-        # would otherwise false-positive this structural guard.
-        lines = USER_PROMPT.read_text().splitlines()
-        order_by_lines = [
-            ln.strip()
-            for ln in lines
-            if ln.strip().startswith("ORDER BY") and not ln.strip().startswith("#")
-        ]
-        assert len(order_by_lines) >= 1, (
-            "expected an ORDER BY clause in the FTS5 query"
-        )
-        for clause in order_by_lines:
-            assert clause == "ORDER BY rank", f"unexpected ordering term: {clause!r}"
-
-    def test_no_tier_predicate_survives_on_either_surface(self) -> None:
-        """Issues athenaeum#1345 / athenaeum#1513 AC: "grepping the
-        implementation for `memory_tier` finds it only in
-        metadata/telemetry positions, never in a `WHERE`, `ORDER BY`, or
-        scoring expression."
-
-        A structural guard beside `test_no_tier_ranking_term_introduced`,
-        because the original gate had TWO enforcement surfaces and
-        athenaeum#1345 warns that removing only the obvious one
-        "reintroduces branch divergence with the sign flipped". Comment
-        lines are excluded -- the file deliberately keeps prose about the
-        gate it removed.
-        """
-        offenders = []
-        for lineno, raw in enumerate(USER_PROMPT.read_text().splitlines(), start=1):
-            line = raw.strip()
-            if line.startswith("#") or "memory_tier" not in line:
-                continue
-            lowered = line.lower()
-            if lowered.startswith(("and ", "where ", "order by ", "having ")):
-                offenders.append((lineno, line))
-            elif "memory_tier" in lowered and "=" in lowered and "'hot'" in lowered:
-                offenders.append((lineno, line))
-        assert offenders == [], (
-            "a tier predicate survives on the push path -- the gate must be "
-            f"gone from BOTH the lexical and the vector surface: {offenders}"
-        )
-
-        # And the awk keep-filter the vector VECTOR_META lookup used to
-        # feed is gone with it (a grep for the SQL alone would miss it).
-        assert "_hot_vector_filenames" not in USER_PROMPT.read_text(), (
-            "the vector post-filter's derived 'kept' set must be removed "
-            "along with the hot-only VECTOR_META restriction"
-        )
-
-    # -- issue athenaeum#1530: local topics trace ---------------------------
-    #
-    # athenaeum#711 decided the ledger stores a query HASH, never raw text or
-    # topics -- a deliberate privacy property this issue must not weaken.
-    # Topics instead go to a SEPARATE, local, ring-buffered file the viewer
-    # joins to a push record by `query_hash`. See that file's own docstring
-    # for the two 2026-09-09 incidents (athenaeum#1513, athenaeum#1516) that
-    # make "verify by running the hook, not by reading the diff" load-bearing
-    # for every test below.
 
     def _topics_trace_path(self, hook_env: dict[str, str]) -> Path:
         # Mirrors the hook's `PM_CACHE_DIR="${ATHENAEUM_CACHE_DIR:-$HOME/.cache/athenaeum}"`
@@ -4094,43 +2458,6 @@ exec "$REAL_AWK" "$@"
             f"within {timeout}s"
         )
 
-    def test_topics_trace_keyed_by_same_query_hash_as_push_record(
-        self, hook_env: dict[str, str]
-    ) -> None:
-        """AC1: after a turn, the trace holds that turn's topics keyed by
-        the SAME `query_hash` the push record carries -- asserted by
-        joining the two artifacts on that value, not by reading the diff.
-        """
-        _require("bash")
-        _require("jq")
-        _require("sqlite3")
-        _require_hook_python(hook_env, "athenaeum.search")
-        self._seed_index(hook_env)
-
-        probe = "tell me about customer development frameworks"
-        result = self._run_hook(hook_env, probe)
-        assert result.returncode == 0, f"stderr: {result.stderr}"
-        assert result.stdout
-
-        wiki_root = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
-        cache_dir = Path(hook_env["ATHENAEUM_CACHE_DIR"])
-        records = read_push_records(wiki_root=wiki_root, cache_dir=cache_dir)
-        assert len(records) == 1
-        query_hash = records[0]["query_hash"]
-        assert query_hash == _query_hash(probe)
-
-        row = self._wait_for_topics_row(self._topics_trace_path(hook_env), query_hash)
-        assert row["query_hash"] == query_hash
-        assert isinstance(row["topics"], list) and row["topics"]
-        # The regex fallback extractor (ATHENAEUM_CLI is stubbed to a
-        # nonexistent path in `hook_env`) tokenizes the probe itself, so the
-        # recorded topics must actually reflect it -- not an empty or
-        # unrelated placeholder.
-        assert any(t in row["topics"] for t in ("customer", "development", "frameworks"))
-        assert probe not in json.dumps(row), (
-            "the trace holds extracted topic TOKENS, never the raw prompt text"
-        )
-
     def test_push_record_shape_unchanged_no_topics_key(
         self, hook_env: dict[str, str]
     ) -> None:
@@ -4141,8 +2468,6 @@ exec "$REAL_AWK" "$@"
         query HASH only.
         """
         _require("bash")
-        _require("jq")
-        _require("sqlite3")
         _require_hook_python(hook_env, "athenaeum.search")
         self._seed_index(hook_env)
 
@@ -4176,261 +2501,21 @@ exec "$REAL_AWK" "$@"
             # No `memory_tier`: issue athenaeum#1514 retired the
             # retrieval-cost vocabulary and this writer stopped emitting
             # the key. `tier` here is the unrelated ACCESS tier.
+            # Exactly `athenaeum.push_metrics.PushedItem`'s four fields. The
+            # retired shell hook also wrote `relevance` and a per-item
+            # `backend`; the packaged writer never did, and since the hook
+            # delegates to it (issue athenaeum#1363) the sidecar row and the
+            # MCP row now have one shape between them, not two.
             assert set(item) == {
                 "id",
                 "tier",
                 "scope",
                 "token_cost",
-                "relevance",
-                "backend",
             }, f"push record item shape changed: {sorted(item)}"
             assert "topics" not in item
 
         raw_line = durable_push_records_path(wiki_root, cache_dir=cache_dir).read_text()
         assert "topics" not in raw_line
-
-    def test_topics_trace_is_ring_buffered_and_bounded(
-        self, hook_env: dict[str, str]
-    ) -> None:
-        """AC3: the trace is bounded (last N turns) and never grows without
-        limit. Pre-seeds the file well past a small test-only cap, runs one
-        more turn, and asserts the file settles back at the cap rather than
-        accumulating unboundedly.
-        """
-        _require("bash")
-        _require("jq")
-        _require("sqlite3")
-        _require_hook_python(hook_env, "athenaeum.search")
-        self._seed_index(hook_env)
-
-        trace_path = self._topics_trace_path(hook_env)
-        trace_path.parent.mkdir(parents=True, exist_ok=True)
-        max_lines = 5
-        with trace_path.open("w") as f:
-            for i in range(50):
-                f.write(
-                    json.dumps(
-                        {
-                            "session_id": "pre-existing",
-                            "ts": "2026-01-01T00:00:00Z",
-                            "query_hash": f"deadbeef0000{i:04d}"[:16],
-                            "topics": ["filler"],
-                        }
-                    )
-                    + "\n"
-                )
-
-        env = dict(hook_env)
-        env["ATHENAEUM_TOPICS_TRACE_MAX_LINES"] = str(max_lines)
-        probe = "tell me about customer development frameworks"
-        result = self._run_hook(env, probe)
-        assert result.returncode == 0, f"stderr: {result.stderr}"
-        assert result.stdout
-
-        wiki_root = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
-        cache_dir = Path(hook_env["ATHENAEUM_CACHE_DIR"])
-        records = read_push_records(wiki_root=wiki_root, cache_dir=cache_dir)
-        query_hash = records[0]["query_hash"]
-        self._wait_for_topics_row(trace_path, query_hash)
-
-        deadline = time.time() + 5.0
-        line_count = None
-        while time.time() < deadline:
-            line_count = len(
-                [ln for ln in trace_path.read_text().splitlines() if ln.strip()]
-            )
-            if line_count <= max_lines:
-                break
-            time.sleep(0.05)
-        assert line_count == max_lines, (
-            f"expected the ring buffer to settle at {max_lines} lines after "
-            f"trimming, got {line_count}"
-        )
-        # And the newest row (this turn's) must have survived the trim --
-        # a correct ring buffer keeps the TAIL, not an arbitrary N lines.
-        kept_hashes = {
-            json.loads(ln)["query_hash"]
-            for ln in trace_path.read_text().splitlines()
-            if ln.strip()
-        }
-        assert query_hash in kept_hashes
-
-    def test_topics_trace_write_failure_never_affects_injection(
-        self, hook_env: dict[str, str]
-    ) -> None:
-        """AC4 (hard gate): a failed trace write degrades to "no topics
-        recorded", NEVER to "no context injected" and never to a slower
-        turn. The write is forced to fail for real (the trace path is a
-        DIRECTORY, so the hook's own `>>` append cannot succeed) rather
-        than asserted only by reading the diff.
-        """
-        _require("bash")
-        _require("jq")
-        _require("sqlite3")
-        _require_hook_python(hook_env, "athenaeum.search")
-        self._seed_index(hook_env)
-
-        trace_path = self._topics_trace_path(hook_env)
-        trace_path.parent.mkdir(parents=True, exist_ok=True)
-        # A directory where the hook expects to append a file: every write
-        # attempt (`printf ... >> "$PM_TOPICS_TRACE_PATH"`) fails with
-        # "Is a directory", exercising the REAL failure path rather than a
-        # simulated one.
-        trace_path.mkdir()
-
-        start = time.monotonic()
-        result = self._run_hook(
-            hook_env, "tell me about customer development frameworks"
-        )
-        elapsed = time.monotonic() - start
-        assert result.returncode == 0, f"stderr: {result.stderr}"
-        assert result.stdout, (
-            "a trace-write failure must never suppress the injected context"
-        )
-        payload = json.loads(result.stdout)
-        context = payload["hookSpecificOutput"]["additionalContext"]
-        assert "Customer Development" in context
-
-        # The synchronous portion of the hook (everything up to and
-        # including its stdout) must not be slowed by a doomed trace write
-        # -- the write is backgrounded specifically so this holds even if
-        # the background attempt itself is slow to fail.
-        assert elapsed < 5.0, (
-            f"hook took {elapsed:.2f}s; a failing trace write must not slow "
-            "the synchronous turn"
-        )
-
-        # The push record ledger -- an entirely separate write -- must be
-        # completely unaffected by the topics-trace failure.
-        wiki_root = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
-        cache_dir = Path(hook_env["ATHENAEUM_CACHE_DIR"])
-        records = read_push_records(wiki_root=wiki_root, cache_dir=cache_dir)
-        assert len(records) == 1
-
-        assert trace_path.is_dir(), "the forced-failure fixture itself must be untouched"
-
-    def test_topics_trace_survives_bwk_awk_semantics(
-        self, hook_env: dict[str, str], tmp_path: Path
-    ) -> None:
-        """AC5: this issue's regression test runs under BWK-semantics awk,
-        not gawk. `user-prompt-recall.sh` has the worst incident history in
-        the repo precisely because a gawk-green CI result proved nothing
-        for athenaeum#1516 -- a multi-line `awk -v` value that GNU awk
-        accepts outright crashes the deployed BWK awk. This issue's own new
-        code (`_pm_topics_json_array`, `_pm_write_topics_trace`) adds no new
-        `awk` invocation at all -- it is pure bash -- but the surrounding
-        hook still runs several existing `awk` passes on the same turn, and
-        this test is the guard that the topics-trace addition did not
-        perturb any of them under the DEPLOYED interpreter's semantics.
-        """
-        _require("bash")
-        _require("jq")
-        _require("sqlite3")
-        _require_hook_python(hook_env, "athenaeum.search")
-        self._seed_index(hook_env)
-
-        shim_dir = self._awk_shim_dir(tmp_path)
-        env = dict(hook_env)
-        env["PATH"] = f"{shim_dir}{os.pathsep}{env['PATH']}"
-
-        probe = "tell me about customer development frameworks"
-        result = self._run_hook(env, probe)
-        assert "newline in string" not in result.stderr, (
-            f"BWK awk semantics broke under this issue's change: {result.stderr!r}"
-        )
-        assert result.returncode == 0, f"stderr: {result.stderr}"
-        assert result.stdout
-
-        wiki_root = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
-        cache_dir = Path(hook_env["ATHENAEUM_CACHE_DIR"])
-        records = read_push_records(wiki_root=wiki_root, cache_dir=cache_dir)
-        assert len(records) == 1
-        query_hash = records[0]["query_hash"]
-
-        row = self._wait_for_topics_row(self._topics_trace_path(env), query_hash)
-        assert row["topics"]
-
-    def test_topics_trace_and_viewer_agree_when_athenaeum_cache_dir_diverges_from_home(
-        self, hook_env: dict[str, str], tmp_path: Path
-    ) -> None:
-        """Regression for a Seer review finding on this PR: the trace path
-        was originally built from the hook's plain, hardcoded
-        `CACHE_DIR="${HOME}/.cache/athenaeum"` while `_cmd_viewer.py` reads
-        the same file via `athenaeum.config.resolve_cache_dir`, whose
-        precedence is `arg > ATHENAEUM_CACHE_DIR env > default`. Any
-        deployment that actually SETS `ATHENAEUM_CACHE_DIR` would have the
-        hook write to one directory and the viewer read from another --
-        silently, since a miss renders the pre-existing (and otherwise
-        legitimate) "not instrumented" state rather than an error. That is
-        exactly the "wrong result that looks like a legitimate one" failure
-        mode issue athenaeum#1530 cites athenaeum#1513 for.
-
-        `hook_env`'s own `ATHENAEUM_CACHE_DIR` happens to already sit under
-        `HOME`, so every OTHER test in this class would pass even with that
-        bug present -- tested by coincidence, not by the join. This test
-        points `ATHENAEUM_CACHE_DIR` at a directory that shares NO path
-        segment with `HOME`, so the two resolutions can only agree by
-        actually consulting the same env var, then asserts the join two
-        ways: the file lands where `PM_CACHE_DIR` (not `CACHE_DIR`) resolves
-        to, AND `_cmd_viewer._load_topics_for_query_hash` -- the viewer's
-        own real production function, not a hand-rolled path -- finds the
-        same row when pointed at that same directory.
-        """
-        _require("bash")
-        _require("jq")
-        _require("sqlite3")
-        _require_hook_python(hook_env, "athenaeum.search")
-        self._seed_index(hook_env)
-
-        # A standalone `tempfile.mkdtemp()`, deliberately NOT nested under
-        # `tmp_path` -- `hook_env` and this test share the same `tmp_path`
-        # fixture instance, so anything built from `tmp_path` (including
-        # `hook_env["HOME"]`) shares its prefix. Only a directory rooted
-        # OUTSIDE that shared tree proves the two resolutions agree by
-        # actually consulting `ATHENAEUM_CACHE_DIR`, rather than by both
-        # happening to descend from the same fixture.
-        divergent_cache = Path(tempfile.mkdtemp(prefix="athenaeum-divergent-cache-"))
-        try:
-            env = dict(hook_env)
-            env["ATHENAEUM_CACHE_DIR"] = str(divergent_cache)
-            assert not str(divergent_cache).startswith(str(Path(hook_env["HOME"])))
-
-            probe = "tell me about customer development frameworks"
-            result = self._run_hook(env, probe)
-            assert result.returncode == 0, f"stderr: {result.stderr}"
-            assert result.stdout
-
-            wiki_root = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
-            records = read_push_records(wiki_root=wiki_root, cache_dir=divergent_cache)
-            assert len(records) == 1
-            query_hash = records[0]["query_hash"]
-
-            # 1. The trace file must land under the DIVERGENT
-            # `ATHENAEUM_CACHE_DIR` -- not under the hardcoded
-            # `$HOME/.cache/athenaeum` the pre-fix code used.
-            correct_trace_path = divergent_cache / "_last_turn_topics.jsonl"
-            stale_trace_path = (
-                Path(hook_env["HOME"]) / ".cache" / "athenaeum" / "_last_turn_topics.jsonl"
-            )
-            row = self._wait_for_topics_row(correct_trace_path, query_hash)
-            assert not stale_trace_path.is_file(), (
-                "the trace must not also (or instead) land at the hardcoded "
-                "$HOME-derived path when ATHENAEUM_CACHE_DIR diverges from it"
-            )
-
-            # 2. The viewer's own real lookup function, pointed at the SAME
-            # divergent cache_dir, must find the SAME row -- this is the
-            # AC1/AC6 join actually being tested, not merely a
-            # file-existence check on each side independently.
-            from athenaeum import _cmd_viewer
-
-            topics = _cmd_viewer._load_topics_for_query_hash(
-                query_hash, cache_dir=divergent_cache
-            )
-            assert topics == row["topics"]
-            assert topics, "expected a non-empty topics list to have round-tripped"
-        finally:
-            shutil.rmtree(divergent_cache, ignore_errors=True)
 
     def test_fts5_query_does_not_match_body_only_term(
         self, hook_env: dict[str, str]
@@ -4450,8 +2535,6 @@ exec "$REAL_AWK" "$@"
         existed.
         """
         _require("bash")
-        _require("jq")
-        _require("sqlite3")
         _require_hook_python(hook_env, "athenaeum.search")
 
         wiki = Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki"
@@ -4476,6 +2559,203 @@ exec "$REAL_AWK" "$@"
             "a body-only term must not surface the page through the hook's "
             f"FTS5 query (schema v6 body dilution regression): got {context!r}"
         )
+
+
+class TestRetiredShellParityGaps:
+    """Three things the retired shell hook did that the packaged adapter does
+    NOT do yet (issue athenaeum#1363).
+
+    Issue athenaeum#1361 cut the live ``UserPromptSubmit`` hook over from
+    ``examples/claude-code/user-prompt-recall.sh`` to
+    :mod:`athenaeum.claude_code_adapter`, and issue athenaeum#1661 audited
+    that cutover for drift and closed six points. Retiring the shell body
+    (this issue) removed the ~1650 lines that were the only remaining
+    implementation of three MORE, and this class is the record of them. They
+    are deltas against the retired shell, **already live since the cutover**
+    -- none of them is introduced by the de-forking commit, and none is fixed
+    by it either, because fixing any of them changes what the live recall
+    path pushes into every turn and belongs in its own change with its own
+    eval receipt (``.github/workflows/eval-receipt-check.yml``), not in a
+    commit whose job is deleting dead code.
+
+    Each gap gets a PAIR of tests, deliberately:
+
+    * a plain test that the knob still RESOLVES, so an ``xfail`` below can
+      never be an artifact of a mis-built fixture -- the single failure mode
+      that would otherwise turn this record into a decoration; and
+    * a ``strict=True`` ``xfail`` test of the behaviour itself, so whoever
+      closes the gap is told by a FAILING suite to come back and delete the
+      marker rather than leaving a stale "known broken" note behind.
+
+    Do not "fix" one of these by relaxing the assertion.
+    """
+
+    def _seed(self, hook_env: dict[str, str]) -> None:
+        subprocess.run(
+            ["bash", str(SESSION_START)],
+            env=hook_env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        )
+
+    def _run(self, hook_env: dict[str, str], prompt: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["bash", str(USER_PROMPT)],
+            input=json.dumps({"prompt": prompt, "session_id": f"test-{uuid.uuid4().hex}"}),
+            env=hook_env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+    def _bullets(self, result: subprocess.CompletedProcess[str]) -> list[str]:
+        if not result.stdout.strip():
+            return []
+        context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+        return [ln for ln in context.splitlines() if ln.startswith("  - ")]
+
+    # -- gap 1: the push-token budget ---------------------------------------
+
+    def test_push_token_budget_still_resolves(self) -> None:
+        """Control for the xfail below: the knob itself is intact."""
+        from athenaeum.config import resolve_push_token_budget
+
+        assert resolve_push_token_budget({"push_budget": {"tokens_per_turn": 1}}) == 1
+
+    def test_core_still_enforces_a_budget_when_given_one(self) -> None:
+        """Second control: the enforcement exists in the core, pinned by
+        ``tests/test_context_core.py::
+        test_budget_skips_a_candidate_that_would_exceed_it``. So gap 1 is
+        purely a missing argument at the adapter's call site, not missing
+        machinery -- the same shape as the ``n`` ceiling issue athenaeum#1661
+        found and closed.
+        """
+        import inspect
+
+        from athenaeum.context import build_context_for_turn
+
+        assert "budget" in inspect.signature(build_context_for_turn).parameters
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "athenaeum#1363 gap 1: the adapter never passes `budget=` to "
+            "build_context_for_turn, so ATHENAEUM_PUSH_TOKEN_BUDGET and "
+            "push_budget.tokens_per_turn are both inert on the per-turn "
+            "sidecar path. The retired shell hook enforced them in its awk "
+            "budget pass. Delete this marker when the adapter forwards the "
+            "resolved budget."
+        ),
+    )
+    def test_push_token_budget_is_honoured_on_the_sidecar_path(
+        self, hook_env: dict[str, str]
+    ) -> None:
+        _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
+        self._seed(hook_env)
+
+        generous = dict(hook_env, ATHENAEUM_PUSH_TOKEN_BUDGET="10000")
+        assert self._bullets(
+            self._run(generous, "tell me about customer development frameworks")
+        ), "precondition: a generous budget must push at least one bullet"
+
+        stingy = dict(hook_env, ATHENAEUM_PUSH_TOKEN_BUDGET="1")
+        assert not self._bullets(
+            self._run(stingy, "tell me about customer development frameworks")
+        ), "a 1-token budget must not be able to afford any bullet"
+
+    # -- gap 2: the recall relevance floor ----------------------------------
+
+    def test_relevance_floor_still_resolves(self) -> None:
+        """Control for the xfail below."""
+        from athenaeum.config import resolve_recall_relevance_floor
+
+        assert (
+            resolve_recall_relevance_floor(
+                {"recall": {"relevance_floor": {"push": {"fts5": -1.0}}}},
+                "fts5",
+                unprompted=True,
+            )
+            == -1.0
+        )
+
+    def test_relevance_floor_is_enforced_on_the_mcp_path(self) -> None:
+        """Second control: the floor IS wired -- just not on this path. It is
+        called from :mod:`athenaeum.mcp_server` (the explicit ``recall``
+        tool) and nowhere in :mod:`athenaeum.context`, which is what the
+        sidecar runs.
+        """
+        mcp = (Path(__file__).parent.parent / "src" / "athenaeum" / "mcp_server.py").read_text()
+        ctx = (Path(__file__).parent.parent / "src" / "athenaeum" / "context.py").read_text()
+        assert "meets_relevance_floor" in mcp
+        assert "meets_relevance_floor" not in ctx
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "athenaeum#1363 gap 2: athenaeum.context never calls "
+            "meets_relevance_floor, so recall.relevance_floor.{fts5,vector} "
+            "(and the ATHENAEUM_RECALL_PUSH_MIN_SCORE_FTS5 env override) are "
+            "inert on the per-turn sidecar path. The retired shell hook "
+            "imported both resolvers and filtered its own rows with them. "
+            "Delete this marker when context.py enforces the floor."
+        ),
+    )
+    def test_relevance_floor_is_honoured_on_the_sidecar_path(
+        self, hook_env: dict[str, str]
+    ) -> None:
+        _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
+        self._seed(hook_env)
+
+        assert self._bullets(
+            self._run(hook_env, "tell me about customer development frameworks")
+        ), "precondition: the probe query must push at least one bullet unfiltered"
+
+        # FTS5 `rank` is negative-is-better, so a floor of -1e9 admits
+        # everything and +1e9 admits nothing: the direction is
+        # `athenaeum.search.meets_relevance_floor`'s, not this test's guess.
+        floored = dict(hook_env, ATHENAEUM_RECALL_PUSH_MIN_SCORE_FTS5="1000000000")
+        assert not self._bullets(
+            self._run(floored, "tell me about customer development frameworks")
+        ), "every hit is below an impossibly strict floor and must be dropped"
+
+    # -- gap 3: the local topics trace --------------------------------------
+
+    def test_the_topics_trace_reader_still_exists(self) -> None:
+        """Control for the xfail below: ``athenaeum viewer`` still reads the
+        trace, so the file going unwritten leaves that column permanently
+        empty rather than removing a surface nobody consults.
+        """
+        from athenaeum._cmd_viewer import _load_topics_for_query_hash
+
+        assert callable(_load_topics_for_query_hash)
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "athenaeum#1363 gap 3: `_last_turn_topics.jsonl` (issue "
+            "athenaeum#1530) was written only by the retired shell hook's "
+            "`_pm_write_topics_trace`. Nothing in src/ writes it, so "
+            "`athenaeum viewer`'s topics column is empty for every turn "
+            "since the athenaeum#1361 cutover. Delete this marker when the "
+            "adapter (or the core) writes the trace again."
+        ),
+    )
+    def test_the_topics_trace_is_written_on_the_sidecar_path(
+        self, hook_env: dict[str, str]
+    ) -> None:
+        _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
+        self._seed(hook_env)
+
+        result = self._run(hook_env, "tell me about customer development frameworks")
+        assert self._bullets(result), "precondition: the turn must push something"
+
+        trace = Path(hook_env["ATHENAEUM_CACHE_DIR"]) / "_last_turn_topics.jsonl"
+        assert trace.exists(), f"no topics trace at {trace}"
 
 
 class TestPreCompactSave:
@@ -5004,8 +3284,20 @@ class TestKillSwitchHooks:
     # and "six hand-maintained copies drifted from the Python reference" is
     # precisely the defect athenaeum#1354 fixed. So assert the invariant the
     # behavioural coverage rests on, rather than leaving it to inspection.
-    def test_kill_switch_helper_is_identical_across_all_six_hooks(self) -> None:
-        """All six copies of `__athenaeum_recall_disabled` are byte-identical.
+    def test_kill_switch_helper_is_identical_across_every_hook_that_has_one(
+        self,
+    ) -> None:
+        """Every shell copy of `__athenaeum_recall_disabled` is byte-identical.
+
+        `user-prompt-recall.sh` is deliberately NOT in this list any more
+        (issue athenaeum#1363): it is a thin launcher for the packaged
+        adapter, and its kill switch is the one the adapter already honours
+        inside `athenaeum.context` (`_recall_disabled`, itself pinned against
+        `athenaeum.killswitch` by `tests/test_context_core.py::
+        test_kill_switch_short_circuits_to_empty_envelope`). The black-box
+        proof that the launcher still no-ops when disabled is
+        `test_user_prompt_recall_noops_when_disabled` below -- so dropping it
+        here removes a source-text comparison, not a guarantee.
 
         Also pins the helper to bash 3.2: `#!/usr/bin/env bash` on stock macOS
         resolves to `/bin/bash`, GNU bash 3.2.57, where the case-folding
@@ -5017,12 +3309,15 @@ class TestKillSwitchHooks:
         """
         hooks = [
             SESSION_START,
-            USER_PROMPT,
             PRE_COMPACT,
             PENDING_QUESTIONS,
             WIKI_INJECT,
             REBUILD_INDEX,
         ]
+        assert "__athenaeum_recall_disabled" not in USER_PROMPT.read_text(), (
+            "the thin launcher must not grow its own copy of the kill-switch "
+            "helper; the adapter it delegates to already honours it"
+        )
         bodies: dict[str, str] = {}
         for hook in hooks:
             lines = hook.read_text().splitlines()
