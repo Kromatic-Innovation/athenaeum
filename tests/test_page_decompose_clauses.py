@@ -162,10 +162,6 @@ def _apply_argv(root: Path, *extra: str) -> list[str]:
     ]
 
 
-def _bullets_by_id(report: dict) -> dict[str, dict]:
-    return {b["id"]: b for b in report["bullets"]}
-
-
 class TestDefaultPathBackwardsCompatibility:
     """Without --split-clauses, nothing changes (issue athenaeum#1947 AC)."""
 
