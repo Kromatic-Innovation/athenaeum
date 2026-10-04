@@ -44,6 +44,7 @@ from pathlib import Path
 
 import pytest
 
+from athenaeum import runlock
 from athenaeum.cli import main
 from athenaeum.footnote_markers import FOOTNOTE_DEF_RE, INLINE_MARKER_RE
 from athenaeum.models import parse_frontmatter
@@ -576,6 +577,16 @@ class TestApplyRefusals:
         argv.remove(str(workspace / "resolutions.json"))
         assert main(argv) == 1
         assert _digests(workspace / "wiki") == before
+
+
+class TestRunLockUnderSplitClauses:
+    def test_dry_run_does_not_take_the_lock(self, workspace: Path) -> None:
+        _dry_run(workspace, "--split-clauses")
+        assert not (workspace / runlock.LOCKFILE_NAME).exists()
+
+    def test_apply_still_takes_the_lock(self, workspace: Path) -> None:
+        assert main(_apply_argv(workspace)) == 0
+        assert (workspace / runlock.LOCKFILE_NAME).exists()
 
 
 class TestNoLLMUnderSplitClauses:
