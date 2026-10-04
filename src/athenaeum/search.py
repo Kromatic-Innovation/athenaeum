@@ -294,7 +294,8 @@ class SearchBackend(Protocol):
 # Public stopword list — sorted tuple for deterministic CLI output.
 # Exposed as the single source of truth so shell hooks and downstream
 # callers don't re-hardcode their own copy. See `athenaeum stopwords`
-# CLI subcommand and examples/claude-code/user-prompt-recall.sh.
+# CLI subcommand. The shipped hook examples reach this list through the
+# packaged code rather than re-hardcoding it (athenaeum#1363).
 #
 # ``current``/``currently`` (issue athenaeum#1789): porter stemming folds
 # both to the same stem, so a query using either collides with any page
@@ -3079,13 +3080,12 @@ def apply_relevance_cap(
     page's on-disk frontmatter) only pays that cost for the withheld tail,
     which is bounded by how far past *limit* the fetch window reached --
     never for the corpus, and never for a hit that is about to be rendered
-    with its type resolved anyway. Omitting *type_of* entirely (the hook's
-    SQL/awk path, which has no Python type resolver to call at all) folds
-    every withheld hit to ``"page"``, which is still a correct (if
-    coarser) breakdown -- see ``examples/claude-code/user-prompt-recall.sh``,
-    which instead carries a real ``type`` column through its own SQL rows
-    and does its own withheld-by-type tally rather than calling this
-    Python function from shell.
+    with its type resolved anyway. Omitting *type_of* entirely folds every
+    withheld hit to ``"page"``, which is still a correct (if coarser)
+    breakdown. The caller that used to omit it was the retired shell hook's
+    SQL/awk path, which had no Python type resolver to call and tallied
+    withheld-by-type from its own SQL ``type`` column; since athenaeum#1363
+    the sidecar reaches this function like every other caller.
     """
     kept = list(hits[:limit])
     withheld_by_type: dict[str, int] = {}
