@@ -964,7 +964,7 @@ class TestIngestIfTriggeredQuiesceCLI:
         _write_tier0_raw(root, "p-0001", "Alice", "20240410T120000Z", "aabbccdd")
 
         write_quiesce(root, holder="a", reason="r", for_duration=timedelta(hours=1))
-        assert release_quiesce(root) is True
+        assert release_quiesce(root, holder="a") is True
 
         rc = main(
             [

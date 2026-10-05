@@ -1097,11 +1097,12 @@ Pause `ingest --if-triggered` without touching the run lock: --for/--reason sets
 | Flag | Default | Choices | Help |
 |---|---|---|---|
 | `--for` | — | — | How long to quiesce, as <number>[h\|m\|s] (default unit hours), e.g. 2h, 90m, 3600s. Capped at the configured maximum (librarian.quiesce.max_hours, default 6h) — a longer request is rejected with a clear error, never silently clamped. Required (together with --reason) unless --release or --status is given. |
-| `--holder` | — | — | Who/what is holding the quiesce, recorded in the sentinel. Default: '<user>@<hostname>' (see _default_holder) — pass this explicitly for a lane that wants a more specific self-identification (e.g. a hestia lane name) than the OS user. |
+| `--force` | `False` | — | Override the holder check: with --release, remove a sentinel held by a DIFFERENT holder; with the default set mode, overwrite an ACTIVE sentinel held by a different holder. Without --force, both cases are refused (exit 1) rather than silently clobbering another party's quiesce. Rejected in combination with --status. |
+| `--holder` | — | — | Who/what is holding the quiesce, recorded in the sentinel. Default: '<user>@<hostname>' (see _default_holder) — pass this explicitly for a lane that wants a more specific self-identification (e.g. a hestia lane name) than the OS user. Also usable with --release, to identify the caller asking to release. |
 | `--path` | — | — | Knowledge directory the sentinel lives next to the run lock under (default: ~/knowledge). |
 | `--reason` | — | — | Free-text reason recorded in the sentinel, for `--status` and for the log line `ingest --if-triggered` emits when it finds an active quiesce. Required (together with --for) unless --release or --status is given. |
-| `--release` | `False` | — | Remove the quiesce sentinel, if present. Idempotent — a no-op, not an error, when nothing is quiesced. Mutually exclusive with --status and with --for/--reason. |
-| `--status` | `False` | — | Read-only: report whether a sentinel is currently active (and its holder/reason/expiry if so). Never writes anything, always exits 0. Mutually exclusive with --release and with --for/--reason. |
+| `--release` | `False` | — | Remove the quiesce sentinel, if present. Idempotent — a no-op, not an error, when nothing is quiesced. Refuses (exit 1) when an ACTIVE sentinel belongs to a different --holder, unless --force is given. Mutually exclusive with --status and with --for/--reason; --holder and --force ARE allowed alongside it. |
+| `--status` | `False` | — | Read-only: report whether a sentinel is currently active (and its holder/reason/expiry if so). Never writes anything, always exits 0. Mutually exclusive with --release and with --for/--reason/--holder/--force. |
 
 ## `athenaeum rebuild-index`
 
