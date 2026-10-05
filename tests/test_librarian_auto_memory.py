@@ -1138,8 +1138,21 @@ class TestRetireIndexSweep:
 
 class TestRetireContradictory:
     def test_contradictory_raw_is_held_not_deleted(self, tmp_path: Path) -> None:
-        from unittest.mock import MagicMock
+        """A 2-member cluster with no ledgered comparator verdict is held.
 
+        Issue athenaeum#1256 retired the C4 contradiction detector --
+        ``merge_clusters_to_wiki`` no longer takes a ``client`` and never
+        populates ``contradictions_detected``/``contradiction`` -- so this
+        test can no longer simulate "the detector found a conflict" and
+        instead exercises the mechanism that replaced it: per the operator
+        decision in ``measurements/c4-retirement-preconditions-2026-09-15.md``,
+        ANY multi-member cluster with no ledgered comparator verdict for a
+        pair holds unconditionally (see
+        ``athenaeum.retire._move_eligibility``, pinned in isolation by
+        ``tests/test_retire_ledger_eligibility.py``). This file's own job is
+        the end-to-end claim that matters operationally either way: a held
+        cluster's raw members are NEVER deleted and the pass never commits.
+        """
         from athenaeum.merge import merge_clusters_to_wiki
         from athenaeum.retire import HOLD, run_retire_pass
 
@@ -1179,30 +1192,20 @@ class TestRetireContradictory:
         (knowledge_root / "wiki").mkdir(parents=True, exist_ok=True)
         _git_init(knowledge_root)
 
-        payload = (
-            '{"detected": true, "conflict_type": "prescriptive", '
-            '"members_involved": ['
-            '"-Users-tristankromer-Code/feedback_commit_v1.md", '
-            '"-Users-tristankromer-Code/feedback_commit_v2.md"], '
-            '"conflicting_passages": ["Commit directly.", "Park on WIP."], '
-            '"rationale": "One says commit; the other says park."}'
-        )
-        response = MagicMock()
-        response.content = [MagicMock(text=payload)]
-        fake_client = MagicMock()
-        fake_client.messages.create.return_value = response
-
-        entries = merge_clusters_to_wiki(knowledge_root, client=fake_client)
-        assert entries[0].contradictions_detected is True
+        entries = merge_clusters_to_wiki(knowledge_root)
+        assert entries[0].contradictions_detected is False
 
         report = run_retire_pass(entries, knowledge_root)
-        # The contradictory raw stays queued — a delete must never race a
-        # pending confirmation.
+        # No comparator verdict is ledgered for this pair — a delete must
+        # never race an un-adjudicated cluster.
         assert a.exists()
         assert b.exists()
         assert report.moved == []
         assert len(report.held) == 2
         assert all(d.disposition == HOLD for d in report.dispositions)
+        assert all(
+            "no comparator verdict ledgered" in d.reason for d in report.dispositions
+        )
         assert report.committed is False
 
 
@@ -1647,29 +1650,53 @@ def _build_two_member_root(
     return knowledge_root
 
 
-def _clean_detector_client(detected: bool = False):
-    """A MagicMock Anthropic client whose detector returns a clean verdict."""
-    from unittest.mock import MagicMock
+def _seed_clean_verdict(knowledge_root: Path, member_a: Path, member_b: Path) -> None:
+    """Ledger a clean (``duplicate``) comparator verdict for one member pair.
 
-    payload = (
-        '{"detected": false, "conflict_type": null, "members_involved": [], '
-        '"conflicting_passages": [], "rationale": "all consistent"}'
+    Issue athenaeum#1256 retired the C4 contradiction detector along with
+    ``merge_clusters_to_wiki``'s ``client``/detector knobs -- move-eligibility
+    for a multi-member cluster is now decided by
+    :func:`athenaeum.retire._move_eligibility` reading the comparator's
+    verdict ledger instead (see ``tests/test_retire_ledger_eligibility.py``,
+    which pins that function's six-way HOLD/eligible mapping in isolation).
+    A cluster with no ledgered pair HOLDS unconditionally, so a test that
+    needs to observe the surviving MOVE/footnote machinery for a
+    multi-member cluster has to ledger a clean verdict for every pair first
+    -- this is the same ``build_verdict_entry`` + ``append_verdict`` under an
+    acquired ``RunLock`` idiom that file (and ``tests/test_verdicts.py``)
+    uses, rather than hand-writing ledger JSONL.
+    """
+    from athenaeum.runlock import RunLock
+    from athenaeum.verdicts import (
+        Basis,
+        append_verdict,
+        build_verdict_entry,
+        page_id_for_path,
     )
-    if detected:
-        payload = (
-            '{"detected": true, "conflict_type": "factual", '
-            '"members_involved": [], "conflicting_passages": [], '
-            '"rationale": "conflict"}'
-        )
-    response = MagicMock()
-    response.content = [MagicMock(text=payload)]
-    client = MagicMock()
-    client.messages.create.return_value = response
-    return client
+
+    wiki_root = knowledge_root / "wiki"
+    id_a = page_id_for_path(member_a, root=wiki_root)
+    id_b = page_id_for_path(member_b, root=wiki_root)
+    entry = build_verdict_entry(
+        id_a, id_b, "duplicate", basis=Basis(), decided_by="comparator"
+    )
+    with RunLock(knowledge_root) as lock:
+        append_verdict(wiki_root, entry, lock=lock)
 
 
 class TestRetireDegradedDetection:
-    """Quine M1: a degraded not-detected verdict must NOT retire."""
+    """Quine M1: a degraded/un-adjudicated cluster must NOT retire.
+
+    Issue athenaeum#1256: this used to drive ``merge_clusters_to_wiki``
+    ``client=None`` to reach the C4 detector's own "llm-unavailable"
+    degraded verdict, indistinguishable from a clean one at the bool
+    level -- the exact hazard retire had to guard against. The detector
+    (and ``client``/``contradiction`` population) is gone, but the same
+    hazard survives in a more general form: a multi-member cluster with NO
+    ledgered comparator verdict is *equally* un-adjudicated (never
+    attempted, same as the old "no client" case) and must hold for the
+    identical reason.
+    """
 
     def test_offline_multimember_cluster_is_held_not_retired(
         self, tmp_path: Path
@@ -1682,11 +1709,10 @@ class TestRetireDegradedDetection:
             body_a="Deploy on Fridays is fine.",
             body_b="Never deploy on Fridays.",
         )
-        # client=None → detector returns detected=False rationale='llm-unavailable'
-        # which is INDISTINGUISHABLE from a clean verdict at the bool level.
-        entries = merge_clusters_to_wiki(root, client=None)
+        # No comparator verdict is ledgered for this pair — un-adjudicated,
+        # same as the retired detector's "llm-unavailable" degraded case.
+        entries = merge_clusters_to_wiki(root)
         assert entries[0].contradictions_detected is False
-        assert entries[0].contradiction.rationale == "llm-unavailable"
 
         report = run_retire_pass(entries, root)
 
@@ -1743,12 +1769,17 @@ class TestRetireDroppedSection:
             body_a="The exact same fact.",
             body_b="The exact same fact.",
         )
-        entries = merge_clusters_to_wiki(root, client=_clean_detector_client())
+        # Issue athenaeum#1256: MOVE for a multi-member cluster now requires a
+        # ledgered clean comparator verdict for every pair (the retired C4
+        # detector's "clean" response used to do this) — see
+        # ``_seed_clean_verdict``'s docstring.
+        scope = root / "raw" / "auto-memory" / "-Users-tristankromer-Code"
+        _seed_clean_verdict(root, scope / "feedback_a.md", scope / "feedback_b.md")
+        entries = merge_clusters_to_wiki(root)
         assert entries[0].contradictions_detected is False
 
         report = run_retire_pass(entries, root)
 
-        scope = root / "raw" / "auto-memory" / "-Users-tristankromer-Code"
         # A landed; B's section dropped → A retired, B retained.
         assert not (scope / "feedback_a.md").exists()
         assert (scope / "feedback_b.md").exists()
@@ -1831,10 +1862,14 @@ class TestRetireMultiMemberMove:
             body_a="Alpha distinctive fact.",
             body_b="Bravo distinctive fact.",
         )
-        entries = merge_clusters_to_wiki(root, client=_clean_detector_client())
+        # Issue athenaeum#1256: MOVE for a multi-member cluster now requires a
+        # ledgered clean comparator verdict for every pair — see
+        # ``_seed_clean_verdict``'s docstring.
+        scope = root / "raw" / "auto-memory" / "-Users-tristankromer-Code"
+        _seed_clean_verdict(root, scope / "feedback_a.md", scope / "feedback_b.md")
+        entries = merge_clusters_to_wiki(root)
         report = run_retire_pass(entries, root)
 
-        scope = root / "raw" / "auto-memory" / "-Users-tristankromer-Code"
         assert not (scope / "feedback_a.md").exists()
         assert not (scope / "feedback_b.md").exists()
         assert len(report.moved) == 2

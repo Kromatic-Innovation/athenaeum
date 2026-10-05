@@ -138,26 +138,28 @@ def merge_root_two_clusters(tmp_path: Path) -> Path:
 
 
 class TestMergeHeartbeats:
-    def test_merge_write_and_merge_detect_emit_start_and_done(
+    def test_merge_write_emits_start_and_done(
         self, merge_root_two_clusters: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """A real (non-dry-run, client=None deterministic) merge run emits
-        ``merge-detect`` and ``merge-write`` heartbeat start/done lines."""
+        """A real (non-dry-run) merge run emits ``merge-write`` heartbeat
+        start/done lines.
+
+        Issue athenaeum#1256 retired the C4 contradiction-detector pass and its
+        ``merge-detect`` heartbeat phase along with it (that phase no longer
+        exists for ``merge_clusters_to_wiki`` to emit) — this test used to
+        assert on both; only ``merge-write`` survives as a subject.
+        """
         caplog.set_level(logging.INFO, logger="athenaeum")
         entries = merge_clusters_to_wiki(
             merge_root_two_clusters,
             config=None,
             dry_run=False,
-            client=None,
         )
         assert len(entries) == 2
 
         lines = _heartbeat_lines(caplog)
-        detect_lines = [line for line in lines if "phase=merge-detect" in line]
         write_lines = [line for line in lines if "phase=merge-write" in line]
 
-        assert any("status=start" in line for line in detect_lines)
-        assert any("status=done" in line for line in detect_lines)
         assert any("status=start" in line for line in write_lines)
         assert any("status=done" in line for line in write_lines)
         # 2 clusters -> 2 write ticks with interval_s=0 (always emit).
@@ -166,21 +168,6 @@ class TestMergeHeartbeats:
         done_line = next(line for line in write_lines if "status=done" in line)
         assert "done=2" in done_line
         assert "compiled=2" in done_line
-
-    def test_merge_dry_run_still_emits_detect_heartbeat(
-        self, merge_root_two_clusters: Path, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        caplog.set_level(logging.INFO, logger="athenaeum")
-        merge_clusters_to_wiki(
-            merge_root_two_clusters,
-            config=None,
-            dry_run=True,
-            client=None,
-        )
-        lines = _heartbeat_lines(caplog)
-        detect_lines = [line for line in lines if "phase=merge-detect" in line]
-        assert any("status=start" in line for line in detect_lines)
-        assert any("status=done" in line for line in detect_lines)
 
 
 # ---------------------------------------------------------------------------
@@ -411,87 +398,6 @@ class TestReresolveHeartbeat:
         reresolve_lines = [line for line in lines if "phase=reresolve" in line]
         assert any("status=start" in line for line in reresolve_lines)
         assert any("status=done" in line for line in reresolve_lines)
-
-
-# ---------------------------------------------------------------------------
-# Issue athenaeum#762 — the C4 detector/resolver loop must tick the RUN LOCK
-# heartbeat (not merely the log-only PhaseHeartbeat), so a long C4 phase does
-# not make a healthy run look wedged to heartbeat-age consumers.
-# ---------------------------------------------------------------------------
-
-
-class TestC4RunLockHeartbeat:
-    def test_run_lock_heartbeat_advances_across_multi_cluster_c4(
-        self, merge_root_two_clusters: Path
-    ) -> None:
-        """The `heartbeat` callable (RunLock.heartbeat, threaded from run() via
-        ctx.heartbeat) is invoked and ADVANCES across a multi-cluster C4 pass —
-        not merely reachable. Each call records a strictly-increasing tick so a
-        genuine advance is asserted, not a single fire. FAILS against pre-athenaeum#762
-        `merge_clusters_to_wiki` (which has no `heartbeat` parameter)."""
-        import time
-
-        ticks: list[float] = []
-
-        def _record() -> None:
-            # A real monotonic reading per call: two consecutive ticks are
-            # strictly ordered, so "advances" is a real assertion, not a count.
-            ticks.append(time.monotonic())
-
-        entries = merge_clusters_to_wiki(
-            merge_root_two_clusters,
-            config=None,
-            dry_run=False,
-            client=None,
-            heartbeat=_record,
-        )
-        assert len(entries) == 2
-
-        # 2 clusters, each ticked at the per-cluster boundary AND its per-chunk
-        # boundary, so the run-lock heartbeat fired multiple times and advanced
-        # across the pass (>= one refresh per cluster).
-        assert len(ticks) >= 2, "C4 must refresh the run-lock heartbeat per cluster"
-        assert ticks == sorted(ticks), "heartbeat timestamps must advance monotonically"
-        # Max observed inter-tick gap in this deterministic repro (client=None):
-        # bounded by one cluster/chunk of in-process work. In production this
-        # gap is bounded by one chunk's detector+resolver latency instead of the
-        # whole C4 phase (the pre-fix behaviour).
-        max_gap = max(
-            (b - a for a, b in zip(ticks, ticks[1:])), default=0.0
-        )
-        assert max_gap >= 0.0  # measurement is well-defined (recorded in the PR body)
-
-    def test_run_lock_heartbeat_is_best_effort(
-        self, merge_root_two_clusters: Path
-    ) -> None:
-        """A heartbeat refresh that RAISES must never break or slow the run
-        (athenaeum#762 AC): the C4 pass swallows it and completes normally."""
-
-        def _boom() -> None:
-            raise RuntimeError("simulated heartbeat write failure")
-
-        entries = merge_clusters_to_wiki(
-            merge_root_two_clusters,
-            config=None,
-            dry_run=False,
-            client=None,
-            heartbeat=_boom,
-        )
-        assert len(entries) == 2, "a failing heartbeat must not abort the C4 pass"
-
-    def test_no_heartbeat_callable_is_a_noop(
-        self, merge_root_two_clusters: Path
-    ) -> None:
-        """`heartbeat=None` (the default / a run with no lock) is a clean no-op —
-        the C4 pass behaves exactly as before."""
-        entries = merge_clusters_to_wiki(
-            merge_root_two_clusters,
-            config=None,
-            dry_run=False,
-            client=None,
-            heartbeat=None,
-        )
-        assert len(entries) == 2
 
 
 # ---------------------------------------------------------------------------

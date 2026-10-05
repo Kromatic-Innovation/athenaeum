@@ -950,9 +950,9 @@ def resolve_max_merge_sources(config: dict[str, Any] | None) -> int:
     sources is not that shape, and complete-linkage (athenaeum#421) means the members of
     a genuine small merge are mutually similar, so 5 sits well inside the
     legitimate-merge margin while excluding the observed 1,600-1,700-source
-    degenerates decisively. (The wider size-25 cap still governs the pooled
-    contradiction-cluster path via :func:`athenaeum.cross_scope.resolve_cluster_size_cap`
-    — this cap is specifically the merge-PROPOSAL fan-in.)
+    degenerates decisively. (The pooled contradiction-cluster path that the
+    wider size-25 cap used to govern was retired along with the C4 detector;
+    this cap is specifically the merge-PROPOSAL fan-in.)
     Env ``ATHENAEUM_MAX_MERGE_SOURCES`` > yaml ``librarian.max_merge_sources`` >
     this default; ``0`` (or negative) disables the cap. No seed in ``_DEFAULTS``
     (athenaeum#231) so the code default stays reachable. ``bool`` and non-numeric yaml
@@ -4216,25 +4216,11 @@ search_backend: vector
 # and are ignored, same as every other yaml knob.
 {{PRICING_YAML_BLOCK}}
 
-# Cross-scope contradiction detection (issue athenaeum#125).
-# cross_scope_mode: off | ancestor (default) | similarity | both.
-#   - off: per-scope cluster only.
-#   - ancestor: pool each cluster with ancestor scopes (-Users-foo-bar
-#     also includes -Users-foo, -Users) before running the detector.
-#   - similarity: per-scope pass + cosine sweep over raw + wiki.
-#   - both: ancestor pooling THEN similarity sweep.
-# cluster_size_cap: pooled-cluster size cap; oversized pools are split
-#   into newest-first chunks before detection.
-# similarity_threshold: cosine cutoff for the cross-scope sweep.
-# Env override: ATHENAEUM_CROSS_SCOPE_MODE.
 # Opus-backed resolver caps (issue athenaeum#126).
 # resolve_max_per_run: cap on resolver calls per ingest. Surplus contradictions
 #   are escalated without a proposal (degraded mode). Default raised from
 #   50 to 250 in issue athenaeum#187. Env override: ATHENAEUM_RESOLVE_MAX_PER_RUN.
 # contradiction:
-#   cross_scope_mode: ancestor
-#   cluster_size_cap: 25
-#   similarity_threshold: 0.85
 #   resolve_max_per_run: 250  # raised from 50 in athenaeum#187
 #   resolved_similarity_threshold: 0.83  # cosine threshold, decision-log match (athenaeum#211)
 #   not_a_conflict_ttl_days: 0  # decay stale auto not_a_conflict (athenaeum#251); 0 = off

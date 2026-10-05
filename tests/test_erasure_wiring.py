@@ -158,8 +158,7 @@ class TestAC1OffCorpusPlacement:
         _seed_inference_cluster(root)
         off_corpus_dir = tmp_path / "off-corpus-store"
         (root / "athenaeum.yaml").write_text(
-            "contradiction:\n  cross_scope_mode: off\n"
-            + _off_corpus_config_yaml(off_corpus_dir),
+            _off_corpus_config_yaml(off_corpus_dir),
             encoding="utf-8",
         )
 
@@ -176,7 +175,7 @@ class TestAC1OffCorpusPlacement:
             b"---\nname: fact-a\n---\nJane's email is redacted.\n",
         )
 
-        merge_clusters_to_wiki(root, client=None)
+        merge_clusters_to_wiki(root)
 
         wiki_pages = sorted((root / "wiki").glob("auto-*.md"))
         assert wiki_pages == [], (
@@ -199,12 +198,9 @@ class TestAC1OffCorpusPlacement:
 
         root = tmp_path / "knowledge"
         _seed_inference_cluster(root)
-        (root / "athenaeum.yaml").write_text(
-            "contradiction:\n  cross_scope_mode: off\n", encoding="utf-8"
-        )
 
         with caplog.at_level(logging.WARNING, logger="athenaeum.merge"):
-            merge_clusters_to_wiki(root, client=None)
+            merge_clusters_to_wiki(root)
 
         wiki_pages = sorted((root / "wiki").glob("auto-*.md"))
         assert len(wiki_pages) == 1, (

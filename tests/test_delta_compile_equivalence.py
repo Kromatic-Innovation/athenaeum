@@ -178,7 +178,6 @@ def _compile(root: Path, *, changed: set[Path] | None, monkeypatch) -> None:
         config=config,
         dry_run=False,
         client=None,
-        usage=None,
         changed_paths=changed,
     )
 

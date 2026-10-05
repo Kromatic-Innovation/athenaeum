@@ -528,19 +528,3 @@ The only inference on this page.
         assert "The core fact statement." in retracted
         assert "The only inference on this page." not in retracted
         assert parse_inference_blocks(retracted) == []
-
-
-# ---------------------------------------------------------------------------
-# merge.py resolver-path wiring: cross-class precheck sits in _emit_escalation
-# alongside the athenaeum#421 suppression gate. Import-level sanity so a refactor that
-# removes the wiring is caught, without needing the full Opus-resolver
-# machinery in this file (that path is exercised in test_librarian_merge.py).
-# ---------------------------------------------------------------------------
-
-
-class TestMergePyWiring:
-    def test_merge_module_imports_type_gate(self) -> None:
-        import athenaeum.merge as merge_mod
-
-        assert merge_mod.cross_class_precheck is cross_class_precheck
-        assert merge_mod.build_cite_proposal is build_cite_proposal

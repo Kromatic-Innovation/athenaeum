@@ -591,52 +591,6 @@ class TestModelPlumbingProductionPath:
         ]
         assert models == ["yaml-classify-model", "yaml-write-model"]
 
-    def test_merge_routes_config_to_detector(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """merge_clusters_to_wiki must pass its resolved_config down to
-        detect_contradictions: the detector's model resolves from
-        ``models.classify`` only when the thread is intact."""
-        monkeypatch.delenv("ATHENAEUM_CLASSIFY_MODEL", raising=False)
-        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(tmp_path / "cache"))
-        from athenaeum.merge import merge_clusters_to_wiki
-
-        root = tmp_path / "knowledge"
-        (root / "wiki").mkdir(parents=True)
-        scope = root / "raw" / "auto-memory" / "-Users-probe-Code"
-        _write_am(scope, "feedback_claim_a.md", "Always use tabs.")
-        _write_am(scope, "feedback_claim_b.md", "Never use tabs.")
-        (root / "raw" / "_librarian-clusters.jsonl").write_text(
-            json.dumps(
-                {
-                    "cluster_id": "probe-0001",
-                    "member_paths": [
-                        "-Users-probe-Code/feedback_claim_a.md",
-                        "-Users-probe-Code/feedback_claim_b.md",
-                    ],
-                    "centroid_score": 0.9,
-                }
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-
-        client = _fake_anthropic_client('{"detected": false}')
-        config = {
-            "recall": {"extra_intake_roots": ["raw/auto-memory"]},
-            "models": {"classify": "yaml-detect-model"},
-        }
-        entries = merge_clusters_to_wiki(
-            root, config=config, client=client, dry_run=True
-        )
-        assert len(entries) == 1
-        assert client.messages.create.call_args is not None, (
-            "detector was never called — fixture no longer reaches "
-            "detect_contradictions"
-        )
-        assert client.messages.create.call_args.kwargs["model"] == "yaml-detect-model"
-
-
 # ---------------------------------------------------------------------------
 # Resolver model: env > models.resolve > resolve.model (legacy) > default
 # ---------------------------------------------------------------------------

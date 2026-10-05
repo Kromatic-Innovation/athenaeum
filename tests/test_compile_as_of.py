@@ -106,7 +106,7 @@ def _page_text(wiki_dir: Path) -> str:
 class TestCompileAsOf:
     def test_live_compile_drops_expired_member(self, temporal_root: Path) -> None:
         # Live compile keys on today (>= 2025): bravo's window closed 2024-12-31.
-        entries = merge_clusters_to_wiki(temporal_root, as_of=date(2025, 6, 1), client=None)
+        entries = merge_clusters_to_wiki(temporal_root, as_of=date(2025, 6, 1))
         assert len(entries) == 1
         text = _page_text(temporal_root / "wiki")
         assert "Alpha guidance" in text
@@ -125,7 +125,7 @@ class TestCompileAsOf:
 
     def test_differs_from_live_and_read_filter(self, temporal_root: Path, tmp_path: Path) -> None:
         # Live compile (what a slice-3 read-time --as-of would filter OVER).
-        merge_clusters_to_wiki(temporal_root, as_of=date(2025, 6, 1), client=None)
+        merge_clusters_to_wiki(temporal_root, as_of=date(2025, 6, 1))
         live_text = _page_text(temporal_root / "wiki")
         # The live page NEVER contains bravo's body, so no read-time filter
         # could resurrect it — only a recompile does.

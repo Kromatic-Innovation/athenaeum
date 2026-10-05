@@ -162,8 +162,14 @@ class TestScreenSiting:
         """AC1: ``merge.py`` no longer DEFINES either screen.
 
         The AC's own check, mechanically: zero ``def`` lines for either name.
-        ``merge.py`` still REACHES both by import (asserted below) — this is
-        about the definition site, not the call sites.
+
+        Issue athenaeum#1256 went further than AC1 anticipated: this class used
+        to also pin that ``merge.py`` still REACHES both by import, for C4's
+        own (now fully retired) call site. ``merge.py``'s own docstring now
+        says it plainly -- "this module neither defines nor names either of
+        them any more" -- so merge.py has no call site left to import them
+        for; that former assertion is gone along with it. This test's own
+        subject (the definition site) is unaffected.
         """
         tree = ast.parse(_MERGE_SRC.read_text(encoding="utf-8"))
         defined = {
@@ -173,21 +179,6 @@ class TestScreenSiting:
         }
         assert "t1_screen_rejects_merge_proposal" not in defined
         assert "t2_screen_merge_proposal" not in defined
-
-    def test_merge_still_reaches_both_screens_by_import(self) -> None:
-        """AC6: C4's call sites are unchanged — both names still resolve in
-        ``merge``'s namespace, and they are the SAME objects the new home
-        exports (not a re-definition or a shim)."""
-        from athenaeum import merge as merge_mod
-        from athenaeum import reasoning_screens as screens_mod
-
-        assert (
-            merge_mod.t1_screen_rejects_merge_proposal
-            is screens_mod.t1_screen_rejects_merge_proposal
-        )
-        assert (
-            merge_mod.t2_screen_merge_proposal is screens_mod.t2_screen_merge_proposal
-        )
 
     def test_cluster_comparator_does_not_import_merge(self) -> None:
         """AC1: the screens are reachable from ``cluster_comparator`` WITHOUT

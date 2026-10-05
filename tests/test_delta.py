@@ -248,13 +248,12 @@ def _capture_compile(monkeypatch):
     return seen
 
 
-@pytest.mark.parametrize("cross_scope_mode", ["ancestor", "off"])
 def test_d5_live_client_delta_eligible_by_default(
-    tmp_path: Path, monkeypatch, cross_scope_mode: str
+    tmp_path: Path, monkeypatch
 ) -> None:
     """Issue athenaeum#463 supersedes the original D5 fallback: a live client is now
     delta-ELIGIBLE by default (``librarian.delta.live_client`` defaults True,
-    ``full_compile_due`` defaults False), REGARDLESS of the cross-scope mode.
+    ``full_compile_due`` defaults False).
 
     Historical note: prior to athenaeum#463, ANY live client unconditionally forced a
     whole-corpus compile (the original D5 fallback trigger). athenaeum#463 replaces
@@ -265,7 +264,6 @@ def test_d5_live_client_delta_eligible_by_default(
     root = tmp_path
     (root / "athenaeum.yaml").write_text(
         "recall:\n  extra_intake_roots:\n    - raw/auto-memory\n"
-        f"contradiction:\n  cross_scope_mode: {cross_scope_mode}\n"
     )
     (root / "wiki").mkdir(parents=True, exist_ok=True)
     p = _write_am(root, "alpha", "project_x.md", "content")
@@ -304,7 +302,6 @@ def test_d5_live_client_delta_eligible_by_default(
         config=config,
         dry_run=False,
         client=_FakeClient(),
-        usage=None,
         changed_paths={p},
     )
     # athenaeum#463: the cluster pass DOES receive changed_paths and the merge DOES
@@ -313,18 +310,16 @@ def test_d5_live_client_delta_eligible_by_default(
     assert seen["only_cluster_ids"] == {"alpha-new"}
 
 
-@pytest.mark.parametrize("cross_scope_mode", ["ancestor", "off"])
 def test_d5_live_client_full_compile_due_forces_whole_corpus(
-    tmp_path: Path, monkeypatch, cross_scope_mode: str
+    tmp_path: Path, monkeypatch
 ) -> None:
-    """A live client WITH ``full_compile_due=True`` still forces whole-corpus,
-    regardless of the cross-scope mode — the periodic reconciliation cadence
-    (issue athenaeum#463) is the backstop that replaces the old blanket D5 veto.
+    """A live client WITH ``full_compile_due=True`` still forces whole-corpus —
+    the periodic reconciliation cadence (issue athenaeum#463) is the backstop that
+    replaces the old blanket D5 veto.
     """
     root = tmp_path
     (root / "athenaeum.yaml").write_text(
         "recall:\n  extra_intake_roots:\n    - raw/auto-memory\n"
-        f"contradiction:\n  cross_scope_mode: {cross_scope_mode}\n"
     )
     (root / "wiki").mkdir(parents=True, exist_ok=True)
     p = _write_am(root, "alpha", "project_x.md", "content")
@@ -340,7 +335,6 @@ def test_d5_live_client_full_compile_due_forces_whole_corpus(
         config=config,
         dry_run=False,
         client=_FakeClient(),
-        usage=None,
         changed_paths={p},
         full_compile_due=True,
     )
@@ -349,17 +343,15 @@ def test_d5_live_client_full_compile_due_forces_whole_corpus(
     assert seen["only_cluster_ids"] is None
 
 
-@pytest.mark.parametrize("cross_scope_mode", ["ancestor", "off"])
 def test_d5_live_client_delta_disabled_via_config_forces_whole_corpus(
-    tmp_path: Path, monkeypatch, cross_scope_mode: str
+    tmp_path: Path, monkeypatch
 ) -> None:
     """``librarian.delta.live_client: false`` keeps the pre-athenaeum#463 whole-corpus-
-    only behaviour for a live client, regardless of the cross-scope mode.
+    only behaviour for a live client.
     """
     root = tmp_path
     (root / "athenaeum.yaml").write_text(
         "recall:\n  extra_intake_roots:\n    - raw/auto-memory\n"
-        f"contradiction:\n  cross_scope_mode: {cross_scope_mode}\n"
         "librarian:\n  delta:\n    live_client: false\n"
     )
     (root / "wiki").mkdir(parents=True, exist_ok=True)
@@ -376,7 +368,6 @@ def test_d5_live_client_delta_disabled_via_config_forces_whole_corpus(
         config=config,
         dry_run=False,
         client=_FakeClient(),
-        usage=None,
         changed_paths={p},
     )
     assert seen["cluster_changed_paths"] is None
@@ -425,7 +416,6 @@ def test_delta_engages_on_client_none(tmp_path: Path, monkeypatch) -> None:
         config=config,
         dry_run=False,
         client=None,
-        usage=None,
         changed_paths={p},
     )
     assert seen["cluster_changed_paths"] == {p}

@@ -90,7 +90,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from athenaeum import batch_state, detection_state, push_state, spend, zero_yield
+from athenaeum import batch_state, push_state, spend, zero_yield
 from athenaeum import stuck_ledger as stuck_ledger_mod
 from athenaeum._retry import TransientAPIError
 from athenaeum.adapter_provenance import record_adapter_provenance_for_pages
@@ -2698,26 +2698,6 @@ def _run_cluster_pass(
     cache_dir = _resolve_cache_dir_config()
     output_path = resolve_cluster_output_path(knowledge_root, config=resolved_config)
 
-    # Issue athenaeum#569 (H6): fold any cluster carrying a detection-incomplete marker
-    # (its detector/resolver gave up after retries on a PRIOR run) into this
-    # run's delta set, REGARDLESS of whether its member files changed. Live-delta
-    # only re-examines clusters whose files changed, so without this a cluster
-    # that hit one transient error would not be looked at again until the
-    # periodic full compile (default 7 days). Unioning the marked members into
-    # ``changed_paths`` lets the existing delta closure re-cluster + re-detect
-    # them; merge clears each marker once the cluster is examined to completion.
-    # Only meaningful on the delta path (``changed_paths is not None``); a
-    # whole-corpus compile re-examines every cluster anyway.
-    if changed_paths is not None:
-        incomplete_members = detection_state.incomplete_member_paths(cache_dir)
-        if incomplete_members:
-            changed_paths = changed_paths | incomplete_members
-            log.info(
-                "delta: %d member file(s) across detection-incomplete cluster(s) "
-                "forced into the delta set for re-detection (issue athenaeum#569)",
-                len(incomplete_members),
-            )
-
     # Issue athenaeum#370 PR2: delta-scoped cluster pass. Only reachable when a caller
     # threads ``changed_paths`` (ingest / session_end); the nightly ``run``
     # never does, so it always takes the whole-corpus path below. An EMPTY set
@@ -2877,28 +2857,21 @@ def _compile_auto_memory(
     config: dict[str, object] | None,
     dry_run: bool,
     client: Any,
-    usage: TokenUsage | None,
     changed_paths: set[Path] | None,
     deadline: float | None = None,
-    max_api_calls: int | None = None,
     full_compile_due: bool = False,
     out_delta_taken: dict[str, bool] | None = None,
     out_merge_stats: dict | None = None,
-    heartbeat: Callable[[], None] | None = None,
-    contradiction_sweep_since: datetime | None = None,
-    force_full_contradiction_sweep: bool = False,
-    resolve_client: Any = None,
-    reasoning_t1_client: Any = None,
-    reasoning_t2_client: Any = None,
     out_embedder_counts: dict[str, int] | None = None,
 ) -> list:
-    """Cluster (C2) + merge (C3/C4) the auto-memory corpus. Returns the entries.
+    """Cluster (C2) + merge (C3) the auto-memory corpus. Returns the entries.
 
-    ``client`` is the ``classify`` knob's client (C4 detect). ``resolve_client``
-    / ``reasoning_t1_client`` / ``reasoning_t2_client`` (issue athenaeum#841) are
-    forwarded straight through to :func:`athenaeum.merge.merge_clusters_to_wiki`
-    — each ``None`` (every pre-athenaeum#841 caller) falls back to *client*
-    there, unchanged.
+    ``client`` decides the delta posture only: a ``None`` client is the
+    deterministic path, a live one the live-client delta path (below). Issue
+    athenaeum#1256 retired C4, so this pass no longer forwards a per-knob
+    client, a token-usage accumulator, an API-call budget or a heartbeat to
+    :func:`athenaeum.merge.merge_clusters_to_wiki` — that pass makes no LLM
+    call and accepts none of them.
 
     Issue athenaeum#370 PR2: this is the single choke point for the delta-scoped compile,
     extracted from :func:`run` so the equivalence test can drive the EXACT
@@ -2934,11 +2907,6 @@ def _compile_auto_memory(
     ``full_compile_due=False`` with no live client) is byte-identical to the
     pre-athenaeum#370 pipeline.
 
-    ``max_api_calls`` (issue athenaeum#461) is threaded straight through to
-    :func:`athenaeum.merge.merge_clusters_to_wiki`'s C4 budget guard — see
-    there for the degrade semantics. ``None`` (the default) preserves the
-    pre-athenaeum#461 unbounded C4 behaviour byte-for-byte.
-
     ``out_delta_taken`` (issue athenaeum#463) is an optional mutable out-param
     (mirrors :func:`_raw_hash_snapshot`'s ``out_stats`` convention): when
     given, this function sets ``out_delta_taken["taken"]`` to whether the
@@ -2966,19 +2934,6 @@ def _compile_auto_memory(
     discarded delta attempt's clustering entirely, so counting both would
     double-count the same files. ``None`` (the default) skips it entirely.
 
-    ``contradiction_sweep_since`` / ``force_full_contradiction_sweep`` (issue
-    athenaeum#909) thread straight through to
-    :func:`athenaeum.merge.merge_clusters_to_wiki`'s ``c4_since`` /
-    ``c4_full_sweep`` — the C4-specific "scope to clusters touched since the
-    last completed sweep" gate, ORTHOGONAL to the athenaeum#370/#463 delta gate
-    above. Deliberately disarmed (forced to ``None``) whenever
-    ``full_compile_due`` is true: a periodic full-compile reconciliation's
-    entire purpose is a TRUE whole-corpus pass that re-enters TTL-decayed
-    suppressions and reconciles drift a scoped pass could not see (see this
-    function's own docstring above) — narrowing it via the C4 stamp would
-    silently defeat that contract. ``None`` / ``False`` (the defaults, and
-    every pre-athenaeum#909 caller) leave ``merge_clusters_to_wiki``'s scoping
-    byte-for-byte unchanged.
     """
     delta_enabled = resolve_delta_enabled(config)
     live_delta_enabled = resolve_live_delta_enabled(config) and not full_compile_due
@@ -3046,34 +3001,19 @@ def _compile_auto_memory(
     if out_delta_taken is not None:
         out_delta_taken["taken"] = only_cluster_ids is not None
 
-    # C3: merge clusters into canonical wiki/auto-*.md entries. C4 contradiction
-    # detection runs inside merge_clusters_to_wiki and reuses the ``classify``
-    # knob's client passed in as *client* above (issue athenaeum#841).
+    # C3: merge clusters into canonical wiki/auto-*.md entries. Issue
+    # athenaeum#1256 retired C4, so this pass makes no LLM call of its own and
+    # takes no client, usage, call-budget or heartbeat argument any more.
     # When ``only_cluster_ids`` is set (delta path), only the affected entries
     # are merged + written; every unaffected wiki page is left untouched.
-    # Issue athenaeum#909: disarm the C4-since scope whenever a real full-compile
-    # reconciliation is due — see the docstring above for why. A forced full
-    # sweep (``force_full_contradiction_sweep``) is passed through unchanged
-    # either way; ``merge_clusters_to_wiki`` itself treats it as an override
-    # that ignores ``c4_since`` regardless.
-    c4_since = None if full_compile_due else contradiction_sweep_since
     return merge_clusters_to_wiki(
         knowledge_root,
         auto_memory_files=auto_memory_files,
         config=config,
         dry_run=dry_run,
-        client=client,
-        resolve_client=resolve_client,
-        reasoning_t1_client=reasoning_t1_client,
-        reasoning_t2_client=reasoning_t2_client,
-        usage=usage,
         only_cluster_ids=only_cluster_ids,
         deadline=deadline,
-        max_api_calls=max_api_calls,
         out_stats=out_merge_stats,
-        heartbeat=heartbeat,
-        c4_since=c4_since,
-        c4_full_sweep=force_full_contradiction_sweep,
     )
 
 
@@ -4415,7 +4355,7 @@ def _render_run_summary(
             schema_fragments=observation-filter:default,_entity-template:a1b2c3d4 \
             prompt_manifest=9f8e7d6c zero_yield=0 | wiki-dedup secs=0.1 reason=completed | \
             entity secs=4.2 calls=6 created=2 updated=1 escalated=0 files=3 reason=completed | \
-            auto-memory secs=7.8 detector_haiku=4 resolver_opus=1 \
+            auto-memory secs=7.8 detector_haiku=4 resolver_opus=0 \
             sweep_pairs=0 clusters_merged=2 escalations=0 reason=completed | \
             retire secs=0.1 reason=completed | reresolve secs=0.05 calls=0 reason=completed
 
@@ -4551,12 +4491,6 @@ class RunContext:
     out_run_stats: dict[str, Any] | None
 
     # --- resolved at the top of the run ----------------------------------
-    #: Issue athenaeum#909 (AC6): force C4 over EVERY cluster this run and, on a
-    #: clean non-dry-run completion, advance the contradiction-sweep stamp.
-    #: Set post-construction (mirrors ``entity_changed_paths`` below) rather
-    #: than threaded through the constructor, to keep the "verbatim run()
-    #: parameters" block above untouched. CLI: ``--full-contradiction-sweep``.
-    full_contradiction_sweep: bool = False
     skip_entity_tiers: bool = False
     #: Issue athenaeum#900: the ENTITY-side changed set — absolute paths of raw
     #: intake this caller just wrote, used to seed the entity phase's selection
@@ -4571,8 +4505,8 @@ class RunContext:
     #: :class:`athenaeum.runlock.RunLock`, when the caller holds one (the CLI
     #: `athenaeum run` path always does for a non-dry-run; a `--dry-run` call,
     #: and every pre-athenaeum#712 test/caller, leaves this ``None``). Set after
-    #: construction, same rationale as ``entity_changed_paths``/
-    #: ``full_contradiction_sweep`` above. Used ONLY by the finalize phase's
+    #: construction, same rationale as ``entity_changed_paths``
+    #: above. Used ONLY by the finalize phase's
     #: verdict-ledger advisor, and only when
     #: ``librarian.verdict_ledger_enabled`` is also on — with either
     #: condition unmet, the run is byte-identical to before athenaeum#712.
@@ -6817,56 +6751,25 @@ def _run_wiki_dedup_phase(ctx: RunContext) -> int | None:
 
 
 def _auto_memory_reason(merge_stats: dict) -> str:
-    """The auto-memory (C1-C4) phase's ``reason`` classification (issue
+    """The auto-memory (C1-C3) phase's ``reason`` classification (issue
     athenaeum#1177, AC3), mirroring ``_entity_exit_reason``'s "must not read as
     completed when everything failed" fix for this phase's own run-profile
     entry.
 
-    ``merge_stats`` is the ``out_stats``/``out_merge_stats`` dict
-    :func:`athenaeum.merge.merge_clusters_to_wiki` populates (see its
-    docstring) — ``haiku_calls``/``resolve_calls`` count ATTEMPTS,
-    ``haiku_calls_succeeded``/``resolve_calls_succeeded`` (also issue
-    athenaeum#1177) count the subset that actually landed a response. A phase
-    that attempted at least one detector/resolver call and landed ZERO
-    successes must not read as ``"completed"`` — the exact shape a
-    four-day credits-exhausted incident produced (``detector_haiku: 20``
-    while the token ledger recorded zero tokens for all twenty). A phase
-    that made no attempts at all (nothing to detect/resolve this run) is a
-    genuine, unremarkable completion, not a failure — same distinction
-    ``_zero_yield_tripped``'s ``attempted_calls`` check draws.
-
-    A phase that attempted calls it could never have MADE is a third case,
-    and issue athenaeum#1738 is where it was found: ``haiku_calls`` and
-    ``resolve_calls`` count INTENTS -- both are incremented before the
-    client is consulted -- so a keyless ``--dry-run`` (no client built at
-    all; see :func:`athenaeum.provider._construct_client`) reported
-    ``detector_haiku=16 ... reason=all-calls-failed``, emitting this
-    function's most precise signal for an unexported environment variable.
-    ``merge_clusters_to_wiki`` now records whether a client existed as
-    ``llm_client_configured``; when it is explicitly ``False`` the reason
-    is ``no-client-configured`` instead. The key is absent from any older
-    caller's stats dict, and absence defaults to the pre-athenaeum#1738
-    classification -- this narrows what ``all-calls-failed`` claims, it
-    does not widen it.
-
-    Deliberately does not name the underlying exception class the way
-    ``_entity_exit_reason``'s ``all-calls-failed:<class>`` does:
-    :class:`~athenaeum.contradictions.ContradictionResult`'s
-    ``rationale="llm-unavailable"`` is an exact-match contract several
-    tests and :mod:`athenaeum.retire` already depend on, so it is not
-    threaded further here — see this issue's PR body for the scoping
-    rationale.
+    Issue athenaeum#1256: this used to distinguish ``"completed"`` from
+    ``"all-calls-failed"``/``"no-client-configured"`` by reading the C4
+    contradiction-detector's ``haiku_calls``/``resolve_calls``/
+    ``haiku_calls_succeeded``/``resolve_calls_succeeded``/
+    ``llm_client_configured`` keys out of ``merge_stats`` — C4 is retired and
+    :func:`athenaeum.merge.merge_clusters_to_wiki` no longer writes any of
+    those keys, so that classification is unreachable and has been removed.
+    The comparator lane (``_comparator_dual_source``) has no attempt/success
+    counters of its own to classify against, so this phase is always a
+    genuine completion once it returns. ``merge_stats`` is kept as a
+    parameter (unused) so call sites need no change and a future phase-level
+    failure signal has somewhere to plug back in.
     """
-    attempted = merge_stats.get("haiku_calls", 0) + merge_stats.get("resolve_calls", 0)
-    succeeded = merge_stats.get("haiku_calls_succeeded", 0) + merge_stats.get(
-        "resolve_calls_succeeded", 0
-    )
-    if attempted > 0 and succeeded == 0:
-        # Issue athenaeum#1738: zero successes out of zero POSSIBLE calls is
-        # not a failure signature, it is a missing credential.
-        if merge_stats.get("llm_client_configured", True) is False:
-            return "no-client-configured"
-        return "all-calls-failed"
+    del merge_stats  # issue athenaeum#1256: no longer classifies on anything
     return "completed"
 
 
@@ -6896,21 +6799,15 @@ def _run_merge_only_phase(ctx: RunContext) -> int:
     _merge_only_stats: dict = {}
     _merge_only_start = time.monotonic()
     try:
+        # Issue athenaeum#1256: C4 is retired, so the C3 merge pass takes no
+        # per-knob client, token-usage accumulator or API-call budget — it
+        # makes no LLM call. The ``classify``/``resolve``/T1/T2 knobs on
+        # ``ctx`` are still routed to the phases that do.
         ctx.merged_entries = merge_clusters_to_wiki(
             ctx.knowledge_root,
             config=ctx.config,
             dry_run=ctx.dry_run,
-            # Issue athenaeum#841: per-knob clients — ``client`` (C4 detect) is the
-            # ``classify`` knob; ``resolve_client``/``reasoning_t1_client``/
-            # ``reasoning_t2_client`` route their own knobs instead of
-            # falling back to ``client``.
-            client=ctx.classify_client,
-            resolve_client=ctx.resolve_client,
-            reasoning_t1_client=ctx.reasoning_t1_client,
-            reasoning_t2_client=ctx.reasoning_t2_client,
-            usage=ctx.usage,
             deadline=ctx.run_deadline,  # issue athenaeum#396
-            max_api_calls=ctx.max_api_calls,  # issue athenaeum#461
             out_stats=_merge_only_stats,  # issue athenaeum#464
             projects_root=ctx.projects_root,  # issue athenaeum#1452
         )
@@ -6919,7 +6816,8 @@ def _run_merge_only_phase(ctx: RunContext) -> int:
     # Issue athenaeum#1102 (AC1): a ``RunDeadlineExceeded`` above returns before
     # this append is ever reached, so reaching here always means the phase
     # ran to completion OR every attempted call failed -- see athenaeum#1177's
-    # ``_auto_memory_reason`` just below, which distinguishes the two.
+    # ``_auto_memory_reason`` just below (issue athenaeum#1256: now always
+    # "completed" — see that function's own docstring for why).
     ctx.run_profile.append(
         (
             "auto-memory",
@@ -6928,13 +6826,16 @@ def _run_merge_only_phase(ctx: RunContext) -> int:
                 # Issue athenaeum#1679 (§3.10): dual-sourced with the
                 # comparator-domain wiki-dedup counts -- see
                 # _comparator_dual_source's docstring.
-                "detector_haiku": _merge_only_stats.get("haiku_calls", 0)
-                + _comparator_dual_source(ctx, "gate2_calls"),
-                "resolver_opus": _merge_only_stats.get("resolve_calls", 0),
-                "sweep_pairs": _merge_only_stats.get("pairs_added_via_similarity", 0),
+                "detector_haiku": _comparator_dual_source(ctx, "gate2_calls"),
+                # Issue athenaeum#1256: the C4 resolver/similarity-sweep sources
+                # were retired and no comparator analog exists (see the
+                # "No 'resolver_opus' analog" comment on
+                # ``wiki_dedup_comparator_summary`` above) -- keep the key for
+                # run-summary format stability, emit a literal 0.
+                "resolver_opus": 0,
+                "sweep_pairs": 0,
                 "clusters_merged": _merge_only_stats.get("entries_merged", 0),
-                "escalations": _merge_only_stats.get("escalations_written", 0)
-                + _comparator_dual_source(ctx, "escalations"),
+                "escalations": _comparator_dual_source(ctx, "escalations"),
                 "reason": _auto_memory_reason(_merge_only_stats),
             },
         )
@@ -8917,32 +8818,7 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
                 )
                 full_compile_due = True
 
-    # Issue athenaeum#909: the C4-specific "since last completed sweep" baseline —
-    # read unconditionally (cheap: one small stamp file), not gated behind
-    # ``ctx.changed_paths is None`` like the full-compile stamp above, since a
-    # caller-supplied ``changed_paths`` (ingest / session_end) does not
-    # preclude the C4-since scope from also applying when THAT delta gate
-    # left ``only_cluster_ids`` at ``None``. A read failure degrades to
-    # ``None`` (no since-scope this run — behaves exactly as it did before
-    # athenaeum#909), never breaks the run.
-    contradiction_sweep_stamp_path = (
-        _resolve_cache_dir(None) / CONTRADICTION_SWEEP_STAMP_NAME
-    )
-    contradiction_sweep_since: datetime | None = None
-    if not ctx.dry_run and not ctx.cluster_only:
-        try:
-            contradiction_sweep_since = _load_timestamp_stamp(
-                contradiction_sweep_stamp_path
-            )
-        except Exception as exc:  # noqa: BLE001 — stamp read must not break the run
-            log.warning(
-                "contradiction-sweep stamp read failed (non-fatal, no "
-                "C4-since scope this run): %s",
-                exc,
-            )
-            contradiction_sweep_since = None
-
-    # C2 + C3 + C4: cluster, merge, and detect. Issue athenaeum#370 PR2 threads the
+    # C2 + C3: cluster and merge. Issue athenaeum#370 PR2 threads the
     # optional ``changed_paths`` delta through this one call — see
     # :func:`_compile_auto_memory` for the delta-eligibility gate (issue
     # athenaeum#463 cadence contract), the cluster pass, the F6 slug-collision guard,
@@ -8959,22 +8835,15 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
             ctx.knowledge_root,
             config=ctx.config,
             dry_run=ctx.dry_run,
-            # Issue athenaeum#841: per-knob clients threaded straight through to
-            # merge_clusters_to_wiki (see _compile_auto_memory below).
+            # Issue athenaeum#1256: C4 is retired, so only the ``classify``
+            # knob's client is still relevant here, and only to pick the delta
+            # posture — the C3 merge itself makes no LLM call.
             client=ctx.classify_client,
-            resolve_client=ctx.resolve_client,
-            reasoning_t1_client=ctx.reasoning_t1_client,
-            reasoning_t2_client=ctx.reasoning_t2_client,
-            usage=ctx.usage,
             changed_paths=run_changed_paths,
             deadline=ctx.run_deadline,
-            max_api_calls=ctx.max_api_calls,  # issue athenaeum#461
             full_compile_due=full_compile_due,  # issue athenaeum#463
             out_delta_taken=_delta_taken_out,  # issue athenaeum#463
             out_merge_stats=_merge_stats,  # issue athenaeum#464
-            heartbeat=ctx.heartbeat,  # issue athenaeum#762: tick run-lock heartbeat in C4
-            contradiction_sweep_since=contradiction_sweep_since,  # issue athenaeum#909
-            force_full_contradiction_sweep=ctx.full_contradiction_sweep,  # athenaeum#909
             out_embedder_counts=_embedder_counts,  # issue athenaeum#1279
         )
     except RunDeadlineExceeded as exc:
@@ -8983,7 +8852,7 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
         # ``_merge_stats`` before the trip — usually none, since the
         # merge call raised, but this stays correct either way)
         # before the deadline-stop path emits the summary. The C2 cluster
-        # pass (and therefore ``_embedder_counts``) always runs BEFORE C3/C4
+        # pass (and therefore ``_embedder_counts``) always runs BEFORE the C3
         # merge, so a deadline trip here still reports real embedder counts,
         # not zeros (issue athenaeum#1279).
         ctx.run_profile.append(
@@ -8994,13 +8863,16 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
                     # Issue athenaeum#1679 (§3.10): dual-sourced with the
                     # comparator-domain wiki-dedup counts -- see
                     # _comparator_dual_source's docstring.
-                    "detector_haiku": _merge_stats.get("haiku_calls", 0)
-                    + _comparator_dual_source(ctx, "gate2_calls"),
-                    "resolver_opus": _merge_stats.get("resolve_calls", 0),
-                    "sweep_pairs": _merge_stats.get("pairs_added_via_similarity", 0),
+                    "detector_haiku": _comparator_dual_source(ctx, "gate2_calls"),
+                    # Issue athenaeum#1256: the C4 resolver/similarity-sweep sources
+                    # were retired and no comparator analog exists (see the
+                    # "No 'resolver_opus' analog" comment on
+                    # ``wiki_dedup_comparator_summary`` above) -- keep the key for
+                    # run-summary format stability, emit a literal 0.
+                    "resolver_opus": 0,
+                    "sweep_pairs": 0,
                     "clusters_merged": _merge_stats.get("entries_merged", 0),
-                    "escalations": _merge_stats.get("escalations_written", 0)
-                    + _comparator_dual_source(ctx, "escalations"),
+                    "escalations": _comparator_dual_source(ctx, "escalations"),
                     # Issue athenaeum#1279: per-file embedder provenance this run's
                     # C2 cluster pass resolved — see
                     # ``clusters.cluster_auto_memory_files``'s
@@ -9025,20 +8897,23 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
                 # Issue athenaeum#1679 (§3.10): dual-sourced with the
                 # comparator-domain wiki-dedup counts -- see
                 # _comparator_dual_source's docstring.
-                "detector_haiku": _merge_stats.get("haiku_calls", 0)
-                + _comparator_dual_source(ctx, "gate2_calls"),
-                "resolver_opus": _merge_stats.get("resolve_calls", 0),
-                "sweep_pairs": _merge_stats.get("pairs_added_via_similarity", 0),
+                "detector_haiku": _comparator_dual_source(ctx, "gate2_calls"),
+                # Issue athenaeum#1256: the C4 resolver/similarity-sweep sources
+                # were retired and no comparator analog exists (see the
+                # "No 'resolver_opus' analog" comment on
+                # ``wiki_dedup_comparator_summary`` above) -- keep the key for
+                # run-summary format stability, emit a literal 0.
+                "resolver_opus": 0,
+                "sweep_pairs": 0,
                 "clusters_merged": _merge_stats.get("entries_merged", 0),
-                "escalations": _merge_stats.get("escalations_written", 0)
-                + _comparator_dual_source(ctx, "escalations"),
+                "escalations": _comparator_dual_source(ctx, "escalations"),
                 # Issue athenaeum#1279: per-file embedder provenance this run's C2
                 # cluster pass resolved — see the deadline-trip branch above
                 # for the full rationale.
                 "embed_chromadb": _embedder_counts.get(EMBEDDER_CHROMADB_DEFAULT, 0),
                 "embed_fallback": _embedder_counts.get(EMBEDDER_FALLBACK_HASHING, 0),
-                # Issue athenaeum#1177 (AC3): no longer unconditionally
-                # "completed" -- see ``_auto_memory_reason``.
+                # Issue athenaeum#1256: ``_auto_memory_reason`` is now always
+                # "completed" -- see that function's own docstring.
                 "reason": _auto_memory_reason(_merge_stats),
             },
         )
@@ -9075,26 +8950,6 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
                 )
             except Exception as exc:  # noqa: BLE001 — must not break the run
                 log.warning("full-compile stamp write failed (non-fatal): %s", exc)
-
-    # Issue athenaeum#909: advance the C4-specific "last completed sweep" stamp
-    # whenever the merge call just above actually examined the WHOLE corpus
-    # (``out_stats["c4_swept_full"]`` — set by
-    # :func:`athenaeum.merge.merge_clusters_to_wiki` from its EFFECTIVE
-    # ``only_cluster_ids`` after the athenaeum#909 since-scope, if it engaged; see
-    # its docstring). Deliberately NOT gated on ``ctx.changed_paths is None``
-    # like the full-compile-manifest block above — a caller-supplied
-    # ``changed_paths`` (ingest / session_end) does not change what "C4 swept
-    # everything this run" means. Best-effort: a write failure never breaks
-    # the run.
-    if (
-        not ctx.dry_run
-        and not ctx.cluster_only
-        and _merge_stats.get("c4_swept_full", False)
-    ):
-        try:
-            _write_timestamp_stamp(contradiction_sweep_stamp_path, run_now)
-        except Exception as exc:  # noqa: BLE001 — must not break the run
-            log.warning("contradiction-sweep stamp write failed (non-fatal): %s", exc)
 
     # Issue athenaeum#396: deadline check at the post-compile phase boundary,
     # before the retire + reresolve passes (both can commit / make
@@ -9717,7 +9572,6 @@ def run(
     changed_paths: set[Path] | None = None,
     entity_changed_paths: set[Path] | None = None,
     full_compile: bool = False,
-    full_contradiction_sweep: bool = False,
     now: datetime | None = None,
     heartbeat: Callable[[], None] | None = None,
     out_run_stats: dict[str, Any] | None = None,
@@ -9848,23 +9702,6 @@ def run(
     ``FULL_COMPILE_STAMP_NAME`` cache-dir stamp and
     :func:`athenaeum.config.resolve_full_compile_every_days`, default 7 days).
 
-    ``full_contradiction_sweep`` (issue athenaeum#909, CLI ``--full-contradiction-sweep``)
-    forces C4 (contradiction detection) over EVERY cluster this run,
-    regardless of what the delta gate / ``full_compile`` cadence above would
-    otherwise have scoped it to, and — on a clean non-dry-run,
-    non-``cluster_only`` completion — advances the SEPARATE
-    ``CONTRADICTION_SWEEP_STAMP_NAME`` cache-dir stamp (distinct from
-    ``FULL_COMPILE_STAMP_NAME``: that one tracks the last whole-corpus C2-C4
-    COMPILE, this one tracks C4 specifically). DEFAULT ``False``: absent an
-    explicit ask, C4's scope is unaffected by this flag or its stamp — see
-    :func:`_compile_auto_memory`'s ``contradiction_sweep_since`` /
-    ``force_full_contradiction_sweep`` params (and
-    :func:`athenaeum.merge.merge_clusters_to_wiki`'s ``c4_since`` /
-    ``c4_full_sweep``) for exactly when the stamp's "since last sweep"
-    value, once one exists, additionally narrows an otherwise-unscoped C4
-    pass. The manual escape hatch for AC6: "a full-corpus contradiction
-    sweep runs only when explicitly invoked."
-
     ``now`` (issue athenaeum#463) is an optional injected "run start" timestamp for
     the full-compile cadence check, mirroring
     :func:`athenaeum.merge.merge_clusters_to_wiki`'s ``now=`` parameter.
@@ -9932,11 +9769,8 @@ def run(
     # constructor arg) to keep the positional field order of this long
     # dataclass untouched.
     ctx.entity_changed_paths = entity_changed_paths
-    # Issue athenaeum#909: same "set after construction" rationale as
-    # ``entity_changed_paths`` above.
-    ctx.full_contradiction_sweep = full_contradiction_sweep
     # Issue athenaeum#1135: same "set after construction" rationale as
-    # ``entity_changed_paths`` / ``full_contradiction_sweep`` above.
+    # ``entity_changed_paths`` above.
     ctx.allow_degraded = allow_degraded
     # Issue athenaeum#1136: same rationale; resolved (CLI arg > env > default)
     # by ``_resolve_run_config`` below, alongside batch_mode/max_runtime/etc.
@@ -10436,10 +10270,10 @@ def _write_full_compile_stamp(path: Path, at: datetime, head: str | None) -> Non
 
 
 # ---------------------------------------------------------------------------
-# Reasoning-tier trigger cadence state (issue athenaeum#909). Two MORE cache-dir
-# stamps, siblings of ``full-compile-stamp.json`` (same "outside the
+# Reasoning-tier trigger cadence state (issue athenaeum#909). A cache-dir
+# stamp, sibling of ``full-compile-stamp.json`` (same "outside the
 # knowledge git repo" rationale, same tolerant-reader/atomic-write shape) —
-# but answering two DIFFERENT questions than that stamp does:
+# but answering a DIFFERENT question than that stamp does:
 #
 # - ``REASONING_TRIGGER_STAMP_NAME`` records when a TRIGGERED reasoning run
 #   (``athenaeum ingest --if-triggered``, see :mod:`athenaeum._cmd_index`)
@@ -10448,13 +10282,6 @@ def _write_full_compile_stamp(path: Path, at: datetime, head: str | None) -> Non
 #   elapsed-interval and nightly-backstop checks — an on-demand or
 #   backlog-depth-triggered run advances it exactly like an interval/backstop
 #   one; every trigger reason marks the same "reasoning ran" clock.
-# - ``CONTRADICTION_SWEEP_STAMP_NAME`` records when C4 (contradiction
-#   detection) last completed a WHOLE-CORPUS pass, independent of the
-#   athenaeum#370/#463 auto-memory delta gate it otherwise piggybacks on. See
-#   :func:`_compile_auto_memory`'s ``contradiction_sweep_since`` /
-#   ``force_full_contradiction_sweep`` params and
-#   :func:`athenaeum.merge.merge_clusters_to_wiki`'s ``c4_since`` /
-#   ``c4_full_sweep`` params for how it narrows C4's scope.
 # ---------------------------------------------------------------------------
 
 #: Stamp recording the last COMPLETED triggered-reasoning run:
@@ -10462,25 +10289,16 @@ def _write_full_compile_stamp(path: Path, at: datetime, head: str | None) -> Non
 #: path to compute ``evaluate_triggers``'s ``since_last_run``.
 REASONING_TRIGGER_STAMP_NAME = "reasoning-trigger-stamp.json"
 
-#: Stamp recording the last completed WHOLE-CORPUS C4 contradiction-detection
-#: sweep: ``{"at": <ISO-8601 UTC timestamp>}``. Distinct from
-#: ``FULL_COMPILE_STAMP_NAME`` — that one records the last whole-corpus C2-C4
-#: auto-memory COMPILE (cluster + merge + detect together); this one records
-#: C4 specifically, so an explicit ``--full-contradiction-sweep`` (which
-#: forces only C4 over every cluster, not a full C2 re-cluster) has its own
-#: cadence clock.
-CONTRADICTION_SWEEP_STAMP_NAME = "contradiction-sweep-stamp.json"
-
 
 def _load_timestamp_stamp(path: Path) -> datetime | None:
     """Load a ``{"at": <ISO-8601 UTC timestamp>}`` stamp's ``at`` as a
     timezone-aware :class:`datetime` (issue athenaeum#909).
 
-    Shared tolerant reader for :data:`REASONING_TRIGGER_STAMP_NAME` and
-    :data:`CONTRADICTION_SWEEP_STAMP_NAME` — both are single-field siblings
-    of :func:`_load_full_compile_stamp`'s richer ``{"at", "head"}`` shape.
-    Returns ``None`` when absent/unreadable/malformed/missing ``at``/an
-    unparsable ``at`` — treated by every caller as "never recorded".
+    Shared tolerant reader for :data:`REASONING_TRIGGER_STAMP_NAME` — a
+    single-field sibling of :func:`_load_full_compile_stamp`'s richer
+    ``{"at", "head"}`` shape. Returns ``None`` when
+    absent/unreadable/malformed/missing ``at``/an unparsable ``at`` —
+    treated by every caller as "never recorded".
     """
     if not path.is_file():
         return None
@@ -10501,10 +10319,9 @@ def _load_timestamp_stamp(path: Path) -> datetime | None:
 
 def _write_timestamp_stamp(path: Path, at: datetime) -> None:
     """Atomically write a ``{"at": <ISO-8601 UTC timestamp>}`` stamp (issue
-    athenaeum#909). Shared writer for :data:`REASONING_TRIGGER_STAMP_NAME` and
-    :data:`CONTRADICTION_SWEEP_STAMP_NAME` — mirrors
-    :func:`_write_full_compile_stamp`'s atomic-write shape minus the
-    audit-only ``head`` field neither of these stamps carries.
+    athenaeum#909). Shared writer for :data:`REASONING_TRIGGER_STAMP_NAME` —
+    mirrors :func:`_write_full_compile_stamp`'s atomic-write shape minus the
+    audit-only ``head`` field that stamp carries.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     payload: dict[str, Any] = {

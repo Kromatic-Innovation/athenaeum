@@ -28,7 +28,6 @@ from athenaeum.librarian import (
     librarian_max_api_calls,
     run,
 )
-from athenaeum.models import TokenUsage
 from athenaeum.resolutions import resolve_max_per_run
 
 # ---------------------------------------------------------------------------
@@ -677,20 +676,33 @@ class TestZeroBudgetStartupWarning:
 
 
 class TestRunLevelBudgetThreading:
-    def test_entity_phase_spend_counts_against_merge_budget(
+    def test_entity_phase_spend_survives_to_the_run_level_summary(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """API calls burned by the entity phase count against max_api_calls.
+        """API calls burned by the entity phase count against max_api_calls
+        and remain visible on the SHARED run-level ``TokenUsage`` all the
+        way through to the finalize-phase "Token usage:" summary.
 
-        Issue athenaeum#461: the entity phase now runs BEFORE the auto-memory block
-        and gets first claim on the shared run-level budget (inverted from
-        the pre-athenaeum#461 ordering, where the merge pass ran first and could
-        starve the entity loop). The entity stand-in burns the whole budget
-        via the threaded run-level TokenUsage; the merge pass must then see
-        an already-exhausted budget when it runs afterward.
+        Issue athenaeum#461: the entity phase now runs BEFORE the auto-memory
+        block and gets first claim on the shared run-level budget (inverted
+        from the pre-athenaeum#461 ordering, where the merge pass ran first and
+        could starve the entity loop).
+
+        Issue athenaeum#1256 retired the C4 contradiction detector along with
+        ``merge_clusters_to_wiki``'s ``usage`` parameter -- this test used to
+        prove threading survived the athenaeum#461 reorder by reading the entity
+        phase's accumulated spend back out of the merge call's own kwargs.
+        The merge pass takes no budget-relevant argument at all now and
+        makes no LLM call, so that specific observation point is gone; the
+        underlying invariant (the entity phase's spend is not lost or
+        reset by the time the run finishes) is still real and still worth
+        proving, just via the run's own end-of-run summary line instead --
+        the same ``caplog``/"Token usage:" idiom
+        ``test_run_summary_cache_line_renders_from_resolver_only_traffic``
+        below already uses for exactly this purpose.
         """
         root = _seed_knowledge_root(tmp_path, n_files=2)
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
@@ -706,14 +718,9 @@ class TestRunLevelBudgetThreading:
         monkeypatch.setattr(
             "athenaeum.librarian._run_cluster_pass", lambda *a, **k: None
         )
-
-        merge_calls = []
-
-        def fake_merge(knowledge_root, **kwargs):
-            merge_calls.append(kwargs["usage"].api_calls)
-            return []
-
-        monkeypatch.setattr("athenaeum.librarian.merge_clusters_to_wiki", fake_merge)
+        monkeypatch.setattr(
+            "athenaeum.librarian.merge_clusters_to_wiki", lambda *a, **k: []
+        )
         monkeypatch.setattr(
             "athenaeum.librarian._run_reresolve_pass", lambda *a, **k: 0
         )
@@ -721,7 +728,7 @@ class TestRunLevelBudgetThreading:
         # lets both files run (0 -> 3 -> 6), so the entity phase completes
         # normally (no entity-side "budget exhausted" trip) but leaves 6
         # calls already spent on the shared TokenUsage before the
-        # auto-memory block — and its merge call — ever run.
+        # auto-memory block (which now spends nothing) ever runs.
         monkeypatch.setattr(
             "athenaeum.librarian.process_one", _fake_process_one_factory(calls_per_file=3)
         )
@@ -735,306 +742,19 @@ class TestRunLevelBudgetThreading:
         )
 
         assert rc == 0
-        # The merge pass ran AFTER the entity phase and observed its spend
-        # via the shared TokenUsage — proving budget threading survives the
-        # athenaeum#461 reorder: the entity phase's 6 calls are visible to merge.
-        assert merge_calls == [6]
-
-    def test_merge_counts_detector_and_resolver_calls(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """merge_clusters_to_wiki increments the threaded usage counter."""
-        import json
-
-        from athenaeum.contradictions import ContradictionResult
-        from athenaeum.merge import merge_clusters_to_wiki
-
-        knowledge_root = tmp_path / "knowledge"
-        scope = knowledge_root / "raw" / "auto-memory" / "scopeA"
-        scope.mkdir(parents=True)
-        for name, body in [
-            ("project_alpha.md", "Alpha says X."),
-            ("project_beta.md", "Beta says not-X."),
-        ]:
-            (scope / name).write_text(
-                f"---\nname: {name}\ntype: feedback\n---\n{body}\n",
-                encoding="utf-8",
-            )
-        (knowledge_root / "athenaeum.yaml").write_text(
-            "recall:\n  extra_intake_roots:\n    - raw/auto-memory\n",
-            encoding="utf-8",
-        )
-        rows = [
-            {
-                "cluster_id": "c1",
-                "member_paths": [
-                    "scopeA/project_alpha.md",
-                    "scopeA/project_beta.md",
-                ],
-                "centroid_score": 0.9,
-                "rationale": "test",
-            }
+        # The merge pass ran AFTER the entity phase and spent nothing; the
+        # finalize-phase summary (recorded last, after every phase) must
+        # still report the entity phase's full 6-call spend — proving the
+        # shared TokenUsage survives the athenaeum#461 reorder all the way to
+        # the end of the run, not merely across the one boundary C4 used to
+        # guard.
+        token_lines = [
+            r.getMessage()
+            for r in caplog.records
+            if r.getMessage().startswith("Token usage:")
         ]
-        (knowledge_root / "raw" / "_librarian-clusters.jsonl").write_text(
-            "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8"
-        )
-
-        detected = ContradictionResult(
-            detected=True,
-            conflict_type="factual",
-            members_involved=[
-                "scopeA/project_alpha.md",
-                "scopeA/project_beta.md",
-            ],
-            conflicting_passages=["X", "not-X"],
-            rationale="conflict",
-        )
-        monkeypatch.setattr(
-            "athenaeum.merge.detect_contradictions",
-            lambda members, client, config=None, usage=None, wiki_root=None: detected,
-        )
-        monkeypatch.setattr(
-            "athenaeum.merge.propose_resolution",
-            lambda result, members, client, usage=None, wiki_root=None: SimpleNamespace(
-                action="keep_a", confidence=0.0
-            ),
-        )
-
-        usage = TokenUsage()
-        entries = merge_clusters_to_wiki(
-            knowledge_root, dry_run=True, client=object(), usage=usage
-        )
-
-        assert entries
-        # 1 detector (Haiku) call + 1 resolver (Opus) call.
-        assert usage.api_calls == 2
-
-    def test_merge_offline_does_not_count(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """client=None makes no API calls, so the counter must not move."""
-        from athenaeum.merge import merge_clusters_to_wiki
-
-        knowledge_root = tmp_path / "knowledge"
-        (knowledge_root / "raw").mkdir(parents=True)
-        usage = TokenUsage()
-        entries = merge_clusters_to_wiki(
-            knowledge_root, dry_run=True, client=None, usage=usage
-        )
-        assert entries == []
-        assert usage.api_calls == 0
-
-    def test_merge_threads_detector_and_resolver_token_counts(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """athenaeum#239: detector + resolver responses feed token/cache counters
-        into the threaded run-level TokenUsage (not just api_calls), so
-        the librarian run summary's cache line reflects this phase."""
-        import json
-        from unittest.mock import MagicMock
-
-        from athenaeum.merge import merge_clusters_to_wiki
-
-        knowledge_root = tmp_path / "knowledge"
-        scope = knowledge_root / "raw" / "auto-memory" / "scopeA"
-        scope.mkdir(parents=True)
-        for name, body in [
-            ("project_alpha.md", "Alpha says X."),
-            ("project_beta.md", "Beta says not-X."),
-        ]:
-            (scope / name).write_text(
-                f"---\nname: {name}\ntype: feedback\n---\n{body}\n",
-                encoding="utf-8",
-            )
-        (knowledge_root / "athenaeum.yaml").write_text(
-            "recall:\n  extra_intake_roots:\n    - raw/auto-memory\n",
-            encoding="utf-8",
-        )
-        rows = [
-            {
-                "cluster_id": "c1",
-                "member_paths": [
-                    "scopeA/project_alpha.md",
-                    "scopeA/project_beta.md",
-                ],
-                "centroid_score": 0.9,
-                "rationale": "test",
-            }
-        ]
-        (knowledge_root / "raw" / "_librarian-clusters.jsonl").write_text(
-            "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8"
-        )
-
-        detector_payload = (
-            '{"detected": true, "conflict_type": "factual", '
-            '"members_involved": ["scopeA/project_alpha.md", '
-            '"scopeA/project_beta.md"], '
-            '"conflicting_passages": ["X", "not-X"], "rationale": "conflict"}'
-        )
-        resolver_payload = (
-            '{"recommended_winner": "a", "action": "keep_a", '
-            '"confidence": 0.5, "rationale": "r", '
-            '"source_precedence_used": []}'
-        )
-
-        def _response(payload: str, cache_read: int) -> MagicMock:
-            response = MagicMock()
-            response.content = [MagicMock(text=payload)]
-            response.usage = MagicMock(
-                input_tokens=100,
-                output_tokens=20,
-                cache_creation_input_tokens=0,
-                cache_read_input_tokens=cache_read,
-            )
-            return response
-
-        client = MagicMock()
-        client.messages.create.side_effect = [
-            _response(detector_payload, 900),
-            _response(resolver_payload, 2400),
-        ]
-
-        usage = TokenUsage()
-        merge_clusters_to_wiki(knowledge_root, dry_run=True, client=client, usage=usage)
-
-        assert usage.api_calls == 2
-        assert usage.input_tokens == 200
-        assert usage.output_tokens == 40
-        assert usage.cache_read_input_tokens == 3300
-
-    def test_run_summary_cache_line_renders_from_resolver_only_traffic(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        """athenaeum#239 acceptance: the rendered run-summary cache line shows nonzero
-        cache counters from merge-phase (detector + resolver) traffic alone.
-
-        The entity tiers are stubbed to burn ZERO api_calls, so the
-        ``usage.api_calls > 0`` gate on the "Token usage:" INFO line must be
-        satisfied by the merge phase's attempt counting — pinning that
-        resolver-only runs still surface their cache spend in the summary.
-
-        Issue athenaeum#461: this invariant is preserved by the reorder. The entity
-        phase now runs BEFORE the auto-memory/merge block, but the run-level
-        "Token usage:" line and the athenaeum#378 spend-ledger write were moved to the
-        finalize section (AFTER both phases) precisely so the shared
-        ``usage`` still reflects the WHOLE run — including merge-phase
-        detector/resolver traffic — exactly as it did pre-athenaeum#461.
-        """
-        import json
-        from unittest.mock import MagicMock
-
-        import anthropic
-
-        root = _seed_knowledge_root(tmp_path, n_files=1)
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
-        monkeypatch.delenv("ATHENAEUM_MAX_API_CALLS", raising=False)
-
-        # Auto-memory cluster fixture (same shape as the merge-threading
-        # tests above) so the REAL merge_clusters_to_wiki -> detector ->
-        # resolver path runs inside run().
-        scope = root / "raw" / "auto-memory" / "scopeA"
-        scope.mkdir(parents=True)
-        for name, body in [
-            ("project_alpha.md", "Alpha says X."),
-            ("project_beta.md", "Beta says not-X."),
-        ]:
-            (scope / name).write_text(
-                f"---\nname: {name}\ntype: feedback\n---\n{body}\n",
-                encoding="utf-8",
-            )
-        (root / "athenaeum.yaml").write_text(
-            "recall:\n  extra_intake_roots:\n    - raw/auto-memory\n",
-            encoding="utf-8",
-        )
-        rows = [
-            {
-                "cluster_id": "c1",
-                "member_paths": [
-                    "scopeA/project_alpha.md",
-                    "scopeA/project_beta.md",
-                ],
-                "centroid_score": 0.9,
-                "rationale": "test",
-            }
-        ]
-        (root / "raw" / "_librarian-clusters.jsonl").write_text(
-            "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8"
-        )
-
-        detector_payload = (
-            '{"detected": true, "conflict_type": "factual", '
-            '"members_involved": ["scopeA/project_alpha.md", '
-            '"scopeA/project_beta.md"], '
-            '"conflicting_passages": ["X", "not-X"], "rationale": "conflict"}'
-        )
-        resolver_payload = (
-            '{"recommended_winner": "a", "action": "keep_a", '
-            '"confidence": 0.5, "rationale": "r", '
-            '"source_precedence_used": []}'
-        )
-
-        def _response(payload: str, creation: int, read: int) -> MagicMock:
-            response = MagicMock()
-            response.content = [MagicMock(text=payload)]
-            response.usage = MagicMock(
-                input_tokens=100,
-                output_tokens=20,
-                cache_creation_input_tokens=creation,
-                cache_read_input_tokens=read,
-            )
-            return response
-
-        client = MagicMock()
-        client.messages.create.side_effect = [
-            _response(detector_payload, 1200, 0),
-            _response(resolver_payload, 0, 2400),
-        ]
-        # run() builds its own client; hand it the mock instead.
-        monkeypatch.setattr(anthropic, "Anthropic", lambda **kwargs: client)
-
-        # Skip the embedding-backed cluster pass; merge reads the seeded
-        # JSONL directly. Entity tiers burn zero API calls.
-        # athenaeum#370 PR2: _run_cluster_pass now returns None (whole-corpus) or the
-        # delta affected-id set — not the old int cluster count.
-        monkeypatch.setattr(
-            "athenaeum.librarian._run_cluster_pass", lambda *a, **k: None
-        )
-        # Issue athenaeum#461: the entity phase makes zero API calls here; the
-        # "Token usage:" gate (``usage.api_calls > 0``) is satisfied by the
-        # merge phase's detector+resolver traffic, which is now folded in
-        # because the log line moved to finalize (after the merge block).
-        monkeypatch.setattr(
-            "athenaeum.librarian.process_one",
-            _fake_process_one_factory(calls_per_file=0),
-        )
-        caplog.set_level(logging.INFO, logger="athenaeum")
-
-        rc = run(
-            raw_root=root / "raw",
-            wiki_root=root / "wiki",
-            knowledge_root=root,
-            dry_run=True,
-        )
-
-        assert rc == 0
-        messages = [r.getMessage() for r in caplog.records]
-        token_lines = [m for m in messages if m.startswith("Token usage:")]
-        assert token_lines, messages
-        line = token_lines[0]
-        # Gate satisfied purely by merge-phase attempt counts (1 detector
-        # + 1 resolver); cache counters rendered nonzero in the summary. The
-        # athenaeum#461 reorder moved this log line to finalize (after merge), so the
-        # merge-phase spend is still folded in — the athenaeum#239 guarantee holds.
-        assert "2 API calls" in line, line
-        assert "(cache: 1200 written, 2400 read)" in line, line
+        assert token_lines, [r.getMessage() for r in caplog.records]
+        assert "6 API calls" in token_lines[0]
 
     def test_yaml_bool_is_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """`max_api_calls: yes` in yaml must not become a cap of 1 (bool is int)."""

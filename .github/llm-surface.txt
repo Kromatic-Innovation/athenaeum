@@ -42,7 +42,6 @@ src/athenaeum/contradictions.py
 src/athenaeum/decay_bucket.py
 src/athenaeum/decay_sweep.py
 src/athenaeum/librarian.py
-src/athenaeum/merge.py
 src/athenaeum/models.py
 src/athenaeum/provider.py
 src/athenaeum/reasoning_screens.py
