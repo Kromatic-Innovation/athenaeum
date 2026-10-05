@@ -38,9 +38,17 @@ from typing import Any
 
 import pytest
 
+from athenaeum.models import TokenUsage
 from tests.evals import north_star_cli
-from tests.evals.containment import ResultStore, read_planned_cells
-from tests.evals.rollout import ALL_ARMS, RECALL_TOOL_NAME, RolloutRecord, ToolCall, TurnTokenUsage
+from tests.evals.containment import NORTH_STAR_CELL_TOKEN_ESTIMATE, ResultStore, read_planned_cells
+from tests.evals.rollout import (
+    ALL_ARMS,
+    DEFAULT_ROLLOUT_MODEL,
+    RECALL_TOOL_NAME,
+    RolloutRecord,
+    ToolCall,
+    TurnTokenUsage,
+)
 from tests.evals.test_rollout_api_mode import _text_block, _tool_use_block, _usage
 
 FIXTURE_DIR = Path(__file__).parent.parent / "fixtures" / "cli_tool_bridge"
@@ -101,6 +109,85 @@ def test_no_preflight_flag_skips_the_projection_line(
     out = capsys.readouterr().out
     assert "preflight: skipped (--no-preflight)" in out
     assert "cells would run" not in out
+
+
+def _price_for_cells(n_cells: int, model: str) -> float:
+    usage = TokenUsage()
+    for _ in range(n_cells):
+        usage.add_tokens(
+            NORTH_STAR_CELL_TOKEN_ESTIMATE.input_tokens,
+            NORTH_STAR_CELL_TOKEN_ESTIMATE.output_tokens,
+            model=model,
+        )
+    return usage.estimated_cost_usd
+
+
+def test_token_ceiling_check_counts_the_preflights_cells(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue athenaeum#1959 AC: "the preflight's cells count toward ... the
+    token ceiling." A ceiling sized to clear the smoke-scale READ GRID alone
+    (``len(ALL_ARMS)`` cells) but not the grid PLUS the preflight's own
+    full group (another ``len(ALL_ARMS)`` cells) must pass with
+    ``--no-preflight`` and refuse without it -- proving the ceiling check
+    (``projected_tokens > token_ceiling``) actually sums the two, not just
+    the read grid."""
+
+    def _exploding_run_probe_all_arms(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("dry-run must never run a cell")
+
+    monkeypatch.setattr(north_star_cli, "run_probe_all_arms", _exploding_run_probe_all_arms)
+    monkeypatch.setattr(north_star_cli, "_default_store_path", lambda: tmp_path / "r.jsonl")
+
+    cell_tokens = NORTH_STAR_CELL_TOKEN_ESTIMATE.total_tokens
+    grid_tokens = len(ALL_ARMS) * cell_tokens
+    combined_tokens = 2 * len(ALL_ARMS) * cell_tokens
+    max_tokens = (grid_tokens + combined_tokens) // 2
+    assert grid_tokens <= max_tokens < combined_tokens  # the threshold actually separates them
+
+    grid_only = north_star_cli.main(
+        ["--dry-run", "--no-preflight", "--max-tokens", str(max_tokens)]
+    )
+    assert grid_only == 0
+
+    with_preflight = north_star_cli.main(["--dry-run", "--max-tokens", str(max_tokens)])
+    assert with_preflight == 1
+    err = capsys.readouterr().err
+    assert f"projected tokens {combined_tokens} exceed the token ceiling {max_tokens}" in err
+
+
+def test_max_spend_pricing_counts_the_preflights_cells(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue athenaeum#1959 AC: "the preflight's cells count toward ... the
+    --max-spend pricing." Same shape as the token-ceiling test above, but
+    against the SEPARATE dollar gate (``combined_estimated_usd >
+    max_spend``, checked before the token-ceiling gate) -- a budget that
+    clears the read grid's own price alone but not the grid plus the
+    preflight's price must pass with ``--no-preflight`` and refuse without
+    it."""
+
+    def _exploding_run_probe_all_arms(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("dry-run must never run a cell")
+
+    monkeypatch.setattr(north_star_cli, "run_probe_all_arms", _exploding_run_probe_all_arms)
+    monkeypatch.setattr(north_star_cli, "_default_store_path", lambda: tmp_path / "r.jsonl")
+
+    grid_price = _price_for_cells(len(ALL_ARMS), DEFAULT_ROLLOUT_MODEL)
+    combined_price = _price_for_cells(2 * len(ALL_ARMS), DEFAULT_ROLLOUT_MODEL)
+    max_spend = (grid_price + combined_price) / 2
+    assert grid_price <= max_spend < combined_price  # the threshold actually separates them
+
+    grid_only = north_star_cli.main(
+        ["--dry-run", "--no-preflight", "--max-spend", str(max_spend)]
+    )
+    assert grid_only == 0
+
+    with_preflight = north_star_cli.main(["--dry-run", "--max-spend", str(max_spend)])
+    assert with_preflight == 1
+    err = capsys.readouterr().err
+    assert "exceeding --max-spend" in err
+    assert "plus preflight" in err
 
 
 # ---------------------------------------------------------------------------
