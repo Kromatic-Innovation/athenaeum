@@ -382,6 +382,45 @@ ATHENAEUM_LLM_PROVIDER=claude-cli python -m tests.evals.north_star_cli \
   Neither is fixed by this flag; both are recorded so a report comparing this arm against
   the `api` backend can account for them.
 
+### Behavioural preflight (issue athenaeum#1959)
+
+A live run (not `--dry-run`, not `--floor-scan`) runs a one-group behavioural preflight by
+default, serially, before the first grid worker starts: one `push_breadcrumb_pull` cell at
+corpus scale `core`, built with the exact same client construction `_run_group` uses for a
+real group. It asserts the one thing a config-only refusal cannot: that the behaviour this
+driver is about to measure actually happens. Origin: the 2026-10-04 retro on athenaeum#1936,
+where the first full-grid dispatch on the claude-cli subscription backend burned about four
+hours of tokens over 384 cells with zero of them recording a tool call, because the CLI
+client ran text-only. The disposition that caught the *next* blocker before any replicate
+spend was a preflight run by hand; this issue moves that check into code.
+
+- **What is asserted.** The preflight cell's `recall_called` must be `true`. When the
+  resolved provider is `claude-cli`, a `CliToolBridgeError` from
+  `ClaudeCliClient.run_tool_loop` (bridge never connected, `apiKeySource` not `"none"`, a
+  `hook_started` event, or no init event at all) is reused unchanged -- not reimplemented
+  here. Either failure aborts `main` with **exit code 2** before any grid cell runs; stderr
+  names the probe, the arm, the provider, and (for the `recall_called` check) the recorded
+  `tool_calls` count.
+- **A probe that legitimately never calls recall fails closed.** That is deliberate: the
+  alternative is a silent, multi-hour, zero-signal grid, which is exactly the failure this
+  issue exists to remove. Pick a different probe with `--preflight-probe <id>` (default: the
+  first entry of the probe list) and re-run.
+- **`--no-preflight`** skips the check entirely; the report header then reads
+  `preflight: skipped (--no-preflight)`. Neither flag has an env-var fallback -- always
+  explicit.
+- **The sibling store.** Preflight rows are appended to `<store>.preflight.jsonl`, never to
+  `--store` itself -- a store-local collision (the preflight's default probe/scale/replicate
+  commonly coincides with the real grid's own first group) would otherwise let the real
+  grid's matching group read as already-done and silently skip it. `read_planned_cells` for
+  the real `--store` counts only the real grid's cells; the preflight re-runs on every
+  invocation and is not itself resume-aware.
+- **Cost accounting.** The preflight's cells count toward `--dry-run`'s projection, the
+  `--max-spend` price, and the token ceiling -- `--dry-run` prints an extra
+  `preflight: N cells would run` line and still makes zero calls.
+- **On success**, one line prints before the grid starts (and the same fields land in the
+  report header): `preflight: ok provider=<p> probe=<id> arm=push_breadcrumb_pull
+  recall_called=true tool_calls=<n>`, plus `apiKeySource=none` for the claude-cli provider.
+
 ### What `rollout` means (issue athenaeum#1742)
 
 `rollout` means **this test costs tokens** — it constructs a live LLM

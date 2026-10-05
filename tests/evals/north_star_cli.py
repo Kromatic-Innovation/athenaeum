@@ -420,6 +420,19 @@ def _resolve_phase2_store_path(args: argparse.Namespace) -> Path:
     return Path(str(_resolve_store_path(args)) + ".phase2.jsonl")
 
 
+def _resolve_preflight_store_path(args: argparse.Namespace) -> Path:
+    """``<store>.preflight.jsonl`` next to the resolved ``--store`` path
+    (issue athenaeum#1959) -- the SAME sibling-store pattern
+    :func:`_resolve_phase2_store_path` already uses, for the same reason:
+    the preflight's rows must never reach ``--store`` itself, where they
+    would either collide with a real grid cell's resume key (the preflight
+    probe may also appear in the real grid) or silently inflate
+    ``completed_keys()`` and make a real cell read as already-done. No
+    ``--preflight-store`` override flag exists -- unlike Phase 2's sibling,
+    an operator has no reason to point this elsewhere."""
+    return Path(str(_resolve_store_path(args)) + ".preflight.jsonl")
+
+
 def _resolve_phase2_scales(args: argparse.Namespace) -> list[str]:
     """``--phase2-scales``, split and validated against :data:`SCALES` --
     the same validate-before-spend discipline :func:`_build_cells` applies
@@ -1245,6 +1258,29 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "naming the key)."
         ),
     )
+    parser.add_argument(
+        "--preflight-probe",
+        default=None,
+        help=(
+            "issue athenaeum#1959: probe id for the default-on behavioural preflight "
+            "(one push_breadcrumb_pull/core group, run serially before the grid -- see "
+            "--no-preflight). Default: the first entry of the probe list "
+            f"({DEFAULT_PROBES[0]!r}). No env fallback -- always explicit."
+        ),
+    )
+    parser.add_argument(
+        "--no-preflight",
+        action="store_true",
+        default=False,
+        help=(
+            "issue athenaeum#1959: skip the default-on behavioural preflight. Omitted "
+            "(default): before the first grid group runs, this driver runs one "
+            "push_breadcrumb_pull/core group serially and refuses to start -- exit 2, "
+            "zero grid cells run -- when that cell recorded no recall tool call, or when "
+            "the claude-cli transport's own guards fire. No env fallback -- always "
+            "explicit."
+        ),
+    )
     return parser
 
 
@@ -1573,6 +1609,104 @@ def _format_abort_reason(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {exc}{location}"
 
 
+class PreflightRecallNotCalledError(Exception):
+    """Raised by :func:`_run_preflight` (issue athenaeum#1959) when the
+    preflight's ``push_breadcrumb_pull`` cell completed without recording a
+    ``recall`` tool call. A DISTINCT, locally-owned check -- never confused
+    with :class:`~athenaeum.provider.CliToolBridgeError`, which this module
+    reuses unchanged for the claude-cli transport's own four guards (bridge
+    never connected, ``apiKeySource`` not ``"none"``, a ``hook_started``
+    event, no init event at all). This exception exists because NONE of
+    those four guards fire when the call genuinely succeeds and the model
+    simply never calls the tool -- ``tests.evals.rollout.parse_stream``'s
+    own contract is that outcome is never an error on its own, so this
+    preflight is the one place that outcome is escalated, deliberately."""
+
+
+@dataclasses.dataclass(frozen=True)
+class PreflightResult:
+    """What :func:`_run_preflight` observed for its one successful group
+    (issue athenaeum#1959) -- the exact fields the AC's stdout line and
+    report-header line both need."""
+
+    probe_id: str
+    arm: str
+    provider: str
+    tool_calls: int
+
+
+def _run_preflight(
+    args: argparse.Namespace,
+    *,
+    probe_id: str,
+    session: EvalSession,
+    materialize_root: Path,
+    store_path: Path,
+) -> PreflightResult:
+    """Run one full (probe, arm=ALL, corpus_scale="core", replicate=0)
+    group, serially, before any grid worker pool exists (issue
+    athenaeum#1959) -- the behavioural preflight the athenaeum#1936
+    disposition ran by hand, moved into code.
+
+    Builds its client EXACTLY the way ``_run_cells``'s own ``_run_group``
+    does: ``build_live_client(cli_tool_passthrough=...)`` only when
+    ``--mode api`` and ``--cli-tool-passthrough`` are both set, otherwise no
+    ``client=`` kwarg at all, so :func:`run_probe_all_arms` resolves its own
+    default exactly as a real grid group would -- a config mistake the real
+    grid would hit is the SAME mistake this preflight hits, before any
+    replicate is paid for.
+
+    Every record this group produces (all ``len(DEFAULT_ARMS)`` of them,
+    the full group -- not just ``push_breadcrumb_pull``) is appended to
+    *store_path*, the sibling preflight store, NEVER to the real grid's
+    ``--store`` -- see :func:`_resolve_preflight_store_path`.
+
+    Raises :class:`~athenaeum.provider.CliToolBridgeError` unchanged when a
+    claude-cli transport guard fires (propagates straight out of
+    ``run_probe_all_arms`` -- reused, never reimplemented here), or
+    :class:`PreflightRecallNotCalledError` when the call completed but the
+    ``push_breadcrumb_pull`` record's ``recall_called`` is ``False``.
+    Returns a :class:`PreflightResult` on success.
+    """
+    group_kwargs: dict[str, Any] = {}
+    if args.mode == "api" and args.cli_tool_passthrough:
+        group_kwargs["client"] = build_live_client(cli_tool_passthrough=args.cli_tool_passthrough)
+    records = run_probe_all_arms(
+        probe_id,
+        "core",
+        session=session,
+        materialize_root=materialize_root / "preflight",
+        model=args.model,
+        search_backend=args.search_backend,
+        claude_binary=args.claude_binary,
+        replicate=0,
+        mode=args.mode,
+        **group_kwargs,
+    )
+    preflight_store = ResultStore(store_path)
+    for arm_name, record in records.items():
+        cell = GridCell(probe=probe_id, arm=arm_name, corpus_scale="core", replicate=0)
+        append_rollout_row(preflight_store, cell, record)
+
+    record = records[DEFAULT_VERDICT_ARM]  # "push_breadcrumb_pull" -- see that constant's own doc
+    provider = record.llm_provider or "api"
+    tool_call_count = len(record.tool_calls)
+    if not record.recall_called:
+        raise PreflightRecallNotCalledError(
+            f"preflight failed: probe={probe_id} arm={DEFAULT_VERDICT_ARM} "
+            f"provider={provider} tool_calls={tool_call_count} -- recall_called is "
+            "False. Refusing to start the grid before any replicate spend. Pass "
+            "--preflight-probe to choose a probe that does call recall for this "
+            "model, or --no-preflight to skip this check deliberately."
+        )
+    return PreflightResult(
+        probe_id=probe_id,
+        arm=DEFAULT_VERDICT_ARM,
+        provider=provider,
+        tool_calls=tool_call_count,
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
     # Issue athenaeum#1951: preflight refusals, exit code 2, before ANY
@@ -1580,7 +1714,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     # below (floor-scan never spends either, but these two are config
     # mistakes this driver can catch unconditionally, not "nothing to
     # validate against a scan" exemptions).
-    from athenaeum.provider import resolve_provider
+    from athenaeum.provider import CliToolBridgeError, resolve_provider
 
     resolved_provider = resolve_provider(None)
     if resolved_provider == "claude-cli" and args.mode == "api" and not args.cli_tool_passthrough:
@@ -1645,6 +1779,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     token_ceiling, ceiling_source = resolve_token_ceiling(args)
     projected_tokens = len(cells) * NORTH_STAR_CELL_TOKEN_ESTIMATE.total_tokens
 
+    # Issue athenaeum#1959: the default-on behavioural preflight is one
+    # FULL group (len(DEFAULT_ARMS) cells, same as any other group this
+    # driver runs) for ONE probe at corpus scale "core", replicate 0 --
+    # sized here, beside the read grid's own sizing above, so it counts
+    # toward the dry-run projection, the --max-spend price and the token
+    # ceiling exactly like the read grid does (see the price_grid/
+    # projected_tokens uses below). No env fallback for either flag --
+    # always explicit.
+    preflight_enabled = not args.no_preflight
+    preflight_probe_id = args.preflight_probe or DEFAULT_PROBES[0]
+    preflight_cell_count = len(DEFAULT_ARMS) if preflight_enabled else 0
+    preflight_projected_tokens = preflight_cell_count * NORTH_STAR_CELL_TOKEN_ESTIMATE.total_tokens
+    projected_tokens += preflight_projected_tokens
+
     # Issue athenaeum#1785: validated here, before any spend, mirroring
     # _build_cells's own "validate before spend" discipline for
     # --corpus-scales. phase2_cell_count is (scales x systems); each of
@@ -1697,6 +1845,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"groups (~{PHASE2_OBSERVATION_TOKEN_ESTIMATE.total_tokens} tokens/observation "
                 "estimate)"
             )
+        # Issue athenaeum#1959: printed beside the wall-clock/token/phase2
+        # projections above, same "before pricing, refusal path too" reason
+        # -- the preflight's own cells are already folded into
+        # projected_tokens (see above) and the price-grid estimate (below),
+        # but an operator sizing a --dry-run dispatch still needs to see
+        # the cell count named explicitly, and this makes zero calls either
+        # way (the preflight itself never runs on the dry-run path).
+        if preflight_enabled:
+            print(
+                f"preflight: {preflight_cell_count} cells would run "
+                f"(probe={preflight_probe_id}) before the grid -- zero calls made"
+            )
+        else:
+            print("preflight: skipped (--no-preflight)")
 
     # Issue athenaeum#1785: the spend gate must count Phase 2 alongside the
     # read grid -- a --max-spend that only priced Phase 1 would let a real
@@ -1723,16 +1885,37 @@ def main(argv: Sequence[str] | None = None) -> int:
             model=args.model,
         )
     phase2_estimated_usd = phase2_usage.estimated_cost_usd
-    combined_estimated_usd = read_grid_estimate.estimated_usd + phase2_estimated_usd
+    # Issue athenaeum#1959: the preflight's cells price the SAME way Phase 2
+    # does above -- a separate TokenUsage accumulation (not a second
+    # price_grid call) folded into the one combined refusal below, so a
+    # preflight-enabled dispatch can never silently exceed --max-spend
+    # while the read grid alone still reads as "under budget".
+    preflight_usage = TokenUsage()
+    for _ in range(preflight_cell_count):
+        preflight_usage.add_tokens(
+            NORTH_STAR_CELL_TOKEN_ESTIMATE.input_tokens,
+            NORTH_STAR_CELL_TOKEN_ESTIMATE.output_tokens,
+            model=args.model,
+        )
+    preflight_estimated_usd = preflight_usage.estimated_cost_usd
+    combined_estimated_usd = (
+        read_grid_estimate.estimated_usd + phase2_estimated_usd + preflight_estimated_usd
+    )
     if combined_estimated_usd > max_spend:
         print(
             f"planned grid ({read_grid_estimate.cell_count} cells @ {args.model}) prices at "
             f"${read_grid_estimate.estimated_usd:.2f}"
             + (
-                f" plus Phase 2 (${phase2_estimated_usd:.2f}) = ${combined_estimated_usd:.2f}"
+                f" plus Phase 2 (${phase2_estimated_usd:.2f})"
                 if args.phase2
                 else ""
             )
+            + (
+                f" plus preflight (${preflight_estimated_usd:.2f})"
+                if preflight_enabled
+                else ""
+            )
+            + f" = ${combined_estimated_usd:.2f}"
             + f", exceeding --max-spend ${max_spend:.2f} -- refusing to start. Shrink --scale, "
             "the probe/arm/corpus-scale/replicate lists, --phase2-scales/--phase2-systems, or "
             "raise --max-spend deliberately.",
@@ -1745,6 +1928,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"scale={args.scale} cells={estimate.cell_count} "
         f"estimated=${estimate.estimated_usd:.4f} model={args.model}"
         + (f" phase2_estimated=${phase2_estimated_usd:.4f}" if args.phase2 else "")
+        + (f" preflight_estimated=${preflight_estimated_usd:.4f}" if preflight_enabled else "")
     )
 
     # Deliberately NOT inside `if args.dry_run` (Quine review of PR
@@ -1779,10 +1963,41 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     session = EvalSession()
     phase2_store_path = _resolve_phase2_store_path(args)
+    preflight_store_path = _resolve_preflight_store_path(args)
 
     aborted = False
     abort_reason = ""
+    preflight_failed = False
+    preflight_summary_text = ""
     try:
+        # Issue athenaeum#1959: the behavioural preflight runs FIRST, inside
+        # this same try (so a failure still renders a report below) and
+        # BEFORE _run_cells creates its worker pool -- one group, serially,
+        # for the probe named by --preflight-probe (default: the first
+        # entry of DEFAULT_PROBES). A model that legitimately never calls
+        # recall for the chosen probe fails closed here rather than
+        # silently producing a zero-signal grid (the athenaeum#1936
+        # failure this issue exists to catch before any replicate spend).
+        if preflight_enabled:
+            preflight_result = _run_preflight(
+                args,
+                probe_id=preflight_probe_id,
+                session=session,
+                materialize_root=materialize_root,
+                store_path=preflight_store_path,
+            )
+            api_key_source_note = (
+                " apiKeySource=none" if preflight_result.provider == "claude-cli" else ""
+            )
+            preflight_summary_text = (
+                f"ok provider={preflight_result.provider} probe={preflight_result.probe_id} "
+                f"arm={preflight_result.arm} recall_called=true "
+                f"tool_calls={preflight_result.tool_calls}{api_key_source_note}"
+            )
+            print(f"preflight: {preflight_summary_text}")
+        else:
+            preflight_summary_text = "skipped (--no-preflight)"
+            print(f"preflight: {preflight_summary_text}")
         if args.phase2:
             # Issue athenaeum#1785 proposal: the write path runs BEFORE the
             # read grid. Shares *session* with _run_cells below, so
@@ -1816,6 +2031,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             cli_tool_passthrough=args.cli_tool_passthrough,
         )
         assert_rollout_ceiling(session, ceiling=token_ceiling)
+    except (CliToolBridgeError, PreflightRecallNotCalledError) as exc:
+        # Issue athenaeum#1959 AC: a preflight failure -- either the
+        # claude-cli transport's own guards (``CliToolBridgeError``, reused
+        # from provider.py UNCHANGED, never reimplemented here) or this
+        # module's own "recall was never called" check -- exits 2, before
+        # any grid cell runs. Caught separately from (and before) the
+        # broad handler below so main's return value can tell "the
+        # preflight itself refused" from "a grid cell failed mid-run" even
+        # though both still render a PARTIAL report over whatever the
+        # store already holds (nothing, for a preflight refusal -- see
+        # _run_preflight's own docstring).
+        aborted = True
+        preflight_failed = True
+        abort_reason = _format_abort_reason(exc)
+        preflight_summary_text = f"failed: {abort_reason}"
+        print(f"preflight: {abort_reason}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
     except (Exception, KeyboardInterrupt) as exc:  # noqa: BLE001 -- see below
         # A partial ResultStore (fsync'd per row -- see ResultStore.append)
         # survives even a hard failure mid-grid; report it as PARTIAL rather
@@ -1878,6 +2110,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             duplicate_rows=diagnostics.duplicates,
             phase2_summary=phase2_summary_text,
             phase2_partial=phase2_partial_pairs,
+            preflight_summary=preflight_summary_text,
         )
     except MixedFloorError as exc:
         # Issue athenaeum#1764 item 1: a mixed-floor store (rows carrying
@@ -1920,6 +2153,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 pool_floor_values=False,
                 phase2_summary=phase2_summary_text,
                 phase2_partial=phase2_partial_pairs,
+                preflight_summary=preflight_summary_text,
             )
         except Exception as recovery_exc:  # noqa: BLE001 -- see below
             # Quine review "should": this recovery build_report call can
@@ -1945,6 +2179,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
     path = write_report(report, out_dir=args.out_dir)
     print(f"report written: {path}")
+    # Issue athenaeum#1959: a preflight refusal is its own exit code (2),
+    # distinct from an ordinary mid-grid abort (1) -- checked first since
+    # ``aborted`` is also True on this path (see the dedicated except
+    # clause above).
+    if preflight_failed:
+        return 2
     return 0 if not aborted else 1
 
 
