@@ -154,6 +154,37 @@ commit, mirroring the two-commit discipline elsewhere in this repo. See
 the `bucket:` / `valid_until:` frontmatter contract in
 [provenance shape](../design/provenance-shape.md) §8.8.
 
+## I want to be sure a quiesce hold is actually mine before I apply
+
+`athenaeum quiesce` pauses the scheduled `ingest --if-triggered` path so a
+long-running write lane isn't contended against. Before relying on that
+pause — right before an apply, not just when you first set it — confirm the
+hold is still yours:
+
+```bash
+athenaeum quiesce --status
+```
+
+Read the `holder` field back and compare it against the identity you
+expect: the auto-derived `<user>@<hostname>`, or whatever you passed
+explicitly to `--holder`. A hold set by someone (or something) else, or one
+that has silently expired and been re-taken, is not a barrier you can trust
+— `--status` is cheap and read-only, so there's no reason to skip it.
+
+If you took the quiesce with an explicit `--holder` (for example, a lane
+identity rather than the default OS user), release it with the **same**
+`--holder` value:
+
+```bash
+athenaeum quiesce --release --holder my-lane-identity
+```
+
+A release whose `--holder` doesn't match a still-active sentinel's
+on-disk holder now refuses rather than silently dropping someone else's
+hold — the JSON response carries a `refused` marker and the sentinel stays
+on disk. `--force` overrides the check when you deliberately need to clear
+a hold that belongs to another party.
+
 ## See also
 
 - Guides — [Answering pending decisions](decisions.md) · [Upgrading](upgrading.md) · [Troubleshooting](troubleshooting.md)

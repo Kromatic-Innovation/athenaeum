@@ -9,18 +9,39 @@ Three modes on ONE subcommand, mutually exclusive:
   existing one. ``<duration>`` is ``<number>[h|m|s]`` (default unit ``h`` —
   see :func:`_parse_duration`), e.g. ``2h``, ``90m``, ``3600s``, or a bare
   ``2`` (hours). Rejected with a plain stderr error (exit 1) when the
-  duration is non-positive or exceeds the configured maximum
+  duration is non-positive, exceeds the configured maximum
   (``librarian.quiesce.max_hours``, default 6h — see
-  :func:`athenaeum.config.resolve_quiesce_max_hours`).
+  :func:`athenaeum.config.resolve_quiesce_max_hours`), or (issue
+  athenaeum#1965) names a holder different from an ACTIVE sentinel already
+  on disk, unless ``--force`` is given — a holder may always extend its OWN
+  quiesce.
 - ``athenaeum quiesce --release`` — remove the sentinel
   (:func:`athenaeum.quiesce.release_quiesce`). Idempotent: releasing an
-  already-absent sentinel is a successful no-op, not an error.
+  already-absent sentinel is a successful no-op, not an error. Holder-aware
+  (issue athenaeum#1965): refuses (exit 1) when an ACTIVE sentinel on disk
+  names a different holder than this invocation's (``--holder``, or the
+  same ``_default_holder()`` derivation ``--for`` uses), unless ``--force``
+  is given.
 - ``athenaeum quiesce --status`` — read-only readout of the current sentinel
   (:func:`athenaeum.quiesce.read_quiesce_state`), or its absence. Never
   writes anything; always exits 0.
 
 Every mode prints one JSON object on stdout, mirroring ``athenaeum ingest``'s
-own summary convention (:mod:`athenaeum._cmd_index`).
+own summary convention (:mod:`athenaeum._cmd_index`). A refused ``--release``
+or ``--for`` additionally sets ``"refused": true`` and reports the on-disk
+``"holder"`` — see :func:`cmd_quiesce` for the exact shape; this
+distinguishes a refusal from the pre-existing "nothing was there"
+``released: false`` case, which the library's return value alone cannot
+(issue athenaeum#1965). A ``--release`` refusal ALSO sets
+``"holder_conflict"``: ``true`` only when the on-disk holder is known and
+genuinely differs from this invocation's (and ``--force`` wasn't given,
+since force bypasses the holder check entirely) — ``false`` means the
+sentinel is still on disk for some OTHER reason (a malformed/unreadable
+sentinel, or an ``OSError`` unlinking it, e.g. a permissions problem),
+which ``--holder``/``--force`` cannot fix (PR athenaeum#1973 review
+finding: the original version of this conflated the two, including the
+nonsensical "held by X, not X" when the caller's own sentinel hit a
+permissions error).
 
 Factoring rule (L5 presentation): a self-contained CLI subcommand lives in
 its own ``_cmd_<name>.py`` and registers via ``add_<name>_subparser`` — see
@@ -42,6 +63,8 @@ from pathlib import Path
 from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT, load_config
 from athenaeum.quiesce import (
     QuiesceDurationExceeded,
+    QuiesceHeldByAnother,
+    quiesce_path,
     read_quiesce_state,
     release_quiesce,
     write_quiesce,
@@ -98,34 +121,123 @@ def _default_holder() -> str:
     return f"{user}@{socket.gethostname()}"
 
 
+def _read_on_disk_holder(path: Path) -> str | None:
+    """Best-effort ``holder`` read for a refusal report (issue athenaeum#1965).
+
+    Tolerant like :func:`athenaeum.quiesce.read_quiesce_state`'s own parse,
+    but deliberately NOT routed through that function: a refusal can only
+    happen for an ACTIVE sentinel (the contested case), so by the time this
+    is called the file is known to still exist — this just re-reads the
+    ``holder`` field to report it, without re-deriving activity/expiry.
+    """
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if isinstance(raw, dict):
+        candidate = raw.get("holder")
+        if isinstance(candidate, str):
+            return candidate
+    return None
+
+
 def cmd_quiesce(args: argparse.Namespace) -> int:
     """Dispatch ``athenaeum quiesce``'s three mutually exclusive modes."""
     knowledge_root = args.path.expanduser().resolve() if args.path else DEFAULT_KNOWLEDGE_ROOT
 
-    if (args.release or args.status) and (
-        args.for_duration is not None or args.reason is not None or args.holder is not None
+    # --status is read-only and takes no identity/scope arguments at all
+    # (issue athenaeum#1965 adds --force to that list; --holder was already
+    # here). --release, unlike --status, now legitimately takes --holder
+    # and --force (it derives/accepts the caller's holder the same way the
+    # default set mode does) -- only --for/--reason remain nonsensical
+    # alongside it.
+    if args.status and (
+        args.for_duration is not None
+        or args.reason is not None
+        or args.holder is not None
+        or args.force
     ):
         print(
-            "error: --for/--reason/--holder cannot be combined with "
-            "--release or --status — pick exactly one of the three "
-            "quiesce modes.",
+            "error: --for/--reason/--holder/--force cannot be combined with "
+            "--status — pick exactly one of the three quiesce modes.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if args.release and (args.for_duration is not None or args.reason is not None):
+        print(
+            "error: --for/--reason cannot be combined with --release — "
+            "pick exactly one of the three quiesce modes.",
             file=sys.stderr,
         )
         return 1
 
     if args.release:
-        released = release_quiesce(knowledge_root)
-        print(
-            json.dumps(
-                {"command": "quiesce", "action": "release", "released": released}
+        holder = args.holder or _default_holder()
+        path = quiesce_path(knowledge_root)
+        existed_before = path.is_file()
+        released = release_quiesce(knowledge_root, holder=holder, force=args.force)
+        # The library's `False` is ambiguous by design (issue athenaeum#1965)
+        # -- and NOT just between "nothing was there" and "refused": a
+        # STILL-on-disk sentinel after a failed release can ALSO mean the
+        # pre-existing `release_quiesce` OSError path fired (e.g. EACCES
+        # unlinking the sentinel or its directory), which has nothing to do
+        # with holders at all (Sentry/Seer finding on PR athenaeum#1973 --
+        # the original version of this block reported that case as a holder
+        # conflict, including the nonsensical "held by X, not X" when the
+        # caller's own sentinel hit a permissions error). Resolve ALL of
+        # that here, never in the library:
+        refused = existed_before and not released and path.is_file()
+        payload: dict[str, object] = {
+            "command": "quiesce",
+            "action": "release",
+            "released": released,
+        }
+        if refused:
+            on_disk_holder = _read_on_disk_holder(path)
+            # A holder conflict requires the on-disk holder to be KNOWN and
+            # to actually DIFFER from this invocation's -- and `force`
+            # bypasses the holder check entirely in `release_quiesce`, so a
+            # still-on-disk sentinel under `--force` is never a holder
+            # conflict either (it's necessarily the OSError path, since
+            # `force=True` never refuses on holder grounds). Anything else
+            # that leaves the file in place is a removal failure: unknown
+            # holder (malformed sentinel, unreadable file) or a holder that
+            # matches but still couldn't be unlinked.
+            holder_conflict = (
+                not args.force
+                and on_disk_holder is not None
+                and on_disk_holder != holder
             )
-        )
+            payload["refused"] = True
+            payload["holder_conflict"] = holder_conflict
+            if on_disk_holder is not None:
+                payload["holder"] = on_disk_holder
+            print(json.dumps(payload))
+            if holder_conflict:
+                print(
+                    f"error: quiesce sentinel is held by {on_disk_holder!r}, "
+                    f"not {holder!r}; pass --holder matching the sentinel's "
+                    "holder, or --force, to release it anyway.",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    "error: failed to release the quiesce sentinel; it is "
+                    "still on disk. This is not a holder conflict -- "
+                    "--holder/--force will not help -- see the logged "
+                    "warning for the underlying OSError (e.g. a permissions "
+                    "problem removing the sentinel or its directory).",
+                    file=sys.stderr,
+                )
+            return 1
+        print(json.dumps(payload))
         return 0
 
     if args.status:
         state = read_quiesce_state(knowledge_root)
         if state is None:
-            payload: dict[str, object] = {
+            payload = {
                 "command": "quiesce",
                 "action": "status",
                 "active": False,
@@ -163,7 +275,22 @@ def cmd_quiesce(args: argparse.Namespace) -> int:
             reason=args.reason,
             for_duration=args.for_duration,
             config=cfg,
+            force=args.force,
         )
+    except QuiesceHeldByAnother as exc:
+        existing = read_quiesce_state(knowledge_root)
+        print(
+            json.dumps(
+                {
+                    "command": "quiesce",
+                    "action": "set",
+                    "refused": True,
+                    "holder": existing.holder if existing is not None else None,
+                }
+            )
+        )
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     except QuiesceDurationExceeded as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -208,8 +335,10 @@ def add_quiesce_subparser(subparsers: argparse._SubParsersAction) -> None:
         "--release",
         action="store_true",
         help="Remove the quiesce sentinel, if present. Idempotent — a "
-        "no-op, not an error, when nothing is quiesced. Mutually exclusive "
-        "with --status and with --for/--reason.",
+        "no-op, not an error, when nothing is quiesced. Refuses (exit 1) "
+        "when an ACTIVE sentinel belongs to a different --holder, unless "
+        "--force is given. Mutually exclusive with --status and with "
+        "--for/--reason; --holder and --force ARE allowed alongside it.",
     )
     mode.add_argument(
         "--status",
@@ -217,7 +346,7 @@ def add_quiesce_subparser(subparsers: argparse._SubParsersAction) -> None:
         help="Read-only: report whether a sentinel is currently active "
         "(and its holder/reason/expiry if so). Never writes anything, "
         "always exits 0. Mutually exclusive with --release and with "
-        "--for/--reason.",
+        "--for/--reason/--holder/--force.",
     )
 
     parser.add_argument(
@@ -246,6 +375,16 @@ def add_quiesce_subparser(subparsers: argparse._SubParsersAction) -> None:
         help="Who/what is holding the quiesce, recorded in the sentinel. "
         "Default: '<user>@<hostname>' (see _default_holder) — pass this "
         "explicitly for a lane that wants a more specific self-identification "
-        "(e.g. a hestia lane name) than the OS user.",
+        "(e.g. a hestia lane name) than the OS user. Also usable with "
+        "--release, to identify the caller asking to release.",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Override the holder check: with --release, remove a sentinel "
+        "held by a DIFFERENT holder; with the default set mode, overwrite "
+        "an ACTIVE sentinel held by a different holder. Without --force, "
+        "both cases are refused (exit 1) rather than silently clobbering "
+        "another party's quiesce. Rejected in combination with --status.",
     )
     parser.set_defaults(func=cmd_quiesce)

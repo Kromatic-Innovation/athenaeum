@@ -26,6 +26,7 @@ from athenaeum.config import resolve_quiesce_max_hours
 from athenaeum.quiesce import (
     QUIESCE_FILENAME,
     QuiesceDurationExceeded,
+    QuiesceHeldByAnother,
     QuiesceState,
     quiesce_path,
     read_quiesce_state,
@@ -90,7 +91,9 @@ class TestWriteQuiesce:
         )
         assert (tmp_path / QUIESCE_FILENAME).is_file()
 
-    def test_overwrites_an_existing_sentinel(self, tmp_path: Path) -> None:
+    def test_same_holder_may_extend_its_own_sentinel(self, tmp_path: Path) -> None:
+        # issue athenaeum#1965: a holder may always overwrite/extend its OWN
+        # active sentinel -- this is what "last write wins" now means.
         write_quiesce(
             tmp_path,
             holder="first",
@@ -100,15 +103,102 @@ class TestWriteQuiesce:
         )
         write_quiesce(
             tmp_path,
-            holder="second",
+            holder="first",
             reason="r2",
             for_duration=timedelta(hours=2),
             now=_FIXED_NOW,
         )
         state = read_quiesce_state(tmp_path, now=_FIXED_NOW)
         assert state is not None
+        assert state.holder == "first"
+        assert state.reason == "r2"
+        assert state.expires_at == _FIXED_NOW + timedelta(hours=2)
+
+    def test_foreign_overwrite_without_force_is_refused(self, tmp_path: Path) -> None:
+        # issue athenaeum#1965 (AC2): a different holder's write against an
+        # ACTIVE sentinel is refused, and the original is left intact.
+        write_quiesce(
+            tmp_path,
+            holder="first",
+            reason="r1",
+            for_duration=timedelta(hours=1),
+            now=_FIXED_NOW,
+        )
+        with pytest.raises(QuiesceHeldByAnother, match="first"):
+            write_quiesce(
+                tmp_path,
+                holder="second",
+                reason="r2",
+                for_duration=timedelta(hours=2),
+                now=_FIXED_NOW,
+            )
+        state = read_quiesce_state(tmp_path, now=_FIXED_NOW)
+        assert state is not None
+        assert state.holder == "first"
+        assert state.reason == "r1"
+
+    def test_force_overwrites_a_foreign_sentinel(self, tmp_path: Path) -> None:
+        write_quiesce(
+            tmp_path,
+            holder="first",
+            reason="r1",
+            for_duration=timedelta(hours=1),
+            now=_FIXED_NOW,
+        )
+        state = write_quiesce(
+            tmp_path,
+            holder="second",
+            reason="r2",
+            for_duration=timedelta(hours=2),
+            now=_FIXED_NOW,
+            force=True,
+        )
         assert state.holder == "second"
         assert state.reason == "r2"
+        on_disk = read_quiesce_state(tmp_path, now=_FIXED_NOW)
+        assert on_disk is not None
+        assert on_disk.holder == "second"
+
+    def test_expired_foreign_sentinel_is_overwritable_without_force(
+        self, tmp_path: Path
+    ) -> None:
+        # The expiry carve-out: an expired sentinel is inert, so a DIFFERENT
+        # holder may overwrite it with no --force at all.
+        write_quiesce(
+            tmp_path,
+            holder="first",
+            reason="r1",
+            for_duration=timedelta(hours=1),
+            now=_FIXED_NOW,
+        )
+        after_expiry = _FIXED_NOW + timedelta(hours=2)
+        state = write_quiesce(
+            tmp_path,
+            holder="second",
+            reason="r2",
+            for_duration=timedelta(hours=1),
+            now=after_expiry,
+        )
+        assert state.holder == "second"
+
+    def test_malformed_sentinel_is_overwritable_without_force(
+        self, tmp_path: Path
+    ) -> None:
+        # The malformed carve-out: no holder is knowable, so any holder may
+        # overwrite with no --force.
+        quiesce_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+        quiesce_path(tmp_path).write_text("not json", encoding="utf-8")
+        state = write_quiesce(
+            tmp_path,
+            holder="anyone",
+            reason="r",
+            for_duration=timedelta(hours=1),
+            now=_FIXED_NOW,
+        )
+        assert state.holder == "anyone"
+
+    def test_quiesce_held_by_another_is_a_value_error_subclass(self) -> None:
+        assert issubclass(QuiesceHeldByAnother, ValueError)
 
     def test_non_positive_duration_rejected(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError):
@@ -269,13 +359,13 @@ class TestReleaseQuiesce:
             for_duration=timedelta(hours=1),
             now=_FIXED_NOW,
         )
-        assert release_quiesce(tmp_path) is True
+        assert release_quiesce(tmp_path, holder="a") is True
         assert not quiesce_path(tmp_path).exists()
         assert read_quiesce_state(tmp_path) is None
 
     def test_release_is_idempotent_on_an_absent_sentinel(self, tmp_path: Path) -> None:
-        assert release_quiesce(tmp_path) is False
-        assert release_quiesce(tmp_path) is False
+        assert release_quiesce(tmp_path, holder="a") is False
+        assert release_quiesce(tmp_path, holder="a") is False
 
     def test_release_removes_an_already_expired_sentinel(self, tmp_path: Path) -> None:
         # Unlike a read, --release is unconditional on expiry: it removes
@@ -290,5 +380,83 @@ class TestReleaseQuiesce:
         # File exists but is expired relative to real "now" (far future
         # fixed timestamp) -- release must still remove it.
         assert quiesce_path(tmp_path).is_file()
-        assert release_quiesce(tmp_path) is True
+        assert release_quiesce(tmp_path, holder="a") is True
+        assert not quiesce_path(tmp_path).exists()
+
+    def test_foreign_release_without_force_is_refused(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # issue athenaeum#1965 (AC1): a different holder's --release against
+        # an ACTIVE sentinel is refused -- file stays, returns False, and
+        # the on-disk holder is named in the log.
+        import logging
+
+        # release_quiesce's own activity check uses REAL "now" (it takes no
+        # `now` override), so this sentinel must be active relative to the
+        # real clock -- unlike every other test in this module, it must NOT
+        # pin `now=_FIXED_NOW` (a fixed past date the real clock has long
+        # since passed, which would make it read as expired/inert instead
+        # of contested).
+        write_quiesce(
+            tmp_path,
+            holder="alice@laptop",
+            reason="b",
+            for_duration=timedelta(hours=1),
+        )
+        with caplog.at_level(logging.WARNING):
+            result = release_quiesce(tmp_path, holder="bob@laptop")
+        assert result is False
+        assert quiesce_path(tmp_path).is_file()
+        assert read_quiesce_state(tmp_path) is not None
+        assert "alice@laptop" in caplog.text
+
+    def test_own_release_succeeds_when_sentinel_has_a_holder(
+        self, tmp_path: Path
+    ) -> None:
+        write_quiesce(
+            tmp_path,
+            holder="alice@laptop",
+            reason="b",
+            for_duration=timedelta(hours=1),
+            now=_FIXED_NOW,
+        )
+        assert release_quiesce(tmp_path, holder="alice@laptop") is True
+        assert not quiesce_path(tmp_path).exists()
+
+    def test_force_releases_a_foreign_sentinel(self, tmp_path: Path) -> None:
+        write_quiesce(
+            tmp_path,
+            holder="alice@laptop",
+            reason="b",
+            for_duration=timedelta(hours=1),
+            now=_FIXED_NOW,
+        )
+        assert release_quiesce(tmp_path, holder="bob@laptop", force=True) is True
+        assert not quiesce_path(tmp_path).exists()
+
+    def test_expired_foreign_release_is_allowed_without_holder_match(
+        self, tmp_path: Path
+    ) -> None:
+        # The expiry carve-out applies to release too: a stale foreign
+        # sentinel must not become unreleasable.
+        already_past = _FIXED_NOW - timedelta(hours=5)
+        write_quiesce(
+            tmp_path,
+            holder="alice@laptop",
+            reason="b",
+            for_duration=timedelta(hours=1),
+            now=already_past,
+        )
+        assert quiesce_path(tmp_path).is_file()
+        assert release_quiesce(tmp_path, holder="bob@laptop") is True
+        assert not quiesce_path(tmp_path).exists()
+
+    def test_malformed_sentinel_release_is_allowed_without_holder_match(
+        self, tmp_path: Path
+    ) -> None:
+        # No holder is knowable for a malformed sentinel, so any holder may
+        # release it.
+        quiesce_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+        quiesce_path(tmp_path).write_text("not json", encoding="utf-8")
+        assert release_quiesce(tmp_path, holder="anyone") is True
         assert not quiesce_path(tmp_path).exists()

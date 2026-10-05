@@ -61,6 +61,22 @@ module whose whole job is filesystem I/O over the knowledge root). Imports
 renderer) and :mod:`athenaeum.config` (L2, a peer, for
 :func:`athenaeum.config.resolve_quiesce_max_hours`) — every import is at or
 below this module's own declared layer.
+
+**Invariant: the CLI is the sentinel's only writer/releaser** (issue
+athenaeum#1965). :mod:`athenaeum._cmd_quiesce` is the ONLY module anywhere
+in this codebase that calls :func:`write_quiesce` or :func:`release_quiesce`
+— every other reader (:mod:`athenaeum._cmd_index`'s trigger evaluation,
+``session-end``'s quiesce guard) goes through :func:`read_quiesce_state`
+only. That is what makes the holder-aware checks in :func:`write_quiesce`
+and :func:`release_quiesce` an actual guarantee rather than a check one
+caller happens to make: the CLI derives the caller's holder once
+(``_default_holder()``, or an explicit ``--holder``) and is the single
+choke point through which that holder reaches these two functions. A second
+write/release path anywhere else in ``src/`` would bypass that choke point
+and could reintroduce the exact holder-blind clobber this issue closes, even
+though each INDIVIDUAL call might look correct in isolation — see
+``tests/test_quiesce_single_writer.py`` for the source-scanning guard test
+that pins this invariant mechanically.
 """
 
 from __future__ import annotations
@@ -98,6 +114,23 @@ class QuiesceDurationExceeded(ValueError):
     the configured maximum (``librarian.quiesce.max_hours``, issue
     athenaeum#1898) — the cap that keeps a crashed or forgotten lane from
     pausing the scheduler indefinitely."""
+
+
+class QuiesceHeldByAnother(ValueError):
+    """Raised by :func:`write_quiesce` (issue athenaeum#1965) when an
+    *active* sentinel on disk names a different ``holder`` and the caller
+    did not pass ``force=True``. Mirrors :exc:`QuiesceDurationExceeded`:
+    both are :exc:`ValueError` subclasses, so a caller that only wants "was
+    this rejected" can catch the parent class, while a caller that wants to
+    distinguish "too long" from "someone else holds it" can catch the
+    specific child. The message names the current holder, its reason and
+    its expiry so a caller/log line never has to re-read the sentinel to
+    explain the refusal.
+
+    Only an ACTIVE sentinel is contested — a caller may always overwrite an
+    expired or malformed sentinel (no holder is knowable for the latter)
+    without ``force``; see :func:`write_quiesce`'s docstring.
+    """
 
 
 @dataclass(frozen=True)
@@ -179,23 +212,48 @@ def write_quiesce(
     for_duration: timedelta,
     config: dict[str, Any] | None = None,
     now: datetime | None = None,
+    force: bool = False,
 ) -> QuiesceState:
     """Write a new quiesce sentinel, capped at the configured maximum (issue athenaeum#1898).
 
-    Always OVERWRITES any existing sentinel (atomically —
-    :func:`athenaeum.atomic_io.atomic_write_text`), whether or not it was
-    still active — the same "last write wins, no merge" contract every other
-    stamp writer in this codebase uses. ``for_duration`` must be a positive
-    :class:`~datetime.timedelta` at or under
-    :func:`athenaeum.config.resolve_quiesce_max_hours`'s resolved ceiling
-    (default 6h); either violation raises rather than silently clamping —
-    :exc:`ValueError` for a non-positive duration, :exc:`QuiesceDurationExceeded`
-    (a :exc:`ValueError` subclass) for one over the cap, so a caller that
-    only wants "was this rejected" can catch the parent class while a caller
-    that wants to distinguish the two can catch the child.
+    OVERWRITES any existing sentinel (atomically —
+    :func:`athenaeum.atomic_io.atomic_write_text`) **unless** an ACTIVE
+    sentinel on disk names a different ``holder`` (issue athenaeum#1965): a
+    holder may always extend its OWN quiesce, but a second party's
+    write would otherwise silently clobber the first party's barrier — the
+    exact defect this issue closes. Pass ``force=True`` to overwrite a
+    foreign sentinel anyway. Two carve-outs need no holder check and no
+    ``force``, because no live holder is being clobbered:
+
+    - An EXPIRED sentinel is inert (:func:`read_quiesce_state` already
+      treats it identically to "nothing is quiesced"), so it is always
+      overwritable.
+    - An unparseable/malformed sentinel names no knowable holder, so it is
+      always overwritable.
+
+    ``for_duration`` must be a positive :class:`~datetime.timedelta` at or
+    under :func:`athenaeum.config.resolve_quiesce_max_hours`'s resolved
+    ceiling (default 6h); either violation raises rather than silently
+    clamping — :exc:`ValueError` for a non-positive duration,
+    :exc:`QuiesceDurationExceeded` (a :exc:`ValueError` subclass) for one
+    over the cap, :exc:`QuiesceHeldByAnother` (also a :exc:`ValueError`
+    subclass) for an unforced foreign overwrite — so a caller that only
+    wants "was this rejected" can catch the parent class while a caller
+    that wants to distinguish the three can catch the specific child.
     """
     if for_duration <= timedelta(0):
         raise ValueError(f"--for must be a positive duration, got {for_duration}")
+
+    effective_now = now if now is not None else datetime.now(timezone.utc)
+
+    existing = read_quiesce_state(knowledge_root, now=effective_now)
+    if existing is not None and existing.holder != holder and not force:
+        raise QuiesceHeldByAnother(
+            f"quiesce sentinel is held by {existing.holder!r} (reason: "
+            f"{existing.reason!r}, expires {now_iso(existing.expires_at)}); "
+            f"refusing to overwrite from holder {holder!r} without force "
+            "(issue athenaeum#1965)"
+        )
 
     max_hours = resolve_quiesce_max_hours(config)
     max_duration = timedelta(hours=max_hours)
@@ -209,7 +267,6 @@ def write_quiesce(
             "maximum if this ceiling is genuinely too low for your workflow."
         )
 
-    effective_now = now if now is not None else datetime.now(timezone.utc)
     expires_at = effective_now + for_duration
     state = QuiesceState(
         holder=holder, reason=reason, created_at=effective_now, expires_at=expires_at
@@ -226,20 +283,85 @@ def write_quiesce(
     return state
 
 
-def release_quiesce(knowledge_root: Path) -> bool:
-    """Remove the quiesce sentinel, if present (issue athenaeum#1898).
+def release_quiesce(knowledge_root: Path, *, holder: str, force: bool = False) -> bool:
+    """Remove the quiesce sentinel, if present (issue athenaeum#1898; holder
+    check added issue athenaeum#1965).
 
     Idempotent: releasing an already-absent (never written, already
     released, or manually deleted) sentinel is not an error — returns
     ``False`` rather than raising, so ``athenaeum quiesce --release`` can be
     run defensively without first checking ``--status``. Returns ``True``
-    only when a file actually existed and was removed. Deliberately
-    unconditional on expiry — this removes the file whether or not it was
-    still active, unlike :func:`read_quiesce_state`'s "expired == absent"
-    treatment, because an explicit ``--release`` is an operator asking to
-    clean up the file itself, not merely to stop it from being honored.
+    only when a file actually existed and was removed.
+
+    ``holder`` is REQUIRED and keyword-only (no default) so this function
+    cannot be called in a way that silently skips the check it exists to
+    add — a defaulted ``holder=None`` would reproduce the exact bug this
+    issue closes. An ACTIVE sentinel (:func:`read_quiesce_state` would
+    return it) whose on-disk ``holder`` differs from the ``holder`` argument
+    is refused: nothing is removed, a warning naming the on-disk holder is
+    logged, and this returns ``False`` — the SAME ``False`` an absent
+    sentinel returns; see ``athenaeum._cmd_quiesce``'s ``--release`` handler
+    for how the CLI tells the two apart (it checks whether a file is still
+    on disk afterward). Pass ``force=True`` to remove a foreign ACTIVE
+    sentinel anyway (this still returns ``True``, and logs that a foreign
+    sentinel was force-released).
+
+    Two carve-outs need no holder check and no ``force``, mirroring
+    :func:`write_quiesce`'s identical carve-outs, because no live holder is
+    being overridden:
+
+    - An EXPIRED sentinel is inert (:func:`read_quiesce_state` already
+      treats it identically to "nothing is quiesced"), so anyone may clean
+      it up.
+    - An unparseable/malformed sentinel names no knowable holder, so anyone
+      may clean it up.
+
+    Deliberately unconditional on expiry for an owned-or-expired release —
+    this removes the file whether or not it was still active, unlike
+    :func:`read_quiesce_state`'s "expired == absent" treatment, because an
+    explicit ``--release`` is an operator asking to clean up the file
+    itself, not merely to stop it from being honored.
     """
     path = quiesce_path(knowledge_root)
+    if not path.is_file():
+        return False
+
+    on_disk_holder: str | None = None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raw = None
+    if isinstance(raw, dict):
+        candidate = raw.get("holder")
+        if isinstance(candidate, str):
+            on_disk_holder = candidate
+
+    # Only an ACTIVE sentinel with a DIFFERENT holder is contested. An
+    # expired or malformed sentinel is inert/unattributable, so it falls
+    # through to the unconditional unlink below regardless of `force`.
+    is_contested = (
+        on_disk_holder is not None
+        and on_disk_holder != holder
+        and read_quiesce_state(knowledge_root) is not None
+    )
+    if is_contested and not force:
+        logger.warning(
+            "refusing to release quiesce sentinel %s: held by %r, caller is "
+            "%r (pass --force / force=True to override, issue athenaeum#1965)",
+            path,
+            on_disk_holder,
+            holder,
+        )
+        return False
+    if is_contested and force:
+        logger.warning(
+            "force-releasing quiesce sentinel %s held by %r (caller: %r, "
+            "issue athenaeum#1965)",
+            path,
+            on_disk_holder,
+            holder,
+        )
+
     try:
         path.unlink()
     except FileNotFoundError:

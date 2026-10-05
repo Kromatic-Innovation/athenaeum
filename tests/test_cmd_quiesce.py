@@ -187,6 +187,310 @@ class TestReleaseMode:
         assert rc == 1
         assert "error:" in capsys.readouterr().err
 
+    def test_foreign_release_is_refused_with_refused_marker_and_holder(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # issue athenaeum#1965 (AC1 at the CLI): a --release from a
+        # different --holder than the active sentinel's is refused: exit 1,
+        # "released": false, "refused": true, and the on-disk holder.
+        main(
+            [
+                "quiesce",
+                "--for",
+                "1h",
+                "--reason",
+                "r",
+                "--holder",
+                "alice@laptop",
+                "--path",
+                str(tmp_path),
+            ]
+        )
+        capsys.readouterr()
+
+        rc = main(
+            [
+                "quiesce",
+                "--release",
+                "--holder",
+                "bob@laptop",
+                "--path",
+                str(tmp_path),
+            ]
+        )
+        assert rc == 1
+        captured = capsys.readouterr()
+        payload = json.loads(captured.out.strip())
+        assert payload["command"] == "quiesce"
+        assert payload["action"] == "release"
+        assert payload["released"] is False
+        assert payload["refused"] is True
+        assert payload["holder_conflict"] is True
+        assert payload["holder"] == "alice@laptop"
+        assert "error:" in captured.err
+        assert quiesce_path(tmp_path).is_file()
+
+    def test_release_failure_unrelated_to_holder_is_not_reported_as_a_conflict(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Sentry/Seer finding on PR athenaeum#1973: `release_quiesce` returns
+        # `False` both for a holder conflict AND for a pre-existing OSError
+        # unlinking the sentinel (e.g. EACCES) -- the CLI's refusal
+        # heuristic used to conflate the two, reporting a permissions error
+        # as "held by alice@laptop, not alice@laptop" (same holder on both
+        # sides, since it's the caller's OWN sentinel) and recommending
+        # --holder/--force, neither of which can fix a filesystem error.
+        #
+        # Monkeypatching `Path.unlink` rather than chmod-ing a directory: a
+        # container often runs with enough privilege that a read-only
+        # directory does not actually deny the unlink, which would make a
+        # permissions-based test silently vacuous.
+        main(
+            [
+                "quiesce",
+                "--for",
+                "1h",
+                "--reason",
+                "r",
+                "--holder",
+                "alice@laptop",
+                "--path",
+                str(tmp_path),
+            ]
+        )
+        capsys.readouterr()
+
+        def _raise_eacces(self: Path, *a: object, **k: object) -> None:
+            raise PermissionError(13, "Permission denied")
+
+        monkeypatch.setattr(Path, "unlink", _raise_eacces)
+
+        rc = main(
+            [
+                "quiesce",
+                "--release",
+                "--holder",
+                "alice@laptop",
+                "--path",
+                str(tmp_path),
+            ]
+        )
+        assert rc == 1
+        captured = capsys.readouterr()
+        payload = json.loads(captured.out.strip())
+        assert payload["released"] is False
+        assert payload["refused"] is True
+        assert payload["holder_conflict"] is False
+        assert payload["holder"] == "alice@laptop"
+        # Operator-visible output must name a removal failure, not a holder
+        # mismatch, and must not RECOMMEND passing --holder/--force as the
+        # fix (the message may still mention the flags to say they won't
+        # help -- it must not say "pass --holder" / "or --force, to release").
+        assert "held by" not in captured.err
+        assert "pass --holder" not in captured.err
+        assert "or --force, to release" not in captured.err
+        assert "removal" in captured.err.lower() or "failed to release" in captured.err.lower()
+
+    def test_holder_is_allowed_alongside_release(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # --holder used to be rejected alongside --release by the old
+        # mutual-exclusion check; issue athenaeum#1965 requires it.
+        main(
+            [
+                "quiesce",
+                "--for",
+                "1h",
+                "--reason",
+                "r",
+                "--holder",
+                "alice@laptop",
+                "--path",
+                str(tmp_path),
+            ]
+        )
+        capsys.readouterr()
+
+        rc = main(
+            [
+                "quiesce",
+                "--release",
+                "--holder",
+                "alice@laptop",
+                "--path",
+                str(tmp_path),
+            ]
+        )
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out.strip())
+        assert payload["released"] is True
+
+    def test_force_releases_a_foreign_sentinel(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        main(
+            [
+                "quiesce",
+                "--for",
+                "1h",
+                "--reason",
+                "r",
+                "--holder",
+                "alice@laptop",
+                "--path",
+                str(tmp_path),
+            ]
+        )
+        capsys.readouterr()
+
+        rc = main(
+            [
+                "quiesce",
+                "--release",
+                "--holder",
+                "bob@laptop",
+                "--force",
+                "--path",
+                str(tmp_path),
+            ]
+        )
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out.strip())
+        assert payload["released"] is True
+        assert not quiesce_path(tmp_path).exists()
+
+
+class TestSetModeForceAndHolderCheck:
+    def test_foreign_set_without_force_is_refused(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # issue athenaeum#1965 (AC2 at the CLI): a --for/--reason from a
+        # different --holder than the active sentinel's is refused: exit 1,
+        # "refused": true, and the on-disk holder; original left intact.
+        main(
+            [
+                "quiesce",
+                "--for",
+                "1h",
+                "--reason",
+                "r1",
+                "--holder",
+                "alice@laptop",
+                "--path",
+                str(tmp_path),
+            ]
+        )
+        capsys.readouterr()
+
+        rc = main(
+            [
+                "quiesce",
+                "--for",
+                "2h",
+                "--reason",
+                "r2",
+                "--holder",
+                "bob@laptop",
+                "--path",
+                str(tmp_path),
+            ]
+        )
+        assert rc == 1
+        captured = capsys.readouterr()
+        payload = json.loads(captured.out.strip())
+        assert payload["command"] == "quiesce"
+        assert payload["action"] == "set"
+        assert payload["refused"] is True
+        assert payload["holder"] == "alice@laptop"
+        assert "error:" in captured.err
+
+        rc = main(["quiesce", "--status", "--path", str(tmp_path)])
+        status_payload = json.loads(capsys.readouterr().out.strip())
+        assert status_payload["holder"] == "alice@laptop"
+        assert status_payload["reason"] == "r1"
+
+    def test_same_holder_may_extend_via_cli(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        main(
+            [
+                "quiesce",
+                "--for",
+                "1h",
+                "--reason",
+                "r1",
+                "--holder",
+                "alice@laptop",
+                "--path",
+                str(tmp_path),
+            ]
+        )
+        capsys.readouterr()
+
+        rc = main(
+            [
+                "quiesce",
+                "--for",
+                "2h",
+                "--reason",
+                "r2",
+                "--holder",
+                "alice@laptop",
+                "--path",
+                str(tmp_path),
+            ]
+        )
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out.strip())
+        assert payload["reason"] == "r2"
+
+    def test_force_overwrites_a_foreign_active_sentinel(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        main(
+            [
+                "quiesce",
+                "--for",
+                "1h",
+                "--reason",
+                "r1",
+                "--holder",
+                "alice@laptop",
+                "--path",
+                str(tmp_path),
+            ]
+        )
+        capsys.readouterr()
+
+        rc = main(
+            [
+                "quiesce",
+                "--for",
+                "2h",
+                "--reason",
+                "r2",
+                "--holder",
+                "bob@laptop",
+                "--force",
+                "--path",
+                str(tmp_path),
+            ]
+        )
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out.strip())
+        assert payload["holder"] == "bob@laptop"
+        assert payload["reason"] == "r2"
+
+    def test_force_is_rejected_with_status(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        rc = main(["quiesce", "--status", "--force", "--path", str(tmp_path)])
+        assert rc == 1
+        assert "error:" in capsys.readouterr().err
+
 
 class TestStatusMode:
     def test_status_with_no_sentinel_reports_inactive(
