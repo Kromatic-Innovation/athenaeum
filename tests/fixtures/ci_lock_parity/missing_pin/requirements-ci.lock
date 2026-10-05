@@ -1,0 +1,4 @@
+# Counter-example lock (athenaeum#1960 AC3b): no pin at all for mcp, a
+# direct dependency the paired pyproject.toml declares.
+pyyaml==6.0.1
+chromadb==0.5.3

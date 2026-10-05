@@ -1,0 +1,18 @@
+# Positive-control fixture (athenaeum#1960 AC3): every pin in the paired
+# requirements-ci.lock is in range. check_parity() must report zero
+# violations for this pair -- it exists so the two counter-example fixtures
+# above are proven to fail for their OWN reason, not because the harness
+# itself always fails.
+[project]
+name = "demo"
+dependencies = [
+    "pyyaml>=6.0,<7",
+]
+
+[project.optional-dependencies]
+mcp = [
+    "mcp>=1.24,<2.0",
+]
+vector = [
+    "chromadb>=0.5.0,<2.0",
+]
