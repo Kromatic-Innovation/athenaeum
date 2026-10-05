@@ -226,6 +226,11 @@ def test_smoke_run_persists_every_arm_for_one_group(
             "--scale", "smoke",
             "--materialize-root", str(tmp_path / "mat"),
             "--out-dir", str(tmp_path / "measurements"),
+            # Issue athenaeum#1959: this test is about group-granularity
+            # resume, not the (default-on) behavioural preflight, which
+            # would otherwise refuse before any grid cell runs -- the stub
+            # above sets no recall_called at all.
+            "--no-preflight",
         ]
     )
 
@@ -246,6 +251,9 @@ def test_rerun_does_not_double_append_a_completed_group(
         "--scale", "smoke",
         "--materialize-root", str(tmp_path / "mat"),
         "--out-dir", str(tmp_path / "measurements"),
+        # Issue athenaeum#1959: see the sibling test above -- not a
+        # preflight test.
+        "--no-preflight",
     ]
 
     first = north_star_cli.main(args)
@@ -271,6 +279,8 @@ def test_smoke_run_writes_a_report(tmp_path: Path, monkeypatch: pytest.MonkeyPat
             str(tmp_path / "mat"),
             "--out-dir",
             str(tmp_path / "measurements"),
+            # Issue athenaeum#1959: not a preflight test.
+            "--no-preflight",
         ]
     )
 
@@ -297,6 +307,8 @@ def test_verdict_arm_flag_threads_through_to_the_written_report(
             "--materialize-root", str(tmp_path / "mat"),
             "--out-dir", str(tmp_path / "measurements"),
             "--verdict-arm", "pull",
+            # Issue athenaeum#1959: not a preflight test.
+            "--no-preflight",
         ]
     )
 
@@ -320,6 +332,8 @@ def test_store_rows_round_trip_through_the_report_loader(
             "--scale", "smoke",
             "--materialize-root", str(tmp_path / "mat"),
             "--out-dir", str(tmp_path / "measurements"),
+            # Issue athenaeum#1959: not a preflight test.
+            "--no-preflight",
         ]
     )
 
@@ -388,7 +402,18 @@ def test_mode_is_threaded_through_to_run_probe_all_arms(
             "--mode", "cli",
             "--materialize-root", str(tmp_path / "mat"),
             "--out-dir", str(tmp_path / "measurements"),
+            # Issue athenaeum#1959: without this, the (default-on)
+            # behavioural preflight makes its own run_probe_all_arms call
+            # FIRST, with the stub's recall_called defaulting False -- so
+            # the preflight refuses before the grid ever runs, and the one
+            # recorded mode would be the preflight's, not the grid's. The
+            # assertion below would then stay vacuously green even if the
+            # grid's own `mode=mode` kwarg were dropped entirely (the exact
+            # regression this test exists to catch) -- see the five
+            # siblings in this file (and test_floor_scan_hardening.py,
+            # test_phase2_cli.py) that already got this same fix.
+            "--no-preflight",
         ]
     )
 
-    assert seen_modes == ["cli"]
+    assert seen_modes == ["cli"]  # the GRID's own call, unambiguously

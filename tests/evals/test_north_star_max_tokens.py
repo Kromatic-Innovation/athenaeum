@@ -91,6 +91,13 @@ def _small_grid_args(tmp_path: Path, *, tag: str) -> list[str]:
         str(tmp_path / f"measurements-{tag}"),
         "--store",
         str(tmp_path / f"store-{tag}.jsonl"),
+        # Issue athenaeum#1959: this module pins the read grid's OWN token-
+        # ceiling arithmetic against hardcoded projection constants -- the
+        # (default-on) behavioural preflight would add its own cells to
+        # that projection (and, via the stubs here, fail its own
+        # recall_called check before the grid ever ran), neither of which
+        # this module is testing.
+        "--no-preflight",
     ]
 
 

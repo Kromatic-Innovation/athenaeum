@@ -123,6 +123,11 @@ def test_main_mixed_floor_store_yields_partial_report_not_a_crash(
             str(tmp_path / "mat"),
             "--out-dir",
             str(out_dir),
+            # Issue athenaeum#1959: not a preflight test -- the stub below
+            # sets no recall_called at all, which would otherwise refuse at
+            # the preflight before this test's own mixed-floor scenario
+            # ever runs.
+            "--no-preflight",
         ]
     )
 
@@ -538,6 +543,8 @@ def test_main_none_backend_store_passes_regardless_of_requested_backend(
             str(tmp_path / "mat"),
             "--out-dir",
             str(tmp_path / "measurements"),
+            # Issue athenaeum#1959: not a behavioural-preflight test.
+            "--no-preflight",
         ]
     )
 
@@ -601,6 +608,8 @@ def test_main_recovery_build_report_failure_still_writes_a_partial_report(
             str(tmp_path / "mat"),
             "--out-dir",
             str(out_dir),
+            # Issue athenaeum#1959: not a preflight test.
+            "--no-preflight",
         ]
     )
 

@@ -521,6 +521,10 @@ def test_main_phase2_end_to_end_offline(tmp_path: Path, monkeypatch: pytest.Monk
             str(tmp_path / "mat"),
             "--out-dir",
             str(out_dir),
+            # Issue athenaeum#1959: this test is about Phase 2, not the
+            # (default-on) behavioural preflight -- the stub above sets no
+            # recall_called at all.
+            "--no-preflight",
         ]
     )
     assert exit_code == 0
@@ -654,6 +658,8 @@ def test_main_phase2_partial_compile_recorded_not_silently_pooled(
             str(tmp_path / "mat"),
             "--out-dir",
             str(tmp_path / "measurements"),
+            # Issue athenaeum#1959: not a preflight test.
+            "--no-preflight",
         ]
     )
     assert exit_code == 0

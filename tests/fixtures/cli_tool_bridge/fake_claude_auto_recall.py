@@ -11,6 +11,17 @@ real arm function (:func:`tests.evals.rollout.run_push_breadcrumb_pull_api`)
 can be driven end to end through the real
 :class:`athenaeum.provider.ClaudeCliClient` without the test needing to
 control the exact prompt text the arm builds.
+
+Issue athenaeum#1959: also answers the text-only ``--output-format json``
+path (:meth:`athenaeum.provider.ClaudeCliClient._create`, what the NONE/
+PUSH_PAGES_UPPER_BOUND/PUSH_BREADCRUMB/ORACLE single-shot arms call) with a
+plain success envelope and no tool call at all -- the preflight's own group
+run (:func:`tests.evals.rollout.run_probe_all_arms`) runs EVERY arm, not
+just ``push_breadcrumb_pull``, and those four arms never pass
+``--mcp-config`` in the first place, so there is no tool to call on this
+path. Every EXISTING caller of this fixture drives it directly through
+:func:`tests.evals.rollout.run_push_breadcrumb_pull_api` (tool-loop mode
+only), so this branch is purely additive -- it was previously unreachable.
 """
 from __future__ import annotations
 
@@ -19,7 +30,9 @@ import json
 import sys
 
 
-def _arg_value(argv: list[str], flag: str) -> str:
+def _arg_value(argv: list[str], flag: str, default: str | None = None) -> str | None:
+    if flag not in argv:
+        return default
     return argv[argv.index(flag) + 1]
 
 
@@ -107,8 +120,20 @@ async def _drive(mcp_config_path: str, prompt: str) -> None:
 
 def main() -> int:
     argv = sys.argv[1:]
-    mcp_config_path = _arg_value(argv, "--mcp-config")
     prompt = sys.stdin.read()
+    output_format = _arg_value(argv, "--output-format", "json")
+    if output_format != "stream-json":
+        # The single-shot text-only path: no --mcp-config is ever passed on
+        # this argv shape, so there is no tool to call.
+        envelope = {
+            "subtype": "success",
+            "is_error": False,
+            "result": "no tool call needed",
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        }
+        print(json.dumps(envelope))
+        return 0
+    mcp_config_path = _arg_value(argv, "--mcp-config")
     asyncio.run(_drive(mcp_config_path, prompt))
     return 0
 

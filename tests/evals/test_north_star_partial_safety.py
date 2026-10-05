@@ -108,6 +108,11 @@ def _small_grid_args(tmp_path: Path, *, workers: int) -> list[str]:
         str(tmp_path / f"measurements-{workers}"),
         "--store",
         str(tmp_path / f"store-{workers}.jsonl"),
+        # Issue athenaeum#1959: this module is about the grid's own
+        # partial-run/resume/torn-row/ceiling properties, not the
+        # (default-on) behavioural preflight -- the stubs here set no
+        # recall_called at all.
+        "--no-preflight",
     ]
 
 
@@ -229,6 +234,9 @@ def test_main_writes_a_report_carrying_the_partial_banner(
             str(tmp_path / "measurements-dying"),
             "--store",
             str(tmp_path / "store-dying.jsonl"),
+            # Issue athenaeum#1959: not a preflight test -- see
+            # _small_grid_args's own comment above.
+            "--no-preflight",
         ]
     )
 
