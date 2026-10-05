@@ -32,7 +32,16 @@ or ``--for`` additionally sets ``"refused": true`` and reports the on-disk
 ``"holder"`` — see :func:`cmd_quiesce` for the exact shape; this
 distinguishes a refusal from the pre-existing "nothing was there"
 ``released: false`` case, which the library's return value alone cannot
-(issue athenaeum#1965).
+(issue athenaeum#1965). A ``--release`` refusal ALSO sets
+``"holder_conflict"``: ``true`` only when the on-disk holder is known and
+genuinely differs from this invocation's (and ``--force`` wasn't given,
+since force bypasses the holder check entirely) — ``false`` means the
+sentinel is still on disk for some OTHER reason (a malformed/unreadable
+sentinel, or an ``OSError`` unlinking it, e.g. a permissions problem),
+which ``--holder``/``--force`` cannot fix (PR athenaeum#1973 review
+finding: the original version of this conflated the two, including the
+nonsensical "held by X, not X" when the caller's own sentinel hit a
+permissions error).
 
 Factoring rule (L5 presentation): a self-contained CLI subcommand lives in
 its own ``_cmd_<name>.py`` and registers via ``add_<name>_subparser`` — see
@@ -168,10 +177,16 @@ def cmd_quiesce(args: argparse.Namespace) -> int:
         path = quiesce_path(knowledge_root)
         existed_before = path.is_file()
         released = release_quiesce(knowledge_root, holder=holder, force=args.force)
-        # The library's `False` is ambiguous ("nothing was there" vs.
-        # "refused") by design (issue athenaeum#1965) -- resolve it here by
-        # checking whether a (necessarily foreign, since release_quiesce
-        # only refuses a foreign active sentinel) sentinel is STILL on disk.
+        # The library's `False` is ambiguous by design (issue athenaeum#1965)
+        # -- and NOT just between "nothing was there" and "refused": a
+        # STILL-on-disk sentinel after a failed release can ALSO mean the
+        # pre-existing `release_quiesce` OSError path fired (e.g. EACCES
+        # unlinking the sentinel or its directory), which has nothing to do
+        # with holders at all (Sentry/Seer finding on PR athenaeum#1973 --
+        # the original version of this block reported that case as a holder
+        # conflict, including the nonsensical "held by X, not X" when the
+        # caller's own sentinel hit a permissions error). Resolve ALL of
+        # that here, never in the library:
         refused = existed_before and not released and path.is_file()
         payload: dict[str, object] = {
             "command": "quiesce",
@@ -180,16 +195,41 @@ def cmd_quiesce(args: argparse.Namespace) -> int:
         }
         if refused:
             on_disk_holder = _read_on_disk_holder(path)
+            # A holder conflict requires the on-disk holder to be KNOWN and
+            # to actually DIFFER from this invocation's -- and `force`
+            # bypasses the holder check entirely in `release_quiesce`, so a
+            # still-on-disk sentinel under `--force` is never a holder
+            # conflict either (it's necessarily the OSError path, since
+            # `force=True` never refuses on holder grounds). Anything else
+            # that leaves the file in place is a removal failure: unknown
+            # holder (malformed sentinel, unreadable file) or a holder that
+            # matches but still couldn't be unlinked.
+            holder_conflict = (
+                not args.force
+                and on_disk_holder is not None
+                and on_disk_holder != holder
+            )
             payload["refused"] = True
+            payload["holder_conflict"] = holder_conflict
             if on_disk_holder is not None:
                 payload["holder"] = on_disk_holder
             print(json.dumps(payload))
-            print(
-                f"error: quiesce sentinel is held by {on_disk_holder!r}, not "
-                f"{holder!r}; pass --holder matching the sentinel's holder, "
-                "or --force, to release it anyway.",
-                file=sys.stderr,
-            )
+            if holder_conflict:
+                print(
+                    f"error: quiesce sentinel is held by {on_disk_holder!r}, "
+                    f"not {holder!r}; pass --holder matching the sentinel's "
+                    "holder, or --force, to release it anyway.",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    "error: failed to release the quiesce sentinel; it is "
+                    "still on disk. This is not a holder conflict -- "
+                    "--holder/--force will not help -- see the logged "
+                    "warning for the underlying OSError (e.g. a permissions "
+                    "problem removing the sentinel or its directory).",
+                    file=sys.stderr,
+                )
             return 1
         print(json.dumps(payload))
         return 0
