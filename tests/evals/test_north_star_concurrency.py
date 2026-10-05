@@ -90,6 +90,13 @@ def _small_grid_args(tmp_path: Path, *, workers: int) -> list[str]:
         str(tmp_path / f"measurements-{workers}"),
         "--store",
         str(tmp_path / f"store-{workers}.jsonl"),
+        # Issue athenaeum#1959: this module is about the GRID's own
+        # concurrency/resume/ceiling properties, not the (default-on)
+        # behavioural preflight -- every stub here sets no recall_called at
+        # all, and the preflight's own extra projected tokens would also
+        # perturb test_token_ceiling_stops_every_worker_mid_grid's
+        # carefully-sized --max-tokens budget.
+        "--no-preflight",
     ]
 
 
