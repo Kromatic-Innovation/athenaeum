@@ -142,6 +142,7 @@ Evidence, kept out of the reading path.
 - [Retirement audit-v5 follow-through — retire counts](measurements/retirement-audit-v5-2026-09-29.md) — the full-corpus audit's candidate list's sampled precision, the operator's per-type retire policy, and the retire/keep counts from the behind-a-tag retire run.
 - [Page-decompose host apply — Streak CRM tool page](measurements/page-decompose-streak-2026-10-02.md) — bullet/disposition counts, operator rulings, and the before/after tool-page size from the behind-a-tag `decompose-page` apply.
 - [Page-decompose host apply — IAP Outreach pipeline tool page](measurements/iap-pipeline-decompose-2026-10-05.md) — clause-level split counts, operator rulings (0 ruled-attach, 23 ruled-drop), and the before/after tool-page size from the behind-a-tag `decompose-page --split-clauses` apply.
+- [C4 retirement coverage gate — live subject backfill](measurements/c4-retirement-coverage-gate-2026-10-05.md) — before/after coverage and Gate 1 (wiki + cluster domain) over the live apply, the shadow-parity re-run, and the GO/NO-GO verdict on precondition (c) of the 2026-09-15 adjudication.
 
 ---
 
