@@ -1011,14 +1011,6 @@ ARTIFACT_REGISTRY: tuple[ArtifactDeclaration, ...] = (
     ),
     # -- operational / machine-local (design note §5.2 table row 9) -----
     ArtifactDeclaration(
-        name="detection-incomplete-state",
-        persistence_class="operational",
-        operational_scope="machine-local",
-        location="cache dir",
-        source_ref="detection_state.py:57 _STORE_NAME 'detection_incomplete.json' "
-        "(design note §5.2 table row 9)",
-    ),
-    ArtifactDeclaration(
         name="zero-yield-state",
         persistence_class="operational",
         operational_scope="machine-local",

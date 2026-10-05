@@ -1242,7 +1242,6 @@ Run the librarian pipeline
 | `--dry-run` | `False` | — | Run pipeline without writing files or committing |
 | `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
 | `--full-compile` | `False` | — | Force a whole-corpus auto-memory compile this run, bypassing both the delta gate and the librarian.full_compile_every_days cadence. Use for an immediate full reconciliation (e.g. after suspecting delta drift) without waiting for the periodic backstop. |
-| `--full-contradiction-sweep` | `False` | — | Force C4 (contradiction detection) over EVERY cluster this run, regardless of the delta gate or --full-compile's own cadence, and advance the contradiction-sweep-completed stamp. Distinct from --full-compile: this forces only C4, not a full C2 re-cluster. The explicit escape hatch — absent this flag, a full-corpus contradiction sweep never runs implicitly. |
 | `--knowledge-root`, `--path` | — | — | Knowledge git repo root (default: ~/knowledge). --path is an alias, matching init/status/serve. |
 | `--max-api-calls` | — | — | Maximum estimated API calls per run (default: ATHENAEUM_MAX_API_CALLS env, then athenaeum.yaml librarian.max_api_calls, then 800) |
 | `--max-files` | — | — | Stop after processing this many raw files (default: ATHENAEUM_MAX_FILES env, then athenaeum.yaml librarian.max_files, then 50) |

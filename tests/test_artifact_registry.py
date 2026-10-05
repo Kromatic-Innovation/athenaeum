@@ -161,7 +161,6 @@ class TestArtifactRegistryClassMembership:
         """Design note §5.2 table row 9: detection/zero-yield/killswitch state
         is machine-scoped and must stay OUT of the seam (AC4's other half)."""
         for name in (
-            "detection-incomplete-state",
             "zero-yield-state",
             "killswitch-state",
         ):

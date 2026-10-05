@@ -906,16 +906,6 @@ class TestDefaultsDoNotShadowCodeDefaults:
         assert DEFAULT_RESOLVE_MAX_PER_RUN == 250
         assert resolve_max_per_run(cfg) == DEFAULT_RESOLVE_MAX_PER_RUN
 
-    def test_cross_scope_mode_code_default_reachable(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.delenv("ATHENAEUM_CROSS_SCOPE_MODE", raising=False)
-        from athenaeum.cross_scope import DEFAULT_MODE, resolve_cross_scope_mode
-
-        cfg = load_config(tmp_path)
-        assert "cross_scope_mode" not in (cfg.get("contradiction") or {})
-        assert resolve_cross_scope_mode(cfg) == DEFAULT_MODE
-
     def test_resolved_similarity_threshold_code_default_reachable(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -929,30 +919,6 @@ class TestDefaultsDoNotShadowCodeDefaults:
         assert "resolved_similarity_threshold" not in (cfg.get("contradiction") or {})
         assert resolve_resolved_similarity_threshold(cfg) == pytest.approx(
             _DEFAULT_RESOLVED_SIMILARITY_THRESHOLD
-        )
-
-    def test_cluster_size_cap_code_default_reachable(self, tmp_path: Path) -> None:
-        from athenaeum.cross_scope import (
-            DEFAULT_CLUSTER_SIZE_CAP,
-            resolve_cluster_size_cap,
-        )
-
-        cfg = load_config(tmp_path)
-        assert "cluster_size_cap" not in (cfg.get("contradiction") or {})
-        assert DEFAULT_CLUSTER_SIZE_CAP == 25
-        assert resolve_cluster_size_cap(cfg) == DEFAULT_CLUSTER_SIZE_CAP
-
-    def test_similarity_threshold_code_default_reachable(self, tmp_path: Path) -> None:
-        from athenaeum.cross_scope import (
-            DEFAULT_SIMILARITY_THRESHOLD,
-            resolve_similarity_threshold,
-        )
-
-        cfg = load_config(tmp_path)
-        assert "similarity_threshold" not in (cfg.get("contradiction") or {})
-        assert DEFAULT_SIMILARITY_THRESHOLD == pytest.approx(0.85)
-        assert resolve_similarity_threshold(cfg) == pytest.approx(
-            DEFAULT_SIMILARITY_THRESHOLD
         )
 
     def test_cluster_output_code_default_reachable(self, tmp_path: Path) -> None:
@@ -985,24 +951,20 @@ class TestDefaultsDoNotShadowCodeDefaults:
     ) -> None:
         """Explicit yaml values must survive load_config and beat code defaults."""
         monkeypatch.delenv("ATHENAEUM_RESOLVE_MAX_PER_RUN", raising=False)
-        monkeypatch.delenv("ATHENAEUM_CROSS_SCOPE_MODE", raising=False)
         monkeypatch.delenv("ATHENAEUM_RESOLVED_SIMILARITY_THRESHOLD", raising=False)
         from athenaeum.clusters import resolve_cluster_threshold
-        from athenaeum.cross_scope import resolve_cross_scope_mode
         from athenaeum.fingerprint import resolve_resolved_similarity_threshold
         from athenaeum.resolutions import resolve_max_per_run
 
         (tmp_path / "athenaeum.yaml").write_text(
             "contradiction:\n"
             "  resolve_max_per_run: 7\n"
-            "  cross_scope_mode: similarity\n"
             "  resolved_similarity_threshold: 0.9\n"
             "librarian:\n"
             "  cluster_threshold: 0.75\n"
         )
         cfg = load_config(tmp_path)
         assert resolve_max_per_run(cfg) == 7
-        assert resolve_cross_scope_mode(cfg) == "similarity"
         assert resolve_resolved_similarity_threshold(cfg) == pytest.approx(0.9)
         assert resolve_cluster_threshold(tmp_path, config=cfg) == pytest.approx(0.75)
 
@@ -1049,7 +1011,6 @@ class TestNonDictSectionsDegradeGracefully:
     def test_scalar_or_list_sections_fall_back_to_code_defaults(
         self, bad_value: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.delenv("ATHENAEUM_CROSS_SCOPE_MODE", raising=False)
         monkeypatch.delenv("ATHENAEUM_RESOLVED_SIMILARITY_THRESHOLD", raising=False)
         from athenaeum.clusters import (
             DEFAULT_CLUSTER_OUTPUT,
@@ -1057,27 +1018,14 @@ class TestNonDictSectionsDegradeGracefully:
             resolve_cluster_output_path,
             resolve_cluster_threshold,
         )
-        from athenaeum.cross_scope import (
-            DEFAULT_CLUSTER_SIZE_CAP,
-            DEFAULT_MODE,
-            DEFAULT_SIMILARITY_THRESHOLD,
-            resolve_cluster_size_cap,
-            resolve_cross_scope_mode,
-            resolve_similarity_threshold,
-        )
         from athenaeum.fingerprint import (
             _DEFAULT_RESOLVED_SIMILARITY_THRESHOLD,
             resolve_resolved_similarity_threshold,
         )
 
         cfg = {"contradiction": bad_value, "librarian": bad_value}
-        assert resolve_cross_scope_mode(cfg) == DEFAULT_MODE
         assert resolve_resolved_similarity_threshold(cfg) == pytest.approx(
             _DEFAULT_RESOLVED_SIMILARITY_THRESHOLD
-        )
-        assert resolve_cluster_size_cap(cfg) == DEFAULT_CLUSTER_SIZE_CAP
-        assert resolve_similarity_threshold(cfg) == pytest.approx(
-            DEFAULT_SIMILARITY_THRESHOLD
         )
         assert resolve_cluster_threshold(tmp_path, config=cfg) == pytest.approx(
             DEFAULT_CLUSTER_THRESHOLD

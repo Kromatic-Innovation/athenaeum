@@ -176,17 +176,6 @@ def add_run_subparser(subparsers: argparse._SubParsersAction) -> None:
         "periodic backstop.",
     )
     run_parser.add_argument(
-        "--full-contradiction-sweep",
-        action="store_true",
-        help="Force C4 (contradiction detection) over EVERY cluster this "
-        "run, regardless of the delta gate or --full-compile's own "
-        "cadence, and advance the contradiction-sweep-completed stamp "
-        "(issue athenaeum#909). Distinct from --full-compile: this forces "
-        "only C4, not a full C2 re-cluster. The explicit escape hatch — "
-        "absent this flag, a full-corpus contradiction sweep never runs "
-        "implicitly.",
-    )
-    run_parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
@@ -256,9 +245,6 @@ def cmd_run(args: argparse.Namespace) -> int:
             push_after_run=getattr(args, "push_after_run", None),
             pull_before_run=getattr(args, "pull_before_run", None),
             full_compile=getattr(args, "full_compile", False),
-            full_contradiction_sweep=getattr(
-                args, "full_contradiction_sweep", False
-            ),
             run_type=getattr(args, "run_type", None),
         )
 
@@ -287,9 +273,6 @@ def cmd_run(args: argparse.Namespace) -> int:
             pull_before_run=getattr(args, "pull_before_run", None),
             install_signal_handlers=True,
             full_compile=getattr(args, "full_compile", False),
-            full_contradiction_sweep=getattr(
-                args, "full_contradiction_sweep", False
-            ),
             run_type=getattr(args, "run_type", None),
             # Issue athenaeum#526 (H10): thread the run lock's heartbeat into the
             # librarian so its per-phase/per-file loop refreshes the lockfile's

@@ -8,14 +8,16 @@ deleted (moved into the wiki entry + ``git rm``'d) or must be held pending
 a human contradiction call — and performs that git-backed retire safely.
 Factoring rule: this module owns RETIREMENT DECISIONS AND THE GIT RM/COMMIT
 MECHANICS only; it does not decide what goes IN the wiki entry (that is
-``merge.py``'s synthesis) and does not detect contradictions itself (that
-is the C4 detector, upstream of this pass) — it only consumes those two
-upstream results to pick move-vs-hold.
+``merge.py``'s synthesis) and does not itself run any comparison (that is
+the comparator's job, upstream of this pass, recorded into the verdict
+ledger) — it only reads merge.py's synthesis and the ledger's recorded
+verdicts to pick move-vs-hold.
 
 ``raw/auto-memory/`` is an *expiring intake queue*, not a permanent source.
 Per nightly run, once the C3 merge has compiled each cluster into a canonical
-``wiki/auto-<topic>.md`` entry and the C4 detector has run, this pass decides
-the fate of every cluster's raw intake:
+``wiki/auto-<topic>.md`` entry, this pass reads the comparator's verdict
+ledger for that cluster's members (see :func:`_move_eligibility`) and
+decides the fate of every cluster's raw intake:
 
 - **non-contradictory** → the fact is *moved* into the wiki entry (with an
   origin-traced footnote and a ``retired: true`` marker) and the raw files are
@@ -45,6 +47,17 @@ to upgrade a source from the honest ``inferred`` default to ``user-stated`` /
 invariant still holds: a footnote never cites the raw ``auto-memory/...``
 filename.
 
+Contradiction detection (issue athenaeum#1256). The C4 detector
+(``athenaeum.contradictions.detect_contradictions``) is retired; this module
+no longer reads a per-cluster detector verdict off ``entry.contradiction``.
+Move-eligibility is decided by :func:`_move_eligibility`, which reads the
+comparator's recorded verdicts straight from the verdict ledger
+(``athenaeum.verdicts.get_verdict_status``) for every candidate pair among a
+cluster's resolved members, instead of consuming an upstream contradiction
+result. See athenaeum#1946 for the known, operator-accepted consequence: the
+cluster-domain comparator lane has no live caller today, so every pair is
+unledgered and every multi-member cluster holds until that lane is wired up.
+
 Layering (L4 domain/pipeline). ``retire.py`` imports ``athenaeum.merge``
 (``MergedWikiEntry``, ``render_merged_entry``, ``resolve_member_path``) at
 module TOP level — a normal downward dependency. This module has NO deferred
@@ -60,6 +73,7 @@ from __future__ import annotations
 import logging
 import subprocess
 from dataclasses import dataclass, field
+from itertools import combinations
 from pathlib import Path
 from typing import Callable
 
@@ -82,6 +96,7 @@ from athenaeum.models import DEFAULT_SOURCE_TYPE, parse_frontmatter
 from athenaeum.session_recovery import SessionRecoverer
 from athenaeum.store import FilesystemStore, Store
 from athenaeum.transcript_verify import default_projects_root, verify_user_stated
+from athenaeum.verdicts import get_verdict_status, make_pair_key, page_id_for_path
 
 log = logging.getLogger(__name__)
 
@@ -96,23 +111,6 @@ SKIP = "skip"
 # can tell "blocked on a human contradiction call" from "blocked on session
 # timing, retry next run" at a glance.
 HOLD_LIVE_SESSION = "hold_live_session"
-
-# Issue athenaeum#261 / Quine M1: ``detect_contradictions`` returns ``detected=False``
-# both for a genuine clean verdict AND when it degraded (offline, API error,
-# unparseable response). A degraded not-detected verdict is NOT trustworthy —
-# retiring a genuinely-contradictory cluster on a degraded verdict would delete
-# raw that a working detector would have held. These rationales mark the
-# degraded paths (see ``athenaeum.contradictions`` + the merge C4 loop); a
-# cluster carrying one of them is HELD, never moved. A legitimate
-# ``singleton`` / ``declared-*`` / empty (real clean) rationale still moves.
-DEGRADED_RATIONALES: frozenset[str] = frozenset(
-    {
-        "llm-unavailable",
-        "detector-returned-no-json",
-        "detector-invalid-conflict-type",
-        "detector-malformed-response",
-    }
-)
 
 
 @dataclass
@@ -183,22 +181,119 @@ def _commit_paths_if_staged(
     return True
 
 
-def _move_eligibility(entry: MergedWikiEntry) -> tuple[bool, str]:
+def _move_eligibility(
+    entry: MergedWikiEntry, wiki_root: Path, members: list[Path]
+) -> tuple[bool, str]:
     """Decide whether a cluster may be MOVED, and the HOLD reason if not.
 
-    Quine M1: MOVE only on a TRUSTWORTHY not-detected verdict. A cluster is
-    held when the detector flagged it, when there is no verdict at all, or
-    when the verdict is one of :data:`DEGRADED_RATIONALES` (offline / API
-    error / unparseable). Everything else (real clean verdict, ``singleton``,
-    declared resolutions) is move-eligible.
+    Issue athenaeum#1256: the C4 contradiction detector is retired, so
+    ``entry.contradiction`` is no longer populated by the merge pass and is
+    NOT consulted here. Eligibility is instead decided by reading the
+    comparator's recorded verdicts straight from the verdict ledger
+    (:func:`athenaeum.verdicts.get_verdict_status`) for every candidate pair
+    among *members* — operator decision on athenaeum#1256 (2026-09-15),
+    verbatim: "A cluster is eligible only when every pair has a current
+    verdict and none is ``contradiction``. A missing row, a stale row,
+    ``contradiction``, ``underdetermined``, Gate 2 unavailable, or a
+    T1-screened-out pair all mean HOLD."
+
+    **The vacuous-quantifier hazard this guards against.** "None of the
+    pairs is ``contradiction``" is vacuously true both for a genuine
+    singleton (zero candidate pairs) and for a cluster whose pairs were all
+    T1-screened-out or never ledgered (zero verdicts, but NOT a singleton).
+    Those two must not collapse onto the same code path: the "fewer than two
+    members" vacuous-pass check below runs ONCE, before any pair is formed,
+    and every pair this function DOES form is then required individually to
+    carry a fresh, non-``contradiction``, non-``underdetermined`` verdict —
+    this never filters down to "the pairs that happen to have a verdict"
+    and folds ``all(...)`` over that (smaller) subset, which would let an
+    all-unledgered multi-member cluster pass by accident.
+
+    **This lane holds conservatively until comparator rows exist.** The
+    cluster-domain comparator (:mod:`athenaeum.cluster_comparator`) has no
+    live caller in the pipeline today (see its own module docstring,
+    "Dark by design") — so in production every multi-member cluster will
+    HOLD, loudly, with a reason naming the missing ledger row, until that
+    lane is wired up. This is a known, operator-accepted state (issue
+    athenaeum#1946), not a bug in this function.
+
+    A cluster carrying a live ``contradictions_detected`` flag (a residual/
+    legacy signal; C4 no longer sets this) is still held defensively — this
+    can only ever turn eligible=False, never override a genuine hold into a
+    move, so keeping the check costs nothing and is a belt-and-suspenders
+    safety net should any upstream path ever set it again.
+
+    Args:
+        entry: The cluster's :class:`MergedWikiEntry`.
+        wiki_root: The SAME root the ledger is read from
+            (``athenaeum.verdicts.get_verdict_status(wiki_root, ...)``) and
+            that member ids are computed against
+            (``athenaeum.verdicts.page_id_for_path(path, root=wiki_root)``)
+            — this must be the identical value a comparator write path would
+            pass as its own ``wiki_root=`` (see
+            :func:`athenaeum.cluster_comparator.run_cluster_comparator`'s
+            docstring), or pair keys silently fail to match and every pair
+            reads as unledgered.
+        members: This cluster's resolved member paths THIS run (the same
+            list :func:`_resolve_members` already computed at the call
+            site) — candidate pairs are formed over this set, not over
+            ``entry.resolved_members``, so a member that failed to resolve
+            this run is not treated as a phantom candidate.
+
+    Returns:
+        ``(True, "")`` when eligible, else ``(False, <loud reason>)``.
     """
     if entry.contradictions_detected:
         return False, "contradiction flagged — queued for human confirmation"
-    c = entry.contradiction
-    if c is None:
-        return False, "no contradiction verdict available — not safe to retire"
-    if c.rationale in DEGRADED_RATIONALES:
-        return False, f"degraded detection ({c.rationale}) — not safe to retire"
+
+    if len(members) < 2:
+        # Genuinely zero candidate pairs (a true singleton, or fewer than
+        # two members resolved this run) — vacuously eligible. This check
+        # MUST run before any pair is formed; see the vacuous-quantifier
+        # note above.
+        return True, ""
+
+    for member_a, member_b in combinations(members, 2):
+        id_a = page_id_for_path(member_a, root=wiki_root)
+        id_b = page_id_for_path(member_b, root=wiki_root)
+        pair_key = make_pair_key(id_a, id_b)
+        status = get_verdict_status(wiki_root, pair_key)
+
+        if not status["decided"]:
+            # No ledger row at all. Indistinguishable, from this read alone,
+            # among "never attempted", "Gate 2 unavailable", and
+            # "T1-screened-out" (cluster_comparator.py's own docstring names
+            # this exact ambiguity) — all three mean HOLD, so the reason is
+            # named loudly rather than implying a detector verdict is
+            # missing (there is no detector anymore, by design).
+            return False, (
+                f"no comparator verdict ledgered for pair {pair_key} — the "
+                "cluster-domain comparator lane has no live caller yet "
+                "(athenaeum#1946); holding conservatively until a verdict "
+                "row exists for every pair in this cluster"
+            )
+
+        if not status["fresh"]:
+            return False, (
+                f"comparator verdict for pair {pair_key} is stale "
+                f"({status['stale_reason'] or 'unspecified reason'}) — "
+                "holding until re-compared"
+            )
+
+        verdict = status["verdict"]
+        if verdict == "contradiction":
+            return False, (
+                f"comparator verdict for pair {pair_key} is contradiction — "
+                "not safe to retire"
+            )
+        if verdict == "underdetermined":
+            return False, (
+                f"comparator verdict for pair {pair_key} is underdetermined "
+                "— not safe to retire"
+            )
+        # verdict in {"duplicate", "distinct", "specialization"} — clean,
+        # this pair clears the rule; keep checking the rest of the cluster.
+
     return True, ""
 
 
@@ -476,9 +571,12 @@ def run_retire_pass(
 
     Args:
         entries: The :class:`MergedWikiEntry` list returned by
-            :func:`athenaeum.merge.merge_clusters_to_wiki` THIS run. Each entry
-            already carries ``contradictions_detected`` (from the C4 detector)
-            plus ``member_paths`` / ``resolved_members``.
+            :func:`athenaeum.merge.merge_clusters_to_wiki` THIS run. Each
+            entry carries ``member_paths`` / ``resolved_members``;
+            move-eligibility is decided by reading the comparator's verdict
+            ledger (see :func:`_move_eligibility`), not by a per-entry
+            contradiction flag (the C4 detector that used to set one is
+            retired — issue athenaeum#1256).
         knowledge_root: Root of the knowledge directory (``wiki/`` + ``raw/``
             + ``.git`` live here).
         config: Optional resolved ``athenaeum.yaml`` dict; resolves the intake
@@ -558,7 +656,7 @@ def run_retire_pass(
     for entry in entries:
         members = _resolve_members(entry, extra_roots)
 
-        eligible, hold_reason = _move_eligibility(entry)
+        eligible, hold_reason = _move_eligibility(entry, wiki_root, members)
         if not eligible:
             # HOLD: contradictory OR a degraded/absent verdict — a delete must
             # never race a pending confirmation, and a degraded verdict is not

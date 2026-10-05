@@ -1382,9 +1382,9 @@ PROPOSAL is a pairwise / small-group refinement; a fold of more than ~5
 sources is not that shape, and complete-linkage means the members of
 a genuine small merge are mutually similar, so 5 sits well inside the
 legitimate-merge margin while excluding the observed 1,600-1,700-source
-degenerates decisively. (The wider size-25 cap still governs the pooled
-contradiction-cluster path via `athenaeum.cross_scope.resolve_cluster_size_cap`
-— this cap is specifically the merge-PROPOSAL fan-in.)
+degenerates decisively. (The pooled contradiction-cluster path that the
+wider size-25 cap used to govern was retired along with the C4 detector;
+this cap is specifically the merge-PROPOSAL fan-in.)
 Env ``ATHENAEUM_MAX_MERGE_SOURCES`` > yaml ``librarian.max_merge_sources`` >
 this default; ``0`` (or negative) disables the cap. No seed in ``_DEFAULTS``
  so the code default stays reachable. ``bool`` and non-numeric yaml
@@ -3756,7 +3756,6 @@ auto-applying tier from the one loop meant to catch it being wrong.
 | `ATHENAEUM_CONTRADICTION_DETECT_MAX_TOKENS` | `src/athenaeum/contradictions.py`, `src/athenaeum/shadow_parity.py` |
 | `ATHENAEUM_CONTRADICTION_DETECT_THINKING` | `src/athenaeum/contradictions.py` |
 | `ATHENAEUM_CREATE_NAME_VARIANT_DECISION_MAX_TOKENS` | `src/athenaeum/tiers.py` |
-| `ATHENAEUM_CROSS_SCOPE_MODE` | `src/athenaeum/config.py`, `src/athenaeum/cross_scope.py`, `src/athenaeum/merge.py` |
 | `ATHENAEUM_DECAY_BUCKET_MAX_TOKENS` | `src/athenaeum/decay_bucket.py` |
 | `ATHENAEUM_DECAY_BUCKET_THINKING` | `src/athenaeum/decay_bucket.py` |
 | `ATHENAEUM_DECAY_DAILY_HORIZON_DAYS` | `src/athenaeum/config.py` |

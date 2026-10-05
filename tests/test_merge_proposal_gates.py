@@ -18,10 +18,8 @@ from athenaeum.config import (
     resolve_min_merge_confidence,
     resolve_min_merge_mean_similarity,
 )
-from athenaeum.merge import (
-    _classify_merge_write_kind,
-    _merge_proposal_suppression_reason,
-)
+from athenaeum.merge_type_gate import _merge_proposal_suppression_reason
+from athenaeum.pending_merges import classify_write_kind
 
 
 class TestResolveMaxMergeSources:
@@ -406,7 +404,7 @@ class TestClassifyMergeWriteKind:
     def test_create_merged_when_slug_free(self, tmp_path) -> None:
         (tmp_path).mkdir(parents=True, exist_ok=True)
         assert (
-            _classify_merge_write_kind("Brand New Topic", tmp_path) == "create-merged"
+            classify_write_kind("Brand New Topic", tmp_path) == "create-merged"
         )
 
     def test_fold_into_existing_when_slug_taken(self, tmp_path) -> None:
@@ -414,7 +412,7 @@ class TestClassifyMergeWriteKind:
 
         name = "Existing Topic"
         (tmp_path / f"{slugify(name)}.md").write_text("# existing", encoding="utf-8")
-        assert _classify_merge_write_kind(name, tmp_path) == "fold-into-existing"
+        assert classify_write_kind(name, tmp_path) == "fold-into-existing"
 
     def test_mirrors_approve_time_target_path(self, tmp_path) -> None:
         # The precheck's existence check must match resolve_merge(approve)'s
@@ -424,6 +422,6 @@ class TestClassifyMergeWriteKind:
 
         name = "Weird   Name/With Slashes"
         target = tmp_path / f"{slugify(name)}.md"
-        assert _classify_merge_write_kind(name, tmp_path) == "create-merged"
+        assert classify_write_kind(name, tmp_path) == "create-merged"
         target.write_text("x", encoding="utf-8")
-        assert _classify_merge_write_kind(name, tmp_path) == "fold-into-existing"
+        assert classify_write_kind(name, tmp_path) == "fold-into-existing"

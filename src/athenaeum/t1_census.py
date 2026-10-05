@@ -4,16 +4,23 @@
 athenaeum#1620 found the T1 reasoning-tier screen reaches roughly 7% of live
 merge-proposal inflow: two of the three writers of ``_pending_merges.md``
 (:mod:`athenaeum.name_collisions`, :mod:`athenaeum.name_structure`) never
-call it at all, and even the one writer that does
+call it at all, and even the one writer that did
 (:mod:`athenaeum.merge`, via :func:`athenaeum.reasoning_screens.
 t1_screen_rejects_merge_proposal`) turned out to be skipping the screen
 silently on every proposal in the measured window. This module is the
 counter that makes that split OBSERVABLE per run instead of requiring a
 by-hand rationale-text audit the next time it drifts (AC3).
 
+Issue athenaeum#1256 retired the C4 detector and with it ``merge.py``'s
+merge-proposal write site, so there are now **two** writers, both
+deliberately unscreened. The census is unchanged and still meaningful: it
+counts screened vs. unscreened writes wherever they occur, and
+:mod:`athenaeum.reasoning_screens` still records a screened/unscreened
+outcome for the cluster-domain comparator lane that does call T1.
+
 Layering: L0 (stdlib-only leaf/primitive) — a plain dataclass counter with
 no imports from elsewhere in :mod:`athenaeum`, so any layer may depend on
-it. Three call sites reach it directly, all at or above L4
+it. Its call sites all sit at or above L4
 (:mod:`athenaeum.reasoning_screens`, :mod:`athenaeum.name_collisions`,
 :mod:`athenaeum.name_structure`), plus :mod:`athenaeum.librarian` (L5) to
 reset it at the top of every run and read it back into the run summary.

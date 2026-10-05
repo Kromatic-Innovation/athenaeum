@@ -53,111 +53,47 @@ _REPO_SRC = Path(__file__).resolve().parent.parent / "src" / "athenaeum"
 # ---------------------------------------------------------------------------
 
 
-def _find_function(tree: ast.AST, name: str) -> ast.FunctionDef:
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == name:
-            return node
-    raise AssertionError(f"no top-level-or-nested function named {name!r} found")
+class TestMergeIsNoLongerAMergeProposalWriter:
+    def test_merge_py_never_writes_a_pending_merge(self) -> None:
+        """Issue athenaeum#1256 supersedes athenaeum#1620 AC1(a) for this module.
 
+        athenaeum#1620 pinned that ``merge.py``'s C4 escalation path called
+        ``t1_screen_rejects_merge_proposal`` as an early-return guard
+        structurally BEFORE its ``write_pending_merge`` call, so no proposal
+        could reach ``_pending_merges.md`` unscreened. Retiring the C4
+        detector removed that write site altogether, which satisfies the same
+        property more strongly: ``merge.py`` contributes ZERO merge-proposal
+        writes, screened or otherwise, so there are now exactly two writers
+        (:mod:`athenaeum.name_collisions`, :mod:`athenaeum.name_structure`),
+        both deliberately unscreened and both pinned by
+        :class:`TestDeliberatelyUnscreenedWriters` below.
 
-def _calls_named(node: ast.AST, name: str):
-    """Every ``ast.Call`` anywhere inside *node* whose called name is *name*
-    (bare ``name(...)`` or ``obj.name(...)``)."""
-    for n in ast.walk(node):
-        if isinstance(n, ast.Call):
-            func = n.func
-            if isinstance(func, ast.Name) and func.id == name:
-                yield n
-            elif isinstance(func, ast.Attribute) and func.attr == name:
-                yield n
-
-
-def _iter_blocks(node: ast.AST):
-    """Yield every statement-list ("block") anywhere under *node* — each
-    ``if``/``try``/``for``/``while``/``with``/function body, ``orelse``,
-    ``finalbody``, and each ``except`` handler's body. Both calls this test
-    cares about may sit at ANY nesting depth (e.g. inside an outer
-    ``if proposal ...:``), so "dominates" has to be checked against the
-    actual shared block the two calls are direct-or-nested-child statements
-    of, not assumed to be the function's own top-level body.
-    """
-    for n in ast.walk(node):
-        for attr in ("body", "orelse", "finalbody"):
-            block = getattr(n, attr, None)
-            if isinstance(block, list) and block and isinstance(block[0], ast.stmt):
-                yield block
-        for handler in getattr(n, "handlers", None) or []:
-            if isinstance(handler.body, list) and handler.body:
-                yield handler.body
-
-
-class TestT1ScreenDominatesWrite:
-    def test_t1_screen_call_dominates_write_pending_merge_in_emit_escalation(
-        self,
-    ) -> None:
-        """Issue athenaeum#1620 AC1(a): within ``merge.py``'s ``_emit_escalation``
-        (the function housing the cluster-path's ``PROPOSE_MERGE_ACTION``
-        branch), the ``t1_screen_rejects_merge_proposal`` call must appear
-        as an early-return GUARD, structurally BEFORE the
-        ``write_pending_merge`` call — i.e. every straight-line path that
-        reaches the write has already passed the screen. This is the
-        static, AST-level version of "dominates": a brittle line-number
-        assertion would not survive an unrelated edit; this survives any
-        edit that does not actually reorder the two calls.
+        Pinning the absence keeps the regression guard alive: re-introducing
+        an unscreened ``write_pending_merge`` into ``merge.py`` fails here,
+        which is what athenaeum#1620 actually cared about.
         """
+        # AST, not a substring scan: ``merge.py``'s prose still discusses the
+        # ``pending_merges`` back-edge issue athenaeum#640 dissolved, so a raw
+        # text check would match a docstring and fail for the wrong reason.
         tree = ast.parse((_REPO_SRC / "merge.py").read_text(encoding="utf-8"))
-        func = _find_function(tree, "_emit_escalation")
-
-        # Find the block that contains BOTH a t1-screen-guard statement and
-        # a write_pending_merge-call statement as two DISTINCT immediate
-        # elements — that is the block "dominates" has to be checked
-        # within, regardless of how deeply nested it is inside
-        # _emit_escalation as a whole. `_iter_blocks` yields coarse
-        # (outer) blocks before fine (inner) ones, and a coarse block's
-        # single top-level statement can recursively CONTAIN both calls
-        # without being a guard at all (e.g. the whole `if proposal...:`
-        # wrapper) — that is a false match (``ti == wi``, the same
-        # statement satisfying both searches), so candidates are collected
-        # and the SMALLEST qualifying block (the most specific one, where
-        # the two calls are genuinely separate sibling statements) wins.
-        candidates: list[tuple[int, int, int, ast.stmt]] = []  # (blocklen, ti, wi, guard_stmt)
-        for block in _iter_blocks(func):
-            ti = wi = None
-            guard_stmt: ast.stmt | None = None
-            for i, stmt in enumerate(block):
-                if ti is None and list(
-                    _calls_named(stmt, "t1_screen_rejects_merge_proposal")
-                ):
-                    ti = i
-                    guard_stmt = stmt
-                if wi is None and list(_calls_named(stmt, "write_pending_merge")):
-                    wi = i
-            if ti is not None and wi is not None and ti != wi:
-                candidates.append((len(block), ti, wi, guard_stmt))
-
-        assert candidates, (
-            "no shared block found in _emit_escalation containing both a "
-            "t1_screen_rejects_merge_proposal guard and a write_pending_merge "
-            "call as distinct statements — has the screen or the write been "
-            "removed or moved?"
-        )
-        _blocklen, t1_index, write_index, guard_stmt = min(candidates, key=lambda c: c[0])
-        # Must be an early-return guard: an `if <...t1 call...>:` whose body
-        # unconditionally returns — not merely a call whose result is
-        # discarded.
-        assert isinstance(guard_stmt, ast.If), (
-            "t1_screen_rejects_merge_proposal is called, but not as an "
-            "`if ...: return` guard clause"
-        )
-        assert any(isinstance(s, ast.Return) for s in guard_stmt.body), (
-            "the t1_screen_rejects_merge_proposal `if` block does not "
-            "contain a `return` — it would not actually stop the write below"
-        )
-        assert t1_index < write_index, (
-            "write_pending_merge is reachable in _emit_escalation without "
-            "first passing the t1_screen_rejects_merge_proposal guard — "
-            "this is the exact regression issue athenaeum#1620 AC1 asks to be "
-            "pinned against"
+        call_sites = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and (
+                (isinstance(node.func, ast.Name) and node.func.id == "write_pending_merge")
+                or (
+                    isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "write_pending_merge"
+                )
+            )
+        ]
+        assert not call_sites, (
+            "merge.py calls write_pending_merge again (line(s) "
+            f"{sorted(n.lineno for n in call_sites)}) — issue athenaeum#1256 "
+            "retired that write site with the C4 detector. A new merge-proposal "
+            "write from this module must come with its own T1 screen (issue "
+            "athenaeum#1620 AC1) and be censused like the other two writers."
         )
 
 

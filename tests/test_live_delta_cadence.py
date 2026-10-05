@@ -13,8 +13,12 @@ consistency backstop for the live-client delta path.
 These tests drive the real ``run()`` entrypoint end-to-end (a real,
 lightweight knowledge git repo; no chromadb — clustering falls back to the
 hashing-trick embedding, see ``_deterministic_fallback_embeddings`` below, when
-no vector index is built) with ``athenaeum.merge.detect_contradictions``
-stubbed to a deterministic, call-counting fake — no live API, no network.
+no vector index is built) with ``athenaeum.merge.merge_cluster_row`` wrapped
+by a call-counting spy (issue athenaeum#1256 retired the C4 contradiction
+detector this used to stub instead; ``merge_cluster_row`` is still called
+exactly once per cluster row the delta scope lets through, so it is an
+equally precise — and now the only available — proxy for "which clusters did
+this merge pass touch") — no live API, no network.
 ``retire=False`` throughout so the auto-memory intake files are NOT
 moved/removed after a compile, letting a SECOND run see (and delta against)
 the same corpus plus whatever the test adds.
@@ -42,7 +46,7 @@ from pathlib import Path
 
 import pytest
 
-from athenaeum.contradictions import ContradictionResult
+from athenaeum import merge as merge_module
 from athenaeum.librarian import (
     AUTO_MEMORY_MANIFEST_NAME,
     FULL_COMPILE_STAMP_NAME,
@@ -154,28 +158,35 @@ def _seed_root(tmp_path: Path, cache_subdir: str = ".cache") -> Path:
 
 
 class _DetectSpy:
-    """Deterministic, call-counting stand-in for ``detect_contradictions``.
+    """Call-counting wrapper around ``merge_cluster_row``.
 
-    Never detects a contradiction (so retire/escalation stay out of the way)
-    and records, per call, the sorted member paths of the cluster it was
-    invoked on — so a test can assert BOTH the total call count and exactly
-    which clusters were (not) touched.
+    Issue athenaeum#1256 retired the C4 contradiction detector (and
+    ``athenaeum.merge.detect_contradictions`` along with it) this class used
+    to stand in for. ``merge_cluster_row`` is still invoked exactly once per
+    cluster row that survives the delta scope filter in
+    ``merge_clusters_to_wiki``, so wrapping it (and delegating to the real
+    implementation) is an equivalent proxy: it records, per call, the
+    (unresolved) member paths declared on the row — so a test can assert
+    BOTH the total call count and exactly which clusters were (not) touched
+    — while leaving the actual merge behaviour completely unchanged.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, original) -> None:
+        self._original = original
         self.n_calls = 0
         self.clusters_seen: list[tuple[str, ...]] = []
 
-    def __call__(self, members, client, *, config=None, usage=None, wiki_root=None):
+    def __call__(self, row, **kwargs):
         self.n_calls += 1
-        self.clusters_seen.append(tuple(sorted(str(m.path) for m in members)))
-        return ContradictionResult(detected=False, rationale="stub-no-conflict")
+        member_paths = tuple(sorted(str(m) for m in row.get("member_paths", [])))
+        self.clusters_seen.append(member_paths)
+        return self._original(row, **kwargs)
 
 
 @pytest.fixture
 def detect_spy(monkeypatch: pytest.MonkeyPatch) -> _DetectSpy:
-    spy = _DetectSpy()
-    monkeypatch.setattr("athenaeum.merge.detect_contradictions", spy)
+    spy = _DetectSpy(merge_module.merge_cluster_row)
+    monkeypatch.setattr("athenaeum.merge.merge_cluster_row", spy)
     return spy
 
 
