@@ -48,8 +48,12 @@ eval-summary.json
 .claude/worktrees/
 
 # uv lockfile — CI installs via `pip install -e ".[dev,vector]"` (no uv, no
-# frozen-lock policy) and the lockfile has never been tracked. If the team
-# later adopts `uv sync --frozen` in CI, remove this line and commit uv.lock.
+# frozen-lock policy) and the lockfile has never been tracked. requirements-
+# ci.lock is the one dependency lock athenaeum commits, and now also
+# constrains the deploy refresh (scripts/deploy-guard.sh, scripts/
+# deploy-sync.sh — athenaeum#1960), not just CI; uv.lock would add a THIRD
+# resolution path rather than unify the two. If the team later adopts
+# `uv sync --frozen` in CI, remove this line and commit uv.lock.
 uv.lock
 
 # Internal agent run-logs — never ship in the sdist (v0.20.0 release gate)

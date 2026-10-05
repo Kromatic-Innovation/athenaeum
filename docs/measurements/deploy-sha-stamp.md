@@ -126,6 +126,45 @@ rewind is applied, athenaeum#614), while `deploy-sync.sh` fast-forwards, refusin
 cadence runs against the worktree above, `deploy-sync.sh` is the manual
 single-checkout path.
 
+## Post-ship re-sync (athenaeum#1960)
+
+CI installs athenaeum's dependencies under the full transitive constraints
+file `requirements-ci.lock` (`pip install -e ".[dev,vector]" -c
+requirements-ci.lock`). `scripts/deploy-guard.sh`'s default install and
+`scripts/deploy-sync.sh`'s reinstall step now constrain the deploy refresh
+the same way: when `requirements-ci.lock` is present in the deploy tree, each
+appends `-c requirements-ci.lock` to its editable install automatically. A
+green CI run and the deployed venv therefore resolve the same dependency
+versions, not merely versions that both happen to satisfy the same open
+`pyproject.toml` ranges.
+
+That guarantee only holds once the deploy checkout has actually fast-forwarded
+past the commit that added this constraint and re-run its install step. After
+a fast-forward (whether via `deploy-guard.sh`'s automated sync or
+`deploy-sync.sh`'s manual one), confirm the refresh landed and smoke-test the
+result:
+
+1. Refresh the deploy checkout's venv under the constraints file — this is
+   exactly what the sync scripts above already do when `requirements-ci.lock`
+   is present, so a plain re-run of whichever one manages the deploy checkout
+   (`scripts/deploy-guard.sh` or `scripts/deploy-sync.sh`) is sufficient; no
+   separate manual `pip install` is needed.
+2. Run `tests/test_cli_tool_bridge_mcp_api_guard.py` against the deploy
+   checkout's own venv as a smoke check, from a copy of this repo's test
+   suite (or `pytest`'s `--rootdir` pointed at the deploy checkout):
+   ```bash
+   # from the deploy checkout
+   .venv/bin/python -m pytest tests/test_cli_tool_bridge_mcp_api_guard.py -q
+   ```
+   This imports the `mcp` package actually installed in that venv and checks
+   the pre-2.0 decorator API `cli_tool_bridge.py` depends on directly — the
+   same check CI runs, but against the deploy interpreter's own resolution
+   rather than CI's.
+
+Automating this re-sync-and-smoke-check step so it runs on its own right
+after a deploy fast-forward (rather than as a manual post-ship step) is
+tracked in the hestia repo (hestia#2758), not duplicated here.
+
 ## Scope
 
 This issue (athenaeum#413) covers only athenaeum's side — producing the stamp. Teaching

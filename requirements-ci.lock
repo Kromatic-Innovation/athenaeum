@@ -20,6 +20,16 @@
 # behind a python_version marker) is simply ignored, so one lock serves the
 # whole matrix.
 #
+# ALSO CONSTRAINS THE DEPLOY REFRESH (athenaeum#1960): scripts/deploy-guard.sh
+# and scripts/deploy-sync.sh both pass `-c requirements-ci.lock` to their
+# editable install/reinstall whenever this file is present in the deploy tree,
+# so the deployed venv resolves the SAME versions CI tested rather than
+# re-resolving pyproject.toml's open ranges fresh. A green CI run now means
+# the deploy runs the same dependency set, closing the drift class where the
+# deploy picked a different, still-range-legal version CI never ran
+# (athenaeum#1953). tests/test_ci_lock_parity.py is the offline check that the
+# pins above stay inside the ranges this depends on.
+#
 # REGENERATE (from a clean venv on the lowest supported Python, 3.11):
 #     python -m venv .venv && .venv/bin/pip install -e ".[dev,vector]"
 #     .venv/bin/pip freeze --exclude-editable | sort -f > requirements-ci.lock
