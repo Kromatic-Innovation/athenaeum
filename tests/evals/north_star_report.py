@@ -3223,6 +3223,15 @@ class NorthStarReport:
     # for the header to render. Empty string (the default) renders nothing,
     # byte-identical to a pre-athenaeum#1785 report.
     phase2_summary: str = ""
+    # issue athenaeum#1959: one line describing the default-on behavioural
+    # preflight's own outcome -- "ok provider=... probe=... arm=... "
+    # "recall_called=true tool_calls=N" (plus "apiKeySource=none" for
+    # claude-cli), "skipped (--no-preflight)", or "failed: <reason>" --
+    # computed by north_star_cli.py, which owns the dispatch flags this
+    # describes, and passed straight through here for the header to
+    # render. Empty string (the default) renders nothing, byte-identical
+    # to a pre-athenaeum#1959 report.
+    preflight_summary: str = ""
     # issue athenaeum#1785 (Quine review of PR#1813, should-fix 1): the
     # (system, corpus_scale) pairs whose write_path_stats/write_costs rows
     # came from a PARTIAL (exit 75) athenaeum compile -- read from the
@@ -3335,6 +3344,7 @@ def build_report(
     pool_floor_values: bool = True,
     phase2_summary: str = "",
     phase2_partial: Sequence[tuple[str, str]] = (),
+    preflight_summary: str = "",
 ) -> NorthStarReport:
     """Assemble a :class:`NorthStarReport` from decoded result-store rows.
 
@@ -3404,6 +3414,7 @@ def build_report(
         relevance_floor_fts5=relevance_floor_fts5,
         phase2_summary=phase2_summary,
         phase2_partial=frozenset(phase2_partial),
+        preflight_summary=preflight_summary,
         turn_cap_counts=_turn_cap_counts(rows),
     )
 
@@ -3526,6 +3537,11 @@ def render_report(report: NorthStarReport) -> str:
     # blank for) renders byte-identical to before this field existed.
     if report.phase2_summary:
         lines.append(f"- phase2: {report.phase2_summary}")
+    # issue athenaeum#1959: printed only when non-empty, same convention
+    # phase2_summary above uses -- a pre-athenaeum#1959 report (or any
+    # report built without passing this kwarg) renders byte-identical.
+    if report.preflight_summary:
+        lines.append(f"- preflight: {report.preflight_summary}")
     for scale in sorted(report.corpus_digests):
         lines.append(f"- corpus_digest[{scale}]: {report.corpus_digests[scale]}")
     # issue athenaeum#1842: Corpus.fingerprint() digests PAGES only (see
