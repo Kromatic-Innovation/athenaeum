@@ -375,6 +375,37 @@ def _extract_frontmatter_fields(text: str) -> tuple[str, str, str, str]:
     Returns a 4-tuple of strings (empty when not present). Mirrors the
     hand-rolled parser FTS5 used inline — factored out so the intake-root
     scanner shares one implementation.
+
+    Issue athenaeum#1966: a key is only ever recognized as ``name:`` /
+    ``tags:`` / ``aliases:`` / ``description:`` when it sits at COLUMN ZERO
+    of the frontmatter block (``raw_line`` has no leading space or tab).
+    Before this guard, every candidate line was ``.strip()``-ed before the
+    ``startswith`` test, so a NESTED key of the same name silently clobbered
+    the page's own top-level value. For example::
+
+        field_sources:
+          name: user:someone        # nested under a top-level mapping key
+        related:
+          - kind: x
+            name: something         # a second key inside a block-list entry
+
+    Both ``  name: user:someone`` and ``    name: something`` are indented,
+    so the column-zero guard below skips them and the page's own top-level
+    ``name:`` (if any) is left untouched. The guard applies ONLY to the key
+    test itself — it deliberately does NOT gate the two continuation cases
+    the scanner already handles on purpose: the folded ``description:``
+    continuation (``in_description``, always indented) and a ``tags:``/
+    ``aliases:`` block-list ``- item`` line (``in_tags``/``in_aliases``),
+    which the real writer emits at column zero (``WikiEntity.render()``) or
+    indented depending on dumper settings — both must keep working, and
+    neither reaches the key test this guard restricts.
+
+    This is deliberately NOT a YAML parse: ``parse_frontmatter`` returns
+    ``{}`` for a block that fails to parse, which would silently de-index a
+    page whose frontmatter is malformed but whose ``name:`` is still legible
+    to this tolerant scanner. The hand-rolled parser also preserves an
+    inline list's original string (``tags: [a, b]`` indexes as ``a, b``),
+    which a YAML load would flatten to ``a b``.
     """
     name, tags, aliases, description = "", "", "", ""
     if not text.startswith("---"):
@@ -414,22 +445,28 @@ def _extract_frontmatter_fields(text: str) -> tuple[str, str, str, str]:
         in_description = False
         in_tags = False
         in_aliases = False
+        # Issue athenaeum#1966: only a column-zero line can be one of the
+        # four recognized keys — see the docstring's worked example. An
+        # indented line falls through every branch below untouched (its
+        # flags were already reset above), so a nested same-named key is
+        # inert rather than overwriting the page's own top-level value.
+        is_top_level = raw_line[:1] not in (" ", "\t")
         line = stripped
-        if line.startswith("name:"):
+        if is_top_level and line.startswith("name:"):
             name = line[5:].strip().strip("\"'")
-        elif line.startswith("tags:"):
+        elif is_top_level and line.startswith("tags:"):
             value = line[5:].strip()
             if value:
                 tags = value.strip("[]")
             else:
                 in_tags = True
-        elif line.startswith("aliases:"):
+        elif is_top_level and line.startswith("aliases:"):
             value = line[8:].strip()
             if value:
                 aliases = value.strip("[]")
             else:
                 in_aliases = True
-        elif line.startswith("description:"):
+        elif is_top_level and line.startswith("description:"):
             description = line[12:].strip()
             in_description = True
     # Strip the YAML quote delimiters ONCE, over the fully joined value — a

@@ -7,11 +7,12 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from athenaeum import search as search_module
-from athenaeum.models import WikiEntity
+from athenaeum.models import WikiEntity, parse_frontmatter
 from athenaeum.search import (
     FTS5Backend,
     KeywordBackend,
@@ -2890,6 +2891,156 @@ class TestBlockListIndexRegression:
         # the aliases column is both filled AND indexed, not merely filled.
         results = FTS5Backend().query("Nightjar", cache)
         assert "acme-corp.md" in [r[0] for r in results]
+
+
+class TestExtractFrontmatterFieldsNestedKeys:
+    """Regression guard for athenaeum#1966: a NESTED key of the same name as
+    one of the four recognized fields must never clobber the page's own
+    top-level value. Covers both real-world shapes named in the issue — an
+    indented mapping value under a sibling top-level key, and a second key
+    inside a block-list entry.
+    """
+
+    def test_nested_mapping_key_does_not_clobber_top_level_name(self) -> None:
+        text = (
+            "---\n"
+            "name: Real Page\n"
+            "field_sources:\n"
+            "  name: user:someone\n"
+            "  tags: provenance-tag\n"
+            "---\n\n"
+            "Body.\n"
+        )
+        name, tags, _aliases, _description = _extract_frontmatter_fields(text)
+        assert name == "Real Page"
+        assert tags == ""
+
+    def test_block_list_entry_second_key_does_not_clobber_top_level_name(
+        self,
+    ) -> None:
+        text = (
+            "---\n"
+            "name: Real Page\n"
+            "related:\n"
+            "  - kind: x\n"
+            "    name: something\n"
+            "---\n\n"
+            "Body.\n"
+        )
+        name, _tags, _aliases, _description = _extract_frontmatter_fields(text)
+        assert name == "Real Page"
+
+    def test_nested_aliases_and_description_do_not_clobber_top_level(self) -> None:
+        text = (
+            "---\n"
+            "name: Real Page\n"
+            "aliases:\n"
+            "- Alt Name\n"
+            "description: The real description.\n"
+            "field_sources:\n"
+            "  aliases: nested-alias\n"
+            "  description: nested description that must not win\n"
+            "---\n\n"
+            "Body.\n"
+        )
+        name, _tags, aliases, description = _extract_frontmatter_fields(text)
+        assert name == "Real Page"
+        assert aliases == "Alt Name"
+        assert description == "The real description."
+
+
+class TestFTS5NestedFrontmatterKeyRegression:
+    """Index-level guard (issue athenaeum#1966 AC2): the FTS5 build path must
+    store the page's own top-level ``name``, not a colliding nested key, for
+    a fixture page shaped like the two real-world collisions named in the
+    issue.
+    """
+
+    @pytest.fixture
+    def nested_key_wiki(self, tmp_path: Path) -> Path:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        (wiki / "real-page.md").write_text(
+            "---\n"
+            "name: Real Page\n"
+            "field_sources:\n"
+            "  name: user:someone\n"
+            "related:\n"
+            "  - kind: x\n"
+            "    name: something\n"
+            "---\n\n"
+            "Body text about Real Page.\n"
+        )
+        return wiki
+
+    def test_row_name_is_the_top_level_value_not_the_nested_one(
+        self, nested_key_wiki: Path, tmp_path: Path
+    ) -> None:
+        cache = tmp_path / "cache"
+        FTS5Backend().build_index(nested_key_wiki, cache)
+        conn = sqlite3.connect(str(cache / search_module._DB_NAME))
+        try:
+            row = conn.execute(
+                "SELECT name FROM wiki WHERE filename = ?", ("real-page.md",)
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row is not None
+        assert row[0] == "Real Page"
+
+
+class TestVectorAddRecordsNestedFrontmatterKeyRegression:
+    """Vector-backend guard (issue athenaeum#1966 AC2): asserts
+    ``VectorBackend._add_records``'s metadata construction directly against a
+    fake collection object, rather than standing up a real embedder —
+    chromadb is not installed in this container (``pytest.importorskip`` on
+    ``chromadb`` skips every other ``TestVectorBackend`` test here for the
+    same reason), and ``_add_records`` never imports or calls chromadb
+    itself: it only calls ``collection.add(ids=, documents=, metadatas=)``,
+    so a fake collection recording its call args exercises the real
+    metadata-construction code path with no model load required.
+    """
+
+    class _FakeCollection:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def add(
+            self,
+            *,
+            ids: list[str],
+            documents: list[str],
+            metadatas: list[dict[str, str]],
+        ) -> None:
+            self.calls.append(
+                {"ids": ids, "documents": documents, "metadatas": metadatas}
+            )
+
+    def test_metadata_name_is_the_top_level_value_not_the_nested_one(self) -> None:
+        text = (
+            "---\n"
+            "name: Real Page\n"
+            "field_sources:\n"
+            "  name: user:someone\n"
+            "related:\n"
+            "  - kind: x\n"
+            "    name: something\n"
+            "---\n\n"
+            "Body text about Real Page.\n"
+        )
+        meta, _body = parse_frontmatter(text)
+        record = (
+            "real-page.md",
+            Path("real-page.md"),
+            "deadbeef",
+            text,
+            meta,
+            ("0", "0"),
+        )
+        collection = self._FakeCollection()
+        VectorBackend()._add_records(collection, [record])
+        assert len(collection.calls) == 1
+        assert collection.calls[0]["metadatas"][0]["name"] == "Real Page"
 
 
 # ---------------------------------------------------------------------------
