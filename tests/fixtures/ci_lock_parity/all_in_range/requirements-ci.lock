@@ -1,0 +1,5 @@
+# Positive-control lock (athenaeum#1960 AC3): every direct dependency has a
+# pin, and every pin satisfies its paired pyproject.toml's declared range.
+pyyaml==6.0.1
+mcp==1.29.0
+chromadb==0.5.3
