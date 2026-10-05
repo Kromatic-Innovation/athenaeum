@@ -402,7 +402,18 @@ def test_mode_is_threaded_through_to_run_probe_all_arms(
             "--mode", "cli",
             "--materialize-root", str(tmp_path / "mat"),
             "--out-dir", str(tmp_path / "measurements"),
+            # Issue athenaeum#1959: without this, the (default-on)
+            # behavioural preflight makes its own run_probe_all_arms call
+            # FIRST, with the stub's recall_called defaulting False -- so
+            # the preflight refuses before the grid ever runs, and the one
+            # recorded mode would be the preflight's, not the grid's. The
+            # assertion below would then stay vacuously green even if the
+            # grid's own `mode=mode` kwarg were dropped entirely (the exact
+            # regression this test exists to catch) -- see the five
+            # siblings in this file (and test_floor_scan_hardening.py,
+            # test_phase2_cli.py) that already got this same fix.
+            "--no-preflight",
         ]
     )
 
-    assert seen_modes == ["cli"]
+    assert seen_modes == ["cli"]  # the GRID's own call, unambiguously
