@@ -80,13 +80,19 @@
 #                             alias for back-compat with older callers/tests.
 #   ATHENAEUM_GUARD_INSTALL_CMD  venv-refresh command run on drift
 #                             (default: <py> -m venv .venv && .venv/bin/python
-#                              -m pip install -q -e ".[<extras>]", where <py>
-#                              is an interpreter that actually satisfies the
-#                              deploy tree's requires-python — see
-#                              _dg_resolve_python; routed through the venv's
-#                              own python rather than bare .venv/bin/pip for
-#                              the same single-interpreter reason as
-#                              ATHENAEUM_GUARD_METADATA_REFRESH_CMD, athenaeum#894)
+#                              -m pip install -q -e ".[<extras>]"<constraints>,
+#                              where <py> is an interpreter that actually
+#                              satisfies the deploy tree's requires-python —
+#                              see _dg_resolve_python; routed through the
+#                              venv's own python rather than bare
+#                              .venv/bin/pip for the same single-interpreter
+#                              reason as ATHENAEUM_GUARD_METADATA_REFRESH_CMD,
+#                              athenaeum#894. <constraints> is
+#                              " -c requirements-ci.lock" when that file
+#                              exists in the deploy tree (dependency parity
+#                              with CI, athenaeum#1960) and empty otherwise;
+#                              an explicit ATHENAEUM_GUARD_INSTALL_CMD
+#                              overrides this default wholesale, unchanged.)
 #   ATHENAEUM_GUARD_PYTHON    force the venv-build interpreter (issue athenaeum#832).
 #                             Skips probing; still VERIFIED against
 #                             requires-python, and a chosen interpreter that
@@ -130,6 +136,21 @@ _dg_deploy_dir() {
 }
 _dg_ref()          { printf '%s' "${ATHENAEUM_DEPLOY_REF:-main}"; }
 _dg_extras()       { printf '%s' "${ATHENAEUM_DEPLOY_EXTRAS:-mcp,vector}"; }
+
+# CI-versus-deploy dependency parity (athenaeum#1960): when the deploy tree
+# carries requirements-ci.lock (it does once the fast-forward has picked up
+# the commit that added it), the default install constrains the refresh to
+# the SAME versions CI tested, instead of letting pip resolve pyproject.toml's
+# open ranges fresh. `pip -c` ignores constraints for packages the current
+# interpreter does not need, so this is safe across the lock's 3.11-3.13
+# matrix (see the lock's own header). Echoes "" when the file is absent, so
+# callers can splice this straight into a printf format string.
+_dg_constraints_flag() {
+  local dir="${1:-.}"
+  if [ -f "$dir/requirements-ci.lock" ]; then
+    printf ' -c requirements-ci.lock'
+  fi
+}
 
 _dg_is_checkout()  { [ -d "$1/.git" ] || [ -f "$1/.git" ]; }
 
@@ -294,20 +315,21 @@ EOF
 # so the common path costs nothing extra. Non-zero when no interpreter
 # satisfies the constraint; the caller aborts loudly.
 _dg_default_install_cmd() {
-  local dir="${1:-.}" py floor clear=""
+  local dir="${1:-.}" py floor clear="" constraints
   py="$(_dg_resolve_python "$dir")" || return 1
   floor="$(_dg_requires_python "$dir")" || floor=""
   if [ -n "$floor" ] && [ -x "$dir/.venv/bin/python" ] \
     && ! _dg_python_satisfies "$dir/.venv/bin/python" "$floor"; then
     clear=" --clear"
   fi
+  constraints="$(_dg_constraints_flag "$dir")"
   # `.venv/bin/python -m pip`, never bare `.venv/bin/pip` (issue athenaeum#894
   # AC2b): a freshly built venv's own pip normally matches its own python, but
   # routing through the interpreter here closes the same class of split this
   # guard's OTHER pip invocation (_dg_default_metadata_refresh_cmd) had to
   # close, so no path is left able to reintroduce it.
-  printf '"%s" -m venv%s .venv && .venv/bin/python -m pip install -q -e ".[%s]"' \
-    "$py" "$clear" "$(_dg_extras)"
+  printf '"%s" -m venv%s .venv && .venv/bin/python -m pip install -q -e ".[%s]"%s' \
+    "$py" "$clear" "$(_dg_extras)" "$constraints"
 }
 
 # The default drift reconcile: hard-reset the deploy checkout to origin/<ref>.

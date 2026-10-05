@@ -526,6 +526,43 @@ def test_deploy_extras_override_flows_into_install(tmp_path: Path) -> None:
     _assert_resolved_under_tmp(_cmd_interpreter(out), tmp_path)
 
 
+def test_install_cmd_adds_constraints_flag_when_lock_present(tmp_path: Path) -> None:
+    # athenaeum#1960 AC1, case 1: requirements-ci.lock exists in the deploy
+    # tree -> the default install is constrained to CI's resolved versions
+    # instead of letting pip re-resolve pyproject.toml's open ranges fresh.
+    tree = _tree_with_floor(tmp_path, ">=3.13")
+    (tree / "requirements-ci.lock").write_text("mcp==1.29.0\n")
+    shims = _shim_dir(tmp_path, {"python3": "3.13"})
+    out = _source_and_eval(f"_dg_default_install_cmd {tree}", {"PATH": _shimmed_path(shims)})
+    assert out == (
+        f'"{shims}/python3" -m venv .venv && '
+        '.venv/bin/python -m pip install -q -e ".[mcp,vector]" -c requirements-ci.lock'
+    )
+    _assert_resolved_under_tmp(_cmd_interpreter(out), tmp_path)
+
+
+def test_install_cmd_omits_constraints_flag_when_lock_absent(tmp_path: Path) -> None:
+    # athenaeum#1960 AC1, case 2: no requirements-ci.lock in the deploy tree
+    # -> unconstrained install, unchanged from before this issue.
+    tree = _tree_with_floor(tmp_path, ">=3.13")
+    assert not (tree / "requirements-ci.lock").exists()
+    shims = _shim_dir(tmp_path, {"python3": "3.13"})
+    out = _source_and_eval(f"_dg_default_install_cmd {tree}", {"PATH": _shimmed_path(shims)})
+    assert out == (
+        f'"{shims}/python3" -m venv .venv && '
+        '.venv/bin/python -m pip install -q -e ".[mcp,vector]"'
+    )
+    assert "-c requirements-ci.lock" not in out
+    _assert_resolved_under_tmp(_cmd_interpreter(out), tmp_path)
+
+
+# athenaeum#1960 AC1, case 3 ("ATHENAEUM_GUARD_INSTALL_CMD still overrides the
+# default unchanged") is already covered by
+# test_install_cmd_override_bypasses_interpreter_resolution above: an explicit
+# override runs as-is and never consults _dg_constraints_flag at all, so the
+# lock's presence/absence cannot affect it either way.
+
+
 def test_default_reconcile_cmd_is_hard_reset_to_origin_ref() -> None:
     # The drift reconcile is a `reset --hard origin/<ref>`, NOT `merge --ff-only`
     # -- so a rewind to an ancestor is actually applied, not a silent no-op

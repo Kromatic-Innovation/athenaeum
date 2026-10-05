@@ -89,6 +89,15 @@
 #   ATHENAEUM_SYNC_REINSTALL=0  skip the `pip install -e` reinstall step
 #   ATHENAEUM_DEPLOY_EXTRAS pip extras to install (default: mcp,vector — what
 #                           the MCP server + librarian's vector search need)
+#
+# CI-versus-deploy dependency parity (athenaeum#1960): when the deploy
+# checkout carries requirements-ci.lock, the reinstall step above passes
+# `-c requirements-ci.lock` so the deploy venv resolves under the SAME
+# constraints CI tested, instead of pyproject.toml's open ranges resolving
+# fresh. Absent that file (e.g. an older checkout mid-fast-forward), the
+# reinstall is unconstrained exactly as before. See _ds_constraints_flag and
+# scripts/deploy-guard.sh's _dg_constraints_flag (the same rule, applied to
+# the `hestia redeploy` path).
 #   ATHENAEUM_PYTHON        python interpreter for the stamp script (default: python3)
 set -euo pipefail
 
@@ -102,6 +111,18 @@ _ds_dir() {
 }
 _ds_ref() { printf '%s' "${ATHENAEUM_DEPLOY_REF:-main}"; }
 _ds_python() { printf '%s' "${ATHENAEUM_PYTHON:-python3}"; }
+
+# CI-versus-deploy dependency parity (athenaeum#1960) — mirrors
+# deploy-guard.sh's _dg_constraints_flag: when the deploy tree carries
+# requirements-ci.lock, constrain the reinstall to the same versions CI
+# tested instead of letting pip resolve pyproject.toml's open ranges fresh.
+# Echoes "" when the file is absent.
+_ds_constraints_flag() {
+  local dir="${1:-.}"
+  if [ -f "$dir/requirements-ci.lock" ]; then
+    printf ' -c requirements-ci.lock'
+  fi
+}
 
 # The stamp comparison ("is the install current with the checkout") — unchanged
 # from before athenaeum#1445, just factored out so --check can report it
@@ -224,7 +245,10 @@ if [ "${ATHENAEUM_SYNC_REINSTALL:-1}" != "0" ]; then
   venv_pip="$dir/.venv/bin/pip"
   if [ -x "$venv_pip" ]; then
     extras="${ATHENAEUM_DEPLOY_EXTRAS:-mcp,vector}"
-    ( cd "$dir" && "$venv_pip" install -q -e ".[${extras}]" )
+    constraints="$(_ds_constraints_flag "$dir")"
+    # shellcheck disable=SC2086 # intentional: $constraints is either empty
+    # or "-c requirements-ci.lock" and must split into two argv words.
+    ( cd "$dir" && "$venv_pip" install -q -e ".[${extras}]" $constraints )
   else
     echo "deploy-sync: no venv pip at $venv_pip — skipping reinstall" >&2
   fi

@@ -258,6 +258,72 @@ def test_deploy_sync_stamps_checkout(git_checkout: Path) -> None:
     assert (git_checkout / "dist" / ".build-sha").read_text() == head + "\n"
 
 
+# --------------------------------------------------------------------------- #
+# deploy-sync.sh reinstall step — CI-versus-deploy dependency parity
+# (athenaeum#1960 AC1). Mirrors the three cases covered against
+# scripts/deploy-guard.sh's _dg_default_install_cmd in test_deploy_guard.py:
+# the constraints flag present when requirements-ci.lock exists in the
+# deploy tree, and absent when it does not. (deploy-sync.sh's reinstall step
+# has no full-command override hook like ATHENAEUM_GUARD_INSTALL_CMD -- only
+# ATHENAEUM_SYNC_REINSTALL=0 to skip it entirely -- so there is no third
+# "override still wins" case to cover here.)
+# --------------------------------------------------------------------------- #
+
+
+def _install_fake_pip(checkout: Path, capture_file: Path) -> None:
+    """A fake `.venv/bin/pip` that records its argv instead of installing
+    anything, so the reinstall step's exact command line can be asserted on
+    without a real venv or network access."""
+    pip_bin = checkout / ".venv" / "bin" / "pip"
+    pip_bin.parent.mkdir(parents=True, exist_ok=True)
+    pip_bin.write_text(
+        "#!/usr/bin/env bash\n"
+        f'printf \'%s\\n\' "$@" > "{capture_file}"\n'
+    )
+    pip_bin.chmod(0o755)
+
+
+def test_deploy_sync_reinstall_adds_constraints_flag_when_lock_present(
+    git_checkout: Path, tmp_path: Path
+) -> None:
+    _require_bash()
+    capture = tmp_path / "pip-argv.txt"
+    _install_fake_pip(git_checkout, capture)
+    (git_checkout / "requirements-ci.lock").write_text("mcp==1.29.0\n")
+    proc = subprocess.run(
+        ["bash", str(DEPLOY_SYNC)],
+        env=_sync_env(git_checkout),
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert capture.read_text().splitlines() == [
+        "install",
+        "-q",
+        "-e",
+        ".[mcp,vector]",
+        "-c",
+        "requirements-ci.lock",
+    ]
+
+
+def test_deploy_sync_reinstall_omits_constraints_flag_when_lock_absent(
+    git_checkout: Path, tmp_path: Path
+) -> None:
+    _require_bash()
+    capture = tmp_path / "pip-argv.txt"
+    _install_fake_pip(git_checkout, capture)
+    assert not (git_checkout / "requirements-ci.lock").exists()
+    proc = subprocess.run(
+        ["bash", str(DEPLOY_SYNC)],
+        env=_sync_env(git_checkout),
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert capture.read_text().splitlines() == ["install", "-q", "-e", ".[mcp,vector]"]
+
+
 def _bare_remote(tmp_path: Path, checkout: Path, ref: str) -> Path:
     """A local bare repo carrying ``checkout``'s current ``ref`` tip.
 
