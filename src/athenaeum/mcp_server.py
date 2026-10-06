@@ -101,6 +101,7 @@ from athenaeum.provenance import resolve_remember_extras, resolve_remember_sourc
 from athenaeum.recall_overflow import (
     OVERFLOW_TEMPLATE_NAME,
     load_overflow_template,
+    render_access_withheld_line,
     render_overflow_line,
 )
 from athenaeum.search import score_keyword_page, tokenize_keyword_query
@@ -250,6 +251,14 @@ def _render_recall_overflow_line(withheld_by_type: dict[str, int], *, at_least: 
     :func:`athenaeum.context.build_context`'s per-turn push path, which is
     where athenaeum#1894 measured the notice going missing."""
     return render_overflow_line(withheld_by_type, at_least=at_least)
+
+
+def _render_recall_access_withheld_line(count: int) -> str:
+    """Thin alias for :func:`athenaeum.recall_overflow.render_access_withheld_line`
+    (issue athenaeum#1967, AC2) -- see that function's docstring for what it
+    reports and why it is a count-only, no-breakdown line, distinct from
+    :func:`_render_recall_overflow_line`'s relevance-cap breadcrumb."""
+    return render_access_withheld_line(count)
 
 
 def active_tool_use_id() -> str | None:
@@ -1326,6 +1335,7 @@ def _recall_via_backend(
     from athenaeum.search import (
         DegradedIndexError,
         apply_relevance_cap,
+        find_personal_page_by_exact_name,
         fts5_index_available,
         get_backend,
         meets_relevance_floor,
@@ -1574,6 +1584,44 @@ def _recall_via_backend(
                     guard_rank=resolve_recall_hybrid_guard_rank(config),
                 )
 
+    # Issue athenaeum#1967 (AC3) -- the operator ruling: an `access: personal`
+    # page must be reachable BY NAME in default recall even when every
+    # backend above ranked it arbitrarily far past `top_k` (AC1 traced the
+    # omission to the ranking layer, not to any filter -- see
+    # `find_personal_page_by_exact_name`'s docstring). Scoped to the
+    # owner/default caller ONLY (`caller_audience is None`) -- a restricted
+    # caller's reachability for an `access: personal` page is unchanged,
+    # still governed solely by an explicit `audience:` grant. Prepending
+    # (rather than appending) guarantees survival through the relevance cap
+    # below regardless of where the real ranking buried it; declining the
+    # rescue when an explicit `type=` filter would be violated keeps this
+    # from surprising a caller who deliberately narrowed by type.
+    if caller_audience is None:
+        personal_rescue = find_personal_page_by_exact_name(query, effective_cache, wiki_root)
+        if personal_rescue is not None:
+            rescue_filename, rescue_name, rescue_type = personal_rescue
+            type_ok = normalized_types is None or (
+                rescue_type is not None and rescue_type in normalized_types
+            )
+            # ``hits`` here is the WINDOW-wide fetch (``window =
+            # max(top_k, _HYBRID_CANDIDATE_POOL)``), not the ``top_k``-wide
+            # rendered slice — a buried personal page is typically already
+            # IN this list, just past index ``top_k``, where the relevance
+            # cap below would still drop it. Dedup-then-prepend handles both
+            # shapes: entirely absent from the window, or present but
+            # buried past ``top_k``.
+            existing_index = next(
+                (i for i, h in enumerate(hits) if h[0] == rescue_filename), None
+            )
+            needs_rescue = type_ok and (existing_index is None or existing_index >= top_k)
+            if needs_rescue:
+                if existing_index is not None:
+                    rescue_score = hits[existing_index][2]
+                    hits = [h for i, h in enumerate(hits) if i != existing_index]
+                else:
+                    rescue_score = hits[0][2] if hits else 0.0
+                hits = [(rescue_filename, rescue_name, rescue_score), *hits]
+
     if not hits:
         return f"No wiki pages matched query: {query!r}{unrecognized_note}"
 
@@ -1684,6 +1732,12 @@ def _recall_via_backend(
     # collected here survives unchanged, in the same order — byte-identical
     # to this issue not existing.
     _rows: list[_RecallRow] = []
+    # Issue athenaeum#1967 (AC2): tally of Layer-C audience drops below, for
+    # the access-withheld breadcrumb appended at the end of this function.
+    # Derived from the ACTUAL per-hit drop below (never a second guess at
+    # the filter) and stays 0 (no line rendered) for the owner, who never
+    # reaches that branch.
+    _withheld_access_count = 0
     # Issue athenaeum#885: ONE index per surface class for the WHOLE call, shared
     # across all top_k hits — never one scan per hit. Keyed by surface class
     # because different hits can map to different excluded surfaces. Each index
@@ -1722,6 +1776,7 @@ def _recall_via_backend(
         # cannot verify, so withhold. Owner (caller_audience=None) is unaffected.
         if caller_audience is not None:
             if not readable or not is_page_authorized(fm, caller_audience):
+                _withheld_access_count += 1
                 continue
 
         # Issue athenaeum#532 (H4): honor the storage-adapter ``recallable`` corpus
@@ -1981,7 +2036,15 @@ def _recall_via_backend(
     blocks: list[str] = [row.block for row in _rows]
     _pushed_hits: list[tuple[str, dict[str, object], int]] = [row.pushed_hit for row in _rows]
     if not blocks:
-        return f"No wiki pages matched query: {query!r}{unrecognized_note}"
+        _no_match = f"No wiki pages matched query: {query!r}{unrecognized_note}"
+        # Issue athenaeum#1967 (AC2): even an otherwise-empty result must
+        # distinguish "withheld" from "a genuine miss" — this is the exact
+        # shape the operator's ruling calls out ("a short result list is
+        # distinguishable from a miss").
+        _access_line = _render_recall_access_withheld_line(_withheld_access_count)
+        if _access_line:
+            _no_match = f"{_no_match}\n\n{_access_line}"
+        return _no_match
 
     parts: list[str] = [f"Found {len(blocks)} matching pages:\n"]
     for rank, block in enumerate(blocks, 1):
@@ -2045,6 +2108,13 @@ def _recall_via_backend(
     result = "\n".join(parts) + unrecognized_note
     if _overflow_line:
         result = f"{result}\n\n{_overflow_line}"
+    # Issue athenaeum#1967 (AC2): the access-withheld breadcrumb, sibling to
+    # the relevance-cap breadcrumb above but for a different removal reason
+    # (a restricted caller's Layer-C audience drop) -- see
+    # `_render_recall_access_withheld_line`'s docstring.
+    _access_line = _render_recall_access_withheld_line(_withheld_access_count)
+    if _access_line:
+        result = f"{result}\n\n{_access_line}"
     return result
 
 
