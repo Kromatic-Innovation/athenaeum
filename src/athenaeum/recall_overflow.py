@@ -19,6 +19,20 @@ renders the SAME line from the SAME template as the MCP surface, rather than
 becoming a second Python implementation that can drift the same way the awk
 one did.
 
+Issue athenaeum#1967 (AC2) added a SECOND, distinct breadcrumb —
+:func:`render_access_withheld_line` — for a different removal reason: a
+restricted caller's Layer-C audience/``recallable`` drop (``athenaeum.mcp_server``'s
+and ``athenaeum._cmd_query``'s own fail-closed re-check against fresh on-disk
+frontmatter), never the relevance cap. The two are kept as separate
+functions/templates rather than folded into one: the cap's "why" is a type
+breakdown (safe to disclose — entity types are not sensitive), while an
+access-withheld "why" is deliberately a single opaque reason with no type or
+page-name breakdown, so the count itself cannot be used to infer which
+access level or how many pages of a given type exist behind the caller's
+scope. Both share this module's "single-sourced across every caller" shape so
+the CLI (``athenaeum recall``) and the MCP ``recall`` tool render identical
+wording for each from the exact same template.
+
 Layering: L1. Deliberately stdlib-only (``importlib.resources`` and
 ``collections.abc``) — :mod:`athenaeum.context` documents a hard
 import-weight contract for the per-turn retrieval path, and a shared helper
@@ -37,6 +51,11 @@ from collections.abc import Mapping
 #: (``policies/prompt-text-is-content.md``: wording is content, not code, so
 #: it lives in a ``.md`` file next to the caller, not a string literal here).
 OVERFLOW_TEMPLATE_NAME = "recall_overflow_breadcrumb.md"
+
+#: Issue athenaeum#1967 (AC2): the access-withheld breadcrumb's packaged
+#: template name, sibling to :data:`OVERFLOW_TEMPLATE_NAME` above but for a
+#: different removal reason — see :func:`render_access_withheld_line`.
+ACCESS_WITHHELD_TEMPLATE_NAME = "recall_access_withheld_breadcrumb.md"
 
 
 def load_overflow_template() -> str:
@@ -79,3 +98,47 @@ def render_overflow_line(withheld_by_type: Mapping[str, int], *, at_least: bool)
     types_str = ", ".join(f"{n} {t}" for t, n in sorted(withheld_by_type.items()))
     template = load_overflow_template().strip("\n")
     return template.format(count=count_str, types=types_str)
+
+
+def load_access_withheld_template() -> str:
+    """Read the access-withheld breadcrumb template (issue athenaeum#1967, AC2).
+
+    Carries one placeholder, ``{count}`` — see :func:`render_access_withheld_line`.
+    Sibling to :func:`load_overflow_template`; same "load fresh, tiny file,
+    never a hot loop" rationale.
+    """
+    resource = importlib.resources.files("athenaeum.prompts").joinpath(
+        ACCESS_WITHHELD_TEMPLATE_NAME
+    )
+    return resource.read_text(encoding="utf-8")
+
+
+def render_access_withheld_line(count: int) -> str:
+    """Render the access-withheld breadcrumb line, or ``""`` when *count* is 0.
+
+    Issue athenaeum#1967 (AC2) — the operator ruling: "When any filter removes
+    results after ranking, the output states how many were withheld and
+    why." This is the "why" for a RESTRICTED caller's Layer-C audience/
+    ``recallable`` drop (:func:`athenaeum.models.is_page_authorized` /
+    :func:`athenaeum.storage.is_recallable`, re-checked against fresh
+    on-disk frontmatter by both the MCP ``recall`` tool and the CLI
+    ``athenaeum recall`` command) — never the owner/default caller, who is
+    authorized for everything and never reaches that branch, and never the
+    relevance-cap breadcrumb :func:`render_overflow_line` already covers.
+
+    Deliberately reports ONLY a count, never a type/page/access-level
+    breakdown (contrast :func:`render_overflow_line`'s ``types`` field,
+    which IS safe to disclose) — see this module's docstring for why a
+    restricted caller must not be able to infer anything about what, or how
+    much, sits behind their own scope beyond "something was here".
+
+    *count* <= 0 returns ``""`` (AC2's honesty requirement: a count of 0
+    must never be printed as noise) — the caller is responsible for passing
+    an ACTUAL pre/post-filter delta (the number of candidate hits this same
+    call's Layer-C check actually dropped), never a second guess at the
+    filter.
+    """
+    if count <= 0:
+        return ""
+    template = load_access_withheld_template().strip("\n")
+    return template.format(count=count)

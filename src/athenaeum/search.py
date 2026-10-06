@@ -81,6 +81,7 @@ from athenaeum.models import (
     audience_index_string,
     audience_string_authorized,
     is_page_authorized,
+    parse_access,
     parse_deprecated,
     parse_frontmatter,
     resolve_page_type,
@@ -1768,6 +1769,119 @@ class FTS5Backend:
         finally:
             conn.close()
         return [str(r[0]) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Exact-name rescue for ``access: personal`` pages (issue athenaeum#1967, AC3)
+# ---------------------------------------------------------------------------
+
+
+def find_personal_page_by_exact_name(
+    query: str,
+    cache_dir: Path,
+    wiki_root: Path,
+) -> tuple[str, str, str | None] | None:
+    """Exact-name rescue for ``access: personal`` pages (issue athenaeum#1967).
+
+    **Why this exists.** AC1's root-cause trace found NO audience/PII/
+    ``recallable`` filter touches a default (owner, ``caller_audience=None``)
+    caller anywhere in this module — :meth:`FTS5Backend.query`'s
+    ``audience_clause`` (only added when ``caller_audience is not None``),
+    :meth:`VectorBackend.query`'s identical gate (via :func:`_hits_from_query_results`),
+    and :meth:`KeywordBackend.query`'s :func:`~athenaeum.models.is_page_authorized`
+    check are ALL no-ops for the owner. The athenaeum#1967 omission is a RANKING
+    effect, not a filter: :meth:`FTS5Backend.query`'s weighted ``bm25()``
+    expression (``_BM25_WEIGHTS``, this class, body weighted 0.15x against
+    1.0x for every other column — see that constant's own comment for the
+    measured tension that sets it there) can score a page whose name-match
+    signal lives mostly in ``body`` far below where RAW (unweighted)
+    ``bm25(wiki)`` — what an operator running a direct SQL query, or the
+    scan-on-query :class:`KeywordBackend`, effectively sees — would rank it;
+    the vector backend's pure embedding distance independently ranks a
+    short proper-noun query poorly on its own (this module's docstring,
+    "Three backends" paragraph) for the same underlying reason the hybrid
+    FTS5+vector fusion design exists at all. Neither is a bug in the
+    filtering sense — both are documented, deliberate ranking trade-offs —
+    but together they can bury a page arbitrarily far past any ``top_k``
+    cutoff.
+
+    The operator's ruling (occam:disposition, 2026-10-05) settles AC3
+    directly against that finding: ``access: personal`` pages must be
+    reachable BY NAME in default recall regardless of what the ranking
+    pipeline does to everyone else. This function is that narrow escape
+    hatch — consulted ALONGSIDE normal ranking, never instead of it:
+
+    - Scope is ONLY ``access: personal``. ``open``/``internal``/
+      ``confidential`` pages are UNTOUCHED — their reachability is decided
+      exactly as it was before this issue (see :func:`athenaeum.models.is_page_authorized`),
+      so a page carrying a ``confidential`` TAG (as athenaeum#1967's own fixture
+      does, alongside ``access: personal``) gets no special treatment from
+      this function at all — only the ``access:`` LEVEL matters here, never
+      a tag.
+    - Scope is ONLY the owner/default caller. Callers MUST gate this behind
+      ``caller_audience is None`` themselves (this function takes no
+      ``caller_audience`` parameter precisely so it cannot be called any
+      other way by accident) — a restricted caller's reachability for an
+      ``access: personal`` page is UNCHANGED: still governed solely by an
+      explicit ``audience:`` grant, same as before this issue.
+
+    **Cost.** A single equality scan over the FTS5 ``name`` column of the
+    ALREADY-BUILT index (``wiki`` is an FTS5 virtual table, so ``WHERE
+    name = ?`` is a content-table scan, not an index-assisted lookup — no
+    ``MATCH``/BM25 ranking, no filesystem walk over the corpus). Measured at
+    ~17ms at 50k rows, so cheap in practice even though it is not O(1).
+    Matched candidates are then re-checked against FRESH on-disk
+    frontmatter (the same Layer-C discipline every other read path in this
+    repo follows), so a stale index entry can never resurrect a page whose
+    ``access:`` has since changed.
+
+    Returns ``(filename, name, page_type)`` for the first candidate whose
+    FRESH frontmatter has ``access: personal``, or ``None`` when: no FTS5
+    index exists yet at *cache_dir* (e.g. a vector-only deployment that has
+    never run ``athenaeum reindex`` — the module docstring's "built
+    unconditionally by session-start-recall.sh" invariant covers every real
+    deployment, so this is a graceful degrade, not an error), *query* is
+    blank, no exact ``name`` match exists, or the matched page's access
+    level is not ``personal``. ``page_type`` is the matched page's resolved
+    ``type:`` (or ``None``), so a caller enforcing an explicit ``type=``
+    filter can decline the rescue when it would violate that filter.
+    """
+    db_path = cache_dir / _DB_NAME
+    if not db_path.is_file():
+        return None
+    normalized = query.strip()
+    if not normalized:
+        return None
+    try:
+        conn = sqlite3.connect(str(db_path))
+    except sqlite3.Error:
+        return None
+    try:
+        rows = conn.execute(
+            "SELECT filename FROM wiki WHERE name = ?1 COLLATE NOCASE",
+            (normalized,),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return None
+    finally:
+        conn.close()
+    for (filename,) in rows:
+        if not isinstance(filename, str):
+            continue  # pragma: no cover - defensive: column is always TEXT
+        page_path = wiki_root / filename
+        if not page_path.is_file():
+            continue
+        try:
+            text = page_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        fm, _ = parse_frontmatter(text)
+        if parse_access(fm) != "personal":
+            continue
+        name_raw = fm.get("name")
+        name = str(name_raw) if name_raw else Path(filename).stem
+        return filename, name, resolve_page_type(fm) or None
+    return None
 
 
 # ---------------------------------------------------------------------------

@@ -102,6 +102,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`access: personal` pages are now reachable by exact name in default
+  recall, CLI and MCP (issue athenaeum#1967, operator ruling 2026-10-05).**
+  AC1's trace found NO audience/PII/`recallable` filter touches the
+  owner/default caller anywhere in `athenaeum.search` or `athenaeum.mcp_server`
+  — every one is a strict no-op when `caller_audience is None`. The reported
+  omission is a ranking effect: `FTS5Backend`'s weighted `bm25()` expression
+  (body weighted 0.15x against 1.0x for every other column) and the vector
+  backend's pure embedding distance can both rank a short proper-noun query
+  far below where raw/unweighted `bm25()` or the scan-on-query keyword
+  backend rank it, burying a page past any `top_k` cutoff with no filter
+  involved. `athenaeum.search.find_personal_page_by_exact_name` is a new,
+  narrow escape hatch — a single equality scan over the FTS5 `name` column
+  (the `wiki` table is an FTS5 virtual table, so this is a content-table
+  scan, not an index-assisted O(1) lookup — cheap in practice, ~17ms at 50k
+  rows), re-verified against fresh on-disk frontmatter — consulted alongside
+  normal ranking for the owner/default caller only; a restricted caller's
+  reachability for an `access: personal` page is unchanged, still governed
+  solely by an explicit
+  `audience:` grant, and no other access level (`open`/`internal`/
+  `confidential`) is affected. Both the MCP `recall` tool and the CLI
+  `athenaeum recall` command now also print a count (never a type/page/level
+  breakdown) whenever a RESTRICTED caller's Layer-C audience re-check removes
+  an already-ranked result, so a short list is distinguishable from a miss —
+  a count of 0 renders nothing.
+
 - **`docs/design/contradiction-detection.md` and `docs/design/conflict-resolution.md`
   no longer claim the C1-C4 contradiction detector is live (issue
   athenaeum#715).** Both docs' "Status" sections dated from athenaeum#715's
