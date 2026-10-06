@@ -10,7 +10,9 @@ import pytest
 
 from athenaeum.models import (
     AI_ATTRIBUTED_SOURCE_TYPES,
+    FOLDED_INTO_FIELD,
     SOURCE_TYPES,
+    TOMBSTONE_STATUS,
     AutoMemoryFile,
     EntityAction,
     EntityIndex,
@@ -21,6 +23,7 @@ from athenaeum.models import (
     delimited_index_string,
     generate_uid,
     is_inactive_memory,
+    is_tombstone,
     load_schema_list,
     parse_asserter,
     parse_deprecated,
@@ -31,6 +34,8 @@ from athenaeum.models import (
     render_frontmatter,
     resolve_page_type,
     slugify,
+    stamp_tombstone,
+    tombstone_target,
 )
 
 # ---------------------------------------------------------------------------
@@ -1269,6 +1274,70 @@ class TestIsInactiveMemory:
 
     def test_active_keys_only(self) -> None:
         assert is_inactive_memory({"name": "x", "deprecated": False}) is False
+
+
+class TestTombstoneRepresentation:
+    """Issue athenaeum#716 (lane 716-A): the tombstone vocabulary itself --
+    ``stamp_tombstone`` / ``is_tombstone`` / ``tombstone_target`` -- kept
+    separate from the index/recall/embedding EXCLUSION tests (those live in
+    ``tests/test_search.py`` / ``tests/test_storage.py`` /
+    ``tests/test_storage_enforcement.py``, which exercise the per-page
+    ``embedded`` override these frontmatter keys feed)."""
+
+    def test_stamp_sets_all_three_keys(self) -> None:
+        meta = {"name": "old-page", "type": "concept"}
+        stamped = stamp_tombstone(meta, "new-page")
+        assert stamped["status"] == TOMBSTONE_STATUS == "folded"
+        assert stamped[FOLDED_INTO_FIELD] == "new-page"
+        assert stamped["folded_into"] == "new-page"
+        assert stamped["embedded"] is False
+
+    def test_stamp_does_not_mutate_input(self) -> None:
+        meta = {"name": "old-page"}
+        stamp_tombstone(meta, "new-page")
+        assert "status" not in meta
+        assert FOLDED_INTO_FIELD not in meta
+        assert "embedded" not in meta
+
+    def test_stamp_preserves_other_keys(self) -> None:
+        meta = {"name": "old-page", "tags": "a b", "type": "concept"}
+        stamped = stamp_tombstone(meta, "new-page")
+        assert stamped["name"] == "old-page"
+        assert stamped["tags"] == "a b"
+        assert stamped["type"] == "concept"
+
+    def test_is_tombstone_true_for_stamped_meta(self) -> None:
+        stamped = stamp_tombstone({"name": "old-page"}, "new-page")
+        assert is_tombstone(stamped) is True
+
+    def test_is_tombstone_false_for_empty_or_missing(self) -> None:
+        assert is_tombstone(None) is False
+        assert is_tombstone({}) is False
+        assert is_tombstone({"name": "x"}) is False
+
+    def test_is_tombstone_does_not_collide_with_contradiction_flagged(self) -> None:
+        # ``status:`` already carries a DIFFERENT page-state value elsewhere
+        # (athenaeum.merge.CONTRADICTION_STATUS_FLAGGED /
+        # athenaeum.verdict_effects.CONTRADICTION_STATUS_FLAGGED, both
+        # "contradiction-flagged") -- proving the two never collide.
+        assert is_tombstone({"status": "contradiction-flagged"}) is False
+        assert TOMBSTONE_STATUS != "contradiction-flagged"
+
+    def test_tombstone_target_returns_folded_into(self) -> None:
+        stamped = stamp_tombstone({"name": "old-page"}, "winner-page")
+        assert tombstone_target(stamped) == "winner-page"
+
+    def test_tombstone_target_none_when_not_a_tombstone(self) -> None:
+        assert tombstone_target(None) is None
+        assert tombstone_target({}) is None
+        assert tombstone_target({"folded_into": "winner-page"}) is None  # no status
+
+    def test_tombstone_target_none_when_malformed(self) -> None:
+        # A tombstone missing/blank ``folded_into`` fails open to ``None``
+        # rather than raising.
+        assert tombstone_target({"status": "folded"}) is None
+        assert tombstone_target({"status": "folded", "folded_into": "  "}) is None
+        assert tombstone_target({"status": "folded", "folded_into": 7}) is None
 
 
 class TestAutoMemoryFileInactive:
