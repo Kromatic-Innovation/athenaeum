@@ -1851,7 +1851,22 @@ def find_personal_page_by_exact_name(
     unconditionally by session-start-recall.sh" invariant covers every real
     deployment, so this is a graceful degrade, not an error), *query* is
     blank, no exact ``name`` match exists, or the matched page's access
-    level is not ``personal``. ``page_type`` is the matched page's resolved
+    level is not ``personal``, or the matched page carries a
+    page-level ``embedded: false`` override.
+
+    **The ``embedded: false`` re-check is load-bearing, not belt-and-braces**
+    (issue athenaeum#716). This function reads the ALREADY-BUILT FTS5 index,
+    and a fold tombstones its source *without* rebuilding that index — so a
+    page tombstoned since the last ``reindex`` still has a live row here. The
+    fresh-frontmatter pass above re-checks ``access:`` for exactly this class
+    of staleness; a tombstone needs the same treatment, and needs it MORE,
+    because this function's result is **prepended** by its callers
+    (:func:`athenaeum.mcp_server.recall_search`,
+    :mod:`athenaeum._cmd_query`) ahead of every backend hit, bypassing the
+    index-build exclusion that keeps a tombstone out of normal recall. Without
+    this check, folding an ``access: personal`` page would leave it reachable
+    by exact name until the next reindex — i.e. NOT "invisible to recall",
+    which athenaeum#716 requires unconditionally. ``page_type`` is the matched page's resolved
     ``type:`` (or ``None``), so a caller enforcing an explicit ``type=``
     filter can decline the rescue when it would violate that filter.
     """
@@ -1886,6 +1901,16 @@ def find_personal_page_by_exact_name(
             continue
         fm, _ = parse_frontmatter(text)
         if parse_access(fm) != "personal":
+            continue
+        # Issue athenaeum#716: a page-level ``embedded: false`` override (a fold
+        # tombstone, or athenaeum#718's cold-tier demotion) is excluded from
+        # every index and invisible to recall. The FTS5 row read above can
+        # predate the override, and this function's result is PREPENDED by its
+        # callers ahead of every backend hit -- so the override must be
+        # re-checked here against fresh frontmatter, exactly like ``access:``
+        # is, or the rescue would resurrect a tombstone past the index-build
+        # exclusion. See this function's docstring.
+        if page_embedding_disabled(fm):
             continue
         name_raw = fm.get("name")
         name = str(name_raw) if name_raw else Path(filename).stem
