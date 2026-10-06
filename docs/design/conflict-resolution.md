@@ -663,30 +663,35 @@ historical merge proposals were both wrong, at 0.84 and 0.82, while the one
 verified-correct cluster sat at 0.77), and similarity's only remaining job is
 proposing which pairs to compare.
 
-### Status: partially cut over
+### Status: both old paths retired; one comparator domain still dark
 
 The comparator and its verdict effects (auto-supersession with its
 partial-order authority treatment and rate limits, evidence-artifact fold
 proposals, the `compatible` TTL re-check, sibling-scope widening probes) are
-**built and tested, gated off by default** behind `librarian.comparator_enabled`
-(default `false`) — see
+**built and tested**, behind the single master switch
+`librarian.comparator_enabled` (default `false`) — see
 [`docs/reference/configuration.md`](../reference/configuration.md#five-verdict-comparator-athenaeum715--off-by-default).
 
 **Tier 3 / `tier3_merge` and this document's audit-locked frontmatter
-disagreement catalog are UNCHANGED and still describe live behaviour.**
-athenaeum#715's cut-over so far only replaces `athenaeum.wiki_dedupe`'s
-wiki-page-vs-wiki-page dedup pass (already-COMPILED `wiki/*.md` pages
-compared against each other) — that pass's own confidence/suppression-gate
-algorithm is deleted outright and replaced by the comparator, gated on the
-SAME `librarian.comparator_enabled` knob. The C1-C4 auto-memory pipeline's
-own intra-cluster contradiction detector (`athenaeum.merge` /
-`athenaeum.contradictions`, see
+disagreement catalog are unaffected and still describe live behaviour.**
+`athenaeum.wiki_dedupe`'s wiki-page-vs-wiki-page dedup pass (already-COMPILED
+`wiki/*.md` pages compared against each other) had its own
+confidence/suppression-gate algorithm **deleted outright** and replaced by
+the comparator, gated on the SAME `librarian.comparator_enabled` knob. The
+C1-C4 auto-memory pipeline's own intra-cluster contradiction detector
+(`athenaeum.merge` / `athenaeum.contradictions`, see
 [`docs/design/contradiction-detection.md`](contradiction-detection.md) for the
-full pipeline) is **still the old path** — deeply interleaved with
-run-level deadline checkpointing, the detection-incomplete retry queue, and
-the shared API-call/spend budget, so retiring it safely is scoped as its
-own follow-up. Until it lands, the other live reader of the new path
-(besides `athenaeum.wiki_dedupe` above) is the explicit, opt-in
+full pipeline and its current status) was **retired from the live pipeline
+by issue athenaeum#1256** (merged via PR athenaeum#1974, 2026-10-05):
+`merge.py` no longer calls `detect_contradictions`, and that function now
+runs only under the `athenaeum measure shadow-parity` measurement path. The
+raw-cluster-domain bridge that would otherwise replace it
+(`athenaeum.cluster_comparator`, issue athenaeum#1255) has no live
+production caller yet either — tracked separately as athenaeum#1946, an
+operator-ruled non-blocker of athenaeum#1256 — so `athenaeum.retire` holds
+multi-member clusters conservatively until that lands, rather than either
+path running in parallel. The other live reader of the new (page-level)
+path (besides `athenaeum.wiki_dedupe` above) is the explicit, opt-in
 `athenaeum merges recompare` command, which re-runs the comparator over the
 existing pending merge proposals and records a verdict per source pair —
 dry-run by default, and with no path to approving a merge at all.

@@ -55,6 +55,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`docs/design/contradiction-detection.md` and `docs/design/conflict-resolution.md`
+  no longer claim the C1-C4 contradiction detector is live (issue
+  athenaeum#715).** Both docs' "Status" sections dated from athenaeum#715's
+  phase 3 and said the detector was "still the old path" pending its own
+  retirement follow-up. Issue athenaeum#1256 (PR athenaeum#1974,
+  2026-10-05) has since retired it: `merge.py` no longer calls
+  `contradictions.detect_contradictions`, and that function now runs only
+  under `athenaeum measure shadow-parity`. Both docs are corrected to
+  describe the unified five-verdict comparator as the current state —
+  including that the raw-cluster-domain bridge (`athenaeum.cluster_comparator`,
+  issue athenaeum#1255) remains dark pending athenaeum#1946, a tracked,
+  operator-ruled non-blocker, so `athenaeum.retire` holds conservatively
+  rather than either detector running in parallel. No source change; this
+  closes the last open item of a fresh full re-sweep of athenaeum#715's 23
+  acceptance criteria against `develop` @ `b80bb775` — the other 22 were
+  independently re-verified as already met by test node-id.
+
 - **`mcp` can no longer silently resolve to a major `cli_tool_bridge.py`
   doesn't support (issue athenaeum#1953).** `cli_tool_bridge.py`
   (athenaeum#1951) imports `mcp.server.lowlevel.Server` and uses the
