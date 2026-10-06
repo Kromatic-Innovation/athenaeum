@@ -40,19 +40,24 @@ dependencies = [
 
 [project.optional-dependencies]
 mcp = [
-    # athenaeum#1953: fastmcp-slim 3.x declares `mcp<2.0,>=1.24.0`; 4.x
-    # declares `mcp<3.0,>=2.0.0` (verified against PyPI metadata). Both
-    # satisfy a bare `fastmcp>=2.0.0,<5.0`, so that range alone does not pin
-    # the `mcp` API surface actually in use -- cli_tool_bridge.py imports
-    # `mcp.server.lowlevel.Server` directly and uses the pre-2.0
-    # `list_tools`/`call_tool` decorator API, which does not exist on
-    # `mcp>=2.0`. The `<4.0` cap keeps the resolver on the fastmcp major
-    # that pulls the matching `mcp` pin below; the explicit `mcp` pin
-    # guards the bridge's direct import even if that transitive
-    # relationship ever changes. See athenaeum#1954 to port the bridge to
-    # the `mcp` 2.x API and lift both pins.
-    "fastmcp>=2.0.0,<4.0",
-    "mcp>=1.24,<2.0",
+    # athenaeum#1954: the `<4.0` fastmcp cap athenaeum#1953 added is lifted --
+    # the pre-2.0 `mcp` API it was protecting is gone, cli_tool_bridge.py now
+    # builds its `mcp.server.lowlevel.Server` with the 2.x `on_list_tools` /
+    # `on_call_tool` constructor callbacks. The `mcp` pin stays DECLARED (the
+    # bridge imports `mcp` directly, so it is a real first-order dependency,
+    # not merely a fastmcp transitive) but its bound is now a FLOOR of 2.0
+    # rather than athenaeum#1953's `<2.0` ceiling: the 2.x registration
+    # surface does not exist on `mcp` 1.x, so a resolver that picked fastmcp
+    # 3.x -- which declares `mcp<2.0` -- would break the bridge in the other
+    # direction. `<3.0` matches what fastmcp-slim 4.x itself declares.
+    "fastmcp>=2.0.0,<5.0",
+    "mcp>=2.0,<3.0",
+    # athenaeum#1954: cli_tool_bridge.py validates `tools/call` arguments
+    # against the served input schema itself -- `mcp` 2.x dropped the pre-2.0
+    # decorator's built-in `validate_input` and offers no stdio equivalent.
+    # `mcp` hard-declares `jsonschema>=4.20.0` so this is already present,
+    # but the bridge imports it DIRECTLY, so it is declared like `mcp` is.
+    "jsonschema>=4.20",
 ]
 vector = [
     "chromadb>=0.5.0,<2.0",
@@ -65,11 +70,11 @@ dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
     "ruff==0.16.9",
-    # athenaeum#1953: kept identical to the `mcp` extra above -- see that
-    # block for why both an `mcp` pin and a tightened `fastmcp` upper bound
-    # are needed.
-    "fastmcp>=2.0.0,<4.0",
-    "mcp>=1.24,<2.0",
+    # athenaeum#1954: kept identical to the `mcp` extra above -- see that
+    # block for why `mcp` stays declared and why its bound is a 2.0 floor.
+    "fastmcp>=2.0.0,<5.0",
+    "mcp>=2.0,<3.0",
+    "jsonschema>=4.20",
     # athenaeum#1066: emits `::error file=...,line=...::` workflow commands for
     # each failing test under `GITHUB_ACTIONS=true`, which GitHub turns into
     # check-run annotations — readable via `gh api

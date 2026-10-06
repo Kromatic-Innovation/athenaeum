@@ -22,9 +22,35 @@ Two halves, run in two different processes:
 - **Child** (:func:`main`, run as ``python -m athenaeum.cli_tool_bridge``):
   a real ``mcp.server.lowlevel.Server`` speaking MCP over stdio to the
   ``claude -p`` subprocess that spawned it (per its generated
-  ``--mcp-config``). ``list_tools`` serves the tool specs verbatim;
-  ``call_tool`` opens a fresh connection to the Host's socket for every
+  ``--mcp-config``). ``tools/list`` serves the tool specs verbatim;
+  ``tools/call`` opens a fresh connection to the Host's socket for every
   call and relays the result back as a single text content block.
+
+  Handlers are registered through the ``mcp`` 2.x ``on_list_tools`` /
+  ``on_call_tool`` **constructor callbacks** (athenaeum#1954). The pre-2.0
+  SDK registered them as ``@server.list_tools()`` / ``@server.call_tool()``
+  decorators; ``mcp`` 2.x removed those methods from ``Server`` entirely, so
+  that spelling raises ``AttributeError`` at bridge start-up rather than
+  failing a protocol round trip. The 2.x callbacks also differ in shape: each
+  receives ``(ServerRequestContext, params)`` and returns a full
+  ``types.ListToolsResult`` / ``types.CallToolResult`` rather than a bare
+  list. Neither difference changes what ``claude -p`` can act on: 2.x's
+  result models serialize some additive fields 1.x never sent
+  (``ttlMs``/``cacheScope``/``resultType``), which a client that does not
+  know them ignores -- it is not a protocol change the harness has to
+  follow.
+
+  One behaviour 2.x does NOT carry over for free, and which is restored
+  explicitly below: the pre-2.0 ``@server.call_tool()`` decorator defaulted
+  to ``validate_input=True`` and ran ``jsonschema.validate`` against the
+  tool's served ``inputSchema`` BEFORE dispatching, turning a
+  non-conforming call into an ``is_error`` result without ever contacting
+  the Host. 2.x's ``on_call_tool`` has no equivalent on the stdio transport
+  (``Server``'s ``get_tool_input_schema`` hook is read only by
+  ``Mcp-Param-*`` header validation on the Streamable-HTTP path), so
+  :func:`main` performs that validation itself. Without it the port would
+  silently widen the Host's ``tool_executor`` contract to inputs it
+  previously never saw.
 
 Neither half ever raises out of a tool call: a socket failure on the child
 side becomes an ``error: tool bridge unavailable: <ExcClass>`` text result
@@ -182,36 +208,83 @@ def main(argv: list[str] | None = None) -> int:
     with open(args.tools, encoding="utf-8") as f:
         specs: list[dict[str, Any]] = json.load(f)
     # Each entry carries BOTH the served (bare) name the child exposes to
-    # claude -p and the original spec name the Host's tool_executor expects
-    # -- these differ exactly when no spec name carried an
-    # ``mcp__<server>__`` prefix (the native-arm shape; see
-    # ``provider._resolve_tool_naming``), and are identical otherwise.
+    # claude -p and the original spec name the Host's tool_executor expects.
+    # They differ exactly when the spec names DO carry an ``mcp__<server>__``
+    # prefix -- `served` is then the bare trailing segment
+    # (``mcp__athenaeum__recall`` -> ``recall``) -- and are identical in the
+    # native-arm shape, where the specs are bare already. (Corrected in
+    # athenaeum#1954: this comment previously stated the condition inverted.
+    # See ``provider._resolve_tool_naming``, which is authoritative.)
     spec_name_by_served = {str(s["served_name"]): str(s["spec_name"]) for s in specs}
+    # The schemas exactly as served by `tools/list` below -- validation must
+    # judge a call against what the model was actually shown, never against
+    # some other copy of the spec.
+    input_schema_by_served = {
+        str(s["served_name"]): dict(s.get("input_schema") or {}) for s in specs
+    }
 
+    # `mcp` hard-declares `jsonschema>=4.20.0`, so it is guaranteed present
+    # wherever this child-only code path runs; it is declared alongside `mcp`
+    # in pyproject anyway, since this module imports it directly.
+    import jsonschema
     import mcp.server.stdio
     import mcp.types as types
+    from mcp.server.context import ServerRequestContext
     from mcp.server.lowlevel import Server
 
-    server: Server = Server(args.server_name)
+    async def handle_list_tools(
+        _ctx: ServerRequestContext[None],
+        _params: types.PaginatedRequestParams | None,
+    ) -> types.ListToolsResult:
+        return types.ListToolsResult(
+            tools=[
+                types.Tool(
+                    name=str(spec["served_name"]),
+                    description=str(spec.get("description", "")),
+                    input_schema=input_schema_by_served[str(spec["served_name"])],
+                )
+                for spec in specs
+            ]
+        )
 
-    @server.list_tools()
-    async def handle_list_tools() -> list[types.Tool]:
-        return [
-            types.Tool(
-                name=str(spec["served_name"]),
-                description=str(spec.get("description", "")),
-                inputSchema=dict(spec.get("input_schema") or {}),
-            )
-            for spec in specs
-        ]
-
-    @server.call_tool()
     async def handle_call_tool(
-        name: str, arguments: dict[str, Any] | None
-    ) -> list[types.TextContent]:
-        spec_name = spec_name_by_served.get(name, name)
-        text = _call_bridge(args.socket, spec_name, arguments or {})
-        return [types.TextContent(type="text", text=text)]
+        _ctx: ServerRequestContext[None],
+        params: types.CallToolRequestParams,
+    ) -> types.CallToolResult:
+        arguments = params.arguments or {}
+        # Input validation, preserving the pre-2.0 decorator's default
+        # behaviour verbatim -- same trigger (a KNOWN tool whose served
+        # schema the arguments violate), same message, same is_error=True,
+        # and the Host is never contacted. See the module docstring for why
+        # this is open-coded rather than delegated to the SDK.
+        schema = input_schema_by_served.get(params.name)
+        if schema is not None:
+            try:
+                jsonschema.validate(instance=arguments, schema=schema)
+            except jsonschema.ValidationError as exc:
+                return types.CallToolResult(
+                    content=[
+                        types.TextContent(
+                            type="text", text=f"Input validation error: {exc.message}"
+                        )
+                    ],
+                    is_error=True,
+                )
+        spec_name = spec_name_by_served.get(params.name, params.name)
+        text = _call_bridge(args.socket, spec_name, arguments)
+        # is_error stays False for the bridge's OWN error strings (a dead
+        # socket, a raising executor): the never-raise contract (see the
+        # module docstring) is that the model sees an ordinary tool_result
+        # carrying the error TEXT, identically to the api-mode path in
+        # tests.evals.rollout.run_api_tool_loop. Only a validation failure
+        # above is a protocol-level error, which is what 1.x did too.
+        return types.CallToolResult(content=[types.TextContent(type="text", text=text)])
+
+    server: Server[None] = Server(
+        args.server_name,
+        on_list_tools=handle_list_tools,
+        on_call_tool=handle_call_tool,
+    )
 
     async def _run() -> None:
         async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
