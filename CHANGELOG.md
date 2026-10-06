@@ -41,10 +41,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   removed from `mcp.server.lowlevel.Server` entirely. It now passes the 2.x
   `on_list_tools` / `on_call_tool` constructor callbacks instead, which take
   `(ServerRequestContext, params)` and return a full `types.ListToolsResult` /
-  `types.CallToolResult` rather than a bare list. The MCP wire protocol is
-  unchanged, so `claude -p` sees exactly what it saw before, and the
-  never-raise contract is unchanged (a bridge error is still an ordinary text
-  `tool_result`, `is_error` left False).
+  `types.CallToolResult` rather than a bare list. Nothing `claude -p` acts on
+  changes: 2.x's result models serialize some additive fields 1.x never sent
+  (`ttlMs`/`cacheScope`/`resultType`), which a client that does not know them
+  ignores. The never-raise contract is unchanged too — the bridge's own error
+  strings (a dead socket, a raising executor) are still ordinary text
+  `tool_result`s with `is_error` False, identical to the api-mode path in
+  `tests.evals.rollout.run_api_tool_loop`.
 
   athenaeum#1953's stopgap pins are lifted with it: `fastmcp` goes back to
   `>=2.0.0,<5.0` and `mcp` is now declared `>=2.0,<3.0` — a FLOOR rather than
@@ -58,9 +61,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tests/test_cli_tool_bridge_mcp_api_guard.py` is inverted to assert the 2.x
   surface (and the *absence* of the retired decorators) instead of retired,
   since the drift risk simply reversed direction.
-  `tests/test_cli_tool_bridge_roundtrip.py` passes unchanged against
-  `mcp==2.3.0` — its real stdio `mcp.client` / `ClientSession` driver needed no
-  edits, the 2.x client API being source-compatible for what it uses.
+  `tests/test_cli_tool_bridge_roundtrip.py`'s three existing tests pass
+  unmodified against `mcp==2.3.0` — the 2.x client API (`ClientSession`,
+  `mcp.client.stdio`) is source-compatible for what the fixtures use, so no
+  fixture needed editing.
+
+  One behaviour the 2.x surface does **not** carry over for free is restored
+  explicitly: the pre-2.0 `@server.call_tool()` decorator defaulted to
+  `validate_input=True` and ran `jsonschema.validate` against the served
+  `inputSchema` before dispatching, so a call violating the schema became an
+  `is_error` result and never reached the Host's `tool_executor`. `mcp` 2.x has
+  no stdio equivalent (`Server`'s `get_tool_input_schema` hook is read only by
+  `Mcp-Param-*` header validation on the Streamable-HTTP path), so the bridge
+  now performs that validation itself — same trigger, same
+  `Input validation error: ...` message, same `is_error`, Host still never
+  contacted. Left out, the port would have silently widened the Host
+  executor's input contract to inputs it had never been handed. `jsonschema`
+  is declared alongside `mcp` since the bridge now imports it directly, and
+  two new round-trip tests cover both directions (reject the violation,
+  still dispatch a conforming call under its spec name).
 
 - **`search_backend` (hybrid vector + FTS5) is now the shipped default
   everywhere the code defaulted to `fts5` (issue athenaeum#1825, operator

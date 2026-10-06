@@ -52,6 +52,12 @@ mcp = [
     # direction. `<3.0` matches what fastmcp-slim 4.x itself declares.
     "fastmcp>=2.0.0,<5.0",
     "mcp>=2.0,<3.0",
+    # athenaeum#1954: cli_tool_bridge.py validates `tools/call` arguments
+    # against the served input schema itself -- `mcp` 2.x dropped the pre-2.0
+    # decorator's built-in `validate_input` and offers no stdio equivalent.
+    # `mcp` hard-declares `jsonschema>=4.20.0` so this is already present,
+    # but the bridge imports it DIRECTLY, so it is declared like `mcp` is.
+    "jsonschema>=4.20",
 ]
 vector = [
     "chromadb>=0.5.0,<2.0",
@@ -68,6 +74,7 @@ dev = [
     # block for why `mcp` stays declared and why its bound is a 2.0 floor.
     "fastmcp>=2.0.0,<5.0",
     "mcp>=2.0,<3.0",
+    "jsonschema>=4.20",
     # athenaeum#1066: emits `::error file=...,line=...::` workflow commands for
     # each failing test under `GITHUB_ACTIONS=true`, which GitHub turns into
     # check-run annotations — readable via `gh api

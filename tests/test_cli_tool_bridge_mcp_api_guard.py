@@ -127,3 +127,41 @@ def test_bridge_result_models_exist_on_installed_mcp() -> None:
         "`tools/call` handlers construct these models directly "
         "(athenaeum#1954)."
     )
+
+
+def test_bridge_result_model_FIELDS_are_the_2x_spelling() -> None:
+    """Name existence alone is NOT a 2.x check -- all four models in
+    :data:`_REQUIRED_TYPES` exist on `mcp` 1.x too, so the test above would
+    pass unchanged on a 1.x install. The fields are what actually moved, and
+    they are what the bridge's call sites spell:
+
+    * ``Tool.input_schema`` is ``inputSchema`` on 1.x with no snake_case
+      alias, so ``types.Tool(name=..., input_schema=...)`` -- the bridge's
+      literal call -- raises ``ValidationError`` there.
+    * ``CallToolResult.is_error`` is the flag the bridge sets on a validation
+      failure; 1.x spells it ``isError``.
+
+    Both are asserted against ``model_fields``, which is the pydantic
+    construction contract rather than a serialization detail.
+    """
+    import mcp.types as types
+
+    installed_version = importlib.metadata.version("mcp")
+    expected = {
+        "Tool": "input_schema",
+        "CallToolResult": "is_error",
+        "ListToolsResult": "tools",
+        "CallToolRequestParams": "arguments",
+    }
+    wrong = {
+        name: sorted(getattr(types, name).model_fields)
+        for name, field in expected.items()
+        if field not in getattr(types, name).model_fields
+    }
+    assert not wrong, (
+        f"mcp=={installed_version}: these mcp.types models do not carry the "
+        f"field name athenaeum.cli_tool_bridge constructs them with: {wrong!r}. "
+        "The 2.x models use snake_case field names (with camelCase aliases); "
+        "`mcp` 1.x used camelCase field names outright, so this is the "
+        "field-level half of the version assertion above (athenaeum#1954)."
+    )
