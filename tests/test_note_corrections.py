@@ -358,6 +358,88 @@ class TestAllOrNothingRefusal:
         assert not (wiki / "_note_corrections_applied.jsonl").exists()
 
 
+class TestSelfMoveRefused:
+    """A `move` whose `target_uid` names the batch's OWN source_uid must
+    never reach apply_batch's commit phase: target_cache would then hold
+    source_path, the commit loop would write it with the appended bullet,
+    and the very next line — the unconditional source write — would
+    immediately clobber that with new_source_body (computed from the
+    ORIGINAL body, which never saw the append), silently destroying the
+    moved line. Confirmed true positive from Sentry/Seer review on PR
+    athenaeum#1985; this class is the regression test that would have
+    caught it before merge."""
+
+    def test_load_batch_rejects_a_move_onto_its_own_source_uid(self, tmp_path: Path) -> None:
+        path = _write_batch(
+            tmp_path,
+            "b-self",
+            [{"bullet_id": BID_1, "action": "move", "target_uid": SOURCE_UID}],
+        )
+        with pytest.raises(NoteCorrectionError, match="same as the batch's own source_uid"):
+            load_batch(path)
+
+    def test_cli_apply_refuses_and_leaves_the_source_page_byte_unchanged(
+        self, workspace: Path
+    ) -> None:
+        wiki = workspace / "wiki"
+        source_file = wiki / f"{SOURCE_UID}-jamie.md"
+        before_bytes = source_file.read_bytes()
+        batch_path = _write_batch(
+            workspace,
+            "b-self-cli",
+            [{"bullet_id": BID_3, "action": "move", "target_uid": SOURCE_UID}],
+        )
+        rc = main(_cli_argv(workspace, batch_path))
+        assert rc == 1
+        # The actual regression: assert the ON-DISK BYTES, not merely a
+        # nonzero exit code. A refusal that still left a half-written page
+        # (the exact failure mode here) would pass a raises/rc-only test.
+        assert source_file.read_bytes() == before_bytes
+        assert not (wiki / "_note_corrections_applied.jsonl").exists()
+
+    def test_apply_batch_refuses_a_self_move_even_when_load_batch_is_bypassed(
+        self, workspace: Path
+    ) -> None:
+        """Belt-and-suspenders: _resolve carries its OWN `target_path ==
+        source_path` check (see its docstring), independent of
+        load_batch's string check — construct the envelope directly,
+        skipping load_batch entirely, and confirm apply_batch still
+        refuses before any write."""
+        wiki = workspace / "wiki"
+        source_file = wiki / f"{SOURCE_UID}-jamie.md"
+        before_bytes = source_file.read_bytes()
+        envelope = BatchEnvelope(
+            source_uid=SOURCE_UID,
+            batch_id="b-self-resolve",
+            created_at="2026-10-06",
+            records=(
+                CorrectionRecord(bullet_id=BID_3, action="move", target_uid=SOURCE_UID),
+            ),
+        )
+        with pytest.raises(NoteCorrectionError):
+            apply_batch(wiki, envelope)
+        assert source_file.read_bytes() == before_bytes
+        assert not (wiki / "_note_corrections_applied.jsonl").exists()
+
+    def test_dry_run_reports_a_self_move_as_a_refusal_without_touching_the_page(
+        self, workspace: Path
+    ) -> None:
+        wiki = workspace / "wiki"
+        before = _digests(wiki)
+        envelope = BatchEnvelope(
+            source_uid=SOURCE_UID,
+            batch_id="b-self-dry",
+            created_at="2026-10-06",
+            records=(
+                CorrectionRecord(bullet_id=BID_3, action="move", target_uid=SOURCE_UID),
+            ),
+        )
+        report = dry_run_report(wiki, envelope)
+        assert report.moved == 0
+        assert report.refused_unknown_target == 1
+        assert _digests(wiki) == before
+
+
 class TestSecondApplyIsANoop:
     """AC1: a second apply of the SAME batch_id writes nothing and reports
     every record as 'noop', keyed off the ledger, not off re-resolving

@@ -47,13 +47,18 @@ top-level bullets across the WHOLE page, not only under a ``## Notes``
 heading — this module does not special-case the heading either, for the
 same reason.
 
-**What this module refuses to guess.** Two failure classes, both refusing
+**What this module refuses to guess.** Three failure classes, all refusing
 the WHOLE batch before any write (the single-snapshot rule below is what
 makes that possible):
 
 * an unknown bullet id — the id no longer matches any bullet on the current
   snapshot (a typo, or a batch authored against a stale copy of the page);
-* a ``move`` record's ``target_uid`` names no wiki page.
+* a ``move`` record's ``target_uid`` names no wiki page;
+* a ``move`` record's ``target_uid`` resolves to the SOURCE page itself —
+  meaningless as an operation, and letting it through would make the
+  source page a write target of its own apply (see :func:`apply_batch`'s
+  commit-phase comment for exactly how that would silently destroy the
+  moved line).
 
 **All-or-nothing, one snapshot.** Every bullet id in a batch is resolved
 against the SAME read of the source page — :func:`apply_batch` parses the
@@ -281,6 +286,20 @@ def load_batch(path: Path) -> BatchEnvelope:
             raise NoteCorrectionError(
                 f"record {i} ({rec_id}): action 'drop' must not carry 'target_uid'"
             )
+        if action == MOVE and target_uid == source_uid:
+            # A move onto the page the line is already on is meaningless as
+            # an operation, and letting it through would make the source
+            # page a write target of its OWN apply: the commit loop writes
+            # the appended copy to `target_cache[source_path]`, then the
+            # unconditional source write immediately overwrites it with
+            # `new_source_body` (computed from the ORIGINAL body, which never
+            # saw the append) — net result, the line is silently destroyed.
+            # Refusing here, before the envelope is even built, means the
+            # whole batch never reaches that code at all (AC5's shape).
+            raise NoteCorrectionError(
+                f"record {i} ({rec_id}): action 'move' target_uid "
+                f"{target_uid!r} is the same as the batch's own source_uid"
+            )
         records.append(
             CorrectionRecord(bullet_id=rec_id, action=action, target_uid=target_uid, note=note)
         )
@@ -454,12 +473,24 @@ def _resolve(
     source_body: str,
     *,
     index: EntityIndex,
+    source_path: Path,
 ) -> _Resolution:
     """Validate every record against ONE snapshot of *source_body* (AC5).
 
     Returns a :class:`_Resolution` whose ``problems`` is non-empty exactly
     when the whole batch must be refused; callers must not write anything
     in that case.
+
+    *source_path* is required so a ``move`` target that resolves to the
+    SAME physical page as the source is refused unconditionally — never
+    added to ``move_targets`` — regardless of how the two uids got there.
+    :func:`load_batch` already rejects the ordinary case (``target_uid ==
+    source_uid``) at parse time; this is the belt-and-suspenders check for
+    the one other way it could happen: two distinct uid strings in the
+    wiki resolving, via :class:`~athenaeum.models.EntityIndex`, to the same
+    path (a duplicate ``uid:`` in the corpus — a pre-existing data-integrity
+    issue this module does not otherwise guard against, but that is no
+    reason to let it reach the double-write this check exists to prevent).
     """
     raw_bullets, _definitions = parse_bullets(source_body)
     id_to_ordinal = {bullet_id(ordinal, raw): ordinal for ordinal, raw, _refs in raw_bullets}
@@ -478,6 +509,13 @@ def _resolve(
             if target_path is None:
                 problems.append(
                     f"{rec.bullet_id}: target uid {rec.target_uid!r} names no wiki page"
+                )
+                unknown_target += 1
+                continue
+            if target_path == source_path:
+                problems.append(
+                    f"{rec.bullet_id}: target uid {rec.target_uid!r} resolves to the "
+                    "same page as the batch's own source_uid"
                 )
                 unknown_target += 1
                 continue
@@ -534,7 +572,7 @@ def dry_run_report(
             page_flag_bytes=flag_bytes,
         )
 
-    resolution = _resolve(envelope, body, index=idx)
+    resolution = _resolve(envelope, body, index=idx, source_path=source_path)
     if resolution.problems:
         return DryRunReport(
             batch_id=envelope.batch_id,
@@ -627,7 +665,7 @@ def apply_batch(
     meta, body = _read_page(source_path)
     definitions = parse_definitions(body)
 
-    resolution = _resolve(envelope, body, index=idx)
+    resolution = _resolve(envelope, body, index=idx, source_path=source_path)
     if resolution.problems:
         raise NoteCorrectionError("; ".join(resolution.problems))
 
@@ -694,7 +732,15 @@ def apply_batch(
         target_cache[target_path] = (t_meta, t_body)
         results.append(RecordResult(bullet_id=rec.bullet_id, disposition="moved"))
 
-    # Commit. Every touched page gets exactly one write.
+    # Commit. Every touched page gets exactly one write. This relies on
+    # target_cache never containing source_path: a move onto the source
+    # page is refused at load_batch time (target_uid == source_uid) and
+    # again, belt-and-suspenders, in _resolve (target_path == source_path)
+    # for the one other way they could collide — see both docstrings. If
+    # source_path were a key here, this loop would write it with the
+    # appended bullet and the unconditional write just below would
+    # immediately clobber that with new_source_body, silently destroying
+    # the moved line; the two refusals above are what make this loop safe.
     for target_path, (t_meta, t_body) in target_cache.items():
         atomic_write_text(target_path, _bump_and_render(dict(t_meta), t_body, stamp))
     atomic_write_text(source_path, _bump_and_render(dict(meta), new_source_body, stamp))
