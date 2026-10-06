@@ -128,6 +128,7 @@ _SUBCOMMAND_LOADERS: dict[str, tuple[str, str]] = {
     "retire-pages": ("athenaeum._cmd_retire", "add_retire_subparser"),
     "reconcile": ("athenaeum._cmd_reconcile", "add_reconcile_subparser"),
     "repair": ("athenaeum._cmd_repair", "add_repair_subparser"),
+    "fold-lint": ("athenaeum._cmd_fold_lint", "add_fold_lint_subparser"),
     "recovery-yield": (
         "athenaeum._cmd_recovery_yield",
         "add_recovery_yield_subparser",
@@ -201,6 +202,7 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_drain import add_drain_subparser
     from athenaeum._cmd_enumerate import add_enumerate_subparser
     from athenaeum._cmd_explain_routing import add_explain_routing_subparser
+    from athenaeum._cmd_fold_lint import add_fold_lint_subparser
     from athenaeum._cmd_index import add_index_subparsers
     from athenaeum._cmd_lifecycle import add_lifecycle_subparsers
     from athenaeum._cmd_measure import add_measure_subparser
@@ -252,6 +254,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_reconcile_subparser(subparsers)  # reconcile (issue athenaeum#1143)
     add_recovery_yield_subparser(subparsers)  # recovery-yield (issue athenaeum#1453)
     add_repair_subparser(subparsers)  # repair
+    add_fold_lint_subparser(subparsers)  # fold-lint (issue athenaeum#716)
     add_pii_restore_subparser(subparsers)  # pii-restore (issue athenaeum#1037)
     add_questions_subparser(subparsers)  # questions
     add_merges_subparser(subparsers)  # merges

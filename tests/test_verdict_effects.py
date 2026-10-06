@@ -167,7 +167,14 @@ class TestEF1PublicAPIShape:
         # apply_propose_merge_effect) alongside the original five-verdict
         # exports below -- see
         # tests/test_verdict_effects_resolver_actions.py for their coverage.
+        # Issue athenaeum#716 added the AUTO_APPLY_* enumeration (the
+        # allowlist of operations this module may ever auto-apply) -- see
+        # tests/test_verdict_effects_auto_apply.py.
         assert set(ve_mod.__all__) == {
+            "AUTO_APPLY_FOLD_ON_DUPLICATE",
+            "AUTO_APPLY_OPERATIONS",
+            "AUTO_APPLY_SPECIALIZATION_REFINES",
+            "AUTO_APPLY_SUPERSESSION_MARKING",
             "CONTRADICTION_STATUS_FLAGGED",
             "FOLD_EVIDENCE_DIRNAME",
             "RESOLVER_ATTRIBUTE_BOTH_ACTION",

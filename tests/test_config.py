@@ -28,6 +28,7 @@ from athenaeum.config import (
     resolve_reasoning_tier_t2_auto_apply_enabled,
     resolve_reindex_full_rehash_max_age_days,
     resolve_retire,
+    resolve_reversible_verdict_auto_apply_enabled,
     resolve_wiki_dedupe_min_body_chars,
     write_default_config,
 )
@@ -649,6 +650,47 @@ class TestResolveReasoningTierT2AutoApplyEnabled:
         }
         assert resolve_reasoning_tier_auditing_enabled(cfg) is True
         assert resolve_reasoning_tier_t2_auto_apply_enabled(cfg) is True
+
+
+class TestResolveReversibleVerdictAutoApplyEnabled:
+    """Issue athenaeum#716: the five-verdict comparator's reversible-operation
+    auto-apply opt-in. Default OFF, same precedence shape as
+    :func:`resolve_reasoning_tier_t2_auto_apply_enabled`."""
+
+    def test_default_off(self) -> None:
+        assert resolve_reversible_verdict_auto_apply_enabled(None) is False
+        assert resolve_reversible_verdict_auto_apply_enabled({}) is False
+        assert resolve_reversible_verdict_auto_apply_enabled({"librarian": {}}) is False
+
+    def test_env_true_enables(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ATHENAEUM_REVERSIBLE_VERDICT_AUTO_APPLY_ENABLED", "true")
+        assert resolve_reversible_verdict_auto_apply_enabled(None) is True
+
+    def test_env_false_explicit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ATHENAEUM_REVERSIBLE_VERDICT_AUTO_APPLY_ENABLED", "false")
+        cfg = {"librarian": {"reversible_verdict_auto_apply_enabled": True}}
+        assert resolve_reversible_verdict_auto_apply_enabled(cfg) is False
+
+    def test_yaml_true_enables(self) -> None:
+        assert (
+            resolve_reversible_verdict_auto_apply_enabled(
+                {"librarian": {"reversible_verdict_auto_apply_enabled": True}}
+            )
+            is True
+        )
+
+    def test_non_bool_yaml_falls_through_to_off(self) -> None:
+        assert (
+            resolve_reversible_verdict_auto_apply_enabled(
+                {"librarian": {"reversible_verdict_auto_apply_enabled": "yes"}}
+            )
+            is False
+        )
+
+    def test_not_seeded_in_defaults(self) -> None:
+        from athenaeum.config import _DEFAULTS
+
+        assert "librarian" not in _DEFAULTS
 
 
 class TestResolveReasoningTierAnyScreenEnabled:
