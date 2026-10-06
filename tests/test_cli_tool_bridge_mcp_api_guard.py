@@ -1,58 +1,167 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Issue athenaeum#1953 -- guard the mcp SDK API cli_tool_bridge.py depends on.
+"""Issue athenaeum#1954 -- guard the mcp SDK API cli_tool_bridge.py depends on.
 
 ``src/athenaeum/cli_tool_bridge.py`` imports ``mcp.server.lowlevel.Server``
-directly and registers handlers with the pre-2.0 decorator API
-(``@server.list_tools()`` / ``@server.call_tool()``). That API does not exist
-on the ``mcp`` 2.x SDK. ``pyproject.toml`` now pins ``mcp>=1.24,<2.0``
-alongside a tightened ``fastmcp`` upper bound (see the comment there for why
-both are needed), but a pin is only as good as a test that fails loudly the
-moment an install drifts off it -- which is exactly how this surfaced: CI
-resolved ``fastmcp-slim==3.4.5`` / ``mcp==1.x`` and passed, while a separate
-install resolved ``fastmcp==4.0.8`` / ``mcp==2.2.0`` and crashed with
-``AttributeError: 'Server' object has no attribute 'list_tools'`` the first
-time the bridge child ran -- four hours into an eval, not at test time.
+directly and registers its two handlers through the ``mcp`` 2.x
+``on_list_tools`` / ``on_call_tool`` **constructor callbacks**. The pre-2.0
+SDK instead exposed ``@server.list_tools()`` / ``@server.call_tool()``
+decorator methods, which 2.x removed.
 
-This test imports the real, installed ``mcp`` package and checks the
-decorator API directly, so it fails on the SAME installed environment the
-bridge itself would crash in -- no mocking, no fixture.
+athenaeum#1953 originally pinned ``mcp>=1.24,<2.0`` and asserted the
+*pre-2.0* decorators were present. athenaeum#1954 ported the bridge and
+lifted that ceiling to a ``mcp>=2.0,<3.0`` floor, so this guard is inverted:
+it now asserts the **2.x** surface. The failure mode is inverted with it --
+the risk is no longer "an install drifted forward onto 2.x" but "an install
+drifted BACK onto 1.x" (a resolver that picked ``fastmcp`` 3.x, which
+declares ``mcp<2.0``), where ``Server.__init__`` would reject the two
+keyword arguments the bridge passes.
 
-When this starts failing because the installed ``mcp`` has genuinely moved
-to 2.x (e.g. the ``mcp>=1.24,<2.0`` pin was intentionally widened), the fix
-is to port ``cli_tool_bridge.py`` to the 2.x registration API -- tracked in
-athenaeum#1954 -- and then update or retire this test to match, not to
-loosen this assertion in place.
+Why the guard still earns its place rather than being retired: the pre-2.0
+API was *also* removed silently, and the original incident surfaced four
+hours into an eval rather than at test time, because nothing asserted the
+installed surface. That asymmetry is unchanged by the port -- a mismatched
+``mcp`` still fails only when the bridge child first runs, in a subprocess
+whose traceback the harness reports as a dead tool call. This test imports
+the real, installed ``mcp`` package, so it fails on the SAME installed
+environment the bridge itself would crash in -- no mocking, no fixture.
+
+If this starts failing because the installed ``mcp`` has genuinely moved to
+a 3.x major, the fix is to port the bridge to whatever registration surface
+that major exposes and update this test to match -- not to loosen the
+assertions in place.
 """
 
 from __future__ import annotations
 
 import importlib.metadata
+import inspect
+
+from packaging.version import Version
+
+#: The exact keyword arguments ``cli_tool_bridge.main`` passes to
+#: ``Server(...)``. Keep in step with the real call site.
+_REQUIRED_SERVER_KWARGS = ("on_list_tools", "on_call_tool")
+
+#: The result models the bridge's two handlers construct and return.
+_REQUIRED_TYPES = ("ListToolsResult", "CallToolResult", "Tool", "TextContent")
 
 
-def test_mcp_server_has_pre_2x_decorator_api() -> None:
-    """``cli_tool_bridge.py`` needs ``Server.list_tools``/``Server.call_tool``.
+def test_installed_mcp_is_2x() -> None:
+    """The declared floor is ``mcp>=2.0,<3.0`` -- assert the install honours it."""
+    installed = Version(importlib.metadata.version("mcp"))
+    assert Version("2.0") <= installed < Version("3.0"), (
+        f"mcp=={installed} is installed, but athenaeum.cli_tool_bridge targets "
+        "the mcp 2.x registration API and pyproject.toml declares "
+        "`mcp>=2.0,<3.0` (athenaeum#1954). An install below 2.0 means "
+        "something resolved outside that floor -- most likely `fastmcp` 3.x, "
+        "which declares `mcp<2.0`. Fix the resolution rather than this "
+        "assertion."
+    )
 
-    These are the pre-2.0 ``mcp`` SDK's registration decorators (see the
-    real usage in ``src/athenaeum/cli_tool_bridge.py``, which imports
-    ``from mcp.server.lowlevel import Server`` and calls
-    ``@server.list_tools()`` / ``@server.call_tool()``). The ``mcp`` 2.x SDK
-    replaced this pattern, so their absence here means the installed `mcp`
-    has drifted onto 2.x despite the `mcp>=1.24,<2.0` pin in pyproject.toml
-    -- a resolver/lockfile problem, not a code bug in this test.
+
+def test_mcp_server_accepts_the_2x_handler_callbacks() -> None:
+    """``cli_tool_bridge.py`` builds its ``Server`` with ``on_list_tools`` /
+    ``on_call_tool`` keyword arguments (the mcp 2.x registration surface).
+
+    Checked against the real ``Server.__init__`` signature, which is what
+    would raise ``TypeError`` at bridge start-up if the installed SDK did not
+    accept them.
     """
     from mcp.server.lowlevel import Server
 
     installed_version = importlib.metadata.version("mcp")
-    missing = [attr for attr in ("list_tools", "call_tool") if not hasattr(Server, attr)]
+    params = inspect.signature(Server.__init__).parameters
+    missing = [kw for kw in _REQUIRED_SERVER_KWARGS if kw not in params]
     assert not missing, (
         f"mcp=={installed_version} is installed, but mcp.server.lowlevel."
-        f"Server is missing {missing!r} -- these are the pre-2.0 decorator "
-        "registration methods athenaeum.cli_tool_bridge depends on "
-        "directly. pyproject.toml pins `mcp>=1.24,<2.0` (athenaeum#1953) "
-        "precisely to keep installs on an mcp release that has this API; "
-        "this failure means something resolved outside that pin. Do NOT "
-        "silence this by relaxing the assertion -- either fix the "
-        "resolution to land back inside the pin, or port "
-        "cli_tool_bridge.py to the mcp 2.x API (tracked in athenaeum#1954) "
-        "and update this test to match the new surface."
+        f"Server.__init__ does not accept {missing!r} -- these are the 2.x "
+        "constructor callbacks athenaeum.cli_tool_bridge registers its "
+        "`tools/list` and `tools/call` handlers through (athenaeum#1954). "
+        "Do NOT silence this by relaxing the assertion -- either fix the "
+        "resolution to land back inside `mcp>=2.0,<3.0`, or port "
+        "cli_tool_bridge.py to the registration surface this `mcp` does "
+        "expose and update this test to match."
+    )
+    # They must be keyword-passable, which is how the bridge passes them.
+    for kw in _REQUIRED_SERVER_KWARGS:
+        assert params[kw].kind is inspect.Parameter.KEYWORD_ONLY, (
+            f"mcp=={installed_version}: Server.__init__'s {kw!r} is "
+            f"{params[kw].kind!s}, not keyword-only -- cli_tool_bridge passes "
+            "it by keyword."
+        )
+
+
+def test_retired_pre_2x_decorator_api_is_absent() -> None:
+    """The positive half of the version assertion, read off the API itself.
+
+    ``Server.list_tools`` / ``Server.call_tool`` were the pre-2.0 decorator
+    registration methods. Their presence would mean the installed SDK is a
+    1.x release regardless of what the metadata version claims (a vendored
+    or patched install), and the bridge's constructor-callback registration
+    would not be reached.
+    """
+    from mcp.server.lowlevel import Server
+
+    installed_version = importlib.metadata.version("mcp")
+    present = [attr for attr in ("list_tools", "call_tool") if hasattr(Server, attr)]
+    assert not present, (
+        f"mcp=={installed_version} exposes the retired pre-2.0 decorator "
+        f"methods {present!r} on mcp.server.lowlevel.Server. athenaeum#1954 "
+        "ported athenaeum.cli_tool_bridge OFF that API onto the 2.x "
+        "`on_list_tools`/`on_call_tool` constructor callbacks, so an install "
+        "that still has the decorators is a 1.x SDK the ported bridge cannot "
+        "run against."
+    )
+
+
+def test_bridge_result_models_exist_on_installed_mcp() -> None:
+    """The handlers return real ``mcp.types`` models, not bare lists (the
+    pre-2.0 shape). Assert each one the bridge constructs is importable."""
+    import mcp.types as types
+
+    installed_version = importlib.metadata.version("mcp")
+    missing = [name for name in _REQUIRED_TYPES if not hasattr(types, name)]
+    assert not missing, (
+        f"mcp=={installed_version} is installed, but mcp.types is missing "
+        f"{missing!r} -- athenaeum.cli_tool_bridge's `tools/list` and "
+        "`tools/call` handlers construct these models directly "
+        "(athenaeum#1954)."
+    )
+
+
+def test_bridge_result_model_FIELDS_are_the_2x_spelling() -> None:
+    """Name existence alone is NOT a 2.x check -- all four models in
+    :data:`_REQUIRED_TYPES` exist on `mcp` 1.x too, so the test above would
+    pass unchanged on a 1.x install. The fields are what actually moved, and
+    they are what the bridge's call sites spell:
+
+    * ``Tool.input_schema`` is ``inputSchema`` on 1.x with no snake_case
+      alias, so ``types.Tool(name=..., input_schema=...)`` -- the bridge's
+      literal call -- raises ``ValidationError`` there.
+    * ``CallToolResult.is_error`` is the flag the bridge sets on a validation
+      failure; 1.x spells it ``isError``.
+
+    Both are asserted against ``model_fields``, which is the pydantic
+    construction contract rather than a serialization detail.
+    """
+    import mcp.types as types
+
+    installed_version = importlib.metadata.version("mcp")
+    expected = {
+        "Tool": "input_schema",
+        "CallToolResult": "is_error",
+        "ListToolsResult": "tools",
+        "CallToolRequestParams": "arguments",
+    }
+    wrong = {
+        name: sorted(getattr(types, name).model_fields)
+        for name, field in expected.items()
+        if field not in getattr(types, name).model_fields
+    }
+    assert not wrong, (
+        f"mcp=={installed_version}: these mcp.types models do not carry the "
+        f"field name athenaeum.cli_tool_bridge constructs them with: {wrong!r}. "
+        "The 2.x models use snake_case field names (with camelCase aliases); "
+        "`mcp` 1.x used camelCase field names outright, so this is the "
+        "field-level half of the version assertion above (athenaeum#1954)."
     )
