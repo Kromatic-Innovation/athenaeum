@@ -169,6 +169,7 @@ MODULE_LAYER: dict[str, int] = {
     "page_decompose": 4,
     "paste_cleanup": 4,
     "decision_answers": 4,
+    "decision_framing": 4,
     "decisions": 4,
     "dedupe": 4,
     "drain": 4,

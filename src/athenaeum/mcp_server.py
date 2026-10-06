@@ -3462,6 +3462,7 @@ def create_server(
         """
         from athenaeum.config import (
             load_config,
+            resolve_decisions_max_item_context_tokens,
             resolve_decisions_max_sources_per_merge,
             resolve_decisions_page_limit,
         )
@@ -3469,11 +3470,13 @@ def create_server(
 
         config = load_config(wiki_root.parent)
         max_sources_per_merge = resolve_decisions_max_sources_per_merge(config)
+        max_item_context_tokens = resolve_decisions_max_item_context_tokens(config)
         if limit is None or limit <= 0:
             limit = resolve_decisions_page_limit(config)
         return list_pending_decisions_page(
             wiki_root,
             max_sources_per_merge=max_sources_per_merge,
+            max_item_context_tokens=max_item_context_tokens,
             caller_audience=caller_audience,
             offset=offset,
             limit=limit,

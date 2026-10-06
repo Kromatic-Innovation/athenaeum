@@ -73,6 +73,7 @@ from typing import TYPE_CHECKING, Literal
 import yaml
 
 from athenaeum.atomic_io import atomic_write_text
+from athenaeum.decision_framing import shape_errors_only, validate_answer
 from athenaeum.models import parse_frontmatter
 from athenaeum.store import now_iso
 
@@ -686,6 +687,46 @@ def apply_decision_answers(
 
         if answer is None:
             # No decision_id — legacy/non-decision file, not our concern.
+            continue
+
+        # Issue athenaeum#717: an answer must satisfy the response schema the
+        # framed queue item published for its decision type. Validating here —
+        # before any per-type dispatch — is what makes the queue a machine
+        # interface rather than a free-text inbox: a malformed answer is
+        # refused at the boundary with a structured error code, never
+        # half-applied. Fail-soft like every other refusal in this loop.
+        #
+        # Division of labour, so one condition never gets two error codes: the
+        # SCHEMA owns the answer's SHAPE (unknown keys, wrong types, a missing
+        # verdict), and each per-type resolver keeps owning its verdict's
+        # VALUE — it already reports ``invalid_decision`` with a per-type
+        # message for an out-of-vocabulary verdict, and that contract is
+        # documented on the MCP mutators. :func:`shape_errors_only` is what
+        # draws that line.
+        schema_errors = shape_errors_only(
+            validate_answer(
+                answer.decision_type,
+                {"verdict": answer.verdict, "note": answer.note},
+            )
+        )
+        if schema_errors:
+            message = "; ".join(schema_errors)
+            log.warning(
+                "decision_answers: answer for %s fails its response schema: %s",
+                answer.decision_id,
+                message,
+            )
+            report.outcomes.append(
+                DecisionAnswerOutcome(
+                    path=path,
+                    decision_id=answer.decision_id,
+                    decision_type=answer.decision_type,
+                    applied=False,
+                    error_code="schema_invalid",
+                    message=message,
+                )
+            )
+            report.skipped += 1
             continue
 
         if answer.decision_type == "question":

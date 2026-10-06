@@ -47,6 +47,7 @@ from athenaeum.answers import raise_pending_question
 from athenaeum.config import (
     DEFAULT_KNOWLEDGE_ROOT,
     load_config,
+    resolve_decisions_max_item_context_tokens,
     resolve_decisions_max_sources_per_merge,
 )
 from athenaeum.decisions import age_days, list_pending_decisions
@@ -207,10 +208,11 @@ def cmd_decisions(args: argparse.Namespace) -> int:
         "count",
         "scan-retractions",
         "raise-confirmation",
+        "answer",
     ):
         print(
             "usage: athenaeum decisions "
-            "{list,next,count,scan-retractions,raise-confirmation} [...]",
+            "{list,next,count,scan-retractions,raise-confirmation,answer} [...]",
             file=sys.stderr,
         )
         return 2
@@ -221,14 +223,19 @@ def cmd_decisions(args: argparse.Namespace) -> int:
     if sub == "raise-confirmation":
         return _cmd_raise_confirmation(args)
 
+    if sub == "answer":
+        return _cmd_answer(args)
+
     wiki_root = _resolve_wiki_root(args)
     with_proposal = getattr(args, "with_proposal", False)
     config = load_config(_resolve_knowledge_root(args))
     max_sources_per_merge = resolve_decisions_max_sources_per_merge(config)
+    max_item_context_tokens = resolve_decisions_max_item_context_tokens(config)
     decisions = list_pending_decisions(
         wiki_root,
         with_proposal=with_proposal,
         max_sources_per_merge=max_sources_per_merge,
+        max_item_context_tokens=max_item_context_tokens,
     )
 
     if sub == "count":
@@ -298,13 +305,129 @@ def cmd_decisions(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_answer(args: argparse.Namespace) -> int:
+    """Answer one queue item, validated against its published response schema.
+
+    Issue athenaeum#717: the unified queue is an INTERFACE, so that a human
+    can answer directly or hand the same interface to an agent they trust to
+    act on their behalf. That only works if an answer is machine-checkable,
+    which is what the item's ``response_schema`` is for — this command is the
+    CLI half of that contract (the MCP mutators are the other half).
+
+    The answer arrives as a JSON object, so unlike the typed MCP tools it can
+    genuinely be the wrong shape; validation here is therefore load-bearing
+    rather than decorative. A schema-invalid answer is REFUSED before
+    anything is written, so nothing half-lands: the decision-answer file is
+    only created once the answer is known to satisfy the schema, and it is
+    then applied by the existing ``athenaeum ingest-answers`` tick exactly
+    like any other answer file.
+    """
+    from athenaeum.decision_answers import write_decision_answer
+    from athenaeum.decision_framing import response_schema_for, validate_answer
+
+    as_json = getattr(args, "json", False)
+    decision_type = args.type
+    raw = args.answer
+
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return _answer_refusal(
+            as_json=as_json,
+            decision_id=args.id,
+            decision_type=decision_type,
+            errors=[f"--answer is not valid JSON: {exc}"],
+        )
+    if not isinstance(parsed, dict):
+        return _answer_refusal(
+            as_json=as_json,
+            decision_id=args.id,
+            decision_type=decision_type,
+            errors=["--answer must be a JSON object"],
+        )
+
+    errors = validate_answer(decision_type, parsed)
+    if errors:
+        return _answer_refusal(
+            as_json=as_json,
+            decision_id=args.id,
+            decision_type=decision_type,
+            errors=errors,
+            schema=response_schema_for(decision_type),
+        )
+
+    raw_root = _resolve_knowledge_root(args) / "raw"
+    path = write_decision_answer(
+        raw_root,
+        decision_id=args.id,
+        decision_type=decision_type,
+        verdict=str(parsed["verdict"]),
+        note=str(parsed.get("note", "")),
+    )
+    if as_json:
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "decision_id": args.id,
+                    "decision_type": decision_type,
+                    "answer_file": str(path),
+                },
+                indent=2,
+            )
+        )
+    else:
+        print(f"answer recorded for {args.id} ({decision_type}): {path}")
+        print("Run `athenaeum ingest-answers` to apply it.")
+    return 0
+
+
+def _answer_refusal(
+    *,
+    as_json: bool,
+    decision_id: str,
+    decision_type: str,
+    errors: list[str],
+    schema: dict | None = None,
+) -> int:
+    """Report a refused answer and return the exit code. Writes nothing."""
+    if as_json:
+        payload: dict = {
+            "ok": False,
+            "decision_id": decision_id,
+            "decision_type": decision_type,
+            "error_code": "schema_invalid",
+            "errors": errors,
+        }
+        if schema is not None:
+            payload["response_schema"] = schema
+        print(json.dumps(payload, indent=2), file=sys.stderr)
+    else:
+        print(
+            f"refused: answer for {decision_id} ({decision_type}) does not "
+            "satisfy its response schema:",
+            file=sys.stderr,
+        )
+        for error in errors:
+            print(f"  - {error}", file=sys.stderr)
+        if schema is not None:
+            print(
+                "expected shape: " + json.dumps(schema, sort_keys=True),
+                file=sys.stderr,
+            )
+    return 1
+
+
 def add_decisions_subparser(subparsers: argparse._SubParsersAction) -> None:
-    """Register ``athenaeum decisions`` and its three modes on ``subparsers``."""
+    """Register ``athenaeum decisions`` and its subcommands on ``subparsers``."""
     d_parser = subparsers.add_parser(
         "decisions",
         help=(
             "One unified 'human decisions needed' list — pending questions "
-            "AND merges, each tagged by type. Three modes: list, next, count."
+            "AND merges, each tagged by type, every item framed with its "
+            "reversibility class, proposed default and response schema. "
+            "Modes: list, next, count, scan-retractions, raise-confirmation, "
+            "answer."
         ),
     )
     d_parser.set_defaults(func=cmd_decisions)
@@ -360,6 +483,44 @@ def add_decisions_subparser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     _add_common(scan_p, with_proposal=False)
+
+    answer_p = d_sub.add_parser(
+        "answer",
+        help=(
+            "Answer one queue item with a JSON object, validated against "
+            "that item's published response_schema (issue athenaeum#717). "
+            "Refuses a schema-invalid answer without writing anything."
+        ),
+    )
+    answer_p.add_argument(
+        "--path",
+        type=Path,
+        default=DEFAULT_KNOWLEDGE_ROOT,
+        help="Knowledge directory (default: ~/knowledge)",
+    )
+    answer_p.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON instead of plain text.",
+    )
+    answer_p.add_argument("--id", required=True, help="The decision id being answered.")
+    answer_p.add_argument(
+        "--type",
+        required=True,
+        help=(
+            "The item's decision type, as reported by `athenaeum decisions "
+            "list` — it selects the response schema the answer is checked "
+            "against."
+        ),
+    )
+    answer_p.add_argument(
+        "--answer",
+        required=True,
+        help=(
+            'The answer as a JSON object, e.g. \'{"verdict": "approve"}\'. '
+            "Must satisfy the item's response_schema."
+        ),
+    )
 
     raise_p = d_sub.add_parser(
         "raise-confirmation",

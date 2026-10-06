@@ -2467,6 +2467,36 @@ def resolve_decisions_page_limit(config: dict[str, Any] | None) -> int:
     )
 
 
+def resolve_decisions_max_item_context_tokens(config: dict[str, Any] | None) -> int:
+    """Resolve the unified decision queue's PER-ITEM context cap (issue athenaeum#717).
+
+    Human decision load is bounded in EFFORT, not count: an items/day budget
+    alone is gameable, because batching lets a system size its own items. So
+    the queue caps the context a single item may carry — about one screen —
+    and :func:`athenaeum.decision_framing.frame_decision` enforces it as the
+    queue's single admission gate rather than aspirationally. An item over
+    cap is decomposed; one still over cap after decomposition is admitted as
+    a scheduled review, never as an oversized item a human is expected to
+    answer in a sitting.
+
+    The default is the ~1,500-token one-screen figure the memory-model design
+    lock states. Raising it is an operator decision with a measurable cost:
+    it directly raises the p95 decision time the queue's own budget
+    instrumentation reports.
+
+    Precedence: ``ATHENAEUM_DECISIONS_MAX_ITEM_CONTEXT_TOKENS`` env > yaml
+    ``librarian.decisions_max_item_context_tokens`` > ``1500``. See
+    :func:`_resolve_positive_int_knob` for the coercion contract (``bool`` /
+    non-int / ``<= 0`` values fall through to the default).
+    """
+    return _resolve_positive_int_knob(
+        config,
+        "decisions_max_item_context_tokens",
+        "ATHENAEUM_DECISIONS_MAX_ITEM_CONTEXT_TOKENS",
+        1500,
+    )
+
+
 def _resolve_optional_positive_number(
     config: dict[str, Any] | None,
     block: str,
