@@ -51,6 +51,7 @@ from athenaeum.batch import (
     process_batch_run,
 )
 from athenaeum.cli import main
+from athenaeum.compile_routing import read_compile_routes
 from athenaeum.intake import discover_raw_files
 from athenaeum.librarian import (
     EXIT_LIBRARIAN_REFUSAL,
@@ -689,6 +690,105 @@ class TestBatchSyncEquivalence:
         assert any(
             "## Existing page content" in m for m in _all_batch_messages(batch_client)
         )
+
+    def test_routing_guard_prevents_a_misroute_on_the_batch_transport(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Issue athenaeum#1949: the guard is live on the BATCH write boundary.
+
+        ``batch.py``'s own standing comment is that a write-boundary
+        behaviour "belongs on both or on neither", because the two transports
+        must produce byte-identical wiki output. The routing guard can PREVENT
+        a merge write, so it is exactly such a behaviour. The SYNCHRONOUS side
+        is covered end to end in ``tests/test_compile_routing_1949.py``; this
+        test is the batch side, which has its own independent Tier-3 write
+        loop and would otherwise be the half that silently kept the defect.
+
+        The fixture is the observed misroute: a one-correspondent summary
+        naming Dana (whose page resolves uniquely through her contact record)
+        whose BODY mentions Robin, so tier-1 index-key matching proposes a
+        merge into Robin's page and nothing is proposed for Dana's.
+
+        Deliberately NOT written as a sync/batch byte-identity assertion.
+        This particular fixture — a note whose classify pass returns no
+        entities, leaving only a tier-1 match — lands on a PRE-EXISTING
+        asymmetry between the transports (the synchronous path produces no
+        Tier-3 action for it at all, the batch path produces the merge), which
+        has nothing to do with this guard and would make the comparison fail
+        for an unrelated reason. ``test_wiki_output_identical`` above remains
+        the byte-identity contract.
+        """
+        note = (
+            "---\n"
+            'observed_at: "2026-09-30T11:04:00Z"\n'
+            'correspondent_email: "dana.quill@example.org"\n'
+            "---\n\n"
+            "Robin Vance replied about tiered pricing.\n"
+        )
+        root = _seed_root(tmp_path, "batch", [note])
+        wiki = root / "wiki"
+        for uid, person in (("uid-dana", "Dana Quill"), ("uid-robin", "Robin Vance")):
+            (wiki / f"{uid}.md").write_text(
+                textwrap.dedent(
+                    f"""\
+                    ---
+                    uid: {uid}
+                    type: person
+                    name: {person}
+                    access: internal
+                    created: '2024-01-01'
+                    updated: '2024-01-01'
+                    ---
+
+                    # {person}
+
+                    Original body line.
+                """
+                ),
+                encoding="utf-8",
+            )
+        (root / "excluded").mkdir(exist_ok=True)
+        (root / "excluded" / "dana-contact.md").write_text(
+            "---\nuid: uid-dana\npii: true\nemails:\n"
+            "  - dana.quill@example.org\n---\n\nContact record.\n",
+            encoding="utf-8",
+        )
+        (root / "athenaeum.yaml").write_text(
+            "storage:\n  mapping:\n    pii: excluded\n", encoding="utf-8"
+        )
+
+        _clean_env(monkeypatch)
+        _freeze_recorded_at(monkeypatch)
+        before = (wiki / "uid-robin.md").read_text(encoding="utf-8")
+
+        batch_client = _FakeClient(_scripted_responder, allow_sync=False)
+        monkeypatch.setattr(anthropic_mod, "Anthropic", lambda **kw: batch_client)
+        _patch_uids(monkeypatch)
+        assert (
+            run(
+                raw_root=root / "raw",
+                wiki_root=wiki,
+                knowledge_root=root,
+                batch_mode=True,
+                now=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            )
+            == 0
+        )
+
+        # The unrelated person's page is byte-for-byte untouched...
+        assert (wiki / "uid-robin.md").read_text(encoding="utf-8") == before
+        # ...and the refusal escalated rather than passing silently.
+        pending = (wiki / "_pending_questions.md").read_text(encoding="utf-8")
+        assert "uid-dana" in pending
+        assert "received no write" in pending
+        # The durable route row names both the intended and the refused page,
+        # which is what makes the misroute reconstructible (AC2).
+        rows = read_compile_routes()
+        assert rows, "no compile-route row was written"
+        row = rows[-1]
+        assert row["correspondent_uid"] == "uid-dana"
+        assert row["prevented_uids"] == ["uid-robin"]
+        assert row["written_uids"] == []
 
     def test_multi_action_file_create_plus_merge_identical(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

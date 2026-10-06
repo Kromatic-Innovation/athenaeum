@@ -112,6 +112,23 @@ from athenaeum.clusters import (
     resolve_rotation_retention,
     write_cluster_report,
 )
+from athenaeum.compile_routing import (
+    # Re-exported deliberately, in the explicit ``as`` form so it reads as a
+    # re-export rather than an unused import. Issue athenaeum#1948 introduced
+    # this constant on `librarian`; athenaeum#1949 moved its definition down to
+    # `compile_routing` so BOTH Tier-3 write boundaries could share one
+    # reader. Keeping the name importable from here means that move is not a
+    # breaking change for anything already reading it off this module.
+    CORRESPONDENT_EMAIL_KEY as CORRESPONDENT_EMAIL_KEY,
+)
+from athenaeum.compile_routing import (
+    PERSON_ENTITY_TYPE,
+    CompileRouteRecord,
+    classify_route,
+    correspondent_from_raw,
+    record_compile_route,
+    resolved_correspondent_uid,
+)
 from athenaeum.config import (
     DEFAULT_KNOWLEDGE_ROOT as _DEFAULT_KNOWLEDGE_ROOT_TEMPLATE,
 )
@@ -1582,88 +1599,6 @@ def tier0_do_not_email_mark(
     return entity, True
 
 
-#: Raw-intake frontmatter key naming the correspondent a conversation-summary
-#: note is about (issue athenaeum#1948). This is the PRODUCER's key, not one
-#: invented here: voltaire's shipped conversation-intake writer
-#: (``src/conversation-intake.ts``, athenaeum#859's agreed submission shape)
-#: emits ``correspondent_email`` — already trimmed and lowercased — on the
-#: prose half of every triaged conversation, alongside the ``.jsonl``
-#: correction batch that targets the same address as
-#: ``{"type": "person", "handle": {"email": ...}}``.
-#:
-#: Deliberately NOT a :data:`~athenaeum.registry.SOURCE_HANDLE_KEYS` member
-#: and never written to a wiki page: the address's only home is the excluded
-#: contacts surface (athenaeum#427/#437), which is the whole reason
-#: :func:`_record_correspondent_contact` exists — see
-#: :data:`athenaeum.corrections.EMAIL_HANDLE_KEY` for the same argument on
-#: the correction-target side.
-CORRESPONDENT_EMAIL_KEY = "correspondent_email"
-
-#: Companion display-name key from the same producer, optional on its side.
-#: Used ONLY to disambiguate which of several created person pages is the
-#: correspondent — never written anywhere.
-CORRESPONDENT_NAME_KEY = "correspondent_name"
-
-#: The entity type a correspondent's address may be recorded against. An
-#: email address identifies a PERSON; recording one against a company or
-#: project page would put a human's address on a non-person record, which the
-#: athenaeum#1416 field-constraint guard exists to refuse on the wiki side and
-#: which has no meaning on the contacts surface either.
-PERSON_ENTITY_TYPE = "person"
-
-
-@dataclass(frozen=True)
-class _CorrespondentRef:
-    """What a raw note's own frontmatter says about its correspondent.
-
-    All three fields blank/empty for the overwhelming majority of raw files,
-    which name no correspondent at all — the caller does nothing in that case,
-    so this is never an error path.
-    """
-
-    address: str = ""
-    display_name: str = ""
-    observed_at: str = ""
-
-
-def _correspondent_from_raw(raw: "RawFile | None") -> _CorrespondentRef:
-    """Read :data:`CORRESPONDENT_EMAIL_KEY` and friends off *raw*'s frontmatter.
-
-    One parse for all three fields. Neither call can raise here:
-    ``RawFile.content`` is already cached by the time any
-    :func:`_apply_tier3_results` caller reaches this (``process_one`` parses
-    it at the top of the file's own processing), and ``parse_frontmatter`` is
-    itself fail-open on malformed YAML — so a note whose frontmatter cannot be
-    read yields blanks rather than an exception, same as every other
-    frontmatter reader on this path.
-
-    ``observed_at`` falls back to the raw file's own timestamp, then to today.
-    The producer always writes ``observed_at`` (the RFC-3339 instant of the
-    most recent contact in the cycle), so the first branch is the real one;
-    the fallbacks exist so a hand-authored note still records a usable date
-    rather than an empty string, which would read back as an unknown
-    observation time.
-    """
-    if raw is None:
-        return _CorrespondentRef()
-    meta, _ = parse_frontmatter(raw.content)
-    if not isinstance(meta, dict):
-        meta = {}
-
-    def _scalar(key: str) -> str:
-        value = meta.get(key)
-        if isinstance(value, str):
-            return value.strip()
-        return str(value).strip() if value is not None else ""
-
-    observed_at = _scalar("observed_at") or raw.timestamp or date.today().isoformat()
-    return _CorrespondentRef(
-        address=_scalar(CORRESPONDENT_EMAIL_KEY),
-        display_name=_scalar(CORRESPONDENT_NAME_KEY),
-        observed_at=observed_at,
-    )
-
-
 def _pick_correspondent_entity(
     created_people: list[WikiEntity],
     display_name: str,
@@ -1746,7 +1681,7 @@ def _record_correspondent_contact(
     """
     if raw is None:
         return
-    ref = _correspondent_from_raw(raw)
+    ref = correspondent_from_raw(raw)
     if not ref.address:
         return
 
@@ -1913,8 +1848,57 @@ def _apply_tier3_results(
     # from both the adapter-provenance ledger below and `result.updated` —
     # counting an uncommitted write as "updated" would misreport AC7's
     # refuse-and-surface contract as a silent success.
+    # Issue athenaeum#1949: before any merge write, ask whether this file's
+    # updates are going where its own frontmatter says they should. A
+    # one-correspondent conversation summary names its correspondent, and that
+    # correspondent resolves uniquely through the SAME `email -> uid` lookup
+    # the corrections path uses (athenaeum#858/#884) -- so the compile already
+    # has a reliable answer for which page the note belongs on and simply
+    # never consulted it. A file naming no correspondent, or one whose address
+    # does not resolve uniquely, yields an inactive verdict and nothing below
+    # changes: the guard cannot touch ordinary intake.
+    _route = classify_route(
+        correspondent_uid=resolved_correspondent_uid(
+            raw,
+            index=index,
+            wiki_root=wiki_root,
+            config=config,
+            excluded_index=excluded_index,
+        ),
+        pending_updates=pending_updates,
+        updated_uids=updated_uids,
+    )
+    for _reason in _route.reasons:
+        # Logged with its reason either way (AC1) -- the ledger row below is
+        # the durable half, this is the operator-visible half.
+        log.warning("  Routing divergence (%s): %s", raw.ref if raw else "?", _reason)
+    if _route.prevented and raw is not None:
+        escalations.append(
+            EscalationItem(
+                raw_ref=raw.ref,
+                entity_name=_route.correspondent_uid,
+                conflict_type="ambiguous",
+                description=(
+                    f"Refused {len(_route.prevented)} update(s) from {raw.ref} to a "
+                    f"person page other than the correspondent's "
+                    f"({_route.correspondent_uid}), whose own page received no "
+                    "write at all. Reasons: " + "; ".join(_route.reasons)
+                ),
+            )
+        )
+
     _admitted_updated_uids: list[str] = []
+    _prevented_uids: list[str] = []
     for _update_idx, (_update_path, _update_content) in enumerate(pending_updates):
+        if _update_idx in _route.prevented:
+            # Issue athenaeum#1949: the misroute shape. Refused BEFORE the
+            # write, so the unrelated person's page is left byte-for-byte
+            # untouched and the update is never counted in `result.updated`
+            # -- same posture as the type/field-constraint guards below.
+            result.misrouted_updates_prevented += 1
+            if _update_idx < len(updated_uids):
+                _prevented_uids.append(str(updated_uids[_update_idx]).strip())
+            continue
         # Write-boundary field-constraint guard (issue athenaeum#1416): the
         # merge path writes an EXISTING page, so unlike the type guard
         # below there is no "new page" to admit/refuse by type — this is
@@ -2059,6 +2043,32 @@ def _apply_tier3_results(
     if raw is not None and _written_uids:
         record_adapter_provenance_for_pages(
             raw.source, raw.ref, raw.content, _written_uids
+        )
+
+    # Issue athenaeum#1949 (AC2): the durable per-file `raw ref -> written
+    # uid(s)` join. Written for EVERY raw file that reaches this boundary,
+    # including one that wrote nothing -- an empty `written_uids` is exactly
+    # the observed symptom ("afterwards, no page in the wiki cites the file")
+    # and is the row a reconstruction most needs. Unlike the
+    # adapter-provenance call immediately above, this is source-agnostic: see
+    # `compile_routing.record_compile_route` for why widening that ledger
+    # instead would have meant inventing an external id for sources with none.
+    if raw is not None:
+        record_compile_route(
+            CompileRouteRecord(
+                raw_ref=raw.ref,
+                source=raw.source,
+                written_uids=list(_written_uids),
+                created_uids=[e.uid for e in result.created],
+                updated_uids=list(_admitted_updated_uids),
+                correspondent_uid=_route.correspondent_uid,
+                prevented_uids=[u for u in _prevented_uids if u],
+                logged_uids=[
+                    str(updated_uids[i]).strip()
+                    for i in _route.logged
+                    if i < len(updated_uids)
+                ],
+            )
         )
 
     result.updated.extend(_admitted_updated_uids)
@@ -4942,6 +4952,12 @@ class RunContext:
     #: ``ProcessingResult.correspondent_contacts_recorded``, mirroring the
     #: ``total_field_constraint_rejected`` accumulator immediately above.
     total_correspondent_contacts: int = 0
+    #: Issue athenaeum#1949: Tier-3 merge writes refused this run by the
+    #: routing guard because they targeted a person page other than the raw
+    #: note's own named correspondent, whose page received no write at all.
+    #: Folded in from ``ProcessingResult.misrouted_updates_prevented``,
+    #: mirroring the accumulator immediately above.
+    total_misrouted_prevented: int = 0
     failed_files: list[str] = field(default_factory=list)
     deferred_refs: list[str] = field(default_factory=list)
     # Issue athenaeum#1144: refs whose Batch API submission was still running when
@@ -8267,6 +8283,10 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                         ctx.total_correspondent_contacts += getattr(
                             result, "correspondent_contacts_recorded", 0
                         )
+                        # Issue athenaeum#1949: same getattr-tolerance rationale.
+                        ctx.total_misrouted_prevented += getattr(
+                            result, "misrouted_updates_prevented", 0
+                        )
                         # Issue athenaeum#1184: fan-out (matches) and the "produced
                         # actions" denominator — ``getattr`` for the same
                         # stubbed-test-seam reason as ``degraded``/``truncated``
@@ -8774,6 +8794,14 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     **(
                         {"correspondent_contacts": ctx.total_correspondent_contacts}
                         if ctx.total_correspondent_contacts
+                        else {}
+                    ),
+                    # Issue athenaeum#1949: misrouted merge writes refused this
+                    # run. Only rendered when non-zero, so a clean run's
+                    # summary shape is unchanged.
+                    **(
+                        {"misrouted_prevented": ctx.total_misrouted_prevented}
+                        if ctx.total_misrouted_prevented
                         else {}
                     ),
                     # athenaeum#663: files skipped/surfaced as stuck this run. Only

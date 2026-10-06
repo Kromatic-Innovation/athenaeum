@@ -115,6 +115,7 @@ MODULE_LAYER: dict[str, int] = {
     "zero_yield": 2,
     # L3 -- services.
     "adapter_provenance": 3,
+    "compile_routing": 3,  # compile_routing.py: "Layering: L3 service"
     "batch_state": 3,
     "calibration": 3,
     "clusters": 3,
