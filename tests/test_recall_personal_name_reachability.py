@@ -133,7 +133,7 @@ class TestAC3ReachableByNameForOwner:
             cache_dir=cache,
             caller_audience=None,
         )
-        assert _TARGET_NAME in result
+        assert "target.md" in result
 
     def test_confidential_access_is_not_widened(self, tmp_path: Path) -> None:
         """The ruling names `access: personal` only — confidential pages
@@ -175,6 +175,16 @@ class TestAC3ReachableByNameForOwner:
             caller_audience={"some-unrelated-role"},
         )
         assert "target.md" not in result
+        # Pins the owner-only gate itself, not just Layer C's filename
+        # drop: an exact-name query for a real `access: personal` page must
+        # look EXACTLY like a genuine miss to a restricted caller. If the
+        # owner-only gate around the rescue helper is ever bypassed for a
+        # restricted caller, the helper still finds the page by name
+        # (bypassing Layer B's in-query audience predicate), Layer C then
+        # drops it as unauthorized, and this breadcrumb line fires -- an
+        # existence oracle: an exact personal name now reads differently
+        # from a name that matches nothing at all.
+        assert "withheld" not in result
 
     def test_rescue_respects_an_explicit_type_filter(self, tmp_path: Path) -> None:
         """A caller who explicitly narrowed by `type=` must not have the
@@ -449,6 +459,39 @@ class TestCliRecallSurface:
         assert rc == 0
         out = capsys.readouterr().out
         assert "target.md" in out
+
+    def test_cli_restricted_caller_reachability_is_unchanged(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """CLI sibling of
+        ``test_restricted_caller_reachability_is_unchanged``: pins the
+        owner-only gate around the rescue helper in ``cmd_recall`` itself,
+        not just the filename's absence from stdout. A restricted caller
+        querying an exact `access: personal` name must look EXACTLY like a
+        genuine miss -- no `withheld` breadcrumb on stderr either, or the
+        rescue helper has turned into a per-name existence oracle."""
+        from athenaeum._cmd_query import cmd_recall
+
+        knowledge_root = tmp_path / "knowledge"
+        wiki = knowledge_root / "wiki"
+        wiki.mkdir(parents=True)
+        cache = tmp_path / "cache"
+        _personal_page(wiki, "target.md", _TARGET_NAME)
+        FTS5Backend().build_index(wiki, cache)
+
+        rc = cmd_recall(
+            self._cli_args(
+                query=_TARGET_NAME,
+                path=knowledge_root,
+                cache_dir=cache,
+                audience="some-unrelated-role",
+                top_k=10,
+            )
+        )
+        assert rc == 0
+        captured = capsys.readouterr()
+        assert "target.md" not in captured.out
+        assert "withheld" not in captured.err
 
     def test_cli_reports_withheld_count_on_stderr(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]

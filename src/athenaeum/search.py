@@ -1825,10 +1825,11 @@ def find_personal_page_by_exact_name(
       ``access: personal`` page is UNCHANGED: still governed solely by an
       explicit ``audience:`` grant, same as before this issue.
 
-    **Cost.** One indexed SQL equality lookup against the ALREADY-BUILT
-    FTS5 index's ``name`` column (no ``MATCH``/BM25 ranking, no filesystem
-    walk over the corpus) — the existing index IS the cheap name-to-file
-    catalog this needs, so this never degrades into an O(corpus) scan.
+    **Cost.** A single equality scan over the FTS5 ``name`` column of the
+    ALREADY-BUILT index (``wiki`` is an FTS5 virtual table, so ``WHERE
+    name = ?`` is a content-table scan, not an index-assisted lookup — no
+    ``MATCH``/BM25 ranking, no filesystem walk over the corpus). Measured at
+    ~17ms at 50k rows, so cheap in practice even though it is not O(1).
     Matched candidates are then re-checked against FRESH on-disk
     frontmatter (the same Layer-C discipline every other read path in this
     repo follows), so a stale index entry can never resurrect a page whose

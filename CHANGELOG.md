@@ -66,10 +66,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   far below where raw/unweighted `bm25()` or the scan-on-query keyword
   backend rank it, burying a page past any `top_k` cutoff with no filter
   involved. `athenaeum.search.find_personal_page_by_exact_name` is a new,
-  narrow escape hatch — an indexed, O(1) exact `name` lookup, re-verified
-  against fresh on-disk frontmatter — consulted alongside normal ranking for
-  the owner/default caller only; a restricted caller's reachability for an
-  `access: personal` page is unchanged, still governed solely by an explicit
+  narrow escape hatch — a single equality scan over the FTS5 `name` column
+  (the `wiki` table is an FTS5 virtual table, so this is a content-table
+  scan, not an index-assisted O(1) lookup — cheap in practice, ~17ms at 50k
+  rows), re-verified against fresh on-disk frontmatter — consulted alongside
+  normal ranking for the owner/default caller only; a restricted caller's
+  reachability for an `access: personal` page is unchanged, still governed
+  solely by an explicit
   `audience:` grant, and no other access level (`open`/`internal`/
   `confidential`) is affected. Both the MCP `recall` tool and the CLI
   `athenaeum recall` command now also print a count (never a type/page/level
