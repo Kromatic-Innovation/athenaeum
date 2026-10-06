@@ -2222,6 +2222,54 @@ off at the call site. No seed in ``_DEFAULTS`` — the default
 lives here in code so it stays reachable. Non-bool yaml values fall through
 to the default (on).
 
+### `resolve_reversible_verdict_auto_apply_enabled`
+
+- **YAML path:** `librarian.reversible_verdict_auto_apply_enabled`
+- **Environment variable:** `ATHENAEUM_REVERSIBLE_VERDICT_AUTO_APPLY_ENABLED`
+- **CLI flag:** —
+- **Default:** `False`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the five-verdict comparator's reversible-operation auto-apply
+opt-in. DEFAULT OFF.
+
+Gates whether `athenaeum.verdict_effects.apply_verdict_effect` may
+ENACT a reversible operation automatically — today that means: the
+``duplicate`` branch folding a pair into an existing canonical page
+(tombstoning the source, rewriting inbound links, recording a reversible
+merge-provenance entry) instead of only writing fold EVIDENCE and queuing
+it for a human. It does NOT gate `athenaeum.verdict_effects`'s
+pre-existing ``specialization`` -> ``refines:`` write (that write has been
+unconditional since shipped the comparator and is
+retained unchanged — see
+``tests/test_verdict_effects.py::TestEF6SpecializationWritesRefines``),
+and it does not gate `athenaeum.supersession`'s own auto-apply
+decision for the ``contradiction`` branch ('s own
+conditions own that call entirely; this module only records what
+supersession decided).
+Every operation this key *can* arm is required by to
+be REVERSIBLE (see `athenaeum.unfold`) and to additionally require a
+FRESH verdict basis (`athenaeum.verdicts.can_authorize_auto_operation`
+— a verdict marked stale by 's invalidation waves cannot
+authorize a NEW automatic fold even while this key is on; an operation
+already applied under an earlier, then-fresh verdict is unaffected either
+way). Anything irreversible (a ``contradiction`` that supersession could
+not decide, ``distinct``, ``underdetermined``) never reaches this gate at
+all — see `athenaeum.verdict_effects.AUTO_APPLY_OPERATIONS` for the
+enumerated allowlist and its accompanying refusal test.
+
+Env ``ATHENAEUM_REVERSIBLE_VERDICT_AUTO_APPLY_ENABLED``
+(``1``/``true``/``yes``/``on``, case-insensitive) > yaml
+``librarian.reversible_verdict_auto_apply_enabled`` > default ``False``.
+No seed in ``_DEFAULTS``. **Default OFF for the first
+release**, mirroring `resolve_reasoning_tier_t2_auto_apply_enabled`'s
+own rationale: flipping this changes what reaches the live corpus with no
+human in the loop, so it stays opt-in until an operator has watched the
+evidence/queue path's proposals for a while and decides to arm it
+deliberately — production behavior is byte-identical to pre-
+until then. Non-bool yaml values and unrecognized env strings fall
+through to off.
+
 ### `resolve_rule_proposals_enabled`
 
 - **YAML path:** `librarian.rule_proposals.enabled`
