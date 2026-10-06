@@ -230,6 +230,13 @@ class TestPhase2StaysDark:
         "supersession",
         "asserter_authority",
         "recompare",
+        # Issue athenaeum#716: the composition module that executes an
+        # authorized duplicate-verdict auto-fold (imports verdict_effects +
+        # pending_merges). Reachable only through the same authorized
+        # wiki_dedupe.py wiring as verdict_effects itself -- a pipeline
+        # entry point importing this directly would bypass that choke
+        # point exactly as importing verdict_effects directly would.
+        "auto_apply",
     )
 
     @pytest.mark.parametrize("entry_point", PIPELINE_ENTRY_POINTS)
@@ -251,15 +258,23 @@ class TestPhase2StaysDark:
 
     def test_wiki_dedupe_is_the_one_authorized_cut_over_wiring(self) -> None:
         """Issue athenaeum#715's cut-over: ``wiki_dedupe.py`` now imports the
-        comparator core and ``verdict_effects`` directly, replacing its own
-        old algorithm — stated here as a positive assertion (not merely an
-        omission from ``PIPELINE_ENTRY_POINTS`` above) so this authorized
-        wiring is visible to a reader of this test file, not just absent
-        from the forbidden list."""
+        comparator core directly, replacing its own old algorithm — stated
+        here as a positive assertion (not merely an omission from
+        ``PIPELINE_ENTRY_POINTS`` above) so this authorized wiring is
+        visible to a reader of this test file, not just absent from the
+        forbidden list.
+
+        Issue athenaeum#716: the verdict-ENACTMENT half of this wiring now goes
+        through :mod:`athenaeum.auto_apply` (``enact_verdict_effect``)
+        instead of calling ``athenaeum.verdict_effects.apply_verdict_effect``
+        directly — that composition module is what executes an authorized
+        duplicate-verdict auto-fold, and it imports ``verdict_effects``
+        itself (see its own module docstring), so this is still the same
+        one authorized choke point, not a second one."""
         repo_root = Path(__file__).resolve().parents[1]
         source = (repo_root / "src/athenaeum/wiki_dedupe.py").read_text(encoding="utf-8")
         assert "from athenaeum.comparator import" in source
-        assert "from athenaeum.verdict_effects import" in source
+        assert "from athenaeum.auto_apply import" in source
 
     def test_comparator_gate_callers_are_recompare_and_the_wiki_dedupe_cutover(self) -> None:
         """``resolve_comparator_enabled`` has exactly SIX callers in ``src/``

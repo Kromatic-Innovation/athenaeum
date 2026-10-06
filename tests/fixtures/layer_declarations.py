@@ -154,6 +154,7 @@ MODULE_LAYER: dict[str, int] = {
     "audit": 4,
     "audit_on_touch": 4,
     "audit_queue": 4,
+    "auto_apply": 4,
     "auto_memory_prune": 4,
     "axiom_governance": 4,
     "backlog_price_sheet": 4,
