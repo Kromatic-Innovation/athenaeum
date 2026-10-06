@@ -556,6 +556,99 @@ class TestStatus:
         assert exit_code == 1
 
 
+class TestRepairDebtInstrumentation:
+    """Issue athenaeum#716: repair-debt instrumentation on ``athenaeum status``."""
+
+    def test_defaults_to_zero_counts_and_no_fraction(self, tmp_path: Path) -> None:
+        root = tmp_path / "knowledge"
+        (root / "wiki").mkdir(parents=True)
+        (root / "raw").mkdir(parents=True)
+        info = status(root)
+        assert info["repair_debt"] == {
+            "auto_applied_folds": 0,
+            "unfold_direct": 0,
+            "unfold_queued": 0,
+            "unfold_queued_fraction": None,
+        }
+
+    def test_surfaces_persisted_unfold_counters(self, tmp_path: Path) -> None:
+        # Written under the CACHE dir (redirected to a per-test tmp dir by
+        # the ``_isolate_cache_dir`` autouse fixture), same discipline as the
+        # zero-yield test above.
+        from athenaeum.config import resolve_cache_dir
+        from athenaeum.unfold import _record_unfold_outcome
+
+        root = tmp_path / "knowledge"
+        (root / "wiki").mkdir(parents=True)
+        (root / "raw").mkdir(parents=True)
+        cache_dir = resolve_cache_dir()
+        _record_unfold_outcome(cache_dir, direct=True)
+        _record_unfold_outcome(cache_dir, direct=False)
+        _record_unfold_outcome(cache_dir, direct=False)
+
+        info = status(root)
+        assert info["repair_debt"]["unfold_direct"] == 1
+        assert info["repair_debt"]["unfold_queued"] == 2
+        assert info["repair_debt"]["unfold_queued_fraction"] == pytest.approx(2 / 3)
+
+    def test_counts_auto_applied_folds_from_merge_provenance_ledger(
+        self, tmp_path: Path
+    ) -> None:
+        from athenaeum.provenance import record_merge_provenance
+
+        root = tmp_path / "knowledge"
+        wiki = root / "wiki"
+        wiki.mkdir(parents=True)
+        (root / "raw").mkdir(parents=True)
+        record_merge_provenance(
+            wiki,
+            merge_id="m1",
+            write_kind="fold-into-existing",
+            canonical_slug="canonical",
+            source_paths=["source.md"],
+            auto_applied=True,
+        )
+        record_merge_provenance(
+            wiki,
+            merge_id="m2",
+            write_kind="fold-into-existing",
+            canonical_slug="other",
+            source_paths=["x.md"],
+            auto_applied=False,
+        )
+        record_merge_provenance(
+            wiki,
+            merge_id="m3",
+            write_kind="create-merged",
+            canonical_slug="created",
+            source_paths=["y.md"],
+            auto_applied=True,
+        )
+
+        info = status(root)
+        # Only the fold-into-existing + auto_applied record counts.
+        assert info["repair_debt"]["auto_applied_folds"] == 1
+
+    def test_format_status_renders_repair_debt_line(self, tmp_path: Path) -> None:
+        root = tmp_path / "knowledge"
+        (root / "wiki").mkdir(parents=True)
+        (root / "raw").mkdir(parents=True)
+        info = status(root)
+        assert "Repair debt:" in format_status(info)
+
+    def test_format_status_tolerates_a_pre_716_status_dict(self) -> None:
+        info: dict = {
+            "raw_pending": 0,
+            "entity_count": 0,
+            "entities_by_type": {},
+            "last_commit_date": "",
+            "last_commit_message": "",
+            "pending_questions": 0,
+        }
+        output = format_status(info)  # type: ignore[arg-type]
+        assert "Repair debt:" not in output
+
+
 def _entity_page(name: str, uid: str, target_bytes: int) -> str:
     """Build an entity page whose UTF-8 body is ~``target_bytes`` long."""
     header = textwrap.dedent(
