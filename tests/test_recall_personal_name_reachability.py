@@ -25,6 +25,7 @@ from pathlib import Path
 import pytest
 
 from athenaeum.mcp_server import recall_search
+from athenaeum.models import parse_frontmatter, render_frontmatter, stamp_tombstone
 from athenaeum.search import FTS5Backend, find_personal_page_by_exact_name
 
 # Invented name used as the exact-match query throughout — never a real
@@ -244,6 +245,43 @@ class TestFindPersonalPageByExactNameUnit:
         cache = tmp_path / "cache"
         _confidential_page(wiki, "target.md", _TARGET_NAME)
         FTS5Backend().build_index(wiki, cache)
+
+        assert find_personal_page_by_exact_name(_TARGET_NAME, cache, wiki) is None
+
+    def test_stale_index_does_not_resurrect_a_fold_tombstone(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue athenaeum#716: a folded page must be invisible to recall
+        UNCONDITIONALLY, including through this rescue.
+
+        The hole this closes is a real interaction between two changes, not a
+        hypothetical: a fold tombstones its source WITHOUT rebuilding the FTS5
+        index, so the tombstoned page still has a live row here — and this
+        helper's result is PREPENDED by its callers ahead of every backend
+        hit, bypassing the index-build exclusion that normally keeps a
+        tombstone out of recall. The access-level re-check above already
+        proves the Layer-C pass runs; this proves it covers the
+        page-level ``embedded: false`` override too.
+        """
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        cache = tmp_path / "cache"
+        _personal_page(wiki, "target.md", _TARGET_NAME)
+        FTS5Backend().build_index(wiki, cache)
+
+        # Positive control: reachable while live, so the assertion below is
+        # about the tombstone and not about a broken fixture.
+        assert find_personal_page_by_exact_name(_TARGET_NAME, cache, wiki) is not None
+
+        # Fold it, leaving the index deliberately STALE (no rebuild) — the
+        # exact state the corpus is in between a fold and the next reindex.
+        page = wiki / "target.md"
+        text = page.read_text(encoding="utf-8")
+        meta, body = parse_frontmatter(text)
+        page.write_text(
+            render_frontmatter(stamp_tombstone(meta, "canonical-slug")) + body,
+            encoding="utf-8",
+        )
 
         assert find_personal_page_by_exact_name(_TARGET_NAME, cache, wiki) is None
 

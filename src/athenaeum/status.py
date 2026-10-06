@@ -198,6 +198,25 @@ class StatusInfo(TypedDict):
     # uses to exclude a file from the entity phase's intake window, so this
     # WARNING and that hold-out never disagree about which files are stuck.
     stuck_backlog_warning: dict[str, object] | None
+    # Issue athenaeum#716: repair-debt instrumentation for the five-verdict
+    # comparator's reversible-operation auto-apply loan (see
+    # docs/design/conflict-resolution.md §15) — "reversible => auto" is a
+    # loan, and this makes the inflow visible rather than assumed.
+    # ``auto_applied_folds`` is a live count over the merge-provenance ledger
+    # (``write_kind == "fold-into-existing"`` and ``auto_applied is True``) —
+    # real today via the pre-existing T2 reasoning-tier auto-finalize path
+    # even before this issue's own comparator-driven auto-fold executes a
+    # write (see ``athenaeum.verdict_effects``'s module docstring for that
+    # gap). ``unfold_direct`` / ``unfold_queued`` are the persisted
+    # :mod:`athenaeum.unfold` outcome counters — both the numerator
+    # (``unfold_queued``) and the denominator (``unfold_direct +
+    # unfold_queued``) are present, not just ``unfold_queued_fraction``
+    # (``None`` when zero unfolds have ever run, rather than a misleading
+    # ``0.0``). Never ``None`` itself — always present, zeros when nothing
+    # has happened yet, mirroring ``zero_yield_consecutive``'s own
+    # always-a-real-count style rather than ``verdict_ledger_duty_cycle``'s
+    # opt-in-gated ``None``.
+    repair_debt: dict[str, object]
 
 
 def scan_page_sizes(
@@ -514,6 +533,48 @@ def status(knowledge_root: Path) -> StatusInfo:
             exc,
         )
 
+    # Issue athenaeum#716: repair-debt instrumentation. Best-effort — a
+    # ledger/sidecar read hiccup here must never break status, same
+    # discipline as the drain advisory / cluster-snapshot sections above.
+    # Function-local imports mirror those same sections: ``athenaeum.unfold``
+    # and ``athenaeum.provenance`` do not import ``status``/``librarian``/
+    # ``drain`` (checked against tests/test_import_graph_acyclic.py), so this
+    # cannot reopen the cycle this module's docstring documents dissolving.
+    repair_debt: dict[str, object] = {
+        "auto_applied_folds": 0,
+        "unfold_direct": 0,
+        "unfold_queued": 0,
+        "unfold_queued_fraction": None,
+    }
+    try:
+        from athenaeum.provenance import read_merge_provenance
+        from athenaeum.unfold import load_repair_debt_counters
+
+        auto_applied_folds = sum(
+            1
+            for record in read_merge_provenance(wiki_root)
+            if record.get("write_kind") == "fold-into-existing"
+            and record.get("auto_applied") is True
+        )
+        counters = load_repair_debt_counters(resolve_cache_dir())
+        unfold_direct = counters["unfold_direct"]
+        unfold_queued = counters["unfold_queued"]
+        total_unfolds = unfold_direct + unfold_queued
+        repair_debt = {
+            "auto_applied_folds": auto_applied_folds,
+            "unfold_direct": unfold_direct,
+            "unfold_queued": unfold_queued,
+            "unfold_queued_fraction": (
+                (unfold_queued / total_unfolds) if total_unfolds else None
+            ),
+        }
+    except Exception as exc:  # noqa: BLE001 — must never break status
+        log.debug(
+            "status: repair-debt instrumentation skipped (%s): %s",
+            type(exc).__name__,
+            exc,
+        )
+
     return {
         "raw_pending": raw_pending,
         "entity_count": entity_count,
@@ -533,6 +594,7 @@ def status(knowledge_root: Path) -> StatusInfo:
         "embedder_provenance": embedder_provenance,
         "cluster_embedder_snapshot": cluster_embedder_snapshot,
         "stuck_backlog_warning": stuck_backlog_warning,
+        "repair_debt": repair_debt,
     }
 
 
@@ -677,6 +739,20 @@ def format_status(info: StatusInfo) -> str:
             sha_hex, is_default = schema_fragments[name]
             detail = "default" if is_default else f"edited (sha8 {sha_hex[:8]})"
             lines.append(f"  {name}: {detail}")
+
+    # Issue athenaeum#716: repair-debt instrumentation. ``.get`` keeps a
+    # pre-athenaeum#716 status dict (missing this key) formatting cleanly.
+    repair_debt = info.get("repair_debt")
+    if repair_debt:
+        fraction = repair_debt.get("unfold_queued_fraction")
+        fraction_str = f"{fraction:.0%}" if isinstance(fraction, (int, float)) else "n/a"
+        lines.append(
+            "Repair debt: auto-applied folds="
+            f"{repair_debt.get('auto_applied_folds', 0)}, unfolds direct="
+            f"{repair_debt.get('unfold_direct', 0)} queued="
+            f"{repair_debt.get('unfold_queued', 0)} "
+            f"(queued fraction={fraction_str})"
+        )
 
     if info["last_commit_date"]:
         lines.append(f"Last commit:          {info['last_commit_date']}")

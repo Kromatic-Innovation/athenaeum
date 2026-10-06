@@ -9,6 +9,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Tombstone fold, unfold, and auto-apply for reversible verdicts
+  (issue athenaeum#716).** A merge may destroy renderings, never observations:
+  folding a duplicate page into its canonical no longer deletes the source.
+  The folded source becomes a tombstone (`status: folded`,
+  `folded_into: <slug>`, `embedded: false`) that is excluded from every search
+  index, invisible to recall, and never re-embedded, while every pre-existing
+  fold step — alias accumulation, inbound-link rewrite, vector purge, and the
+  athenaeum#947 provenance-snapshot commit — is preserved. That one change
+  reclassifies fold from irreversible to reversible, which is what lets it be
+  applied automatically with an audit trail and an undo path.
+  - A new per-page `embedded: false` frontmatter override
+    (`storage.page_embedding_disabled` / `page_is_embedded`) is honored by all
+    three search backends at index time, not merely at the renderer. The
+    override is negative-only: a page-level `embedded: true` cannot force
+    embedding for a class whose corpus policy excludes it.
+  - The merge-provenance ledger record is now reversal-sufficient
+    (`MERGE_PROVENANCE_VERSION` 2): it carries `folded_sources`,
+    `aliases_added`, the per-link `links_rewritten` detail, the post-fold
+    `canonical_content_hash`, and `coordinates_widened`. Older records simply
+    lack the keys and read as not directly unfoldable.
+  - **Coordinates widen, never narrow.** Equivalent content at nested scopes
+    folds into the claim with the widest coordinates (intervals to their union,
+    hierarchies to the shorter ancestor prefix), reusing athenaeum#715's own
+    `_widen_dimension` rather than a second implementation. A fold that would
+    leave the canonical narrower on any axis than a folded source is refused,
+    not repaired later.
+  - **Fold-graph invariants are enforced at write:** `folded_into` must stay
+    acyclic and exactly one live canonical may exist per fold set, including
+    the chained A-folds-into-B-folds-into-C case. `athenaeum fold-lint` reports
+    violations over the live store, read-only by default.
+  - **`athenaeum.unfold`** is the compensating repair path: it restores the
+    tombstone to live, re-points inbound links from the ledgered rewrite list,
+    and re-embeds. It executes directly only while the canonical is untouched
+    since the fold — decided by an actual content-hash comparison, never a
+    timestamp — and otherwise becomes a queued proposal carrying a diff.
+  - **Auto-apply is behind `librarian.reversible_verdict_auto_apply_enabled`,
+    default off.** With it on, a `duplicate` verdict with a fresh
+    athenaeum#712 basis folds for real through the ordinary fold machinery, via
+    the new `athenaeum.auto_apply` composition module, ledgered
+    `auto_applied: true`; a stale-marked verdict cannot authorize a new
+    automatic fold, and operations already applied stand. An explicit
+    allowlist, with its own boundary test, keeps everything irreversible
+    routed to a human.
+  - **Repair debt is instrumented, not assumed.** `athenaeum status` reports
+    auto-applied folds, unfold proposals generated, and the fraction of
+    unfolds that had to become queued diff-adjudications, so the
+    "reversible implies automatic" loan is visible rather than hidden.
+
 - **Validating north-star grid for the `follow_through` path-to-beat
   (issue athenaeum#1854).** `docs/measurements/native-memory-baseline-2026-09-19.md`
   records the reading from workflow run 35443944736 (768 rows, `develop`
@@ -102,6 +150,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The name-collision scanner no longer re-detects a folded-away page
+  (issue athenaeum#716).** `scan_name_collisions` now skips tombstones, which
+  are excluded from every index and invisible to recall and so should not
+  compete for a name either. Without this, every fold would have left a
+  permanent false-positive `ambiguous` collision in the scanner's report.
 - **`access: personal` pages are now reachable by exact name in default
   recall, CLI and MCP (issue athenaeum#1967, operator ruling 2026-10-05).**
   AC1's trace found NO audience/PII/`recallable` filter touches the

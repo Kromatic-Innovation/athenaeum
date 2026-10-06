@@ -35,7 +35,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Literal
 
-from athenaeum.models import parse_frontmatter, resolve_page_type, slugify
+from athenaeum.models import is_tombstone, parse_frontmatter, resolve_page_type, slugify
 from athenaeum.pending_merges import parse_pending_merges, resolve_merge, write_pending_merge
 from athenaeum.t1_census import T1_UNSCREENED_NAME_COLLISION, get_t1_census
 
@@ -99,7 +99,31 @@ def scan_name_collisions(wiki_root: Path) -> list[NameCollision]:
     silently skipped, never raised — exactly that index's own tolerance, so
     this scan never trips over the same malformed file the rest of the
     pipeline already tolerates. A page with no ``name:`` frontmatter key is
-    likewise skipped (nothing to key a collision group on).
+    likewise skipped (nothing to key a collision group on). A page already
+    carrying the issue athenaeum#716 tombstone stamp (``status: folded`` —
+    :func:`athenaeum.models.is_tombstone`) is also skipped (issue athenaeum#716
+    cross-lane fix): a tombstone is not live content — it is excluded from
+    every index and invisible to ``recall`` on the same grounds
+    (:mod:`athenaeum.storage`'s ``embedded: false`` predicate) — so it must
+    not compete for a ``(name, type)`` slot either. Before this fix, a
+    successful ``fold-into-existing`` approve (this issue's own tombstone-
+    instead-of-delete change) left the folded-away source's file on disk
+    still sharing its ``name:``/``type:`` with the canonical page it was
+    folded into, so every later scan re-detected the same pair as a
+    "collision" forever — and because the tombstone's three new frontmatter
+    keys (``status``/``folded_into``/``embedded``) are not identity/
+    provenance keys :func:`classify_collision` already ignored, it
+    classified the pair ``ambiguous`` rather than re-merging it: no crash,
+    no corruption, but a permanent false-positive queued item. Skipping
+    tombstones here removes them from every collision GROUP entirely
+    (rather than, say, adding those three keys to
+    :data:`_IGNORED_FRONTMATTER_KEYS`, which would still let a tombstone
+    occupy a group slot and compete for canonical-page tiebreaks) — the
+    same page now groups alone, ``scan_name_collisions`` never reports it as
+    a group of >= 2, and a post-fold re-scan correctly finds nothing left to
+    resolve for that pair. See
+    ``tests/test_name_collisions_1170.py::
+    TestResolveNameCollisionsIdempotency::test_second_run_after_automerge_finds_no_collision``.
 
     Grouping key is ``(name.strip().lower(), resolved_type)`` — case-
     insensitive on the name (matching :meth:`EntityIndex.lookup`'s own
@@ -125,6 +149,12 @@ def scan_name_collisions(wiki_root: Path) -> list[NameCollision]:
             continue
         meta, body = parse_frontmatter(text)
         if not meta:
+            continue
+        if is_tombstone(meta):
+            # Issue athenaeum#716 cross-lane fix: a tombstone is not live
+            # content and must not compete for a (name, type) slot — see
+            # this function's own docstring for the false-positive this
+            # closes.
             continue
 
         uid_raw = meta.get("uid", "")

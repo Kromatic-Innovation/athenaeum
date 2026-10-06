@@ -698,6 +698,75 @@ def parse_deprecated(meta: Mapping[str, object] | None) -> bool:
     return bool(dep)
 
 
+# --- Tombstone representation (issue athenaeum#716, lane 716-A) ---
+#
+# "A merge may destroy renderings, never observations": when wiki-dedup folds
+# one page's content into another, the source page must stay on disk (never
+# ``git rm``-ed) but become a TOMBSTONE — excluded from every index, invisible
+# to recall, and never (re-)embedded. This lane builds the REPRESENTATION and
+# the exclusion only; a later lane (716-B) is what makes
+# ``pending_merges._apply_fold_into_existing`` write one instead of deleting
+# the source.
+
+#: Frontmatter key already defined by :mod:`athenaeum.pii` (``FOLDED_INTO_FIELD``,
+#: issue athenaeum#850's bounce-mark fold) for "this record's mark has been folded
+#: onto another record, never deleted." Issue athenaeum#716 reuses the SAME
+#: key/spelling for the wiki-page fold tombstone, so this is the one canonical
+#: definition — :mod:`athenaeum.pii` imports and re-exports this name rather
+#: than keeping its own second spelling (both modules are otherwise unrelated
+#: in scope; this module is the shared L1 frontmatter-vocabulary hub the two
+#: converge on).
+FOLDED_INTO_FIELD = "folded_into"
+
+#: ``status:`` value stamped on a tombstone. ``status:`` is already used
+#: elsewhere for a DIFFERENT page state — :data:`athenaeum.merge.CONTRADICTION_STATUS_FLAGGED`
+#: / :data:`athenaeum.verdict_effects.CONTRADICTION_STATUS_FLAGGED` both write
+#: ``"contradiction-flagged"`` to this same key on an auto-memory page. Grepped
+#: before claiming the key: ``"folded"`` is an ADDITIONAL value, not a
+#: collision — a page is in one state or the other, never both, and nothing
+#: in this codebase treats ``status`` as exclusively a contradiction marker.
+TOMBSTONE_STATUS = "folded"
+
+
+def stamp_tombstone(meta: dict[str, object], folded_into: str) -> dict[str, object]:
+    """Return a COPY of *meta* stamped as a tombstone folded into *folded_into*.
+
+    Sets the three frontmatter keys the athenaeum#716 tombstone representation
+    requires: ``status: folded`` (:data:`TOMBSTONE_STATUS`), ``folded_into:
+    <folded_into>`` (:data:`FOLDED_INTO_FIELD`), and ``embedded: false`` (the
+    per-page corpus-exclusion override every index build/scan consults — see
+    :mod:`athenaeum.storage`'s ``page_embedding_disabled`` / ``page_is_embedded``).
+    Pure: *meta* is not mutated in place, so a caller can inspect the stamped
+    result before deciding whether/when to persist it.
+    """
+    stamped = dict(meta)
+    stamped["status"] = TOMBSTONE_STATUS
+    stamped[FOLDED_INTO_FIELD] = folded_into
+    stamped["embedded"] = False
+    return stamped
+
+
+def is_tombstone(meta: Mapping[str, object] | None) -> bool:
+    """Whether *meta* is a tombstone (``status: folded``) — issue athenaeum#716."""
+    if not meta:
+        return False
+    return meta.get("status") == TOMBSTONE_STATUS
+
+
+def tombstone_target(meta: Mapping[str, object] | None) -> str | None:
+    """The slug a tombstone page was folded into, or ``None``.
+
+    ``None`` both when *meta* is not a tombstone (:func:`is_tombstone` is
+    ``False``) and when it is one but ``folded_into`` is missing, blank, or
+    non-string — a malformed tombstone fails open to "no known target" rather
+    than raising, matching this module's house fail-open style.
+    """
+    if not is_tombstone(meta):
+        return None
+    target = meta.get(FOLDED_INTO_FIELD) if meta else None
+    return target if isinstance(target, str) and target.strip() else None
+
+
 # --- Claim-level temporal validity (issue athenaeum#308, slice 1) ---
 #
 # ``valid_from:`` / ``valid_until:`` are optional ISO-8601 date frontmatter

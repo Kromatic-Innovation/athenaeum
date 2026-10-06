@@ -145,14 +145,99 @@ from athenaeum.comparator import (
     ComparatorPage,
     CompareOutcome,
 )
+from athenaeum.config import resolve_reversible_verdict_auto_apply_enabled
 from athenaeum.dimensions import DEFAULT_REGISTRY, coordinate_value
 from athenaeum.models import EscalationItem, parse_frontmatter, render_frontmatter, slugify
 from athenaeum.tiers import tier4_escalate
-from athenaeum.verdicts import make_pair_key
+from athenaeum.verdicts import can_authorize_auto_operation, lookup_pair, make_pair_key
 
 #: Sub-directory of ``wiki_root`` where fold-adjudication evidence files are
 #: written (issue athenaeum#715 / athenaeum#658 D2).
 FOLD_EVIDENCE_DIRNAME = "_fold_evidence"
+
+#: Issue athenaeum#716: the complete, enumerated set of operations this module
+#: may ever AUTO-apply (write something to the corpus with no human in the
+#: loop) rather than queue for one. Every member is REQUIRED to be
+#: REVERSIBLE and gated on a FRESH verdict basis
+#: (:func:`athenaeum.verdicts.can_authorize_auto_operation`) — see
+#: :func:`athenaeum.config.resolve_reversible_verdict_auto_apply_enabled`'s
+#: docstring for the full product rule this encodes, and
+#: ``tests/test_verdict_effects_auto_apply.py`` for the test asserting the
+#: dispatch path refuses anything outside this set.
+#:
+#: ``specialization-refines`` is enumerated here for completeness even though
+#: its write has been UNCONDITIONAL (no gate, no freshness check) since issue
+#: athenaeum#715 shipped the comparator — :func:`_apply_specialization` never
+#: calls :func:`_check_auto_apply_operation` and
+#: ``tests/test_verdict_effects.py::TestEF6SpecializationWritesRefines``
+#: pins that pre-existing behavior; this issue does not change it.
+#: ``supersession-marking`` is likewise enumerated for completeness: the
+#: actual auto-apply DECISION for a ``contradiction`` belongs entirely to
+#: :mod:`athenaeum.supersession` under issue athenaeum#715's own conditions —
+#: this module only RECORDS what it decided (see :func:`_apply_contradiction`).
+#: Only ``fold-on-duplicate`` is actually gated by this module today (see
+#: :func:`_duplicate_auto_apply_authorization`).
+AUTO_APPLY_FOLD_ON_DUPLICATE = "fold-on-duplicate"
+AUTO_APPLY_SPECIALIZATION_REFINES = "specialization-refines"
+AUTO_APPLY_SUPERSESSION_MARKING = "supersession-marking"
+
+AUTO_APPLY_OPERATIONS: frozenset[str] = frozenset(
+    {
+        AUTO_APPLY_FOLD_ON_DUPLICATE,
+        AUTO_APPLY_SPECIALIZATION_REFINES,
+        AUTO_APPLY_SUPERSESSION_MARKING,
+    }
+)
+
+
+def _check_auto_apply_operation(operation: str) -> None:
+    """Raise :class:`ValueError` unless *operation* is one of
+    :data:`AUTO_APPLY_OPERATIONS`.
+
+    The single checkpoint every call site that is about to treat something as
+    auto-appliable (rather than routing it to a human) passes through.
+    Issue athenaeum#716 AC — "everything irreversible still routes to a
+    human" — this is the structural half of that guarantee: a deliberate,
+    reviewable frozenset any future auto-apply addition must edit by hand,
+    plus a loud refusal for anything else. Matches this module's existing
+    "no silent no-ops" rule (module docstring): an unrecognized operation is
+    a caller bug, raised, never swallowed into a queued result or ignored.
+    """
+    if operation not in AUTO_APPLY_OPERATIONS:
+        raise ValueError(
+            f"{operation!r} is not an auto-appliable operation; only "
+            f"{sorted(AUTO_APPLY_OPERATIONS)!r} may ever auto-apply — "
+            "everything else (an undecided/queued contradiction, distinct, "
+            "underdetermined, and every ported resolver action outside this "
+            "set) routes to a human. No silent no-ops."
+        )
+
+
+def _duplicate_auto_apply_authorization(
+    *, wiki_root: Path, pair_key: str, config: dict[str, Any] | None
+) -> tuple[bool, str]:
+    """Whether a ``duplicate`` verdict's fold may auto-apply right now.
+
+    Two gates, both required (issue athenaeum#716): the operator opt-in
+    (:func:`athenaeum.config.resolve_reversible_verdict_auto_apply_enabled`,
+    default off) AND a FRESH verdict basis in the issue athenaeum#712 ledger
+    (:func:`athenaeum.verdicts.can_authorize_auto_operation` — "a stale
+    verdict cannot authorize a new automatic operation"; this function reuses
+    it rather than writing a second freshness predicate). A pair with no
+    verdict-ledger entry at all (the common case while
+    ``librarian.verdict_ledger_enabled`` is off, or before issue athenaeum#712
+    is wired to the comparator in a given deployment) fails CLOSED, same as
+    an explicitly stale one — there is no fresh basis to point to either way.
+    """
+    _check_auto_apply_operation(AUTO_APPLY_FOLD_ON_DUPLICATE)
+    if not resolve_reversible_verdict_auto_apply_enabled(config):
+        return False, "auto_apply_disabled"
+    entry = lookup_pair(wiki_root, pair_key)
+    if entry is None:
+        return False, "no_verdict_ledger_entry"
+    if not can_authorize_auto_operation(entry):
+        return False, "stale_verdict"
+    return True, "authorized"
 
 #: The five real comparator verdicts this module knows how to route. A
 #: ``None`` verdict (Gate 2 was unavailable — see
@@ -445,10 +530,39 @@ def _apply_duplicate(
     config: dict[str, Any] | None,
     now: datetime | None,
 ) -> EffectResult:
+    pair_key = make_pair_key(page_a.id, page_b.id)
+    auto_apply_authorized, auto_apply_reason = _duplicate_auto_apply_authorization(
+        wiki_root=wiki_root, pair_key=pair_key, config=config
+    )
+    details: dict[str, Any] = {
+        "auto_apply_authorized": auto_apply_authorized,
+        "auto_apply_reason": auto_apply_reason,
+    }
+    if auto_apply_authorized:
+        # Issue athenaeum#716 lane C cross-lane finding, recorded loudly rather
+        # than papered over: authorization (gate on + a fresh verdict basis)
+        # is the part THIS module can decide on its own. Actually WRITING the
+        # fold (tombstoning the source, rewriting inbound links, ledgering a
+        # reversible merge-provenance record) belongs to
+        # :mod:`athenaeum.pending_merges`'s fold-into-existing path — a
+        # concurrent sibling lane's surface for this same issue, and a module
+        # this one's own docstring already states it does NOT import. That
+        # module has no standalone entry point for a non-human-approved fold
+        # today (only the ``PendingMerge`` human-approval flow via
+        # :func:`athenaeum.pending_merges.resolve_merge`, which requires a
+        # mandatory ``confidence``/draft body this module is banned from
+        # fabricating — see the module docstring's "Queue routing"). Rather
+        # than duplicate that write path's git-recoverability safety gate
+        # here (a real regression risk if done hastily), this branch falls
+        # back to the existing evidence+queue behavior and records the
+        # authorization so the gap is visible in every call's own result
+        # rather than hidden — see also the repair-debt instrumentation on
+        # ``athenaeum status``, which reports this count honestly (today
+        # always zero via THIS code path) rather than inflating it.
+        details["auto_apply_blocked_reason"] = "fold_write_primitive_unavailable_to_this_module"
     evidence_path = write_fold_evidence(page_a, page_b, outcome, wiki_root=wiki_root, now=now)
     side, reason, _rows = _canonical_side(page_a, page_b, outcome)
     canonical_id = page_a.id if side == "a" else page_b.id
-    pair_key = make_pair_key(page_a.id, page_b.id)
     title_a, title_b = _title(page_a), _title(page_b)
     description = (
         f'Approve folding "{title_a}" and "{title_b}" into one page? See the '
@@ -464,12 +578,13 @@ def _apply_duplicate(
         raw_ref=f"comparator:{pair_key}",
         description=description,
     )
+    details.update({"canonical_side": side, "canonical_id": canonical_id, "rule": reason})
     return EffectResult(
         verdict=VERDICT_DUPLICATE,
         action="fold-proposal",
         artifacts=[str(evidence_path)],
         queued=[pair_key],
-        details={"canonical_side": side, "canonical_id": canonical_id, "rule": reason},
+        details=details,
     )
 
 
@@ -1107,6 +1222,10 @@ def apply_propose_merge_effect(
 
 
 __all__ = [
+    "AUTO_APPLY_FOLD_ON_DUPLICATE",
+    "AUTO_APPLY_OPERATIONS",
+    "AUTO_APPLY_SPECIALIZATION_REFINES",
+    "AUTO_APPLY_SUPERSESSION_MARKING",
     "CONTRADICTION_STATUS_FLAGGED",
     "FOLD_EVIDENCE_DIRNAME",
     "RESOLVER_ATTRIBUTE_BOTH_ACTION",

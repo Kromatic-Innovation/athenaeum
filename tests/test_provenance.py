@@ -2,12 +2,18 @@
 """Tests for athenaeum.provenance — per-claim source parsing/validation."""
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from athenaeum.provenance import (
+    MERGE_PROVENANCE_VERSION,
     SourceRef,
+    build_merge_provenance_record,
     parse_per_value_field_sources,
     parse_source,
+    read_merge_provenance,
+    record_merge_provenance,
     resolve_remember_extras,
     resolve_remember_sources,
     validate_field_sources,
@@ -397,3 +403,148 @@ class TestResolveRememberExtras:
     def test_unknown_wrapper_key_still_rejected(self) -> None:
         with pytest.raises(ValueError, match="_field_sources|_asserter|_source"):
             resolve_remember_sources({"_source": "api:x:y", "_bogus": "junk"})
+
+
+# ---------------------------------------------------------------------------
+# Merge-provenance ledger — issue athenaeum#716 (lane 716-B) extensions.
+#
+# The fold-specific lifecycle (writing one via pending_merges._apply_fold_
+# into_existing, the tombstone, the widening) is covered end to end in
+# tests/test_merge_fold_write_paths.py; these are the module's OWN unit
+# tests for the record builder / reader contract in isolation.
+# ---------------------------------------------------------------------------
+
+
+class TestMergeProvenanceReversalFields:
+    def test_version_bumped_to_2(self) -> None:
+        assert MERGE_PROVENANCE_VERSION == 2
+
+    def test_create_merged_shaped_record_omits_fold_only_keys(self) -> None:
+        """A `create-merged` caller passes none of the five new kwargs —
+        the record must OMIT them entirely (not write them as null), so a
+        v1-shaped reader sees a byte-identical record to before this issue."""
+        record = build_merge_provenance_record(
+            merge_id="m1",
+            write_kind="create-merged",
+            canonical_slug="topic",
+            source_paths=["a.md", "b.md"],
+        )
+        assert record["v"] == 2
+        for key in (
+            "folded_sources",
+            "aliases_added",
+            "links_rewritten",
+            "canonical_content_hash",
+            "coordinates_widened",
+        ):
+            assert key not in record
+
+    def test_fold_shaped_record_carries_all_five_reversal_fields(self) -> None:
+        record = build_merge_provenance_record(
+            merge_id="m1",
+            write_kind="fold-into-existing",
+            canonical_slug="canonical",
+            source_paths=["old-a.md"],
+            folded_sources=["old-a.md"],
+            aliases_added=["old-a"],
+            links_rewritten=[
+                {"path": "referrer.md", "from_slug": "old-a", "to_slug": "canonical"}
+            ],
+            canonical_content_hash="deadbeef",
+            coordinates_widened={"scope": "org"},
+        )
+        assert record["folded_sources"] == ["old-a.md"]
+        assert record["aliases_added"] == ["old-a"]
+        assert record["links_rewritten"] == [
+            {"path": "referrer.md", "from_slug": "old-a", "to_slug": "canonical"}
+        ]
+        assert record["canonical_content_hash"] == "deadbeef"
+        assert record["coordinates_widened"] == {"scope": "org"}
+
+    def test_empty_coordinates_widened_is_written_not_omitted(self) -> None:
+        """`{}` is a meaningful value ("nothing widened"), distinct from
+        `None` ("not a fold-into-existing record at all") — only `None`
+        omits the key."""
+        record = build_merge_provenance_record(
+            merge_id="m1",
+            write_kind="fold-into-existing",
+            canonical_slug="canonical",
+            source_paths=["old-a.md"],
+            folded_sources=["old-a.md"],
+            aliases_added=[],
+            links_rewritten=[],
+            canonical_content_hash="deadbeef",
+            coordinates_widened={},
+        )
+        assert "coordinates_widened" in record
+        assert record["coordinates_widened"] == {}
+        assert "links_rewritten" in record
+        assert record["links_rewritten"] == []
+
+    def test_reader_tolerates_an_old_v1_record_missing_the_new_keys(
+        self, tmp_path: Path
+    ) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        record_merge_provenance(
+            wiki,
+            merge_id="legacy",
+            write_kind="fold-into-existing",
+            canonical_slug="canonical",
+            source_paths=["old-a.md"],
+        )
+        ledger = wiki / "_merge_provenance.jsonl"
+        text = ledger.read_text(encoding="utf-8")
+        assert '"v":1' not in text.replace(" ", "")  # this write is v2
+        # Hand-craft a genuine OLD v1 line (no fold-only keys at all) and
+        # confirm the reader does not choke on it.
+        import json
+
+        ledger.write_text(
+            json.dumps(
+                {
+                    "v": 1,
+                    "ts": "2026-01-01T00:00:00Z",
+                    "merge_id": "ancient",
+                    "write_kind": "fold-into-existing",
+                    "canonical_slug": "canonical",
+                    "source_paths": ["old-a.md"],
+                    "auto_applied": False,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        records = read_merge_provenance(wiki)
+        assert len(records) == 1
+        assert records[0]["v"] == 1
+        assert "coordinates_widened" not in records[0]
+
+    def test_record_merge_provenance_forwards_all_five_kwargs(
+        self, tmp_path: Path
+    ) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        ok = record_merge_provenance(
+            wiki,
+            merge_id="m1",
+            write_kind="fold-into-existing",
+            canonical_slug="canonical",
+            source_paths=["old-a.md"],
+            folded_sources=["old-a.md"],
+            aliases_added=["old-a"],
+            links_rewritten=[
+                {"path": "referrer.md", "from_slug": "old-a", "to_slug": "canonical"}
+            ],
+            canonical_content_hash="deadbeef",
+            coordinates_widened={"valid-time": ["2025-01-01", "2026-12-31"]},
+        )
+        assert ok is True
+        records = read_merge_provenance(wiki)
+        assert len(records) == 1
+        rec = records[0]
+        assert rec["folded_sources"] == ["old-a.md"]
+        assert rec["aliases_added"] == ["old-a"]
+        assert rec["links_rewritten"][0]["from_slug"] == "old-a"
+        assert rec["canonical_content_hash"] == "deadbeef"
+        assert rec["coordinates_widened"] == {"valid-time": ["2025-01-01", "2026-12-31"]}

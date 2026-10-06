@@ -212,3 +212,78 @@ class TestAdapterExtensionPointContract:
             wiki, "keepmarker", top_k=5, search_backend="keyword", config=config
         )
         assert "readme" in shown.lower()
+
+
+# ---------------------------------------------------------------------------
+# Per-page ``embedded`` override (issue athenaeum#716) — the per-page
+# COUNTERPART to ``is_embedded``'s class-level policy exercised above. Unit
+# coverage of the predicate itself lives in ``tests/test_storage.py``;
+# per-backend index-build exclusion lives in ``tests/test_search.py``. This
+# class covers what neither of those can: the actual MCP recall ENTRY POINT
+# (not a raw backend call) and the negative-only asymmetry proven through a
+# real index build rather than the predicate in isolation.
+# ---------------------------------------------------------------------------
+
+
+class TestPerPageEmbeddedOverrideEnforcement:
+    def _write_tombstone(self, wiki: Path, fname: str, *, name: str, marker: str) -> None:
+        (wiki / fname).write_text(
+            f"---\nname: {name}\nstatus: folded\nfolded_into: winner\n"
+            f"embedded: false\n---\n\n{marker} content now lives elsewhere.\n"
+        )
+
+    def test_tombstone_invisible_via_recall_search_entry_point(
+        self, tmp_path: Path
+    ) -> None:
+        """"Invisible to recall": driven through ``mcp_server.recall_search``
+        itself (the entry point the MCP tool and ``_cmd_query.py`` both sit
+        on top of), not the raw ``KeywordBackend.query`` call — a page-level
+        override proven only at the raw backend would not discharge this
+        AC, per the lane brief's own framing."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        self._write_tombstone(
+            wiki, "folded-source.md", name="Folded Source", marker="tombstonemarker"
+        )
+        out = recall_search(
+            wiki, "tombstonemarker", top_k=5, search_backend="keyword", config=None
+        )
+        assert "folded-source" not in out.lower()
+        assert "no wiki pages matched" in out.lower()
+
+    def test_page_embedded_true_cannot_escape_excluded_class(
+        self, tmp_path: Path
+    ) -> None:
+        """The negative-only asymmetry, proven end to end through a REAL FTS5
+        index build rather than the predicate in isolation: a page of a
+        class mapped to the all-false ``excluded`` adapter sets its OWN
+        ``embedded: true`` and must still never enter the index."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        (wiki / "escapee.md").write_text(
+            "---\nname: Escapee\ntype: secret\nembedded: true\n"
+            "description: escapemarker page\n---\n\n"
+            "This page mentions escapemarker exactly once.\n"
+        )
+        config = {"storage": {"mapping": {"secret": "excluded"}}}
+        cache = tmp_path / "cache"
+        count = FTS5Backend().build_index(wiki, cache, config=config)
+        assert count == 0
+        assert not query_fts5_index("escapemarker", cache)
+
+    def test_page_embedded_false_excludes_from_an_otherwise_embedded_class(
+        self, tmp_path: Path
+    ) -> None:
+        """Control for the test above: with NO storage config at all (the
+        class is fully embedded by default), the page's own ``embedded:
+        false`` still suppresses it — proving the drop above is the
+        page-level override, not an artifact of the ``excluded`` adapter."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        self._write_tombstone(
+            wiki, "folded-source.md", name="Folded Source", marker="hushmarker"
+        )
+        cache = tmp_path / "cache"
+        count = FTS5Backend().build_index(wiki, cache)
+        assert count == 0
+        assert not query_fts5_index("hushmarker", cache)

@@ -179,6 +179,7 @@ from typing import Any
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.footnote_markers import parse_footnote_definitions
 from athenaeum.models import (
+    FOLDED_INTO_FIELD,
     EntityIndex,
     parse_frontmatter,
     render_frontmatter,
@@ -3519,13 +3520,12 @@ def mark_bounced(
     return target, True
 
 
-#: Frontmatter key stamped on a slug-keyed bounce record whose mark has been
-#: folded onto the person record that lists the same address (issue athenaeum#850).
-#: Presence is what makes :func:`find_orphaned_bounce_marks` skip the record on
-#: a re-run, so the repair is idempotent WITHOUT deleting anything — the
-#: original record stays exactly where it was, having only gained a field, per
-#: the "never deleted, only ever gains fields" posture the mark itself has.
-FOLDED_INTO_FIELD = "folded_into"
+# NOTE: ``FOLDED_INTO_FIELD`` (used below by :func:`find_orphaned_bounce_marks`
+# and :func:`fold_orphaned_bounce_marks` for this exact "folded onto another
+# record, never deleted" purpose) is imported from :mod:`athenaeum.models`
+# above — issue athenaeum#716 hoisted it there as the one canonical definition
+# so the wiki-page tombstone fold (:func:`athenaeum.models.stamp_tombstone`)
+# reuses the same key/spelling instead of a second one living here.
 
 
 @dataclass(frozen=True)

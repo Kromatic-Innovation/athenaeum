@@ -1294,6 +1294,59 @@ def resolve_reasoning_tier_any_screen_enabled(config: dict[str, Any] | None) -> 
     ) or resolve_reasoning_tier_t2_auto_apply_enabled(config)
 
 
+def resolve_reversible_verdict_auto_apply_enabled(config: dict[str, Any] | None) -> bool:
+    """Resolve the five-verdict comparator's reversible-operation auto-apply
+    opt-in (issue athenaeum#716). DEFAULT OFF.
+
+    Gates whether :func:`athenaeum.verdict_effects.apply_verdict_effect` may
+    ENACT a reversible operation automatically — today that means: the
+    ``duplicate`` branch folding a pair into an existing canonical page
+    (tombstoning the source, rewriting inbound links, recording a reversible
+    merge-provenance entry) instead of only writing fold EVIDENCE and queuing
+    it for a human. It does NOT gate :mod:`athenaeum.verdict_effects`'s
+    pre-existing ``specialization`` -> ``refines:`` write (that write has been
+    unconditional since issue athenaeum#715 shipped the comparator and is
+    retained unchanged — see
+    ``tests/test_verdict_effects.py::TestEF6SpecializationWritesRefines``),
+    and it does not gate :mod:`athenaeum.supersession`'s own auto-apply
+    decision for the ``contradiction`` branch (issue athenaeum#715's own
+    conditions own that call entirely; this module only records what
+    supersession decided).
+    Every operation this key *can* arm is required by issue athenaeum#716 to
+    be REVERSIBLE (see :mod:`athenaeum.unfold`) and to additionally require a
+    FRESH verdict basis (:func:`athenaeum.verdicts.can_authorize_auto_operation`
+    — a verdict marked stale by issue athenaeum#712's invalidation waves cannot
+    authorize a NEW automatic fold even while this key is on; an operation
+    already applied under an earlier, then-fresh verdict is unaffected either
+    way). Anything irreversible (a ``contradiction`` that supersession could
+    not decide, ``distinct``, ``underdetermined``) never reaches this gate at
+    all — see :data:`athenaeum.verdict_effects.AUTO_APPLY_OPERATIONS` for the
+    enumerated allowlist and its accompanying refusal test.
+
+    Env ``ATHENAEUM_REVERSIBLE_VERDICT_AUTO_APPLY_ENABLED``
+    (``1``/``true``/``yes``/``on``, case-insensitive) > yaml
+    ``librarian.reversible_verdict_auto_apply_enabled`` > default ``False``.
+    No seed in ``_DEFAULTS`` (issue athenaeum#231). **Default OFF for the first
+    release**, mirroring :func:`resolve_reasoning_tier_t2_auto_apply_enabled`'s
+    own rationale: flipping this changes what reaches the live corpus with no
+    human in the loop, so it stays opt-in until an operator has watched the
+    evidence/queue path's proposals for a while and decides to arm it
+    deliberately — production behavior is byte-identical to pre-athenaeum#716
+    until then. Non-bool yaml values and unrecognized env strings fall
+    through to off.
+    """
+    env = os.environ.get("ATHENAEUM_REVERSIBLE_VERDICT_AUTO_APPLY_ENABLED")
+    if env is not None:
+        return env.strip().lower() in ("1", "true", "yes", "on")
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("reversible_verdict_auto_apply_enabled")
+            if isinstance(raw, bool):
+                return raw
+    return False
+
+
 def resolve_min_merge_mean_similarity(config: dict[str, Any] | None) -> float:
     """Resolve the merge-proposal mean-pairwise-similarity floor (athenaeum#421).
 

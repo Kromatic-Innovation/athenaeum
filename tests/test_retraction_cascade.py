@@ -21,6 +21,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from athenaeum.decisions import list_pending_decisions
+from athenaeum.models import is_tombstone, parse_frontmatter, tombstone_target
 from athenaeum.pending_merges import (
     parse_pending_merges,
     resolve_merge,
@@ -266,10 +267,15 @@ class TestNeverUnmerges:
         append_supersession(contacts, retracts=str(src), reason="x", at="2026-07-24T00:00:00Z")
         scan_retraction_cascade(wiki, contacts)
 
-        # The merge stands: the canonical page is byte-for-byte unchanged and
-        # the folded source is NOT resurrected.
+        # The merge stands: the canonical page is byte-for-byte unchanged,
+        # and the folded source stays exactly as the fold left it — a
+        # tombstone (issue athenaeum#716), neither resurrected nor further
+        # modified by the retraction scan.
         assert (wiki / "canonical.md").read_text(encoding="utf-8") == canonical_before
-        assert not src.exists()  # still gone (consumed by the fold), not un-deleted
+        assert src.exists()
+        src_meta, _ = parse_frontmatter(src.read_text(encoding="utf-8"))
+        assert is_tombstone(src_meta)
+        assert tombstone_target(src_meta) == "canonical"
 
     def test_module_exports_no_unmerge_function(self) -> None:
         import athenaeum.retraction_cascade as rc

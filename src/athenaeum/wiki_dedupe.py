@@ -4,14 +4,22 @@
 Contract: clusters already-COMPILED wiki pages (not raw intake) against
 each other and, for every candidate PAIR inside a cluster, runs the
 five-verdict comparator (:mod:`athenaeum.comparator`) and enacts whatever
-it decides (:mod:`athenaeum.verdict_effects`) — a ``duplicate`` verdict
-writes fold EVIDENCE (never a merged body), ``specialization`` writes
-``refines:``, ``contradiction`` routes to supersession-or-queue,
-``underdetermined``/``distinct`` are ledger-only. Factoring rule: this
-module owns the WIKI-VS-WIKI clustering pass only — it deliberately does
-NOT reimplement clustering (reuses ``clusters.cluster_auto_memory_files``)
-or verdict decision/enactment (reuses ``comparator``/``verdict_effects``);
-it is glue over those two, not a third implementation of either.
+it decides via :func:`athenaeum.auto_apply.enact_verdict_effect` — a
+``duplicate`` verdict writes fold EVIDENCE and queues it for a human
+(never a merged body, see :mod:`athenaeum.verdict_effects`'s docstring),
+UNLESS it is AUTHORIZED to auto-apply (issue athenaeum#716 —
+``librarian.reversible_verdict_auto_apply_enabled`` on, plus a fresh
+verdict-ledger basis), in which case the fold actually executes through
+:mod:`athenaeum.pending_merges`'s real fold machinery — see
+:mod:`athenaeum.auto_apply`'s own docstring for the composition and why
+neither :mod:`athenaeum.verdict_effects` nor :mod:`athenaeum.pending_merges`
+imports the other. ``specialization`` writes ``refines:``, ``contradiction``
+routes to supersession-or-queue, ``underdetermined``/``distinct`` are
+ledger-only. Factoring rule: this module owns the WIKI-VS-WIKI clustering
+pass only — it deliberately does NOT reimplement clustering (reuses
+``clusters.cluster_auto_memory_files``) or verdict decision/enactment
+(reuses ``comparator``/``auto_apply``); it is glue over those, not a third
+implementation of any of them.
 
 **Cut-over (issue athenaeum#715).** Before this issue, this module ran its OWN
 duplicate-detection algorithm: the same complete-linkage clustering below,
@@ -113,16 +121,21 @@ Design (see PR body for the full rationale):
 Out of scope (deliberate):
 
 - Real-time re-clustering triggered by a single page edit (issue athenaeum#290
-  scope) or applying/enacting a duplicate fold (a separate, future child of
-  athenaeum#709 — this module only ever produces evidence, never a merged page).
+  scope).
 - Retroactively re-clustering already ``archived``/``superseded_by`` pages.
 
+  Issue athenaeum#716 note: applying/enacting a duplicate fold is no longer
+  categorically out of scope — an AUTHORIZED fold (gate on, fresh verdict
+  basis) now executes via :func:`athenaeum.auto_apply.enact_verdict_effect`.
+  An unauthorized one still only ever produces evidence, never a merged
+  page, exactly as before.
+
 Layering (L4 domain/pipeline). ``wiki_dedupe.py`` imports
-``athenaeum.comparator`` / ``athenaeum.verdict_effects`` at module TOP level
-— normal downward dependencies; neither imports this module back. After
-issue athenaeum#545 dissolved the librarian-centered named-8 coupling,
-``wiki_dedupe.py`` is NOT part of any import SCC. ``librarian.py`` calls
-into this module only via its own deferred import (a one-way edge).
+``athenaeum.comparator`` / ``athenaeum.auto_apply`` at module TOP level
+— normal same-layer/downward dependencies; neither imports this module
+back. After issue athenaeum#545 dissolved the librarian-centered named-8
+coupling, ``wiki_dedupe.py`` is NOT part of any import SCC. ``librarian.py``
+calls into this module only via its own deferred import (a one-way edge).
 """
 
 from __future__ import annotations
@@ -134,6 +147,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from athenaeum.authority import is_pointer_stub
+from athenaeum.auto_apply import enact_verdict_effect
 from athenaeum.clusters import (
     EMBEDDER_CHROMADB_DEFAULT,
     EMBEDDER_FALLBACK_HASHING,
@@ -162,7 +176,6 @@ from athenaeum.runlock import RunLock
 from athenaeum.search import embed_texts
 from athenaeum.storage import is_merge_eligible
 from athenaeum.vecmath import mean_pool
-from athenaeum.verdict_effects import apply_verdict_effect
 from athenaeum.wiki_dedupe_attribution import (
     ERASURE_CLASS_REFUSED_REASON,
     OUTCOME_CROSS_CLASS_REJECTED,
@@ -543,9 +556,11 @@ def propose_wiki_page_merges(
     — clustering only proposes candidates (issue athenaeum#715: "similarity's
     only job is proposing pairs"); it never decides a verdict itself. A
     decided, non-fresh verdict is enacted via
-    :func:`athenaeum.verdict_effects.apply_verdict_effect` (a ``duplicate``
-    verdict writes fold EVIDENCE, never a merged body — see that module's
-    docstring for all five branches).
+    :func:`athenaeum.auto_apply.enact_verdict_effect` (a ``duplicate``
+    verdict writes fold EVIDENCE and queues it for a human, UNLESS it is
+    authorized to auto-apply — issue athenaeum#716 — in which case the fold
+    really executes; see that module's docstring, and
+    :mod:`athenaeum.verdict_effects`'s for the other four branches).
 
     Dark by default: returns ``[]`` immediately unless
     :func:`athenaeum.config.resolve_comparator_enabled` is true — the SAME
@@ -848,7 +863,17 @@ def propose_wiki_page_merges(
                         )
                     )
                     continue
-                effect = apply_verdict_effect(
+                # Issue athenaeum#716: enact_verdict_effect is apply_verdict_effect
+                # plus the authorized-duplicate auto-fold execution (see
+                # athenaeum.auto_apply's module docstring) -- same shape,
+                # same return type, for every verdict this call site already
+                # handles. cache_dir/search_backend/embedding_model are left
+                # at their defaults (None): resolve_merge's own docstring
+                # calls the vector-purge hygiene they gate "opportunistic,
+                # never a hard dependency of resolving a merge", and this
+                # call site does not otherwise thread a search backend
+                # through this function today.
+                effect = enact_verdict_effect(
                     page_a,
                     page_b,
                     outcome,

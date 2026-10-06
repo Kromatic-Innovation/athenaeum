@@ -36,7 +36,7 @@ import pytest
 
 from athenaeum.decisions import list_pending_decisions
 from athenaeum.librarian import _run_name_collision_phase, _run_wiki_dedup_phase
-from athenaeum.models import EntityIndex, parse_frontmatter
+from athenaeum.models import EntityIndex, is_tombstone, parse_frontmatter, tombstone_target
 from athenaeum.name_collisions import (
     CollisionPage,
     NameCollision,
@@ -503,11 +503,15 @@ class TestEntityTemplateAutomergeIsTheRealisticCase:
         assert result["merged"] == 1
         assert result["ambiguous"] == 0
         # The fold landed INTO the existing entity-template canonical file --
-        # the duplicate is gone, and no THIRD page was minted at the
-        # bare-slug path a pre-fix run would have (mis)targeted.
-        assert not dup_path.exists()
+        # the duplicate is TOMBSTONED, not deleted (issue athenaeum#716) -- and
+        # no THIRD page was minted at the bare-slug path a pre-fix run would
+        # have (mis)targeted.
+        assert dup_path.exists()
+        dup_meta, _ = parse_frontmatter(dup_path.read_text(encoding="utf-8"))
+        assert is_tombstone(dup_meta)
+        assert tombstone_target(dup_meta) == "u1-acme"
         page_names = sorted(p.name for p in wiki.glob("*.md") if not p.name.startswith("_"))
-        assert page_names == ["u1-acme.md"]
+        assert page_names == ["u1-acme.md", "u2-acme.md"]
         assert not (wiki / "acme.md").exists()
 
         meta, _ = parse_frontmatter((wiki / "u1-acme.md").read_text(encoding="utf-8"))
@@ -646,9 +650,25 @@ class TestResolveNameCollisionsIdempotency:
         assert len(second_blocks) == 1
 
     def test_second_run_after_automerge_finds_no_collision(self, tmp_path: Path) -> None:
-        """The merged case's idempotency is trivial by construction: the
-        fold deletes the non-canonical source, so the second scan finds
-        zero collisions and does nothing further."""
+        """Issue athenaeum#716 cross-lane fix (originally reported by lane
+        716-B, closed by lane 716-D): a successful ``fold-into-existing``
+        auto-merge TOMBSTONES the non-canonical source in place rather than
+        deleting it, so without this fix the two pages would still share
+        ``(name, type)`` and :func:`scan_name_collisions` would re-detect
+        them as a "collision" on every subsequent scan, forever (classified
+        ``ambiguous`` rather than re-merged, since the tombstone's three new
+        frontmatter keys are not identity/provenance keys
+        :func:`classify_collision` already ignores — no crash, no
+        corruption, but a permanent false-positive queued item).
+
+        The fix: :func:`scan_name_collisions` now skips tombstoned pages
+        outright (issue athenaeum#716 — a tombstone is not live content and
+        must not compete for a ``(name, type)`` slot, the same grounds it is
+        already excluded from every index and invisible to ``recall``). This
+        test now pins the CORRECT behavior: a second scan after a successful
+        auto-merge finds the tombstoned source has dropped out of its
+        collision group entirely, so the group's size falls back below 2 and
+        the pair is no longer reported as a collision at all."""
         wiki = tmp_path / "wiki"
         _write_page(
             wiki, "acme.md", uid="u1", name="Acme", type_="company", body="Real content."
@@ -658,14 +678,22 @@ class TestResolveNameCollisionsIdempotency:
 
         first = resolve_name_collisions(wiki, auto_merge=True, dry_run=False)
         assert first["merged"] == 1
-        assert not (wiki / "acme-dup.md").exists()
+        assert (wiki / "acme-dup.md").exists()  # tombstoned, not deleted
+        dup_meta, _ = parse_frontmatter((wiki / "acme-dup.md").read_text(encoding="utf-8"))
+        assert is_tombstone(dup_meta)
 
         corpus_before = (wiki / "acme.md").read_text(encoding="utf-8")
         merges_before = (wiki / "_pending_merges.md").read_text(encoding="utf-8")
 
         second = resolve_name_collisions(wiki, auto_merge=True, dry_run=False)
+        # Corrected behavior: the tombstoned source is invisible to the
+        # scanner, so its (now singleton) group is not a collision at all —
+        # not merely reclassified ambiguous.
         assert second["collisions"] == 0
+        assert second["unambiguous"] == 0
+        assert second["ambiguous"] == 0
         assert second["merged"] == 0
+        assert second["queued"] == 0
         assert (wiki / "acme.md").read_text(encoding="utf-8") == corpus_before
         assert (wiki / "_pending_merges.md").read_text(encoding="utf-8") == merges_before
 
@@ -703,7 +731,11 @@ class TestResolveNameCollisionsReversibility:
 
         result = resolve_name_collisions(wiki, auto_merge=True, dry_run=False)
         assert result["merged"] == 1
-        assert not dup_path.exists()
+        # Issue athenaeum#716: tombstoned in place, never deleted.
+        assert dup_path.exists()
+        dup_meta, dup_body = parse_frontmatter(dup_path.read_text(encoding="utf-8"))
+        assert is_tombstone(dup_meta)
+        assert tombstone_target(dup_meta) == "u1-acme"
         # No spurious bare-slug third page either.
         assert not (wiki / "acme.md").exists()
 
@@ -714,7 +746,9 @@ class TestResolveNameCollisionsReversibility:
         assert "provenance snapshot" in snapshot_msg
         assert "fold" in fold_msg
 
-        # Recover the deleted page's exact pre-fold content via git history.
+        # Recover the pre-fold (pre-tombstone) content via git history — the
+        # original frontmatter + body are still a `git show`/`git revert`
+        # away, exactly as athenaeum#947 originally guaranteed for a delete.
         fold_sha = subprocess.run(
             ["git", "rev-parse", "HEAD"], cwd=str(wiki),
             capture_output=True, text=True, check=True,
@@ -725,7 +759,9 @@ class TestResolveNameCollisionsReversibility:
         ).stdout
         assert recovered == original_dup_content
 
-        # git revert restores the deleted file to the working tree.
+        # git revert restores the PRE-tombstone frontmatter to the working
+        # tree (the file was never removed, so there is nothing to
+        # resurrect — only the tombstone stamp itself is undone).
         subprocess.run(
             ["git", "revert", "--no-edit", "HEAD"],
             cwd=str(wiki), capture_output=True, text=True, check=True,
@@ -810,7 +846,10 @@ class TestResolveNameCollisionsAliasSurvival:
         init_git_repo(wiki)
         result = resolve_name_collisions(wiki, auto_merge=True, dry_run=False)
         assert result["merged"] == 1
-        assert not dup_path.exists()
+        assert dup_path.exists()  # tombstoned, not deleted (issue athenaeum#716)
+        dup_meta, _ = parse_frontmatter(dup_path.read_text(encoding="utf-8"))
+        assert is_tombstone(dup_meta)
+        assert tombstone_target(dup_meta) == "u1-acme"
         assert not (wiki / "acme.md").exists()  # no spurious bare-slug page
 
         meta, _ = parse_frontmatter(canonical_path.read_text(encoding="utf-8"))

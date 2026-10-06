@@ -695,3 +695,117 @@ path (besides `athenaeum.wiki_dedupe` above) is the explicit, opt-in
 `athenaeum merges recompare` command, which re-runs the comparator over the
 existing pending merge proposals and records a verdict per source pair —
 dry-run by default, and with no path to approving a merge at all.
+
+## 15. Unfold, the fold-graph lint, and auto-apply for reversible verdicts (athenaeum#716)
+
+Issue athenaeum#716 changed the fold write path from DELETING a folded-away
+source to TOMBSTONING it in place (`status: folded`, `folded_into:
+<canonical-slug>`, `embedded: false` — `athenaeum.models.stamp_tombstone` /
+`is_tombstone` / `tombstone_target`) and added the pieces below on top of
+that representation.
+
+**Unfold — the compensating repair path (`src/athenaeum/unfold.py`).**
+Restoring a tombstone is a COMPENSATING operation, never claimed to be a
+perfect inverse: `stamp_tombstone` overwrites whatever `status:` a page
+carried pre-fold, so restoring clears the tombstone's three stamped keys
+rather than recovering a prior value, and a fold's fidelity decays the
+longer the canonical accumulates independent post-fold edits. Concretely:
+**unfold executes directly while the canonical is byte-identical to its
+state immediately after the fold (an actual content-hash comparison —
+`athenaeum.verdicts.content_hash_for_path` against the merge-provenance
+record's `canonical_content_hash` — never a timestamp or mtime heuristic),
+and becomes a queued, human-adjudicated proposal once it is not.** The
+direct path re-points every inbound wikilink the fold itself rewrote
+(`links_rewritten`, scoped per-source so a multi-source fold's sibling
+source is never touched) and re-embeds by virtue of the file changing — the
+next incremental index build re-evaluates `athenaeum.storage.page_is_embedded`
+and picks the page back up; this module never calls an embedding backend.
+
+*Two ledger-contract gaps found and reported, not papered over, while
+building this:* (1) the pinned `canonical_content_hash` field is a HASH, not
+a text snapshot, so a queued proposal cannot literally carry "a diff against
+the canonical's post-fold text" as worded — `unfold.py` instead diffs the
+canonical's CURRENT text against the tombstoned source's own current text,
+clearly labeled as such, which is a real and useful diff for a human but not
+the one the ledger as specified can produce. (2) when two different sources
+folded into the same canonical both rewrote a link in the SAME sibling file
+to the same slug, the post-rewrite occurrences are textually identical and
+`links_rewritten`'s `{path, from_slug, to_slug}` shape cannot disambiguate
+which occurrence came from which source — `unfold.py` detects this
+collision and refuses to touch that file rather than risk mis-repointing a
+still-folded sibling's link, surfacing it in the result instead.
+
+**Fold-graph lint (`src/athenaeum/fold_graph_lint.py`, `athenaeum
+fold-lint`).** Read-only by default: scans the live store for violations of
+the two fold-graph invariants — the `folded_into` graph is acyclic, and
+every connected fold set has exactly one live (non-tombstone) canonical,
+never zero (an orphaned fold set) or more than one (an ambiguous merge).
+
+**Auto-apply for reversible verdicts.** A single config key,
+`librarian.reversible_verdict_auto_apply_enabled` (env
+`ATHENAEUM_REVERSIBLE_VERDICT_AUTO_APPLY_ENABLED`, **default `false`**),
+gates whether `athenaeum.verdict_effects` may enact a reversible operation
+with no human in the loop, in addition to a FRESH verdict basis
+(`athenaeum.verdicts.can_authorize_auto_operation` — a verdict athenaeum#712
+marked stale can never authorize a new automatic fold, though an operation
+already applied under an earlier, then-fresh verdict stands either way). The
+complete, enumerated set of operations that may ever reach this gate is
+`athenaeum.verdict_effects.AUTO_APPLY_OPERATIONS` — `fold-on-duplicate`,
+`specialization-refines`, `supersession-marking` — enforced by a dispatch
+checkpoint that refuses (raises) anything outside it; everything irreversible
+(an unresolved `contradiction`, `distinct`, `underdetermined`) never reaches
+the gate at all.
+
+*Specialization's `refines:` write is retained UNCONDITIONAL* (it has had no
+gate since athenaeum#715 shipped the comparator — `_apply_specialization`
+never consults the new key, and
+`tests/test_verdict_effects.py::TestEF6SpecializationWritesRefines` pins
+that), and *supersession's own auto-apply decision belongs entirely to
+`athenaeum.supersession` under athenaeum#715's own conditions* — this module
+only records what it decided. Only the `duplicate` branch is actually gated
+by the new key today.
+
+*Cross-lane gap, reported rather than built around hastily:* the `duplicate`
+branch's two-gate AUTHORIZATION check (operator opt-in + fresh basis) is
+fully implemented and tested, but this module does not itself perform the
+fold WRITE when authorized — the fold-write primitive (tombstone + inbound
+link rewrite + a reversible merge-provenance record) lives in
+`athenaeum.pending_merges`, which `athenaeum.verdict_effects`'s own module
+docstring states it does not import, and which has no standalone,
+non-human-approval entry point today (only the `PendingMerge` flow via
+`resolve_merge`, which requires a mandatory `confidence`/draft body this
+module is banned from fabricating). Duplicating that write path's
+git-recoverability safety gate here would be a real regression risk done
+hastily. An authorized duplicate verdict therefore still falls back to the
+existing evidence-plus-queue behavior, with the authorization recorded in
+`EffectResult.details` so the gap is visible on every call rather than
+hidden. Wiring the actual write is a follow-up, not a silent no-op.
+
+**Repair-debt instrumentation.** Surfaced on `athenaeum status`
+(`StatusInfo["repair_debt"]`, populated in `src/athenaeum/status.py`), not
+the per-run run-summary log: these are standing, cumulative corpus-state
+counters (how much reversible-operation debt currently exists), not a
+per-invocation phase timing the run-summary ledger's `{phase: {secs,
+calls, ...}}` shape is built around. Three counters: `auto_applied_folds`
+(a live count over the merge-provenance ledger's `write_kind ==
+"fold-into-existing" and auto_applied == true` records — real today via the
+pre-existing T2 reasoning-tier auto-finalize path even though this issue's
+own comparator-driven auto-fold does not yet execute, per the gap above),
+and `unfold_direct` / `unfold_queued` (persisted by `athenaeum.unfold` in a
+small cache-dir sidecar, mirroring `athenaeum.zero_yield`'s state-file
+convention), from which the queued-fraction is derived with both the
+numerator and the denominator present rather than only a ratio.
+
+**Known limitation — existing folded/merged pages are not retroactively
+migrated.** Every fold applied BEFORE this issue landed used the prior
+DELETE-based write path: the source page is gone from disk, not tombstoned,
+and no merge-provenance record for it carries the fields `athenaeum.unfold`
+needs (`folded_sources` / `links_rewritten` / `canonical_content_hash`).
+There is no code path — in this issue or otherwise — that can resurrect a
+deleted observation's original text from a hash or from nothing; pretending
+a migration could do so would be worse than naming the gap. A prior merge's
+provenance record is readable (`athenaeum.provenance.read_merge_provenance`)
+and tells you THAT a page was folded away and roughly when, but not what it
+said. A follow-up issue has been filed to decide what, if anything, should
+be done for that population (see the lane report for this issue for the
+exact title/body filed).

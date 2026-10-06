@@ -89,7 +89,7 @@ from athenaeum.models import (
     validity_bound_str,
 )
 from athenaeum.pii import is_pii_flagged
-from athenaeum.storage import is_embedded
+from athenaeum.storage import page_embedding_disabled, page_is_embedded
 from athenaeum.store import FilesystemStore, ObjectMeta, Store, StoreKey
 
 # ---------------------------------------------------------------------------
@@ -902,11 +902,20 @@ def _scan_indexed_records(
         # config every class maps to the all-true wiki surface, so
         # ``is_embedded`` is ``True`` for every page and nothing is dropped.
         # ``config is None`` (callers that don't thread config, e.g. shell-hook
-        # convenience builds) also short-circuits to today's behavior.
+        # convenience builds) also short-circuits the CLASS-level check to
+        # today's behavior.
         if config is not None:
             page_type = str(meta.get("type") or "")
-            if not is_embedded(page_type, config):
+            if not page_is_embedded(meta, page_type, config):
                 return None
+        elif page_embedding_disabled(meta):
+            # Issue athenaeum#716: the PAGE-level ``embedded: false`` override (a
+            # wiki-dedup fold tombstone, or athenaeum#718's cold-tier demotion) is
+            # honored even when no ``storage:`` config was threaded at all —
+            # unlike the class-level policy above, it needs no config to
+            # resolve, so a shell-hook convenience build still drops a page
+            # that has declared itself excluded from every index.
+            return None
         vu = validity_bound_str(meta, "valid_until")
         return indexed_name, _local_path_for(key), content_hash, text, meta, (meta_obj.version, vu)
 
@@ -1842,7 +1851,22 @@ def find_personal_page_by_exact_name(
     unconditionally by session-start-recall.sh" invariant covers every real
     deployment, so this is a graceful degrade, not an error), *query* is
     blank, no exact ``name`` match exists, or the matched page's access
-    level is not ``personal``. ``page_type`` is the matched page's resolved
+    level is not ``personal``, or the matched page carries a
+    page-level ``embedded: false`` override.
+
+    **The ``embedded: false`` re-check is load-bearing, not belt-and-braces**
+    (issue athenaeum#716). This function reads the ALREADY-BUILT FTS5 index,
+    and a fold tombstones its source *without* rebuilding that index — so a
+    page tombstoned since the last ``reindex`` still has a live row here. The
+    fresh-frontmatter pass above re-checks ``access:`` for exactly this class
+    of staleness; a tombstone needs the same treatment, and needs it MORE,
+    because this function's result is **prepended** by its callers
+    (:func:`athenaeum.mcp_server.recall_search`,
+    :mod:`athenaeum._cmd_query`) ahead of every backend hit, bypassing the
+    index-build exclusion that keeps a tombstone out of normal recall. Without
+    this check, folding an ``access: personal`` page would leave it reachable
+    by exact name until the next reindex — i.e. NOT "invisible to recall",
+    which athenaeum#716 requires unconditionally. ``page_type`` is the matched page's resolved
     ``type:`` (or ``None``), so a caller enforcing an explicit ``type=``
     filter can decline the rescue when it would violate that filter.
     """
@@ -1877,6 +1901,16 @@ def find_personal_page_by_exact_name(
             continue
         fm, _ = parse_frontmatter(text)
         if parse_access(fm) != "personal":
+            continue
+        # Issue athenaeum#716: a page-level ``embedded: false`` override (a fold
+        # tombstone, or athenaeum#718's cold-tier demotion) is excluded from
+        # every index and invisible to recall. The FTS5 row read above can
+        # predate the override, and this function's result is PREPENDED by its
+        # callers ahead of every backend hit -- so the override must be
+        # re-checked here against fresh frontmatter, exactly like ``access:``
+        # is, or the rescue would resurrect a tombstone past the index-build
+        # exclusion. See this function's docstring.
+        if page_embedding_disabled(fm):
             continue
         name_raw = fm.get("name")
         name = str(name_raw) if name_raw else Path(filename).stem
@@ -3090,6 +3124,16 @@ class KeywordBackend:
             # excluded from keyword recall too, even though this backend scans
             # on query rather than a pre-built index.
             if is_pii_flagged(fm):
+                continue
+            # Issue athenaeum#716: a page-level ``embedded: false`` override (a
+            # wiki-dedup fold tombstone, or athenaeum#718's cold-tier demotion)
+            # is excluded from this backend's scan-on-query results too, even
+            # though ``build_index`` treats ``embedded`` as inert here (see its
+            # docstring) — the override means "excluded from every index",
+            # not merely "not embedded into vectors", so the scan-on-query
+            # keyword backend must honor it exactly like FTS5/vector do at
+            # their own index build.
+            if page_embedding_disabled(fm):
                 continue
             # Issue athenaeum#312 — Layer B (keyword): authorize BEFORE scoring so a
             # forbidden page never enters ``scored`` and cannot occupy a top-n
