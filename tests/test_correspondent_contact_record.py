@@ -494,3 +494,49 @@ class TestAmbiguityIsPreserved:
         records = pii.resolve_contact_records(contacts, _ADDRESS)
         assert len(records) == 1
         assert pii.uid_on_record(records[0]) == dana.uid
+
+    def test_address_on_a_record_naming_no_entity_declines_and_escalates(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The address is known, but nothing on the surface says whose it is.
+
+        Declining leaves this resolving exactly as it does today
+        (``email-handle-record-without-uid`` raises a tier) rather than
+        adopting an address for a page created this run.
+        """
+        knowledge = tmp_path / "knowledge"
+        unowned = _write_record(
+            knowledge, "unowned-contact.md", uid=None, emails=[_ADDRESS]
+        )
+        before = unowned.read_text(encoding="utf-8")
+
+        _, result = _compile(
+            tmp_path, monkeypatch, note=_prose_note(), classified=[_person(_DISPLAY)]
+        )
+        assert result.correspondent_contacts_recorded == 0  # type: ignore[attr-defined]
+        assert unowned.read_text(encoding="utf-8") == before
+        contacts = pii.contacts_surface_root(knowledge, EXCLUDED_CONFIG)
+        assert pii.resolve_contact_records(contacts, _ADDRESS) == [unowned]
+        assert any(
+            "no record says whose it is" in item.description
+            for item in result.escalated  # type: ignore[attr-defined]
+        )
+
+    def test_a_surface_write_that_raises_never_fails_the_compile(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fail-open: the wiki writes have already landed, so this cannot raise."""
+
+        def _boom(*_a: object, **_k: object) -> None:
+            raise OSError("contacts surface is read-only")
+
+        monkeypatch.setattr(
+            "athenaeum.librarian.record_observed_contact_value", _boom
+        )
+        knowledge, result = _compile(
+            tmp_path, monkeypatch, note=_prose_note(), classified=[_person(_DISPLAY)]
+        )
+        # The page still landed, and the compile reported it as created.
+        assert len(result.created) == 1  # type: ignore[attr-defined]
+        assert (knowledge / "wiki" / result.created[0].filename).is_file()  # type: ignore[attr-defined]
+        assert result.correspondent_contacts_recorded == 0  # type: ignore[attr-defined]
