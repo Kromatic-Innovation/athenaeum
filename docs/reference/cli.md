@@ -53,6 +53,7 @@ Every subcommand is registered top-level on one `parser.add_subparsers()` in `cl
 - [`athenaeum entity`](#athenaeum-entity) (command) — One-call read of a SINGLE entity's page by uid, for any entity class, with an explicit --include-excluded flag (default off). The generic form of `person`; prints the same JSON object shape.
 - [`athenaeum enumerate`](#athenaeum-enumerate) (command) — Enumerate every entity of a declared type matching field predicates — no query text. The generalized form of the former `athenaeum people` (removed) — see docs/design/recall-architecture.md's capability-parity table.
 - [`athenaeum explain-routing`](#athenaeum-explain-routing) (command) — Read-only preview: resolved provider/model/batch/price per model knob. Prints what 'athenaeum run' would actually use for this athenaeum.yaml + environment -- no LLM call, no file processed, no routing behavior changed.
+- [`athenaeum fold-lint`](#athenaeum-fold-lint) (command) — Read-only check of the two fold-graph invariants: the folded_into graph is acyclic, and every fold set has exactly one live canonical page.
 - [`athenaeum ingest`](#athenaeum-ingest) (command) — Compile new/changed raw intake into the wiki on demand. --incremental (default) compiles only files new/changed since the last ingest; --full recompiles.
 - [`athenaeum ingest-answers`](#athenaeum-ingest-answers) (command) — Ingest answered pending questions from _pending_questions.md
 - [`athenaeum ingest-merges`](#athenaeum-ingest-merges) (command) — Archive resolved pending merges from wiki/_pending_merges.md
@@ -636,6 +637,15 @@ Read-only preview: resolved provider/model/batch/price per model knob. Prints wh
 | Flag | Default | Choices | Help |
 |---|---|---|---|
 | `--json` | `False` | — | Emit machine-readable JSON instead of a formatted table. |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+
+## `athenaeum fold-lint`
+
+Read-only check of the two fold-graph invariants: the folded_into graph is acyclic, and every fold set has exactly one live canonical page.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 
 ## `athenaeum ingest`
