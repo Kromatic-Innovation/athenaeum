@@ -81,6 +81,12 @@ import anthropic
 from athenaeum import batch_state, spend
 from athenaeum._retry import TransientAPIError, with_retry
 from athenaeum.atomic_io import atomic_write_text
+from athenaeum.compile_routing import (
+    CompileRouteRecord,
+    classify_route,
+    record_compile_route,
+    resolved_correspondent_uid,
+)
 from athenaeum.config import resolve_page_size_threshold_chars
 from athenaeum.intake import tier0_passthrough
 from athenaeum.models import (
@@ -924,6 +930,13 @@ class BatchRunResult:
     #: write-boundary guard — see ``athenaeum.wiki_write_guard``). Not
     #: counted in ``created``.
     type_rejected: int = 0
+    #: Issue athenaeum#1949: Tier-3 merge writes this run's routing guard
+    #: REFUSED because they targeted a person page other than the raw note's
+    #: own named correspondent, whose page received no write at all. Mirrors
+    #: ``athenaeum.models.ProcessingResult.misrouted_updates_prevented`` on
+    #: the synchronous transport, and is excluded from ``updated`` for the
+    #: same reason: a refused write never reached disk.
+    misrouted_prevented: int = 0
     failed_refs: list[str] = field(default_factory=list)
     deferred_refs: list[str] = field(default_factory=list)
     #: Issue athenaeum#1144: files whose batch was still in flight when the run's
@@ -2151,10 +2164,69 @@ def process_batch_run(
                     )
                     updated_uids.append(action.existing_uid or "")
 
+            # Issue athenaeum#1949: the same routing guard
+            # `librarian._apply_tier3_results` applies on the synchronous
+            # path, at the same point (before the merge writes). This guard
+            # can PREVENT a write, which is wiki-visible, and this
+            # transport's standing contract with the synchronous one — see
+            # the `stamp_related_edges` comment below — is that a
+            # write-boundary behaviour belongs on both or on neither.
+            # `excluded_index=None` here, as everywhere else in this module:
+            # the resolution falls back to an unindexed surface scan, which
+            # is correct, just unamortized.
+            _route = classify_route(
+                correspondent_uid=resolved_correspondent_uid(
+                    st.raw,
+                    index=index,
+                    wiki_root=wiki_root,
+                    config=resolved_config,
+                    excluded_index=None,
+                ),
+                pending_updates=pending_updates,
+                updated_uids=updated_uids,
+                # This transport applies no field-constraint guard to a merge
+                # write (unlike `librarian._apply_tier3_results`, which
+                # evaluates athenaeum#1416's guard in its own pass first), so
+                # every pending update here is one that will actually be
+                # written and `admitted` is the full set. Passed explicitly
+                # rather than left to default so the difference is stated
+                # where a reader can see it: if this loop ever gains such a
+                # guard, this argument is what has to change with it.
+                admitted=range(len(pending_updates)),
+            )
+            for _reason in _route.reasons:
+                log.warning(
+                    "  Routing divergence (%s): %s", st.raw.ref, _reason
+                )
+            if _route.prevented:
+                escalations.append(
+                    EscalationItem(
+                        raw_ref=st.raw.ref,
+                        entity_name=_route.correspondent_uid,
+                        conflict_type="ambiguous",
+                        description=(
+                            f"Refused {len(_route.prevented)} update(s) from "
+                            f"{st.raw.ref} to a person page other than the "
+                            f"correspondent's ({_route.correspondent_uid}), whose "
+                            "own page received no write at all. Reasons: "
+                            + "; ".join(_route.reasons)
+                        ),
+                    )
+                )
+
             # All calls for this file succeeded — apply writes (updates
             # first, then creates, matching the synchronous order).
-            for path, content in pending_updates:
+            _applied_updated_uids: list[str] = []
+            _prevented_uids: list[str] = []
+            for _update_idx, (path, content) in enumerate(pending_updates):
+                if _update_idx in _route.prevented:
+                    result.misrouted_prevented += 1
+                    if _update_idx < len(updated_uids):
+                        _prevented_uids.append(str(updated_uids[_update_idx]).strip())
+                    continue
                 atomic_write_text(path, content)
+                if _update_idx < len(updated_uids):
+                    _applied_updated_uids.append(str(updated_uids[_update_idx]).strip())
             # Issue athenaeum#1576: the same compile-time ``related:`` stamp
             # ``librarian._apply_tier3_results`` applies on the synchronous
             # path, at the same point (after the merge writes, before the
@@ -2199,7 +2271,10 @@ def process_batch_run(
                 )
 
             result.created += len(written_entities)
-            result.updated += len(updated_uids)
+            # Issue athenaeum#1949: a refused misroute is never counted as an
+            # update — it never reached disk, same posture as the synchronous
+            # transport's `result.updated` exclusion.
+            result.updated += len(_applied_updated_uids)
             result.escalated += len(escalations)
             # Issue athenaeum#1182: derived from `escalations` by conflict_type,
             # mirroring athenaeum.librarian._apply_tier3_results on the
@@ -2216,6 +2291,27 @@ def process_batch_run(
                 1 for _e in escalations if _e.conflict_type == "oversize_log_demote"
             )
             result.skipped += len(st.skipped)
+            # Issue athenaeum#1949 (AC2): the same durable per-file
+            # `raw ref -> written uid(s)` row the synchronous transport writes.
+            record_compile_route(
+                CompileRouteRecord(
+                    raw_ref=st.raw.ref,
+                    source=st.raw.source,
+                    written_uids=[
+                        *_applied_updated_uids,
+                        *(e.uid for e in written_entities),
+                    ],
+                    created_uids=[e.uid for e in written_entities],
+                    updated_uids=list(_applied_updated_uids),
+                    correspondent_uid=_route.correspondent_uid,
+                    prevented_uids=[u for u in _prevented_uids if u],
+                    logged_uids=[
+                        str(updated_uids[i]).strip()
+                        for i in _route.logged
+                        if i < len(updated_uids)
+                    ],
+                )
+            )
             st.raw.path.unlink()
             log.info("  Deleted: %s", st.raw.path)
         except _BatchItemError as exc:

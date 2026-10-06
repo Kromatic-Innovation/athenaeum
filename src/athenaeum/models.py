@@ -3122,6 +3122,19 @@ class ProcessingResult:
     #: never reports an address that was not in fact written down.
     #: Surfaced as ``correspondent_contacts=N`` in the run summary.
     correspondent_contacts_recorded: int = 0
+    #: Count of Tier-3 merge writes this file's write phase REFUSED because
+    #: they targeted a person page OTHER than the correspondent the raw
+    #: note's own frontmatter names, while the correspondent's own page
+    #: received no write at all (issue athenaeum#1949 — the observed misroute:
+    #: a silent drop plus an unrelated, uncited rewrite of another person's
+    #: page). Stays ``0`` for every raw file that names no correspondent, and
+    #: for one whose correspondent's page WAS also written — that is ordinary
+    #: multi-person compilation, logged rather than refused. Not counted in
+    #: ``updated``: a refused write never reaches disk and the pre-existing
+    #: page is left byte-for-byte unchanged, same posture as
+    #: ``field_constraint_rejected`` above. Surfaced as
+    #: ``misrouted_prevented=N`` in the run summary.
+    misrouted_updates_prevented: int = 0
     #: One decision per tier-0 person-registry hint candidate this file's
     #: consult surfaced (issue athenaeum#1866): ``(uid, tier, verdict)``.
     #: ``tier`` is ``"classify"`` when tier 2 never proposed a claim for the
