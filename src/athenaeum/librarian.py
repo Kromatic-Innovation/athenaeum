@@ -2452,383 +2452,473 @@ def process_one(
             )
         return result
 
-    # --- Tier 0 (person-registry consult): resolve a mention of an
-    # EXISTING type: person record via the consult-only registry into a
-    # HINT for the reasoning tiers, LLM-free (issue athenaeum#1866).
+    # --- uid bind (issue athenaeum#1982): an explicit top-level `uid:` on raw
+    # intake binds the merge target directly and takes precedence over EVERY
+    # tier below that would otherwise resolve by name -- the tier-0
+    # person-registry consult just below (by name/alias, via
+    # :func:`athenaeum.identity_resolution.match_person_mentions`),
+    # :func:`athenaeum.tiers.tier1_programmatic_match` (raw-content
+    # word-boundary scan against the wiki index's name/alias keys), and the
+    # tier-2/3 create-name gate's own name/meaning-based resolver
+    # (:func:`athenaeum.tiers.gate_create_name_classifications` ->
+    # :func:`athenaeum.tiers.validate_create_name`). All three resolve by
+    # NAME; none of them ever consults a raw file's own ``uid:``
+    # declaration -- which is why a generic bare-first-name draft whose
+    # target page's alias was deliberately dropped (so name resolution no
+    # longer reaches it) escalated as ambiguous instead of landing on the
+    # page it actually named.
     #
-    # Reassessed for athenaeum#1597 AC1's follow-on (tier1 restored to
-    # matching persons -- DEMOTED_NAME_MATCH_TYPES removed). This step's
-    # ORIGINAL rationale -- "runs before Tier 1 because Tier 1 no longer
-    # matches person names at all" -- is now stale: tier1 CAN match a
-    # person page again. KEPT ANYWAY, deliberately, for a measured reason,
-    # not by default: on today's UNMIGRATED corpus (person pages still
-    # living under wiki_root, pre-athenaeum#1247) this step and tier1 both
-    # match against the SAME underlying data (a person page's `name`/
-    # `aliases` fields), using the identical literal-substring mechanism
-    # (:func:`athenaeum.identity_resolution.match_person_mentions` here,
-    # :func:`athenaeum.tiers.tier1_programmatic_match` there), so running
-    # this step first and folding its hit into a hint (rather than letting
-    # tier1 re-discover the identical uid moments later) costs nothing —
-    # see the filtering of `matched` immediately below, which is what keeps
-    # tier1 from double-dispatching the same uid as an unconditional
-    # `raw.content[:2000]` update.
-    # Revisit if either changes: athenaeum#1247 relocates person pages out
-    # of `wiki_root` (this step's `person_registry` root and tier1's
-    # `EntityIndex` root would then diverge), or a caller ever runs the
-    # entity pipeline with `person_registry=None` (this step never engages,
-    # and tier1 restoration becomes the only remaining match path).
-    #
-    # Issue athenaeum#1866: this step used to attribute a bounded excerpt to
-    # the matched page directly and RETURN — a raw file it claimed was
-    # claimed whole, and no other entity that same file mentioned was ever
-    # tier1/2/3-processed on that run. It now builds a HINT list and falls
-    # through: the tier-2 classifier (which already reads the whole file on
-    # the classify model, per issue athenaeum#1866's motivation) decides,
-    # per candidate, whether the file actually asserts anything about that
-    # person; tier-3 `tiers.tier3_merge` verifies and writes an affirmed
-    # claim. The rest of the file is processed exactly as any other raw
-    # file — no more single-entity claiming.
-    # Issue athenaeum#1684: a `.jsonl` shaped as structured machine records
-    # (the contact-sync `semantic.jsonl` shape that polluted 950 person
-    # pages) is excluded from person hinting ENTIRELY, before
-    # `match_person_mentions` ever scans its content — see
-    # `athenaeum.intake.is_structured_jsonl_raw_file`'s docstring for the
-    # exact shape test and its conservative failure defaults.
-    # Issue athenaeum#1716 (moved, athenaeum#1866): `match_person_mentions`
-    # can resolve one raw file against many person pages at once (e.g. a
-    # memo naming a whole team). Two independent caps now apply, at two
-    # different points in the pipeline, deliberately not conflated: this
-    # block caps how many hits become CANDIDATES in the tier-2 prompt
-    # (`PERSON_HINT_MAX_CANDIDATES`, larger — a candidate is cheap, just a
-    # few hundred prompt tokens on a call already made); the action-building
-    # step near the end of this function caps how many hint-derived ACTIONS
-    # actually get built from the classifier's response
-    # (`PERSON_OBSERVATION_MAX_FANOUT`, the pre-existing, narrower cap —
-    # see that constant's docstring in `athenaeum.intake`). Both log
-    # anything over their cap rather than dropping it silently.
-    person_hints: list[dict[str, str]] = []
-    hint_uids: set[str] = set()
-    if person_registry is not None and not is_structured_jsonl_raw_file(raw):
-        person_hits = match_person_mentions(raw, wiki_root, index, person_registry)
-        if len(person_hits) > PERSON_HINT_MAX_CANDIDATES:
-            skipped_hits = person_hits[PERSON_HINT_MAX_CANDIDATES:]
-            person_hits = person_hits[:PERSON_HINT_MAX_CANDIDATES]
-            log.warning(
-                "  T0 person-registry consult: hint-candidate cap %d reached "
-                "for %s — skipping %d additional match(es): %s",
-                PERSON_HINT_MAX_CANDIDATES,
-                raw.ref,
-                len(skipped_hits),
-                [hit.uid for hit in skipped_hits],
-            )
-        for hit in person_hits:
-            hint_uids.add(hit.uid)
-            person_hints.append(
-                {
-                    "uid": hit.uid,
-                    "name": hit.name,
-                    "description": _person_hint_description(hit),
-                }
-            )
-        if person_hints:
-            log.info(
-                "  T0 person-registry consult: %d hint candidate(s) for %s: %s",
-                len(person_hints),
-                raw.ref,
-                [h["uid"] for h in person_hints],
-            )
-
-    # --- Tier 1: Programmatic matching ---
-    # Issue athenaeum#662: pass config so junk-name matches (here/get/main/reach/lane a
-    # and operator-tuned stopwords) are filtered before they cost a tier-3 call.
-    matched = tier1_programmatic_match(raw, index, config=config)
-    # Issue athenaeum#1866: a uid this file's tier-0 person-registry consult
-    # already turned into a hint candidate must not ALSO become a tier1
-    # match — matched_names below feeds the "already matched (skip these)"
-    # list tier 2 sees, and the unconditional `raw.content[:2000]` update
-    # tier1 hits build near the end of this function. Both would bypass the
-    # classify-then-verify path this issue exists to enforce. Dropped
-    # BEFORE `matched_names` is built (not filtered out later) so neither
-    # list-mode ever sees the uid.
-    if hint_uids:
-        _hint_shadowed = [m for m in matched if m[1] in hint_uids]
-        matched = [m for m in matched if m[1] not in hint_uids]
-        if _hint_shadowed:
-            log.info(
-                "  T1 match dropped (issue athenaeum#1866, now a person "
-                "hint instead): %s",
-                [name for name, _uid, _fpath in _hint_shadowed],
-            )
-    matched_names = [name for name, _, _ in matched]
-    # Issue athenaeum#1184: the fan-out driver — how many existing entities this
-    # ONE file's index-key hits dispatched a merge decision for. Recorded on
-    # the result (not a separate return value) so every existing caller of
-    # ``process_one`` keeps working unchanged.
-    result.matched = len(matched)
-
-    for name, uid_or_name, fpath in matched:
-        if index.has_entity_format(fpath):
-            log.info("  T1 match (entity format): %s → %s", name, fpath.name)
-        else:
-            log.info("  T1 match (old format, skip): %s → %s", name, fpath.name)
-            result.skipped.append(name)
-
-    if dry_run:
-        log.info(
-            "  [DRY RUN] T1 matched %d, skipped %d — LLM tiers skipped",
-            len(matched),
-            len(result.skipped),
-        )
-        log.info(
-            "  [DRY RUN] Raw content preview: %s", raw.content[:120].replace("\n", " ")
-        )
-        return result
-
-    # Deterministic self-resolving-document guard (issue athenaeum#300 follow-up,
-    # athenaeum#304): flag embedded self-confirmation claims BEFORE any LLM stage
-    # sees the text, so the untrusted-data boundary doesn't depend on the
-    # model choosing to notice the claim itself. Mutates only this
-    # in-memory RawFile's cached content, not the raw file on disk, so
-    # each future run re-reads the real, unflagged raw file — but the
-    # flagged text DOES persist downstream into this run's wiki writes
-    # (Tier 2's own observations, and the raw.content[:2000] fallback
-    # below), by design: the warning is meant to survive into whatever
-    # Tier 3 sees, not just the classify prompt.
-    raw._content = flag_self_resolving_claims(raw.content)
-
-    # --- Tier 2: Classification ---
-    # athenaeum#472: thread a stats object so a response that drops all entities on
-    # unparseable JSON (even after the repair pass + one retry) is counted and
-    # surfaced in the run summary instead of vanishing into a warning log.
-    t2_stats = Tier2ParseStats()
-    assert client is not None, "client required for non-dry-run"
-    classified = tier2_classify(
-        raw,
-        matched_names,
-        valid_types,
-        valid_tags,
-        valid_access,
-        client,
-        wiki_root=wiki_root,
-        usage=usage,
-        config=config,
-        stats=t2_stats,
-        person_candidates=person_hints or None,
-    )
-    result.degraded += t2_stats.degraded
-    result.truncated += t2_stats.truncated  # issue athenaeum#476
-    log.info("  T2 classified %d new entities", len(classified))
-    # Issue athenaeum#1866: one decision per hinted candidate, defaulting to
-    # "the classifier never asserted anything about this person" — every
-    # branch below (a dropped item, a fan-out-capped action, a write-merge
-    # verdict) OVERWRITES this default; a candidate that never appears in
-    # any of them genuinely was not asserted.
-    hint_decisions: dict[str, tuple[str, str]] = {
-        uid: ("classify", "not_asserted") for uid in hint_uids
-    }
-    for _uid, _reason in t2_stats.hint_drops.items():
-        hint_decisions[_uid] = ("classify", _reason)
-
-    # Enforce the sticky intake access (issue athenaeum#320 §5) on every NEW entity the
-    # LLM created from this raw: the screener's label is authoritative and is
-    # never downgraded — take the more restrictive of (raw label, LLM guess).
-    # Scoped to new entities only; a merge into a pre-existing page (below) does
-    # not relabel that page from this one raw file.
-    if sticky_access:
-        from athenaeum.screening import more_restrictive
-
-        for c in classified:
-            c.access = more_restrictive(c.access, sticky_access)
-
-    # Issue athenaeum#680: a candidate whose name is a filename/path (a code artifact)
-    # must NOT become a wiki entity — the repo is the source of truth for its own
-    # code, so a memory of it is stale by construction and costs a session to
-    # disprove. Drop it AT CREATION, before the tier-3 create call (complementary
-    # to, and no change to, athenaeum#662's read-side stopword gate).
-    classified, _dropped_code = partition_code_artifact_classifications(
-        classified, config
-    )
-    for _name in _dropped_code:
-        log.info("  T3 create skipped (issue athenaeum#680, code artifact): %s", _name)
-
-    # Issue athenaeum#1126: a candidate whose name is a bare email address must
-    # not become a NEW entity named after that address — resolve it to the
-    # entity that owns the address (via the sanctioned recall reverse lookup)
-    # or decline it loudly rather than mint an orphan address-named page.
-    # excluded_index is the run's shared ExcludedRecordIndex
-    # (athenaeum#883, athenaeum#1124) so the O(corpus) contacts scan is paid
-    # once, not per address.
-    address_outcome = resolve_address_named_classifications(
-        classified,
-        knowledge_root=wiki_root.parent,
-        wiki_root=wiki_root,
-        config=config,
-        excluded_index=excluded_index,
-    )
-    classified = address_outcome.kept
-    for _address, _uid, _display_name in address_outcome.resolved:
-        log.info(
-            "%s: address=%s uid=%s name=%r",
-            TIER2_ADDRESS_RESOLVED_MARKER,
-            _address,
-            _uid,
-            _display_name,
-        )
-    address_escalations: list[EscalationItem] = []
-    for _ref_name, _reason in address_outcome.declined:
-        log.warning(
-            "%s: ref=%s address=%s reason=%s",
-            TIER2_ADDRESS_UNRESOLVED_MARKER,
-            raw.ref,
-            _ref_name,
-            _reason,
-        )
-        address_escalations.append(
-            EscalationItem(
-                raw_ref=raw.ref,
-                entity_name=_ref_name,
-                conflict_type="classification_failed",
-                description=(
-                    f"This statement's subject ({_ref_name!r}) is an email "
-                    "address that resolves to no known entity (reason: "
-                    f"{_reason}); no address-named page was created "
-                    "(athenaeum#1126). The statement text follows so the "
-                    f"fact is not lost:\n\n{raw.content[:2000]}"
-                ),
-            )
-        )
-
-    # Issue athenaeum#1173: create-path name gate. Sits immediately after the
-    # athenaeum#1126 address gate above (same "kept" chaining) and BEFORE
-    # actions are built — a rejected/escalated name never reaches a tier-3
-    # create action. See gate_create_name_classifications' docstring.
-    # Issue athenaeum#1170: `index` (already a local parameter here) is threaded
-    # through so a colliding create disambiguates against — or escalates
-    # for — the existing page instead of minting a duplicate.
-    # Issue athenaeum#1615: thread the same tier-2 client through so a missed
-    # exact-name lookup falls back to the meaning-based (embedding + tier-2
-    # confirmation) resolver instead of creating unconditionally.
-    # Issue athenaeum#1657: thread this raw file's own tier-1 matches so a
-    # create whose name is a name-structure variant of one of them reaches
-    # the fold/mint model decision instead of minting unconditionally.
-    name_gate_outcome = gate_create_name_classifications(
-        classified,
-        raw.ref,
-        raw.content,
-        config,
-        index=index,
-        client=client,
-        usage=usage,
-        tier1_matched_entities=matched,
-        variant_candidate_builder=collect_create_name_variant_candidates,
-    )
-    classified = name_gate_outcome.kept
-    address_escalations.extend(name_gate_outcome.escalations)
-
-    # Build actions
-    actions: list[EntityAction] = []
-    # Issue athenaeum#1866: hint-derived actions (a candidate the tier-2
-    # classifier affirmed a claim for) are capped SEPARATELY from ordinary
-    # classify/tier1 actions, at the pre-existing, narrower
-    # `PERSON_OBSERVATION_MAX_FANOUT` — see that constant's docstring in
-    # `athenaeum.intake` for why this cap moved here rather than being
-    # removed.
-    _hint_action_count = 0
-    for c in classified:
-        if c.from_person_hint:
-            if _hint_action_count >= PERSON_OBSERVATION_MAX_FANOUT:
-                log.warning(
-                    "  T2/T3 person-hint action cap %d reached for %s — "
-                    "dropping additional hint-derived claim for uid=%s",
-                    PERSON_OBSERVATION_MAX_FANOUT,
+    # Deterministic and LLM-free: a plain :meth:`~athenaeum.models.
+    # EntityIndex.get_by_uid` lookup decides WHICH page this binds to, no
+    # classify/confirm call is made for the binding decision itself. When it
+    # resolves, this file's merge target is already settled, so the
+    # person-hint consult, tier1 match, and tier2 classify/create-name-gate
+    # below are skipped entirely for this file (every one of them is gated
+    # on ``uid_bound_action is None``) -- the write itself still goes
+    # through Tier 3's ordinary write-merge LLM call below, exactly like a
+    # tier1-matched update does.
+    uid_bind_value = str(raw_meta.get("uid", "") or "").strip()
+    uid_bound_action: EntityAction | None = None
+    if uid_bind_value:
+        bound_path = index.get_by_uid(uid_bind_value)
+        if bound_path is not None and bound_path.exists():
+            bound_meta, _ = parse_frontmatter(bound_path.read_text(encoding="utf-8"))
+            bound_name = str((bound_meta or {}).get("name", "") or "").strip()
+            file_name = str(raw_meta.get("name", "") or "").strip()
+            # AC3: the merge still binds by uid even when the names differ --
+            # only a mismatch COUNTER is recorded, never a refusal.
+            if file_name and bound_name and file_name.casefold() != bound_name.casefold():
+                result.uid_bind_mismatch += 1
+                log.info(
+                    "  uid-bind: %s declares name=%r but bound uid=%s is "
+                    "named %r -- binding by uid anyway (issue athenaeum#1982)",
                     raw.ref,
-                    c.existing_uid,
+                    file_name,
+                    uid_bind_value,
+                    bound_name,
                 )
-                if c.existing_uid:
-                    hint_decisions[c.existing_uid] = ("classify", "dropped")
+            result.uid_bound += 1
+            log.info(
+                "  uid-bind: %s -> %s (matched by uid=%s, name resolution skipped)",
+                raw.ref,
+                bound_path.name,
+                uid_bind_value,
+            )
+            if dry_run:
+                log.info(
+                    "  [DRY RUN] uid-bind matched %s -- LLM tiers skipped",
+                    bound_path.name,
+                )
+                return result
+            raw._content = flag_self_resolving_claims(raw.content)
+            uid_bound_action = EntityAction(
+                kind="update",
+                name=bound_name or file_name,
+                entity_type="",
+                tags=[],
+                access="",
+                existing_uid=uid_bind_value,
+                observations=raw.content[:2000],
+            )
+        else:
+            # AC2: the uid names no existing page -- fall back to today's
+            # name resolution below, and record the miss so the run summary
+            # (and its durable ledger copy) show it rather than silently
+            # dropping back to pre-athenaeum#1982 behaviour unremarked.
+            result.uid_bind_unresolved += 1
+            log.info(
+                "  uid-bind: %s declares uid=%s but no existing page matches "
+                "-- falling back to name resolution (issue athenaeum#1982)",
+                raw.ref,
+                uid_bind_value,
+            )
+
+    # Declared once, ahead of the branch, so mypy sees one binding each
+    # (not a redefinition) across the uid-bound fast path and the ordinary
+    # name-resolution path below -- both assign these, never re-annotate.
+    actions: list[EntityAction]
+    address_escalations: list[EscalationItem]
+    hint_decisions: dict[str, tuple[str, str]]
+    if uid_bound_action is not None:
+        actions = [uid_bound_action]
+        address_escalations = []
+        hint_decisions = {}
+    else:
+        # --- Tier 0 (person-registry consult): resolve a mention of an
+        # EXISTING type: person record via the consult-only registry into a
+        # HINT for the reasoning tiers, LLM-free (issue athenaeum#1866).
+        #
+        # Reassessed for athenaeum#1597 AC1's follow-on (tier1 restored to
+        # matching persons -- DEMOTED_NAME_MATCH_TYPES removed). This step's
+        # ORIGINAL rationale -- "runs before Tier 1 because Tier 1 no longer
+        # matches person names at all" -- is now stale: tier1 CAN match a
+        # person page again. KEPT ANYWAY, deliberately, for a measured reason,
+        # not by default: on today's UNMIGRATED corpus (person pages still
+        # living under wiki_root, pre-athenaeum#1247) this step and tier1 both
+        # match against the SAME underlying data (a person page's `name`/
+        # `aliases` fields), using the identical literal-substring mechanism
+        # (:func:`athenaeum.identity_resolution.match_person_mentions` here,
+        # :func:`athenaeum.tiers.tier1_programmatic_match` there), so running
+        # this step first and folding its hit into a hint (rather than letting
+        # tier1 re-discover the identical uid moments later) costs nothing —
+        # see the filtering of `matched` immediately below, which is what keeps
+        # tier1 from double-dispatching the same uid as an unconditional
+        # `raw.content[:2000]` update.
+        # Revisit if either changes: athenaeum#1247 relocates person pages out
+        # of `wiki_root` (this step's `person_registry` root and tier1's
+        # `EntityIndex` root would then diverge), or a caller ever runs the
+        # entity pipeline with `person_registry=None` (this step never engages,
+        # and tier1 restoration becomes the only remaining match path).
+        #
+        # Issue athenaeum#1866: this step used to attribute a bounded excerpt to
+        # the matched page directly and RETURN — a raw file it claimed was
+        # claimed whole, and no other entity that same file mentioned was ever
+        # tier1/2/3-processed on that run. It now builds a HINT list and falls
+        # through: the tier-2 classifier (which already reads the whole file on
+        # the classify model, per issue athenaeum#1866's motivation) decides,
+        # per candidate, whether the file actually asserts anything about that
+        # person; tier-3 `tiers.tier3_merge` verifies and writes an affirmed
+        # claim. The rest of the file is processed exactly as any other raw
+        # file — no more single-entity claiming.
+        # Issue athenaeum#1684: a `.jsonl` shaped as structured machine records
+        # (the contact-sync `semantic.jsonl` shape that polluted 950 person
+        # pages) is excluded from person hinting ENTIRELY, before
+        # `match_person_mentions` ever scans its content — see
+        # `athenaeum.intake.is_structured_jsonl_raw_file`'s docstring for the
+        # exact shape test and its conservative failure defaults.
+        # Issue athenaeum#1716 (moved, athenaeum#1866): `match_person_mentions`
+        # can resolve one raw file against many person pages at once (e.g. a
+        # memo naming a whole team). Two independent caps now apply, at two
+        # different points in the pipeline, deliberately not conflated: this
+        # block caps how many hits become CANDIDATES in the tier-2 prompt
+        # (`PERSON_HINT_MAX_CANDIDATES`, larger — a candidate is cheap, just a
+        # few hundred prompt tokens on a call already made); the action-building
+        # step near the end of this function caps how many hint-derived ACTIONS
+        # actually get built from the classifier's response
+        # (`PERSON_OBSERVATION_MAX_FANOUT`, the pre-existing, narrower cap —
+        # see that constant's docstring in `athenaeum.intake`). Both log
+        # anything over their cap rather than dropping it silently.
+        person_hints: list[dict[str, str]] = []
+        hint_uids: set[str] = set()
+        if person_registry is not None and not is_structured_jsonl_raw_file(raw):
+            person_hits = match_person_mentions(raw, wiki_root, index, person_registry)
+            if len(person_hits) > PERSON_HINT_MAX_CANDIDATES:
+                skipped_hits = person_hits[PERSON_HINT_MAX_CANDIDATES:]
+                person_hits = person_hits[:PERSON_HINT_MAX_CANDIDATES]
+                log.warning(
+                    "  T0 person-registry consult: hint-candidate cap %d reached "
+                    "for %s — skipping %d additional match(es): %s",
+                    PERSON_HINT_MAX_CANDIDATES,
+                    raw.ref,
+                    len(skipped_hits),
+                    [hit.uid for hit in skipped_hits],
+                )
+            for hit in person_hits:
+                hint_uids.add(hit.uid)
+                person_hints.append(
+                    {
+                        "uid": hit.uid,
+                        "name": hit.name,
+                        "description": _person_hint_description(hit),
+                    }
+                )
+            if person_hints:
+                log.info(
+                    "  T0 person-registry consult: %d hint candidate(s) for %s: %s",
+                    len(person_hints),
+                    raw.ref,
+                    [h["uid"] for h in person_hints],
+                )
+
+        # --- Tier 1: Programmatic matching ---
+        # Issue athenaeum#662: pass config so junk-name matches (here/get/main/reach/lane a
+        # and operator-tuned stopwords) are filtered before they cost a tier-3 call.
+        matched = tier1_programmatic_match(raw, index, config=config)
+        # Issue athenaeum#1866: a uid this file's tier-0 person-registry consult
+        # already turned into a hint candidate must not ALSO become a tier1
+        # match — matched_names below feeds the "already matched (skip these)"
+        # list tier 2 sees, and the unconditional `raw.content[:2000]` update
+        # tier1 hits build near the end of this function. Both would bypass the
+        # classify-then-verify path this issue exists to enforce. Dropped
+        # BEFORE `matched_names` is built (not filtered out later) so neither
+        # list-mode ever sees the uid.
+        if hint_uids:
+            _hint_shadowed = [m for m in matched if m[1] in hint_uids]
+            matched = [m for m in matched if m[1] not in hint_uids]
+            if _hint_shadowed:
+                log.info(
+                    "  T1 match dropped (issue athenaeum#1866, now a person "
+                    "hint instead): %s",
+                    [name for name, _uid, _fpath in _hint_shadowed],
+                )
+        matched_names = [name for name, _, _ in matched]
+        # Issue athenaeum#1184: the fan-out driver — how many existing entities this
+        # ONE file's index-key hits dispatched a merge decision for. Recorded on
+        # the result (not a separate return value) so every existing caller of
+        # ``process_one`` keeps working unchanged.
+        result.matched = len(matched)
+
+        for name, uid_or_name, fpath in matched:
+            if index.has_entity_format(fpath):
+                log.info("  T1 match (entity format): %s → %s", name, fpath.name)
+            else:
+                log.info("  T1 match (old format, skip): %s → %s", name, fpath.name)
+                result.skipped.append(name)
+
+        if dry_run:
+            log.info(
+                "  [DRY RUN] T1 matched %d, skipped %d — LLM tiers skipped",
+                len(matched),
+                len(result.skipped),
+            )
+            log.info(
+                "  [DRY RUN] Raw content preview: %s", raw.content[:120].replace("\n", " ")
+            )
+            return result
+
+        # Deterministic self-resolving-document guard (issue athenaeum#300 follow-up,
+        # athenaeum#304): flag embedded self-confirmation claims BEFORE any LLM stage
+        # sees the text, so the untrusted-data boundary doesn't depend on the
+        # model choosing to notice the claim itself. Mutates only this
+        # in-memory RawFile's cached content, not the raw file on disk, so
+        # each future run re-reads the real, unflagged raw file — but the
+        # flagged text DOES persist downstream into this run's wiki writes
+        # (Tier 2's own observations, and the raw.content[:2000] fallback
+        # below), by design: the warning is meant to survive into whatever
+        # Tier 3 sees, not just the classify prompt.
+        raw._content = flag_self_resolving_claims(raw.content)
+
+        # --- Tier 2: Classification ---
+        # athenaeum#472: thread a stats object so a response that drops all entities on
+        # unparseable JSON (even after the repair pass + one retry) is counted and
+        # surfaced in the run summary instead of vanishing into a warning log.
+        t2_stats = Tier2ParseStats()
+        assert client is not None, "client required for non-dry-run"
+        classified = tier2_classify(
+            raw,
+            matched_names,
+            valid_types,
+            valid_tags,
+            valid_access,
+            client,
+            wiki_root=wiki_root,
+            usage=usage,
+            config=config,
+            stats=t2_stats,
+            person_candidates=person_hints or None,
+        )
+        result.degraded += t2_stats.degraded
+        result.truncated += t2_stats.truncated  # issue athenaeum#476
+        log.info("  T2 classified %d new entities", len(classified))
+        # Issue athenaeum#1866: one decision per hinted candidate, defaulting to
+        # "the classifier never asserted anything about this person" — every
+        # branch below (a dropped item, a fan-out-capped action, a write-merge
+        # verdict) OVERWRITES this default; a candidate that never appears in
+        # any of them genuinely was not asserted.
+        hint_decisions = {uid: ("classify", "not_asserted") for uid in hint_uids}
+        for _uid, _reason in t2_stats.hint_drops.items():
+            hint_decisions[_uid] = ("classify", _reason)
+
+        # Enforce the sticky intake access (issue athenaeum#320 §5) on every NEW entity the
+        # LLM created from this raw: the screener's label is authoritative and is
+        # never downgraded — take the more restrictive of (raw label, LLM guess).
+        # Scoped to new entities only; a merge into a pre-existing page (below) does
+        # not relabel that page from this one raw file.
+        if sticky_access:
+            from athenaeum.screening import more_restrictive
+
+            for c in classified:
+                c.access = more_restrictive(c.access, sticky_access)
+
+        # Issue athenaeum#680: a candidate whose name is a filename/path (a code artifact)
+        # must NOT become a wiki entity — the repo is the source of truth for its own
+        # code, so a memory of it is stale by construction and costs a session to
+        # disprove. Drop it AT CREATION, before the tier-3 create call (complementary
+        # to, and no change to, athenaeum#662's read-side stopword gate).
+        classified, _dropped_code = partition_code_artifact_classifications(
+            classified, config
+        )
+        for _name in _dropped_code:
+            log.info("  T3 create skipped (issue athenaeum#680, code artifact): %s", _name)
+
+        # Issue athenaeum#1126: a candidate whose name is a bare email address must
+        # not become a NEW entity named after that address — resolve it to the
+        # entity that owns the address (via the sanctioned recall reverse lookup)
+        # or decline it loudly rather than mint an orphan address-named page.
+        # excluded_index is the run's shared ExcludedRecordIndex
+        # (athenaeum#883, athenaeum#1124) so the O(corpus) contacts scan is paid
+        # once, not per address.
+        address_outcome = resolve_address_named_classifications(
+            classified,
+            knowledge_root=wiki_root.parent,
+            wiki_root=wiki_root,
+            config=config,
+            excluded_index=excluded_index,
+        )
+        classified = address_outcome.kept
+        for _address, _uid, _display_name in address_outcome.resolved:
+            log.info(
+                "%s: address=%s uid=%s name=%r",
+                TIER2_ADDRESS_RESOLVED_MARKER,
+                _address,
+                _uid,
+                _display_name,
+            )
+        address_escalations = []
+        for _ref_name, _reason in address_outcome.declined:
+            log.warning(
+                "%s: ref=%s address=%s reason=%s",
+                TIER2_ADDRESS_UNRESOLVED_MARKER,
+                raw.ref,
+                _ref_name,
+                _reason,
+            )
+            address_escalations.append(
+                EscalationItem(
+                    raw_ref=raw.ref,
+                    entity_name=_ref_name,
+                    conflict_type="classification_failed",
+                    description=(
+                        f"This statement's subject ({_ref_name!r}) is an email "
+                        "address that resolves to no known entity (reason: "
+                        f"{_reason}); no address-named page was created "
+                        "(athenaeum#1126). The statement text follows so the "
+                        f"fact is not lost:\n\n{raw.content[:2000]}"
+                    ),
+                )
+            )
+
+        # Issue athenaeum#1173: create-path name gate. Sits immediately after the
+        # athenaeum#1126 address gate above (same "kept" chaining) and BEFORE
+        # actions are built — a rejected/escalated name never reaches a tier-3
+        # create action. See gate_create_name_classifications' docstring.
+        # Issue athenaeum#1170: `index` (already a local parameter here) is threaded
+        # through so a colliding create disambiguates against — or escalates
+        # for — the existing page instead of minting a duplicate.
+        # Issue athenaeum#1615: thread the same tier-2 client through so a missed
+        # exact-name lookup falls back to the meaning-based (embedding + tier-2
+        # confirmation) resolver instead of creating unconditionally.
+        # Issue athenaeum#1657: thread this raw file's own tier-1 matches so a
+        # create whose name is a name-structure variant of one of them reaches
+        # the fold/mint model decision instead of minting unconditionally.
+        name_gate_outcome = gate_create_name_classifications(
+            classified,
+            raw.ref,
+            raw.content,
+            config,
+            index=index,
+            client=client,
+            usage=usage,
+            tier1_matched_entities=matched,
+            variant_candidate_builder=collect_create_name_variant_candidates,
+        )
+        classified = name_gate_outcome.kept
+        address_escalations.extend(name_gate_outcome.escalations)
+
+        # Build actions
+        actions = []
+        # Issue athenaeum#1866: hint-derived actions (a candidate the tier-2
+        # classifier affirmed a claim for) are capped SEPARATELY from ordinary
+        # classify/tier1 actions, at the pre-existing, narrower
+        # `PERSON_OBSERVATION_MAX_FANOUT` — see that constant's docstring in
+        # `athenaeum.intake` for why this cap moved here rather than being
+        # removed.
+        _hint_action_count = 0
+        for c in classified:
+            if c.from_person_hint:
+                if _hint_action_count >= PERSON_OBSERVATION_MAX_FANOUT:
+                    log.warning(
+                        "  T2/T3 person-hint action cap %d reached for %s — "
+                        "dropping additional hint-derived claim for uid=%s",
+                        PERSON_OBSERVATION_MAX_FANOUT,
+                        raw.ref,
+                        c.existing_uid,
+                    )
+                    if c.existing_uid:
+                        hint_decisions[c.existing_uid] = ("classify", "dropped")
+                    continue
+                _hint_action_count += 1
+                actions.append(
+                    EntityAction(
+                        kind="update",
+                        name=c.name,
+                        entity_type="",
+                        tags=[],
+                        access="",
+                        existing_uid=c.existing_uid,
+                        # Issue athenaeum#1866 AC4: never the raw.content[:2000]
+                        # fallback — a hint-derived item's observations is
+                        # always the classifier's stated claim (parse_tier2_entities
+                        # drops any item whose claim text is empty before it
+                        # ever reaches here).
+                        observations=c.observations,
+                        from_person_hint=True,
+                    )
+                )
                 continue
-            _hint_action_count += 1
             actions.append(
                 EntityAction(
-                    kind="update",
+                    kind="create" if c.is_new else "update",
                     name=c.name,
-                    entity_type="",
-                    tags=[],
-                    access="",
+                    entity_type=c.entity_type if c.is_new else "",
+                    tags=c.tags if c.is_new else [],
+                    access=c.access if c.is_new else "",
                     existing_uid=c.existing_uid,
-                    # Issue athenaeum#1866 AC4: never the raw.content[:2000]
-                    # fallback — a hint-derived item's observations is
-                    # always the classifier's stated claim (parse_tier2_entities
-                    # drops any item whose claim text is empty before it
-                    # ever reaches here).
-                    observations=c.observations,
-                    from_person_hint=True,
-                )
-            )
-            continue
-        actions.append(
-            EntityAction(
-                kind="create" if c.is_new else "update",
-                name=c.name,
-                entity_type=c.entity_type if c.is_new else "",
-                tags=c.tags if c.is_new else [],
-                access=c.access if c.is_new else "",
-                existing_uid=c.existing_uid,
-                observations=c.observations or raw.content[:2000],
-            )
-        )
-
-    for name, uid_or_name, fpath in matched:
-        if index.has_entity_format(fpath):
-            actions.append(
-                EntityAction(
-                    kind="update",
-                    name=name,
-                    entity_type="",
-                    tags=[],
-                    access="",
-                    existing_uid=uid_or_name,
-                    observations=raw.content[:2000],
+                    observations=c.observations or raw.content[:2000],
                 )
             )
 
-    if not actions:
-        log.info("  No actions needed for %s", raw.ref)
-        # Issue athenaeum#1866: no hint-derived action was built at all (every
-        # hinted candidate is either unasserted or was dropped at classify
-        # time), so `hint_decisions` is already final — no write-merge stage
-        # runs on this early-return path.
-        result.person_hint_decisions = sorted(
-            (uid, tier, verdict) for uid, (tier, verdict) in hint_decisions.items()
-        )
-        if address_escalations or incoming_handles:
-            # Issue athenaeum#1126: the raw file is unlinked after this run
-            # regardless of outcome (below, on the write path) — if the ONLY
-            # classification for this file was a declined address, the
-            # early return above would otherwise destroy the fact silently.
-            # Flush the escalation(s) through the same write/escalate seam
-            # the normal completion path uses.
-            #
-            # Issue athenaeum#1109: also reached (with `address_escalations` possibly
-            # empty) when this raw carries populated source handles but Tier
-            # 1/2 found NO action to take for it at all — the most direct
-            # form of "these handles are about to be silently dropped".
-            # `_apply_tier3_results` raises before this would otherwise be a
-            # silent no-op return.
-            _apply_tier3_results(
-                result,
-                new_entities=[],
-                pending_updates=[],
-                updated_uids=[],
-                escalations=address_escalations,
-                wiki_root=wiki_root,
-                index=index,
-                config=config,
-                incoming_handles=incoming_handles,
-                raw=raw,
-                excluded_index=excluded_index,
+        for name, uid_or_name, fpath in matched:
+            if index.has_entity_format(fpath):
+                actions.append(
+                    EntityAction(
+                        kind="update",
+                        name=name,
+                        entity_type="",
+                        tags=[],
+                        access="",
+                        existing_uid=uid_or_name,
+                        observations=raw.content[:2000],
+                    )
+                )
+
+        if not actions:
+            log.info("  No actions needed for %s", raw.ref)
+            # Issue athenaeum#1866: no hint-derived action was built at all (every
+            # hinted candidate is either unasserted or was dropped at classify
+            # time), so `hint_decisions` is already final — no write-merge stage
+            # runs on this early-return path.
+            result.person_hint_decisions = sorted(
+                (uid, tier, verdict) for uid, (tier, verdict) in hint_decisions.items()
             )
-        return result
+            if address_escalations or incoming_handles:
+                # Issue athenaeum#1126: the raw file is unlinked after this run
+                # regardless of outcome (below, on the write path) — if the ONLY
+                # classification for this file was a declined address, the
+                # early return above would otherwise destroy the fact silently.
+                # Flush the escalation(s) through the same write/escalate seam
+                # the normal completion path uses.
+                #
+                # Issue athenaeum#1109: also reached (with `address_escalations` possibly
+                # empty) when this raw carries populated source handles but Tier
+                # 1/2 found NO action to take for it at all — the most direct
+                # form of "these handles are about to be silently dropped".
+                # `_apply_tier3_results` raises before this would otherwise be a
+                # silent no-op return.
+                _apply_tier3_results(
+                    result,
+                    new_entities=[],
+                    pending_updates=[],
+                    updated_uids=[],
+                    escalations=address_escalations,
+                    wiki_root=wiki_root,
+                    index=index,
+                    config=config,
+                    incoming_handles=incoming_handles,
+                    raw=raw,
+                    excluded_index=excluded_index,
+                )
+            return result
 
     # --- Tier 3: LLM-call phase (issue athenaeum#898: writes NOTHING yet) ---
     # Issue athenaeum#994: the per-file LLM-call / wall-clock bound is now
@@ -5122,6 +5212,19 @@ class RunContext:
     # ``run_summary_log.compute_run_economics``.
     total_matched: int = 0
     total_files_acted: int = 0
+
+    # Issue athenaeum#1982: uid-bind accumulators, same best-effort
+    # "synchronous path only" scope as ``total_matched`` above — sums
+    # ``ProcessingResult.uid_bound``/``uid_bind_unresolved``/
+    # ``uid_bind_mismatch`` across every file the synchronous entity loop
+    # processed to completion. Rendered into the entity profile segment
+    # (``uid_bound`` unconditionally, beside created/updated/escalated;
+    # the other two only when non-zero, mirroring the degraded/truncated
+    # convention), from which the durable athenaeum#1102 ledger carries
+    # them forward like every other phase field.
+    total_uid_bound: int = 0
+    total_uid_bind_unresolved: int = 0
+    total_uid_bind_mismatch: int = 0
 
     # Issue athenaeum#1291 AC3: sources that had pending intake this run and
     # received ZERO slots in the max_files window. Empty on every run where
@@ -7672,7 +7775,15 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                 FilesystemStore(ctx.knowledge_root, {}).snapshot(
                     f"librarian: partial run (interrupted after {ctx.processed_count} "
                     f"file(s), {ctx.total_created}C {ctx.total_updated}U "
-                    f"{ctx.total_escalated}E {len(ctx.failed_files)}F)",
+                    f"{ctx.total_escalated}E {len(ctx.failed_files)}F "
+                    # Issue athenaeum#1982 AC4: uid-bound merges, as their own
+                    # count beside C/U/E/F -- this is the literal line a human
+                    # reads diagnosing a run (the surface the issue's own
+                    # "0C 0U 11E 0F" observation was read off), not just the
+                    # structured ``run_profile``/durable-ledger field above.
+                    # ``B`` for "uid-Bound" -- unambiguous beside the existing
+                    # four letters, none of which it collides with.
+                    f"{ctx.total_uid_bound}B)",
                 )
                 sys.exit(EXIT_EXTERNAL_KILL)
 
@@ -8305,6 +8416,15 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                         # above (a double predating this issue has no ``matched``
                         # attribute).
                         ctx.total_matched += getattr(result, "matched", 0)
+                        # Issue athenaeum#1982: same getattr-tolerance rationale as
+                        # degraded/truncated/matched above.
+                        ctx.total_uid_bound += getattr(result, "uid_bound", 0)
+                        ctx.total_uid_bind_unresolved += getattr(
+                            result, "uid_bind_unresolved", 0
+                        )
+                        ctx.total_uid_bind_mismatch += getattr(
+                            result, "uid_bind_mismatch", 0
+                        )
                         # Issue athenaeum#1866: same getattr-tolerance rationale as
                         # degraded/truncated/matched above.
                         for _uid, _tier, _verdict in getattr(
@@ -8449,7 +8569,12 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     msg = (
                         f"librarian: processed {_processed_n} file(s) "
                         f"({ctx.total_created}C {ctx.total_updated}U "
-                        f"{ctx.total_escalated}E {len(ctx.failed_files)}F)"
+                        f"{ctx.total_escalated}E {len(ctx.failed_files)}F "
+                        # Issue athenaeum#1982 AC4: same addition, same
+                        # rationale, as the partial-run snapshot above --
+                        # both sites must carry it so an interrupted run is
+                        # not the only one missing the count.
+                        f"{ctx.total_uid_bound}B)"
                     )
                     FilesystemStore(ctx.knowledge_root, {}).snapshot(msg)
             finally:
@@ -8570,6 +8695,15 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     "created": ctx.total_created,
                     "updated": ctx.total_updated,
                     "escalated": ctx.total_escalated,
+                    # Issue athenaeum#1982 AC4: uid-bound merges, counted
+                    # separately from (and already also folded into)
+                    # ``updated`` above — this is "how many of those updates
+                    # skipped name resolution because the file named its own
+                    # uid", not a replacement for the existing C/U/E/F
+                    # counts. Rendered unconditionally, same as
+                    # created/updated/escalated, so a healthy run with none
+                    # still reads as `uid_bound=0` rather than an absent key.
+                    "uid_bound": ctx.total_uid_bound,
                     "files": ctx.processed_count,
                     # Issue athenaeum#1184: fan-out — see RunContext.total_matched's
                     # docstring for scope (synchronous path only).
@@ -8681,6 +8815,24 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     **(
                         {"truncated": ctx.total_truncated}
                         if ctx.total_truncated
+                        else {}
+                    ),
+                    # issue athenaeum#1982 AC2: files whose declared ``uid:``
+                    # matched no existing page this run -- the durable record
+                    # of the fallback, mirroring degraded/truncated's
+                    # render-only-when-non-zero convention.
+                    **(
+                        {"uid_bind_unresolved": ctx.total_uid_bind_unresolved}
+                        if ctx.total_uid_bind_unresolved
+                        else {}
+                    ),
+                    # issue athenaeum#1982 AC3: uid-bound merges (counted in
+                    # ``uid_bound`` above) whose bound page's own ``name:``
+                    # differed from the raw file's declared ``name:`` -- a
+                    # counter only, never a refusal. Same convention.
+                    **(
+                        {"uid_bind_mismatch": ctx.total_uid_bind_mismatch}
+                        if ctx.total_uid_bind_mismatch
                         else {}
                     ),
                     # athenaeum#1182: pages the page-size invariant suppressed a

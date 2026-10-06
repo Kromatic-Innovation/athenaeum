@@ -10,6 +10,30 @@ a plain markdown document containing observations, notes, or session
 transcripts. The `{source}` directory identifies the origin (e.g.,
 `sessions`, `imports`).
 
+**Raw intake frontmatter.** A raw file may optionally open with a YAML
+frontmatter block of its own, separate from (and read before) whatever a
+compiled wiki page ends up carrying. Two keys in that block change how the
+librarian resolves the file's merge target:
+
+- **`uid`** — a binding key. When present and it matches an existing wiki
+  page's own `uid`, the librarian merges this file's content onto that
+  page directly and skips name/alias resolution entirely — a page whose
+  own `name`/`aliases` no longer match the file's text (or that several
+  other pages share a name with) is still reached unambiguously. A `uid`
+  that matches no existing page falls back to ordinary name resolution. A
+  `uid` that resolves to a page whose `name` differs from the file's own
+  is still honored — the binding wins, the mismatch is only counted.
+  Writers that set `uid` today: a pre-structured seed carrying `type` +
+  `name` (the shape `tier0_passthrough`/the handle-upsert path promote
+  verbatim), and an enrichment/observation adapter that already knows the
+  uid of the page its draft is about.
+- **`name`** — the subject's display name, read alongside `uid` above and
+  used as a fallback label when the bound page itself is missing one.
+
+Neither key is required; the overwhelming majority of raw intake (free-form
+notes and session transcripts) carries no frontmatter at all and is
+classified by the LLM tiers exactly as before.
+
 **Wiki entity pages** live in `wiki/` with YAML frontmatter:
 
 ```yaml
