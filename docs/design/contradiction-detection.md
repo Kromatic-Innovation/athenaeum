@@ -59,31 +59,64 @@ historical merge proposals were both wrong, at 0.84 and 0.82, while the one
 verified-correct cluster sat at 0.77), and similarity's only remaining job is
 proposing which pairs to compare.
 
-### Status: partially cut over
+### Status: both old paths retired; one comparator domain still dark
 
 The comparator and its verdict effects (auto-supersession with its
 partial-order authority treatment and rate limits, evidence-artifact fold
 proposals, the `compatible` TTL re-check, sibling-scope widening probes) are
-**built and tested, gated off by default** behind `librarian.comparator_enabled`
-(default `false`) — see
+**built and tested**, behind the single master switch
+`librarian.comparator_enabled` (default `false`) — see
 [`docs/reference/configuration.md`](../reference/configuration.md#five-verdict-comparator-athenaeum715--off-by-default).
 
-**The pipeline below (raw `auto-memory` intake → C1-C4 → this document's
-Haiku-detect/Opus-resolve split) is UNCHANGED and still describes live
-behaviour.** athenaeum#715's cut-over so far only replaces the OTHER old
-duplicate-detection path — `athenaeum.wiki_dedupe`'s wiki-page-vs-wiki-page
-dedup pass (a separate pass from the diagram below: it compares
-already-COMPILED `wiki/*.md` pages against each other, not raw intake). That
-pass's own confidence/suppression-gate algorithm is deleted outright and
-replaced by the comparator, gated on the SAME `librarian.comparator_enabled`
-knob. The C1-C4 pipeline's own intra-cluster contradiction detector
-(`athenaeum.merge`'s `merge_clusters_to_wiki`, described in full below) is
-**still the old path** — deeply interleaved with run-level deadline
-checkpointing, the detection-incomplete retry queue, and the shared
-API-call/spend budget across multiple `librarian.py` call sites, so
-retiring it safely is scoped as its own follow-up rather than folded into
-this pass. Until it lands, the other live reader of the new path (besides
-`athenaeum.wiki_dedupe` above) is the explicit, opt-in
+**Both split paths athenaeum#715 set out to remove are now gone from the live
+pipeline** — not partially, as earlier revisions of this section said:
+
+- `athenaeum.wiki_dedupe`'s wiki-page-vs-wiki-page dedup pass (compiled
+  `wiki/*.md` pages compared against each other, a separate pass from the
+  raw-intake diagram below) had its own confidence/suppression-gate
+  algorithm **deleted outright** and replaced by the comparator, gated on
+  `librarian.comparator_enabled`.
+- The C1-C4 pipeline's own intra-cluster contradiction detector — the
+  **Haiku-detect / Opus-resolve split diagrammed below**, driven by
+  `contradictions.py:detect_contradictions` and
+  `resolutions.py:propose_resolution` over raw auto-memory clusters — was
+  **retired from `athenaeum.merge`'s `merge_clusters_to_wiki` (C3) by issue
+  athenaeum#1256** (merged via PR athenaeum#1974, 2026-10-05). `merge.py` no
+  longer calls `detect_contradictions` anywhere; `MergedWikiEntry`'s
+  `contradictions_detected` / `contradiction` fields are retained for wire
+  compatibility but are now always `False` / `None` out of the merge pass.
+  The diagram's "Haiku detect (per-cluster, fast)" and "Opus resolve
+  (per-detected, capped)" steps therefore **no longer run as part of an
+  ordinary `athenaeum run` / `athenaeum ingest`** — `detect_contradictions`
+  and `resolutions.propose_resolution`'s auto-memory-cluster invocation
+  survive only as the `athenaeum measure shadow-parity` measurement path
+  (`src/athenaeum/shadow_parity.py`, one call site), kept deliberately as a
+  declared reversible default by athenaeum#1974 rather than deleted outright.
+  The functions and the `_pending_questions.md` escalation surface
+  (`tier4_escalate`) are NOT dead code — `tier4_escalate` is still fed live
+  by Tier 0/Tier 3 conflicts (`batch.py`, `librarian.py`) and by the
+  comparator's own `underdetermined`/queued-`contradiction` routing
+  (`verdict_effects.py`) — only the raw-cluster contradiction *detector*
+  feeding this specific diagram stopped running automatically.
+
+**The raw-cluster-domain replacement is itself dark, by a tracked,
+operator-accepted gap — not a reintroduced parallel old path.** The bridge
+from the comparator to the raw-cluster domain (`athenaeum.cluster_comparator`,
+issue athenaeum#1255) is gated on the SAME `librarian.comparator_enabled`
+switch, but as of this writing has **no live caller in the production
+pipeline** — only `shadow_parity.py` (measurement) and tests invoke
+`run_cluster_comparator`. Wiring it into the nightly run is tracked
+separately as athenaeum#1946 (raw cluster members carry no `subject`
+coordinate yet, so every pair would hold rather than decide), explicitly
+ruled by the operator as **not** a blocker of athenaeum#1256's retirement.
+Until it lands, `athenaeum.retire`'s move-eligibility check
+(`_move_eligibility`) holds every multi-member cluster conservatively,
+loudly naming the missing ledger row, rather than silently reusing the
+retired `contradiction` field — a known, documented state, not a silent
+regression.
+
+The other live reader of the new (page-level) path besides
+`athenaeum.wiki_dedupe` above is the explicit, opt-in
 `athenaeum merges recompare` command, which re-runs the comparator over the
 existing pending merge proposals and records a verdict per source pair —
 dry-run by default, and with no path to approving a merge at all.
@@ -91,6 +124,13 @@ dry-run by default, and with no path to approving a merge at all.
 ---
 
 ## 1. Pipeline overview
+
+> **The detect/resolve stages below no longer run automatically.** As of
+> athenaeum#1256 (2026-10-05), the "Haiku detect" / "Opus resolve" steps in
+> this diagram execute only under `athenaeum measure shadow-parity`, never
+> during an ordinary `athenaeum run` — see "Status" above. The surrounding
+> stages (cluster, escalate, surface, record, apply) are unaffected and
+> still describe live behaviour.
 
 ```
 raw/auto-memory/<scope>/
