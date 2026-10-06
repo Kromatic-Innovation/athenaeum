@@ -88,7 +88,7 @@ from athenaeum.models import (
     validity_bound_str,
 )
 from athenaeum.pii import is_pii_flagged
-from athenaeum.storage import is_embedded
+from athenaeum.storage import page_embedding_disabled, page_is_embedded
 from athenaeum.store import FilesystemStore, ObjectMeta, Store, StoreKey
 
 # ---------------------------------------------------------------------------
@@ -901,11 +901,20 @@ def _scan_indexed_records(
         # config every class maps to the all-true wiki surface, so
         # ``is_embedded`` is ``True`` for every page and nothing is dropped.
         # ``config is None`` (callers that don't thread config, e.g. shell-hook
-        # convenience builds) also short-circuits to today's behavior.
+        # convenience builds) also short-circuits the CLASS-level check to
+        # today's behavior.
         if config is not None:
             page_type = str(meta.get("type") or "")
-            if not is_embedded(page_type, config):
+            if not page_is_embedded(meta, page_type, config):
                 return None
+        elif page_embedding_disabled(meta):
+            # Issue athenaeum#716: the PAGE-level ``embedded: false`` override (a
+            # wiki-dedup fold tombstone, or athenaeum#718's cold-tier demotion) is
+            # honored even when no ``storage:`` config was threaded at all —
+            # unlike the class-level policy above, it needs no config to
+            # resolve, so a shell-hook convenience build still drops a page
+            # that has declared itself excluded from every index.
+            return None
         vu = validity_bound_str(meta, "valid_until")
         return indexed_name, _local_path_for(key), content_hash, text, meta, (meta_obj.version, vu)
 
@@ -2976,6 +2985,16 @@ class KeywordBackend:
             # excluded from keyword recall too, even though this backend scans
             # on query rather than a pre-built index.
             if is_pii_flagged(fm):
+                continue
+            # Issue athenaeum#716: a page-level ``embedded: false`` override (a
+            # wiki-dedup fold tombstone, or athenaeum#718's cold-tier demotion)
+            # is excluded from this backend's scan-on-query results too, even
+            # though ``build_index`` treats ``embedded`` as inert here (see its
+            # docstring) — the override means "excluded from every index",
+            # not merely "not embedded into vectors", so the scan-on-query
+            # keyword backend must honor it exactly like FTS5/vector do at
+            # their own index build.
+            if page_embedding_disabled(fm):
                 continue
             # Issue athenaeum#312 — Layer B (keyword): authorize BEFORE scoring so a
             # forbidden page never enters ``scored`` and cannot occupy a top-n

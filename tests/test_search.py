@@ -956,6 +956,73 @@ class TestKeywordBackend:
         assert isinstance(KeywordBackend(), SearchBackend)
 
 
+# ---------------------------------------------------------------------------
+# Tombstone / per-page ``embedded: false`` override (issue athenaeum#716) —
+# "excluded from every index" tested separately per backend, per the lane
+# brief: a test that only proves the renderer hides a tombstone does not
+# discharge this criterion, so every test below drives a BACKEND directly
+# (build + query / scan), never a render-layer helper.
+# ---------------------------------------------------------------------------
+
+
+def _write_tombstone(wiki: Path, fname: str, *, name: str, folded_into: str) -> None:
+    """A page already in tombstone shape (issue athenaeum#716): ``status: folded``,
+    ``folded_into``, and the ``embedded: false`` override every backend below
+    must honor at index build / scan-on-query time."""
+    (wiki / fname).write_text(
+        "---\n"
+        f"name: {name}\n"
+        "status: folded\n"
+        f"folded_into: {folded_into}\n"
+        "embedded: false\n"
+        "---\n\n"
+        f"This content now lives on {folded_into}.\n"
+    )
+
+
+class TestTombstoneExcludedFromEveryIndex:
+    """Each backend gets its OWN test — see module comment above."""
+
+    def test_fts5_build_excludes_tombstone(
+        self, wiki_with_pages: Path, tmp_path: Path
+    ) -> None:
+        _write_tombstone(
+            wiki_with_pages, "folded-source.md", name="Folded Source", folded_into="acme-corp"
+        )
+        cache = tmp_path / "cache"
+        count = FTS5Backend().build_index(wiki_with_pages, cache)
+        assert count == 3  # the 3 wiki_with_pages fixtures; tombstone excluded
+        results = query_fts5_index("folded-source", cache)
+        assert not results
+        results = query_fts5_index("This content now lives on", cache)
+        assert not results
+
+    def test_vector_build_excludes_tombstone(
+        self, wiki_with_pages: Path, tmp_path: Path
+    ) -> None:
+        pytest.importorskip("chromadb")
+        _write_tombstone(
+            wiki_with_pages, "folded-source.md", name="Folded Source", folded_into="acme-corp"
+        )
+        cache = tmp_path / "cache"
+        count = VectorBackend().build_index(wiki_with_pages, cache)
+        assert count == 3
+        results = VectorBackend().query("folded source content lives", cache, n=5)
+        assert "folded-source.md" not in [r[0] for r in results]
+
+    def test_keyword_query_excludes_tombstone(
+        self, wiki_with_pages: Path, tmp_path: Path
+    ) -> None:
+        _write_tombstone(
+            wiki_with_pages, "folded-source.md", name="Folded Source", folded_into="acme-corp"
+        )
+        cache = tmp_path / "cache"
+        results = KeywordBackend().query(
+            "folded source content lives", cache, wiki_root=wiki_with_pages
+        )
+        assert "folded-source.md" not in [r[0] for r in results]
+
+
 class TestKeywordCheapLocalScan:
     """Issue athenaeum#981 (S6): ``KeywordBackend`` gates its scan-on-query walk
     on the ``cheap_local_scan`` capability (design note §7 honest-refusal
@@ -1665,6 +1732,31 @@ class TestFTS5Incremental:
         results = FTS5Backend().query("acme fintech", cache)
         assert "acme-corp.md" not in [r[0] for r in results]
 
+    def test_flip_to_tombstone_is_a_delete(
+        self, seeded: tuple[Path, Path], delta_spy: dict
+    ) -> None:
+        """A page folded (issue athenaeum#716) mid-corpus — ``embedded: false``
+        appended on reindex — is purged from the FTS5 index exactly like the
+        ``deprecated: true`` flip above, proving "excluded from every index"
+        for a page that was ALREADY indexed, not just a fresh build."""
+        wiki, cache = seeded
+        (wiki / "acme-corp.md").write_text(
+            "---\n"
+            "name: Acme Corp\n"
+            "tags: [client, fintech]\n"
+            "description: Enterprise client in financial services\n"
+            "status: folded\n"
+            "folded_into: some-other-page\n"
+            "embedded: false\n"
+            "---\n\n"
+            "Acme Corp is a fintech company.\n"
+        )
+        count = FTS5Backend().build_index(wiki, cache)
+        assert delta_spy["removed"] == ["acme-corp.md"]
+        assert count == 2
+        results = FTS5Backend().query("acme fintech", cache)
+        assert "acme-corp.md" not in [r[0] for r in results]
+
     def test_full_flag_rebuilds_from_scratch(self, seeded: tuple[Path, Path]) -> None:
         """``incremental=False`` wipes and rebuilds (seed / reindex --full)."""
         wiki, cache = seeded
@@ -1795,6 +1887,46 @@ class TestVectorIncremental:
         count = VectorBackend().build_index(wiki, cache)
         assert delta_spy["removed"] == ["acme-corp.md"]
         assert count == 2
+
+    def test_flip_to_tombstone_is_a_delete_and_never_reembeds(
+        self,
+        seeded: tuple[Path, Path],
+        delta_spy: dict,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A page folded (issue athenaeum#716) mid-corpus — ``embedded: false``
+        appended on reindex — proves BOTH halves of "never re-embedded": the
+        reindex pass never calls the embed/add path for it (the spy below),
+        AND its prior vector is purged (``removed`` + absent from query),
+        exactly like ``test_flip_inactive_is_a_delete`` above proves for a
+        ``deprecated`` flip."""
+        wiki, cache = seeded
+        added_records = {"n": 0}
+        orig_add = VectorBackend._add_records
+
+        def counting_add(self, collection, records):  # type: ignore[no-untyped-def]
+            added_records["n"] += len(records)
+            return orig_add(self, collection, records)
+
+        monkeypatch.setattr(VectorBackend, "_add_records", counting_add)
+
+        (wiki / "acme-corp.md").write_text(
+            "---\n"
+            "name: Acme Corp\n"
+            "tags: [client, fintech]\n"
+            "description: Enterprise client in financial services\n"
+            "status: folded\n"
+            "folded_into: some-other-page\n"
+            "embedded: false\n"
+            "---\n\n"
+            "Acme Corp is a fintech company.\n"
+        )
+        count = VectorBackend().build_index(wiki, cache)
+        assert delta_spy["removed"] == ["acme-corp.md"]
+        assert count == 2
+        assert added_records["n"] == 0  # never re-embedded
+        results = VectorBackend().query("fintech financial services", cache, n=5)
+        assert "acme-corp.md" not in [r[0] for r in results]
 
     def test_full_flag_rebuilds_from_scratch(self, seeded: tuple[Path, Path]) -> None:
         wiki, cache = seeded
