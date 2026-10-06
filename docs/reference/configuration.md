@@ -878,6 +878,35 @@ default: **sensitivity classification is deployment configuration**,
 never shipped in this repo (docs/design/field-corrections.md §7.1,
 out-of-scope list).
 
+### `resolve_decisions_max_item_context_tokens`
+
+- **YAML path:** `librarian.decisions_max_item_context_tokens`
+- **Environment variable:** `ATHENAEUM_DECISIONS_MAX_ITEM_CONTEXT_TOKENS`
+- **CLI flag:** —
+- **Default:** `1500`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the unified decision queue's PER-ITEM context cap.
+
+Human decision load is bounded in EFFORT, not count: an items/day budget
+alone is gameable, because batching lets a system size its own items. So
+the queue caps the context a single item may carry — about one screen —
+and `athenaeum.decision_framing.frame_decision` enforces it as the
+queue's single admission gate rather than aspirationally. An item over
+cap is decomposed; one still over cap after decomposition is admitted as
+a scheduled review, never as an oversized item a human is expected to
+answer in a sitting.
+
+The default is the ~1,500-token one-screen figure the memory-model design
+lock states. Raising it is an operator decision with a measurable cost:
+it directly raises the p95 decision time the queue's own budget
+instrumentation reports.
+
+Precedence: ``ATHENAEUM_DECISIONS_MAX_ITEM_CONTEXT_TOKENS`` env > yaml
+``librarian.decisions_max_item_context_tokens`` > ``1500``. See
+`_resolve_positive_int_knob` for the coercion contract (``bool`` /
+non-int / ``<= 0`` values fall through to the default).
+
 ### `resolve_decisions_max_sources_per_merge`
 
 - **YAML path:** `librarian.decisions_max_sources_per_merge`

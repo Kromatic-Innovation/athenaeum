@@ -65,6 +65,7 @@ from pathlib import Path
 
 from athenaeum.answers import PendingQuestion, parse_pending_questions
 from athenaeum.calibration import list_pending_audit
+from athenaeum.decision_framing import frame_decision
 from athenaeum.models import parse_frontmatter
 from athenaeum.pagination import paginate
 from athenaeum.pending_merges import PendingMerge, parse_pending_merges
@@ -100,6 +101,14 @@ _GIST_LIMIT = 160
 # import cycle risk; the two are covered by
 # ``tests/test_bound_merge_read_path.py``'s config-parity check).
 _DECISIONS_MAX_SOURCES_DEFAULT = 20
+
+# Fallback per-item context cap (issue athenaeum#717) used when a caller does not
+# resolve its own value from config. Mirrors the code default in
+# :func:`athenaeum.config.resolve_decisions_max_item_context_tokens` (kept as a
+# plain literal here for the same reason as the cap above — no
+# decisions->config->decisions import risk; the two are covered by the
+# config-parity check in ``tests/test_decision_framing.py``).
+_DECISIONS_MAX_ITEM_CONTEXT_TOKENS_DEFAULT = 1500
 
 
 def _one_line(text: str, *, limit: int = _GIST_LIMIT) -> str:
@@ -540,6 +549,7 @@ def list_pending_decisions(
     *,
     with_proposal: bool = False,
     max_sources_per_merge: int = _DECISIONS_MAX_SOURCES_DEFAULT,
+    max_item_context_tokens: int = _DECISIONS_MAX_ITEM_CONTEXT_TOKENS_DEFAULT,
     caller_audience: set[str] | None = None,
     offset: int = 0,
     limit: int | None = None,
@@ -621,6 +631,14 @@ def list_pending_decisions(
         decisions += [
             proposed_rule_to_decision(rec) for rec in list_pending_rule_proposals(wiki_root)
         ]
+    # Issue athenaeum#717: framing is applied to the WHOLE union, at the one
+    # point every item passes through, so no item can enter the queue unframed
+    # or carrying an over-cap context bundle. Because this is downstream of
+    # every per-type builder, it is also the correct seam for the cap to be
+    # checked AFTER any future batching rather than before it.
+    decisions = [
+        frame_decision(d, max_context_tokens=max_item_context_tokens) for d in decisions
+    ]
     decisions.sort(key=lambda d: d["created_at"] or "")
 
     return paginate(decisions, offset=offset, limit=limit)["items"]
@@ -631,6 +649,7 @@ def list_pending_decisions_page(
     *,
     with_proposal: bool = False,
     max_sources_per_merge: int = _DECISIONS_MAX_SOURCES_DEFAULT,
+    max_item_context_tokens: int = _DECISIONS_MAX_ITEM_CONTEXT_TOKENS_DEFAULT,
     caller_audience: set[str] | None = None,
     offset: int = 0,
     limit: int | None = None,
@@ -665,6 +684,7 @@ def list_pending_decisions_page(
         wiki_root,
         with_proposal=with_proposal,
         max_sources_per_merge=max_sources_per_merge,
+        max_item_context_tokens=max_item_context_tokens,
         caller_audience=caller_audience,
     )
     return paginate(all_decisions, offset=offset, limit=limit)

@@ -9,6 +9,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Framed, effort-capped items in the unified decision queue
+  (issue athenaeum#717).** Every item the unified queue emits now carries the
+  framing a human needs to answer it: the plain-language question (the
+  existing `summary`), a structured `context_bundle`, a `proposed_default`
+  with its `consequences`, a `reversibility` class, a machine-readable
+  `response_schema`, an `escalation_rationale` naming what specifically could
+  not be determined without a human, and a `routing` tag separating items
+  that reach a human for **authority** (the queue working as designed) from
+  those that reach one for **competence** (a gap). Every no-answer default is
+  the conservative one, so an unanswered item can never enact a change by
+  timing out; an unregistered decision type fails closed as
+  irreversible/owner-only rather than being auto-classified as cheap.
+- **A per-item context cap, enforced in code rather than aspirationally
+  (issue athenaeum#717).** Human decision load is bounded in EFFORT, not
+  count — an items/day budget alone is gameable, because batching lets a
+  system size its own items. `decisions.max_item_context_tokens`
+  (`librarian.decisions_max_item_context_tokens`,
+  `ATHENAEUM_DECISIONS_MAX_ITEM_CONTEXT_TOKENS`, default `1500` — about one
+  screen) bounds the context a single item may carry.
+  `decision_framing.frame_decision` is the queue's single admission gate and
+  applies a two-step remedy: **decompose** (drop bulk deterministically,
+  cheapest sufficient drop first, recording what was dropped) and, if the
+  irreducible pointer bundle is still over cap, **escalate as a scheduled
+  review** rather than present work that is demonstrably not a one-screen
+  decision as though it were. No item can enter the queue carrying an
+  over-cap bundle. Being the single gate is also what makes the cap checked
+  AFTER any future batching rather than before it.
+- **`athenaeum decisions answer` — a schema-validated answer interface
+  (issue athenaeum#717).** The queue is an interface, so a human can answer
+  directly or hand the same interface to an agent acting on their behalf.
+  The answer arrives as a JSON object and is validated against the item's
+  published `response_schema`; a schema-invalid answer is refused before
+  anything is written, so nothing half-lands. The inbound file path
+  (`apply_decision_answers`) validates too, with the division of labour made
+  explicit so one condition never acquires two error codes: the schema owns
+  the answer's SHAPE (unknown keys, wrong types, a missing verdict) and each
+  per-type resolver keeps owning its verdict's VALUE, still reporting
+  `invalid_decision`. The outbound view tags seven item types while the
+  inbound applier registers four, so the command translates
+  (`confirmation` answers route to the question path — that is literally how a
+  confirmation is stored and resolved) and refuses `retraction` /
+  `quarantine` cleanly with `type_not_answerable` and a nonzero exit, rather
+  than guessing an applier for a type that has none.
+
 - **Tombstone fold, unfold, and auto-apply for reversible verdicts
   (issue athenaeum#716).** A merge may destroy renderings, never observations:
   folding a duplicate page into its canonical no longer deletes the source.
