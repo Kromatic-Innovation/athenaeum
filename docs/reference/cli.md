@@ -30,7 +30,8 @@ Every subcommand is registered top-level on one `parser.add_subparsers()` in `cl
 - [`athenaeum compile`](#athenaeum-compile) (command) — : recompile a historical wiki snapshot as-of a past date into a scratch --out dir (compile-as-of). Distinct from the read-time `recall/reindex --as-of` filter — this re-runs the C3 blend so members expired now but valid then are re-included. Deterministic (no LLM); never mutates the live wiki or raw tree.
 - [`athenaeum context`](#athenaeum-context) (command) — Build one sidecar context envelope (ranked candidates + rendered text) for a prompt — the agent-neutral core,
 - [`athenaeum decay-sweep`](#athenaeum-decay-sweep) (command) — Archive expired bucket:daily wiki pages. Default is dry-run (prints kill-list + retained-list); --apply git-archives the kill-list in a two-commit pair and rebuilds the recall index.
-- [`athenaeum decisions`](#athenaeum-decisions) (group) — One unified 'human decisions needed' list — pending questions AND merges, each tagged by type. Three modes: list, next, count.
+- [`athenaeum decisions`](#athenaeum-decisions) (group) — One unified 'human decisions needed' list — pending questions AND merges, each tagged by type, every item framed with its reversibility class, proposed default and response schema. Modes: list, next, count, scan-retractions, raise-confirmation, answer.
+- [`athenaeum decisions answer`](#athenaeum-decisions-answer) (command) — Answer one queue item with a JSON object, validated against that item's published response_schema. Refuses a schema-invalid answer without writing anything.
 - [`athenaeum decisions count`](#athenaeum-decisions-count) (command) — Print `N decisions pending (Q questions, M merges; oldest Xd)`.
 - [`athenaeum decisions list`](#athenaeum-decisions-list) (command) — List all pending decisions, oldest first.
 - [`athenaeum decisions next`](#athenaeum-decisions-next) (command) — Show the oldest pending decision (single block).
@@ -358,15 +359,28 @@ Archive expired bucket:daily wiki pages. Default is dry-run (prints kill-list + 
 
 ## `athenaeum decisions`
 
-One unified 'human decisions needed' list — pending questions AND merges, each tagged by type. Three modes: list, next, count.
+One unified 'human decisions needed' list — pending questions AND merges, each tagged by type, every item framed with its reversibility class, proposed default and response schema. Modes: list, next, count, scan-retractions, raise-confirmation, answer.
 
 Subcommands:
 
+- `athenaeum decisions answer` — Answer one queue item with a JSON object, validated against that item's published response_schema. Refuses a schema-invalid answer without writing anything.
 - `athenaeum decisions count` — Print `N decisions pending (Q questions, M merges; oldest Xd)`.
 - `athenaeum decisions list` — List all pending decisions, oldest first.
 - `athenaeum decisions next` — Show the oldest pending decision (single block).
 - `athenaeum decisions raise-confirmation` — File a NEW agent-raised 'implemented X without Y, confirm?' item into the pending-decisions queue — the CLI counterpart of the MCP raise_decision tool's kind="confirmation" path.
 - `athenaeum decisions scan-retractions` — Flag any completed merge that relied on a now-retracted source for human review. Idempotent; never unmerges.
+
+## `athenaeum decisions answer`
+
+Answer one queue item with a JSON object, validated against that item's published response_schema. Refuses a schema-invalid answer without writing anything.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--answer` | — | — | The answer as a JSON object, e.g. '{"verdict": "approve"}'. Must satisfy the item's response_schema. |
+| `--id` | — | — | The decision id being answered. |
+| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+| `--type` | — | — | The item's decision type, as reported by `athenaeum decisions list` — it selects the response schema the answer is checked against. |
 
 ## `athenaeum decisions count`
 
