@@ -3134,6 +3134,25 @@ class ProcessingResult:
     #: path that never reaches Tier 1 (e.g. the Tier-0 do-not-email/handle
     #: short-circuits), which is correct — those paths dispatch no matches.
     matched: int = 0
+    #: Count of merges this file bound onto an existing page via its own
+    #: top-level ``uid:`` frontmatter, bypassing name resolution entirely
+    #: (issue athenaeum#1982). Set by ``athenaeum.librarian.process_one``'s
+    #: uid-bind step, BEFORE Tier 1/2 ever run, whenever the declared uid
+    #: resolves to an existing page. Surfaced as ``uid_bound=N`` in the run
+    #: summary, beside ``created``/``updated``/``escalated``.
+    uid_bound: int = 0
+    #: Count of files this file's uid-bind step declined to bind because the
+    #: declared ``uid:`` matched no existing page (issue athenaeum#1982 AC2)
+    #: — the file fell back to today's name resolution instead. Surfaced as
+    #: ``uid_bind_unresolved=N`` in the run summary (only when non-zero,
+    #: mirroring the ``degraded``/``truncated`` convention).
+    uid_bind_unresolved: int = 0
+    #: Count of uid-bound merges (above) whose bound page's own ``name:``
+    #: differed from the raw file's declared ``name:`` (issue athenaeum#1982
+    #: AC3) — the merge still bound by uid; this is a counter only, never a
+    #: refusal. Surfaced as ``uid_bind_mismatch=N`` in the run summary (only
+    #: when non-zero, same convention as ``uid_bind_unresolved``).
+    uid_bind_mismatch: int = 0
     #: Count of Tier-3 merges suppressed by the page-size invariant (issue
     #: athenaeum#1182): a page over ``librarian.page_size_threshold_chars``
     #: routes to escalation (``EscalationItem.conflict_type=
