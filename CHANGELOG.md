@@ -34,6 +34,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`cli_tool_bridge.py` now targets the `mcp` 2.x API, and the `mcp<2.0` pin
+  is lifted (issue athenaeum#1954).** The bridge child registered its
+  `tools/list` / `tools/call` handlers with the pre-2.0 SDK's
+  `@server.list_tools()` / `@server.call_tool()` decorators, which `mcp` 2.x
+  removed from `mcp.server.lowlevel.Server` entirely. It now passes the 2.x
+  `on_list_tools` / `on_call_tool` constructor callbacks instead, which take
+  `(ServerRequestContext, params)` and return a full `types.ListToolsResult` /
+  `types.CallToolResult` rather than a bare list. The MCP wire protocol is
+  unchanged, so `claude -p` sees exactly what it saw before, and the
+  never-raise contract is unchanged (a bridge error is still an ordinary text
+  `tool_result`, `is_error` left False).
+
+  athenaeum#1953's stopgap pins are lifted with it: `fastmcp` goes back to
+  `>=2.0.0,<5.0` and `mcp` is now declared `>=2.0,<3.0` — a FLOOR rather than
+  that issue's `<2.0` ceiling, because the 2.x registration surface does not
+  exist on `mcp` 1.x, so an install that drifted *back* (via `fastmcp` 3.x,
+  which declares `mcp<2.0`) would break the bridge in the other direction.
+  `requirements-ci.lock` moves with them: `mcp` 1.29.0 -> 2.3.0 (plus its new
+  `mcp-types` split-out), `fastmcp`/`fastmcp-slim` 3.4.5 -> 4.0.11, and
+  `uncalled-for` 0.3.2 -> 0.4.0, which `fastmcp-slim` 4.x requires at `>=0.4.0`
+  — four packages, which is the whole forced closure of the bump.
+  `tests/test_cli_tool_bridge_mcp_api_guard.py` is inverted to assert the 2.x
+  surface (and the *absence* of the retired decorators) instead of retired,
+  since the drift risk simply reversed direction.
+  `tests/test_cli_tool_bridge_roundtrip.py` passes unchanged against
+  `mcp==2.3.0` — its real stdio `mcp.client` / `ClientSession` driver needed no
+  edits, the 2.x client API being source-compatible for what it uses.
+
 - **`search_backend` (hybrid vector + FTS5) is now the shipped default
   everywhere the code defaulted to `fts5` (issue athenaeum#1825, operator
   ruling on issue athenaeum#1736, 2026-09-18).** `athenaeum.config._DEFAULTS`

@@ -22,9 +22,20 @@ Two halves, run in two different processes:
 - **Child** (:func:`main`, run as ``python -m athenaeum.cli_tool_bridge``):
   a real ``mcp.server.lowlevel.Server`` speaking MCP over stdio to the
   ``claude -p`` subprocess that spawned it (per its generated
-  ``--mcp-config``). ``list_tools`` serves the tool specs verbatim;
-  ``call_tool`` opens a fresh connection to the Host's socket for every
+  ``--mcp-config``). ``tools/list`` serves the tool specs verbatim;
+  ``tools/call`` opens a fresh connection to the Host's socket for every
   call and relays the result back as a single text content block.
+
+  Handlers are registered through the ``mcp`` 2.x ``on_list_tools`` /
+  ``on_call_tool`` **constructor callbacks** (athenaeum#1954). The pre-2.0
+  SDK registered them as ``@server.list_tools()`` / ``@server.call_tool()``
+  decorators; ``mcp`` 2.x removed those methods from ``Server`` entirely, so
+  that spelling raises ``AttributeError`` at bridge start-up rather than
+  failing a protocol round trip. The 2.x callbacks also differ in shape: each
+  receives ``(ServerRequestContext, params)`` and returns a full
+  ``types.ListToolsResult`` / ``types.CallToolResult`` rather than a bare
+  list. Neither difference is observable to ``claude -p`` -- the wire
+  protocol is the same.
 
 Neither half ever raises out of a tool call: a socket failure on the child
 side becomes an ``error: tool bridge unavailable: <ExcClass>`` text result
@@ -190,28 +201,41 @@ def main(argv: list[str] | None = None) -> int:
 
     import mcp.server.stdio
     import mcp.types as types
+    from mcp.server.context import ServerRequestContext
     from mcp.server.lowlevel import Server
 
-    server: Server = Server(args.server_name)
+    async def handle_list_tools(
+        _ctx: ServerRequestContext[None],
+        _params: types.PaginatedRequestParams | None,
+    ) -> types.ListToolsResult:
+        return types.ListToolsResult(
+            tools=[
+                types.Tool(
+                    name=str(spec["served_name"]),
+                    description=str(spec.get("description", "")),
+                    input_schema=dict(spec.get("input_schema") or {}),
+                )
+                for spec in specs
+            ]
+        )
 
-    @server.list_tools()
-    async def handle_list_tools() -> list[types.Tool]:
-        return [
-            types.Tool(
-                name=str(spec["served_name"]),
-                description=str(spec.get("description", "")),
-                inputSchema=dict(spec.get("input_schema") or {}),
-            )
-            for spec in specs
-        ]
-
-    @server.call_tool()
     async def handle_call_tool(
-        name: str, arguments: dict[str, Any] | None
-    ) -> list[types.TextContent]:
-        spec_name = spec_name_by_served.get(name, name)
-        text = _call_bridge(args.socket, spec_name, arguments or {})
-        return [types.TextContent(type="text", text=text)]
+        _ctx: ServerRequestContext[None],
+        params: types.CallToolRequestParams,
+    ) -> types.CallToolResult:
+        spec_name = spec_name_by_served.get(params.name, params.name)
+        text = _call_bridge(args.socket, spec_name, params.arguments or {})
+        # is_error stays False even for the bridge's own error strings: the
+        # never-raise contract (see the module docstring) is that the model
+        # sees an ordinary tool_result carrying the error TEXT, identically
+        # to the api-mode path in tests.evals.rollout.run_api_tool_loop.
+        return types.CallToolResult(content=[types.TextContent(type="text", text=text)])
+
+    server: Server[None] = Server(
+        args.server_name,
+        on_list_tools=handle_list_tools,
+        on_call_tool=handle_call_tool,
+    )
 
     async def _run() -> None:
         async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
