@@ -29,6 +29,7 @@ Every subcommand is registered top-level on one `parser.add_subparsers()` in `cl
 - [`athenaeum claims`](#athenaeum-claims) (command) — Detect claims restated across distinct wiki entities (read-only). Default --find prints a YAML report.
 - [`athenaeum compile`](#athenaeum-compile) (command) — : recompile a historical wiki snapshot as-of a past date into a scratch --out dir (compile-as-of). Distinct from the read-time `recall/reindex --as-of` filter — this re-runs the C3 blend so members expired now but valid then are re-included. Deterministic (no LLM); never mutates the live wiki or raw tree.
 - [`athenaeum context`](#athenaeum-context) (command) — Build one sidecar context envelope (ranked candidates + rendered text) for a prompt — the agent-neutral core,
+- [`athenaeum correct-notes`](#athenaeum-correct-notes) (command) — Move or drop individual Notes lines on a person/company page, e.g. lines misfiled onto a first-name match-magnet page. Default is APPLY: every bullet id and move target in --batch is resolved against one snapshot of the page, and the whole batch is written only when every record resolves. --dry-run reports counts only and changes nothing. Makes no LLM call.
 - [`athenaeum decay-sweep`](#athenaeum-decay-sweep) (command) — Archive expired bucket:daily wiki pages. Default is dry-run (prints kill-list + retained-list); --apply git-archives the kill-list in a two-commit pair and rebuilds the recall index.
 - [`athenaeum decisions`](#athenaeum-decisions) (group) — One unified 'human decisions needed' list — pending questions AND merges, each tagged by type, every item framed with its reversibility class, proposed default and response schema. Modes: list, next, count, scan-retractions, raise-confirmation, answer.
 - [`athenaeum decisions answer`](#athenaeum-decisions-answer) (command) — Answer one queue item with a JSON object, validated against that item's published response_schema. Refuses a schema-invalid answer without writing anything.
@@ -342,6 +343,22 @@ Build one sidecar context envelope (ranked candidates + rendered text) for a pro
 | `--no-llm` | `False` | — | Skip LLM term extraction, use the regex fallback |
 | `--session-id` | — | — | Session id, for dedup bookkeeping by the caller |
 | `--stdin-json` | `False` | — | Read {"prompt":..., "session_id":...} from stdin (hook-input shape) |
+
+## `athenaeum correct-notes`
+
+Move or drop individual Notes lines on a person/company page, e.g. lines misfiled onto a first-name match-magnet page. Default is APPLY: every bullet id and move target in --batch is resolved against one snapshot of the page, and the whole batch is written only when every record resolves. --dry-run reports counts only and changes nothing. Makes no LLM call.
+
+**Positional arguments:**
+
+- `uid` — uid of the page the batch's Notes lines are corrected on. Must match the batch file's own source_uid.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--batch` | — | — | Host-path JSON batch file: {source_uid, batch_id, created_at, records: [{bullet_id, action: 'move'\|'drop', target_uid?, note?}]}. Never read from raw/ -- see the module docstring for why that boundary matters here. A batch_id already present in the ledger makes the whole batch a no-op. |
+| `--dry-run` | `False` | — | Report counts only (records by action, refusals, body characters and file bytes against their respective thresholds) and write nothing. Without this flag the command applies. |
+| `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+| `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 
 ## `athenaeum decay-sweep`
 

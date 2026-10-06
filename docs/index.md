@@ -93,6 +93,8 @@ does not answer.
 - [Provenance shape](design/provenance-shape.md)
 - [One way in, one way out](design/one-way-in-one-way-out.md) — the two-path invariant.
 - [Field corrections](design/field-corrections.md)
+- [Note corrections](design/note-corrections.md) — why a CLI pass, not a fast-path record
+  or a `decompose-page` extension.
 - [Shape rules](design/shape-rules.md)
 - [Routing](design/routing.md)
 - [Conflict resolution](design/conflict-resolution.md)
