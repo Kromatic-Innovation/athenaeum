@@ -387,14 +387,16 @@ def cmd_recall(args: argparse.Namespace) -> int:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
+    from athenaeum.search import normalize_type_filter
+
+    normalized_types = normalize_type_filter(type_filter)
+
     # Issue athenaeum#964: same "never a silent no-results" rule as the MCP `recall`
     # tool — an unrecognized `--type` value prints the deployment's actual
     # entity classes rather than leaving an empty hit list unexplained.
     if type_filter:
         from athenaeum.entity_schema import resolve_entity_classes_cached
-        from athenaeum.search import normalize_type_filter
 
-        normalized_types = normalize_type_filter(type_filter) or ()
         # Issue athenaeum#1194: memoized. A one-shot CLI resolves once either
         # way; this keeps the CLI and the MCP server on the SAME entry point.
         known_names = {
@@ -403,7 +405,7 @@ def cmd_recall(args: argparse.Namespace) -> int:
                 wiki_root, caller_audience=caller_audience
             )
         }
-        unrecognized = [t for t in normalized_types if t not in known_names]
+        unrecognized = [t for t in (normalized_types or ()) if t not in known_names]
         if unrecognized:
             classes_str = ", ".join(sorted(known_names)) if known_names else "(none)"
             print(
@@ -413,6 +415,28 @@ def cmd_recall(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
 
+    # Issue athenaeum#1967 (AC3) -- the operator ruling: an `access: personal`
+    # page must be reachable BY NAME in default recall even when ranking
+    # buried it past `--top-k` (AC1 traced the omission to the ranking
+    # layer, not to any filter; see `find_personal_page_by_exact_name`'s
+    # docstring). Scoped to the owner/default caller ONLY -- a restricted
+    # caller's reachability for an `access: personal` page is unchanged.
+    if caller_audience is None:
+        from athenaeum.search import find_personal_page_by_exact_name
+
+        personal_rescue = find_personal_page_by_exact_name(
+            args.query, query_cache, wiki_root
+        )
+        if personal_rescue is not None:
+            rescue_filename, rescue_name, rescue_type = personal_rescue
+            already_present = any(h[0] == rescue_filename for h in hits)
+            type_ok = normalized_types is None or (
+                rescue_type is not None and rescue_type in normalized_types
+            )
+            if not already_present and type_ok:
+                rescue_score = hits[0][2] if hits else 0.0
+                hits = [(rescue_filename, rescue_name, rescue_score), *hits]
+
     from athenaeum.mcp_server import _resolve_hit_path
 
     # Issues athenaeum#885/#886: ONE index per surface class for the whole
@@ -420,6 +444,11 @@ def cmd_recall(args: argparse.Namespace) -> int:
     # lazily, so a class no hit resolves to costs nothing and a run without
     # --with-pii never touches this at all.
     excluded_indexes: dict[str, ExcludedRecordIndex] = {}
+    # Issue athenaeum#1967 (AC2): tally of Layer-C audience drops below, for
+    # the access-withheld note printed at the end of this command. Derived
+    # from the ACTUAL per-hit drop (never a second guess at the filter) and
+    # stays 0 for the owner, who never reaches that branch.
+    withheld_access_count = 0
     for filename, _name, score in hits:
         page_path, _display = _resolve_hit_path(filename, wiki_root, extra_roots)
         preview = ""
@@ -437,6 +466,7 @@ def cmd_recall(args: argparse.Namespace) -> int:
         if caller_audience is not None and (
             not readable or not is_page_authorized(fm, caller_audience)
         ):
+            withheld_access_count += 1
             continue
         # Issue athenaeum#308: temporal backstop — drop any hit outside its validity
         # window relative to ``as_of`` (default today), so the CLI output stays
@@ -469,6 +499,17 @@ def cmd_recall(args: argparse.Namespace) -> int:
                 usage_classes=getattr(args, "usage_class", None) or None,
             )
         print(f"{score:.2f}\t{filename}\t{preview}{excluded_suffix}")
+
+    # Issue athenaeum#1967 (AC2): the access-withheld breadcrumb, printed to
+    # stderr (like the --type unrecognized-value note above) so it never
+    # contaminates the tab-separated stdout contract a shell caller parses.
+    # Sibling to the MCP `recall` tool's identical line -- both render from
+    # the SAME packaged template via `render_access_withheld_line`.
+    from athenaeum.recall_overflow import render_access_withheld_line
+
+    access_line = render_access_withheld_line(withheld_access_count)
+    if access_line:
+        print(f"Note: {access_line}", file=sys.stderr)
 
     return 0
 

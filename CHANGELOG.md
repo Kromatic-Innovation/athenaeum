@@ -55,6 +55,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`access: personal` pages are now reachable by exact name in default
+  recall, CLI and MCP (issue athenaeum#1967, operator ruling 2026-10-05).**
+  AC1's trace found NO audience/PII/`recallable` filter touches the
+  owner/default caller anywhere in `athenaeum.search` or `athenaeum.mcp_server`
+  — every one is a strict no-op when `caller_audience is None`. The reported
+  omission is a ranking effect: `FTS5Backend`'s weighted `bm25()` expression
+  (body weighted 0.15x against 1.0x for every other column) and the vector
+  backend's pure embedding distance can both rank a short proper-noun query
+  far below where raw/unweighted `bm25()` or the scan-on-query keyword
+  backend rank it, burying a page past any `top_k` cutoff with no filter
+  involved. `athenaeum.search.find_personal_page_by_exact_name` is a new,
+  narrow escape hatch — an indexed, O(1) exact `name` lookup, re-verified
+  against fresh on-disk frontmatter — consulted alongside normal ranking for
+  the owner/default caller only; a restricted caller's reachability for an
+  `access: personal` page is unchanged, still governed solely by an explicit
+  `audience:` grant, and no other access level (`open`/`internal`/
+  `confidential`) is affected. Both the MCP `recall` tool and the CLI
+  `athenaeum recall` command now also print a count (never a type/page/level
+  breakdown) whenever a RESTRICTED caller's Layer-C audience re-check removes
+  an already-ranked result, so a short list is distinguishable from a miss —
+  a count of 0 renders nothing.
+
 - **`mcp` can no longer silently resolve to a major `cli_tool_bridge.py`
   doesn't support (issue athenaeum#1953).** `cli_tool_bridge.py`
   (athenaeum#1951) imports `mcp.server.lowlevel.Server` and uses the
