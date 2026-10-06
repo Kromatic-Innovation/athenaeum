@@ -72,6 +72,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -320,6 +321,7 @@ def classify_route(
     pending_updates: list[tuple[Path, str]],
     updated_uids: list[str],
     created_uids: list[str] | None = None,
+    admitted: "Collection[int] | None" = None,
 ) -> RouteVerdict:
     """Decide which proposed updates diverge from the correspondent's page.
 
@@ -345,6 +347,23 @@ def classify_route(
       :data:`DIVERGENCE_PREVENTED` and refused, so the unrelated write never
       reaches disk.
 
+    ``admitted`` is the set of ``pending_updates`` indices that will ACTUALLY
+    be written -- i.e. those that already passed the caller's own
+    write-boundary guards. Pass it whenever the caller has such a guard, and
+    note that it is load-bearing in BOTH directions:
+
+    - a correspondent update that the caller is going to REFUSE must not
+      count as "the correspondent was written". Computing ``reached`` from
+      the merely-proposed list would leave it ``True`` while nothing landed
+      on that page, and a genuinely misrouted sibling write would then be
+      logged instead of prevented -- the defect this guard exists to stop,
+      slipping through on a technicality;
+    - a refused update to ANOTHER person is not a write at all, so it cannot
+      be a misroute either, and must not be reported as one.
+
+    ``None`` means "every pending update will be written", which is correct
+    for a caller with no guard of its own.
+
     ``created_uids`` is accepted for completeness and is only ever consulted
     for the "was the correspondent written" question. A create mints a FRESH
     uid, so it can never equal an already-resolving correspondent's uid; the
@@ -359,8 +378,15 @@ def classify_route(
     if not str(correspondent_uid).strip():
         return RouteVerdict()
     wanted = str(correspondent_uid).strip()
+    will_write = (
+        range(len(pending_updates)) if admitted is None else frozenset(admitted)
+    )
 
-    reached = wanted in {str(u).strip() for u in updated_uids}
+    reached = wanted in {
+        str(updated_uids[i]).strip()
+        for i in will_write
+        if i < len(updated_uids)
+    }
     if not reached and created_uids:
         reached = wanted in {str(u).strip() for u in created_uids}
 
@@ -368,6 +394,10 @@ def classify_route(
     logged: list[int] = []
     reasons: list[str] = []
     for position, (path, content) in enumerate(pending_updates):
+        if position not in will_write:
+            # Already refused by the caller's own write-boundary guard, so
+            # there is no write here to route, prevent, or report.
+            continue
         uid = (
             str(updated_uids[position]).strip()
             if position < len(updated_uids)

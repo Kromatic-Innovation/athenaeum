@@ -1848,15 +1848,47 @@ def _apply_tier3_results(
     # from both the adapter-provenance ledger below and `result.updated` —
     # counting an uncommitted write as "updated" would misreport AC7's
     # refuse-and-surface contract as a silent success.
-    # Issue athenaeum#1949: before any merge write, ask whether this file's
-    # updates are going where its own frontmatter says they should. A
-    # one-correspondent conversation summary names its correspondent, and that
-    # correspondent resolves uniquely through the SAME `email -> uid` lookup
-    # the corrections path uses (athenaeum#858/#884) -- so the compile already
-    # has a reliable answer for which page the note belongs on and simply
-    # never consulted it. A file naming no correspondent, or one whose address
-    # does not resolve uniquely, yields an inactive verdict and nothing below
-    # changes: the guard cannot touch ordinary intake.
+    # Write-boundary field-constraint guard (issue athenaeum#1416): the merge
+    # path writes an EXISTING page, so unlike the type guard below there is no
+    # "new page" to admit/refuse by type — this is the join point for AC5's
+    # counter-example (a Tier-3 merge writing a forbidden field onto an
+    # already-existing page). A deployment with no declared
+    # wiki/_schema/field-constraints.md pays one fast no-op check and never
+    # reaches the parse below (see guard_entity_field_constraints's own fast
+    # path). A refused merge leaves the pre-existing page byte-for-byte
+    # untouched — the violating content is parked and ledgered, never applied
+    # and never counted in result.updated.
+    #
+    # Evaluated as its own pass, BEFORE the athenaeum#1949 routing verdict
+    # below, because that verdict has to know which updates will ACTUALLY be
+    # written: an update to the correspondent's own page that this guard
+    # refuses must not count as "the correspondent was written", or a
+    # genuinely misrouted sibling write would be logged instead of prevented.
+    # Nothing is written in this pass.
+    _field_admitted: list[int] = []
+    for _update_idx, (_update_path, _update_content) in enumerate(pending_updates):
+        _update_meta, _ = parse_frontmatter(_update_content)
+        _update_admitted, _ = guard_entity_field_constraints(
+            wiki_root,
+            _update_path.name,
+            _update_content,
+            _update_meta or {},
+            source="tier3-merge",
+        )
+        if not _update_admitted:
+            result.field_constraint_rejected += 1
+            continue
+        _field_admitted.append(_update_idx)
+
+    # Issue athenaeum#1949: now ask whether this file's updates are going
+    # where its own frontmatter says they should. A one-correspondent
+    # conversation summary names its correspondent, and that correspondent
+    # resolves uniquely through the SAME `email -> uid` lookup the corrections
+    # path uses (athenaeum#858/#884) -- so the compile already has a reliable
+    # answer for which page the note belongs on and simply never consulted it.
+    # A file naming no correspondent, or one whose address does not resolve
+    # uniquely, yields an inactive verdict and nothing below changes: the
+    # guard cannot touch ordinary intake.
     _route = classify_route(
         correspondent_uid=resolved_correspondent_uid(
             raw,
@@ -1867,6 +1899,7 @@ def _apply_tier3_results(
         ),
         pending_updates=pending_updates,
         updated_uids=updated_uids,
+        admitted=_field_admitted,
     )
     for _reason in _route.reasons:
         # Logged with its reason either way (AC1) -- the ledger row below is
@@ -1889,37 +1922,16 @@ def _apply_tier3_results(
 
     _admitted_updated_uids: list[str] = []
     _prevented_uids: list[str] = []
-    for _update_idx, (_update_path, _update_content) in enumerate(pending_updates):
+    for _update_idx in _field_admitted:
+        _update_path, _update_content = pending_updates[_update_idx]
         if _update_idx in _route.prevented:
             # Issue athenaeum#1949: the misroute shape. Refused BEFORE the
             # write, so the unrelated person's page is left byte-for-byte
             # untouched and the update is never counted in `result.updated`
-            # -- same posture as the type/field-constraint guards below.
+            # -- same posture as the type/field-constraint guard above.
             result.misrouted_updates_prevented += 1
             if _update_idx < len(updated_uids):
                 _prevented_uids.append(str(updated_uids[_update_idx]).strip())
-            continue
-        # Write-boundary field-constraint guard (issue athenaeum#1416): the
-        # merge path writes an EXISTING page, so unlike the type guard
-        # below there is no "new page" to admit/refuse by type — this is
-        # the join point for AC5's counter-example (a Tier-3 merge writing
-        # a forbidden field onto an already-existing page). A deployment
-        # with no declared wiki/_schema/field-constraints.md pays one
-        # fast no-op check and never reaches the parse below (see
-        # guard_entity_field_constraints's own fast path). A refused merge
-        # leaves the pre-existing page byte-for-byte untouched — the
-        # violating content is parked and ledgered, never applied and
-        # never counted in result.updated.
-        _update_meta, _ = parse_frontmatter(_update_content)
-        _update_admitted, _ = guard_entity_field_constraints(
-            wiki_root,
-            _update_path.name,
-            _update_content,
-            _update_meta or {},
-            source="tier3-merge",
-        )
-        if not _update_admitted:
-            result.field_constraint_rejected += 1
             continue
         atomic_write_text(_update_path, _update_content)
         if _update_idx < len(updated_uids):

@@ -2184,6 +2184,15 @@ def process_batch_run(
                 ),
                 pending_updates=pending_updates,
                 updated_uids=updated_uids,
+                # This transport applies no field-constraint guard to a merge
+                # write (unlike `librarian._apply_tier3_results`, which
+                # evaluates athenaeum#1416's guard in its own pass first), so
+                # every pending update here is one that will actually be
+                # written and `admitted` is the full set. Passed explicitly
+                # rather than left to default so the difference is stated
+                # where a reader can see it: if this loop ever gains such a
+                # guard, this argument is what has to change with it.
+                admitted=range(len(pending_updates)),
             )
             for _reason in _route.reasons:
                 log.warning(

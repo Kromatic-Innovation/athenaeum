@@ -594,3 +594,59 @@ class TestFailOpen:
 
     def test_a_missing_ledger_reads_as_empty(self, tmp_path: Path) -> None:
         assert read_compile_routes(tmp_path / "never-written") == []
+
+
+class TestAdmittedWrites:
+    """Only writes that will ACTUALLY land may decide the verdict.
+
+    Raised in review of this change: ``reached`` was computed from the
+    merely-PROPOSED update list, before the caller's own write-boundary
+    guard (athenaeum#1416's field-constraint check) could refuse one. A
+    refused update to the correspondent's own page would then still have
+    counted as "the correspondent was written", and a genuinely misrouted
+    sibling write would have been logged instead of prevented — the exact
+    defect this guard exists to stop, slipping through on a technicality.
+    """
+
+    def test_a_refused_correspondent_update_does_not_count_as_reaching_them(
+        self,
+    ) -> None:
+        verdict = classify_route(
+            correspondent_uid=_DANA_UID,
+            pending_updates=[_pending("person", "dana"), _pending("person", "robin")],
+            updated_uids=[_DANA_UID, _ROBIN_UID],
+            # The caller is going to refuse index 0 (Dana's own update).
+            admitted=[1],
+        )
+        assert verdict.prevented == (1,), (
+            "with nothing landing on the correspondent's page, the sibling "
+            "write is the misroute shape and must be prevented"
+        )
+        assert verdict.logged == ()
+
+    def test_a_refused_sibling_update_is_not_reported_as_a_misroute(self) -> None:
+        """A write the caller already refused is not a write at all."""
+        verdict = classify_route(
+            correspondent_uid=_DANA_UID,
+            pending_updates=[_pending("person", "robin")],
+            updated_uids=[_ROBIN_UID],
+            admitted=[],
+        )
+        assert verdict.divergent == ()
+        assert verdict.reasons == ()
+
+    def test_admitted_none_means_every_update_will_be_written(self) -> None:
+        """The default is correct for a caller with no guard of its own."""
+        with_default = classify_route(
+            correspondent_uid=_DANA_UID,
+            pending_updates=[_pending("person", "robin")],
+            updated_uids=[_ROBIN_UID],
+        )
+        with_explicit = classify_route(
+            correspondent_uid=_DANA_UID,
+            pending_updates=[_pending("person", "robin")],
+            updated_uids=[_ROBIN_UID],
+            admitted=[0],
+        )
+        assert with_default == with_explicit
+        assert with_default.prevented == (0,)
