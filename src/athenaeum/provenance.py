@@ -422,7 +422,16 @@ def resolve_remember_extras(sources: Any) -> dict[str, Any]:
 # the cache dir.
 
 #: Schema version stamped on every record so a future reader can migrate.
-MERGE_PROVENANCE_VERSION = 1
+#:
+#: Bumped to 2 by issue athenaeum#716 (lane 716-B): a ``fold-into-existing``
+#: record now carries five additional keys (``folded_sources``,
+#: ``aliases_added``, ``links_rewritten``, ``canonical_content_hash``,
+#: ``coordinates_widened`` — see :func:`build_merge_provenance_record`)
+#: making the record SUFFICIENT to reverse the fold, per the issue's design
+#: rule ("a merge may destroy renderings, never observations"). The reader
+#: (:func:`read_merge_provenance`) stays tolerant of v1 records, which
+#: simply lack these keys — no migration is performed on read.
+MERGE_PROVENANCE_VERSION = 2
 
 #: Sidecar filename, alongside ``_pending_merges.md`` under ``wiki/``.
 MERGE_PROVENANCE_FILENAME = "_merge_provenance.jsonl"
@@ -441,6 +450,11 @@ def build_merge_provenance_record(
     source_paths: list[str],
     ts: datetime | None = None,
     auto_applied: bool = False,
+    folded_sources: list[str] | None = None,
+    aliases_added: list[str] | None = None,
+    links_rewritten: list[dict[str, str]] | None = None,
+    canonical_content_hash: str | None = None,
+    coordinates_widened: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build one merge-provenance record.
 
@@ -459,8 +473,34 @@ def build_merge_provenance_record(
     approved this" and every T2 auto-finalize reads unambiguously as "nobody
     reviewed this write". See ``athenaeum merges provenance`` (:mod:`athenaeum
     ._cmd_merges`) for the human-facing surface that renders this field.
+
+    The five ``folded_sources``/``aliases_added``/``links_rewritten``/
+    ``canonical_content_hash``/``coordinates_widened`` keyword-only
+    parameters are issue athenaeum#716 (lane 716-B) additions, written on a
+    ``fold-into-existing`` record so it is SUFFICIENT to reverse the
+    operation (the design rule: "a merge may destroy renderings, never
+    observations" — fold no longer deletes a source, it tombstones it, and
+    this ledger entry is what a later ``unfold`` reads to undo the body
+    overwrite, the alias grant, and the inbound-link rewrite). All five
+    default to ``None`` and are OMITTED from the record (not written as
+    ``null``) when ``None`` — a ``create-merged`` record, which has none of
+    this fold-specific detail, stays byte-identical to a pre-athenaeum#716
+    record; only a ``fold-into-existing`` caller
+    (:func:`athenaeum.pending_merges.resolve_merge`) passes them:
+
+    - ``folded_sources``: the tombstoned source paths, canonical EXCLUDED.
+    - ``aliases_added``: the slugs unioned into the canonical's ``aliases:``.
+    - ``links_rewritten``: one ``{"path", "from_slug", "to_slug"}`` dict per
+      inbound wikilink actually rewritten (``path`` relative to wiki_root).
+    - ``canonical_content_hash``: :func:`athenaeum.verdicts.content_hash` of
+      the canonical page's text AS WRITTEN BY THIS FOLD (after the body
+      write and the alias write) — the comparison basis a later unfold uses
+      to decide direct-unfold vs queued-diff-proposal.
+    - ``coordinates_widened``: ``{dimension_name: widened_coordinate}`` for
+      every separator dimension this fold actually widened; ``{}`` when
+      none were (e.g. all sources already shared the canonical's coordinate).
     """
-    return {
+    record: dict[str, Any] = {
         "v": MERGE_PROVENANCE_VERSION,
         "ts": now_iso(ts),
         "merge_id": merge_id,
@@ -469,6 +509,17 @@ def build_merge_provenance_record(
         "source_paths": list(source_paths),
         "auto_applied": auto_applied,
     }
+    if folded_sources is not None:
+        record["folded_sources"] = list(folded_sources)
+    if aliases_added is not None:
+        record["aliases_added"] = list(aliases_added)
+    if links_rewritten is not None:
+        record["links_rewritten"] = list(links_rewritten)
+    if canonical_content_hash is not None:
+        record["canonical_content_hash"] = canonical_content_hash
+    if coordinates_widened is not None:
+        record["coordinates_widened"] = dict(coordinates_widened)
+    return record
 
 
 def _append_jsonl_line(path: Path, line: str) -> None:
@@ -489,6 +540,11 @@ def record_merge_provenance(
     provenance_path: Path | None = None,
     ts: datetime | None = None,
     auto_applied: bool = False,
+    folded_sources: list[str] | None = None,
+    aliases_added: list[str] | None = None,
+    links_rewritten: list[dict[str, str]] | None = None,
+    canonical_content_hash: str | None = None,
+    coordinates_widened: dict[str, Any] | None = None,
 ) -> bool:
     """Append one provenance record for an executed merge. Best-effort.
 
@@ -501,6 +557,12 @@ def record_merge_provenance(
 
     ``auto_applied`` (issue athenaeum#602): forwarded verbatim to
     :func:`build_merge_provenance_record` — see that function's docstring.
+
+    ``folded_sources``/``aliases_added``/``links_rewritten``/
+    ``canonical_content_hash``/``coordinates_widened`` (issue athenaeum#716,
+    lane 716-B): forwarded verbatim to :func:`build_merge_provenance_record`
+    — see that function's docstring. All default to ``None`` (omitted from
+    the record), so a ``create-merged`` caller is unaffected.
     """
     try:
         record = build_merge_provenance_record(
@@ -510,6 +572,11 @@ def record_merge_provenance(
             source_paths=source_paths,
             ts=ts,
             auto_applied=auto_applied,
+            folded_sources=folded_sources,
+            aliases_added=aliases_added,
+            links_rewritten=links_rewritten,
+            canonical_content_hash=canonical_content_hash,
+            coordinates_widened=coordinates_widened,
         )
         target = (
             provenance_path

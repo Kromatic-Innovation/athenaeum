@@ -45,6 +45,7 @@ from athenaeum.decision_answers import (
     render_decision_answer,
     write_decision_answer,
 )
+from athenaeum.models import is_tombstone, parse_frontmatter, tombstone_target
 from tests.conftest import init_git_repo
 
 # ---------------------------------------------------------------------------
@@ -517,19 +518,22 @@ class TestVerdictLedgerWiring:
 
 
 # ---------------------------------------------------------------------------
-# TestFoldRecoverability — issue athenaeum#947 AC4.
+# TestFoldRecoverability — issue athenaeum#947 AC4; issue athenaeum#716 turned the
+# recovery mechanism from "deleted, but git-revertible" into "never deleted
+# at all" (a tombstone).
 #
 # Drives the REAL deferred (MCP-shaped) path end to end: write a
 # decision-answer file approving a fold-into-existing merge (the exact
 # shape mcp_server.resolve_merge produces via write_decision_answer), apply
 # it through apply_decision_answers (the same function
 # _cmd_pending.cmd_ingest_answers calls after acquiring the run lock), and
-# assert the folded-away page is recoverable from git history afterward.
+# assert the folded-away page is recoverable afterward — now trivially,
+# because it was tombstoned in place rather than deleted.
 # ---------------------------------------------------------------------------
 
 
 class TestFoldRecoverability:
-    def test_folded_source_recoverable_from_git_history(
+    def test_folded_source_tombstoned_and_content_preserved(
         self, wiki_root: Path, raw_root: Path
     ) -> None:
         target_path = wiki_root / "canonical-topic.md"
@@ -578,15 +582,22 @@ class TestFoldRecoverability:
         assert report.applied == 1
         assert report.skipped == 0
 
-        # Working tree: the folded-away source is gone; the target survived
-        # with the merged content.
-        assert not src_path.exists()
+        # Working tree: the folded-away source is TOMBSTONED, never deleted
+        # (issue athenaeum#716); the target survived with the merged content.
+        assert src_path.exists()
+        src_meta, src_body = parse_frontmatter(src_path.read_text(encoding="utf-8"))
+        assert is_tombstone(src_meta)
+        assert tombstone_target(src_meta) == "canonical-topic"
+        assert src_meta["embedded"] is False
+        # The original content is recoverable not via git archaeology but
+        # because it was never removed — the body is untouched by tombstoning.
+        assert "THE ORIGINAL SOURCE CONTENT" in src_body
         assert target_path.exists()
         assert "MERGED PROSE" in target_path.read_text(encoding="utf-8")
 
-        # Git history: exactly one commit deleted old-source.md, and the
-        # ORIGINAL content (from before that commit) is still recoverable —
-        # the README.md "a bad merge is a `git revert` away" guarantee.
+        # Git history: no commit DELETES old-source.md anymore — it is only
+        # ever modified (the provenance-snapshot commit, then the tombstone
+        # stamp as part of the fold commit).
         rel_src = "old-source.md"
         log = subprocess.run(
             ["git", "log", "--diff-filter=D", "--format=%H", "--", rel_src],
@@ -596,17 +607,7 @@ class TestFoldRecoverability:
             check=True,
         )
         deleting_commits = [c for c in log.stdout.splitlines() if c]
-        assert len(deleting_commits) == 1
-        deleting_commit = deleting_commits[0]
-
-        recovered = subprocess.run(
-            ["git", "show", f"{deleting_commit}^:{rel_src}"],
-            cwd=str(wiki_root),
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        assert "THE ORIGINAL SOURCE CONTENT" in recovered.stdout
+        assert deleting_commits == []
 
 
 # ---------------------------------------------------------------------------
