@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the merge-vs-fold write paths (issue athenaeum#425).
+"""Tests for the merge-vs-fold write paths (issue athenaeum#425; issue athenaeum#716
+lane 716-B extends this with the tombstone fold, coordinate widening, the
+narrowing-invariant refusal, and the fold-graph invariants).
 
 Covers:
 
@@ -7,10 +9,17 @@ Covers:
    ``target_exists`` is unreachable for a correctly-classified proposal.
 2. ``create-merged`` is UNCHANGED — a misclassified create-kind proposal
    that hits an existing slug still fails closed with ``target_exists``.
-3. Inbound wikilink rewrite across ``wiki/``; old source files deleted;
-   ``aliases:`` added + deduped on re-fold; link-time alias resolution.
-4. Vector-store hygiene: deleted slugs purged, aliases never embedded.
-5. Provenance recording + the read API (library + CLI).
+3. Inbound wikilink rewrite across ``wiki/``; old source files TOMBSTONED
+   (issue athenaeum#716, never deleted); ``aliases:`` added + deduped on re-fold;
+   link-time alias resolution.
+4. Vector-store hygiene: tombstoned slugs purged, aliases never embedded.
+5. Provenance recording + the read API (library + CLI); the ledger's
+   reversal-sufficient fields (issue athenaeum#716).
+6. Coordinate widening (issue athenaeum#716): valid-time union, scope
+   ancestor-widening, and the narrowing-invariant refusal.
+7. Fold-graph invariants (issue athenaeum#716): acyclic refusal, exactly-one-
+   live-canonical (including the chained A->B->C case), and the
+   already-tombstoned-source refusal.
 """
 
 from __future__ import annotations
@@ -21,7 +30,7 @@ from pathlib import Path
 
 import pytest
 
-from athenaeum.models import parse_frontmatter, slugify
+from athenaeum.models import is_tombstone, parse_frontmatter, slugify, tombstone_target
 from athenaeum.pending_merges import (
     _apply_fold_into_existing,
     parse_pending_merges,
@@ -40,13 +49,35 @@ def _write_source(path: Path, *, name: str, body: str = "body\n") -> None:
     )
 
 
-def _write_wiki_page(path: Path, *, name: str, body: str = "", aliases=None) -> None:
+def _write_wiki_page(
+    path: Path, *, name: str, body: str = "", aliases=None, extra: dict | None = None
+) -> None:
     fm = [f"name: {name}", "type: concept"]
     if aliases:
         alias_yaml = ", ".join(f'"{a}"' for a in aliases)
         fm.append(f"aliases: [{alias_yaml}]")
+    for key, value in (extra or {}).items():
+        fm.append(f"{key}: {value}")
     path.write_text(
         "---\n" + "\n".join(fm) + "\n---\n" + body, encoding="utf-8"
+    )
+
+
+def _write_tombstone_page(
+    path: Path, *, name: str, folded_into: str, body: str = ""
+) -> None:
+    """A page already carrying the issue athenaeum#716 tombstone stamp — used to
+    fixture a fold-graph invariant scenario without going through a real
+    fold first."""
+    path.write_text(
+        "---\n"
+        f"name: {name}\n"
+        "type: concept\n"
+        "status: folded\n"
+        f"folded_into: {folded_into}\n"
+        "embedded: false\n"
+        "---\n" + body,
+        encoding="utf-8",
     )
 
 
@@ -117,7 +148,10 @@ class TestFoldIntoExisting:
         assert result["ok"] is True
         assert result["error_code"] != "target_exists"
 
-    def test_source_files_deleted_after_fold(self, tmp_path: Path) -> None:
+    def test_source_files_tombstoned_after_fold(self, tmp_path: Path) -> None:
+        """Issue athenaeum#716: fold no longer deletes sources — it tombstones
+        them in place (status: folded, folded_into: <canonical>, embedded:
+        false), preserving the file (and its body) on disk."""
         wiki = tmp_path / "wiki"
         wiki.mkdir()
         target = wiki / "canonical.md"
@@ -142,15 +176,23 @@ class TestFoldIntoExisting:
         result = resolve_merge(merges_path, pm_id, "approve", wiki_root=wiki)
 
         assert result["ok"] is True
-        assert not src_a.exists()
-        assert not src_b.exists()
+        assert src_a.exists()
+        assert src_b.exists()
         assert set(result["folded_sources"]) == {str(src_a), str(src_b)}
+        for src, body in ((src_a, "a\n"), (src_b, "b\n")):
+            meta, src_body = parse_frontmatter(src.read_text(encoding="utf-8"))
+            assert is_tombstone(meta)
+            assert tombstone_target(meta) == "canonical"
+            assert meta["embedded"] is False
+            # The body is untouched — never destroyed, only the source page
+            # is excluded from recall/index/embedding going forward.
+            assert src_body == body
 
-    def test_fold_does_not_delete_canonical_reappearing_in_own_sources(
+    def test_fold_does_not_tombstone_canonical_reappearing_in_own_sources(
         self, tmp_path: Path
     ) -> None:
         """A source path that IS the canonical page (same slug) must never be
-        deleted — only the OTHER sources are folded away."""
+        tombstoned — only the OTHER sources are folded away."""
         wiki = tmp_path / "wiki"
         wiki.mkdir()
         target = wiki / "canonical.md"
@@ -174,7 +216,12 @@ class TestFoldIntoExisting:
 
         assert result["ok"] is True
         assert target.exists()
-        assert not src_b.exists()
+        target_meta, _ = parse_frontmatter(target.read_text(encoding="utf-8"))
+        assert not is_tombstone(target_meta)  # canonical stays live
+        assert src_b.exists()
+        src_meta, _ = parse_frontmatter(src_b.read_text(encoding="utf-8"))
+        assert is_tombstone(src_meta)
+        assert tombstone_target(src_meta) == "canonical"
         assert result["folded_sources"] == [str(src_b)]
 
 
@@ -721,8 +768,20 @@ class TestProvenanceRecording:
         assert rec["write_kind"] == "fold-into-existing"
         assert rec["canonical_slug"] == "canonical"
         assert rec["source_paths"] == [str(src_a)]
-        assert rec["v"] == 1
+        assert rec["v"] == 2
         assert "ts" in rec
+        # Issue athenaeum#716: the record must be sufficient to reverse the
+        # fold — the tombstoned source, the resulting post-fold content
+        # hash, and (an empty) widened-coordinates map are all present.
+        assert rec["folded_sources"] == [str(src_a)]
+        assert rec["aliases_added"] == ["old-a"]
+        assert rec["links_rewritten"] == []
+        from athenaeum.verdicts import content_hash
+
+        assert rec["canonical_content_hash"] == content_hash(
+            target.read_text(encoding="utf-8")
+        )
+        assert rec["coordinates_widened"] == {}
 
     def test_create_merged_records_provenance_too(self, tmp_path: Path) -> None:
         wiki = tmp_path / "wiki"
@@ -886,12 +945,344 @@ class TestProvenanceRecording:
 
 
 class TestInternalHelpers:
-    def test_apply_fold_into_existing_reports_ok_false_never(self) -> None:
-        """_apply_fold_into_existing has no failure branch — it is only
-        invoked once write_kind classification has already guaranteed the
-        target exists. Documents the contract as a smoke test."""
+    def test_apply_fold_into_existing_signature_has_registry_param(self) -> None:
+        """Issue athenaeum#716: _apply_fold_into_existing now DOES have failure
+        branches (the fold-graph + narrowing-invariant preflight below) —
+        the pre-athenaeum#716 claim that it never returns ``ok: False`` no longer
+        holds (see TestCoordinateWidening / TestFoldGraphInvariants for the
+        behavioral tests of each new refusal). This is now just a signature
+        smoke test for the ``registry`` parameter those checks are gated on."""
         import inspect
 
         sig = inspect.signature(_apply_fold_into_existing)
         assert "target_path" in sig.parameters
         assert "target_slug" in sig.parameters
+        assert "registry" in sig.parameters
+
+
+# ---------------------------------------------------------------------------
+# AC 6 — coordinate widening (issue athenaeum#716): valid-time union, scope
+# ancestor-widening, and the narrowing-invariant refusal.
+# ---------------------------------------------------------------------------
+
+
+class TestCoordinateWidening:
+    def test_valid_time_widens_to_the_union_of_canonical_and_source(
+        self, tmp_path: Path
+    ) -> None:
+        """Overlapping (here: nested) validity windows fold to their union —
+        the canonical's prior window is narrower than the folded source's on
+        BOTH ends, so the post-fold window must cover both."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        target = wiki / "canonical.md"
+        _write_wiki_page(
+            target,
+            name="Canonical",
+            body="old\n",
+            extra={"valid_from": "2026-01-01", "valid_until": "2026-06-30"},
+        )
+        src_a = wiki / "old-a.md"
+        _write_wiki_page(
+            src_a,
+            name="Old A",
+            body="a\n",
+            extra={"valid_from": "2025-01-01", "valid_until": "2026-12-31"},
+        )
+
+        init_git_repo(wiki)
+        merges_path = wiki / "_pending_merges.md"
+        write_pending_merge(
+            merges_path,
+            merge_target_name="Canonical",
+            sources=[str(src_a)],
+            rationale="r",
+            draft_merged_body="merged\n",
+            confidence=0.9,
+            write_kind="fold-into-existing",
+        )
+        pm_id = parse_pending_merges(merges_path)[0].id
+        result = resolve_merge(merges_path, pm_id, "approve", wiki_root=wiki)
+
+        assert result["ok"] is True, result
+        meta, _ = parse_frontmatter(target.read_text(encoding="utf-8"))
+        assert meta["valid_from"] == "2025-01-01"
+        assert meta["valid_until"] == "2026-12-31"
+
+        records = read_merge_provenance(wiki)
+        assert records[0]["coordinates_widened"]["valid-time"] == [
+            "2025-01-01",
+            "2027-01-01",
+        ]
+
+    def test_scope_widens_to_the_shorter_ancestor_prefix(self, tmp_path: Path) -> None:
+        """Issue athenaeum#716: "Equivalent content at nested scopes folds into
+        the claim with the WIDEST coordinates." The canonical's own PRIOR
+        scope is the narrow one here; a folded source carries the wider
+        ancestor scope, and the canonical must end up at the wider one even
+        though the draft body itself is silent on scope."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        target = wiki / "canonical.md"
+        _write_wiki_page(
+            target, name="Canonical", body="old\n", extra={"claimed_scope": "org/team-a"}
+        )
+        src_a = wiki / "old-a.md"
+        _write_wiki_page(
+            src_a, name="Old A", body="a\n", extra={"claimed_scope": "org"}
+        )
+
+        init_git_repo(wiki)
+        merges_path = wiki / "_pending_merges.md"
+        write_pending_merge(
+            merges_path,
+            merge_target_name="Canonical",
+            sources=[str(src_a)],
+            rationale="r",
+            draft_merged_body="merged\n",  # silent on scope
+            confidence=0.9,
+            write_kind="fold-into-existing",
+        )
+        pm_id = parse_pending_merges(merges_path)[0].id
+        result = resolve_merge(merges_path, pm_id, "approve", wiki_root=wiki)
+
+        assert result["ok"] is True, result
+        meta, _ = parse_frontmatter(target.read_text(encoding="utf-8"))
+        assert meta["claimed_scope"] == "org"
+        records = read_merge_provenance(wiki)
+        assert records[0]["coordinates_widened"]["scope"] == "org"
+
+    def test_no_widening_needed_reports_empty_coordinates_widened(
+        self, tmp_path: Path
+    ) -> None:
+        """A fold where nothing actually widens (no separator-dimension
+        coordinates anywhere) ships an empty ``coordinates_widened`` map —
+        not absent, not null."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        target = wiki / "canonical.md"
+        _write_wiki_page(target, name="Canonical", body="old\n")
+        src_a = wiki / "old-a.md"
+        _write_wiki_page(src_a, name="Old A", body="a\n")
+
+        init_git_repo(wiki)
+        merges_path = wiki / "_pending_merges.md"
+        write_pending_merge(
+            merges_path,
+            merge_target_name="Canonical",
+            sources=[str(src_a)],
+            rationale="r",
+            draft_merged_body="merged\n",
+            confidence=0.9,
+            write_kind="fold-into-existing",
+        )
+        pm_id = parse_pending_merges(merges_path)[0].id
+        result = resolve_merge(merges_path, pm_id, "approve", wiki_root=wiki)
+        assert result["ok"] is True
+
+        records = read_merge_provenance(wiki)
+        assert records[0]["coordinates_widened"] == {}
+
+    def test_fold_refuses_when_canonical_would_narrow_a_sources_scope(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue athenaeum#716: "silent scope collapse is a fold bug by
+        definition." Two genuinely DIFFERENT (sibling, not ancestor/
+        descendant) scopes reaching fold-apply time is exactly the
+        malformed-proposal case the narrowing invariant exists to catch —
+        the widening step cannot manufacture a common ancestor between
+        siblings, so it must refuse rather than silently pick one.
+        Refusal happens BEFORE any mutation: no commit, no checkbox flip."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        target = wiki / "canonical.md"
+        _write_wiki_page(
+            target, name="Canonical", body="OLD BODY\n", extra={"claimed_scope": "team-a"}
+        )
+        src_a = wiki / "old-a.md"
+        _write_wiki_page(
+            src_a, name="Old A", body="a\n", extra={"claimed_scope": "team-b"}
+        )
+
+        init_git_repo(wiki)
+        merges_path = wiki / "_pending_merges.md"
+        write_pending_merge(
+            merges_path,
+            merge_target_name="Canonical",
+            sources=[str(src_a)],
+            rationale="r",
+            draft_merged_body="NEW BODY\n",
+            confidence=0.9,
+            write_kind="fold-into-existing",
+        )
+        pm_id = parse_pending_merges(merges_path)[0].id
+        result = resolve_merge(merges_path, pm_id, "approve", wiki_root=wiki)
+
+        assert result["ok"] is False
+        assert result["error_code"] == "fold_narrows_coordinate"
+        assert result["resolved_block"] is None
+        # Nothing was mutated: no commit taken, target untouched, source
+        # untouched, checkbox still unflipped.
+        assert target.read_text(encoding="utf-8") == (
+            "---\nname: Canonical\ntype: concept\nclaimed_scope: team-a\n"
+            "---\nOLD BODY\n"
+        )
+        assert src_a.exists()
+        src_meta, _ = parse_frontmatter(src_a.read_text(encoding="utf-8"))
+        assert not is_tombstone(src_meta)
+        log = subprocess.run(
+            ["git", "log", "--format=%H"], cwd=str(wiki), capture_output=True, text=True, check=True
+        )
+        assert len(log.stdout.splitlines()) == 1  # only init_git_repo's seed commit
+        md = merges_path.read_text(encoding="utf-8")
+        assert "- [ ]" in md
+        assert "- [x]" not in md
+
+
+# ---------------------------------------------------------------------------
+# AC 7 — fold-graph invariants (issue athenaeum#716): acyclic refusal,
+# exactly-one-live-canonical (including the chained case), and the
+# already-tombstoned-source refusal.
+# ---------------------------------------------------------------------------
+
+
+class TestFoldGraphInvariants:
+    def test_fold_refuses_into_an_already_tombstoned_target(self, tmp_path: Path) -> None:
+        """A fold target that is itself already a tombstone is refused —
+        this single check is BOTH the acyclic guarantee (a live node can
+        never have an outgoing edge, so nothing can loop back to one) and
+        the exactly-one-live-canonical guarantee (a tombstone is not a live
+        canonical of anything new) at once."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        # "already-folded" is itself a tombstone pointing at "elsewhere".
+        target = wiki / "already-folded.md"
+        _write_tombstone_page(target, name="Already Folded", folded_into="elsewhere")
+        wiki_elsewhere = wiki / "elsewhere.md"
+        _write_wiki_page(wiki_elsewhere, name="Elsewhere", body="e\n")
+        src_a = wiki / "new-source.md"
+        _write_wiki_page(src_a, name="New Source", body="a\n")
+
+        init_git_repo(wiki)
+        merges_path = wiki / "_pending_merges.md"
+        write_pending_merge(
+            merges_path,
+            merge_target_name="Already Folded",
+            sources=[str(src_a)],
+            rationale="r",
+            draft_merged_body="merged\n",
+            confidence=0.9,
+            write_kind="fold-into-existing",
+        )
+        pm_id = parse_pending_merges(merges_path)[0].id
+        result = resolve_merge(merges_path, pm_id, "approve", wiki_root=wiki)
+
+        assert result["ok"] is False
+        assert result["error_code"] == "fold_target_is_tombstone"
+        assert result["resolved_block"] is None
+        assert src_a.exists()
+        src_meta, _ = parse_frontmatter(src_a.read_text(encoding="utf-8"))
+        assert not is_tombstone(src_meta)
+
+    def test_fold_refuses_an_already_tombstoned_source(self, tmp_path: Path) -> None:
+        """A source that is already a tombstone (folded into a DIFFERENT
+        canonical) must not be re-folded — a tombstone's folded_into is set
+        once and never overwritten, which is also what keeps the graph
+        acyclic by construction."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        target = wiki / "canonical.md"
+        _write_wiki_page(target, name="Canonical", body="c\n")
+        other_target = wiki / "other.md"
+        _write_wiki_page(other_target, name="Other", body="o\n")
+        src_a = wiki / "already-folded-elsewhere.md"
+        _write_tombstone_page(
+            src_a, name="Already Folded Elsewhere", folded_into="other", body="a\n"
+        )
+
+        init_git_repo(wiki)
+        merges_path = wiki / "_pending_merges.md"
+        write_pending_merge(
+            merges_path,
+            merge_target_name="Canonical",
+            sources=[str(src_a)],
+            rationale="r",
+            draft_merged_body="merged\n",
+            confidence=0.9,
+            write_kind="fold-into-existing",
+        )
+        pm_id = parse_pending_merges(merges_path)[0].id
+        result = resolve_merge(merges_path, pm_id, "approve", wiki_root=wiki)
+
+        assert result["ok"] is False
+        assert result["error_code"] == "fold_source_already_tombstoned"
+        assert result["resolved_block"] is None
+        # The source's ORIGINAL fold target is unchanged.
+        src_meta, _ = parse_frontmatter(src_a.read_text(encoding="utf-8"))
+        assert tombstone_target(src_meta) == "other"
+        # The would-be new canonical was never written.
+        assert target.read_text(encoding="utf-8") == (
+            "---\nname: Canonical\ntype: concept\n---\nc\n"
+        )
+
+    def test_chained_fold_leaves_exactly_one_live_canonical(self, tmp_path: Path) -> None:
+        """A folds into B, B LATER folds into C — both steps are legitimate
+        (B is live at the time it absorbs A, and still live at the time IT
+        is folded into C). After both: exactly one live page among
+        {A, B, C} — C — proving the fold-graph invariant holds across a
+        chain, not just a single fold."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        page_a = wiki / "page-a.md"
+        page_b = wiki / "page-b.md"
+        page_c = wiki / "page-c.md"
+        _write_wiki_page(page_a, name="Page A", body="a\n")
+        _write_wiki_page(page_b, name="Page B", body="b\n")
+        _write_wiki_page(page_c, name="Page C", body="c\n")
+        init_git_repo(wiki)
+
+        merges_path = wiki / "_pending_merges.md"
+
+        # Fold A into B.
+        write_pending_merge(
+            merges_path,
+            merge_target_name="Page B",
+            sources=[str(page_a)],
+            rationale="r",
+            draft_merged_body="merged ab\n",
+            confidence=0.9,
+            write_kind="fold-into-existing",
+        )
+        pm_id_1 = next(
+            pm.id for pm in parse_pending_merges(merges_path) if not pm.resolved
+        )
+        result_1 = resolve_merge(merges_path, pm_id_1, "approve", wiki_root=wiki)
+        assert result_1["ok"] is True, result_1
+
+        # B (still live at this point) now folds into C.
+        write_pending_merge(
+            merges_path,
+            merge_target_name="Page C",
+            sources=[str(page_b)],
+            rationale="r",
+            draft_merged_body="merged bc\n",
+            confidence=0.9,
+            write_kind="fold-into-existing",
+        )
+        pm_id_2 = next(
+            pm.id for pm in parse_pending_merges(merges_path) if not pm.resolved
+        )
+        result_2 = resolve_merge(merges_path, pm_id_2, "approve", wiki_root=wiki)
+        assert result_2["ok"] is True, result_2
+
+        a_meta, _ = parse_frontmatter(page_a.read_text(encoding="utf-8"))
+        b_meta, _ = parse_frontmatter(page_b.read_text(encoding="utf-8"))
+        c_meta, _ = parse_frontmatter(page_c.read_text(encoding="utf-8"))
+        live = [
+            p
+            for p, meta in (("A", a_meta), ("B", b_meta), ("C", c_meta))
+            if not is_tombstone(meta)
+        ]
+        assert live == ["C"]
+        assert tombstone_target(a_meta) == "page-b"
+        assert tombstone_target(b_meta) == "page-c"

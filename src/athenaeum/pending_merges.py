@@ -79,14 +79,40 @@ import hashlib
 import logging
 import re
 import subprocess
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Literal
 
 from athenaeum.atomic_io import atomic_write_text
+
+# Issue athenaeum#716 (lane 716-B): reuse the ALREADY-EXISTING coordinate
+# widening primitive rather than writing a second one (comparator.py's own
+# docstring, athenaeum#715 AC9). `comparator` and `pending_merges` are both
+# declared L4 (tests/fixtures/layer_declarations.py) -- a same-layer import
+# is not an upward edge (test_layer_boundary.py only forbids importer_layer
+# < imported_layer), and comparator.py never imports pending_merges (or
+# anything that transitively does), so this introduces no cycle either --
+# see tests/test_import_graph_acyclic.py, which this change keeps green.
+from athenaeum.comparator import _widen_dimension
+from athenaeum.dimensions import (
+    DEFAULT_REGISTRY,
+    Dimension,
+    DimensionKind,
+    DimensionRegistry,
+    coordinate_value,
+    parsed_coordinate,
+)
 from athenaeum.merge_type_gate import _merge_proposal_suppression_reason
-from athenaeum.models import parse_frontmatter, render_frontmatter, slugify
+from athenaeum.models import (
+    is_tombstone,
+    parse_frontmatter,
+    render_frontmatter,
+    slugify,
+    stamp_tombstone,
+    tombstone_target,
+)
 
 if TYPE_CHECKING:
     # Annotation-only (issue athenaeum#1627) — the real import stays local to
@@ -102,6 +128,7 @@ from athenaeum.sidecar_blocks import (
     split_blocks,
 )
 from athenaeum.store import now_iso
+from athenaeum.verdicts import content_hash
 
 log = logging.getLogger(__name__)
 
@@ -1019,6 +1046,7 @@ def _rewrite_inbound_wikilinks(
     *,
     skip: Path | None = None,
     touched: list[Path] | None = None,
+    link_details: list[dict[str, str]] | None = None,
 ) -> int:
     """Rewrite every ``[[old-slug]]`` / ``[[old-slug|text]]`` link to canonical.
 
@@ -1037,6 +1065,18 @@ def _rewrite_inbound_wikilinks(
     ``git add`` pathspec to them; the return value here is only a count).
     Additive optional parameter — :mod:`athenaeum.storage_migrate`'s
     existing call site, which only wants the count, is unaffected.
+
+    ``link_details``, when supplied, has one ``{"path", "from_slug",
+    "to_slug"}`` dict appended per (file, old-slug) pair actually rewritten
+    in that file — ``path`` relative to ``wiki_root`` (issue athenaeum#716,
+    lane 716-B: the merge-provenance ledger's ``links_rewritten`` needs the
+    per-link detail, not just a count, to be "sufficient to reverse the
+    operation"). One entry per distinct old slug rewritten in a file, not
+    one per occurrence — a file with three ``[[old-a]]`` links and one
+    ``[[old-b]]`` link, both folded into ``canonical``, gets exactly two
+    entries. Additive optional parameter — the existing count-only callers
+    (:mod:`athenaeum.storage_migrate`, and this module's own call site when
+    it only needs the int) are unaffected by leaving this ``None``.
 
     Returns the number of files modified. Best-effort: unreadable files are
     skipped, not fatal.
@@ -1064,10 +1104,14 @@ def _rewrite_inbound_wikilinks(
         except (OSError, UnicodeDecodeError):
             continue
 
+        matched_old_slugs: set[str] = set()
+
         def _replace(m: "re.Match[str]") -> str:
             target = m.group(1).strip()
-            if slugify(target) not in old_slug_set:
+            ts = slugify(target)
+            if ts not in old_slug_set:
                 return m.group(0)
+            matched_old_slugs.add(ts)
             alias_suffix = m.group(2) or ""
             return f"[[{canonical_slug}{alias_suffix}]]"
 
@@ -1077,6 +1121,19 @@ def _rewrite_inbound_wikilinks(
             n += 1
             if touched is not None:
                 touched.append(path)
+            if link_details is not None:
+                try:
+                    rel_path = str(path.relative_to(wiki_root))
+                except ValueError:
+                    rel_path = path.name
+                for old_slug in sorted(matched_old_slugs):
+                    link_details.append(
+                        {
+                            "path": rel_path,
+                            "from_slug": old_slug,
+                            "to_slug": canonical_slug,
+                        }
+                    )
     return n
 
 
@@ -1261,6 +1318,149 @@ def _find_git_repo(wiki_root: Path) -> Path | None:
     return Path(top)
 
 
+# ---------------------------------------------------------------------------
+# Coordinate widening / narrowing-invariant (issue athenaeum#716, lane 716-B)
+# ---------------------------------------------------------------------------
+#
+# "Coordinates widen, never narrow": when a fold consolidates several pages'
+# separator-dimension coordinates (valid-time, scope, subject, memory-class —
+# whichever a deployment's registry declares with ``separates=True``) onto
+# one canonical page, the canonical must end up at least as wide as every
+# source it absorbed. :func:`_widen_over_metas` computes that widest
+# coordinate by folding :func:`athenaeum.comparator._widen_dimension` (the
+# EXISTING primitive, athenaeum#715 AC9 — reused here rather than
+# reimplemented) across however many metas are involved;
+# :func:`_write_coordinate` is its write-side mirror, round-tripping a
+# widened value back into the frontmatter key(s) :func:`athenaeum.dimensions
+# .coordinate_value` reads it from; :func:`_coordinate_is_at_least_as_wide`
+# is the narrowing-invariant predicate itself, called from
+# :func:`_apply_fold_into_existing` as a hard refusal (never a later repair)
+# per the issue's "silent scope collapse is a fold bug by definition".
+
+
+def _write_coordinate(meta: dict[str, Any], dimension: Dimension, value: Any) -> None:
+    """Write *value* (the shape :func:`_widen_dimension` returns) back into
+    *meta* for *dimension*, in place — the inverse of
+    :func:`athenaeum.dimensions.coordinate_value` /
+    :func:`athenaeum.dimensions.parsed_coordinate`.
+
+    ``valid-time`` is the one kernel dimension split across TWO frontmatter
+    keys (``valid_from``/``valid_until``) with an on-disk INCLUSIVE
+    ``valid_until`` — :func:`parsed_coordinate`'s own docstring documents the
+    exclusive-until conversion at the read boundary; this is that
+    conversion's mirror at the write boundary. Every other separator
+    dimension (kernel or operator-declared) round-trips through a single
+    bare value key, so a generic ``meta[key] = value`` suffices. ``value is
+    None`` removes the key rather than writing a null — absent and
+    explicitly-null are not the same frontmatter shape, and "no coordinate"
+    should read as absent, matching how every bare-key dimension already
+    reads a missing key as ``None`` (:func:`coordinate_value`).
+    """
+    if dimension.name == "valid-time":
+        from_date, until_exclusive = value if value is not None else (None, None)
+        if from_date is not None:
+            meta["valid_from"] = from_date.isoformat()
+        else:
+            meta.pop("valid_from", None)
+        if until_exclusive is not None:
+            meta["valid_until"] = (until_exclusive - timedelta(days=1)).isoformat()
+        else:
+            meta.pop("valid_until", None)
+        return
+    if dimension.name == "scope":
+        key = "claimed_scope"
+    elif dimension.name == "subject":
+        key = "subject"
+    elif dimension.name == "memory-class":
+        key = "memory_class"
+    else:
+        key = dimension.name
+    if value is None:
+        meta.pop(key, None)
+    else:
+        meta[key] = value
+
+
+def _widen_over_metas(dimension: Dimension, metas: list[dict[str, Any]]) -> Any:
+    """Fold :func:`_widen_dimension` across *metas* in order.
+
+    Returns the single widest coordinate covering all of them, in the same
+    shape :func:`_widen_dimension` itself returns (an ``(from, until)``
+    interval tuple, or a raw string for HIERARCHY/ENUM/IDENTITY). ``metas``
+    with fewer than one entry returns ``None``; a single entry returns that
+    entry's own coordinate (parsed for INTERVAL, raw otherwise) unchanged.
+    """
+    if not metas:
+        return None
+    acc: dict[str, Any] = dict(metas[0])
+    value = (
+        parsed_coordinate(dimension, acc)
+        if dimension.kind == DimensionKind.INTERVAL
+        else coordinate_value(dimension, acc)
+    )
+    for meta in metas[1:]:
+        value = _widen_dimension(dimension, acc, meta)
+        acc = {}
+        _write_coordinate(acc, dimension, value)
+    return value
+
+
+def _coordinate_is_at_least_as_wide(
+    dimension: Dimension, wide_meta: Mapping[str, Any], narrow_meta: Mapping[str, Any]
+) -> bool:
+    """True when *wide_meta*'s coordinate on *dimension* is AT LEAST AS WIDE
+    as *narrow_meta*'s — the narrowing-invariant predicate (issue athenaeum#716:
+    "the narrowing invariant is the mirror of widening"). ``False`` is the
+    ONLY failure signal this predicate ever returns; a caller refuses the
+    fold on ``False`` rather than attempting a repair.
+
+    An absent coordinate on EITHER side never fails the check — mirrors
+    :func:`_widen_dimension`'s own treatment of a missing side (the other
+    side's value is taken as-is, neither widened nor narrowed), and matches
+    every kernel separator dimension's ``null_means`` semantics (``scope``/
+    ``valid-time`` are ``NullMeans.UNIVERSAL`` — absent means "applies
+    everywhere", the WIDEST possible state, never narrower than anything).
+    """
+    if dimension.kind == DimensionKind.INTERVAL:
+        wide = parsed_coordinate(dimension, wide_meta)
+        narrow = parsed_coordinate(dimension, narrow_meta)
+        if wide is None or narrow is None:
+            return True
+        wide_from, wide_until = wide
+        narrow_from, narrow_until = narrow
+        from_ok = wide_from is None or (
+            narrow_from is not None and narrow_from >= wide_from
+        )
+        until_ok = wide_until is None or (
+            narrow_until is not None and narrow_until <= wide_until
+        )
+        return from_ok and until_ok
+    raw_wide = coordinate_value(dimension, wide_meta)
+    raw_narrow = coordinate_value(dimension, narrow_meta)
+    if raw_wide is None or raw_narrow is None:
+        return True
+    if dimension.kind == DimensionKind.HIERARCHY:
+        wide_parts = str(raw_wide).strip().lower().split("/")
+        narrow_parts = str(raw_narrow).strip().lower().split("/")
+        # "wide" is at least as wide as "narrow" iff wide is a prefix of (or
+        # equal to) narrow -- the same ancestor-prefix test
+        # _widen_dimension's own HIERARCHY branch relies on.
+        return wide_parts == narrow_parts[: len(wide_parts)]
+    # ENUM / IDENTITY: no graduated width -- "at least as wide" means equal
+    # (a real mismatch here means these claims should never have reached a
+    # fold together; refusing is the correct, safe outcome).
+    return raw_wide == raw_narrow
+
+
+def _json_safe_coordinate(value: Any) -> Any:
+    """Render a widened coordinate value (interval tuples carry ``date``
+    objects) into something :func:`json.dumps` accepts, for the
+    ``coordinates_widened`` provenance-ledger field."""
+    if isinstance(value, tuple):
+        return [v.isoformat() if hasattr(v, "isoformat") else v for v in value]
+    return value
+
+
 def _apply_fold_into_existing(
     pm: PendingMerge,
     *,
@@ -1271,22 +1471,44 @@ def _apply_fold_into_existing(
     cache_dir: Path | None,
     search_backend: str | None,
     embedding_model: str | None,
+    registry: DimensionRegistry = DEFAULT_REGISTRY,
 ) -> dict:
-    """Execute the ``fold-into-existing`` write path (issue athenaeum#425).
+    """Execute the ``fold-into-existing`` write path (issue athenaeum#425; issue
+    athenaeum#716 lane 716-B turned step 5 from a delete into a tombstone and
+    added the fold-graph/coordinate preflight below).
 
     The target IS the canonical existing page. Steps, in order:
 
+    -1. Fold-graph + coordinate preflight (issue athenaeum#716) — refuses
+        BEFORE any mutation whatsoever, same shape as the pre-existing
+        ``fold_target_missing``/``no_git_repo`` gates in :func:`resolve_merge`:
+        the target must not itself already be a tombstone (keeps
+        ``folded_into`` acyclic — a live node has no outgoing edge, so
+        nothing can ever loop back to it — AND keeps exactly one live
+        canonical per fold set), no folded source may already be a
+        tombstone (a tombstone's ``folded_into`` is set once, never
+        overwritten by a later, different fold), and the canonical's
+        post-fold coordinate on every separator dimension must be at least
+        as wide as every folded source's (the mirror check for the widening
+        this function performs in step 1 — "silent scope collapse is a
+        fold bug by definition").
     0. Take a provenance-snapshot commit (Commit A) of the target page and
        every folded-away source, BEFORE any write below touches a byte
-       (issue athenaeum#947 — the delete in step 5 must be recoverable via
-       plain ``git revert``/``git show``, per ``README.md``'s recovery
-       guarantee). Callers of this function (only :func:`resolve_merge`, for
-       ``write_kind == "fold-into-existing"``) have already verified
-       ``repo_root`` is a real git repo before calling — see the
-       ``no_git_repo`` gate there — so this step is never skipped for that
-       write kind.
-    1. Write ``draft_merged_body`` to ``target_path`` (the merged content —
-       same convention as the ``create-merged`` path's body write).
+       (issue athenaeum#947 — originally so the step-5 DELETE stayed
+       recoverable via plain ``git revert``/``git show`` per ``README.md``'s
+       recovery guarantee; athenaeum#716 turned step 5 into a tombstone, which
+       does not need git to be recoverable at all — the page is never
+       removed — but Commit A is KEPT regardless, because it still protects
+       the body overwrite (step 1) and the inbound-link rewrite (step 4),
+       exactly as it always has). Callers of this function (only
+       :func:`resolve_merge`, for ``write_kind == "fold-into-existing"``)
+       have already verified ``repo_root`` is a real git repo before
+       calling — see the ``no_git_repo`` gate there — so this step is never
+       skipped for that write kind.
+    1. Write ``draft_merged_body`` (coordinate-widened per the preflight
+       above — see :data:`coordinates_widened` in the return value) to
+       ``target_path`` (the merged content — same convention as the
+       ``create-merged`` path's body write).
     2. Derive the folded-away source slugs (the OTHER sources — a source
        whose own slug already equals the target is the canonical page
        itself reappearing in its own cluster and is not folded away).
@@ -1294,19 +1516,30 @@ def _apply_fold_into_existing(
        frontmatter, deduped.
     4. Rewrite every inbound ``[[old-slug]]`` wikilink under ``wiki_root``
        (excluding the canonical page itself) to ``target_slug``.
-    5. Delete the old source wiki files via ``git rm`` (issue athenaeum#947 —
-       never a bare ``Path.unlink()``; see the step-5 comment below for the
-       untracked-file fallback).
-    6. Best-effort purge their vectors from the search index.
+    5. TOMBSTONE the old source wiki files (issue athenaeum#716 — "a merge may
+       destroy renderings, never observations"): stamp each with
+       :func:`athenaeum.models.stamp_tombstone` (``status: folded``,
+       ``folded_into: <target_slug>``, ``embedded: false``) IN PLACE, via
+       ``git add`` (never ``git rm``, never ``Path.unlink()`` — the file
+       stays on disk, body untouched, every other frontmatter key —
+       including the source's own scope coordinate, "the narrow
+       restatement tombstones with its scope noted" — preserved verbatim,
+       because :func:`stamp_tombstone` COPIES the meta it is given rather
+       than replacing it).
+    6. Best-effort purge their vectors from the search index — unchanged;
+       this is what keeps a tombstone non-polluting on day one rather than
+       waiting for the next reindex to notice ``embedded: false``.
     7. Commit the fold itself as its own commit (Commit B), scoped to
        exactly the paths this fold touched.
 
     Returns ``{"ok": True, "folded_sources", "aliases_added",
-    "links_rewritten"}`` on success. ``target_exists`` is unreachable from
-    here by construction — the caller only takes this path for
-    ``write_kind == "fold-into-existing"``, and athenaeum#421's proposal-time
-    classification only assigns that write_kind when the slug already
-    exists; this function does not re-check.
+    "links_rewritten", "link_details", "canonical_content_hash",
+    "coordinates_widened"}`` on success, or ``{"ok": False, "error_code",
+    "message"}`` when the step -1 preflight refuses. ``target_exists`` is
+    unreachable from here by construction — the caller only takes this path
+    for ``write_kind == "fold-into-existing"``, and athenaeum#421's
+    proposal-time classification only assigns that write_kind when the slug
+    already exists; this function does not re-check.
 
     Concurrency (issue athenaeum#947 AC3, extended by athenaeum#1170): this function
     performs real file mutation and git commits. It is reached via TWO
@@ -1349,6 +1582,26 @@ def _apply_fold_into_existing(
     prior_aliases_list = prior_aliases if isinstance(prior_aliases, list) else []
     existing_alias_slugs = {slugify(str(a)) for a in prior_aliases_list}
 
+    # Step -1a (issue athenaeum#716): the target must not itself already be a
+    # tombstone. This single check is BOTH fold-graph invariants at once —
+    # acyclic (a live node has no outgoing `folded_into` edge, so nothing
+    # can ever loop back to a live target; a cycle is only constructible by
+    # folding INTO a page that is itself already mid-chain) and exactly-one-
+    # live-canonical (a tombstone is, by definition, not the live canonical
+    # of anything — designating it as a NEW fold target would create a
+    # second claim of canonicity for whatever it already points to).
+    if is_tombstone(prior_meta):
+        return {
+            "ok": False,
+            "error_code": "fold_target_is_tombstone",
+            "message": (
+                f"{target_path} is already a tombstone (folded_into="
+                f"{tombstone_target(prior_meta)!r}); refusing to fold more "
+                "sources into a non-live canonical. Re-target the proposal "
+                "at the live page this one was itself folded into."
+            ),
+        }
+
     # Step 2 (computed early, before any write) — folded-away source slugs,
     # excluding the canonical page reappearing among its own sources. Moved
     # ahead of step 1 (the numbering above is the SEMANTIC step order, not
@@ -1377,6 +1630,100 @@ def _apply_fold_into_existing(
     canonical_slugs.add(target_slug)
     folded_slugs = [s for s in all_source_slugs if s not in canonical_slugs]
     folded_sources = [src for src in pm.sources if not _is_canonical(src)]
+
+    # Step -1b (issue athenaeum#716): read every folded source's CURRENT
+    # frontmatter up front (needed below for both the preflight and the
+    # eventual tombstone stamp), and refuse if any is ALREADY a tombstone —
+    # a tombstone's `folded_into` is set exactly once; re-pointing it at a
+    # DIFFERENT canonical here would silently abandon its original fold
+    # record and could manufacture a cycle this function has no way to
+    # detect in general (the acyclic guarantee holds by construction only
+    # because this is refused, not because it is checked exhaustively).
+    source_texts: dict[str, str] = {}
+    source_metas: dict[str, dict[str, Any]] = {}
+    for src in folded_sources:
+        src_path = Path(src)
+        try:
+            src_text = src_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            src_text = ""
+        src_meta, _ = parse_frontmatter(src_text)
+        if not isinstance(src_meta, dict):
+            src_meta = {}
+        source_texts[src] = src_text
+        source_metas[src] = src_meta
+        if is_tombstone(src_meta):
+            return {
+                "ok": False,
+                "error_code": "fold_source_already_tombstoned",
+                "message": (
+                    f"{src_path} is already a tombstone (folded_into="
+                    f"{tombstone_target(src_meta)!r}); refusing to re-fold "
+                    "an already-folded page into a different canonical — "
+                    "exactly one live canonical per fold set, and a "
+                    "tombstone's folded_into is set once and never "
+                    "overwritten."
+                ),
+            }
+
+    # Step -1c (issue athenaeum#716): coordinate widening + the narrowing-
+    # invariant refusal. Parse the draft's OWN frontmatter (it may carry
+    # none at all) without writing anything to disk yet, compute the widest
+    # coordinate covering {prior canonical, draft, every folded source} on
+    # every separator dimension (reusing `_widen_dimension`, never a second
+    # implementation), patch that into the draft's frontmatter, and THEN
+    # verify the result is not narrower than any folded source — refusing
+    # the fold outright (nothing written, no commit taken) if it is.
+    draft_meta, draft_body_text = parse_frontmatter(pm.draft_merged_body)
+    if not isinstance(draft_meta, dict):
+        draft_meta = {}
+    widened_draft_meta = dict(draft_meta)
+    coordinates_widened: dict[str, Any] = {}
+    for dimension in registry:
+        if not dimension.separates:
+            continue
+        metas_in_order = [prior_meta, draft_meta] + [
+            source_metas[s] for s in folded_sources
+        ]
+        widened_value = _widen_over_metas(dimension, metas_in_order)
+        current_value = (
+            parsed_coordinate(dimension, draft_meta)
+            if dimension.kind == DimensionKind.INTERVAL
+            else coordinate_value(dimension, draft_meta)
+        )
+        if widened_value != current_value:
+            _write_coordinate(widened_draft_meta, dimension, widened_value)
+            coordinates_widened[dimension.name] = _json_safe_coordinate(widened_value)
+
+    for dimension in registry:
+        if not dimension.separates:
+            continue
+        for src in folded_sources:
+            if not _coordinate_is_at_least_as_wide(
+                dimension, widened_draft_meta, source_metas[src]
+            ):
+                return {
+                    "ok": False,
+                    "error_code": "fold_narrows_coordinate",
+                    "message": (
+                        f"fold refused: canonical {target_slug!r}'s post-fold "
+                        f"{dimension.name!r} coordinate would be narrower "
+                        f"than folded source {src!r}'s — coordinates widen "
+                        "on a fold, they never narrow (silent scope collapse "
+                        "is a fold bug by definition). If these are meant to "
+                        "diverge, specialize a new narrow claim instead of "
+                        "narrowing the canonical."
+                    ),
+                }
+
+    if widened_draft_meta != draft_meta:
+        effective_draft_body = (
+            render_frontmatter(widened_draft_meta) + draft_body_text
+            if widened_draft_meta
+            else draft_body_text
+        )
+    else:
+        effective_draft_body = pm.draft_merged_body
 
     # --- Commit A: provenance snapshot, BEFORE any write below (issue
     # athenaeum#947). Stages exactly the target page (about to be
@@ -1413,8 +1760,9 @@ def _apply_fold_into_existing(
                 *snapshot_rel_paths,
             )
 
-    # Step 1 — write the merged draft body to the canonical target.
-    atomic_write_text(target_path, pm.draft_merged_body)
+    # Step 1 — write the merged (coordinate-widened) draft body to the
+    # canonical target.
+    atomic_write_text(target_path, effective_draft_body)
 
     # Step 3 — alias map, deduped. The draft body just written in step 1 may
     # carry its OWN frontmatter (a merge draft can legitimately open with
@@ -1430,44 +1778,52 @@ def _apply_fold_into_existing(
     )
     new_meta = _add_aliases_to_frontmatter(carried_meta, folded_slugs)
     if new_meta != target_meta:
-        new_target_text = render_frontmatter(new_meta) + target_body
-        atomic_write_text(target_path, new_target_text)
+        final_target_text = render_frontmatter(new_meta) + target_body
+        atomic_write_text(target_path, final_target_text)
+    else:
+        final_target_text = target_text
     aliases_added = [s for s in folded_slugs if s not in existing_alias_slugs]
+
+    # Issue athenaeum#716: the canonical's post-fold content hash, taken
+    # HERE — after the step-1 body write and the step-3 alias write, not
+    # before — is the comparison basis a later ``unfold`` (lane 716-C) uses
+    # to decide direct-unfold vs queued-diff-proposal.
+    canonical_content_hash = content_hash(final_target_text)
 
     # Step 4 — rewrite inbound wikilinks pointing at any folded slug.
     # ``touched`` collects the exact sibling paths modified (a-priori
     # unknown — could be any page under ``wiki_root``) so Commit B below
     # can scope its pathspec to them instead of guessing (issue athenaeum#947).
+    # ``link_details`` collects the per-link (path, from_slug, to_slug) the
+    # merge-provenance ledger needs to be reversal-sufficient (issue athenaeum#716).
     rewritten_touched: list[Path] = []
+    link_details: list[dict[str, str]] = []
     links_rewritten = _rewrite_inbound_wikilinks(
-        wiki_root, folded_slugs, target_slug, skip=target_path, touched=rewritten_touched
+        wiki_root,
+        folded_slugs,
+        target_slug,
+        skip=target_path,
+        touched=rewritten_touched,
+        link_details=link_details,
     )
 
-    # Step 5 — delete the old source wiki files via ``git rm`` (issue
-    # athenaeum#947 — reference rewrite, not stub pages: a content-bearing
-    # stub would get re-embedded and create a near-duplicate retrieval hit).
-    # ``resolve_merge`` has already confirmed ``repo_root`` is a real git
-    # repo before calling this function, so ``git rm`` is expected to
-    # succeed for every source that is actually tracked. A source that is
-    # NOT tracked (e.g. written straight to disk and never committed) falls
-    # back to a plain ``unlink`` for THAT FILE ONLY — reasoning: the file is
-    # still inside a git repo, so Commit A above already captured its
-    # content if it was staged there; an untracked file was never
-    # recoverable via git regardless of which delete mechanism removes it,
-    # so the fallback does not weaken the recoverability guarantee for any
-    # file git actually knew about.
-    deleted_paths: list[str] = []
-    git_rm_staged_rel: list[str] = []
-    unlink_fallback_rel: list[str] = []
+    # Step 5 — TOMBSTONE the old source wiki files (issue athenaeum#716 — "a
+    # merge may destroy renderings, never observations"). Never a
+    # ``git rm``, never a bare ``Path.unlink()``: the file stays on disk,
+    # ``git add`` stages the IN-PLACE frontmatter edit regardless of
+    # whether the source was already tracked (unlike a delete, a modify-or-
+    # create add needs no tracked/untracked fallback branch at all).
+    tombstoned_paths: list[str] = []
+    tombstone_staged_rel: list[str] = []
     for src in folded_sources:
         src_path = Path(src)
         try:
-            # Issue athenaeum#748: never delete a source whose resolved path IS
-            # the canonical target page, even if it slipped past the slug-based
-            # ``folded_sources`` filter above (e.g. a differently-spelled path
-            # that resolves to the same file). The slug filter is the primary
-            # guard; this path-equality check is defense in depth so no code
-            # path can delete the page being folded into.
+            # Issue athenaeum#748: never tombstone a source whose resolved path
+            # IS the canonical target page, even if it slipped past the
+            # slug-based ``folded_sources`` filter above (e.g. a differently
+            # -spelled path that resolves to the same file). The slug filter
+            # is the primary guard; this path-equality check is defense in
+            # depth so no code path can tombstone the page being folded into.
             if _same_file(src_path, target_path):
                 continue
             if not src_path.is_file():
@@ -1477,44 +1833,52 @@ def _apply_fold_into_existing(
             except ValueError:
                 log.warning(
                     "pending_merges: folded source %s is outside git repo %s; "
-                    "skipping delete (git-only removal cannot be guaranteed)",
+                    "skipping tombstone (git-only modification cannot be "
+                    "guaranteed)",
                     src_path,
                     repo_root,
                 )
                 continue
-            rm_result = _git(repo_root, "rm", "--quiet", "-f", "--", rel_src)
-            if rm_result.returncode == 0:
-                git_rm_staged_rel.append(rel_src)
-                deleted_paths.append(src)
+            stamped_meta = stamp_tombstone(source_metas[src], target_slug)
+            _, src_body = parse_frontmatter(source_texts[src])
+            atomic_write_text(src_path, render_frontmatter(stamped_meta) + src_body)
+            add_result = _git(repo_root, "add", "--", rel_src)
+            if add_result.returncode == 0:
+                tombstone_staged_rel.append(rel_src)
             else:
                 log.warning(
-                    "pending_merges: git rm failed for folded source %s (%s); "
-                    "falling back to unlink",
+                    "pending_merges: git add failed for tombstoned source "
+                    "%s (%s)",
                     src_path,
-                    rm_result.stderr.strip(),
+                    add_result.stderr.strip(),
                 )
-                src_path.unlink()
-                unlink_fallback_rel.append(rel_src)
-                deleted_paths.append(src)
+            tombstoned_paths.append(src)
         except OSError as exc:
             log.warning(
-                "pending_merges: could not delete folded source %s: %s", src_path, exc
+                "pending_merges: could not tombstone folded source %s: %s",
+                src_path,
+                exc,
             )
 
-    # Step 6 — best-effort vector purge for the deleted slugs.
+    # Step 6 — best-effort vector purge for the tombstoned slugs (unchanged
+    # — this is what keeps a tombstone non-polluting on day one rather than
+    # waiting for the next reindex to notice ``embedded: false``).
     _purge_vector_ids(
-        [s for s in folded_slugs if any(slugify(Path(p).stem) == s for p in deleted_paths)],
+        [
+            s
+            for s in folded_slugs
+            if any(slugify(Path(p).stem) == s for p in tombstoned_paths)
+        ],
         cache_dir=cache_dir,
         search_backend=search_backend,
         embedding_model=embedding_model,
     )
 
     # --- Commit B: the fold itself, as its own commit (issue athenaeum#947).
-    # ``git rm`` already staged the tracked deletes above; here we additionally
-    # `git add` the target page (rewritten in steps 1/3), any wikilink-rewritten
-    # siblings (step 4), and any unlink-fallback deletes (step 5's untracked
-    # branch) — each a SPECIFIC path, never a directory-wide or repo-wide add,
-    # so this commit cannot silently absorb unrelated dirty state either.
+    # `git add` the target page (rewritten in steps 1/3), any wikilink-
+    # rewritten siblings (step 4), and every tombstoned source (step 5) —
+    # each a SPECIFIC path, never a directory-wide or repo-wide add, so this
+    # commit cannot silently absorb unrelated dirty state either.
     add_rel_paths = list(
         dict.fromkeys(
             [str(target_path.resolve().relative_to(repo_root_resolved))]
@@ -1522,12 +1886,12 @@ def _apply_fold_into_existing(
                 str(p.resolve().relative_to(repo_root_resolved))
                 for p in rewritten_touched
             ]
-            + unlink_fallback_rel
+            + tombstone_staged_rel
         )
     )
     if add_rel_paths:
         _git(repo_root, "add", "--", *add_rel_paths)
-    commit_b_rel_paths = list(dict.fromkeys(add_rel_paths + git_rm_staged_rel))
+    commit_b_rel_paths = add_rel_paths
     if commit_b_rel_paths:
         staged_b = _git(
             repo_root, "diff", "--cached", "--quiet", "--", *commit_b_rel_paths
@@ -1545,7 +1909,10 @@ def _apply_fold_into_existing(
 
     return {
         "ok": True,
-        "folded_sources": deleted_paths,
+        "folded_sources": tombstoned_paths,
+        "link_details": link_details,
+        "canonical_content_hash": canonical_content_hash,
+        "coordinates_widened": coordinates_widened,
         "aliases_added": aliases_added,
         "links_rewritten": links_rewritten,
     }
@@ -1562,6 +1929,7 @@ def resolve_merge(
     search_backend: str | None = None,
     embedding_model: str | None = None,
     auto_applied: bool = False,
+    registry: DimensionRegistry = DEFAULT_REGISTRY,
 ) -> dict:
     """Mark a pending-merge block as resolved.
 
@@ -1592,38 +1960,42 @@ def resolve_merge(
               ``target_exists`` if the slug is already taken — including a
               MISCLASSIFIED create-kind proposal, as defense in depth.
             - ``"fold-into-existing"``: the target slug is the CANONICAL
-              existing page; sources fold INTO it. Writes
-              ``draft_merged_body`` to the existing target, rewrites every
-              inbound ``[[old-slug]]`` wikilink under ``wiki_root`` to the
-              canonical slug, adds the folded-away source slugs to the
-              canonical page's ``aliases:`` frontmatter (deduped), deletes
-              the old source wiki files, and (when ``cache_dir`` +
+              existing page; sources fold INTO it. Writes a coordinate-
+              widened ``draft_merged_body`` to the existing target, rewrites
+              every inbound ``[[old-slug]]`` wikilink under ``wiki_root`` to
+              the canonical slug, adds the folded-away source slugs to the
+              canonical page's ``aliases:`` frontmatter (deduped),
+              TOMBSTONES the old source wiki files in place (issue athenaeum#716
+              — ``status: folded`` / ``folded_into: <slug>`` / ``embedded:
+              false``; never deleted), and (when ``cache_dir`` +
               ``search_backend="vector"`` are supplied) purges their
               vectors from the vector store. ``target_exists`` is
               unreachable here for a correctly-classified proposal — the
               precheck at proposal time (`_classify_merge_write_kind`)
               already confirmed the slug exists. Issue athenaeum#947: the
-              delete step (and the target-page overwrite before it) is
+              tombstone step (and the target-page overwrite before it) is
               refused with ``no_git_repo`` — no file is touched, the
               checkbox is not flipped — unless ``wiki_root`` resolves
               (via ``git rev-parse --show-toplevel``) inside a git
-              repository, since the removal must stay recoverable via
-              plain ``git revert``/``git show`` (README.md's recovery
-              guarantee). When it does resolve, the fold lands as TWO
-              commits: a provenance snapshot of the target + sources
+              repository. The tombstone itself no longer NEEDS git to be
+              recoverable (the page is never removed), but the gate is kept
+              exactly as-is — it still protects the body overwrite and the
+              inbound-link rewrite the same way it always has (README.md's
+              recovery guarantee). When it does resolve, the fold lands as
+              TWO commits: a provenance snapshot of the target + sources
               taken before any write, then the fold itself. This gate
               applies ONLY to ``fold-into-existing`` — ``create-merged``
-              deletes nothing and is unaffected.
+              touches nothing else and is unaffected.
 
             Either way, on success a provenance record is appended (see
             :func:`athenaeum.provenance.record_merge_provenance`) naming
             the canonical slug, source paths, merge id, and write_kind.
             The source memories are NOT archived/deleted for
-            ``create-merged`` — the human reviews the wiki write before
-            any source deletion; ``fold-into-existing`` DOES delete the
-            (wiki-tree) source files as part of consolidation, since the
-            merge target already existed and review has already happened
-            at approval time.
+            ``create-merged`` — the human reviews the wiki write before any
+            source change; ``fold-into-existing`` TOMBSTONES the (wiki-tree)
+            source files in place (issue athenaeum#716 — never deleted) as part
+            of consolidation, since the merge target already existed and
+            review has already happened at approval time.
 
             ``"reject"`` flips the checkbox and writes an honest,
             non-directional ``merge_rejected_with:`` declaration into the
@@ -1637,7 +2009,7 @@ def resolve_merge(
             ``merges_path.parent``).
         cache_dir: Optional search-index cache dir. When supplied together
             with ``search_backend="vector"``, a ``fold-into-existing``
-            approve purges the deleted sources' vectors from the store
+            approve purges the tombstoned sources' vectors from the store
             (issue athenaeum#425 embedding hygiene). ``None`` (default) skips the
             purge — vector hygiene is opportunistic, never a hard
             dependency of resolving a merge.
@@ -1647,13 +2019,18 @@ def resolve_merge(
         embedding_model: Embedding model name passed through to the vector
             backend purge call, matching the model the live index was
             built with (see :class:`athenaeum.search.VectorBackend`).
+        registry: Dimension registry (issue athenaeum#716) used to decide
+            which separator dimensions a fold widens / narrowing-checks.
+            Defaults to :data:`athenaeum.dimensions.DEFAULT_REGISTRY` (the
+            kernel-only registry), matching
+            :func:`athenaeum.comparator.compare_pages`'s own default.
 
     Returns:
         ``{"ok": bool, "error_code": str | None, "message": str,
            "resolved_block": str | None}``. A ``fold-into-existing``
-        approve additionally sets ``"folded_sources"`` (the deleted source
-        paths), ``"aliases_added"`` (the new alias slugs recorded), and
-        ``"links_rewritten"`` (the count of sibling wiki files whose
+        approve additionally sets ``"folded_sources"`` (the tombstoned
+        source paths), ``"aliases_added"`` (the new alias slugs recorded),
+        and ``"links_rewritten"`` (the count of sibling wiki files whose
         inbound wikilinks were repointed).
     """
     if decision not in ("approve", "reject"):
@@ -1714,6 +2091,12 @@ def resolve_merge(
 
     warning: str | None = None
     extra_response: dict = {}
+    # Issue athenaeum#716: the fold-specific ledger keys (`folded_sources`,
+    # `aliases_added`, `links_rewritten` detail, `canonical_content_hash`,
+    # `coordinates_widened`), forwarded to `record_merge_provenance` below.
+    # Stays empty for `create-merged` and for `reject`, so neither write a
+    # single one of these fold-only keys onto their ledger record.
+    fold_ledger_extra: dict[str, Any] = {}
 
     # Apply the side-effect tied to the decision BEFORE flushing the file.
     if decision == "approve":
@@ -1784,12 +2167,13 @@ def resolve_merge(
                     "error_code": "no_git_repo",
                     "message": (
                         f"{root} is not inside a git repository; refusing to "
-                        "fold — a fold-into-existing approve deletes the "
-                        "folded-away source pages, and removal must be "
-                        "git-only so it stays recoverable via `git revert` "
-                        "(README.md's recovery guarantee). Initialize the "
-                        "knowledge root as a git repo before approving this "
-                        "merge."
+                        "fold — a fold-into-existing approve tombstones the "
+                        "folded-away source pages in place, and that write "
+                        "must stay git-only so the body overwrite and the "
+                        "inbound-link rewrite it also performs stay "
+                        "recoverable via `git revert` (README.md's recovery "
+                        "guarantee). Initialize the knowledge root as a git "
+                        "repo before approving this merge."
                     ),
                     "resolved_block": None,
                 }
@@ -1802,6 +2186,7 @@ def resolve_merge(
                 cache_dir=cache_dir,
                 search_backend=search_backend,
                 embedding_model=embedding_model,
+                registry=registry,
             )
             if not fold_result["ok"]:
                 return {
@@ -1814,6 +2199,13 @@ def resolve_merge(
                 "folded_sources": fold_result["folded_sources"],
                 "aliases_added": fold_result["aliases_added"],
                 "links_rewritten": fold_result["links_rewritten"],
+            }
+            fold_ledger_extra = {
+                "folded_sources": fold_result["folded_sources"],
+                "aliases_added": fold_result["aliases_added"],
+                "links_rewritten": fold_result["link_details"],
+                "canonical_content_hash": fold_result["canonical_content_hash"],
+                "coordinates_widened": fold_result["coordinates_widened"],
             }
         else:
             # ``create-merged`` path — UNCHANGED behavior. A misclassified
@@ -1843,6 +2235,7 @@ def resolve_merge(
             canonical_slug=target_slug,
             source_paths=list(target_pm.sources),
             auto_applied=auto_applied,
+            **fold_ledger_extra,
         )
     elif decision == "reject" and len(target_pm.sources) >= 2:
         # Issue athenaeum#715 (restating athenaeum#658's D3): a rejection means "these

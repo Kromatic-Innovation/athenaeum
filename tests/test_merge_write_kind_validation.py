@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-from athenaeum.models import slugify
+from athenaeum.models import is_tombstone, parse_frontmatter, slugify, tombstone_target
 from athenaeum.pending_merges import (
     classify_write_kind,
     find_identity_pages,
@@ -264,8 +264,12 @@ class TestTargetPageNeverDeleted:
         # The aliasing source was skipped by the guard, not folded away.
         assert alias_link.exists()
         assert str(alias_link) not in result["folded_sources"]
-        # The genuine other source WAS folded away.
-        assert not other.exists()
+        # The genuine other source was folded away -- tombstoned, not
+        # deleted (issue athenaeum#716).
+        assert other.exists()
+        other_meta, _ = parse_frontmatter(other.read_text(encoding="utf-8"))
+        assert is_tombstone(other_meta)
+        assert tombstone_target(other_meta) == "canonical"
         assert result["folded_sources"] == [str(other)]
 
 
@@ -430,7 +434,13 @@ class TestIdentityTargetResolution:
         assert result["ok"] is True
         assert canonical.exists()
         assert "merged prose" in canonical.read_text(encoding="utf-8")
-        assert not dup.exists()
+        assert dup.exists()  # tombstoned, not deleted (issue athenaeum#716)
+        dup_meta, _ = parse_frontmatter(dup.read_text(encoding="utf-8"))
+        assert is_tombstone(dup_meta)
+        # folded_into carries target_slug (slugify(merge_target_name)), the
+        # same identifier aliases:/wikilink-rewrite already use -- not the
+        # canonical file's own uid-prefixed stem.
+        assert tombstone_target(dup_meta) == "learn-s-i-m-p-l-e"
         assert result["folded_sources"] == [str(dup)]
         assert not (wiki / "learn-s-i-m-p-l-e.md").exists()
 

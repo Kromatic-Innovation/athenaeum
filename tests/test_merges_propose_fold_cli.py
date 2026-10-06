@@ -17,6 +17,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 
 from athenaeum.cli import main as cli_main
+from athenaeum.models import is_tombstone, parse_frontmatter, tombstone_target
 from athenaeum.pending_merges import parse_pending_merges, resolve_merge
 from tests.conftest import init_git_repo
 
@@ -412,10 +413,15 @@ def test_queued_proposal_folds_correctly_via_resolve_merge(tmp_path: Path) -> No
     result = resolve_merge(merges_path, pm_id, "approve", wiki_root=wiki)
 
     assert result["ok"] is True
-    # Canonical page survived; the two source duplicates were folded away.
+    # Canonical page survived; the two source duplicates were folded away --
+    # tombstoned in place, not deleted (issue athenaeum#716).
     assert canonical.exists()
-    assert not src_b.exists()
-    assert not src_c.exists()
+    assert src_b.exists()
+    assert src_c.exists()
+    for src in (src_b, src_c):
+        src_meta, _ = parse_frontmatter(src.read_text(encoding="utf-8"))
+        assert is_tombstone(src_meta)
+        assert tombstone_target(src_meta) == "maria-springer"
     assert set(result["folded_sources"]) == {str(src_b), str(src_c)}
     # The canonical body prose is preserved (a fold does not rewrite it).
     assert "RICH canonical body" in canonical.read_text(encoding="utf-8")
@@ -432,9 +438,9 @@ def test_queued_proposal_folds_correctly_via_resolve_merge(tmp_path: Path) -> No
 def test_queued_uid_prefixed_fold_actually_folds_on_approve(tmp_path: Path) -> None:
     """End-to-end reproduction: propose-fold --apply into a `<uid>-<slug>.md`
     canonical page, then approve. The proposal must derive
-    ``write_kind="fold-into-existing"`` and the approve must DELETE the source
-    pages into the existing canonical file -- not create a second page beside
-    it and leave every source in place."""
+    ``write_kind="fold-into-existing"`` and the approve must FOLD the source
+    pages into the existing canonical file (tombstoning them, issue athenaeum#716)
+    -- not create a second page beside it and leave every source untouched."""
     wiki = tmp_path / "wiki"
     wiki.mkdir()
     canonical = wiki / "f351b6a1-learn-s-i-m-p-l-e.md"
@@ -474,10 +480,17 @@ def test_queued_uid_prefixed_fold_actually_folds_on_approve(tmp_path: Path) -> N
     result = resolve_merge(merges_path, queued.id, "approve", wiki_root=wiki)
 
     assert result["ok"] is True
-    # Folded INTO the existing uid-prefixed page: sources gone, canonical kept.
+    # Folded INTO the existing uid-prefixed page: sources tombstoned (never
+    # deleted, issue athenaeum#716), canonical kept.
     assert canonical.exists()
-    assert not src_b.exists()
-    assert not src_c.exists()
+    assert src_b.exists()
+    assert src_c.exists()
+    for src in (src_b, src_c):
+        src_meta, _ = parse_frontmatter(src.read_text(encoding="utf-8"))
+        assert is_tombstone(src_meta)
+        # folded_into carries target_slug (slugify(merge_target_name), here
+        # the canonical's human-readable name) -- not its uid-prefixed stem.
+        assert tombstone_target(src_meta) == "learn-s-i-m-p-l-e"
     assert set(result["folded_sources"]) == {str(src_b), str(src_c)}
     # No 29th page beside it -- the bare-slug file must never be created.
     assert not (wiki / "learn-s-i-m-p-l-e.md").exists()
