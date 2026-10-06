@@ -15,7 +15,10 @@ Athenaeum is an **open-source Python library** (Apache 2.0) published to PyPI. I
   - `anthropic>=0.39.0,<1.0` — "pre-1.0 and ships breaking changes freely"
   - `pydantic>=2.0,<3.0`
   - `chromadb>=0.5.0,<2.0` — "has shipped sqlite schema migrations in minor bumps"
-  - `fastmcp>=2.0.0,<4.0` — post-1.0 but still iterating on its MCP protocol surface
+  - `fastmcp>=2.0.0,<5.0` — post-1.0 but still iterating on its MCP protocol surface
+  - `mcp>=2.0,<3.0` — a FLOOR as much as a cap: `cli_tool_bridge.py` imports the
+    `mcp` SDK directly and uses the 2.x `on_list_tools`/`on_call_tool` registration
+    surface, which does not exist on 1.x (and `fastmcp` 3.x declares `mcp<2.0`)
   - **Verify these against `pyproject.toml` quarterly** (see §3.3) — this table is a snapshot, not the source of truth; `pyproject.toml` is.
 - Third-party GitHub Actions are **pinned to SHAs** in both CI and release workflows for supply-chain hygiene.
 
@@ -384,7 +387,8 @@ A "major bump" here is sometimes Dependabot proposing to raise the upper-bound c
 - **Anthropic 1.0** when it ships → schedule a focused PR. Audit breaking changes. Bump the cap and run the full test matrix.
 - **Pydantic 3.0** → same.
 - **Chromadb 2.0** → review SQLite migration path; consumers' existing databases must keep working.
-- **Fastmcp 3.0** is **not** a future trigger — the current cap is `fastmcp>=2.0.0,<4.0` (`pyproject.toml:45,54`), so a `3.x` release resolves inside the existing range and is eligible for the ordinary minor-bump path in §3.1 (still hold-listed there, so it requires a human eye, but it does not need a cap-bump PR). **Fastmcp 4.0** is the actual future cap-bump trigger — audit MCP protocol changes when it ships.
+- **Fastmcp 4.0** was the trigger named here and it has now been taken: the cap is `fastmcp>=2.0.0,<5.0` (`pyproject.toml:53,69`), raised from `<4.0` when the bridge was ported to the `mcp` 2.x API. So neither a `3.x` nor a `4.x` release needs a cap-bump PR — both resolve inside the existing range and take the ordinary minor-bump path in §3.1 (still hold-listed there, so still a human eye). **Fastmcp 5.0** is the next cap-bump trigger — audit MCP protocol changes when it ships.
+- **Mcp 3.0** is a cap-bump trigger in its own right, and a sharper one than the others here, because the cap is paired with a floor: `mcp>=2.0,<3.0` is the registration surface `cli_tool_bridge.py` codes against directly, and `mcp` removed the pre-2.0 `@server.list_tools()`/`@server.call_tool()` decorators in exactly one major step. A 3.0 needs the bridge's handler registration audited against whatever surface it exposes, plus `tests/test_cli_tool_bridge_mcp_api_guard.py` updated to assert it — not just the cap moved.
 
 For all of these, the worktree-internal version cap shift is the actual change; the dependency bump is a consequence.
 

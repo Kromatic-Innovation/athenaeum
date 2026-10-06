@@ -34,6 +34,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`cli_tool_bridge.py` now targets the `mcp` 2.x API, and the `mcp<2.0` pin
+  is lifted (issue athenaeum#1954).** The bridge child registered its
+  `tools/list` / `tools/call` handlers with the pre-2.0 SDK's
+  `@server.list_tools()` / `@server.call_tool()` decorators, which `mcp` 2.x
+  removed from `mcp.server.lowlevel.Server` entirely. It now passes the 2.x
+  `on_list_tools` / `on_call_tool` constructor callbacks instead, which take
+  `(ServerRequestContext, params)` and return a full `types.ListToolsResult` /
+  `types.CallToolResult` rather than a bare list. Nothing `claude -p` acts on
+  changes: 2.x's result models serialize some additive fields 1.x never sent
+  (`ttlMs`/`cacheScope`/`resultType`), which a client that does not know them
+  ignores. The never-raise contract is unchanged too — the bridge's own error
+  strings (a dead socket, a raising executor) are still ordinary text
+  `tool_result`s with `is_error` False, identical to the api-mode path in
+  `tests.evals.rollout.run_api_tool_loop`.
+
+  athenaeum#1953's stopgap pins are lifted with it: `fastmcp` goes back to
+  `>=2.0.0,<5.0` and `mcp` is now declared `>=2.0,<3.0` — a FLOOR rather than
+  that issue's `<2.0` ceiling, because the 2.x registration surface does not
+  exist on `mcp` 1.x, so an install that drifted *back* (via `fastmcp` 3.x,
+  which declares `mcp<2.0`) would break the bridge in the other direction.
+  `requirements-ci.lock` moves with them: `mcp` 1.29.0 -> 2.3.0 (plus its new
+  `mcp-types` split-out), `fastmcp`/`fastmcp-slim` 3.4.5 -> 4.0.11, and
+  `uncalled-for` 0.3.2 -> 0.4.0, which `fastmcp-slim` 4.x requires at `>=0.4.0`
+  — four packages, which is the whole forced closure of the bump.
+  `tests/test_cli_tool_bridge_mcp_api_guard.py` is inverted to assert the 2.x
+  surface (and the *absence* of the retired decorators) instead of retired,
+  since the drift risk simply reversed direction.
+  `tests/test_cli_tool_bridge_roundtrip.py`'s three existing tests pass
+  unmodified against `mcp==2.3.0` — the 2.x client API (`ClientSession`,
+  `mcp.client.stdio`) is source-compatible for what the fixtures use, so no
+  fixture needed editing.
+
+  One behaviour the 2.x surface does **not** carry over for free is restored
+  explicitly: the pre-2.0 `@server.call_tool()` decorator defaulted to
+  `validate_input=True` and ran `jsonschema.validate` against the served
+  `inputSchema` before dispatching, so a call violating the schema became an
+  `is_error` result and never reached the Host's `tool_executor`. `mcp` 2.x has
+  no stdio equivalent (`Server`'s `get_tool_input_schema` hook is read only by
+  `Mcp-Param-*` header validation on the Streamable-HTTP path), so the bridge
+  now performs that validation itself — same trigger, same
+  `Input validation error: ...` message, same `is_error`, Host still never
+  contacted. Left out, the port would have silently widened the Host
+  executor's input contract to inputs it had never been handed. `jsonschema`
+  is declared alongside `mcp` since the bridge now imports it directly, and
+  two new round-trip tests cover both directions (reject the violation,
+  still dispatch a conforming call under its spec name).
+
 - **`search_backend` (hybrid vector + FTS5) is now the shipped default
   everywhere the code defaulted to `fts5` (issue athenaeum#1825, operator
   ruling on issue athenaeum#1736, 2026-09-18).** `athenaeum.config._DEFAULTS`
@@ -79,6 +126,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   breakdown) whenever a RESTRICTED caller's Layer-C audience re-check removes
   an already-ranked result, so a short list is distinguishable from a miss —
   a count of 0 renders nothing.
+
+- **`docs/design/contradiction-detection.md` and `docs/design/conflict-resolution.md`
+  no longer claim the C1-C4 contradiction detector is live (issue
+  athenaeum#715).** Both docs' "Status" sections dated from athenaeum#715's
+  phase 3 and said the detector was "still the old path" pending its own
+  retirement follow-up. Issue athenaeum#1256 (PR athenaeum#1974,
+  2026-10-05) has since retired it: `merge.py` no longer calls
+  `contradictions.detect_contradictions`, and that function now runs only
+  under `athenaeum measure shadow-parity`. Both docs are corrected to
+  describe the unified five-verdict comparator as the current state —
+  including that the raw-cluster-domain bridge (`athenaeum.cluster_comparator`,
+  issue athenaeum#1255) remains dark pending athenaeum#1946, a tracked,
+  operator-ruled non-blocker, so `athenaeum.retire` holds conservatively
+  rather than either detector running in parallel. No source change; this
+  closes the last open item of a fresh full re-sweep of athenaeum#715's 23
+  acceptance criteria against `develop` @ `b80bb775` — the other 22 were
+  independently re-verified as already met by test node-id.
 
 - **`mcp` can no longer silently resolve to a major `cli_tool_bridge.py`
   doesn't support (issue athenaeum#1953).** `cli_tool_bridge.py`
