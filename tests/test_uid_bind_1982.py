@@ -32,21 +32,33 @@ One test class per acceptance criterion this file covers:
   ``name:`` differs from the file's own still binds by uid; the mismatch
   is recorded on ``ProcessingResult.uid_bind_mismatch``, not refused.
 
-AC4 (the run summary's own ``uid_bound=`` count) is covered directly by
-``TestRunSummaryField`` in `tests/test_librarian_run_summary.py`-adjacent
-style, asserting the ``RunContext``/entity-profile wiring here where the
-counters are cheapest to exercise without a full ``run()`` fixture.
+- ``TestRunSummarySurfacesUidBound`` (AC4): the uid-bound count appears on
+  the RENDERED human-readable run-summary line -- the literal `NC NU NE NF`
+  snapshot message a human reads diagnosing a run (the surface the issue's
+  own "0C 0U 11E 0F" observation was read off), for BOTH the normal
+  end-of-run snapshot and the interrupted/partial-run snapshot. Asserted
+  against the actual rendered text via a real :func:`athenaeum.librarian.run`
+  call, not just the counter attribute -- a test that only checked
+  ``ctx.total_uid_bound`` could not see a gap at this specific surface.
 """
 
 from __future__ import annotations
 
+import os
+import signal
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
-from athenaeum.librarian import process_one
+from athenaeum.librarian import process_one, run
 from athenaeum.models import EntityIndex, RawFile, TokenUsage
+
+# Reuse the deadline suite's fixtures verbatim -- same run() harness, same
+# "mock process_one, read the git-commit subject back" idiom
+# TestRunSummarySurfacesUidBound needs below.
+from tests.test_librarian_deadline import _last_subject, _seed_knowledge_root
 
 VALID_TYPES = ["person", "company", "concept", "reference"]
 VALID_ACCESS = ["open", "internal", "confidential", "personal"]
@@ -255,3 +267,109 @@ class TestUidBindNameMismatch:
         # The bound page's OWN name wins over the file's disagreeing name --
         # the action is never attributed to "Patricia".
         assert captured_actions[0].name == "Pat"
+
+
+class TestRunSummarySurfacesUidBound:
+    """AC4: the uid-bound count is on the RENDERED human-readable snapshot
+    line -- not just the structured ``run_profile``/durable-ledger field.
+
+    Drives a real :func:`athenaeum.librarian.run`, with ``process_one``
+    replaced by a stand-in that reports ``uid_bound`` on its
+    ``ProcessingResult``-shaped return, and reads the actual committed
+    snapshot subject back -- the same thing a human reads when diagnosing a
+    run.
+    """
+
+    def test_normal_completion_snapshot_carries_the_uid_bound_count(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = _seed_knowledge_root(tmp_path, n_files=1)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+        monkeypatch.delenv("ATHENAEUM_MAX_API_CALLS", raising=False)
+
+        def _fake_process_one(raw, index, wiki_root_arg, client, *args, **kwargs):
+            return SimpleNamespace(
+                created=[],
+                updated=["pat-002"],
+                escalated=[],
+                skipped=[],
+                uid_bound=1,
+            )
+
+        monkeypatch.setattr("athenaeum.librarian.process_one", _fake_process_one)
+
+        rc = run(
+            raw_root=root / "raw",
+            wiki_root=root / "wiki",
+            knowledge_root=root,
+            max_api_calls=100,
+            max_runtime=1000,
+        )
+
+        assert rc == 0
+        subject = _last_subject(root)
+        assert subject.startswith("librarian: processed 1 file(s)")
+        # The literal C/U/E/F line, now carrying uid-bound beside it.
+        assert "(0C 1U 0E 0F 1B)" in subject
+
+    def test_interrupted_run_snapshot_also_carries_the_uid_bound_count(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The OTHER snapshot site (``librarian.py``'s signal-interrupt
+        partial-run commit, issue athenaeum#337) -- a SIGTERM mid-run, same
+        harness as ``test_librarian_interrupt.py``, not the wall-clock
+        deadline path (that one renders the ordinary ``processed N
+        file(s)`` message, already covered by the normal-completion test
+        above)."""
+        root = _seed_knowledge_root(tmp_path, n_files=3)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
+        monkeypatch.delenv("ATHENAEUM_MAX_API_CALLS", raising=False)
+
+        state = {"n": 0}
+
+        def _fake_process_one(raw, index, wiki_root_arg, client, *args, **kwargs):
+            state["n"] += 1
+            page = (root / "wiki") / f"entity-{state['n']}.md"
+            page.write_text(f"# Entity {state['n']}\n", encoding="utf-8")
+            if state["n"] == 2:
+                # Signal fires mid-call, BEFORE this (second) call returns --
+                # file 1's result below is already folded into ctx.total_*
+                # by the time it arrives, mirroring
+                # test_librarian_interrupt.py's own interrupt_on=2 shape.
+                os.kill(os.getpid(), signal.SIGTERM)
+            return SimpleNamespace(
+                created=[],
+                updated=["pat-002"],
+                escalated=[],
+                skipped=[],
+                uid_bound=1,
+            )
+
+        monkeypatch.setattr("athenaeum.librarian.process_one", _fake_process_one)
+
+        # Safety net mirroring test_librarian_interrupt.py's sentinel: if
+        # run() ever regresses and fails to install its own handler, this
+        # turns the self-sent signal into a clean AssertionError instead of
+        # killing the whole pytest process.
+        def _sentinel(signum: int, frame: object) -> None:
+            raise AssertionError(
+                f"run() did not install a signal {signum} handler"
+            )
+
+        prev = signal.signal(signal.SIGTERM, _sentinel)
+        try:
+            with pytest.raises(SystemExit) as excinfo:
+                run(
+                    raw_root=root / "raw",
+                    wiki_root=root / "wiki",
+                    knowledge_root=root,
+                    max_api_calls=100,
+                    install_signal_handlers=True,
+                )
+        finally:
+            signal.signal(signal.SIGTERM, prev)
+
+        assert excinfo.value.code == 124
+        subject = _last_subject(root)
+        assert subject.startswith("librarian: partial run (interrupted after 1 file(s)")
+        assert "0C 1U 0E 0F 1B)" in subject

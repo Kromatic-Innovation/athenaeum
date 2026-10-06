@@ -7775,7 +7775,15 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                 FilesystemStore(ctx.knowledge_root, {}).snapshot(
                     f"librarian: partial run (interrupted after {ctx.processed_count} "
                     f"file(s), {ctx.total_created}C {ctx.total_updated}U "
-                    f"{ctx.total_escalated}E {len(ctx.failed_files)}F)",
+                    f"{ctx.total_escalated}E {len(ctx.failed_files)}F "
+                    # Issue athenaeum#1982 AC4: uid-bound merges, as their own
+                    # count beside C/U/E/F -- this is the literal line a human
+                    # reads diagnosing a run (the surface the issue's own
+                    # "0C 0U 11E 0F" observation was read off), not just the
+                    # structured ``run_profile``/durable-ledger field above.
+                    # ``B`` for "uid-Bound" -- unambiguous beside the existing
+                    # four letters, none of which it collides with.
+                    f"{ctx.total_uid_bound}B)",
                 )
                 sys.exit(EXIT_EXTERNAL_KILL)
 
@@ -8561,7 +8569,12 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     msg = (
                         f"librarian: processed {_processed_n} file(s) "
                         f"({ctx.total_created}C {ctx.total_updated}U "
-                        f"{ctx.total_escalated}E {len(ctx.failed_files)}F)"
+                        f"{ctx.total_escalated}E {len(ctx.failed_files)}F "
+                        # Issue athenaeum#1982 AC4: same addition, same
+                        # rationale, as the partial-run snapshot above --
+                        # both sites must carry it so an interrupted run is
+                        # not the only one missing the count.
+                        f"{ctx.total_uid_bound}B)"
                     )
                     FilesystemStore(ctx.knowledge_root, {}).snapshot(msg)
             finally:
