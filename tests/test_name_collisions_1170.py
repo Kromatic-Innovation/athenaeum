@@ -650,30 +650,25 @@ class TestResolveNameCollisionsIdempotency:
         assert len(second_blocks) == 1
 
     def test_second_run_after_automerge_finds_no_collision(self, tmp_path: Path) -> None:
-        """KNOWN CROSS-LANE GAP (issue athenaeum#716, lane 716-B) — this
-        docstring's ORIGINAL claim ("the fold deletes the non-canonical
-        source, so the second scan finds zero collisions") is no longer
-        true: fold now TOMBSTONES the source in place instead of deleting
-        it, so the two pages still share ``(name, type)`` and
-        :func:`scan_name_collisions` (``name_collisions.py`` — out of this
-        lane's file surface) re-detects them as a "collision" on every
-        subsequent scan, forever.
+        """Issue athenaeum#716 cross-lane fix (originally reported by lane
+        716-B, closed by lane 716-D): a successful ``fold-into-existing``
+        auto-merge TOMBSTONES the non-canonical source in place rather than
+        deleting it, so without this fix the two pages would still share
+        ``(name, type)`` and :func:`scan_name_collisions` would re-detect
+        them as a "collision" on every subsequent scan, forever (classified
+        ``ambiguous`` rather than re-merged, since the tombstone's three new
+        frontmatter keys are not identity/provenance keys
+        :func:`classify_collision` already ignores — no crash, no
+        corruption, but a permanent false-positive queued item).
 
-        It is NOT silently re-merged or corrupted, though: the tombstone's
-        three new frontmatter keys (``status``/``folded_into``/``embedded``)
-        are not in ``name_collisions._IGNORED_FRONTMATTER_KEYS``, so
-        :func:`classify_collision` reads them as "this page carries
-        information the canonical doesn't" and classifies the pair
-        ``ambiguous`` — which means ``auto_merge`` never re-attempts the
-        fold (and so never reaches this lane's new
-        ``fold_source_already_tombstoned`` refusal either). The net, actual
-        effect is a permanent false-positive ``ambiguous``/``queued`` report
-        on an already-resolved pair, not a crash or a data change — this
-        test pins exactly THAT behavior so it does not silently drift
-        further. The real fix belongs in ``name_collisions.py`` (teach
-        ``scan_name_collisions`` to skip tombstones, or add the three keys
-        to ``_IGNORED_FRONTMATTER_KEYS``) and is reported upward rather than
-        made here."""
+        The fix: :func:`scan_name_collisions` now skips tombstoned pages
+        outright (issue athenaeum#716 — a tombstone is not live content and
+        must not compete for a ``(name, type)`` slot, the same grounds it is
+        already excluded from every index and invisible to ``recall``). This
+        test now pins the CORRECT behavior: a second scan after a successful
+        auto-merge finds the tombstoned source has dropped out of its
+        collision group entirely, so the group's size falls back below 2 and
+        the pair is no longer reported as a collision at all."""
         wiki = tmp_path / "wiki"
         _write_page(
             wiki, "acme.md", uid="u1", name="Acme", type_="company", body="Real content."
@@ -691,12 +686,14 @@ class TestResolveNameCollisionsIdempotency:
         merges_before = (wiki / "_pending_merges.md").read_text(encoding="utf-8")
 
         second = resolve_name_collisions(wiki, auto_merge=True, dry_run=False)
-        # Pinned regression (see docstring): still "detected", but
-        # reclassified ambiguous rather than re-merged — no write, no crash.
-        assert second["collisions"] == 1
+        # Corrected behavior: the tombstoned source is invisible to the
+        # scanner, so its (now singleton) group is not a collision at all —
+        # not merely reclassified ambiguous.
+        assert second["collisions"] == 0
         assert second["unambiguous"] == 0
-        assert second["ambiguous"] == 1
+        assert second["ambiguous"] == 0
         assert second["merged"] == 0
+        assert second["queued"] == 0
         assert (wiki / "acme.md").read_text(encoding="utf-8") == corpus_before
         assert (wiki / "_pending_merges.md").read_text(encoding="utf-8") == merges_before
 
