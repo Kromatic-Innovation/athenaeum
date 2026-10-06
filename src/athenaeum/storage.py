@@ -60,6 +60,7 @@ corpus policy for a specific entity beyond what ``storage.mapping`` says.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -349,6 +350,45 @@ def corpus_policy_for_class(
 def is_embedded(entity_class: str | None, config: dict[str, Any] | None) -> bool:
     """Whether pages of *entity_class* are embedded into the index."""
     return corpus_policy_for_class(entity_class, config).embedded
+
+
+def page_embedding_disabled(meta: Mapping[str, Any] | None) -> bool:
+    """Whether *meta* carries a page-level ``embedded: false`` override (issue athenaeum#716).
+
+    This is the per-page counterpart to :func:`is_embedded`'s class-level
+    corpus policy. The shipped mechanism resolved ``embedded`` on entity
+    class + config ONLY — there was no page-level read of an ``embedded:``
+    frontmatter key anywhere on the read/index path before this issue (an
+    athenaeum#716 external design review finding). Negative-only BY
+    CONSTRUCTION: only the literal bool ``False`` triggers an override;
+    ``embedded: true``, any other value, or the key's absence all return
+    ``False`` here — see :func:`page_is_embedded` for why a page can never
+    use this to force itself INTO an index its class is excluded from.
+    General-purpose, not fold-specific: a wiki-dedup tombstone
+    (:func:`athenaeum.models.stamp_tombstone`) is the first consumer, but
+    athenaeum#718's cold-tier demotion is meant to reuse this same seam.
+    """
+    return isinstance(meta, Mapping) and meta.get("embedded") is False
+
+
+def page_is_embedded(
+    meta: Mapping[str, Any] | None,
+    entity_class: str | None,
+    config: dict[str, Any] | None,
+) -> bool:
+    """Final per-page embed decision: class policy AND the page override.
+
+    ``True`` only when the class-level policy (:func:`is_embedded`) allows it
+    AND the page itself has not opted out via ``embedded: false``
+    (:func:`page_embedding_disabled`). There is no code path here that can
+    turn a class-level ``False`` into ``True`` — a page cannot set
+    ``embedded: true`` to escape an ``excluded`` adapter, or any class whose
+    corpus policy already says no, by setting its own frontmatter (issue
+    athenaeum#716 external review: "note the asymmetry deliberately").
+    """
+    if page_embedding_disabled(meta):
+        return False
+    return is_embedded(entity_class, config)
 
 
 def is_recallable(entity_class: str | None, config: dict[str, Any] | None) -> bool:

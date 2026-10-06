@@ -20,6 +20,8 @@ from athenaeum.storage import (
     is_excluded,
     is_merge_eligible,
     is_recallable,
+    page_embedding_disabled,
+    page_is_embedded,
     register_adapter,
     resolve_adapter_for_class,
     surface_root_for_class,
@@ -132,6 +134,61 @@ class TestMappingToExcluded:
         root = surface_root_for_class("pii", config, tmp_path)
         assert root == tmp_path / "excluded"
         assert (tmp_path / "wiki") not in root.parents and root != tmp_path / "wiki"
+
+
+# ---------------------------------------------------------------------------
+# Per-page ``embedded`` override (issue athenaeum#716) — negative-only, no class
+# dependency needed to read the page-level flag. See tests/test_search.py /
+# tests/test_storage_enforcement.py for the index-build / recall INTEGRATION
+# of these same predicates; this class is unit coverage of the predicates in
+# isolation.
+# ---------------------------------------------------------------------------
+
+
+class TestPageEmbeddingDisabled:
+    def test_false_when_meta_is_none_or_empty(self) -> None:
+        assert page_embedding_disabled(None) is False
+        assert page_embedding_disabled({}) is False
+
+    def test_true_only_for_literal_false(self) -> None:
+        assert page_embedding_disabled({"embedded": False}) is True
+
+    def test_false_for_true_or_absent_or_other_values(self) -> None:
+        # Negative-only: anything other than the literal bool False is a
+        # no-op, including the string "false" (not the same object/type as
+        # the bool) and a page that simply never mentions the key.
+        assert page_embedding_disabled({"embedded": True}) is False
+        assert page_embedding_disabled({"name": "x"}) is False
+        assert page_embedding_disabled({"embedded": "false"}) is False
+        assert page_embedding_disabled({"embedded": None}) is False
+
+
+class TestPageIsEmbedded:
+    def test_default_surface_no_override_is_embedded(self) -> None:
+        assert page_is_embedded({"name": "x"}, "person", None) is True
+
+    def test_page_override_suppresses_an_otherwise_embedded_class(self) -> None:
+        meta = {"name": "x", "embedded": False}
+        assert page_is_embedded(meta, "person", None) is False
+
+    def test_page_override_true_cannot_force_an_excluded_class(self) -> None:
+        # The asymmetry: a page under a class mapped to the all-false
+        # ``excluded`` adapter cannot escape by declaring ``embedded: true``
+        # on itself (issue athenaeum#716 external review: "note the asymmetry
+        # deliberately").
+        config = {"storage": {"mapping": {"pii": "excluded"}}}
+        meta = {"name": "x", "embedded": True}
+        assert page_is_embedded(meta, "pii", config) is False
+
+    def test_page_override_false_on_an_excluded_class_stays_excluded(self) -> None:
+        config = {"storage": {"mapping": {"pii": "excluded"}}}
+        meta = {"name": "x", "embedded": False}
+        assert page_is_embedded(meta, "pii", config) is False
+
+    def test_no_override_on_an_embedded_class_stays_embedded(self) -> None:
+        config = {"storage": {"mapping": {"pii": "excluded"}}}
+        meta = {"name": "x"}
+        assert page_is_embedded(meta, "person", config) is True
 
 
 # ---------------------------------------------------------------------------
