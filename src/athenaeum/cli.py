@@ -125,6 +125,10 @@ _SUBCOMMAND_LOADERS: dict[str, tuple[str, str]] = {
         "athenaeum._cmd_decompose_page",
         "add_decompose_page_subparser",
     ),
+    "correct-notes": (
+        "athenaeum._cmd_correct_notes",
+        "add_correct_notes_subparser",
+    ),
     "retire-pages": ("athenaeum._cmd_retire", "add_retire_subparser"),
     "reconcile": ("athenaeum._cmd_reconcile", "add_reconcile_subparser"),
     "repair": ("athenaeum._cmd_repair", "add_repair_subparser"),
@@ -192,6 +196,7 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_bounce_contract import add_bounce_contract_subparser
     from athenaeum._cmd_calibration import add_calibration_subparser
     from athenaeum._cmd_context import add_context_subparser
+    from athenaeum._cmd_correct_notes import add_correct_notes_subparser
     from athenaeum._cmd_curate import add_curate_subparsers
     from athenaeum._cmd_decay import add_decay_subparser
     from athenaeum._cmd_decisions import add_decisions_subparser
@@ -251,6 +256,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_decay_subparser(subparsers)  # decay-sweep
     add_retire_subparser(subparsers)  # retire-pages (issue athenaeum#1625)
     add_decompose_page_subparser(subparsers)  # decompose-page (issue athenaeum#1914)
+    add_correct_notes_subparser(subparsers)  # correct-notes (issue athenaeum#1976)
     add_reconcile_subparser(subparsers)  # reconcile (issue athenaeum#1143)
     add_recovery_yield_subparser(subparsers)  # recovery-yield (issue athenaeum#1453)
     add_repair_subparser(subparsers)  # repair
