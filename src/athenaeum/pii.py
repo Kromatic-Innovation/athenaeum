@@ -3190,6 +3190,192 @@ def classify_contact_value(
     return record_path
 
 
+#: An address this writer may claim for *uid*: either no record lists it yet
+#: (mint), or the only record listing it already carries *uid* (classify).
+OBSERVED_CONTACT_MINTED = "minted"
+OBSERVED_CONTACT_CLASSIFIED = "classified"
+
+#: The address is already on the surface and is NOT this uid's to claim.
+#: ``other-entity`` — some record listing it carries a DIFFERENT ``uid``.
+#: ``record-without-uid`` — a record lists it but names no entity at all, so
+#: nothing on the surface says whose it is. Both decline the write; see
+#: :func:`record_observed_contact_value` for why the second declines too.
+OBSERVED_CONTACT_OTHER_ENTITY = "other-entity"
+OBSERVED_CONTACT_RECORD_WITHOUT_UID = "record-without-uid"
+
+#: Nothing to do: a blank address or a blank uid. Never an error — the
+#: caller is a compile-time observer, and an absent field is the common case.
+OBSERVED_CONTACT_SKIPPED = "skipped"
+
+
+@dataclass(frozen=True)
+class ObservedContactWrite:
+    """Outcome of :func:`record_observed_contact_value`.
+
+    ``outcome`` is one of the ``OBSERVED_CONTACT_*`` tokens above. ``path`` is
+    the record written, set only for ``minted``/``classified``. ``uids`` carries
+    the DISTINCT uids already found on the surface for the address, and is
+    populated only for ``other-entity`` — it is what lets the caller name the
+    competing entity in an escalation instead of reporting a bare conflict.
+    """
+
+    outcome: str
+    path: Path | None = None
+    uids: tuple[str, ...] = ()
+
+
+def record_observed_contact_value(
+    contacts_root: Path,
+    identifier: str,
+    *,
+    uid: str,
+    name: str | None = None,
+    source: str | dict[str, Any],
+    observed_at: str,
+    index: "ExcludedRecordIndex | None" = None,
+) -> ObservedContactWrite:
+    """Record *identifier* as ``observed`` for *uid*, minting if needed (athenaeum#1948).
+
+    The write primitive the prose-compile create path needs, and the gap
+    between the two writers that already exist:
+    :func:`classify_contact_value` classifies an address the surface ALREADY
+    holds and deliberately never mints, while :func:`mark_bounced` mints but
+    writes a deliverability close rather than a usage classification. A person
+    page created from a raw file naming its correspondent's address needs both
+    halves at once — a record carrying the address and the ``uid`` linkage, so
+    the ``address -> record -> uid -> page`` chain
+    (:func:`resolve_contact_records` / :func:`uid_on_record`) resolves on the
+    NEXT submission, plus the :data:`USAGE_CLASS_OBSERVED` classification that
+    records how the address was obtained.
+
+    **Ownership is checked before anything is written, and a contested
+    address is never claimed.** The uid-dedupe walk below is the same one
+    ``corrections._resolve_email_handle`` and
+    ``identity_resolution._walk_email_handle`` perform — deduped by UID, not
+    by record, because several records carrying the SAME uid are one person
+    described twice rather than an ambiguous address. Two cases decline:
+
+    - some record carries a DIFFERENT uid
+      (:data:`OBSERVED_CONTACT_OTHER_ENTITY`) — the address demonstrably
+      belongs to another entity;
+    - a record lists the address but carries no uid at all
+      (:data:`OBSERVED_CONTACT_RECORD_WITHOUT_UID`). This declines too, and
+      the reason is worth stating: the address IS on the surface, so minting a
+      second record for it would duplicate the listing, while stamping this
+      uid onto the existing record would ADOPT an address no record says is
+      this person's. Declining leaves that case resolving exactly as it does
+      today (``email-handle-record-without-uid`` raises a tier) rather than
+      guessing an owner at compile time.
+
+    Never writes to a wiki page, a page body, or any frontmatter outside the
+    excluded surface — the address only ever lands on the contact record, via
+    this module, per ``docs/design/one-way-in-one-way-out.md`` §3.
+
+    Idempotent. A re-observation of an address already recorded ``observed``
+    for the same uid merges to byte-identical frontmatter through
+    :func:`_merge_contact_classification` and rewrites nothing.
+
+    Args:
+        uid: The entity the address is being recorded FOR — the created page's
+            own uid. Blank yields :data:`OBSERVED_CONTACT_SKIPPED`: with no uid
+            there is no linkage to write, which is the whole point of the write.
+        name: The entity's display name, when known, for the minted record's
+            ``name``/``contact_of`` fields, mirroring the athenaeum#427/#437
+            migrator's own record shape. Optional — a
+            minted record without it still carries the load-bearing
+            ``uid``/``emails`` linkage.
+        source: Per-claim provenance for the classification, pointing at the
+            raw file the address was observed in.
+        observed_at: When the address was observed.
+        index: An already-built :class:`ExcludedRecordIndex` to resolve
+            through, and to KEEP CURRENT — same contract as
+            :func:`mark_bounced`'s: a minted record is
+            :meth:`~ExcludedRecordIndex.register`-ed back before returning, so
+            a second create in the same run resolves to the record the first
+            one just minted instead of minting a duplicate.
+    """
+    if not normalize_identifier(identifier) or not str(uid).strip():
+        return ObservedContactWrite(outcome=OBSERVED_CONTACT_SKIPPED)
+
+    wanted_uid = str(uid).strip()
+    records = resolve_contact_records(contacts_root, identifier, index=index)
+
+    if records:
+        found_uids: list[str] = []
+        for record in records:
+            found = uid_on_record(record)
+            if found is not None and found not in found_uids:
+                found_uids.append(found)
+        if not found_uids:
+            return ObservedContactWrite(
+                outcome=OBSERVED_CONTACT_RECORD_WITHOUT_UID,
+                uids=(),
+            )
+        if any(found != wanted_uid for found in found_uids):
+            return ObservedContactWrite(
+                outcome=OBSERVED_CONTACT_OTHER_ENTITY,
+                uids=tuple(found_uids),
+            )
+        # Every matching record is already this uid's. Classify onto the
+        # existing record rather than minting a second one.
+        classified = classify_contact_value(
+            contacts_root,
+            identifier,
+            usage_class=USAGE_CLASS_OBSERVED,
+            source=source,
+            observed_at=observed_at,
+            index=index,
+        )
+        return ObservedContactWrite(
+            outcome=OBSERVED_CONTACT_CLASSIFIED, path=classified
+        )
+
+    # No record lists the address: mint one. `default_bounce_record_path` is
+    # the surface's per-identifier placement convention (its docstring is
+    # scoped to the surface, not to bounces) and is exactly where
+    # `resolve_contact_record` will look for it later, so reusing it is what
+    # keeps the mint and the subsequent resolution agreeing.
+    target = default_bounce_record_path(contacts_root, identifier)
+    existing_meta = read_bounce_record(target)
+    existing_body = ""
+    if target.exists():
+        _, existing_body = parse_frontmatter(target.read_text(encoding="utf-8"))
+
+    minted = dict(existing_meta)
+    minted["uid"] = wanted_uid
+    display = str(name).strip() if name is not None else ""
+    if display:
+        minted.setdefault("name", f"{display} — contact record")
+        minted.setdefault("contact_of", display)
+    minted[PII_FLAG] = True
+    emails = [item for item in (minted.get("emails") or []) if isinstance(item, str)]
+    if not any(normalize_identifier(item) == normalize_identifier(identifier) for item in emails):
+        emails = [*emails, identifier]
+    minted["emails"] = emails
+    merged = _merge_contact_classification(
+        minted,
+        identifier,
+        usage_class=USAGE_CLASS_OBSERVED,
+        source=source,
+        observed_at=observed_at,
+    )
+
+    body = existing_body or (
+        f"Contact record for {identifier!r}, recorded when the entity page was "
+        "created from raw intake naming it (issue athenaeum#1948). This record "
+        "is outside the corpus: not embedded, recalled, or merge-eligible.\n"
+    )
+    new_text = render_frontmatter(merged) + "\n" + body
+    if target.exists() and target.read_text(encoding="utf-8") == new_text:
+        return ObservedContactWrite(outcome=OBSERVED_CONTACT_MINTED, path=target)
+    atomic_write_text(target, new_text)
+    if index is not None:
+        # Register AFTER the write so the re-read sees the minted
+        # frontmatter — mirrors `mark_bounced`'s own ordering and reason.
+        index.register(target)
+    return ObservedContactWrite(outcome=OBSERVED_CONTACT_MINTED, path=target)
+
+
 def _merge_identifier_validity(
     existing_meta: dict[str, Any],
     identifier: str,

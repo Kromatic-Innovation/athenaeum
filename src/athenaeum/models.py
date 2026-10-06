@@ -3110,6 +3110,18 @@ class ProcessingResult:
     #: as ``field_constraint_rejected=N`` in the run summary, mirroring the
     #: ``type_rejected`` convention above.
     field_constraint_rejected: int = 0
+    #: Count of correspondent addresses this file's Tier-3 create phase
+    #: recorded on a created person page's EXCLUDED contact record (issue
+    #: athenaeum#1948). Almost always 0 or 1 per file: a conversation-summary
+    #: note names one correspondent, and every other raw file names none, so
+    #: this stays ``0`` for the overwhelming majority. Counts only an
+    #: actual surface write (minted or classified) — a declined write
+    #: (the address belongs to another entity, or the file created several
+    #: person pages and none could be singled out) raises an
+    #: ``EscalationItem`` instead and is NOT counted here, so this counter
+    #: never reports an address that was not in fact written down.
+    #: Surfaced as ``correspondent_contacts=N`` in the run summary.
+    correspondent_contacts_recorded: int = 0
     #: One decision per tier-0 person-registry hint candidate this file's
     #: consult surfaced (issue athenaeum#1866): ``(uid, tier, verdict)``.
     #: ``tier`` is ``"classify"`` when tier 2 never proposed a claim for the

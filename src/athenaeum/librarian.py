@@ -204,12 +204,15 @@ from athenaeum.never_ingest import (
 )
 from athenaeum.person_registry import PERSON_TYPE, PersonRegistry, PersonRegistryEntry
 from athenaeum.pii import (
+    OBSERVED_CONTACT_OTHER_ENTITY,
+    OBSERVED_CONTACT_RECORD_WITHOUT_UID,
     DoNotEmailFact,
     ExcludedRecordIndex,
     HardBounceFact,
     contacts_surface_root,
     detect_do_not_email_fact,
     mark_bounced,
+    record_observed_contact_value,
 )
 from athenaeum.progress import PhaseHeartbeat
 from athenaeum.provider import (
@@ -1579,6 +1582,254 @@ def tier0_do_not_email_mark(
     return entity, True
 
 
+#: Raw-intake frontmatter key naming the correspondent a conversation-summary
+#: note is about (issue athenaeum#1948). This is the PRODUCER's key, not one
+#: invented here: voltaire's shipped conversation-intake writer
+#: (``src/conversation-intake.ts``, athenaeum#859's agreed submission shape)
+#: emits ``correspondent_email`` — already trimmed and lowercased — on the
+#: prose half of every triaged conversation, alongside the ``.jsonl``
+#: correction batch that targets the same address as
+#: ``{"type": "person", "handle": {"email": ...}}``.
+#:
+#: Deliberately NOT a :data:`~athenaeum.registry.SOURCE_HANDLE_KEYS` member
+#: and never written to a wiki page: the address's only home is the excluded
+#: contacts surface (athenaeum#427/#437), which is the whole reason
+#: :func:`_record_correspondent_contact` exists — see
+#: :data:`athenaeum.corrections.EMAIL_HANDLE_KEY` for the same argument on
+#: the correction-target side.
+CORRESPONDENT_EMAIL_KEY = "correspondent_email"
+
+#: Companion display-name key from the same producer, optional on its side.
+#: Used ONLY to disambiguate which of several created person pages is the
+#: correspondent — never written anywhere.
+CORRESPONDENT_NAME_KEY = "correspondent_name"
+
+#: The entity type a correspondent's address may be recorded against. An
+#: email address identifies a PERSON; recording one against a company or
+#: project page would put a human's address on a non-person record, which the
+#: athenaeum#1416 field-constraint guard exists to refuse on the wiki side and
+#: which has no meaning on the contacts surface either.
+PERSON_ENTITY_TYPE = "person"
+
+
+@dataclass(frozen=True)
+class _CorrespondentRef:
+    """What a raw note's own frontmatter says about its correspondent.
+
+    All three fields blank/empty for the overwhelming majority of raw files,
+    which name no correspondent at all — the caller does nothing in that case,
+    so this is never an error path.
+    """
+
+    address: str = ""
+    display_name: str = ""
+    observed_at: str = ""
+
+
+def _correspondent_from_raw(raw: "RawFile | None") -> _CorrespondentRef:
+    """Read :data:`CORRESPONDENT_EMAIL_KEY` and friends off *raw*'s frontmatter.
+
+    One parse for all three fields. Neither call can raise here:
+    ``RawFile.content`` is already cached by the time any
+    :func:`_apply_tier3_results` caller reaches this (``process_one`` parses
+    it at the top of the file's own processing), and ``parse_frontmatter`` is
+    itself fail-open on malformed YAML — so a note whose frontmatter cannot be
+    read yields blanks rather than an exception, same as every other
+    frontmatter reader on this path.
+
+    ``observed_at`` falls back to the raw file's own timestamp, then to today.
+    The producer always writes ``observed_at`` (the RFC-3339 instant of the
+    most recent contact in the cycle), so the first branch is the real one;
+    the fallbacks exist so a hand-authored note still records a usable date
+    rather than an empty string, which would read back as an unknown
+    observation time.
+    """
+    if raw is None:
+        return _CorrespondentRef()
+    meta, _ = parse_frontmatter(raw.content)
+    if not isinstance(meta, dict):
+        meta = {}
+
+    def _scalar(key: str) -> str:
+        value = meta.get(key)
+        if isinstance(value, str):
+            return value.strip()
+        return str(value).strip() if value is not None else ""
+
+    observed_at = _scalar("observed_at") or raw.timestamp or date.today().isoformat()
+    return _CorrespondentRef(
+        address=_scalar(CORRESPONDENT_EMAIL_KEY),
+        display_name=_scalar(CORRESPONDENT_NAME_KEY),
+        observed_at=observed_at,
+    )
+
+
+def _pick_correspondent_entity(
+    created_people: list[WikiEntity],
+    display_name: str,
+) -> WikiEntity | None:
+    """Which newly-created person page is the correspondent, or ``None``.
+
+    One created person page is the overwhelming case for a one-correspondent
+    summary, and it is unambiguous. When a file created SEVERAL person pages
+    (the summary named other people too) the correspondent's address must not
+    be attached by position or by luck: fall back to an exact,
+    case-insensitive match on the producer's own ``correspondent_name``, and
+    if that still does not single one out, return ``None`` so the caller
+    escalates instead of guessing. Attaching an address to the wrong person
+    is precisely the failure mode athenaeum#1948 exists to stop, so the
+    ambiguous case declines the write.
+    """
+    if not created_people:
+        return None
+    if len(created_people) == 1:
+        return created_people[0]
+    wanted = display_name.casefold()
+    if not wanted:
+        return None
+    matches = [e for e in created_people if e.name.strip().casefold() == wanted]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _record_correspondent_contact(
+    result: ProcessingResult,
+    *,
+    raw: "RawFile | None",
+    created_people: list[WikiEntity],
+    escalations: list[EscalationItem],
+    wiki_root: Path,
+    config: dict[str, object] | None,
+    excluded_index: ExcludedRecordIndex | None,
+) -> None:
+    """Record the correspondent's address on a page this compile just created.
+
+    Closes the half of athenaeum#859/#884 that was never built (issue
+    athenaeum#1948). That design put the ``email -> contact record -> uid ->
+    wiki page`` resolution inside the librarian, so a correction keyed on an
+    address resolves at tier 0 and no external caller needs the uid. But a
+    correspondent met for the FIRST time has no contact record for that chain
+    to walk: the correction raises a tier, the prose half creates the person
+    page, and nothing ever writes the address down. Every later correction for
+    the same person therefore resolves to zero again
+    (``email-handle-no-match``) and pays another tier escalation,
+    indefinitely — measured at 34 of 40 raised-tier corrections from one
+    submitter.
+
+    So: at the moment a person page is created from a note whose frontmatter
+    names the correspondent's address, record that address on the page's
+    excluded contact record. This is the one point in the pipeline where the
+    raw note's frontmatter and the uid it just landed on are both in hand —
+    the same property that makes this function's neighbour,
+    :func:`~athenaeum.adapter_provenance.record_adapter_provenance_for_pages`,
+    live here too.
+
+    Three properties worth stating because each is a thing this must NOT do:
+
+    - **The address never touches the wiki.** It goes to
+      :func:`~athenaeum.pii.record_observed_contact_value` and lands only on
+      the excluded surface, with provenance pointing at the raw file and usage
+      class :data:`~athenaeum.pii.USAGE_CLASS_OBSERVED`. The page body and the
+      page frontmatter are not modified here at all.
+    - **A contested address is never claimed.** Ownership is checked before
+      anything is written (see that function's docstring); a decline writes
+      nothing and escalates, which leaves the ambiguous case resolving exactly
+      as it does today.
+    - **This never creates a page.** It only ever annotates a page some other
+      part of this function already decided to write — the athenaeum#884
+      zero-match carve-out (a bare ``handle: {email}`` must never auto-create
+      a person) is untouched, because the create decision is upstream and the
+      significance gate stays voltaire's.
+
+    Fail-open, like every other observability/annotation write on this path: a
+    surface write that raises is logged and swallowed, never allowed to fail a
+    compile whose wiki writes have already landed.
+    """
+    if raw is None:
+        return
+    ref = _correspondent_from_raw(raw)
+    if not ref.address:
+        return
+
+    entity = _pick_correspondent_entity(created_people, ref.display_name)
+    if entity is None:
+        if created_people:
+            escalations.append(
+                EscalationItem(
+                    raw_ref=raw.ref,
+                    entity_name=ref.display_name or ref.address,
+                    conflict_type="ambiguous",
+                    description=(
+                        f"Raw file names correspondent {ref.address!r} but created "
+                        f"{len(created_people)} person pages "
+                        f"({', '.join(sorted(e.name for e in created_people))}); "
+                        "cannot tell which one the address belongs to, so it was "
+                        "not recorded on any of them (issue athenaeum#1948)."
+                    ),
+                )
+            )
+        return
+
+    contacts_root = contacts_surface_root(wiki_root.parent, config)
+    try:
+        written = record_observed_contact_value(
+            contacts_root,
+            ref.address,
+            uid=entity.uid,
+            name=entity.name,
+            source=raw.ref,
+            observed_at=ref.observed_at,
+            index=excluded_index,
+        )
+    except Exception:
+        log.warning(
+            "  Could not record correspondent address for %s (uid %s) from %s",
+            entity.name,
+            entity.uid,
+            raw.ref,
+            exc_info=True,
+        )
+        return
+
+    if written.outcome == OBSERVED_CONTACT_OTHER_ENTITY:
+        escalations.append(
+            EscalationItem(
+                raw_ref=raw.ref,
+                entity_name=entity.name,
+                conflict_type="ambiguous",
+                description=(
+                    f"Correspondent address on {raw.ref} already belongs to "
+                    f"{'/'.join(written.uids)} on the contacts surface, but this "
+                    f"file created person page {entity.uid}. No contact record "
+                    "was written (issue athenaeum#1948)."
+                ),
+            )
+        )
+        return
+    if written.outcome == OBSERVED_CONTACT_RECORD_WITHOUT_UID:
+        escalations.append(
+            EscalationItem(
+                raw_ref=raw.ref,
+                entity_name=entity.name,
+                conflict_type="ambiguous",
+                description=(
+                    f"Correspondent address on {raw.ref} is already on the "
+                    "contacts surface but no record says whose it is, so it was "
+                    f"not claimed for the person page {entity.uid} this file "
+                    "created (issue athenaeum#1948)."
+                ),
+            )
+        )
+        return
+    if written.path is not None:
+        result.correspondent_contacts_recorded += 1
+        log.info(
+            "  Recorded correspondent address for %s (uid %s) from %s",
+            entity.name,
+            entity.uid,
+            raw.ref,
+        )
+
+
 def _apply_tier3_results(
     result: ProcessingResult,
     *,
@@ -1591,6 +1842,7 @@ def _apply_tier3_results(
     config: dict[str, object] | None,
     incoming_handles: dict[str, object] | None = None,
     raw: RawFile | None = None,
+    excluded_index: ExcludedRecordIndex | None = None,
 ) -> None:
     """Write a Tier-3 result set to disk and fold it into *result* in place.
 
@@ -1628,6 +1880,15 @@ def _apply_tier3_results(
     makes this the compile-time join point the ledger is written from.
     ``None`` (every pre-athenaeum#1462 caller, and any caller with no raw
     file to attribute to) skips the ledger write entirely.
+
+    ``excluded_index`` (issue athenaeum#1948, keyword-only, ``None`` default)
+    is the compile run's shared
+    :class:`~athenaeum.pii.ExcludedRecordIndex`, threaded in for
+    :func:`_record_correspondent_contact` below — the one thing in this
+    function that reads or writes the excluded contacts surface. ``None``
+    keeps the unindexed per-call behaviour (a fresh surface scan), exactly as
+    :func:`~athenaeum.pii.record_observed_contact_value` documents; it never
+    disables the recording itself.
     """
     if incoming_handles:
         _written_metas: list[dict[str, object]] = []
@@ -1685,6 +1946,12 @@ def _apply_tier3_results(
     # ``continue``s above/below), for the adapter-provenance ledger call at
     # the end of this function.
     _written_uids: list[str] = list(_admitted_updated_uids)
+
+    # Issue athenaeum#1948: the person pages this call actually created, for
+    # the correspondent-contact recording after the create loop. Person-typed
+    # only, and populated only after a create survives both write-boundary
+    # guards — a refused page must never acquire a contact record.
+    _created_people: list[WikiEntity] = []
 
     # Issue athenaeum#1576: stamp compile-time ``related:`` edges onto the
     # pages this call is about to create. Placed HERE, immediately before the
@@ -1758,7 +2025,29 @@ def _apply_tier3_results(
         index.register(entity)
         result.created.append(entity)
         _written_uids.append(entity.uid)
+        if str(entity.type).strip().casefold() == PERSON_ENTITY_TYPE:
+            _created_people.append(entity)
         log.info("  Created: %s → %s", entity.name, entity.filename)
+
+    # Issue athenaeum#1948: now that every create for this file has either
+    # landed or been refused, record the correspondent's address (if the raw
+    # note named one) on the person page that was created for them. Placed
+    # HERE rather than inside the loop above for two reasons: the ambiguity
+    # check needs to see ALL the person pages this file created before it can
+    # say whether exactly one of them is the correspondent, and a page
+    # refused by the type/field-constraint guards above must never get a
+    # contact record (it is not in `_created_people`, so it cannot). Any
+    # escalation it appends is picked up by the `escalations` handling below,
+    # which has not run yet.
+    _record_correspondent_contact(
+        result,
+        raw=raw,
+        created_people=_created_people,
+        escalations=escalations,
+        wiki_root=wiki_root,
+        config=config,
+        excluded_index=excluded_index,
+    )
 
     # Issue athenaeum#1462: ledger the source-object <-> page join for every
     # uid this call just wrote, from the raw record's own frontmatter. A
@@ -2515,6 +2804,7 @@ def process_one(
                 config=config,
                 incoming_handles=incoming_handles,
                 raw=raw,
+                excluded_index=excluded_index,
             )
         return result
 
@@ -2573,6 +2863,7 @@ def process_one(
             index=index,
             config=config,
             raw=raw,
+            excluded_index=excluded_index,
         )
         raise
 
@@ -2604,6 +2895,7 @@ def process_one(
         config=config,
         incoming_handles=incoming_handles,
         raw=raw,
+        excluded_index=excluded_index,
     )
     return result
 
@@ -4644,6 +4936,12 @@ class RunContext:
     #: constraint. Folded in from ``ProcessingResult.field_constraint_rejected``,
     #: mirroring the ``total_type_rejected`` accumulator immediately above.
     total_field_constraint_rejected: int = 0
+    #: Issue athenaeum#1948: correspondent addresses recorded on the excluded
+    #: contacts surface this run, for person pages this run CREATED from a
+    #: raw note naming the correspondent. Folded in from
+    #: ``ProcessingResult.correspondent_contacts_recorded``, mirroring the
+    #: ``total_field_constraint_rejected`` accumulator immediately above.
+    total_correspondent_contacts: int = 0
     failed_files: list[str] = field(default_factory=list)
     deferred_refs: list[str] = field(default_factory=list)
     # Issue athenaeum#1144: refs whose Batch API submission was still running when
@@ -7964,6 +8262,11 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                         ctx.total_field_constraint_rejected += getattr(
                             result, "field_constraint_rejected", 0
                         )
+                        # Issue athenaeum#1948: same getattr-tolerance rationale
+                        # as field_constraint_rejected above.
+                        ctx.total_correspondent_contacts += getattr(
+                            result, "correspondent_contacts_recorded", 0
+                        )
                         # Issue athenaeum#1184: fan-out (matches) and the "produced
                         # actions" denominator — ``getattr`` for the same
                         # stubbed-test-seam reason as ``degraded``/``truncated``
@@ -8460,6 +8763,17 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                             )
                         }
                         if ctx.total_field_constraint_rejected
+                        else {}
+                    ),
+                    # Issue athenaeum#1948: correspondent addresses recorded on
+                    # the contacts surface this run. Only rendered when
+                    # non-zero, mirroring field_constraint_rejected above --
+                    # a run that compiled no conversation-summary note never
+                    # sees this key, so a clean run's summary shape is
+                    # unchanged.
+                    **(
+                        {"correspondent_contacts": ctx.total_correspondent_contacts}
+                        if ctx.total_correspondent_contacts
                         else {}
                     ),
                     # athenaeum#663: files skipped/surfaced as stuck this run. Only
