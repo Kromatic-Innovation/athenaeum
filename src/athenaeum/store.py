@@ -827,6 +827,18 @@ ARTIFACT_REGISTRY: tuple[ArtifactDeclaration, ...] = (
         source_ref="corrections.py:1843 CORRECTIONS_LEDGER_FILENAME (design note §5.2 table row 5)",
     ),
     ArtifactDeclaration(
+        name="note-corrections-applied-ledger",
+        persistence_class="operational",
+        operational_scope="store-durable",
+        location="wiki root",
+        source_ref=(
+            "note_corrections.py NOTE_CORRECTIONS_LEDGER_FILENAME (issue athenaeum#1976; "
+            "sibling of the corrections-applied-ledger row immediately above, same "
+            "house-style duplicated appender §2.4 counts, not itself named in the "
+            "design note §5.2 table)"
+        ),
+    ),
+    ArtifactDeclaration(
         name="shape-rules-applied-ledger",
         persistence_class="operational",
         operational_scope="store-durable",
