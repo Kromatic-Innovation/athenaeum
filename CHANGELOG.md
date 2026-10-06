@@ -46,7 +46,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicit so one condition never acquires two error codes: the schema owns
   the answer's SHAPE (unknown keys, wrong types, a missing verdict) and each
   per-type resolver keeps owning its verdict's VALUE, still reporting
-  `invalid_decision`.
+  `invalid_decision`. The outbound view tags seven item types while the
+  inbound applier registers four, so the command translates
+  (`confirmation` answers route to the question path — that is literally how a
+  confirmation is stored and resolved) and refuses `retraction` /
+  `quarantine` cleanly with `type_not_answerable` and a nonzero exit, rather
+  than guessing an applier for a type that has none.
 
 - **Tombstone fold, unfold, and auto-apply for reversible verdicts
   (issue athenaeum#716).** A merge may destroy renderings, never observations:

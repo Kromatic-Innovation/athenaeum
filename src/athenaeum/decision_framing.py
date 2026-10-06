@@ -569,3 +569,44 @@ def shape_errors_only(errors: list[str]) -> list[str]:
     per-type message.
     """
     return [error for error in errors if not error.startswith(_VERDICT_ERROR_PREFIX)]
+
+
+#: Queue item ``type`` -> the ``decision_type``
+#: :func:`athenaeum.decision_answers.apply_decision_answers` dispatches on.
+#:
+#: The two id spaces are NOT the same vocabulary, which is easy to miss: the
+#: outbound view tags seven types, while the inbound applier registers four
+#: (:data:`athenaeum.decision_answers.VALID_DECISION_TYPES`). Handing the
+#: applier an outbound tag it does not register raises, so any interface that
+#: accepts a type from ``decisions list`` must translate through this table
+#: and refuse what it cannot route.
+#:
+#: ``confirmation`` maps to ``question`` because that is literally how it is
+#: stored and resolved — a confirmation IS a block in
+#: ``_pending_questions.md`` with ``decision_kind: confirmation``, and
+#: :func:`athenaeum.decisions.confirmation_to_decision` is explicit that
+#: nothing about its resolution differs. Nothing is lost by recording the
+#: answer against the question path: the confirmation-ness lives in the
+#: block, not in the answer file.
+#:
+#: ``retraction`` and ``quarantine`` are deliberately ABSENT rather than
+#: guessed at. Neither has an inbound applier at all, so there is nothing to
+#: translate to, and inventing one here would be a cut-over smuggled in
+#: through a lookup table.
+ANSWERABLE_AS: dict[str, str] = {
+    "question": "question",
+    "confirmation": "question",
+    "merge": "merge",
+    "audit": "audit",
+    "proposed-rule": "proposed-rule",
+}
+
+
+def answerable_as(decision_type: str) -> str | None:
+    """The applier's ``decision_type`` for a queue item type, or ``None``.
+
+    ``None`` means the item cannot currently be answered through the answer
+    interface — see :data:`ANSWERABLE_AS`. Callers must refuse cleanly on
+    ``None`` rather than passing the value through, which raises.
+    """
+    return ANSWERABLE_AS.get(decision_type)

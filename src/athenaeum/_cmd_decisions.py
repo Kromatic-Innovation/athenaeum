@@ -323,11 +323,36 @@ def _cmd_answer(args: argparse.Namespace) -> int:
     like any other answer file.
     """
     from athenaeum.decision_answers import write_decision_answer
-    from athenaeum.decision_framing import response_schema_for, validate_answer
+    from athenaeum.decision_framing import (
+        ANSWERABLE_AS,
+        answerable_as,
+        response_schema_for,
+        validate_answer,
+    )
 
     as_json = getattr(args, "json", False)
     decision_type = args.type
     raw = args.answer
+
+    # The outbound view tags seven types; the inbound applier registers four.
+    # Translate, and refuse cleanly on a type that has no applier — passing one
+    # through raises a bare ValueError out of the render step, which is both an
+    # unhandled traceback and (because argparse dispatch swallows the code) an
+    # exit 0, so a caller reads a hard failure as success.
+    applier_type = answerable_as(decision_type)
+    if applier_type is None:
+        answerable = ", ".join(sorted(ANSWERABLE_AS))
+        return _answer_refusal(
+            as_json=as_json,
+            decision_id=args.id,
+            decision_type=decision_type,
+            error_code="type_not_answerable",
+            headline="names a decision type this interface cannot route",
+            errors=[
+                f"decision type {decision_type!r} has no inbound applier yet — "
+                f"answerable types are: {answerable}"
+            ],
+        )
 
     try:
         parsed = json.loads(raw)
@@ -360,7 +385,7 @@ def _cmd_answer(args: argparse.Namespace) -> int:
     path = write_decision_answer(
         raw_root,
         decision_id=args.id,
-        decision_type=decision_type,
+        decision_type=applier_type,
         verdict=str(parsed["verdict"]),
         note=str(parsed.get("note", "")),
     )
@@ -388,15 +413,23 @@ def _answer_refusal(
     decision_id: str,
     decision_type: str,
     errors: list[str],
+    error_code: str = "schema_invalid",
+    headline: str = "does not satisfy its response schema",
     schema: dict | None = None,
 ) -> int:
-    """Report a refused answer and return the exit code. Writes nothing."""
+    """Report a refused answer and return the exit code. Writes nothing.
+
+    ``error_code``/``headline`` are the caller's, because the refusals are not
+    all the same kind: an unroutable decision TYPE is not a schema violation,
+    and reporting it as one sends the reader looking for a malformed answer
+    they did not write.
+    """
     if as_json:
         payload: dict = {
             "ok": False,
             "decision_id": decision_id,
             "decision_type": decision_type,
-            "error_code": "schema_invalid",
+            "error_code": error_code,
             "errors": errors,
         }
         if schema is not None:
@@ -404,8 +437,7 @@ def _answer_refusal(
         print(json.dumps(payload, indent=2), file=sys.stderr)
     else:
         print(
-            f"refused: answer for {decision_id} ({decision_type}) does not "
-            "satisfy its response schema:",
+            f"refused: answer for {decision_id} ({decision_type}) {headline}:",
             file=sys.stderr,
         )
         for error in errors:

@@ -18,11 +18,13 @@ import pytest
 
 from athenaeum.decision_framing import (
     _TYPE_FRAMING,
+    ANSWERABLE_AS,
     REVERSIBILITY_CLASSES,
     ROUTING_AUTHORITY,
     ROUTING_CLASSES,
     ROUTING_COMPETENCE,
     ROUTING_SCHEDULED_REVIEW,
+    answerable_as,
     build_context_bundle,
     bundle_tokens,
     escalation_rationale_for,
@@ -419,3 +421,122 @@ class TestFramingReachesTheRealReadPath:
             assert item["response_schema"]["type"] == "object"
             assert item["escalation_rationale"].strip()
             assert item["proposed_default"]["action"].strip()
+
+
+class TestAnswerableTypeTranslation:
+    """The outbound view tags seven types; the inbound applier registers four.
+
+    Handing the applier an outbound-only tag raised a bare ``ValueError`` out of
+    the render step. Found by the async reviewer on athenaeum#1984 and
+    reproduced before fixing: it was an unhandled traceback AND — because
+    argparse dispatch swallowed the code — an **exit 0**, so a caller read a
+    hard failure as success. That is the worse half, and it is what these tests
+    pin.
+    """
+
+    def test_the_two_vocabularies_really_do_differ(self) -> None:
+        """If these ever converge, this translation layer is dead weight."""
+        from athenaeum.decision_answers import VALID_DECISION_TYPES
+
+        assert set(LIVE_DECISION_TYPES) - VALID_DECISION_TYPES
+
+    def test_every_answerable_target_is_one_the_applier_registers(self) -> None:
+        from athenaeum.decision_answers import VALID_DECISION_TYPES
+
+        assert set(ANSWERABLE_AS.values()) <= VALID_DECISION_TYPES
+
+    def test_confirmation_routes_to_the_question_path(self) -> None:
+        """A confirmation IS a question block -- same store, same resolution."""
+        assert answerable_as("confirmation") == "question"
+
+    @pytest.mark.parametrize("decision_type", ["retraction", "quarantine", "nonsense"])
+    def test_a_type_with_no_applier_is_absent_rather_than_guessed(
+        self, decision_type: str
+    ) -> None:
+        assert answerable_as(decision_type) is None
+
+
+class TestAnswerCommandRefusals:
+    @staticmethod
+    def _run(argv: list[str]) -> int:
+        from athenaeum.cli import main as cli_main
+
+        return cli_main(argv)
+
+    @pytest.fixture
+    def store(self, tmp_path: Path) -> Path:
+        (tmp_path / "wiki").mkdir()
+        (tmp_path / "raw").mkdir()
+        return tmp_path
+
+    def _answers(self, store: Path) -> list[Path]:
+        answers_dir = store / "raw" / "answers"
+        return sorted(answers_dir.glob("*.md")) if answers_dir.exists() else []
+
+    @pytest.mark.parametrize("decision_type", ["retraction", "quarantine", "nonsense"])
+    def test_an_unroutable_type_is_refused_nonzero_and_writes_nothing(
+        self, store: Path, decision_type: str
+    ) -> None:
+        rc = self._run(
+            [
+                "decisions", "answer", "--path", str(store), "--id", "abc",
+                "--type", decision_type, "--answer", '{"verdict": "approve"}',
+            ]
+        )
+
+        # Nonzero is the half that matters: the bug exited 0 on a traceback.
+        assert rc == 1
+        assert self._answers(store) == []
+
+    def test_a_schema_invalid_answer_is_refused_and_writes_nothing(
+        self, store: Path
+    ) -> None:
+        rc = self._run(
+            [
+                "decisions", "answer", "--path", str(store), "--id", "abc",
+                "--type", "merge", "--answer", '{"verdict": "maybe"}',
+            ]
+        )
+
+        assert rc == 1
+        assert self._answers(store) == []
+
+    def test_malformed_json_is_refused_and_writes_nothing(self, store: Path) -> None:
+        rc = self._run(
+            [
+                "decisions", "answer", "--path", str(store), "--id", "abc",
+                "--type", "merge", "--answer", "{not json",
+            ]
+        )
+
+        assert rc == 1
+        assert self._answers(store) == []
+
+    def test_a_valid_merge_answer_is_recorded(self, store: Path) -> None:
+        rc = self._run(
+            [
+                "decisions", "answer", "--path", str(store), "--id", "abc",
+                "--type", "merge", "--answer", '{"verdict": "approve", "note": "ok"}',
+            ]
+        )
+
+        assert rc == 0
+        written = self._answers(store)
+        assert len(written) == 1
+        assert "merge" in written[0].name
+
+    def test_a_confirmation_answer_is_recorded_against_the_question_path(
+        self, store: Path
+    ) -> None:
+        rc = self._run(
+            [
+                "decisions", "answer", "--path", str(store), "--id", "abc",
+                "--type", "confirmation", "--answer", '{"verdict": "approve"}',
+            ]
+        )
+
+        assert rc == 0
+        written = self._answers(store)
+        assert len(written) == 1
+        # Recorded as the type the applier dispatches on, not the view's tag.
+        assert "question" in written[0].name
