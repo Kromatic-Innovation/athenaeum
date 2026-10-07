@@ -92,6 +92,7 @@ from athenaeum.config import (
     resolve_page_size_threshold_chars,
     resolve_preserved_log_dir,
 )
+from athenaeum.decision_provider import DecisionBackend
 from athenaeum.entity_resolution import (
     Ambiguous,
     Match,
@@ -7064,6 +7065,14 @@ def tier4_escalate(
         """
         if prop is None:
             return (False, None)
+        # Issue athenaeum#1997: a Jev-routed proposal is human-review-only
+        # regardless of confidence -- checked FIRST, before the per-action
+        # threshold AND before the correct_*/forget_* authorship
+        # short-circuit below, since this path's thresholds were tuned
+        # against Opus's self-reported confidence, not Jev's calibrated
+        # probability.
+        if getattr(prop, "jev_routed", False):
+            return (False, None)
         action = getattr(prop, "action", None)
         if not isinstance(action, str):
             return (False, None)
@@ -7866,6 +7875,8 @@ def reresolve_open_questions(
     config: dict[str, Any] | None = None,
     usage: TokenUsage | None = None,
     projects_root: Path | None = None,
+    decision_backend: "DecisionBackend | None" = None,
+    decision_redact_outbound: bool = False,
 ) -> int:
     """Re-resolve OPEN, PROPOSAL-LESS pending questions (issue athenaeum#188).
 
@@ -7905,10 +7916,12 @@ def reresolve_open_questions(
     if not pending_path.exists():
         return 0
 
-    # Offline: no resolver. Leave everything as-is so a later run can heal it.
-    # propose_resolution would only return the deterministic fallback here,
-    # which renders to "" — so this is also a cost/no-op short-circuit.
-    if client is None:
+    # Offline: no resolver AND no Jev decision backend (issue athenaeum#1997
+    # widened this check -- a Jev-only run, text ``client=None``, must not
+    # short-circuit here). propose_resolution would only return the
+    # deterministic fallback with neither, which renders to "" — so this is
+    # also a cost/no-op short-circuit.
+    if client is None and decision_backend is None:
         return 0
 
     from athenaeum.answers import parse_pending_questions
@@ -7980,6 +7993,11 @@ def reresolve_open_questions(
     resolver_model_id = _resolver_model(resolved_config)
 
     def _should_auto_apply(prop: Any, members: list[str] | None = None) -> bool:
+        # Issue athenaeum#1997: a Jev-routed proposal is human-review-only
+        # regardless of confidence -- see the sibling gate's identical check
+        # in tier4_escalate above for the full rationale.
+        if getattr(prop, "jev_routed", False):
+            return False
         action = getattr(prop, "action", None)
         if not isinstance(action, str):
             return False
@@ -8068,7 +8086,13 @@ def reresolve_open_questions(
         # wiki_root — no new parameter needed to resolve the ledger behind
         # the seam.
         proposal = propose_resolution(
-            result, members, client, usage=usage, wiki_root=pending_path.parent
+            result,
+            members,
+            client,
+            usage=usage,
+            wiki_root=pending_path.parent,
+            decision_backend=decision_backend,
+            decision_redact_outbound=decision_redact_outbound,
         )
 
         action = getattr(proposal, "action", None)
