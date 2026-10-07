@@ -145,7 +145,7 @@ Evidence, kept out of the reading path.
 - [Page-decompose host apply — Streak CRM tool page](measurements/page-decompose-streak-2026-10-02.md) — bullet/disposition counts, operator rulings, and the before/after tool-page size from the behind-a-tag `decompose-page` apply.
 - [Page-decompose host apply — IAP Outreach pipeline tool page](measurements/iap-pipeline-decompose-2026-10-05.md) — clause-level split counts, operator rulings (0 ruled-attach, 23 ruled-drop), and the before/after tool-page size from the behind-a-tag `decompose-page --split-clauses` apply.
 - [C4 retirement coverage gate — live subject backfill](measurements/c4-retirement-coverage-gate-2026-10-05.md) — before/after coverage and Gate 1 (wiki + cluster domain) over the live apply, the shadow-parity re-run, and the GO/NO-GO verdict on precondition (c) of the 2026-09-15 adjudication.
-- [Raw auto-memory cluster member `subject` coverage](measurements/raw-member-subject-coverage-2026-10-07.md) — fixture before/after coverage and before/after relation split for the two release/hold clusters, from a direct script run against the real library code (athenaeum#1946).
+- [Raw auto-memory cluster member `subject` coverage](measurements/raw-member-subject-coverage-2026-10-07.md) — fixture before/after coverage and before/after relation split for the two release/hold clusters, from a direct script run against the real library code.
 
 ---
 
