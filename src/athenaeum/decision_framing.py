@@ -397,15 +397,25 @@ def proposed_default_for(decision_type: str) -> dict[str, str]:
 #: parsed from that prose at runtime -- ``default_action`` is written for a
 #: human reader (e.g. ``"leave quarantined"``) and has already drifted in
 #: wording from the machine token (``"reject"``) that denotes the very same
-#: outcome. Only the four types using :func:`_approve_reject_schema` get an
-#: entry: a free-text type (``question``/``retraction``/``audit``, or an
+#: outcome. A free-text type (``question``/``retraction``/``audit``, or an
 #: unknown type) has no discrete default an answer could match unmodified,
 #: so it can never register as a "default acceptance" -- see
 #: :func:`is_default_acceptance`.
+#:
+#: Deliberately does NOT include ``quarantine``, even though it uses
+#: :func:`_approve_reject_schema` too: :func:`answerable_as` returns
+#: ``None`` for it (:data:`ANSWERABLE_AS` has no entry), so it has no
+#: applier and cannot be answered through
+#: :mod:`athenaeum.decision_answers`'s ``apply_decision_answers`` at all
+#: today -- it resolves only through :func:`athenaeum.quarantine.
+#: release_quarantine`'s own dedicated path. A table entry this function
+#: can never actually be asked about would be a declared-but-unreachable
+#: type (the exact Seer finding on PR #2005 for ``confirmation`` before the
+#: ``origin_decision_type`` fix below) -- dropped rather than left looking
+#: live. Add it back if/when ``quarantine`` grows an inbound applier.
 _DEFAULT_ACCEPTANCE_VERDICT: dict[str, str] = {
     "confirmation": "approve",  # default_action: "accept the narrowed scope"
     "merge": "reject",  # default_action: "reject (keep the pages separate)"
-    "quarantine": "reject",  # default_action: "leave quarantined"
     "proposed-rule": "reject",  # default_action: "reject (do not adopt the rule)"
 }
 

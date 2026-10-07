@@ -110,6 +110,12 @@ class DecisionAnswer:
     note: str
     resolved_at: str
     path: Path
+    #: Issue athenaeum#1996: the ORIGINAL outbound-queue type before
+    #: ``answerable_as`` translation (see ``render_decision_answer``'s
+    #: docstring). Equal to ``decision_type`` for every file that does not
+    #: record a distinct one — including every file written before this
+    #: field existed.
+    origin_decision_type: str = ""
 
 
 @dataclass
@@ -149,6 +155,7 @@ def render_decision_answer(
     verdict: str,
     note: str = "",
     resolved_at: str | None = None,
+    origin_decision_type: str = "",
 ) -> str:
     """Render a decision-answer raw-intake record (athenaeum#908 D1 format).
 
@@ -156,10 +163,21 @@ def render_decision_answer(
     multi-line question answer body round-trips safely through the
     frontmatter block instead of corrupting it.
 
-    Raises:
-        ValueError: ``decision_type`` is not one of
-            :data:`VALID_DECISION_TYPES`, or ``decision_id``/``verdict`` is
-            empty.
+    ``origin_decision_type`` (issue athenaeum#1996, Seer finding on PR #2005):
+    the ORIGINAL outbound-queue type (one of the seven :mod:`athenaeum.
+    decision_framing` tags, e.g. ``"confirmation"``) before
+    :func:`athenaeum.decision_framing.answerable_as` translates it to its
+    inbound APPLIER type (``decision_type`` above, one of the four
+    :data:`VALID_DECISION_TYPES`). The two differ for exactly one live
+    case today (``confirmation`` -> applier ``question``) — recorded
+    separately because a ``confirmation`` item's own
+    ``proposed_default`` ("accept the narrowed scope") is a REAL discrete
+    default a free-text ``question`` answer has none of, and
+    :func:`athenaeum.decision_framing.is_default_acceptance` needs the
+    ORIGINAL type to tell the two apart. Defaults to *decision_type* when
+    omitted (every caller for which the two are not known to diverge, and
+    every answer file written before this field existed, round-trips as
+    "origin == applier", which is correct for all three of those).
     """
     if decision_type not in VALID_DECISION_TYPES:
         raise ValueError(
@@ -171,10 +189,17 @@ def render_decision_answer(
     if not verdict or not verdict.strip():
         raise ValueError("verdict must be a non-empty string")
 
+    resolved_origin_type = (
+        origin_decision_type.strip()
+        if origin_decision_type and origin_decision_type.strip()
+        else decision_type
+    )
+
     meta: dict[str, object] = {
         "source": DECISION_ANSWER_SOURCE_TAG,
         "decision_id": decision_id.strip(),
         "decision_type": decision_type,
+        "origin_decision_type": resolved_origin_type,
         "verdict": verdict,
         "resolved_at": resolved_at or now_iso(),
     }
@@ -200,6 +225,7 @@ def write_decision_answer(
     decision_type: str,
     verdict: str,
     note: str = "",
+    origin_decision_type: str = "",
 ) -> Path:
     """Render + write one decision-answer file under ``raw_root/answers/``.
 
@@ -207,6 +233,10 @@ def write_decision_answer(
     numeric suffix on collision (two answers written in the same second) —
     mirrors :func:`athenaeum.answers.ingest_answers`'s collision handling.
     Returns the path written.
+
+    ``origin_decision_type`` (issue athenaeum#1996): see
+    :func:`render_decision_answer`'s docstring — forwarded verbatim,
+    defaulting to *decision_type* when omitted.
     """
     answers_dir = raw_root / "answers"
     answers_dir.mkdir(parents=True, exist_ok=True)
@@ -221,6 +251,7 @@ def write_decision_answer(
         verdict=verdict,
         note=note,
         resolved_at=iso_ts,
+        origin_decision_type=origin_decision_type,
     )
 
     stem = f"{filename_ts}-{decision_type}-{decision_id}"
@@ -359,6 +390,18 @@ def _load_decision_answer(path: Path) -> DecisionAnswer | None:
     note = meta.get("note", "") or ""
     resolved_at = meta.get("resolved_at", "") or ""
 
+    # Issue athenaeum#1996: a legacy file (written before this field existed)
+    # or a non-string/empty value falls back to the APPLIER type — correct
+    # for every type except confirmation, whose own answer files are only
+    # ever written by the one caller (_cmd_decisions._cmd_answer) that has
+    # carried this field from day one.
+    raw_origin_type = meta.get("origin_decision_type")
+    origin_decision_type = (
+        raw_origin_type.strip()
+        if isinstance(raw_origin_type, str) and raw_origin_type.strip()
+        else decision_type
+    )
+
     return DecisionAnswer(
         decision_id=decision_id.strip(),
         decision_type=decision_type,
@@ -366,6 +409,7 @@ def _load_decision_answer(path: Path) -> DecisionAnswer | None:
         note=str(note),
         resolved_at=str(resolved_at),
         path=path,
+        origin_decision_type=origin_decision_type,
     )
 
 
@@ -835,11 +879,19 @@ def apply_decision_answers(
             # the budget-event write immediately above: this is a calibration
             # SIDE channel, never a reason to fail an already-successful
             # apply.
+            #
+            # Checked against `answer.origin_decision_type` -- the ORIGINAL
+            # outbound-queue type -- never `answer.decision_type` (the
+            # inbound APPLIER type). Those two differ for a `confirmation`
+            # item (applier "question"): checking the applier type would
+            # silently and permanently exclude `confirmation` -- the exact
+            # Seer finding on PR #2005, since `question`'s own free-text
+            # schema has no discrete default to match at all.
             try:
                 from athenaeum.calibration import sample_default_acceptance
                 from athenaeum.decision_framing import is_default_acceptance
 
-                if is_default_acceptance(answer.decision_type, answer.verdict):
+                if is_default_acceptance(answer.origin_decision_type, answer.verdict):
                     sample_default_acceptance(
                         wiki_root,
                         decision_id=answer.decision_id,

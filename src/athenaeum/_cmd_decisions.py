@@ -442,6 +442,11 @@ def _cmd_answer(args: argparse.Namespace) -> int:
         decision_type=applier_type,
         verdict=str(parsed["verdict"]),
         note=str(parsed.get("note", "")),
+        # Issue athenaeum#1996: preserve the ORIGINAL outbound-queue type
+        # (e.g. "confirmation") alongside the applier type (e.g. "question")
+        # — they diverge exactly here, the one call site that does the
+        # answerable_as translation. See render_decision_answer's docstring.
+        origin_decision_type=decision_type,
     )
     if as_json:
         print(
