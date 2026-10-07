@@ -77,7 +77,15 @@ module (:func:`athenaeum.pending_merges.resolve_merge`,
 re-syncing the store never calls any of them, by construction (see
 :func:`migrate_legacy_queues`'s own docstring); an answer landing on a
 legacy store is picked up on the VERY NEXT ``list_pending_decisions`` call,
-since the sync is unconditional, not a cache. The remaining three types
+since the sync is unconditional, not a cache. ``list_pending_decisions`` is
+a READ api, so the store's write is fail-soft: a read-only knowledge store,
+a permission error, or a full disk degrades PERSISTENCE (logged, never
+raised — the same contract as
+:func:`athenaeum.decision_budget.record_decision_answered`'s ledger
+append), never the read itself, because the records that write just
+attempted to persist are also what gets returned
+(:attr:`MigrationReport.records`) — one construction, not two. The
+remaining three types
 (``retraction``, ``quarantine``, ``proposed-rule``) are ledger-derived,
 ephemeral-by-design records outside AC3's named scope, so they stay pure
 read-time projections, unchanged.
@@ -94,8 +102,9 @@ explicit reading of AC2 this rests on.
 from __future__ import annotations
 
 import json
+import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 
@@ -109,6 +118,8 @@ from athenaeum.pending_merges import PendingMerge, parse_pending_merges
 from athenaeum.quarantine import list_pending_quarantine
 from athenaeum.retraction_cascade import read_retraction_reviews
 from athenaeum.rule_proposals import list_pending_rule_proposals
+
+log = logging.getLogger(__name__)
 
 # Keys the resolver appends to a pending-question block tail (issue athenaeum#126),
 # re-extracted verbatim when ``--with-proposal`` is requested. Kept in sync
@@ -661,13 +672,24 @@ def list_pending_decisions(
     # confirmation / audit item back FROM that store — it is the actual
     # queue for these three types, not a second, independently-derived
     # presentation of the same underlying data.
-    migrate_legacy_queues(
+    #
+    # Fail-soft (this is a READ api): when the store's disk write fails
+    # (read-only knowledge store, permission error, full disk —
+    # :func:`migrate_legacy_queues` never raises for this, it logs and
+    # reports ``persisted=False``), read-back-from-disk is skipped in
+    # favor of the records that write JUST ATTEMPTED to persist — the same
+    # construction, not a second one, so there is no divergent shape
+    # between the normal and degraded paths. Persistence degrades; the
+    # read never does.
+    report = migrate_legacy_queues(
         wiki_root,
         with_proposal=with_proposal,
         max_sources_per_merge=max_sources_per_merge,
     )
+    migrated = load_migrated_queue(wiki_root) if report.persisted else report.records
+
     decisions: list[dict] = []
-    for rec in load_migrated_queue(wiki_root):
+    for rec in migrated:
         if rec.get("disposition") != "pending":
             continue
         rtype = rec.get("type")
@@ -835,6 +857,18 @@ class MigrationReport:
     disposition-drift comparison needs before and after a migration run
     (the issue's own test AC: "verified by id-set comparison, not by count
     alone").
+
+    ``records`` is the exact in-memory list this run computed and attempted
+    to persist to ``path`` — the SAME objects ``json.dumps`` serialized,
+    before any write was attempted. ``persisted`` is ``False`` when writing
+    ``path`` raised (fail-soft: logged as a warning, never raised to the
+    caller — see :func:`migrate_legacy_queues`). A caller that needs the
+    records regardless of persistence outcome (:func:`list_pending_decisions`)
+    uses ``records`` directly when ``persisted`` is ``False``, rather than
+    reading back a stale-or-missing ``path`` — this is "one construction,
+    not two": ``records`` and whatever a successful write/read-back of
+    ``path`` would yield are value-identical (every field is already a
+    JSON-safe primitive), so the two paths never diverge in shape.
     """
 
     path: Path
@@ -842,6 +876,8 @@ class MigrationReport:
     merge_count: int
     question_count: int
     audit_count: int
+    records: list[dict] = field(default_factory=list)
+    persisted: bool = True
 
     @property
     def ids(self) -> set[str]:
@@ -935,6 +971,17 @@ def migrate_legacy_queues(
     the ``athenaeum decisions migrate`` CLI, :func:`list_pending_decisions`,
     or a test building a fixture legacy store — can inspect exactly what
     migrated without re-reading the written file.
+
+    **Never raises on the write.** ``list_pending_decisions`` is a READ
+    api that calls this on every listing, so a failure persisting
+    :data:`MIGRATED_QUEUE_FILENAME` (read-only knowledge store, a
+    permission error, a full disk) is caught, logged as a warning, and
+    reported via :attr:`MigrationReport.persisted` — the same contract
+    :func:`athenaeum.decision_budget.record_decision_answered` documents
+    for its own incidental ledger write ("Never raises"). The computed
+    :attr:`MigrationReport.records` are returned regardless, so a caller
+    can still serve a correct, complete list even when nothing durable
+    got written this time.
     """
     merges_path = wiki_root / "_pending_merges.md"
     questions_path = wiki_root / "_pending_questions.md"
@@ -1011,7 +1058,21 @@ def migrate_legacy_queues(
     records.sort(key=lambda r: r["id"])
     out_path = wiki_root / MIGRATED_QUEUE_FILENAME
     text = "".join(json.dumps(r, sort_keys=True) + "\n" for r in records)
-    atomic_write_text(out_path, text)
+
+    # Issue athenaeum#1992 (fail-soft): this is a READ path's incidental
+    # persisted projection, not something a caller asked to write — same
+    # shape as :func:`athenaeum.decision_budget.record_decision_answered`'s
+    # ledger append, which documents "Never raises" and downgrades a write
+    # failure to a warning. A read-only knowledge store, a permission
+    # error, or a full disk must degrade PERSISTENCE, never the read: the
+    # caller still gets ``records`` (see :attr:`MigrationReport.records`),
+    # just not durably mirrored to disk this time.
+    persisted = True
+    try:
+        atomic_write_text(out_path, text)
+    except OSError as exc:
+        persisted = False
+        log.warning("decisions: failed to persist unified queue store %s: %s", out_path, exc)
 
     return MigrationReport(
         path=out_path,
@@ -1019,6 +1080,8 @@ def migrate_legacy_queues(
         merge_count=merge_count,
         question_count=question_count,
         audit_count=audit_count,
+        records=records,
+        persisted=persisted,
     )
 
 

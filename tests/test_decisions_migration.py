@@ -502,3 +502,99 @@ class TestListPendingDecisionsIsAuthoritative:
         # Everything else (notably the two PII-hazard proposals) unaffected.
         assert legacy_store["merge_pii_1_id"] in after_ids
         assert legacy_store["merge_pii_2_id"] in after_ids
+
+
+class TestListPendingDecisionsFailSoft:
+    """``list_pending_decisions`` is a READ api: a failure persisting the
+    unified store must degrade PERSISTENCE, never the read (coordinator
+    review on athenaeum#1992). Two independent proofs of the same
+    contract — an OS-level read-only directory (the realistic failure
+    mode) and a direct monkeypatch of ``atomic_write_text`` (the
+    deterministic, environment-independent proof; the same pattern
+    ``tests/test_decay_bucket_classify.py`` uses for its own
+    ``atomic_write_text`` fail-soft coverage) — so the result doesn't
+    depend on whether this sandbox happens to enforce directory
+    permissions for the user running the suite.
+    """
+
+    def test_readonly_wiki_root_still_returns_a_correct_and_complete_list(
+        self,
+        legacy_store: dict,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        import logging
+
+        wiki_root = legacy_store["wiki_root"]
+        # A read-only SUBDIRECTORY derived from tmp_path (never a hand-rolled
+        # absolute-home-style path literal, per public-safe-lint's
+        # absolute-path gate) blocks atomic_write_text's mkstemp call inside
+        # it while leaving every legacy file (already written before this
+        # chmod) fully readable.
+        original_mode = wiki_root.stat().st_mode
+        wiki_root.chmod(0o555)
+        try:
+            with caplog.at_level(logging.WARNING, logger="athenaeum.decisions"):
+                result = list_pending_decisions(wiki_root)
+        finally:
+            # Restore before the test ends so pytest's tmp_path teardown
+            # (which needs to unlink entries inside this directory) succeeds.
+            wiki_root.chmod(original_mode)
+
+        assert any(
+            "decisions" in rec.message and "persist" in rec.message
+            for rec in caplog.records
+            if rec.levelno == logging.WARNING
+        ), f"expected a persistence warning; got: {[r.message for r in caplog.records]}"
+
+        ids = {d["id"] for d in result}
+        assert legacy_store["merge_pending_id"] in ids
+        assert legacy_store["merge_pii_1_id"] in ids
+        assert legacy_store["merge_pii_2_id"] in ids
+        assert legacy_store["merge_approved_id"] not in ids
+        assert legacy_store["question_pending_id"] in ids
+        assert legacy_store["question_answered_id"] not in ids
+        assert legacy_store["audit_pending_id"] in ids
+        assert legacy_store["audit_reviewed_id"] not in ids
+
+    def test_write_failure_falls_back_to_the_same_in_memory_construction(
+        self,
+        legacy_store: dict,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Deterministic counterpart of the read-only-directory test above —
+        proves ``report.records`` (the fallback) and what a successful
+        write/read-back would have produced are value-identical, i.e. ONE
+        construction, not two.
+        """
+        import logging
+
+        import athenaeum.decisions as decisions_mod
+
+        wiki_root = legacy_store["wiki_root"]
+
+        # Ground truth: what the NORMAL (persisted) path returns.
+        expected = list_pending_decisions(wiki_root)
+        expected_by_id = {d["id"]: d for d in expected}
+
+        def _boom(*args: object, **kwargs: object) -> None:
+            raise OSError("simulated: read-only file system")
+
+        monkeypatch.setattr(decisions_mod, "atomic_write_text", _boom)
+
+        report = decisions_mod.migrate_legacy_queues(wiki_root)
+        assert report.persisted is False
+        assert report.records  # the in-memory construction is still there
+
+        with caplog.at_level(logging.WARNING, logger="athenaeum.decisions"):
+            result = decisions_mod.list_pending_decisions(wiki_root)
+
+        assert any(
+            rec.levelno == logging.WARNING and "persist" in rec.message
+            for rec in caplog.records
+        )
+
+        result_by_id = {d["id"]: d for d in result}
+        assert set(result_by_id) == set(expected_by_id)
+        for item_id, expected_item in expected_by_id.items():
+            assert result_by_id[item_id] == expected_item
