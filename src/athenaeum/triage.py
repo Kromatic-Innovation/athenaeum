@@ -103,7 +103,7 @@ it for a prompt-injection payload to land on in the first place; see
 "Prompt-injection hardening" below for how this is actually proven, not
 just asserted.
 
-One known, accepted characteristic of the UNDERLYING #1993 applier this
+One known, accepted characteristic of the UNDERLYING athenaeum#1993 applier this
 researcher submits through, noted here rather than worked around (fixing
 it would mean editing ``_apply_coordinate_answer``, which this issue does
 not own and which issue athenaeum#1994 is actively extending): the
@@ -236,7 +236,7 @@ from athenaeum.calibration import sample_triage_decision
 from athenaeum.config import resolve_dimensions
 from athenaeum.decision_answers import write_decision_answer
 from athenaeum.decision_framing import (
-    ROUTING_AUTHORITY,
+    ROUTING_CLASSES,
     ROUTING_COMPETENCE,
     answerable_as,
     routing_for,
@@ -509,13 +509,53 @@ class TriageReport:
     but for different reasons (permission vs. unresolved knowledge), and
     folding them into one count would let a shrinking competence-escalation
     rate be faked by routing more items through authority instead.
+
+    ``authority_prepared`` counts every :data:`ACTION_PREPARED` outcome
+    regardless of its EXACT routing value, via :attr:`prepared_by_routing`
+    — not a filter on :data:`athenaeum.decision_framing.ROUTING_AUTHORITY`
+    alone. A Seer review of this module caught the gap a literal
+    ``== ROUTING_AUTHORITY`` filter leaves: ``run_triage`` sends anything
+    non-competence-routed down the SAME prepared path, which also includes
+    :data:`~athenaeum.decision_framing.ROUTING_SCHEDULED_REVIEW` (a real,
+    reachable third routing class — ``decision_framing.frame_decision``'s
+    own over-cap-after-decompose escalation). A routing-value-specific
+    filter silently dropped a scheduled-review item from EVERY category
+    here, so the reported counts no longer summed to ``total`` — exactly
+    the "a status surface renders a confident number that doesn't add up"
+    defect class. :attr:`prepared_by_routing` is keyed from
+    :data:`athenaeum.decision_framing.ROUTING_CLASSES` (plus any routing
+    value that tuple doesn't name, recorded rather than silently dropped),
+    so a FOURTH routing class added later is counted automatically rather
+    than needing a new hardcoded counter here — see
+    ``tests/test_triage.py``'s ``TestReportCategoriesSumToTotal`` for the
+    assertion that pins this invariant.
     """
 
     outcomes: list[TriageOutcome] = field(default_factory=list)
 
     @property
+    def prepared_by_routing(self) -> dict[str, int]:
+        """Count of :data:`ACTION_PREPARED` outcomes per routing class.
+
+        Zero-filled for every member of
+        :data:`athenaeum.decision_framing.ROUTING_CLASSES` so the shape is
+        stable even when a run produces none of a given class, PLUS any
+        routing value outside that tuple (a defensive catch-all — should
+        never happen, but recording it beats silently losing it).
+        """
+        counts: dict[str, int] = {cls: 0 for cls in ROUTING_CLASSES}
+        for o in self.outcomes:
+            if o.action != ACTION_PREPARED:
+                continue
+            counts[o.routing] = counts.get(o.routing, 0) + 1
+        return counts
+
+    @property
     def authority_prepared(self) -> int:
-        return sum(1 for o in self.outcomes if o.routing == ROUTING_AUTHORITY)
+        """Total items PREPARED for the human, across every non-competence
+        routing class (see class docstring for why this is a sum over
+        :attr:`prepared_by_routing` rather than a single-value filter)."""
+        return sum(self.prepared_by_routing.values())
 
     @property
     def competence_absorbed(self) -> int:
@@ -531,9 +571,27 @@ class TriageReport:
     def refused(self) -> int:
         return sum(1 for o in self.outcomes if o.action == ACTION_REFUSED)
 
+    @property
+    def category_total(self) -> int:
+        """Sum of every reported category — must always equal ``len(outcomes)``.
+
+        Exposed as its own property (rather than left for a caller to
+        derive) so a consumer can assert this invariant itself; the
+        regression this guards against is precisely a routing class that
+        falls into NEITHER :attr:`authority_prepared` nor a
+        ``competence_*``/``refused`` bucket.
+        """
+        return (
+            self.authority_prepared
+            + self.competence_absorbed
+            + self.competence_escalated
+            + self.refused
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "authority_prepared": self.authority_prepared,
+            "prepared_by_routing": self.prepared_by_routing,
             "competence_absorbed": self.competence_absorbed,
             "competence_escalated": self.competence_escalated,
             "refused": self.refused,

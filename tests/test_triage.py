@@ -39,12 +39,19 @@ from athenaeum.cli import main as cli_main
 from athenaeum.comparator import CompareOutcome, page_from_text
 from athenaeum.decision_answers import apply_decision_answers
 from athenaeum.decision_budget import read_decision_budget_events
-from athenaeum.decision_framing import ROUTING_AUTHORITY, ROUTING_COMPETENCE
+from athenaeum.decision_framing import (
+    ROUTING_AUTHORITY,
+    ROUTING_COMPETENCE,
+    ROUTING_SCHEDULED_REVIEW,
+)
 from athenaeum.decisions import list_pending_decisions
 from athenaeum.triage import (
     ACTION_ABSORBED,
     ACTION_ESCALATED,
     ACTION_PREPARED,
+    ACTION_REFUSED,
+    TriageOutcome,
+    TriageReport,
     TriageResolution,
     coordinate_request_researcher,
     run_triage,
@@ -657,6 +664,76 @@ class TestAuthorityCompetenceCountedSeparately:
         as_dict = report.to_dict()
         assert as_dict["authority_prepared"] == 1
         assert as_dict["competence_escalated"] == 1
+
+
+class TestReportCategoriesSumToTotal:
+    """Seer-found (LOW) gap, verified and fixed: ``authority_prepared`` used
+    to filter on ``routing == ROUTING_AUTHORITY`` alone, so a
+    ``scheduled-review``-routed item (a real, reachable third routing
+    class — ``decision_framing.frame_decision``'s over-cap-after-decompose
+    escalation) landed in ``outcomes`` tagged :data:`ACTION_PREPARED` but
+    was counted in NEITHER ``authority_prepared`` NOR either
+    ``competence_*`` bucket — the reported categories silently stopped
+    summing to ``total``. This is the permanent regression guard: a
+    fixture exercising every :data:`athenaeum.decision_framing.ROUTING_CLASSES`
+    member (plus every :class:`~athenaeum.triage.TriageOutcome` action),
+    asserting the category counts always sum to the real total — not just
+    today's specific bug, but ANY future routing or action value that
+    could otherwise fall through every bucket.
+    """
+
+    def _outcome(self, *, routing: str, action: str) -> TriageOutcome:
+        return TriageOutcome(
+            decision_id=f"id-{routing}-{action}",
+            decision_type="question",
+            routing=routing,
+            action=action,
+        )
+
+    def test_all_three_routing_classes_plus_every_action_sum_to_total(self) -> None:
+        report = TriageReport(
+            outcomes=[
+                self._outcome(routing=ROUTING_AUTHORITY, action=ACTION_PREPARED),
+                # The actual bug: a scheduled-review item is PREPARED too,
+                # but is a DIFFERENT routing value than ROUTING_AUTHORITY.
+                self._outcome(routing=ROUTING_SCHEDULED_REVIEW, action=ACTION_PREPARED),
+                self._outcome(routing=ROUTING_COMPETENCE, action=ACTION_ABSORBED),
+                self._outcome(routing=ROUTING_COMPETENCE, action=ACTION_ESCALATED),
+                self._outcome(routing=ROUTING_COMPETENCE, action=ACTION_REFUSED),
+            ]
+        )
+
+        assert report.category_total == len(report.outcomes) == 5
+        # The scheduled-review item is counted — this is the fix.
+        assert report.authority_prepared == 2
+        assert report.prepared_by_routing == {
+            ROUTING_COMPETENCE: 0,
+            ROUTING_AUTHORITY: 1,
+            ROUTING_SCHEDULED_REVIEW: 1,
+        }
+        assert report.competence_absorbed == 1
+        assert report.competence_escalated == 1
+        assert report.refused == 1
+
+    def test_prepared_by_routing_is_zero_filled_for_every_declared_class(self) -> None:
+        report = TriageReport(
+            outcomes=[self._outcome(routing=ROUTING_AUTHORITY, action=ACTION_PREPARED)]
+        )
+        counts = report.prepared_by_routing
+        assert set(counts) == {ROUTING_COMPETENCE, ROUTING_AUTHORITY, ROUTING_SCHEDULED_REVIEW}
+        assert counts[ROUTING_SCHEDULED_REVIEW] == 0
+        assert report.category_total == 1
+
+    def test_an_unrecognized_routing_value_is_recorded_not_dropped(self) -> None:
+        """Defensive: even a routing string outside ``ROUTING_CLASSES``
+        (should never happen) is still counted in `authority_prepared`/
+        `category_total` rather than silently vanishing."""
+        report = TriageReport(
+            outcomes=[self._outcome(routing="some-future-class", action=ACTION_PREPARED)]
+        )
+        assert report.prepared_by_routing["some-future-class"] == 1
+        assert report.authority_prepared == 1
+        assert report.category_total == 1
 
 
 # ---------------------------------------------------------------------------
