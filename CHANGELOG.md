@@ -57,6 +57,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or model-knob default changed; this issue only wires a new, default-OFF
   provider option behind an existing prompt.
 
+- **Deprecation-flag mechanism for legacy CLI surfaces, and the first real
+  migration of legacy queue data into the unified `decisions.py` schema
+  (issue athenaeum#1992, slice (c)/AC-group-1 of athenaeum#717).**
+  `athenaeum.config.deprecated_cli_surface_message(surface, config)` /
+  `resolve_deprecated_cli_surfaces_enabled` (new `librarian.
+  deprecated_cli_surfaces_enabled` yaml key /
+  `ATHENAEUM_DEPRECATED_CLI_SURFACES_ENABLED` env override, **default ON**)
+  is the documented mechanism a CLI surface declares itself against; `athenaeum
+  merges` and `athenaeum questions` now print a one-line stderr warning on
+  every invocation pointing at `athenaeum decisions` — behavior is otherwise
+  byte-identical, so nothing reachable through either surface is blocked.
+  `athenaeum.decisions.migrate_legacy_queues(wiki_root)` (new `athenaeum
+  decisions migrate` CLI mode) is the first thing this module has ever
+  written to disk: it materializes every `_pending_merges.md` /
+  `_pending_questions.md` record — resolved AND unresolved — into a
+  persisted unified-schema mirror (`wiki/_decisions_queue.jsonl`), preserving
+  every record's id and disposition unchanged (it never calls
+  `resolve_merge`/`resolve_by_id`; read-only w.r.t. the legacy stores,
+  idempotent, re-syncable). Covered by
+  `tests/test_decisions_migration.py` (id-set / disposition-drift
+  comparison against a fixture legacy store, including two fixture
+  PII-hazard proposals that stay unapproved by id, not by count) and
+  `tests/test_deprecated_cli_surfaces.py`. The other four unioned decision
+  types (`retraction`/`audit`/`quarantine`/`proposed-rule`) are
+  ledger-derived with no comparable legacy CLI and are untouched. `athenaeum
+  audit`'s page-freshness surface (`_cmd_audit.py`) is NOT flagged
+  deprecated here — it has no overlap with `decisions.py`'s own, unrelated
+  `audit` item type (a calibration-sampled-review record); see the PR
+  description for the full discrepancy note.
 - **Coordinate-answer loop: a real `coordinate` decision type + mechanical
   re-compare (issue athenaeum#1993).** Closes the loop issue athenaeum#1991's
   batching left open. `decision_framing._TYPE_FRAMING` gains a `coordinate`
@@ -364,6 +393,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Inline phone detector no longer flags bare digit-run identifiers
+  embedded in URLs, filenames, or backticks (issue athenaeum#2006).**
+  `find_inline_phones` (and the mirrored `phone` sensitivity recognizer)
+  previously treated any separator-free 10-15 digit run as phone-shaped —
+  a band that also covers common non-phone identifiers that appear
+  unlabeled in prose, such as comment/run ids embedded in a URL or
+  filename, or a digit run inside an inline-code span. A new structural
+  exclusion (`_is_embedded_bare_digit_run`) retires a bare digit run that
+  is either attached (no intervening whitespace) to an adjacent token
+  carrying a letter via a URL/path/filename joiner, or sits inside
+  backticks. Formatted numbers (with `+`, parens, or separators) and
+  labeled numbers (`tel:`/`phone:`/`mobile:`) are unaffected.
+  `recompare.identify_pii_hazards` also now accepts the adjudicated PII
+  allowlist (`athenaeum.pii.load_pii_allowlist`, resolved once per run
+  from the wiki root `lint-pii`/`migrate-pii` already read) so an
+  operator-adjudicated address no longer floods the comparator's
+  PII-hazard route on every recompare pass.
 - **The name-collision scanner no longer re-detects a folded-away page
   (issue athenaeum#716).** `scan_name_collisions` now skips tombstones, which
   are excluded from every index and invisible to recall and so should not

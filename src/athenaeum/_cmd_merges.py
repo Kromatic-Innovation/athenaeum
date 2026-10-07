@@ -54,8 +54,12 @@ import json
 import sys
 from pathlib import Path
 
-from athenaeum._cli_shared import _resolve_wiki_root
-from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT
+from athenaeum._cli_shared import _resolve_knowledge_root, _resolve_wiki_root
+from athenaeum.config import (
+    DEFAULT_KNOWLEDGE_ROOT,
+    deprecated_cli_surface_message,
+    load_config,
+)
 from athenaeum.decisions import list_pending_merges_rich
 from athenaeum.provenance import read_merge_provenance
 
@@ -613,6 +617,15 @@ def cmd_merges(args: argparse.Namespace) -> int:
     count returns 0 / null oldest, list/next print nothing and exit 0. Same
     discipline for ``provenance`` against a missing/empty
     ``_merge_provenance.jsonl``.
+
+    Issue athenaeum#1992: this whole surface is flagged deprecated in favor
+    of ``athenaeum decisions`` (pending-merge proposals are now surfaced,
+    framed, and answerable there too). A one-line warning is printed to
+    stderr before dispatch — on EVERY subcommand, including the
+    maintenance-only ones (``revalidate``/``recompare``/``scrub-pii``/
+    ``propose-fold``/``provenance``) that have no ``decisions`` equivalent —
+    but nothing about this surface's own behavior changes; see
+    :func:`athenaeum.config.deprecated_cli_surface_message`.
     """
     sub = getattr(args, "merges_target", None)
     if sub not in (
@@ -632,6 +645,12 @@ def cmd_merges(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+
+    message = deprecated_cli_surface_message(
+        "merges", load_config(_resolve_knowledge_root(args))
+    )
+    if message:
+        print(f"DEPRECATED: {message}", file=sys.stderr)
 
     if sub == "propose-fold":
         return _cmd_propose_fold(args)
