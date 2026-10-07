@@ -41,6 +41,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`verdict_effects.member_provenance_for_batch` + the decision-answer's
   own stable id).
 
+- **`coord_origins` population + stale-mark blast-radius wiring (issue
+  athenaeum#1994, athenaeum#717 AC group 3).** The two `coord_origins={}`
+  literals (`comparator.record_comparison`, `verdicts.record_pair_decision`)
+  are now an honest, caller-supplied `{dimension_name: answer_id}` mapping
+  via a new optional `coord_origins` keyword on each — still `{}` for every
+  caller that decides nothing from an answered coordinate (never a
+  fabricated id). `decision_answers._apply_coordinate_answer` (issue
+  athenaeum#1993's coordinate-answer loop) now stamps the FRESH verdict
+  it ledgers for every pair in a batch with the SAME `answer.decision_id`
+  — the identical id `verdict_effects.member_provenance_for_batch` would
+  stamp as `decided_by: human-batch:<ref>` — so one batch answer's
+  challenge reaches every pair the batch decided, not just one. New
+  `verdicts.challenge_coordinate_answer(wiki_root, answer_id, *, lock)` is
+  the first production caller of the already-unit-tested
+  `select_stale_for_coordinate_challenged` + `mark_pairs_stale` pair,
+  exposed as `athenaeum decisions challenge-coordinate <answer-id>`
+  (`_cmd_decisions.py`) — the "a human or the triage agent challenges a
+  prior answer" entry point the issue names; a future triage lane (issue
+  athenaeum#1995, out of scope here) can call the same function. End-to-end
+  tested in `tests/test_coordinate_answer_loop.py::
+  TestCoordinateChallengeBlastRadius`: a two-pair batch answer challenged
+  stale-marks exactly its two verdicts, never a third, unrelated pair
+  answered by a different id.
+
 - **Meaning-based `subject` population extended to raw auto-memory cluster
   members (issue athenaeum#1946, follow-up to athenaeum#1944).** `athenaeum
   subject-population` gains `--include-raw-members <clusters-path>`,
