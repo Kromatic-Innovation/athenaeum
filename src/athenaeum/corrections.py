@@ -105,6 +105,7 @@ from athenaeum.config import (
     resolve_corrections_max_batch_bytes,
     resolve_corrections_max_records_per_batch,
     resolve_corrections_max_records_per_run,
+    resolve_corrections_retry_days,
     resolve_corrections_schema_slots,
     resolve_corrections_sensitive_fields,
 )
@@ -235,6 +236,14 @@ DISPOSITIONS: frozenset[str] = frozenset(
         "routed-elsewhere",
         "held-schema-proposal",
         "recorded-as-prose",
+        # athenaeum#1988: a zero-match `handle: {email}` target, parked in
+        # `_corrections_parked.json` for `corrections.retry_days` instead of
+        # being handed off on first sight (§8.2). The ONE record shape this
+        # disposition is ever assigned to is `resolution.reason ==
+        # "email-handle-no-match"` -- every other unresolvable email-handle
+        # reason (ambiguous, orphan-uid, record-without-uid, cross-type,
+        # unavailable) still raises a tier immediately, unchanged.
+        "parked",
     }
 )
 
@@ -248,6 +257,7 @@ _FIRST_PASS_TERMINAL: frozenset[str] = frozenset(
         "deferred-lower-precedence",
         "recorded-as-prose",
         "raised-tier",  # terminal for the BATCH once §8.1's handoff file is written
+        "parked",  # terminal for the BATCH once the parked store owns the record (§8.2)
         "held-schema-proposal",  # terminal once the proposal is recorded
         "escalated",  # terminal once the question is recorded
     }
@@ -1184,6 +1194,25 @@ def process_correction_record(
             unknown_keys=unknown_keys,
         )
 
+    def _parked(reason: str) -> CorrectionRecordResult:
+        # athenaeum#1988 §8.2: same payload shape as `_raised` -- the parked
+        # store and a later handoff both need the full record, not just the
+        # reason -- but a distinct disposition so the §8.1 handoff path and
+        # idempotency bookkeeping never see it by accident.
+        return CorrectionRecordResult(
+            correction_id=correction_id,
+            disposition="parked",
+            reason=reason,
+            target=target,
+            op=op,
+            field=field_name,
+            value=value,
+            source=source,
+            observed_at=observed_at,
+            note=note,
+            unknown_keys=unknown_keys,
+        )
+
     if raw_record.get("record") != "correction":
         return _raised("record is not a valid correction record")
     if unknown_keys:
@@ -1290,6 +1319,18 @@ def process_correction_record(
         dry_run_pages=dry_run_pages,
     )
     if resolution.kind == "unresolvable":
+        if resolution.reason == "email-handle-no-match" and ratified_source is None:
+            # athenaeum#1988 §8.2: "not yet known" (no contact record exists
+            # for this address YET) is parked for a retry window rather than
+            # hand off immediately -- the common case for a mechanical
+            # writer that observes a correspondent before any page exists.
+            # A ratified correction (athenaeum#1850) never reaches this
+            # branch in practice (ratified mode rejects `creatable`
+            # resolutions before this point and otherwise targets an
+            # existing page), but the guard is explicit so a future caller
+            # of ratified mode cannot silently park an operator-ratified
+            # correction instead of acting on their decision.
+            return _parked(resolution.reason)
         # athenaeum#1884: an email-handle target carries the specific
         # `EmailHandleResolution.reason` (e.g. "email-handle-orphan-uid") on
         # `resolution.reason` -- surface it so the handoff note names the
@@ -2140,6 +2181,273 @@ def previously_handed_off_correction_ids(wiki_root: Path, batch_id: str) -> set[
 
 
 # ---------------------------------------------------------------------------
+# §8.2 parked corrections -- email-handle-no-match retry window (athenaeum#1988)
+# ---------------------------------------------------------------------------
+
+#: Beside the batch ledger (:data:`CORRECTIONS_LEDGER_FILENAME`), same
+#: directory discipline. A JSON object keyed by ``correction_id``
+#: (mirroring ``stuck_ledger.py``'s mutable-ledger shape, not an
+#: append-only JSONL -- entries here are added, aged, and removed, never
+#: merely appended) so idempotent re-parking (AC4) is a dict-membership
+#: check, not a scan. Carries no contacts-surface data -- just the handle
+#: already present in the raw batch (AC6) plus the record's own fields.
+PARKED_CORRECTIONS_FILENAME = "_corrections_parked.json"
+
+
+def default_parked_corrections_path(wiki_root: Path) -> Path:
+    return wiki_root / PARKED_CORRECTIONS_FILENAME
+
+
+def load_parked_corrections(wiki_root: Path) -> dict[str, dict[str, Any]]:
+    """Load the parked-corrections store. Missing/corrupt -> empty, the same
+    fail-open discipline as :func:`athenaeum.stuck_ledger.load_stuck_ledger`
+    -- a parse error must never wedge a run; at worst a parked correction is
+    re-parked (not lost) the next time its batch is (re)submitted."""
+    path = default_parked_corrections_path(wiki_root)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def save_parked_corrections(wiki_root: Path, store: dict[str, dict[str, Any]]) -> None:
+    """Persist the parked-corrections store, or remove it when empty --
+    mirrors :func:`athenaeum.stuck_ledger.write_stuck_ledger`'s "no stale
+    file left behind" rule."""
+    path = default_parked_corrections_path(wiki_root)
+    if not store:
+        if path.exists():
+            path.unlink()
+        return
+    atomic_write_text(path, json.dumps(store, indent=2, sort_keys=True) + "\n")
+
+
+def _park_new_results(
+    wiki_root: Path,
+    parked_results: list[CorrectionRecordResult],
+    *,
+    envelope: dict[str, Any],
+    outcome: BatchOutcome,
+    today: date,
+) -> None:
+    """§8.2 AC1/AC4: add each newly-parked record to the store, keyed on
+    ``correction_id`` so a batch re-submitting the SAME correction while it
+    is already parked (AC4) does not create a second row -- an existing
+    row's ``first_seen``/``attempts`` are left untouched."""
+    if not parked_results:
+        return
+    store = load_parked_corrections(wiki_root)
+    changed = False
+    for r in parked_results:
+        if r.correction_id in store:
+            continue
+        store[r.correction_id] = {
+            "correction_id": r.correction_id,
+            "target": r.target,
+            "op": r.op,
+            "field": r.field,
+            "value": r.value,
+            "source": r.source,
+            "observed_at": r.observed_at,
+            "note": r.note,
+            "schema_version": envelope.get("schema_version"),
+            "submitter": outcome.submitter,
+            "batch_id": outcome.batch_id,
+            "source_dir": outcome.source,
+            "first_seen": today.isoformat(),
+            "attempts": 0,
+        }
+        changed = True
+    if changed:
+        save_parked_corrections(wiki_root, store)
+
+
+def _row_as_raw_record(row: dict[str, Any]) -> dict[str, Any]:
+    """Reconstruct a self-contained correction record from a parked row --
+    every field the row carries is already fully hoisted (§3.2), so the
+    synthetic envelope's ``defaults`` is deliberately empty and
+    :func:`hoist_record` is a no-op on replay."""
+    raw_record: dict[str, Any] = {
+        "record": "correction",
+        "target": row.get("target"),
+        "op": row.get("op"),
+        "field": row.get("field"),
+        "value": row.get("value"),
+        "source": row.get("source"),
+        "observed_at": row.get("observed_at"),
+    }
+    if row.get("note"):
+        raw_record["note"] = row["note"]
+    return raw_record
+
+
+def _row_envelope(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "record": "batch",
+        "schema_version": row.get("schema_version", 1),
+        "submitter": row.get("submitter"),
+        "batch_id": row.get("batch_id", ""),
+        "defaults": {},
+    }
+
+
+def _row_outcome(
+    row: dict[str, Any], envelope: dict[str, Any], result: CorrectionRecordResult
+) -> BatchOutcome:
+    """A single-record synthetic :class:`BatchOutcome` so the retry path can
+    reuse :func:`write_correction_handoff` and
+    :func:`append_corrections_ledger` byte-for-byte instead of a parallel
+    implementation."""
+    source_dir = str(row.get("source_dir") or "unknown")
+    return BatchOutcome(
+        path=Path(source_dir) / PARKED_CORRECTIONS_FILENAME,
+        source=source_dir,
+        envelope=envelope,
+        records_total=1,
+        results=[result],
+    )
+
+
+def _note_with_attempts(note: str, *, first_seen: str, attempts: int) -> str:
+    suffix = f"(parked since {first_seen}, {attempts} attempt(s))"
+    return f"{note} {suffix}".strip() if note else suffix
+
+
+def retry_parked_corrections(
+    *,
+    raw_root: Path,
+    wiki_root: Path,
+    knowledge_root: Path,
+    index: EntityIndex,
+    config: dict[str, Any] | None,
+    registry_entities: dict[str, Any],
+    dry_run_pages: DryRunPageOverlay | None,
+    escalate_one: Callable[[CorrectionRecordResult, BatchOutcome], bool],
+    retry_days: int,
+    today: date,
+    max_records_per_run: int,
+    applied_so_far: int,
+    deadline_check: Callable[[], bool] | None = None,
+) -> tuple[dict[str, int], int]:
+    """§8.2: re-resolve every parked record BEFORE this run's ordinary batch
+    loop. Returns ``(disposition_counts, newly_applied)`` for the caller to
+    fold into its own run summary / ``max_records_per_run`` accounting.
+
+    Resolution outcomes:
+
+    - ``applied`` / ``noop`` / ``routed-elsewhere`` / ``deferred-lower-
+      precedence`` / ``recorded-as-prose``: the row is resolved -- the
+      correction is DONE and the row is removed. AC2's "original
+      provenance" holds because the row carries the original ``source`` /
+      ``observed_at`` verbatim and :func:`process_correction_record` runs
+      again on exactly that payload -- the SAME tier-0 applier a fresh
+      batch would hit, not a bespoke apply path.
+    - ``raised-tier``: the handle now resolves to something OTHER than a
+      clean match (ambiguous, orphan-uid, ...) -- handed off immediately,
+      same as an ordinary first-pass raise, and the row is removed.
+    - ``parked`` (still ``email-handle-no-match``): younger than
+      ``retry_days`` -> ``attempts`` increments and the row stays;
+      ``retry_days`` or older -> handed off (AC3, with ``attempts`` and
+      ``first_seen`` in the note) and the row is removed.
+    - ``escalated`` / ``held-schema-proposal``: routed through
+      ``escalate_one`` exactly like a fresh batch; the row is removed only
+      once the caller confirms the question was actually RECORDED (mirrors
+      §5.4's ``escalations_recorded`` distinction) -- a rate-cap miss
+      leaves the row parked for the next run rather than dropping it.
+    """
+    counts: dict[str, int] = {}
+    store = load_parked_corrections(wiki_root)
+    if not store:
+        return counts, 0
+
+    changed = False
+    applied_delta = 0
+    for correction_id, row in list(store.items()):
+        if deadline_check is not None and deadline_check():
+            break
+        if applied_so_far + applied_delta >= max_records_per_run:
+            break
+
+        raw_record = _row_as_raw_record(row)
+        envelope = _row_envelope(row)
+        result = process_correction_record(
+            raw_record,
+            envelope,
+            index=index,
+            knowledge_root=knowledge_root,
+            registry_entities=registry_entities,
+            config=config,
+            dry_run=False,
+            dry_run_pages=dry_run_pages,
+        )
+
+        if result.disposition == "parked":
+            first_seen = str(row.get("first_seen") or today.isoformat())
+            try:
+                age_days = (today - date.fromisoformat(first_seen)).days
+            except ValueError:
+                age_days = retry_days  # malformed first_seen -> fail safe to handoff
+            attempts = int(row.get("attempts", 0)) + 1
+            if age_days >= retry_days:
+                result.note = _note_with_attempts(
+                    result.note, first_seen=first_seen, attempts=attempts
+                )
+                # athenaeum#1988 bot finding (Sentry, PR#1989): the handed-off
+                # record's disposition must flip to "raised-tier" BEFORE it
+                # reaches the ledger -- `build_ledger_record` only adds a
+                # correction_id to `raised_tier_correction_ids` when
+                # `r.disposition == "raised-tier"`, and
+                # `previously_handed_off_correction_ids` keys its §8.1
+                # idempotency check on exactly that list. Leaving the
+                # disposition as "parked" here made this expiry handoff
+                # invisible to that dedup, so a crash between this handoff
+                # write and the end-of-loop `save_parked_corrections` (the
+                # row's deletion is batched, not persisted per-record) would
+                # re-emit a second, differently-named handoff file for the
+                # same correction on the next run.
+                result.disposition = "raised-tier"
+                outcome = _row_outcome(row, envelope, result)
+                write_correction_handoff(
+                    outcome, [result], raw_root=raw_root, knowledge_root=knowledge_root
+                )
+                append_corrections_ledger(wiki_root, outcome)
+                counts["raised-tier"] = counts.get("raised-tier", 0) + 1
+                del store[correction_id]
+            else:
+                row["attempts"] = attempts
+                counts["parked"] = counts.get("parked", 0) + 1
+            changed = True
+            continue
+
+        if result.disposition in ("escalated", "held-schema-proposal"):
+            outcome = _row_outcome(row, envelope, result)
+            if escalate_one(result, outcome):
+                append_corrections_ledger(wiki_root, outcome)
+                counts[result.disposition] = counts.get(result.disposition, 0) + 1
+                del store[correction_id]
+                changed = True
+            # Rate-cap miss: leave the row parked untouched for next run.
+            continue
+
+        outcome = _row_outcome(row, envelope, result)
+        if result.disposition == "raised-tier":
+            write_correction_handoff(
+                outcome, [result], raw_root=raw_root, knowledge_root=knowledge_root
+            )
+        append_corrections_ledger(wiki_root, outcome)
+        counts[result.disposition] = counts.get(result.disposition, 0) + 1
+        if result.disposition in ("applied", "routed-elsewhere"):
+            applied_delta += 1
+        del store[correction_id]
+        changed = True
+
+    if changed:
+        save_parked_corrections(wiki_root, store)
+    return counts, applied_delta
+
+
+# ---------------------------------------------------------------------------
 # §5.4 batch retirement
 # ---------------------------------------------------------------------------
 
@@ -2401,6 +2709,7 @@ def run_correction_phase(
     escalate_one: Callable[[CorrectionRecordResult, BatchOutcome], bool],
     deadline_check: Callable[[], bool] | None = None,
     dry_run: bool = False,
+    now: date | None = None,
 ) -> dict[str, Any]:
     """§10.1 orchestration: find candidate batches, process each respecting
     the §10.2 volume bounds and a BATCH-BOUNDARY-ONLY deadline check, then
@@ -2435,6 +2744,32 @@ def run_correction_phase(
     # lands in a DIFFERENT batch file processed later in this same run.
     dry_run_pages: DryRunPageOverlay = {}
     applied_this_run = 0
+
+    # athenaeum#1988 §8.2: re-resolve every parked record BEFORE this run's
+    # ordinary batch loop, same ordering rationale as the phase itself
+    # running before the entity tiers (§10.1) -- a cheap retry must never
+    # be starved by, or starve, fresh batch processing.
+    retry_days = resolve_corrections_retry_days(config)
+    today = now if now is not None else date.today()
+    if not dry_run:
+        retry_counts, retry_applied = retry_parked_corrections(
+            raw_root=raw_root,
+            wiki_root=wiki_root,
+            knowledge_root=knowledge_root,
+            index=index,
+            config=config,
+            registry_entities=registry_entities,
+            dry_run_pages=dry_run_pages,
+            escalate_one=escalate_one,
+            retry_days=retry_days,
+            today=today,
+            max_records_per_run=max_records_per_run,
+            applied_so_far=applied_this_run,
+            deadline_check=deadline_check,
+        )
+        applied_this_run += retry_applied
+        for k, v in retry_counts.items():
+            summary["dispositions"][k] = summary["dispositions"].get(k, 0) + v
 
     for path, source, envelope in find_correction_batches(raw_root):
         if deadline_check is not None and deadline_check():
@@ -2476,6 +2811,16 @@ def run_correction_phase(
         applied_this_run += sum(
             1 for r in outcome.results if r.disposition in ("applied", "routed-elsewhere")
         )
+
+        # athenaeum#1988 §8.2: a fresh "email-handle-no-match" raise parks
+        # instead of handing off immediately -- the store, not this batch,
+        # owns the record from here (`_FIRST_PASS_TERMINAL` already treats
+        # "parked" as terminal for the batch, mirroring "raised-tier").
+        parked_now = [r for r in outcome.results if r.disposition == "parked"]
+        if parked_now and not dry_run:
+            _park_new_results(
+                wiki_root, parked_now, envelope=envelope, outcome=outcome, today=today
+            )
 
         # §7.2/§5.4: ``held-schema-proposal`` is terminal only once the
         # proposal is actually RECORDED on the human-decision surface, same

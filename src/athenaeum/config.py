@@ -5009,6 +5009,23 @@ def resolve_corrections_max_records_per_run(config: dict[str, Any] | None) -> in
     )
 
 
+def resolve_corrections_retry_days(config: dict[str, Any] | None) -> int:
+    """§8.2 ``librarian.corrections.retry_days`` (default 30, issue athenaeum#1988).
+
+    How long a parked ``email-handle-no-match`` correction
+    (`athenaeum.corrections.run_correction_phase`'s parked-corrections store)
+    is retried before it falls through to the ordinary §8.1 handoff.
+    """
+    return _resolve_corrections_int(
+        config,
+        "ATHENAEUM_CORRECTIONS_RETRY_DAYS",
+        "librarian",
+        "corrections",
+        "retry_days",
+        30,
+    )
+
+
 def resolve_corrections_max_batch_bytes(config: dict[str, Any] | None) -> int:
     """§10.2 ``librarian.corrections.max_batch_bytes`` (default 32 MiB).
 
