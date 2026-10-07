@@ -36,11 +36,15 @@ from athenaeum.decisions import list_pending_decisions
 from athenaeum.models import parse_frontmatter
 from athenaeum.tiers import tier4_escalate
 from athenaeum.verdict_effects import (
+    COORDINATE_BATCH_PREFIX,
     FOLD_EVIDENCE_DIRNAME,
     EffectResult,
     apply_verdict_effect,
     build_coordinate_request,
     build_fold_evidence,
+    member_provenance_for_batch,
+    parse_coordinate_batch_members,
+    queue_coordinate_batch,
     write_fold_evidence,
     write_refines_declaration,
 )
@@ -184,12 +188,16 @@ class TestEF1PublicAPIShape:
             "RESOLVER_NEVER_AUTO_APPLY_ACTIONS",
             "RESOLVER_PROPOSE_MERGE_ACTION",
             "RESOLVER_SUPPRESS_ACTION",
+            "COORDINATE_BATCH_PREFIX",
             "EffectResult",
             "apply_propose_merge_effect",
             "apply_suppress_or_attribute_both_effect",
             "apply_verdict_effect",
             "build_coordinate_request",
             "build_fold_evidence",
+            "member_provenance_for_batch",
+            "parse_coordinate_batch_members",
+            "queue_coordinate_batch",
             "write_contested_flag",
             "write_fold_evidence",
             "write_refines_declaration",
@@ -616,6 +624,11 @@ class TestEF10UnderdeterminedCoordinateRequest:
             assert "conflict" not in key
 
     def test_question_first_line_is_the_small_answerable_question(self, tmp_path: Path) -> None:
+        """Issue athenaeum#1991: a no-sink (batch-of-one) call still produces
+        exactly one small, answerable item -- its summary now names the
+        batch shape rather than embedding the single pair's own question
+        text verbatim, since the SAME code path (``queue_coordinate_batch``)
+        renders a batch of any size."""
         wiki_root = tmp_path / "wiki"
         wiki_root.mkdir()
         outcome = _outcome(VERDICT_UNDERDETERMINED, missing=["scope"])
@@ -1109,3 +1122,205 @@ class TestEF17HouseStyle:
             pending,
         )
         assert pending.is_file()
+
+
+# ---------------------------------------------------------------------------
+# EF11 -- issue athenaeum#1991: per-claim/per-cluster batching replaces the
+# per-pair coordinate queue for the ``underdetermined`` verdict.
+# ---------------------------------------------------------------------------
+
+
+class TestEF11CoordinateBatching:
+    def test_sink_defers_queueing_and_never_writes_a_file(self, tmp_path: Path) -> None:
+        wiki_root = tmp_path / "wiki"
+        sink: list[dict[str, Any]] = []
+        outcome = _outcome(VERDICT_UNDERDETERMINED, missing=["scope"])
+        result = apply_verdict_effect(
+            _page("a"), _page("b"), outcome, wiki_root=wiki_root, coordinate_sink=sink
+        )
+        assert result.action == "coordinate-pending"
+        assert result.queued == []
+        assert len(sink) == 1
+        assert sink[0]["pair_key"] == make_pair_key("a", "b")
+        assert not (wiki_root / "_pending_questions.md").exists()
+
+    def test_no_sink_still_queues_a_batch_of_one_never_a_silent_no_op(
+        self, tmp_path: Path
+    ) -> None:
+        wiki_root = tmp_path / "wiki"
+        outcome = _outcome(VERDICT_UNDERDETERMINED, missing=["scope"])
+        result = apply_verdict_effect(_page("a"), _page("b"), outcome, wiki_root=wiki_root)
+        assert result.action == "queued"
+        assert result.queued
+        assert (wiki_root / "_pending_questions.md").exists()
+
+    def test_batch_ref_is_never_the_retired_comparator_pair_prefix(self) -> None:
+        pair_key = make_pair_key("a", "b")
+        outcome = _outcome(VERDICT_UNDERDETERMINED, missing=["scope"])
+        member = {
+            "pair_key": pair_key,
+            "request": build_coordinate_request(_page("a"), _page("b"), outcome),
+            "conflict_type": "ambiguous",
+        }
+        effect = queue_coordinate_batch(
+            [member], wiki_root=Path("/tmp/wontwrite-ve"), config=None
+        )
+        ref = effect.details["batch_ref"]
+        assert ref != pair_key
+        assert not ref.startswith("comparator:")
+        assert ref.startswith(COORDINATE_BATCH_PREFIX)
+
+    def test_many_members_produce_exactly_one_queued_item(self, tmp_path: Path) -> None:
+        wiki_root = tmp_path / "wiki"
+        members = []
+        for i in range(5):
+            a, b = _page(f"a{i}"), _page(f"b{i}")
+            outcome = _outcome(VERDICT_UNDERDETERMINED, missing=["scope"])
+            members.append(
+                {
+                    "pair_key": make_pair_key(a.id, b.id),
+                    "request": build_coordinate_request(a, b, outcome),
+                    "conflict_type": "ambiguous",
+                }
+            )
+        effect = queue_coordinate_batch(members, wiki_root=wiki_root, config=None)
+        assert effect.action == "queued"
+        assert len(effect.queued) == 1
+        decisions = list_pending_decisions(wiki_root)
+        assert len(decisions) == 1
+        assert len(effect.details["members"]) == 5
+
+    def test_cap_decomposes_a_large_batch_rather_than_admitting_it_whole(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue athenaeum#1991 AC: the per-item context cap
+        (``decision_framing.frame_decision``) is checked AFTER batching.
+        A 28-pair batch's full bundle (~1300 tokens, measured) comfortably
+        exceeds a 200-token cap, but dropping just ``description`` (the
+        member list) brings it to ~90 tokens -- well under. The cap must
+        land in DECOMPOSE, not fall through to a pointer-only
+        scheduled-review, and the batch ref (a pointer key) must survive
+        either way (AC5)."""
+        wiki_root = tmp_path / "wiki"
+        pages = [_page(f"p{i}") for i in range(8)]
+        outcome = _outcome(VERDICT_UNDERDETERMINED, missing=["scope"])
+        members = [
+            {
+                "pair_key": make_pair_key(pages[i].id, pages[j].id),
+                "request": build_coordinate_request(pages[i], pages[j], outcome),
+                "conflict_type": "ambiguous",
+            }
+            for i in range(8)
+            for j in range(i + 1, 8)
+        ]
+        assert len(members) == 28
+        queue_coordinate_batch(members, wiki_root=wiki_root, config=None)
+
+        decisions = list_pending_decisions(wiki_root, max_item_context_tokens=200)
+        assert len(decisions) == 1
+        item = decisions[0]
+        assert item["context_decomposed"] is True
+        assert item["routing"] != "scheduled-review"
+        assert item["context_tokens"] <= 200
+        assert "description" in item["context_dropped"]
+        assert item["context_bundle"]["source"].startswith(COORDINATE_BATCH_PREFIX)
+
+    def test_batch_ref_is_stable_regardless_of_member_order(self) -> None:
+        outcome = _outcome(VERDICT_UNDERDETERMINED, missing=["scope"])
+        m1 = {
+            "pair_key": make_pair_key("a", "b"),
+            "request": build_coordinate_request(_page("a"), _page("b"), outcome),
+            "conflict_type": "ambiguous",
+        }
+        m2 = {
+            "pair_key": make_pair_key("c", "d"),
+            "request": build_coordinate_request(_page("c"), _page("d"), outcome),
+            "conflict_type": "ambiguous",
+        }
+        e1 = queue_coordinate_batch([m1, m2], wiki_root=Path("/tmp/wontwrite-ve2"), config=None)
+        e2 = queue_coordinate_batch([m2, m1], wiki_root=Path("/tmp/wontwrite-ve3"), config=None)
+        assert e1.details["batch_ref"] == e2.details["batch_ref"]
+
+    def test_empty_batch_is_a_recorded_noop_not_a_silent_one(self) -> None:
+        effect = queue_coordinate_batch([], wiki_root=Path("/tmp/wontwrite-ve4"), config=None)
+        assert effect.action == "noop"
+        assert effect.details
+
+    def test_member_provenance_stamps_human_batch_per_pair(self, tmp_path: Path) -> None:
+        wiki_root = tmp_path / "wiki"
+        a, b = _page("alpha"), _page("beta")
+        c, d = _page("gamma"), _page("delta")
+        outcome = _outcome(VERDICT_UNDERDETERMINED, missing=["scope"])
+        members = [
+            {
+                "pair_key": make_pair_key(a.id, b.id),
+                "request": build_coordinate_request(a, b, outcome),
+                "conflict_type": "ambiguous",
+            },
+            {
+                "pair_key": make_pair_key(c.id, d.id),
+                "request": build_coordinate_request(c, d, outcome),
+                "conflict_type": "ambiguous",
+            },
+        ]
+        effect = queue_coordinate_batch(members, wiki_root=wiki_root, config=None)
+        provenance = member_provenance_for_batch(
+            effect.details["members"], answer_ref="ans-42"
+        )
+        assert len(provenance) == 2
+        pairs = {p["pair"] for p in provenance}
+        assert pairs == {make_pair_key(a.id, b.id), make_pair_key(c.id, d.id)}
+        for p in provenance:
+            assert p["decided_by"] == "human-batch:ans-42"
+            assert p["dimensions"] == ["scope"]
+
+    def test_member_provenance_on_an_empty_member_list_is_empty(self) -> None:
+        assert member_provenance_for_batch([], answer_ref="ans-1") == []
+
+    def test_members_round_trip_through_the_on_disk_pending_question_block(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue athenaeum#1991 AC4: the inbound coordinate-answer loop
+        (issue athenaeum#1993) runs in a LATER process with no access to
+        this call's in-memory ``EffectResult`` -- only the on-disk
+        ``_pending_questions.md`` block survives. Provenance must be
+        recoverable from THAT, via ``parse_pending_questions`` +
+        ``parse_coordinate_batch_members``, not just from the fresh
+        ``EffectResult``."""
+        from athenaeum.answers import parse_pending_questions
+
+        wiki_root = tmp_path / "wiki"
+        a, b = _page("alpha"), _page("beta")
+        c, d = _page("gamma"), _page("delta")
+        outcome = _outcome(VERDICT_UNDERDETERMINED, missing=["scope"])
+        members = [
+            {
+                "pair_key": make_pair_key(a.id, b.id),
+                "request": build_coordinate_request(a, b, outcome),
+                "conflict_type": "ambiguous",
+            },
+            {
+                "pair_key": make_pair_key(c.id, d.id),
+                "request": build_coordinate_request(c, d, outcome),
+                "conflict_type": "ambiguous",
+            },
+        ]
+        effect = queue_coordinate_batch(members, wiki_root=wiki_root, config=None)
+        batch_ref = effect.details["batch_ref"]
+
+        questions = parse_pending_questions(wiki_root / "_pending_questions.md")
+        assert len(questions) == 1
+        recovered = parse_coordinate_batch_members(questions[0].description)
+        provenance = member_provenance_for_batch(recovered, answer_ref=batch_ref)
+        assert {p["pair"] for p in provenance} == {
+            make_pair_key(a.id, b.id),
+            make_pair_key(c.id, d.id),
+        }
+        for p in provenance:
+            assert p["decided_by"] == f"human-batch:{batch_ref}"
+            assert p["dimensions"] == ["scope"]
+
+    def test_parse_coordinate_batch_members_on_a_block_with_no_marker_is_empty(
+        self,
+    ) -> None:
+        assert parse_coordinate_batch_members("just a plain description, no marker") == []
