@@ -24,6 +24,7 @@ from athenaeum.corrections import (
     decide_verdict,
     find_correction_batches,
     hoist_record,
+    load_parked_corrections,
     load_registry,
     parse_batch_envelope,
     process_batch_file,
@@ -2933,3 +2934,247 @@ class TestEmailHandleRaisedReasonInHandoff:
 
         assert result.disposition == "raised-tier"
         assert result.reason == "target resolves to zero or several entities"
+
+
+# ---------------------------------------------------------------------------
+# athenaeum#1988: a zero-match `handle: {email}` correction is parked for
+# `corrections.retry_days` instead of handed off the moment it is first
+# seen -- the common case for a mechanical writer observing a correspondent
+# before any person page exists for them.
+# ---------------------------------------------------------------------------
+
+
+class TestParkedEmailNoMatchCorrections:
+    def _config(self) -> dict:
+        return {
+            "storage": {"mapping": {"pii": "excluded"}},
+            "librarian": {
+                "corrections": {
+                    "fields": {
+                        "gmail_last_message_date": {
+                            "shape": "scalar",
+                            "writers": ["voltaire"],
+                        }
+                    }
+                }
+            },
+        }
+
+    def _record(self, *, address: str, source: str, observed_at: str) -> dict:
+        return {
+            "record": "correction",
+            "target": {"type": "person", "handle": {"email": address}},
+            "op": "set",
+            "field": "gmail_last_message_date",
+            "value": observed_at,
+            "source": source,
+            "observed_at": observed_at,
+        }
+
+    def test_no_match_correction_is_parked_not_handed_off(self, tmp_path: Path) -> None:
+        _git_init(tmp_path)
+        wiki = tmp_path / "wiki"
+        wiki.mkdir(parents=True)
+        raw = tmp_path / "raw" / "voltaire"
+        raw.mkdir(parents=True)
+        config = self._config()
+        batch = raw / "20260806T030000Z-1a2b3c4d.jsonl"
+        batch.write_text(
+            _corrections_batch(
+                self._record(
+                    address="stranger@example.net",
+                    source="email:msg-1",
+                    observed_at="2026-08-06T03:00:00Z",
+                ),
+                submitter="voltaire",
+            )
+        )
+
+        summary = run_correction_phase(
+            raw_root=tmp_path / "raw",
+            wiki_root=wiki,
+            knowledge_root=tmp_path,
+            index=EntityIndex(wiki),
+            config=config,
+            escalate_one=lambda result, outcome: True,
+            now=date(2026, 8, 6),
+        )
+
+        assert summary["dispositions"] == {"parked": 1}
+        # No §8.1 handoff note for a fresh park -- that is the whole point.
+        assert list(raw.glob("*.md")) == []
+        # The batch is terminal once the parked store owns the record.
+        assert not batch.exists()
+
+        store = load_parked_corrections(wiki)
+        assert len(store) == 1
+        row = next(iter(store.values()))
+        assert row["source"] == "email:msg-1"
+        assert row["observed_at"] == "2026-08-06T03:00:00Z"
+        assert row["first_seen"] == "2026-08-06"
+        assert row["attempts"] == 0
+        assert row["submitter"] == "voltaire"
+        # AC6: nothing from the contacts surface -- just the handle already
+        # present in the raw batch.
+        assert "uid" not in row
+        assert "path" not in row
+
+    def test_parked_resolves_on_later_run_once_handle_exists(self, tmp_path: Path) -> None:
+        _git_init(tmp_path)
+        wiki = tmp_path / "wiki"
+        wiki.mkdir(parents=True)
+        raw = tmp_path / "raw" / "voltaire"
+        raw.mkdir(parents=True)
+        config = self._config()
+        batch = raw / "20260806T030000Z-1a2b3c4d.jsonl"
+        batch.write_text(
+            _corrections_batch(
+                self._record(
+                    address="later@example.net",
+                    source="email:msg-7",
+                    observed_at="2026-08-06T03:00:00Z",
+                ),
+                submitter="voltaire",
+            )
+        )
+        run_correction_phase(
+            raw_root=tmp_path / "raw",
+            wiki_root=wiki,
+            knowledge_root=tmp_path,
+            index=EntityIndex(wiki),
+            config=config,
+            escalate_one=lambda result, outcome: True,
+            now=date(2026, 8, 6),
+        )
+        assert len(load_parked_corrections(wiki)) == 1
+
+        # The sibling writer creates BOTH a person page and a contact
+        # record for this correspondent between runs -- with only the
+        # contact record the resolution would hit `orphan-uid`, not a
+        # clean match, and the point of this test is the clean-match path.
+        page = _write_page(
+            wiki, "corr-7.md", {"uid": "corr-7", "type": "person", "name": "Correspondent"}
+        )
+        _write_contact_record(
+            tmp_path, config, "corr-7-contact.md", uid="corr-7", emails=["later@example.net"]
+        )
+
+        summary = run_correction_phase(
+            raw_root=tmp_path / "raw",
+            wiki_root=wiki,
+            knowledge_root=tmp_path,
+            index=EntityIndex(wiki),
+            config=config,
+            escalate_one=lambda result, outcome: True,
+            now=date(2026, 8, 10),
+        )
+
+        assert summary["dispositions"].get("applied") == 1
+        written = page.read_text()
+        # Original provenance preserved -- the applied value/source/
+        # observed_at are exactly what the parked row carried, not
+        # something re-derived on the retry pass.
+        assert "2026-08-06T03:00:00Z" in written
+        assert "email:msg-7" in written
+        assert load_parked_corrections(wiki) == {}
+
+    def test_parked_expires_after_retry_days_and_hands_off(self, tmp_path: Path) -> None:
+        _git_init(tmp_path)
+        wiki = tmp_path / "wiki"
+        wiki.mkdir(parents=True)
+        raw = tmp_path / "raw" / "voltaire"
+        raw.mkdir(parents=True)
+        config = self._config()
+        batch = raw / "20260806T030000Z-1a2b3c4d.jsonl"
+        batch.write_text(
+            _corrections_batch(
+                self._record(
+                    address="ghost@example.net",
+                    source="email:msg-9",
+                    observed_at="2026-08-06T03:00:00Z",
+                ),
+                submitter="voltaire",
+            )
+        )
+        run_correction_phase(
+            raw_root=tmp_path / "raw",
+            wiki_root=wiki,
+            knowledge_root=tmp_path,
+            index=EntityIndex(wiki),
+            config=config,
+            escalate_one=lambda result, outcome: True,
+            now=date(2026, 8, 6),
+        )
+        assert len(load_parked_corrections(wiki)) == 1
+
+        summary = run_correction_phase(
+            raw_root=tmp_path / "raw",
+            wiki_root=wiki,
+            knowledge_root=tmp_path,
+            index=EntityIndex(wiki),
+            config=config,
+            escalate_one=lambda result, outcome: True,
+            now=date(2026, 9, 6),  # 31 days later -- past the 30-day default
+        )
+
+        assert summary["dispositions"].get("raised-tier") == 1
+        assert load_parked_corrections(wiki) == {}
+        handoffs = list(raw.glob("*.md"))
+        assert len(handoffs) == 1
+        text = handoffs[0].read_text()
+        assert "email-handle-no-match" in text
+        assert "attempt" in text
+        assert "email:msg-9" in text  # original source preserved, unredacted
+
+    def test_resubmitting_while_parked_does_not_duplicate(self, tmp_path: Path) -> None:
+        _git_init(tmp_path)
+        wiki = tmp_path / "wiki"
+        wiki.mkdir(parents=True)
+        raw = tmp_path / "raw" / "voltaire"
+        raw.mkdir(parents=True)
+        config = self._config()
+        record = self._record(
+            address="repeat@example.net",
+            source="email:msg-3",
+            observed_at="2026-08-06T03:00:00Z",
+        )
+
+        batch1 = raw / "20260806T030000Z-1a2b3c4d.jsonl"
+        batch1.write_text(_corrections_batch(record, submitter="voltaire"))
+        run_correction_phase(
+            raw_root=tmp_path / "raw",
+            wiki_root=wiki,
+            knowledge_root=tmp_path,
+            index=EntityIndex(wiki),
+            config=config,
+            escalate_one=lambda result, outcome: True,
+            now=date(2026, 8, 6),
+        )
+        store_after_first = load_parked_corrections(wiki)
+        assert len(store_after_first) == 1
+        row_id = next(iter(store_after_first))
+        first_seen = store_after_first[row_id]["first_seen"]
+
+        # The SAME correction (identical target/op/field/value) is
+        # re-submitted a day later, exactly as a mechanical writer that
+        # re-observes the same unresolved correspondent every cycle would.
+        batch2 = raw / "20260807T030000Z-2b3c4d5e.jsonl"
+        raw.mkdir(parents=True, exist_ok=True)
+        batch2.write_text(
+            _corrections_batch(
+                record, submitter="voltaire", batch_id="20260807T030000Z-2b3c4d5e"
+            )
+        )
+        run_correction_phase(
+            raw_root=tmp_path / "raw",
+            wiki_root=wiki,
+            knowledge_root=tmp_path,
+            index=EntityIndex(wiki),
+            config=config,
+            escalate_one=lambda result, outcome: True,
+            now=date(2026, 8, 7),
+        )
+
+        store_after_second = load_parked_corrections(wiki)
+        assert len(store_after_second) == 1  # not duplicated
+        assert store_after_second[row_id]["first_seen"] == first_seen  # not reset

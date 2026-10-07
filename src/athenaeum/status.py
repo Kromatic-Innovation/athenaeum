@@ -58,6 +58,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+from datetime import date
 from pathlib import Path
 from typing import TypedDict, cast
 
@@ -102,6 +103,11 @@ class StatusInfo(TypedDict):
     last_commit_date: str
     last_commit_message: str
     pending_questions: int
+    # Issue athenaeum#1988: count of `email-handle-no-match` corrections
+    # currently parked (`_corrections_parked.json`), and the age in days of
+    # the oldest one (``None`` when the store is empty/missing).
+    corrections_parked: int
+    corrections_parked_oldest_days: int | None
     # Issue athenaeum#310: wiki entity pages over the soft size thresholds, each a
     # ``(filename, byte_size)`` tuple sorted largest-first. ``pages_warn`` and
     # ``pages_flag`` are disjoint — a page over the flag threshold appears in
@@ -410,6 +416,28 @@ def status(knowledge_root: Path) -> StatusInfo:
         text = pq_path.read_text(encoding="utf-8")
         pending_questions = text.count("## [")
 
+    # Issue athenaeum#1988: parked `email-handle-no-match` corrections.
+    # Best-effort, same discipline as the other advisory sections here -- a
+    # corrupt/missing store must never break status (load_parked_corrections
+    # already fails open; the try/except guards the date-arithmetic only).
+    corrections_parked = 0
+    corrections_parked_oldest_days: int | None = None
+    try:
+        from athenaeum.corrections import load_parked_corrections
+
+        parked_store = load_parked_corrections(wiki_root)
+        corrections_parked = len(parked_store)
+        if parked_store:
+            oldest = min(
+                row.get("first_seen", "") for row in parked_store.values()
+            )
+            if oldest:
+                corrections_parked_oldest_days = (date.today() - date.fromisoformat(oldest)).days
+    except Exception as exc:  # noqa: BLE001 — must never break status
+        log.debug(
+            "status: corrections-parked check skipped (%s): %s", type(exc).__name__, exc
+        )
+
     # Oversized wiki pages (issue athenaeum#310). Thresholds come from config so an
     # operator can tune them; the scan is warn-only and never mutates anything.
     warn_bytes = resolve_page_warn_bytes(config)
@@ -582,6 +610,8 @@ def status(knowledge_root: Path) -> StatusInfo:
         "last_commit_date": last_commit_date,
         "last_commit_message": last_commit_message,
         "pending_questions": pending_questions,
+        "corrections_parked": corrections_parked,
+        "corrections_parked_oldest_days": corrections_parked_oldest_days,
         "pages_warn": pages_warn,
         "pages_flag": pages_flag,
         "pages_unmarked": pages_unmarked,
@@ -632,6 +662,14 @@ def format_status(info: StatusInfo) -> str:
             lines.append(f"  {etype}: {info['entities_by_type'][etype]}")
 
     lines.append(f"Pending questions:    {info['pending_questions']}")
+
+    # Issue athenaeum#1988: shown only when non-zero (same "quiet when
+    # healthy" convention as the zero-yield/refusal counters below).
+    corrections_parked = info.get("corrections_parked", 0)
+    if corrections_parked:
+        oldest = info.get("corrections_parked_oldest_days")
+        oldest_text = f", oldest {oldest}d" if oldest is not None else ""
+        lines.append(f"Corrections parked:   {corrections_parked}{oldest_text}")
 
     # Issue athenaeum#470: backlog-drain ETA advisory. Use ``.get`` so pre-athenaeum#470 status
     # dicts (missing the key) still format cleanly; shown only when set (a

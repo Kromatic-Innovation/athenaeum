@@ -812,6 +812,20 @@ Caps how many correction records `athenaeum.corrections.run_correction_phase`
 applies across ALL batch files in one run; once the cap is hit, every
 remaining batch is left untouched and carried over to the next run.
 
+### `resolve_corrections_retry_days`
+
+- **YAML path:** `librarian.corrections.retry_days`
+- **Environment variable:** `ATHENAEUM_CORRECTIONS_RETRY_DAYS`
+- **CLI flag:** —
+- **Default:** `30`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+§8.2 ``librarian.corrections.retry_days`` (default 30, issue athenaeum#1988).
+
+How long a parked `email-handle-no-match` correction (`athenaeum.corrections.run_correction_phase`'s
+parked-corrections store) is retried before it falls through to the
+ordinary §8.1 handoff.
+
 ### `resolve_corrections_runtime_share`
 
 - **YAML path:** `librarian.corrections.runtime_share`

@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Parked retry window for `email-handle-no-match` corrections (issue
+  athenaeum#1988).** A field correction whose `handle: {email}` target has no
+  matching contact record yet is parked in `_corrections_parked.json`
+  (beside the batch ledger) instead of handed off to reasoning on first
+  sight. Every run re-resolves parked records first: a record whose handle
+  now resolves applies at tier 0 with its original `source`/`observed_at`;
+  one still unresolved after `librarian.corrections.retry_days` (default
+  30, `ATHENAEUM_CORRECTIONS_RETRY_DAYS`) falls through to the existing
+  §8.1 handoff, with the attempt count and original `first_seen` date in
+  the note. Re-submitting the same correction while parked does not create
+  a second row or reset its age. `athenaeum status` reports the parked
+  count and oldest age; see `docs/design/field-corrections.md` §8.2.
+
 - **Framed, effort-capped items in the unified decision queue
   (issue athenaeum#717).** Every item the unified queue emits now carries the
   framing a human needs to answer it: the plain-language question (the

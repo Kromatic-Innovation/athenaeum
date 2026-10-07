@@ -731,7 +731,7 @@ schema design onto every writer — precisely the per-consumer coupling §1.1 re
 | Attribute not on the allowlist, or writer not permitted | Reasoning tier. The allowlist bounds what may be written *cheaply*, not what may be reported. |
 | `{"uid"}` or `{"type","name"}` target resolves to nothing; any target resolves ambiguously (>1) | Reasoning tier — entity resolution is exactly what tiers 1-2 exist for. |
 | `{"type","handle"}` target resolves to nothing | **Creates the entity at tier 0** (§3.3, issue athenaeum#865) — a stable external key with no match is not an identity question for reasoning, it is new information. Falls through to reasoning instead only if `type` is missing/blank or the constructed page fails schema validation. |
-| `{"type","handle":{"email"}}` target resolves to nothing | **Reasoning tier — NEVER creates.** The carve-out below (issue athenaeum#884). |
+| `{"type","handle":{"email"}}` target resolves to nothing | **Parked for `corrections.retry_days` (default 30), then reasoning tier.** Never creates (the carve-out below, issue athenaeum#884); the parking is new as of issue athenaeum#1988, §8.2. |
 
 A fallthrough is not a failure and never fails a batch: conformant records in the same
 batch apply normally, and the ledger counts the rest as `raised-tier`.
@@ -821,6 +821,51 @@ Submitters should still pre-filter targets against `registry.json`
 built for this. But that is a **courtesy that keeps work in the cheap tier**, not an
 admission requirement.
 
+### 8.2 Parking an email no-match for retry (issue athenaeum#1988)
+
+A zero-match `handle: {email}` target is overwhelmingly "not yet known," not "will
+never be known" — a mechanical writer (voltaire's conversation intake) observes a
+correspondent long before any sibling writer gets around to creating that person's
+page. Handing the correction off to reasoning on first sight, as §8 otherwise
+prescribes, throws away a fact (a last-contact date and direction, typically) that the
+later-created page will never see again, even though the page shows up within days on
+a deployment running both writers.
+
+**The mechanism.** This is the ONE §8 fallthrough row that does not hand off
+immediately. Instead:
+
+1. The record is parked in `_corrections_parked.json`, beside the batch ledger
+   (`_corrections_applied.jsonl`) under `wiki_root` — a JSON object keyed by
+   `correction_id`, carrying the record's own fields (`target`, `op`, `field`,
+   `value`, `source`, `observed_at`, `note`), `submitter`, the originating
+   `batch_id`/source directory, `first_seen`, and an `attempts` counter. Nothing from
+   the contacts surface — no `uid`, no page path — crosses into this file (§12a's
+   trust boundary: the store lives beside raw intake, under the same trust boundary
+   as the batch that produced it).
+2. On every subsequent run, BEFORE any fresh batch is processed, every parked record
+   is re-resolved through the ordinary tier-0 applier — the identical code path a
+   fresh batch takes, not a bespoke "apply from the store" shortcut. Three outcomes:
+   - **Resolves.** The correction applies (or no-ops, or routes elsewhere) with its
+     ORIGINAL `source`/`observed_at` — precedence is exactly as if this had been
+     applied the day it was submitted. The row is removed.
+   - **Still no match, within `corrections.retry_days`.** `attempts` increments; the
+     row stays parked.
+   - **Still no match, at or past `corrections.retry_days` (default 30).** Handed off
+     exactly as §8.1 describes, with `attempts` and the original `first_seen` date
+     appended to the note, and the row is removed.
+   - **A DIFFERENT outcome now** (the handle resolved to something ambiguous, or an
+     orphan uid) — handed off immediately with that specific reason, same as an
+     ordinary first-pass raise.
+3. Idempotent re-parking: a batch re-submitting the SAME `correction_id` while it is
+   already parked (the ordinary case for a mechanical writer that re-observes an
+   unresolved correspondent every cycle) does not create a second row, and does not
+   reset `first_seen` — resetting it would mean such a writer's corrections never
+   expire.
+
+`athenaeum status` reports the parked count and the oldest `first_seen` age, mirroring
+how it reports the pending-questions count — an operator-visible signal that the
+retry window, not reasoning, is quietly carrying a backlog.
+
 ---
 
 ## 9. Conformant or prose? The submitter's guide
@@ -868,6 +913,7 @@ path's budget, which is the correct accounting: they cost what reasoning costs.
 | Batch file size | `librarian.corrections.max_batch_bytes` | 32 MiB |
 | Escalations per run | `librarian.corrections.max_escalations_per_run` | 50 |
 | Phase runtime share | `librarian.corrections.runtime_share` | 0.05 |
+| Parked email-no-match retry window (days) | `librarian.corrections.retry_days` | 30 |
 
 Over a size bound, the batch is not refused — it is deferred whole to the next run and
 reported as carry-over. Batches apply FIFO by filename across submitters.
