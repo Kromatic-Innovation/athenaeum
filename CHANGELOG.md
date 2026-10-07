@@ -31,6 +31,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pass and no new nightly caller — both remain explicitly out of scope,
   carried to a follow-up `~operator`/`needs:host-write` issue.
 
+- **Per-claim/per-cluster batching replaces per-pair coordinate queueing
+  (issue athenaeum#1991).** `wiki_dedupe.propose_wiki_page_merges` used to
+  queue one `_pending_questions.md` item per `underdetermined` pair
+  (`verdict_effects._apply_underdetermined` called `_queue` directly, keyed
+  to that pair's `pair_key`) — the exact premise issue athenaeum#717's own
+  AC group 2 says must not exist. That direct call is gone:
+  `_apply_underdetermined` now either appends to a caller-supplied
+  `coordinate_sink` (deferring queueing) or, with no sink, queues a
+  batch-of-one through the new `verdict_effects.queue_coordinate_batch` —
+  never through the retired `comparator:<pair_key>` shape.
+  `wiki_dedupe.propose_wiki_page_merges` threads one sink across its whole
+  run, grouping each cluster's collected pairs by shared claim (page) or, when
+  every member names the same missing dimension, by the whole cluster
+  (`_coordinate_batches_for_cluster`), and flushes in its existing `finally`
+  so a mid-run exception cannot drop an already-ledgered pair's coordinate
+  request. The per-item context cap (`decision_framing.frame_decision`,
+  issue athenaeum#717) is unchanged and is applied to the batched bundle,
+  never to the pre-batch members — a 28-pair batch over cap decomposes
+  (drops its member list) rather than being admitted whole. A batch's
+  member list also survives as a machine-parseable JSON marker in the
+  queued description (`verdict_effects.parse_coordinate_batch_members`),
+  since the inbound answer loop runs in a later process with no access to
+  this call's in-memory result. `verdict_effects.member_provenance_for_batch`
+  computes the `decided_by: human-batch:<ref>` stamp per member a batch
+  answer settles — a pure function over that recovered member list; the
+  item is still queued as a flattened `question`-type block (no `coordinate`
+  decision type or inbound applier exists yet) and writing the stamp to the
+  verdict ledger's `coord_origins` is issue athenaeum#1993's and issue
+  athenaeum#1994's scope, not this one's.
+
 - **Parked retry window for `email-handle-no-match` corrections (issue
   athenaeum#1988).** A field correction whose `handle: {email}` target has no
   matching contact record yet is parked in `_corrections_parked.json`

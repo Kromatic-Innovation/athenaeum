@@ -164,6 +164,7 @@ def enact_verdict_effect(
     search_backend: str | None = None,
     embedding_model: str | None = None,
     now: datetime | None = None,
+    coordinate_sink: list[dict[str, Any]] | None = None,
 ) -> EffectResult:
     """Enact *outcome* exactly like
     :func:`athenaeum.verdict_effects.apply_verdict_effect`, additionally
@@ -191,6 +192,11 @@ def enact_verdict_effect(
     :func:`apply_verdict_effect` would have recorded plus
     ``folded_sources`` / ``aliases_added`` / ``links_rewritten`` /
     ``merge_id`` from the real fold.
+
+    ``coordinate_sink`` (issue athenaeum#1991, keyword-only, ``None``
+    default) is forwarded verbatim to every ``apply_verdict_effect`` call
+    this function makes -- the ``duplicate`` verdict never reads it (same
+    as that function's own docstring).
     """
     wiki_root = Path(wiki_root)
 
@@ -206,6 +212,7 @@ def enact_verdict_effect(
             path_b=path_b,
             config=config,
             now=now,
+            coordinate_sink=coordinate_sink,
         )
 
     pair_key = make_pair_key(page_a.id, page_b.id)
@@ -223,6 +230,7 @@ def enact_verdict_effect(
             path_b=path_b,
             config=config,
             now=now,
+            coordinate_sink=coordinate_sink,
         )
         if authorized:
             # Authorized, but this caller cannot name a real on-disk path
