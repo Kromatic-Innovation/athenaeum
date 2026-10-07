@@ -55,16 +55,62 @@ this module only READS and re-shapes the three underlying queues into a
 common item shape — it owns no queue's storage format or mutation path;
 resolving/writing back to a given queue stays the owning module's job (e.g.
 ``answers.py`` for questions, ``merge.py``/``resolutions.py`` for merges).
+
+Issue athenaeum#1992 narrows that factoring rule for exactly the three types
+its own AC3 names. ``merge`` and ``question``/``confirmation`` are the two
+legacy surfaces with a REAL CLI (``_cmd_merges.py``, ``_cmd_questions.py``,
+now both flagged deprecated — :data:`athenaeum.config.
+DEPRECATED_CLI_SURFACE_MESSAGES`); ``audit`` has no legacy CLI of its own
+(it was always only reachable through this module's union — see
+:func:`audit_to_decision`'s own docstring and the PII-hazard note in
+:func:`migrate_legacy_queues`), but AC3 names it explicitly alongside the
+other two, so it gets the same treatment. For these three, this module now
+OWNS a persisted unified-schema store (:func:`migrate_legacy_queues`,
+:data:`MIGRATED_QUEUE_FILENAME`) that :func:`list_pending_decisions` reads
+back FROM (sync-then-read, on every call) rather than re-deriving
+independently — this is the first time this module has written anything to
+disk, and the store is the thing actually consumed, not an unread mirror.
+Mutation of an individual item's disposition still belongs to the owning
+module (:func:`athenaeum.pending_merges.resolve_merge`,
+:func:`athenaeum.answers.resolve_by_id`,
+:func:`athenaeum.calibration.record_audit_review`) unchanged — migrating/
+re-syncing the store never calls any of them, by construction (see
+:func:`migrate_legacy_queues`'s own docstring); an answer landing on a
+legacy store is picked up on the VERY NEXT ``list_pending_decisions`` call,
+since the sync is unconditional, not a cache. ``list_pending_decisions`` is
+a READ api, so the store's write is fail-soft: a read-only knowledge store,
+a permission error, or a full disk degrades PERSISTENCE (logged, never
+raised — the same contract as
+:func:`athenaeum.decision_budget.record_decision_answered`'s ledger
+append), never the read itself, because the records that write just
+attempted to persist are also what gets returned
+(:attr:`MigrationReport.records`) — one construction, not two. The
+remaining three types
+(``retraction``, ``quarantine``, ``proposed-rule``) are ledger-derived,
+ephemeral-by-design records outside AC3's named scope, so they stay pure
+read-time projections, unchanged.
+
+``_cmd_audit.py`` (the ``athenaeum audit`` CLI) is a DIFFERENT, unrelated
+surface — page-freshness auditing (``last_audited``/``retirement_candidate``
+written into each wiki page's own frontmatter), not a pending-decision
+queue at all, with no disposition and no overlap with this module's own
+``audit`` item type (calibration-sampled T1/T2 review). It is deliberately
+NOT flagged deprecated by athenaeum#1992 — see the PR description for the
+explicit reading of AC2 this rests on.
 """
 
 from __future__ import annotations
 
+import json
+import logging
 import re
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 
 from athenaeum.answers import PendingQuestion, parse_pending_questions
-from athenaeum.calibration import list_pending_audit
+from athenaeum.atomic_io import atomic_write_text
+from athenaeum.calibration import AUDIT_KIND, REVIEW_KIND, read_calibration_ledger
 from athenaeum.decision_framing import frame_decision
 from athenaeum.models import parse_frontmatter
 from athenaeum.pagination import paginate
@@ -72,6 +118,8 @@ from athenaeum.pending_merges import PendingMerge, parse_pending_merges
 from athenaeum.quarantine import list_pending_quarantine
 from athenaeum.retraction_cascade import read_retraction_reviews
 from athenaeum.rule_proposals import list_pending_rule_proposals
+
+log = logging.getLogger(__name__)
 
 # Keys the resolver appends to a pending-question block tail (issue athenaeum#126),
 # re-extracted verbatim when ``--with-proposal`` is requested. Kept in sync
@@ -90,6 +138,14 @@ _UID_PREFIX_RE = re.compile(r"^[0-9a-f]{6,}-(?P<rest>.+)$")
 # Conventional auto-memory filename prefixes (see the frontmatter ``type``);
 # stripped for a friendlier fallback title when there is no ``name:``.
 _MEMORY_PREFIXES = ("feedback_", "project_", "reference_", "user_", "recall_")
+
+#: Every ``PendingQuestion.decision_kind`` value :func:`question_to_decision`
+#: (and :func:`migrate_legacy_queues`'s own explicit dispatch) knows how to
+#: route to a dedicated builder, or the plain-question default. Kept as its
+#: own named set (issue athenaeum#1992) so an unrecognized kind is a loud,
+#: logged gap rather than a silent fallthrough — see
+#: :func:`migrate_legacy_queues`.
+_KNOWN_QUESTION_DECISION_KINDS = frozenset({"question", "confirmation", "coordinate"})
 
 # Cap for a one-line gist so a ``decisions list`` line stays readable.
 _GIST_LIMIT = 160
@@ -630,6 +686,22 @@ def list_pending_decisions(
     Owner (``None``, the default) sees everything, preserving existing
     behavior.
 
+    Issue athenaeum#1992: for the three types with a real persisted
+    disposition (``merge``, ``question``/``confirmation``, ``audit``), this
+    function is no longer a from-scratch re-derivation — it SYNCS the
+    unified-schema store (:func:`migrate_legacy_queues`, using this call's
+    own ``with_proposal``/``max_sources_per_merge``) and then reads the
+    ``item`` shape straight back from that store (:func:`load_migrated_queue`)
+    rather than re-building it inline from ``parse_pending_merges`` /
+    ``parse_pending_questions`` / the calibration ledger a second time. The
+    sync is unconditional on every call — this is a real, idempotent,
+    read-only-w.r.t.-the-legacy-stores rebuild (same cost as the old inline
+    re-derivation plus one small JSONL write), not a cached snapshot that
+    could go stale between an answer landing and the next list call.
+    ``retraction`` / ``quarantine`` / ``proposed-rule`` stay pure
+    ledger-derived read-time projections, unchanged — AC3's named scope is
+    exactly the three migrated types.
+
     Issue athenaeum#1431: ``offset``/``limit`` page over the FINAL, unified,
     oldest-first list — the slice is applied AFTER the ``decisions.sort(...)``
     call below, not threaded into any of the per-kind sub-lists (in
@@ -650,26 +722,78 @@ def list_pending_decisions(
     from athenaeum.models import all_sources_authorized, is_page_authorized_at
 
     knowledge_root = wiki_root.parent
-    questions = [
-        pq
-        for pq in parse_pending_questions(wiki_root / "_pending_questions.md")
-        if not pq.answered
-        and is_page_authorized_at(pq.source, caller_audience, base=knowledge_root)
-    ]
-    decisions = [question_to_decision(pq, with_proposal=with_proposal) for pq in questions]
-    decisions += [
-        merge_to_decision(pm, max_sources=max_sources_per_merge)
-        for pm in parse_pending_merges(wiki_root / "_pending_merges.md")
-        if not pm.resolved
-        and all_sources_authorized(pm.sources, caller_audience, base=knowledge_root)
-    ]
+
+    # Issue athenaeum#1992: sync the unified store to the CURRENT legacy-file
+    # / calibration-ledger state (this call's own with_proposal /
+    # max_sources_per_merge shape it), then read every merge / question /
+    # confirmation / audit item back FROM that store — it is the actual
+    # queue for these three types, not a second, independently-derived
+    # presentation of the same underlying data.
+    #
+    # Fail-soft (this is a READ api): when the store's disk write fails
+    # (read-only knowledge store, permission error, full disk —
+    # :func:`migrate_legacy_queues` never raises for this, it logs and
+    # reports ``persisted=False``), read-back-from-disk is skipped in
+    # favor of the records that write JUST ATTEMPTED to persist — the same
+    # construction, not a second one, so there is no divergent shape
+    # between the normal and degraded paths. Persistence degrades; the
+    # read never does.
+    report = migrate_legacy_queues(
+        wiki_root,
+        with_proposal=with_proposal,
+        max_sources_per_merge=max_sources_per_merge,
+    )
+    migrated = load_migrated_queue(wiki_root) if report.persisted else report.records
+
+    decisions: list[dict] = []
+    for rec in migrated:
+        if rec.get("disposition") != "pending":
+            continue
+        rtype = rec.get("type")
+        if rtype == "merge":
+            if not all_sources_authorized(
+                rec.get("sources", []), caller_audience, base=knowledge_root
+            ):
+                continue
+        elif rtype == "audit":
+            # Owner-only for a restricted caller, same as retraction/
+            # quarantine/proposed-rule below (no readable source-page path
+            # to authorize against, issue athenaeum#538).
+            if caller_audience is not None:
+                continue
+        else:
+            # Every record this store carries that is NOT "merge" or
+            # "audit" is question-file-derived — "question",
+            # "confirmation", "coordinate" (issue athenaeum#1993), and
+            # whatever decision_kind is added next (see
+            # _KNOWN_QUESTION_DECISION_KINDS in migrate_legacy_queues).
+            # These all share ONE authorization rule — the same
+            # fail-closed source check a plain question has always used —
+            # deliberately NOT enumerated here by type-literal name: a
+            # prior revision's ``rtype in ("question", "confirmation")``
+            # tuple silently dropped "coordinate" the moment migration
+            # started labeling it correctly, which is the exact
+            # generalization trap this branch exists to close. If a
+            # genuinely different-shaped type is ever added to this
+            # store, give it its own ``elif`` ABOVE this one — this
+            # ``else`` must stay the question-like catch-all, never a
+            # silent default for an unrelated type.
+            if not is_page_authorized_at(
+                rec.get("source", ""), caller_audience, base=knowledge_root
+            ):
+                continue
+        decisions.append(rec["item"])
+
     if caller_audience is None:
-        # Retraction/audit/quarantine items are owner-only for a restricted
-        # caller (no readable source-page path to authorize against, athenaeum#538).
+        # Retraction/quarantine/proposed-rule items are owner-only for a
+        # restricted caller (no readable source-page path to authorize
+        # against, athenaeum#538). Ledger-derived, ephemeral by design, no
+        # comparable legacy CLI to deprecate — outside athenaeum#1992's
+        # named migration scope ("pending merges, pending questions, audit
+        # items"), so they stay pure read-time projections, unchanged.
         decisions += [
             retraction_to_decision(rec) for rec in read_retraction_reviews(wiki_root)
         ]
-        decisions += [audit_to_decision(rec) for rec in list_pending_audit(wiki_root)]
         # Issue athenaeum#898: quarantined raw-intake files awaiting an operator's
         # release/leave-quarantined decision (AC 4/5).
         decisions += [
@@ -782,3 +906,314 @@ def decision_time_minutes(raised_at: str, answered_at: str) -> int | None:
     from athenaeum.metrics import minutes_between
 
     return minutes_between(raised_at, answered_at)
+
+
+#: Issue athenaeum#1992: filename of the persisted unified-schema mirror of
+#: every legacy merge + question record, written by
+#: :func:`migrate_legacy_queues`. Lives directly under ``wiki_root`` (the
+#: same directory as ``_pending_merges.md`` / ``_pending_questions.md``).
+#: One JSON object per line, sorted by ``id`` so a re-run with no legacy
+#: change produces a byte-identical file.
+MIGRATED_QUEUE_FILENAME = "_decisions_queue.jsonl"
+
+
+@dataclass(frozen=True)
+class MigrationReport:
+    """Outcome of one :func:`migrate_legacy_queues` run (issue athenaeum#1992).
+
+    ``by_id`` maps every migrated record's PRESERVED legacy id to the
+    disposition read from the legacy store/ledger at migration time
+    (``"pending"``, ``"approved"``, ``"rejected"``, ``"answered"``,
+    ``"confirmed"``, or ``"overturned"``) — the exact shape an id-set /
+    disposition-drift comparison needs before and after a migration run
+    (the issue's own test AC: "verified by id-set comparison, not by count
+    alone").
+
+    ``records`` is the exact in-memory list this run computed and attempted
+    to persist to ``path`` — the SAME objects ``json.dumps`` serialized,
+    before any write was attempted. ``persisted`` is ``False`` when writing
+    ``path`` raised (fail-soft: logged as a warning, never raised to the
+    caller — see :func:`migrate_legacy_queues`). A caller that needs the
+    records regardless of persistence outcome (:func:`list_pending_decisions`)
+    uses ``records`` directly when ``persisted`` is ``False``, rather than
+    reading back a stale-or-missing ``path`` — this is "one construction,
+    not two": ``records`` and whatever a successful write/read-back of
+    ``path`` would yield are value-identical (every field is already a
+    JSON-safe primitive), so the two paths never diverge in shape.
+    """
+
+    path: Path
+    by_id: dict[str, str]
+    merge_count: int
+    question_count: int
+    audit_count: int
+    records: list[dict] = field(default_factory=list)
+    persisted: bool = True
+
+    @property
+    def ids(self) -> set[str]:
+        """The full set of migrated ids (merge + question + audit combined)."""
+        return set(self.by_id)
+
+
+def _merge_disposition(pm: PendingMerge) -> str:
+    """The migration-stable disposition of one legacy merge proposal.
+
+    A straight read of ``pm.resolved``/``pm.decision`` — the same two
+    fields :func:`athenaeum.pending_merges.resolve_merge` writes and
+    ``_cmd_merges.py`` renders. Never invents a value: an unresolved record
+    is ``"pending"``; a resolved record whose ``decision`` is neither
+    ``"approve"`` nor ``"reject"`` (should not happen, but never silently
+    misreported as either) comes back as ``"resolved"``.
+    """
+    if not pm.resolved:
+        return "pending"
+    if pm.decision == "approve":
+        return "approved"
+    if pm.decision == "reject":
+        return "rejected"
+    return "resolved"
+
+
+def _question_disposition(pq: PendingQuestion) -> str:
+    """The migration-stable disposition of one legacy pending question."""
+    return "answered" if pq.answered else "pending"
+
+
+def _audit_disposition(review: dict | None) -> str:
+    """The migration-stable disposition of one calibration-ledger audit item.
+
+    A straight read of whether a ``REVIEW_KIND`` record exists for this
+    audit id, and if so, its own ``overturned`` field — the same field
+    :func:`athenaeum.calibration.record_audit_review` writes. Never
+    invents a value: no review record is ``"pending"``; a review's
+    ``overturned=True``/``False`` becomes ``"overturned"``/``"confirmed"``.
+    """
+    if review is None:
+        return "pending"
+    return "overturned" if review.get("overturned") else "confirmed"
+
+
+def migrate_legacy_queues(
+    wiki_root: Path,
+    *,
+    with_proposal: bool = False,
+    max_sources_per_merge: int = _DECISIONS_MAX_SOURCES_DEFAULT,
+) -> MigrationReport:
+    """Migrate every legacy merge + question + audit record into the unified schema.
+
+    Issue athenaeum#717's AC group 1 (slice athenaeum#1992) requires this
+    module to stop being a read-only view and become the actual queue for
+    the three legacy surfaces named in AC3 — pending merges, pending
+    questions (including every ``decision_kind`` that file carries —
+    plain questions, ``confirmation``, ``coordinate``, and anything added
+    later; see :data:`_KNOWN_QUESTION_DECISION_KINDS`), and
+    calibration-sampled audit items. This is the function that makes that
+    true, and :func:`list_pending_decisions` now calls it (with its own
+    ``with_proposal``/``max_sources_per_merge``) on every listing rather
+    than re-deriving the same shapes independently — the persisted file
+    this writes is what gets read back, not a second, unread presentation
+    of the same data.
+
+    A pending-questions block's ``decision_kind`` gets an EXPLICIT,
+    complete dispatch here (``confirmation`` ->
+    :func:`confirmation_to_decision`, ``coordinate`` ->
+    :func:`coordinate_to_decision`, otherwise ->
+    :func:`question_to_decision`) — not a boolean special-case for one
+    kind that lets every other kind fall through to a generic question.
+    A real incident motivated this: the first revision of this function
+    special-cased only ``confirmation``, so a ``coordinate`` item (issue
+    athenaeum#1993, landed the same week) migrated as a type-``"question"``
+    record — invisible as a coordinate item to any consumer that trusted
+    the migrated record's own ``type`` field rather than digging into
+    ``item["type"]``. An unrecognized ``decision_kind`` (neither a known
+    kind nor the default) is now a LOGGED warning, not a silent
+    reshape — the item still migrates (as the generic question shape, so
+    nothing is dropped), but the gap is visible immediately rather than
+    waiting for the next kind to hit the same trap.
+
+    Read-only with respect to every LEGACY store: nothing here ever calls
+    :func:`athenaeum.pending_merges.resolve_merge`,
+    :func:`athenaeum.answers.resolve_by_id`,
+    :func:`athenaeum.calibration.record_audit_review`, or any other
+    disposition mutator. It only *reads* ``_pending_merges.md`` /
+    ``_pending_questions.md`` / the calibration ledger — every record,
+    resolved AND unresolved/reviewed AND unreviewed — and writes the full
+    union into :data:`MIGRATED_QUEUE_FILENAME` under ``wiki_root``,
+    atomically (:func:`athenaeum.atomic_io.atomic_write_text`).
+
+    Identity preservation: every record's ``id`` is the SAME id its owning
+    store already assigned it (:class:`PendingMerge`'s content-addressed
+    id / :class:`PendingQuestion`'s block-derived id /
+    :func:`athenaeum.calibration.audit_item_id`'s ``(tier, proposal_id)``
+    hash) — nothing is re-minted, so an id-set comparison against the
+    legacy stores' own ids is exact, and running this twice with no legacy
+    change produces a byte-identical file (idempotent; cheap enough to run
+    on every list call — see :func:`list_pending_decisions` — as well as
+    the standalone ``athenaeum decisions migrate`` CLI mode). Disposition
+    preservation: :func:`_merge_disposition` / :func:`_question_disposition`
+    / :func:`_audit_disposition` read each record's own fields with zero
+    transformation, so migrating (or re-migrating any number of times) can
+    never flip a disposition — the two PII-hazard proposals the issue's AC
+    names stay exactly as unresolved/resolved as the legacy store already
+    has them, because nothing in this function ever writes to that store.
+
+    Returns a :class:`MigrationReport` (rather than ``None``) so a caller —
+    the ``athenaeum decisions migrate`` CLI, :func:`list_pending_decisions`,
+    or a test building a fixture legacy store — can inspect exactly what
+    migrated without re-reading the written file.
+
+    **Never raises on the write.** ``list_pending_decisions`` is a READ
+    api that calls this on every listing, so a failure persisting
+    :data:`MIGRATED_QUEUE_FILENAME` (read-only knowledge store, a
+    permission error, a full disk) is caught, logged as a warning, and
+    reported via :attr:`MigrationReport.persisted` — the same contract
+    :func:`athenaeum.decision_budget.record_decision_answered` documents
+    for its own incidental ledger write ("Never raises"). The computed
+    :attr:`MigrationReport.records` are returned regardless, so a caller
+    can still serve a correct, complete list even when nothing durable
+    got written this time.
+    """
+    merges_path = wiki_root / "_pending_merges.md"
+    questions_path = wiki_root / "_pending_questions.md"
+
+    by_id: dict[str, str] = {}
+    records: list[dict] = []
+
+    for pm in parse_pending_merges(merges_path):
+        disposition = _merge_disposition(pm)
+        by_id[pm.id] = disposition
+        records.append(
+            {
+                "id": pm.id,
+                "type": "merge",
+                "disposition": disposition,
+                "resolved": pm.resolved,
+                "decision": pm.decision,
+                "created_at": pm.created_at,
+                "answered_at": pm.answered_at,
+                "sources": list(pm.sources),
+                "item": merge_to_decision(pm, max_sources=max_sources_per_merge),
+            }
+        )
+    merge_count = len(records)
+
+    for pq in parse_pending_questions(questions_path):
+        disposition = _question_disposition(pq)
+        by_id[pq.id] = disposition
+        kind = pq.decision_kind
+        if kind not in _KNOWN_QUESTION_DECISION_KINDS:
+            # Issue athenaeum#1992 (generalized from the athenaeum#1993
+            # coordinate-erasure finding): an unrecognized decision_kind
+            # must be VISIBLE, never silently reshaped into a generic
+            # question — the exact failure mode that made a real,
+            # already-landed decision_kind ("coordinate") disappear from
+            # the migrated store's type bookkeeping. This is a loud,
+            # non-fatal degrade (same precedent as the fail-soft write
+            # above: degrade loudly, never quietly) — the item still
+            # migrates, as the best-effort generic question shape, but the
+            # gap is logged so a future kind added to
+            # :func:`question_to_decision` without a matching branch here
+            # is caught immediately rather than silently absorbed.
+            log.warning(
+                "decisions: unrecognized question decision_kind %r (id=%s) "
+                "-- no dedicated branch in migrate_legacy_queues; migrating "
+                "as a generic question so nothing is dropped, but this "
+                "kind needs its own branch here (and, if relevant, its own "
+                "*_to_decision builder).",
+                kind,
+                pq.id,
+            )
+        # Explicit, complete dispatch — not a boolean special-case for one
+        # kind that lets every OTHER kind silently fall through to
+        # "question". Mirrors exactly the branches
+        # :func:`question_to_decision` itself dispatches on internally;
+        # the record's ``type`` is read back from the builder's own
+        # ``item["type"]`` rather than duplicated as a second literal, so
+        # the two can never diverge.
+        if kind == "confirmation":
+            item = confirmation_to_decision(pq)
+        elif kind == "coordinate":
+            item = coordinate_to_decision(pq)
+        else:
+            item = question_to_decision(pq, with_proposal=with_proposal)
+        records.append(
+            {
+                "id": pq.id,
+                "type": item["type"],
+                "disposition": disposition,
+                "resolved": pq.answered,
+                "decision": "",
+                "created_at": pq.created_at,
+                "answered_at": pq.answered_at,
+                "source": pq.source,
+                "item": item,
+            }
+        )
+    question_count = len(records) - merge_count
+
+    ledger_records = read_calibration_ledger(wiki_root)
+    reviews_by_id = {
+        str(r.get("id")): r for r in ledger_records if r.get("kind") == REVIEW_KIND
+    }
+    audit_records = [r for r in ledger_records if r.get("kind") == AUDIT_KIND]
+    for rec in audit_records:
+        audit_id = str(rec.get("id"))
+        review = reviews_by_id.get(audit_id)
+        disposition = _audit_disposition(review)
+        by_id[audit_id] = disposition
+        records.append(
+            {
+                "id": audit_id,
+                "type": "audit",
+                "disposition": disposition,
+                "resolved": review is not None,
+                "decision": "",
+                "created_at": rec.get("created_at"),
+                "answered_at": (review or {}).get("answered_at", ""),
+                "item": audit_to_decision(rec),
+            }
+        )
+    audit_count = len(audit_records)
+
+    records.sort(key=lambda r: r["id"])
+    out_path = wiki_root / MIGRATED_QUEUE_FILENAME
+    text = "".join(json.dumps(r, sort_keys=True) + "\n" for r in records)
+
+    # Issue athenaeum#1992 (fail-soft): this is a READ path's incidental
+    # persisted projection, not something a caller asked to write — same
+    # shape as :func:`athenaeum.decision_budget.record_decision_answered`'s
+    # ledger append, which documents "Never raises" and downgrades a write
+    # failure to a warning. A read-only knowledge store, a permission
+    # error, or a full disk must degrade PERSISTENCE, never the read: the
+    # caller still gets ``records`` (see :attr:`MigrationReport.records`),
+    # just not durably mirrored to disk this time.
+    persisted = True
+    try:
+        atomic_write_text(out_path, text)
+    except OSError as exc:
+        persisted = False
+        log.warning("decisions: failed to persist unified queue store %s: %s", out_path, exc)
+
+    return MigrationReport(
+        path=out_path,
+        by_id=by_id,
+        merge_count=merge_count,
+        question_count=question_count,
+        audit_count=audit_count,
+        records=records,
+        persisted=persisted,
+    )
+
+
+def load_migrated_queue(wiki_root: Path) -> list[dict]:
+    """Read back :data:`MIGRATED_QUEUE_FILENAME`, or ``[]`` if never migrated."""
+    path = wiki_root / MIGRATED_QUEUE_FILENAME
+    if not path.exists():
+        return []
+    records: list[dict] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if stripped:
+            records.append(json.loads(stripped))
+    return records

@@ -2719,6 +2719,73 @@ def resolve_ingestion_gate_enabled(config: dict[str, Any] | None) -> bool:
     return False
 
 
+#: Issue athenaeum#1992: the CLI surfaces whose data now lives in the unified
+#: ``athenaeum decisions`` queue (:mod:`athenaeum.decisions`), and the
+#: human-readable message shown when one is used while deprecated. Keyed by
+#: the surface's own registered subcommand name (``add_*_subparser`` in
+#: ``cli.py`` — ``"merges"``, ``"questions"``). A surface not listed here is
+#: simply never deprecated; nothing elsewhere needs updating to add one.
+DEPRECATED_CLI_SURFACE_MESSAGES: dict[str, str] = {
+    "merges": (
+        "'athenaeum merges' is deprecated (athenaeum#1992) in favor of "
+        "'athenaeum decisions' — pending-merge proposals are surfaced there "
+        "too, framed with a response schema you can answer directly."
+    ),
+    "questions": (
+        "'athenaeum questions' is deprecated (athenaeum#1992) in favor of "
+        "'athenaeum decisions' — pending questions are surfaced there too, "
+        "framed with a response schema you can answer directly."
+    ),
+}
+
+
+def resolve_deprecated_cli_surfaces_enabled(config: dict[str, Any] | None) -> bool:
+    """Resolve whether deprecated-CLI-surface warnings are shown (issue athenaeum#1992).
+
+    ON by default: a deprecated surface (see
+    :data:`DEPRECATED_CLI_SURFACE_MESSAGES`) prints a one-line warning to
+    stderr before running, on every invocation, pointing at its
+    ``athenaeum decisions`` replacement — the documented deprecation-flag
+    mechanism athenaeum#717's "no separate queue survives... behind a
+    documented deprecation flag" escape hatch requires. The flagged surface
+    itself keeps working unchanged either way; this flag only toggles the
+    warning's visibility, never behavior, so a scripted consumer mid
+    transition is never broken by it. Precedence:
+    ``ATHENAEUM_DEPRECATED_CLI_SURFACES_ENABLED`` env >
+    ``librarian.deprecated_cli_surfaces_enabled`` yaml > ``True``. Any env
+    value other than a falsey token (``0`` / ``false`` / ``no`` / ``off``,
+    case-insensitive) is truthy; a non-bool yaml value falls through to the
+    default. No seed in ``_DEFAULTS`` (issue athenaeum#231) — mirrors
+    :func:`resolve_push_metrics_enabled`'s shape.
+    """
+    env = os.environ.get("ATHENAEUM_DEPRECATED_CLI_SURFACES_ENABLED")
+    if env is not None:
+        return env.strip().lower() not in ("0", "false", "no", "off", "")
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("deprecated_cli_surfaces_enabled")
+            if isinstance(raw, bool):
+                return raw
+    return True
+
+
+def deprecated_cli_surface_message(
+    surface: str, config: dict[str, Any] | None
+) -> str:
+    """The deprecation message for *surface*, or ``""`` if not flagged / silenced.
+
+    The one call a CLI surface's own dispatcher makes to "declare itself
+    against" the mechanism (issue athenaeum#1992 AC1) — combines
+    :data:`DEPRECATED_CLI_SURFACE_MESSAGES` with
+    :func:`resolve_deprecated_cli_surfaces_enabled` so neither needs to be
+    consulted separately at any call site.
+    """
+    if not resolve_deprecated_cli_surfaces_enabled(config):
+        return ""
+    return DEPRECATED_CLI_SURFACE_MESSAGES.get(surface, "")
+
+
 def resolve_push_token_budget(config: dict[str, Any] | None) -> int:
     """Resolve the unprompted push budget in tokens-per-turn (issue athenaeum#718).
 
