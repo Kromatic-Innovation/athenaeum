@@ -335,6 +335,52 @@ def confirmation_to_decision(pq: PendingQuestion) -> dict:
     }
 
 
+def coordinate_to_decision(pq: PendingQuestion) -> dict:
+    """Convert a coordinate-kind :class:`PendingQuestion` to a unified decision dict.
+
+    A ``type: "coordinate"`` item (issue athenaeum#1993): a batched
+    :func:`athenaeum.verdict_effects.queue_coordinate_batch` request for an
+    ``underdetermined`` comparator pair/claim/cluster -- the comparator
+    could not resolve a separator dimension on one or both sides, and needs
+    a human to supply it. Storage-wise this is STILL a block in
+    ``_pending_questions.md`` written by the DETECTOR side
+    (:func:`athenaeum.tiers.tier4_escalate`) -- :func:`question_to_decision`
+    dispatches here purely on ``pq.decision_kind == "coordinate"``, the
+    SAME mechanism athenaeum#1290 added for ``confirmation`` (an
+    AGENT-raised kind on the same file). Resolution differs: answering one
+    goes through ``decision_framing.answerable_as("coordinate")`` to a
+    dedicated applier (:mod:`athenaeum.decision_answers`), not the
+    free-text question path.
+
+    ``payload["members"]`` recovers the batch's per-pair dimension list
+    from the block's machine-parseable marker
+    (:func:`athenaeum.verdict_effects.parse_coordinate_batch_members`) --
+    the only on-disk structure that survives into a LATER process (this
+    one): the batch's :class:`~athenaeum.verdict_effects.EffectResult`
+    lived only in the writer's call stack. ``payload["batch_ref"]`` is
+    ``pq.source`` -- the header's ``(from ...)`` reference, which
+    :func:`athenaeum.tiers.tier4_escalate` stamps from
+    ``EscalationItem.raw_ref`` (:func:`athenaeum.verdict_effects._batch_ref`)
+    -- the SAME id an answer must name via ``--id`` to resolve this item.
+    """
+    from athenaeum.verdict_effects import parse_coordinate_batch_members
+
+    return {
+        "type": "coordinate",
+        "id": pq.id,
+        "created_at": pq.created_at,
+        "summary": pq.question,
+        "confidence": None,
+        "payload": {
+            "batch_ref": pq.source,
+            "conflict_type": pq.conflict_type,
+            "description": pq.description,
+            "members": parse_coordinate_batch_members(pq.description),
+            "raised_by": pq.raised_by,
+        },
+    }
+
+
 def question_to_decision(pq: PendingQuestion, *, with_proposal: bool = False) -> dict:
     """Convert a :class:`PendingQuestion` to a unified decision dict.
 
@@ -348,14 +394,17 @@ def question_to_decision(pq: PendingQuestion, *, with_proposal: bool = False) ->
     Issue athenaeum#1290: a block whose ``decision_kind`` is
     ``"confirmation"`` is delegated to :func:`confirmation_to_decision`
     instead — a DIFFERENT ``type`` in the unified view (``"confirmation"``,
-    not ``"question"``) with a richer, structured payload. This branch is the
-    ONLY change athenaeum#1290 makes here; an ordinary question's returned
-    dict (``decision_kind == "question"``, true for every pre-athenaeum#1290
-    block and every plain ``raise_decision`` call) is byte-for-byte
-    unchanged.
+    not ``"question"``) with a richer, structured payload. Issue athenaeum#1993
+    adds a second such delegation: ``decision_kind == "coordinate"`` goes to
+    :func:`coordinate_to_decision`. Both are purely ADDITIVE branches; an
+    ordinary question's returned dict (``decision_kind == "question"``,
+    true for every block that predates either issue and every plain
+    ``raise_decision`` call) is byte-for-byte unchanged.
     """
     if pq.decision_kind == "confirmation":
         return confirmation_to_decision(pq)
+    if pq.decision_kind == "coordinate":
+        return coordinate_to_decision(pq)
     payload: dict = {
         "entity": pq.entity,
         "source": pq.source,

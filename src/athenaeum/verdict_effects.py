@@ -321,17 +321,29 @@ def _queue(
     conflict_type: str,
     raw_ref: str,
     description: str,
+    decision_kind: str = "question",
 ) -> None:
     """Append one framed item to ``<wiki_root>/_pending_questions.md``.
 
     See the module docstring, "Queue routing", for why ``tier4_escalate``
-    over :mod:`athenaeum.pending_merges`.
+    over :mod:`athenaeum.pending_merges``.
+
+    ``decision_kind`` (issue athenaeum#1993, keyword-only, defaults to the
+    pre-existing ``"question"``) is forwarded to
+    :class:`athenaeum.models.EscalationItem` so :func:`tier4_escalate` tags
+    the rendered block's ``**Decision kind**:`` line -- the signal
+    :mod:`athenaeum.decisions` dispatches on
+    (:func:`athenaeum.decisions.question_to_decision`) to give the item a
+    ``type`` other than the generic ``"question"`` in the unified queue.
+    Every OTHER caller in this module omits it and keeps writing a plain
+    question item, unchanged.
     """
     item = EscalationItem(
         raw_ref=raw_ref,
         entity_name=entity_name,
         conflict_type=conflict_type,
         description=description,
+        decision_kind=decision_kind,
     )
     tier4_escalate([item], wiki_root / "_pending_questions.md", config=config)
 
@@ -941,6 +953,13 @@ def queue_coordinate_batch(
         conflict_type=conflict_type,
         raw_ref=ref,
         description=description,
+        # Issue athenaeum#1993: tag this item ``coordinate``, not the generic
+        # ``question`` every other ``_queue`` call site still gets -- the
+        # ONLY change needed here for `athenaeum.decisions` to give the
+        # unified queue a real ``type: "coordinate"`` and for
+        # `decision_framing.answerable_as("coordinate")` to route an answer
+        # to the dedicated applier instead of the free-text question path.
+        decision_kind="coordinate",
     )
     return EffectResult(
         verdict=VERDICT_UNDERDETERMINED,

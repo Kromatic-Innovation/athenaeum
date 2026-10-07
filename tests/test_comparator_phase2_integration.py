@@ -216,9 +216,13 @@ class TestPhase2StaysDark:
     double the night's work.
     """
 
+    # Issue athenaeum#1993: ``decision_answers.py`` is DELIBERATELY removed
+    # from this tuple -- it is no longer fully dark. See
+    # ``TestCoordinateAnswerLoopIsANarrowAuthorizedException`` below for the
+    # replacement, NARROWER invariant that now applies to it instead of the
+    # blanket one every other entry point here still gets.
     PIPELINE_ENTRY_POINTS = (
         "src/athenaeum/librarian.py",
-        "src/athenaeum/decision_answers.py",
         "src/athenaeum/merge.py",
         "src/athenaeum/contradictions.py",
     )
@@ -248,6 +252,77 @@ class TestPhase2StaysDark:
                 f"{entry_point} imports athenaeum.{module} -- athenaeum#715's "
                 "cut-over must REPLACE the old split paths, not run beside them"
             )
+
+
+class TestCoordinateAnswerLoopIsANarrowAuthorizedException:
+    """Issue athenaeum#1993 authorizes a SECOND, much narrower wiring than
+    ``wiki_dedupe.py``'s (``TestPhase2StaysDark.test_wiki_dedupe_is_the_one_
+    authorized_cut_over_wiring`` above): ``decision_answers.py`` may reach
+    ``athenaeum.comparator`` (to mechanically re-compare a pair a human just
+    answered a coordinate request for) and ``athenaeum.verdict_effects``
+    (only :func:`~athenaeum.verdict_effects.parse_coordinate_batch_members`,
+    to recover a queued batch's members) -- and ONLY those two, ONLY via a
+    function-local (deferred) import inside the coordinate applier, never a
+    module-level one. Every OTHER phase-2 module
+    (``TestPhase2StaysDark.DARK_MODULES`` minus these two) stays exactly as
+    dark for ``decision_answers.py`` as it is for every other entry point.
+    """
+
+    _STILL_DARK = (
+        "comparator_instruments",
+        "supersession",
+        "asserter_authority",
+        "recompare",
+        "auto_apply",
+    )
+
+    def test_the_remaining_dark_modules_are_still_dark(self) -> None:
+        """AST-based, not a substring check (issue athenaeum#1993's own
+        docstrings in ``decision_answers.py`` legitimately NAME
+        ``athenaeum.recompare`` in prose -- explaining why it is NOT the
+        re-compare seam used here -- without importing it; a substring
+        check cannot tell "mentioned" from "imported")."""
+        import ast
+
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "src/athenaeum/decision_answers.py").read_text(
+            encoding="utf-8"
+        )
+        dark_names = {f"athenaeum.{module}" for module in self._STILL_DARK}
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module in dark_names:
+                pytest.fail(f"decision_answers.py imports {node.module}")
+            if isinstance(node, ast.Import):
+                hit = dark_names & {alias.name for alias in node.names}
+                assert not hit, f"decision_answers.py imports {hit}"
+
+    def test_comparator_and_verdict_effects_are_imported_only_function_locally(
+        self,
+    ) -> None:
+        import ast
+
+        repo_root = Path(__file__).resolve().parents[1]
+        source = (repo_root / "src/athenaeum/decision_answers.py").read_text(
+            encoding="utf-8"
+        )
+        assert "athenaeum.comparator" in source
+        assert "athenaeum.verdict_effects" in source
+        tree = ast.parse(source)
+        for node in ast.iter_child_nodes(tree):
+            if isinstance(node, ast.ImportFrom) and node.module in (
+                "athenaeum.comparator",
+                "athenaeum.verdict_effects",
+            ):
+                pytest.fail(
+                    f"module-level import of {node.module} in decision_answers.py "
+                    "-- athenaeum#1993 authorizes a function-local import only"
+                )
+            if isinstance(node, ast.Import):
+                assert not any(
+                    alias.name in ("athenaeum.comparator", "athenaeum.verdict_effects")
+                    for alias in node.names
+                )
 
     def test_the_probe_can_actually_fail(self) -> None:
         # Positive control: the substring check above must be able to detect a
