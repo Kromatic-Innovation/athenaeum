@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Decision-queue budget instrumentation (issue athenaeum#1990, #717 AC group 6).
+"""Decision-queue budget instrumentation (issue athenaeum#1990, athenaeum#717 AC group 6).
 
 :mod:`athenaeum.decisions` unifies every pending human decision into one
 queue; :mod:`athenaeum.decision_framing` caps each item's context and
 publishes its token count. Neither reports whether the queue, as a whole,
-is within the three effort bounds #717 sets:
+is within the three effort bounds athenaeum#717 sets:
 
 - items/day: rolling 30-day mean <= ``librarian.decisions_budget_items_per_day_max``
 - per-item context: <= ``librarian.decisions_max_item_context_tokens`` (already
@@ -14,7 +14,7 @@ is within the three effort bounds #717 sets:
 This module adds exactly that: a durable **answer-event ledger** —
 ``wiki/_decision_budget_events.jsonl`` — recording ``{decision_id,
 decision_type, raised_at, answered_at}`` once per resolved decision, plus
-the five #717 figures computed from it and from the live pending-decision
+the five athenaeum#717 figures computed from it and from the live pending-decision
 list:
 
 - **items/day** — rolling-window mean over :data:`answered_at` timestamps
@@ -176,7 +176,7 @@ def items_per_day(
     window_days: int,
     now: datetime | None = None,
 ) -> float:
-    """Rolling ``window_days``-day mean of answered items (#717's items/day figure).
+    """Rolling ``window_days``-day mean of answered items (athenaeum#717's items/day figure).
 
     Counts events whose ``answered_at`` falls within the trailing window
     (inclusive of today), divided by ``window_days``. Events with an
@@ -326,8 +326,8 @@ def record_overflow_shapes(
 ) -> dict[str, Any] | None:
     """Record the recurring decision *shapes* driving a sustained overflow.
 
-    #717's own AC: sustained overflow must not be silently absorbed — the
-    shapes driving it are recorded for the self-tuning child (#719) to mine
+    athenaeum#717's own AC: sustained overflow must not be silently absorbed — the
+    shapes driving it are recorded for the self-tuning child (athenaeum#719) to mine
     later. ``breach_dims`` names which of the three bounds are in breach
     (e.g. ``["items_per_day", "decision_minutes_p50"]``); the shape itself
     is the per-``decision_type`` count across the currently-pending items,
@@ -367,7 +367,7 @@ def budget_report(
     now: datetime | None = None,
     record_shapes: bool = True,
 ) -> dict[str, Any]:
-    """The five #717 budget figures, plus a prominent breach report.
+    """The five athenaeum#717 budget figures, plus a prominent breach report.
 
     ``pending_items`` is the caller's already-fetched
     :func:`athenaeum.decisions.list_pending_decisions` result (never
@@ -375,7 +375,7 @@ def budget_report(
     ledger). When ``record_shapes`` is true (the default) and any bound is
     in breach, the recurring decision shapes are recorded via
     :func:`record_overflow_shapes` — the "report it prominently AND record
-    the shapes" half of #717's overflow AC; the CLI/status caller owns
+    the shapes" half of athenaeum#717's overflow AC; the CLI/status caller owns
     rendering the prominent part.
     """
     events = read_decision_budget_events(wiki_root, events_path=events_path)

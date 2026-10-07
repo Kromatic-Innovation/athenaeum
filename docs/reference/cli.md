@@ -33,7 +33,7 @@ Every subcommand is registered top-level on one `parser.add_subparsers()` in `cl
 - [`athenaeum decay-sweep`](#athenaeum-decay-sweep) (command) — Archive expired bucket:daily wiki pages. Default is dry-run (prints kill-list + retained-list); --apply git-archives the kill-list in a two-commit pair and rebuilds the recall index.
 - [`athenaeum decisions`](#athenaeum-decisions) (group) — One unified 'human decisions needed' list — pending questions AND merges, each tagged by type, every item framed with its reversibility class, proposed default and response schema. Modes: list, next, count, scan-retractions, raise-confirmation, answer.
 - [`athenaeum decisions answer`](#athenaeum-decisions-answer) (command) — Answer one queue item with a JSON object, validated against that item's published response_schema. Refuses a schema-invalid answer without writing anything.
-- [`athenaeum decisions budget`](#athenaeum-decisions-budget) (command) — Report the five #717 effort-budget figures (items/day, per-item context size distribution, decision time p50/p95, p95 item age, queue depth trend) and flag a sustained breach prominently.
+- [`athenaeum decisions budget`](#athenaeum-decisions-budget) (command) — Report the five athenaeum#717 effort-budget figures (items/day, per-item context size distribution, decision time p50/p95, p95 item age, queue depth trend) and flag a sustained breach prominently.
 - [`athenaeum decisions count`](#athenaeum-decisions-count) (command) — Print `N decisions pending (Q questions, M merges; oldest Xd)`.
 - [`athenaeum decisions list`](#athenaeum-decisions-list) (command) — List all pending decisions, oldest first.
 - [`athenaeum decisions next`](#athenaeum-decisions-next) (command) — Show the oldest pending decision (single block).
@@ -382,7 +382,7 @@ One unified 'human decisions needed' list — pending questions AND merges, each
 Subcommands:
 
 - `athenaeum decisions answer` — Answer one queue item with a JSON object, validated against that item's published response_schema. Refuses a schema-invalid answer without writing anything.
-- `athenaeum decisions budget` — Report the five #717 effort-budget figures (items/day, per-item context size distribution, decision time p50/p95, p95 item age, queue depth trend) and flag a sustained breach prominently.
+- `athenaeum decisions budget` — Report the five athenaeum#717 effort-budget figures (items/day, per-item context size distribution, decision time p50/p95, p95 item age, queue depth trend) and flag a sustained breach prominently.
 - `athenaeum decisions count` — Print `N decisions pending (Q questions, M merges; oldest Xd)`.
 - `athenaeum decisions list` — List all pending decisions, oldest first.
 - `athenaeum decisions next` — Show the oldest pending decision (single block).
@@ -403,7 +403,7 @@ Answer one queue item with a JSON object, validated against that item's publishe
 
 ## `athenaeum decisions budget`
 
-Report the five #717 effort-budget figures (items/day, per-item context size distribution, decision time p50/p95, p95 item age, queue depth trend) and flag a sustained breach prominently.
+Report the five athenaeum#717 effort-budget figures (items/day, per-item context size distribution, decision time p50/p95, p95 item age, queue depth trend) and flag a sustained breach prominently.
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|

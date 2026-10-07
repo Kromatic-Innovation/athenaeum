@@ -196,7 +196,7 @@ def _cmd_raise_confirmation(args: argparse.Namespace) -> int:
 
 
 def _cmd_budget(args: argparse.Namespace) -> int:
-    """``athenaeum decisions budget`` — the five #717 figures (issue athenaeum#1990).
+    """``athenaeum decisions budget`` — the five athenaeum#717 figures (issue athenaeum#1990).
 
     Fetches the live queue once (:func:`list_pending_decisions`, which
     already applies :func:`athenaeum.decision_framing.frame_decision` —
@@ -604,7 +604,7 @@ def add_decisions_subparser(subparsers: argparse._SubParsersAction) -> None:
     budget_p = d_sub.add_parser(
         "budget",
         help=(
-            "Report the five #717 effort-budget figures (items/day, "
+            "Report the five athenaeum#717 effort-budget figures (items/day, "
             "per-item context size distribution, decision time p50/p95, "
             "p95 item age, queue depth trend) and flag a sustained breach "
             "prominently (issue athenaeum#1990)."

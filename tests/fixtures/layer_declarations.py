@@ -176,7 +176,7 @@ MODULE_LAYER: dict[str, int] = {
     "paste_cleanup": 4,
     "decision_answers": 4,
     "decision_framing": 4,
-    # Issue athenaeum#1990: the five #717 budget figures + the answer-event
+    # Issue athenaeum#1990: the five athenaeum#717 budget figures + the answer-event
     # ledger. Imports athenaeum.metrics (L3) and athenaeum.store (L0/L1
     # upper bound), deliberately NOT athenaeum.decisions -- see that
     # module's own docstring for the import-cycle this avoids.

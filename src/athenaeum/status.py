@@ -223,7 +223,7 @@ class StatusInfo(TypedDict):
     # always-a-real-count style rather than ``verdict_ledger_duty_cycle``'s
     # opt-in-gated ``None``.
     repair_debt: dict[str, object]
-    # Issue athenaeum#1990: the five #717 decision-queue budget figures
+    # Issue athenaeum#1990: the five athenaeum#717 decision-queue budget figures
     # (:func:`athenaeum.decision_budget.budget_report`), or ``None`` on a
     # best-effort read failure (status must never break on this). See
     # that function's docstring for the shape.
@@ -608,7 +608,7 @@ def status(knowledge_root: Path) -> StatusInfo:
             exc,
         )
 
-    # Issue athenaeum#1990: the five #717 decision-queue budget figures.
+    # Issue athenaeum#1990: the five athenaeum#717 decision-queue budget figures.
     # Best-effort — a read hiccup here must never break status, same
     # discipline as the repair-debt/cluster-snapshot sections above.
     decision_budget: dict[str, object] | None = None
