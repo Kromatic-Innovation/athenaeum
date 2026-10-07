@@ -22,6 +22,19 @@ are named by their frontmatter `name:` (not the uuid-slug) with a
 one-line gist each, because cosine topic-similarity alone doesn't tell you
 whether two pages *should* merge.
 
+**`athenaeum merges` and `athenaeum questions` (below) are deprecated** in
+favor of this unified surface — each prints a reminder to stderr on every
+call, pointing back here. Nothing about either surface's own behavior
+changes, and their maintenance-only modes (`revalidate`, `recompare`,
+`scrub-pii`, `provenance`) have no equivalent here yet, so they remain the
+right tool for those jobs; use `athenaeum decisions` for listing and
+answering. `athenaeum decisions migrate` additionally materializes every
+pending-merge and pending-question record (resolved and unresolved) into a
+persisted unified-schema file (`wiki/_decisions_queue.jsonl`) alongside the
+two legacy sidecars, with every id and disposition carried over unchanged —
+useful for anything that wants to read the whole queue in one shape without
+re-deriving it from two different file formats.
+
 ## I want to answer a contradiction question
 
 When the resolver can't settle an ambiguity or a principled contradiction,
