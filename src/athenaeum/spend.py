@@ -151,6 +151,12 @@ LEDGER_FILENAME = "spend.jsonl"
 #: report ("API $0.42") and ``claude-cli`` unchanged (the subscription path).
 PROVIDER_ANTHROPIC = "anthropic"
 PROVIDER_CLAUDE_CLI = "claude-cli"
+#: Jev (TypeSafe AI) typed-decision backend (issue athenaeum#1997). Routed
+#: through ``decision_provider.py``, NOT ``provider.resolve_provider`` — see
+#: that module's docstring for why the two provider vocabularies stay
+#: separate. Mapped explicitly in :func:`ledger_provider` so a Jev-routed
+#: call is never mislabeled as Anthropic API spend.
+PROVIDER_JEV = "jev"
 
 #: The ``run_type`` vocabulary (issue athenaeum#1136). Previously every call
 #: site passed a bare string literal with no shared source of truth — the
@@ -173,6 +179,11 @@ RUN_TYPE_PASTE_CLEANUP = "paste-cleanup"
 RUN_TYPE_MEMORY_CLASS_BACKFILL = "memory-class-backfill"
 RUN_TYPE_DESCRIPTION_BACKFILL = "description-backfill"
 RUN_TYPE_AUDIT = "audit"
+#: The athenaeum#188 reresolve pass's Jev-routed decision calls (issue
+#: athenaeum#1997). Separate from RUN_TYPE_ANSWERS/RUN_TYPE_LIBRARIAN so a
+#: Jev ledger row is distinguishable from the text-provider resolver calls
+#: it stands in for.
+RUN_TYPE_RERESOLVE = "reresolve"
 
 
 def is_librarian_run_type(run_type: object) -> bool:
@@ -199,8 +210,18 @@ def is_librarian_run_type(run_type: object) -> bool:
 
 
 def ledger_provider(resolved_provider: str | None) -> str:
-    """Map a :func:`resolve_provider` value to the ledger's provider term."""
-    return PROVIDER_CLAUDE_CLI if resolved_provider == "claude-cli" else PROVIDER_ANTHROPIC
+    """Map a :func:`resolve_provider` (or Jev decision-provider, athenaeum#1997)
+    value to the ledger's provider term.
+
+    ``"jev"`` is handled explicitly — without this branch a Jev-routed call
+    would fall through to the ``else`` and be mislabeled as Anthropic API
+    spend (the exact AC athenaeum#1997 calls out).
+    """
+    if resolved_provider == "claude-cli":
+        return PROVIDER_CLAUDE_CLI
+    if resolved_provider == "jev":
+        return PROVIDER_JEV
+    return PROVIDER_ANTHROPIC
 
 
 def default_cache_dir() -> Path:

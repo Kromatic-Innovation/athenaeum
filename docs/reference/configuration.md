@@ -3984,6 +3984,8 @@ auto-applying tier from the one loop meant to catch it being wrong.
 | `ATHENAEUM_RESOLVED_SIMILARITY_THRESHOLD` | `src/athenaeum/fingerprint.py` |
 | `ATHENAEUM_RESOLVE_AUTO_APPLY` | `src/athenaeum/resolutions.py` |
 | `ATHENAEUM_RESOLVE_AUTO_APPLY_THRESHOLD` | `src/athenaeum/config.py`, `src/athenaeum/resolutions.py` |
+| `ATHENAEUM_RESOLVE_DECISION_PROVIDER` | `src/athenaeum/decision_provider.py` |
+| `ATHENAEUM_RESOLVE_DECISION_PROVIDER_REDACT_OUTBOUND` | `src/athenaeum/decision_provider.py` |
 | `ATHENAEUM_RESOLVE_FULL_BODY_TOKEN_CAP` | `src/athenaeum/resolutions.py` |
 | `ATHENAEUM_RESOLVE_LLM_PROVIDER` | `src/athenaeum/_cmd_pending.py` |
 | `ATHENAEUM_RESOLVE_MAX_PER_RUN` | `src/athenaeum/config.py`, `src/athenaeum/resolutions.py` |
