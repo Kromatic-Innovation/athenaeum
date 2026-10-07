@@ -234,20 +234,41 @@ def _check_auto_apply_operation(operation: str) -> None:
 
 
 def _duplicate_auto_apply_authorization(
-    *, wiki_root: Path, pair_key: str, config: dict[str, Any] | None
+    *,
+    wiki_root: Path,
+    pair_key: str,
+    config: dict[str, Any] | None,
+    effort_budget_breach: bool = False,
 ) -> tuple[bool, str]:
     """Whether a ``duplicate`` verdict's fold may auto-apply right now.
 
-    Two gates, both required (issue athenaeum#716): the operator opt-in
+    Three gates, all required (issues athenaeum#716 and athenaeum#1996): the
+    operator opt-in
     (:func:`athenaeum.config.resolve_reversible_verdict_auto_apply_enabled`,
-    default off) AND a FRESH verdict basis in the issue athenaeum#712 ledger
+    default off), a FRESH verdict basis in the issue athenaeum#712 ledger
     (:func:`athenaeum.verdicts.can_authorize_auto_operation` — "a stale
     verdict cannot authorize a new automatic operation"; this function reuses
-    it rather than writing a second freshness predicate). A pair with no
-    verdict-ledger entry at all (the common case while
-    ``librarian.verdict_ledger_enabled`` is off, or before issue athenaeum#712
-    is wired to the comparator in a given deployment) fails CLOSED, same as
-    an explicitly stale one — there is no fresh basis to point to either way.
+    it rather than writing a second freshness predicate), and the decision
+    queue's effort budget (issue athenaeum#1990's
+    :func:`athenaeum.decision_budget.budget_report`) NOT being in breach —
+    the athenaeum#1996 delegation ratchet: widening how much this module
+    auto-applies is exactly the wrong move while the human queue is already
+    over its effort bounds. A pair with no verdict-ledger entry at all (the
+    common case while ``librarian.verdict_ledger_enabled`` is off, or before
+    issue athenaeum#712 is wired to the comparator in a given deployment)
+    fails CLOSED, same as an explicitly stale one — there is no fresh basis
+    to point to either way.
+
+    ``effort_budget_breach`` (keyword-only, default ``False``) is the
+    caller's already-computed breach boolean — this function performs no
+    budget I/O of its own. Computing it is deliberately NOT this module's
+    job: this module's own docstring forbids importing
+    :mod:`athenaeum.decisions` (the source of the ``pending_items`` the
+    breach determination needs), so the one caller that already runs the
+    whole-corpus dedupe pass (:mod:`athenaeum.wiki_dedupe`) computes the
+    breach ONCE per run and threads it down through
+    :func:`athenaeum.auto_apply.enact_verdict_effect` instead of this
+    function re-deriving it (expensively, and per-pair) on its own.
     """
     _check_auto_apply_operation(AUTO_APPLY_FOLD_ON_DUPLICATE)
     if not resolve_reversible_verdict_auto_apply_enabled(config):
@@ -257,6 +278,8 @@ def _duplicate_auto_apply_authorization(
         return False, "no_verdict_ledger_entry"
     if not can_authorize_auto_operation(entry):
         return False, "stale_verdict"
+    if effort_budget_breach:
+        return False, "effort_budget_breach"
     return True, "authorized"
 
 #: The five real comparator verdicts this module knows how to route. A
@@ -549,10 +572,14 @@ def _apply_duplicate(
     wiki_root: Path,
     config: dict[str, Any] | None,
     now: datetime | None,
+    effort_budget_breach: bool = False,
 ) -> EffectResult:
     pair_key = make_pair_key(page_a.id, page_b.id)
     auto_apply_authorized, auto_apply_reason = _duplicate_auto_apply_authorization(
-        wiki_root=wiki_root, pair_key=pair_key, config=config
+        wiki_root=wiki_root,
+        pair_key=pair_key,
+        config=config,
+        effort_budget_breach=effort_budget_breach,
     )
     details: dict[str, Any] = {
         "auto_apply_authorized": auto_apply_authorized,
@@ -1194,6 +1221,7 @@ def apply_verdict_effect(
     config: dict[str, Any] | None = None,
     now: datetime | None = None,
     coordinate_sink: list[dict[str, Any]] | None = None,
+    effort_budget_breach: bool = False,
 ) -> EffectResult:
     """Enact the storage-side effect of one decided :class:`CompareOutcome`.
 
@@ -1215,6 +1243,12 @@ def apply_verdict_effect(
     default) is forwarded verbatim to the ``underdetermined`` branch (see
     :func:`_apply_underdetermined`) and ignored by every other branch --
     only that verdict defers its queueing to a caller-owned batch.
+
+    ``effort_budget_breach`` (issue athenaeum#1996, keyword-only, ``False``
+    default) is forwarded verbatim to the ``duplicate`` branch's auto-apply
+    authorization check (see :func:`_duplicate_auto_apply_authorization`)
+    and ignored by every other branch -- only ``duplicate`` can ever
+    auto-apply. The caller computes this, never this function.
     """
     if outcome.verdict not in _KNOWN_VERDICTS:
         raise ValueError(
@@ -1228,7 +1262,13 @@ def apply_verdict_effect(
     wiki_root = Path(wiki_root)
     if outcome.verdict == VERDICT_DUPLICATE:
         return _apply_duplicate(
-            page_a, page_b, outcome, wiki_root=wiki_root, config=config, now=now
+            page_a,
+            page_b,
+            outcome,
+            wiki_root=wiki_root,
+            config=config,
+            now=now,
+            effort_budget_breach=effort_budget_breach,
         )
     if outcome.verdict == VERDICT_SPECIALIZATION:
         return _apply_specialization(

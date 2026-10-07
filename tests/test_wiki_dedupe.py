@@ -10,6 +10,7 @@ the suite is deterministic and dependency-free.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -1445,6 +1446,118 @@ class TestEveryRemainingBranchIsAccountedFor:
         assert len(rows) == 3
         assert all(r.outcome == OUTCOME_NO_VERDICT for r in rows)
         assert all(r.reason == "no-outcome-returned" for r in rows)
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1996 ratchet guard 1: the real pipeline wiring resolves the
+# decision queue's effort-budget breach ONCE per run and threads the SAME
+# value into every ``enact_verdict_effect`` call -- never a comment-only
+# intent, never re-derived per pair.
+# ---------------------------------------------------------------------------
+
+
+def _fake_duplicate_verdict(wiki_root, page_a, page_b, **kw):
+    from athenaeum.comparator import VERDICT_DUPLICATE, CompareOutcome
+    from athenaeum.verdicts import make_pair_key
+
+    return {
+        "ok": True,
+        "pair": make_pair_key(page_a.id, page_b.id),
+        "verdict": VERDICT_DUPLICATE,
+        "skipped": None,
+        "reason": None,
+        "outcome": CompareOutcome(verdict=VERDICT_DUPLICATE, widened_coords={}),
+    }
+
+
+class TestEffortBudgetBreachWiring:
+    """``propose_wiki_page_merges`` is the ONE real pipeline caller of
+    :func:`athenaeum.auto_apply.enact_verdict_effect`
+    (:mod:`athenaeum.wiki_dedupe`'s own module docstring). Each test here
+    monkeypatches :func:`athenaeum.decision_budget.budget_report` (the
+    collaborator the wiring calls through, same discipline
+    ``TestEveryRemainingBranchIsAccountedFor`` uses) rather than the wiring
+    itself, so this exercises the real production call site, not a
+    restatement of it."""
+
+    def _spy_on_enact(self, monkeypatch: pytest.MonkeyPatch, wd) -> list[Any]:
+        seen: list[Any] = []
+        real_enact = wd.enact_verdict_effect
+
+        def _spy(*args, **kwargs):
+            seen.append(kwargs.get("effort_budget_breach"))
+            return real_enact(*args, **kwargs)
+
+        monkeypatch.setattr(wd, "enact_verdict_effect", _spy)
+        return seen
+
+    def test_breach_true_reaches_every_enact_call(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import athenaeum.decision_budget as db_module
+        import athenaeum.decisions as decisions_module
+        import athenaeum.wiki_dedupe as wd
+
+        knowledge_root = _seed_identical_pages(tmp_path, n=2)
+        monkeypatch.setattr(wd, "record_comparison", _fake_duplicate_verdict)
+        monkeypatch.setattr(decisions_module, "list_pending_decisions", lambda *a, **kw: [])
+        monkeypatch.setattr(
+            db_module,
+            "budget_report",
+            lambda *a, **kw: {"breach": True, "breach_dims": ["items_per_day"]},
+        )
+        seen = self._spy_on_enact(monkeypatch, wd)
+
+        _run_pass(knowledge_root)
+
+        assert seen, "enact_verdict_effect was never called -- test setup is wrong"
+        assert all(b is True for b in seen)
+
+    def test_no_breach_is_the_default(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import athenaeum.decision_budget as db_module
+        import athenaeum.decisions as decisions_module
+        import athenaeum.wiki_dedupe as wd
+
+        knowledge_root = _seed_identical_pages(tmp_path, n=2)
+        monkeypatch.setattr(wd, "record_comparison", _fake_duplicate_verdict)
+        monkeypatch.setattr(decisions_module, "list_pending_decisions", lambda *a, **kw: [])
+        monkeypatch.setattr(
+            db_module, "budget_report", lambda *a, **kw: {"breach": False, "breach_dims": []}
+        )
+        seen = self._spy_on_enact(monkeypatch, wd)
+
+        _run_pass(knowledge_root)
+
+        assert seen, "enact_verdict_effect was never called -- test setup is wrong"
+        assert all(b is False for b in seen)
+
+    def test_a_read_hiccup_in_the_breach_check_fails_open(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Best-effort posture (same as the attribution-snapshot writer and
+        ``status.py``'s own budget section): a broken collaborator must
+        never take the whole dedupe pass down, and must never make
+        auto-apply MORE permissive by accident either -- it degrades to
+        ``effort_budget_breach=False`` (pre-athenaeum#1996 behavior)."""
+        import athenaeum.decisions as decisions_module
+        import athenaeum.wiki_dedupe as wd
+
+        knowledge_root = _seed_identical_pages(tmp_path, n=2)
+        monkeypatch.setattr(wd, "record_comparison", _fake_duplicate_verdict)
+
+        def _boom(*a, **kw):
+            raise RuntimeError("simulated decisions-queue read failure")
+
+        monkeypatch.setattr(decisions_module, "list_pending_decisions", _boom)
+        seen = self._spy_on_enact(monkeypatch, wd)
+
+        results = _run_pass(knowledge_root)
+
+        assert results, "the pass itself must still complete"
+        assert seen, "enact_verdict_effect was never called -- test setup is wrong"
+        assert all(b is False for b in seen)
 
 
 # ---------------------------------------------------------------------------
