@@ -157,6 +157,7 @@ from athenaeum.clusters import (
     resolve_cluster_threshold,
 )
 from athenaeum.comparator import (
+    VERDICT_UNDERDETERMINED,
     begin_content_relation_unavailable_tracking,
     flush_content_relation_unavailable_warning,
     page_from_path,
@@ -176,6 +177,7 @@ from athenaeum.runlock import RunLock
 from athenaeum.search import embed_texts
 from athenaeum.storage import is_merge_eligible
 from athenaeum.vecmath import mean_pool
+from athenaeum.verdict_effects import queue_coordinate_batch
 from athenaeum.wiki_dedupe_attribution import (
     ERASURE_CLASS_REFUSED_REASON,
     OUTCOME_CROSS_CLASS_REJECTED,
@@ -537,6 +539,66 @@ def find_wiki_page_clusters(
     return [c for c in clusters if len(c.member_paths) >= 2]
 
 
+def _group_coordinate_members_by_claim(
+    members: list[dict[str, Any]]
+) -> list[list[dict[str, Any]]]:
+    """Group a cluster's underdetermined members by shared claim (page).
+
+    Issue athenaeum#1991 AC1: "one answer item covers every pair that
+    names the same claim/page on either side". Two members whose requests
+    name a common page id (``request["sides"]["a"]["id"]`` or ``"b"``)
+    belong to the SAME claim group, transitively (union-find over page
+    ids) — a chain of pairs ``a-b``, ``b-c`` is one claim group covering
+    ``a``, ``b``, and ``c``, not two.
+    """
+    parent: dict[str, str] = {}
+
+    def find(x: str) -> str:
+        parent.setdefault(x, x)
+        root = x
+        while parent[root] != root:
+            root = parent[root]
+        while parent[x] != root:
+            parent[x], x = root, parent[x]
+        return root
+
+    def union(a: str, b: str) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for m in members:
+        sides = m["request"]["sides"]
+        union(sides["a"]["id"], sides["b"]["id"])
+
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for m in members:
+        root = find(m["request"]["sides"]["a"]["id"])
+        groups.setdefault(root, []).append(m)
+    return list(groups.values())
+
+
+def _coordinate_batches_for_cluster(
+    members: list[dict[str, Any]]
+) -> list[list[dict[str, Any]]]:
+    """How many :func:`athenaeum.verdict_effects.queue_coordinate_batch`
+    calls one cluster's underdetermined members become.
+
+    Issue athenaeum#1991 AC2: when every member in the cluster names the
+    exact SAME set of missing dimensions (the "are all 14 of these from
+    repo X?" case), the whole cluster collapses into ONE batch regardless
+    of claim boundaries — a per-cluster decision, not one per claim within
+    it. Otherwise, falls back to AC1's per-claim grouping
+    (:func:`_group_coordinate_members_by_claim`).
+    """
+    if not members:
+        return []
+    dimension_sets = {tuple(sorted(m["request"]["dimensions"])) for m in members}
+    if len(dimension_sets) == 1:
+        return [members]
+    return _group_coordinate_members_by_claim(members)
+
+
 def propose_wiki_page_merges(
     knowledge_root: Path,
     *,
@@ -608,7 +670,13 @@ def propose_wiki_page_merges(
         happened for them): ``pair`` (the ledger pair key), ``verdict``,
         ``action`` (the :class:`~athenaeum.verdict_effects.EffectResult`
         action token; omitted in dry-run, which never enacts anything), and
-        ``sources`` (the two absolute page paths).
+        ``sources`` (the two absolute page paths). This invariant is kept
+        even for ``underdetermined`` pairs (issue athenaeum#1991): each such
+        pair's own entry's ``action`` starts as ``"coordinate-pending"`` and
+        is updated in place, once every cluster's pairs are examined, to the
+        batched ``queue_coordinate_batch`` outcome (normally ``"queued"``)
+        plus a ``batch_ref`` key naming the ONE queue item this pair's
+        request ended up in — never a synthetic extra row.
     """
     resolved_config = config if config is not None else load_config(knowledge_root)
     wiki_root = knowledge_root / "wiki"
@@ -697,6 +765,17 @@ def propose_wiki_page_merges(
         return []
 
     results: list[dict[str, Any]] = []
+
+    # Issue athenaeum#1991: one shared sink for every ``underdetermined``
+    # pair this run decides, across every cluster — NOT flushed per cluster.
+    # ``record_comparison`` ledgers the verdict before this call site's
+    # effect runs, so a pair decided this run is already "fresh" on the
+    # next one; if a mid-loop exception discarded a per-cluster sink along
+    # with everything after it, that pair's coordinate request would be
+    # lost permanently rather than merely delayed. Flushed exactly once, in
+    # the ``finally`` below, so a partial run still queues whatever it
+    # decided.
+    coordinate_members: list[dict[str, Any]] = []
 
     # Issue athenaeum#1245 (QA review finding 2): reset this pass's own
     # content_relation-unavailable count/latch before the loop starts, so this
@@ -873,6 +952,12 @@ def propose_wiki_page_merges(
                 # never a hard dependency of resolving a merge", and this
                 # call site does not otherwise thread a search backend
                 # through this function today.
+                # Issue athenaeum#1991: ``coordinate_sink`` defers an
+                # ``underdetermined`` pair's queueing to the shared
+                # ``coordinate_members`` sink (flushed once, batched, in the
+                # ``finally`` below) instead of letting this call site queue
+                # one item per pair_key, exactly the path this issue
+                # replaces. Every other verdict ignores the sink.
                 effect = enact_verdict_effect(
                     page_a,
                     page_b,
@@ -881,7 +966,10 @@ def propose_wiki_page_merges(
                     path_a=path_a,
                     path_b=path_b,
                     config=resolved_config,
+                    coordinate_sink=coordinate_members,
                 )
+                if effect.action == "coordinate-pending" and coordinate_members:
+                    coordinate_members[-1]["cluster_id"] = cluster.cluster_id
                 attribution_rows.append(
                     build_attribution_row(
                         path_a,
@@ -912,6 +1000,56 @@ def propose_wiki_page_merges(
         # summary WARNING of whatever this partial pass accumulated, instead of
         # silently discarding the count along with the exception.
         flush_content_relation_unavailable_warning()
+        # Issue athenaeum#1991: flush every ``underdetermined`` pair this run
+        # decided into one or more BATCHED queue items — never one per
+        # pair_key. In the same ``finally`` as the attribution snapshot
+        # below, for the same reason: ``record_comparison`` already
+        # ledgered these pairs' verdicts, so a mid-loop exception must not
+        # drop their coordinate requests along with it (they would read as
+        # "fresh" and be silently skipped on the next run otherwise).
+        # Grouped by cluster first (each cluster's members never mix with
+        # another cluster's in one batch), then by
+        # ``_coordinate_batches_for_cluster``'s per-claim/per-cluster rule.
+        #
+        # This never appends a synthetic extra row to ``results`` — the
+        # per-pair entry each ``underdetermined`` pair already got in the
+        # main loop above (``action="coordinate-pending"``) is updated IN
+        # PLACE with the batch's real action and a ``batch_ref``, keeping
+        # this function's documented "one entry per decided pair" contract
+        # exactly as it was before this issue.
+        #
+        # Wrapped in try/except, same posture as ``_flush_attribution``
+        # just below: a failure here must not swallow a real exception
+        # already propagating out of the main loop, nor skip the
+        # attribution flush and ``heartbeat.done()`` that still need to run.
+        if coordinate_members:
+            try:
+                pair_to_result = {
+                    r["pair"]: r for r in results if r.get("verdict") == VERDICT_UNDERDETERMINED
+                }
+                by_cluster: dict[str, list[dict[str, Any]]] = {}
+                for member in coordinate_members:
+                    by_cluster.setdefault(member.get("cluster_id", ""), []).append(member)
+                for cluster_members in by_cluster.values():
+                    for batch in _coordinate_batches_for_cluster(cluster_members):
+                        batch_effect = queue_coordinate_batch(
+                            batch, wiki_root=wiki_root, config=resolved_config
+                        )
+                        batch_ref = batch_effect.details.get("batch_ref")
+                        for member in batch:
+                            r = pair_to_result.get(member["pair_key"])
+                            if r is not None:
+                                r["action"] = batch_effect.action
+                                r["batch_ref"] = batch_ref
+            except Exception:
+                log.exception(
+                    "wiki-page dedup: failed to flush %d pending coordinate "
+                    "request(s) into a batched queue item — their pairs are "
+                    "already ledgered (verdict=underdetermined) and will "
+                    "read as fresh on the next run; pairs affected: %s",
+                    len(coordinate_members),
+                    sorted({m["pair_key"] for m in coordinate_members}),
+                )
         # Issue athenaeum#1243: in the SAME ``finally``, and for the same
         # reason athenaeum#1245 put the warning flush here — a mid-loop
         # exception still snapshots whatever this partial pass accounted for,

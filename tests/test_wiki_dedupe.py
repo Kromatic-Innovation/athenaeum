@@ -1445,3 +1445,203 @@ class TestEveryRemainingBranchIsAccountedFor:
         assert len(rows) == 3
         assert all(r.outcome == OUTCOME_NO_VERDICT for r in rows)
         assert all(r.reason == "no-outcome-returned" for r in rows)
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1991: per-claim/per-cluster batching replaces the per-pair
+# coordinate queue for the ``underdetermined`` verdict.
+# ---------------------------------------------------------------------------
+
+
+def _fake_underdetermined_factory(missing: list[str] | None = None):
+    from athenaeum.comparator import VERDICT_UNDERDETERMINED, CompareOutcome
+    from athenaeum.verdicts import make_pair_key
+
+    def _fake(wiki_root, page_a, page_b, **kw):
+        return {
+            "ok": True,
+            "pair": make_pair_key(page_a.id, page_b.id),
+            "verdict": VERDICT_UNDERDETERMINED,
+            "skipped": None,
+            "reason": None,
+            "outcome": CompareOutcome(
+                verdict=VERDICT_UNDERDETERMINED, missing=missing or ["scope"]
+            ),
+        }
+
+    return _fake
+
+
+class TestCoordinateBatchingReplacesPerPairQueueing:
+    def test_multi_pair_cluster_produces_exactly_one_queued_item(
+        self, duplicate_topic_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The venture-a/b/c cluster is 3 pages -> 3 pairs. Before issue
+        athenaeum#1991, each pair's ``underdetermined`` verdict queued its
+        own item (3 items). After, the whole cluster collapses into ONE,
+        and ``results`` still carries exactly 3 entries -- the pre-existing
+        "one entry per decided pair" contract, unbroken by batching."""
+        import athenaeum.wiki_dedupe as wd
+        from athenaeum.comparator import VERDICT_UNDERDETERMINED
+        from athenaeum.decisions import list_pending_decisions
+
+        monkeypatch.setattr(wd, "record_comparison", _fake_underdetermined_factory())
+        results = _run_pass(duplicate_topic_wiki, embedding_provider=_fake_embed)
+
+        assert len(results) == 3, "one result entry per decided pair, never a synthetic extra"
+        assert all(r["verdict"] == VERDICT_UNDERDETERMINED for r in results)
+        batch_refs = {r["batch_ref"] for r in results}
+        assert len(batch_refs) == 1, "all 3 pairs must land in the SAME batch"
+        assert all(r["action"] == "queued" for r in results)
+
+        wiki_root = duplicate_topic_wiki / "wiki"
+        decisions = list_pending_decisions(wiki_root)
+        underdetermined_items = [
+            d for d in decisions if str(d["payload"].get("source", "")).startswith(
+                "coordinate-batch:"
+            )
+        ]
+        assert len(underdetermined_items) == 1, (
+            "3 undecided pairs in one cluster must collapse into ONE "
+            f"queue item, got {len(underdetermined_items)}"
+        )
+
+    def test_no_item_is_ever_keyed_to_a_bare_pair_key(
+        self, duplicate_topic_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Sweep: neither the batched (cluster) path nor a direct single-pair
+        ``apply_verdict_effect`` call (no sink) ever produces a queue item
+        whose ``source`` is the retired ``comparator:<pair_key>`` shape --
+        and exactly 2 items exist in total (one 3-pair batch from the
+        cluster run, one batch-of-one from the direct call), so this
+        assertion cannot pass vacuously on an empty queue."""
+        import athenaeum.wiki_dedupe as wd
+        from athenaeum.comparator import VERDICT_UNDERDETERMINED, CompareOutcome
+        from athenaeum.decisions import list_pending_decisions
+        from athenaeum.verdict_effects import apply_verdict_effect
+
+        monkeypatch.setattr(wd, "record_comparison", _fake_underdetermined_factory())
+        _run_pass(duplicate_topic_wiki, embedding_provider=_fake_embed)
+
+        wiki_root = duplicate_topic_wiki / "wiki"
+
+        # A second, direct (non-batched, no-sink) caller -- the shape every
+        # pre-athenaeum#1991 call site used -- appends to the SAME file.
+        from athenaeum.comparator import page_from_path
+
+        pages = sorted((duplicate_topic_wiki / "wiki").glob("venture-*.md"))
+        page_a = page_from_path(pages[0])
+        page_b = page_from_path(pages[1])
+        direct_outcome = CompareOutcome(verdict=VERDICT_UNDERDETERMINED, missing=["scope"])
+        apply_verdict_effect(page_a, page_b, direct_outcome, wiki_root=wiki_root)
+
+        decisions = list_pending_decisions(wiki_root)
+        sources = [str(d["payload"].get("source", "")) for d in decisions]
+        matched = [s for s in sources if s.startswith("coordinate-batch:")]
+        assert len(matched) == 2, f"expected exactly 2 batched items, got {sources!r}"
+        assert not any(s.startswith("comparator:") for s in sources), (
+            f"a queue item is keyed to a bare pair_key -- the per-pair path "
+            f"athenaeum#1991 retires: {sources!r}"
+        )
+
+    def test_a_mid_loop_exception_still_flushes_already_decided_pairs(
+        self, duplicate_topic_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Issue athenaeum#1991: ``record_comparison`` ledgers a pair's
+        verdict BEFORE this call site's effect runs, so a pair decided this
+        run is already "fresh" on the next one. If an exception partway
+        through a run dropped its coordinate request along with everything
+        after it, that pair's request would be lost permanently, not merely
+        delayed. The ``finally``-block flush must still queue whatever was
+        decided before the exception, and the exception itself must still
+        propagate (never swallowed)."""
+        import athenaeum.wiki_dedupe as wd
+        from athenaeum.decisions import list_pending_decisions
+
+        calls = {"n": 0}
+        fake = _fake_underdetermined_factory()
+
+        def _flaky(wiki_root, page_a, page_b, **kw):
+            calls["n"] += 1
+            if calls["n"] >= 3:
+                raise RuntimeError("simulated mid-loop failure")
+            return fake(wiki_root, page_a, page_b, **kw)
+
+        monkeypatch.setattr(wd, "record_comparison", _flaky)
+
+        with pytest.raises(RuntimeError, match="simulated mid-loop failure"):
+            _run_pass(duplicate_topic_wiki, embedding_provider=_fake_embed)
+
+        wiki_root = duplicate_topic_wiki / "wiki"
+        decisions = list_pending_decisions(wiki_root)
+        batched = [
+            d for d in decisions if str(d["payload"].get("source", "")).startswith(
+                "coordinate-batch:"
+            )
+        ]
+        assert len(batched) == 1, "the 2 pairs decided before the raise must still be queued"
+        assert "Members:" in str(batched[0]["payload"].get("description", ""))
+
+
+class TestCoordinateBatchesForCluster:
+    """Unit coverage for ``_coordinate_batches_for_cluster`` in isolation --
+    issue athenaeum#1991 AC1 (per-claim aggregation) and AC2 (per-cluster
+    batching when the missing dimension is shared) are two DIFFERENT rules;
+    the sweep tests above only exercise the case where both agree."""
+
+    @staticmethod
+    def _member(pair_key: str, a_id: str, b_id: str, dims: list[str]) -> dict:
+        return {
+            "pair_key": pair_key,
+            "request": {
+                "dimensions": dims,
+                "sides": {"a": {"id": a_id, "title": a_id}, "b": {"id": b_id, "title": b_id}},
+                "question": f"differ by {dims}?",
+            },
+            "conflict_type": "ambiguous",
+        }
+
+    def test_disjoint_claims_with_different_dims_give_two_batches(self) -> None:
+        from athenaeum.wiki_dedupe import _coordinate_batches_for_cluster
+
+        members = [
+            self._member("a+b", "a", "b", ["scope"]),
+            self._member("c+d", "c", "d", ["valid-time"]),
+        ]
+        batches = _coordinate_batches_for_cluster(members)
+        assert len(batches) == 2
+        assert {tuple(sorted(m["pair_key"] for m in b)) for b in batches} == {
+            ("a+b",),
+            ("c+d",),
+        }
+
+    def test_chained_claims_with_different_dims_give_one_batch(self) -> None:
+        """AC1: a-b and b-c share claim ``b`` -- one claim group, even though
+        the two pairs name different missing dimensions."""
+        from athenaeum.wiki_dedupe import _coordinate_batches_for_cluster
+
+        members = [
+            self._member("a+b", "a", "b", ["scope"]),
+            self._member("b+c", "b", "c", ["valid-time"]),
+        ]
+        batches = _coordinate_batches_for_cluster(members)
+        assert len(batches) == 1
+        assert len(batches[0]) == 2
+
+    def test_disjoint_claims_with_identical_dims_give_one_batch(self) -> None:
+        """AC2: a-b and c-d share NO claim, but every member names the same
+        missing dimension -- the whole cluster collapses into one batch."""
+        from athenaeum.wiki_dedupe import _coordinate_batches_for_cluster
+
+        members = [
+            self._member("a+b", "a", "b", ["scope"]),
+            self._member("c+d", "c", "d", ["scope"]),
+        ]
+        batches = _coordinate_batches_for_cluster(members)
+        assert len(batches) == 1
+        assert len(batches[0]) == 2
+
+    def test_empty_cluster_gives_no_batches(self) -> None:
+        from athenaeum.wiki_dedupe import _coordinate_batches_for_cluster
+
+        assert _coordinate_batches_for_cluster([]) == []
