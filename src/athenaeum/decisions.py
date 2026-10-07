@@ -695,13 +695,41 @@ def age_days(created_at: str, *, today: date | None = None) -> int | None:
 
     Returns ``None`` when ``created_at`` can't be parsed. Only the date
     portion is used, so a full ``YYYY-MM-DDThh:mm:ssZ`` timestamp works too.
+
+    Delegates to :func:`athenaeum.metrics.days_since` (issue athenaeum#1990)
+    — the shared L3 implementation :mod:`athenaeum.decision_budget` also
+    uses, so the two never fork the same day-diff logic, and so this module
+    does not need to import that one (which would close an import cycle:
+    ``decisions`` already reaches ``quarantine``, and ``decision_budget``
+    reaches both).
     """
-    if not created_at:
-        return None
-    day_part = created_at.strip()[:10]
-    try:
-        created = date.fromisoformat(day_part)
-    except ValueError:
-        return None
-    ref = today or date.today()
-    return (ref - created).days
+    from athenaeum.metrics import days_since
+
+    return days_since(created_at, today=today)
+
+
+def decision_time_minutes(raised_at: str, answered_at: str) -> int | None:
+    """Whole minutes between ``raised_at`` and ``answered_at``.
+
+    Sibling to :func:`age_days`: the queue's decision-time metric (issue
+    athenaeum#1990), consumed by :mod:`athenaeum.decision_budget`.
+    ``raised_at`` is an item's own raise timestamp —
+    ``PendingQuestion.raised_at`` when the item was agent-raised (issue
+    athenaeum#912), otherwise its ``created_at`` (every detector-raised
+    question, and every merge / audit / quarantine / proposed-rule record).
+    ``answered_at`` is the matching resolution timestamp each per-type
+    resolver stamps: ``PendingQuestion.answered_at``,
+    ``PendingMerge.answered_at``, or the ``answered_at`` key on the
+    audit-review, quarantine-release, and rule-proposal-disposition ledger
+    records.
+
+    Returns ``None`` — never a fabricated duration — when either timestamp
+    is missing or unparseable, or when the pair resolves to a negative
+    duration (clock skew or a malformed record, not a real decision time).
+    Delegates to :func:`athenaeum.metrics.minutes_between`; see
+    :func:`age_days` above for why the delegation (not a local
+    implementation importing this module from ``decision_budget``) matters.
+    """
+    from athenaeum.metrics import minutes_between
+
+    return minutes_between(raised_at, answered_at)

@@ -291,11 +291,18 @@ def record_audit_review(
 
     overturned = human_verdict != audit.get("verdict")
     applied = bool(audit.get("applied"))
+    reviewed_at = now_iso()
     record = {
         "v": CALIBRATION_LEDGER_VERSION,
         "kind": REVIEW_KIND,
         "id": audit_id,
-        "created_at": now_iso(),
+        "created_at": reviewed_at,
+        # Issue athenaeum#1990: decision-time metric's resolution-side
+        # timestamp. Equal to this record's own ``created_at`` — kept as a
+        # separate, explicitly-named key so every budget-instrumentation
+        # consumer reads the same ``answered_at`` field name across every
+        # decision type instead of a per-type alias.
+        "answered_at": reviewed_at,
         "tier": audit.get("tier"),
         "original_verdict": audit.get("verdict"),
         "human_verdict": human_verdict,
