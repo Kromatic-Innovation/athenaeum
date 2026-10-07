@@ -38,6 +38,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deprecated here — it has no overlap with `decisions.py`'s own, unrelated
   `audit` item type (a calibration-sampled-review record); see the PR
   description for the full discrepancy note.
+- **Coordinate-answer loop: a real `coordinate` decision type + mechanical
+  re-compare (issue athenaeum#1993).** Closes the loop issue athenaeum#1991's
+  batching left open. `decision_framing._TYPE_FRAMING` gains a `coordinate`
+  entry (reversible, competence-routed) with a response schema; a queued
+  coordinate batch (`verdict_effects.queue_coordinate_batch`,
+  `_apply_underdetermined`) now tags its `_pending_questions.md` block
+  `**Decision kind**: coordinate` (threaded through a new
+  `EscalationItem.decision_kind` field, default `"question"`, so every
+  other escalation renders byte-for-byte unchanged), surfaced by
+  `athenaeum decisions list` as `type: "coordinate"`
+  (`decisions.coordinate_to_decision`) instead of the generic free-text
+  question fallback. `athenaeum decisions answer --type coordinate` is
+  registered via `decision_framing.answerable_as`; its inbound applier
+  (`decision_answers._apply_coordinate_answer`) validates the decoded
+  answer against a dedicated structural schema
+  (`decision_framing.validate_coordinate_payload`), writes the supplied
+  coordinate value(s) to the affected page(s)' frontmatter by reusing
+  `pending_merges._write_coordinate`/`_widen_over_metas` verbatim, stale-
+  marks the pair, and mechanically re-compares it through the existing
+  `comparator.record_comparison` entry point — `client=None` always (this
+  module makes no LLM call, ever); the common separator-dimension case
+  (e.g. a human-ratified `subject` identity answer) resolves on Gate 1
+  alone, and a pair that genuinely still needs Gate 2 is left for the
+  next LLM-backed comparator pass rather than blocked on. The freshly
+  decided verdict is ledgered exactly like any other comparator verdict,
+  giving it provenance (`basis`) and revocability (`stale`/
+  `stale_reason`) with no new machinery. `coord_origins` population and
+  its blast-radius stale-marking are deliberately left untouched — that
+  is issue athenaeum#1994's job, which this issue leaves a clean seam for
+  (`verdict_effects.member_provenance_for_batch` + the decision-answer's
+  own stable id).
 
 - **Meaning-based `subject` population extended to raw auto-memory cluster
   members (issue athenaeum#1946, follow-up to athenaeum#1944).** `athenaeum

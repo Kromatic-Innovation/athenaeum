@@ -64,17 +64,18 @@ this module cheap to import when only the render path is needed (e.g. from
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import yaml
 
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.decision_framing import shape_errors_only, validate_answer
-from athenaeum.models import parse_frontmatter
+from athenaeum.models import parse_frontmatter, render_frontmatter
 from athenaeum.store import now_iso
 
 if TYPE_CHECKING:  # pragma: no cover - type-checking only, avoids a hard import
@@ -83,10 +84,12 @@ if TYPE_CHECKING:  # pragma: no cover - type-checking only, avoids a hard import
 log = logging.getLogger(__name__)
 
 #: Registered decision types. ``proposed-rule`` is registered per athenaeum#908's
-#: D6 — schema-only, fails closed on apply. See module docstring.
-DecisionType = Literal["question", "merge", "audit", "proposed-rule"]
+#: D6 — schema-only, fails closed on apply. ``coordinate`` (issue athenaeum#1993)
+#: writes a comparator coordinate and triggers a mechanical re-compare — see
+#: :func:`_apply_coordinate_answer`. See module docstring.
+DecisionType = Literal["question", "merge", "audit", "proposed-rule", "coordinate"]
 VALID_DECISION_TYPES: frozenset[str] = frozenset(
-    ("question", "merge", "audit", "proposed-rule")
+    ("question", "merge", "audit", "proposed-rule", "coordinate")
 )
 
 #: Frontmatter ``source:`` tag stamped on every decision-answer file, distinct
@@ -603,6 +606,293 @@ def _apply_proposed_rule_answer(wiki_root: Path, answer: DecisionAnswer) -> Deci
     )
 
 
+def _find_page_path_by_id(wiki_root: Path, page_id: str) -> Path | None:
+    """Reverse-lookup a comparator page id to its file under *wiki_root*.
+
+    Issue athenaeum#1993: :class:`athenaeum.comparator.ComparatorPage` and
+    :func:`athenaeum.verdict_effects.build_coordinate_request` carry only a
+    page's id (its slug, :func:`athenaeum.verdicts.page_id_for_path` with no
+    *root* — see that function's docstring: "the comparator's own
+    (non-cluster) call site intentionally still does not pass root"), never
+    its path — so a coordinate answer, arriving in a LATER process with
+    only the id (via ``pair`` in the answer payload), has to look the path
+    back up. Walks every ``*.md`` file under *wiki_root* (skipping sidecar
+    files — ``_pending_questions.md``, ``_pending_merges.md``, etc. — by
+    their leading underscore) and returns the first whose
+    :func:`~athenaeum.verdicts.page_id_for_path` matches, using the SAME
+    bare-stem derivation the comparator used when it built this id in the
+    first place. Returns ``None`` (never raises) when nothing matches — a
+    resolution miss is a refusal for the caller to report, not a crash.
+    """
+    from athenaeum.verdicts import page_id_for_path
+
+    for candidate in sorted(wiki_root.rglob("*.md")):
+        if candidate.name.startswith("_"):
+            continue
+        if page_id_for_path(candidate) == page_id:
+            return candidate
+    return None
+
+
+def _apply_coordinate_answer(
+    wiki_root: Path,
+    pending_path: Path,
+    answer: DecisionAnswer,
+    *,
+    config: dict | None,
+    lock: "RunLock | None" = None,
+) -> DecisionAnswerOutcome:
+    """Apply one ``coordinate`` decision answer (issue athenaeum#1993).
+
+    Writes the human-supplied coordinate value(s) to the affected page(s)'
+    frontmatter — reusing :func:`athenaeum.pending_merges._write_coordinate`
+    verbatim, never a second implementation — then mechanically re-compares
+    the pair(s) the answer names through the EXISTING comparator entry
+    point (:func:`athenaeum.comparator.record_comparison` ->
+    :func:`athenaeum.comparator.compare_pages`), never a second, ad hoc
+    comparison path. A freshly decided verdict is ledgered by
+    ``record_comparison`` itself exactly like any other comparator verdict
+    (:func:`athenaeum.verdicts.append_verdict`) — which is what gives it
+    provenance (the ledger entry's ``basis``) and revocability (every
+    ledger entry already supports the ``stale``/``stale_reason`` mechanism)
+    with ZERO new machinery; see module docstring, "per athenaeum#717's own
+    AC for this loop".
+
+    ``client=None`` is passed to ``record_comparison`` deliberately, not a
+    shortcut: this module's whole contract is "tier 0 — deterministic, no
+    LLM call, ever" (module docstring), and a coordinate answer is exactly
+    a SEPARATOR-DIMENSION (Gate 1) input — the common case (e.g. two pages
+    now disjoint on ``subject``) resolves mechanically, no Gate 2 content
+    judgement needed at all. When Gate 2 genuinely is still needed,
+    ``compare_pages`` degrades gracefully (its own documented contract:
+    "Never raises for an LLM-unavailable Gate 2") and ``record_comparison``
+    reports ``ok=False``/``verdict=None`` rather than ledgering anything —
+    the pair stays queued for the next LLM-backed comparator pass
+    (:mod:`athenaeum.wiki_dedupe` / :mod:`athenaeum.recompare`) to decide.
+    That is the honest outcome, not a bug: the coordinate was still
+    WRITTEN, so that later pass's own Gate 1 will see it.
+
+    Fails soft and refuses BEFORE writing anything on: malformed ``verdict``
+    JSON, a decoded payload that fails
+    :func:`athenaeum.decision_framing.validate_coordinate_payload`, an
+    unknown ``decision_id``, an already-answered item, a ``pair`` that is
+    not a member of THIS batch
+    (:func:`athenaeum.verdict_effects.parse_coordinate_batch_members`), a
+    page id that is not one of its own named pair's two members, or an
+    unknown dimension name — "nothing half-lands", the same posture every
+    other applier in this module takes.
+    """
+    from athenaeum.answers import parse_pending_questions, resolve_by_id
+    from athenaeum.comparator import page_from_path, record_comparison
+    from athenaeum.config import resolve_dimensions
+    from athenaeum.decision_framing import validate_coordinate_payload
+    from athenaeum.pending_merges import _write_coordinate
+    from athenaeum.verdict_effects import parse_coordinate_batch_members
+    from athenaeum.verdicts import mark_pairs_stale
+
+    def _refuse(error_code: str, message: str) -> DecisionAnswerOutcome:
+        return DecisionAnswerOutcome(
+            path=answer.path,
+            decision_id=answer.decision_id,
+            decision_type=answer.decision_type,
+            applied=False,
+            error_code=error_code,
+            message=message,
+        )
+
+    try:
+        payload = json.loads(answer.verdict)
+    except (ValueError, TypeError) as exc:
+        return _refuse("malformed_verdict_json", f"verdict is not valid JSON: {exc}")
+
+    schema_errors = validate_coordinate_payload(payload)
+    if schema_errors:
+        return _refuse("schema_invalid", "; ".join(schema_errors))
+
+    questions = parse_pending_questions(pending_path)
+    pq = next((q for q in questions if q.id == answer.decision_id), None)
+    if pq is None:
+        return _refuse(
+            "id_not_found", f"coordinate item id not found: {answer.decision_id}"
+        )
+    if pq.answered:
+        return _refuse(
+            "already_resolved",
+            f"coordinate item {answer.decision_id} already answered",
+        )
+
+    batch_members = parse_coordinate_batch_members(pq.description)
+    batch_pairs = {m["pair"] for m in batch_members}
+    if not batch_pairs:
+        return _refuse(
+            "no_recoverable_members",
+            f"coordinate item {answer.decision_id} carries no recoverable batch "
+            "members (missing or malformed machine-readable marker)",
+        )
+
+    registry = resolve_dimensions(config)
+
+    # Validate everything and resolve every page path BEFORE writing
+    # anything — same "nothing half-lands" posture as the schema-shape
+    # refusal above, just one layer deeper (value semantics, not shape).
+    errors: list[str] = []
+    plan: list[tuple[str, Path, Path, str, str, dict[str, dict[str, Any]]]] = []
+    for item in payload["answers"]:
+        pair_key = str(item["pair"])
+        if pair_key not in batch_pairs:
+            errors.append(
+                f"pair {pair_key!r} is not a member of batch {answer.decision_id!r}"
+            )
+            continue
+        ids = pair_key.split("+", 1)
+        if len(ids) != 2 or not all(ids):
+            errors.append(f"pair {pair_key!r} is not a valid '<id>+<id>' pair key")
+            continue
+        id_a, id_b = ids
+        path_a = _find_page_path_by_id(wiki_root, id_a)
+        path_b = _find_page_path_by_id(wiki_root, id_b)
+        if path_a is None or path_b is None:
+            missing = id_a if path_a is None else id_b
+            errors.append(
+                f"pair {pair_key!r}: could not locate page {missing!r} under {wiki_root}"
+            )
+            continue
+        dims_for_pair: dict[str, dict[str, Any]] = {}
+        for dim_name, values in item["dimensions"].items():
+            dimension = registry.get(dim_name)
+            if dimension is None:
+                errors.append(f"pair {pair_key!r}: unknown dimension {dim_name!r}")
+                continue
+            if not isinstance(values, dict):
+                errors.append(
+                    f"pair {pair_key!r} dimension {dim_name!r}: value must be an "
+                    "object keyed by page id"
+                )
+                continue
+            unknown_ids = sorted(set(values) - {id_a, id_b})
+            if unknown_ids:
+                errors.append(
+                    f"pair {pair_key!r} dimension {dim_name!r}: {unknown_ids} are "
+                    "not members of this pair"
+                )
+                continue
+            dims_for_pair[dim_name] = values
+        plan.append((pair_key, path_a, path_b, id_a, id_b, dims_for_pair))
+
+    if errors:
+        return _refuse("invalid_coordinate_answer", "; ".join(errors))
+
+    if lock is None:
+        return _refuse(
+            "lock_required",
+            "coordinate answers require an active run lock to stale-mark and "
+            "re-compare the affected pair(s)",
+        )
+
+    recompared: list[str] = []
+    for pair_key, path_a, path_b, id_a, id_b, dims_for_pair in plan:
+        meta_a, body_a = parse_frontmatter(path_a.read_text(encoding="utf-8"))
+        meta_b, body_b = parse_frontmatter(path_b.read_text(encoding="utf-8"))
+        meta_a = dict(meta_a) if isinstance(meta_a, dict) else {}
+        meta_b = dict(meta_b) if isinstance(meta_b, dict) else {}
+        for dim_name, values in dims_for_pair.items():
+            dimension = registry.get(dim_name)
+            if dimension is None:  # pragma: no cover - already refused above
+                continue
+            if id_a in values:
+                _write_coordinate(meta_a, dimension, values[id_a])
+            if id_b in values:
+                _write_coordinate(meta_b, dimension, values[id_b])
+        atomic_write_text(path_a, render_frontmatter(meta_a) + body_a)
+        atomic_write_text(path_b, render_frontmatter(meta_b) + body_b)
+
+        # The write above just changed this pair's CLAIM coordinates, but
+        # athenaeum.verdicts' staleness sweep (mark_pairs_stale /
+        # select_stale_for_*) is a separate maintenance pass, never run
+        # automatically on a bare frontmatter write — without this,
+        # record_comparison's own memoization (get_verdict_status) would
+        # see the OLD verdict as still "fresh" and hand it back UNCHANGED,
+        # never re-comparing. We already know the exact pair that needs
+        # re-comparison (we just answered it), so this stale-marks it
+        # directly rather than reaching for the content-hash-diff rule
+        # built for a bulk corpus sweep (select_stale_for_changed_page).
+        #
+        # Issue athenaeum#1994 seam: member_provenance_for_batch (already
+        # built, verdict_effects.py) computes one
+        # {"pair", "decided_by": f"human-batch:{answer.decision_id}",
+        # "dimensions"} stamp per member of `batch_members` above — that
+        # slice's job is to write it onto the FRESH entry's
+        # basis.coord_origins below (left at `{}` here, deliberately — see
+        # this issue's "Out of scope"). `answer.decision_id` is exactly the
+        # `answer_id` that slice's blast-radius stale-marking
+        # (select_stale_for_coordinate_challenged) keys on, and it is
+        # already durable (the pending-question block's own id) and
+        # already reachable from here.
+        mark_pairs_stale(
+            wiki_root,
+            {pair_key: f"coordinate answered via decisions answer {answer.decision_id}"},
+            lock=lock,
+        )
+
+        result = record_comparison(
+            wiki_root,
+            page_from_path(path_a),
+            page_from_path(path_b),
+            registry=registry,
+            client=None,
+            config=config,
+            lock=lock,
+            authority_basis=f"human-batch:{answer.decision_id}",
+            # Issue athenaeum#1993: Gate 1's ``subject`` (IDENTITY-kind)
+            # comparator refuses to separate on anything but ratified
+            # evidence — "subjects never separate on a model-reported
+            # scalar" (dimensions.compare_identity's own docstring) — a
+            # DIFFERENT value on each side is otherwise reported UNKNOWN,
+            # not DISJOINT, no matter how different. A human-answered
+            # ``subject`` coordinate for THIS pair IS that evidence class
+            # ("backed by human confirmation"), so it is ratified exactly
+            # when this pair's own answered dimensions named it — never
+            # unconditionally, and never for any other dimension kind
+            # (every other comparator ignores the flag by construction).
+            subject_ratified="subject" in dims_for_pair,
+        )
+        if result.get("ok") and not result.get("skipped"):
+            recompared.append(f"{pair_key}: {result.get('verdict')}")
+        elif result.get("skipped") == "fresh":
+            recompared.append(f"{pair_key}: fresh (unexpected — not re-compared)")
+        else:
+            recompared.append(
+                f"{pair_key}: not yet decided "
+                f"({result.get('reason') or 'Gate 2 unavailable at tier 0'}); "
+                "coordinate written, awaiting the next LLM-backed comparator pass"
+            )
+
+    answer_summary = "; ".join(recompared)
+    resolve_result = resolve_by_id(
+        pending_path,
+        answer.decision_id,
+        f"Coordinate(s) recorded. Re-compare: {answer_summary}",
+    )
+    if not resolve_result.get("ok"):
+        return _refuse(
+            resolve_result.get("error_code") or "resolve_failed",
+            resolve_result.get("message")
+            or (
+                f"coordinate(s) written and re-compared ({answer_summary}) but the "
+                "queue item could not be marked answered"
+            ),
+        )
+
+    return DecisionAnswerOutcome(
+        path=answer.path,
+        decision_id=answer.decision_id,
+        decision_type=answer.decision_type,
+        applied=True,
+        error_code=None,
+        message=f"coordinate(s) written; re-compare: {answer_summary}",
+    )
+
+
 def _raised_at_for(
     decision_type: str,
     decision_id: str,
@@ -680,6 +970,13 @@ def apply_decision_answers(
       / :func:`~athenaeum.rule_proposals.reject_rule_proposal` (athenaeum#905
       store, wired by athenaeum#921). ``knowledge_root`` is derived as
       ``wiki_root.parent`` — see :func:`_apply_proposed_rule_answer`.
+    - ``coordinate`` -> :func:`_apply_coordinate_answer` (athenaeum#1993):
+      writes the answered coordinate(s) to the affected page(s)'
+      frontmatter and mechanically re-compares the pair(s) via
+      :func:`athenaeum.comparator.record_comparison`. The ONE dispatch
+      branch in this module that is not purely a file/ledger mutation on
+      an already-decided value — see that function's docstring for why it
+      still makes no LLM call itself.
 
     A file with no ``decision_id`` (a legacy answer, or anything else that
     happens to live in ``raw/answers/``) is silently left alone — not
@@ -806,6 +1103,10 @@ def apply_decision_answers(
             )
         elif answer.decision_type == "audit":
             outcome = _apply_audit_answer(wiki_root, answer)
+        elif answer.decision_type == "coordinate":
+            outcome = _apply_coordinate_answer(
+                wiki_root, pending_questions_path, answer, config=config, lock=lock
+            )
         else:  # "proposed-rule" — the only other member of VALID_DECISION_TYPES
             outcome = _apply_proposed_rule_answer(wiki_root, answer)
 
