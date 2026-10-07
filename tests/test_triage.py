@@ -47,7 +47,6 @@ from athenaeum.triage import (
     ACTION_PREPARED,
     TriageResolution,
     coordinate_request_researcher,
-    render_research_digest,
     run_triage,
     submit_answer,
 )
@@ -249,17 +248,44 @@ class TestCoordinateResearcherResolves:
         outcome = report.outcomes[0]
         assert outcome.routing == ROUTING_COMPETENCE
         assert outcome.action == ACTION_ABSORBED
-        assert outcome.decided_by == "agent:coordinate-gate1"
+        assert outcome.decided_by == "agent:coordinate-resupply"
         assert outcome.answer_path is not None
         assert outcome.answer_path.exists()
 
-        # Apply through the SAME tick every other decision answer uses.
-        apply_report = apply_decision_answers(wiki_root, knowledge_root / "raw")
-        assert apply_report.applied == 1
+        # The submitted verdict is the resupplied coordinate payload, not a
+        # free-text narration — coordinate's applier parses it as JSON.
+        from athenaeum.models import parse_frontmatter
 
+        answer_meta, _ = parse_frontmatter(outcome.answer_path.read_text(encoding="utf-8"))
+        submitted = json.loads(str(answer_meta["verdict"]))
+        assert submitted == {
+            "answers": [
+                {
+                    "pair": "page-a+page-b",
+                    "dimensions": {"subject": {"page-a": "alice", "page-b": "alice"}},
+                }
+            ]
+        }
+
+        # Apply through the SAME tick every other decision answer uses —
+        # the coordinate applier requires an active run lock (it stale-marks
+        # and mechanically re-compares the pair).
+        from athenaeum.runlock import RunLock
+
+        with RunLock(knowledge_root) as lock:
+            apply_report = apply_decision_answers(wiki_root, knowledge_root / "raw", lock=lock)
+        assert apply_report.applied == 1
+        assert apply_report.outcomes[0].error_code is None
+
+        # decided_by is NOT in the persisted block text for a coordinate
+        # answer — the applier overwrites it with its own fixed summary
+        # (see module docstring, "decided_by stamping"). It IS durably
+        # recorded in this module's own run report (asserted above) and,
+        # when sampled, the calibration ledger (TestCalibrationSampling).
         pending_text = (wiki_root / "_pending_questions.md").read_text(encoding="utf-8")
         assert "- [x]" in pending_text
-        assert "decided_by: agent:coordinate-gate1" in pending_text
+        assert "Coordinate(s) recorded" in pending_text
+        assert "decided_by: agent:coordinate-resupply" not in pending_text
 
         # No longer pending.
         assert list_pending_decisions(wiki_root) == []
@@ -278,14 +304,58 @@ class TestCoordinateResearcherResolves:
         # Item is still pending — dry run changed nothing.
         assert len(list_pending_decisions(wiki_root)) == 1
 
-
-class TestCoordinateResearcherDefers:
-    def test_unratified_differing_subject_is_left_for_the_human(
+    def test_differing_present_subject_is_resolved_via_resupply_and_ratification(
         self, knowledge_root: Path
     ) -> None:
+        """Both sides already carry a (DIFFERENT) subject value — Gate 1's
+        identity comparator reports this UNKNOWN, not DISJOINT, until a
+        human-ratified answer says the disagreement is real
+        (dimensions.compare_identity's own contract). Resupplying the
+        already-asserted values through the coordinate-answer loop IS that
+        ratification (decision_answers._apply_coordinate_answer passes
+        subject_ratified=True whenever an answer names "subject") — this
+        researcher does not invent the values, it only supplies what is
+        already on disk, exactly as determinately as the EQUAL case."""
         wiki_root = knowledge_root / "wiki"
         _write_subject_page(wiki_root, uid="page-a", subject="alice")
         _write_subject_page(wiki_root, uid="page-b", subject="bob")
+        _queue_coordinate_item(wiki_root, id_a="page-a", id_b="page-b")
+
+        report = run_triage(knowledge_root, config=_SAMPLE_NONE_TRIAGE_CONFIG)
+
+        outcome = report.outcomes[0]
+        assert outcome.action == ACTION_ABSORBED
+        assert outcome.decided_by == "agent:coordinate-resupply"
+
+        from athenaeum.models import parse_frontmatter
+        from athenaeum.runlock import RunLock
+
+        answer_meta, _ = parse_frontmatter(outcome.answer_path.read_text(encoding="utf-8"))
+        submitted = json.loads(str(answer_meta["verdict"]))
+        assert submitted["answers"][0]["dimensions"]["subject"] == {
+            "page-a": "alice",
+            "page-b": "bob",
+        }
+
+        with RunLock(knowledge_root) as lock:
+            apply_report = apply_decision_answers(wiki_root, knowledge_root / "raw", lock=lock)
+        assert apply_report.applied == 1
+        assert apply_report.outcomes[0].error_code is None
+        assert "distinct" in apply_report.outcomes[0].message
+
+
+class TestCoordinateResearcherDefers:
+    def test_dimension_missing_on_one_side_is_left_for_the_human(
+        self, knowledge_root: Path
+    ) -> None:
+        """A genuinely missing coordinate (no value on one side at all) is
+        exactly the case a coordinate item exists FOR — this researcher has
+        no live source to consult, so it must decline, never guess."""
+        wiki_root = knowledge_root / "wiki"
+        _write_subject_page(wiki_root, uid="page-a", subject="alice")
+        (wiki_root / "page-b.md").write_text(
+            "---\nname: page-b\nuid: page-b\n---\nBody for page-b.\n", encoding="utf-8"
+        )
         _queue_coordinate_item(wiki_root, id_a="page-a", id_b="page-b")
 
         report = run_triage(knowledge_root)
@@ -295,6 +365,16 @@ class TestCoordinateResearcherDefers:
         assert len(list_pending_decisions(wiki_root)) == 1
         answers_dir = knowledge_root / "raw" / "answers"
         assert not answers_dir.exists() or not list(answers_dir.glob("*.md"))
+
+    def test_unknown_dimension_name_is_left_for_the_human(self, knowledge_root: Path) -> None:
+        wiki_root = knowledge_root / "wiki"
+        _write_subject_page(wiki_root, uid="page-a", subject="alice")
+        _write_subject_page(wiki_root, uid="page-b", subject="alice")
+        _queue_coordinate_item(wiki_root, id_a="page-a", id_b="page-b", dim="not-a-real-dimension")
+
+        report = run_triage(knowledge_root)
+
+        assert report.outcomes[0].action == ACTION_ESCALATED
 
     def test_plain_non_coordinate_question_is_left_for_the_human(
         self, knowledge_root: Path
@@ -367,6 +447,59 @@ class TestSubmitAnswerMatchesCli:
             assert "source: decision_answer" in text
             assert "decision_type: question" in text
 
+    def test_submission_matches_cli_for_coordinate_type_too(
+        self, knowledge_root: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """issue athenaeum#1995's "no parallel write path" property must
+        hold for `coordinate` too, not just `question` — answerable_as/
+        validate_answer/write_decision_answer are generic over decision
+        type, so this is the same equivalence proof, just with a
+        structured (JSON) verdict instead of free text."""
+        wiki_root = knowledge_root / "wiki"
+        _write_subject_page(wiki_root, uid="cli-a", subject="alice")
+        _write_subject_page(wiki_root, uid="cli-b", subject="alice")
+        _queue_coordinate_item(wiki_root, id_a="cli-a", id_b="cli-b")
+        qid_cli = list_pending_decisions(wiki_root)[0]["id"]
+
+        payload = json.dumps(
+            {"answers": [{"pair": "cli-a+cli-b", "dimensions": {"subject": {"cli-a": "alice"}}}]}
+        )
+        rc = cli_main(
+            [
+                "decisions",
+                "answer",
+                "--path",
+                str(knowledge_root),
+                "--id",
+                qid_cli,
+                "--type",
+                "coordinate",
+                "--answer",
+                json.dumps({"verdict": payload}),
+                "--json",
+            ]
+        )
+        assert rc == 0
+        cli_out = json.loads(capsys.readouterr().out)
+        assert cli_out["ok"] is True
+
+        submission = submit_answer(
+            knowledge_root,
+            decision_id="some-other-coordinate-id",
+            decision_type="coordinate",
+            answer={"verdict": payload},
+        )
+        assert submission.ok is True
+
+        coord_answer_files = sorted(
+            (knowledge_root / "raw" / "answers").glob("*coordinate*.md")
+        )
+        assert len(coord_answer_files) == 2
+        for p in coord_answer_files:
+            text = p.read_text(encoding="utf-8")
+            assert "source: decision_answer" in text
+            assert "decision_type: coordinate" in text
+
     def test_submit_answer_refuses_unanswerable_type(self, knowledge_root: Path) -> None:
         submission = submit_answer(
             knowledge_root,
@@ -407,11 +540,15 @@ class TestBudgetInstrumentationFeedsForFree:
 
         report = run_triage(knowledge_root)
         assert report.outcomes[0].action == ACTION_ABSORBED
-        apply_decision_answers(wiki_root, knowledge_root / "raw")
+
+        from athenaeum.runlock import RunLock
+
+        with RunLock(knowledge_root) as lock:
+            apply_decision_answers(wiki_root, knowledge_root / "raw", lock=lock)
 
         after = read_decision_budget_events(wiki_root)
         assert len(after) == 1
-        assert after[0]["decision_type"] == "question"
+        assert after[0]["decision_type"] == "coordinate"
 
 
 # ---------------------------------------------------------------------------
@@ -569,41 +706,59 @@ class TestInjectionHardening:
     def test_adversarial_page_body_does_not_change_the_resolved_attribution(
         self, knowledge_root: Path
     ) -> None:
-        wiki_root = knowledge_root / "wiki"
-        # page-a's body is an injection attempt; its FRONTMATTER (what Gate 1
-        # actually reads) is still clean, so this still resolves — but the
-        # decided_by stamp must be ours, never anything the body suggests.
-        text = (
-            "---\n"
-            "name: page-a\n"
-            "uid: page-a\n"
-            "subject: alice\n"
-            "---\n"
-            f"{_INJECTION_PAYLOAD}\n"
-        )
-        (wiki_root / "page-a.md").write_text(text, encoding="utf-8")
-        _write_subject_page(wiki_root, uid="page-b", subject="alice")
-        _queue_coordinate_item(wiki_root, id_a="page-a", id_b="page-b")
+        """This is the path that ACTUALLY reaches the default researcher
+        post-athenaeum#1993 (a `coordinate` item, not a `question`). One
+        page's BODY carries a forged-instruction payload; its FRONTMATTER
+        (the only thing :func:`coordinate_request_researcher` ever reads)
+        is clean. Proves the injection has ZERO observable effect — not
+        merely a fenced one — by diffing the full outcome against an
+        otherwise-identical control fixture with an innocuous body."""
+        from athenaeum.models import parse_frontmatter
 
-        report = run_triage(knowledge_root)
+        def _run(*, adversarial: bool) -> tuple:
+            knowledge_root_i = knowledge_root.parent / (
+                "adversarial" if adversarial else "control"
+            )
+            wiki_root_i = knowledge_root_i / "wiki"
+            wiki_root_i.mkdir(parents=True)
+            body = _INJECTION_PAYLOAD if adversarial else "An ordinary, uninteresting body."
+            text = (
+                "---\nname: page-a\nuid: page-a\nsubject: alice\n---\n" f"{body}\n"
+            )
+            (wiki_root_i / "page-a.md").write_text(text, encoding="utf-8")
+            _write_subject_page(wiki_root_i, uid="page-b", subject="alice")
+            _queue_coordinate_item(wiki_root_i, id_a="page-a", id_b="page-b")
 
-        outcome = report.outcomes[0]
-        assert outcome.action == ACTION_ABSORBED
-        # decided_by is ALWAYS our own stamp — never derived from page text.
-        assert outcome.decided_by == "agent:coordinate-gate1"
-        assert "human:operator" not in (outcome.decided_by or "")
+            report = run_triage(knowledge_root_i, config=_SAMPLE_NONE_TRIAGE_CONFIG)
+            outcome = report.outcomes[0]
+            answer_meta, _ = parse_frontmatter(
+                outcome.answer_path.read_text(encoding="utf-8")
+            )
+            return outcome.action, outcome.decided_by, answer_meta["verdict"]
 
-    def test_render_research_digest_defangs_a_forged_fence(self) -> None:
-        digest = render_research_digest(_INJECTION_PAYLOAD)
-        # The real fence markers this function itself writes still exist...
-        assert digest.startswith("<corpus_page>")
-        assert digest.rstrip().endswith("</corpus_page>")
-        # ...but the forged markers INSIDE the untrusted text cannot break out.
-        inner = digest[len("<corpus_page>") : digest.rindex("</corpus_page>")]
-        assert "</corpus_page>" not in inner
-        assert "(corpus_page)" in inner
-        # The instruction text itself survives as inert data.
-        assert "IGNORE ALL PRIOR INSTRUCTIONS" in inner
+        adversarial_result = _run(adversarial=True)
+        control_result = _run(adversarial=False)
+
+        # Byte-identical outcome — the injected body changed NOTHING.
+        assert adversarial_result == control_result
+        action, decided_by, verdict = adversarial_result
+        assert action == ACTION_ABSORBED
+        assert decided_by == "agent:coordinate-resupply"
+        assert "human:operator" not in decided_by
+        submitted = json.loads(verdict)
+        assert submitted == {
+            "answers": [
+                {
+                    "pair": "page-a+page-b",
+                    "dimensions": {"subject": {"page-a": "alice", "page-b": "alice"}},
+                }
+            ]
+        }
+        # The forged instruction text literally never appears in what was
+        # submitted — there is no fence to break because the body was
+        # never read into anything this researcher produces.
+        assert "IGNORE ALL PRIOR INSTRUCTIONS" not in verdict
+        assert "human:operator" not in verdict
 
     def test_default_researcher_declines_rather_than_resolve_from_free_text(
         self, knowledge_root: Path

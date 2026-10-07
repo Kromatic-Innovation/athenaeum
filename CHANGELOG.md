@@ -15,22 +15,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Authority-routed items (`confirmation`/`retraction`/`quarantine`/
   `proposed-rule`, and anything unrecognized) are only PREPARED — never
   auto-answered, a safety boundary tested explicitly, including under
-  prompt-injection pressure. Competence-routed `question` items are offered
-  to a pluggable `TriageResearcher`; the shipped default
-  (`coordinate_request_researcher`) deterministically settles a comparator
-  coordinate-request batch by re-running Gate 1
-  (`athenaeum.comparator.gate1_separator_relations`) against each named
-  page's CURRENT frontmatter — no LLM call, and it never re-judges the
-  comparator's Gate 2 verdict. `merge` and `audit` items are deliberately
-  excluded from absorption even though they are competence-routed and
-  answerable (see the module docstring, "Why only `question`"). A resolved
+  prompt-injection pressure. Competence-routed `question`/`coordinate`
+  items are offered to a pluggable `TriageResearcher`; the shipped default
+  (`coordinate_request_researcher`) only ever resolves `coordinate` items
+  (issue athenaeum#1993's structured separator-dimension decision type —
+  every `question` is declined, since free text carries no structural
+  contract a deterministic reader can safely act on): for each named
+  pair/dimension it reads BOTH sides' CURRENT frontmatter coordinate value
+  (`athenaeum.dimensions.coordinate_value`) and, when every named
+  dimension already has a value on both sides, resupplies those same
+  already-asserted values through the SAME `coordinate` applier issue
+  athenaeum#1993 added (`decision_answers._apply_coordinate_answer`),
+  which mechanically re-compares the pair via the real comparator entry
+  point — no LLM call, and this module never re-judges that comparator
+  verdict itself. `merge` and `audit` items are deliberately excluded from
+  absorption even though they are competence-routed and answerable (see
+  the module docstring, "Why only `question`/`coordinate`"). A resolved
   item is submitted through `triage.submit_answer()`, which reuses the
   EXACT validate-then-write primitives `athenaeum decisions answer` uses
   (`decision_framing.answerable_as`/`validate_answer`,
-  `decision_answers.write_decision_answer`) — no parallel write path — and
-  stamps `decided_by: agent:<ref>` directly onto the submitted verdict text
-  (the one place the attribution is guaranteed to survive into the durable
-  record). New CLI: `athenaeum triage run [--dry-run] [--json]` and
+  `decision_answers.write_decision_answer`) — no parallel write path,
+  unchanged by the `coordinate` type since those primitives are already
+  generic over decision type. `decided_by: agent:<ref>` is stamped
+  directly onto a `question` answer's submitted verdict text (the one
+  place the attribution survives into that type's durable record); a
+  `coordinate` answer's verdict is a JSON payload the applier parses and
+  discards after writing its own fixed summary, so `decided_by` for that
+  type is recorded in this module's own run report and, when sampled, the
+  calibration ledger instead — see the module docstring, "decided_by
+  stamping". New CLI: `athenaeum triage run [--dry-run] [--json]` and
   `athenaeum triage report [--json]`.
   `athenaeum.calibration` gains additive-only sampling for this channel —
   `TRIAGE_TIER_NAME`, `sample_triage_decision()`,

@@ -25,44 +25,96 @@ walks every pending item and, for each one, does exactly one of two things —
    never reads untrusted content in the first place — see "Prompt-injection
    hardening" below).
 2. **Competence items are offered to a pluggable researcher.** Only
-   ``question``-type items are offered (see "Why only `question`" below).
-   A :data:`TriageResearcher` callable either resolves the item (returns a
-   :class:`TriageResolution`) or declines (returns ``None``). A resolved
-   item is submitted through :func:`submit_answer` — the SAME validate-
-   then-write sequence :mod:`athenaeum._cmd_decisions`'s ``answer``
-   subcommand uses (:func:`athenaeum.decision_framing.answerable_as`,
+   ``question``/``coordinate``-type items are offered (see "Why only these
+   two types" below). A :data:`TriageResearcher` callable either resolves
+   the item (returns a :class:`TriageResolution`) or declines (returns
+   ``None``). A resolved item is submitted through :func:`submit_answer` —
+   the SAME validate-then-write sequence :mod:`athenaeum._cmd_decisions`'s
+   ``answer`` subcommand uses (:func:`athenaeum.decision_framing.answerable_as`,
    :func:`~athenaeum.decision_framing.validate_answer`,
    :func:`athenaeum.decision_answers.write_decision_answer`) — never a
    parallel write path. A declined item is left exactly where it already
    was; the next ``athenaeum ingest-answers`` tick and the budget ledger
    (:mod:`athenaeum.decision_budget`) do not even know triage looked at it.
 
-**Why only `question`.** ``merge`` and ``audit`` are also competence-routed
-and answerable, but both are deliberately EXCLUDED from absorption:
+**Why only `question`/`coordinate`, and why the shipped researcher only
+ever resolves the latter.** ``merge`` and ``audit`` are also
+competence-routed and answerable, but both are deliberately EXCLUDED from
+absorption:
 
-- ``merge`` — answering approve/reject on a merge proposal IS re-judging the
-  comparator's verdict, which this issue's "Out of scope" section rules out
-  explicitly ("triage only answers framed decisions, it never re-judges a
-  verdict").
+- ``merge`` — answering approve/reject on a merge proposal IS re-judging
+  the comparator's verdict, which this issue's "Out of scope" section
+  rules out explicitly ("triage only answers framed decisions, it never
+  re-judges a verdict").
 - ``audit`` — an audit item IS the calibration measurement surface itself
   (:mod:`athenaeum.calibration`'s sampled T1/T2 review). Auto-answering a
   sample would corrupt the very signal it exists to produce.
 
+``question`` (a detector- or agent-raised free-text escalation) and
+``coordinate`` (issue athenaeum#1993's structured "supply a separator-
+dimension coordinate" item, split out of the generic ``question`` type
+after this module first shipped — see "Catch-up note" below) are both
+left in :data:`RESEARCHABLE_DECISION_TYPES` because both are, in
+principle, things a research step could resolve. The SHIPPED default
+researcher (:func:`coordinate_request_researcher`) only ever resolves
+``coordinate`` items: a ``question``'s payload is free text with no
+structural contract a deterministic reader can safely act on, so the
+default researcher declines every ``question`` item unconditionally. The
+type stays in the researchable set anyway — a future, more capable
+researcher plugged in via :data:`TriageResearcher` is free to attempt one;
+nothing about this module's routing/sampling mechanics needs to change for
+that to happen.
+
 **The default researcher (:func:`coordinate_request_researcher`) is
-deterministic — no LLM call.** It resolves exactly one concrete, safe case:
-a ``question`` item born from the comparator's ``underdetermined`` verdict
+deterministic — no LLM call, and it never reads a page BODY at all.** A
+``coordinate`` item names one or more pairs and, per pair, one or more
+separator dimensions the comparator could not resolve
 (:func:`athenaeum.verdict_effects.build_coordinate_request` /
-:func:`~athenaeum.verdict_effects.queue_coordinate_batch`), where the
-MISSING coordinate(s) it named have since become determinate on BOTH
-sides' CURRENT frontmatter. It answers by re-running Gate 1
-(:func:`athenaeum.comparator.gate1_separator_relations`) — the SAME typed,
-free, no-LLM comparator step that would itself have settled this pair had
-the coordinate been known at compare time — never Gate 2's LLM content
-judgement. This is "research" in the sense the issue's examples describe
-("answerable from provenance/... session context"): reading what the corpus
-itself now says, not forming a new editorial opinion about it. A batch with
-any still-``unknown``/absent/ambiguous (``contains``/``overlaps``) named
-dimension is left for the human, whole — never partially answered.
+:func:`~athenaeum.verdict_effects.queue_coordinate_batch`) — structurally
+recovered via ``item["payload"]["members"]``
+(:func:`athenaeum.decisions.coordinate_to_decision`), never re-parsed from
+free text. For each named pair/dimension, this researcher reads BOTH
+sides' CURRENT frontmatter coordinate value
+(:func:`athenaeum.dimensions.coordinate_value` — the exact raw-value
+reader :func:`athenaeum.pending_merges._write_coordinate` round-trips
+against). If every named dimension already has a value on BOTH named
+pages, it resupplies those same, already-asserted values back through
+:func:`submit_answer`'s ``coordinate`` applier
+(:mod:`athenaeum.decision_answers`'s ``_apply_coordinate_answer``, issue
+athenaeum#1993) — which writes them (a no-op when they already match) and
+mechanically re-compares the pair via the REAL comparator entry point
+(:func:`athenaeum.comparator.record_comparison`), never a second,
+ad hoc judgement this module invents. This is "research" in the sense the
+issue's examples describe ("answerable from provenance/... session
+context"): reading what the corpus itself already asserts and routing it
+through the designated channel — not forming a new editorial opinion, and
+not fabricating a value nothing on disk supports. If ANY named dimension
+is missing a value on EITHER side of ANY named pair, the WHOLE item is
+left for the human — never a partial answer (a partial coordinate answer
+still flips the item "answered" per the applier's own contract, so
+submitting one half of what's needed would silently drop the other half
+of the question; see ``tests/test_coordinate_answer_loop.py``'s
+``test_partial_answer_defers_to_the_next_llm_backed_pass`` for that
+applier-level behavior this researcher deliberately never triggers).
+
+Because this researcher never touches ``body`` at all — only a page's
+parsed frontmatter mapping — there is no untrusted-prose surface inside
+it for a prompt-injection payload to land on in the first place; see
+"Prompt-injection hardening" below for how this is actually proven, not
+just asserted.
+
+One known, accepted characteristic of the UNDERLYING #1993 applier this
+researcher submits through, noted here rather than worked around (fixing
+it would mean editing ``_apply_coordinate_answer``, which this issue does
+not own and which issue athenaeum#1994 is actively extending): the
+applier's own mechanical re-compare always stamps the verdict ledger's
+``authority_basis`` as ``f"human-batch:{decision_id}"`` regardless of
+whether a human or this module answered — so the comparator's OWN verdict
+ledger does not distinguish an agent-triage coordinate resolution from a
+human one. This module's own records (the run report, and the calibration
+ledger when sampled) are therefore the only place "answered by triage, not
+a human" is actually visible for a ``coordinate`` resolution — see
+"decided_by stamping" below.
 
 **No new model-backend call site.** A genuinely live-source research agent
 (as the issue's phrasing gestures at) would need one, but this lane's own
@@ -79,39 +131,51 @@ sample-audit mechanics at all.
 **Prompt-injection hardening (issue athenaeum#1995 AC5).** Per the standing
 rule in ``docs/design/conflict-resolution.md`` ("corpus page bodies are
 untrusted data"), any corpus text this module reads is DATA, never
-instructions:
+instructions — and, for the shipped researcher, no corpus BODY text is
+read at all:
 
 - The authority/competence routing gate and every control-plane value this
   module itself produces (``decided_by``, which type gets attempted, which
   item is prepared vs. submitted) are derived ONLY from the item's ``type``/
   ``routing`` fields and from this module's own code — never from parsed
-  page or question text. A page body (or a question's free-text
-  description) containing a forged instruction therefore has no surface to
-  act on, which ``tests/test_triage.py``'s
-  ``TestInjectionHardening.test_adversarial_page_body_does_not_change_routing_or_attribution``
-  proves directly: an adversarial payload is threaded through both the
-  authority-prepare path and the default researcher, and the observed
-  routing/``decided_by``/submitted-verdict are asserted byte-identical to
-  the non-adversarial control.
-- Any corpus snippet this module DOES choose to surface (the research
-  digest a resolution's ``rationale`` carries, for audit readability) is
-  built with :func:`render_research_digest`, which fences it through
-  :func:`athenaeum.prompt_safety.fence_untrusted` exactly like every other
-  untrusted-content call site in this repo — so a forged fence marker in a
-  page body cannot break out of the digest and poison whatever surface
-  later re-displays it (the pending-decisions queue, a future LLM prompt
-  that embeds an item's rationale as :mod:`athenaeum.contradictions` already
-  does for ordinary question text).
+  page or question text.
+- :func:`coordinate_request_researcher` reads ONLY each referenced page's
+  parsed frontmatter MAPPING (via :func:`athenaeum.models.parse_frontmatter`,
+  then :func:`athenaeum.dimensions.coordinate_value` on specific, named
+  keys) — never the page ``body``. A forged instruction sitting in a page's
+  prose body is therefore not merely fenced-and-ignored, it is never
+  parsed into anything this researcher looks at in the first place.
+  ``tests/test_triage.py``'s ``TestInjectionHardening`` proves this
+  directly: a page carrying an adversarial body is still resolved
+  correctly (frontmatter is clean), and the run's outcome
+  (``decided_by``, the submitted verdict's actual coordinate values) is
+  byte-identical to the same fixture with an innocuous body — the
+  injected text has zero observable effect, not merely a fenced one.
 
-**decided_by stamping.** A ``question``-type answer's ``verdict`` text IS
-what :func:`athenaeum.answers.resolve_by_id` writes into the resolved
-block body — :mod:`athenaeum.decision_answers`'s question applier does not
-thread ``note`` through to the store at all (see that module's
-``_apply_question_answer``). So "records ``decided_by: agent:<ref>``"
-(issue athenaeum#1995 AC2) is implemented by stamping it directly onto the
-submitted ``verdict`` text via :func:`_stamp_decided_by` — the one place
-the attribution is guaranteed to survive into the durable, human-readable
-record, with zero changes to ``answers.py``/``decision_answers.py``.
+**decided_by stamping.** For a ``question`` item, the submitted ``verdict``
+text IS what :func:`athenaeum.answers.resolve_by_id` writes into the
+resolved block body — :mod:`athenaeum.decision_answers`'s question
+applier does not thread ``note`` through to the store at all (see that
+module's ``_apply_question_answer``). So :func:`_stamp_decided_by` appends
+``(decided_by: agent:<ref>)`` directly onto a ``question`` answer's
+``verdict`` text before submission — the one place the attribution is
+guaranteed to survive into that type's durable, human-readable record.
+
+A ``coordinate`` answer's ``verdict`` is instead a JSON-encoded payload
+the applier parses and discards after writing (see
+:data:`athenaeum.decision_framing._SCHEMA_COORDINATE`'s docstring) — the
+applier's own resolved-block text is a FIXED
+``"Coordinate(s) recorded. Re-compare: ..."`` summary it constructs
+itself, never influenced by this module's ``verdict``/``note``.
+Appending text to a coordinate verdict would corrupt its JSON and be
+refused outright (``malformed_verdict_json``), so :func:`run_triage`
+submits a coordinate resolution's JSON verbatim and records
+``decided_by`` ONLY in its own run report
+(:attr:`TriageOutcome.decided_by`) and, when sampled, in the calibration
+ledger's ``reason`` field (:func:`athenaeum.calibration.sample_triage_decision`)
+— the one durable surface this module itself controls for that type. See
+"The default researcher" above for the related, accepted
+``authority_basis`` characteristic at the comparator-ledger layer.
 
 **Budget instrumentation (issue athenaeum#1995 AC8) needs no new wiring.**
 :func:`athenaeum.decision_answers.apply_decision_answers` already calls
@@ -125,33 +189,51 @@ writing to it directly.
 
 **Sample-auditing / confirmed_wrong** wire into :mod:`athenaeum.calibration`'s
 EXISTING ``should_sample``/``record_audit_review``/``calibration_summary``
-primitives via that module's NEW, additive
+primitives via that module's additive
 :func:`athenaeum.calibration.sample_triage_decision` /
 :func:`~athenaeum.calibration.triage_confirmed_wrong_count` /
 :func:`~athenaeum.calibration.triage_confirmed_wrong_threshold_breached` —
 see that module's "Agent-triage sampling" section for why this is additive
 rather than a second mechanism.
 
+**Catch-up note (issue athenaeum#1993).** This module originally shipped
+with a ``question``-only researcher that re-parsed a coordinate-request's
+free-text description and re-ran Gate 1 itself
+(:func:`athenaeum.comparator.gate1_separator_relations`) to narrate an
+answer. Issue athenaeum#1993 landed on ``develop`` afterward and gave
+coordinate-request items their OWN decision type (``coordinate``) with a
+dedicated, structured applier (the ``_apply_coordinate_answer`` resupply
+path this module now submits through) — so the researcher was rewritten
+against the real mechanism rather than patched to route around it. A
+pre-existing coordinate-request item still sitting on disk tagged
+``decision_kind: question`` from before issue athenaeum#1993's writer-side
+change landed is NOT retroactively handled by this researcher — that would
+need re-detecting the legacy free-text marker as a SEPARATE code path
+alongside the structured one, which this module deliberately does not
+carry; such an item is simply escalated to the human like any other
+``question``, same as it always was before this module existed.
+
 Layering: L4 domain/pipeline module, a peer of :mod:`athenaeum.decisions` /
 :mod:`athenaeum.decision_framing` / :mod:`athenaeum.decision_answers` /
 :mod:`athenaeum.comparator` / :mod:`athenaeum.verdict_effects` (all L4) — may
 import any of them plus L0-L3 (:mod:`athenaeum.calibration`,
-:mod:`athenaeum.config`, :mod:`athenaeum.prompt_safety`, :mod:`athenaeum.
-models`, :mod:`athenaeum.dimensions`) freely. Never imports
-:mod:`athenaeum.cli` or any ``_cmd_*`` module (L5) — the CLI wiring
-(``athenaeum triage``) lives in the sibling :mod:`athenaeum._cmd_triage`,
-which imports THIS module, not the other way around.
+:mod:`athenaeum.config`, :mod:`athenaeum.models`, :mod:`athenaeum.
+dimensions`) freely. Never imports :mod:`athenaeum.cli` or any ``_cmd_*``
+module (L5) — the CLI wiring (``athenaeum triage``) lives in the sibling
+:mod:`athenaeum._cmd_triage`, which imports THIS module, not the other way
+around.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
 from athenaeum.calibration import sample_triage_decision
-from athenaeum.comparator import gate1_separator_relations
+from athenaeum.config import resolve_dimensions
 from athenaeum.decision_answers import write_decision_answer
 from athenaeum.decision_framing import (
     ROUTING_AUTHORITY,
@@ -161,10 +243,8 @@ from athenaeum.decision_framing import (
     validate_answer,
 )
 from athenaeum.decisions import list_pending_decisions
-from athenaeum.dimensions import DEFAULT_REGISTRY, Relation
+from athenaeum.dimensions import coordinate_value
 from athenaeum.models import EntityIndex, parse_frontmatter
-from athenaeum.prompt_safety import fence_untrusted
-from athenaeum.verdict_effects import parse_coordinate_batch_members
 
 log = logging.getLogger(__name__)
 
@@ -173,13 +253,19 @@ log = logging.getLogger(__name__)
 #: docstring, "Prompt-injection hardening").
 TRIAGE_DECIDED_BY_PREFIX = "agent:"
 
-#: The only outbound decision ``type`` the default researcher is offered —
-#: see module docstring, "Why only `question`". A FUTURE researcher plugged
-#: in via :data:`TriageResearcher` is free to decline just as easily as the
-#: default one; this constant only bounds what :func:`run_triage` ever
-#: calls a researcher FOR, so a misconfigured/future researcher can never
-#: be asked to adjudicate a merge or an audit sample by construction.
-RESEARCHABLE_DECISION_TYPES: frozenset[str] = frozenset({"question"})
+#: Decision ``type``s the default researcher is OFFERED — see module
+#: docstring, "Why only `question`/`coordinate`". A FUTURE researcher
+#: plugged in via :data:`TriageResearcher` is free to decline just as
+#: easily as the default one; this constant only bounds what
+#: :func:`run_triage` ever calls a researcher FOR, so a misconfigured/
+#: future researcher can never be asked to adjudicate a merge or an audit
+#: sample by construction.
+RESEARCHABLE_DECISION_TYPES: frozenset[str] = frozenset({"question", "coordinate"})
+
+#: Decision types whose submitted ``verdict`` is a machine-readable
+#: payload the applier parses (and therefore must NOT have text appended
+#: to it — see :func:`_verdict_text_for_submission`).
+_STRUCTURED_VERDICT_TYPES: frozenset[str] = frozenset({"coordinate"})
 
 #: Actions one :class:`TriageOutcome` records.
 ACTION_PREPARED = "prepared"  # authority (or unrecognized) routing — human only
@@ -193,14 +279,16 @@ ACTION_REFUSED = "refused"  # researcher resolved it, but submission was refused
 class TriageResolution:
     """What a :data:`TriageResearcher` proposes for one competence item.
 
-    ``verdict`` is the resolution text as a human would write it — it
-    becomes (after :func:`_stamp_decided_by`) the literal ``verdict`` field
-    submitted via :func:`submit_answer`, so it must already satisfy the
-    item's ``response_schema`` (for ``question`` items, any non-empty
-    string). ``ref`` is the free-form researcher identifier that becomes
-    ``agent:<ref>`` in the stamped verdict (e.g. ``"coordinate-gate1"``);
-    ``rationale`` is audit-readable context carried onto the calibration
-    sample, never into the submitted verdict itself.
+    ``verdict`` must already satisfy the item's ``response_schema`` outer
+    shape (a non-empty string either way): for a ``question`` item it is
+    free text a human would write, and :func:`run_triage` appends the
+    ``decided_by`` tag onto it before submission; for a ``coordinate`` item
+    it is a JSON-encoded ``{"answers": [...]}`` string
+    (:data:`athenaeum.decision_framing._SCHEMA_COORDINATE_PAYLOAD`) and is
+    submitted VERBATIM — see module docstring, "decided_by stamping".
+    ``ref`` is the free-form researcher identifier that becomes
+    ``agent:<ref>``; ``rationale`` is audit-readable context carried onto
+    the calibration sample, never into the submitted verdict itself.
     """
 
     verdict: str
@@ -214,77 +302,61 @@ class TriageResearcher(Protocol):
     ``item`` is one framed decision dict from
     :func:`athenaeum.decisions.list_pending_decisions` (already carries
     ``type``/``routing``/``payload``/``response_schema`` etc.); ``wiki_root``
-    is where the corpus this item's payload may reference lives. Returning
-    ``None`` means "this item needs a human" — the ONLY refusal signal;
-    raising is a bug, not a decline (:func:`run_triage` does not catch
-    researcher exceptions).
+    is where the corpus this item's payload may reference lives; ``config``
+    is the resolved athenaeum config dict (or ``None``), forwarded so a
+    researcher can resolve its own config knobs (e.g. the separator
+    dimension registry) the same way the rest of the pipeline does.
+    Returning ``None`` means "this item needs a human" — the ONLY refusal
+    signal; raising is a bug, not a decline (:func:`run_triage` does not
+    catch researcher exceptions).
     """
 
-    def __call__(self, item: dict[str, Any], wiki_root: Path) -> TriageResolution | None: ...
-
-
-def render_research_digest(page_body: str, *, max_chars: int = 2000) -> str:
-    """Fence a corpus-page-body snippet for inclusion in an audit rationale.
-
-    The one place this module embeds raw corpus text anywhere outside its
-    own internal comparison logic — truncate/defang/wrap via
-    :func:`athenaeum.prompt_safety.fence_untrusted`, same as every other
-    untrusted-content call site in this repo (module docstring,
-    "Prompt-injection hardening"). Never fed back into a submitted
-    ``verdict`` — only into a :class:`TriageResolution`'s ``rationale``,
-    which :func:`run_triage` carries onto the calibration audit record
-    (:func:`athenaeum.calibration.sample_triage_decision`'s ``reason``), a
-    surface a human reads, not one that re-executes anything.
-    """
-    return fence_untrusted(page_body, tag="corpus_page", max_chars=max_chars)
-
-
-def _resolvable_dimension(relation: str | None) -> bool:
-    """Whether a Gate-1 relation is determinate enough to answer a coordinate request.
-
-    Only ``EQUAL``/``DISJOINT`` are determinate ("same" / "different", which
-    is exactly what a coordinate-request question asks). ``CONTAINS``/
-    ``OVERLAPS`` are a partial relation that still needs a human to say
-    which side is which; ``UNKNOWN`` or the dimension being absent entirely
-    (not consulted — see :func:`athenaeum.comparator.gate1_separator_relations`)
-    both mean the coordinate is still missing. A single non-resolvable named
-    dimension defers the WHOLE item (see :func:`coordinate_request_researcher`).
-    """
-    return relation in (Relation.EQUAL, Relation.DISJOINT)
+    def __call__(
+        self, item: dict[str, Any], wiki_root: Path, *, config: dict[str, Any] | None = None
+    ) -> TriageResolution | None: ...
 
 
 def coordinate_request_researcher(
-    item: dict[str, Any], wiki_root: Path
+    item: dict[str, Any], wiki_root: Path, *, config: dict[str, Any] | None = None
 ) -> TriageResolution | None:
-    """Default researcher: settle a comparator coordinate-request batch, if its
-    named dimensions are now determinate on both sides' CURRENT frontmatter.
+    """Default researcher: resupply a ``coordinate`` item's named dimensions
+    from both sides' CURRENT frontmatter, if every one is already present.
 
     See the module docstring's "The default researcher" section for the
-    full rationale. Declines (returns ``None``) on anything that is not
-    recognizably a coordinate-request ``question`` item, on a page id this
-    corpus no longer has (renamed/retracted since the item was raised —
-    answering against a page that may not even be the same one is exactly
-    the kind of guess this module must not make), or on any named dimension
-    that Gate 1 still cannot settle.
+    full rationale. Declines (returns ``None``) on anything that is not a
+    ``coordinate`` item (including every ``question`` — see "Why only
+    `question`/`coordinate`"), on a malformed/unrecoverable member list,
+    on a page id this corpus no longer has (renamed/retracted since the
+    item was raised — answering against a page that may not even be the
+    same one is exactly the kind of guess this module must not make), on
+    an unknown dimension name, or on any named dimension missing a value
+    on either side. Never partially answers a batch — see the module
+    docstring's "never a partial answer" note.
     """
-    if item.get("type") != "question":
+    if item.get("type") != "coordinate":
         return None
     payload = item.get("payload")
     if not isinstance(payload, dict):
         return None
-    description = str(payload.get("description") or "")
-    members = parse_coordinate_batch_members(description)
-    if not members:
+    members = payload.get("members")
+    if not isinstance(members, list) or not members:
         return None
 
+    registry = resolve_dimensions(config)
     index = EntityIndex(wiki_root)
-    resolved_lines: list[str] = []
+    answers: list[dict[str, Any]] = []
+
     for member in members:
+        if not isinstance(member, dict):
+            return None
         pair = str(member.get("pair") or "")
         dims = [str(d) for d in (member.get("dimensions") or [])]
         if not pair or "+" not in pair or not dims:
             return None
         id_a, id_b = pair.split("+", 1)
+        if not id_a or not id_b:
+            return None
+
         path_a = index.get_by_uid(id_a)
         path_b = index.get_by_uid(id_b)
         if path_a is None or path_b is None:
@@ -296,43 +368,57 @@ def coordinate_request_researcher(
         except OSError:
             return None
 
-        relations = gate1_separator_relations(DEFAULT_REGISTRY, meta_a, meta_b)
-        for dim in dims:
-            relation = relations.get(dim)
-            if not _resolvable_dimension(relation):
-                return None  # still underdetermined -> defer the WHOLE item
-            name_a = str(meta_a.get("name") or id_a)
-            name_b = str(meta_b.get("name") or id_b)
-            if relation == Relation.EQUAL:
-                resolved_lines.append(
-                    f'{pair} ({dim}): "{name_a}" and "{name_b}" do NOT actually '
-                    f"differ by {dim} — both carry the same coordinate."
-                )
-            else:  # Relation.DISJOINT
-                resolved_lines.append(
-                    f'{pair} ({dim}): "{name_a}" and "{name_b}" DO differ by '
-                    f"{dim} — their current coordinates disagree."
-                )
+        dims_for_pair: dict[str, dict[str, Any]] = {}
+        for dim_name in dims:
+            dimension = registry.get(dim_name)
+            if dimension is None:
+                return None  # unknown dimension; do not guess its shape
+            value_a = coordinate_value(dimension, meta_a)
+            value_b = coordinate_value(dimension, meta_b)
+            if value_a is None or value_b is None:
+                return None  # still genuinely missing -> defer the WHOLE item
+            dims_for_pair[dim_name] = {id_a: value_a, id_b: value_b}
 
-    verdict = " ".join(resolved_lines)
+        answers.append({"pair": pair, "dimensions": dims_for_pair})
+
+    verdict = json.dumps({"answers": answers}, sort_keys=True)
     return TriageResolution(
         verdict=verdict,
-        ref="coordinate-gate1",
+        ref="coordinate-resupply",
         rationale=(
-            f"Resolved {len(members)} coordinate-request member(s) by re-running "
-            "comparator Gate 1 against current frontmatter (no LLM judgement)."
+            f"Resupplied {len(answers)} coordinate-request member(s) from "
+            "both sides' current frontmatter (no LLM judgement; the "
+            "mechanical re-compare is the applier's own, not this module's)."
         ),
     )
 
 
 def _stamp_decided_by(verdict: str, decided_by: str) -> str:
-    """Append a ``(decided_by: agent:<ref>)`` tag to a submitted verdict text.
+    """Append a ``(decided_by: agent:<ref>)`` tag to a free-text verdict.
 
     See module docstring, "decided_by stamping" — this is the durable
-    record issue athenaeum#1995 AC2 asks for, since ``note`` is dropped on
-    the question apply path.
+    record issue athenaeum#1995 AC2 asks for a ``question`` answer, since
+    ``note`` is dropped on that apply path. NEVER called for a structured
+    (``coordinate``) verdict — see :func:`_verdict_text_for_submission`.
     """
     return f"{verdict} (decided_by: {decided_by})"
+
+
+def _verdict_text_for_submission(
+    decision_type: str, resolution: TriageResolution, decided_by: str
+) -> str:
+    """The exact text submitted as ``verdict`` for *decision_type*.
+
+    A structured type's verdict (currently only ``coordinate``) is a
+    machine-parsed payload — submitted VERBATIM, since appending anything
+    would corrupt it and be refused as ``malformed_verdict_json`` by the
+    applier. Every other (free-text) type gets the ``decided_by`` stamp
+    appended, since that is the only durable channel for it. See module
+    docstring, "decided_by stamping".
+    """
+    if decision_type in _STRUCTURED_VERDICT_TYPES:
+        return resolution.verdict
+    return _stamp_decided_by(resolution.verdict, decided_by)
 
 
 @dataclass(frozen=True)
@@ -359,10 +445,13 @@ def submit_answer(
     :func:`~athenaeum.decision_framing.validate_answer`,
     :func:`athenaeum.decision_answers.write_decision_answer`) so there is
     no parallel write path (issue athenaeum#1995 AC1) — only a second thin
-    caller of the same three functions the CLI command itself calls.
-    Never touches ``_cmd_decisions.py`` (a file sibling lanes athenaeum#1992/
-    athenaeum#1993 are editing concurrently — see this issue's concurrency
-    note).
+    caller of the same three functions the CLI command itself calls. This
+    is type-agnostic: it works unchanged for ``coordinate`` (issue
+    athenaeum#1993) exactly as it already did for ``question``, because
+    ``answerable_as``/``validate_answer`` are themselves generic over
+    decision type. Never touches ``_cmd_decisions.py`` (a file sibling
+    lanes athenaeum#1992/athenaeum#1993/athenaeum#1994 are editing — see
+    this issue's concurrency note).
 
     Refuses (returns ``ok=False``) exactly where the CLI would: an
     unanswerable type, a schema-invalid answer. Writing is deferred to
@@ -474,7 +563,8 @@ def run_triage(
     dry_run: bool = False,
 ) -> TriageReport:
     """Walk the unified decision queue once; prepare authority items, offer
-    competence ``question`` items to *researcher*, submit what it resolves.
+    competence ``question``/``coordinate`` items to *researcher*, submit
+    what it resolves.
 
     ``researcher`` defaults to :func:`coordinate_request_researcher`.
     ``dry_run=True`` runs the researcher and records what WOULD be
@@ -506,13 +596,13 @@ def run_triage(
         if decision_type not in RESEARCHABLE_DECISION_TYPES:
             # Competence-routed and (for merge/audit) even answerable, but
             # deliberately never offered to a researcher — see module
-            # docstring, "Why only `question`".
+            # docstring, "Why only `question`/`coordinate`".
             report.outcomes.append(
                 TriageOutcome(decision_id, decision_type, routing, ACTION_ESCALATED)
             )
             continue
 
-        resolution = active_researcher(item, wiki_root)
+        resolution = active_researcher(item, wiki_root, config=config)
         if resolution is None:
             report.outcomes.append(
                 TriageOutcome(decision_id, decision_type, routing, ACTION_ESCALATED)
@@ -520,7 +610,7 @@ def run_triage(
             continue
 
         decided_by = f"{TRIAGE_DECIDED_BY_PREFIX}{resolution.ref}"
-        stamped_verdict = _stamp_decided_by(resolution.verdict, decided_by)
+        verdict_to_submit = _verdict_text_for_submission(decision_type, resolution, decided_by)
 
         if dry_run:
             report.outcomes.append(
@@ -538,7 +628,7 @@ def run_triage(
             knowledge_root,
             decision_id=decision_id,
             decision_type=decision_type,
-            answer={"verdict": stamped_verdict},
+            answer={"verdict": verdict_to_submit},
         )
         if not submission.ok:
             log.warning(
@@ -569,8 +659,8 @@ def run_triage(
         sampled_record = sample_triage_decision(
             wiki_root,
             proposal_id=decision_id,
-            verdict=stamped_verdict,
-            reason=resolution.rationale,
+            verdict=verdict_to_submit,
+            reason=f"decided_by: {decided_by}; {resolution.rationale}",
             config=config,
         )
         if sampled_record is not None:
@@ -594,7 +684,6 @@ __all__ = [
     "TriageSubmission",
     "TriageOutcome",
     "TriageReport",
-    "render_research_digest",
     "coordinate_request_researcher",
     "submit_answer",
     "run_triage",
