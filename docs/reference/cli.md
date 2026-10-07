@@ -119,6 +119,9 @@ Every subcommand is registered top-level on one `parser.add_subparsers()` in `cl
 - [`athenaeum subject-population`](#athenaeum-subject-population) (command) — Meaning-based subject: population over the comparator-eligible wiki pages (concept/reference/principle) -- the operator CLI over athenaeum.subject_population. Default is dry run (streams a JSONL report); apply happens separately, from that report, via --from-report PATH --apply.
 - [`athenaeum surface-divergence`](#athenaeum-surface-divergence) (command) — Report the two-surface divergence for a REGISTERED field (wiki frontmatter vs. the contacts/excluded surface) and, by default, exit non-zero when it exceeds the field's declared allowance. Generalizes bounce-divergence / do-not-email-divergence into one per-field guard. Read-only; output is safe to paste publicly.
 - [`athenaeum test-mcp`](#athenaeum-test-mcp) (command) — Smoke-test MCP remember/recall against a synthetic knowledge dir
+- [`athenaeum triage`](#athenaeum-triage) (group) — Agent triage lane over the unified decision queue: prepares authority items for the human, absorbs research-resolvable competence items through the same `decisions answer` interface. Modes: run, report.
+- [`athenaeum triage report`](#athenaeum-triage-report) (command) — Read-only agent-triage calibration summary, including the confirmed-wrong-in-a-rolling-quarter threshold state.
+- [`athenaeum triage run`](#athenaeum-triage-run) (command) — Walk the pending-decisions queue once: prepare authority items for the human, submit whatever the default researcher resolves for a competence question item.
 - [`athenaeum usage-report`](#athenaeum-usage-report) (command) — Per-claim usage report (pushed / referenced / last-referenced) computed from the push-metrics ledgers — ids-only, no content.
 - [`athenaeum verdicts`](#athenaeum-verdicts) (group) — Inspect the verdict ledger (`wiki/_verdicts/`) — pairwise comparison verdicts with their justification basis. Four modes: count, list-by-verdict, show-one-pair, show-stale.
 - [`athenaeum verdicts count`](#athenaeum-verdicts-count) (command) — Print the live verdict count.
@@ -1504,6 +1507,34 @@ Smoke-test MCP remember/recall against a synthetic knowledge dir
 | Flag | Default | Choices | Help |
 |---|---|---|---|
 | `--keep` | `False` | — | Don't delete the temp knowledge dir on exit (for debugging) |
+
+## `athenaeum triage`
+
+Agent triage lane over the unified decision queue: prepares authority items for the human, absorbs research-resolvable competence items through the same `decisions answer` interface. Modes: run, report.
+
+Subcommands:
+
+- `athenaeum triage report` — Read-only agent-triage calibration summary, including the confirmed-wrong-in-a-rolling-quarter threshold state.
+- `athenaeum triage run` — Walk the pending-decisions queue once: prepare authority items for the human, submit whatever the default researcher resolves for a competence question item.
+
+## `athenaeum triage report`
+
+Read-only agent-triage calibration summary, including the confirmed-wrong-in-a-rolling-quarter threshold state.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+
+## `athenaeum triage run`
+
+Walk the pending-decisions queue once: prepare authority items for the human, submit whatever the default researcher resolves for a competence question item.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--dry-run` | `False` | — | Report what would be absorbed without submitting or sampling anything. |
+| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 
 ## `athenaeum usage-report`
 
