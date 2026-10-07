@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Memory model v6 queue: budget-breach ratchet guard + default-acceptance
+  rubber-stamp measurement (issue athenaeum#1996, slice (f)/(g) of #717 AC
+  group 7, "both ratchet guards").** Two independent delegation ratchets:
+  (1) `verdict_effects._duplicate_auto_apply_authorization` (and its real
+  caller, `auto_apply.enact_verdict_effect`) now additionally refuses a
+  `fold-on-duplicate` auto-apply with a new `effort_budget_breach` reason
+  token when the decision queue's effort budget
+  (`decision_budget.budget_report`'s `breach`, issue athenaeum#1990) is in
+  breach — and authorizes again once it clears. The real pipeline caller,
+  `wiki_dedupe.propose_wiki_page_merges`, resolves the breach ONCE per run
+  (never per pair) and threads the same value through every
+  `enact_verdict_effect` call; a read hiccup fails OPEN
+  (`effort_budget_breach=False`, pre-athenaeum#1996 behavior), never taking
+  the dedupe pass down. (2) A "default acceptance" — a human answering a
+  queue item by accepting its `proposed_default` unmodified
+  (`decision_framing.is_default_acceptance`) — is now tagged at answer time
+  inside `decision_answers.apply_decision_answers` (the `athenaeum decisions
+  answer` / `ingest-answers` path) and offered to calibration's EXISTING
+  `should_sample`/`record_audit_review` primitives (new tier value
+  `calibration.DEFAULT_ACCEPTANCE_TIER`, new sample-rate knob
+  `librarian.default_acceptance_audit_sample_rate`, default 10%) — no second
+  sampling mechanism, and `calibration_summary` buckets the new population
+  with zero changes to that function. The measured rubber-stamp rate
+  (`calibration.default_acceptance_rubber_stamp_rate`: the fraction of
+  reviewed samples a careful reviewer CONFIRMED rather than overturned) is
+  surfaced via the SAME shared `decision_budget.format_budget_report`
+  rendering slice (a) built for the other five budget figures — both
+  `athenaeum decisions budget` and `athenaeum status` extend the same
+  report dict with one optional `default_acceptance_rubber_stamp` key
+  rather than adding a third surface. This measures; it never overrides a
+  human's answer.
+
 - **Meaning-based `subject` population extended to raw auto-memory cluster
   members (issue athenaeum#1946, follow-up to athenaeum#1944).** `athenaeum
   subject-population` gains `--include-raw-members <clusters-path>`,
