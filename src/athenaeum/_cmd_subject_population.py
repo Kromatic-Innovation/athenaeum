@@ -184,6 +184,7 @@ def _cmd_collect(args: argparse.Namespace) -> int:
     from athenaeum.spend import ceiling_tripped
     from athenaeum.subject_population import (
         SubjectRegistry,
+        build_raw_member_subject_report,
         build_subject_population_report,
         build_tier2_confirm,
         decision_to_row,
@@ -248,6 +249,32 @@ def _cmd_collect(args: argparse.Namespace) -> int:
             ceiling_check=ceiling_check,
         )
 
+        # Issue athenaeum#1946: additive raw-member source, same report/
+        # registry/resume/ceiling contract. Runs AFTER the wiki-page pass
+        # in this same process so the raw pass's mints continue from
+        # wherever the wiki pass's (or a resumed run's) ``registry.next_id``
+        # already is -- never a fresh counter that could collide with ids
+        # already minted. Only armed by its own flag; omitted, this is a
+        # dry-run-by-default no-op exactly like the wiki path.
+        if args.include_raw_members is not None:
+            raw_report = build_raw_member_subject_report(
+                args.include_raw_members.expanduser().resolve(),
+                knowledge_root,
+                embedder=memoized_embed,
+                confirm=confirm,
+                config=config,
+                registry=registry,
+                limit=args.limit,
+                on_decision=on_decision,
+                prior_decisions=prior_decisions,
+                ceiling_check=ceiling_check,
+            )
+            report.scanned += raw_report.scanned
+            report.decisions.extend(raw_report.decisions)
+            if raw_report.stopped_reason and not report.stopped_reason:
+                report.stopped_reason = raw_report.stopped_reason
+                report.stopped_due_to_ceiling = raw_report.stopped_due_to_ceiling
+
     confirmer_calls = sum(1 for d in report.decisions if d.confirmer_ran)
 
     if args.json:
@@ -296,7 +323,22 @@ def _cmd_apply_from_report(args: argparse.Namespace) -> int:
             print(f"error: no decisions found in report {report_path}", file=sys.stderr)
             return 1
 
-        target_paths = sorted({d.path for d in decisions})
+        from athenaeum.subject_population import RAW_MEMBER_DOMAIN_PREFIX
+
+        wiki_decisions = [
+            d for d in decisions if not d.type.startswith(RAW_MEMBER_DOMAIN_PREFIX)
+        ]
+        raw_decisions = [
+            d for d in decisions if d.type.startswith(RAW_MEMBER_DOMAIN_PREFIX)
+        ]
+
+        # Issue athenaeum#1946: the git-uncommitted guard below only reaches
+        # pages inside the knowledge_root git working tree -- a raw member
+        # lives under ~/.claude/projects/<scope>/memory/, outside it (see
+        # subject_population.apply_raw_member_subject_population's own
+        # docstring). Checking it would be vacuous at best; it is excluded
+        # from this check entirely rather than silently "passing".
+        target_paths = sorted({d.path for d in wiki_decisions})
         dirty = _git_uncommitted_targets(knowledge_root, target_paths)
         if dirty:
             print(
@@ -321,11 +363,17 @@ def _cmd_apply_from_report(args: argparse.Namespace) -> int:
             SUBJECT_REGISTRY_FILENAME,
             SubjectPopulationReport,
             SubjectRegistry,
+            apply_raw_member_subject_population,
             apply_subject_population,
         )
 
         wiki_root = knowledge_root / "wiki"
-        registry = SubjectRegistry.load(wiki_root / SUBJECT_REGISTRY_FILENAME)
+        registry_path = wiki_root / SUBJECT_REGISTRY_FILENAME
+        registry = SubjectRegistry.load(registry_path)
+        # Reseed EVERY decision (wiki and raw alike) before either apply
+        # runs -- never mints here, only replays ids the original
+        # collection pass already decided (issue athenaeum#1946: a retried
+        # apply must reuse the same id, never mint a second one).
         for decision in decisions:
             if decision.reason == "minted":
                 registry.seed_minted(
@@ -336,8 +384,22 @@ def _cmd_apply_from_report(args: argparse.Namespace) -> int:
                     decision.subject, decision.uid, confirmer_ran=decision.confirmer_ran
                 )
 
-        replay_report = SubjectPopulationReport(scanned=len(decisions), decisions=decisions)
-        changed = apply_subject_population(replay_report, registry, wiki_root=wiki_root)
+        wiki_report = SubjectPopulationReport(
+            scanned=len(wiki_decisions), decisions=wiki_decisions
+        )
+        changed = apply_subject_population(wiki_report, registry, wiki_root=wiki_root)
+
+        raw_rollback_rows: list[dict[str, object]] = []
+        if raw_decisions:
+            raw_report = SubjectPopulationReport(
+                scanned=len(raw_decisions), decisions=raw_decisions
+            )
+            # Issue athenaeum#1946: registry-write-then-stamp ordering --
+            # see apply_raw_member_subject_population's own docstring.
+            raw_changed, raw_rollback_rows = apply_raw_member_subject_population(
+                raw_report, registry, registry_path=registry_path
+            )
+            changed += raw_changed
 
         if args.json:
             sys.stdout.write(
@@ -346,6 +408,7 @@ def _cmd_apply_from_report(args: argparse.Namespace) -> int:
                         "applied_from": str(report_path),
                         "decisions_replayed": len(decisions),
                         "files_changed": changed,
+                        "raw_member_rollback_rows": raw_rollback_rows,
                     }
                 )
                 + "\n"
@@ -354,6 +417,8 @@ def _cmd_apply_from_report(args: argparse.Namespace) -> int:
             print(f"applied from: {report_path}")
             print(f"decisions replayed: {len(decisions)}")
             print(f"files changed: {changed}")
+            if raw_rollback_rows:
+                print(f"raw-member rollback rows: {len(raw_rollback_rows)}")
             print("not committed -- the operator commits.")
         return 0
     finally:
@@ -417,6 +482,20 @@ def add_subject_population_subparser(subparsers: argparse._SubParsersAction) -> 
         help="Stop after this many NEWLY-decided pages this run (a "
         "deliberate, zero-error pause -- never counts a replayed "
         "--resume row).",
+    )
+    parser.add_argument(
+        "--include-raw-members",
+        type=Path,
+        default=None,
+        metavar="CLUSTERS_PATH",
+        help="Issue athenaeum#1946: additionally run meaning-based subject "
+        "population over the raw auto-memory cluster members named in "
+        "this clusters JSONL file (see `athenaeum measure "
+        "coordinate-coverage --clusters`), additive to the wiki-page pass "
+        "above -- same dry-run-by-default, --resume, spend-ceiling, "
+        "fail-closed, and --from-report --apply contract. Collection mode "
+        "only; a replayed --from-report --apply always applies every row "
+        "a report carries, wiki or raw, with no separate flag needed.",
     )
     parser.add_argument(
         "--apply",

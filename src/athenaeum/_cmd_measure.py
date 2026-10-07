@@ -405,6 +405,7 @@ def cmd_coordinate_coverage(args: argparse.Namespace) -> int:
     """
     from athenaeum.coordinate_coverage import (
         measure_coordinate_coverage,
+        raw_member_subject_coverage_from_clusters,
         subject_relation_counts_from_clusters,
         subject_relation_counts_from_report,
     )
@@ -426,6 +427,11 @@ def cmd_coordinate_coverage(args: argparse.Namespace) -> int:
             else None
         )
         report.cluster_relation_counts = subject_relation_counts_from_clusters(
+            knowledge_root, clusters_path
+        )
+        # Issue athenaeum#1946 AC1: raw-member subject coverage (present/
+        # undeterminable/absent), the same --clusters flag.
+        report.raw_member_subject_coverage = raw_member_subject_coverage_from_clusters(
             knowledge_root, clusters_path
         )
 
@@ -456,6 +462,8 @@ def cmd_coordinate_coverage(args: argparse.Namespace) -> int:
             print(f"pair_relation_counts (subject): {report.pair_relation_counts}")
         if report.cluster_relation_counts is not None:
             print(f"cluster_relation_counts (subject): {report.cluster_relation_counts}")
+        if report.raw_member_subject_coverage is not None:
+            print(f"raw_member_subject_coverage: {report.raw_member_subject_coverage}")
     return 0
 
 

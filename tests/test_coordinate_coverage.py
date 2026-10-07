@@ -10,6 +10,7 @@ from athenaeum.coordinate_coverage import (
     NO_TYPE_BUCKET,
     measure_coordinate_coverage,
     newest_clusters_file,
+    raw_member_subject_coverage_from_clusters,
     subject_relation_counts_from_clusters,
     subject_relation_counts_from_report,
 )
@@ -264,3 +265,48 @@ class TestSubjectRelationCountsFromClusters:
         knowledge = tmp_path / "knowledge"
         counts = subject_relation_counts_from_clusters(knowledge)
         assert counts == {Relation.EQUAL: 0, Relation.UNKNOWN: 0, Relation.DISJOINT: 0}
+
+
+class TestRawMemberSubjectCoverageFromClusters:
+    """Issue athenaeum#1946 AC1: raw-member subject coverage (present /
+    undeterminable / absent), same counting rule as the per-type coverage
+    above, over a fixture clusters file."""
+
+    def test_present_undeterminable_absent_split(self, tmp_path: Path) -> None:
+        knowledge = tmp_path / "knowledge"
+        raw_dir = knowledge / "raw" / "auto-memory" / "scope-a"
+        raw_dir.mkdir(parents=True)
+        (raw_dir / "feedback_one.md").write_text(
+            "---\nname: one\ntype: feedback\n---\nbody\n", encoding="utf-8"
+        )
+        (raw_dir / "feedback_two.md").write_text(
+            "---\nname: two\ntype: feedback\nsubject: undeterminable\n---\nbody\n",
+            encoding="utf-8",
+        )
+        (raw_dir / "feedback_three.md").write_text(
+            "---\nname: three\ntype: feedback\nsubject: subject-000001\n---\nbody\n",
+            encoding="utf-8",
+        )
+        clusters_path = knowledge / "raw" / "_librarian-clusters-fixture.jsonl"
+        clusters_path.write_text(
+            json.dumps(
+                {
+                    "cluster_id": "c1",
+                    "member_paths": [
+                        "scope-a/feedback_one.md",
+                        "scope-a/feedback_two.md",
+                        "scope-a/feedback_three.md",
+                    ],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        counts = raw_member_subject_coverage_from_clusters(knowledge, clusters_path)
+        assert counts == {"present": 1, "undeterminable": 1, "absent": 1}
+
+    def test_no_clusters_file_returns_zero_counts(self, tmp_path: Path) -> None:
+        knowledge = tmp_path / "knowledge"
+        counts = raw_member_subject_coverage_from_clusters(knowledge)
+        assert counts == {"present": 0, "undeterminable": 0, "absent": 0}
