@@ -360,3 +360,57 @@ def test_raise_confirmation_blank_required_field_is_reported_not_written(
     assert payload["ok"] is False
     assert payload["error_code"] == "missing_confirmation_field"
     assert not (tmp_path / "wiki" / "_pending_questions.md").exists()
+
+
+def test_challenge_coordinate_stale_marks_named_pairs_only(tmp_path: Path) -> None:
+    """`athenaeum decisions challenge-coordinate <id>` stale-marks every
+    live verdict whose basis.coord_origins names the id, and leaves an
+    unrelated verdict (a DIFFERENT answer id) untouched (issue
+    athenaeum#1994, the first production caller of
+    `verdicts.select_stale_for_coordinate_challenged`)."""
+    from athenaeum.runlock import RunLock
+    from athenaeum.verdicts import Basis, append_verdict, build_verdict_entry, iter_live_entries
+
+    wiki = tmp_path / "wiki"
+    wiki.mkdir()
+    with RunLock(tmp_path) as lock:
+        challenged = build_verdict_entry(
+            "page-a",
+            "page-b",
+            "distinct",
+            basis=Basis(coord_origins={"subject": "answer-1"}),
+            decided_by="comparator",
+        )
+        append_verdict(wiki, challenged, lock=lock)
+
+        unrelated = build_verdict_entry(
+            "page-c",
+            "page-d",
+            "distinct",
+            basis=Basis(coord_origins={"subject": "answer-2"}),
+            decided_by="comparator",
+        )
+        append_verdict(wiki, unrelated, lock=lock)
+
+    rc, out = _run(
+        ["decisions", "challenge-coordinate", "answer-1", "--path", str(tmp_path), "--json"]
+    )
+    assert rc == 0
+    payload = json.loads(out)
+    assert payload == {
+        "ok": True,
+        "answer_id": "answer-1",
+        "marked_stale": 1,
+        "pairs": ["page-a+page-b"],
+    }
+
+    entries = {e.pair: e for _, e in iter_live_entries(wiki)}
+    assert entries["page-a+page-b"].stale is True
+    assert entries["page-c+page-d"].stale is False
+
+
+def test_challenge_coordinate_no_match_is_a_clean_noop(tmp_path: Path) -> None:
+    (tmp_path / "wiki").mkdir()
+    rc, out = _run(["decisions", "challenge-coordinate", "no-such-id", "--path", str(tmp_path)])
+    assert rc == 0
+    assert "no live verdict names" in out

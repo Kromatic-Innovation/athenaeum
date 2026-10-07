@@ -42,8 +42,12 @@ from athenaeum.decision_framing import (
 )
 from athenaeum.decisions import list_pending_decisions
 from athenaeum.runlock import RunLock
-from athenaeum.verdict_effects import apply_verdict_effect, parse_coordinate_batch_members
-from athenaeum.verdicts import iter_live_entries, make_pair_key
+from athenaeum.verdict_effects import (
+    apply_verdict_effect,
+    parse_coordinate_batch_members,
+    queue_coordinate_batch,
+)
+from athenaeum.verdicts import challenge_coordinate_answer, iter_live_entries, make_pair_key
 
 
 def _write_page(path: Path, *, name: str, body: str) -> None:
@@ -110,6 +114,70 @@ def _seed_underdetermined_coordinate_item(wiki_root: Path, lock: RunLock) -> tup
     assert {id_a, id_b} == {page_a.id, page_b.id}
 
     return path_a, path_b, id_a, id_b, pair_key, pq
+
+
+def _seed_two_pair_coordinate_batch(wiki_root: Path, lock: RunLock) -> tuple:
+    """Like :func:`_seed_underdetermined_coordinate_item`, but TWO
+    independent pairs flushed as ONE batch -- mirroring how a real
+    per-cluster caller (e.g. :mod:`athenaeum.wiki_dedupe`) aggregates many
+    ``underdetermined`` pairs into a single queue item via a shared
+    ``coordinate_sink`` (issue athenaeum#1991), rather than two separate
+    batch-of-one items.
+
+    Returns ``([(path_a, path_b, id_a, id_b, pair_key), (path_c, path_d,
+    id_c, id_d, pair_key2)], pq)`` -- one ``pq`` covering both pairs.
+    """
+    sink: list[dict] = []
+    pairs = []
+    for suffix in ("1", "2"):
+        path_a = wiki_root / f"page-{suffix}a.md"
+        path_b = wiki_root / f"page-{suffix}b.md"
+        _write_page(
+            path_a, name=f"Page {suffix}A", body=f"A claim that birthday {suffix} is Jan 1."
+        )
+        _write_page(
+            path_b, name=f"Page {suffix}B", body=f"A claim that birthday {suffix} is July 4."
+        )
+
+        page_a = page_from_path(path_a)
+        page_b = page_from_path(path_b)
+        client = _conflicting_client()
+
+        outcome = compare_pages(page_a, page_b, client=client)
+        assert outcome.verdict == VERDICT_UNDERDETERMINED
+        assert outcome.missing == ["subject"]
+
+        record_comparison(wiki_root, page_a, page_b, client=client, lock=lock)
+        effect = apply_verdict_effect(
+            page_a,
+            page_b,
+            outcome,
+            wiki_root=wiki_root,
+            path_a=path_a,
+            path_b=path_b,
+            config=None,
+            coordinate_sink=sink,
+        )
+        assert effect.verdict == VERDICT_UNDERDETERMINED
+        assert effect.action == "coordinate-pending"
+
+        pair_key = make_pair_key(page_a.id, page_b.id)
+        pairs.append((path_a, path_b, page_a.id, page_b.id, pair_key))
+
+    assert len(sink) == 2
+    result = queue_coordinate_batch(sink, wiki_root=wiki_root, config=None)
+    assert result.action == "queued"
+
+    pending_path = wiki_root / "_pending_questions.md"
+    candidates = [
+        q
+        for q in parse_pending_questions(pending_path)
+        if q.decision_kind == "coordinate"
+        and len(parse_coordinate_batch_members(q.description)) == 2
+    ]
+    assert len(candidates) == 1
+    pq = candidates[0]
+    return pairs, pq
 
 
 # ---------------------------------------------------------------------------
@@ -458,11 +526,11 @@ class TestCoordinateAnswerEndToEnd:
         assert recomputed.stale is False
         assert recomputed.decided_by == "comparator"
         assert f"human-batch:{pq.id}" == recomputed.basis.authority_basis
-        # Out of scope for athenaeum#1993 (slice d2, athenaeum#1994's job):
-        # coord_origins stays exactly the EXISTING {} literal every fresh
-        # compare writes (comparator.py / verdicts.py) -- this issue must
-        # not populate it.
-        assert recomputed.basis.coord_origins == {}
+        # Issue athenaeum#1994: coord_origins now carries the real mapping
+        # -- the "subject" dimension this answer supplied, stamped with
+        # the SAME answer id (pq.id == answer.decision_id for a
+        # single-member batch) that a challenge keys on.
+        assert recomputed.basis.coord_origins == {"subject": pq.id}
 
     def test_partial_answer_defers_to_the_next_llm_backed_pass(
         self, tmp_path: Path
@@ -498,3 +566,163 @@ class TestCoordinateAnswerEndToEnd:
         # decide (one side still has no subject), so nothing new ledgers.
         assert len(entries) == 1
         assert entries[0].verdict == VERDICT_UNDERDETERMINED
+
+
+# ---------------------------------------------------------------------------
+# coord_origins population + stale-mark blast radius (issue athenaeum#1994)
+# ---------------------------------------------------------------------------
+
+
+class TestCoordinateChallengeBlastRadius:
+    def test_challenging_a_batch_answer_stale_marks_exactly_its_pairs(
+        self, tmp_path: Path
+    ) -> None:
+        """End-to-end: answer a two-pair coordinate BATCH, answer an
+        UNRELATED pair's own batch-of-one separately, challenge only the
+        first batch's answer id, and assert exactly the two pairs it
+        decided are stale-marked -- no more (the unrelated pair stays
+        fresh) and no fewer (both batch members, not just one)."""
+        with RunLock(tmp_path) as lock:
+            pairs, batch_pq = _seed_two_pair_coordinate_batch(tmp_path, lock)
+            (path_1a, path_1b, id_1a, id_1b, pair_key_1), (
+                path_2a,
+                path_2b,
+                id_2a,
+                id_2b,
+                pair_key_2,
+            ) = pairs
+
+            # A THIRD, wholly unrelated pair answered through its OWN
+            # batch-of-one -- not via the shared helper above (which
+            # asserts it is the ONLY pending question; two batches
+            # already exist in this test by now).
+            path_3a = tmp_path / "page-3a.md"
+            path_3b = tmp_path / "page-3b.md"
+            _write_page(path_3a, name="Page 3A", body="A claim that birthday 3 is Jan 1.")
+            _write_page(path_3b, name="Page 3B", body="A claim that birthday 3 is July 4.")
+            page_3a = page_from_path(path_3a)
+            page_3b = page_from_path(path_3b)
+            client_3 = _conflicting_client()
+            outcome_3 = compare_pages(page_3a, page_3b, client=client_3)
+            assert outcome_3.verdict == VERDICT_UNDERDETERMINED
+            record_comparison(tmp_path, page_3a, page_3b, client=client_3, lock=lock)
+            effect_3 = apply_verdict_effect(
+                page_3a,
+                page_3b,
+                outcome_3,
+                wiki_root=tmp_path,
+                path_a=path_3a,
+                path_b=path_3b,
+                config=None,
+            )
+            assert effect_3.action == "queued"
+            id_3a, id_3b = page_3a.id, page_3b.id
+            pair_key_3 = make_pair_key(id_3a, id_3b)
+
+            pending_path = tmp_path / "_pending_questions.md"
+            [solo_pq] = [
+                q
+                for q in parse_pending_questions(pending_path)
+                if q.decision_kind == "coordinate"
+                and parse_coordinate_batch_members(q.description) == [
+                    {"pair": pair_key_3, "dimensions": ["subject"]}
+                ]
+            ]
+
+            raw_root = tmp_path / "raw"
+
+            # Answer the TWO-pair batch with one decision-answer file.
+            write_decision_answer(
+                raw_root,
+                decision_id=batch_pq.id,
+                decision_type="coordinate",
+                verdict=json.dumps(
+                    {
+                        "answers": [
+                            {
+                                "pair": pair_key_1,
+                                "dimensions": {"subject": {id_1a: "alice", id_1b: "bob"}},
+                            },
+                            {
+                                "pair": pair_key_2,
+                                "dimensions": {"subject": {id_2a: "carol", id_2b: "dave"}},
+                            },
+                        ]
+                    }
+                ),
+            )
+            # Answer the UNRELATED solo pair with its OWN, different
+            # decision id -- this must stay out of the batch's blast
+            # radius entirely.
+            write_decision_answer(
+                raw_root,
+                decision_id=solo_pq.id,
+                decision_type="coordinate",
+                verdict=json.dumps(
+                    {
+                        "answers": [
+                            {
+                                "pair": pair_key_3,
+                                "dimensions": {"subject": {id_3a: "erin", id_3b: "frank"}},
+                            }
+                        ]
+                    }
+                ),
+            )
+
+            report = apply_decision_answers(tmp_path, raw_root, lock=lock)
+            assert report.applied == 2
+            assert all(o.error_code is None for o in report.outcomes)
+
+            # coord_origins carries the SAME batch answer id for BOTH
+            # members -- the identity this AC is "most easily faked" on.
+            fresh_1 = [
+                e
+                for _, e in iter_live_entries(tmp_path)
+                if e.pair == pair_key_1 and not e.stale
+            ]
+            fresh_2 = [
+                e
+                for _, e in iter_live_entries(tmp_path)
+                if e.pair == pair_key_2 and not e.stale
+            ]
+            fresh_3 = [
+                e
+                for _, e in iter_live_entries(tmp_path)
+                if e.pair == pair_key_3 and not e.stale
+            ]
+            assert len(fresh_1) == len(fresh_2) == len(fresh_3) == 1
+            assert fresh_1[0].basis.coord_origins == {"subject": batch_pq.id}
+            assert fresh_2[0].basis.coord_origins == {"subject": batch_pq.id}
+            assert fresh_3[0].basis.coord_origins == {"subject": solo_pq.id}
+
+            # Challenge ONLY the batch answer.
+            result = challenge_coordinate_answer(tmp_path, batch_pq.id, lock=lock)
+
+        assert result["ok"] is True
+        assert result["marked_stale"] == 2
+        assert set(result["pairs"]) == {pair_key_1, pair_key_2}
+
+        # Positive side: BOTH batch members' fresh verdicts are now stale.
+        entries_1 = [e for _, e in iter_live_entries(tmp_path) if e.pair == pair_key_1]
+        entries_2 = [e for _, e in iter_live_entries(tmp_path) if e.pair == pair_key_2]
+        assert all(e.stale for e in entries_1)
+        assert all(e.stale for e in entries_2)
+
+        # Negative side: the unrelated pair's fresh verdict is UNTOUCHED --
+        # exactly one non-stale entry remains, the one just recomputed.
+        entries_3 = [e for _, e in iter_live_entries(tmp_path) if e.pair == pair_key_3]
+        still_fresh_3 = [e for e in entries_3 if not e.stale]
+        assert len(still_fresh_3) == 1
+        assert still_fresh_3[0].basis.coord_origins == {"subject": solo_pq.id}
+
+        # Challenging an id with no coord_origins hits is a clean no-op,
+        # not an error.
+        with RunLock(tmp_path) as lock:
+            empty = challenge_coordinate_answer(tmp_path, "no-such-answer-id", lock=lock)
+        assert empty == {
+            "ok": True,
+            "answer_id": "no-such-answer-id",
+            "marked_stale": 0,
+            "pairs": [],
+        }
