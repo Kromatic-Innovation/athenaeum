@@ -391,6 +391,50 @@ def proposed_default_for(decision_type: str) -> dict[str, str]:
     }
 
 
+#: Issue athenaeum#1996 guard 2: the discrete answer-schema ``verdict`` token
+#: that matches each approve/reject-shaped decision type's own
+#: :func:`proposed_default_for` action, hand-mapped here once rather than
+#: parsed from that prose at runtime -- ``default_action`` is written for a
+#: human reader (e.g. ``"leave quarantined"``) and has already drifted in
+#: wording from the machine token (``"reject"``) that denotes the very same
+#: outcome. Only the four types using :func:`_approve_reject_schema` get an
+#: entry: a free-text type (``question``/``retraction``/``audit``, or an
+#: unknown type) has no discrete default an answer could match unmodified,
+#: so it can never register as a "default acceptance" -- see
+#: :func:`is_default_acceptance`.
+_DEFAULT_ACCEPTANCE_VERDICT: dict[str, str] = {
+    "confirmation": "approve",  # default_action: "accept the narrowed scope"
+    "merge": "reject",  # default_action: "reject (keep the pages separate)"
+    "quarantine": "reject",  # default_action: "leave quarantined"
+    "proposed-rule": "reject",  # default_action: "reject (do not adopt the rule)"
+}
+
+
+def default_acceptance_verdict_for(decision_type: str) -> str | None:
+    """The answer-schema ``verdict`` token that matches *decision_type*'s
+    ``proposed_default``, or ``None`` when this type has no discrete
+    default a free-text answer could match (issue athenaeum#1996 guard 2).
+    """
+    return _DEFAULT_ACCEPTANCE_VERDICT.get(decision_type)
+
+
+def is_default_acceptance(decision_type: str, verdict: str) -> bool:
+    """Whether answering *decision_type* with *verdict* accepts that item's
+    ``proposed_default`` UNMODIFIED, as opposed to overriding it (issue
+    athenaeum#1996 guard 2).
+
+    This measures the SHAPE of the answer against the default -- never
+    whether the default (or the human's acceptance of it) was actually
+    correct. Case/whitespace-insensitive on *verdict*, matching how every
+    answer applier already normalizes it (see e.g.
+    :mod:`athenaeum.decision_answers`'s ``_apply_merge_answer``).
+    """
+    default_verdict = default_acceptance_verdict_for(decision_type)
+    if default_verdict is None:
+        return False
+    return verdict.strip().lower() == default_verdict
+
+
 def escalation_rationale_for(item: dict[str, Any]) -> str:
     """What, specifically, could not be determined without a human.
 

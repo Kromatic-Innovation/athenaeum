@@ -22,11 +22,14 @@ from pathlib import Path
 import pytest
 
 from athenaeum.calibration import (
+    DEFAULT_ACCEPTANCE_TIER,
     audit_item_id,
     calibration_summary,
+    default_acceptance_rubber_stamp_rate,
     list_pending_audit,
     read_calibration_ledger,
     record_audit_review,
+    sample_default_acceptance,
     sample_probability,
     sample_tier_decision,
     should_sample,
@@ -282,3 +285,145 @@ class TestLedgerReader:
         recs = read_calibration_ledger(wiki)
         assert len(recs) == 1
         assert recs[0]["id"] == "a"
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1996 ratchet guard 2: a human DEFAULT-ACCEPTANCE is sampled
+# for second review through these SAME should_sample/record_audit_review
+# primitives (tier athenaeum#DEFAULT_ACCEPTANCE_TIER), measuring the rate at
+# which a careful reviewer would have confirmed (not overturned) the human's
+# acceptance.
+# ---------------------------------------------------------------------------
+
+
+def _sample_all_default_acceptance_config() -> dict:
+    return {"librarian": {"default_acceptance_audit_sample_rate": 1.0}}
+
+
+class TestDefaultAcceptanceSampling:
+    def test_sampled_record_lands_in_the_same_ledger_under_its_own_tier(
+        self, tmp_path: Path
+    ) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        record = sample_default_acceptance(
+            wiki, decision_id="merge-1", config=_sample_all_default_acceptance_config()
+        )
+        assert record is not None
+        assert record["tier"] == DEFAULT_ACCEPTANCE_TIER
+        assert record["verdict"] == "accept"
+        assert record["kind"] == "audit"
+
+        ledger = read_calibration_ledger(wiki)
+        assert len(ledger) == 1
+        assert ledger[0]["id"] == record["id"]
+
+    def test_zero_rate_samples_nothing(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        record = sample_default_acceptance(
+            wiki,
+            decision_id="merge-1",
+            config={"librarian": {"default_acceptance_audit_sample_rate": 0.0}},
+        )
+        assert record is None
+        assert read_calibration_ledger(wiki) == []
+
+    def test_resampling_the_same_decision_is_idempotent(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        config = _sample_all_default_acceptance_config()
+        first = sample_default_acceptance(wiki, decision_id="merge-1", config=config)
+        second = sample_default_acceptance(wiki, decision_id="merge-1", config=config)
+        assert first is not None
+        assert second is None  # already recorded — no duplicate row
+        assert len(read_calibration_ledger(wiki)) == 1
+
+    def test_never_collides_with_a_t1_or_t2_tier_bucket(self, tmp_path: Path) -> None:
+        """Issue athenaeum#1995 (sibling lane, concurrent) also samples through
+        should_sample/record_audit_review, into the SAME ledger, for a
+        DIFFERENT population (agent triage resolutions). This pins that the
+        two coexist without one's count leaking into the other's bucket."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        sample_tier_decision(
+            wiki, tier="T2", verdict="approve", proposal_id="p1", reason="r",
+            config=_sample_all_config(),
+        )
+        sample_default_acceptance(
+            wiki, decision_id="merge-1", config=_sample_all_default_acceptance_config()
+        )
+        summary = calibration_summary(wiki)
+        assert summary["T2"]["sampled"] == 1
+        assert summary[DEFAULT_ACCEPTANCE_TIER]["sampled"] == 1
+        assert summary["T1"]["sampled"] == 0
+
+
+class TestDefaultAcceptanceRubberStampRate:
+    def test_no_reviews_yet_rate_is_none(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        sample_default_acceptance(
+            wiki, decision_id="merge-1", config=_sample_all_default_acceptance_config()
+        )
+        result = default_acceptance_rubber_stamp_rate(wiki)
+        assert result["sampled"] == 1
+        assert result["reviewed"] == 0
+        assert result["rate"] is None
+
+    def test_no_samples_at_all_rate_is_none(self, tmp_path: Path) -> None:
+        result = default_acceptance_rubber_stamp_rate(tmp_path / "wiki")
+        assert result == {"sampled": 0, "reviewed": 0, "overturned": 0, "rate": None}
+
+    def test_known_overridden_fraction_produces_the_expected_rate(
+        self, tmp_path: Path
+    ) -> None:
+        """Required test (issue athenaeum#1996): a fixture set of
+        default-acceptances with a KNOWN fraction of "would have been
+        overridden on review" produces the expected measured rate.
+
+        10 sampled default-acceptances; a careful reviewer overturns exactly
+        3 of them (confirms the other 7) -- the measured rubber-stamp rate
+        must be exactly 7/10 = 0.7, the CONFIRMED fraction, never the
+        overturned one."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        config = _sample_all_default_acceptance_config()
+        audit_ids = []
+        for i in range(10):
+            record = sample_default_acceptance(
+                wiki, decision_id=f"merge-{i}", config=config
+            )
+            assert record is not None
+            audit_ids.append(record["id"])
+
+        # A careful reviewer overturns items 0, 1, 2 (the KNOWN
+        # "would have been overridden" fraction = 3/10) and confirms the rest.
+        overridden_on_review = set(audit_ids[:3])
+        for audit_id in audit_ids:
+            human_verdict = "reject" if audit_id in overridden_on_review else "accept"
+            record_audit_review(wiki, audit_id=audit_id, human_verdict=human_verdict)
+
+        result = default_acceptance_rubber_stamp_rate(wiki)
+        assert result["sampled"] == 10
+        assert result["reviewed"] == 10
+        assert result["overturned"] == 3
+        assert result["rate"] == pytest.approx(0.7)
+
+    def test_rate_never_counts_toward_t1_t2_buckets(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        config = _sample_all_default_acceptance_config()
+        record = sample_default_acceptance(wiki, decision_id="merge-1", config=config)
+        assert record is not None
+        record_audit_review(wiki, audit_id=record["id"], human_verdict="accept")
+
+        summary = calibration_summary(wiki)
+        assert summary["T1"] == {
+            "sampled": 0, "reviewed": 0, "overturned": 0,
+            "applied": 0, "overturned_applied": 0,
+        }
+        assert summary["T2"] == {
+            "sampled": 0, "reviewed": 0, "overturned": 0,
+            "applied": 0, "overturned_applied": 0,
+        }

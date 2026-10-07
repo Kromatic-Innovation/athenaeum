@@ -1187,6 +1187,37 @@ def resolve_audit_sample_rate_t1_rejects(config: dict[str, Any] | None) -> float
     )
 
 
+def resolve_default_acceptance_audit_sample_rate(config: dict[str, Any] | None) -> float:
+    """Resolve the share of human DEFAULT-ACCEPTANCES sampled for second
+    review (issue athenaeum#1996 ratchet guard 2).
+
+    A "default acceptance" is a human answer to a queue item that accepts
+    the item's ``proposed_default`` unmodified (see
+    :func:`athenaeum.decision_framing.is_default_acceptance`) rather than
+    overriding it. This is the rubber-stamp-rate measurement's own sample
+    rate -- deliberately a SEPARATE knob from
+    :func:`resolve_audit_sample_rate_t1_rejects` /
+    :func:`resolve_audit_sample_rate_t2_approvals`, even though all three
+    resolve through the same :func:`athenaeum.calibration.should_sample`
+    primitive, because this measures a different population (human
+    default-acceptances, not T1/T2 tier verdicts) and an operator may
+    reasonably want to sample it at a different rate.
+
+    Env ``ATHENAEUM_DEFAULT_ACCEPTANCE_AUDIT_SAMPLE_RATE`` > yaml
+    ``librarian.default_acceptance_audit_sample_rate`` > default ``0.1``
+    (10% -- a looser default than the T1/T2 7.5%: this population is
+    expected to be smaller per athenaeum#717's own effort-budget bounds, so a
+    slightly higher rate still keeps the absolute review volume small).
+    Clamped to ``[0.0, 1.0]``.
+    """
+    return _resolve_sample_rate(
+        config,
+        env_var="ATHENAEUM_DEFAULT_ACCEPTANCE_AUDIT_SAMPLE_RATE",
+        key="default_acceptance_audit_sample_rate",
+        default=0.1,
+    )
+
+
 def resolve_reasoning_tier_auditing_enabled(config: dict[str, Any] | None) -> bool:
     """Resolve the T1 reasoning-tier screen's opt-in (issue athenaeum#518). DEFAULT OFF.
 

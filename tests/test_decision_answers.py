@@ -390,6 +390,95 @@ class TestApplyMerge:
 
 
 # ---------------------------------------------------------------------------
+# TestDefaultAcceptanceTaggedAtAnswerTime — issue athenaeum#1996 ratchet guard 2.
+#
+# A human answering a merge item with "reject" (merge's proposed_default) is
+# a default-acceptance, tagged right here in apply_decision_answers (the
+# SAME call site athenaeum.decisions answer / athenaeum ingest-answers
+# drives) and offered to calibration's deterministic sampler. Answering
+# "approve" (overriding the default) must never be sampled.
+# ---------------------------------------------------------------------------
+
+
+class TestDefaultAcceptanceTaggedAtAnswerTime:
+    _SAMPLE_ALL_CONFIG = {"librarian": {"default_acceptance_audit_sample_rate": 1.0}}
+
+    def test_accepting_the_default_is_sampled(self, wiki_root: Path, raw_root: Path) -> None:
+        from athenaeum.calibration import DEFAULT_ACCEPTANCE_TIER, read_calibration_ledger
+
+        merges_path = wiki_root / "_pending_merges.md"
+        mid = _write_merge(
+            merges_path,
+            target="rubber-stamp-topic",
+            src_a=wiki_root / "feedback_rs_a.md",
+            src_b=wiki_root / "feedback_rs_b.md",
+        )
+        # merge's proposed_default is "reject (keep the pages separate)" —
+        # answering reject accepts it unmodified.
+        write_decision_answer(
+            raw_root, decision_id=mid, decision_type="merge", verdict="reject"
+        )
+
+        report = apply_decision_answers(
+            wiki_root, raw_root, config=self._SAMPLE_ALL_CONFIG
+        )
+        assert report.applied == 1
+
+        ledger = read_calibration_ledger(wiki_root)
+        audit_records = [r for r in ledger if r.get("kind") == "audit"]
+        assert len(audit_records) == 1
+        assert audit_records[0]["tier"] == DEFAULT_ACCEPTANCE_TIER
+        assert audit_records[0]["proposal_id"] == mid
+
+    def test_overriding_the_default_is_never_sampled(
+        self, wiki_root: Path, raw_root: Path
+    ) -> None:
+        from athenaeum.calibration import read_calibration_ledger
+
+        merges_path = wiki_root / "_pending_merges.md"
+        mid = _write_merge(
+            merges_path,
+            target="overridden-topic",
+            src_a=wiki_root / "feedback_ov_a.md",
+            src_b=wiki_root / "feedback_ov_b.md",
+        )
+        # "approve" OVERRIDES merge's "reject" default — never a
+        # default-acceptance, so it must never be sampled, even at rate 1.0.
+        write_decision_answer(
+            raw_root, decision_id=mid, decision_type="merge", verdict="approve"
+        )
+
+        report = apply_decision_answers(
+            wiki_root, raw_root, config=self._SAMPLE_ALL_CONFIG
+        )
+        assert report.applied == 1
+        assert read_calibration_ledger(wiki_root) == []
+
+    def test_a_free_text_question_answer_is_never_sampled(
+        self, wiki_root: Path, raw_root: Path
+    ) -> None:
+        """question is free-text — there is no discrete default a free-text
+        answer could match unmodified, so it can never register as a
+        default-acceptance, no matter what the human wrote."""
+        from athenaeum.calibration import read_calibration_ledger
+
+        pending_path = wiki_root / "_pending_questions.md"
+        qid = _write_question_block(pending_path)
+        write_decision_answer(
+            raw_root,
+            decision_id=qid,
+            decision_type="question",
+            verdict="leave unresolved",
+        )
+
+        report = apply_decision_answers(
+            wiki_root, raw_root, config=self._SAMPLE_ALL_CONFIG
+        )
+        assert report.applied == 1
+        assert read_calibration_ledger(wiki_root) == []
+
+
+# ---------------------------------------------------------------------------
 # TestVerdictLedgerWiring — issue athenaeum#712 Wiring AC.
 #
 # The verdict ledger is "consumed within this same issue by writing verdicts

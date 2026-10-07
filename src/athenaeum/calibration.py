@@ -70,6 +70,21 @@ REVIEW_KIND = "review"
 #: is not in this map is never an audit candidate.
 _WATCHED_VERDICT: dict[str, str] = {"T1": "reject", "T2": "approve"}
 
+#: Issue athenaeum#1996 guard 2: the audit-record ``tier`` value for a
+#: second-reviewed human DEFAULT-ACCEPTANCE -- a human accepting a queue
+#: item's ``proposed_default`` unmodified (see
+#: :func:`athenaeum.decision_framing.is_default_acceptance`). Deliberately
+#: NOT ``"T1"``/``"T2"``: this measures a different population (human
+#: default-acceptances, not tier verdicts) through the SAME ledger and the
+#: SAME :func:`should_sample` / :func:`record_audit_review` primitives --
+#: :func:`calibration_summary` already buckets by whatever ``tier`` string
+#: appears in the ledger, so this population gets its own summary bucket
+#: with no change to that function. The explicit, distinct name also keeps
+#: this from ever colliding with issue athenaeum#1995's separate agent-triage-
+#: resolution audit, which samples through these same primitives for a
+#: DIFFERENT population on a concurrent lane.
+DEFAULT_ACCEPTANCE_TIER = "default_acceptance"
+
 
 def default_calibration_ledger_path(wiki_root: Path) -> Path:
     """Default calibration ledger path: ``<wiki_root>/_calibration.jsonl``."""
@@ -221,6 +236,117 @@ def sample_tier_decision(
     )
     _append_jsonl_line(target, json.dumps(record, separators=(",", ":")) + "\n")
     return record
+
+
+def sample_default_acceptance(
+    wiki_root: Path,
+    *,
+    decision_id: str,
+    config: dict[str, Any] | None = None,
+    ledger_path: Path | None = None,
+) -> dict[str, Any] | None:
+    """Sample one recorded human DEFAULT-ACCEPTANCE for second review (issue
+    athenaeum#1996 ratchet guard 2).
+
+    Called right after ``athenaeum decisions answer`` tags an answer as a
+    default-acceptance (see
+    :func:`athenaeum.decision_framing.is_default_acceptance`) --
+    "a human accepted this item's ``proposed_default`` unmodified" is the
+    population this measures; calling this function is not itself a verdict
+    on whether that acceptance was right, only on whether it gets a second
+    look. Deliberately NOT built on :func:`sample_tier_decision`: that
+    function's gate is ``(tier, verdict) in _WATCHED_VERDICT``, a T1/T2-only
+    predicate this population does not satisfy (and must not be made to, by
+    issue athenaeum#1996's own "no second sampling mechanism" instruction cutting
+    the other way too -- extending ``_WATCHED_VERDICT`` would blur a tier
+    verdict and a human default-acceptance into the same table). Instead
+    this writes the SAME :data:`AUDIT_KIND` record shape into the SAME
+    ledger, sampled via the SAME :func:`should_sample`, tagged with tier
+    :data:`DEFAULT_ACCEPTANCE_TIER` -- reviewed, with zero changes, by the
+    EXISTING :func:`record_audit_review` (which is already tier-agnostic:
+    it only reads a sampled record's own ``verdict``/``tier``/``applied``
+    fields back).
+
+    A sampled record's ``verdict`` is fixed to ``"accept"`` -- that is what
+    makes it a default-acceptance in the first place -- so
+    :func:`record_audit_review` later classifies a careful reviewer's
+    ``human_verdict`` of anything else as an overturn: the human's
+    acceptance did not match what the reviewer would have chosen.
+
+    Returns the audit record when sampled and newly recorded, ``None`` when
+    not selected by :func:`should_sample` at the configured rate
+    (:func:`athenaeum.config.resolve_default_acceptance_audit_sample_rate`),
+    or when this exact *decision_id* was already sampled on a prior run
+    (idempotent, same discipline as :func:`sample_tier_decision`).
+    """
+    from athenaeum.config import resolve_default_acceptance_audit_sample_rate
+
+    rate = resolve_default_acceptance_audit_sample_rate(config)
+    if not should_sample(DEFAULT_ACCEPTANCE_TIER, decision_id, rate=rate):
+        return None
+
+    item_id = audit_item_id(DEFAULT_ACCEPTANCE_TIER, decision_id)
+    existing = {
+        str(r.get("id"))
+        for r in read_calibration_ledger(wiki_root, ledger_path=ledger_path)
+        if r.get("kind") == AUDIT_KIND
+    }
+    if item_id in existing:
+        return None  # already sampled on a prior run
+
+    record = {
+        "v": CALIBRATION_LEDGER_VERSION,
+        "kind": AUDIT_KIND,
+        "id": item_id,
+        "created_at": now_iso(),
+        "tier": DEFAULT_ACCEPTANCE_TIER,
+        "verdict": "accept",
+        "proposal_id": decision_id,
+        "reason": "default-acceptance sample (issue athenaeum#1996)",
+        "sample_rate": rate,
+        # Whether the accepted default itself executed a write is a
+        # separate, per-decision-type question this measurement does not
+        # need: it measures whether the human's answer MATCHES a careful
+        # reviewer's, never whether that answer was applied.
+        "applied": False,
+    }
+    target = (
+        ledger_path if ledger_path is not None else default_calibration_ledger_path(wiki_root)
+    )
+    _append_jsonl_line(target, json.dumps(record, separators=(",", ":")) + "\n")
+    return record
+
+
+def default_acceptance_rubber_stamp_rate(
+    wiki_root: Path, *, ledger_path: Path | None = None
+) -> dict[str, Any]:
+    """The measured rubber-stamp rate for human DEFAULT-ACCEPTANCES (issue
+    athenaeum#1996 ratchet guard 2): of reviewed samples, the fraction a
+    careful reviewer CONFIRMED (matched the human's acceptance) rather than
+    overturned.
+
+    Reads :func:`calibration_summary`'s existing, UNCHANGED
+    :data:`DEFAULT_ACCEPTANCE_TIER` bucket -- this function adds no new
+    counting of its own, only the ratio. This is a MEASUREMENT, never an
+    override: nothing here unwinds or re-answers a decision, same posture
+    as :func:`record_audit_review`'s own docstring.
+
+    Returns ``{"sampled", "reviewed", "overturned", "rate"}``; ``rate`` is
+    ``None`` until at least one sample has been reviewed -- an unreviewed
+    sample asserts nothing about accuracy yet, so it must not render as a
+    misleading ``0.0`` or ``1.0``.
+    """
+    bucket = calibration_summary(wiki_root, ledger_path=ledger_path).get(
+        DEFAULT_ACCEPTANCE_TIER, _empty_tier_bucket()
+    )
+    reviewed = bucket["reviewed"]
+    rate = ((reviewed - bucket["overturned"]) / reviewed) if reviewed else None
+    return {
+        "sampled": bucket["sampled"],
+        "reviewed": reviewed,
+        "overturned": bucket["overturned"],
+        "rate": rate,
+    }
 
 
 def _reviewed_ids(records: list[dict[str, Any]]) -> set[str]:
@@ -389,4 +515,7 @@ __all__ = [
     "list_pending_audit",
     "record_audit_review",
     "calibration_summary",
+    "DEFAULT_ACCEPTANCE_TIER",
+    "sample_default_acceptance",
+    "default_acceptance_rubber_stamp_rate",
 ]

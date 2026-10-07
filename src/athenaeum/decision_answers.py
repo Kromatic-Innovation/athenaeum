@@ -828,6 +828,30 @@ def apply_decision_answers(
                     exc,
                 )
 
+            # Issue athenaeum#1996 ratchet guard 2: tag a default-acceptance AT
+            # ANSWER TIME -- right here, on the same conformant, newly-applied
+            # answer the budget-event write above just recorded -- and offer
+            # it to the deterministic sampler. Best-effort, same discipline as
+            # the budget-event write immediately above: this is a calibration
+            # SIDE channel, never a reason to fail an already-successful
+            # apply.
+            try:
+                from athenaeum.calibration import sample_default_acceptance
+                from athenaeum.decision_framing import is_default_acceptance
+
+                if is_default_acceptance(answer.decision_type, answer.verdict):
+                    sample_default_acceptance(
+                        wiki_root,
+                        decision_id=answer.decision_id,
+                        config=config,
+                    )
+            except Exception as exc:  # noqa: BLE001 - must never break apply
+                log.debug(
+                    "decision_answers: default-acceptance sampling skipped (%s): %s",
+                    type(exc).__name__,
+                    exc,
+                )
+
         report.outcomes.append(outcome)
         if outcome.applied:
             report.applied += 1

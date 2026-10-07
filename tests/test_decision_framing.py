@@ -27,8 +27,10 @@ from athenaeum.decision_framing import (
     answerable_as,
     build_context_bundle,
     bundle_tokens,
+    default_acceptance_verdict_for,
     escalation_rationale_for,
     frame_decision,
+    is_default_acceptance,
     proposed_default_for,
     response_schema_for,
     reversibility_for,
@@ -165,6 +167,38 @@ class TestProposedDefaultsAreConservative:
                 f"{decision_type}'s no-answer default opens with {verb!r}, "
                 f"which is not one of {sorted(self.INACTION_VERBS)}: {action!r}"
             )
+
+
+class TestDefaultAcceptance:
+    """Issue athenaeum#1996 guard 2: whether an answer accepts a decision
+    type's ``proposed_default`` unmodified."""
+
+    def test_answering_with_the_default_verdict_is_a_default_acceptance(self) -> None:
+        # merge's default_action is "reject (keep the pages separate)".
+        assert is_default_acceptance("merge", "reject") is True
+        # proposed-rule's default_action is "reject (do not adopt the rule)".
+        assert is_default_acceptance("proposed-rule", "reject") is True
+        # confirmation's default_action is "accept the narrowed scope".
+        assert is_default_acceptance("confirmation", "approve") is True
+        # quarantine's default_action is "leave quarantined".
+        assert is_default_acceptance("quarantine", "reject") is True
+
+    def test_overriding_the_default_is_not_a_default_acceptance(self) -> None:
+        assert is_default_acceptance("merge", "approve") is False
+        assert is_default_acceptance("proposed-rule", "approve") is False
+        assert is_default_acceptance("confirmation", "reject") is False
+        assert is_default_acceptance("quarantine", "approve") is False
+
+    def test_free_text_types_have_no_discrete_default_so_never_qualify(self) -> None:
+        # question/retraction/audit are free-text — there is no discrete
+        # default token any free-text answer could match unmodified.
+        for decision_type in ("question", "retraction", "audit", "an-unknown-type"):
+            assert default_acceptance_verdict_for(decision_type) is None
+            assert is_default_acceptance(decision_type, "anything") is False
+
+    def test_case_and_whitespace_insensitive(self) -> None:
+        assert is_default_acceptance("merge", "  Reject  ") is True
+        assert is_default_acceptance("merge", "REJECT") is True
 
 
 class TestEscalationRationale:

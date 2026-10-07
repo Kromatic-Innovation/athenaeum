@@ -428,6 +428,17 @@ def format_budget_report(report: dict[str, Any]) -> str:
     the two surfaces never drift into two different renderings of one
     report. Lives here (L4) rather than in either presentation module so
     neither has to import the other.
+
+    ``report["default_acceptance_rubber_stamp"]`` (issue athenaeum#1996 ratchet
+    guard 2, OPTIONAL key) is rendered as one extra line when present --
+    :func:`budget_report` itself never sets this key (this function's other
+    five figures and the breach logic above are unchanged by athenaeum#1996); a
+    caller that wants the measured rubber-stamp rate alongside the other
+    figures computes it via
+    :func:`athenaeum.calibration.default_acceptance_rubber_stamp_rate` and
+    merges it into the dict before calling this function, exactly once, in
+    the SAME shared surface both ``athenaeum decisions budget`` and
+    ``athenaeum status`` already call through -- never a third rendering.
     """
     lines = ["Decision-queue budget", "=" * 40]
     lines.append(
@@ -467,6 +478,15 @@ def format_budget_report(report: dict[str, Any]) -> str:
         )
     else:
         lines.append("Within budget.")
+    stamp = report.get("default_acceptance_rubber_stamp")
+    if stamp:
+        rate = stamp.get("rate")
+        rate_str = f"{rate:.0%}" if rate is not None else "n/a (none reviewed yet)"
+        lines.append(
+            f"Default-acceptance rubber-stamp rate: {rate_str} "
+            f"(sampled={stamp.get('sampled', 0)}, reviewed={stamp.get('reviewed', 0)}, "
+            f"overturned={stamp.get('overturned', 0)})"
+        )
     return "\n".join(lines)
 
 
