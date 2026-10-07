@@ -143,6 +143,7 @@ import yaml
 
 from athenaeum.answers import raise_pending_question
 from athenaeum.atomic_io import atomic_write_text
+from athenaeum.cluster_comparator import auto_memory_root
 from athenaeum.dimensions import UNDETERMINABLE_SUBJECT
 from athenaeum.entity_resolution import (
     DEFAULT_TOP_K,
@@ -155,8 +156,9 @@ from athenaeum.entity_resolution import (
     SubjectPage,
     resolve_same_subject,
 )
-from athenaeum.models import EntityIndex, parse_frontmatter
+from athenaeum.models import AutoMemoryFile, EntityIndex, parse_frontmatter, render_frontmatter
 from athenaeum.search import embed_texts
+from athenaeum.verdicts import page_id_for_path
 from athenaeum.wiki_dedupe import DEDUPE_CANDIDATE_TYPES, discover_wiki_dedupe_candidates
 
 if TYPE_CHECKING:
@@ -179,6 +181,34 @@ UNDETERMINABLE = UNDETERMINABLE_SUBJECT
 #: registry" (operator decision 1). JSON, not YAML/frontmatter: it is not
 #: itself a wiki page.
 SUBJECT_REGISTRY_FILENAME = "_subject_registry.json"
+
+#: Domain tag prefix for a raw auto-memory cluster member's :class:`SubjectPage.type
+#: <athenaeum.entity_resolution.SubjectPage>` (issue athenaeum#1946). A raw
+#: file's own ``type:`` frontmatter value (``feedback``/``project``/
+#: ``reference``/``user``/``recall``/``unknown``) literally collides with a
+#: wiki page's ``type:`` vocabulary (``concept``/``reference``/``principle``)
+#: -- ``reference`` is a member of BOTH. Prefixing segregates the raw-member
+#: candidate pool from the wiki-page pool by construction: ``resolve_same_
+#: subject`` is only ever handed one pool or the other (never mixed), so this
+#: tag need not be unique against anything except itself, but it is kept
+#: distinct from every wiki type anyway so a mis-wired caller fails loudly
+#: (an accidental cross-domain match) rather than silently.
+RAW_MEMBER_DOMAIN_PREFIX = "raw:"
+
+#: Known ``raw/auto-memory`` filename prefixes (:class:`athenaeum.models.
+#: AutoMemoryFile`'s own docstring: "``feedback_*.md``, ``project_*.md``,
+#: ``reference_*.md``, ``user_*.md``, ``Recall_*.md``"). Used only to label
+#: the domain-tagged pool a raw member's candidate falls into; never fed back
+#: into any wiki-type-shaped decision. A stem that matches none of these
+#: falls back to ``"unknown"`` -- the same literal :func:`athenaeum.merge`'s
+#: own path-only reconstruction shim uses for an unrecognized raw file.
+_RAW_MEMORY_TYPE_PREFIXES: tuple[str, ...] = (
+    "feedback",
+    "project",
+    "reference",
+    "user",
+    "recall",
+)
 
 #: Same shape as ``memory_class_backfill._FRONTMATTER_RE`` /
 #: ``page_description._FRONTMATTER_RE`` — re-declared per that established
@@ -319,6 +349,17 @@ class PageDecision:
     matched_uid: str | None = None
     confirmer_ran: bool = False
     top_k_uids: tuple[str, ...] = ()
+    #: Raw-member rows only (issue athenaeum#1946): the member's own
+    #: ``subject:`` value immediately before this decision -- ``"absent"``
+    #: (no key / empty) or ``"undeterminable"``. ``None`` for every
+    #: wiki-page decision (this module never overwrites a resolved wiki
+    #: subject either, but the wiki path has git/commit-based rollback
+    #: already -- see ``retire.py``/``_cmd_subject_population.py``'s own
+    #: rollback note -- so it never needed this field). This is the
+    #: raw-member apply's documented rollback mechanism: a reverse-replay
+    #: of the report can restore each stamped file to this exact prior
+    #: state (issue athenaeum#1946's design decision, "Rollback").
+    prior_subject_state: str | None = None
 
 
 @dataclass
@@ -775,6 +816,7 @@ def decision_to_row(decision: PageDecision) -> dict[str, Any]:
         "matched_uid": decision.matched_uid,
         "confirmer_ran": decision.confirmer_ran,
         "top_k_uids": list(decision.top_k_uids),
+        "prior_subject_state": decision.prior_subject_state,
     }
 
 
@@ -790,6 +832,7 @@ def decision_from_row(row: dict[str, Any]) -> PageDecision:
         matched_uid=row.get("matched_uid"),
         confirmer_ran=bool(row.get("confirmer_ran", False)),
         top_k_uids=tuple(row.get("top_k_uids") or ()),
+        prior_subject_state=row.get("prior_subject_state"),
     )
 
 
@@ -888,6 +931,442 @@ def apply_subject_population(
     return changed
 
 
+# ---------------------------------------------------------------------------
+# Raw auto-memory cluster members (issue athenaeum#1946)
+# ---------------------------------------------------------------------------
+
+
+def _infer_raw_memory_type(path: Path) -> str:
+    """Best-effort ``memory_type`` label for a raw filename, for the domain
+    tag only -- never written anywhere, never fed into any decision logic
+    beyond pool segregation (see :data:`RAW_MEMBER_DOMAIN_PREFIX`)."""
+    stem = path.stem.lower()
+    for prefix in _RAW_MEMORY_TYPE_PREFIXES:
+        if stem.startswith(prefix + "_") or stem == prefix:
+            return prefix
+    return "unknown"
+
+
+def _resolve_cluster_member_path(knowledge_root: Path, member_path: str) -> Path:
+    """Resolve one raw clusters-file ``member_paths`` entry to an absolute
+    path. Mirrors :func:`athenaeum.coordinate_coverage._resolve_cluster_
+    member_path` exactly (a raw member_path entry is either absolute, or
+    POSIX-relative to ``raw/auto-memory/``) -- duplicated here rather than
+    imported because that helper is private to its own module and this is
+    the identical, independently-stable contract, not a drifted copy.
+    """
+    candidate = Path(member_path)
+    if candidate.is_absolute():
+        return candidate
+    return knowledge_root / "raw" / "auto-memory" / candidate
+
+
+def _read_raw_name(path: Path) -> str:
+    """The candidate ``name`` :func:`~athenaeum.entity_resolution.
+    resolve_same_subject` compares on: the raw file's own ``name:``
+    frontmatter value, or its filename stem when absent/empty."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ""
+    meta, _body = parse_frontmatter(text)
+    name = meta.get("name") if meta else None
+    if isinstance(name, str) and name.strip():
+        return name.strip()
+    return path.stem
+
+
+def discover_raw_member_candidates(
+    clusters_path: Path, knowledge_root: Path
+) -> list[tuple[str, str, str, Path]]:
+    """Every raw cluster member named in *clusters_path*, as
+    ``(uid, name, domain_tag, path)`` -- the raw-domain analogue of
+    :func:`athenaeum.wiki_dedupe.discover_wiki_dedupe_candidates`'s role in
+    :func:`build_subject_population_report`'s wiki-page loop.
+
+    *uid* is :func:`athenaeum.verdicts.page_id_for_path` rooted at
+    :func:`athenaeum.cluster_comparator.auto_memory_root` -- the SAME id the
+    verdict ledger keys cluster pairs on (issue athenaeum#1946's design
+    decision, "Registry"). *domain_tag* is :data:`RAW_MEMBER_DOMAIN_PREFIX`
+    plus :func:`_infer_raw_memory_type`.
+
+    A member path that cannot be read is silently skipped -- the same
+    fail-open posture :mod:`athenaeum.coordinate_coverage`'s own clusters
+    reader uses. Deduplicated by uid (a member can legitimately recur across
+    cluster rows) and returned in uid-sorted order for determinism.
+    """
+    seen: dict[str, tuple[str, str, str, Path]] = {}
+    if not clusters_path.is_file():
+        return []
+    for line in clusters_path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        row = json.loads(stripped)
+        member_paths = row.get("member_paths") if isinstance(row, dict) else None
+        if not isinstance(member_paths, list):
+            continue
+        for member_path in member_paths:
+            resolved = _resolve_cluster_member_path(knowledge_root, str(member_path))
+            if not resolved.is_file():
+                continue
+            am = AutoMemoryFile(
+                path=resolved,
+                origin_scope=resolved.parent.name,
+                memory_type=_infer_raw_memory_type(resolved),
+            )
+            root = auto_memory_root(am)
+            uid = page_id_for_path(am.path, root=root)
+            if uid in seen:
+                continue
+            name = _read_raw_name(resolved)
+            domain_tag = RAW_MEMBER_DOMAIN_PREFIX + am.memory_type
+            seen[uid] = (uid, name, domain_tag, resolved)
+    return [seen[uid] for uid in sorted(seen)]
+
+
+def build_raw_member_subject_report(
+    clusters_path: Path,
+    knowledge_root: Path,
+    *,
+    embedder: EmbedFn | None = None,
+    confirm: ConfirmFn | None = None,
+    config: dict[str, Any] | None = None,
+    top_k: int = DEFAULT_TOP_K,
+    registry: SubjectRegistry | None = None,
+    limit: int | None = None,
+    on_decision: Callable[[PageDecision], None] | None = None,
+    prior_decisions: Sequence[PageDecision] | None = None,
+    ceiling_check: Callable[[], str | None] | None = None,
+) -> SubjectPopulationReport:
+    """Raw-member analogue of :func:`build_subject_population_report`
+    (issue athenaeum#1946) -- same algorithm, same dry-run-by-default
+    posture (this never writes anything; see :func:`apply_raw_member_
+    subject_population`), applied over raw auto-memory cluster members
+    named in *clusters_path* instead of comparator-eligible wiki pages.
+
+    The candidate pool is segregated per :data:`RAW_MEMBER_DOMAIN_PREFIX`-
+    tagged domain (never mixed with the wiki-page pool or across raw
+    ``memory_type``\\ s) -- matching :func:`build_subject_population_report`'s
+    own per-``entity_type`` pool segregation. Pass the SAME *registry*
+    instance a wiki-page pass already populated (in one process) to avoid
+    a fresh mint counter colliding with ids the wiki pass (or a prior run)
+    already minted; this function never resets ``registry.next_id`` itself.
+
+    A member whose candidate *name* is empty/whitespace-only is recorded
+    ``undeterminable-degraded`` directly, with no resolver call at all --
+    :func:`~athenaeum.entity_resolution.resolve_same_subject` would return
+    ``NoMatch`` for an empty normalized name indistinguishably from a
+    genuine first-of-its-kind page, which would mint a subject id for a
+    page with no real name to have matched on; athenaeum#1714's own
+    invariant ("every degraded or ambiguous outcome gives undeterminable,
+    never a guessed id") requires treating this as degraded explicitly
+    rather than letting it fall through to a mint.
+    """
+    if registry is None:
+        registry = SubjectRegistry()
+
+    prior_by_uid: dict[str, PageDecision] = {d.uid: d for d in (prior_decisions or ())}
+    candidates = discover_raw_member_candidates(clusters_path, knowledge_root)
+
+    report = SubjectPopulationReport()
+    new_decisions = 0
+    stopped = False
+
+    domain_tags = sorted({tag for _uid, _name, tag, _path in candidates})
+    for domain_tag in domain_tags:
+        if stopped:
+            break
+        type_members = [
+            (uid, name, path)
+            for uid, name, tag, path in candidates
+            if tag == domain_tag
+        ]
+
+        resolved_pool: list[SubjectPage] = []
+        pool_subjects: dict[str, str] = {}
+        unresolved: list[tuple[str, str, Path]] = []
+
+        for uid, name, path in type_members:
+            existing_subject = _read_existing_subject(path)
+            if existing_subject and existing_subject != UNDETERMINABLE:
+                resolved_pool.append(
+                    SubjectPage(uid=uid, name=name, type=domain_tag, path=path)
+                )
+                pool_subjects[uid] = existing_subject
+                registry.record_match(existing_subject, uid)
+            else:
+                unresolved.append((uid, name, path))
+
+        for uid, name, path in unresolved:
+            prior = prior_by_uid.get(uid)
+            if prior is not None:
+                report.scanned += 1
+                report.decisions.append(prior)
+                if prior.reason in ("matched", "minted"):
+                    resolved_pool.append(
+                        SubjectPage(uid=uid, name=name, type=domain_tag, path=path)
+                    )
+                    pool_subjects[uid] = prior.subject
+                    registry.seed_minted(
+                        prior.subject, uid, confirmer_ran=prior.confirmer_ran
+                    )
+                continue
+
+            if ceiling_check is not None:
+                trip_reason = ceiling_check()
+                if trip_reason is not None:
+                    report.stopped_reason = trip_reason
+                    report.stopped_due_to_ceiling = True
+                    stopped = True
+                    break
+
+            if limit is not None and new_decisions >= limit:
+                report.stopped_reason = f"limit reached: {limit} new decision(s) this run"
+                stopped = True
+                break
+
+            prior_state = (
+                "undeterminable"
+                if _read_existing_subject(path) == UNDETERMINABLE
+                else "absent"
+            )
+            report.scanned += 1
+            new_decisions += 1
+
+            if not name.strip():
+                decision = PageDecision(
+                    uid,
+                    name,
+                    domain_tag,
+                    path,
+                    UNDETERMINABLE,
+                    "undeterminable-degraded",
+                    prior_subject_state=prior_state,
+                )
+                report.decisions.append(decision)
+                if on_decision is not None:
+                    on_decision(decision)
+                continue
+
+            candidate = SubjectPage(uid=uid, name=name, type=domain_tag, path=path)
+            outcome = _resolve_with_degradation_tracking(
+                candidate,
+                resolved_pool,
+                embedder=embedder,
+                confirm=confirm,
+                config=config,
+                top_k=top_k,
+            )
+            result = outcome.result
+
+            if outcome.degraded:
+                decision = PageDecision(
+                    uid,
+                    name,
+                    domain_tag,
+                    path,
+                    UNDETERMINABLE,
+                    "undeterminable-degraded",
+                    confirmer_ran=outcome.confirmer_ran,
+                    top_k_uids=outcome.top_k_uids,
+                    prior_subject_state=prior_state,
+                )
+                report.decisions.append(decision)
+                if on_decision is not None:
+                    on_decision(decision)
+                continue
+
+            if isinstance(result, Ambiguous):
+                decision = PageDecision(
+                    uid,
+                    name,
+                    domain_tag,
+                    path,
+                    UNDETERMINABLE,
+                    "undeterminable-ambiguous",
+                    confirmer_ran=outcome.confirmer_ran,
+                    top_k_uids=outcome.top_k_uids,
+                    prior_subject_state=prior_state,
+                )
+                report.decisions.append(decision)
+                if on_decision is not None:
+                    on_decision(decision)
+                continue
+
+            if isinstance(result, Match):
+                subject_id = pool_subjects.get(result.uid)
+                if subject_id is None:
+                    decision = PageDecision(
+                        uid,
+                        name,
+                        domain_tag,
+                        path,
+                        UNDETERMINABLE,
+                        "undeterminable-degraded",
+                        confirmer_ran=outcome.confirmer_ran,
+                        top_k_uids=outcome.top_k_uids,
+                        prior_subject_state=prior_state,
+                    )
+                    report.decisions.append(decision)
+                    if on_decision is not None:
+                        on_decision(decision)
+                    continue
+                decision = PageDecision(
+                    uid,
+                    name,
+                    domain_tag,
+                    path,
+                    subject_id,
+                    "matched",
+                    matched_uid=result.uid,
+                    confirmer_ran=outcome.confirmer_ran,
+                    top_k_uids=outcome.top_k_uids,
+                    prior_subject_state=prior_state,
+                )
+                report.decisions.append(decision)
+                resolved_pool.append(candidate)
+                pool_subjects[uid] = subject_id
+                registry.record_match(subject_id, uid, confirmer_ran=outcome.confirmer_ran)
+                if on_decision is not None:
+                    on_decision(decision)
+                continue
+
+            subject_id = registry.mint(uid, confirmer_ran=outcome.confirmer_ran)
+            decision = PageDecision(
+                uid,
+                name,
+                domain_tag,
+                path,
+                subject_id,
+                "minted",
+                confirmer_ran=outcome.confirmer_ran,
+                top_k_uids=outcome.top_k_uids,
+                prior_subject_state=prior_state,
+            )
+            report.decisions.append(decision)
+            resolved_pool.append(candidate)
+            pool_subjects[uid] = subject_id
+            if on_decision is not None:
+                on_decision(decision)
+
+    return report
+
+
+def _stamp_raw_subject(path: Path, subject: str) -> bool:
+    """Write ``subject:`` into *path*'s own frontmatter, in place.
+
+    Same pattern :func:`athenaeum.claim_kind.stamp_claim_kind` already uses
+    for a different coordinate on these exact raw files (issue athenaeum#1946's
+    design decision, "Why frontmatter, not a sidecar"): parse, assign the
+    one key (overwriting a literal ``undeterminable`` the SAME way a fresh
+    absence would be filled -- :func:`athenaeum.models.render_frontmatter`
+    re-renders the whole block rather than textually inserting a second
+    ``subject:`` line), re-render, :func:`~athenaeum.atomic_io.
+    atomic_write_text`. Idempotent: re-checks the file's CURRENT ``subject``
+    at write time and no-ops if it is already a real (non-undeterminable)
+    value -- never overwrites a resolved subject, matching :func:`apply_
+    subject_population`'s wiki-page invariant. Fail-open: any read/parse/
+    write error leaves the file untouched and returns ``False``, never
+    raises (issue athenaeum#1946: "fail-open ... a read or write error
+    leaves the file unstamped, never raises").
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    meta, body = parse_frontmatter(text)
+    existing = meta.get("subject") if meta else None
+    if (
+        isinstance(existing, str)
+        and existing.strip()
+        and existing.strip() != UNDETERMINABLE
+    ):
+        return False
+    meta = dict(meta) if meta else {}
+    meta["subject"] = subject
+    rendered = render_frontmatter(meta) + body
+    try:
+        atomic_write_text(path, rendered)
+    except OSError:
+        return False
+    return True
+
+
+def apply_raw_member_subject_population(
+    report: SubjectPopulationReport,
+    registry: SubjectRegistry,
+    *,
+    registry_path: Path,
+    pending_path: Path | None = None,
+) -> tuple[int, list[dict[str, Any]]]:
+    """Write every raw-member decision in *report*: the registry FIRST,
+    then each member's own frontmatter (issue athenaeum#1946's design
+    decision, "Registry ... Write order").
+
+    This ordering -- durable via :meth:`SubjectRegistry.save`, THEN the
+    per-file stamp -- is the one this issue requires: a process crash
+    between the two never produces a stamped file whose id the registry
+    does not know about (the inverse -- registered, not yet stamped --
+    self-heals: a retried apply reuses the SAME id via
+    :meth:`SubjectRegistry.seed_minted`/:meth:`~SubjectRegistry.record_match`,
+    never minting a second one, exactly as a retried wiki-page apply
+    already does in :mod:`athenaeum._cmd_subject_population`). The caller
+    is responsible for having already reseeded *registry* from *report*'s
+    own decisions (``seed_minted``/``record_match`` per ``minted``/
+    ``matched`` row) BEFORE calling this -- this function only persists and
+    stamps, it never mints.
+
+    Returns ``(files_changed, rollback_rows)``. Each rollback row -- the
+    documented undo log for a raw-member stamp, since the git-based
+    uncommitted-changes guard and ``git revert`` (the wiki-page rollback)
+    do not reach a file living under ``~/.claude/projects/<scope>/memory/``,
+    outside the ``~/knowledge`` git working tree -- carries ``uid``,
+    ``path``, the member's ``prior_subject_state`` (``"absent"`` or
+    ``"undeterminable"``), and the ``subject`` id written: enough for a
+    documented reverse-replay (re-stamp ``prior_subject_state`` in place of
+    ``subject``) to undo the stamp.
+    """
+    if pending_path is None:
+        pending_path = registry_path.parent / "_pending_questions.md"
+
+    registry.save(registry_path)
+
+    changed = 0
+    rollback_rows: list[dict[str, Any]] = []
+    for decision in report.decisions:
+        if decision.reason == "undeterminable-ambiguous":
+            raise_pending_question(
+                pending_path,
+                question=(
+                    f"Which existing subject, if any, is {decision.name!r} "
+                    f"({decision.uid}) the same real-world thing as?"
+                ),
+                context=(
+                    "athenaeum#1946 meaning-based subject population (raw "
+                    f"auto-memory cluster member) found {decision.name!r} "
+                    f"({decision.uid}, type={decision.type}) plausibly "
+                    "matches more than one existing subject and could not "
+                    "confirm a single one automatically."
+                ),
+                entity=decision.name,
+                source=str(decision.path),
+            )
+
+        if _stamp_raw_subject(decision.path, decision.subject):
+            changed += 1
+            rollback_rows.append(
+                {
+                    "uid": decision.uid,
+                    "path": str(decision.path),
+                    "prior_subject_state": decision.prior_subject_state,
+                    "subject": decision.subject,
+                }
+            )
+
+    return changed, rollback_rows
+
+
 def run_subject_population(
     wiki_root: Path,
     *,
@@ -922,14 +1401,18 @@ def run_subject_population(
 
 __all__ = [
     "PageDecision",
+    "RAW_MEMBER_DOMAIN_PREFIX",
     "SubjectPopulationReport",
     "SubjectRegistry",
     "UNDETERMINABLE",
+    "apply_raw_member_subject_population",
     "apply_subject_population",
+    "build_raw_member_subject_report",
     "build_subject_population_report",
     "build_tier2_confirm",
     "decision_from_row",
     "decision_to_row",
+    "discover_raw_member_candidates",
     "insert_subject",
     "read_decision_report",
     "run_subject_population",

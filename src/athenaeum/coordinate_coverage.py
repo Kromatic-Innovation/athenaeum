@@ -133,6 +133,11 @@ class CoordinateCoverageReport:
     no_frontmatter: int = 0
     pair_relation_counts: dict[str, int] | None = None
     cluster_relation_counts: dict[str, int] | None = None
+    #: Issue athenaeum#1946: raw auto-memory cluster member ``subject``
+    #: coverage (present / undeterminable / absent), same counting rule as
+    #: :data:`TypeCoverage`'s own ``subject_*`` fields, deduped by resolved
+    #: path across every cluster row in the clusters file.
+    raw_member_subject_coverage: dict[str, int] | None = None
 
     def all_pages_total(self) -> TypeCoverage:
         """Sum of every ``by_type`` bucket (the issue's own table's "all" row)."""
@@ -157,6 +162,8 @@ class CoordinateCoverageReport:
             payload["pair_relation_counts"] = dict(self.pair_relation_counts)
         if self.cluster_relation_counts is not None:
             payload["cluster_relation_counts"] = dict(self.cluster_relation_counts)
+        if self.raw_member_subject_coverage is not None:
+            payload["raw_member_subject_coverage"] = dict(self.raw_member_subject_coverage)
         return payload
 
 
@@ -314,6 +321,57 @@ def subject_relation_counts_from_clusters(
     return counts
 
 
+def raw_member_subject_coverage_from_clusters(
+    knowledge_root: Path, clusters_path: Path | None = None
+) -> dict[str, int]:
+    """``subject`` coverage (present / undeterminable / absent) over every
+    raw auto-memory cluster member named in one clusters JSONL file (issue
+    athenaeum#1946, AC1) -- the raw-member analogue of
+    :func:`measure_coordinate_coverage`'s per-type ``subject_*`` counts,
+    using the SAME counting rule (:func:`_present`, and the literal
+    :data:`~athenaeum.dimensions.UNDETERMINABLE_SUBJECT` sentinel split out
+    from "present").
+
+    Deduplicated by resolved path across every cluster row -- a member can
+    legitimately recur across clusters (or within one, degenerately), and
+    this reports each real file once. *clusters_path* defaults to
+    :func:`newest_clusters_file`. A member path that cannot be read is
+    silently skipped (mirrors :func:`subject_relation_counts_from_clusters`'s
+    own fail-open posture).
+    """
+    path = clusters_path if clusters_path is not None else newest_clusters_file(knowledge_root)
+    counts = {"present": 0, "undeterminable": 0, "absent": 0}
+    if path is None or not path.is_file():
+        return counts
+
+    seen_paths: set[Path] = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        row = json.loads(stripped)
+        member_paths = row.get("member_paths") if isinstance(row, dict) else None
+        if not isinstance(member_paths, list):
+            continue
+        for member_path in member_paths:
+            resolved = _resolve_cluster_member_path(knowledge_root, str(member_path))
+            if resolved in seen_paths:
+                continue
+            seen_paths.add(resolved)
+            meta = _read_meta(resolved)
+            if meta is None:
+                continue
+            subject = meta.get("subject")
+            if not _present(subject):
+                counts["absent"] += 1
+            elif isinstance(subject, str) and subject.strip() == UNDETERMINABLE_SUBJECT:
+                counts["undeterminable"] += 1
+            else:
+                counts["present"] += 1
+
+    return counts
+
+
 __all__ = [
     "NO_TYPE_BUCKET",
     "CoordinateCoverageReport",
@@ -321,6 +379,7 @@ __all__ = [
     "iter_wiki_files",
     "measure_coordinate_coverage",
     "newest_clusters_file",
+    "raw_member_subject_coverage_from_clusters",
     "subject_relation_counts_from_clusters",
     "subject_relation_counts_from_report",
 ]

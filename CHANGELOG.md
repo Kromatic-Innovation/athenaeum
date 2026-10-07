@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Meaning-based `subject` population extended to raw auto-memory cluster
+  members (issue athenaeum#1946, follow-up to athenaeum#1944).** `athenaeum
+  subject-population` gains `--include-raw-members <clusters-path>`,
+  additive to the existing wiki-page pass behind the same dry-run-by-
+  default / `--resume` / spend-ceiling / `claude-cli`-only fail-closed /
+  `--from-report --apply` contract. `--apply` stamps `subject:` into a raw
+  member's own frontmatter (`athenaeum.atomic_io.atomic_write_text`,
+  idempotent, fail-open, never overwriting a resolved value), writes
+  `wiki/_subject_registry.json` with the raw member's uid BEFORE the
+  frontmatter stamp (crash-recovery-safe: a retried apply reuses the same
+  id rather than minting a second one), and returns a rollback row per
+  stamp (prior state + id written) since the git-based rollback the
+  wiki-page path uses does not reach a file living under
+  `~/.claude/projects/<scope>/memory/`. `athenaeum measure
+  coordinate-coverage --clusters` additionally reports raw-member
+  `subject` coverage (present/undeterminable/absent). See
+  `docs/measurements/raw-member-subject-coverage-2026-10-07.md` for the
+  fixture measurement (before/after coverage, and the two "release via
+  specialization" / "still held, correctly" fixtures). No live corpus
+  pass and no new nightly caller — both remain explicitly out of scope,
+  carried to a follow-up `~operator`/`needs:host-write` issue.
+
 - **Parked retry window for `email-handle-no-match` corrections (issue
   athenaeum#1988).** A field correction whose `handle: {email}` target has no
   matching contact record yet is parked in `_corrections_parked.json`
