@@ -817,22 +817,25 @@ def _apply_coordinate_answer(
         # directly rather than reaching for the content-hash-diff rule
         # built for a bulk corpus sweep (select_stale_for_changed_page).
         #
-        # Issue athenaeum#1994 seam: member_provenance_for_batch (already
-        # built, verdict_effects.py) computes one
-        # {"pair", "decided_by": f"human-batch:{answer.decision_id}",
-        # "dimensions"} stamp per member of `batch_members` above — that
-        # slice's job is to write it onto the FRESH entry's
-        # basis.coord_origins below (left at `{}` here, deliberately — see
-        # this issue's "Out of scope"). `answer.decision_id` is exactly the
-        # `answer_id` that slice's blast-radius stale-marking
-        # (select_stale_for_coordinate_challenged) keys on, and it is
-        # already durable (the pending-question block's own id) and
-        # already reachable from here.
         mark_pairs_stale(
             wiki_root,
             {pair_key: f"coordinate answered via decisions answer {answer.decision_id}"},
             lock=lock,
         )
+
+        # Issue athenaeum#1994: the FRESH entry's basis.coord_origins maps
+        # each dimension THIS answer supplied for this pair to the same
+        # `answer.decision_id` that member_provenance_for_batch
+        # (verdict_effects.py) would stamp as `decided_by:
+        # f"human-batch:{answer.decision_id}"` -- the identical id, loop-
+        # invariant across every member of `plan` above, so challenging
+        # one batch-answer id (verdicts.challenge_coordinate_answer ->
+        # select_stale_for_coordinate_challenged) reaches every pair this
+        # answer decided, not just this one. A dimension NOT in
+        # `dims_for_pair` (this pair's coordinate did not come from this
+        # answer) gets no entry here -- an honest absent mapping, never an
+        # invented id.
+        pair_coord_origins = {dim_name: answer.decision_id for dim_name in dims_for_pair}
 
         result = record_comparison(
             wiki_root,
@@ -843,6 +846,7 @@ def _apply_coordinate_answer(
             config=config,
             lock=lock,
             authority_basis=f"human-batch:{answer.decision_id}",
+            coord_origins=pair_coord_origins,
             # Issue athenaeum#1993: Gate 1's ``subject`` (IDENTITY-kind)
             # comparator refuses to separate on anything but ratified
             # evidence — "subjects never separate on a model-reported

@@ -42,7 +42,12 @@ import json
 import sys
 from pathlib import Path
 
-from athenaeum._cli_shared import _resolve_knowledge_root, _resolve_wiki_root
+from athenaeum._cli_shared import (
+    _acquire_or_exit,
+    _add_lock_args,
+    _resolve_knowledge_root,
+    _resolve_wiki_root,
+)
 from athenaeum.answers import raise_pending_question
 from athenaeum.config import (
     DEFAULT_KNOWLEDGE_ROOT,
@@ -238,6 +243,52 @@ def _cmd_budget(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_challenge_coordinate(args: argparse.Namespace) -> int:
+    """``athenaeum decisions challenge-coordinate`` — revoke a previously
+    answered coordinate decision (issue athenaeum#1994, athenaeum#717 AC
+    group 3, "the coord_origins blast radius").
+
+    Stale-marks every live verdict whose ``basis.coord_origins`` names the
+    given answer id, via :func:`athenaeum.verdicts.challenge_coordinate_answer`.
+    This is the production wiring the AC needed: the selector
+    (:func:`athenaeum.verdicts.select_stale_for_coordinate_challenged`) and
+    the ledger primitive it composes with
+    (:func:`athenaeum.verdicts.mark_pairs_stale`) both already existed and
+    were already unit-tested — this command is their first production
+    caller, the "wherever a human or the triage agent challenges a prior
+    answer" entry point the issue names (a human runs this directly; a
+    future triage lane, issue athenaeum#1995, out of scope here, can call
+    the same function). A stale-marked pair is picked up by
+    :func:`athenaeum.comparator.record_comparison`'s existing memoization
+    the next time anything re-compares it — this command does not itself
+    decide a new verdict or re-queue anything, and it never unwrites the
+    coordinate value already in frontmatter.
+    """
+    from athenaeum.verdicts import challenge_coordinate_answer
+
+    knowledge_root = _resolve_knowledge_root(args)
+    wiki_root = knowledge_root / "wiki"
+    cfg = load_config(knowledge_root)
+    lock = _acquire_or_exit(knowledge_root, args, cfg)
+    if isinstance(lock, int):
+        return lock
+    try:
+        result = challenge_coordinate_answer(wiki_root, args.answer_id, lock=lock)
+    finally:
+        lock.release()
+
+    if args.json:
+        sys.stdout.write(json.dumps(result) + "\n")
+    elif result["marked_stale"]:
+        print(
+            f"{result['marked_stale']} verdict(s) stale-marked for challenged "
+            f"answer {args.answer_id!r}: {', '.join(result['pairs'])}"
+        )
+    else:
+        print(f"no live verdict names answer {args.answer_id!r} in coord_origins")
+    return 0
+
+
 def cmd_decisions(args: argparse.Namespace) -> int:
     """Dispatch ``athenaeum decisions {list,next,count}``.
 
@@ -253,10 +304,12 @@ def cmd_decisions(args: argparse.Namespace) -> int:
         "raise-confirmation",
         "answer",
         "budget",
+        "challenge-coordinate",
     ):
         print(
             "usage: athenaeum decisions "
-            "{list,next,count,scan-retractions,raise-confirmation,answer,budget} [...]",
+            "{list,next,count,scan-retractions,raise-confirmation,answer,budget,"
+            "challenge-coordinate} [...]",
             file=sys.stderr,
         )
         return 2
@@ -266,6 +319,9 @@ def cmd_decisions(args: argparse.Namespace) -> int:
 
     if sub == "raise-confirmation":
         return _cmd_raise_confirmation(args)
+
+    if sub == "challenge-coordinate":
+        return _cmd_challenge_coordinate(args)
 
     if sub == "answer":
         return _cmd_answer(args)
@@ -506,7 +562,7 @@ def add_decisions_subparser(subparsers: argparse._SubParsersAction) -> None:
             "AND merges, each tagged by type, every item framed with its "
             "reversibility class, proposed default and response schema. "
             "Modes: list, next, count, scan-retractions, raise-confirmation, "
-            "answer."
+            "answer, budget, challenge-coordinate."
         ),
     )
     d_parser.set_defaults(func=cmd_decisions)
@@ -611,6 +667,34 @@ def add_decisions_subparser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     _add_common(budget_p, with_proposal=False)
+
+    challenge_p = d_sub.add_parser(
+        "challenge-coordinate",
+        help=(
+            "Challenge/revoke a previously answered coordinate decision: "
+            "stale-marks every verdict whose basis names the given answer "
+            "id, so it is re-compared next time (issue athenaeum#1994)."
+        ),
+    )
+    challenge_p.add_argument(
+        "--path",
+        type=Path,
+        default=DEFAULT_KNOWLEDGE_ROOT,
+        help="Knowledge directory (default: ~/knowledge)",
+    )
+    challenge_p.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON instead of plain text.",
+    )
+    challenge_p.add_argument(
+        "answer_id",
+        help=(
+            "The coordinate decision's id (the same id recorded into "
+            "every affected verdict's basis.coord_origins)."
+        ),
+    )
+    _add_lock_args(challenge_p)
 
     raise_p = d_sub.add_parser(
         "raise-confirmation",
