@@ -312,6 +312,25 @@ def test_migration_zero_item_count_and_disposition_drift(legacy_store: dict) -> 
     assert set(persisted_by_id) == before_ids
     assert persisted_by_id == report.by_id
 
+    # Zero TYPE drift, verified per id — the generalized version of the
+    # athenaeum#1993 coordinate-erasure finding: an id-set/disposition-only
+    # comparison passes happily even when a record's TYPE is silently
+    # rewritten (e.g. a decision_kind collapsed to the generic "question"
+    # bucket), because it never inspects item shape. Every record here is
+    # a plain question (none carry decision_kind "confirmation" or
+    # "coordinate" — those get their own dedicated round-trip test below),
+    # so every migrated question record's type must be exactly "question".
+    records_by_id = {rec["id"]: rec for rec in persisted}
+    for mid in before_merges:
+        assert records_by_id[mid]["type"] == "merge"
+        assert records_by_id[mid]["item"]["type"] == "merge"
+    for qid in before_questions:
+        assert records_by_id[qid]["type"] == "question"
+        assert records_by_id[qid]["item"]["type"] == "question"
+    for aid in before_audit_ids:
+        assert records_by_id[aid]["type"] == "audit"
+        assert records_by_id[aid]["item"]["type"] == "audit"
+
 
 def test_migration_never_mutates_the_legacy_stores(legacy_store: dict) -> None:
     """Migration is read-only w.r.t. the legacy files/ledger — byte-identical before/after."""
@@ -598,3 +617,106 @@ class TestListPendingDecisionsFailSoft:
         assert set(result_by_id) == set(expected_by_id)
         for item_id, expected_item in expected_by_id.items():
             assert result_by_id[item_id] == expected_item
+
+
+class TestQuestionDecisionKindDispatchIsComplete:
+    """Issue athenaeum#1992, generalized from a live coordinator finding:
+
+    the first revision of ``migrate_legacy_queues`` special-cased only
+    ``decision_kind == "confirmation"``, so a REAL, already-landed
+    ``coordinate`` item (issue athenaeum#1993, merged the same week) would
+    have migrated as a generic ``type: "question"`` record — invisible as
+    a coordinate item to any consumer that trusts the migrated record's
+    own ``type`` field. The existing id-set/disposition-drift test never
+    caught this because it only ever compares ids and dispositions, never
+    item TYPE. These tests pin the generalized fix: an explicit, complete
+    dispatch (not a boolean special-case for one kind), and a logged
+    warning for anything that dispatch doesn't recognize.
+    """
+
+    def test_coordinate_item_round_trips_with_type_and_members_intact(
+        self, tmp_path: Path
+    ) -> None:
+        from athenaeum.runlock import RunLock
+        from athenaeum.verdict_effects import parse_coordinate_batch_members
+        from tests.test_coordinate_answer_loop import _seed_underdetermined_coordinate_item
+
+        wiki_root = tmp_path
+        with RunLock(wiki_root) as lock:
+            _, _, _, _, pair_key, pq = _seed_underdetermined_coordinate_item(
+                wiki_root, lock
+            )
+        assert pq.decision_kind == "coordinate"
+        expected_members = parse_coordinate_batch_members(pq.description)
+
+        # Through migrate_legacy_queues -> load_migrated_queue directly.
+        report = migrate_legacy_queues(wiki_root)
+        assert report.by_id[pq.id] == "pending"
+        persisted = load_migrated_queue(wiki_root)
+        rec = next(r for r in persisted if r["id"] == pq.id)
+        assert rec["type"] == "coordinate"
+        assert rec["item"]["type"] == "coordinate"
+        assert rec["item"]["payload"]["members"] == expected_members
+        assert rec["item"]["payload"]["members"] == [
+            {"pair": pair_key, "dimensions": ["subject"]}
+        ]
+
+        # And through the full list_pending_decisions READ path.
+        decisions = list_pending_decisions(wiki_root)
+        matches = [d for d in decisions if d["id"] == pq.id]
+        assert len(matches) == 1
+        decision = matches[0]
+        assert decision["type"] == "coordinate"
+        assert decision["payload"]["members"] == expected_members
+
+    def test_unrecognized_decision_kind_logs_a_warning_and_still_migrates(
+        self,
+        wiki_root: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A HYPOTHETICAL future decision_kind with no dedicated branch
+        (and no dedicated *_to_decision builder) must be visible, not
+        silently absorbed as a plain question. Hand-edits a real
+        confirmation block's ``**Decision kind**:`` line, since
+        ``raise_pending_question`` itself refuses an unrecognized kind at
+        write time (by design) -- this fixture simulates a kind that
+        landed in a LATER version of the writer than this reader knows
+        about, which validation-at-write-time cannot prevent.
+        """
+        import logging
+
+        questions_path = wiki_root / "_pending_questions.md"
+        raised = raise_pending_question(
+            questions_path,
+            "",
+            "",
+            kind="confirmation",
+            raiser="agent",
+            repo="owner/repo",
+            issue_ref="123",
+            narrowed_scope="scope",
+            implemented_behavior="did X",
+            alternative="could have done Y",
+        )
+        before_text = questions_path.read_text(encoding="utf-8")
+        assert "**Decision kind**: confirmation" in before_text
+        after_text = before_text.replace(
+            "**Decision kind**: confirmation", "**Decision kind**: future-kind-xyz"
+        )
+        questions_path.write_text(after_text, encoding="utf-8")
+
+        with caplog.at_level(logging.WARNING, logger="athenaeum.decisions"):
+            migrate_legacy_queues(wiki_root)
+
+        assert any(
+            rec.levelno == logging.WARNING
+            and "future-kind-xyz" in rec.message
+            and "unrecognized" in rec.message
+            for rec in caplog.records
+        ), f"expected an unrecognized-kind warning; got: {[r.message for r in caplog.records]}"
+
+        persisted = load_migrated_queue(wiki_root)
+        rec = next(r for r in persisted if r["id"] == raised["decision_id"])
+        # Still migrates -- nothing dropped -- as the safe generic shape.
+        assert rec["type"] == "question"
+        assert rec["item"]["type"] == "question"

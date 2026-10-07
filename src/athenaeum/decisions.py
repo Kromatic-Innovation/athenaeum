@@ -139,6 +139,14 @@ _UID_PREFIX_RE = re.compile(r"^[0-9a-f]{6,}-(?P<rest>.+)$")
 # stripped for a friendlier fallback title when there is no ``name:``.
 _MEMORY_PREFIXES = ("feedback_", "project_", "reference_", "user_", "recall_")
 
+#: Every ``PendingQuestion.decision_kind`` value :func:`question_to_decision`
+#: (and :func:`migrate_legacy_queues`'s own explicit dispatch) knows how to
+#: route to a dedicated builder, or the plain-question default. Kept as its
+#: own named set (issue athenaeum#1992) so an unrecognized kind is a loud,
+#: logged gap rather than a silent fallthrough — see
+#: :func:`migrate_legacy_queues`.
+_KNOWN_QUESTION_DECISION_KINDS = frozenset({"question", "confirmation", "coordinate"})
+
 # Cap for a one-line gist so a ``decisions list`` line stays readable.
 _GIST_LIMIT = 160
 
@@ -747,19 +755,33 @@ def list_pending_decisions(
                 rec.get("sources", []), caller_audience, base=knowledge_root
             ):
                 continue
-        elif rtype in ("question", "confirmation"):
-            if not is_page_authorized_at(
-                rec.get("source", ""), caller_audience, base=knowledge_root
-            ):
-                continue
         elif rtype == "audit":
             # Owner-only for a restricted caller, same as retraction/
             # quarantine/proposed-rule below (no readable source-page path
             # to authorize against, issue athenaeum#538).
             if caller_audience is not None:
                 continue
-        else:  # pragma: no cover - defensive; the store only holds the above
-            continue
+        else:
+            # Every record this store carries that is NOT "merge" or
+            # "audit" is question-file-derived — "question",
+            # "confirmation", "coordinate" (issue athenaeum#1993), and
+            # whatever decision_kind is added next (see
+            # _KNOWN_QUESTION_DECISION_KINDS in migrate_legacy_queues).
+            # These all share ONE authorization rule — the same
+            # fail-closed source check a plain question has always used —
+            # deliberately NOT enumerated here by type-literal name: a
+            # prior revision's ``rtype in ("question", "confirmation")``
+            # tuple silently dropped "coordinate" the moment migration
+            # started labeling it correctly, which is the exact
+            # generalization trap this branch exists to close. If a
+            # genuinely different-shaped type is ever added to this
+            # store, give it its own ``elif`` ABOVE this one — this
+            # ``else`` must stay the question-like catch-all, never a
+            # silent default for an unrelated type.
+            if not is_page_authorized_at(
+                rec.get("source", ""), caller_audience, base=knowledge_root
+            ):
+                continue
         decisions.append(rec["item"])
 
     if caller_audience is None:
@@ -983,12 +1005,32 @@ def migrate_legacy_queues(
     Issue athenaeum#717's AC group 1 (slice athenaeum#1992) requires this
     module to stop being a read-only view and become the actual queue for
     the three legacy surfaces named in AC3 — pending merges, pending
-    questions/confirmations, and calibration-sampled audit items. This is
-    the function that makes that true, and :func:`list_pending_decisions`
-    now calls it (with its own ``with_proposal``/``max_sources_per_merge``)
-    on every listing rather than re-deriving the same shapes independently
-    — the persisted file this writes is what gets read back, not a second,
-    unread presentation of the same data.
+    questions (including every ``decision_kind`` that file carries —
+    plain questions, ``confirmation``, ``coordinate``, and anything added
+    later; see :data:`_KNOWN_QUESTION_DECISION_KINDS`), and
+    calibration-sampled audit items. This is the function that makes that
+    true, and :func:`list_pending_decisions` now calls it (with its own
+    ``with_proposal``/``max_sources_per_merge``) on every listing rather
+    than re-deriving the same shapes independently — the persisted file
+    this writes is what gets read back, not a second, unread presentation
+    of the same data.
+
+    A pending-questions block's ``decision_kind`` gets an EXPLICIT,
+    complete dispatch here (``confirmation`` ->
+    :func:`confirmation_to_decision`, ``coordinate`` ->
+    :func:`coordinate_to_decision`, otherwise ->
+    :func:`question_to_decision`) — not a boolean special-case for one
+    kind that lets every other kind fall through to a generic question.
+    A real incident motivated this: the first revision of this function
+    special-cased only ``confirmation``, so a ``coordinate`` item (issue
+    athenaeum#1993, landed the same week) migrated as a type-``"question"``
+    record — invisible as a coordinate item to any consumer that trusted
+    the migrated record's own ``type`` field rather than digging into
+    ``item["type"]``. An unrecognized ``decision_kind`` (neither a known
+    kind nor the default) is now a LOGGED warning, not a silent
+    reshape — the item still migrates (as the generic question shape, so
+    nothing is dropped), but the gap is visible immediately rather than
+    waiting for the next kind to hit the same trap.
 
     Read-only with respect to every LEGACY store: nothing here ever calls
     :func:`athenaeum.pending_merges.resolve_merge`,
@@ -1059,16 +1101,46 @@ def migrate_legacy_queues(
     for pq in parse_pending_questions(questions_path):
         disposition = _question_disposition(pq)
         by_id[pq.id] = disposition
-        is_confirmation = pq.decision_kind == "confirmation"
-        item = (
-            confirmation_to_decision(pq)
-            if is_confirmation
-            else question_to_decision(pq, with_proposal=with_proposal)
-        )
+        kind = pq.decision_kind
+        if kind not in _KNOWN_QUESTION_DECISION_KINDS:
+            # Issue athenaeum#1992 (generalized from the athenaeum#1993
+            # coordinate-erasure finding): an unrecognized decision_kind
+            # must be VISIBLE, never silently reshaped into a generic
+            # question — the exact failure mode that made a real,
+            # already-landed decision_kind ("coordinate") disappear from
+            # the migrated store's type bookkeeping. This is a loud,
+            # non-fatal degrade (same precedent as the fail-soft write
+            # above: degrade loudly, never quietly) — the item still
+            # migrates, as the best-effort generic question shape, but the
+            # gap is logged so a future kind added to
+            # :func:`question_to_decision` without a matching branch here
+            # is caught immediately rather than silently absorbed.
+            log.warning(
+                "decisions: unrecognized question decision_kind %r (id=%s) "
+                "-- no dedicated branch in migrate_legacy_queues; migrating "
+                "as a generic question so nothing is dropped, but this "
+                "kind needs its own branch here (and, if relevant, its own "
+                "*_to_decision builder).",
+                kind,
+                pq.id,
+            )
+        # Explicit, complete dispatch — not a boolean special-case for one
+        # kind that lets every OTHER kind silently fall through to
+        # "question". Mirrors exactly the branches
+        # :func:`question_to_decision` itself dispatches on internally;
+        # the record's ``type`` is read back from the builder's own
+        # ``item["type"]`` rather than duplicated as a second literal, so
+        # the two can never diverge.
+        if kind == "confirmation":
+            item = confirmation_to_decision(pq)
+        elif kind == "coordinate":
+            item = coordinate_to_decision(pq)
+        else:
+            item = question_to_decision(pq, with_proposal=with_proposal)
         records.append(
             {
                 "id": pq.id,
-                "type": "confirmation" if is_confirmation else "question",
+                "type": item["type"],
                 "disposition": disposition,
                 "resolved": pq.answered,
                 "decision": "",
