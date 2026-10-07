@@ -75,7 +75,13 @@ from athenaeum.comparator import (
 from athenaeum.dimensions import DEFAULT_REGISTRY, DimensionRegistry
 from athenaeum.models import TokenUsage, parse_frontmatter
 from athenaeum.pending_merges import PendingMerge, parse_pending_merges
-from athenaeum.pii import find_inline_emails, find_inline_phones, is_pii_flagged
+from athenaeum.pii import (
+    PII_ALLOWLIST_FILENAME,
+    find_inline_emails,
+    find_inline_phones,
+    is_pii_flagged,
+    load_pii_allowlist,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from athenaeum.provider import LLMBackend
@@ -175,7 +181,9 @@ def resolve_source_path(source: str, wiki_root: Path) -> Path | None:
     return None
 
 
-def identify_pii_hazards(paths: list[Path]) -> list[str]:
+def identify_pii_hazards(
+    paths: list[Path], *, allowlist: dict[str, str] | None = None
+) -> list[str]:
     """Return human-readable reasons this proposal is a PII hazard, or ``[]``.
 
     Run BEFORE any comparison, per athenaeum#715 ("Identify them before the
@@ -189,8 +197,18 @@ def identify_pii_hazards(paths: list[Path]) -> list[str]:
       body, which is the shape that makes a fold irreversible in a way a
       later erasure request cannot undo.
 
+    *allowlist* (issue athenaeum#2006) is an optional ``{value: reason}`` mapping —
+    the same adjudicated allowlist ``lint-pii``/``migrate-pii`` read via
+    :func:`athenaeum.pii.load_pii_allowlist`. A detected email/phone token
+    matching a key EXACTLY was already operator-adjudicated as "not a way to
+    contact a specific human" and is excluded from the hazard count; the
+    ``pii:`` frontmatter flag is NOT consulted against the allowlist (a flag
+    the operator set stays a hazard signal regardless). Omitting *allowlist*
+    preserves this function's pre-athenaeum#2006 behaviour exactly.
+
     A reason names the file, so the operator can go and look.
     """
+    allowlist = allowlist or {}
     reasons: list[str] = []
     for path in paths:
         try:
@@ -201,10 +219,10 @@ def identify_pii_hazards(paths: list[Path]) -> list[str]:
         meta, body = parse_frontmatter(text)
         if is_pii_flagged(meta):
             reasons.append(f"{path.name}: pii: frontmatter flag")
-        emails = find_inline_emails(body)
+        emails = [e for e in find_inline_emails(body) if e not in allowlist]
         if emails:
             reasons.append(f"{path.name}: {len(emails)} inline email address(es)")
-        phones = find_inline_phones(body)
+        phones = [p for p in find_inline_phones(body) if p not in allowlist]
         if phones:
             reasons.append(f"{path.name}: {len(phones)} inline phone number(s)")
     return reasons
@@ -286,6 +304,14 @@ def recompare_pending_merges(
         )
 
     merges_path = merges_path or (wiki_root / "_pending_merges.md")
+    # Loaded once per run (issue athenaeum#2006), same path resolution and reader
+    # `lint-pii`/`migrate-pii` use (`athenaeum.pii.load_pii_allowlist`), so this
+    # re-run can never disagree with the corpus lint about which value is
+    # already operator-adjudicated as "not a way to contact a specific
+    # human". A missing or malformed allowlist degrades to "nothing
+    # adjudicated" (fails toward MORE hazards flagged, never fewer).
+    allowlist_entries, _allowlist_errors = load_pii_allowlist(wiki_root / PII_ALLOWLIST_FILENAME)
+    allowlist = {e.value: e.reason for e in allowlist_entries}
     all_proposals: list[PendingMerge] = parse_pending_merges(merges_path)
     unresolved = [p for p in all_proposals if not p.resolved]
     if limit is not None and limit > 0:
@@ -323,7 +349,7 @@ def recompare_pending_merges(
                     continue
                 paths.append(resolved)
 
-            hazard_reasons = identify_pii_hazards(paths)
+            hazard_reasons = identify_pii_hazards(paths, allowlist=allowlist)
             is_hazard = bool(hazard_reasons)
 
             pair_verdicts: dict[str, str | None] = {}

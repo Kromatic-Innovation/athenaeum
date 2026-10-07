@@ -683,6 +683,90 @@ class TestPhoneDetector732GenuineNumbersStayFlagged:
 
 
 # ---------------------------------------------------------------------------
+# Phone detector — bare digit runs embedded in URLs/paths/filenames/backticks
+# must NOT match (issue athenaeum#2006)
+# ---------------------------------------------------------------------------
+#
+# The E.164-plausible-length band (10-15 digits) that keeps a genuine bare
+# phone number matched also contains the digit lengths of common identifiers
+# that appear unlabeled in prose: GitHub comment/run ids embedded in URLs,
+# filenames, or backtick code spans, and third-party record ids with a
+# dotted alphanumeric prefix. Every value below is a synthetic/fabricated
+# example, not a real corpus value.
+
+
+class TestPhoneDetectorEmbeddedIdentifiers2006:
+    #: (label, text containing an embedded id, synthetic/fabricated throughout)
+    EMBEDDED_IDENTIFIER_FALSE_POSITIVES = (
+        (
+            "github issuecomment id in a URL",
+            "see https://github.com/example/repo/issues/1#issuecomment-1234567890 for context",
+        ),
+        (
+            "filename with trailing dash-joined id",
+            "archived as notes-comment-5550001111.md on disk",
+        ),
+        (
+            "github actions run id in backticks (with label)",
+            "check `run 10000000001` for the failure",
+        ),
+        (
+            "github actions run id in backticks (bare)",
+            "inspect `10000000001` directly",
+        ),
+        (
+            "dotted alphanumeric-prefixed board id",
+            "synced as board1234.1600000000000 upstream",
+        ),
+    )
+
+    @pytest.mark.parametrize(
+        "example",
+        [pytest.param(v, id=label) for label, v in EMBEDDED_IDENTIFIER_FALSE_POSITIVES],
+    )
+    def test_embedded_identifier_reports_no_phone(self, example: str) -> None:
+        assert find_inline_phones(example) == [], example
+
+    def test_genuine_phones_still_matched(self) -> None:
+        # Formatted and labeled numbers are untouched by the new exclusion.
+        assert find_inline_phones("call +1-555-0100 now") == ["+1-555-0100"]
+        assert find_inline_phones("(555) 010-0100 please") == ["(555) 010-0100"]
+        assert find_inline_phones("tel:5551234567 for support") == ["5551234567"]
+        assert find_inline_phones("phone: (555) 010-0100.") == ["(555) 010-0100"]
+        assert find_inline_phones("mobile +1 555 0100 ok") == ["+1 555 0100"]
+        # A standalone bare number in prose, including at sentence-end, is
+        # still matched — the exclusion only fires on an ATTACHED suffix/
+        # prefix or a backtick span.
+        assert find_inline_phones("cell 5551234567 anytime") == ["5551234567"]
+        assert find_inline_phones("end of sentence 5551234567.") == ["5551234567"]
+
+    def test_joiner_delimited_phone_list_keeps_both_numbers(self) -> None:
+        # Neither side of a '/'-joined pair of bare numbers has a letter, so
+        # the embedded-identifier exclusion (which requires a LETTER on the
+        # far side of the joiner) must not retire either one.
+        assert find_inline_phones("numbers 5551234567/5559876543 both valid") == [
+            "5551234567",
+            "5559876543",
+        ]
+
+    def test_embedded_identifier_corpus_scan_reports_no_phones(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        (wiki / "embedded_ids.md").write_text(
+            "## Refs\n"
+            "https://github.com/example/repo/issues/1#issuecomment-1234567890\n"
+            "notes-comment-5550001111.md\n"
+            "`run 10000000001`\n"
+            "board1234.1600000000000\n",
+            encoding="utf-8",
+        )
+        (wiki / "real_phone.md").write_text("Reach Alice at 917-231-6130.\n", encoding="utf-8")
+        findings = scan_corpus_pii(wiki)
+        assert [f.path.name for f in findings] == ["real_phone.md"]
+        assert findings[0].phones == ["917-231-6130"]
+
+
+# ---------------------------------------------------------------------------
 # Observation log — append, read, supersession, deterministic fold
 # ---------------------------------------------------------------------------
 

@@ -284,6 +284,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Inline phone detector no longer flags bare digit-run identifiers
+  embedded in URLs, filenames, or backticks (issue athenaeum#2006).**
+  `find_inline_phones` (and the mirrored `phone` sensitivity recognizer)
+  previously treated any separator-free 10-15 digit run as phone-shaped —
+  a band that also covers common non-phone identifiers that appear
+  unlabeled in prose, such as comment/run ids embedded in a URL or
+  filename, or a digit run inside an inline-code span. A new structural
+  exclusion (`_is_embedded_bare_digit_run`) retires a bare digit run that
+  is either attached (no intervening whitespace) to an adjacent token
+  carrying a letter via a URL/path/filename joiner, or sits inside
+  backticks. Formatted numbers (with `+`, parens, or separators) and
+  labeled numbers (`tel:`/`phone:`/`mobile:`) are unaffected.
+  `recompare.identify_pii_hazards` also now accepts the adjudicated PII
+  allowlist (`athenaeum.pii.load_pii_allowlist`, resolved once per run
+  from the wiki root `lint-pii`/`migrate-pii` already read) so an
+  operator-adjudicated address no longer floods the comparator's
+  PII-hazard route on every recompare pass.
 - **The name-collision scanner no longer re-detects a folded-away page
   (issue athenaeum#716).** `scan_name_collisions` now skips tombstones, which
   are excluded from every index and invisible to recall and so should not

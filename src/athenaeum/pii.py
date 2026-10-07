@@ -492,6 +492,82 @@ def _has_labeled_identifier_prefix(preceding_text: str) -> bool:
     return bool(_LABELED_PREFIX_RE.search(preceding_text[-64:]))
 
 
+#: Joiner characters that can glue a bare digit run directly onto an
+#: adjacent identifier token with no intervening whitespace — URL path
+#: separators, filename/slug joiners, and query-string joiners. Deliberately
+#: excludes ``:`` (a labeled number like ``tel:5551234567``/``phone:`` must
+#: still match — that path is handled by :func:`_has_labeled_identifier_prefix`,
+#: not this exclusion) and ``,`` (list separators are already handled by the
+#: sibling exclusions in :func:`_is_excluded_phone_shape`).
+_EMBEDDED_IDENTIFIER_JOINERS = "-_./=#?&"
+
+
+def _is_embedded_bare_digit_run(source: str, start: int, end: int) -> bool:
+    """True when the bare digit run ``source[start:end]`` is embedded in a
+    larger identifier token rather than standing alone as a phone (issue athenaeum#2006).
+
+    Catches the false-positive class outside the reach of
+    :func:`_is_excluded_phone_shape`'s length band: GitHub issue/PR comment
+    ids and Actions run ids inside URLs, filenames, or backtick code spans,
+    and third-party record ids with a dotted alphanumeric prefix —
+    ``issuecomment-1234567890``, ``notes-comment-5550001111.md``,
+    `` `run 10000000001` ``, ``board1234.1600000000000`` (examples
+    synthetic). Only applies to a BARE (separator-free) digit run — a
+    formatted number (with ``+``, parens, spaces, or internal dashes) is
+    never a bare run in the first place, so a URL-embedded formatted phone
+    and a labeled ``tel:``/``phone:`` number are unaffected.
+
+    Two independent structural signals, either sufficient on its own:
+
+    * **Attached via a joiner with a letter on the other side.** The run
+      sits directly against one of :data:`_EMBEDDED_IDENTIFIER_JOINERS` (no
+      intervening whitespace), and the token on the other side of that
+      joiner contains at least one letter. A genuine standalone phone is
+      bounded by whitespace or text edges, never glued straight onto an
+      identifier word. Requiring a LETTER — not just an alphanumeric
+      neighbor — on the other side keeps a joiner-delimited phone list
+      (``5551234567/5559876543``) intact: both sides are bare digit runs
+      with no letter, so neither trips this.
+    * **Inside an inline code span.** An odd number of backtick characters
+      precede ``start`` on the same line (a span opened and not yet
+      closed) — a bare run inside backticks is call-out/example formatting
+      (an id, a command argument), not prose carrying a phone number.
+    """
+    if not source[start:end].isdigit():
+        return False
+
+    def _is_joiner_or_alnum(ch: str) -> bool:
+        return ch.isalnum() or ch in _EMBEDDED_IDENTIFIER_JOINERS
+
+    # Preceding side: digit run sits directly against a joiner at
+    # `start - 1`. Walk left from just before that joiner, through any run
+    # of alphanumerics/joiners, to find the far edge of the adjacent token.
+    if start > 0 and source[start - 1] in _EMBEDDED_IDENTIFIER_JOINERS:
+        pos = start - 1
+        while pos > 0 and _is_joiner_or_alnum(source[pos - 1]):
+            pos -= 1
+        if any(ch.isalpha() for ch in source[pos : start - 1]):
+            return True
+
+    # Trailing side: digit run sits directly against a joiner at `end`.
+    # Walk right from just after that joiner to find the far edge.
+    if end < len(source) and source[end] in _EMBEDDED_IDENTIFIER_JOINERS:
+        n = len(source)
+        pos = end + 1
+        while pos < n and _is_joiner_or_alnum(source[pos]):
+            pos += 1
+        if any(ch.isalpha() for ch in source[end + 1 : pos]):
+            return True
+
+    # Inline code span: an odd number of backticks precede `start` on the
+    # same line means a span opened earlier on the line and has not closed.
+    line_start = source.rfind("\n", 0, start) + 1
+    if source[line_start:start].count("`") % 2 == 1:
+        return True
+
+    return False
+
+
 def _is_isbn13(candidate: str) -> bool:
     """True when *candidate* is a bare ISBN-13 — 13 digits with a 978/979 prefix.
 
@@ -669,6 +745,11 @@ def find_inline_phones(text: str) -> list[str]:
     issue athenaeum#732) — ``QBO realm 1008563730``, GA4 ``stream 5139685489``,
     ``ISBN 978…`` — which needs the match position and so is applied here rather
     than in the token-only :func:`_is_excluded_phone_shape`.
+
+    Also excludes a BARE digit run embedded in a larger identifier token —
+    a GitHub comment/run id inside a URL or filename, or a digit run inside
+    backticks (:func:`_is_embedded_bare_digit_run`, issue athenaeum#2006) — which
+    likewise needs the match position.
     """
     source = text or ""
     seen: list[str] = []
@@ -682,6 +763,11 @@ def find_inline_phones(text: str) -> list[str]:
         # 1008563730`, GA4 `stream 5139685489`, `ISBN 978…` — is a self-
         # identifying identifier, not a phone (issue athenaeum#732).
         if _has_labeled_identifier_prefix(source[: m.start(1)]):
+            continue
+        # A bare digit run glued onto a URL/path/filename identifier, or
+        # sitting inside backticks, is an embedded id, not a phone
+        # (issue athenaeum#2006).
+        if _is_embedded_bare_digit_run(source, m.start(1), m.end(1)):
             continue
         if token not in seen:
             seen.append(token)
