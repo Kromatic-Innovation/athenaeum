@@ -410,7 +410,7 @@ def proposed_default_for(decision_type: str) -> dict[str, str]:
 #: today -- it resolves only through :func:`athenaeum.quarantine.
 #: release_quarantine`'s own dedicated path. A table entry this function
 #: can never actually be asked about would be a declared-but-unreachable
-#: type (the exact Seer finding on PR #2005 for ``confirmation`` before the
+#: type (the exact Seer finding on PR athenaeum#2005 for ``confirmation`` before the
 #: ``origin_decision_type`` fix below) -- dropped rather than left looking
 #: live. Add it back if/when ``quarantine`` grows an inbound applier.
 _DEFAULT_ACCEPTANCE_VERDICT: dict[str, str] = {

@@ -169,7 +169,7 @@ class TestRenderParseRoundTrip:
     def test_origin_decision_type_round_trips_when_it_diverges_from_applier(
         self, tmp_path: Path
     ) -> None:
-        """Issue athenaeum#1996 (Seer finding on PR #2005): confirmation's
+        """Issue athenaeum#1996 (Seer finding on PR athenaeum#2005): confirmation's
         applier is "question" — origin_decision_type must survive the
         round trip distinctly from decision_type."""
         path = tmp_path / "answer.md"
@@ -525,7 +525,7 @@ class TestDefaultAcceptanceTaggedAtAnswerTime:
 
 
 # ---------------------------------------------------------------------------
-# TestEveryDeclaredDefaultAcceptanceTypeIsReachable — Seer finding on PR #2005
+# TestEveryDeclaredDefaultAcceptanceTypeIsReachable — Seer finding on PR athenaeum#2005
 # (issue athenaeum#1996).
 #
 # `is_default_acceptance` was being called with `answer.decision_type` — the

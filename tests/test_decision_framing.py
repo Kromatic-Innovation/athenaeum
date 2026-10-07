@@ -196,7 +196,7 @@ class TestDefaultAcceptance:
     def test_quarantine_is_deliberately_excluded_not_merely_unanswerable_today(
         self,
     ) -> None:
-        """Issue athenaeum#1996 (Seer finding on PR #2005): a table entry for a
+        """Issue athenaeum#1996 (Seer finding on PR athenaeum#2005): a table entry for a
         type with no reachable answer path is worse than no entry — it
         reports a confident verdict about a population that can never be
         observed. `quarantine` uses the same approve/reject schema as

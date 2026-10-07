@@ -163,7 +163,7 @@ def render_decision_answer(
     multi-line question answer body round-trips safely through the
     frontmatter block instead of corrupting it.
 
-    ``origin_decision_type`` (issue athenaeum#1996, Seer finding on PR #2005):
+    ``origin_decision_type`` (issue athenaeum#1996, Seer finding on PR athenaeum#2005):
     the ORIGINAL outbound-queue type (one of the seven :mod:`athenaeum.
     decision_framing` tags, e.g. ``"confirmation"``) before
     :func:`athenaeum.decision_framing.answerable_as` translates it to its
@@ -885,7 +885,7 @@ def apply_decision_answers(
             # inbound APPLIER type). Those two differ for a `confirmation`
             # item (applier "question"): checking the applier type would
             # silently and permanently exclude `confirmation` -- the exact
-            # Seer finding on PR #2005, since `question`'s own free-text
+            # Seer finding on PR athenaeum#2005, since `question`'s own free-text
             # schema has no discrete default to match at all.
             try:
                 from athenaeum.calibration import sample_default_acceptance
