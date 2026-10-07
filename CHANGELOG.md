@@ -10,8 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Memory model v6 queue: budget-breach ratchet guard + default-acceptance
-  rubber-stamp measurement (issue athenaeum#1996, slice (f)/(g) of #717 AC
-  group 7, "both ratchet guards").** Two independent delegation ratchets:
+  rubber-stamp measurement (issue athenaeum#1996, slice (f)/(g) of
+  athenaeum#717 AC group 7, "both ratchet guards").** Two independent
+  delegation ratchets:
   (1) `verdict_effects._duplicate_auto_apply_authorization` (and its real
   caller, `auto_apply.enact_verdict_effect`) now additionally refuses a
   `fold-on-duplicate` auto-apply with a new `effort_budget_breach` reason
