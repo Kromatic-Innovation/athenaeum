@@ -43,7 +43,12 @@ never a silent no-op (see "No silent no-ops" below).
   ``content:coexist`` marker — is recorded in ``EffectResult.details``.
 - ``underdetermined`` -> :func:`build_coordinate_request`, a SMALL,
   answerable question naming the missing dimension(s). Never embeds a page
-  body, never creates a merge proposal, never sets a conflict flag.
+  body, never creates a merge proposal, never sets a conflict flag. Issue
+  athenaeum#1991: queueing is BATCHED, never per-pair — a caller iterating
+  many pairs (:mod:`athenaeum.wiki_dedupe`) supplies a ``coordinate_sink``
+  so this branch defers queueing; :func:`queue_coordinate_batch` is the
+  only call site that ever appends an item, keyed to a batch ref, never a
+  bare ``pair_key``.
 - ``contradiction`` -> routed to :mod:`athenaeum.supersession` (a PARALLEL
   lane, imported lazily and defensively — see "Supersession is optional"
   below) when available and it can decide; otherwise queued with the
@@ -128,6 +133,8 @@ docstring) rather than merely by convention.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -154,6 +161,19 @@ from athenaeum.verdicts import can_authorize_auto_operation, lookup_pair, make_p
 #: Sub-directory of ``wiki_root`` where fold-adjudication evidence files are
 #: written (issue athenaeum#715 / athenaeum#658 D2).
 FOLD_EVIDENCE_DIRNAME = "_fold_evidence"
+
+#: ``raw_ref`` prefix for a batched coordinate-request queue item (issue
+#: athenaeum#1991). Deliberately NOT ``"comparator:"`` -- that prefix is
+#: reserved for the single-pair key a lone call writes (see
+#: :func:`queue_coordinate_batch`'s docstring); a reader that filters queue
+#: items on this prefix can tell a batched item apart from a pre-athenaeum#1991
+#: one without parsing the description.
+COORDINATE_BATCH_PREFIX = "coordinate-batch"
+
+#: Marker preceding the machine-parseable members JSON blob
+#: :func:`queue_coordinate_batch` embeds in a batch's description (issue
+#: athenaeum#1991 AC4) and :func:`parse_coordinate_batch_members` reads back.
+_MEMBERS_MARKER = "athenaeum:coordinate-batch-members"
 
 #: Issue athenaeum#716: the complete, enumerated set of operations this module
 #: may ever AUTO-apply (write something to the corpus with no human in the
@@ -765,31 +785,237 @@ def _apply_underdetermined(
     *,
     wiki_root: Path,
     config: dict[str, Any] | None,
+    coordinate_sink: list[dict[str, Any]] | None = None,
 ) -> EffectResult:
+    """Build an ``underdetermined`` pair's coordinate request.
+
+    Issue athenaeum#1991: this branch no longer queues a single-pair item
+    directly keyed to ``pair_key`` -- that was the exact premise issue
+    athenaeum#717's own survey found already false ("nothing queues
+    per-pair"). What this branch does now depends on *coordinate_sink*:
+
+    - **A sink is supplied** (the normal path: a caller iterating many
+      pairs, e.g. :mod:`athenaeum.wiki_dedupe`'s per-cluster loop) -- the
+      request is appended to the sink and NOTHING is queued yet. The
+      caller owns flushing the sink through :func:`queue_coordinate_batch`
+      (see that function's docstring for the per-claim/per-cluster
+      aggregation it applies) once every pair in scope has been examined.
+      Returned action is ``"coordinate-pending"`` -- a decided verdict
+      with a deferred, not yet silently-dropped, effect.
+    - **No sink** (a direct, single-pair caller -- existing tests, or any
+      future caller that does not batch) -- this is still never a silent
+      no-op (module docstring): the request is queued immediately as a
+      batch-of-one via :func:`queue_coordinate_batch`, so the queue item is
+      keyed to a stable batch ref, never to the bare ``pair_key`` string
+      the old ``comparator:<pair_key>`` shape used.
+    """
     pair_key = make_pair_key(page_a.id, page_b.id)
     request = build_coordinate_request(page_a, page_b, outcome)
-    description = "\n".join(
-        [
-            request["question"],
-            f'Side A: {request["sides"]["a"]["id"]} ("{request["sides"]["a"]["title"]}")',
-            f'Side B: {request["sides"]["b"]["id"]} ("{request["sides"]["b"]["title"]}")',
-            f"Missing dimensions: {', '.join(request['dimensions']) or '(none named)'}",
-        ]
+    member = {
+        "pair_key": pair_key,
+        "request": request,
+        "conflict_type": outcome.conflict_type or "ambiguous",
+    }
+    if coordinate_sink is not None:
+        coordinate_sink.append(member)
+        return EffectResult(
+            verdict=VERDICT_UNDERDETERMINED,
+            action="coordinate-pending",
+            queued=[],
+            details={
+                "missing": list(outcome.missing),
+                "request": request,
+                "pair_key": pair_key,
+                "batched": True,
+            },
+        )
+    return queue_coordinate_batch([member], wiki_root=wiki_root, config=config)
+
+
+def _batch_ref(pair_keys: list[str]) -> str:
+    """Stable id for a coordinate batch, independent of member order.
+
+    A hash (not a concatenation of the keys themselves) because a batch
+    can cover many pairs -- the ref must stay short regardless of batch
+    size, and it must be the SAME ref for the same set of pairs across
+    runs (idempotent re-queue), never ``comparator:<pair_key>``.
+    """
+    digest = hashlib.sha1("|".join(sorted(pair_keys)).encode("utf-8")).hexdigest()[:12]
+    return f"{COORDINATE_BATCH_PREFIX}:{digest}"
+
+
+def queue_coordinate_batch(
+    members: list[dict[str, Any]],
+    *,
+    wiki_root: Path,
+    config: dict[str, Any] | None,
+) -> EffectResult:
+    """Queue ONE pending-decision item covering every member in *members*.
+
+    Issue athenaeum#1991 AC3: this is the ONLY place left in this module
+    that writes an ``underdetermined`` item to the queue, and it never
+    constructs one keyed to a single ``pair_key`` -- the ``raw_ref`` is
+    :func:`_batch_ref`, a hash of the WHOLE member set, prefixed
+    :data:`COORDINATE_BATCH_PREFIX` rather than the retired
+    ``"comparator:"`` single-pair prefix. A batch of one (the no-sink path
+    in :func:`_apply_underdetermined`) still goes through this function,
+    so there is exactly one code path that ever appends an underdetermined
+    item, and it is this one.
+
+    ``members`` is a list of ``{"pair_key", "request", "conflict_type"}``
+    dicts, each the same shape :func:`_apply_underdetermined` builds. The
+    per-cluster/per-claim GROUPING of members into one or more calls to
+    this function is the caller's job (see
+    :func:`athenaeum.wiki_dedupe._coordinate_batches_for_cluster`) -- this
+    function itself always produces exactly one queue item per call.
+
+    Per-member provenance (issue athenaeum#1991 AC4) is recorded BOTH in
+    the returned :class:`EffectResult`'s ``details["members"]`` (for a
+    same-process caller) AND in the queued description itself, as a
+    machine-parseable JSON blob :func:`parse_coordinate_batch_members`
+    reads back (for a later process that only has the on-disk block) --
+    each entry carries its own ``pair`` and ``dimensions`` -- so a caller
+    answering this batch later can stamp ``decided_by: human-batch:<ref>``
+    per member (:func:`member_provenance_for_batch`) without re-deriving
+    which pairs the batch covered. Writing that stamp
+    to the verdict ledger's ``coord_origins`` (issue athenaeum#717's
+    coord_origins blast radius) is out of this issue's scope -- the
+    inbound coordinate-answer loop is a separate, blocked-by-this child
+    (issue athenaeum#1993, issue athenaeum#1994) -- this function's job ends at making the
+    batch ref a stable, answer-id-shaped reference (AC5) that slice can
+    read back.
+    """
+    if not members:
+        return EffectResult(
+            verdict=VERDICT_UNDERDETERMINED,
+            action="noop",
+            details={"reason": "empty_batch"},
+        )
+
+    pair_keys = [m["pair_key"] for m in members]
+    ref = _batch_ref(pair_keys)
+    dims = sorted({d for m in members for d in m["request"]["dimensions"]})
+    conflict_types = {m.get("conflict_type") or "ambiguous" for m in members}
+    conflict_type = next(iter(conflict_types)) if len(conflict_types) == 1 else "ambiguous"
+
+    plural = "pair" if len(members) == 1 else "pairs"
+    dims_text = ", ".join(dims) or "an unnamed dimension"
+    # No BLANK lines anywhere in this block: ``answers._parse_block``'s
+    # ``**Description**:`` continuation window closes on the first blank
+    # line (a blank line is a pure section terminator there), so a
+    # multi-paragraph description would lose everything after its first
+    # paragraph on round-trip through ``_pending_questions.md`` -- the
+    # members list AND the machine-parseable marker below both depend on
+    # staying inside that window.
+    lines = [
+        f"Do these {len(members)} {plural} actually differ by {dims_text}, "
+        f"and if so which side is which for each? Missing dimension(s) "
+        f"named across the batch: {dims_text}.",
+        "Members:",
+    ]
+    for m in members:
+        req = m["request"]
+        lines.append(
+            f'- {m["pair_key"]}: {req["question"]} '
+            f'(A: {req["sides"]["a"]["id"]} "{req["sides"]["a"]["title"]}", '
+            f'B: {req["sides"]["b"]["id"]} "{req["sides"]["b"]["title"]}")'
+        )
+    # Machine-parseable mirror of the bullet list above, so a caller that
+    # only has the on-disk ``_pending_questions.md`` block (the inbound
+    # coordinate-answer loop, issue athenaeum#1993, which runs in a later
+    # process with no access to this call's in-memory EffectResult) can
+    # still recover exactly which pairs this batch covers, for
+    # :func:`member_provenance_for_batch`. An HTML comment so it renders
+    # invisibly for a human reading the queue.
+    members_json = json.dumps(
+        [{"pair": m["pair_key"], "dimensions": m["request"]["dimensions"]} for m in members],
+        sort_keys=True,
     )
+    lines.append(f"<!-- {_MEMBERS_MARKER} {members_json} -->")
+    description = "\n".join(lines)
+
     _queue(
         wiki_root,
         config=config,
-        entity_name=f'"{_title(page_a)}" / "{_title(page_b)}"',
-        conflict_type=outcome.conflict_type or "ambiguous",
-        raw_ref=f"comparator:{pair_key}",
+        entity_name=f"coordinate batch: {len(members)} pair(s)",
+        conflict_type=conflict_type,
+        raw_ref=ref,
         description=description,
     )
     return EffectResult(
         verdict=VERDICT_UNDERDETERMINED,
         action="queued",
-        queued=[pair_key],
-        details={"missing": list(outcome.missing), "request": request},
+        queued=[ref],
+        details={
+            "batch_ref": ref,
+            "members": [
+                {"pair": m["pair_key"], "dimensions": m["request"]["dimensions"]}
+                for m in members
+            ],
+        },
     )
+
+
+def parse_coordinate_batch_members(description: str) -> list[dict[str, Any]]:
+    """Recover a batch's member list from its queued block's description.
+
+    Issue athenaeum#1991 AC4: the inbound coordinate-answer loop (issue
+    athenaeum#1993) runs in a LATER process with no access to the
+    in-memory :class:`EffectResult` :func:`queue_coordinate_batch` returned
+    when the item was queued -- by the time a human answers it, only the
+    on-disk ``_pending_questions.md`` block (a
+    :class:`athenaeum.answers.PendingQuestion`'s ``description``) exists.
+    This reads back the ``_MEMBERS_MARKER`` JSON blob that function embeds,
+    so that process can still recover exactly which pairs the batch
+    covers. Returns ``[]`` (never raises) when the marker is absent or the
+    embedded JSON is malformed -- a hand-edited or pre-athenaeum#1991 block
+    has no members to recover, not a crash.
+    """
+    marker = re.search(
+        rf"<!--\s*{re.escape(_MEMBERS_MARKER)}\s*(\[.*?\])\s*-->", description, re.DOTALL
+    )
+    if marker is None:
+        return []
+    try:
+        parsed = json.loads(marker.group(1))
+    except (ValueError, TypeError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [m for m in parsed if isinstance(m, dict) and "pair" in m]
+
+
+def member_provenance_for_batch(
+    members: list[dict[str, Any]], *, answer_ref: str
+) -> list[dict[str, Any]]:
+    """Per-member provenance stamps for a batch answer (issue athenaeum#1991 AC4).
+
+    Pure function over a plain member list -- takes no action and writes
+    nothing. *members* is either a :func:`queue_coordinate_batch` return
+    value's ``details["members"]`` (same process) or
+    :func:`parse_coordinate_batch_members`'s return value (recovered from
+    disk in a later process) -- both share the same
+    ``{"pair": ..., "dimensions": [...]}`` shape. Returns one dict per
+    member: ``{"pair": <pair_key>, "decided_by": "human-batch:<answer_ref>",
+    "dimensions": [...]}``.
+
+    This is the handoff point for the inbound coordinate-answer loop
+    (issue athenaeum#1993) and the ``coord_origins`` ledger wiring (issue
+    athenaeum#1994) -- neither exists yet (issue athenaeum#717's 2026-10-06
+    survey, group 4), so this function stops at computing the stamp a
+    human-batch answer SHOULD apply per member; actually writing it to
+    :class:`athenaeum.verdicts.VerdictEntry.basis.coord_origins` is that
+    slice's own call to make, against the verdict ledger this module does
+    not touch (module docstring, "No confidence ... no LLM call").
+    """
+    return [
+        {
+            "pair": m["pair"],
+            "decided_by": f"human-batch:{answer_ref}",
+            "dimensions": list(m.get("dimensions") or []),
+        }
+        for m in members
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -967,6 +1193,7 @@ def apply_verdict_effect(
     path_b: Path | None = None,
     config: dict[str, Any] | None = None,
     now: datetime | None = None,
+    coordinate_sink: list[dict[str, Any]] | None = None,
 ) -> EffectResult:
     """Enact the storage-side effect of one decided :class:`CompareOutcome`.
 
@@ -983,6 +1210,11 @@ def apply_verdict_effect(
     wrote nothing to the ledger, so there is nothing here to have an effect
     ABOUT yet; a caller that reaches this function with such an outcome has
     a bug to fix, not a branch this module should quietly absorb.
+
+    ``coordinate_sink`` (issue athenaeum#1991, keyword-only, ``None``
+    default) is forwarded verbatim to the ``underdetermined`` branch (see
+    :func:`_apply_underdetermined`) and ignored by every other branch --
+    only that verdict defers its queueing to a caller-owned batch.
     """
     if outcome.verdict not in _KNOWN_VERDICTS:
         raise ValueError(
@@ -1011,7 +1243,14 @@ def apply_verdict_effect(
     if outcome.verdict == VERDICT_DISTINCT:
         return _apply_distinct(outcome)
     if outcome.verdict == VERDICT_UNDERDETERMINED:
-        return _apply_underdetermined(page_a, page_b, outcome, wiki_root=wiki_root, config=config)
+        return _apply_underdetermined(
+            page_a,
+            page_b,
+            outcome,
+            wiki_root=wiki_root,
+            config=config,
+            coordinate_sink=coordinate_sink,
+        )
     return _apply_contradiction(
         page_a,
         page_b,
@@ -1235,12 +1474,16 @@ __all__ = [
     "RESOLVER_NEVER_AUTO_APPLY_ACTIONS",
     "RESOLVER_PROPOSE_MERGE_ACTION",
     "RESOLVER_SUPPRESS_ACTION",
+    "COORDINATE_BATCH_PREFIX",
     "EffectResult",
     "apply_propose_merge_effect",
     "apply_suppress_or_attribute_both_effect",
     "apply_verdict_effect",
     "build_coordinate_request",
     "build_fold_evidence",
+    "member_provenance_for_batch",
+    "parse_coordinate_batch_members",
+    "queue_coordinate_batch",
     "write_contested_flag",
     "write_fold_evidence",
     "write_refines_declaration",
