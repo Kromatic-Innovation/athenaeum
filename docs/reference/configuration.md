@@ -820,11 +820,11 @@ remaining batch is left untouched and carried over to the next run.
 - **Default:** `30`
 - **Precedence:** environment variable > `athenaeum.yaml` > code default
 
-§8.2 ``librarian.corrections.retry_days`` (default 30, issue athenaeum#1988).
+§8.2 ``librarian.corrections.retry_days`` (default 30).
 
-How long a parked `email-handle-no-match` correction (`athenaeum.corrections.run_correction_phase`'s
-parked-corrections store) is retried before it falls through to the
-ordinary §8.1 handoff.
+How long a parked ``email-handle-no-match`` correction
+(`athenaeum.corrections.run_correction_phase`'s parked-corrections store)
+is retried before it falls through to the ordinary §8.1 handoff.
 
 ### `resolve_corrections_runtime_share`
 
