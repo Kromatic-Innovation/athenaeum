@@ -55,15 +55,35 @@ this module only READS and re-shapes the three underlying queues into a
 common item shape — it owns no queue's storage format or mutation path;
 resolving/writing back to a given queue stays the owning module's job (e.g.
 ``answers.py`` for questions, ``merge.py``/``resolutions.py`` for merges).
+
+Issue athenaeum#1992 narrows that factoring rule for exactly two of the
+unioned types. ``merge`` and ``question``/``confirmation`` are the two
+legacy surfaces with a REAL CLI (``_cmd_merges.py``, ``_cmd_questions.py``,
+now both flagged deprecated — :data:`athenaeum.config.
+DEPRECATED_CLI_SURFACE_MESSAGES`) and a real pending/resolved disposition on
+the record itself, so this module now ALSO owns a persisted unified-schema
+mirror of them (:func:`migrate_legacy_queues`,
+:data:`MIGRATED_QUEUE_FILENAME`) — the first time this module has written
+anything to disk rather than only reading. Mutation of an individual item's
+disposition still belongs to the owning module (:func:`resolve_merge`,
+:func:`resolve_by_id`) unchanged — migrating/re-syncing the mirror never
+calls either, by construction (see :func:`migrate_legacy_queues`'s own
+docstring). The other four types (``retraction``, ``audit``, ``quarantine``,
+``proposed-rule``) are ledger-derived, ephemeral-by-design records with no
+comparable legacy CLI to deprecate, so they are untouched by athenaeum#1992
+and remain pure read-time projections as before.
 """
 
 from __future__ import annotations
 
+import json
 import re
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
 from athenaeum.answers import PendingQuestion, parse_pending_questions
+from athenaeum.atomic_io import atomic_write_text
 from athenaeum.calibration import list_pending_audit
 from athenaeum.decision_framing import frame_decision
 from athenaeum.models import parse_frontmatter
@@ -733,3 +753,167 @@ def decision_time_minutes(raised_at: str, answered_at: str) -> int | None:
     from athenaeum.metrics import minutes_between
 
     return minutes_between(raised_at, answered_at)
+
+
+#: Issue athenaeum#1992: filename of the persisted unified-schema mirror of
+#: every legacy merge + question record, written by
+#: :func:`migrate_legacy_queues`. Lives directly under ``wiki_root`` (the
+#: same directory as ``_pending_merges.md`` / ``_pending_questions.md``).
+#: One JSON object per line, sorted by ``id`` so a re-run with no legacy
+#: change produces a byte-identical file.
+MIGRATED_QUEUE_FILENAME = "_decisions_queue.jsonl"
+
+
+@dataclass(frozen=True)
+class MigrationReport:
+    """Outcome of one :func:`migrate_legacy_queues` run (issue athenaeum#1992).
+
+    ``by_id`` maps every migrated record's PRESERVED legacy id to the
+    disposition read from the legacy store at migration time (``"pending"``,
+    ``"approved"``, ``"rejected"``, or ``"answered"``) — the exact shape an
+    id-set / disposition-drift comparison needs before and after a
+    migration run (the issue's own test AC: "verified by id-set comparison,
+    not by count alone").
+    """
+
+    path: Path
+    by_id: dict[str, str]
+    merge_count: int
+    question_count: int
+
+    @property
+    def ids(self) -> set[str]:
+        """The full set of migrated ids (merges + questions combined)."""
+        return set(self.by_id)
+
+
+def _merge_disposition(pm: PendingMerge) -> str:
+    """The migration-stable disposition of one legacy merge proposal.
+
+    A straight read of ``pm.resolved``/``pm.decision`` — the same two
+    fields :func:`athenaeum.pending_merges.resolve_merge` writes and
+    ``_cmd_merges.py`` renders. Never invents a value: an unresolved record
+    is ``"pending"``; a resolved record whose ``decision`` is neither
+    ``"approve"`` nor ``"reject"`` (should not happen, but never silently
+    misreported as either) comes back as ``"resolved"``.
+    """
+    if not pm.resolved:
+        return "pending"
+    if pm.decision == "approve":
+        return "approved"
+    if pm.decision == "reject":
+        return "rejected"
+    return "resolved"
+
+
+def _question_disposition(pq: PendingQuestion) -> str:
+    """The migration-stable disposition of one legacy pending question."""
+    return "answered" if pq.answered else "pending"
+
+
+def migrate_legacy_queues(wiki_root: Path) -> MigrationReport:
+    """Migrate every legacy merge + question record into the unified schema.
+
+    Issue athenaeum#717's AC group 1 (slice athenaeum#1992) requires this
+    module to stop being a read-only view and become the actual queue for
+    the legacy surfaces that have a real CLI and a real disposition:
+    pending merges and pending questions/confirmations. This is the
+    function that makes that true — it is the first thing in this module
+    that writes anything to disk.
+
+    Read-only with respect to the LEGACY stores: nothing here ever calls
+    :func:`athenaeum.pending_merges.resolve_merge`,
+    :func:`athenaeum.answers.resolve_by_id`, or any other disposition
+    mutator. It only *reads* ``_pending_merges.md`` / ``_pending_questions.md``
+    — every record, resolved AND unresolved, unlike
+    :func:`list_pending_decisions` which deliberately shows only the
+    unresolved live queue — and writes the full union into
+    :data:`MIGRATED_QUEUE_FILENAME` under ``wiki_root``, atomically
+    (:func:`athenaeum.atomic_io.atomic_write_text`).
+
+    Identity preservation: every record's ``id`` is the SAME id the legacy
+    store already assigned it (:class:`PendingMerge`'s content-addressed
+    id / :class:`PendingQuestion`'s block-derived id) — nothing is
+    re-minted, so an id-set comparison against the legacy store's own ids
+    is exact, and running this twice with no legacy change produces a
+    byte-identical file (idempotent; safe to run on every ``decisions
+    migrate`` invocation, including as a cron-style re-sync after a batch
+    of answers lands). Disposition preservation: :func:`_merge_disposition`
+    / :func:`_question_disposition` read the legacy record's own fields
+    with zero transformation, so migrating (or re-migrating any number of
+    times) can never flip a disposition — the two PII-hazard proposals the
+    issue's AC names stay exactly as unresolved/resolved as the legacy
+    store already has them, because nothing in this function ever writes
+    to that store.
+
+    Returns a :class:`MigrationReport` (rather than ``None``) so a caller —
+    the ``athenaeum decisions migrate`` CLI, or a test building a fixture
+    legacy store — can inspect exactly what migrated without re-reading the
+    written file.
+    """
+    merges_path = wiki_root / "_pending_merges.md"
+    questions_path = wiki_root / "_pending_questions.md"
+
+    by_id: dict[str, str] = {}
+    records: list[dict] = []
+
+    for pm in parse_pending_merges(merges_path):
+        disposition = _merge_disposition(pm)
+        by_id[pm.id] = disposition
+        records.append(
+            {
+                "id": pm.id,
+                "type": "merge",
+                "disposition": disposition,
+                "resolved": pm.resolved,
+                "decision": pm.decision,
+                "created_at": pm.created_at,
+                "answered_at": pm.answered_at,
+                "item": merge_to_decision(pm),
+            }
+        )
+    merge_count = len(records)
+
+    for pq in parse_pending_questions(questions_path):
+        disposition = _question_disposition(pq)
+        by_id[pq.id] = disposition
+        is_confirmation = pq.decision_kind == "confirmation"
+        item = confirmation_to_decision(pq) if is_confirmation else question_to_decision(pq)
+        records.append(
+            {
+                "id": pq.id,
+                "type": "confirmation" if is_confirmation else "question",
+                "disposition": disposition,
+                "resolved": pq.answered,
+                "decision": "",
+                "created_at": pq.created_at,
+                "answered_at": pq.answered_at,
+                "item": item,
+            }
+        )
+    question_count = len(records) - merge_count
+
+    records.sort(key=lambda r: r["id"])
+    out_path = wiki_root / MIGRATED_QUEUE_FILENAME
+    text = "".join(json.dumps(r, sort_keys=True) + "\n" for r in records)
+    atomic_write_text(out_path, text)
+
+    return MigrationReport(
+        path=out_path,
+        by_id=by_id,
+        merge_count=merge_count,
+        question_count=question_count,
+    )
+
+
+def load_migrated_queue(wiki_root: Path) -> list[dict]:
+    """Read back :data:`MIGRATED_QUEUE_FILENAME`, or ``[]`` if never migrated."""
+    path = wiki_root / MIGRATED_QUEUE_FILENAME
+    if not path.exists():
+        return []
+    records: list[dict] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if stripped:
+            records.append(json.loads(stripped))
+    return records
