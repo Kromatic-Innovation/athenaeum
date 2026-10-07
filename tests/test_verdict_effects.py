@@ -1222,8 +1222,16 @@ class TestEF11CoordinateBatching:
         assert item["context_decomposed"] is True
         assert item["routing"] != "scheduled-review"
         assert item["context_tokens"] <= 200
+        # Issue athenaeum#1993: a queued coordinate batch now renders through
+        # `decisions.coordinate_to_decision` (type "coordinate", not the
+        # generic question fallback), whose structured "members" recovery
+        # is bulk-equivalent to "description" for a 28-pair batch and
+        # therefore also droppable (`_SHRINK_ORDER`) -- both drop here.
+        # The batch ref survives under its real field name, `batch_ref`
+        # (not the generic fallback's `source`).
         assert "description" in item["context_dropped"]
-        assert item["context_bundle"]["source"].startswith(COORDINATE_BATCH_PREFIX)
+        assert "members" in item["context_dropped"]
+        assert item["context_bundle"]["batch_ref"].startswith(COORDINATE_BATCH_PREFIX)
 
     def test_batch_ref_is_stable_regardless_of_member_order(self) -> None:
         outcome = _outcome(VERDICT_UNDERDETERMINED, missing=["scope"])
