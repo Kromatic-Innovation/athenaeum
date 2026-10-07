@@ -7428,12 +7428,29 @@ def tier4_escalate(
         fingerprint_line = (
             f"**Fingerprint**: {item_fingerprint}\n" if item_fingerprint else ""
         )
+        # Issue athenaeum#1993: a ``decision_kind`` other than the default
+        # ``"question"`` (today, only ``"coordinate"`` --
+        # :func:`athenaeum.verdict_effects.queue_coordinate_batch`) is
+        # rendered as its own ``**Decision kind**:`` line, the SAME line
+        # athenaeum#1290's agent-raised confirmation path already writes
+        # (:func:`athenaeum.answers.raise_pending_question`) and
+        # ``_parse_block`` already reads back generically (keyed off
+        # ``_CONFIRMATION_FIELD_PREFIXES``, despite that dict's name --
+        # it is not confirmation-specific). Omitted for the default, so
+        # every pre-athenaeum#1993 block (and every other verdict's escalation)
+        # renders byte-for-byte unchanged.
+        decision_kind_line = (
+            f"**Decision kind**: {item.decision_kind}\n"
+            if item.decision_kind and item.decision_kind != "question"
+            else ""
+        )
         block = (
             f'## [{today}] Entity: "{escaped_entity}" (from {item.raw_ref})\n'
             f"- [ ] {question}\n\n"
             f"**Conflict type**: {item.conflict_type}\n"
             f"**Description**: {item.description}\n"
             f"{fingerprint_line}"
+            f"{decision_kind_line}"
         )
         proposal = getattr(item, "proposal", None)
         item_members = getattr(item, "members", None)

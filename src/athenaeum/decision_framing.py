@@ -165,6 +165,109 @@ _SCHEMA_FREE_TEXT: dict[str, Any] = {
 }
 
 
+#: A ``coordinate`` answer (issue athenaeum#1993): the human supplies a value
+#: for one or more separator dimensions, for one or both members of one or
+#: more pairs in a batch (:func:`athenaeum.verdict_effects.queue_coordinate_batch`).
+#:
+#: ``verdict`` stays a plain, non-empty STRING here -- not a nested object --
+#: because the existing inbound plumbing enforces that shape at BOTH ends
+#: regardless of decision type: :func:`athenaeum._cmd_decisions._cmd_answer`
+#: forwards only ``str(parsed["verdict"])`` into the on-disk answer file, and
+#: :func:`athenaeum.decision_answers._load_decision_answer` rejects a
+#: ``verdict`` that is not ``isinstance(..., str)``. So a coordinate answer's
+#: REAL structure -- which pair(s), which dimension(s), which page id(s) --
+#: travels as a JSON-encoded string inside that one field, e.g.::
+#:
+#:     {"verdict": "{\\"answers\\": [{\\"pair\\": \\"a+b\\", \\"dimensions\\": "
+#:                  "{\\"subject\\": {\\"a\\": \\"alice\\"}}}]}"}
+#:
+#: This schema only gates the OUTER shape (a non-empty string), which is all
+#: :func:`validate_answer` / :func:`shape_errors_only` can check without
+#: parsing it. The decoded payload's REAL structural contract is
+#: :data:`_SCHEMA_COORDINATE_PAYLOAD`, applied by
+#: :func:`validate_coordinate_payload` -- called from
+#: :mod:`athenaeum.decision_answers`'s coordinate applier, after
+#: ``json.loads``, before anything is written.
+_SCHEMA_COORDINATE: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "verdict": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "A JSON-encoded object: {\"answers\": [{\"pair\": "
+                "\"<pair_key, exactly as queued>\", \"dimensions\": "
+                "{\"<dimension-name>\": {\"<page-id>\": <value>, ...}}}]}. "
+                "Supply a value only for the page id(s)/dimension(s) you "
+                "are answering; the rest are left unset."
+            ),
+        },
+        "note": _NOTE_PROPERTY,
+    },
+    "required": ["verdict"],
+    "additionalProperties": False,
+}
+
+#: The REAL structural contract for a decoded ``coordinate`` answer payload
+#: (issue athenaeum#1993) -- see :data:`_SCHEMA_COORDINATE`'s docstring for
+#: why this is a SEPARATE schema from the one :func:`response_schema_for`
+#: publishes. Each ``answers[]`` entry names one queued pair (``pair``, the
+#: exact ``pair_key`` string the batch's machine-parseable marker carries --
+#: see :func:`athenaeum.verdict_effects.parse_coordinate_batch_members`) and
+#: a non-empty map of dimension name -> {page id: value}. Which page ids are
+#: VALID for a given ``pair`` (its own two members) and which dimensions the
+#: batch actually named are both instance-specific facts a static schema
+#: cannot express -- :mod:`athenaeum.decision_answers`'s applier checks
+#: those against the batch's own recovered members before writing anything.
+_SCHEMA_COORDINATE_PAYLOAD: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "answers": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "pair": {"type": "string", "minLength": 1},
+                    "dimensions": {
+                        "type": "object",
+                        "minProperties": 1,
+                        "additionalProperties": {
+                            "type": "object",
+                            "minProperties": 1,
+                        },
+                    },
+                },
+                "required": ["pair", "dimensions"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["answers"],
+    "additionalProperties": False,
+}
+
+
+def validate_coordinate_payload(payload: Any) -> list[str]:
+    """Validate a decoded ``coordinate`` answer payload against
+    :data:`_SCHEMA_COORDINATE_PAYLOAD`. Mirrors :func:`validate_answer`'s
+    contract exactly: returns a list of human-readable errors, empty when
+    valid. ``payload`` that is not even a ``dict`` (a malformed
+    ``json.loads`` result -- a bare list, string, or number) is refused
+    without handing a non-mapping to :mod:`jsonschema`.
+    """
+    if not isinstance(payload, dict):
+        return ["<payload>: must be a JSON object"]
+    import jsonschema
+
+    validator = jsonschema.Draft202012Validator(_SCHEMA_COORDINATE_PAYLOAD)
+    errors = sorted(validator.iter_errors(payload), key=lambda e: list(e.path))
+    return [
+        f"{'/'.join(str(p) for p in error.path) or '<payload>'}: {error.message}"
+        for error in errors
+    ]
+
+
 def _approve_reject_schema(*, description: str) -> dict[str, Any]:
     """A two-token ``approve``/``reject`` answer schema."""
     return {
@@ -308,6 +411,25 @@ _TYPE_FRAMING: dict[str, dict[str, Any]] = {
             "policy is the operator's call, not the drafter's."
         ),
     },
+    "coordinate": {
+        # Undoing a coordinate answer costs nothing but a second answer --
+        # the same REVERSIBLE class "question" uses, for the same reason.
+        "reversibility": REVERSIBILITY_REVERSIBLE,
+        "routing": ROUTING_COMPETENCE,
+        "schema": _SCHEMA_COORDINATE,
+        "default_action": "leave the pair(s) underdetermined",
+        "default_consequences": (
+            "The pair(s)' verdict stays `underdetermined`; recall may "
+            "surface either side, and nothing is auto-authorized to treat "
+            "them as a settled merge or supersession until answered."
+        ),
+        "rationale": (
+            "The comparator could not resolve a required separator "
+            "dimension on one or both sides -- the missing coordinate, not "
+            "a content judgement, is what blocked a verdict (issue "
+            "athenaeum#715's `underdetermined` branch)."
+        ),
+    },
 }
 
 #: Framing for an item whose ``type`` this module does not know. Deliberately
@@ -342,6 +464,13 @@ _SHRINK_ORDER: tuple[str, ...] = (
     "proposal",
     "rationale",
     "description",
+    # Issue athenaeum#1993: ``coordinate_to_decision``'s structured,
+    # per-pair recovery of a batch's members (parsed off the SAME raw
+    # ``description`` text this already drops) — same bulk-per-unit-of-
+    # signal class as ``description`` for a many-pair batch, dropped right
+    # after it for the same reason. Absent from every other type's
+    # payload, so this is a no-op for them.
+    "members",
     "context",
     "sources",
 )
@@ -599,6 +728,11 @@ ANSWERABLE_AS: dict[str, str] = {
     "merge": "merge",
     "audit": "audit",
     "proposed-rule": "proposed-rule",
+    # Issue athenaeum#1993: a dedicated applier, NOT routed through
+    # "question" -- a coordinate answer writes coordinates and triggers a
+    # mechanical re-compare, which the free-text question path knows
+    # nothing about. See `athenaeum.decision_answers._apply_coordinate_answer`.
+    "coordinate": "coordinate",
 }
 
 

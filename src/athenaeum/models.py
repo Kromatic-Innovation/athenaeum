@@ -1893,6 +1893,17 @@ class EscalationItem:
     # Empty for non-source-attributed escalations (the enactment lane then
     # no-ops). Stored as strings to keep the dataclass trivially copyable.
     members: list[str] = field(default_factory=list)
+    # Issue athenaeum#1993: the block's ``**Decision kind**:`` tag -- the
+    # SAME generic field athenaeum#1290 added to
+    # :class:`athenaeum.answers.PendingQuestion` for ``confirmation``, now
+    # also written by the DETECTOR side (:func:`tier4_escalate`), not just
+    # the agent-raised side (:func:`athenaeum.answers.raise_pending_question`).
+    # Defaults to ``"question"`` -- every pre-athenaeum#1993 caller's output
+    # is byte-for-byte unchanged (`tier4_escalate` only renders a
+    # ``**Decision kind**:`` line when this is NOT the default; see that
+    # function). ``"coordinate"`` is the one other value in use today
+    # (:func:`athenaeum.verdict_effects.queue_coordinate_batch`).
+    decision_kind: str = "question"
 
 
 # Conflict taxonomy (moved from athenaeum.contradictions, issue athenaeum#1253, step S0 of the
