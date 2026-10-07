@@ -1496,8 +1496,12 @@ class TestCoordinateBatchingReplacesPerPairQueueing:
 
         wiki_root = duplicate_topic_wiki / "wiki"
         decisions = list_pending_decisions(wiki_root)
+        # Issue athenaeum#1993: a coordinate batch now renders through
+        # `decisions.coordinate_to_decision` (type "coordinate"), whose
+        # batch-ref field is named `batch_ref`, not the generic question
+        # fallback's `source`.
         underdetermined_items = [
-            d for d in decisions if str(d["payload"].get("source", "")).startswith(
+            d for d in decisions if str(d["payload"].get("batch_ref", "")).startswith(
                 "coordinate-batch:"
             )
         ]
@@ -1536,7 +1540,10 @@ class TestCoordinateBatchingReplacesPerPairQueueing:
         apply_verdict_effect(page_a, page_b, direct_outcome, wiki_root=wiki_root)
 
         decisions = list_pending_decisions(wiki_root)
-        sources = [str(d["payload"].get("source", "")) for d in decisions]
+        # Issue athenaeum#1993: see the comment in the sibling test above --
+        # the batch-ref field is `batch_ref`, not `source`, now that this
+        # renders as a real `type: "coordinate"` item.
+        sources = [str(d["payload"].get("batch_ref", "")) for d in decisions]
         matched = [s for s in sources if s.startswith("coordinate-batch:")]
         assert len(matched) == 2, f"expected exactly 2 batched items, got {sources!r}"
         assert not any(s.startswith("comparator:") for s in sources), (
@@ -1574,8 +1581,10 @@ class TestCoordinateBatchingReplacesPerPairQueueing:
 
         wiki_root = duplicate_topic_wiki / "wiki"
         decisions = list_pending_decisions(wiki_root)
+        # Issue athenaeum#1993: see the comment in
+        # test_multi_pair_cluster_produces_exactly_one_queued_item above.
         batched = [
-            d for d in decisions if str(d["payload"].get("source", "")).startswith(
+            d for d in decisions if str(d["payload"].get("batch_ref", "")).startswith(
                 "coordinate-batch:"
             )
         ]
