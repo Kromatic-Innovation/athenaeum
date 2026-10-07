@@ -298,6 +298,43 @@ def _cmd_challenge_coordinate(args: argparse.Namespace) -> int:
         )
     else:
         print(f"no live verdict names answer {args.answer_id!r} in coord_origins")
+def _cmd_migrate(args: argparse.Namespace) -> int:
+    """``athenaeum decisions migrate`` — materialize the legacy queues (issue athenaeum#1992).
+
+    Migrates every ``_pending_merges.md`` / ``_pending_questions.md`` record
+    (resolved and unresolved alike), and every calibration-sampled audit
+    item (reviewed and unreviewed alike), into the unified-schema store
+    :func:`athenaeum.decisions.migrate_legacy_queues` writes — the SAME
+    store :func:`athenaeum.decisions.list_pending_decisions` reads back
+    from on every call, preserving every record's id and disposition
+    unchanged. Idempotent — safe to run by hand, on a cron, or implicitly
+    (every ``decisions list``/``next``/``count``/``budget`` call already
+    does this). Never touches any legacy store/ledger and never
+    approves/rejects/answers/reviews anything.
+    """
+    from athenaeum.decisions import migrate_legacy_queues
+
+    wiki_root = _resolve_wiki_root(args)
+    report = migrate_legacy_queues(wiki_root)
+    if args.json:
+        sys.stdout.write(
+            json.dumps(
+                {
+                    "path": str(report.path),
+                    "merge_count": report.merge_count,
+                    "question_count": report.question_count,
+                    "audit_count": report.audit_count,
+                    "total": len(report.by_id),
+                }
+            )
+            + "\n"
+        )
+    else:
+        print(
+            f"migrated {report.merge_count} merge(s) + {report.question_count} "
+            f"question(s)/confirmation(s) + {report.audit_count} audit item(s) "
+            f"-> {report.path}"
+        )
     return 0
 
 
@@ -317,11 +354,12 @@ def cmd_decisions(args: argparse.Namespace) -> int:
         "answer",
         "budget",
         "challenge-coordinate",
+        "migrate",
     ):
         print(
             "usage: athenaeum decisions "
             "{list,next,count,scan-retractions,raise-confirmation,answer,budget,"
-            "challenge-coordinate} [...]",
+            "challenge-coordinate,migrate} [...]",
             file=sys.stderr,
         )
         return 2
@@ -340,6 +378,9 @@ def cmd_decisions(args: argparse.Namespace) -> int:
 
     if sub == "budget":
         return _cmd_budget(args)
+
+    if sub == "migrate":
+        return _cmd_migrate(args)
 
     wiki_root = _resolve_wiki_root(args)
     with_proposal = getattr(args, "with_proposal", False)
@@ -575,6 +616,7 @@ def add_decisions_subparser(subparsers: argparse._SubParsersAction) -> None:
             "reversibility class, proposed default and response schema. "
             "Modes: list, next, count, scan-retractions, raise-confirmation, "
             "answer, budget, challenge-coordinate."
+            "answer, budget, migrate."
         ),
     )
     d_parser.set_defaults(func=cmd_decisions)
@@ -776,3 +818,15 @@ def add_decisions_subparser(subparsers: argparse._SubParsersAction) -> None:
         default="",
         help="Optional short human-readable header label. Cosmetic only.",
     )
+
+    migrate_p = d_sub.add_parser(
+        "migrate",
+        help=(
+            "Materialize every pending-merge and pending-question record "
+            "(resolved and unresolved alike) into the unified-schema "
+            "mirror, id and disposition unchanged (issue athenaeum#1992). "
+            "Idempotent; never touches the legacy files or approves/"
+            "rejects/answers anything."
+        ),
+    )
+    _add_common(migrate_p, with_proposal=False)

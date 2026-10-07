@@ -130,7 +130,9 @@ high-authority data. → [modules/conflicts](docs/modules/conflicts.md)
 **Unresolvable conflicts go to a human, not a coin flip.** A memory system that silently
 picks a side on every ambiguity will eventually pick the wrong one, and nobody will know to
 check. Conflicts the pipeline can't settle land in a durable decisions queue you can list,
-answer, and audit. → [guides/decisions](docs/guides/decisions.md)
+answer, and audit — `athenaeum decisions` is the one queue for every pending item (questions,
+merge proposals, and more); the older `athenaeum merges` / `athenaeum questions` surfaces
+are deprecated in its favor. → [guides/decisions](docs/guides/decisions.md)
 
 **Recall is scoped, and fails closed.** A scheduled agent that needs operational context
 must not be able to reach PII or client-confidential pages — and "visible unless labeled
