@@ -2393,6 +2393,20 @@ def retry_parked_corrections(
                 result.note = _note_with_attempts(
                     result.note, first_seen=first_seen, attempts=attempts
                 )
+                # athenaeum#1988 bot finding (Sentry, PR#1989): the handed-off
+                # record's disposition must flip to "raised-tier" BEFORE it
+                # reaches the ledger -- `build_ledger_record` only adds a
+                # correction_id to `raised_tier_correction_ids` when
+                # `r.disposition == "raised-tier"`, and
+                # `previously_handed_off_correction_ids` keys its §8.1
+                # idempotency check on exactly that list. Leaving the
+                # disposition as "parked" here made this expiry handoff
+                # invisible to that dedup, so a crash between this handoff
+                # write and the end-of-loop `save_parked_corrections` (the
+                # row's deletion is batched, not persisted per-record) would
+                # re-emit a second, differently-named handoff file for the
+                # same correction on the next run.
+                result.disposition = "raised-tier"
                 outcome = _row_outcome(row, envelope, result)
                 write_correction_handoff(
                     outcome, [result], raw_root=raw_root, knowledge_root=knowledge_root

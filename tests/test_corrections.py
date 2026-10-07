@@ -27,6 +27,7 @@ from athenaeum.corrections import (
     load_parked_corrections,
     load_registry,
     parse_batch_envelope,
+    previously_handed_off_correction_ids,
     process_batch_file,
     process_correction_record,
     resolve_target,
@@ -3178,3 +3179,79 @@ class TestParkedEmailNoMatchCorrections:
         store_after_second = load_parked_corrections(wiki)
         assert len(store_after_second) == 1  # not duplicated
         assert store_after_second[row_id]["first_seen"] == first_seen  # not reset
+
+    def test_expired_handoff_is_recorded_raised_tier_and_not_duplicated(
+        self, tmp_path: Path
+    ) -> None:
+        """Regression for a Sentry finding on PR#1989 (athenaeum#1988): the
+        expiry-handoff branch of `retry_parked_corrections` wrote the
+        handoff/ledger with `result.disposition` still `"parked"`, so
+        `build_ledger_record` never added the id to
+        `raised_tier_correction_ids` and `previously_handed_off_correction_ids`
+        -- which §8.1's own idempotency check keys on -- could never see
+        this handoff as already having happened. Pins both the ledger shape
+        AND the observable "run the phase twice, still exactly one handoff"
+        behaviour."""
+        _git_init(tmp_path)
+        wiki = tmp_path / "wiki"
+        wiki.mkdir(parents=True)
+        raw = tmp_path / "raw" / "voltaire"
+        raw.mkdir(parents=True)
+        config = self._config()
+        batch = raw / "20260806T030000Z-1a2b3c4d.jsonl"
+        batch.write_text(
+            _corrections_batch(
+                self._record(
+                    address="expiring@example.net",
+                    source="email:msg-11",
+                    observed_at="2026-08-06T03:00:00Z",
+                ),
+                submitter="voltaire",
+            )
+        )
+        run_correction_phase(
+            raw_root=tmp_path / "raw",
+            wiki_root=wiki,
+            knowledge_root=tmp_path,
+            index=EntityIndex(wiki),
+            config=config,
+            escalate_one=lambda result, outcome: True,
+            now=date(2026, 8, 6),
+        )
+        store = load_parked_corrections(wiki)
+        assert len(store) == 1
+        correction_id = next(iter(store))
+        batch_id = store[correction_id]["batch_id"]
+
+        # First phase run past the retry window -- expires and hands off.
+        summary = run_correction_phase(
+            raw_root=tmp_path / "raw",
+            wiki_root=wiki,
+            knowledge_root=tmp_path,
+            index=EntityIndex(wiki),
+            config=config,
+            escalate_one=lambda result, outcome: True,
+            now=date(2026, 9, 6),
+        )
+        assert summary["dispositions"].get("raised-tier") == 1
+        assert load_parked_corrections(wiki) == {}
+        assert len(list(raw.glob("*.md"))) == 1
+
+        # The bug's exact signature: the handoff must be recorded under
+        # `raised_tier_correction_ids`, which is what the §8.1 idempotency
+        # check reads -- not silently dropped because the ledger line still
+        # said "parked".
+        assert correction_id in previously_handed_off_correction_ids(wiki, batch_id)
+
+        # Second phase run (the parked row is already gone, exactly as it
+        # would be after a clean run) -- must not re-emit a handoff.
+        run_correction_phase(
+            raw_root=tmp_path / "raw",
+            wiki_root=wiki,
+            knowledge_root=tmp_path,
+            index=EntityIndex(wiki),
+            config=config,
+            escalate_one=lambda result, outcome: True,
+            now=date(2026, 9, 6),
+        )
+        assert len(list(raw.glob("*.md"))) == 1
