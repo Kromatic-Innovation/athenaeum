@@ -217,6 +217,8 @@ MODULE_LAYER: dict[str, int] = {
     "unfold": 4,
     "verdict_effects": 4,
     "wiki_dedupe": 4,
+    # issue athenaeum#1995: "Layering: L4 domain/pipeline module" (own docstring).
+    "triage": 4,
     # L5 -- presentation (CLI).
     "_cli_shared": 5,
     "_cmd_audit": 5,
@@ -260,6 +262,7 @@ MODULE_LAYER: dict[str, int] = {
     "_cmd_storage": 5,
     "_cmd_subject_population": 5,
     "_cmd_surface_divergence": 5,
+    "_cmd_triage": 5,  # issue athenaeum#1995
     "_cmd_usage_report": 5,
     "_cmd_verdicts": 5,
     "_cmd_viewer": 5,
