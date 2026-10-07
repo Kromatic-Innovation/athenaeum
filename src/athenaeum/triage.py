@@ -3,8 +3,9 @@
 
 Child of athenaeum#717 (unified decision queue), slice (e) of the
 hestia-lanes-agent 2026-10-06 "what remains" survey on athenaeum#717 (AC
-group 5, "Agent triage, honestly scoped"). :mod:`athenaeum.decisions` already joins every human-decision
-surface into one queue; :mod:`athenaeum.decision_framing` already frames
+group 5, "Agent triage, honestly scoped"). :mod:`athenaeum.decisions`
+already joins every human-decision surface into one queue;
+:mod:`athenaeum.decision_framing` already frames
 each item with a ``routing`` tag (:data:`athenaeum.decision_framing.
 ROUTING_AUTHORITY` vs :data:`~athenaeum.decision_framing.ROUTING_COMPETENCE`)
 and a published ``response_schema``. This module is the first thing that
