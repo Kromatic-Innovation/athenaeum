@@ -2497,6 +2497,112 @@ def resolve_decisions_max_item_context_tokens(config: dict[str, Any] | None) -> 
     )
 
 
+def resolve_decisions_budget_window_days(config: dict[str, Any] | None) -> int:
+    """Resolve the decision-budget instrumentation's rolling-window size, in
+    days (issue athenaeum#1990).
+
+    The window ``athenaeum decisions budget`` / ``athenaeum status`` average
+    items/day and reconstruct the queue-depth trend over. #717 states the
+    figure as a rolling 30-day mean.
+
+    Precedence: ``ATHENAEUM_DECISIONS_BUDGET_WINDOW_DAYS`` env > yaml
+    ``librarian.decisions_budget_window_days`` > ``30``. See
+    :func:`_resolve_positive_int_knob` for the coercion contract (``bool`` /
+    non-int / ``<= 0`` values fall through to the default).
+    """
+    return _resolve_positive_int_knob(
+        config,
+        "decisions_budget_window_days",
+        "ATHENAEUM_DECISIONS_BUDGET_WINDOW_DAYS",
+        30,
+    )
+
+
+def resolve_decisions_budget_items_per_day_max(config: dict[str, Any] | None) -> int:
+    """Resolve the decision queue's items/day effort bound (issue athenaeum#1990).
+
+    #717 states this bound as <= 20 items/day, averaged over the rolling
+    window :func:`resolve_decisions_budget_window_days` resolves. Breaching
+    it is reported prominently by ``athenaeum decisions budget`` /
+    ``athenaeum status`` rather than silently absorbed.
+
+    Precedence: ``ATHENAEUM_DECISIONS_BUDGET_ITEMS_PER_DAY_MAX`` env > yaml
+    ``librarian.decisions_budget_items_per_day_max`` > ``20``. See
+    :func:`_resolve_positive_int_knob` for the coercion contract (``bool`` /
+    non-int / ``<= 0`` values fall through to the default).
+    """
+    return _resolve_positive_int_knob(
+        config,
+        "decisions_budget_items_per_day_max",
+        "ATHENAEUM_DECISIONS_BUDGET_ITEMS_PER_DAY_MAX",
+        20,
+    )
+
+
+def resolve_decisions_budget_decision_minutes_p50_max(config: dict[str, Any] | None) -> int:
+    """Resolve the decision queue's p50 decision-time effort bound, in
+    minutes (issue athenaeum#1990).
+
+    #717 states this bound as <= 30 min/day at p50. This metric measures
+    QUEUE WAIT TIME (``answered_at`` minus ``raised_at``/``created_at``),
+    not the human-effort-per-day #717's own prose names — the two are not
+    the same measurement, and this issue's PR description states that
+    mismatch rather than silently comparing wait time against an effort
+    bound. See :func:`athenaeum.decisions.decision_time_minutes`.
+
+    Precedence: ``ATHENAEUM_DECISIONS_BUDGET_DECISION_MINUTES_P50_MAX`` env >
+    yaml ``librarian.decisions_budget_decision_minutes_p50_max`` > ``30``.
+    See :func:`_resolve_positive_int_knob` for the coercion contract
+    (``bool`` / non-int / ``<= 0`` values fall through to the default).
+    """
+    return _resolve_positive_int_knob(
+        config,
+        "decisions_budget_decision_minutes_p50_max",
+        "ATHENAEUM_DECISIONS_BUDGET_DECISION_MINUTES_P50_MAX",
+        30,
+    )
+
+
+def resolve_decisions_budget_decision_minutes_p95_max(config: dict[str, Any] | None) -> int:
+    """Resolve the decision queue's p95 decision-time effort bound, in
+    minutes (issue athenaeum#1990).
+
+    #717 states this bound as <= 60 min/day at p95 — see
+    :func:`resolve_decisions_budget_decision_minutes_p50_max` for the same
+    queue-wait-time-vs-effort caveat, which applies identically here.
+
+    Precedence: ``ATHENAEUM_DECISIONS_BUDGET_DECISION_MINUTES_P95_MAX`` env >
+    yaml ``librarian.decisions_budget_decision_minutes_p95_max`` > ``60``.
+    See :func:`_resolve_positive_int_knob` for the coercion contract
+    (``bool`` / non-int / ``<= 0`` values fall through to the default).
+    """
+    return _resolve_positive_int_knob(
+        config,
+        "decisions_budget_decision_minutes_p95_max",
+        "ATHENAEUM_DECISIONS_BUDGET_DECISION_MINUTES_P95_MAX",
+        60,
+    )
+
+
+def resolve_decisions_budget_item_age_p95_days_max(config: dict[str, Any] | None) -> int:
+    """Resolve the decision queue's p95 item-age effort bound, in days
+    (issue athenaeum#1990).
+
+    #717 states this bound as p95 item age <= 7 days.
+
+    Precedence: ``ATHENAEUM_DECISIONS_BUDGET_ITEM_AGE_P95_DAYS_MAX`` env >
+    yaml ``librarian.decisions_budget_item_age_p95_days_max`` > ``7``. See
+    :func:`_resolve_positive_int_knob` for the coercion contract (``bool`` /
+    non-int / ``<= 0`` values fall through to the default).
+    """
+    return _resolve_positive_int_knob(
+        config,
+        "decisions_budget_item_age_p95_days_max",
+        "ATHENAEUM_DECISIONS_BUDGET_ITEM_AGE_P95_DAYS_MAX",
+        7,
+    )
+
+
 def _resolve_optional_positive_number(
     config: dict[str, Any] | None,
     block: str,

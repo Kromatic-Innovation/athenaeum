@@ -603,6 +603,60 @@ def _apply_proposed_rule_answer(wiki_root: Path, answer: DecisionAnswer) -> Deci
     )
 
 
+def _raised_at_for(
+    decision_type: str,
+    decision_id: str,
+    *,
+    pending_questions_path: Path,
+    pending_merges_path: Path,
+    wiki_root: Path,
+) -> str:
+    """Best-effort lookup of a decision item's own raise timestamp.
+
+    Issue athenaeum#1990: called BEFORE dispatch (see
+    :func:`apply_decision_answers`) — once a decision is applied it no
+    longer appears in its source's pending view. Returns ``""`` on any
+    miss or lookup error rather than raising; the caller's budget-event
+    recording already treats an empty/unparseable ``raised_at`` as
+    "exclude this event from decision-time figures", never a fabricated
+    zero.
+    """
+    try:
+        if decision_type == "question":
+            from athenaeum.answers import parse_pending_questions
+
+            for pq in parse_pending_questions(pending_questions_path):
+                if pq.id == decision_id:
+                    return pq.raised_at or pq.created_at
+            return ""
+        if decision_type == "merge":
+            from athenaeum.pending_merges import parse_pending_merges
+
+            for pm in parse_pending_merges(pending_merges_path):
+                if pm.id == decision_id:
+                    return pm.created_at
+            return ""
+        if decision_type == "audit":
+            from athenaeum.calibration import AUDIT_KIND, read_calibration_ledger
+
+            for rec in read_calibration_ledger(wiki_root):
+                if rec.get("kind") == AUDIT_KIND and str(rec.get("id")) == decision_id:
+                    return str(rec.get("created_at") or "")
+            return ""
+        if decision_type == "proposed-rule":
+            from athenaeum.rule_proposals import PROPOSAL_KIND, read_rule_proposals_ledger
+
+            for rec in read_rule_proposals_ledger(wiki_root):
+                if rec.get("kind") == PROPOSAL_KIND and str(rec.get("id")) == decision_id:
+                    return str(rec.get("created_at") or "")
+            return ""
+    except Exception as exc:  # noqa: BLE001 - lookup is best-effort
+        log.debug(
+            "decision_answers: raised_at lookup skipped (%s): %s", type(exc).__name__, exc
+        )
+    return ""
+
+
 def apply_decision_answers(
     wiki_root: Path,
     raw_root: Path,
@@ -729,6 +783,21 @@ def apply_decision_answers(
             report.skipped += 1
             continue
 
+        # Issue athenaeum#1990: look up the item's OWN raise timestamp before
+        # dispatching — once applied, a question/merge/audit/proposed-rule
+        # item is resolved and no longer appears in its source's "pending"
+        # view, so this is the last point it is cheaply available. Best
+        # effort: a lookup miss leaves raised_at empty, which the budget
+        # instrumentation's decision-time metric already excludes rather
+        # than treats as zero.
+        raised_at = _raised_at_for(
+            answer.decision_type,
+            answer.decision_id,
+            pending_questions_path=pending_questions_path,
+            pending_merges_path=pending_merges_path,
+            wiki_root=wiki_root,
+        )
+
         if answer.decision_type == "question":
             outcome = _apply_question_answer(pending_questions_path, answer)
         elif answer.decision_type == "merge":
@@ -739,6 +808,25 @@ def apply_decision_answers(
             outcome = _apply_audit_answer(wiki_root, answer)
         else:  # "proposed-rule" — the only other member of VALID_DECISION_TYPES
             outcome = _apply_proposed_rule_answer(wiki_root, answer)
+
+        if outcome.applied:
+            # Best-effort: the budget ledger is instrumentation, never a
+            # reason to fail an already-successful apply.
+            try:
+                from athenaeum.decision_budget import record_decision_answered
+
+                record_decision_answered(
+                    wiki_root,
+                    decision_id=answer.decision_id,
+                    decision_type=answer.decision_type,
+                    raised_at=raised_at,
+                )
+            except Exception as exc:  # noqa: BLE001 - must never break apply
+                log.debug(
+                    "decision_answers: budget-event recording skipped (%s): %s",
+                    type(exc).__name__,
+                    exc,
+                )
 
         report.outcomes.append(outcome)
         if outcome.applied:

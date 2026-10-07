@@ -223,6 +223,11 @@ class StatusInfo(TypedDict):
     # always-a-real-count style rather than ``verdict_ledger_duty_cycle``'s
     # opt-in-gated ``None``.
     repair_debt: dict[str, object]
+    # Issue athenaeum#1990: the five #717 decision-queue budget figures
+    # (:func:`athenaeum.decision_budget.budget_report`), or ``None`` on a
+    # best-effort read failure (status must never break on this). See
+    # that function's docstring for the shape.
+    decision_budget: dict[str, object] | None
 
 
 def scan_page_sizes(
@@ -603,6 +608,48 @@ def status(knowledge_root: Path) -> StatusInfo:
             exc,
         )
 
+    # Issue athenaeum#1990: the five #717 decision-queue budget figures.
+    # Best-effort — a read hiccup here must never break status, same
+    # discipline as the repair-debt/cluster-snapshot sections above.
+    decision_budget: dict[str, object] | None = None
+    try:
+        from athenaeum.config import (
+            resolve_decisions_budget_decision_minutes_p50_max,
+            resolve_decisions_budget_decision_minutes_p95_max,
+            resolve_decisions_budget_item_age_p95_days_max,
+            resolve_decisions_budget_items_per_day_max,
+            resolve_decisions_budget_window_days,
+            resolve_decisions_max_item_context_tokens,
+            resolve_decisions_max_sources_per_merge,
+        )
+        from athenaeum.decision_budget import budget_report
+        from athenaeum.decisions import list_pending_decisions
+
+        pending_items = list_pending_decisions(
+            wiki_root,
+            max_sources_per_merge=resolve_decisions_max_sources_per_merge(config),
+            max_item_context_tokens=resolve_decisions_max_item_context_tokens(config),
+        )
+        decision_budget = budget_report(
+            wiki_root,
+            pending_items,
+            items_per_day_max=resolve_decisions_budget_items_per_day_max(config),
+            decision_minutes_p50_max=resolve_decisions_budget_decision_minutes_p50_max(
+                config
+            ),
+            decision_minutes_p95_max=resolve_decisions_budget_decision_minutes_p95_max(
+                config
+            ),
+            item_age_p95_days_max=resolve_decisions_budget_item_age_p95_days_max(config),
+            window_days=resolve_decisions_budget_window_days(config),
+        )
+    except Exception as exc:  # noqa: BLE001 — must never break status
+        log.debug(
+            "status: decision-budget instrumentation skipped (%s): %s",
+            type(exc).__name__,
+            exc,
+        )
+
     return {
         "raw_pending": raw_pending,
         "entity_count": entity_count,
@@ -625,6 +672,7 @@ def status(knowledge_root: Path) -> StatusInfo:
         "cluster_embedder_snapshot": cluster_embedder_snapshot,
         "stuck_backlog_warning": stuck_backlog_warning,
         "repair_debt": repair_debt,
+        "decision_budget": decision_budget,
     }
 
 
@@ -791,6 +839,15 @@ def format_status(info: StatusInfo) -> str:
             f"{repair_debt.get('unfold_queued', 0)} "
             f"(queued fraction={fraction_str})"
         )
+
+    # Issue athenaeum#1990: decision-queue budget figures. ``.get`` keeps a
+    # pre-athenaeum#1990 status dict (missing this key) formatting cleanly.
+    decision_budget = info.get("decision_budget")
+    if decision_budget:
+        from athenaeum.decision_budget import format_budget_report
+
+        lines.append("")
+        lines.append(format_budget_report(decision_budget))
 
     if info["last_commit_date"]:
         lines.append(f"Last commit:          {info['last_commit_date']}")

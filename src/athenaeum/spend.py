@@ -2124,12 +2124,18 @@ class _ReplayUsage:
 
 
 def _percentile(values: list[float], pct: float) -> float:
-    """Nearest-rank percentile of *values* (0 <= pct <= 100). Assumes non-empty."""
-    ordered = sorted(values)
-    if len(ordered) == 1:
-        return ordered[0]
-    rank = max(0, min(len(ordered) - 1, int(round(pct / 100 * (len(ordered) - 1)))))
-    return ordered[rank]
+    """Nearest-rank percentile of *values* (0 <= pct <= 100). Assumes non-empty.
+
+    Issue athenaeum#1990: delegates to :func:`athenaeum.metrics.percentile` —
+    the implementation moved there (an L3 service module with no dependents
+    of its own) so :mod:`athenaeum.decision_budget` can reuse the exact same
+    nearest-rank percentile/rounding without forking a second implementation
+    with different rounding. This wrapper keeps every existing call site in
+    this module unchanged.
+    """
+    from athenaeum.metrics import percentile
+
+    return percentile(values, pct)
 
 
 def _metric_distribution(values: list[float]) -> dict[str, Any] | None:

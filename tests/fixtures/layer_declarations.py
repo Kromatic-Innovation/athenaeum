@@ -146,6 +146,11 @@ MODULE_LAYER: dict[str, int] = {
     "search": 3,
     "self_resolving": 3,
     "sensitivity": 3,
+    # Issue athenaeum#1990: pure numeric/date-parsing helpers (percentile,
+    # UTC timestamp parsing, day-diff), no I/O, no athenaeum imports --
+    # shared by athenaeum.spend and athenaeum.decision_budget so neither
+    # forks the other's rounding/parsing convention.
+    "metrics": 3,
     "spend": 3,
     "usage_report": 3,
     "wiki_dedupe_attribution": 3,
@@ -171,6 +176,11 @@ MODULE_LAYER: dict[str, int] = {
     "paste_cleanup": 4,
     "decision_answers": 4,
     "decision_framing": 4,
+    # Issue athenaeum#1990: the five #717 budget figures + the answer-event
+    # ledger. Imports athenaeum.metrics (L3) and athenaeum.store (L0/L1
+    # upper bound), deliberately NOT athenaeum.decisions -- see that
+    # module's own docstring for the import-cycle this avoids.
+    "decision_budget": 4,
     "decisions": 4,
     "dedupe": 4,
     "drain": 4,

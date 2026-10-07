@@ -154,6 +154,13 @@ _META_PREFIXES = ("**Conflict type**:", "**Description**:")
 _RAISED_BY_PREFIX = "**Raised by**:"
 _RAISED_BY_AGENT = "agent"
 
+# Issue athenaeum#1990: the moment ``resolve_by_id`` flips a block's checkbox
+# to ``[x]`` — the decision-time metric's paired counterpart to the header's
+# raise date / the confirmation-only ``**Raised at**:`` line. Written by
+# :func:`_rewrite_block_as_answered` on every answered block (question AND
+# confirmation), not just confirmation blocks, unlike ``**Raised at**:``.
+_ANSWERED_AT_PREFIX = "**Answered at**:"
+
 # Issue athenaeum#1290: a "confirmation" decision — an agent narrowed scope
 # mid-build and needs a durable, non-blocking place to flag "implemented X
 # without Y, confirm?" that survives the session. Reuses the SAME
@@ -226,6 +233,11 @@ class PendingQuestion:
     # parsing identically. ``"agent"`` means the block was inserted via the
     # ``raise_decision`` MCP tool (:func:`raise_pending_question` below).
     raised_by: str = ""
+    # Issue athenaeum#1990: the resolution-side twin of ``created_at`` /
+    # ``raised_at`` — ISO-8601 UTC, stamped by ``resolve_by_id`` at the
+    # moment the checkbox is flipped. "" means unanswered, or an answered
+    # block that predates this field.
+    answered_at: str = ""
     # Issue athenaeum#1290: ``"question"`` (the default, including every
     # pre-athenaeum#1290 block, which lacks a ``**Decision kind**:`` line) or
     # ``"confirmation"`` for an agent-raised "implemented X without Y,
@@ -436,6 +448,7 @@ def _parse_block(block_text: str, *, quiet: bool = False) -> PendingQuestion | N
     also_affects: list[str] = []
     fingerprint = ""
     raised_by = ""
+    answered_at = ""
     # Issue athenaeum#1290: confirmation-only metadata, keyed by
     # PendingQuestion attribute name — see `_CONFIRMATION_FIELD_PREFIXES`.
     # Absent (empty dict) on every ordinary question block.
@@ -500,6 +513,12 @@ def _parse_block(block_text: str, *, quiet: bool = False) -> PendingQuestion | N
             in_description = False
             raised_by = stripped.removeprefix(_RAISED_BY_PREFIX).strip()
             continue
+        if stripped.startswith(_ANSWERED_AT_PREFIX):
+            # Issue athenaeum#1990: resolution timestamp — metadata, must not
+            # leak into answer_lines as a phantom answer line.
+            in_description = False
+            answered_at = stripped.removeprefix(_ANSWERED_AT_PREFIX).strip()
+            continue
         if _match_confirmation_key(stripped):
             in_description = False
             continue
@@ -529,6 +548,9 @@ def _parse_block(block_text: str, *, quiet: bool = False) -> PendingQuestion | N
                     continue
                 if stripped.startswith(_RAISED_BY_PREFIX):
                     raised_by = stripped.removeprefix(_RAISED_BY_PREFIX).strip()
+                    continue
+                if stripped.startswith(_ANSWERED_AT_PREFIX):
+                    answered_at = stripped.removeprefix(_ANSWERED_AT_PREFIX).strip()
                     continue
                 if _match_confirmation_key(stripped):
                     continue
@@ -561,6 +583,7 @@ def _parse_block(block_text: str, *, quiet: bool = False) -> PendingQuestion | N
         fingerprint=fingerprint,
         also_affects=also_affects,
         raised_by=raised_by,
+        answered_at=answered_at,
         decision_kind=confirmation_fields.get("decision_kind", "question"),
         raiser=confirmation_fields.get("raiser", ""),
         repo=confirmation_fields.get("repo", ""),
@@ -2157,7 +2180,9 @@ def raise_pending_question(
     }
 
 
-def resolve_by_id(pending_path: Path, question_id: str, answer: str) -> dict:
+def resolve_by_id(
+    pending_path: Path, question_id: str, answer: str, *, answered_at: str | None = None
+) -> dict:
     """Locate a block by id, flip ``[ ]`` -> ``[x]``, append the answer body.
 
     Does NOT archive — archival happens on the next ``ingest_answers`` run
@@ -2227,7 +2252,7 @@ def resolve_by_id(pending_path: Path, question_id: str, answer: str) -> dict:
                 "error": msg,
             }
 
-        updated = _rewrite_block_as_answered(pq.raw_block, answer)
+        updated = _rewrite_block_as_answered(pq.raw_block, answer, answered_at=answered_at)
         new_block_text = updated
         rewritten_blocks.append(updated)
 
@@ -2256,12 +2281,19 @@ def resolve_by_id(pending_path: Path, question_id: str, answer: str) -> dict:
     }
 
 
-def _rewrite_block_as_answered(block_text: str, answer: str) -> str:
+def _rewrite_block_as_answered(
+    block_text: str, answer: str, *, answered_at: str | None = None
+) -> str:
     """Flip the checkbox on ``block_text`` and insert ``answer`` beneath it.
 
     Preserves all other lines (header, conflict type, description) so the
-    archive trail keeps full context.
+    archive trail keeps full context. Also appends an ``**Answered at**:``
+    line (issue athenaeum#1990) — the decision-time metric's resolution-side
+    timestamp, paired with the header's raise date / the confirmation-only
+    ``**Raised at**:`` line. ``answered_at`` defaults to the current instant
+    (:func:`athenaeum.store.now_iso`) when not supplied.
     """
+    stamp = answered_at or now_iso()
     lines = block_text.splitlines()
     new_lines: list[str] = []
     answer_inserted = False
@@ -2274,6 +2306,7 @@ def _rewrite_block_as_answered(block_text: str, answer: str) -> str:
             for answer_line in answer.rstrip().splitlines():
                 new_lines.append(answer_line)
             new_lines.append("")
+            new_lines.append(f"{_ANSWERED_AT_PREFIX} {stamp}")
             answer_inserted = True
             continue
         new_lines.append(line)
