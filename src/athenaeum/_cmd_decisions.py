@@ -284,6 +284,18 @@ def _cmd_challenge_coordinate(args: argparse.Namespace) -> int:
             f"{result['marked_stale']} verdict(s) stale-marked for challenged "
             f"answer {args.answer_id!r}: {', '.join(result['pairs'])}"
         )
+    elif result["pairs"]:
+        # Issue athenaeum#1994 (PR athenaeum#2010 review finding): `marked_stale
+        # == 0` does NOT mean "no match" -- every matching pair may simply
+        # have been ALREADY stale. Conflating the two reports "nothing to
+        # see here" when verdicts naming this answer id genuinely exist;
+        # `result["pairs"]` is the matched set regardless of staleness, so
+        # it is what distinguishes the two facts.
+        print(
+            f"{len(result['pairs'])} verdict(s) already stale for challenged "
+            f"answer {args.answer_id!r} (nothing new to mark): "
+            f"{', '.join(result['pairs'])}"
+        )
     else:
         print(f"no live verdict names answer {args.answer_id!r} in coord_origins")
     return 0

@@ -414,3 +414,34 @@ def test_challenge_coordinate_no_match_is_a_clean_noop(tmp_path: Path) -> None:
     rc, out = _run(["decisions", "challenge-coordinate", "no-such-id", "--path", str(tmp_path)])
     assert rc == 0
     assert "no live verdict names" in out
+
+
+def test_challenge_coordinate_already_stale_is_distinct_from_no_match(tmp_path: Path) -> None:
+    """Seer finding on PR athenaeum#2010: `marked_stale == 0` means EITHER
+    "nothing matched" OR "everything matching was already stale" -- two
+    different facts. The CLI text output must not conflate them."""
+    from athenaeum.runlock import RunLock
+    from athenaeum.verdicts import Basis, append_verdict, build_verdict_entry, mark_pairs_stale
+
+    wiki = tmp_path / "wiki"
+    wiki.mkdir()
+    with RunLock(tmp_path) as lock:
+        entry = build_verdict_entry(
+            "page-a",
+            "page-b",
+            "distinct",
+            basis=Basis(coord_origins={"subject": "answer-1"}),
+            decided_by="comparator",
+        )
+        append_verdict(wiki, entry, lock=lock)
+        # Already stale BEFORE the challenge (e.g. some other invalidation
+        # wave already marked it).
+        mark_pairs_stale(wiki, {"page-a+page-b": "unrelated reason"}, lock=lock)
+
+    rc, out = _run(
+        ["decisions", "challenge-coordinate", "answer-1", "--path", str(tmp_path)]
+    )
+    assert rc == 0
+    assert "already stale" in out
+    assert "page-a+page-b" in out
+    assert "no live verdict names" not in out

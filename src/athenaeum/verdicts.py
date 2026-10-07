@@ -957,13 +957,39 @@ def challenge_coordinate_answer(
     memoization the next time anything re-compares it — this function does
     not itself decide a new verdict or re-queue anything.
 
+    **Only each pair's CURRENT verdict can ever match (PR athenaeum#2010
+    review finding).** Before compaction runs, :func:`iter_live_entries`
+    can return MULTIPLE entries for one pair — an earlier, now-superseded
+    entry (stale-marked when the pair was re-decided) alongside the fresh
+    one that superseded it. :func:`select_stale_for_coordinate_challenged`
+    is shared ``select_stale_for_*`` family code (issue athenaeum#712) that
+    every OTHER rule in that family wants applied to every matching entry,
+    not just a pair's latest — so the fix belongs here, in this caller, not
+    in the selector. This function therefore collapses *entries* to one
+    per pair — the LAST one in :func:`iter_live_entries`'s own (month,
+    then on-disk append) order — before calling the selector, so a pair
+    whose CURRENT verdict was decided by a DIFFERENT, non-challenged answer
+    is never stale-marked just because an old, already-superseded entry
+    still live in the same partition happens to name *answer_id*.
+    :func:`lookup_pair`'s own ``max(key=at)`` is NOT reused here: ``at`` is
+    DATE-only (see ``tests/test_coordinate_answer_loop.py``'s own comment
+    on this), so two same-day entries for a pair tie under it and
+    ``max`` silently keeps the FIRST (oldest) one — append order is the
+    only unambiguous "latest" signal before compaction.
+
     Returns ``{"ok": True, "answer_id": answer_id, "marked_stale": int,
-    "pairs": list[str]}``. ``marked_stale`` is ``0`` (not an error) when no
-    live verdict's ``basis.coord_origins`` names *answer_id* — e.g. the
-    answer never produced one, or every affected verdict was already
-    re-compared since.
+    "pairs": list[str]}``. ``pairs`` is every pair whose CURRENT verdict
+    names *answer_id* — present even when ``marked_stale`` is ``0``
+    because every one of them was ALREADY stale (a caller should not read
+    ``marked_stale == 0`` as "nothing matched"; check ``pairs`` for that).
+    ``pairs`` is itself empty only when no live verdict's
+    ``basis.coord_origins`` names *answer_id* at all — e.g. the answer
+    never produced one.
     """
-    entries = [e for _, e in iter_live_entries(wiki_root)]
+    current_by_pair: dict[str, VerdictEntry] = {}
+    for _, entry in iter_live_entries(wiki_root):
+        current_by_pair[entry.pair] = entry
+    entries = list(current_by_pair.values())
     reasons = select_stale_for_coordinate_challenged(entries, answer_id)
     marked = mark_pairs_stale(wiki_root, reasons, lock=lock) if reasons else 0
     return {

@@ -47,7 +47,12 @@ from athenaeum.verdict_effects import (
     parse_coordinate_batch_members,
     queue_coordinate_batch,
 )
-from athenaeum.verdicts import challenge_coordinate_answer, iter_live_entries, make_pair_key
+from athenaeum.verdicts import (
+    challenge_coordinate_answer,
+    iter_live_entries,
+    make_pair_key,
+    mark_pairs_stale,
+)
 
 
 def _write_page(path: Path, *, name: str, body: str) -> None:
@@ -726,3 +731,78 @@ class TestCoordinateChallengeBlastRadius:
             "marked_stale": 0,
             "pairs": [],
         }
+
+
+class TestCoordinateChallengeIgnoresSupersededEntries:
+    def test_challenging_a_superseded_answer_does_not_stale_mark_the_current_verdict(
+        self, tmp_path: Path
+    ) -> None:
+        """Seer finding on PR athenaeum#2010: before compaction runs, a pair
+        can carry MULTIPLE live entries -- an old, already-superseded entry
+        decided by answer A, and the CURRENT one decided by a later, DIFFERENT
+        answer B. Challenging A must stale-mark NOTHING for this pair: its
+        current verdict was not decided by A. (Constructed directly via the
+        same ledger primitives the coordinate-answer loop itself uses --
+        `_write_coordinate` short-circuits Gate 1 on a second compare once a
+        subject coordinate is already on disk, so a genuine third `coordinate`
+        answer round-trip for the SAME pair cannot be driven through the
+        full CLI/queue path a second time without re-deriving a third
+        comparator scenario; this is the narrowest construction that still
+        exercises the real `challenge_coordinate_answer` production path.)"""
+        from athenaeum.verdicts import Basis, append_verdict, build_verdict_entry
+
+        with RunLock(tmp_path) as lock:
+            # Pair decided by answer A.
+            entry_a = build_verdict_entry(
+                "page-x",
+                "page-y",
+                VERDICT_DISTINCT,
+                basis=Basis(coord_origins={"subject": "answer-A"}),
+                decided_by="comparator",
+            )
+            append_verdict(tmp_path, entry_a, lock=lock)
+
+            # Re-decided later -- the A-era entry is stale-marked exactly as
+            # `_apply_coordinate_answer` stale-marks a pair before its own
+            # re-compare, and a FRESH entry for the SAME pair is appended,
+            # decided by a DIFFERENT answer B.
+            mark_pairs_stale(tmp_path, {"page-x+page-y": "re-answered"}, lock=lock)
+            entry_b = build_verdict_entry(
+                "page-x",
+                "page-y",
+                VERDICT_DISTINCT,
+                basis=Basis(coord_origins={"subject": "answer-B"}),
+                decided_by="comparator",
+            )
+            append_verdict(tmp_path, entry_b, lock=lock)
+
+            # Challenge the SUPERSEDED answer A.
+            result = challenge_coordinate_answer(tmp_path, "answer-A", lock=lock)
+
+        # No more: the pair's CURRENT (B-decided) verdict is untouched, and
+        # nothing is reported as matched or marked for the superseded answer.
+        assert result == {
+            "ok": True,
+            "answer_id": "answer-A",
+            "marked_stale": 0,
+            "pairs": [],
+        }
+        entries = [e for _, e in iter_live_entries(tmp_path) if e.pair == "page-x+page-y"]
+        current = [e for e in entries if e.basis.coord_origins == {"subject": "answer-B"}]
+        assert len(current) == 1
+        assert current[0].stale is False
+
+        # No fewer, in the same breath: challenging the CURRENT answer B
+        # DOES stale-mark it.
+        with RunLock(tmp_path) as lock:
+            result_b = challenge_coordinate_answer(tmp_path, "answer-B", lock=lock)
+        assert result_b == {
+            "ok": True,
+            "answer_id": "answer-B",
+            "marked_stale": 1,
+            "pairs": ["page-x+page-y"],
+        }
+        entries_after = [
+            e for _, e in iter_live_entries(tmp_path) if e.pair == "page-x+page-y"
+        ]
+        assert all(e.stale for e in entries_after)
