@@ -195,6 +195,49 @@ def _cmd_raise_confirmation(args: argparse.Namespace) -> int:
     return 0 if result["ok"] else 1
 
 
+def _cmd_budget(args: argparse.Namespace) -> int:
+    """``athenaeum decisions budget`` — the five athenaeum#717 figures (issue athenaeum#1990).
+
+    Fetches the live queue once (:func:`list_pending_decisions`, which
+    already applies :func:`athenaeum.decision_framing.frame_decision` —
+    this command measures nothing a second time) and combines it with the
+    answer-event ledger via :func:`athenaeum.decision_budget.budget_report`.
+    """
+    from athenaeum.config import (
+        resolve_decisions_budget_decision_minutes_p50_max,
+        resolve_decisions_budget_decision_minutes_p95_max,
+        resolve_decisions_budget_item_age_p95_days_max,
+        resolve_decisions_budget_items_per_day_max,
+        resolve_decisions_budget_window_days,
+    )
+    from athenaeum.decision_budget import budget_report, format_budget_report
+
+    wiki_root = _resolve_wiki_root(args)
+    config = load_config(_resolve_knowledge_root(args))
+    max_sources_per_merge = resolve_decisions_max_sources_per_merge(config)
+    max_item_context_tokens = resolve_decisions_max_item_context_tokens(config)
+    pending_items = list_pending_decisions(
+        wiki_root,
+        max_sources_per_merge=max_sources_per_merge,
+        max_item_context_tokens=max_item_context_tokens,
+    )
+    report = budget_report(
+        wiki_root,
+        pending_items,
+        items_per_day_max=resolve_decisions_budget_items_per_day_max(config),
+        decision_minutes_p50_max=resolve_decisions_budget_decision_minutes_p50_max(config),
+        decision_minutes_p95_max=resolve_decisions_budget_decision_minutes_p95_max(config),
+        item_age_p95_days_max=resolve_decisions_budget_item_age_p95_days_max(config),
+        window_days=resolve_decisions_budget_window_days(config),
+    )
+    if args.json:
+        sys.stdout.write(json.dumps(report) + "\n")
+        return 0
+
+    print(format_budget_report(report))
+    return 0
+
+
 def cmd_decisions(args: argparse.Namespace) -> int:
     """Dispatch ``athenaeum decisions {list,next,count}``.
 
@@ -209,10 +252,11 @@ def cmd_decisions(args: argparse.Namespace) -> int:
         "scan-retractions",
         "raise-confirmation",
         "answer",
+        "budget",
     ):
         print(
             "usage: athenaeum decisions "
-            "{list,next,count,scan-retractions,raise-confirmation,answer} [...]",
+            "{list,next,count,scan-retractions,raise-confirmation,answer,budget} [...]",
             file=sys.stderr,
         )
         return 2
@@ -225,6 +269,9 @@ def cmd_decisions(args: argparse.Namespace) -> int:
 
     if sub == "answer":
         return _cmd_answer(args)
+
+    if sub == "budget":
+        return _cmd_budget(args)
 
     wiki_root = _resolve_wiki_root(args)
     with_proposal = getattr(args, "with_proposal", False)
@@ -553,6 +600,17 @@ def add_decisions_subparser(subparsers: argparse._SubParsersAction) -> None:
             "Must satisfy the item's response_schema."
         ),
     )
+
+    budget_p = d_sub.add_parser(
+        "budget",
+        help=(
+            "Report the five athenaeum#717 effort-budget figures (items/day, "
+            "per-item context size distribution, decision time p50/p95, "
+            "p95 item age, queue depth trend) and flag a sustained breach "
+            "prominently (issue athenaeum#1990)."
+        ),
+    )
+    _add_common(budget_p, with_proposal=False)
 
     raise_p = d_sub.add_parser(
         "raise-confirmation",

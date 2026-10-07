@@ -402,11 +402,17 @@ def release_quarantine(
             quarantine_id,
         )
 
+    released_at = now_iso()
     record = {
         "v": QUARANTINE_LEDGER_VERSION,
         "kind": RELEASE_KIND,
         "id": quarantine_id,
-        "created_at": now_iso(),
+        "created_at": released_at,
+        # Issue athenaeum#1990: decision-time metric's resolution-side
+        # timestamp, equal to this record's own ``created_at`` — named
+        # explicitly so the budget instrumentation reads one field name
+        # across every decision type.
+        "answered_at": released_at,
         "ref": quarantined.get("ref"),
         "note": note,
     }
@@ -420,6 +426,28 @@ def release_quarantine(
         quarantine_id,
         quarantined.get("ref"),
     )
+    # Issue athenaeum#1990: quarantine resolves through its own dedicated
+    # path (not through athenaeum.decision_answers' unified applier), so
+    # the budget-instrumentation event is recorded here directly rather
+    # than at that other module's single choke point. Best-effort — a
+    # ledger-write hiccup on the event log must never fail an already-
+    # successful release.
+    try:
+        from athenaeum.decision_budget import record_decision_answered
+
+        record_decision_answered(
+            wiki_root,
+            decision_id=quarantine_id,
+            decision_type="quarantine",
+            raised_at=str(quarantined.get("created_at") or ""),
+            answered_at=released_at,
+        )
+    except Exception as exc:  # noqa: BLE001 - must never break release
+        log.debug(
+            "quarantine: budget-event recording skipped (%s): %s",
+            type(exc).__name__,
+            exc,
+        )
     return record
 
 

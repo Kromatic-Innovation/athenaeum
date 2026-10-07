@@ -892,6 +892,106 @@ default: **sensitivity classification is deployment configuration**,
 never shipped in this repo (docs/design/field-corrections.md §7.1,
 out-of-scope list).
 
+### `resolve_decisions_budget_decision_minutes_p50_max`
+
+- **YAML path:** `librarian.decisions_budget_decision_minutes_p50_max`
+- **Environment variable:** `ATHENAEUM_DECISIONS_BUDGET_DECISION_MINUTES_P50_MAX`
+- **CLI flag:** —
+- **Default:** `30`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the decision queue's p50 decision-time effort bound, in
+minutes.
+
+ states this bound as <= 30 min/day at p50. This metric measures
+QUEUE WAIT TIME (``answered_at`` minus ``raised_at``/``created_at``),
+not the human-effort-per-day 's own prose names — the two are not
+the same measurement, and this issue's PR description states that
+mismatch rather than silently comparing wait time against an effort
+bound. See `athenaeum.decisions.decision_time_minutes`.
+
+Precedence: ``ATHENAEUM_DECISIONS_BUDGET_DECISION_MINUTES_P50_MAX`` env >
+yaml ``librarian.decisions_budget_decision_minutes_p50_max`` > ``30``.
+See `_resolve_positive_int_knob` for the coercion contract
+(``bool`` / non-int / ``<= 0`` values fall through to the default).
+
+### `resolve_decisions_budget_decision_minutes_p95_max`
+
+- **YAML path:** `librarian.decisions_budget_decision_minutes_p95_max`
+- **Environment variable:** `ATHENAEUM_DECISIONS_BUDGET_DECISION_MINUTES_P95_MAX`
+- **CLI flag:** —
+- **Default:** `60`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the decision queue's p95 decision-time effort bound, in
+minutes.
+
+ states this bound as <= 60 min/day at p95 — see
+`resolve_decisions_budget_decision_minutes_p50_max` for the same
+queue-wait-time-vs-effort caveat, which applies identically here.
+
+Precedence: ``ATHENAEUM_DECISIONS_BUDGET_DECISION_MINUTES_P95_MAX`` env >
+yaml ``librarian.decisions_budget_decision_minutes_p95_max`` > ``60``.
+See `_resolve_positive_int_knob` for the coercion contract
+(``bool`` / non-int / ``<= 0`` values fall through to the default).
+
+### `resolve_decisions_budget_item_age_p95_days_max`
+
+- **YAML path:** `librarian.decisions_budget_item_age_p95_days_max`
+- **Environment variable:** `ATHENAEUM_DECISIONS_BUDGET_ITEM_AGE_P95_DAYS_MAX`
+- **CLI flag:** —
+- **Default:** `7`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the decision queue's p95 item-age effort bound, in days
+
+ states this bound as p95 item age <= 7 days.
+
+Precedence: ``ATHENAEUM_DECISIONS_BUDGET_ITEM_AGE_P95_DAYS_MAX`` env >
+yaml ``librarian.decisions_budget_item_age_p95_days_max`` > ``7``. See
+`_resolve_positive_int_knob` for the coercion contract (``bool`` /
+non-int / ``<= 0`` values fall through to the default).
+
+### `resolve_decisions_budget_items_per_day_max`
+
+- **YAML path:** `librarian.decisions_budget_items_per_day_max`
+- **Environment variable:** `ATHENAEUM_DECISIONS_BUDGET_ITEMS_PER_DAY_MAX`
+- **CLI flag:** —
+- **Default:** `20`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the decision queue's items/day effort bound.
+
+ states this bound as <= 20 items/day, averaged over the rolling
+window `resolve_decisions_budget_window_days` resolves. Breaching
+it is reported prominently by ``athenaeum decisions budget`` /
+``athenaeum status`` rather than silently absorbed.
+
+Precedence: ``ATHENAEUM_DECISIONS_BUDGET_ITEMS_PER_DAY_MAX`` env > yaml
+``librarian.decisions_budget_items_per_day_max`` > ``20``. See
+`_resolve_positive_int_knob` for the coercion contract (``bool`` /
+non-int / ``<= 0`` values fall through to the default).
+
+### `resolve_decisions_budget_window_days`
+
+- **YAML path:** `librarian.decisions_budget_window_days`
+- **Environment variable:** `ATHENAEUM_DECISIONS_BUDGET_WINDOW_DAYS`
+- **CLI flag:** —
+- **Default:** `30`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the decision-budget instrumentation's rolling-window size, in
+days.
+
+The window ``athenaeum decisions budget`` / ``athenaeum status`` average
+items/day and reconstruct the queue-depth trend over. states the
+figure as a rolling 30-day mean.
+
+Precedence: ``ATHENAEUM_DECISIONS_BUDGET_WINDOW_DAYS`` env > yaml
+``librarian.decisions_budget_window_days`` > ``30``. See
+`_resolve_positive_int_knob` for the coercion contract (``bool`` /
+non-int / ``<= 0`` values fall through to the default).
+
 ### `resolve_decisions_max_item_context_tokens`
 
 - **YAML path:** `librarian.decisions_max_item_context_tokens`

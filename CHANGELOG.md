@@ -31,6 +31,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pass and no new nightly caller — both remain explicitly out of scope,
   carried to a follow-up `~operator`/`needs:host-write` issue.
 
+- **`answered_at` timestamps and decision-queue budget instrumentation
+  (issue athenaeum#1990).** Every decision type with an existing resolution
+  path (`question`/`confirmation`, `merge`, `audit`, `quarantine`,
+  `proposed-rule`) now stamps an `answered_at` ISO-8601 UTC timestamp at
+  the moment it is resolved, paired with its `raised_at`/`created_at`.
+  `decisions.decision_time_minutes` computes the paired decision time,
+  sharing `spend._percentile`'s exact rounding (promoted to
+  `athenaeum.metrics.percentile`). A new answer-event ledger
+  (`wiki/_decision_budget_events.jsonl`, written by
+  `athenaeum.decision_budget.record_decision_answered`) backs the five
+  athenaeum#717 budget figures — items/day (rolling 30-day mean), per-item context
+  size distribution, decision time p50/p95, p95 item age, and queue depth
+  trend — surfaced by `athenaeum decisions budget` and on `athenaeum
+  status`. A sustained breach of any bound is reported prominently and the
+  recurring decision-type shapes are recorded to
+  `wiki/_decision_budget_shapes.jsonl` for athenaeum#719 to mine later. New config
+  keys: `librarian.decisions_budget_items_per_day_max` (20),
+  `librarian.decisions_budget_decision_minutes_p50_max` (30),
+  `librarian.decisions_budget_decision_minutes_p95_max` (60),
+  `librarian.decisions_budget_item_age_p95_days_max` (7),
+  `librarian.decisions_budget_window_days` (30). `retraction` has no
+  resolution path anywhere in this codebase (pre-existing gap, not
+  invented here) and is therefore the one decision type with no
+  `answered_at`/budget-event wiring — see the PR for the full writeup.
+
 - **Per-claim/per-cluster batching replaces per-pair coordinate queueing
   (issue athenaeum#1991).** `wiki_dedupe.propose_wiki_page_merges` used to
   queue one `_pending_questions.md` item per `underdetermined` pair

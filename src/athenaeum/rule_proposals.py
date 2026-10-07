@@ -958,6 +958,11 @@ def approve_rule_proposal(
         "kind": APPROVE_KIND,
         "id": proposal_id,
         "created_at": _now_iso(now),
+        # Issue athenaeum#1990: decision-time metric's resolution-side
+        # timestamp, equal to this record's own ``created_at`` — named
+        # explicitly so the budget instrumentation reads one field name
+        # across every decision type.
+        "answered_at": _now_iso(now),
         "rule_path": str(target.relative_to(knowledge_root)),
         "note": note,
     }
@@ -1007,6 +1012,7 @@ def reject_rule_proposal(
         "kind": REJECT_KIND,
         "id": proposal_id,
         "created_at": _now_iso(now),
+        "answered_at": _now_iso(now),
         "note": note,
     }
     ledger_target = (

@@ -211,6 +211,12 @@ class PendingMerge:
     # pre-existing block still parses without a KeyError and without
     # fabricating an embedder value nobody recorded.
     embedder: str = ""
+    # Issue athenaeum#1990: ISO-8601 UTC resolution timestamp, stamped by
+    # :func:`_rewrite_block_resolved` at the moment the checkbox flips —
+    # the decision-time metric's resolution-side counterpart to
+    # ``created_at``. "" means unresolved, or a resolved block that
+    # predates this field.
+    answered_at: str = ""
     # Issue athenaeum#1170 code review: the human-readable name to show a
     # reviewer, when it differs from ``merge_target_name`` (which, for a
     # name-collision proposal, is deliberately the canonical page's
@@ -549,6 +555,7 @@ def _parse_block(block_text: str) -> PendingMerge | None:
     decision = ""
     note = ""
     write_kind = "create-merged"
+    answered_at = ""
     auto_applied = False
     embedder = ""
     display_name = ""
@@ -624,6 +631,10 @@ def _parse_block(block_text: str) -> PendingMerge | None:
             in_sources = False
             display_name = s.removeprefix("**Display name**:").strip()
             continue
+        if s.startswith("**Answered at**:"):
+            in_sources = False
+            answered_at = s.removeprefix("**Answered at**:").strip()
+            continue
         if in_sources and s.startswith("- "):
             sources.append(s[2:].strip())
             continue
@@ -654,6 +665,7 @@ def _parse_block(block_text: str) -> PendingMerge | None:
         auto_applied=auto_applied,
         embedder=embedder,
         display_name=display_name,
+        answered_at=answered_at,
     )
 
 
@@ -935,6 +947,7 @@ def _rewrite_block_resolved(
     note: str,
     *,
     auto_applied: bool = False,
+    answered_at: str | None = None,
 ) -> str:
     """Flip the checkbox and tag the block with decision + note.
 
@@ -946,7 +959,12 @@ def _rewrite_block_resolved(
     human approve (the default, ``False``, adds nothing — a pre-athenaeum#602
     resolved block and an ordinary human approve are byte-identical to
     before this existed).
+
+    ``answered_at`` (issue athenaeum#1990): the decision-time metric's
+    resolution-side timestamp, written as a ``**Answered at**:`` line.
+    Defaults to the current instant (:func:`athenaeum.store.now_iso`).
     """
+    stamp = answered_at or now_iso()
     lines = block_text.splitlines()
     new_lines: list[str] = []
     flipped = False
@@ -964,6 +982,7 @@ def _rewrite_block_resolved(
         new_lines.append(f"**Note**: {note}")
     if auto_applied:
         new_lines.append("**Auto-applied**: true")
+    new_lines.append(f"**Answered at**: {stamp}")
     return "\n".join(new_lines).rstrip() + "\n"
 
 
@@ -1930,8 +1949,13 @@ def resolve_merge(
     embedding_model: str | None = None,
     auto_applied: bool = False,
     registry: DimensionRegistry = DEFAULT_REGISTRY,
+    answered_at: str | None = None,
 ) -> dict:
     """Mark a pending-merge block as resolved.
+
+    ``answered_at`` (issue athenaeum#1990): the decision-time metric's
+    resolution timestamp, forwarded to :func:`_rewrite_block_resolved`.
+    Defaults to the current instant when not supplied.
 
     Args:
         merges_path: Path to ``_pending_merges.md``.
@@ -2078,6 +2102,7 @@ def resolve_merge(
             decision,
             note,
             auto_applied=auto_applied and decision == "approve",
+            answered_at=answered_at,
         )
         rewritten.append(resolved_text)
 
