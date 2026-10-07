@@ -242,12 +242,15 @@ def _cmd_migrate(args: argparse.Namespace) -> int:
     """``athenaeum decisions migrate`` — materialize the legacy queues (issue athenaeum#1992).
 
     Migrates every ``_pending_merges.md`` / ``_pending_questions.md`` record
-    (resolved and unresolved alike) into the unified-schema mirror
-    :func:`athenaeum.decisions.migrate_legacy_queues` writes, preserving
-    every record's id and disposition unchanged. Idempotent — safe to run
-    by hand or on a cron after a batch of answers lands, to keep the
-    persisted mirror current. Never touches either legacy file and never
-    approves/rejects/answers anything.
+    (resolved and unresolved alike), and every calibration-sampled audit
+    item (reviewed and unreviewed alike), into the unified-schema store
+    :func:`athenaeum.decisions.migrate_legacy_queues` writes — the SAME
+    store :func:`athenaeum.decisions.list_pending_decisions` reads back
+    from on every call, preserving every record's id and disposition
+    unchanged. Idempotent — safe to run by hand, on a cron, or implicitly
+    (every ``decisions list``/``next``/``count``/``budget`` call already
+    does this). Never touches any legacy store/ledger and never
+    approves/rejects/answers/reviews anything.
     """
     from athenaeum.decisions import migrate_legacy_queues
 
@@ -260,6 +263,7 @@ def _cmd_migrate(args: argparse.Namespace) -> int:
                     "path": str(report.path),
                     "merge_count": report.merge_count,
                     "question_count": report.question_count,
+                    "audit_count": report.audit_count,
                     "total": len(report.by_id),
                 }
             )
@@ -268,7 +272,8 @@ def _cmd_migrate(args: argparse.Namespace) -> int:
     else:
         print(
             f"migrated {report.merge_count} merge(s) + {report.question_count} "
-            f"question(s)/confirmation(s) -> {report.path}"
+            f"question(s)/confirmation(s) + {report.audit_count} audit item(s) "
+            f"-> {report.path}"
         )
     return 0
 

@@ -56,22 +56,39 @@ common item shape — it owns no queue's storage format or mutation path;
 resolving/writing back to a given queue stays the owning module's job (e.g.
 ``answers.py`` for questions, ``merge.py``/``resolutions.py`` for merges).
 
-Issue athenaeum#1992 narrows that factoring rule for exactly two of the
-unioned types. ``merge`` and ``question``/``confirmation`` are the two
+Issue athenaeum#1992 narrows that factoring rule for exactly the three types
+its own AC3 names. ``merge`` and ``question``/``confirmation`` are the two
 legacy surfaces with a REAL CLI (``_cmd_merges.py``, ``_cmd_questions.py``,
 now both flagged deprecated — :data:`athenaeum.config.
-DEPRECATED_CLI_SURFACE_MESSAGES`) and a real pending/resolved disposition on
-the record itself, so this module now ALSO owns a persisted unified-schema
-mirror of them (:func:`migrate_legacy_queues`,
-:data:`MIGRATED_QUEUE_FILENAME`) — the first time this module has written
-anything to disk rather than only reading. Mutation of an individual item's
-disposition still belongs to the owning module (:func:`resolve_merge`,
-:func:`resolve_by_id`) unchanged — migrating/re-syncing the mirror never
-calls either, by construction (see :func:`migrate_legacy_queues`'s own
-docstring). The other four types (``retraction``, ``audit``, ``quarantine``,
-``proposed-rule``) are ledger-derived, ephemeral-by-design records with no
-comparable legacy CLI to deprecate, so they are untouched by athenaeum#1992
-and remain pure read-time projections as before.
+DEPRECATED_CLI_SURFACE_MESSAGES`); ``audit`` has no legacy CLI of its own
+(it was always only reachable through this module's union — see
+:func:`audit_to_decision`'s own docstring and the PII-hazard note in
+:func:`migrate_legacy_queues`), but AC3 names it explicitly alongside the
+other two, so it gets the same treatment. For these three, this module now
+OWNS a persisted unified-schema store (:func:`migrate_legacy_queues`,
+:data:`MIGRATED_QUEUE_FILENAME`) that :func:`list_pending_decisions` reads
+back FROM (sync-then-read, on every call) rather than re-deriving
+independently — this is the first time this module has written anything to
+disk, and the store is the thing actually consumed, not an unread mirror.
+Mutation of an individual item's disposition still belongs to the owning
+module (:func:`athenaeum.pending_merges.resolve_merge`,
+:func:`athenaeum.answers.resolve_by_id`,
+:func:`athenaeum.calibration.record_audit_review`) unchanged — migrating/
+re-syncing the store never calls any of them, by construction (see
+:func:`migrate_legacy_queues`'s own docstring); an answer landing on a
+legacy store is picked up on the VERY NEXT ``list_pending_decisions`` call,
+since the sync is unconditional, not a cache. The remaining three types
+(``retraction``, ``quarantine``, ``proposed-rule``) are ledger-derived,
+ephemeral-by-design records outside AC3's named scope, so they stay pure
+read-time projections, unchanged.
+
+``_cmd_audit.py`` (the ``athenaeum audit`` CLI) is a DIFFERENT, unrelated
+surface — page-freshness auditing (``last_audited``/``retirement_candidate``
+written into each wiki page's own frontmatter), not a pending-decision
+queue at all, with no disposition and no overlap with this module's own
+``audit`` item type (calibration-sampled T1/T2 review). It is deliberately
+NOT flagged deprecated by athenaeum#1992 — see the PR description for the
+explicit reading of AC2 this rests on.
 """
 
 from __future__ import annotations
@@ -84,7 +101,7 @@ from pathlib import Path
 
 from athenaeum.answers import PendingQuestion, parse_pending_questions
 from athenaeum.atomic_io import atomic_write_text
-from athenaeum.calibration import list_pending_audit
+from athenaeum.calibration import AUDIT_KIND, REVIEW_KIND, read_calibration_ledger
 from athenaeum.decision_framing import frame_decision
 from athenaeum.models import parse_frontmatter
 from athenaeum.pagination import paginate
@@ -601,6 +618,22 @@ def list_pending_decisions(
     Owner (``None``, the default) sees everything, preserving existing
     behavior.
 
+    Issue athenaeum#1992: for the three types with a real persisted
+    disposition (``merge``, ``question``/``confirmation``, ``audit``), this
+    function is no longer a from-scratch re-derivation — it SYNCS the
+    unified-schema store (:func:`migrate_legacy_queues`, using this call's
+    own ``with_proposal``/``max_sources_per_merge``) and then reads the
+    ``item`` shape straight back from that store (:func:`load_migrated_queue`)
+    rather than re-building it inline from ``parse_pending_merges`` /
+    ``parse_pending_questions`` / the calibration ledger a second time. The
+    sync is unconditional on every call — this is a real, idempotent,
+    read-only-w.r.t.-the-legacy-stores rebuild (same cost as the old inline
+    re-derivation plus one small JSONL write), not a cached snapshot that
+    could go stale between an answer landing and the next list call.
+    ``retraction`` / ``quarantine`` / ``proposed-rule`` stay pure
+    ledger-derived read-time projections, unchanged — AC3's named scope is
+    exactly the three migrated types.
+
     Issue athenaeum#1431: ``offset``/``limit`` page over the FINAL, unified,
     oldest-first list — the slice is applied AFTER the ``decisions.sort(...)``
     call below, not threaded into any of the per-kind sub-lists (in
@@ -621,26 +654,53 @@ def list_pending_decisions(
     from athenaeum.models import all_sources_authorized, is_page_authorized_at
 
     knowledge_root = wiki_root.parent
-    questions = [
-        pq
-        for pq in parse_pending_questions(wiki_root / "_pending_questions.md")
-        if not pq.answered
-        and is_page_authorized_at(pq.source, caller_audience, base=knowledge_root)
-    ]
-    decisions = [question_to_decision(pq, with_proposal=with_proposal) for pq in questions]
-    decisions += [
-        merge_to_decision(pm, max_sources=max_sources_per_merge)
-        for pm in parse_pending_merges(wiki_root / "_pending_merges.md")
-        if not pm.resolved
-        and all_sources_authorized(pm.sources, caller_audience, base=knowledge_root)
-    ]
+
+    # Issue athenaeum#1992: sync the unified store to the CURRENT legacy-file
+    # / calibration-ledger state (this call's own with_proposal /
+    # max_sources_per_merge shape it), then read every merge / question /
+    # confirmation / audit item back FROM that store — it is the actual
+    # queue for these three types, not a second, independently-derived
+    # presentation of the same underlying data.
+    migrate_legacy_queues(
+        wiki_root,
+        with_proposal=with_proposal,
+        max_sources_per_merge=max_sources_per_merge,
+    )
+    decisions: list[dict] = []
+    for rec in load_migrated_queue(wiki_root):
+        if rec.get("disposition") != "pending":
+            continue
+        rtype = rec.get("type")
+        if rtype == "merge":
+            if not all_sources_authorized(
+                rec.get("sources", []), caller_audience, base=knowledge_root
+            ):
+                continue
+        elif rtype in ("question", "confirmation"):
+            if not is_page_authorized_at(
+                rec.get("source", ""), caller_audience, base=knowledge_root
+            ):
+                continue
+        elif rtype == "audit":
+            # Owner-only for a restricted caller, same as retraction/
+            # quarantine/proposed-rule below (no readable source-page path
+            # to authorize against, issue athenaeum#538).
+            if caller_audience is not None:
+                continue
+        else:  # pragma: no cover - defensive; the store only holds the above
+            continue
+        decisions.append(rec["item"])
+
     if caller_audience is None:
-        # Retraction/audit/quarantine items are owner-only for a restricted
-        # caller (no readable source-page path to authorize against, athenaeum#538).
+        # Retraction/quarantine/proposed-rule items are owner-only for a
+        # restricted caller (no readable source-page path to authorize
+        # against, athenaeum#538). Ledger-derived, ephemeral by design, no
+        # comparable legacy CLI to deprecate — outside athenaeum#1992's
+        # named migration scope ("pending merges, pending questions, audit
+        # items"), so they stay pure read-time projections, unchanged.
         decisions += [
             retraction_to_decision(rec) for rec in read_retraction_reviews(wiki_root)
         ]
-        decisions += [audit_to_decision(rec) for rec in list_pending_audit(wiki_root)]
         # Issue athenaeum#898: quarantined raw-intake files awaiting an operator's
         # release/leave-quarantined decision (AC 4/5).
         decisions += [
@@ -769,21 +829,23 @@ class MigrationReport:
     """Outcome of one :func:`migrate_legacy_queues` run (issue athenaeum#1992).
 
     ``by_id`` maps every migrated record's PRESERVED legacy id to the
-    disposition read from the legacy store at migration time (``"pending"``,
-    ``"approved"``, ``"rejected"``, or ``"answered"``) — the exact shape an
-    id-set / disposition-drift comparison needs before and after a
-    migration run (the issue's own test AC: "verified by id-set comparison,
-    not by count alone").
+    disposition read from the legacy store/ledger at migration time
+    (``"pending"``, ``"approved"``, ``"rejected"``, ``"answered"``,
+    ``"confirmed"``, or ``"overturned"``) — the exact shape an id-set /
+    disposition-drift comparison needs before and after a migration run
+    (the issue's own test AC: "verified by id-set comparison, not by count
+    alone").
     """
 
     path: Path
     by_id: dict[str, str]
     merge_count: int
     question_count: int
+    audit_count: int
 
     @property
     def ids(self) -> set[str]:
-        """The full set of migrated ids (merges + questions combined)."""
+        """The full set of migrated ids (merge + question + audit combined)."""
         return set(self.by_id)
 
 
@@ -811,45 +873,68 @@ def _question_disposition(pq: PendingQuestion) -> str:
     return "answered" if pq.answered else "pending"
 
 
-def migrate_legacy_queues(wiki_root: Path) -> MigrationReport:
-    """Migrate every legacy merge + question record into the unified schema.
+def _audit_disposition(review: dict | None) -> str:
+    """The migration-stable disposition of one calibration-ledger audit item.
+
+    A straight read of whether a ``REVIEW_KIND`` record exists for this
+    audit id, and if so, its own ``overturned`` field — the same field
+    :func:`athenaeum.calibration.record_audit_review` writes. Never
+    invents a value: no review record is ``"pending"``; a review's
+    ``overturned=True``/``False`` becomes ``"overturned"``/``"confirmed"``.
+    """
+    if review is None:
+        return "pending"
+    return "overturned" if review.get("overturned") else "confirmed"
+
+
+def migrate_legacy_queues(
+    wiki_root: Path,
+    *,
+    with_proposal: bool = False,
+    max_sources_per_merge: int = _DECISIONS_MAX_SOURCES_DEFAULT,
+) -> MigrationReport:
+    """Migrate every legacy merge + question + audit record into the unified schema.
 
     Issue athenaeum#717's AC group 1 (slice athenaeum#1992) requires this
     module to stop being a read-only view and become the actual queue for
-    the legacy surfaces that have a real CLI and a real disposition:
-    pending merges and pending questions/confirmations. This is the
-    function that makes that true — it is the first thing in this module
-    that writes anything to disk.
+    the three legacy surfaces named in AC3 — pending merges, pending
+    questions/confirmations, and calibration-sampled audit items. This is
+    the function that makes that true, and :func:`list_pending_decisions`
+    now calls it (with its own ``with_proposal``/``max_sources_per_merge``)
+    on every listing rather than re-deriving the same shapes independently
+    — the persisted file this writes is what gets read back, not a second,
+    unread presentation of the same data.
 
-    Read-only with respect to the LEGACY stores: nothing here ever calls
+    Read-only with respect to every LEGACY store: nothing here ever calls
     :func:`athenaeum.pending_merges.resolve_merge`,
-    :func:`athenaeum.answers.resolve_by_id`, or any other disposition
-    mutator. It only *reads* ``_pending_merges.md`` / ``_pending_questions.md``
-    — every record, resolved AND unresolved, unlike
-    :func:`list_pending_decisions` which deliberately shows only the
-    unresolved live queue — and writes the full union into
-    :data:`MIGRATED_QUEUE_FILENAME` under ``wiki_root``, atomically
-    (:func:`athenaeum.atomic_io.atomic_write_text`).
+    :func:`athenaeum.answers.resolve_by_id`,
+    :func:`athenaeum.calibration.record_audit_review`, or any other
+    disposition mutator. It only *reads* ``_pending_merges.md`` /
+    ``_pending_questions.md`` / the calibration ledger — every record,
+    resolved AND unresolved/reviewed AND unreviewed — and writes the full
+    union into :data:`MIGRATED_QUEUE_FILENAME` under ``wiki_root``,
+    atomically (:func:`athenaeum.atomic_io.atomic_write_text`).
 
-    Identity preservation: every record's ``id`` is the SAME id the legacy
+    Identity preservation: every record's ``id`` is the SAME id its owning
     store already assigned it (:class:`PendingMerge`'s content-addressed
-    id / :class:`PendingQuestion`'s block-derived id) — nothing is
-    re-minted, so an id-set comparison against the legacy store's own ids
-    is exact, and running this twice with no legacy change produces a
-    byte-identical file (idempotent; safe to run on every ``decisions
-    migrate`` invocation, including as a cron-style re-sync after a batch
-    of answers lands). Disposition preservation: :func:`_merge_disposition`
-    / :func:`_question_disposition` read the legacy record's own fields
-    with zero transformation, so migrating (or re-migrating any number of
-    times) can never flip a disposition — the two PII-hazard proposals the
-    issue's AC names stay exactly as unresolved/resolved as the legacy
-    store already has them, because nothing in this function ever writes
-    to that store.
+    id / :class:`PendingQuestion`'s block-derived id /
+    :func:`athenaeum.calibration.audit_item_id`'s ``(tier, proposal_id)``
+    hash) — nothing is re-minted, so an id-set comparison against the
+    legacy stores' own ids is exact, and running this twice with no legacy
+    change produces a byte-identical file (idempotent; cheap enough to run
+    on every list call — see :func:`list_pending_decisions` — as well as
+    the standalone ``athenaeum decisions migrate`` CLI mode). Disposition
+    preservation: :func:`_merge_disposition` / :func:`_question_disposition`
+    / :func:`_audit_disposition` read each record's own fields with zero
+    transformation, so migrating (or re-migrating any number of times) can
+    never flip a disposition — the two PII-hazard proposals the issue's AC
+    names stay exactly as unresolved/resolved as the legacy store already
+    has them, because nothing in this function ever writes to that store.
 
     Returns a :class:`MigrationReport` (rather than ``None``) so a caller —
-    the ``athenaeum decisions migrate`` CLI, or a test building a fixture
-    legacy store — can inspect exactly what migrated without re-reading the
-    written file.
+    the ``athenaeum decisions migrate`` CLI, :func:`list_pending_decisions`,
+    or a test building a fixture legacy store — can inspect exactly what
+    migrated without re-reading the written file.
     """
     merges_path = wiki_root / "_pending_merges.md"
     questions_path = wiki_root / "_pending_questions.md"
@@ -869,7 +954,8 @@ def migrate_legacy_queues(wiki_root: Path) -> MigrationReport:
                 "decision": pm.decision,
                 "created_at": pm.created_at,
                 "answered_at": pm.answered_at,
-                "item": merge_to_decision(pm),
+                "sources": list(pm.sources),
+                "item": merge_to_decision(pm, max_sources=max_sources_per_merge),
             }
         )
     merge_count = len(records)
@@ -878,7 +964,11 @@ def migrate_legacy_queues(wiki_root: Path) -> MigrationReport:
         disposition = _question_disposition(pq)
         by_id[pq.id] = disposition
         is_confirmation = pq.decision_kind == "confirmation"
-        item = confirmation_to_decision(pq) if is_confirmation else question_to_decision(pq)
+        item = (
+            confirmation_to_decision(pq)
+            if is_confirmation
+            else question_to_decision(pq, with_proposal=with_proposal)
+        )
         records.append(
             {
                 "id": pq.id,
@@ -888,10 +978,35 @@ def migrate_legacy_queues(wiki_root: Path) -> MigrationReport:
                 "decision": "",
                 "created_at": pq.created_at,
                 "answered_at": pq.answered_at,
+                "source": pq.source,
                 "item": item,
             }
         )
     question_count = len(records) - merge_count
+
+    ledger_records = read_calibration_ledger(wiki_root)
+    reviews_by_id = {
+        str(r.get("id")): r for r in ledger_records if r.get("kind") == REVIEW_KIND
+    }
+    audit_records = [r for r in ledger_records if r.get("kind") == AUDIT_KIND]
+    for rec in audit_records:
+        audit_id = str(rec.get("id"))
+        review = reviews_by_id.get(audit_id)
+        disposition = _audit_disposition(review)
+        by_id[audit_id] = disposition
+        records.append(
+            {
+                "id": audit_id,
+                "type": "audit",
+                "disposition": disposition,
+                "resolved": review is not None,
+                "decision": "",
+                "created_at": rec.get("created_at"),
+                "answered_at": (review or {}).get("answered_at", ""),
+                "item": audit_to_decision(rec),
+            }
+        )
+    audit_count = len(audit_records)
 
     records.sort(key=lambda r: r["id"])
     out_path = wiki_root / MIGRATED_QUEUE_FILENAME
@@ -903,6 +1018,7 @@ def migrate_legacy_queues(wiki_root: Path) -> MigrationReport:
         by_id=by_id,
         merge_count=merge_count,
         question_count=question_count,
+        audit_count=audit_count,
     )
 
 

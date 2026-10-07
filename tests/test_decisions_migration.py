@@ -3,14 +3,20 @@
 
 Builds a fixture legacy store (pending merges + pending questions, each with
 a resolved AND an unresolved record, plus two PII-hazard merge proposals
-that are never approved) entirely under ``tmp_path`` — no live
-``~/knowledge`` store is read or written anywhere in this module.
+that are never approved, plus a calibration-ledger audit item of each
+disposition) entirely under ``tmp_path`` — no live ``~/knowledge`` store is
+read or written anywhere in this module.
 
 The issue's own test AC: "a fixture legacy store (pending merges + pending
 questions) migrates to the unified schema with zero item-count drift and
 zero disposition drift, verified by id-set comparison, not by count alone."
 Every assertion below compares SETS of ids (and a disposition dict keyed by
-id), never bare counts.
+id), never bare counts. AC3 additionally names "audit items" as a third
+migrated type and requires the unified store be AUTHORITATIVE (not merely a
+second, unread presentation) — covered by the
+``TestListPendingDecisionsIsAuthoritative`` class below, which asserts
+``list_pending_decisions`` reads records back from the synced store rather
+than re-deriving them independently.
 """
 
 from __future__ import annotations
@@ -25,7 +31,13 @@ from athenaeum.answers import (
     raise_pending_question,
     resolve_by_id,
 )
-from athenaeum.decisions import MigrationReport, load_migrated_queue, migrate_legacy_queues
+from athenaeum.calibration import read_calibration_ledger, record_audit_review, sample_tier_decision
+from athenaeum.decisions import (
+    MigrationReport,
+    list_pending_decisions,
+    load_migrated_queue,
+    migrate_legacy_queues,
+)
 from athenaeum.pending_merges import (
     _make_id,
     _rewrite_block_resolved,
@@ -175,6 +187,33 @@ def legacy_store(wiki_root: Path) -> dict:
         answered_at="2026-01-03T00:00:00+00:00",
     )
 
+    # Two calibration-sampled audit items (issue athenaeum#1992 AC3 names
+    # "audit items" explicitly): one left pending (unreviewed), one
+    # reviewed (confirmed). rate=1.0 forces deterministic sampling so the
+    # fixture doesn't depend on the hash-based sampler picking these ids.
+    audit_pending = sample_tier_decision(
+        wiki_root,
+        tier="T1",
+        verdict="reject",
+        proposal_id="audit-fixture-pending",
+        reason="fixture reject",
+        config={"librarian": {"audit_sample_rate_t1_rejects": 1.0}},
+    )
+    audit_reviewed = sample_tier_decision(
+        wiki_root,
+        tier="T2",
+        verdict="approve",
+        proposal_id="audit-fixture-reviewed",
+        reason="fixture approve",
+        config={"librarian": {"audit_sample_rate_t2_approvals": 1.0}},
+        applied=True,
+    )
+    assert audit_pending is not None
+    assert audit_reviewed is not None
+    record_audit_review(
+        wiki_root, audit_id=audit_reviewed["id"], human_verdict="approve"
+    )
+
     return {
         "wiki_root": wiki_root,
         "merge_pending_id": pending_id,
@@ -187,6 +226,8 @@ def legacy_store(wiki_root: Path) -> dict:
         },
         "question_pending_id": pending_q["decision_id"],
         "question_answered_id": answered_q["decision_id"],
+        "audit_pending_id": audit_pending["id"],
+        "audit_reviewed_id": audit_reviewed["id"],
     }
 
 
@@ -215,17 +256,26 @@ def test_legacy_store_disposition_before_migration(legacy_store: dict) -> None:
     assert not questions[legacy_store["question_pending_id"]].answered
     assert questions[legacy_store["question_answered_id"]].answered
 
+    ledger = read_calibration_ledger(wiki_root)
+    audit_ids = {str(r.get("id")) for r in ledger if r.get("kind") == "audit"}
+    review_ids = {str(r.get("id")) for r in ledger if r.get("kind") == "review"}
+    assert legacy_store["audit_pending_id"] in audit_ids
+    assert legacy_store["audit_pending_id"] not in review_ids
+    assert legacy_store["audit_reviewed_id"] in review_ids
+
 
 def test_migration_zero_item_count_and_disposition_drift(legacy_store: dict) -> None:
     """The issue's own test AC: id-set comparison, not a bare count."""
     wiki_root = legacy_store["wiki_root"]
 
-    # BEFORE snapshot, read directly off the legacy stores.
+    # BEFORE snapshot, read directly off the legacy stores/ledger.
     before_merges = {pm.id: pm for pm in parse_pending_merges(wiki_root / "_pending_merges.md")}
     before_questions = {
         pq.id: pq for pq in parse_pending_questions(wiki_root / "_pending_questions.md")
     }
-    before_ids = set(before_merges) | set(before_questions)
+    before_ledger = read_calibration_ledger(wiki_root)
+    before_audit_ids = {str(r.get("id")) for r in before_ledger if r.get("kind") == "audit"}
+    before_ids = set(before_merges) | set(before_questions) | before_audit_ids
 
     report = migrate_legacy_queues(wiki_root)
     assert isinstance(report, MigrationReport)
@@ -234,6 +284,7 @@ def test_migration_zero_item_count_and_disposition_drift(legacy_store: dict) -> 
     assert report.ids == before_ids
     assert report.merge_count == len(before_merges)
     assert report.question_count == len(before_questions)
+    assert report.audit_count == len(before_audit_ids)
 
     # Zero disposition drift, verified per id.
     for mid, pm in before_merges.items():
@@ -251,6 +302,10 @@ def test_migration_zero_item_count_and_disposition_drift(legacy_store: dict) -> 
     assert report.by_id[legacy_store["merge_pii_1_id"]] == "pending"
     assert report.by_id[legacy_store["merge_pii_2_id"]] == "pending"
 
+    # Audit disposition drift, verified per id.
+    assert report.by_id[legacy_store["audit_pending_id"]] == "pending"
+    assert report.by_id[legacy_store["audit_reviewed_id"]] == "confirmed"
+
     # The persisted mirror round-trips to the same id set and dispositions.
     persisted = load_migrated_queue(wiki_root)
     persisted_by_id = {rec["id"]: rec["disposition"] for rec in persisted}
@@ -259,15 +314,18 @@ def test_migration_zero_item_count_and_disposition_drift(legacy_store: dict) -> 
 
 
 def test_migration_never_mutates_the_legacy_stores(legacy_store: dict) -> None:
-    """Migration is read-only w.r.t. the legacy files — byte-identical before/after."""
+    """Migration is read-only w.r.t. the legacy files/ledger — byte-identical before/after."""
     wiki_root = legacy_store["wiki_root"]
     merges_before = (wiki_root / "_pending_merges.md").read_text(encoding="utf-8")
     questions_before = (wiki_root / "_pending_questions.md").read_text(encoding="utf-8")
+    ledger_path = wiki_root / "_calibration.jsonl"
+    ledger_before = ledger_path.read_text(encoding="utf-8")
 
     migrate_legacy_queues(wiki_root)
 
     assert (wiki_root / "_pending_merges.md").read_text(encoding="utf-8") == merges_before
     assert (wiki_root / "_pending_questions.md").read_text(encoding="utf-8") == questions_before
+    assert ledger_path.read_text(encoding="utf-8") == ledger_before
 
 
 def test_migration_is_idempotent(legacy_store: dict) -> None:
@@ -317,3 +375,130 @@ def test_migrated_record_shape_is_json_line_per_item(legacy_store: dict) -> None
     for line in lines:
         rec = json.loads(line)
         assert {"id", "type", "disposition", "item"} <= rec.keys()
+
+
+class TestListPendingDecisionsIsAuthoritative:
+    """AC3: the unified store is what gets READ, not an unread second mirror.
+
+    These tests prove the dependency directly — not just that the output
+    happens to match, which could pass even if ``list_pending_decisions``
+    still independently re-derived everything from the legacy files/ledger.
+    """
+
+    def test_sync_and_read_are_both_actually_called(
+        self, legacy_store: dict, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import athenaeum.decisions as decisions_mod
+
+        wiki_root = legacy_store["wiki_root"]
+        calls = {"migrate": 0, "load": 0}
+
+        real_migrate = decisions_mod.migrate_legacy_queues
+        real_load = decisions_mod.load_migrated_queue
+
+        def _spy_migrate(*args, **kwargs):
+            calls["migrate"] += 1
+            return real_migrate(*args, **kwargs)
+
+        def _spy_load(*args, **kwargs):
+            calls["load"] += 1
+            return real_load(*args, **kwargs)
+
+        monkeypatch.setattr(decisions_mod, "migrate_legacy_queues", _spy_migrate)
+        monkeypatch.setattr(decisions_mod, "load_migrated_queue", _spy_load)
+
+        result = decisions_mod.list_pending_decisions(wiki_root)
+
+        assert calls["migrate"] == 1
+        assert calls["load"] == 1
+        ids = {d["id"] for d in result}
+        assert legacy_store["merge_pending_id"] in ids
+        assert legacy_store["merge_pii_1_id"] in ids
+        assert legacy_store["merge_pii_2_id"] in ids
+        assert legacy_store["merge_approved_id"] not in ids  # resolved, excluded
+        assert legacy_store["question_pending_id"] in ids
+        assert legacy_store["question_answered_id"] not in ids  # answered, excluded
+        assert legacy_store["audit_pending_id"] in ids
+        assert legacy_store["audit_reviewed_id"] not in ids  # reviewed, excluded
+
+    def test_output_comes_from_the_persisted_store_not_independent_rederivation(
+        self, legacy_store: dict, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A fabricated record in the store, unrelated to any legacy file,
+        must surface in the output — proof ``list_pending_decisions`` reads
+        FROM ``load_migrated_queue``'s return value rather than recomputing
+        independently from ``_pending_merges.md``/``_pending_questions.md``.
+        """
+        import athenaeum.decisions as decisions_mod
+
+        wiki_root = legacy_store["wiki_root"]
+        fabricated_item = {
+            "type": "merge",
+            "id": "fabricated-0000",
+            "created_at": "2026-01-01",
+            "summary": "fabricated — not in any legacy file",
+            "confidence": 0.5,
+            "payload": {
+                "merge_target_name": "fabricated",
+                "rationale": "test",
+                "sources": [],
+                "sources_omitted": 0,
+            },
+        }
+        fabricated_record = {
+            "id": "fabricated-0000",
+            "type": "merge",
+            "disposition": "pending",
+            "sources": [],
+            "item": fabricated_item,
+        }
+
+        def _fake_load(wiki_root_arg):
+            return [fabricated_record]
+
+        monkeypatch.setattr(decisions_mod, "load_migrated_queue", _fake_load)
+
+        result = decisions_mod.list_pending_decisions(wiki_root)
+
+        ids = {d["id"] for d in result}
+        assert "fabricated-0000" in ids
+        # And nothing else — proving the real legacy files are NOT
+        # independently re-consulted once the store's own read is faked.
+        assert ids == {"fabricated-0000"}
+
+    def test_audit_items_are_owner_only(self, legacy_store: dict) -> None:
+
+        wiki_root = legacy_store["wiki_root"]
+
+        owner_ids = {d["id"] for d in list_pending_decisions(wiki_root)}
+        assert legacy_store["audit_pending_id"] in owner_ids
+
+        restricted_ids = {
+            d["id"]
+            for d in list_pending_decisions(wiki_root, caller_audience=set())
+        }
+        assert legacy_store["audit_pending_id"] not in restricted_ids
+
+    def test_a_later_resolve_merge_disposition_change_is_reflected_next_call(
+        self, legacy_store: dict
+    ) -> None:
+        """The sync-then-read path (not a cache) picks up a legacy-store
+        mutation on the very next call — the staleness risk a cached
+        mirror would have.
+        """
+        from athenaeum.pending_merges import resolve_merge
+
+        wiki_root = legacy_store["wiki_root"]
+        merges_path = wiki_root / "_pending_merges.md"
+
+        before_ids = {d["id"] for d in list_pending_decisions(wiki_root)}
+        assert legacy_store["merge_pending_id"] in before_ids
+
+        result = resolve_merge(merges_path, legacy_store["merge_pending_id"], "reject")
+        assert result["ok"]
+
+        after_ids = {d["id"] for d in list_pending_decisions(wiki_root)}
+        assert legacy_store["merge_pending_id"] not in after_ids
+        # Everything else (notably the two PII-hazard proposals) unaffected.
+        assert legacy_store["merge_pii_1_id"] in after_ids
+        assert legacy_store["merge_pii_2_id"] in after_ids
