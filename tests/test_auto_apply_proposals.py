@@ -4,6 +4,7 @@ athenaeum#719 Plan step 6)."""
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -279,6 +280,46 @@ class TestApproveWidensConfigOnlyNeverBypassesInFlight:
         )
         assert resolved == 0.99  # operator's own explicit setting always wins
 
+    def test_ledger_override_wins_over_legacy_scalar_fallback(self, tmp_path: Path) -> None:
+        """Issue athenaeum#2032: pin the precedence
+        ``resolve_auto_apply_threshold_for``'s code (and its own docstring)
+        already implements -- the ledger (layer 3) outranks the legacy
+        scalar fallback (layer 4) -- against the actual resolver output.
+        ``config.auto_apply_threshold_ledger_override_for``'s docstring
+        previously mis-stated this (grouped the legacy env var in with the
+        per-action override it is consulted BEFORE this layer, implying it
+        too outranks the ledger; it is the opposite — see athenaeum#2032).
+
+        ``keep_a`` is the action under test because the legacy scalar
+        fallback (``resolve.auto_apply_threshold`` /
+        ``ATHENAEUM_RESOLVE_AUTO_APPLY_THRESHOLD``) only ever applies to
+        ``keep_a``/``keep_b`` — see ``_LEGACY_SCALAR_FALLBACK_ACTIONS``.
+        """
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        _seed_t1_disagreement(wiki_root, overturned=3, confirmed=1)
+        config = {
+            "librarian": {
+                "auto_apply_proposals": {
+                    "disagreement_trigger": 0.2,
+                    "widen_step": 0.05,
+                }
+            },
+            # Legacy scalar -- keep_a/keep_b only. A deliberately STRICTER
+            # value than keep_a's 0.90 default so "legacy won" and "ledger
+            # won" are unambiguously distinguishable outcomes.
+            "resolve": {"auto_apply_threshold": 0.99},
+        }
+        run_auto_apply_proposal_detection(["keep_a"], wiki_root=wiki_root, config=config)
+        pending = list_pending_auto_apply_threshold_proposals(wiki_root)
+        assert pending, "expected a drafted keep_a widen proposal"
+        proposed_threshold = pending[0]["proposed_threshold"]
+        approve_auto_apply_threshold_proposal(wiki_root, proposal_id=pending[0]["id"])
+
+        resolved = resolve_auto_apply_threshold_for(config, "keep_a", wiki_root=wiki_root)
+        assert resolved == pytest.approx(proposed_threshold)
+        assert resolved != pytest.approx(0.99)  # NOT the legacy scalar
+
     def test_approve_never_touches_pending_merges_or_questions(self, tmp_path: Path) -> None:
         """A decision already escalated to a human before this proposal was
         drafted or approved must be untouched by the approval -- the
@@ -371,3 +412,77 @@ class TestLedgerFilename:
             default_auto_apply_proposals_ledger_path(wiki_root)
             == wiki_root / AUTO_APPLY_PROPOSALS_LEDGER_FILENAME
         )
+
+
+class TestAsOfCutoff:
+    """Issue athenaeum#2032: ``as_of`` lets a caller re-deciding an
+    ALREADY-PENDING item (``athenaeum.tiers.reresolve_open_questions``)
+    only honor an approval that predates the item's own raise time. Unit
+    tests against the ledger function directly; the end-to-end proof at the
+    real ``tiers.py`` call site lives in
+    ``tests/test_tiers_auto_apply_threshold_gating.py``.
+    """
+
+    def _approve(self, tmp_path: Path, *, approved_at: datetime) -> tuple[Path, float]:
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        _seed_t1_disagreement(wiki_root, overturned=3, confirmed=1)
+        config = {
+            "librarian": {
+                "auto_apply_proposals": {"disagreement_trigger": 0.2, "widen_step": 0.05}
+            }
+        }
+        run_auto_apply_proposal_detection(["not_a_conflict"], wiki_root=wiki_root, config=config)
+        pending = list_pending_auto_apply_threshold_proposals(wiki_root)
+        proposed_threshold = pending[0]["proposed_threshold"]
+        approve_auto_apply_threshold_proposal(
+            wiki_root, proposal_id=pending[0]["id"], now=approved_at
+        )
+        return wiki_root, proposed_threshold
+
+    def test_approval_at_or_before_as_of_is_honored(self, tmp_path: Path) -> None:
+        wiki_root, proposed_threshold = self._approve(
+            tmp_path, approved_at=datetime(2026, 1, 1, 0, 0, 0)
+        )
+        value = auto_apply_threshold_ledger_override_for(
+            "not_a_conflict", wiki_root=wiki_root, as_of="2026-01-02T00:00:00Z"
+        )
+        assert value == pytest.approx(proposed_threshold)
+
+        # The boundary itself (approved exactly AT as_of) is also honored.
+        value_at_boundary = auto_apply_threshold_ledger_override_for(
+            "not_a_conflict", wiki_root=wiki_root, as_of="2026-01-01T00:00:00Z"
+        )
+        assert value_at_boundary == pytest.approx(proposed_threshold)
+
+    def test_approval_after_as_of_is_not_honored(self, tmp_path: Path) -> None:
+        wiki_root, _ = self._approve(tmp_path, approved_at=datetime(2026, 1, 5, 0, 0, 0))
+        value = auto_apply_threshold_ledger_override_for(
+            "not_a_conflict", wiki_root=wiki_root, as_of="2026-01-01T00:00:00Z"
+        )
+        assert value is None
+
+    def test_unparseable_as_of_fails_closed(self, tmp_path: Path) -> None:
+        wiki_root, _ = self._approve(tmp_path, approved_at=datetime(2026, 1, 1, 0, 0, 0))
+        assert (
+            auto_apply_threshold_ledger_override_for(
+                "not_a_conflict", wiki_root=wiki_root, as_of="not-a-timestamp"
+            )
+            is None
+        )
+
+    def test_empty_as_of_fails_closed(self, tmp_path: Path) -> None:
+        wiki_root, _ = self._approve(tmp_path, approved_at=datetime(2026, 1, 1, 0, 0, 0))
+        assert (
+            auto_apply_threshold_ledger_override_for(
+                "not_a_conflict", wiki_root=wiki_root, as_of=""
+            )
+            is None
+        )
+
+    def test_omitted_as_of_keeps_pre_2032_trust_latest_behavior(self, tmp_path: Path) -> None:
+        wiki_root, proposed_threshold = self._approve(
+            tmp_path, approved_at=datetime(2026, 1, 5, 0, 0, 0)
+        )
+        value = auto_apply_threshold_ledger_override_for("not_a_conflict", wiki_root=wiki_root)
+        assert value == pytest.approx(proposed_threshold)

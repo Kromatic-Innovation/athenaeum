@@ -35,14 +35,26 @@ decisions.** Approving a drafted proposal
 record to this module's OWN ledger; :func:`athenaeum.config.
 auto_apply_threshold_ledger_override_for` reads that ledger back as a
 new, lower-precedence-than-explicit-config layer inside
-:func:`athenaeum.resolutions.resolve_auto_apply_threshold_for`. Both
+:func:`athenaeum.resolutions.resolve_auto_apply_threshold_for`.
 ``resolutions.py``'s and ``verdict_effects.py``'s auto-apply gates decide
-auto-apply AT THE MOMENT a verdict is produced, never by re-sweeping a
-pending queue later — so a decision already escalated to (and sitting in)
-``_pending_questions.md``/``_pending_merges.md`` before this proposal was
-even drafted, let alone approved, is never retroactively reopened or
-auto-finalized by a later-widened threshold. See
-``tests/test_auto_apply_proposals.py`` for the regression proving this.
+auto-apply AT THE MOMENT a verdict is FIRST produced, never by re-sweeping
+``_pending_questions.md``/``_pending_merges.md`` to retroactively flip an
+ALREADY-DECIDED ``[x]``/``[ ]`` verdict — so far so simple. One gate does
+re-visit the queue, though: :func:`athenaeum.tiers.reresolve_open_questions`
+re-verdicts open, PROPOSAL-LESS blocks (ones that never got a verdict at
+all — a deterministic fallback, an offline run, a budget-exhausted skip)
+on a later pass. For THAT gate, "decides at the moment a verdict is first
+produced" means the ledger override (issue athenaeum#2032) is only honored
+when the approval predates the block's own raise time — see that
+function's ``as_of`` threading and
+:func:`athenaeum.config.auto_apply_threshold_ledger_override_for`'s
+``as_of`` contract for the mechanism. Net effect is the same guarantee
+either way: a decision already escalated to (and sitting in)
+``_pending_questions.md``/``_pending_merges.md`` before a proposal was even
+drafted, let alone approved, is never auto-finalized by a later-widened
+threshold it predates. See ``tests/test_auto_apply_proposals.py`` and
+``tests/test_tiers_auto_apply_threshold_gating.py`` for the regressions
+proving this.
 
 **Id is the (action, current, proposed) triple.** :func:`proposal_item_id`
 hashes all three — not the action alone — so rejecting one proposed widen

@@ -9,6 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Auto-apply-threshold ledger override: thread through `tiers.py`'s
+  gating call sites, fix the documented precedence (issue athenaeum#2032,
+  follow-up to athenaeum#2018/#2024).** `tier4_escalate` and
+  `reresolve_open_questions` now pass `wiki_root` to
+  `resolutions.resolve_auto_apply_threshold_for`, so the ledger-backed
+  override (issue athenaeum#2018) is live on the production gating path,
+  not just the drafter's read path. `reresolve_open_questions` — the one
+  gate that re-decides a block ALREADY sitting in `_pending_questions.md`
+  — also threads a new `as_of` keyword (added to
+  `resolve_auto_apply_threshold_for` and
+  `config.auto_apply_threshold_ledger_override_for`) set to the block's
+  own `PendingQuestion.raised_at`: only an approval whose own `created_at`
+  is at or before `as_of` is honored, so a proposal approved AFTER a block
+  was already raised can never retroactively widen the floor that gates
+  it — the athenaeum#2018 AC ("approving an auto-apply-threshold proposal
+  never bypasses decisions already in flight") is now proven at the real
+  `tiers.py` call site, not just at the resolver/ledger level. An
+  unparseable or empty `as_of` fails CLOSED (no ledger override at all for
+  that call) rather than guessing; `tier4_escalate` never passes `as_of` —
+  every item it processes is a fresh verdict, never an already-pending one.
+  Separately, `config.auto_apply_threshold_ledger_override_for`'s docstring
+  previously mis-stated the precedence between the ledger layer and the
+  legacy scalar fallback (`resolve.auto_apply_threshold` /
+  `ATHENAEUM_RESOLVE_AUTO_APPLY_THRESHOLD`, `keep_a`/`keep_b` only) — it
+  read as though the legacy scalar is consulted BEFORE the ledger, when
+  `resolve_auto_apply_threshold_for`'s own code (and docstring) already had
+  it the other way (ledger, layer 3, outranks the legacy scalar, layer 4).
+  The docstring is corrected; a new test
+  (`test_ledger_override_wins_over_legacy_scalar_fallback`) pins the actual
+  resolver order so this cannot silently drift back. New tests:
+  `tests/test_tiers_auto_apply_threshold_gating.py` (the `tiers.py`
+  end-to-end proof, both call sites) and `TestAsOfCutoff` /
+  `test_ledger_override_wins_over_legacy_scalar_fallback` in
+  `tests/test_auto_apply_proposals.py` (the `as_of` + precedence unit
+  tests).
 - **Self-tuning loop: quarterly convergence report + nightly wiring, default
   OFF, dry-run (issue athenaeum#2020, athenaeum#719 Plan steps 7-8).** New
   `convergence.py`: computes, per quarter, supply (count of `approve`

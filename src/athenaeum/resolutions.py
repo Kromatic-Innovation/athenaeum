@@ -798,6 +798,7 @@ def resolve_auto_apply_threshold_for(
     action: str,
     *,
     wiki_root: Path | None = None,
+    as_of: str | None = None,
 ) -> float | None:
     """Resolve the auto-apply threshold for a SPECIFIC resolver action.
 
@@ -835,6 +836,16 @@ def resolve_auto_apply_threshold_for(
     :func:`resolve_auto_apply_threshold`. *wiki_root* defaults to ``None``
     (every pre-athenaeum#2018 call site), which skips layer 3 entirely and
     reproduces this function's exact prior behavior.
+
+    *as_of* (issue athenaeum#2032): keyword-only, default ``None``, threaded
+    straight through to layer 3's :func:`athenaeum.config.
+    auto_apply_threshold_ledger_override_for`. Pass the item's own raise
+    timestamp when re-deciding something that was ALREADY pending before
+    now, so a proposal approved after the item was raised cannot
+    retroactively widen the floor that gates it — see that function's
+    *as_of* contract for the fail-closed details. Omit it (the default) for
+    a genuinely fresh verdict being produced right now, which is every
+    call site except :func:`athenaeum.tiers.reresolve_open_questions`.
     """
     if action in _NEVER_AUTO_APPLY_ACTIONS:
         return None
@@ -866,7 +877,7 @@ def resolve_auto_apply_threshold_for(
     # is a pure no-op for them.
     if wiki_root is not None:
         ledger_override = auto_apply_threshold_ledger_override_for(
-            action, wiki_root=wiki_root, config=config
+            action, wiki_root=wiki_root, config=config, as_of=as_of
         )
         if ledger_override is not None:
             return ledger_override
