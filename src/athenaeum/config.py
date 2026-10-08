@@ -6768,8 +6768,27 @@ def resolve_auto_apply_proposals_widen_step(config: dict[str, Any] | None) -> fl
     )
 
 
+def _parse_auto_apply_ledger_timestamp(value: Any) -> datetime | None:
+    """Parse a ``created_at`` / ``raised_at`` UTC-ISO stamp (``athenaeum.store.now_iso``'s
+    ``"%Y-%m-%dT%H:%M:%SZ"`` rendering). ``None`` on anything else -- missing,
+    empty, or a format this parser does not recognize -- so a caller can fail
+    closed rather than guess (see :func:`auto_apply_threshold_ledger_override_for`'s
+    ``as_of`` contract).
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return None
+
+
 def auto_apply_threshold_ledger_override_for(
-    action: str, *, wiki_root: Path | None, config: dict[str, Any] | None = None
+    action: str,
+    *,
+    wiki_root: Path | None,
+    config: dict[str, Any] | None = None,
+    as_of: str | None = None,
 ) -> float | None:
     """A ledger-backed override for one resolver action's auto-apply floor
     (issue athenaeum#2018, athenaeum#719 Plan step 6).
@@ -6791,11 +6810,38 @@ def auto_apply_threshold_ledger_override_for(
     exist, or no approved record names *action* -- the caller
     (:func:`athenaeum.resolutions.resolve_auto_apply_threshold_for`) treats
     ``None`` as "no override", falling through to its own lower-precedence
-    layers. Explicit operator config (``resolve.auto_apply_threshold_per_action.<action>``
-    in ``athenaeum.yaml``, or the ``ATHENAEUM_RESOLVE_AUTO_APPLY_THRESHOLD``
-    env var) is consulted by the caller BEFORE this override, by design --
-    an operator's own explicit setting always wins over a proposal the
-    operator merely approved.
+    layers. Explicit per-action operator config
+    (``resolve.auto_apply_threshold_per_action.<action>`` in ``athenaeum.yaml``)
+    is consulted by the caller strictly BEFORE this layer, by design -- an
+    operator's own explicit per-action setting always wins over a proposal
+    the operator merely approved. The legacy scalar fallback
+    (``resolve.auto_apply_threshold`` / ``ATHENAEUM_RESOLVE_AUTO_APPLY_THRESHOLD``,
+    ``keep_a``/``keep_b`` only) is the OPPOSITE: it is a pre-athenaeum#170
+    compatibility knob, lower precedence than this ledger layer, and is only
+    consulted by the caller AFTER this function returns ``None`` -- do not
+    read the mention of "explicit operator config" above as covering the
+    legacy scalar too; the two are different layers with different rank
+    (issue athenaeum#2032).
+
+    *as_of* (issue athenaeum#2032): keyword-only, default ``None``. When a
+    caller is re-deciding a decision that was ALREADY RAISED/pending before
+    "now" (a proposal-less block :func:`athenaeum.tiers.reresolve_open_questions`
+    is re-verdicting), pass the item's own raise timestamp
+    (``athenaeum.answers.PendingQuestion.raised_at``, same
+    ``athenaeum.store.now_iso`` rendering) here. Only ``approve`` records
+    whose own ``created_at`` is at or before *as_of* are honored -- a
+    proposal approved AFTER the item was already raised must never
+    retroactively widen the floor that gates it (the athenaeum#2018 AC this
+    issue is closing: "approving an auto-apply-threshold proposal never
+    bypasses decisions already in flight"). An unparseable or empty *as_of*
+    fails CLOSED -- this function returns ``None`` (no ledger override at
+    all for this call) rather than guessing the item is older or newer than
+    every approval; callers that cannot resolve a reliable raise timestamp
+    for an item must not pass one at all (equivalent to omitting *as_of*,
+    which keeps the pre-athenaeum#2032 "trust the latest approval"
+    behavior for genuinely-fresh verdicts, e.g. :func:`athenaeum.tiers.
+    tier4_escalate`, which never re-decides an already-pending item and so
+    never passes *as_of*).
 
     *config* is accepted for signature symmetry with every other
     ``resolve_*`` function but is not consulted today -- there is no env
@@ -6806,6 +6852,15 @@ def auto_apply_threshold_ledger_override_for(
     del config  # unused today; see docstring
     if wiki_root is None:
         return None
+
+    as_of_dt: datetime | None = None
+    if as_of is not None:
+        as_of_dt = _parse_auto_apply_ledger_timestamp(as_of)
+        if as_of_dt is None:
+            # Fail closed: cannot establish when the item was raised, so no
+            # approval can be proven to predate it.
+            return None
+
     ledger_path = Path(wiki_root) / "_auto_apply_proposals.jsonl"
     if not ledger_path.is_file():
         return None
@@ -6835,6 +6890,15 @@ def auto_apply_threshold_ledger_override_for(
             resolved_ids.add(rec_id)
             proposal = pending_by_id.get(rec_id)
             if proposal and proposal.get("action") == action:
+                if as_of_dt is not None:
+                    approved_at = _parse_auto_apply_ledger_timestamp(
+                        record.get("created_at")
+                    )
+                    if approved_at is None or approved_at > as_of_dt:
+                        # Approved after the item was raised (or the approve
+                        # record itself has no readable timestamp) -- never
+                        # honor it for THIS item's as_of.
+                        continue
                 raw_threshold = proposal.get("proposed_threshold")
                 if raw_threshold is None:
                     continue
