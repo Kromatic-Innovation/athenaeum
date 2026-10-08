@@ -644,6 +644,91 @@ class TestEveryDeclaredDefaultAcceptanceTypeIsReachable:
 
 
 # ---------------------------------------------------------------------------
+# TestConfirmationGuard2ThroughTheRealCliPath — issue athenaeum#1996.
+#
+# The two classes above prove the mechanism (`is_default_acceptance` checked
+# against `origin_decision_type`) by calling `write_decision_answer(...,
+# origin_decision_type=...)` directly. That proves the applier-side fix but
+# not the writer side: the only thing that forwards `origin_decision_type`
+# for a real confirmation answer is `_cmd_decisions.py::_cmd_answer`, one
+# specific call site. If that forwarding were ever dropped, every test above
+# would stay green (they hand `origin_decision_type` in by hand), and only
+# this test — which drives the real CLI entry point, exactly as an operator
+# or agent would — would catch it.
+# ---------------------------------------------------------------------------
+
+
+class TestConfirmationGuard2ThroughTheRealCliPath:
+    _SAMPLE_ALL_CONFIG = {"librarian": {"default_acceptance_audit_sample_rate": 1.0}}
+
+    @staticmethod
+    def _cli_answer(store: Path, *, decision_id: str, verdict: str) -> int:
+        from athenaeum.cli import main as cli_main
+
+        return cli_main(
+            [
+                "decisions", "answer", "--path", str(store), "--id", decision_id,
+                "--type", "confirmation", "--answer", f'{{"verdict": "{verdict}"}}',
+            ]
+        )
+
+    def test_accepting_the_default_through_the_cli_is_tagged(
+        self, tmp_path: Path, wiki_root: Path, raw_root: Path
+    ) -> None:
+        """confirmation's default_action is "accept the narrowed scope" —
+        answering "approve" through the real CLI must round-trip
+        `origin_decision_type="confirmation"` into the written answer file
+        and be tagged as a default-acceptance when applied."""
+        from athenaeum.calibration import DEFAULT_ACCEPTANCE_TIER, read_calibration_ledger
+
+        pending_path = wiki_root / "_pending_questions.md"
+        qid = _write_question_block(pending_path)
+
+        rc = self._cli_answer(tmp_path, decision_id=qid, verdict="approve")
+        assert rc == 0
+
+        written = sorted((raw_root / "answers").glob("*.md"))
+        assert len(written) == 1
+        parsed = _load_decision_answer(written[0])
+        assert parsed is not None
+        assert parsed.decision_type == "question"  # the real applier type
+        assert parsed.origin_decision_type == "confirmation"
+
+        report = apply_decision_answers(
+            wiki_root, raw_root, config=self._SAMPLE_ALL_CONFIG
+        )
+        assert report.applied == 1
+
+        ledger = read_calibration_ledger(wiki_root)
+        audit_records = [r for r in ledger if r.get("kind") == "audit"]
+        assert len(audit_records) == 1, (
+            "a confirmation answered 'approve' via the real CLI was not "
+            "tagged as a default-acceptance"
+        )
+        assert audit_records[0]["tier"] == DEFAULT_ACCEPTANCE_TIER
+        assert audit_records[0]["proposal_id"] == qid
+
+    def test_overriding_the_default_through_the_cli_is_not_tagged(
+        self, tmp_path: Path, wiki_root: Path, raw_root: Path
+    ) -> None:
+        """Answering with "reject" overrides confirmation's default — must
+        NOT be tagged as a default-acceptance."""
+        from athenaeum.calibration import read_calibration_ledger
+
+        pending_path = wiki_root / "_pending_questions.md"
+        qid = _write_question_block(pending_path)
+
+        rc = self._cli_answer(tmp_path, decision_id=qid, verdict="reject")
+        assert rc == 0
+
+        report = apply_decision_answers(
+            wiki_root, raw_root, config=self._SAMPLE_ALL_CONFIG
+        )
+        assert report.applied == 1
+        assert read_calibration_ledger(wiki_root) == []
+
+
+# ---------------------------------------------------------------------------
 # TestVerdictLedgerWiring — issue athenaeum#712 Wiring AC.
 #
 # The verdict ledger is "consumed within this same issue by writing verdicts
