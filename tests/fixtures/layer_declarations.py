@@ -209,6 +209,10 @@ MODULE_LAYER: dict[str, int] = {
     "retraction_cascade": 4,
     "name_structure": 4,
     "rule_proposals": 4,
+    # Issue athenaeum#2015 (athenaeum#719 Plan step 3): dimension-proposal
+    # drafter -- a deterministic peer of rule_proposals.py/signal_mining.py,
+    # draws on signal_mining's MinedShape/ShapeKey (both L4).
+    "dimension_proposals": 4,
     # Issue athenaeum#719: shape mining over the verdict ledger (L2) and the
     # dimension coordinate readers (L1/L2 upper bound) -- the self-tuning
     # loop's signal-mining phase. Sibling L4 to rule_proposals.py, which it

@@ -5700,6 +5700,54 @@ def resolve_signal_mining_dry_run(config: dict[str, Any] | None) -> bool:
     return True
 
 
+def resolve_dimension_proposals_enabled(config: dict[str, Any] | None) -> bool:
+    """``librarian.dimension_proposals.enabled`` (default False). DEFAULT OFF.
+
+    Issue athenaeum#2015 (athenaeum#719 Plan step 3): with this off, nothing
+    about an existing deployment's behavior changes — the drafter
+    (:mod:`athenaeum.dimension_proposals`) is not invoked by any nightly
+    phase. Mirrors :func:`resolve_signal_mining_enabled`'s shape exactly:
+    env ``ATHENAEUM_DIMENSION_PROPOSALS_ENABLED``
+    (``1``/``true``/``yes``/``on``, case-insensitive) > yaml
+    ``librarian.dimension_proposals.enabled`` > default ``False``.
+    """
+    env = os.environ.get("ATHENAEUM_DIMENSION_PROPOSALS_ENABLED")
+    if env is not None:
+        return env.strip().lower() in ("1", "true", "yes", "on")
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            section_cfg = cfg.get("dimension_proposals")
+            if isinstance(section_cfg, dict):
+                raw = section_cfg.get("enabled")
+                if isinstance(raw, bool):
+                    return raw
+    return False
+
+
+def resolve_dimension_proposals_dry_run(config: dict[str, Any] | None) -> bool:
+    """``librarian.dimension_proposals.dry_run`` (default True).
+
+    Issue athenaeum#2015's dry-run-listing AC (athenaeum#719 Plan step 2's
+    remaining half): drafted proposals are computed and reported but never
+    appended to ``_dimension_proposals.jsonl`` while this is true. Consulted
+    only when :func:`resolve_dimension_proposals_enabled` is True. Mirrors
+    :func:`resolve_signal_mining_dry_run`'s env/yaml/default precedence.
+    """
+    env = os.environ.get("ATHENAEUM_DIMENSION_PROPOSALS_DRY_RUN")
+    if env is not None:
+        return env.strip().lower() in ("1", "true", "yes", "on")
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            section_cfg = cfg.get("dimension_proposals")
+            if isinstance(section_cfg, dict):
+                raw = section_cfg.get("dry_run")
+                if isinstance(raw, bool):
+                    return raw
+    return True
+
+
 def resolve_comparator_enabled(config: dict[str, Any] | None) -> bool:
     """Resolve the five-verdict comparator opt-in (issue athenaeum#715). DEFAULT OFF.
 
