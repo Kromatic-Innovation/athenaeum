@@ -1226,6 +1226,40 @@ case-insensitive) is truthy; a non-bool yaml value falls through to the
 default. No seed in ``_DEFAULTS`` — mirrors
 `resolve_push_metrics_enabled`'s shape.
 
+### `resolve_dimension_proposals_dry_run`
+
+- **YAML path:** `librarian.dimension_proposals.dry_run`
+- **Environment variable:** `ATHENAEUM_DIMENSION_PROPOSALS_DRY_RUN`
+- **CLI flag:** —
+- **Default:** `True`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+``librarian.dimension_proposals.dry_run`` (default True).
+
+'s dry-run-listing AC (Plan step 2's
+remaining half): drafted proposals are computed and reported but never
+appended to ``_dimension_proposals.jsonl`` while this is true. Consulted
+only when `resolve_dimension_proposals_enabled` is True. Mirrors
+`resolve_signal_mining_dry_run`'s env/yaml/default precedence.
+
+### `resolve_dimension_proposals_enabled`
+
+- **YAML path:** `librarian.dimension_proposals.enabled`
+- **Environment variable:** `ATHENAEUM_DIMENSION_PROPOSALS_ENABLED`
+- **CLI flag:** —
+- **Default:** `False`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+``librarian.dimension_proposals.enabled`` (default False). DEFAULT OFF.
+
+ (Plan step 3): with this off, nothing
+about an existing deployment's behavior changes — the drafter
+(`athenaeum.dimension_proposals`) is not invoked by any nightly
+phase. Mirrors `resolve_signal_mining_enabled`'s shape exactly:
+env ``ATHENAEUM_DIMENSION_PROPOSALS_ENABLED``
+(``1``/``true``/``yes``/``on``, case-insensitive) > yaml
+``librarian.dimension_proposals.enabled`` > default ``False``.
+
 ### `resolve_dimension_registry_epoch`
 
 - **YAML path:** `librarian.dimensions_registry_epoch`

@@ -9,6 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Self-tuning loop, Plan step 3: dimension-proposal drafter + decision
+  type (issue athenaeum#2015).** New `src/athenaeum/dimension_proposals.py`
+  (L4): `run_dimension_proposal_drafting()` turns a triggered
+  `MinedShape` (issue athenaeum#719's signal-mining step) into one
+  deterministic, ledgered proposal per missing dimension — no LLM call,
+  no client, no prompt, kept off the trigger path per athenaeum#719's own
+  AC. `plan_backfill()` marks each missing dimension `"auto"` (provenance
+  already recorded elsewhere) or `"ask"`, with a hard exception that
+  never auto-populates the kernel `scope` dimension from provenance even
+  when a caller's `coord_origins` names it (issue athenaeum#714's
+  "origin is provenance, not an answer" rule, restated for this
+  drafter). `enforce_ask_budget()` bounds a proposal's manual-backfill
+  tail against the EXISTING `resolve_decisions_budget_items_per_day_max`
+  resolver (issue athenaeum#1990/athenaeum#717) — reused rather than a
+  second budget knob — narrowing the affected-pair population or
+  flipping to auto-backfill-only, enforced in the drafter at proposal
+  time, never discovered at ratification. New ledger
+  `wiki/_dimension_proposals.jsonl`. Wired into the unified decision
+  queue: `decision_framing.py` gains a `"dimension-proposal"` entry in
+  `_TYPE_FRAMING` with a new three-way `_approve_rename_reject_schema()`
+  (approve/rename/reject), and `decisions.py` gains
+  `dimension_proposal_to_decision()`, reading the new ledger into
+  `list_pending_decisions()`'s union. The item is visible in the queue
+  but deliberately NOT YET answerable — `answerable_as("dimension-proposal")`
+  is `None` (no entry in `ANSWERABLE_AS`, and `"dimension-proposal"` is
+  NOT added to `decision_answers.VALID_DECISION_TYPES`) — ratification
+  (approve/rename/reject against the real dimension registry) is the
+  next child's `_apply_dimension_proposal_answer`; every inbound answer
+  path (the CLI, the MCP triage submit path, a hand-written answer file)
+  refuses cleanly rather than misrouting into
+  `_apply_proposed_rule_answer`. New config keys (mirroring
+  `librarian.signal_mining`'s shape): `librarian.dimension_proposals.enabled`
+  (default `false`) and `librarian.dimension_proposals.dry_run` (default
+  `true`). Not yet wired into the nightly librarian run — that is a
+  later Plan step.
 - **Self-tuning loop, Plan step 1: shape mining over the verdict ledger
   (issue athenaeum#719).** New `src/athenaeum/signal_mining.py`:
   `mine_underdetermined_shapes()` groups the live verdict ledger's
