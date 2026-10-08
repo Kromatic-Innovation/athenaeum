@@ -485,7 +485,6 @@ def run_dimension_proposal_drafting(
 
     records = read_dimension_proposals_ledger(wiki_root, ledger_path=ledger_path)
     resolved_ids = _resolved_ids(records)
-    rejected_ids = _kind_ids(records, REJECT_KIND)
     pending_ids = {
         str(r.get("id"))
         for r in records
@@ -502,7 +501,16 @@ def run_dimension_proposal_drafting(
         for dimension_name in shape.key.missing_dimensions:
             summary.candidates_seen += 1
             item_id = proposal_item_id(dimension_name, shape.key)
-            if item_id in rejected_ids:
+            # Issue athenaeum#2016: an APPROVED id must be suppressed the SAME
+            # way a REJECTED one is -- before ratification existed, nothing
+            # was ever in `resolved_ids` except via reject, so checking only
+            # `rejected_ids` here was unreachable-dead code, not a bug; now
+            # that approve is a real ledger outcome, an id resolved by
+            # approve but absent from `rejected_ids` fell through both guards
+            # below and got RE-DRAFTED as a brand-new proposal for a
+            # dimension already registered. Checking the full resolved set
+            # (approve OR reject) closes that.
+            if item_id in resolved_ids:
                 summary.skipped_suppressed += 1
                 continue
             if item_id in pending_ids:

@@ -294,6 +294,28 @@ class TestConditionStandingState:
 
 
 class TestConditionNoOverlaps:
+    def test_retired_dimension_excluded_like_backfill(self) -> None:
+        """Issue athenaeum#2016: ``_same_coordinates``'s existing
+        ``!= ENFORCED`` guard excludes a RETIRED dimension exactly like a
+        BACKFILL one -- no code change needed, only this regression test."""
+        from athenaeum.supersession import _same_coordinates
+
+        retired = Dimension(
+            name="engagement",
+            kind=DimensionKind.IDENTITY,
+            null_means=NullMeans.UNKNOWN,
+            separates=True,
+            state=LifecycleState.RETIRED,
+            origin="proposed:abc",
+        )
+        registry = DimensionRegistry(dimensions=(*DEFAULT_REGISTRY, retired))
+        # Different, non-null values on a RETIRED dimension would otherwise
+        # disjoint-separate the pair; excluded, the pair still reads as
+        # "same coordinates" on every other (kernel, all-absent) axis.
+        meta_winner = {"engagement": "alice"}
+        meta_loser = {"engagement": "bob"}
+        assert _same_coordinates(registry, meta_winner, meta_loser) is True
+
     def test_overlapping_valid_time_queues(self, tmp_path: Path) -> None:
         winner, loser = _golden_pair(
             winner_extra={"valid_from": date(2026, 1, 1), "valid_until": date(2026, 1, 31)},
