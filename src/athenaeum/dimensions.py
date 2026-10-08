@@ -90,6 +90,7 @@ import warnings
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Mapping
 
 from athenaeum.memory_class import MEMORY_CLASSES

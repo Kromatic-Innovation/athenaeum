@@ -42,7 +42,10 @@ from athenaeum.dimensions import (
     cross_corpus_compare,
     dimension_applies,
     maybe_flip_to_enforced,
+    restore_dimension,
+    retire_dimension,
     retire_dimension_coordinate,
+    retire_dimension_coordinate_across_wiki,
     scope_relation,
     stamp_recorded_time,
     validate_intake_temporal,
@@ -1211,4 +1214,117 @@ class TestScopeRelation:
 
     def test_disjoint(self) -> None:
         assert scope_relation({"claimed_scope": "org/team-a"}, "org/team-b") == "disjoint"
+
+
+# ---------------------------------------------------------------------------
+# LifecycleState.RETIRED + retire/restore transitions (issue athenaeum#2016)
+# ---------------------------------------------------------------------------
+
+
+class TestRetiredLifecycle:
+    def _operator_dim(self, **overrides: object) -> Dimension:
+        base = dict(
+            name="engagement",
+            kind=DimensionKind.IDENTITY,
+            null_means=NullMeans.UNKNOWN,
+            separates=True,
+            applies_to={},
+            state=LifecycleState.BACKFILL,
+            origin="operator",
+        )
+        base.update(overrides)
+        return Dimension(**base)  # type: ignore[arg-type]
+
+    def test_all_includes_retired(self) -> None:
+        assert LifecycleState.ALL == (
+            LifecycleState.BACKFILL,
+            LifecycleState.ENFORCED,
+            LifecycleState.RETIRED,
+        )
+
+    def test_retired_is_a_valid_dimension_state(self) -> None:
+        dim = self._operator_dim(state=LifecycleState.RETIRED)
+        assert dim.state == LifecycleState.RETIRED
+
+    def test_retire_dimension_flips_backfill_to_retired(self) -> None:
+        dim = self._operator_dim(state=LifecycleState.BACKFILL)
+        retired = retire_dimension(dim)
+        assert retired.state == LifecycleState.RETIRED
+        # Everything else about the entry is preserved verbatim.
+        assert retired.name == dim.name
+        assert retired.kind == dim.kind
+        assert retired.applies_to == dim.applies_to
+        assert retired.origin == dim.origin
+
+    def test_retire_dimension_flips_enforced_to_retired(self) -> None:
+        dim = self._operator_dim(state=LifecycleState.ENFORCED)
+        assert retire_dimension(dim).state == LifecycleState.RETIRED
+
+    def test_retire_dimension_is_idempotent(self) -> None:
+        dim = self._operator_dim(state=LifecycleState.RETIRED)
+        assert retire_dimension(dim) is dim or retire_dimension(dim).state == LifecycleState.RETIRED
+
+    def test_retire_dimension_refuses_a_kernel_dimension(self) -> None:
+        with pytest.raises(DimensionRegistryError):
+            retire_dimension(SCOPE)
+
+    def test_restore_dimension_reverses_to_backfill(self) -> None:
+        dim = self._operator_dim(state=LifecycleState.RETIRED)
+        restored = restore_dimension(dim)
+        assert restored.state == LifecycleState.BACKFILL
+
+    def test_restore_dimension_noop_when_not_retired(self) -> None:
+        dim = self._operator_dim(state=LifecycleState.BACKFILL)
+        assert restore_dimension(dim).state == LifecycleState.BACKFILL
+
+    def test_compare_dimension_retired_null_coordinate_is_unknown(self) -> None:
+        """AC: a RETIRED dimension with a null coordinate on either side
+        reads as unknown/absent, never a comparator error."""
+        dim = self._operator_dim(state=LifecycleState.RETIRED)
+        assert compare_dimension(dim, {"engagement": None}, {"engagement": "x"}) == (
+            Relation.UNKNOWN
+        )
+        assert compare_dimension(dim, {}, {}) == Relation.UNKNOWN
+
+    def test_retire_dimension_coordinate_across_wiki_renulls_every_carrier(
+        self, tmp_path: Path
+    ) -> None:
+        wiki_root = tmp_path
+        carrier_a = wiki_root / "a.md"
+        carrier_a.write_text("---\nengagement: high\n---\nbody a\n", encoding="utf-8")
+        carrier_b = wiki_root / "b.md"
+        carrier_b.write_text("---\nengagement: low\nother: x\n---\nbody b\n", encoding="utf-8")
+        untouched = wiki_root / "c.md"
+        untouched.write_text("---\nother: y\n---\nbody c\n", encoding="utf-8")
+        sidecar = wiki_root / "_pending_questions.md"
+        sidecar.write_text("---\nengagement: high\n---\n", encoding="utf-8")
+
+        changed = retire_dimension_coordinate_across_wiki(wiki_root, "engagement")
+
+        assert sorted(p.name for p in changed) == ["a.md", "b.md"]
+        assert "engagement: null" in carrier_a.read_text()
+        meta_b = carrier_b.read_text()
+        assert "engagement: null" in meta_b
+        assert "other: x" in meta_b
+        # Untouched page was never written (no coordinate at all).
+        assert untouched.read_text() == "---\nother: y\n---\nbody c\n"
+        # Sidecar file is skipped by its leading underscore.
+        assert "null" not in sidecar.read_text()
+
+    def test_retire_then_restore_never_resurrects_coordinates(self, tmp_path: Path) -> None:
+        """AC: un-retiring restores the dimension at backfill, never
+        resurrects nulled coordinates."""
+        wiki_root = tmp_path
+        page = wiki_root / "a.md"
+        page.write_text("---\nengagement: high\n---\nbody\n", encoding="utf-8")
+
+        dim = self._operator_dim(state=LifecycleState.ENFORCED)
+        retired = retire_dimension(dim)
+        retire_dimension_coordinate_across_wiki(wiki_root, dim.name)
+        assert "engagement: null" in page.read_text()
+
+        restored = restore_dimension(retired)
+        assert restored.state == LifecycleState.BACKFILL
+        # Restoring the REGISTRY entry does not touch any page.
+        assert "engagement: null" in page.read_text()
 
