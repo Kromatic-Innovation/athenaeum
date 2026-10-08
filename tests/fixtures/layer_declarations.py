@@ -215,6 +215,10 @@ MODULE_LAYER: dict[str, int] = {
     # drafter -- a deterministic peer of rule_proposals.py/signal_mining.py,
     # draws on signal_mining's MinedShape/ShapeKey (both L4).
     "dimension_proposals": 4,
+    # Issue athenaeum#2019 (athenaeum#719 Plan step 6): tier-movement + policy-pack-edit
+    # proposal drafters, same deterministic L4 peer shape as dimension_proposals.py.
+    "tier_movement_proposals": 4,
+    "policy_pack_edit_proposals": 4,
     # Issue athenaeum#719: shape mining over the verdict ledger (L2) and the
     # dimension coordinate readers (L1/L2 upper bound) -- the self-tuning
     # loop's signal-mining phase. Sibling L4 to rule_proposals.py, which it

@@ -13,12 +13,15 @@ from pathlib import Path
 from athenaeum.answers import raise_pending_question
 from athenaeum.decision_answers import apply_decision_answers, write_decision_answer
 from athenaeum.decision_budget import (
+    RATCHET_GUARDED_DECISION_TYPES,
+    RATCHET_REFUSAL_QUEUE_INFLOW_BREACH,
     budget_report,
     context_size_distribution,
     format_budget_report,
     item_age_p95_days,
     items_per_day,
     queue_depth_trend,
+    ratification_refusal,
     read_decision_budget_events,
     record_decision_answered,
     record_overflow_shapes,
@@ -403,3 +406,50 @@ def test_cmd_decisions_budget_surfaces_the_rate_via_the_shared_rendering(
     rendered = format_budget_report(report)
     assert "Default-acceptance rubber-stamp rate: n/a (none reviewed yet)" in rendered
     assert "sampled=1" in rendered
+
+
+class TestRatchetGuard:
+    """Issue athenaeum#2019 (athenaeum#719 Plan step 6, Ratchet guard 1): ratifying a
+    policy-pack-edit (or the sibling athenaeum#2018's auto-apply-threshold-proposal)
+    is refused outright while the queue's effort budget is in breach.
+    """
+
+    def test_guarded_types_refused_on_breach(self) -> None:
+        for decision_type in RATCHET_GUARDED_DECISION_TYPES:
+            assert (
+                ratification_refusal(decision_type, effort_budget_breach=True)
+                == RATCHET_REFUSAL_QUEUE_INFLOW_BREACH
+            )
+
+    def test_guarded_types_allowed_when_not_in_breach(self) -> None:
+        for decision_type in RATCHET_GUARDED_DECISION_TYPES:
+            assert ratification_refusal(decision_type, effort_budget_breach=False) is None
+
+    def test_unguarded_type_never_refused_regardless_of_breach(self) -> None:
+        for breach in (True, False):
+            assert ratification_refusal("merge", effort_budget_breach=breach) is None
+            assert ratification_refusal("proposed-rule", effort_budget_breach=breach) is None
+
+    def test_policy_pack_edit_is_guarded(self) -> None:
+        assert "policy-pack-edit" in RATCHET_GUARDED_DECISION_TYPES
+
+    def test_sibling_auto_apply_threshold_literal_is_guarded_by_name(self) -> None:
+        """athenaeum#2018's sibling type, named by string so this module gains no
+        import edge toward whatever module lands its drafter (see the
+        constant's own comment). If athenaeum#2018 merges under a different
+        literal, this assertion -- not a passing test elsewhere -- is
+        where the drift surfaces.
+        """
+        assert "auto-apply-threshold-proposal" in RATCHET_GUARDED_DECISION_TYPES
+
+    def test_every_guard_worthy_framing_entry_is_covered(self) -> None:
+        """Every ``_TYPE_FRAMING`` key naming 'auto-apply' or 'policy-pack'
+        must be in :data:`RATCHET_GUARDED_DECISION_TYPES` -- a cheap
+        regression against a new guard-worthy type landing unguarded.
+        """
+        from athenaeum.decision_framing import _TYPE_FRAMING
+
+        guard_worthy = {
+            t for t in _TYPE_FRAMING if "auto-apply" in t or "policy-pack" in t
+        }
+        assert guard_worthy <= RATCHET_GUARDED_DECISION_TYPES

@@ -118,9 +118,11 @@ from athenaeum.models import parse_frontmatter
 from athenaeum.page_split_proposals import list_pending_page_split_proposals
 from athenaeum.pagination import paginate
 from athenaeum.pending_merges import PendingMerge, parse_pending_merges
+from athenaeum.policy_pack_edit_proposals import list_pending_policy_pack_edit_proposals
 from athenaeum.quarantine import list_pending_quarantine
 from athenaeum.retraction_cascade import read_retraction_reviews
 from athenaeum.rule_proposals import list_pending_rule_proposals
+from athenaeum.tier_movement_proposals import list_pending_tier_movement_proposals
 
 log = logging.getLogger(__name__)
 
@@ -782,6 +784,83 @@ def auto_apply_threshold_proposal_to_decision(rec: dict) -> dict:
     }
 
 
+def tier_movement_proposal_to_decision(rec: dict) -> dict:
+    """Convert a tier-movement-proposal ledger record to a unified decision
+    dict (issue athenaeum#2019, athenaeum#719 Plan step 6).
+
+    A ``type: "tier-movement-proposal"`` item: the self-tuning loop's
+    drafter (:mod:`athenaeum.tier_movement_proposals`) found a claim whose
+    push/reference usage crossed a configured low-value threshold.
+    ``confidence`` is ``None`` -- deterministically derived, no model
+    score, mirroring :func:`proposed_rule_to_decision` /
+    :func:`dimension_proposal_to_decision`. There is no automatic tier to
+    move the claim into (athenaeum#1514 retired that vocabulary) -- see
+    :mod:`athenaeum.tier_movement_proposals`'s module docstring -- so this
+    is advisory-review only.
+    """
+    claim_id = rec.get("claim_id", "")
+    pushed_count = rec.get("pushed_count", 0)
+    referenced_count = rec.get("referenced_count", 0)
+    window_days = rec.get("window_days")
+    summary = (
+        f'Claim "{claim_id}" was pushed {pushed_count} time(s) but '
+        f"referenced {referenced_count} time(s) in the last {window_days} "
+        f"day(s) -- approve to flag it for human review, or reject to "
+        f"dismiss the finding."
+    )
+    return {
+        "type": "tier-movement-proposal",
+        "id": rec.get("id"),
+        "created_at": rec.get("created_at"),
+        "summary": summary,
+        "confidence": None,
+        "payload": {
+            "claim_id": claim_id,
+            "pushed_count": pushed_count,
+            "referenced_count": referenced_count,
+            "window_days": window_days,
+            "pushed_min": rec.get("pushed_min"),
+            "referenced_max": rec.get("referenced_max"),
+            "proposed_action": rec.get("proposed_action"),
+            "rationale": rec.get("rationale"),
+        },
+    }
+
+
+def policy_pack_edit_proposal_to_decision(rec: dict) -> dict:
+    """Convert a policy-pack-edit-proposal ledger record to a unified
+    decision dict (issue athenaeum#2019, athenaeum#719 Plan step 6).
+
+    A ``type: "policy-pack-edit"`` item: a proposed diff to a named
+    retention-policy pack (:mod:`athenaeum.policy_pack_edit_proposals`).
+    ``confidence`` is ``None`` -- no detector-reported score, same
+    convention as every other proposal builder in this module. This item
+    is framed :data:`~athenaeum.decision_framing.REVERSIBILITY_IRREVERSIBLE`
+    and is deliberately absent from
+    :data:`athenaeum.decision_framing.ANSWERABLE_AS` -- the only path to an
+    effective change is a future ratification applier's explicit human
+    ``"approve"``, never an auto-apply threshold crossing (see
+    :mod:`athenaeum.policy_pack_edit_proposals`'s module docstring).
+    """
+    pack_name = rec.get("pack_name", "")
+    summary = (
+        f'A proposed edit to policy pack "{pack_name}" is pending -- '
+        f"approve to apply it, or reject to discard the proposal."
+    )
+    return {
+        "type": "policy-pack-edit",
+        "id": rec.get("id"),
+        "created_at": rec.get("created_at"),
+        "summary": summary,
+        "confidence": None,
+        "payload": {
+            "pack_name": pack_name,
+            "proposed_diff": rec.get("proposed_diff", {}),
+            "rationale": rec.get("rationale"),
+        },
+    }
+
+
 def list_pending_merges_rich(merges_path: Path) -> list[dict]:
     """Unresolved merges as decidable dicts (title + gist + question)."""
     return [
@@ -966,6 +1045,17 @@ def list_pending_decisions(
         decisions += [
             auto_apply_threshold_proposal_to_decision(rec)
             for rec in list_pending_auto_apply_threshold_proposals(wiki_root)
+        ]
+        # Issue athenaeum#2019 (athenaeum#719 Plan step 6): drafted
+        # tier-movement and policy-pack-edit proposals, same
+        # visible-but-framed posture as dimension-proposal above.
+        decisions += [
+            tier_movement_proposal_to_decision(rec)
+            for rec in list_pending_tier_movement_proposals(wiki_root)
+        ]
+        decisions += [
+            policy_pack_edit_proposal_to_decision(rec)
+            for rec in list_pending_policy_pack_edit_proposals(wiki_root)
         ]
     # Issue athenaeum#717: framing is applied to the WHOLE union, at the one
     # point every item passes through, so no item can enter the queue unframed

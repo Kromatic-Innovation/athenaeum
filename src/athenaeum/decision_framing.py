@@ -562,8 +562,91 @@ _TYPE_FRAMING: dict[str, dict[str, Any]] = {
             "something the mining signal alone can decide."
         ),
     },
+    "tier-movement-proposal": {
+        # Issue athenaeum#2019 (athenaeum#719 Plan step 6): this is an ADVISORY
+        # review flag, not a tier assignment -- athenaeum#1514 retired the
+        # memory-tier vocabulary and its promote-on-use sweep, so there is
+        # no tier left to move a claim into, and approving this today
+        # changes nothing beyond the ledger record itself. Reversible is
+        # therefore the honest class: there is no mutation to undo.
+        "reversibility": REVERSIBILITY_REVERSIBLE,
+        # Same reasoning as "proposed-rule"/"dimension-proposal": adopting
+        # (or even just acknowledging) a usage-pattern finding as worth
+        # acting on is the operator's call, not the drafter's confidence.
+        "routing": ROUTING_AUTHORITY,
+        "schema": _approve_reject_schema(
+            description="approve = acknowledge the usage-pattern flag; "
+            "reject = dismiss it.",
+        ),
+        "default_action": "leave unacknowledged",
+        "default_consequences": (
+            "The claim's low-reference usage pattern is never reviewed; it "
+            "keeps being pushed at the same rate and keeps producing the "
+            "same proposal on the next drafting pass."
+        ),
+        "rationale": (
+            "A claim's push/reference counts crossed a configured "
+            "low-value threshold. There is no automatic tier-movement "
+            "executor (athenaeum#1514), so a human reviewing the pattern is the "
+            "only available next step."
+        ),
+    },
+    "policy-pack-edit": {
+        # athenaeum#719's own AC states this directly: "Policy-pack edits are
+        # proposal-only and never auto-applied -- policy changes are
+        # irreversible-class decisions." A retention-pack rule governs
+        # erasure-class classification for whole categories of future
+        # content; unwinding a bad edit after content has already been
+        # classified under it is not a simple undo. Same class as
+        # "retraction" for the same reason: a consequential, not-cheaply-
+        # reversible change to policy that governs other data.
+        "reversibility": REVERSIBILITY_IRREVERSIBLE,
+        "routing": ROUTING_AUTHORITY,
+        "schema": _approve_reject_schema(
+            description="approve = apply the proposed edit to the named "
+            "policy pack; reject = discard the proposal.",
+        ),
+        "default_action": "reject (do not edit the policy pack)",
+        "default_consequences": (
+            "The named policy pack's rule table is unchanged; whatever "
+            "classification gap or over/under-broad rule motivated the "
+            "proposal persists."
+        ),
+        "rationale": (
+            "A proposed edit to a retention-policy pack changes how future "
+            "content is classified for erasure/retention purposes across "
+            "the pack's whole ruleset. That is a policy decision, not "
+            "something any detector's confidence settles on its own."
+        ),
+    },
 }
 
+#: Issue athenaeum#2019 (athenaeum#719 Plan step 6, the delegation-ratchet
+#: guard): decision types whose RATIFICATION (an "approve" answer, once a
+#: future applier wires one in) must be refused outright while the queue's
+#: effort budget is in breach -- "no constitutional amendments during an
+#: emergency" (athenaeum#717's own Ratchet guard 1 wording). See
+#: :mod:`athenaeum.decision_budget`'s :data:`~athenaeum.decision_budget.
+#: RATCHET_GUARDED_DECISION_TYPES` and :func:`~athenaeum.decision_budget.
+#: ratification_refusal` for the actual guard -- this module only frames
+#: items, it does not gate ratification, so the guard is NOT re-declared
+#: here. This comment exists purely so a reader who finds "policy-pack-edit"
+#: here also finds the guard's module.
+
+#: Issue athenaeum#2015 (athenaeum#719 Plan step 3): "dimension-proposal" is
+#: framed (visible in the unified queue, with a real schema a future triage
+#: UI can render) but DELIBERATELY carries no entry in :data:`ANSWERABLE_AS`
+#: below -- :func:`answerable_as("dimension-proposal")` returns ``None``
+#: until the ratification child (the next one; see the module this issue's
+#: own "Out of scope" section names) lands
+#: ``decision_answers._apply_dimension_proposal_answer`` and registers it
+#: there. This is the SAME declared-but-not-yet-answerable state
+#: "quarantine" already lives in (see that type's own comment on
+#: :data:`_DEFAULT_ACCEPTANCE_VERDICT` above) -- not a half-wired bug.
+#: ``tests/test_dimension_proposals.py``'s misroute-guard tests assert both
+#: halves hold: the item is listed, and answering it is refused cleanly by
+#: every inbound caller (the CLI, the MCP triage path), never dispatched
+#: into ``decision_answers._apply_proposed_rule_answer`` by accident.
 #: Issue athenaeum#2015 (athenaeum#719 Plan step 3) framed "dimension-proposal"
 #: (visible in the unified queue, with a real schema) but deliberately left
 #: it out of :data:`ANSWERABLE_AS` until the ratification child landed.
