@@ -42,6 +42,115 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rather than adding a third surface. This measures; it never overrides a
   human's answer.
 
+- **Jev typed-decision backend for the `resolve` knob's action-choice path
+  (issue athenaeum#1997, Option A).** A new `DecisionBackend` Protocol +
+  `DecisionResult` dataclass (`decision_provider.py`, a sibling L3 module to
+  `provider.py`/`outbound_pii.py`) models Jev's (TypeSafe AI) three
+  structured-answer question types instead of widening the text-only
+  `LLMBackend` seam — see the module's docstring for why those two
+  surfaces must stay separate. A new knob family,
+  `llm.decision_providers.<knob>` yaml (`{provider: "none" | "jev",
+  redact_outbound: bool}`, default `provider: "none"`) /
+  `ATHENAEUM_<KNOB>_DECISION_PROVIDER` /
+  `ATHENAEUM_<KNOB>_DECISION_PROVIDER_REDACT_OUTBOUND` env
+  (`resolve_decision_provider()`), is deliberately kept OUT of
+  `provider.VALID_PROVIDERS` so a text-call knob can never be misrouted to
+  Jev. `resolutions.propose_resolution` gains an optional
+  `decision_backend` parameter: when the caller (`athenaeum
+  reresolve-questions`, the only production call site) resolves and
+  preflights the `resolve` knob's decision provider to `"jev"`, every
+  action EXCEPT `propose_merge` (which has no Jev-representable
+  `draft_merged_body` slot) routes through a Jev Choice question built
+  from the SAME `_RESOLVE_SYSTEM` prompt and user message the text path
+  already sends — no new prompt text. A Jev-routed `ResolutionProposal`
+  carries `jev_routed=True`, which the auto-apply gate
+  (`tiers._should_auto_apply`, both copies) checks FIRST, before the
+  per-action confidence threshold and before the `correct_*`/`forget_*`
+  authorship short-circuit: a Jev-routed proposal is always written
+  human-review-only, regardless of confidence, until a follow-up
+  recalibrates the thresholds against Jev's probability distribution
+  (they were set against Opus's self-reported confidence).
+  `preflight_decision_provider()` fails loudly at startup on a missing
+  `JEV_API_KEY` — no silent fallback to the text provider. A transient Jev
+  error maps to `athenaeum._retry.TransientError`; exhaustion or an
+  uncoercible response falls back to the existing `_fallback()` path. A
+  Jev-routed call's (chars/4-approximated — Jev's typed-answer wire
+  contract carries no token counters) spend is ledgered as its own
+  `provider="jev"` row (`spend.PROVIDER_JEV`, `RUN_TYPE_RERESOLVE`), with a
+  `models.py` pricing-table entry (`"jev": (0.042, 0.0)` USD/MTok,
+  flaviocopes.com/jev/) — note for operators: `configure_model_rates`
+  REPLACES the active rate table wholesale from `athenaeum.yaml`'s
+  `pricing:` section when one is set, so a deployment that already
+  overrides pricing must add this row to its OWN config by hand. The Jev
+  wire shape (request/response JSON) was not independently re-verified
+  against a live Jev account during this issue (none was available — see
+  the issue's "Operator host step"); the translation is isolated in
+  `JevDecisionBackend._build_payload`/`_parse_payload` for a one-place
+  correction once a credential exists. Evals: not needed — no prompt text
+  or model-knob default changed; this issue only wires a new, default-OFF
+  provider option behind an existing prompt.
+
+- **Deprecation-flag mechanism for legacy CLI surfaces, and the first real
+  migration of legacy queue data into the unified `decisions.py` schema
+  (issue athenaeum#1992, slice (c)/AC-group-1 of athenaeum#717).**
+  `athenaeum.config.deprecated_cli_surface_message(surface, config)` /
+  `resolve_deprecated_cli_surfaces_enabled` (new `librarian.
+  deprecated_cli_surfaces_enabled` yaml key /
+  `ATHENAEUM_DEPRECATED_CLI_SURFACES_ENABLED` env override, **default ON**)
+  is the documented mechanism a CLI surface declares itself against; `athenaeum
+  merges` and `athenaeum questions` now print a one-line stderr warning on
+  every invocation pointing at `athenaeum decisions` — behavior is otherwise
+  byte-identical, so nothing reachable through either surface is blocked.
+  `athenaeum.decisions.migrate_legacy_queues(wiki_root)` (new `athenaeum
+  decisions migrate` CLI mode) is the first thing this module has ever
+  written to disk: it materializes every `_pending_merges.md` /
+  `_pending_questions.md` record — resolved AND unresolved — into a
+  persisted unified-schema mirror (`wiki/_decisions_queue.jsonl`), preserving
+  every record's id and disposition unchanged (it never calls
+  `resolve_merge`/`resolve_by_id`; read-only w.r.t. the legacy stores,
+  idempotent, re-syncable). Covered by
+  `tests/test_decisions_migration.py` (id-set / disposition-drift
+  comparison against a fixture legacy store, including two fixture
+  PII-hazard proposals that stay unapproved by id, not by count) and
+  `tests/test_deprecated_cli_surfaces.py`. The other four unioned decision
+  types (`retraction`/`audit`/`quarantine`/`proposed-rule`) are
+  ledger-derived with no comparable legacy CLI and are untouched. `athenaeum
+  audit`'s page-freshness surface (`_cmd_audit.py`) is NOT flagged
+  deprecated here — it has no overlap with `decisions.py`'s own, unrelated
+  `audit` item type (a calibration-sampled-review record); see the PR
+  description for the full discrepancy note.
+- **Coordinate-answer loop: a real `coordinate` decision type + mechanical
+  re-compare (issue athenaeum#1993).** Closes the loop issue athenaeum#1991's
+  batching left open. `decision_framing._TYPE_FRAMING` gains a `coordinate`
+  entry (reversible, competence-routed) with a response schema; a queued
+  coordinate batch (`verdict_effects.queue_coordinate_batch`,
+  `_apply_underdetermined`) now tags its `_pending_questions.md` block
+  `**Decision kind**: coordinate` (threaded through a new
+  `EscalationItem.decision_kind` field, default `"question"`, so every
+  other escalation renders byte-for-byte unchanged), surfaced by
+  `athenaeum decisions list` as `type: "coordinate"`
+  (`decisions.coordinate_to_decision`) instead of the generic free-text
+  question fallback. `athenaeum decisions answer --type coordinate` is
+  registered via `decision_framing.answerable_as`; its inbound applier
+  (`decision_answers._apply_coordinate_answer`) validates the decoded
+  answer against a dedicated structural schema
+  (`decision_framing.validate_coordinate_payload`), writes the supplied
+  coordinate value(s) to the affected page(s)' frontmatter by reusing
+  `pending_merges._write_coordinate`/`_widen_over_metas` verbatim, stale-
+  marks the pair, and mechanically re-compares it through the existing
+  `comparator.record_comparison` entry point — `client=None` always (this
+  module makes no LLM call, ever); the common separator-dimension case
+  (e.g. a human-ratified `subject` identity answer) resolves on Gate 1
+  alone, and a pair that genuinely still needs Gate 2 is left for the
+  next LLM-backed comparator pass rather than blocked on. The freshly
+  decided verdict is ledgered exactly like any other comparator verdict,
+  giving it provenance (`basis`) and revocability (`stale`/
+  `stale_reason`) with no new machinery. `coord_origins` population and
+  its blast-radius stale-marking are deliberately left untouched — that
+  is issue athenaeum#1994's job, which this issue leaves a clean seam for
+  (`verdict_effects.member_provenance_for_batch` + the decision-answer's
+  own stable id).
+
 - **Meaning-based `subject` population extended to raw auto-memory cluster
   members (issue athenaeum#1946, follow-up to athenaeum#1944).** `athenaeum
   subject-population` gains `--include-raw-members <clusters-path>`,
@@ -317,6 +426,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Inline phone detector no longer flags bare digit-run identifiers
+  embedded in URLs, filenames, or backticks (issue athenaeum#2006).**
+  `find_inline_phones` (and the mirrored `phone` sensitivity recognizer)
+  previously treated any separator-free 10-15 digit run as phone-shaped —
+  a band that also covers common non-phone identifiers that appear
+  unlabeled in prose, such as comment/run ids embedded in a URL or
+  filename, or a digit run inside an inline-code span. A new structural
+  exclusion (`_is_embedded_bare_digit_run`) retires a bare digit run that
+  is either attached (no intervening whitespace) to an adjacent token
+  carrying a letter via a URL/path/filename joiner, or sits inside
+  backticks. Formatted numbers (with `+`, parens, or separators) and
+  labeled numbers (`tel:`/`phone:`/`mobile:`) are unaffected.
+  `recompare.identify_pii_hazards` also now accepts the adjudicated PII
+  allowlist (`athenaeum.pii.load_pii_allowlist`, resolved once per run
+  from the wiki root `lint-pii`/`migrate-pii` already read) so an
+  operator-adjudicated address no longer floods the comparator's
+  PII-hazard route on every recompare pass.
 - **The name-collision scanner no longer re-detects a folded-away page
   (issue athenaeum#716).** `scan_name_collisions` now skips tombstones, which
   are excluded from every index and invisible to recall and so should not

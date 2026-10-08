@@ -182,8 +182,8 @@ class TestAC1LandedDark:
         assert resolve_comparator_enabled(config) is False
 
     def test_comparator_module_not_imported_by_pipeline_entry_points(self) -> None:
-        """Neither ``librarian.py`` nor ``decision_answers.py`` imports this
-        module DIRECTLY. Issue athenaeum#715's cut-over does wire the comparator
+        """``librarian.py`` never imports this module, DIRECTLY or
+        otherwise. Issue athenaeum#715's cut-over does wire the comparator
         into the pipeline — but through ``athenaeum.wiki_dedupe`` (see
         ``tests/test_comparator_phase2_integration.py::TestPhase2StaysDark``
         for the full, up-to-date map of who is and is not authorized to
@@ -191,10 +191,43 @@ class TestAC1LandedDark:
         contradiction detector is separately unaffected and still does not
         reach this module at all."""
         repo_root = Path(__file__).resolve().parents[1]
-        for rel in ("src/athenaeum/librarian.py", "src/athenaeum/decision_answers.py"):
-            src = (repo_root / rel).read_text(encoding="utf-8")
-            assert "athenaeum.comparator" not in src
-            assert "import comparator" not in src
+        src = (repo_root / "src/athenaeum/librarian.py").read_text(encoding="utf-8")
+        assert "athenaeum.comparator" not in src
+        assert "import comparator" not in src
+
+    def test_decision_answers_imports_comparator_only_lazily_for_coordinate(
+        self,
+    ) -> None:
+        """Issue athenaeum#1993 is a DELIBERATE, narrow exception to the
+        "stays dark" rule above: ``decision_answers.py`` now reaches this
+        module, but ONLY to mechanically re-compare a pair a human just
+        answered a coordinate request for — a path that can only ever run
+        if the comparator pipeline already produced that coordinate
+        request in the first place (``comparator_enabled`` was already on).
+        Asserted structurally via ``ast`` rather than a substring check: no
+        MODULE-LEVEL (top-of-file) import of ``athenaeum.comparator`` may
+        exist — every reference must be a function-local, deferred import,
+        matching this module's own established convention for every other
+        per-type L4 dependency (``athenaeum.pending_merges``,
+        ``athenaeum.calibration``, ``athenaeum.rule_proposals``, ...)."""
+        import ast
+
+        repo_root = Path(__file__).resolve().parents[1]
+        src = (repo_root / "src/athenaeum/decision_answers.py").read_text(encoding="utf-8")
+        assert "athenaeum.comparator" in src, (
+            "this test itself is stale if athenaeum#1993's import disappears "
+            "-- update or remove it, don't let it silently pass on nothing"
+        )
+        tree = ast.parse(src)
+        for node in ast.iter_child_nodes(tree):
+            if isinstance(node, ast.ImportFrom) and node.module == "athenaeum.comparator":
+                pytest.fail(
+                    "athenaeum.comparator must only be imported function-"
+                    "locally (deferred), never at module level, in "
+                    "decision_answers.py"
+                )
+            if isinstance(node, ast.Import):
+                assert not any(alias.name == "athenaeum.comparator" for alias in node.names)
 
     def test_single_entry_point_implements_full_five_verdict_space(self) -> None:
         """compare_pages can reach all five verdicts plus the no-verdict

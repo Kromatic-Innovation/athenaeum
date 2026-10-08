@@ -1893,6 +1893,17 @@ class EscalationItem:
     # Empty for non-source-attributed escalations (the enactment lane then
     # no-ops). Stored as strings to keep the dataclass trivially copyable.
     members: list[str] = field(default_factory=list)
+    # Issue athenaeum#1993: the block's ``**Decision kind**:`` tag -- the
+    # SAME generic field athenaeum#1290 added to
+    # :class:`athenaeum.answers.PendingQuestion` for ``confirmation``, now
+    # also written by the DETECTOR side (:func:`tier4_escalate`), not just
+    # the agent-raised side (:func:`athenaeum.answers.raise_pending_question`).
+    # Defaults to ``"question"`` -- every pre-athenaeum#1993 caller's output
+    # is byte-for-byte unchanged (`tier4_escalate` only renders a
+    # ``**Decision kind**:`` line when this is NOT the default; see that
+    # function). ``"coordinate"`` is the one other value in use today
+    # (:func:`athenaeum.verdict_effects.queue_coordinate_batch`).
+    decision_kind: str = "question"
 
 
 # Conflict taxonomy (moved from athenaeum.contradictions, issue athenaeum#1253, step S0 of the
@@ -1978,6 +1989,15 @@ _MODEL_RATES_USD_PER_MTOK: dict[str, tuple[float, float]] = {
     # reason as the Claude 5 family above.
     "claude-fable-5": (10.0, 50.0),
     "claude-mythos-5": (10.0, 50.0),
+    # Jev (TypeSafe AI) typed-decision backend (issue athenaeum#1997). Published
+    # rate: $0.042/M input, $0/M output (flaviocopes.com/jev/, re-verify at
+    # build time per the issue's own AC — unverified against a live account
+    # while implementing this). configure_model_rates() REPLACES this table
+    # wholesale from athenaeum.yaml's `pricing:` section when one is set, so a
+    # deployment that already carries a `pricing:` section must add this row
+    # by hand to its OWN athenaeum.yaml — this code-default entry only helps
+    # an install with no `pricing:` override.
+    "jev": (0.042, 0.0),
     # Explicit 4.6/4.7/4.8-tier and Sonnet-4.6/Haiku-4.5 entries (issue athenaeum#777).
     # The shorter claude-opus-4 / claude-sonnet-4 / claude-haiku-4 prefixes below
     # already resolve these correctly via longest-prefix match — this is
@@ -2218,6 +2238,15 @@ _MIN_CACHEABLE_PREFIX_TOKENS: dict[str, int] = {
     "claude-sonnet-4": 1024,
     # claude-haiku-4 has exactly one member, Haiku 4.5.
     "claude-haiku-4": 4096,
+    # Jev (TypeSafe AI, issue athenaeum#1997) is not an Anthropic Messages API
+    # model and never receives a ``cache_control`` breakpoint -- its wire
+    # protocol (decision_provider.py) has no such concept at all. Recorded
+    # here only because ``test_min_cacheable_table_covers_every_priced_model_
+    # family`` requires every ``_MODEL_RATES_USD_PER_MTOK`` prefix to have a
+    # floor; the value is inert (no call site ever consults it for "jev").
+    # Uses the most conservative tier so it can never be mistaken for a
+    # cacheable prefix if that assumption ever changes.
+    "jev": 4096,
 }
 
 

@@ -87,6 +87,7 @@ from athenaeum.pii import (
     _PHONE_RE,
     _has_enough_digits,
     _has_labeled_identifier_prefix,
+    _is_embedded_bare_digit_run,
     _is_excluded_phone_shape,
 )
 from athenaeum.screening import _ACCESS_RANK
@@ -239,10 +240,12 @@ class _PhoneRecognizer:
     the digit floor is skipped, a provably-non-phone shape
     (:func:`athenaeum.pii._is_excluded_phone_shape` — ISO dates, year
     ranges, bare id fragments, bare ISBN-13s; athenaeum#500 / athenaeum#683 / athenaeum#720)
-    is skipped, and a run the surrounding prose already types as a labeled
+    is skipped, a run the surrounding prose already types as a labeled
     record id (:func:`athenaeum.pii._has_labeled_identifier_prefix`; athenaeum#732)
-    is skipped — so migrating a caller onto this registry cannot regress
-    either issue's fix. Unlike :func:`~athenaeum.pii.find_inline_phones` this
+    is skipped, and a bare digit run embedded in a URL/path/filename
+    identifier or inside backticks (:func:`athenaeum.pii._is_embedded_bare_digit_run`;
+    athenaeum#2006) is skipped — so migrating a caller onto this registry cannot
+    regress any of those fixes. Unlike :func:`~athenaeum.pii.find_inline_phones` this
     does not dedupe: each occurrence of a repeated value is its own match,
     carrying its own span. Scans ``text`` only; ``frontmatter`` is accepted
     for protocol conformance but not consulted.
@@ -262,6 +265,8 @@ class _PhoneRecognizer:
             if _is_excluded_phone_shape(token):
                 continue
             if _has_labeled_identifier_prefix(source[: m.start(1)]):
+                continue
+            if _is_embedded_bare_digit_run(source, m.start(1), m.end(1)):
                 continue
             matches.append(
                 SensitivityMatch(

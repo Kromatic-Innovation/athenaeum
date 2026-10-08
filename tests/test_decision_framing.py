@@ -48,6 +48,8 @@ LIVE_DECISION_TYPES = (
     "audit",
     "quarantine",
     "proposed-rule",
+    # Issue athenaeum#1993.
+    "coordinate",
 )
 
 

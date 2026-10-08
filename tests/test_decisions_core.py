@@ -12,6 +12,7 @@ from athenaeum.decisions import (
     _one_line,
     age_days,
     confirmation_to_decision,
+    coordinate_to_decision,
     decision_time_minutes,
     list_pending_decisions,
     quarantine_to_decision,
@@ -162,6 +163,45 @@ def test_confirmation_to_decision_shape() -> None:
         "context": pq.description,
         "raised_by": "agent",
     }
+
+
+def test_coordinate_to_decision_shape() -> None:
+    """Mirrors test_confirmation_to_decision_shape above -- issue athenaeum#1993's
+    second ``decision_kind`` delegation."""
+    description = (
+        "Do these 1 pair actually differ by subject, and if so which side "
+        "is which for each? Missing dimension(s) named across the batch: "
+        "subject.\n"
+        "Members:\n"
+        '- page-a+page-b: question text (A: page-a "Page A", B: page-b "Page B")\n'
+        '<!-- athenaeum:coordinate-batch-members [{"dimensions": ["subject"], '
+        '"pair": "page-a+page-b"}] -->'
+    )
+    pq = PendingQuestion(
+        id="abc123",
+        entity="coordinate batch: 1 pair(s)",
+        source="coordinate-batch:deadbeef1234",
+        question="Do these 1 pair actually differ by subject...?",
+        conflict_type="ambiguous",
+        description=description,
+        created_at="2026-10-07",
+        answered=False,
+        answer_lines=[],
+        raw_block="",
+        decision_kind="coordinate",
+    )
+    decision = coordinate_to_decision(pq)
+    assert decision["type"] == "coordinate"
+    assert decision["id"] == "abc123"
+    assert decision["confidence"] is None
+    assert decision["created_at"] == "2026-10-07"
+    assert decision["summary"] == pq.question
+    payload = decision["payload"]
+    assert payload["batch_ref"] == "coordinate-batch:deadbeef1234"
+    assert payload["conflict_type"] == "ambiguous"
+    assert payload["description"] == description
+    assert payload["members"] == [{"pair": "page-a+page-b", "dimensions": ["subject"]}]
+    assert payload["raised_by"] == ""
 
 
 def test_plain_question_payload_shape_unchanged_by_confirmation_field(

@@ -92,6 +92,7 @@ from athenaeum.config import (
     resolve_page_size_threshold_chars,
     resolve_preserved_log_dir,
 )
+from athenaeum.decision_provider import DecisionBackend
 from athenaeum.entity_resolution import (
     Ambiguous,
     Match,
@@ -7064,6 +7065,14 @@ def tier4_escalate(
         """
         if prop is None:
             return (False, None)
+        # Issue athenaeum#1997: a Jev-routed proposal is human-review-only
+        # regardless of confidence -- checked FIRST, before the per-action
+        # threshold AND before the correct_*/forget_* authorship
+        # short-circuit below, since this path's thresholds were tuned
+        # against Opus's self-reported confidence, not Jev's calibrated
+        # probability.
+        if getattr(prop, "jev_routed", False):
+            return (False, None)
         action = getattr(prop, "action", None)
         if not isinstance(action, str):
             return (False, None)
@@ -7428,12 +7437,29 @@ def tier4_escalate(
         fingerprint_line = (
             f"**Fingerprint**: {item_fingerprint}\n" if item_fingerprint else ""
         )
+        # Issue athenaeum#1993: a ``decision_kind`` other than the default
+        # ``"question"`` (today, only ``"coordinate"`` --
+        # :func:`athenaeum.verdict_effects.queue_coordinate_batch`) is
+        # rendered as its own ``**Decision kind**:`` line, the SAME line
+        # athenaeum#1290's agent-raised confirmation path already writes
+        # (:func:`athenaeum.answers.raise_pending_question`) and
+        # ``_parse_block`` already reads back generically (keyed off
+        # ``_CONFIRMATION_FIELD_PREFIXES``, despite that dict's name --
+        # it is not confirmation-specific). Omitted for the default, so
+        # every pre-athenaeum#1993 block (and every other verdict's escalation)
+        # renders byte-for-byte unchanged.
+        decision_kind_line = (
+            f"**Decision kind**: {item.decision_kind}\n"
+            if item.decision_kind and item.decision_kind != "question"
+            else ""
+        )
         block = (
             f'## [{today}] Entity: "{escaped_entity}" (from {item.raw_ref})\n'
             f"- [ ] {question}\n\n"
             f"**Conflict type**: {item.conflict_type}\n"
             f"**Description**: {item.description}\n"
             f"{fingerprint_line}"
+            f"{decision_kind_line}"
         )
         proposal = getattr(item, "proposal", None)
         item_members = getattr(item, "members", None)
@@ -7849,6 +7875,8 @@ def reresolve_open_questions(
     config: dict[str, Any] | None = None,
     usage: TokenUsage | None = None,
     projects_root: Path | None = None,
+    decision_backend: "DecisionBackend | None" = None,
+    decision_redact_outbound: bool = False,
 ) -> int:
     """Re-resolve OPEN, PROPOSAL-LESS pending questions (issue athenaeum#188).
 
@@ -7888,10 +7916,12 @@ def reresolve_open_questions(
     if not pending_path.exists():
         return 0
 
-    # Offline: no resolver. Leave everything as-is so a later run can heal it.
-    # propose_resolution would only return the deterministic fallback here,
-    # which renders to "" — so this is also a cost/no-op short-circuit.
-    if client is None:
+    # Offline: no resolver AND no Jev decision backend (issue athenaeum#1997
+    # widened this check -- a Jev-only run, text ``client=None``, must not
+    # short-circuit here). propose_resolution would only return the
+    # deterministic fallback with neither, which renders to "" — so this is
+    # also a cost/no-op short-circuit.
+    if client is None and decision_backend is None:
         return 0
 
     from athenaeum.answers import parse_pending_questions
@@ -7963,6 +7993,11 @@ def reresolve_open_questions(
     resolver_model_id = _resolver_model(resolved_config)
 
     def _should_auto_apply(prop: Any, members: list[str] | None = None) -> bool:
+        # Issue athenaeum#1997: a Jev-routed proposal is human-review-only
+        # regardless of confidence -- see the sibling gate's identical check
+        # in tier4_escalate above for the full rationale.
+        if getattr(prop, "jev_routed", False):
+            return False
         action = getattr(prop, "action", None)
         if not isinstance(action, str):
             return False
@@ -8051,7 +8086,13 @@ def reresolve_open_questions(
         # wiki_root — no new parameter needed to resolve the ledger behind
         # the seam.
         proposal = propose_resolution(
-            result, members, client, usage=usage, wiki_root=pending_path.parent
+            result,
+            members,
+            client,
+            usage=usage,
+            wiki_root=pending_path.parent,
+            decision_backend=decision_backend,
+            decision_redact_outbound=decision_redact_outbound,
         )
 
         action = getattr(proposal, "action", None)

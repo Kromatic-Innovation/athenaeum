@@ -34,7 +34,11 @@ from pathlib import Path
 from typing import Any
 
 from athenaeum.answers import PendingQuestion, parse_pending_questions
-from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT
+from athenaeum.config import (
+    DEFAULT_KNOWLEDGE_ROOT,
+    deprecated_cli_surface_message,
+    load_config,
+)
 
 # Keys the resolver appends to a block tail (locked by issue athenaeum#126 and the
 # resolutions.py module docstring). Order matters for re-extraction.
@@ -114,6 +118,12 @@ def cmd_questions(args: argparse.Namespace) -> int:
     The hook surface contract: this never raises on a missing or empty
     ``_pending_questions.md`` — count returns 0 / null oldest, list/next
     print nothing and exit 0. Lets the SessionStart hook fail-silent.
+
+    Issue athenaeum#1992: this surface is flagged deprecated in favor of
+    ``athenaeum decisions`` (pending questions are now surfaced, framed, and
+    answerable there too) — a one-line warning on stderr before dispatch,
+    behavior otherwise unchanged; see
+    :func:`athenaeum.config.deprecated_cli_surface_message`.
     """
     sub = getattr(args, "questions_target", None)
     if sub not in ("list", "next", "count"):
@@ -122,6 +132,13 @@ def cmd_questions(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+
+    knowledge_root = (
+        (getattr(args, "path", None) or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
+    )
+    message = deprecated_cli_surface_message("questions", load_config(knowledge_root))
+    if message:
+        print(f"DEPRECATED: {message}", file=sys.stderr)
 
     pending_path = _resolve_pending_path(args)
     questions = _unanswered(pending_path)

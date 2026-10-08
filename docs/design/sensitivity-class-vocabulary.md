@@ -389,10 +389,11 @@ repeated occurrences of one value into a single match. athenaeum#989 resolved
 this in favor of `span` (the choice that keeps a future span-consuming
 caller migratable): `_EmailRecognizer`/`_PhoneRecognizer` iterate
 `pii._EMAIL_RE`/`pii._PHONE_RE` directly via `.finditer`, applying
-`pii._is_excluded_phone_shape` and `pii._has_labeled_identifier_prefix` so
-the phone false-positive suppression `find_inline_phones` already has
-(athenaeum#500 / athenaeum#683 / athenaeum#720 / athenaeum#732) is preserved
-byte-for-byte, and yielding one `SensitivityMatch` — with a real
+`pii._is_excluded_phone_shape`, `pii._has_labeled_identifier_prefix`, and
+`pii._is_embedded_bare_digit_run` so the phone false-positive suppression
+`find_inline_phones` already has (athenaeum#500 / athenaeum#683 / athenaeum#720 /
+athenaeum#732 / athenaeum#2006) is preserved byte-for-byte, and yielding one
+`SensitivityMatch` — with a real
 `(start, end)` span — per occurrence rather than a deduped set.
 `find_inline_emails`/`find_inline_phones` themselves, and every existing
 caller of either, are untouched.

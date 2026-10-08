@@ -1176,6 +1176,32 @@ re-cluster cost so a pathological closure can never do MORE work than a full
 run. ``librarian.delta.max_affected_members``; ``bool`` and non-positive /
 non-int values fall through to the default.
 
+### `resolve_deprecated_cli_surfaces_enabled`
+
+- **YAML path:** `librarian.deprecated_cli_surfaces_enabled`
+- **Environment variable:** `ATHENAEUM_DEPRECATED_CLI_SURFACES_ENABLED`
+- **CLI flag:** —
+- **Default:** `True`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve whether deprecated-CLI-surface warnings are shown.
+
+ON by default: a deprecated surface (see
+`DEPRECATED_CLI_SURFACE_MESSAGES`) prints a one-line warning to
+stderr before running, on every invocation, pointing at its
+``athenaeum decisions`` replacement — the documented deprecation-flag
+mechanism 's "no separate queue survives... behind a
+documented deprecation flag" escape hatch requires. The flagged surface
+itself keeps working unchanged either way; this flag only toggles the
+warning's visibility, never behavior, so a scripted consumer mid
+transition is never broken by it. Precedence:
+``ATHENAEUM_DEPRECATED_CLI_SURFACES_ENABLED`` env >
+``librarian.deprecated_cli_surfaces_enabled`` yaml > ``True``. Any env
+value other than a falsey token (``0`` / ``false`` / ``no`` / ``off``,
+case-insensitive) is truthy; a non-bool yaml value falls through to the
+default. No seed in ``_DEFAULTS`` — mirrors
+`resolve_push_metrics_enabled`'s shape.
+
 ### `resolve_dimension_registry_epoch`
 
 - **YAML path:** `librarian.dimensions_registry_epoch`
@@ -4014,6 +4040,8 @@ auto-applying tier from the one loop meant to catch it being wrong.
 | `ATHENAEUM_RESOLVED_SIMILARITY_THRESHOLD` | `src/athenaeum/fingerprint.py` |
 | `ATHENAEUM_RESOLVE_AUTO_APPLY` | `src/athenaeum/resolutions.py` |
 | `ATHENAEUM_RESOLVE_AUTO_APPLY_THRESHOLD` | `src/athenaeum/config.py`, `src/athenaeum/resolutions.py` |
+| `ATHENAEUM_RESOLVE_DECISION_PROVIDER` | `src/athenaeum/decision_provider.py` |
+| `ATHENAEUM_RESOLVE_DECISION_PROVIDER_REDACT_OUTBOUND` | `src/athenaeum/decision_provider.py` |
 | `ATHENAEUM_RESOLVE_FULL_BODY_TOKEN_CAP` | `src/athenaeum/resolutions.py` |
 | `ATHENAEUM_RESOLVE_LLM_PROVIDER` | `src/athenaeum/_cmd_pending.py` |
 | `ATHENAEUM_RESOLVE_MAX_PER_RUN` | `src/athenaeum/config.py`, `src/athenaeum/resolutions.py` |
