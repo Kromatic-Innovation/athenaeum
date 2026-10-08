@@ -501,12 +501,18 @@ class TestAnswerableTypeTranslation:
         """A confirmation IS a question block -- same store, same resolution."""
         assert answerable_as("confirmation") == "question"
 
+    def test_dimension_proposal_routes_to_its_own_applier(self) -> None:
+        """Issue athenaeum#2016 (the ratification child of athenaeum#2015): removed
+        from the parametrized "no applier" case below -- it now registers
+        its own applier, self-mapped (no translation, unlike confirmation).
+        """
+        assert answerable_as("dimension-proposal") == "dimension-proposal"
+
     @pytest.mark.parametrize(
         "decision_type",
         [
             "retraction",
             "quarantine",
-            "dimension-proposal",
             "tier-movement-proposal",
             "policy-pack-edit",
             "nonsense",
@@ -535,12 +541,14 @@ class TestAnswerCommandRefusals:
         answers_dir = store / "raw" / "answers"
         return sorted(answers_dir.glob("*.md")) if answers_dir.exists() else []
 
+    # "dimension-proposal" removed from this parametrization by issue
+    # athenaeum#2016 -- it is now routable (see TestAnswerableTypeTranslation
+    # .test_dimension_proposal_routes_to_its_own_applier above).
     @pytest.mark.parametrize(
         "decision_type",
         [
             "retraction",
             "quarantine",
-            "dimension-proposal",
             "tier-movement-proposal",
             "policy-pack-edit",
             "nonsense",

@@ -42,7 +42,7 @@ from athenaeum.comparator import (
     record_comparison,
 )
 from athenaeum.config import resolve_comparator_enabled
-from athenaeum.dimensions import DEFAULT_REGISTRY, VALID_TIME
+from athenaeum.dimensions import DEFAULT_REGISTRY, VALID_TIME, DimensionRegistry
 from athenaeum.runlock import RunLock
 from athenaeum.verdicts import get_verdict_status, lookup_pair, make_pair_key
 
@@ -266,6 +266,26 @@ class TestAC2Gate1SeparatorsOnly:
         meta_b = {"memory_class": "procedure"}
         rels = gate1_separator_relations(DEFAULT_REGISTRY, meta_a, meta_b)
         assert "memory-class" not in rels
+
+    def test_retired_dimension_excluded_from_gate1(self) -> None:
+        """Issue athenaeum#2016: a RETIRED dimension is excluded from Gate 1
+        exactly like a BACKFILL one -- the existing ``!= ENFORCED`` guard
+        needs no code change to cover the new state."""
+        from athenaeum.dimensions import Dimension, DimensionKind, LifecycleState, NullMeans
+
+        retired = Dimension(
+            name="engagement",
+            kind=DimensionKind.IDENTITY,
+            null_means=NullMeans.UNKNOWN,
+            separates=True,
+            state=LifecycleState.RETIRED,
+            origin="proposed:abc",
+        )
+        registry = DimensionRegistry(dimensions=(*DEFAULT_REGISTRY, retired))
+        meta_a = {"engagement": None}
+        meta_b = {"engagement": None}
+        rels = gate1_separator_relations(registry, meta_a, meta_b)
+        assert "engagement" not in rels
 
     def test_two_observations_of_same_fact_different_observed_time_not_distinct(self) -> None:
         """The AC's own named regression: two observations of the SAME fact at

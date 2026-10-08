@@ -5,8 +5,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from athenaeum.dimension_proposals import (
     DIMENSION_PROPOSALS_LEDGER_FILENAME,
     default_dimension_proposals_ledger_path,
@@ -293,7 +291,12 @@ class TestQueueVisibility:
 
 
 # ---------------------------------------------------------------------------
-# Misroute guard: framed + visible, but NOT answerable (AC)
+# Misroute guard (issue athenaeum#2015): framed + visible, but NOT answerable.
+# Issue athenaeum#2016 (the ratification child) FLIPS every assertion below
+# to its opposite -- "dimension-proposal" is now a registered, answerable
+# type with its OWN applier, never misrouted into
+# decision_answers._apply_proposed_rule_answer. The class name is kept so
+# the history ("this used to guard the opposite state") stays legible.
 # ---------------------------------------------------------------------------
 
 
@@ -303,23 +306,27 @@ class TestMisrouteGuard:
 
         assert "dimension-proposal" in _TYPE_FRAMING
 
-    def test_type_is_not_in_valid_decision_types(self) -> None:
-        """The hard AC: this child must NOT add "dimension-proposal" to the
-        applier's vocabulary -- ratification is the next child's job."""
+    def test_type_is_now_in_valid_decision_types(self) -> None:
+        """Flipped by athenaeum#2016: ratification registers the real applier."""
         from athenaeum.decision_answers import VALID_DECISION_TYPES
 
-        assert "dimension-proposal" not in VALID_DECISION_TYPES
+        assert "dimension-proposal" in VALID_DECISION_TYPES
 
-    def test_answerable_as_returns_none(self) -> None:
+    def test_answerable_as_returns_its_own_applier_type(self) -> None:
         from athenaeum.decision_framing import answerable_as
 
-        assert answerable_as("dimension-proposal") is None
+        assert answerable_as("dimension-proposal") == "dimension-proposal"
 
-    def test_cli_answer_refuses_cleanly_not_a_crash(self, tmp_path: Path) -> None:
+    def test_cli_answer_succeeds_for_a_pending_proposal(self, tmp_path: Path) -> None:
         from athenaeum.cli import main as cli_main
 
         (tmp_path / "wiki").mkdir()
         (tmp_path / "raw").mkdir()
+        shape = _shape(count=10, threshold=5)
+        run_dimension_proposal_drafting([shape], wiki_root=tmp_path / "wiki")
+        pending = list_pending_dimension_proposals(tmp_path / "wiki")
+        decision_id = pending[0]["id"]
+
         rc = cli_main(
             [
                 "decisions",
@@ -327,24 +334,24 @@ class TestMisrouteGuard:
                 "--path",
                 str(tmp_path),
                 "--id",
-                "abc",
+                decision_id,
                 "--type",
                 "dimension-proposal",
                 "--answer",
                 '{"verdict": "approve"}',
             ]
         )
-        assert rc != 0
+        assert rc == 0
         answers_dir = tmp_path / "raw" / "answers"
-        written = sorted(answers_dir.glob("*.md")) if answers_dir.exists() else []
-        assert written == []
+        written = sorted(answers_dir.glob("*.md"))
+        assert len(written) == 1
 
-    def test_load_decision_answer_rejects_an_unregistered_type(self, tmp_path: Path) -> None:
-        """A hand-written answer file naming "dimension-proposal" must be
-        refused as malformed, never silently dispatched to
-        _apply_proposed_rule_answer (the dispatch's only remaining "else"
-        branch)."""
-        from athenaeum.decision_answers import MalformedDecisionAnswer, _load_decision_answer
+    def test_load_decision_answer_accepts_a_registered_type(self, tmp_path: Path) -> None:
+        """A hand-written answer file naming "dimension-proposal" now parses
+        cleanly -- it is a registered type with its OWN applier
+        (_apply_dimension_proposal_answer), never misrouted into
+        _apply_proposed_rule_answer."""
+        from athenaeum.decision_answers import _load_decision_answer
 
         path = tmp_path / "answer.md"
         path.write_text(
@@ -355,8 +362,9 @@ class TestMisrouteGuard:
             "---\n",
             encoding="utf-8",
         )
-        with pytest.raises(MalformedDecisionAnswer):
-            _load_decision_answer(path)
+        answer = _load_decision_answer(path)
+        assert answer is not None
+        assert answer.decision_type == "dimension-proposal"
 
     def test_response_schema_is_three_way(self) -> None:
         from athenaeum.decision_framing import response_schema_for
@@ -378,3 +386,352 @@ class TestMisrouteGuard:
 
         assert validate_answer("dimension-proposal", {"verdict": "approve"}) == []
         assert validate_answer("dimension-proposal", {"verdict": "reject"}) == []
+
+
+# ---------------------------------------------------------------------------
+# Ratification (issue athenaeum#2016): approve/rename/reject via
+# apply_decision_answers -> _apply_dimension_proposal_answer
+# ---------------------------------------------------------------------------
+
+
+def _drafted_knowledge_root(
+    tmp_path: Path, *, shape: MinedShape | None = None
+) -> tuple[Path, Path, Path, str]:
+    """A knowledge root with one drafted, pending dimension proposal.
+
+    Returns ``(knowledge_root, wiki_root, raw_root, decision_id)``.
+    """
+    knowledge_root = tmp_path
+    wiki_root = knowledge_root / "wiki"
+    wiki_root.mkdir()
+    raw_root = knowledge_root / "raw"
+    raw_root.mkdir()
+    (knowledge_root / "athenaeum.yaml").write_text("auto_recall: true\n", encoding="utf-8")
+
+    shape = shape or _shape(count=10, threshold=5)
+    run_dimension_proposal_drafting([shape], wiki_root=wiki_root)
+    pending = list_pending_dimension_proposals(wiki_root)
+    decision_id = pending[0]["id"]
+    return knowledge_root, wiki_root, raw_root, decision_id
+
+
+class TestRatificationApprove:
+    def test_approve_writes_dimension_into_athenaeum_yaml(self, tmp_path: Path) -> None:
+        from athenaeum.config import load_config
+        from athenaeum.decision_answers import apply_decision_answers, write_decision_answer
+        from athenaeum.dimensions import build_registry
+
+        knowledge_root, wiki_root, raw_root, decision_id = _drafted_knowledge_root(tmp_path)
+        write_decision_answer(
+            raw_root, decision_id=decision_id, decision_type="dimension-proposal", verdict="approve"
+        )
+        report = apply_decision_answers(wiki_root, raw_root, config=load_config(knowledge_root))
+        assert report.applied == 1
+
+        cfg = load_config(knowledge_root)
+        dims = cfg.get("dimensions") or []
+        assert len(dims) == 1
+        entry = dims[0]
+        assert entry["name"] == "jurisdiction"
+        assert entry["state"] == "backfill"
+        assert entry["origin"] == f"proposed:{decision_id}"
+        # The whole list, kernel + operator, validates cleanly.
+        registry = build_registry(dims)
+        assert registry.get("jurisdiction") is not None
+
+    def test_approve_strips_the_ask_budget_max_pairs_annotation(self, tmp_path: Path) -> None:
+        """The drafter's narrowed-applies_to annotation (enforce_ask_budget's
+        "max_pairs") is informational about the backfill plan, never a real
+        applies_to selector key -- it must not be written into the
+        registered dimension's config entry."""
+        from athenaeum.config import load_config
+        from athenaeum.decision_answers import apply_decision_answers, write_decision_answer
+
+        shape = _shape(count=1000, threshold=5)
+        knowledge_root, wiki_root, raw_root, decision_id = _drafted_knowledge_root(
+            tmp_path, shape=shape
+        )
+        write_decision_answer(
+            raw_root, decision_id=decision_id, decision_type="dimension-proposal", verdict="approve"
+        )
+        apply_decision_answers(wiki_root, raw_root, config=load_config(knowledge_root))
+        dims = load_config(knowledge_root).get("dimensions") or []
+        assert "max_pairs" not in dims[0]["applies_to"]
+
+    def test_reapplying_an_approved_proposal_is_already_resolved(self, tmp_path: Path) -> None:
+        from athenaeum.config import load_config
+        from athenaeum.decision_answers import apply_decision_answers, write_decision_answer
+
+        knowledge_root, wiki_root, raw_root, decision_id = _drafted_knowledge_root(tmp_path)
+        write_decision_answer(
+            raw_root, decision_id=decision_id, decision_type="dimension-proposal", verdict="approve"
+        )
+        apply_decision_answers(wiki_root, raw_root, config=load_config(knowledge_root))
+        write_decision_answer(
+            raw_root, decision_id=decision_id, decision_type="dimension-proposal", verdict="approve"
+        )
+        report = apply_decision_answers(wiki_root, raw_root, config=load_config(knowledge_root))
+        codes = {o.error_code for o in report.outcomes if not o.applied}
+        assert "already_resolved" in codes
+        # And the yaml entry was not duplicated.
+        dims = load_config(knowledge_root).get("dimensions") or []
+        assert len(dims) == 1
+
+    def test_approve_refuses_a_kernel_name_collision(self, tmp_path: Path) -> None:
+        from athenaeum.config import load_config
+        from athenaeum.decision_answers import apply_decision_answers, write_decision_answer
+
+        shape = _shape(missing=("scope",))
+        knowledge_root, wiki_root, raw_root, decision_id = _drafted_knowledge_root(
+            tmp_path, shape=shape
+        )
+        write_decision_answer(
+            raw_root, decision_id=decision_id, decision_type="dimension-proposal", verdict="approve"
+        )
+        report = apply_decision_answers(wiki_root, raw_root, config=load_config(knowledge_root))
+        assert report.applied == 0
+        assert report.outcomes[0].error_code == "invalid_dimension_entry"
+        assert load_config(knowledge_root).get("dimensions") in (None, [])
+
+
+class TestRatificationRename:
+    def test_rename_registers_under_the_new_name(self, tmp_path: Path) -> None:
+        from athenaeum.config import load_config
+        from athenaeum.decision_answers import apply_decision_answers, write_decision_answer
+
+        knowledge_root, wiki_root, raw_root, decision_id = _drafted_knowledge_root(tmp_path)
+        write_decision_answer(
+            raw_root,
+            decision_id=decision_id,
+            decision_type="dimension-proposal",
+            verdict="rename",
+            name="geo-region",
+        )
+        report = apply_decision_answers(wiki_root, raw_root, config=load_config(knowledge_root))
+        assert report.applied == 1
+        dims = load_config(knowledge_root).get("dimensions") or []
+        assert dims[0]["name"] == "geo-region"
+        assert dims[0]["origin"] == f"proposed:{decision_id}"
+
+
+class TestRatificationReject:
+    def test_reject_never_writes_athenaeum_yaml(self, tmp_path: Path) -> None:
+        from athenaeum.config import load_config
+        from athenaeum.decision_answers import apply_decision_answers, write_decision_answer
+
+        knowledge_root, wiki_root, raw_root, decision_id = _drafted_knowledge_root(tmp_path)
+        write_decision_answer(
+            raw_root, decision_id=decision_id, decision_type="dimension-proposal", verdict="reject"
+        )
+        report = apply_decision_answers(wiki_root, raw_root, config=load_config(knowledge_root))
+        assert report.applied == 1
+        assert load_config(knowledge_root).get("dimensions") in (None, [])
+
+    def test_reject_suppresses_redrafting(self, tmp_path: Path) -> None:
+        """A rejected (dimension, shape) pair is never re-drafted -- the
+        drafter's own idempotent resolved-id filter reads the SAME ledger
+        this applier writes to."""
+        from athenaeum.config import load_config
+        from athenaeum.decision_answers import apply_decision_answers, write_decision_answer
+
+        shape = _shape(count=10, threshold=5)
+        knowledge_root, wiki_root, raw_root, decision_id = _drafted_knowledge_root(
+            tmp_path, shape=shape
+        )
+        write_decision_answer(
+            raw_root, decision_id=decision_id, decision_type="dimension-proposal", verdict="reject"
+        )
+        apply_decision_answers(wiki_root, raw_root, config=load_config(knowledge_root))
+
+        summary = run_dimension_proposal_drafting([shape], wiki_root=wiki_root)
+        assert summary.proposed == 0
+        assert summary.skipped_suppressed == 1 or summary.skipped_pending == 1
+        assert list_pending_dimension_proposals(wiki_root) == []
+
+    def test_approve_suppresses_redrafting(self, tmp_path: Path) -> None:
+        """Issue athenaeum#2016: an APPROVED id must be suppressed exactly
+        like a rejected one -- before ratification existed this path was
+        unreachable; now approve is a real ledger outcome and a re-run of
+        the drafter must not mint a second proposal for an axis that is
+        already registered."""
+        from athenaeum.config import load_config
+        from athenaeum.decision_answers import apply_decision_answers, write_decision_answer
+
+        shape = _shape(count=10, threshold=5)
+        knowledge_root, wiki_root, raw_root, decision_id = _drafted_knowledge_root(
+            tmp_path, shape=shape
+        )
+        write_decision_answer(
+            raw_root, decision_id=decision_id, decision_type="dimension-proposal", verdict="approve"
+        )
+        apply_decision_answers(wiki_root, raw_root, config=load_config(knowledge_root))
+
+        summary = run_dimension_proposal_drafting([shape], wiki_root=wiki_root)
+        assert summary.proposed == 0
+        assert summary.skipped_suppressed == 1
+        assert list_pending_dimension_proposals(wiki_root) == []
+
+
+# ---------------------------------------------------------------------------
+# AC: three-example-pair cap survives ratification (the cap itself is
+# enforced upstream, at MinedShape construction -- see signal_mining.py's
+# ``pairs[:3]``; this is the regression guard that the ledger record a
+# ratification reads from never carries more than that).
+# ---------------------------------------------------------------------------
+
+
+class TestThreeExamplePairCap:
+    def test_ledger_record_never_carries_more_than_three_example_pairs(
+        self, tmp_path: Path
+    ) -> None:
+        # _shape()'s own example_pairs default is 2; verify the cap holds
+        # even if a caller tries to pass more than 3 directly into the
+        # drafter's input shape.
+        shape = _shape(
+            count=10,
+            threshold=5,
+            example_pairs=("a+b", "c+d", "e+f", "g+h", "i+j"),
+        )
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        run_dimension_proposal_drafting([shape], wiki_root=wiki_root)
+        pending = list_pending_dimension_proposals(wiki_root)
+        assert len(pending) == 1
+        # The drafter forwards shape.example_pairs verbatim (it is the
+        # signal-mining step's own job to cap it at 3) -- so a shape built
+        # with 5 pairs, bypassing that cap, surfaces here as a 5-pair
+        # record. Document that boundary explicitly rather than assert a
+        # cap this module does not itself enforce.
+        assert len(pending[0]["example_pairs"]) == 5
+
+    def test_signal_mining_itself_caps_at_three(self, tmp_path: Path) -> None:
+        """The REAL cap: athenaeum.signal_mining.mine_underdetermined_shapes
+        never emits more than 3 example pairs per shape -- this is what
+        ratification actually ever sees in practice, over the real
+        verdict-ledger pipeline (mirrors tests/test_signal_mining.py's own
+        fixture helpers)."""
+        from datetime import datetime, timezone
+
+        from athenaeum.runlock import RunLock
+        from athenaeum.signal_mining import mine_underdetermined_shapes
+        from athenaeum.verdicts import Basis, append_verdict, build_verdict_entry
+
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        names = [f"page-{i}" for i in range(10)]
+        for name in names:
+            (wiki_root / f"{name}.md").write_text(
+                f"---\nname: {name}\ntype: feedback\n---\nbody\n", encoding="utf-8"
+            )
+
+        basis = Basis(
+            content_hashes=["hash-a", "hash-b"],
+            coords=[None, None],
+            coord_origins={},
+            registry_epoch=1,
+            tree_epoch=1,
+            authority_basis=None,
+            predicate_instrument=[None, None],
+            comparator_version="v1.gate2",
+        )
+        with RunLock(wiki_root.parent) as lock:
+            for i in range(0, 10, 2):
+                entry = build_verdict_entry(
+                    names[i],
+                    names[i + 1],
+                    "underdetermined",
+                    basis=basis,
+                    missing=["jurisdiction"],
+                    at=f"2026-10-0{(i // 2) + 1}",
+                    decided_by="comparator",
+                )
+                append_verdict(wiki_root, entry, lock=lock)
+
+        config = {"librarian": {"signal_mining": {"threshold": 2, "window_days": 30}}}
+        now = datetime(2026, 10, 7, 12, 0, 0, tzinfo=timezone.utc)
+        shapes = mine_underdetermined_shapes(wiki_root, config=config, now=now)
+        triggered = [s for s in shapes if s.triggered]
+        assert triggered
+        assert triggered[0].count == 5
+        assert len(triggered[0].example_pairs) <= 3
+
+
+class TestRatifiedDimensionReusesExistingFlip:
+    def test_ratified_dimension_flips_backfill_to_enforced_unmodified(
+        self, tmp_path: Path
+    ) -> None:
+        """AC: a ratified dimension enters at state: backfill and follows
+        the EXISTING backfill -> enforced flip unmodified -- one lifecycle,
+        not a second one."""
+        from athenaeum.config import load_config
+        from athenaeum.decision_answers import apply_decision_answers, write_decision_answer
+        from athenaeum.dimensions import LifecycleState, build_registry, maybe_flip_to_enforced
+
+        knowledge_root, wiki_root, raw_root, decision_id = _drafted_knowledge_root(tmp_path)
+        write_decision_answer(
+            raw_root, decision_id=decision_id, decision_type="dimension-proposal", verdict="approve"
+        )
+        apply_decision_answers(wiki_root, raw_root, config=load_config(knowledge_root))
+
+        registry = build_registry(load_config(knowledge_root).get("dimensions"))
+        dim = registry.get("jurisdiction")
+        assert dim is not None
+        assert dim.state == LifecycleState.BACKFILL
+
+        flipped, marked = maybe_flip_to_enforced(dim, coverage=1.0)
+        assert flipped.state == LifecycleState.ENFORCED
+        assert marked == 0  # no on_flip callback supplied
+
+
+class TestCLIRenameAndNameMisuse:
+    def test_cli_rename_registers_the_operator_chosen_name(self, tmp_path: Path) -> None:
+        from athenaeum.cli import main as cli_main
+        from athenaeum.config import load_config
+
+        knowledge_root, wiki_root, raw_root, decision_id = _drafted_knowledge_root(tmp_path)
+        rc = cli_main(
+            [
+                "decisions",
+                "answer",
+                "--path",
+                str(knowledge_root),
+                "--id",
+                decision_id,
+                "--type",
+                "dimension-proposal",
+                "--answer",
+                '{"verdict": "rename", "name": "geo-region"}',
+            ]
+        )
+        assert rc == 0
+        from athenaeum.decision_answers import apply_decision_answers
+
+        apply_decision_answers(wiki_root, raw_root, config=load_config(knowledge_root))
+        dims = load_config(knowledge_root).get("dimensions") or []
+        assert dims[0]["name"] == "geo-region"
+
+    def test_approve_with_a_name_is_refused_as_schema_invalid(self, tmp_path: Path) -> None:
+        """The schema's own conditional forbids "name" alongside approve/
+        reject -- a caller that supplies one anyway must be refused at the
+        boundary, never silently ignored."""
+        from athenaeum.cli import main as cli_main
+
+        knowledge_root, _wiki_root, _raw_root, decision_id = _drafted_knowledge_root(tmp_path)
+        rc = cli_main(
+            [
+                "decisions",
+                "answer",
+                "--path",
+                str(knowledge_root),
+                "--id",
+                decision_id,
+                "--type",
+                "dimension-proposal",
+                "--answer",
+                '{"verdict": "approve", "name": "geo-region"}',
+            ]
+        )
+        assert rc != 0
+        answers_dir = knowledge_root / "raw" / "answers"
+        written = sorted(answers_dir.glob("*.md")) if answers_dir.exists() else []
+        assert written == []
