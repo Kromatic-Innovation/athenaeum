@@ -490,6 +490,68 @@ def format_budget_report(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+#: Issue athenaeum#2019 (athenaeum#719 Plan step 6, Ratchet guard 1: "auto-apply
+#: widenings are the one decision class that cannot be ratified while the
+#: effort budget is in breach ... no constitutional amendments during an
+#: emergency"). Decision types whose ratification this guard refuses while
+#: :func:`budget_report`'s ``breach`` is ``True``.
+#:
+#: ``"policy-pack-edit"`` is this issue's own type (see
+#: :mod:`athenaeum.policy_pack_edit_proposals`). ``"auto-apply-threshold-proposal"``
+#: is the SIBLING child's type (athenaeum#2018, "Memory model v6 self-tuning loop:
+#: page-split + auto-apply-threshold proposals") -- named here BY STRING, not
+#: by importing that child's module, so this module gains no edge toward
+#: whichever module athenaeum#2018 lands its drafter in (this module already
+#: sits at the bottom of the decision_budget/decisions/quarantine cycle
+#: risk the module docstring describes; a new import edge toward a
+#: sibling-authored module built concurrently is exactly the kind of risk
+#: that discipline exists to avoid). If athenaeum#2018 lands under a different literal, this
+#: constant and that module's literal must be reconciled at merge --
+#: ``tests/test_decision_budget.py``'s
+#: ``test_every_guard_worthy_framing_entry_is_covered`` fails loudly if the
+#: two ever drift, rather than silently leaving one type unguarded.
+RATCHET_GUARDED_DECISION_TYPES: frozenset[str] = frozenset(
+    {"policy-pack-edit", "auto-apply-threshold-proposal"}
+)
+
+#: The named refusal reason :func:`ratification_refusal` returns. A single
+#: constant rather than inline strings at each call site, so a future
+#: caller can match on it rather than parsing prose.
+RATCHET_REFUSAL_QUEUE_INFLOW_BREACH = "queue_inflow_breach"
+
+
+def ratification_refusal(decision_type: str, *, effort_budget_breach: bool) -> str | None:
+    """The ratchet-guard refusal reason for ratifying *decision_type*, or
+    ``None`` when ratification is not refused (issue athenaeum#2019, athenaeum#717
+    Ratchet guard 1).
+
+    A pure predicate -- it does not compute *effort_budget_breach* itself
+    (the caller's already-resolved :func:`budget_report`'s ``"breach"`` key,
+    the SAME boolean :mod:`athenaeum.auto_apply`'s ``effort_budget_breach``
+    parameter already threads through for the duplicate-fold ratchet guard
+    athenaeum#1996 landed -- reused here rather than inventing a second inflow
+    signal) and performs no I/O. Returns
+    :data:`RATCHET_REFUSAL_QUEUE_INFLOW_BREACH` when *decision_type* is in
+    :data:`RATCHET_GUARDED_DECISION_TYPES` AND *effort_budget_breach* is
+    ``True``; returns ``None`` otherwise -- including for every
+    non-guarded decision type, regardless of breach state, and for a
+    guarded type when the budget is NOT in breach.
+
+    This function does not itself gate any applier call site -- wiring a
+    ratification applier to call it is the next child's job (whichever
+    module ends up answering ``"policy-pack-edit"`` / the sibling's auto-
+    apply-threshold type; see athenaeum#2019's own AC). It exists now, with its
+    own test coverage, so that applier has a single, already-tested guard
+    to import rather than reinventing the breach check at ratification
+    time.
+    """
+    if decision_type not in RATCHET_GUARDED_DECISION_TYPES:
+        return None
+    if effort_budget_breach:
+        return RATCHET_REFUSAL_QUEUE_INFLOW_BREACH
+    return None
+
+
 __all__ = [
     "DECISION_BUDGET_EVENTS_FILENAME",
     "DECISION_BUDGET_SHAPES_FILENAME",
@@ -505,4 +567,7 @@ __all__ = [
     "record_overflow_shapes",
     "budget_report",
     "format_budget_report",
+    "RATCHET_GUARDED_DECISION_TYPES",
+    "RATCHET_REFUSAL_QUEUE_INFLOW_BREACH",
+    "ratification_refusal",
 ]
