@@ -694,7 +694,7 @@ _DEFAULT_ACCEPTANCE_VERDICT: dict[str, str] = {
     "merge": "reject",  # default_action: "reject (keep the pages separate)"
     "proposed-rule": "reject",  # default_action: "reject (do not adopt the rule)"
     "page-split": "reject",  # default_action: "reject (do not authorize the split)"
-    "auto-apply-threshold": "reject",  # default_action: "reject (keep the current auto-apply floor)"
+    "auto-apply-threshold": "reject",  # default_action: "reject (keep current floor)"
 }
 
 

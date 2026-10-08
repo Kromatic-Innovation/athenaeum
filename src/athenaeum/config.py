@@ -6566,8 +6566,11 @@ def resolve_auto_apply_threshold_ledger_override(
             resolved_ids.add(rec_id)
             proposal = pending_by_id.get(rec_id)
             if proposal and proposal.get("action") == action:
+                raw_threshold = proposal.get("proposed_threshold")
+                if raw_threshold is None:
+                    continue
                 try:
-                    approved[rec_id] = float(proposal.get("proposed_threshold"))
+                    approved[rec_id] = float(raw_threshold)
                 except (TypeError, ValueError):
                     continue
         elif kind == "reject":

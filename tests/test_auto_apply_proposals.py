@@ -20,9 +20,11 @@ from athenaeum.auto_apply_proposals import (
     run_auto_apply_proposal_detection,
 )
 from athenaeum.calibration import read_calibration_ledger, record_audit_review, sample_tier_decision
-from athenaeum.resolutions import DEFAULT_AUTO_APPLY_THRESHOLD_PER_ACTION
 from athenaeum.config import resolve_auto_apply_threshold_ledger_override
-from athenaeum.resolutions import resolve_auto_apply_threshold_for
+from athenaeum.resolutions import (
+    DEFAULT_AUTO_APPLY_THRESHOLD_PER_ACTION,
+    resolve_auto_apply_threshold_for,
+)
 
 _FULL_SAMPLE_CONFIG = {
     "librarian": {
@@ -186,7 +188,7 @@ class TestRunAutoApplyProposalDetection:
         config_b = {
             "librarian": {
                 "auto_apply_proposals_disagreement_trigger": 0.2,
-                "auto_apply_proposals_widen_step": 0.10,  # a different step -> different proposed value
+                "auto_apply_proposals_widen_step": 0.10,  # different step
             }
         }
         again = run_auto_apply_proposal_detection(
