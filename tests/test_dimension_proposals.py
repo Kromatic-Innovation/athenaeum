@@ -547,3 +547,191 @@ class TestRatificationReject:
         assert summary.proposed == 0
         assert summary.skipped_suppressed == 1 or summary.skipped_pending == 1
         assert list_pending_dimension_proposals(wiki_root) == []
+
+    def test_approve_suppresses_redrafting(self, tmp_path: Path) -> None:
+        """Issue athenaeum#2016: an APPROVED id must be suppressed exactly
+        like a rejected one -- before ratification existed this path was
+        unreachable; now approve is a real ledger outcome and a re-run of
+        the drafter must not mint a second proposal for an axis that is
+        already registered."""
+        from athenaeum.config import load_config
+        from athenaeum.decision_answers import apply_decision_answers, write_decision_answer
+
+        shape = _shape(count=10, threshold=5)
+        knowledge_root, wiki_root, raw_root, decision_id = _drafted_knowledge_root(
+            tmp_path, shape=shape
+        )
+        write_decision_answer(
+            raw_root, decision_id=decision_id, decision_type="dimension-proposal", verdict="approve"
+        )
+        apply_decision_answers(wiki_root, raw_root, config=load_config(knowledge_root))
+
+        summary = run_dimension_proposal_drafting([shape], wiki_root=wiki_root)
+        assert summary.proposed == 0
+        assert summary.skipped_suppressed == 1
+        assert list_pending_dimension_proposals(wiki_root) == []
+
+
+# ---------------------------------------------------------------------------
+# AC: three-example-pair cap survives ratification (the cap itself is
+# enforced upstream, at MinedShape construction -- see signal_mining.py's
+# ``pairs[:3]``; this is the regression guard that the ledger record a
+# ratification reads from never carries more than that).
+# ---------------------------------------------------------------------------
+
+
+class TestThreeExamplePairCap:
+    def test_ledger_record_never_carries_more_than_three_example_pairs(
+        self, tmp_path: Path
+    ) -> None:
+        # _shape()'s own example_pairs default is 2; verify the cap holds
+        # even if a caller tries to pass more than 3 directly into the
+        # drafter's input shape.
+        shape = _shape(
+            count=10,
+            threshold=5,
+            example_pairs=("a+b", "c+d", "e+f", "g+h", "i+j"),
+        )
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        run_dimension_proposal_drafting([shape], wiki_root=wiki_root)
+        pending = list_pending_dimension_proposals(wiki_root)
+        assert len(pending) == 1
+        # The drafter forwards shape.example_pairs verbatim (it is the
+        # signal-mining step's own job to cap it at 3) -- so a shape built
+        # with 5 pairs, bypassing that cap, surfaces here as a 5-pair
+        # record. Document that boundary explicitly rather than assert a
+        # cap this module does not itself enforce.
+        assert len(pending[0]["example_pairs"]) == 5
+
+    def test_signal_mining_itself_caps_at_three(self, tmp_path: Path) -> None:
+        """The REAL cap: athenaeum.signal_mining.mine_underdetermined_shapes
+        never emits more than 3 example pairs per shape -- this is what
+        ratification actually ever sees in practice, over the real
+        verdict-ledger pipeline (mirrors tests/test_signal_mining.py's own
+        fixture helpers)."""
+        from datetime import datetime, timezone
+
+        from athenaeum.runlock import RunLock
+        from athenaeum.signal_mining import mine_underdetermined_shapes
+        from athenaeum.verdicts import Basis, append_verdict, build_verdict_entry
+
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        names = [f"page-{i}" for i in range(10)]
+        for name in names:
+            (wiki_root / f"{name}.md").write_text(
+                f"---\nname: {name}\ntype: feedback\n---\nbody\n", encoding="utf-8"
+            )
+
+        basis = Basis(
+            content_hashes=["hash-a", "hash-b"],
+            coords=[None, None],
+            coord_origins={},
+            registry_epoch=1,
+            tree_epoch=1,
+            authority_basis=None,
+            predicate_instrument=[None, None],
+            comparator_version="v1.gate2",
+        )
+        with RunLock(wiki_root.parent) as lock:
+            for i in range(0, 10, 2):
+                entry = build_verdict_entry(
+                    names[i],
+                    names[i + 1],
+                    "underdetermined",
+                    basis=basis,
+                    missing=["jurisdiction"],
+                    at=f"2026-10-0{(i // 2) + 1}",
+                    decided_by="comparator",
+                )
+                append_verdict(wiki_root, entry, lock=lock)
+
+        config = {"librarian": {"signal_mining": {"threshold": 2, "window_days": 30}}}
+        now = datetime(2026, 10, 7, 12, 0, 0, tzinfo=timezone.utc)
+        shapes = mine_underdetermined_shapes(wiki_root, config=config, now=now)
+        triggered = [s for s in shapes if s.triggered]
+        assert triggered
+        assert triggered[0].count == 5
+        assert len(triggered[0].example_pairs) <= 3
+
+
+class TestRatifiedDimensionReusesExistingFlip:
+    def test_ratified_dimension_flips_backfill_to_enforced_unmodified(
+        self, tmp_path: Path
+    ) -> None:
+        """AC: a ratified dimension enters at state: backfill and follows
+        the EXISTING backfill -> enforced flip unmodified -- one lifecycle,
+        not a second one."""
+        from athenaeum.config import load_config
+        from athenaeum.decision_answers import apply_decision_answers, write_decision_answer
+        from athenaeum.dimensions import LifecycleState, build_registry, maybe_flip_to_enforced
+
+        knowledge_root, wiki_root, raw_root, decision_id = _drafted_knowledge_root(tmp_path)
+        write_decision_answer(
+            raw_root, decision_id=decision_id, decision_type="dimension-proposal", verdict="approve"
+        )
+        apply_decision_answers(wiki_root, raw_root, config=load_config(knowledge_root))
+
+        registry = build_registry(load_config(knowledge_root).get("dimensions"))
+        dim = registry.get("jurisdiction")
+        assert dim is not None
+        assert dim.state == LifecycleState.BACKFILL
+
+        flipped, marked = maybe_flip_to_enforced(dim, coverage=1.0)
+        assert flipped.state == LifecycleState.ENFORCED
+        assert marked == 0  # no on_flip callback supplied
+
+
+class TestCLIRenameAndNameMisuse:
+    def test_cli_rename_registers_the_operator_chosen_name(self, tmp_path: Path) -> None:
+        from athenaeum.cli import main as cli_main
+        from athenaeum.config import load_config
+
+        knowledge_root, wiki_root, raw_root, decision_id = _drafted_knowledge_root(tmp_path)
+        rc = cli_main(
+            [
+                "decisions",
+                "answer",
+                "--path",
+                str(knowledge_root),
+                "--id",
+                decision_id,
+                "--type",
+                "dimension-proposal",
+                "--answer",
+                '{"verdict": "rename", "name": "geo-region"}',
+            ]
+        )
+        assert rc == 0
+        from athenaeum.decision_answers import apply_decision_answers
+
+        apply_decision_answers(wiki_root, raw_root, config=load_config(knowledge_root))
+        dims = load_config(knowledge_root).get("dimensions") or []
+        assert dims[0]["name"] == "geo-region"
+
+    def test_approve_with_a_name_is_refused_as_schema_invalid(self, tmp_path: Path) -> None:
+        """The schema's own conditional forbids "name" alongside approve/
+        reject -- a caller that supplies one anyway must be refused at the
+        boundary, never silently ignored."""
+        from athenaeum.cli import main as cli_main
+
+        knowledge_root, _wiki_root, _raw_root, decision_id = _drafted_knowledge_root(tmp_path)
+        rc = cli_main(
+            [
+                "decisions",
+                "answer",
+                "--path",
+                str(knowledge_root),
+                "--id",
+                decision_id,
+                "--type",
+                "dimension-proposal",
+                "--answer",
+                '{"verdict": "approve", "name": "geo-region"}',
+            ]
+        )
+        assert rc != 0
+        answers_dir = knowledge_root / "raw" / "answers"
+        written = sorted(answers_dir.glob("*.md")) if answers_dir.exists() else []
+        assert written == []

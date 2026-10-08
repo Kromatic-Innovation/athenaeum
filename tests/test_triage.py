@@ -507,6 +507,46 @@ class TestSubmitAnswerMatchesCli:
             assert "source: decision_answer" in text
             assert "decision_type: coordinate" in text
 
+    def test_submission_matches_cli_for_dimension_proposal_rename(
+        self, knowledge_root: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Issue athenaeum#2016: the "no parallel write path" property holds
+        for dimension-proposal's "rename" verdict too -- submit_answer must
+        forward the human-chosen "name" through write_decision_answer the
+        SAME way _cmd_decisions._cmd_answer does, not just verdict/note."""
+        from athenaeum.decision_answers import _load_decision_answer
+        from athenaeum.dimension_proposals import (
+            list_pending_dimension_proposals,
+            run_dimension_proposal_drafting,
+        )
+        from athenaeum.signal_mining import MinedShape, ShapeKey
+
+        wiki_root = knowledge_root / "wiki"
+        key = ShapeKey(
+            verdict_type="underdetermined",
+            missing_dimensions=("jurisdiction",),
+            memory_classes=("fact", "fact"),
+            scopes=(None, None),
+        )
+        shape = MinedShape(
+            key=key, count=10, window_days=30, threshold=5, example_pairs=("a+b",)
+        )
+        run_dimension_proposal_drafting([shape], wiki_root=wiki_root)
+        decision_id = list_pending_dimension_proposals(wiki_root)[0]["id"]
+
+        submission = submit_answer(
+            knowledge_root,
+            decision_id=decision_id,
+            decision_type="dimension-proposal",
+            answer={"verdict": "rename", "name": "geo-region"},
+        )
+        assert submission.ok is True
+        assert submission.path is not None
+
+        answer = _load_decision_answer(submission.path)
+        assert answer is not None
+        assert answer.name == "geo-region"
+
     def test_submit_answer_refuses_unanswerable_type(self, knowledge_root: Path) -> None:
         submission = submit_answer(
             knowledge_root,
