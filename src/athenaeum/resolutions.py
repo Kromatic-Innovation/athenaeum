@@ -74,7 +74,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal, cast
 
 from athenaeum._retry import TransientAPIError, with_retry
 from athenaeum.atomic_io import atomic_write_text
-from athenaeum.config import _env_number
+from athenaeum.config import _env_number, auto_apply_threshold_ledger_override_for
 from athenaeum.config import resolve_model as _resolve_model_knob
 from athenaeum.decision_provider import DecisionBackend as _DecisionBackend
 from athenaeum.json_utils import extract_json_object
@@ -796,6 +796,8 @@ def resolve_auto_apply_threshold(config: dict[str, Any] | None = None) -> float:
 def resolve_auto_apply_threshold_for(
     config: dict[str, Any] | None,
     action: str,
+    *,
+    wiki_root: Path | None = None,
 ) -> float | None:
     """Resolve the auto-apply threshold for a SPECIFIC resolver action.
 
@@ -814,16 +816,25 @@ def resolve_auto_apply_threshold_for(
 
     1. If the action is in :data:`_NEVER_AUTO_APPLY_ACTIONS` → return ``None``.
     2. Per-action explicit override (``resolve.auto_apply_threshold_per_action.<action>``).
-    3. Legacy scalar (``resolve.auto_apply_threshold``) — only honored for
+    3. Issue athenaeum#2018 (athenaeum#719 Plan step 6): a ledger-backed override
+       from an APPROVED auto-apply-threshold proposal (see
+       :func:`athenaeum.config.auto_apply_threshold_ledger_override_for`),
+       when *wiki_root* is given. An operator's own explicit per-action
+       config (layer 2) always wins over a proposal the operator merely
+       approved — this layer only fires when layer 2 named nothing for
+       *action*.
+    4. Legacy scalar (``resolve.auto_apply_threshold``) — only honored for
        ``keep_a`` / ``keep_b``. Lets pre-athenaeum#170 configs keep working.
-    4. Per-action default from :data:`DEFAULT_AUTO_APPLY_THRESHOLD_PER_ACTION`.
-    5. ``None`` for any unknown / non-auto-applicable action (the auto-apply
+    5. Per-action default from :data:`DEFAULT_AUTO_APPLY_THRESHOLD_PER_ACTION`.
+    6. ``None`` for any unknown / non-auto-applicable action (the auto-apply
        gate treats ``None`` the same as the propose_merge sentinel —
        skip auto-apply, escalate to human).
 
     Values are validated against ``[0.0, 1.0]`` with :class:`ValueError`
     raised on out-of-range — same loud-fail discipline as
-    :func:`resolve_auto_apply_threshold`.
+    :func:`resolve_auto_apply_threshold`. *wiki_root* defaults to ``None``
+    (every pre-athenaeum#2018 call site), which skips layer 3 entirely and
+    reproduces this function's exact prior behavior.
     """
     if action in _NEVER_AUTO_APPLY_ACTIONS:
         return None
@@ -849,7 +860,18 @@ def resolve_auto_apply_threshold_for(
                     )
                 return value
 
-    # Layer 3: legacy scalar fallback — only for keep_a / keep_b. Honors
+    # Layer 3: ledger-backed override from an approved auto-apply-threshold
+    # proposal (issue athenaeum#2018) -- only consulted when the caller passed
+    # a wiki_root; every pre-athenaeum#2018 call site omits it, so this layer
+    # is a pure no-op for them.
+    if wiki_root is not None:
+        ledger_override = auto_apply_threshold_ledger_override_for(
+            action, wiki_root=wiki_root, config=config
+        )
+        if ledger_override is not None:
+            return ledger_override
+
+    # Layer 4: legacy scalar fallback — only for keep_a / keep_b. Honors
     # both the yaml key (`resolve.auto_apply_threshold`) AND the legacy env
     # var (`ATHENAEUM_RESOLVE_AUTO_APPLY_THRESHOLD`). The env-only path
     # matters for operators who set the override at the shell without
@@ -867,11 +889,11 @@ def resolve_auto_apply_threshold_for(
             # raises loudly and env > yaml precedence is preserved.
             return resolve_auto_apply_threshold(config)
 
-    # Layer 4: per-action default.
+    # Layer 5: per-action default.
     if action in DEFAULT_AUTO_APPLY_THRESHOLD_PER_ACTION:
         return DEFAULT_AUTO_APPLY_THRESHOLD_PER_ACTION[action]
 
-    # Layer 5: unknown action → no auto-apply.
+    # Layer 6: unknown action → no auto-apply.
     return None
 
 

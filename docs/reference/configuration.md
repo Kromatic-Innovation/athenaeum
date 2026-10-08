@@ -639,6 +639,46 @@ load_authority_manifest`) handle a missing file as "no manifest configured"
 (empty, not an error). No seed in ``_DEFAULTS`` so this code
 default stays reachable.
 
+### `resolve_auto_apply_proposals_disagreement_trigger`
+
+- **YAML path:** `librarian.auto_apply_proposals.disagreement_trigger`
+- **Environment variable:** `ATHENAEUM_AUTO_APPLY_PROPOSALS_DISAGREEMENT_TRIGGER`
+- **CLI flag:** —
+- **Default:** `0.2`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+``librarian.auto_apply_proposals.disagreement_trigger`` (default 0.2).
+
+ (Plan step 6): the auto-apply-threshold
+proposal drafter's trigger. `athenaeum.calibration.calibration_summary`'s
+per-tier ``overturned / reviewed`` rate -- the share of audited T1-reject
+verdicts a human later overturned, i.e. judged the reject too strict --
+must reach this rate before
+`athenaeum.auto_apply_proposals.run_auto_apply_proposal_detection`
+drafts a proposal to widen the corresponding
+`athenaeum.resolutions.resolve_auto_apply_threshold_for` floor.
+Clamped to ``[0.0, 1.0]`` -- this is a rate, not a count.
+
+### `resolve_auto_apply_proposals_widen_step`
+
+- **YAML path:** `librarian.auto_apply_proposals.widen_step`
+- **Environment variable:** `ATHENAEUM_AUTO_APPLY_PROPOSALS_WIDEN_STEP`
+- **CLI flag:** —
+- **Default:** `0.05`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+``librarian.auto_apply_proposals.widen_step`` (default 0.05).
+
+ (Plan step 6): how far a single
+auto-apply-threshold proposal widens (LOWERS) the resolver action's
+current `athenaeum.resolutions.resolve_auto_apply_threshold_for`
+floor when `resolve_auto_apply_proposals_disagreement_trigger`'s
+rate is crossed. Deliberately small and additive, never multiplicative:
+a single approved proposal moves the floor one conservative step, not
+all the way to the disagreement rate itself -- the next detection pass
+proposes the next step if the signal persists. Clamped to ``[0.0,
+1.0]``.
+
 ### `resolve_auto_supersession_enabled`
 
 - **YAML path:** `librarian.auto_supersession_enabled`
@@ -1854,6 +1894,25 @@ validation contract exactly: must be ``>= 1`` (bool rejected as an int
 subclass, so ``page_size_threshold_chars: yes`` in yaml cannot silently
 become a threshold of 1); non-numeric, non-positive, missing, or bool
 values fall back to `DEFAULT_PAGE_SIZE_THRESHOLD_CHARS`.
+
+### `resolve_page_split_proposals_heterogeneity_threshold`
+
+- **YAML path:** `librarian.page_split_proposals.heterogeneity_threshold`
+- **Environment variable:** `ATHENAEUM_PAGE_SPLIT_PROPOSALS_HETEROGENEITY_THRESHOLD`
+- **CLI flag:** —
+- **Default:** `5`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+``librarian.page_split_proposals.heterogeneity_threshold`` (default 5).
+
+ (Plan step 6): the page-split proposal
+drafter's trigger. A page's
+`athenaeum.page_decompose.measure_coordinate_heterogeneity` --
+the count of DISTINCT resolved subject uids among its bullets -- must
+reach this many before `athenaeum.page_split_proposals.run_page_split_proposal_detection`
+drafts a proposal for it. A small default: a page already flagged as an
+aggregate by `athenaeum.page_decompose` naming even a handful of
+distinct subjects is worth surfacing, not something to wait on.
 
 ### `resolve_page_warn_bytes`
 

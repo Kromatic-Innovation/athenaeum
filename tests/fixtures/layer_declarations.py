@@ -224,6 +224,16 @@ MODULE_LAYER: dict[str, int] = {
     # loop's signal-mining phase. Sibling L4 to rule_proposals.py, which it
     # mirrors the detect/threshold/window shape of.
     "signal_mining": 4,
+    # Issue athenaeum#2018 (athenaeum#719 Plan step 6): page-split proposal
+    # drafter -- a deterministic peer of dimension_proposals.py/
+    # rule_proposals.py, draws on page_decompose's DecomposeReport (L4,
+    # same-layer import allowed).
+    "page_split_proposals": 4,
+    # Issue athenaeum#2018 (athenaeum#719 Plan step 6): auto-apply-threshold
+    # proposal drafter -- a deterministic peer of dimension_proposals.py/
+    # rule_proposals.py, draws on calibration.py (L3) and resolutions.py
+    # (undeclared; see the UNDECLARED set below).
+    "auto_apply_proposals": 4,
     "sensitivity_lint": 4,
     "shadow_linkage": 4,
     "shadow_parity": 4,

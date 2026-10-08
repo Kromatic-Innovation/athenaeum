@@ -87,14 +87,34 @@ log = logging.getLogger(__name__)
 #: Registered decision types. ``proposed-rule`` is registered per athenaeum#908's
 #: D6 — schema-only, fails closed on apply. ``coordinate`` (issue athenaeum#1993)
 #: writes a comparator coordinate and triggers a mechanical re-compare — see
-#: :func:`_apply_coordinate_answer`. ``dimension-proposal`` (issue athenaeum#2016)
-#: ratifies/renames/rejects a drafted dimension proposal (athenaeum#2015) — see
-#: :func:`_apply_dimension_proposal_answer`. See module docstring.
+#: :func:`_apply_coordinate_answer`. ``page-split`` / ``auto-apply-threshold``
+#: (issue athenaeum#2018) are each proposal-only — see
+#: :func:`_apply_page_split_proposal_answer` /
+#: :func:`_apply_auto_apply_threshold_proposal_answer`. ``dimension-proposal``
+#: (issue athenaeum#2016) ratifies/renames/rejects a drafted dimension
+#: proposal (athenaeum#2015) — see :func:`_apply_dimension_proposal_answer`.
+#: See module docstring.
 DecisionType = Literal[
-    "question", "merge", "audit", "proposed-rule", "coordinate", "dimension-proposal"
+    "question",
+    "merge",
+    "audit",
+    "proposed-rule",
+    "coordinate",
+    "page-split",
+    "auto-apply-threshold",
+    "dimension-proposal",
 ]
 VALID_DECISION_TYPES: frozenset[str] = frozenset(
-    ("question", "merge", "audit", "proposed-rule", "coordinate", "dimension-proposal")
+    (
+        "question",
+        "merge",
+        "audit",
+        "proposed-rule",
+        "coordinate",
+        "page-split",
+        "auto-apply-threshold",
+        "dimension-proposal",
+    )
 )
 
 #: Frontmatter ``source:`` tag stamped on every decision-answer file, distinct
@@ -669,6 +689,143 @@ def _apply_proposed_rule_answer(wiki_root: Path, answer: DecisionAnswer) -> Deci
     )
 
 
+
+
+def _apply_page_split_proposal_answer(
+    wiki_root: Path, answer: DecisionAnswer
+) -> DecisionAnswerOutcome:
+    """Apply one ``page-split`` decision answer against the real store
+    (:mod:`athenaeum.page_split_proposals`, issue athenaeum#2018) — tier 0,
+    deterministic, no LLM call.
+
+    **Proposal-only**: :func:`~athenaeum.page_split_proposals.
+    approve_page_split_proposal` NEVER calls
+    :func:`athenaeum.page_decompose.apply_report` — it only records the
+    approval. Mirrors :func:`_apply_proposed_rule_answer`'s shape exactly
+    (same ``approve``/``reject`` vocabulary, same fail-soft
+    ``invalid_decision``/``already_resolved``/``id_not_found`` outcomes).
+    """
+    from athenaeum.page_split_proposals import (
+        approve_page_split_proposal,
+        reject_page_split_proposal,
+    )
+
+    decision = answer.verdict.strip().lower()
+    if decision not in ("approve", "reject"):
+        return DecisionAnswerOutcome(
+            path=answer.path,
+            decision_id=answer.decision_id,
+            decision_type=answer.decision_type,
+            applied=False,
+            error_code="invalid_decision",
+            message=f"verdict must be 'approve' or 'reject', got {answer.verdict!r}",
+        )
+
+    try:
+        if decision == "approve":
+            approve_page_split_proposal(
+                wiki_root,
+                proposal_id=answer.decision_id,
+                note=answer.note,
+            )
+        else:
+            reject_page_split_proposal(
+                wiki_root,
+                proposal_id=answer.decision_id,
+                note=answer.note,
+            )
+    except ValueError as exc:
+        msg = str(exc)
+        error_code = "already_resolved" if "already resolved" in msg else "id_not_found"
+        return DecisionAnswerOutcome(
+            path=answer.path,
+            decision_id=answer.decision_id,
+            decision_type=answer.decision_type,
+            applied=False,
+            error_code=error_code,
+            message=msg,
+        )
+
+    return DecisionAnswerOutcome(
+        path=answer.path,
+        decision_id=answer.decision_id,
+        decision_type=answer.decision_type,
+        applied=True,
+        error_code=None,
+        message=f"page-split proposal {'approved' if decision == 'approve' else 'rejected'}",
+    )
+
+
+def _apply_auto_apply_threshold_proposal_answer(
+    wiki_root: Path, answer: DecisionAnswer
+) -> DecisionAnswerOutcome:
+    """Apply one ``auto-apply-threshold`` decision answer against the real
+    store (:mod:`athenaeum.auto_apply_proposals`, issue athenaeum#2018) —
+    tier 0, deterministic, no LLM call.
+
+    **Widens config only, never bypasses in-flight decisions**:
+    :func:`~athenaeum.auto_apply_proposals.
+    approve_auto_apply_threshold_proposal` only appends to this proposal
+    type's own ledger — it never touches ``_pending_questions.md`` /
+    ``_pending_merges.md`` or any already-decided verdict. Mirrors
+    :func:`_apply_proposed_rule_answer`'s shape exactly.
+    """
+    from athenaeum.auto_apply_proposals import (
+        approve_auto_apply_threshold_proposal,
+        reject_auto_apply_threshold_proposal,
+    )
+
+    decision = answer.verdict.strip().lower()
+    if decision not in ("approve", "reject"):
+        return DecisionAnswerOutcome(
+            path=answer.path,
+            decision_id=answer.decision_id,
+            decision_type=answer.decision_type,
+            applied=False,
+            error_code="invalid_decision",
+            message=f"verdict must be 'approve' or 'reject', got {answer.verdict!r}",
+        )
+
+    try:
+        if decision == "approve":
+            approve_auto_apply_threshold_proposal(
+                wiki_root,
+                proposal_id=answer.decision_id,
+                note=answer.note,
+            )
+        else:
+            reject_auto_apply_threshold_proposal(
+                wiki_root,
+                proposal_id=answer.decision_id,
+                note=answer.note,
+            )
+    except ValueError as exc:
+        msg = str(exc)
+        error_code = "already_resolved" if "already resolved" in msg else "id_not_found"
+        return DecisionAnswerOutcome(
+            path=answer.path,
+            decision_id=answer.decision_id,
+            decision_type=answer.decision_type,
+            applied=False,
+            error_code=error_code,
+            message=msg,
+        )
+
+    return DecisionAnswerOutcome(
+        path=answer.path,
+        decision_id=answer.decision_id,
+        decision_type=answer.decision_type,
+        applied=True,
+        error_code=None,
+        message=(
+            f"auto-apply-threshold proposal "
+            f"{'approved' if decision == 'approve' else 'rejected'}"
+        ),
+    )
+
+
+
+
 def _apply_dimension_proposal_answer(
     knowledge_root: Path,
     wiki_root: Path,
@@ -1192,6 +1349,26 @@ def _raised_at_for(
                 if rec.get("kind") == PROPOSAL_KIND and str(rec.get("id")) == decision_id:
                     return str(rec.get("created_at") or "")
             return ""
+        if decision_type == "page-split":
+            from athenaeum.page_split_proposals import (
+                PROPOSAL_KIND,
+                read_page_split_proposals_ledger,
+            )
+
+            for rec in read_page_split_proposals_ledger(wiki_root):
+                if rec.get("kind") == PROPOSAL_KIND and str(rec.get("id")) == decision_id:
+                    return str(rec.get("created_at") or "")
+            return ""
+        if decision_type == "auto-apply-threshold":
+            from athenaeum.auto_apply_proposals import (
+                PROPOSAL_KIND,
+                read_auto_apply_proposals_ledger,
+            )
+
+            for rec in read_auto_apply_proposals_ledger(wiki_root):
+                if rec.get("kind") == PROPOSAL_KIND and str(rec.get("id")) == decision_id:
+                    return str(rec.get("created_at") or "")
+            return ""
         if decision_type == "dimension-proposal":
             from athenaeum.dimension_proposals import (
                 PROPOSAL_KIND,
@@ -1376,6 +1553,10 @@ def apply_decision_answers(
             )
         elif answer.decision_type == "proposed-rule":
             outcome = _apply_proposed_rule_answer(wiki_root, answer)
+        elif answer.decision_type == "page-split":
+            outcome = _apply_page_split_proposal_answer(wiki_root, answer)
+        elif answer.decision_type == "auto-apply-threshold":
+            outcome = _apply_auto_apply_threshold_proposal_answer(wiki_root, answer)
         elif answer.decision_type == "dimension-proposal":
             # Issue athenaeum#2016: converts the prior child's bare
             # ``else: # "proposed-rule" — only other member`` into an
