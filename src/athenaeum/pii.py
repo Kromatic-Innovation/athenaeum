@@ -720,13 +720,24 @@ def _is_embedded_slug_digit_run(source: str, start: int, end: int) -> bool:
       whitespace — i.e. it is a bare or hyphen/dot-grouped digit run, never a
       formatted phone (``+1-555-0100``, ``(555) 010-0100``) — so AC(d)'s
       labeled/parenthesized/plus-prefixed phones can never trip it.
+    * Only applies when the token ITSELF also looks like a slug/id shape —
+      carries a ``YYYYMMDD`` date group (:func:`_has_date_group`) or an
+      epoch-millis group (:func:`_has_epoch_millis_group`) — never merely
+      because it sits next to a lettered segment. Without this gate a
+      genuine hyphen-formatted phone (``555-123-4567``) glued onto an
+      ordinary label (``sales-555-123-4567``) would be suppressed outright,
+      a false-NEGATIVE on real PII — the opposite failure from the one
+      athenaeum#2027 closes (caught by Seer finding 17625842 on this PR).
 
     Catches a lane/job slug (``deploy-alpha-back-709-20250101``): the
     captured token ``709-20250101`` sits directly against a ``-`` whose other
-    side (``...-back-``) contains letters.
+    side (``...-back-``) contains letters, AND ``20250101`` is itself a
+    ``YYYYMMDD`` group.
     """
     token = source[start:end]
     if any(ch in token for ch in "+() \t\n\r"):
+        return False
+    if not (_has_date_group(token) or _has_epoch_millis_group(token)):
         return False
 
     def _segment_has_letter(seg_start: int, seg_end: int) -> bool:

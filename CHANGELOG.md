@@ -568,6 +568,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `athenaeum.pii` exclusion helpers. No public signature changed;
   `lint-pii`, `is_pii_flagged`, and `identify_pii_hazards` are unaffected
   except as a direct consequence of fewer phone-shaped false positives.
+  **`_is_embedded_slug_digit_run` additionally requires the matched token
+  itself to carry a `YYYYMMDD` date group or an epoch-millis group**
+  (Seer finding 17625842 on athenaeum#2028's own review) — without that
+  gate, any hyphen-formatted phone glued onto an ordinary lettered label
+  (`sales-555-123-4567`) was suppressed outright, a false-NEGATIVE on real
+  PII and the opposite failure from the one this entry closes. Both
+  existing slug fixtures already carry a date group, so the added gate
+  changes no prior case; a new `STILL_MATCHES` fixture
+  (`sales-555-123-4567` → `555-123-4567`) locks the regression closed.
 
 ### Changed
 

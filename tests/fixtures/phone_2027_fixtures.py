@@ -87,4 +87,11 @@ STILL_MATCHES: tuple[tuple[str, str, str], ...] = (
     ("bare national number just below epoch band", "logged 1299999999999 today", "1299999999999"),
     ("bare national number just above epoch band", "logged 2000000000001 today", "2000000000001"),
     ("bare number standing alone, not labeled", "cell 5551234567 anytime", "5551234567"),
+    (
+        "hyphen-grouped phone glued onto a lettered label, no date group "
+        "(Seer finding 17625842 on athenaeum#2028 — a non-date slug "
+        "neighbor must not suppress a real phone)",
+        "contact sales-555-123-4567 for a quote",
+        "555-123-4567",
+    ),
 )
