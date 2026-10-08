@@ -6428,3 +6428,131 @@ def resolve_person_registry_root(knowledge_root: Path, config: dict[str, Any] | 
                 candidate = Path(raw).expanduser()
                 return candidate if candidate.is_absolute() else knowledge_root / candidate
     return knowledge_root / "wiki"
+
+
+# ---------------------------------------------------------------------------
+# Tier-movement + policy-pack-edit proposals (issue athenaeum#2019, athenaeum#719 Plan step 6)
+# ---------------------------------------------------------------------------
+
+
+def resolve_tier_movement_proposals_enabled(config: dict[str, Any] | None) -> bool:
+    """Resolve the tier-movement proposal drafter's opt-in (issue athenaeum#2019).
+    DEFAULT OFF.
+
+    Gates :func:`athenaeum.tier_movement_proposals.run_tier_movement_proposal_drafting`
+    entirely — with this off, that function does no I/O at all (not even a
+    read of the push-metrics ledgers). athenaeum#719's own DoD requires a
+    self-tuning trigger to land dark behind a documented config key the
+    operator enables deliberately, mirroring
+    :func:`resolve_scope_aware_recall_enabled`'s shape exactly.
+
+    Precedence: ``ATHENAEUM_TIER_MOVEMENT_PROPOSALS_ENABLED`` env
+    (``1``/``true``/``yes``/``on``, case-insensitive) > yaml
+    ``librarian.tier_movement_proposals_enabled`` > default ``False``. No
+    seed in ``_DEFAULTS`` (issue athenaeum#231).
+    """
+    env = os.environ.get("ATHENAEUM_TIER_MOVEMENT_PROPOSALS_ENABLED")
+    if env is not None:
+        return env.strip().lower() in ("1", "true", "yes", "on")
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("tier_movement_proposals_enabled")
+            if isinstance(raw, bool):
+                return raw
+    return False
+
+
+def resolve_tier_movement_window_days(config: dict[str, Any] | None) -> int:
+    """Resolve the tier-movement proposal drafter's usage-window size, in
+    days (issue athenaeum#2019).
+
+    The trailing window :func:`athenaeum.usage_report.compute_usage_report`
+    is queried over when deciding whether a claim's usage crosses the
+    drafter's threshold. Precedence:
+    ``ATHENAEUM_TIER_MOVEMENT_WINDOW_DAYS`` env > yaml
+    ``librarian.tier_movement_window_days`` > ``30``. See
+    :func:`_resolve_positive_int_knob` for the coercion contract.
+    """
+    return _resolve_positive_int_knob(
+        config,
+        "tier_movement_window_days",
+        "ATHENAEUM_TIER_MOVEMENT_WINDOW_DAYS",
+        30,
+    )
+
+
+def resolve_tier_movement_pushed_min(config: dict[str, Any] | None) -> int:
+    """Resolve the tier-movement proposal drafter's minimum push count
+    (issue athenaeum#2019).
+
+    A claim pushed at least this many times in the window
+    (:func:`resolve_tier_movement_window_days`) is a candidate for the
+    "referenced at most X times" half of the threshold
+    (:func:`resolve_tier_movement_referenced_max`) — both conditions must
+    hold. Precedence: ``ATHENAEUM_TIER_MOVEMENT_PUSHED_MIN`` env > yaml
+    ``librarian.tier_movement_pushed_min`` > ``5``. See
+    :func:`_resolve_positive_int_knob` for the coercion contract.
+    """
+    return _resolve_positive_int_knob(
+        config,
+        "tier_movement_pushed_min",
+        "ATHENAEUM_TIER_MOVEMENT_PUSHED_MIN",
+        5,
+    )
+
+
+def resolve_tier_movement_referenced_max(config: dict[str, Any] | None) -> int:
+    """Resolve the tier-movement proposal drafter's maximum referenced count
+    (issue athenaeum#2019).
+
+    A claim referenced AT MOST this many times (zero, by default — never
+    actually used after being pushed) in the window is the "low value"
+    half of the threshold. Precedence:
+    ``ATHENAEUM_TIER_MOVEMENT_REFERENCED_MAX`` env > yaml
+    ``librarian.tier_movement_referenced_max`` > ``0``. Unlike
+    :func:`_resolve_positive_int_knob`'s siblings, ``0`` is the intended
+    default and a valid operator override (an unused-but-pushed claim is
+    EXACTLY the ``referenced_count == 0`` case), so this resolver accepts
+    any non-negative int rather than rejecting ``<= 0``; a negative or
+    non-int value (env or yaml) falls through to the default.
+    """
+    env = _env_number("ATHENAEUM_TIER_MOVEMENT_REFERENCED_MAX", int)
+    if env is not None and env >= 0:
+        return env
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("tier_movement_referenced_max")
+            if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
+                return raw
+    return 0
+
+
+def resolve_policy_pack_edit_proposals_enabled(config: dict[str, Any] | None) -> bool:
+    """Resolve the policy-pack-edit proposal drafter's opt-in (issue
+    athenaeum#2019). DEFAULT OFF.
+
+    Gates
+    :func:`athenaeum.policy_pack_edit_proposals.run_policy_pack_edit_proposal_drafting`
+    entirely — with this off, that function does no I/O at all. There is no
+    detector for this trigger yet (see that module's own docstring); this
+    key still exists and defaults off so the drafting entry point itself is
+    never reachable in a default install, matching athenaeum#719's DoD for
+    every other self-tuning trigger in this issue.
+
+    Precedence: ``ATHENAEUM_POLICY_PACK_EDIT_PROPOSALS_ENABLED`` env
+    (``1``/``true``/``yes``/``on``, case-insensitive) > yaml
+    ``librarian.policy_pack_edit_proposals_enabled`` > default ``False``.
+    No seed in ``_DEFAULTS`` (issue athenaeum#231).
+    """
+    env = os.environ.get("ATHENAEUM_POLICY_PACK_EDIT_PROPOSALS_ENABLED")
+    if env is not None:
+        return env.strip().lower() in ("1", "true", "yes", "on")
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("policy_pack_edit_proposals_enabled")
+            if isinstance(raw, bool):
+                return raw
+    return False
