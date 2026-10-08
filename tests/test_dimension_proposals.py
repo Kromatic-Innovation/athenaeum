@@ -163,6 +163,24 @@ class TestDraftDimensionProposal:
         assert draft.applies_to.get("memory_class") == ["decision", "fact"]
         assert draft.applies_to.get("scope") == ["team-a"]
 
+    def test_coord_origins_persisted_on_the_draft_and_ledger_record(self) -> None:
+        """Issue athenaeum#2017 (AC5): the provenance mapping a draft's "auto"
+        backfill came from is honest, round-trips onto the dataclass, and is
+        written into the ledger record so a later revocation of the answer
+        can find and stale-mark this proposal."""
+        shape = _shape(missing=("jurisdiction",))
+        draft = draft_dimension_proposal(
+            shape, "jurisdiction", coord_origins={"jurisdiction": "dec-coord-1"}
+        )
+        assert draft.coord_origins == {"jurisdiction": "dec-coord-1"}
+        assert draft.to_ledger_record()["coord_origins"] == {"jurisdiction": "dec-coord-1"}
+
+    def test_coord_origins_defaults_to_empty_when_not_provided(self) -> None:
+        shape = _shape()
+        draft = draft_dimension_proposal(shape, "jurisdiction")
+        assert draft.coord_origins == {}
+        assert draft.to_ledger_record()["coord_origins"] == {}
+
 
 # ---------------------------------------------------------------------------
 # run_dimension_proposal_drafting: ledger + idempotency + dry run
@@ -476,6 +494,32 @@ class TestRatificationApprove:
         # And the yaml entry was not duplicated.
         dims = load_config(knowledge_root).get("dimensions") or []
         assert len(dims) == 1
+
+    def test_approve_ingests_the_ratification_as_a_resolution_claim(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue athenaeum#2017 AC1: a dimension-proposal ratification is
+        ingested as a claim naming the registered dimension."""
+        from athenaeum.config import load_config
+        from athenaeum.decision_answers import apply_decision_answers, write_decision_answer
+        from athenaeum.resolution_claims import read_resolution_claims
+
+        knowledge_root, wiki_root, raw_root, decision_id = _drafted_knowledge_root(tmp_path)
+        write_decision_answer(
+            raw_root, decision_id=decision_id, decision_type="dimension-proposal", verdict="approve"
+        )
+        apply_decision_answers(wiki_root, raw_root, config=load_config(knowledge_root))
+
+        claims = read_resolution_claims(wiki_root)
+        matching = [
+            c
+            for c in claims
+            if c.get("decision_id") == decision_id
+            and c.get("decision_type") == "dimension-proposal"
+        ]
+        assert len(matching) == 1
+        assert matching[0]["dimension_name"] == "jurisdiction"
+        assert matching[0]["verdict"] == "approve"
 
     def test_approve_refuses_a_kernel_name_collision(self, tmp_path: Path) -> None:
         from athenaeum.config import load_config

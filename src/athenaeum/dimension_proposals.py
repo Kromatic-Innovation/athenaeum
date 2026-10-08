@@ -102,6 +102,15 @@ DIMENSION_PROPOSALS_LEDGER_FILENAME = "_dimension_proposals.jsonl"
 PROPOSAL_KIND = "proposal"
 APPROVE_KIND = "approve"
 REJECT_KIND = "reject"
+#: Issue athenaeum#2017 (AC5): a pending proposal whose drafted backfill plan
+#: cited a since-revoked resolution claim as its "auto" provenance for one
+#: axis. Appended, never replacing or removing the ``proposal`` record it
+#: names — "stale-marked, never deleted" mirrors
+#: :mod:`athenaeum.verdicts`'s ``stale``/``stale_reason`` convention for the
+#: verdict ledger, applied here as a distinct event record rather than an
+#: in-place field flip, since this ledger's existing records are written
+#: once and never rewritten (unlike the verdict ledger's partitions).
+STALE_KIND = "stale"
 
 BackfillAction = Literal["auto", "ask"]
 
@@ -201,6 +210,69 @@ def list_pending_dimension_proposals(
     return [
         r for r in records if r.get("kind") == PROPOSAL_KIND and str(r.get("id")) not in resolved
     ]
+
+
+def stale_proposal_ids(records: list[dict[str, Any]]) -> set[str]:
+    """The set of proposal ids carrying at least one :data:`STALE_KIND` event."""
+    return _kind_ids(records, STALE_KIND)
+
+
+def mark_proposals_stale_for_decision(
+    wiki_root: Path,
+    decision_id: str,
+    *,
+    reason: str,
+    ledger_path: Path | None = None,
+) -> list[str]:
+    """Stale-mark every PENDING proposal whose backfill plan cited *decision_id*
+    (issue athenaeum#2017 AC5).
+
+    Called by :func:`athenaeum.resolution_claims.revoke_resolution_claim` when
+    a resolution claim is revoked — reuses THIS ledger's existing
+    ``proposal``/``approve``/``reject`` event-append shape (never rewriting
+    an existing record) by appending one :data:`STALE_KIND` event per
+    affected, still-pending proposal id. A proposal already resolved
+    (approved/rejected) or already stale-marked for THIS *decision_id* is
+    left alone — idempotent, matching every other ledger-write in this
+    codebase.
+
+    Returns the list of proposal ids newly marked (empty when nothing
+    pending cites *decision_id*, or everything that does was already
+    marked).
+    """
+    records = read_dimension_proposals_ledger(wiki_root, ledger_path=ledger_path)
+    resolved = _resolved_ids(records)
+    already_stale = {
+        str(r.get("id"))
+        for r in records
+        if r.get("kind") == STALE_KIND and r.get("decision_id") == decision_id
+    }
+    target = (
+        ledger_path
+        if ledger_path is not None
+        else default_dimension_proposals_ledger_path(wiki_root)
+    )
+    newly_marked: list[str] = []
+    for r in records:
+        if r.get("kind") != PROPOSAL_KIND:
+            continue
+        proposal_id = str(r.get("id"))
+        if proposal_id in resolved or proposal_id in already_stale:
+            continue
+        coord_origins = r.get("coord_origins") or {}
+        if not isinstance(coord_origins, dict) or decision_id not in coord_origins.values():
+            continue
+        event = {
+            "v": DIMENSION_PROPOSALS_LEDGER_VERSION,
+            "kind": STALE_KIND,
+            "id": proposal_id,
+            "decision_id": decision_id,
+            "reason": reason,
+            "created_at": now_iso(),
+        }
+        _append_jsonl_line(target, json.dumps(event, sort_keys=True) + "\n")
+        newly_marked.append(proposal_id)
+    return newly_marked
 
 
 # ---------------------------------------------------------------------------
@@ -336,6 +408,15 @@ class DimensionProposalDraft:
     count: int
     window_days: int
     threshold: int
+    #: Issue athenaeum#2017 (AC5): the honest ``{dimension_name: answer_id}``
+    #: provenance mapping this draft's "auto" backfill entries were planned
+    #: from (see :func:`plan_backfill`'s *coord_origins* parameter) —
+    #: persisted so a later revocation of one of those answers
+    #: (:func:`athenaeum.resolution_claims.revoke_resolution_claim`) can
+    #: find and stale-mark this proposal via
+    #: :func:`mark_proposals_stale_for_decision`. Empty for every proposal
+    #: whose backfill plan is entirely ``"ask"`` (the pre-athenaeum#2017 case).
+    coord_origins: dict[str, str] = field(default_factory=dict)
 
     def to_ledger_record(self, *, now: datetime | None = None) -> dict[str, Any]:
         return {
@@ -355,6 +436,7 @@ class DimensionProposalDraft:
             "count": self.count,
             "window_days": self.window_days,
             "threshold": self.threshold,
+            "coord_origins": dict(self.coord_origins),
         }
 
 
@@ -424,6 +506,7 @@ def draft_dimension_proposal(
         example_pairs=shape.example_pairs,
         backfill_plan=final_plan,
         ask_count=ask_count,
+        coord_origins=dict(coord_origins or {}),
         applies_to_narrowed=narrowed,
         count=shape.count,
         window_days=shape.window_days,
@@ -554,11 +637,14 @@ __all__ = [
     "PROPOSAL_KIND",
     "APPROVE_KIND",
     "REJECT_KIND",
+    "STALE_KIND",
     "BackfillAction",
     "default_dimension_proposals_ledger_path",
     "proposal_item_id",
     "read_dimension_proposals_ledger",
     "list_pending_dimension_proposals",
+    "stale_proposal_ids",
+    "mark_proposals_stale_for_decision",
     "plan_backfill",
     "enforce_ask_budget",
     "DimensionProposalDraft",

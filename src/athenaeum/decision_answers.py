@@ -146,6 +146,12 @@ class DecisionAnswerOutcome:
     # own ``malformed`` (schema-invalid answer file).
     error_code: str | None
     message: str
+    #: Issue athenaeum#2017 (AC1): the dimension this resolution concerned,
+    #: when the applier can name one unambiguously (today only
+    #: ``dimension-proposal``'s own registered/rejected name). Empty for
+    #: every other type and for every pre-athenaeum#2017 call site — an absent
+    #: dimension name is honest, never a guess.
+    dimension_name: str = ""
 
 
 @dataclass
@@ -779,6 +785,7 @@ def _apply_dimension_proposal_answer(
         append_line_durable(
             ledger_target, (json.dumps(record, sort_keys=True) + "\n").encode("utf-8")
         )
+        rejected_name = str(proposal.get("name", ""))
         return DecisionAnswerOutcome(
             path=answer.path,
             decision_id=answer.decision_id,
@@ -786,6 +793,7 @@ def _apply_dimension_proposal_answer(
             applied=True,
             error_code=None,
             message="dimension proposal rejected; the underlying shape is suppressed",
+            dimension_name=rejected_name,
         )
 
     # approve / rename
@@ -850,6 +858,7 @@ def _apply_dimension_proposal_answer(
         decision_type=answer.decision_type,
         applied=True,
         error_code=None,
+        dimension_name=name,
         message=f"dimension {name!r} registered at state=backfill",
     )
 
@@ -1444,6 +1453,32 @@ def apply_decision_answers(
             except Exception as exc:  # noqa: BLE001 - must never break apply
                 log.debug(
                     "decision_answers: default-acceptance sampling skipped (%s): %s",
+                    type(exc).__name__,
+                    exc,
+                )
+
+            # Issue athenaeum#2017 (AC1): ingest this resolution as a claim with
+            # provenance (who/when/which decision id) -- a resolution-claims
+            # SIDE channel, same discipline as the two best-effort writes
+            # above: never a reason to fail an already-successful apply.
+            # ingest_resolution_claim itself is a no-op for a decision_type
+            # outside RESOLUTION_CLAIM_DECISION_TYPES, so this call is safe
+            # (and a no-op) for "question"/"merge"/"proposed-rule" too.
+            try:
+                from athenaeum.resolution_claims import ingest_resolution_claim
+
+                ingest_resolution_claim(
+                    wiki_root,
+                    decision_id=answer.decision_id,
+                    decision_type=answer.decision_type,
+                    verdict=answer.verdict,
+                    dimension_name=outcome.dimension_name,
+                    resolved_at=answer.resolved_at,
+                    note=answer.note,
+                )
+            except Exception as exc:  # noqa: BLE001 - must never break apply
+                log.debug(
+                    "decision_answers: resolution-claim ingestion skipped (%s): %s",
                     type(exc).__name__,
                     exc,
                 )
