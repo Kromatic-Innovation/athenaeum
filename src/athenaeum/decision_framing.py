@@ -285,6 +285,58 @@ def _approve_reject_schema(*, description: str) -> dict[str, Any]:
     }
 
 
+def _approve_rename_reject_schema(*, description: str) -> dict[str, Any]:
+    """A three-token ``approve``/``rename``/``reject`` answer schema.
+
+    Issue athenaeum#2015: a dimension proposal needs a verdict
+    :func:`_approve_reject_schema` cannot express — a human may rename the
+    drafted axis before ratifying it (the drafter's own name is a
+    mechanical derivation, never a claimed-final one). ``name`` is
+    REQUIRED when ``verdict == "rename"`` and forbidden otherwise, enforced
+    via a conditional subschema rather than a bare optional property, so a
+    ``rename`` answer with no new name is schema-invalid rather than
+    silently falling back to the drafted name.
+
+    This schema is admissible today even though ``dimension-proposal`` has
+    no inbound applier yet (:data:`ANSWERABLE_AS` carries no entry for it,
+    by design — see the ``_TYPE_FRAMING["dimension-proposal"]`` entry's own
+    comment): :func:`response_schema_for` is a pure function of the type
+    table, consulted by a future triage UI to know what a ratification will
+    look like, independent of whether an answer can be SUBMITTED today.
+    """
+    return {
+        "type": "object",
+        "properties": {
+            "verdict": {
+                "type": "string",
+                "enum": ["approve", "rename", "reject"],
+                "description": description,
+            },
+            "name": {
+                "type": "string",
+                "description": "Required when verdict is 'rename': the operator-chosen "
+                "replacement for the drafter's proposed dimension name.",
+            },
+            "note": _NOTE_PROPERTY,
+        },
+        "required": ["verdict"],
+        "additionalProperties": False,
+        "allOf": [
+            {
+                "if": {"properties": {"verdict": {"const": "rename"}}, "required": ["verdict"]},
+                "then": {"required": ["name"]},
+            },
+            {
+                "if": {
+                    "properties": {"verdict": {"enum": ["approve", "reject"]}},
+                    "required": ["verdict"],
+                },
+                "then": {"not": {"required": ["name"]}},
+            },
+        ],
+    }
+
+
 #: Per-decision-type framing metadata. Keyed by the ``type`` tag
 #: :mod:`athenaeum.decisions` stamps on each item.
 #:
@@ -430,7 +482,51 @@ _TYPE_FRAMING: dict[str, dict[str, Any]] = {
             "athenaeum#715's `underdetermined` branch)."
         ),
     },
+    "dimension-proposal": {
+        # Issue athenaeum#2015 (athenaeum#719 Plan step 3): retiring a
+        # mis-registered dimension re-nulls its coordinates (see
+        # athenaeum.dimensions.retire_dimension_coordinate) -- it never
+        # moves or deletes claim data -- so the class is REVERSIBLE, the
+        # same as "question"/"coordinate", not REVERSIBLE_WITH_WORK.
+        "reversibility": REVERSIBILITY_REVERSIBLE,
+        # Registering a new axis is a policy decision about the registry
+        # itself, like "proposed-rule" adopting a rule -- the operator's
+        # call, not something the drafter's confidence settles.
+        "routing": ROUTING_AUTHORITY,
+        "schema": _approve_rename_reject_schema(
+            description="approve = register the dimension as drafted; "
+            "rename = register it under a different name (see 'name'); "
+            "reject = discard the proposal.",
+        ),
+        "default_action": "reject (do not register the dimension)",
+        "default_consequences": (
+            "The recurring missing-dimension shape keeps recurring and "
+            "keeps producing signal-mining candidates; no new axis is "
+            "added to the registry."
+        ),
+        "rationale": (
+            "The self-tuning loop detected a recurring missing-dimension "
+            "shape and drafted a candidate axis from it. Whether to adopt "
+            "a new dimension into the operator's registry is policy, not "
+            "something the mining signal alone can decide."
+        ),
+    },
 }
+
+#: Issue athenaeum#2015 (athenaeum#719 Plan step 3): "dimension-proposal" is
+#: framed (visible in the unified queue, with a real schema a future triage
+#: UI can render) but DELIBERATELY carries no entry in :data:`ANSWERABLE_AS`
+#: below -- :func:`answerable_as("dimension-proposal")` returns ``None``
+#: until the ratification child (the next one; see the module this issue's
+#: own "Out of scope" section names) lands
+#: ``decision_answers._apply_dimension_proposal_answer`` and registers it
+#: there. This is the SAME declared-but-not-yet-answerable state
+#: "quarantine" already lives in (see that type's own comment on
+#: :data:`_DEFAULT_ACCEPTANCE_VERDICT` above) -- not a half-wired bug.
+#: ``tests/test_dimension_proposals.py``'s misroute-guard tests assert both
+#: halves hold: the item is listed, and answering it is refused cleanly by
+#: every inbound caller (the CLI, the MCP triage path), never dispatched
+#: into ``decision_answers._apply_proposed_rule_answer`` by accident.
 
 #: Framing for an item whose ``type`` this module does not know. Deliberately
 #: the most conservative cell of the table: irreversible, owner-only, free
