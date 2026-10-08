@@ -175,6 +175,36 @@ class TestPiiHazardGuard:
         assert result.pii_hazard_ids == []
         assert result.proposals[0].route == ROUTE_LEDGER
 
+    def test_recompare_pending_merges_consults_the_sticky_not_pii_ledger(
+        self, wiki_root: Path
+    ) -> None:
+        # Issue athenaeum#689 AC3/AC4: a sticky "not PII" verdict in the
+        # athenaeum#712 ledger (no YAML allowlist entry at all) suppresses the hazard
+        # route, exactly like test_recompare_pending_merges_consults_the_
+        # wiki_root_allowlist above does for the YAML allowlist.
+        from athenaeum.pii_classification_decision import CLASS_NOT_PII_TEST_ACCOUNT
+        from athenaeum.pii_verdicts import record_not_pii
+
+        a = _write_page(wiki_root, "a", body="service account svc@example.com")
+        b = _write_page(wiki_root, "b")
+        _write_queue(wiki_root, [_block("hazard", [a, b])])
+
+        with RunLock(wiki_root.parent) as lock:
+            record_not_pii(
+                wiki_root,
+                page_id="auto-example-a",
+                value="svc@example.com",
+                verdict_class=CLASS_NOT_PII_TEST_ACCOUNT,
+                decided_by="human:test",
+                lock=lock,
+            )
+
+        client = _fake_client(_content_payload("equivalent"))
+        result = recompare_pending_merges(wiki_root, client=client)
+
+        assert result.pii_hazard_ids == []
+        assert result.proposals[0].route == ROUTE_LEDGER
+
     def test_a_duplicate_verdict_on_a_hazard_still_cannot_auto_apply(self) -> None:
         # The literal athenaeum#715 sentence: "If the re-run's verdict for either
         # is `duplicate`, it still routes to a human."
