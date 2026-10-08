@@ -82,6 +82,7 @@ from athenaeum.pii import (
     is_pii_flagged,
     load_pii_allowlist,
 )
+from athenaeum.pii_verdicts import load_not_pii_allowlist
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from athenaeum.provider import LLMBackend
@@ -312,6 +313,13 @@ def recompare_pending_merges(
     # adjudicated" (fails toward MORE hazards flagged, never fewer).
     allowlist_entries, _allowlist_errors = load_pii_allowlist(wiki_root / PII_ALLOWLIST_FILENAME)
     allowlist = {e.value: e.reason for e in allowlist_entries}
+    # Issue athenaeum#689 AC3/AC4: a value with a sticky "not PII" verdict in
+    # the athenaeum#712 ledger is merged into the SAME allowlist mapping
+    # identify_pii_hazards() already consults -- no second hazard-exclusion
+    # path. The YAML allowlist (the operator's own explicit artifact) wins
+    # on any value present in both.
+    for value, reason in load_not_pii_allowlist(wiki_root).items():
+        allowlist.setdefault(value, reason)
     all_proposals: list[PendingMerge] = parse_pending_merges(merges_path)
     unresolved = [p for p in all_proposals if not p.resolved]
     if limit is not None and limit > 0:

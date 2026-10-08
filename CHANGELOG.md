@@ -26,6 +26,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   detection only; it is not yet consumed anywhere, matching the issue's
   own "commit after each numbered Plan step" instruction for an
   in-progress, multi-step issue.
+- **PII classification policy, response schema, and sticky-verdict recording
+  (issue athenaeum#689, AC1-AC4).** `docs/design/pii-classification-policy.md`
+  documents the five classes that separate a non-contact token (an SSH host
+  alias, a calendar id, a page that exists to hold addresses, a test/role
+  account) from a genuine personal address, the page-purpose rule, and the
+  "over-restoring is worse than under-restoring" principle. A new module,
+  `pii_classification_decision.py` (L4), authors issue athenaeum#717's
+  framed-decision response schema and per-item context shape for a
+  `pii-classification` decision — dark and unwired by design (AC2's 2026-09-03
+  scoping note: authoring the schema discharges this AC; nothing imports it
+  into the decision-queue path, and `athenaeum run` behaviour is unchanged). A
+  second new module, `pii_verdicts.py` (L4), records sticky PII-classification
+  verdicts through the existing athenaeum#712 verdict ledger: a "not PII"
+  verdict is written plainly to the in-git ledger (mirroring the existing
+  `_pii-allowlist.yml` precedent) and suppresses re-flagging by `lint-pii` and
+  `recompare.identify_pii_hazards`; an "is PII" verdict is erasure-class by
+  construction and is therefore NEVER written to the in-git ledger — it
+  routes to the athenaeum#984 off-corpus ledger shard when configured, or is
+  refused and reported otherwise, exactly like
+  `verdicts.record_pair_decision`'s existing erasure-class routing. AC5-AC7
+  (verifying the ~70 residual addresses from issue athenaeum#691 against the
+  live corpus) are a separate operator host step, not built here.
 - **Memory model v6 queue: budget-breach ratchet guard + default-acceptance
   rubber-stamp measurement (issue athenaeum#1996, slice (f)/(g) of
   athenaeum#717 AC group 7, "both ratchet guards").** Two independent
