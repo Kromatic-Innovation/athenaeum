@@ -48,6 +48,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   / `_apply_auto_apply_threshold_proposal_answer`), since each AC requires
   one. New ledgers `wiki/_page_split_proposals.jsonl` /
   `wiki/_auto_apply_proposals.jsonl`.
+- **Self-tuning loop, Plan step 4: dimension-proposal ratification +
+  reversible retire (issue athenaeum#2016).** Adds `LifecycleState.RETIRED`
+  as a third dimension state (`dimensions.py`) — never a deletion: the
+  registry entry's name/kind/`null_means`/`applies_to`/`origin` are
+  preserved so a reversal restores the SAME dimension. `compare_dimension`'s
+  `BACKFILL`-only null-coordinate branch now also treats `RETIRED` as
+  unknown/absent; `comparator.py`/`supersession.py`'s existing
+  `!= ENFORCED` guards already excluded `RETIRED` with no code change.
+  New `retire_dimension()`/`restore_dimension()` (pure state transitions,
+  refusing a kernel dimension) and `retire_dimension_coordinate_
+  across_wiki()` (composes the existing per-page
+  `retire_dimension_coordinate()` primitive over every page under a wiki
+  root — never changes the primitive itself). `config.py` gains
+  `write_dimensions_config()`: a surgical, comment-preserving rewrite of
+  `athenaeum.yaml`'s top-level `dimensions:` block (no existing
+  rewrite-one-key convention was found elsewhere in this codebase — see
+  that function's own docstring for what was checked and rejected). Wires
+  `"dimension-proposal"` (issue athenaeum#2015) into the unified decision
+  queue's inbound applier: added to `decision_answers.VALID_DECISION_TYPES`
+  with an explicit dispatch branch (`apply_decision_answers`'s prior bare
+  `else: # "proposed-rule"` is now an explicit `elif` per type, with a
+  defensive `unroutable` fallback), a self-mapped `decision_framing.
+  ANSWERABLE_AS` entry, and the new `_apply_dimension_proposal_answer()`
+  — `approve`/`rename` write the drafted dimension into `athenaeum.yaml`
+  at `state: backfill`, `origin: proposed:<id>` (stripping the drafter's
+  ask-budget `max_pairs` annotation, which is informational, never a real
+  `applies_to` selector key), validated through `dimensions.build_registry`
+  before anything is written; `reject` writes a suppression record only,
+  reusing the drafter's own resolved-id filter so the shape is never
+  re-proposed. A ratified dimension follows the existing
+  `backfill -> enforced` flip unmodified — one lifecycle, not a second
+  one. The prior child's misroute-guard tests
+  (`tests/test_dimension_proposals.py::TestMisrouteGuard`) are flipped to
+  their opposite: the answer path now accepts the type instead of
+  refusing it.
 - **Self-tuning loop, Plan step 3: dimension-proposal drafter + decision
   type (issue athenaeum#2015).** New `src/athenaeum/dimension_proposals.py`
   (L4): `run_dimension_proposal_drafting()` turns a triggered
@@ -100,6 +135,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   detection only; it is not yet consumed anywhere, matching the issue's
   own "commit after each numbered Plan step" instruction for an
   in-progress, multi-step issue.
+- **PII classification policy, response schema, and sticky-verdict recording
+  (issue athenaeum#689, AC1-AC4).** `docs/design/pii-classification-policy.md`
+  documents the five classes that separate a non-contact token (an SSH host
+  alias, a calendar id, a page that exists to hold addresses, a test/role
+  account) from a genuine personal address, the page-purpose rule, and the
+  "over-restoring is worse than under-restoring" principle. A new module,
+  `pii_classification_decision.py` (L4), authors issue athenaeum#717's
+  framed-decision response schema and per-item context shape for a
+  `pii-classification` decision — dark and unwired by design (AC2's 2026-09-03
+  scoping note: authoring the schema discharges this AC; nothing imports it
+  into the decision-queue path, and `athenaeum run` behaviour is unchanged). A
+  second new module, `pii_verdicts.py` (L4), records sticky PII-classification
+  verdicts through the existing athenaeum#712 verdict ledger: a "not PII"
+  verdict is written plainly to the in-git ledger (mirroring the existing
+  `_pii-allowlist.yml` precedent) and suppresses re-flagging by `lint-pii` and
+  `recompare.identify_pii_hazards`; an "is PII" verdict is erasure-class by
+  construction and is therefore NEVER written to the in-git ledger — it
+  routes to the athenaeum#984 off-corpus ledger shard when configured, or is
+  refused and reported otherwise, exactly like
+  `verdicts.record_pair_decision`'s existing erasure-class routing. AC5-AC7
+  (verifying the ~70 residual addresses from issue athenaeum#691 against the
+  live corpus) are a separate operator host step, not built here.
 - **Memory model v6 queue: budget-breach ratchet guard + default-acceptance
   rubber-stamp measurement (issue athenaeum#1996, slice (f)/(g) of
   athenaeum#717 AC group 7, "both ratchet guards").** Two independent

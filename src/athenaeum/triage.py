@@ -481,6 +481,11 @@ def submit_answer(
         decision_type=applier_type,
         verdict=str(answer["verdict"]),
         note=str(answer.get("note", "")),
+        # Issue athenaeum#2016: forward a "rename" answer's human-chosen
+        # dimension name, type-agnostically (``validate_answer`` above
+        # already refused a "name" the decision_type's own schema does not
+        # declare, so this is empty for every other type).
+        name=str(answer.get("name", "")),
     )
     return TriageSubmission(ok=True, path=path)
 

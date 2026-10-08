@@ -12,7 +12,8 @@ name *which* decision an answer resolves:
 
 - ``decision_id`` — the id being resolved (from ``list_pending_decisions``).
 - ``decision_type`` — one of ``question`` | ``merge`` | ``audit`` |
-  ``proposed-rule`` (**required**). The three live id spaces are per-type
+  ``proposed-rule`` | ``coordinate`` | ``dimension-proposal`` (**required**).
+  The live id spaces are per-type
   and unrelated (question ids are ``answers._make_id``, sha1 of
   header+question; merge ids are ``pending_merges._make_id``, sha1 of
   sources+target — same length, different key space, no cross-type
@@ -89,7 +90,10 @@ log = logging.getLogger(__name__)
 #: :func:`_apply_coordinate_answer`. ``page-split`` / ``auto-apply-threshold``
 #: (issue athenaeum#2018) are each proposal-only — see
 #: :func:`_apply_page_split_proposal_answer` /
-#: :func:`_apply_auto_apply_threshold_proposal_answer`. See module docstring.
+#: :func:`_apply_auto_apply_threshold_proposal_answer`. ``dimension-proposal``
+#: (issue athenaeum#2016) ratifies/renames/rejects a drafted dimension
+#: proposal (athenaeum#2015) — see :func:`_apply_dimension_proposal_answer`.
+#: See module docstring.
 DecisionType = Literal[
     "question",
     "merge",
@@ -98,6 +102,7 @@ DecisionType = Literal[
     "coordinate",
     "page-split",
     "auto-apply-threshold",
+    "dimension-proposal",
 ]
 VALID_DECISION_TYPES: frozenset[str] = frozenset(
     (
@@ -108,6 +113,7 @@ VALID_DECISION_TYPES: frozenset[str] = frozenset(
         "coordinate",
         "page-split",
         "auto-apply-threshold",
+        "dimension-proposal",
     )
 )
 
@@ -138,6 +144,12 @@ class DecisionAnswer:
     #: record a distinct one — including every file written before this
     #: field existed.
     origin_decision_type: str = ""
+    #: Issue athenaeum#2016: required when ``verdict == "rename"`` on a
+    #: ``dimension-proposal`` answer — the operator-chosen replacement name
+    #: for the drafter's proposed dimension. Empty string for every other
+    #: answer (the schema's own ``allOf`` conditional forbids it alongside
+    #: ``approve``/``reject`` — see ``decision_framing._approve_rename_reject_schema``).
+    name: str = ""
 
 
 @dataclass
@@ -178,6 +190,7 @@ def render_decision_answer(
     note: str = "",
     resolved_at: str | None = None,
     origin_decision_type: str = "",
+    name: str = "",
 ) -> str:
     """Render a decision-answer raw-intake record (athenaeum#908 D1 format).
 
@@ -227,6 +240,8 @@ def render_decision_answer(
     }
     if note and note.strip():
         meta["note"] = note
+    if name and name.strip():
+        meta["name"] = name.strip()
 
     frontmatter = yaml.safe_dump(
         meta, sort_keys=False, allow_unicode=True, default_flow_style=False
@@ -248,6 +263,7 @@ def write_decision_answer(
     verdict: str,
     note: str = "",
     origin_decision_type: str = "",
+    name: str = "",
 ) -> Path:
     """Render + write one decision-answer file under ``raw_root/answers/``.
 
@@ -274,6 +290,7 @@ def write_decision_answer(
         note=note,
         resolved_at=iso_ts,
         origin_decision_type=origin_decision_type,
+        name=name,
     )
 
     stem = f"{filename_ts}-{decision_type}-{decision_id}"
@@ -424,6 +441,8 @@ def _load_decision_answer(path: Path) -> DecisionAnswer | None:
         else decision_type
     )
 
+    raw_name = meta.get("name", "") or ""
+
     return DecisionAnswer(
         decision_id=decision_id.strip(),
         decision_type=decision_type,
@@ -432,6 +451,7 @@ def _load_decision_answer(path: Path) -> DecisionAnswer | None:
         resolved_at=str(resolved_at),
         path=path,
         origin_decision_type=origin_decision_type,
+        name=str(raw_name),
     )
 
 
@@ -669,6 +689,8 @@ def _apply_proposed_rule_answer(wiki_root: Path, answer: DecisionAnswer) -> Deci
     )
 
 
+
+
 def _apply_page_split_proposal_answer(
     wiki_root: Path, answer: DecisionAnswer
 ) -> DecisionAnswerOutcome:
@@ -799,6 +821,193 @@ def _apply_auto_apply_threshold_proposal_answer(
             f"auto-apply-threshold proposal "
             f"{'approved' if decision == 'approve' else 'rejected'}"
         ),
+    )
+
+
+
+
+def _apply_dimension_proposal_answer(
+    knowledge_root: Path,
+    wiki_root: Path,
+    answer: DecisionAnswer,
+    *,
+    config: dict[str, Any] | None,
+) -> DecisionAnswerOutcome:
+    """Apply one ``dimension-proposal`` decision answer (issue athenaeum#2016,
+    the ratification child of athenaeum#2015/athenaeum#719 Plan step 3-4).
+
+    Three verdicts (see ``decision_framing._approve_rename_reject_schema``):
+
+    - ``approve`` — register the drafted dimension AS DRAFTED, at
+      ``state: backfill``, ``origin: proposed:<decision_id>``, written into
+      the operator's ``athenaeum.yaml`` ``dimensions:`` list via
+      :func:`athenaeum.config.write_dimensions_config`.
+    - ``rename`` — same, under ``answer.name`` (the human-edited name)
+      instead of the drafter's own name. ``answer.name`` is REQUIRED here;
+      ``decision_framing.validate_answer`` already refuses a schema-invalid
+      rename with no ``name`` before this function is ever reached, but this
+      is checked again defensively rather than trusted blindly.
+    - ``reject`` — writes a suppression record only (mirrors
+      :func:`athenaeum.rule_proposals.reject_rule_proposal`): the underlying
+      ``(dimension_name, shape)`` pair is permanently suppressed by
+      set-membership in :func:`athenaeum.dimension_proposals.
+      list_pending_dimension_proposals`'s own resolved-id filter — the
+      drafter never re-proposes it.
+
+    Validated through :func:`athenaeum.dimensions.build_registry` INSIDE
+    :func:`write_dimensions_config` — a malformed draft (bad kebab-case
+    rename, a name colliding with a kernel or already-registered dimension)
+    fails loudly there, before anything is written, converted here into a
+    fail-soft ``invalid_dimension_entry`` outcome (never raised out of the
+    batch loop), matching every other refusal in this module.
+
+    "Nothing half-lands" ordering: the YAML write happens BEFORE the ledger
+    record. If a crash or re-apply lands between the two, this function
+    detects an already-written ``origin: proposed:<decision_id>`` entry in
+    the operator's config and skips straight to the ledger write rather than
+    re-appending a second, name-colliding copy.
+    """
+    from athenaeum.config import write_dimensions_config
+    from athenaeum.dimension_proposals import (
+        APPROVE_KIND,
+        DIMENSION_PROPOSALS_LEDGER_VERSION,
+        PROPOSAL_KIND,
+        REJECT_KIND,
+        default_dimension_proposals_ledger_path,
+        read_dimension_proposals_ledger,
+    )
+    from athenaeum.dimensions import DimensionRegistryError
+    from athenaeum.store import append_line_durable, now_iso
+
+    def _refuse(error_code: str, message: str) -> DecisionAnswerOutcome:
+        return DecisionAnswerOutcome(
+            path=answer.path,
+            decision_id=answer.decision_id,
+            decision_type=answer.decision_type,
+            applied=False,
+            error_code=error_code,
+            message=message,
+        )
+
+    decision = answer.verdict.strip().lower()
+    if decision not in ("approve", "rename", "reject"):
+        return _refuse(
+            "invalid_decision",
+            f"verdict must be 'approve', 'rename' or 'reject', got {answer.verdict!r}",
+        )
+    if decision == "rename" and not answer.name.strip():
+        return _refuse(
+            "invalid_decision", "verdict 'rename' requires a non-empty 'name'"
+        )
+
+    records = read_dimension_proposals_ledger(wiki_root)
+    proposal = next(
+        (
+            r
+            for r in records
+            if r.get("kind") == PROPOSAL_KIND and str(r.get("id")) == answer.decision_id
+        ),
+        None,
+    )
+    if proposal is None:
+        return _refuse(
+            "id_not_found", f"unknown dimension-proposal id: {answer.decision_id}"
+        )
+    resolved_ids = {
+        str(r.get("id")) for r in records if r.get("kind") in (APPROVE_KIND, REJECT_KIND)
+    }
+    if answer.decision_id in resolved_ids:
+        return _refuse(
+            "already_resolved",
+            f"dimension-proposal {answer.decision_id} already resolved",
+        )
+
+    ledger_target = default_dimension_proposals_ledger_path(wiki_root)
+
+    if decision == "reject":
+        record = {
+            "v": DIMENSION_PROPOSALS_LEDGER_VERSION,
+            "kind": REJECT_KIND,
+            "id": answer.decision_id,
+            "created_at": now_iso(),
+            "answered_at": now_iso(),
+            "note": answer.note,
+        }
+        append_line_durable(
+            ledger_target, (json.dumps(record, sort_keys=True) + "\n").encode("utf-8")
+        )
+        return DecisionAnswerOutcome(
+            path=answer.path,
+            decision_id=answer.decision_id,
+            decision_type=answer.decision_type,
+            applied=True,
+            error_code=None,
+            message="dimension proposal rejected; the underlying shape is suppressed",
+        )
+
+    # approve / rename
+    name = answer.name.strip() if decision == "rename" else str(proposal.get("name", ""))
+    # Issue athenaeum#2016 fix: read the LIVE dimensions: list off disk, never
+    # the caller's *config* dict. apply_decision_answers loads config ONCE
+    # before its whole batch loop; a stale in-memory snapshot would make a
+    # second approve in the SAME pass overwrite the first approve's just-
+    # written yaml entry (list-replace, not append), and config=None would
+    # wipe every operator-declared dimension outright. load_config() re-reads
+    # athenaeum.yaml fresh on every call, so each approve in a batch sees
+    # every prior one's write.
+    from athenaeum.config import load_config
+
+    existing_entries = list(load_config(knowledge_root).get("dimensions") or [])
+    already_written = any(
+        isinstance(e, dict) and e.get("origin") == f"proposed:{answer.decision_id}"
+        for e in existing_entries
+    )
+    if not already_written:
+        # Strip the drafter's ``max_pairs`` ask-budget annotation (issue
+        # athenaeum#2015's `enforce_ask_budget`) -- it is informational about
+        # the proposal's backfill plan, never a real `applies_to` selector
+        # key, and writing it in would make `dimension_applies` require a
+        # `max_pairs:` frontmatter key on every claim, which nothing sets.
+        applies_to = {
+            k: v
+            for k, v in dict(proposal.get("applies_to") or {}).items()
+            if k != "max_pairs"
+        }
+        entry: dict[str, Any] = {
+            "name": name,
+            "kind": proposal.get("dimension_kind"),
+            "null_means": proposal.get("null_semantics"),
+            "separates": bool(proposal.get("separates", True)),
+            "applies_to": applies_to,
+            "state": "backfill",
+            "origin": f"proposed:{answer.decision_id}",
+            "since": datetime.now(timezone.utc).date().isoformat(),
+        }
+        try:
+            write_dimensions_config(knowledge_root, [*existing_entries, entry])
+        except DimensionRegistryError as exc:
+            return _refuse("invalid_dimension_entry", str(exc))
+
+    record = {
+        "v": DIMENSION_PROPOSALS_LEDGER_VERSION,
+        "kind": APPROVE_KIND,
+        "id": answer.decision_id,
+        "created_at": now_iso(),
+        "answered_at": now_iso(),
+        "name": name,
+        "note": answer.note,
+    }
+    append_line_durable(
+        ledger_target, (json.dumps(record, sort_keys=True) + "\n").encode("utf-8")
+    )
+
+    return DecisionAnswerOutcome(
+        path=answer.path,
+        decision_id=answer.decision_id,
+        decision_type=answer.decision_type,
+        applied=True,
+        error_code=None,
+        message=f"dimension {name!r} registered at state=backfill",
     )
 
 
@@ -1160,6 +1369,16 @@ def _raised_at_for(
                 if rec.get("kind") == PROPOSAL_KIND and str(rec.get("id")) == decision_id:
                     return str(rec.get("created_at") or "")
             return ""
+        if decision_type == "dimension-proposal":
+            from athenaeum.dimension_proposals import (
+                PROPOSAL_KIND,
+                read_dimension_proposals_ledger,
+            )
+
+            for rec in read_dimension_proposals_ledger(wiki_root):
+                if rec.get("kind") == PROPOSAL_KIND and str(rec.get("id")) == decision_id:
+                    return str(rec.get("created_at") or "")
+            return ""
     except Exception as exc:  # noqa: BLE001 - lookup is best-effort
         log.debug(
             "decision_answers: raised_at lookup skipped (%s): %s", type(exc).__name__, exc
@@ -1274,11 +1493,16 @@ def apply_decision_answers(
         # message for an out-of-vocabulary verdict, and that contract is
         # documented on the MCP mutators. :func:`shape_errors_only` is what
         # draws that line.
+        # Issue athenaeum#2016: ``name`` is only a DECLARED schema property for
+        # ``dimension-proposal`` (and only valid alongside verdict=="rename" —
+        # the schema's own conditional forbids it being present at all
+        # otherwise), so it is included here ONLY when non-empty rather than
+        # unconditionally like ``verdict``/``note``.
+        answer_dict: dict[str, str] = {"verdict": answer.verdict, "note": answer.note}
+        if answer.name.strip():
+            answer_dict["name"] = answer.name.strip()
         schema_errors = shape_errors_only(
-            validate_answer(
-                answer.decision_type,
-                {"verdict": answer.verdict, "note": answer.note},
-            )
+            validate_answer(answer.decision_type, answer_dict)
         )
         if schema_errors:
             message = "; ".join(schema_errors)
@@ -1331,8 +1555,28 @@ def apply_decision_answers(
             outcome = _apply_proposed_rule_answer(wiki_root, answer)
         elif answer.decision_type == "page-split":
             outcome = _apply_page_split_proposal_answer(wiki_root, answer)
-        else:  # "auto-apply-threshold" — the only other member of VALID_DECISION_TYPES
+        elif answer.decision_type == "auto-apply-threshold":
             outcome = _apply_auto_apply_threshold_proposal_answer(wiki_root, answer)
+        elif answer.decision_type == "dimension-proposal":
+            # Issue athenaeum#2016: converts the prior child's bare
+            # ``else: # "proposed-rule" — only other member`` into an
+            # explicit branch per type, per this issue's own AC — the
+            # misroute-guard test now asserts a dimension-proposal answer
+            # reaches THIS branch, never ``_apply_proposed_rule_answer``.
+            outcome = _apply_dimension_proposal_answer(
+                wiki_root.parent, wiki_root, answer, config=config
+            )
+        else:  # pragma: no cover - unreachable: _load_decision_answer already
+            # refuses any decision_type outside VALID_DECISION_TYPES as
+            # MalformedDecisionAnswer before this loop ever dispatches.
+            outcome = DecisionAnswerOutcome(
+                path=answer.path,
+                decision_id=answer.decision_id,
+                decision_type=answer.decision_type,
+                applied=False,
+                error_code="unroutable",
+                message=f"no dispatch branch for decision_type {answer.decision_type!r}",
+            )
 
         if outcome.applied:
             # Best-effort: the budget ledger is instrumentation, never a

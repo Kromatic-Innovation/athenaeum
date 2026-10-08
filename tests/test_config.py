@@ -1306,3 +1306,219 @@ class TestResolveAuditOnTouchFreshnessHours:
         config = {"librarian": {"audit_on_touch_freshness_hours": 6}}
         assert resolve_audit_on_touch_freshness_hours(config) == 6.0
 
+
+
+# ---------------------------------------------------------------------------
+# write_dimensions_config / retire_operator_dimension / restore_operator_dimension
+# (issue athenaeum#2016)
+# ---------------------------------------------------------------------------
+
+
+class TestWriteDimensionsConfig:
+    def test_appends_when_no_live_block(self, tmp_path: Path) -> None:
+        from athenaeum.config import write_dimensions_config
+
+        (tmp_path / "athenaeum.yaml").write_text(
+            "auto_recall: true\n# dimensions:\n#   - name: engagement\nowner:\n  uid: abc\n",
+            encoding="utf-8",
+        )
+        write_dimensions_config(
+            tmp_path,
+            [
+                {
+                    "name": "jurisdiction",
+                    "kind": "hierarchy",
+                    "null_means": "unknown",
+                    "separates": True,
+                    "applies_to": {},
+                    "state": "backfill",
+                    "origin": "proposed:abc",
+                }
+            ],
+        )
+        text = (tmp_path / "athenaeum.yaml").read_text(encoding="utf-8")
+        assert "owner:\n  uid: abc" in text
+        assert "name: jurisdiction" in text
+        cfg = load_config(tmp_path)
+        assert cfg["dimensions"][0]["name"] == "jurisdiction"
+
+    def test_replaces_a_live_block_in_place(self, tmp_path: Path) -> None:
+        from athenaeum.config import write_dimensions_config
+
+        (tmp_path / "athenaeum.yaml").write_text(
+            "auto_recall: true\n"
+            "dimensions:\n"
+            "  - name: engagement\n"
+            "    kind: identity\n"
+            "    null_means: unknown\n"
+            "    separates: true\n"
+            "    applies_to: {}\n"
+            "    state: backfill\n"
+            "    origin: operator\n"
+            "owner:\n  uid: abc\n",
+            encoding="utf-8",
+        )
+        write_dimensions_config(
+            tmp_path,
+            [
+                {
+                    "name": "engagement",
+                    "kind": "identity",
+                    "null_means": "unknown",
+                    "separates": True,
+                    "applies_to": {},
+                    "state": "backfill",
+                    "origin": "operator",
+                },
+                {
+                    "name": "jurisdiction",
+                    "kind": "hierarchy",
+                    "null_means": "unknown",
+                    "separates": True,
+                    "applies_to": {},
+                    "state": "backfill",
+                    "origin": "proposed:abc",
+                },
+            ],
+        )
+        cfg = load_config(tmp_path)
+        names = [d["name"] for d in cfg["dimensions"]]
+        assert names == ["engagement", "jurisdiction"]
+        assert "owner:\n  uid: abc" in (tmp_path / "athenaeum.yaml").read_text(encoding="utf-8")
+
+    def test_preserves_a_comment_paragraph_after_the_block(self, tmp_path: Path) -> None:
+        """Regression: the line-span scan must not swallow a comment
+        paragraph sitting between the dimensions: block and the next
+        top-level key — it is not part of the block."""
+        from athenaeum.config import write_dimensions_config
+
+        (tmp_path / "athenaeum.yaml").write_text(
+            "auto_recall: true\n"
+            "dimensions:\n"
+            "  - name: engagement\n"
+            "    kind: identity\n"
+            "    null_means: unknown\n"
+            "    separates: true\n"
+            "    applies_to: {}\n"
+            "    state: backfill\n"
+            "    origin: operator\n"
+            "\n"
+            "# This paragraph documents the next section.\n"
+            "# It must survive byte for byte.\n"
+            "owner:\n  uid: abc\n",
+            encoding="utf-8",
+        )
+        write_dimensions_config(
+            tmp_path,
+            [
+                {
+                    "name": "engagement",
+                    "kind": "identity",
+                    "null_means": "unknown",
+                    "separates": True,
+                    "applies_to": {},
+                    "state": "backfill",
+                    "origin": "operator",
+                }
+            ],
+        )
+        text = (tmp_path / "athenaeum.yaml").read_text(encoding="utf-8")
+        assert "# This paragraph documents the next section." in text
+        assert "# It must survive byte for byte." in text
+        assert "owner:\n  uid: abc" in text
+
+    def test_validates_before_writing(self, tmp_path: Path) -> None:
+        from athenaeum.config import write_dimensions_config
+        from athenaeum.dimensions import DimensionRegistryError
+
+        (tmp_path / "athenaeum.yaml").write_text("auto_recall: true\n", encoding="utf-8")
+        with pytest.raises(DimensionRegistryError):
+            write_dimensions_config(tmp_path, [{"name": "scope", "kind": "hierarchy"}])
+        # Nothing was written.
+        assert "dimensions:" not in (tmp_path / "athenaeum.yaml").read_text(encoding="utf-8")
+
+
+class TestRetireAndRestoreOperatorDimension:
+    def _seeded_root(self, tmp_path: Path, *, state: str = "enforced") -> tuple[Path, Path]:
+        knowledge_root = tmp_path
+        wiki_root = knowledge_root / "wiki"
+        wiki_root.mkdir()
+        (knowledge_root / "athenaeum.yaml").write_text(
+            "dimensions:\n"
+            "- name: engagement\n"
+            "  kind: identity\n"
+            "  null_means: unknown\n"
+            "  separates: true\n"
+            "  applies_to: {}\n"
+            f"  state: {state}\n"
+            "  origin: operator\n",
+            encoding="utf-8",
+        )
+        return knowledge_root, wiki_root
+
+    def test_retire_writes_state_back_and_renulls_coordinates(self, tmp_path: Path) -> None:
+        from athenaeum.config import retire_operator_dimension
+
+        knowledge_root, wiki_root = self._seeded_root(tmp_path)
+        page = wiki_root / "a.md"
+        page.write_text("---\nengagement: high\n---\nbody\n", encoding="utf-8")
+
+        result = retire_operator_dimension(knowledge_root, wiki_root, "engagement")
+        assert result["state"] == "retired"
+        assert str(page) in result["pages_renulled"]
+        assert "engagement: null" in page.read_text(encoding="utf-8")
+        assert load_config(knowledge_root)["dimensions"][0]["state"] == "retired"
+
+    def test_retire_invokes_on_retire_callback_for_stale_marking(self, tmp_path: Path) -> None:
+        from athenaeum.config import retire_operator_dimension
+
+        knowledge_root, wiki_root = self._seeded_root(tmp_path)
+        calls = []
+
+        def on_retire(dim: object) -> int:
+            calls.append(dim)
+            return 5
+
+        result = retire_operator_dimension(
+            knowledge_root, wiki_root, "engagement", on_retire=on_retire
+        )
+        assert len(calls) == 1
+        assert result["stale_marked"] == 5
+
+    def test_retire_refuses_an_unknown_dimension(self, tmp_path: Path) -> None:
+        from athenaeum.config import retire_operator_dimension
+        from athenaeum.dimensions import DimensionRegistryError
+
+        knowledge_root, wiki_root = self._seeded_root(tmp_path)
+        with pytest.raises(DimensionRegistryError):
+            retire_operator_dimension(knowledge_root, wiki_root, "nonexistent")
+
+    def test_retire_then_restore_round_trips_through_yaml_without_resurrecting(
+        self, tmp_path: Path
+    ) -> None:
+        """AC: un-retiring restores the dimension at backfill, never
+        resurrects nulled coordinates — verified through the real
+        athenaeum.yaml round trip, not just the pure transition."""
+        from athenaeum.config import restore_operator_dimension, retire_operator_dimension
+
+        knowledge_root, wiki_root = self._seeded_root(tmp_path)
+        page = wiki_root / "a.md"
+        page.write_text("---\nengagement: high\n---\nbody\n", encoding="utf-8")
+
+        retire_operator_dimension(knowledge_root, wiki_root, "engagement")
+        assert "engagement: null" in page.read_text(encoding="utf-8")
+
+        result = restore_operator_dimension(knowledge_root, "engagement")
+        assert result["state"] == "backfill"
+        assert load_config(knowledge_root)["dimensions"][0]["state"] == "backfill"
+        # The page's coordinate is still null — restoring the registry entry
+        # never resurrects it.
+        assert "engagement: null" in page.read_text(encoding="utf-8")
+
+    def test_restore_refuses_an_unknown_dimension(self, tmp_path: Path) -> None:
+        from athenaeum.config import restore_operator_dimension
+        from athenaeum.dimensions import DimensionRegistryError
+
+        knowledge_root, _wiki_root = self._seeded_root(tmp_path)
+        with pytest.raises(DimensionRegistryError):
+            restore_operator_dimension(knowledge_root, "nonexistent")

@@ -559,6 +559,10 @@ def _cmd_answer(args: argparse.Namespace) -> int:
         # — they diverge exactly here, the one call site that does the
         # answerable_as translation. See render_decision_answer's docstring.
         origin_decision_type=decision_type,
+        # Issue athenaeum#2016: forward a "rename" answer's human-chosen
+        # dimension name. Absent for every other type/verdict (validate_answer
+        # above already refused a "name" the schema does not declare).
+        name=str(parsed.get("name", "")),
     )
     if as_json:
         print(

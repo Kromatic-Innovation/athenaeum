@@ -297,12 +297,12 @@ def _approve_rename_reject_schema(*, description: str) -> dict[str, Any]:
     ``rename`` answer with no new name is schema-invalid rather than
     silently falling back to the drafted name.
 
-    This schema is admissible today even though ``dimension-proposal`` has
-    no inbound applier yet (:data:`ANSWERABLE_AS` carries no entry for it,
-    by design — see the ``_TYPE_FRAMING["dimension-proposal"]`` entry's own
-    comment): :func:`response_schema_for` is a pure function of the type
-    table, consulted by a future triage UI to know what a ratification will
-    look like, independent of whether an answer can be SUBMITTED today.
+    Issue athenaeum#2016 (the ratification child): ``dimension-proposal`` now
+    HAS an inbound applier
+    (:func:`athenaeum.decision_answers._apply_dimension_proposal_answer`),
+    registered in :data:`ANSWERABLE_AS` below — this schema is what that
+    applier (and :func:`validate_answer`) checks a ``rename`` answer's
+    ``name`` against.
     """
     return {
         "type": "object",
@@ -564,20 +564,19 @@ _TYPE_FRAMING: dict[str, dict[str, Any]] = {
     },
 }
 
-#: Issue athenaeum#2015 (athenaeum#719 Plan step 3): "dimension-proposal" is
-#: framed (visible in the unified queue, with a real schema a future triage
-#: UI can render) but DELIBERATELY carries no entry in :data:`ANSWERABLE_AS`
-#: below -- :func:`answerable_as("dimension-proposal")` returns ``None``
-#: until the ratification child (the next one; see the module this issue's
-#: own "Out of scope" section names) lands
-#: ``decision_answers._apply_dimension_proposal_answer`` and registers it
-#: there. This is the SAME declared-but-not-yet-answerable state
-#: "quarantine" already lives in (see that type's own comment on
-#: :data:`_DEFAULT_ACCEPTANCE_VERDICT` above) -- not a half-wired bug.
-#: ``tests/test_dimension_proposals.py``'s misroute-guard tests assert both
-#: halves hold: the item is listed, and answering it is refused cleanly by
-#: every inbound caller (the CLI, the MCP triage path), never dispatched
-#: into ``decision_answers._apply_proposed_rule_answer`` by accident.
+#: Issue athenaeum#2015 (athenaeum#719 Plan step 3) framed "dimension-proposal"
+#: (visible in the unified queue, with a real schema) but deliberately left
+#: it out of :data:`ANSWERABLE_AS` until the ratification child landed.
+#: Issue athenaeum#2016 (that child) now registers it below, with its OWN
+#: applier (``decision_answers._apply_dimension_proposal_answer``) — NOT
+#: routed through ``proposed-rule``, which writes a different store
+#: (:mod:`athenaeum.rule_proposals`) entirely.
+#: ``tests/test_dimension_proposals.py``'s former misroute-guard tests were
+#: flipped by athenaeum#2016 to assert the OPPOSITE of what they asserted
+#: under athenaeum#2015: the type IS in :data:`athenaeum.decision_answers.
+#: VALID_DECISION_TYPES`, :func:`answerable_as` returns ``"dimension-proposal"``,
+#: and a well-formed answer reaches ``_apply_dimension_proposal_answer``,
+#: never ``_apply_proposed_rule_answer``.
 
 #: Framing for an item whose ``type`` this module does not know. Deliberately
 #: the most conservative cell of the table: irreversible, owner-only, free
@@ -689,12 +688,19 @@ def proposed_default_for(decision_type: str) -> dict[str, str]:
 #: type (the exact Seer finding on PR athenaeum#2005 for ``confirmation`` before the
 #: ``origin_decision_type`` fix below) -- dropped rather than left looking
 #: live. Add it back if/when ``quarantine`` grows an inbound applier.
+#:
+#: Issue athenaeum#2016: ``dimension-proposal`` now has an inbound applier
+#: (:func:`athenaeum.decision_answers._apply_dimension_proposal_answer`), so
+#: per the rule above it qualifies for an entry -- its ``default_action`` is
+#: "reject (do not register the dimension)", the SAME discrete token
+#: ``merge``/``proposed-rule`` already use for their own conservative default.
 _DEFAULT_ACCEPTANCE_VERDICT: dict[str, str] = {
     "confirmation": "approve",  # default_action: "accept the narrowed scope"
     "merge": "reject",  # default_action: "reject (keep the pages separate)"
     "proposed-rule": "reject",  # default_action: "reject (do not adopt the rule)"
     "page-split": "reject",  # default_action: "reject (do not authorize the split)"
     "auto-apply-threshold": "reject",  # default_action: "reject (keep current floor)"
+    "dimension-proposal": "reject",  # default_action: "reject (do not register the dimension)"
 }
 
 
@@ -942,6 +948,10 @@ ANSWERABLE_AS: dict[str, str] = {
     # `_apply_auto_apply_threshold_proposal_answer`.
     "page-split": "page-split",
     "auto-apply-threshold": "auto-apply-threshold",
+    # Issue athenaeum#2016: self-mapped -- the outbound queue tag and the
+    # inbound applier's decision_type are the SAME string for this type
+    # (no translation needed, matching merge/audit/proposed-rule/coordinate).
+    "dimension-proposal": "dimension-proposal",
 }
 
 

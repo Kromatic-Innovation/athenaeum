@@ -627,3 +627,40 @@ class TestLintPiiAllowlistCLI:
         payload = json.loads(capsys.readouterr().out)
         assert payload["wiki"][0]["adjudicated"] is True
         assert payload["wiki"][0]["emails"] == []
+
+    def test_sticky_not_pii_ledger_verdict_suppresses_re_flagging(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        # Issue athenaeum#689 AC3: a value with a sticky "not PII" verdict in
+        # the athenaeum#712 ledger (NOT the YAML allowlist) is adjudicated, same as a
+        # YAML allowlist entry would be -- without any allowlist file at all.
+        from athenaeum.pii_classification_decision import CLASS_NOT_PII_ALIAS
+        from athenaeum.pii_verdicts import record_not_pii
+        from athenaeum.runlock import RunLock
+
+        root = _wiki(tmp_path)
+        wiki_root = root / "wiki"
+        synthetic_alias = "user@example-ssh-host.test"
+        (wiki_root / "_queue.md").write_text(
+            f"remote set as {synthetic_alias}\n", encoding="utf-8"
+        )
+
+        # Before any verdict: an ordinary unexplained finding.
+        rc = main(["storage", "lint-pii", "--path", str(root)])
+        assert rc == EXIT_PII_FOUND
+        assert synthetic_alias in capsys.readouterr().out
+
+        with RunLock(root) as lock:
+            record_not_pii(
+                wiki_root,
+                page_id="auto-example-queue",
+                value=synthetic_alias,
+                verdict_class=CLASS_NOT_PII_ALIAS,
+                decided_by="human:test",
+                lock=lock,
+            )
+
+        rc = main(["storage", "lint-pii", "--path", str(root)])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "1 adjudicated residue" in out
