@@ -213,7 +213,12 @@ def mine_underdetermined_shapes(
         )
 
     shapes.sort(
-        key=lambda s: (-s.count, s.key.missing_dimensions, s.key.memory_classes, s.key.scopes)
+        key=lambda s: (
+            -s.count,
+            s.key.missing_dimensions,
+            tuple(v or "" for v in s.key.memory_classes),
+            tuple(v or "" for v in s.key.scopes),
+        )
     )
     return shapes
 

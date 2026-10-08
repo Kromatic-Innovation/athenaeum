@@ -128,6 +128,26 @@ class TestTypedClustering:
         assert len(shapes) == 2
         assert all(s.count == 1 for s in shapes)
 
+    def test_sort_tolerates_mixed_none_and_string_coordinates(self, tmp_path: Path) -> None:
+        """Sentry finding (PR#2021): un-backfilled pages leave memory_class/
+        scope as None on one shape while another shape has string values —
+        sorting must not raise TypeError comparing NoneType to str."""
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        _write_page(wiki_root, name="alpha")
+        _write_page(wiki_root, name="beta")
+        _write_page(wiki_root, name="gamma", memory_class="fact", scope="team-a")
+        _write_page(wiki_root, name="delta", memory_class="fact", scope="team-a")
+        _seed_underdetermined(
+            wiki_root, id_a="alpha", id_b="beta", missing=["source-authority"], at="2026-10-01"
+        )
+        _seed_underdetermined(
+            wiki_root, id_a="gamma", id_b="delta", missing=["source-authority"], at="2026-10-02"
+        )
+        # Must not raise — this is what reproduced the Sentry-flagged crash.
+        shapes = mine_underdetermined_shapes(wiki_root, config=_config(), now=_NOW)
+        assert len(shapes) == 2
+
     def test_side_order_does_not_fragment_a_shape(self, tmp_path: Path) -> None:
         """Comparing (a, b) and (b, a) must produce the SAME shape key."""
         wiki_root = tmp_path / "wiki"

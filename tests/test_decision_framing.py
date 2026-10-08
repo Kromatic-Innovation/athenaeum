@@ -52,6 +52,9 @@ LIVE_DECISION_TYPES = (
     "coordinate",
     # Issue athenaeum#2015 (athenaeum#719 Plan step 3).
     "dimension-proposal",
+    # Issue athenaeum#2019 (athenaeum#719 Plan step 6).
+    "tier-movement-proposal",
+    "policy-pack-edit",
 )
 
 
@@ -506,7 +509,14 @@ class TestAnswerableTypeTranslation:
         assert answerable_as("dimension-proposal") == "dimension-proposal"
 
     @pytest.mark.parametrize(
-        "decision_type", ["retraction", "quarantine", "nonsense"]
+        "decision_type",
+        [
+            "retraction",
+            "quarantine",
+            "tier-movement-proposal",
+            "policy-pack-edit",
+            "nonsense",
+        ],
     )
     def test_a_type_with_no_applier_is_absent_rather_than_guessed(
         self, decision_type: str
@@ -535,7 +545,14 @@ class TestAnswerCommandRefusals:
     # athenaeum#2016 -- it is now routable (see TestAnswerableTypeTranslation
     # .test_dimension_proposal_routes_to_its_own_applier above).
     @pytest.mark.parametrize(
-        "decision_type", ["retraction", "quarantine", "nonsense"]
+        "decision_type",
+        [
+            "retraction",
+            "quarantine",
+            "tier-movement-proposal",
+            "policy-pack-edit",
+            "nonsense",
+        ],
     )
     def test_an_unroutable_type_is_refused_nonzero_and_writes_nothing(
         self, store: Path, decision_type: str

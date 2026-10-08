@@ -110,6 +110,9 @@ does not answer.
 - [Security posture](design/security-posture.md)
 - [Bounce surface convergence](design/bounce-surface-convergence.md)
 - [Deprecated email tracking](design/deprecated-email-tracking.md)
+- [PII classification policy](design/pii-classification-policy.md) — the five classes that
+  separate a non-contact token from a genuine personal address, the page-purpose rule, and
+  the over-restoring-is-worse-than-under-restoring principle.
 
 ## Measurements
 

@@ -1871,6 +1871,29 @@ is surfaced in ``status`` as a warn-level oversized page — a nudge to split,
 never a block. See `_resolve_positive_int_knob` for the coercion
 contract.
 
+### `resolve_policy_pack_edit_proposals_enabled`
+
+- **YAML path:** `librarian.policy_pack_edit_proposals_enabled`
+- **Environment variable:** `ATHENAEUM_POLICY_PACK_EDIT_PROPOSALS_ENABLED`
+- **CLI flag:** —
+- **Default:** `False`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the policy-pack-edit proposal drafter's opt-in. DEFAULT OFF.
+
+Gates
+`athenaeum.policy_pack_edit_proposals.run_policy_pack_edit_proposal_drafting`
+entirely — with this off, that function does no I/O at all. There is no
+detector for this trigger yet (see that module's own docstring); this
+key still exists and defaults off so the drafting entry point itself is
+never reachable in a default install, matching 's DoD for
+every other self-tuning trigger in this issue.
+
+Precedence: ``ATHENAEUM_POLICY_PACK_EDIT_PROPOSALS_ENABLED`` env
+(``1``/``true``/``yes``/``on``, case-insensitive) > yaml
+``librarian.policy_pack_edit_proposals_enabled`` > default ``False``.
+No seed in ``_DEFAULTS``.
+
 ### `resolve_preserved_log_adapter`
 
 - **YAML path:** `librarian.preserved_log_adapter`
@@ -2973,6 +2996,86 @@ fact); the per-asserter limit
 
 Env ``ATHENAEUM_SUPERSESSION_SELF_REVISION_WINDOW_DAYS`` > yaml
 ``librarian.supersession_self_revision_window_days`` > ``90``. See
+`_resolve_positive_int_knob` for the coercion contract.
+
+### `resolve_tier_movement_proposals_enabled`
+
+- **YAML path:** `librarian.tier_movement_proposals_enabled`
+- **Environment variable:** `ATHENAEUM_TIER_MOVEMENT_PROPOSALS_ENABLED`
+- **CLI flag:** —
+- **Default:** `False`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the tier-movement proposal drafter's opt-in.
+DEFAULT OFF.
+
+Gates `athenaeum.tier_movement_proposals.run_tier_movement_proposal_drafting`
+entirely — with this off, that function does no I/O at all (not even a
+read of the push-metrics ledgers). 's own DoD requires a
+self-tuning trigger to land dark behind a documented config key the
+operator enables deliberately, mirroring
+`resolve_scope_aware_recall_enabled`'s shape exactly.
+
+Precedence: ``ATHENAEUM_TIER_MOVEMENT_PROPOSALS_ENABLED`` env
+(``1``/``true``/``yes``/``on``, case-insensitive) > yaml
+``librarian.tier_movement_proposals_enabled`` > default ``False``. No
+seed in ``_DEFAULTS``.
+
+### `resolve_tier_movement_pushed_min`
+
+- **YAML path:** `librarian.tier_movement_pushed_min`
+- **Environment variable:** `ATHENAEUM_TIER_MOVEMENT_PUSHED_MIN`
+- **CLI flag:** —
+- **Default:** `5`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the tier-movement proposal drafter's minimum push count
+
+A claim pushed at least this many times in the window
+(`resolve_tier_movement_window_days`) is a candidate for the
+"referenced at most X times" half of the threshold
+(`resolve_tier_movement_referenced_max`) — both conditions must
+hold. Precedence: ``ATHENAEUM_TIER_MOVEMENT_PUSHED_MIN`` env > yaml
+``librarian.tier_movement_pushed_min`` > ``5``. See
+`_resolve_positive_int_knob` for the coercion contract.
+
+### `resolve_tier_movement_referenced_max`
+
+- **YAML path:** `librarian.tier_movement_referenced_max`
+- **Environment variable:** `ATHENAEUM_TIER_MOVEMENT_REFERENCED_MAX`
+- **CLI flag:** —
+- **Default:** `0`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the tier-movement proposal drafter's maximum referenced count
+
+A claim referenced AT MOST this many times (zero, by default — never
+actually used after being pushed) in the window is the "low value"
+half of the threshold. Precedence:
+``ATHENAEUM_TIER_MOVEMENT_REFERENCED_MAX`` env > yaml
+``librarian.tier_movement_referenced_max`` > ``0``. Unlike
+`_resolve_positive_int_knob`'s siblings, ``0`` is the intended
+default and a valid operator override (an unused-but-pushed claim is
+EXACTLY the ``referenced_count == 0`` case), so this resolver accepts
+any non-negative int rather than rejecting ``<= 0``; a negative or
+non-int value (env or yaml) falls through to the default.
+
+### `resolve_tier_movement_window_days`
+
+- **YAML path:** `librarian.tier_movement_window_days`
+- **Environment variable:** `ATHENAEUM_TIER_MOVEMENT_WINDOW_DAYS`
+- **CLI flag:** —
+- **Default:** `30`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the tier-movement proposal drafter's usage-window size, in
+days.
+
+The trailing window `athenaeum.usage_report.compute_usage_report`
+is queried over when deciding whether a claim's usage crosses the
+drafter's threshold. Precedence:
+``ATHENAEUM_TIER_MOVEMENT_WINDOW_DAYS`` env > yaml
+``librarian.tier_movement_window_days`` > ``30``. See
 `_resolve_positive_int_knob` for the coercion contract.
 
 ### `resolve_unmarked_sentence_max_ratio`
