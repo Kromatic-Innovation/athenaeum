@@ -14,7 +14,7 @@ silently drift apart.
 from __future__ import annotations
 
 #: (label, text) pairs that must report NO phone. Each name says which of
-#: #2027's false-positive classes it covers.
+#: athenaeum#2027's false-positive classes it covers.
 FALSE_POSITIVES: tuple[tuple[str, str], ...] = (
     (
         "lane slug: date-shaped group glued onto a letter suffix",
