@@ -179,6 +179,7 @@ _SUBCOMMAND_LOADERS: dict[str, tuple[str, str]] = {
         "athenaeum._cmd_subject_population",
         "add_subject_population_subparser",
     ),
+    "triage": ("athenaeum._cmd_triage", "add_triage_subparser"),
 }
 
 
@@ -231,6 +232,7 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_storage import add_storage_subparser
     from athenaeum._cmd_subject_population import add_subject_population_subparser
     from athenaeum._cmd_surface_divergence import add_surface_divergence_subparser
+    from athenaeum._cmd_triage import add_triage_subparser
     from athenaeum._cmd_usage_report import add_usage_report_subparser
     from athenaeum._cmd_verdicts import add_verdicts_subparser
     from athenaeum._cmd_viewer import add_viewer_subparser
@@ -302,6 +304,7 @@ def build_parser() -> argparse.ArgumentParser:
         subparsers
     )  # reindex/rebuild-index, compile, registry, ingest, session-end
     add_quiesce_subparser(subparsers)  # quiesce (issue athenaeum#1898)
+    add_triage_subparser(subparsers)  # triage run|report (issue athenaeum#1995)
 
     return parser
 
