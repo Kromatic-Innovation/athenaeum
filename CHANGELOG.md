@@ -67,7 +67,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   auto-apply rail (issue athenaeum#2018) is not present on this base at all.
 
   The host-side live-run observation issue athenaeum#719's own Wiring AC
-  requires stays open on #719 itself — out of scope for this child's PR, per
+  requires stays open on athenaeum#719 itself — out of scope for this child's PR, per
   the issue's own "Operator host step" section.
 
 - **Self-tuning loop closure: resolutions as claims, decision-queue shape
