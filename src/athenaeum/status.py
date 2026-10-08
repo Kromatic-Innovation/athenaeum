@@ -643,6 +643,14 @@ def status(knowledge_root: Path) -> StatusInfo:
             item_age_p95_days_max=resolve_decisions_budget_item_age_p95_days_max(config),
             window_days=resolve_decisions_budget_window_days(config),
         )
+        # Issue athenaeum#1996: the SAME shared surface slice (a) built for the
+        # other five figures, extended with one more -- never a third
+        # rendering (see format_budget_report's own docstring).
+        from athenaeum.calibration import default_acceptance_rubber_stamp_rate
+
+        decision_budget["default_acceptance_rubber_stamp"] = (
+            default_acceptance_rubber_stamp_rate(wiki_root)
+        )
     except Exception as exc:  # noqa: BLE001 — must never break status
         log.debug(
             "status: decision-budget instrumentation skipped (%s): %s",
