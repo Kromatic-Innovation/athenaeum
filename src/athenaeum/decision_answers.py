@@ -790,8 +790,17 @@ def _apply_dimension_proposal_answer(
 
     # approve / rename
     name = answer.name.strip() if decision == "rename" else str(proposal.get("name", ""))
-    cfg = config or {}
-    existing_entries = list(cfg.get("dimensions") or [])
+    # Issue athenaeum#2016 fix: read the LIVE dimensions: list off disk, never
+    # the caller's *config* dict. apply_decision_answers loads config ONCE
+    # before its whole batch loop; a stale in-memory snapshot would make a
+    # second approve in the SAME pass overwrite the first approve's just-
+    # written yaml entry (list-replace, not append), and config=None would
+    # wipe every operator-declared dimension outright. load_config() re-reads
+    # athenaeum.yaml fresh on every call, so each approve in a batch sees
+    # every prior one's write.
+    from athenaeum.config import load_config
+
+    existing_entries = list(load_config(knowledge_root).get("dimensions") or [])
     already_written = any(
         isinstance(e, dict) and e.get("origin") == f"proposed:{answer.decision_id}"
         for e in existing_entries

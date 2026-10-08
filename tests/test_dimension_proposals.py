@@ -5,8 +5,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from athenaeum.dimension_proposals import (
     DIMENSION_PROPOSALS_LEDGER_FILENAME,
     default_dimension_proposals_ledger_path,
@@ -403,8 +401,6 @@ def _drafted_knowledge_root(
 
     Returns ``(knowledge_root, wiki_root, raw_root, decision_id)``.
     """
-    from athenaeum.config import load_config
-
     knowledge_root = tmp_path
     wiki_root = knowledge_root / "wiki"
     wiki_root.mkdir()

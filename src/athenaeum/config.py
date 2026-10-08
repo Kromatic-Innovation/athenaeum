@@ -4211,10 +4211,22 @@ def _find_top_level_block(lines: list[str], key: str) -> tuple[int, int] | None:
 
     Returns ``(start, end)`` as a half-open ``[start, end)`` range over
     *lines* (0-indexed), where ``start`` is the ``key:`` line itself and
-    ``end`` is the first line that starts a new top-level entry (column 0,
-    non-blank, not a comment) or ``len(lines)``. Returns ``None`` when no
-    live (non-commented) ``key:`` line exists at column 0 — a commented-out
-    example block (``# dimensions:``) does not count as a match.
+    ``end`` is one past the LAST line that is genuinely part of the block
+    (an indented continuation, or a column-0 ``- `` list item). Returns
+    ``None`` when no live (non-commented) ``key:`` line exists at column 0
+    — a commented-out example block (``# dimensions:``) does not count as a
+    match.
+
+    Deliberately does NOT extend ``end`` through a trailing blank line or
+    comment that follows the block's last real content line: a blank/
+    comment run between the block and the next top-level key (or between
+    the block and EOF) is NOT part of the block's own span and must be
+    preserved untouched by a caller that replaces ``[start, end)`` — see
+    :func:`write_dimensions_config`'s own "every comment elsewhere in the
+    file is left byte-identical" contract. The scan still has to look PAST
+    blank/comment lines (not stop at the first one) because a comment line
+    can legitimately sit BETWEEN two list items; it just never counts one
+    as the new ``end`` unless real content follows it.
     """
     pattern = f"{key}:"
     start = None
@@ -4224,16 +4236,20 @@ def _find_top_level_block(lines: list[str], key: str) -> tuple[int, int] | None:
             break
     if start is None:
         return None
-    end = len(lines)
-    for idx in range(start + 1, len(lines)):
+    last_content = start
+    idx = start + 1
+    while idx < len(lines):
         line = lines[idx]
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
+            idx += 1
             continue
-        if not line[0].isspace() and not line.startswith("-"):
-            end = idx
-            break
-    return start, end
+        if line[0].isspace() or line.startswith("-"):
+            last_content = idx
+            idx += 1
+            continue
+        break
+    return start, last_content + 1
 
 
 def render_dimensions_yaml_block(dimensions_config: list[dict[str, Any]]) -> str:
@@ -4305,6 +4321,116 @@ def write_dimensions_config(knowledge_root: Path, dimensions_config: list[dict[s
 
     atomic_write_text(config_path, new_text)
     return config_path
+
+
+def _find_dimension_entry_index(entries: list[Any], dimension_name: str) -> int | None:
+    """Index of the ``dimensions:`` list entry named *dimension_name*, or
+    ``None``. Shared by :func:`retire_operator_dimension` and
+    :func:`restore_operator_dimension` so the two never disagree on lookup.
+    """
+    for i, entry in enumerate(entries):
+        if isinstance(entry, dict) and entry.get("name") == dimension_name:
+            return i
+    return None
+
+
+def retire_operator_dimension(
+    knowledge_root: Path,
+    wiki_root: Path,
+    dimension_name: str,
+    *,
+    on_retire: "Callable[[Any], int] | None" = None,
+) -> dict[str, Any]:
+    """Retire an operator-declared dimension end to end (issue athenaeum#2016).
+
+    Composes the three pieces the issue's AC lists separately: the pure
+    state transition (:func:`athenaeum.dimensions.retire_dimension`), the
+    per-page coordinate sweep (:func:`athenaeum.dimensions.
+    retire_dimension_coordinate_across_wiki`), and the registry entry's own
+    write-back to ``athenaeum.yaml`` (:func:`write_dimensions_config`) — "the
+    lifecycle change on the Dimension registry entry itself (state:
+    retired), written back to the operator's athenaeum.yaml dimensions:
+    list".
+
+    *on_retire*, optional: mirrors :func:`athenaeum.dimensions.
+    maybe_flip_to_enforced`'s ``on_flip`` injection — the issue's own design
+    note names retirement a stale-mark trigger symmetric to a dimension
+    flipping to ``enforced``, so a caller wires athenaeum#712's targeted
+    stale-marking here the SAME way, given the still-pre-retirement
+    dimension and returning the count of pairs marked stale. ``None`` (the
+    default) marks nothing.
+
+    Raises :class:`athenaeum.dimensions.DimensionRegistryError` for an
+    unknown or kernel dimension name — never silently no-ops.
+    """
+    from athenaeum.dimensions import (
+        parse_dimension_entry,
+        retire_dimension,
+        retire_dimension_coordinate_across_wiki,
+    )
+
+    cfg = load_config(knowledge_root)
+    entries = list(cfg.get("dimensions") or [])
+    idx = _find_dimension_entry_index(entries, dimension_name)
+    if idx is None:
+        from athenaeum.dimensions import DimensionRegistryError
+
+        raise DimensionRegistryError(
+            f"dimension {dimension_name!r} is not declared in athenaeum.yaml's "
+            "dimensions: list (kernel dimensions are never retirable here)"
+        )
+
+    dim = parse_dimension_entry(entries[idx])
+    retired = retire_dimension(dim)  # raises on a kernel origin (never true here)
+    marked = on_retire(dim) if on_retire is not None else 0
+    changed_pages = retire_dimension_coordinate_across_wiki(wiki_root, dimension_name)
+
+    new_entry = dict(entries[idx])
+    new_entry["state"] = retired.state
+    entries[idx] = new_entry
+    write_dimensions_config(knowledge_root, entries)
+
+    return {
+        "name": dimension_name,
+        "state": retired.state,
+        "pages_renulled": [str(p) for p in changed_pages],
+        "stale_marked": marked,
+    }
+
+
+def restore_operator_dimension(knowledge_root: Path, dimension_name: str) -> dict[str, Any]:
+    """Reverse a retirement end to end (issue athenaeum#2016): ``RETIRED`` ->
+    ``BACKFILL`` on the registry entry, written back to ``athenaeum.yaml``.
+
+    Never touches a page's coordinate — un-retiring restores the REGISTRY
+    entry only; nulled coordinates are never resurrected (see
+    :func:`athenaeum.dimensions.restore_dimension`'s own docstring). Raises
+    :class:`athenaeum.dimensions.DimensionRegistryError` for an unknown
+    dimension name.
+    """
+    from athenaeum.dimensions import (
+        DimensionRegistryError,
+        parse_dimension_entry,
+        restore_dimension,
+    )
+
+    cfg = load_config(knowledge_root)
+    entries = list(cfg.get("dimensions") or [])
+    idx = _find_dimension_entry_index(entries, dimension_name)
+    if idx is None:
+        raise DimensionRegistryError(
+            f"dimension {dimension_name!r} is not declared in athenaeum.yaml's dimensions: list"
+        )
+
+    dim = parse_dimension_entry(entries[idx])
+    restored = restore_dimension(dim)
+
+    new_entry = dict(entries[idx])
+    new_entry["state"] = restored.state
+    entries[idx] = new_entry
+    write_dimensions_config(knowledge_root, entries)
+
+    return {"name": dimension_name, "state": restored.state}
 
 
 _DEFAULT_CONFIG_CONTENT = """\
