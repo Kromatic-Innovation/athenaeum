@@ -53,6 +53,7 @@ from athenaeum.schemas import PersonWiki, validate_wiki_meta
 from athenaeum.search import FTS5Backend, KeywordBackend
 from athenaeum.storage import surface_root_for_class
 from athenaeum.wiki_dedupe import discover_wiki_dedupe_candidates
+from tests.fixtures.phone_2027_fixtures import FALSE_POSITIVES, STILL_MATCHES
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -758,6 +759,70 @@ class TestPhoneDetectorEmbeddedIdentifiers2006:
             "notes-comment-5550001111.md\n"
             "`run 10000000001`\n"
             "board1234.1600000000000\n",
+            encoding="utf-8",
+        )
+        (wiki / "real_phone.md").write_text("Reach Alice at 917-231-6130.\n", encoding="utf-8")
+        findings = scan_corpus_pii(wiki)
+        assert [f.path.name for f in findings] == ["real_phone.md"]
+        assert findings[0].phones == ["917-231-6130"]
+
+
+# ---------------------------------------------------------------------------
+# Phone detector — slug ids, epoch-ms timestamps, and labeled run/comment ids
+# must NOT match (issue athenaeum#2027, operator ruling on athenaeum#689).
+# ---------------------------------------------------------------------------
+#
+# The second false-positive class: a hyphen-joined digit-group token that is
+# itself embedded in a larger slug containing letters, a date-number-hash id
+# pattern, a bare 13-digit epoch-millisecond timestamp (standalone or after a
+# dotted prefix), and a bare 10-11 digit run with a run/comment/job/id label
+# but no joiner. Fixtures are shared with ``test_sensitivity.py`` via
+# ``tests/fixtures/phone_2027_fixtures.py`` so the two detection paths cannot
+# drift. Every value is synthetic/fabricated.
+
+
+class TestPhoneDetectorSecondFalsePositiveClass2027:
+    @pytest.mark.parametrize(
+        "example",
+        [pytest.param(text, id=label) for label, text in FALSE_POSITIVES],
+    )
+    def test_false_positive_reports_no_phone(self, example: str) -> None:
+        assert find_inline_phones(example) == [], example
+
+    @pytest.mark.parametrize(
+        "text,expected",
+        [pytest.param(text, expected, id=label) for label, text, expected in STILL_MATCHES],
+    )
+    def test_still_matches(self, text: str, expected: str) -> None:
+        assert find_inline_phones(text) == [expected]
+
+    def test_date_group_helper_requires_a_valid_month_and_day(self) -> None:
+        # Unit-level: a group that merely starts with a plausible year but
+        # carries an invalid month/day (99) is not a date, so the helper
+        # must not retire it on that basis alone.
+        from athenaeum.pii import _has_date_group
+
+        assert _has_date_group("709-20250101") is True
+        assert _has_date_group("20250101-42") is True
+        assert _has_date_group("20259999-55") is False
+        assert _has_date_group("917-231-6130") is False
+
+    def test_epoch_millis_gated_on_no_plus(self) -> None:
+        # A '+'-prefixed 13-digit run is a plausible international number,
+        # never retired by the epoch-ms check even if the digits fall inside
+        # the epoch-ms band.
+        assert find_inline_phones("call +1600000000000 now") == ["+1600000000000"]
+
+    def test_corpus_scan_reports_no_false_positives(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        (wiki / "slugs_and_ids.md").write_text(
+            "## Refs\n"
+            "deploy-alpha-back-709-20250101\n"
+            "20250101-42-ab12cd34\n"
+            "1600000000000\n"
+            "deploy5164.1600000000000\n"
+            "run 12345678901\n",
             encoding="utf-8",
         )
         (wiki / "real_phone.md").write_text("Reach Alice at 917-231-6130.\n", encoding="utf-8")

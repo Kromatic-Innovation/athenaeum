@@ -58,6 +58,16 @@ in ``tests/test_outbound_pii.py``); the difference is a strict convergence
 with the corpus-lint's already-shipped athenaeum#732 fix, not a new suppression
 invented for this module.
 
+Because this module goes through :func:`athenaeum.sensitivity.classify` (and
+therefore the built-in ``phone`` recogniser) rather than calling
+:func:`athenaeum.pii._is_excluded_phone_shape` directly, it ALSO inherits the
+athenaeum#2027 second false-positive class whole — not just
+``_is_excluded_phone_shape``'s new epoch-millisecond/date-group-in-token
+checks, but the position-dependent ones too
+(:func:`athenaeum.pii._is_embedded_slug_digit_run`,
+:func:`athenaeum.pii._has_bare_run_id_label_prefix`). No code change was
+needed in this module for that fix to take effect.
+
 Allowlist / fail-safe (the "isn't already known to the recipient" qualifier in
 athenaeum#428): a caller that can establish an address is already known to the recipient
 passes it in the ``allowlist`` — such findings are dropped (not flagged, not

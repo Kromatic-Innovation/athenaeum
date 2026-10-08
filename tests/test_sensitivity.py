@@ -28,6 +28,7 @@ from athenaeum.sensitivity import (
     classify,
     register_recognizer,
 )
+from tests.fixtures.phone_2027_fixtures import FALSE_POSITIVES, STILL_MATCHES
 from tests.fixtures.street_address_fixtures import NEGATIVE_FIXTURES, POSITIVE_FIXTURES
 
 
@@ -283,6 +284,25 @@ class TestPhoneRecognizer:
         rec = available_recognizers(None)["phone"]
         matches = rec.detect(text="realm42 917-231-6130", frontmatter=None)
         assert [m.value for m in matches] == ["917-231-6130"]
+
+    @pytest.mark.parametrize(
+        "example",
+        [pytest.param(text, id=label) for label, text in FALSE_POSITIVES],
+    )
+    def test_suppresses_second_false_positive_class_2027(self, example: str) -> None:
+        # AC5: fixtures shared with find_inline_phones (athenaeum#2027) so
+        # the two detection paths cannot drift.
+        rec = available_recognizers(None)["phone"]
+        assert rec.detect(text=example, frontmatter=None) == []
+
+    @pytest.mark.parametrize(
+        "text,expected",
+        [pytest.param(text, expected, id=label) for label, text, expected in STILL_MATCHES],
+    )
+    def test_still_matches_2027(self, text: str, expected: str) -> None:
+        rec = available_recognizers(None)["phone"]
+        matches = rec.detect(text=text, frontmatter=None)
+        assert [m.value for m in matches] == [expected]
 
 
 class TestStreetAddressRecognizer:
