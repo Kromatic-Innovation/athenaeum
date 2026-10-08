@@ -157,12 +157,24 @@ class NullMeans:
 
 
 class LifecycleState:
-    """Dimension lifecycle states (issue athenaeum#714)."""
+    """Dimension lifecycle states (issue athenaeum#714; ``RETIRED`` added by
+    issue athenaeum#2016).
+
+    ``RETIRED`` is a third typed state, not a deletion: retiring a
+    mis-registered dimension re-nulls its coordinates everywhere (see
+    :func:`retire_dimension_coordinate` /
+    :func:`retire_dimension_coordinate_across_wiki`) and flips the registry
+    entry's own ``state`` to ``RETIRED`` — the config entry itself (name,
+    kind, ``null_means``, ``applies_to``, ``origin``) is PRESERVED, never
+    deleted, so a reversal (:func:`restore_dimension`) can restore the SAME
+    dimension rather than re-drafting a fresh proposal from zero knowledge.
+    """
 
     BACKFILL = "backfill"
     ENFORCED = "enforced"
+    RETIRED = "retired"
 
-    ALL = (BACKFILL, ENFORCED)
+    ALL = (BACKFILL, ENFORCED, RETIRED)
 
 
 #: A claim may write this literal value to EXPLICITLY assert universal,
@@ -881,13 +893,22 @@ def compare_dimension(
     - ``state == backfill`` -> UNKNOWN unless BOTH sides carry a coordinate
       (issue athenaeum#714 AC: "the comparator consults the dimension only for
       pairs where BOTH sides carry coordinates").
+    - ``state == retired`` (issue athenaeum#2016) -> the SAME null-coordinate
+      treatment as ``backfill``: a retired dimension's coordinates are nulled
+      by construction (:func:`retire_dimension_coordinate_across_wiki`), and a
+      null coordinate on either side must read as unknown/absent, never as a
+      comparator error. ``comparator.py``/``supersession.py`` already exclude
+      ``RETIRED`` dimensions entirely via their own ``!= ENFORCED`` guards, so
+      this branch only matters for a direct :func:`compare_dimension` call.
     - Otherwise -> the kind comparator, honoring ``null_means``.
     """
     if not (dimension_applies(dimension, meta_a) and dimension_applies(dimension, meta_b)):
         return Relation.UNKNOWN
     a = parsed_coordinate(dimension, meta_a)
     b = parsed_coordinate(dimension, meta_b)
-    if dimension.state == LifecycleState.BACKFILL and (a is None or b is None):
+    if dimension.state in (LifecycleState.BACKFILL, LifecycleState.RETIRED) and (
+        a is None or b is None
+    ):
         return Relation.UNKNOWN
     return compare(dimension, a, b, **kwargs)
 
@@ -1069,6 +1090,88 @@ def retire_dimension_coordinate(meta: dict[str, Any], key: str) -> dict[str, Any
     return out
 
 
+def retire_dimension(dimension: Dimension) -> Dimension:
+    """Flip *dimension*'s lifecycle ``state`` to ``RETIRED`` (issue athenaeum#2016).
+
+    A pure state transition on the registry entry itself — never touches any
+    page's coordinate (that is :func:`retire_dimension_coordinate_across_wiki`'s
+    job, composed separately by the caller so the two can be sequenced /
+    retried independently). No-op (returns *dimension* unchanged) if already
+    ``RETIRED``.
+
+    Refuses to retire a kernel dimension (``origin == "builtin"``): kernel
+    dimensions are built in and not deletable/retirable (same posture as
+    :func:`build_registry`'s "kernel dimensions... cannot be redeclared or
+    deleted"). Raises :class:`DimensionRegistryError`.
+    """
+    if dimension.origin == "builtin":
+        raise DimensionRegistryError(
+            f"dimension {dimension.name!r} is a kernel dimension (origin=builtin) "
+            "and cannot be retired"
+        )
+    if dimension.state == LifecycleState.RETIRED:
+        return dimension
+    return replace(dimension, state=LifecycleState.RETIRED)
+
+
+def restore_dimension(dimension: Dimension) -> Dimension:
+    """Reverse a retirement: ``RETIRED`` -> ``BACKFILL`` (issue athenaeum#2016).
+
+    A reversed dimension re-enters at ``backfill`` and re-collects
+    coordinates going forward exactly like a freshly-ratified one — it
+    follows the existing :func:`maybe_flip_to_enforced` flip unmodified, one
+    lifecycle, not a second one. Coordinates nulled by
+    :func:`retire_dimension_coordinate_across_wiki` are NEVER resurrected by
+    this function or by anything it calls — restoring the registry entry's
+    state is the whole of what "un-retire" means; a page's coordinate only
+    becomes non-null again through ordinary future writes. No-op if
+    *dimension* is not ``RETIRED``.
+    """
+    if dimension.state != LifecycleState.RETIRED:
+        return dimension
+    return replace(dimension, state=LifecycleState.BACKFILL)
+
+
+def retire_dimension_coordinate_across_wiki(wiki_root: Path, dimension_name: str) -> list[Path]:
+    """Re-null *dimension_name*'s coordinate on EVERY page under *wiki_root*
+    that carries it (issue athenaeum#2016).
+
+    Composes :func:`retire_dimension_coordinate` (the per-page primitive,
+    unchanged) over the corpus — this is the "new orchestrating function,
+    not a change to the per-page primitive" the issue's own touch-site list
+    names. Only operates on a NON-kernel dimension's bare frontmatter key
+    (:func:`coordinate_value`'s "deployment-declared dimensions read their
+    own bare name" branch) — callers are expected to have already refused a
+    kernel dimension via :func:`retire_dimension` before reaching here, so
+    this function does not re-derive a kernel key mapping.
+
+    Skips sidecar files (``_pending_questions.md``, ``_dimension_proposals
+    .jsonl``, ...) by their leading-underscore filename convention, matching
+    every other whole-corpus walk in this codebase (e.g.
+    :mod:`athenaeum.decision_answers`'s ``_find_page_path_by_id``). Returns
+    the list of page paths actually rewritten (coordinate was present and
+    non-``None``); a page that never carried the key is left untouched and
+    not written at all, so retiring a dimension never touches a page it
+    never applied to.
+    """
+    from athenaeum.atomic_io import atomic_write_text
+    from athenaeum.models import parse_frontmatter, render_frontmatter
+
+    wiki_root = Path(wiki_root)
+    changed: list[Path] = []
+    for path in sorted(wiki_root.rglob("*.md")):
+        if path.name.startswith("_"):
+            continue
+        text = path.read_text(encoding="utf-8")
+        meta, body = parse_frontmatter(text)
+        if not isinstance(meta, dict) or meta.get(dimension_name) is None:
+            continue
+        new_meta = retire_dimension_coordinate(meta, dimension_name)
+        atomic_write_text(path, render_frontmatter(new_meta) + body)
+        changed.append(path)
+    return changed
+
+
 # ---------------------------------------------------------------------------
 # Corpus namespacing (issue athenaeum#714 AC)
 # ---------------------------------------------------------------------------
@@ -1158,7 +1261,10 @@ __all__ = [
     "maybe_flip_to_enforced",
     "parse_dimension_entry",
     "parsed_coordinate",
+    "restore_dimension",
+    "retire_dimension",
     "retire_dimension_coordinate",
+    "retire_dimension_coordinate_across_wiki",
     "scope_relation",
     "stamp_recorded_time",
     "validate_intake_temporal",
