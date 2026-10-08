@@ -201,14 +201,32 @@ def list_pending_dimension_proposals(
     reject record — same "unreviewed" filter shape as
     :func:`athenaeum.rule_proposals.list_pending_rule_proposals`. Today
     nothing in this codebase ever writes an approve/reject record to this
-    ledger (that is the next child's job), so every proposal here is
-    unconditionally pending; this filter exists so that child's writes are
-    honored the moment they land, with no change needed on this side.
+    ledger except the ratification applier
+    (:func:`athenaeum.decision_answers._apply_dimension_proposal_answer`),
+    so every proposal here is unconditionally pending unless resolved there.
+
+    Issue athenaeum#2017 fix (Sentry PRRT_kwDOSEs9CM6qiPZE): also excludes any
+    proposal carrying a :data:`STALE_KIND` event
+    (:func:`mark_proposals_stale_for_decision`) — a proposal whose backfill
+    plan cited a since-revoked resolution claim must not keep listing as
+    pending (it would otherwise still reach a human for ratification on
+    provenance that is no longer live). Stale-marking never deletes the
+    underlying proposal record (see :func:`mark_proposals_stale_for_decision`'s
+    own docstring); this is the ONE read path that treats "stale" the same
+    as "resolved" for visibility purposes, mirroring how a resolved id is
+    excluded. Every consumer of this function (e.g.
+    :func:`athenaeum.decisions.dimension_proposal_to_decision`'s caller)
+    inherits the exclusion with no change on its side.
     """
     records = read_dimension_proposals_ledger(wiki_root, ledger_path=ledger_path)
     resolved = _resolved_ids(records)
+    stale = stale_proposal_ids(records)
     return [
-        r for r in records if r.get("kind") == PROPOSAL_KIND and str(r.get("id")) not in resolved
+        r
+        for r in records
+        if r.get("kind") == PROPOSAL_KIND
+        and str(r.get("id")) not in resolved
+        and str(r.get("id")) not in stale
     ]
 
 
