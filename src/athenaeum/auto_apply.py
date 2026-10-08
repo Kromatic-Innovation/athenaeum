@@ -165,6 +165,7 @@ def enact_verdict_effect(
     embedding_model: str | None = None,
     now: datetime | None = None,
     coordinate_sink: list[dict[str, Any]] | None = None,
+    effort_budget_breach: bool = False,
 ) -> EffectResult:
     """Enact *outcome* exactly like
     :func:`athenaeum.verdict_effects.apply_verdict_effect`, additionally
@@ -197,6 +198,20 @@ def enact_verdict_effect(
     default) is forwarded verbatim to every ``apply_verdict_effect`` call
     this function makes -- the ``duplicate`` verdict never reads it (same
     as that function's own docstring).
+
+    ``effort_budget_breach`` (issue athenaeum#1996, keyword-only, ``False``
+    default) is the delegation-ratchet guard: the CALLER's already-computed
+    "is the decision queue's effort budget in breach right now"
+    (:func:`athenaeum.decision_budget.budget_report`) boolean. This module
+    does not compute it itself -- :mod:`athenaeum.wiki_dedupe` already runs
+    the whole-corpus pass this value gates, so it resolves the breach ONCE
+    per run and threads the same value through every pair's call, rather
+    than this function (or :func:`~athenaeum.verdict_effects.
+    _duplicate_auto_apply_authorization`, which this value also reaches)
+    re-deriving it per pair. When true, authorization is refused with
+    reason ``"effort_budget_breach"`` even when the operator opt-in is on
+    and the verdict basis is fresh -- widening auto-apply is exactly the
+    wrong move while the human queue is already over budget.
     """
     wiki_root = Path(wiki_root)
 
@@ -213,11 +228,15 @@ def enact_verdict_effect(
             config=config,
             now=now,
             coordinate_sink=coordinate_sink,
+            effort_budget_breach=effort_budget_breach,
         )
 
     pair_key = make_pair_key(page_a.id, page_b.id)
     authorized, reason = _duplicate_auto_apply_authorization(
-        wiki_root=wiki_root, pair_key=pair_key, config=config
+        wiki_root=wiki_root,
+        pair_key=pair_key,
+        config=config,
+        effort_budget_breach=effort_budget_breach,
     )
 
     if not authorized or path_a is None or path_b is None:
@@ -231,6 +250,7 @@ def enact_verdict_effect(
             config=config,
             now=now,
             coordinate_sink=coordinate_sink,
+            effort_budget_breach=effort_budget_breach,
         )
         if authorized:
             # Authorized, but this caller cannot name a real on-disk path

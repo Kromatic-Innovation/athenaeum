@@ -207,6 +207,64 @@ class TestGateOnStaleVerdictNoFoldExecuted:
             assert not is_tombstone(meta)
 
 
+class TestEffortBudgetBreachBlocksAutoApply:
+    """Issue athenaeum#1996 ratchet guard 1: an otherwise-authorized
+    duplicate fold (gate on, fresh verdict basis) is refused while the
+    decision queue's effort budget is in breach, and authorized again once
+    it clears -- both directions, against the SAME pair/ledger state, so
+    only ``effort_budget_breach`` itself can explain the different
+    outcome."""
+
+    def test_breach_refuses_then_clearing_reauthorizes(self, tmp_path: Path) -> None:
+        wiki, a_path, b_path, _linker = _setup_pair(tmp_path)
+        _append_entry(wiki, "alpha", "beta", stale=False)
+        page_a, page_b = page_from_path(a_path), page_from_path(b_path)
+        outcome = CompareOutcome(verdict=VERDICT_DUPLICATE, widened_coords={})
+
+        # Breach reported: refused even though gate is on and the verdict
+        # basis is fresh -- the SAME preconditions
+        # TestGateOnFreshDuplicateFoldExecutes authorizes under.
+        refused = enact_verdict_effect(
+            page_a,
+            page_b,
+            outcome,
+            wiki_root=wiki,
+            path_a=a_path,
+            path_b=b_path,
+            config=_AUTO_APPLY_CONFIG,
+            effort_budget_breach=True,
+        )
+        assert refused.action == "fold-proposal"
+        assert refused.details["auto_apply_authorized"] is False
+        assert refused.details["auto_apply_reason"] == "effort_budget_breach"
+        assert not (wiki / "_pending_merges.md").exists()
+        for p in (a_path, b_path):
+            meta, _ = parse_frontmatter(p.read_text(encoding="utf-8"))
+            assert not is_tombstone(meta)
+
+        # Breach clears: nothing else about the pair/ledger changed (the
+        # refused call above wrote no fold), so this call is authorized and
+        # the fold really executes.
+        side, _rule, _rows = _canonical_side(page_a, page_b, outcome)
+        other_path = b_path if side == "a" else a_path
+
+        cleared = enact_verdict_effect(
+            page_a,
+            page_b,
+            outcome,
+            wiki_root=wiki,
+            path_a=a_path,
+            path_b=b_path,
+            config=_AUTO_APPLY_CONFIG,
+            effort_budget_breach=False,
+        )
+        assert cleared.action == AUTO_FOLD_EXECUTED_ACTION
+        assert cleared.details["auto_apply_authorized"] is True
+        assert cleared.details["auto_apply_reason"] == "authorized"
+        other_meta, _ = parse_frontmatter(other_path.read_text(encoding="utf-8"))
+        assert is_tombstone(other_meta)
+
+
 class TestAlreadyAppliedOperationsStand:
     """4. gate on, fold applied, THEN the verdict is marked stale =>
     the tombstone and the canonical are unchanged (operations already

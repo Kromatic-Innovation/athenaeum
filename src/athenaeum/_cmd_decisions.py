@@ -201,13 +201,16 @@ def _cmd_raise_confirmation(args: argparse.Namespace) -> int:
 
 
 def _cmd_budget(args: argparse.Namespace) -> int:
-    """``athenaeum decisions budget`` — the five athenaeum#717 figures (issue athenaeum#1990).
+    """``athenaeum decisions budget`` — the five athenaeum#717 figures (issue athenaeum#1990),
+    plus the measured default-acceptance rubber-stamp rate (issue athenaeum#1996
+    ratchet guard 2).
 
     Fetches the live queue once (:func:`list_pending_decisions`, which
     already applies :func:`athenaeum.decision_framing.frame_decision` —
     this command measures nothing a second time) and combines it with the
     answer-event ledger via :func:`athenaeum.decision_budget.budget_report`.
     """
+    from athenaeum.calibration import default_acceptance_rubber_stamp_rate
     from athenaeum.config import (
         resolve_decisions_budget_decision_minutes_p50_max,
         resolve_decisions_budget_decision_minutes_p95_max,
@@ -235,6 +238,10 @@ def _cmd_budget(args: argparse.Namespace) -> int:
         item_age_p95_days_max=resolve_decisions_budget_item_age_p95_days_max(config),
         window_days=resolve_decisions_budget_window_days(config),
     )
+    # Issue athenaeum#1996: the SAME shared surface slice (a) built for the other
+    # five figures, extended with one more -- never a third rendering (see
+    # format_budget_report's own docstring).
+    report["default_acceptance_rubber_stamp"] = default_acceptance_rubber_stamp_rate(wiki_root)
     if args.json:
         sys.stdout.write(json.dumps(report) + "\n")
         return 0
@@ -547,6 +554,11 @@ def _cmd_answer(args: argparse.Namespace) -> int:
         decision_type=applier_type,
         verdict=str(parsed["verdict"]),
         note=str(parsed.get("note", "")),
+        # Issue athenaeum#1996: preserve the ORIGINAL outbound-queue type
+        # (e.g. "confirmation") alongside the applier type (e.g. "question")
+        # — they diverge exactly here, the one call site that does the
+        # answerable_as translation. See render_decision_answer's docstring.
+        origin_decision_type=decision_type,
     )
     if as_json:
         print(
