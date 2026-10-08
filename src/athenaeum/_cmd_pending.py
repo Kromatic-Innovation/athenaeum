@@ -224,9 +224,7 @@ def cmd_ingest_answers(args: argparse.Namespace) -> int:
         # _acquire_or_exit(...)`) so a merge decision applied in this tick can
         # record a verdict-ledger entry when librarian.verdict_ledger_enabled
         # is on — see apply_decision_answers's `lock` docstring.
-        decision_report = apply_decision_answers(
-            wiki_root, raw_root, config=cfg, lock=lock
-        )
+        decision_report = apply_decision_answers(wiki_root, raw_root, config=cfg, lock=lock)
         # Issue athenaeum#1446: `--quiet` suppresses the per-block
         # `log.warning` noise `_parse_block`/`ingest_answers` emit by
         # level, not by structurally deleting the calls — restored in
@@ -337,6 +335,12 @@ def cmd_reresolve_questions(args: argparse.Namespace) -> int:
     delegates to :func:`athenaeum.tiers.reresolve_open_questions`.
     """
     from athenaeum.config import load_config
+    from athenaeum.decision_provider import (
+        DecisionProviderConfigError,
+        build_decision_client,
+        preflight_decision_provider,
+        resolve_decision_provider,
+    )
     from athenaeum.provider import ProviderConfigError, build_llm_client
     from athenaeum.tiers import reresolve_open_questions
 
@@ -347,6 +351,23 @@ def cmd_reresolve_questions(args: argparse.Namespace) -> int:
 
     pending_path = target / "wiki" / "_pending_questions.md"
     cfg = load_config(target)
+
+    # Issue athenaeum#1997: resolve + preflight the Jev decision-provider knob
+    # ONCE here (never per-contradiction inside propose_resolution) so a
+    # missing JEV_API_KEY fails loudly at startup, mirroring the
+    # build_llm_client/preflight_provider pattern immediately below. Default
+    # (``llm.decision_providers.resolve`` unset) resolves to "none" and
+    # ``decision_backend`` stays ``None`` — byte-identical to pre-athenaeum#1997.
+    try:
+        decision_provider_cfg = resolve_decision_provider(cfg, "resolve")
+    except DecisionProviderConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    decision_preflight_err = preflight_decision_provider(decision_provider_cfg.provider)
+    if decision_preflight_err:
+        print(f"error: {decision_preflight_err}", file=sys.stderr)
+        return 1
+    decision_backend = build_decision_client(decision_provider_cfg)
 
     # Issue athenaeum#330: construct via the provider seam (api key -> SDK client;
     # claude-cli -> subscription CLI client; None when the api backend has no
@@ -377,7 +398,11 @@ def cmd_reresolve_questions(args: argparse.Namespace) -> int:
         return lock
     try:
         count = reresolve_open_questions(
-            pending_path, client=anthropic_client, config=cfg
+            pending_path,
+            client=anthropic_client,
+            config=cfg,
+            decision_backend=decision_backend,
+            decision_redact_outbound=decision_provider_cfg.redact_outbound,
         )
     except Exception as exc:  # noqa: BLE001 — surface a clean CLI error
         print(
@@ -388,7 +413,7 @@ def cmd_reresolve_questions(args: argparse.Namespace) -> int:
     finally:
         lock.release()
 
-    if anthropic_client is None:
+    if anthropic_client is None and decision_backend is None:
         print("No ANTHROPIC_API_KEY; offline — left proposal-less questions as-is.")
     else:
         print(f"Re-resolved {count} proposal-less question(s).")

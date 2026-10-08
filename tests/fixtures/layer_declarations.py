@@ -122,6 +122,9 @@ MODULE_LAYER: dict[str, int] = {
     "context": 3,
     "context_schema": 3,
     "contradictions": 3,
+    # Issue athenaeum#1997: typed-decision backend seam (Jev). Sibling L3 to
+    # provider.py / outbound_pii.py -- see its own "Layering:" docstring note.
+    "decision_provider": 3,
     "delta": 3,
     "erasure": 3,
     "fingerprint": 3,
