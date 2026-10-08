@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Self-tuning loop, Plan step 1: shape mining over the verdict ledger
+  (issue athenaeum#719).** New `src/athenaeum/signal_mining.py`:
+  `mine_underdetermined_shapes()` groups the live verdict ledger's
+  `underdetermined` entries into typed shapes — the sorted missing-
+  dimension tuple plus both sides' `memory_class`/`scope` coordinates
+  (never free text, never an LLM's impression of similarity — issue
+  athenaeum#719 AC2) — over a configurable window, and flags which shapes
+  cross a configurable recurrence threshold. New config keys (all under
+  `librarian.signal_mining`, mirroring `librarian.rule_proposals`'s
+  shape): `threshold` (default 5), `window_days` (default 30), `enabled`
+  (default `false` — nothing is wired into the nightly run yet; later
+  Plan steps add the drafter, ratification path, and librarian wiring
+  behind this same gate), and `dry_run` (default `true`, for when
+  `enabled` is later flipped on). This step lands pure, read-only
+  detection only; it is not yet consumed anywhere, matching the issue's
+  own "commit after each numbered Plan step" instruction for an
+  in-progress, multi-step issue.
 - **PII classification policy, response schema, and sticky-verdict recording
   (issue athenaeum#689, AC1-AC4).** `docs/design/pii-classification-policy.md`
   documents the five classes that separate a non-contact token (an SSH host

@@ -2769,6 +2769,80 @@ Env ``ATHENAEUM_SIBLING_WIDENING_MIN_SIMILARITY`` > yaml
 value is authoritative over yaml (M1); a ``bool`` /
 non-numeric / out-of-``(0, 1]`` yaml value falls through to the default.
 
+### `resolve_signal_mining_dry_run`
+
+- **YAML path:** `librarian.signal_mining.dry_run`
+- **Environment variable:** `ATHENAEUM_SIGNAL_MINING_DRY_RUN`
+- **CLI flag:** —
+- **Default:** `True`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+``librarian.signal_mining.dry_run`` (default True).
+
+'s wiring AC: "Provide a dry-run mode that lists
+proposals without queueing them." Consulted only when
+`resolve_signal_mining_enabled` is True. Defaulting to True means
+the first time an operator flips the master switch on, the loop lists
+what it would have proposed rather than immediately queueing anything —
+the operator must take a second, explicit step
+(``librarian.signal_mining.dry_run: false``) to let proposals reach the
+queue. Mirrors `resolve_signal_mining_enabled`'s env/yaml/default
+precedence.
+
+### `resolve_signal_mining_enabled`
+
+- **YAML path:** `librarian.signal_mining.enabled`
+- **Environment variable:** `ATHENAEUM_SIGNAL_MINING_ENABLED`
+- **CLI flag:** —
+- **Default:** `False`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+``librarian.signal_mining.enabled`` (default False). DEFAULT OFF.
+
+'s self-tuning loop (mining -> dimension proposals ->
+ratification -> convergence reporting): with this off, the nightly
+librarian's mining phase is not invoked at all and nothing about an
+existing deployment's behavior changes. Mirrors
+`resolve_comparator_enabled`'s shape exactly: env
+``ATHENAEUM_SIGNAL_MINING_ENABLED`` (``1``/``true``/``yes``/``on``,
+case-insensitive) > yaml ``librarian.signal_mining.enabled`` > default
+``False``. An operator enables this deliberately, after seeing what the
+loop would have proposed via `resolve_signal_mining_dry_run`.
+
+### `resolve_signal_mining_threshold`
+
+- **YAML path:** `librarian.signal_mining.threshold`
+- **Environment variable:** `ATHENAEUM_SIGNAL_MINING_THRESHOLD`
+- **CLI flag:** —
+- **Default:** `5`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+``librarian.signal_mining.threshold`` (default 5).
+
+ AC1: the self-tuning loop's shape-mining pass groups
+the verdict ledger's ``underdetermined`` entries by typed shape (missing
+dimensions + memory class + scope pattern — see
+`athenaeum.signal_mining`). A shape recurring across at least this
+many DISTINCT pairs within `resolve_signal_mining_window_days` is
+the trigger for a dimension proposal. Deliberately a small default: the
+loop's own convergence-reporting AC requires this to be low enough that
+real recurrence is visible quickly, not tuned only after a huge backlog
+accumulates.
+
+### `resolve_signal_mining_window_days`
+
+- **YAML path:** `librarian.signal_mining.window_days`
+- **Environment variable:** `ATHENAEUM_SIGNAL_MINING_WINDOW_DAYS`
+- **CLI flag:** —
+- **Default:** `30`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+``librarian.signal_mining.window_days`` (default 30).
+
+ AC1's "configurable window": the shape-mining pass
+only counts verdict-ledger entries whose ``at`` timestamp falls within
+this many days of "now".
+
 ### `resolve_standing_state_claim_kinds`
 
 - **YAML path:** `librarian.standing_state_claim_kinds`

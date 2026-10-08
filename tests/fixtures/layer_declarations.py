@@ -211,6 +211,11 @@ MODULE_LAYER: dict[str, int] = {
     "retraction_cascade": 4,
     "name_structure": 4,
     "rule_proposals": 4,
+    # Issue athenaeum#719: shape mining over the verdict ledger (L2) and the
+    # dimension coordinate readers (L1/L2 upper bound) -- the self-tuning
+    # loop's signal-mining phase. Sibling L4 to rule_proposals.py, which it
+    # mirrors the detect/threshold/window shape of.
+    "signal_mining": 4,
     "sensitivity_lint": 4,
     "shadow_linkage": 4,
     "shadow_parity": 4,
