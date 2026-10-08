@@ -9,6 +9,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Self-tuning loop, Plan step 6: tier-movement + policy-pack-edit
+  proposals (issue athenaeum#2019).** New `src/athenaeum/tier_movement_proposals.py`
+  (L4): `run_tier_movement_proposal_drafting()` drafts an advisory
+  review item when `athenaeum.usage_report.compute_usage_report()` shows
+  a claim pushed at least `librarian.tier_movement_pushed_min` times
+  (default 5) while referenced at most `librarian.tier_movement_referenced_max`
+  times (default 0) over `librarian.tier_movement_window_days` (default
+  30), gated off by default behind `librarian.tier_movement_proposals_enabled`.
+  **AC1 is met under reinterpretation**: athenaeum#1514 already retired the
+  `memory_tier` vocabulary (`hot`/`warm`/`cold`/`refused`) and its
+  promote-on-use sweep before this issue was authored, so there is no
+  tier left to move a claim into and `tiers.py` (the unrelated intake
+  tier1-4 classify pipeline) holds no usage-metric logic at all; the
+  trigger reads `usage_report` only, and every drafted record carries
+  the advisory `"advisory-review"` action, never a retired tier token
+  (regression-tested). New `src/athenaeum/policy_pack_edit_proposals.py`
+  (L4): `draft_policy_pack_edit_proposal()` / `run_policy_pack_edit_proposal_drafting()`
+  ledger a proposed diff against a named retention-policy pack
+  (`athenaeum.erasure.RetentionPack`), gated behind
+  `librarian.policy_pack_edit_proposals_enabled` (default `false`); no
+  detector exists for this trigger yet, so this ships as a drafting
+  entry point a future detector or operator-triggered command calls.
+  Both new ledgers (`wiki/_tier_movement_proposals.jsonl`,
+  `wiki/_policy_pack_edit_proposals.jsonl`) follow the same
+  idempotent-per-candidate, dry-run-capable shape as
+  `dimension_proposals.py`. Wired into the unified decision queue:
+  `decision_framing.py` gains `"tier-movement-proposal"`
+  (`REVERSIBILITY_REVERSIBLE`, `ROUTING_AUTHORITY`) and
+  `"policy-pack-edit"` (`REVERSIBILITY_IRREVERSIBLE`, `ROUTING_AUTHORITY`
+  — matching the `retraction`/`quarantine` precedent for a genuinely
+  consequential item, per athenaeum#719's own "policy changes are
+  irreversible-class decisions" AC) entries in `_TYPE_FRAMING`, and
+  `decisions.py` gains `tier_movement_proposal_to_decision()` /
+  `policy_pack_edit_proposal_to_decision()`, wired into
+  `list_pending_decisions()`'s union. Both types are deliberately absent
+  from `ANSWERABLE_AS` and `decision_answers.VALID_DECISION_TYPES` —
+  same "framed but not yet answerable" posture as `dimension-proposal`
+  — so the only path to an effective change is a future ratification
+  applier's explicit human `"approve"`, never an auto-apply threshold
+  crossing (test-asserted: `"policy-pack-edit"` is absent from
+  `verdict_effects.AUTO_APPLY_OPERATIONS` and from both answer-routing
+  tables). **Ratchet guard** (athenaeum#717's Ratchet guard 1, "no
+  constitutional amendments during an emergency"): new
+  `decision_budget.RATCHET_GUARDED_DECISION_TYPES` (`"policy-pack-edit"`
+  plus athenaeum#2018's sibling `"auto-apply-threshold-proposal"` literal,
+  named by string so this module gains no import edge toward whichever
+  module that child lands its drafter in) and the pure predicate
+  `decision_budget.ratification_refusal()`, which refuses a guarded
+  type's ratification with `RATCHET_REFUSAL_QUEUE_INFLOW_BREACH` while
+  `decision_budget.budget_report()`'s `"breach"` is true — the SAME
+  inflow-budget signal `auto_apply.py`'s `effort_budget_breach`
+  parameter already reads for the duplicate-fold guard athenaeum#1996
+  landed. The guard is built and tested now; wiring a ratification
+  applier to call it is the next child's job (athenaeum#2019's own
+  AC/Plan). `CHANGELOG.md`/`docs/reference/configuration.md` cover both
+  new config namespaces; `tests/fixtures/layer_declarations.py` declares
+  both new modules L4.
 - **Self-tuning loop, Plan step 3: dimension-proposal drafter + decision
   type (issue athenaeum#2015).** New `src/athenaeum/dimension_proposals.py`
   (L4): `run_dimension_proposal_drafting()` turns a triggered
