@@ -691,22 +691,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   where both halves parse under 65536; and a receipt, invoice, approval,
   or merge-decision id, or a Google Ads account id in the
   `NNN-NNN-NNNN` form (identical in shape to a North American phone
-  number), when immediately labeled as such. `src/athenaeum/pii.py`'s
-  `_has_bare_run_id_label_prefix` is now a token-window scan (the last 6
-  tokens, `_BARE_RUN_ID_LABEL_GAP_TOKENS`) rather than an anchored regex,
-  so the existing athenaeum#2027 directly-adjacent case is just this
-  window's zero-gap case; `BARE_RUN_ID_LABEL_PREFIXES` gains `workflow`.
-  New `_is_decimal_number` and `_is_port_range` fold into
+  number), when immediately labeled as such and UNFORMATTED (no
+  `+`/parens/whitespace). `src/athenaeum/pii.py`'s
+  `_has_bare_run_id_label_prefix` now also does a same-line token-window
+  scan (the last 6 tokens, `_BARE_RUN_ID_LABEL_GAP_TOKENS`) for the
+  narrower `_RUN_ID_GAP_LABEL_PREFIXES` subset (`run`/`runs`/`job`/
+  `workflow` — AC(a)'s own list), stopping short if a closer `tel`/
+  `phone`/`mobile`/`cell` label is also in that window (AC(b): a closer
+  phone label always wins) and never crossing a line break; the existing
+  athenaeum#2027 directly-adjacent regex (`comment`/`id` included) is
+  unchanged and checked first. `BARE_RUN_ID_LABEL_PREFIXES` gains
+  `workflow`. New `_is_decimal_number` and `_is_port_range` fold into
   `_is_excluded_phone_shape` (same no-`+`/parens/whitespace gate as the
-  existing date/epoch-group checks). `LABELED_IDENTIFIER_PREFIXES` gains
-  `receipt`, `invoice`, `approval`, `decision`, `account` — the formatted,
-  3-group `NNN-NNN-NNNN` phone form still matches when it is NOT preceded
-  by one of these labels (the Seer-finding-17625842 contract from
-  athenaeum#2028 is unaffected). `sensitivity.py`'s `_PhoneRecognizer` and
-  `outbound_pii.py`'s egress lint both inherit the fix with no further
-  code change, since all three share the same `athenaeum.pii` exclusion
-  helpers. No public signature changed; new synthetic regression
-  fixtures in `tests/fixtures/phone_2031_fixtures.py`, shared by
+  existing date/epoch-group checks). New
+  `ACCOUNT_RECORD_ID_LABEL_PREFIXES` (`receipt`/`invoice`/`approval`/
+  `decision`/`account`) and `_has_account_record_id_label_prefix` are a
+  SEPARATE, shape-gated check from `_has_labeled_identifier_prefix` —
+  applied only to a token with no `+`, parens, or whitespace, so a
+  plus-prefixed, parenthesized, or space-grouped phone with one of these
+  labels (`account +1-555-0100`, `invoice (555) 010-0100`) still matches;
+  only the unformatted `NNN-NNN-NNNN`/bare form is retired, and only when
+  labeled (an unlabeled `NNN-NNN-NNNN` run still matches — the
+  athenaeum#2028 Seer-finding-17625842 contract is unaffected).
+  `sensitivity.py`'s `_PhoneRecognizer` and `outbound_pii.py`'s egress
+  lint both inherit the fix with no further code change, since all three
+  share the same `athenaeum.pii` exclusion helpers. No public signature
+  changed; new synthetic regression fixtures in
+  `tests/fixtures/phone_2031_fixtures.py`, shared by
   `test_pii_off_corpus.py` and `test_sensitivity.py` so the two detection
   paths cannot drift.
 

@@ -86,6 +86,7 @@ from athenaeum.pii import (
     _BARE_PHONE_MIN_DIGITS,
     _EMAIL_RE,
     _PHONE_RE,
+    _has_account_record_id_label_prefix,
     _has_bare_run_id_label_prefix,
     _has_enough_digits,
     _has_labeled_identifier_prefix,
@@ -252,17 +253,20 @@ class _PhoneRecognizer:
     regress any of those fixes. Also skips a hyphen-joined digit-group token
     glued onto a letter-containing slug segment
     (:func:`athenaeum.pii._is_embedded_slug_digit_run`; athenaeum#2027) and a bare
-    10-11 digit run labeled run/comment/job/id/workflow — even when the
-    label sits a few tokens away rather than directly against the run
+    10-11 digit run labeled run/comment/job/id/workflow — for
+    run/runs/job/workflow even when the label sits a few tokens away rather
+    than directly against the run, comment/id staying directly-adjacent-only
     (:func:`athenaeum.pii._has_bare_run_id_label_prefix`; athenaeum#2027 /
     athenaeum#2031). Also skips a bare decimal number and an
     ``NNNN-NNNN`` port range (:func:`athenaeum.pii._is_decimal_number` /
     :func:`athenaeum.pii._is_port_range`, folded into
-    :func:`athenaeum.pii._is_excluded_phone_shape`; athenaeum#2031), and a
-    run labeled receipt/invoice/approval/decision/account via the same
-    labeled-identifier-prefix check's extended
-    :data:`athenaeum.pii.LABELED_IDENTIFIER_PREFIXES` (athenaeum#2031).
-    Unlike :func:`~athenaeum.pii.find_inline_phones` this
+    :func:`athenaeum.pii._is_excluded_phone_shape`; athenaeum#2031), and an
+    UNFORMATTED run (no ``+``/parens/whitespace) labeled
+    receipt/invoice/approval/decision/account
+    (:func:`athenaeum.pii._has_account_record_id_label_prefix`;
+    athenaeum#2031) — a plus-prefixed, parenthesized, or space-grouped phone
+    with one of those labels still matches. Unlike
+    :func:`~athenaeum.pii.find_inline_phones` this
     does not dedupe: each occurrence of a repeated value is its own match,
     carrying its own span. Scans ``text`` only; ``frontmatter`` is accepted
     for protocol conformance but not consulted.
@@ -286,6 +290,14 @@ class _PhoneRecognizer:
             if _is_embedded_bare_digit_run(source, m.start(1), m.end(1)):
                 continue
             if _is_embedded_slug_digit_run(source, m.start(1), m.end(1)):
+                continue
+            if (
+                not token.startswith("+")
+                and "(" not in token
+                and ")" not in token
+                and " " not in token
+                and _has_account_record_id_label_prefix(source[: m.start(1)])
+            ):
                 continue
             candidate = _normalize_phone_token(token)
             if (

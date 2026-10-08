@@ -67,15 +67,15 @@ FALSE_POSITIVES: tuple[tuple[str, str], ...] = (
     ),
     (
         "Google Ads account id, NNN-NNN-NNNN form, labeled",
-        "the Google Ads account 650-253-0001 was linked to the dashboard",
+        "the Google Ads account 206-555-0142 was linked to the dashboard",
     ),
     (
         "archived approval id, labeled",
-        "approval 702-418-9963 was archived after the review",
+        "approval 702-555-0116 was archived after the review",
     ),
     (
         "archived merge-decision id, labeled",
-        "the merge-decision 221-904-7765 was archived with the ticket",
+        "the merge-decision 415-555-0199 was archived with the ticket",
     ),
 )
 
@@ -91,12 +91,32 @@ STILL_MATCHES: tuple[tuple[str, str, str], ...] = (
     ("mobile label, hyphen-grouped", "mobile 917-231-6130 preferred", "917-231-6130"),
     (
         "NNN-NNN-NNNN form with no id-like label still matches as a phone",
-        "reach the office at 650-253-0001 after hours",
-        "650-253-0001",
+        "reach the office at 206-555-0142 after hours",
+        "206-555-0142",
     ),
     (
         "bare number standing alone, not near a run-id label",
         "cell 5551234567 anytime",
+        "5551234567",
+    ),
+    (
+        "account-shaped NNN-NNN-NNNN form with a plus prefix still matches",
+        "account +1-206-555-0142 on file",
+        "+1-206-555-0142",
+    ),
+    (
+        "invoice-labeled parenthesized number still matches",
+        "invoice (206) 555-0142 on the statement",
+        "(206) 555-0142",
+    ),
+    (
+        "run-id gap label does not eat an unrelated, non-adjacent phone",
+        "caller id showed 5551234567",
+        "5551234567",
+    ),
+    (
+        "paragraph break stops the run-id gap window from reaching back",
+        "Job went well.\n\nCall 5551234567 to confirm",
         "5551234567",
     ),
 )
