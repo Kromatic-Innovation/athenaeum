@@ -47,6 +47,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -69,6 +70,28 @@ REVIEW_KIND = "review"
 #: T2 *approve* is the false-approve risk. A decision whose ``(tier, verdict)``
 #: is not in this map is never an audit candidate.
 _WATCHED_VERDICT: dict[str, str] = {"T1": "reject", "T2": "approve"}
+
+#: ``tier`` value stamped on every agent-triage audit record (issue
+#: athenaeum#1995). A distinct string from ``"T1"``/``"T2"`` so
+#: :func:`calibration_summary`'s per-tier bucketing separates this
+#: measurement from the reasoning-tier one automatically — same ledger, same
+#: ``should_sample``/``record_audit_review``/``calibration_summary``
+#: primitives, zero shared counters. Deliberately also distinct from
+#: whatever tier name a sibling "default-acceptance" sampling lane (issue
+#: athenaeum#1996, built concurrently against this same module) picks for
+#: itself — "triage" is unambiguous and could not collide with a
+#: human-default-acceptance measurement.
+TRIAGE_TIER_NAME = "agent-triage"
+
+#: issue athenaeum#1995 AC7: "≥2 confirmed-wrong triage resolutions in a
+#: rolling quarter trips a review." A fixed rule, not a config knob — the
+#: issue states the number itself, not a tunable rate.
+CONFIRMED_WRONG_QUARTER_THRESHOLD = 2
+
+#: "A rolling quarter", for :func:`triage_confirmed_wrong_count`'s window.
+#: 92 days (~13 weeks), the common fixed-length approximation of a calendar
+#: quarter used where no fiscal calendar is configured.
+_QUARTER_WINDOW_DAYS = 92
 
 
 def default_calibration_ledger_path(wiki_root: Path) -> Path:
@@ -375,17 +398,189 @@ def _empty_tier_bucket() -> dict[str, int]:
     }
 
 
+# ---------------------------------------------------------------------------
+# Agent-triage sampling (issue athenaeum#1995)
+# ---------------------------------------------------------------------------
+#
+# A SECOND measurement on the SAME primitives above, for a different source:
+# :mod:`athenaeum.triage`'s research-resolved answers, rather than the T1/T2
+# reasoning-tier verdicts :func:`sample_tier_decision` samples. Deliberately
+# does not touch :func:`should_sample`, :func:`record_audit_review`, or
+# :func:`calibration_summary` — those three are reused byte-for-byte; only
+# :data:`TRIAGE_TIER_NAME` and the sampler/threshold functions below are new.
+# This is intentional: issue athenaeum#1996 (a concurrent, sibling lane) adds
+# its OWN sampling pass over this same module for a third source (human
+# default-acceptances), and the two additions must merge without either one
+# touching a line the other also touches.
+
+
+def sample_triage_decision(
+    wiki_root: Path,
+    *,
+    proposal_id: str,
+    verdict: str,
+    reason: str,
+    config: dict[str, Any] | None = None,
+    ledger_path: Path | None = None,
+) -> dict[str, Any] | None:
+    """Sample one agent-triage resolution for human audit, if selected.
+
+    Mirrors :func:`sample_tier_decision`'s shape on the SAME ledger (an
+    ``AUDIT_KIND`` record keyed by ``tier``), but the tier is always
+    :data:`TRIAGE_TIER_NAME` here — there is no watched-verdict gate
+    (:data:`_WATCHED_VERDICT`) because a triage resolution has only one
+    direction to audit: "the agent decided this", not a tier's
+    reject-vs-approve split. The sample rate is
+    :func:`athenaeum.config.resolve_audit_sample_rate_agent_triage`.
+
+    Called by :mod:`athenaeum.triage` right after one of its research-based
+    answers has been submitted through ``athenaeum decisions answer`` and
+    applied by the same ``ingest-answers`` tick that applies every other
+    decision answer (see that module's ``run_triage``). ``applied`` is
+    therefore always recorded ``True`` — unlike a T2 approve, a triage
+    answer has no "proposed but not yet live" state by the time this is
+    called.
+
+    Idempotent, exactly like :func:`sample_tier_decision`: re-sampling an
+    already-recorded ``(tier, proposal_id)`` pair returns ``None`` rather
+    than duplicating it. Returns the audit record when sampled and
+    appended, else ``None`` (not selected by the deterministic sampler, or
+    already sampled on a prior run).
+    """
+    from athenaeum.config import resolve_audit_sample_rate_agent_triage
+
+    rate = resolve_audit_sample_rate_agent_triage(config)
+    if not should_sample(TRIAGE_TIER_NAME, proposal_id, rate=rate):
+        return None
+
+    item_id = audit_item_id(TRIAGE_TIER_NAME, proposal_id)
+    existing = {
+        str(r.get("id"))
+        for r in read_calibration_ledger(wiki_root, ledger_path=ledger_path)
+        if r.get("kind") == AUDIT_KIND
+    }
+    if item_id in existing:
+        return None  # already sampled on a prior run
+
+    record = {
+        "v": CALIBRATION_LEDGER_VERSION,
+        "kind": AUDIT_KIND,
+        "id": item_id,
+        "created_at": now_iso(),
+        "tier": TRIAGE_TIER_NAME,
+        "verdict": verdict,
+        "proposal_id": proposal_id,
+        "reason": reason,
+        "sample_rate": rate,
+        "applied": True,
+    }
+    target = (
+        ledger_path if ledger_path is not None else default_calibration_ledger_path(wiki_root)
+    )
+    _append_jsonl_line(target, json.dumps(record, separators=(",", ":")) + "\n")
+    return record
+
+
+def _parse_review_day(value: Any) -> date | None:
+    """Best-effort ``YYYY-MM-DD`` prefix parse of a ledger timestamp string.
+
+    Mirrors :func:`athenaeum.decision_budget._parse_day`'s exact idiom
+    (slice to the first 10 chars, ``date.fromisoformat``, fail-open to
+    ``None`` on anything unparseable) rather than inventing a second one —
+    this module had no datetime parsing before issue athenaeum#1995.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return date.fromisoformat(text[:10])
+    except ValueError:
+        return None
+
+
+def triage_confirmed_wrong_count(
+    wiki_root: Path,
+    *,
+    as_of: datetime | None = None,
+    ledger_path: Path | None = None,
+) -> int:
+    """Count agent-triage reviews CONFIRMED WRONG within a trailing quarter.
+
+    Issue athenaeum#1995 AC7's measurement surface: built entirely on
+    :func:`read_calibration_ledger` and the ``overturned`` field
+    :func:`record_audit_review` already writes — no second ledger, no
+    bespoke counter. "Confirmed wrong" is a human's review of a triage
+    resolution that OVERTURNED it (``record_audit_review``'s
+    ``human_verdict != audit verdict``), restricted to ``tier ==``
+    :data:`TRIAGE_TIER_NAME` so a reasoning-tier overturn (T1/T2) or a
+    sibling lane's default-acceptance overturn never counts here.
+
+    The window is the trailing :data:`_QUARTER_WINDOW_DAYS` days ending at
+    ``as_of`` (default: now), inclusive of both ends, keyed to each REVIEW
+    record's own ``created_at`` (when the human recorded the review — not
+    when the original resolution was sampled). A review with an unparseable
+    timestamp is excluded, not counted as "today" (fail-closed on the
+    count, mirroring :func:`athenaeum.decision_budget.items_per_day`'s same
+    choice for the same reason: silently inflating a threshold count on bad
+    data is the wrong direction to fail).
+    """
+    ref = as_of or datetime.now(timezone.utc)
+    ref_day = ref.date()
+    window_start = ref_day - timedelta(days=_QUARTER_WINDOW_DAYS - 1)
+    count = 0
+    for record in read_calibration_ledger(wiki_root, ledger_path=ledger_path):
+        if record.get("kind") != REVIEW_KIND:
+            continue
+        if record.get("tier") != TRIAGE_TIER_NAME:
+            continue
+        if not record.get("overturned"):
+            continue
+        day = _parse_review_day(record.get("created_at"))
+        if day is None:
+            continue
+        if window_start <= day <= ref_day:
+            count += 1
+    return count
+
+
+def triage_confirmed_wrong_threshold_breached(
+    wiki_root: Path,
+    *,
+    as_of: datetime | None = None,
+    ledger_path: Path | None = None,
+) -> bool:
+    """Whether the agent-triage confirmed-wrong rate trips a review (issue athenaeum#1995 AC7).
+
+    ``True`` iff :func:`triage_confirmed_wrong_count` is at least
+    :data:`CONFIRMED_WRONG_QUARTER_THRESHOLD` (``2``) over the same trailing
+    quarter. This function makes no decision and sends no notification —
+    exactly like :func:`calibration_summary`, it reports a number for a
+    caller (the ``athenaeum triage report`` CLI, an operator briefing) to
+    act on. The ratchet guard that would act automatically on a breach is
+    issue athenaeum#1996 (slice f), explicitly out of scope here.
+    """
+    return (
+        triage_confirmed_wrong_count(wiki_root, as_of=as_of, ledger_path=ledger_path)
+        >= CONFIRMED_WRONG_QUARTER_THRESHOLD
+    )
+
+
 __all__ = [
     "CALIBRATION_LEDGER_VERSION",
     "CALIBRATION_LEDGER_FILENAME",
     "AUDIT_KIND",
     "REVIEW_KIND",
+    "TRIAGE_TIER_NAME",
+    "CONFIRMED_WRONG_QUARTER_THRESHOLD",
     "default_calibration_ledger_path",
     "audit_item_id",
     "sample_probability",
     "should_sample",
     "read_calibration_ledger",
     "sample_tier_decision",
+    "sample_triage_decision",
+    "triage_confirmed_wrong_count",
+    "triage_confirmed_wrong_threshold_breached",
     "list_pending_audit",
     "record_audit_review",
     "calibration_summary",
