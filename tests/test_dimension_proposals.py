@@ -7,10 +7,12 @@ from pathlib import Path
 
 from athenaeum.dimension_proposals import (
     DIMENSION_PROPOSALS_LEDGER_FILENAME,
+    PROPOSAL_KIND,
     default_dimension_proposals_ledger_path,
     draft_dimension_proposal,
     enforce_ask_budget,
     list_pending_dimension_proposals,
+    mark_proposals_stale_for_decision,
     plan_backfill,
     proposal_item_id,
     read_dimension_proposals_ledger,
@@ -162,6 +164,113 @@ class TestDraftDimensionProposal:
         draft = draft_dimension_proposal(shape, "jurisdiction")
         assert draft.applies_to.get("memory_class") == ["decision", "fact"]
         assert draft.applies_to.get("scope") == ["team-a"]
+
+    def test_coord_origins_persisted_on_the_draft_and_ledger_record(self) -> None:
+        """Issue athenaeum#2017 (AC5): the provenance mapping a draft's "auto"
+        backfill came from is honest, round-trips onto the dataclass, and is
+        written into the ledger record so a later revocation of the answer
+        can find and stale-mark this proposal."""
+        shape = _shape(missing=("jurisdiction",))
+        draft = draft_dimension_proposal(
+            shape, "jurisdiction", coord_origins={"jurisdiction": "dec-coord-1"}
+        )
+        assert draft.coord_origins == {"jurisdiction": "dec-coord-1"}
+        assert draft.to_ledger_record()["coord_origins"] == {"jurisdiction": "dec-coord-1"}
+
+    def test_coord_origins_defaults_to_empty_when_not_provided(self) -> None:
+        shape = _shape()
+        draft = draft_dimension_proposal(shape, "jurisdiction")
+        assert draft.coord_origins == {}
+        assert draft.to_ledger_record()["coord_origins"] == {}
+
+
+class TestStaleProposalsExcludedFromPendingListing:
+    """Sentry PRRT_kwDOSEs9CM6qiPZE: a proposal stale-marked by a revoked
+    resolution claim must not keep listing as pending — it would otherwise
+    still reach a human for ratification on provenance that is no longer
+    live."""
+
+    def test_revoke_then_stale_mark_removes_it_from_pending(self, tmp_path: Path) -> None:
+        from athenaeum.resolution_claims import ingest_resolution_claim, revoke_resolution_claim
+        from athenaeum.runlock import RunLock
+
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        ingest_resolution_claim(
+            wiki_root,
+            decision_id="dec-coord-3",
+            decision_type="coordinate",
+            verdict='{"answers": []}',
+        )
+        shape = _shape(missing=("jurisdiction",), count=10, threshold=5)
+        run_dimension_proposal_drafting(
+            [shape],
+            wiki_root=wiki_root,
+            coord_origins_by_pair={"alpha+beta": {"jurisdiction": "dec-coord-3"}},
+        )
+        pending_before = list_pending_dimension_proposals(wiki_root)
+        assert len(pending_before) == 1
+        proposal_id = pending_before[0]["id"]
+
+        with RunLock(wiki_root.parent) as lock:
+            revoke_resolution_claim(
+                wiki_root, "dec-coord-3", reason="answer reversed", lock=lock
+            )
+        marked = mark_proposals_stale_for_decision(
+            wiki_root, "dec-coord-3", reason="resolution claim revoked"
+        )
+        assert marked == [proposal_id]
+
+        pending_after = list_pending_dimension_proposals(wiki_root)
+        assert pending_after == []
+
+        # Never deleted -- still present in the raw ledger, just excluded
+        # from the pending view.
+        all_records = read_dimension_proposals_ledger(wiki_root)
+        assert any(r["kind"] == PROPOSAL_KIND and r["id"] == proposal_id for r in all_records)
+
+    def test_list_pending_decisions_inherits_the_exclusion(self, tmp_path: Path) -> None:
+        """The decision-queue surface (`athenaeum.decisions.list_pending_decisions`,
+        which calls `dimension_proposal_to_decision` over
+        `list_pending_dimension_proposals`'s own output) needs no change of
+        its own -- it inherits the stale exclusion for free."""
+        from athenaeum.decisions import list_pending_decisions
+
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        shape = _shape(missing=("jurisdiction",), count=10, threshold=5)
+        run_dimension_proposal_drafting([shape], wiki_root=wiki_root)
+        proposal_id = list_pending_dimension_proposals(wiki_root)[0]["id"]
+
+        # Directly append a stale-mark event (isolating the read-side fix
+        # from the coord_origins-matching path, which the previous test
+        # already covers end to end).
+        import json
+
+        from athenaeum.dimension_proposals import (
+            DIMENSION_PROPOSALS_LEDGER_VERSION,
+            STALE_KIND,
+            default_dimension_proposals_ledger_path,
+        )
+        from athenaeum.store import append_line_durable, now_iso
+
+        event = {
+            "v": DIMENSION_PROPOSALS_LEDGER_VERSION,
+            "kind": STALE_KIND,
+            "id": proposal_id,
+            "decision_id": "dec-x",
+            "reason": "test",
+            "created_at": now_iso(),
+        }
+        append_line_durable(
+            default_dimension_proposals_ledger_path(wiki_root),
+            (json.dumps(event, sort_keys=True) + "\n").encode("utf-8"),
+        )
+
+        dp_items = [
+            i for i in list_pending_decisions(wiki_root) if i["type"] == "dimension-proposal"
+        ]
+        assert dp_items == []
 
 
 # ---------------------------------------------------------------------------
@@ -476,6 +585,32 @@ class TestRatificationApprove:
         # And the yaml entry was not duplicated.
         dims = load_config(knowledge_root).get("dimensions") or []
         assert len(dims) == 1
+
+    def test_approve_ingests_the_ratification_as_a_resolution_claim(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue athenaeum#2017 AC1: a dimension-proposal ratification is
+        ingested as a claim naming the registered dimension."""
+        from athenaeum.config import load_config
+        from athenaeum.decision_answers import apply_decision_answers, write_decision_answer
+        from athenaeum.resolution_claims import read_resolution_claims
+
+        knowledge_root, wiki_root, raw_root, decision_id = _drafted_knowledge_root(tmp_path)
+        write_decision_answer(
+            raw_root, decision_id=decision_id, decision_type="dimension-proposal", verdict="approve"
+        )
+        apply_decision_answers(wiki_root, raw_root, config=load_config(knowledge_root))
+
+        claims = read_resolution_claims(wiki_root)
+        matching = [
+            c
+            for c in claims
+            if c.get("decision_id") == decision_id
+            and c.get("decision_type") == "dimension-proposal"
+        ]
+        assert len(matching) == 1
+        assert matching[0]["dimension_name"] == "jurisdiction"
+        assert matching[0]["verdict"] == "approve"
 
     def test_approve_refuses_a_kernel_name_collision(self, tmp_path: Path) -> None:
         from athenaeum.config import load_config

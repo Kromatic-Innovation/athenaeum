@@ -972,6 +972,27 @@ class TestApplyAudit:
         assert reviews[0]["id"] == audit_id
         assert reviews[0]["overturned"] is False  # verdict matches sampled verdict
 
+    def test_apply_ingests_the_review_as_a_resolution_claim(
+        self, wiki_root: Path, raw_root: Path
+    ) -> None:
+        """Issue athenaeum#2017 AC1: a contradiction call (the audit review of a
+        sampled contradiction) is ingested as a claim with provenance."""
+        from athenaeum.resolution_claims import read_resolution_claims
+
+        audit_id = _seed_audit_item(wiki_root, pid="proposal-1")
+        write_decision_answer(
+            raw_root, decision_id=audit_id, decision_type="audit", verdict="approve"
+        )
+
+        report = apply_decision_answers(wiki_root, raw_root)
+        assert report.applied == 1
+
+        claims = read_resolution_claims(wiki_root)
+        assert any(
+            c.get("decision_id") == audit_id and c.get("decision_type") == "audit"
+            for c in claims
+        )
+
 
 # ---------------------------------------------------------------------------
 # TestApplyProposedRule — AC3, AC6, athenaeum#921

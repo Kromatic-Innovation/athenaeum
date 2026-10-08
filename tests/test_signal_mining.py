@@ -6,9 +6,12 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
+from athenaeum.resolution_claims import ingest_resolution_claim
 from athenaeum.runlock import RunLock
 from athenaeum.signal_mining import (
     ShapeKey,
+    decision_shape_key,
+    mine_decision_shapes,
     mine_underdetermined_shapes,
     shape_key_for_entry,
     triggered_shapes,
@@ -245,3 +248,180 @@ class TestDeterminism:
         key = shape_key_for_entry(entry, wiki_root=wiki_root, cache={})
         assert isinstance(key, ShapeKey)
         assert key.verdict_type == "underdetermined"
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#2017 AC2/AC3 — decision-queue shape mining over resolution
+# claims
+# ---------------------------------------------------------------------------
+
+
+class TestDecisionQueueShapeMining:
+    def test_same_decision_type_verdict_dimension_cluster_together(
+        self, tmp_path: Path
+    ) -> None:
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        for i in range(2):
+            ingest_resolution_claim(
+                wiki_root,
+                decision_id=f"dp-{i}",
+                decision_type="dimension-proposal",
+                verdict="approve",
+                dimension_name="jurisdiction",
+            )
+        shapes = mine_decision_shapes(wiki_root, config=_config(), now=_NOW)
+        assert len(shapes) == 1
+        assert shapes[0].count == 2
+        assert shapes[0].key.verdict_type == "decision:dimension-proposal:approve"
+        assert shapes[0].key.missing_dimensions == ("jurisdiction",)
+        assert shapes[0].triggered
+
+    def test_different_verdicts_do_not_cluster(self, tmp_path: Path) -> None:
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        ingest_resolution_claim(
+            wiki_root,
+            decision_id="dp-1",
+            decision_type="dimension-proposal",
+            verdict="approve",
+            dimension_name="jurisdiction",
+        )
+        ingest_resolution_claim(
+            wiki_root,
+            decision_id="dp-2",
+            decision_type="dimension-proposal",
+            verdict="reject",
+            dimension_name="jurisdiction",
+        )
+        shapes = mine_decision_shapes(wiki_root, config=_config(), now=_NOW)
+        assert len(shapes) == 2
+        assert all(not s.triggered for s in shapes)
+
+    def test_returns_the_same_type_the_verdict_ledger_miner_returns(
+        self, tmp_path: Path
+    ) -> None:
+        """AC3: mined by the SAME shape-clustering machinery -- a decision
+        shape and an underdetermined-verdict shape are the identical
+        MinedShape/ShapeKey type, so both can feed the SAME proposal
+        drafter with no branching on the caller's side."""
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        ingest_resolution_claim(
+            wiki_root,
+            decision_id="audit-1",
+            decision_type="audit",
+            verdict="agree",
+        )
+        shapes = mine_decision_shapes(wiki_root, config=_config(), now=_NOW)
+        assert len(shapes) == 1
+        from athenaeum.signal_mining import MinedShape
+
+        assert isinstance(shapes[0], MinedShape)
+        assert isinstance(shapes[0].key, ShapeKey)
+
+    def test_revoked_resolution_claim_is_excluded_from_mining(self, tmp_path: Path) -> None:
+        from athenaeum.resolution_claims import revoke_resolution_claim
+
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        for i in range(2):
+            ingest_resolution_claim(
+                wiki_root,
+                decision_id=f"dp-{i}",
+                decision_type="dimension-proposal",
+                verdict="approve",
+                dimension_name="jurisdiction",
+            )
+        with RunLock(wiki_root.parent) as lock:
+            revoke_resolution_claim(wiki_root, "dp-0", reason="reversed", lock=lock)
+        shapes = mine_decision_shapes(wiki_root, config=_config(), now=_NOW)
+        assert len(shapes) == 1
+        assert shapes[0].count == 1
+
+    def test_decision_shape_key_is_typed_not_free_text(self) -> None:
+        key = decision_shape_key(
+            {"decision_type": "audit", "verdict": "agree", "dimension_name": ""}
+        )
+        assert isinstance(key, ShapeKey)
+        assert key.verdict_type == "decision:audit:agree"
+        assert key.missing_dimensions == ()
+
+    def test_decision_shapes_feed_the_dimension_proposal_drafter(
+        self, tmp_path: Path
+    ) -> None:
+        """AC2/AC3: a triggered decision shape runs through the EXACT same
+        drafter the verdict-ledger shapes feed, with no adapter needed."""
+        from athenaeum.dimension_proposals import run_dimension_proposal_drafting
+
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        for i in range(3):
+            ingest_resolution_claim(
+                wiki_root,
+                decision_id=f"dp-{i}",
+                decision_type="dimension-proposal",
+                verdict="approve",
+                dimension_name="jurisdiction",
+            )
+        shapes = mine_decision_shapes(wiki_root, config=_config(threshold=2), now=_NOW)
+        summary = run_dimension_proposal_drafting(shapes, wiki_root=wiki_root, dry_run=True)
+        assert summary.proposed == 0  # dry run
+        assert len(summary.drafts) == 1
+        assert summary.drafts[0].name == "jurisdiction"
+
+    def test_decision_sourced_proposal_coord_origins_and_revocation_stale_mark(
+        self, tmp_path: Path
+    ) -> None:
+        """Sentry PRRT_kwDOSEs9CM6qiPZL: a decision-sourced proposal's
+        coord_origins must be non-empty (the decision itself is the
+        provenance for the axis it named), and revoking the backing
+        resolution claim must then stale-mark that proposal -- closing the
+        loop the empty-coord_origins bug previously broke."""
+        from athenaeum.dimension_proposals import (
+            mark_proposals_stale_for_decision,
+            run_dimension_proposal_drafting,
+        )
+        from athenaeum.resolution_claims import revoke_resolution_claim
+        from athenaeum.signal_mining import coord_origins_for_decision_shapes
+
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        for i in range(3):
+            ingest_resolution_claim(
+                wiki_root,
+                decision_id=f"dp-{i}",
+                decision_type="dimension-proposal",
+                verdict="approve",
+                dimension_name="jurisdiction",
+            )
+        shapes = mine_decision_shapes(wiki_root, config=_config(threshold=2), now=_NOW)
+        assert len(shapes) == 1
+        example_decision_ids = set(shapes[0].example_pairs)
+
+        origins_by_pair = coord_origins_for_decision_shapes(shapes)
+        for did in example_decision_ids:
+            assert origins_by_pair[did] == {"jurisdiction": did}
+
+        summary = run_dimension_proposal_drafting(
+            shapes, wiki_root=wiki_root, coord_origins_by_pair=origins_by_pair
+        )
+        assert summary.proposed == 1
+        draft = summary.drafts[0]
+        # Non-empty, and the decision id it names is one of this shape's
+        # own example decisions -- which one wins is the drafter's own
+        # last-example-wins merge order (run_dimension_proposal_drafting),
+        # not something this regression test needs to pin further.
+        assert draft.coord_origins
+        decision_id = draft.coord_origins["jurisdiction"]
+        assert decision_id in example_decision_ids
+
+        proposal_id = draft.id
+        with RunLock(wiki_root.parent) as lock:
+            revoke_resolution_claim(
+                wiki_root, decision_id, reason="ratification reversed", lock=lock
+            )
+        marked = mark_proposals_stale_for_decision(
+            wiki_root, decision_id, reason="resolution claim revoked"
+        )
+        assert marked == [proposal_id]
