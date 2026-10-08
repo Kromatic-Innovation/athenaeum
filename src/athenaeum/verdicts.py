@@ -936,6 +936,70 @@ def mark_pairs_stale(
     return marked
 
 
+def challenge_coordinate_answer(
+    wiki_root: Path, answer_id: str, *, lock: RunLock
+) -> dict[str, Any]:
+    """Challenge/revoke a previously-recorded coordinate answer (issue athenaeum#1994).
+
+    This is the first production caller of
+    :func:`select_stale_for_coordinate_challenged` — the selector and the
+    ledger primitive it composes with (:func:`mark_pairs_stale`) both
+    already existed and were already unit-tested (issue athenaeum#712); the
+    only missing piece was a real wiring from "a human or the triage agent
+    challenges a prior answer" to this ledger write. :func:`athenaeum.
+    decision_answers._apply_coordinate_answer` stamps every pair it decides
+    with the SAME ``answer.decision_id`` (see that function's own
+    docstring), so challenging one id here stale-marks every verdict basis
+    that lists it, not just one a caller happens to probe for.
+
+    Takes no action beyond stale-marking: a stale-marked pair is picked up
+    by :func:`athenaeum.comparator.record_comparison`'s existing
+    memoization the next time anything re-compares it — this function does
+    not itself decide a new verdict or re-queue anything.
+
+    **Only each pair's CURRENT verdict can ever match (PR athenaeum#2010
+    review finding).** Before compaction runs, :func:`iter_live_entries`
+    can return MULTIPLE entries for one pair — an earlier, now-superseded
+    entry (stale-marked when the pair was re-decided) alongside the fresh
+    one that superseded it. :func:`select_stale_for_coordinate_challenged`
+    is shared ``select_stale_for_*`` family code (issue athenaeum#712) that
+    every OTHER rule in that family wants applied to every matching entry,
+    not just a pair's latest — so the fix belongs here, in this caller, not
+    in the selector. This function therefore collapses *entries* to one
+    per pair — the LAST one in :func:`iter_live_entries`'s own (month,
+    then on-disk append) order — before calling the selector, so a pair
+    whose CURRENT verdict was decided by a DIFFERENT, non-challenged answer
+    is never stale-marked just because an old, already-superseded entry
+    still live in the same partition happens to name *answer_id*.
+    :func:`lookup_pair`'s own ``max(key=at)`` is NOT reused here: ``at`` is
+    DATE-only (see ``tests/test_coordinate_answer_loop.py``'s own comment
+    on this), so two same-day entries for a pair tie under it and
+    ``max`` silently keeps the FIRST (oldest) one — append order is the
+    only unambiguous "latest" signal before compaction.
+
+    Returns ``{"ok": True, "answer_id": answer_id, "marked_stale": int,
+    "pairs": list[str]}``. ``pairs`` is every pair whose CURRENT verdict
+    names *answer_id* — present even when ``marked_stale`` is ``0``
+    because every one of them was ALREADY stale (a caller should not read
+    ``marked_stale == 0`` as "nothing matched"; check ``pairs`` for that).
+    ``pairs`` is itself empty only when no live verdict's
+    ``basis.coord_origins`` names *answer_id* at all — e.g. the answer
+    never produced one.
+    """
+    current_by_pair: dict[str, VerdictEntry] = {}
+    for _, entry in iter_live_entries(wiki_root):
+        current_by_pair[entry.pair] = entry
+    entries = list(current_by_pair.values())
+    reasons = select_stale_for_coordinate_challenged(entries, answer_id)
+    marked = mark_pairs_stale(wiki_root, reasons, lock=lock) if reasons else 0
+    return {
+        "ok": True,
+        "answer_id": answer_id,
+        "marked_stale": marked,
+        "pairs": sorted(reasons),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Epoch registry — no-overlapping-wave guard + duty-cycle computation
 # ---------------------------------------------------------------------------
@@ -1168,6 +1232,7 @@ def record_pair_decision(
     at: str | None = None,
     config: dict[str, Any] | None = None,
     knowledge_root: Path | None = None,
+    coord_origins: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Record one verdict for a pair the pipeline just decided, end to end.
 
@@ -1201,6 +1266,13 @@ def record_pair_decision(
     anywhere — this is the "documented config key defaulting to off" the
     issue's Wiring AC describes; ``config=None``/``knowledge_root=None`` is
     the off state.
+
+    *coord_origins* (issue athenaeum#1994, optional, ``None`` by default):
+    an honest ``{dimension_name: answer_id}`` mapping for coordinates this
+    verdict's pair carries that came from an answered decision — e.g. the
+    coordinate-answer loop's own write path. ``None``/omitted stays the
+    empty mapping this field always was; never fabricate an id for a
+    coordinate that did not come from an answer.
 
     Returns ``{"ok": bool, "error_code": str|None, "pair": str|None}``, plus
     ``"ledger": "off-corpus"`` on a pair routed off-git. Never raises for an
@@ -1254,7 +1326,14 @@ def record_pair_decision(
         basis = Basis(
             content_hashes=[hash_a, hash_b],
             coords=[None, None],
-            coord_origins={},
+            # Issue athenaeum#1994: *coord_origins* is the caller's honest
+            # mapping, never invented here. The merge approve/reject path
+            # this function serves (`_apply_merge_answer`) decides nothing
+            # about a coordinate, so its only caller passes nothing and
+            # this stays the empty mapping it always was — a pair whose
+            # coordinate did NOT come from an answer keeps an absent
+            # mapping, not a fabricated one.
+            coord_origins=dict(coord_origins or {}),
             registry_epoch=registry_epoch,
             tree_epoch=tree_epoch,
             authority_basis=authority_basis,
@@ -1355,6 +1434,7 @@ __all__ = [
     "select_stale_for_authority_revoked",
     "select_stale_for_comparator_epoch_bump",
     "mark_pairs_stale",
+    "challenge_coordinate_answer",
     "BranchEpochState",
     "duty_cycle",
     "load_epoch_registry",
