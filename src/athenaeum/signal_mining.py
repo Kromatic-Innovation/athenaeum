@@ -223,6 +223,104 @@ def triggered_shapes(shapes: list[MinedShape]) -> list[MinedShape]:
     return [s for s in shapes if s.triggered]
 
 
+# ---------------------------------------------------------------------------
+# Decision-queue shape mining (issue athenaeum#2017 AC2/AC3) — the
+# decision-queue half this epic's signal-mining child (athenaeum#719 Plan step 1)
+# deliberately deferred.
+# ---------------------------------------------------------------------------
+#
+# A recurring human RESOLUTION (ingested as a claim with provenance by
+# :mod:`athenaeum.resolution_claims`, issue athenaeum#2017 AC1) is a typed shape
+# exactly like a recurring underdetermined verdict is: ``(decision_type,
+# verdict, dimension_name)`` is already-declared structure, never free text.
+# Reusing :class:`ShapeKey`/:class:`MinedShape` themselves — rather than a
+# parallel dataclass pair — is what literally lets
+# :func:`athenaeum.dimension_proposals.draft_dimension_proposal` (the SAME
+# drafter the verdict-ledger shapes feed) consume a decision shape with zero
+# changes on that side: ``verdict_type`` carries ``"decision:<type>:<verdict>"``
+# (never collides with the bare ``"underdetermined"`` verdict-ledger shapes),
+# ``missing_dimensions`` carries the one axis the resolution named (or ``()``
+# when none), and ``memory_classes``/``scopes`` are always ``(None, None)`` —
+# a decision-queue resolution carries no page-pair coordinates to cluster on,
+# only the two sides already named above.
+
+
+def _within_claim_window(record: dict[str, Any], *, now: datetime, window_days: int) -> bool:
+    """Same fail-open-to-included posture as :func:`_within_window`, reading
+    a resolution-claim record's ``created_at`` field instead of a verdict
+    entry's ``at``."""
+    at = _parse_at(str(record.get("created_at") or ""))
+    if at is None:
+        return True
+    return (now - at) <= timedelta(days=window_days)
+
+
+def decision_shape_key(record: dict[str, Any]) -> ShapeKey:
+    """Typed shape key for one resolution-claim record (AC2)."""
+    decision_type = str(record.get("decision_type") or "")
+    verdict = str(record.get("verdict") or "")
+    dimension_name = str(record.get("dimension_name") or "")
+    return ShapeKey(
+        verdict_type=f"decision:{decision_type}:{verdict}",
+        missing_dimensions=(dimension_name,) if dimension_name else (),
+        memory_classes=(None, None),
+        scopes=(None, None),
+    )
+
+
+def mine_decision_shapes(
+    wiki_root: Path,
+    *,
+    config: dict[str, Any] | None = None,
+    now: datetime | None = None,
+) -> list[MinedShape]:
+    """AC2's detector: recurring typed shapes among ACTIVE (non-revoked)
+    resolution claims (:mod:`athenaeum.resolution_claims`, issue athenaeum#2017
+    AC1), over the SAME :func:`athenaeum.config.resolve_signal_mining_window_days`
+    window :func:`mine_underdetermined_shapes` uses.
+
+    Pure and side-effect-free. Returns :class:`MinedShape` instances —
+    identical type to :func:`mine_underdetermined_shapes`'s output, so a
+    caller can mine both sources and feed every triggered shape from either
+    into :func:`athenaeum.dimension_proposals.run_dimension_proposal_drafting`
+    without branching on which detector produced it (AC3: "mined by the same
+    shape-clustering machinery ... feeding the same proposal drafter").
+    """
+    from athenaeum.resolution_claims import list_active_resolution_claims
+
+    wiki_root = Path(wiki_root)
+    now = now or datetime.now(timezone.utc)
+    threshold = resolve_signal_mining_threshold(config)
+    window_days = resolve_signal_mining_window_days(config)
+
+    claims = [
+        c
+        for c in list_active_resolution_claims(wiki_root)
+        if _within_claim_window(c, now=now, window_days=window_days)
+    ]
+
+    grouped: dict[ShapeKey, list[dict[str, Any]]] = {}
+    for claim in claims:
+        key = decision_shape_key(claim)
+        grouped.setdefault(key, []).append(claim)
+
+    shapes: list[MinedShape] = []
+    for key, rows in grouped.items():
+        ids = sorted({str(r.get("decision_id") or "") for r in rows})
+        shapes.append(
+            MinedShape(
+                key=key,
+                count=len(ids),
+                example_pairs=tuple(ids[:3]),
+                threshold=threshold,
+                window_days=window_days,
+            )
+        )
+
+    shapes.sort(key=lambda s: (-s.count, s.key.verdict_type, s.key.missing_dimensions))
+    return shapes
+
+
 __all__ = [
     "UNDERDETERMINED",
     "ShapeKey",
@@ -230,4 +328,6 @@ __all__ = [
     "mine_underdetermined_shapes",
     "shape_key_for_entry",
     "triggered_shapes",
+    "decision_shape_key",
+    "mine_decision_shapes",
 ]
