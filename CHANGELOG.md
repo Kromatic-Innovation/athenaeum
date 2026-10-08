@@ -9,6 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Self-tuning loop closure: resolutions as claims, decision-queue shape
+  mining, no-exemplar test (issue athenaeum#2017, athenaeum#719 Plan step 5).**
+  New `resolution_claims.py`: every human resolution named by the issue's
+  own enumeration — a `coordinate` answer writing a coordinate, a
+  `dimension-proposal` ratification, or a contradiction call (`audit`) — is
+  ingested as a claim (`wiki/_resolution_claims.jsonl`) with provenance
+  (`decision_id`/`decision_type`/`dimension_name`/`decided_by`/
+  `created_at`) via `ingest_resolution_claim()`, wired into
+  `decision_answers.apply_decision_answers`'s existing best-effort
+  side-channel block (alongside the budget-event and default-acceptance
+  writes). Revocation (`revoke_resolution_claim()`) never edits or deletes
+  the original claim — it appends a second `revocation` record (mirroring
+  `retraction_cascade.py`'s "flag, never touch" posture) and reuses
+  `verdicts.select_stale_for_coordinate_challenged`/`mark_pairs_stale`
+  (issue athenaeum#1994's existing coord_origins-keyed mechanism) to
+  stale-mark every live verdict that cited the decision; the companion
+  `dimension_proposals.mark_proposals_stale_for_decision()` does the same
+  for pending dimension proposals (a new `coord_origins` field, persisted
+  on `DimensionProposalDraft`/its ledger record, is what makes a proposal
+  findable by decision id) — called separately from `revoke_resolution_claim`
+  to avoid a real import cycle through `signal_mining.py` (documented in
+  `resolution_claims.py`'s module docstring). `signal_mining.py` gains
+  `mine_decision_shapes()`: the decision-queue half of shape mining this
+  epic's signal-mining child (issue athenaeum#719 Plan step 1) deliberately
+  deferred — it clusters active (non-revoked) resolution claims into the
+  SAME `ShapeKey`/`MinedShape` types `mine_underdetermined_shapes()`
+  already returns (`verdict_type="decision:<type>:<verdict>"`,
+  `missing_dimensions=(dimension_name,)` when known), so a recurring
+  resolution pattern feeds `dimension_proposals.run_dimension_proposal_drafting()`
+  — the SAME drafter the verdict-ledger shapes feed — with zero changes on
+  that side. `tests/test_comparator.py` adds the no-exemplar-channel
+  regression test: seeds a resolution claim containing a sentinel string,
+  calls the REAL prompt-building call site (`content_relation()`, not a
+  mocked builder), and asserts the sentinel never reaches the built prompt
+  — comparator.py has no code path that reads the resolution-claims ledger
+  at all, and this is the gate that keeps that true. (Evals: not needed —
+  no comparator prompt text changed; the no-exemplar test only proves an
+  absence.)
+
 - **Self-tuning loop, Plan step 4: dimension-proposal ratification +
   reversible retire (issue athenaeum#2016).** Adds `LifecycleState.RETIRED`
   as a third dimension state (`dimensions.py`) — never a deletion: the
