@@ -2,7 +2,7 @@
 """End-to-end wiring tests for the page-split / auto-apply-threshold
 decision types (issue athenaeum#2018, athenaeum#719 Plan step 6).
 
-Mirrors #2015's misroute-guard shape: proves both types are listed by
+Mirrors athenaeum#2015's misroute-guard shape: proves both types are listed by
 ``list_pending_decisions`` (owner-only, same as proposed-rule/dimension-
 proposal), answerable via ``apply_decision_answers`` end to end with a real
 ``raw/answers/*.md`` file, and that ``validate_answer`` accepts only
