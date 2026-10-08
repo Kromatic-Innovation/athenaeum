@@ -54,6 +54,12 @@ from athenaeum.search import FTS5Backend, KeywordBackend
 from athenaeum.storage import surface_root_for_class
 from athenaeum.wiki_dedupe import discover_wiki_dedupe_candidates
 from tests.fixtures.phone_2027_fixtures import FALSE_POSITIVES, STILL_MATCHES
+from tests.fixtures.phone_2031_fixtures import (
+    FALSE_POSITIVES as FALSE_POSITIVES_2031,
+)
+from tests.fixtures.phone_2031_fixtures import (
+    STILL_MATCHES as STILL_MATCHES_2031,
+)
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -806,6 +812,62 @@ class TestPhoneDetectorSecondFalsePositiveClass2027:
         assert _has_date_group("20250101-42") is True
         assert _has_date_group("20259999-55") is False
         assert _has_date_group("917-231-6130") is False
+
+
+# ---------------------------------------------------------------------------
+# Phone detector — gapped run/job/workflow labels, decimal thresholds, port
+# ranges, and labeled account/receipt/approval/decision ids must NOT match
+# (issue athenaeum#2031, third false-positive class).
+# ---------------------------------------------------------------------------
+#
+# Fixtures are shared with ``test_sensitivity.py`` via
+# ``tests/fixtures/phone_2031_fixtures.py`` so the two detection paths cannot
+# drift. Every value is synthetic/fabricated.
+
+
+class TestPhoneDetectorThirdFalsePositiveClass2031:
+    @pytest.mark.parametrize(
+        "example",
+        [pytest.param(text, id=label) for label, text in FALSE_POSITIVES_2031],
+    )
+    def test_false_positive_reports_no_phone(self, example: str) -> None:
+        assert find_inline_phones(example) == [], example
+
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            pytest.param(text, expected, id=label)
+            for label, text, expected in STILL_MATCHES_2031
+        ],
+    )
+    def test_still_matches(self, text: str, expected: str) -> None:
+        assert find_inline_phones(text) == [expected]
+
+    def test_decimal_helper_requires_exactly_two_digit_groups(self) -> None:
+        from athenaeum.pii import _is_decimal_number
+
+        assert _is_decimal_number("3.14159265358979") is True
+        assert _is_decimal_number("2018.08.02") is False
+        assert _is_decimal_number("917-231-6130") is False
+        assert _is_decimal_number("5551234567") is False
+
+    def test_port_range_helper_requires_both_halves_below_65536(self) -> None:
+        from athenaeum.pii import _is_port_range
+
+        assert _is_port_range("60000-65000") is True
+        assert _is_port_range("65536-70000") is False
+        assert _is_port_range("917-231-6130") is False
+        assert _is_port_range("5551234567") is False
+
+    def test_run_id_label_prefix_tolerates_intervening_tokens(self) -> None:
+        from athenaeum.pii import _has_bare_run_id_label_prefix
+
+        assert (
+            _has_bare_run_id_label_prefix("the workflow finished and its id, ")
+            is True
+        )
+        assert _has_bare_run_id_label_prefix("run ") is True
+        assert _has_bare_run_id_label_prefix("cell ") is False
 
     def test_epoch_millis_gated_on_no_plus(self) -> None:
         # A '+'-prefixed 13-digit run is a plausible international number,
