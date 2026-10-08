@@ -110,12 +110,12 @@ from pathlib import Path
 
 from athenaeum.answers import PendingQuestion, parse_pending_questions
 from athenaeum.atomic_io import atomic_write_text
+from athenaeum.auto_apply_proposals import list_pending_auto_apply_threshold_proposals
 from athenaeum.calibration import AUDIT_KIND, REVIEW_KIND, read_calibration_ledger
 from athenaeum.decision_framing import frame_decision
-from athenaeum.auto_apply_proposals import list_pending_auto_apply_threshold_proposals
 from athenaeum.dimension_proposals import list_pending_dimension_proposals
-from athenaeum.page_split_proposals import list_pending_page_split_proposals
 from athenaeum.models import parse_frontmatter
+from athenaeum.page_split_proposals import list_pending_page_split_proposals
 from athenaeum.pagination import paginate
 from athenaeum.pending_merges import PendingMerge, parse_pending_merges
 from athenaeum.quarantine import list_pending_quarantine
@@ -724,6 +724,7 @@ def page_split_proposal_to_decision(rec: dict) -> dict:
             "source_uid": rec.get("source_uid"),
             "source_name": source_name,
             "source_path": rec.get("source_path"),
+            "subject_until": rec.get("subject_until"),
             "heterogeneity": heterogeneity,
             "threshold": threshold,
             "subject_uids": rec.get("subject_uids", []),

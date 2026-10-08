@@ -183,6 +183,7 @@ class PageSplitProposalDraft:
     source_uid: str
     source_name: str
     source_path: str
+    subject_until: str
     heterogeneity: int
     threshold: int
     subject_uids: tuple[str, ...]
@@ -199,6 +200,11 @@ class PageSplitProposalDraft:
             "source_uid": self.source_uid,
             "source_name": self.source_name,
             "source_path": self.source_path,
+            # Carried so a human-triggered follow-up can rebuild the SAME
+            # DecomposeReport page_decompose.apply_report needs -- without
+            # this, the approval record alone cannot reconstruct the
+            # subject-span regex build_report was originally called with.
+            "subject_until": self.subject_until,
             "heterogeneity": self.heterogeneity,
             "threshold": self.threshold,
             "subject_uids": list(self.subject_uids),
@@ -228,6 +234,7 @@ def draft_page_split_proposal(
         source_uid=report.source_uid,
         source_name=report.source_name,
         source_path=report.source_path,
+        subject_until=report.subject_until,
         heterogeneity=heterogeneity,
         threshold=threshold,
         subject_uids=subject_uids,
@@ -362,6 +369,7 @@ def approve_page_split_proposal(
         "answered_at": _now_iso(now),
         "source_uid": proposal.get("source_uid"),
         "source_path": proposal.get("source_path"),
+        "subject_until": proposal.get("subject_until"),
         "subject_uids": proposal.get("subject_uids", []),
         "note": note,
     }
