@@ -44,6 +44,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `test_ledger_override_wins_over_legacy_scalar_fallback` in
   `tests/test_auto_apply_proposals.py` (the `as_of` + precedence unit
   tests).
+- **Self-tuning loop: quarterly convergence report + nightly wiring, default
+  OFF, dry-run (issue athenaeum#2020, athenaeum#719 Plan steps 7-8).** New
+  `convergence.py`: computes, per quarter, supply (count of `approve`
+  resolutions on `dimension-proposal` ledger items — a `rename` verdict
+  writes the same `approve`-kind record and counts identically) and demand
+  (count of unresolved `underdetermined` verdicts naming at least one
+  dimension absent from the current `DimensionRegistry`, deduped per pair
+  the same way `verdicts.lookup_pair` already does, since `underdetermined`
+  verdicts need no shape-mining's windowed clustering for this). Classifies
+  the two series into one of three deterministic readings — both falling =
+  `convergence`; ratifications falling while the missing-dimension signal
+  rises = `abandonment`; anything else = `cyc_failure_mode` (the Cyc-style
+  open-ended-registry-growth failure named by the parent epic's Motivation)
+  — plus a fourth, `insufficient_data`, when fewer than two completed
+  quarters exist. The in-progress quarter is always excluded so a partial
+  bucket never reads as "falling". Surfaced via a new, always-available,
+  read-only `athenaeum convergence` command (`_cmd_convergence.py`) —
+  reachable regardless of the loop's own master key, since an operator must
+  be able to check the registry's history even while the automated loop
+  stays off.
+
+  Wires the mining -> dimension-proposal-drafting half of the self-tuning
+  loop into the nightly `athenaeum run` loop as a new
+  `librarian._run_signal_mining_phase`, gated behind the EXISTING master key
+  `librarian.signal_mining.enabled` (default `False`) and its own
+  `librarian.signal_mining.dry_run` (default `True`), mirroring
+  `_run_rule_proposal_phase`'s gate pattern exactly — off, this is a no-op
+  (no ledger read, no mining pass). Unlike the rule-proposals phase, this
+  one makes no LLM call: `signal_mining.py`'s two detectors and
+  `dimension_proposals.py`'s drafter are fully deterministic. Mines BOTH
+  signal sources (`mine_underdetermined_shapes` + `mine_decision_shapes`)
+  and feeds every triggered shape into one
+  `run_dimension_proposal_drafting()` call, threading
+  `signal_mining.coord_origins_for_decision_shapes()` through so a
+  decision-sourced proposal's `coord_origins` is non-empty (findable by
+  `mark_proposals_stale_for_decision` if the backing resolution is later
+  revoked). Ratification (a human answering a drafted proposal) and closure
+  (ingesting that resolution as a claim) both already happen outside the
+  nightly run, at answer-apply time, and are unaffected.
+
+  Supply/demand are unaffected by this branch's two upstream Sentry fixes
+  (`list_pending_dimension_proposals` now excluding stale ids,
+  `mine_decision_shapes`'s decision-id-keyed `example_pairs`): supply counts
+  only RESOLVED `approve` records, which `mark_proposals_stale_for_decision`
+  never stale-marks (only PENDING proposals can be); demand reads the
+  verdict ledger directly, never the dimension-proposals ledger.
+
+  The sibling proposal rails merged ahead of this child (issue athenaeum#2019:
+  `tier_movement_proposals.py` / `policy_pack_edit_proposals.py`) have no
+  nightly-phase wiring of their own yet on this base, so there is nothing
+  yet for this master key to additionally gate — a new, deliberately
+  failing `xfail(strict=True)` TODO test
+  (`test_master_key_gates_every_sibling_proposals_module`) pins this and
+  will flip to a real pass (and must then be updated) the moment either
+  sibling's own nightly phase lands gated the same way. The page-split +
+  auto-apply rail (issue athenaeum#2018) is not present on this base at all.
+
+  The host-side live-run observation issue athenaeum#719's own Wiring AC
+  requires stays open on athenaeum#719 itself — out of scope for this child's PR, per
+  the issue's own "Operator host step" section.
 
 - **Self-tuning loop closure: resolutions as claims, decision-queue shape
   mining, no-exemplar test (issue athenaeum#2017, athenaeum#719 Plan step 5).**

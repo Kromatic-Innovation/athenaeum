@@ -29,6 +29,7 @@ Every subcommand is registered top-level on one `parser.add_subparsers()` in `cl
 - [`athenaeum claims`](#athenaeum-claims) (command) — Detect claims restated across distinct wiki entities (read-only). Default --find prints a YAML report.
 - [`athenaeum compile`](#athenaeum-compile) (command) — : recompile a historical wiki snapshot as-of a past date into a scratch --out dir (compile-as-of). Distinct from the read-time `recall/reindex --as-of` filter — this re-runs the C3 blend so members expired now but valid then are re-included. Deterministic (no LLM); never mutates the live wiki or raw tree.
 - [`athenaeum context`](#athenaeum-context) (command) — Build one sidecar context envelope (ranked candidates + rendered text) for a prompt — the agent-neutral core,
+- [`athenaeum convergence`](#athenaeum-convergence) (command) — Quarterly self-tuning-loop convergence report: supply (dimension-proposal approvals) vs. demand (unregistered-dimension signal), labelled convergence/abandonment/cyc_failure_mode/insufficient_data.
 - [`athenaeum correct-notes`](#athenaeum-correct-notes) (command) — Move or drop individual Notes lines on a person/company page, e.g. lines misfiled onto a first-name match-magnet page. Default is APPLY: every bullet id and move target in --batch is resolved against one snapshot of the page, and the whole batch is written only when every record resolves. --dry-run reports counts only and changes nothing. Makes no LLM call.
 - [`athenaeum decay-sweep`](#athenaeum-decay-sweep) (command) — Archive expired bucket:daily wiki pages. Default is dry-run (prints kill-list + retained-list); --apply git-archives the kill-list in a two-commit pair and rebuilds the recall index.
 - [`athenaeum decisions`](#athenaeum-decisions) (group) — One unified 'human decisions needed' list — pending questions AND merges, each tagged by type, every item framed with its reversibility class, proposed default and response schema. Modes: list, next, count, scan-retractions, raise-confirmation, answer, budget, challenge-coordinate.answer, budget, migrate.
@@ -349,6 +350,15 @@ Build one sidecar context envelope (ranked candidates + rendered text) for a pro
 | `--no-llm` | `False` | — | Skip LLM term extraction, use the regex fallback |
 | `--session-id` | — | — | Session id, for dedup bookkeeping by the caller |
 | `--stdin-json` | `False` | — | Read {"prompt":..., "session_id":...} from stdin (hook-input shape) |
+
+## `athenaeum convergence`
+
+Quarterly self-tuning-loop convergence report: supply (dimension-proposal approvals) vs. demand (unregistered-dimension signal), labelled convergence/abandonment/cyc_failure_mode/insufficient_data.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--json` | `False` | — | Emit machine-readable JSON. |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge). |
 
 ## `athenaeum correct-notes`
 

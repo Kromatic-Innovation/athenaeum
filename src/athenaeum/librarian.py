@@ -158,6 +158,8 @@ from athenaeum.config import (
     resolve_retire,
     resolve_rule_proposals_enabled,
     resolve_shape_rules_runtime_share,
+    resolve_signal_mining_dry_run,
+    resolve_signal_mining_enabled,
 )
 from athenaeum.config import resolve_cache_dir as _resolve_cache_dir_config
 from athenaeum.corrections import (
@@ -4987,6 +4989,13 @@ class RunContext:
     # mirroring ``rule_proposals_summary``'s "disabled phase never touches
     # this field" contract immediately above).
     audit_nightly_drain_summary: dict[str, Any] | None = None
+    # Issue athenaeum#2020: run-summary counts from
+    # ``_run_signal_mining_phase`` (``None`` until that phase runs,
+    # including when its config gate --
+    # ``athenaeum.config.resolve_signal_mining_enabled`` -- is off, same
+    # "disabled phase never touches this field" contract as
+    # ``rule_proposals_summary``/``audit_nightly_drain_summary`` above).
+    signal_mining_summary: dict[str, Any] | None = None
     # Issue athenaeum#1679 (§3.10): comparator-domain (five-verdict
     # comparator, reached only via ``athenaeum.wiki_dedupe`` -- see that
     # module's own docstring) counts from ``_run_wiki_dedup_phase`` (``None``
@@ -6776,6 +6785,124 @@ def _run_audit_nightly_drain_phase(ctx: RunContext) -> None:
             summary.skipped_budget,
             summary.stale_remaining,
             summary.cost_usd,
+        )
+
+
+def _run_signal_mining_phase(ctx: RunContext) -> None:
+    """Self-tuning loop nightly wiring (issue athenaeum#2020, athenaeum#719
+    Plan steps 7-8): mining -> dimension-proposal drafting, behind ONE
+    master gate.
+
+    **Config-gated OFF by default**
+    (:func:`~athenaeum.config.resolve_signal_mining_enabled`,
+    ``librarian.signal_mining.enabled``), mirroring
+    `_run_rule_proposal_phase`'s own gate pattern exactly, per issue
+    athenaeum#2020 AC4's own text. Off (the default), this function returns
+    immediately -- no ledger read, no mining pass,
+    ``ctx.signal_mining_summary`` stays ``None``.
+
+    Unlike `_run_rule_proposal_phase`, this phase makes NO LLM call --
+    :mod:`athenaeum.signal_mining`'s two detectors and
+    :mod:`athenaeum.dimension_proposals`'s drafter are all fully
+    deterministic (see their own module docstrings) -- so there is no
+    client to build, no knob-provider/model to record, and no spend-ledger
+    entry.
+
+    **Dry-run** (:func:`~athenaeum.config.resolve_signal_mining_dry_run`,
+    default True, OR'd with the run's own ``ctx.dry_run``): drafted
+    proposals are computed and reported in the summary but never appended
+    to ``_dimension_proposals.jsonl`` -- the exact mechanism
+    :func:`athenaeum.dimension_proposals.run_dimension_proposal_drafting`'s
+    own ``dry_run`` kwarg already provides; this phase is simply the first
+    caller that reaches it from the nightly run.
+
+    Mines BOTH signal sources (issue athenaeum#2017 AC2/AC3: "mined by the
+    same shape-clustering machinery... feeding the same proposal drafter")
+    -- :func:`athenaeum.signal_mining.mine_underdetermined_shapes` and
+    :func:`athenaeum.signal_mining.mine_decision_shapes` -- and feeds every
+    triggered shape from either into ONE
+    :func:`athenaeum.dimension_proposals.run_dimension_proposal_drafting`
+    call.
+
+    Called from ``run()`` immediately after `_run_audit_nightly_drain_phase`
+    -- same "opt-in, zero-cost-until-enabled phase runs LAST" position, and
+    skipped under the identical ``ctx.deadline_tripped`` guard (a run that
+    already blew its wall-clock budget must not open a brand-new phase).
+
+    **Ratification and closure are deliberately NOT part of this phase.**
+    Ratification (a human answering a drafted proposal,
+    ``decision_answers._apply_dimension_proposal_answer``) and closure
+    (ingesting that resolution as a claim,
+    ``resolution_claims.ingest_resolution_claim``, already wired into
+    ``decision_answers.apply_decision_answers``) both happen OUTSIDE the
+    nightly run, at answer-apply time -- this phase gates only the
+    automated, unattended half of the loop (mining + drafting). The
+    convergence REPORT (:mod:`athenaeum.convergence`) is likewise never
+    gated here: it is a free, read-only computation over ledgers that
+    already exist, surfaced on demand via ``athenaeum convergence``
+    regardless of this key -- an operator must be able to check the
+    registry's history even while the automated loop stays off.
+    """
+    if not resolve_signal_mining_enabled(ctx.config):
+        return
+    if ctx.deadline_tripped or ctx.deadline_exceeded():
+        ctx.signal_mining_summary = {"skipped_deadline_tripped": True}
+        return
+
+    try:
+        from athenaeum.dimension_proposals import run_dimension_proposal_drafting
+        from athenaeum.signal_mining import (
+            coord_origins_for_decision_shapes,
+            mine_decision_shapes,
+            mine_underdetermined_shapes,
+        )
+
+        verdict_shapes = mine_underdetermined_shapes(
+            ctx.wiki_root, config=ctx.config, now=ctx.now
+        )
+        decision_shapes = mine_decision_shapes(ctx.wiki_root, config=ctx.config, now=ctx.now)
+        shapes = verdict_shapes + decision_shapes
+        # Decision-sourced shapes' `example_pairs` holds decision ids, not
+        # comparator pair keys (see `coord_origins_for_decision_shapes`'s own
+        # docstring, Sentry PRRT_kwDOSEs9CM6qiPZL) -- without this, every
+        # decision-sourced proposal would draft with empty `coord_origins`,
+        # making it unfindable by `mark_proposals_stale_for_decision` if the
+        # backing resolution is later revoked (issue athenaeum#2017 AC5).
+        coord_origins_by_pair = coord_origins_for_decision_shapes(decision_shapes)
+
+        dry_run = bool(ctx.dry_run) or resolve_signal_mining_dry_run(ctx.config)
+        summary = run_dimension_proposal_drafting(
+            shapes,
+            wiki_root=ctx.wiki_root,
+            config=ctx.config,
+            coord_origins_by_pair=coord_origins_by_pair,
+            dry_run=dry_run,
+            now=ctx.now,
+        )
+    except Exception:
+        log.exception("signal-mining phase failed; continuing run")
+        ctx.signal_mining_summary = {"skipped_failed": True}
+        return
+
+    ctx.signal_mining_summary = {
+        "shapes_seen": summary.shapes_seen,
+        "candidates_seen": summary.candidates_seen,
+        "proposed": summary.proposed,
+        "skipped_pending": summary.skipped_pending,
+        "skipped_suppressed": summary.skipped_suppressed,
+        "dry_run": dry_run,
+        "drafted_ids": [d.id for d in summary.drafts],
+    }
+    if summary.proposed or summary.drafts:
+        log.info(
+            "signal-mining: %d shape(s) triggered, %d candidate(s), %d proposal(s) "
+            "%s (%d pending, %d suppressed)",
+            summary.shapes_seen,
+            summary.candidates_seen,
+            len(summary.drafts),
+            "listed (dry-run)" if dry_run else "queued",
+            summary.skipped_pending,
+            summary.skipped_suppressed,
         )
 
 
@@ -10416,6 +10543,16 @@ def run(
     # entity/auto-memory have already spent whatever `ctx.run_deadline`
     # allowed — see `_run_audit_nightly_drain_phase`'s own docstring.
     _run_audit_nightly_drain_phase(ctx)
+
+    # Phase: self-tuning loop mining + dimension-proposal drafting (issue
+    # athenaeum#2020) — config-gated OFF by default
+    # (`librarian.signal_mining.enabled`), same "no-op until an operator
+    # opts in" contract as rule-proposals/audit-nightly-drain directly
+    # above, and run right after them for the identical reason: all three
+    # are opt-in phases that must run LAST, after entity/auto-memory have
+    # already spent whatever `ctx.run_deadline` allowed — see
+    # `_run_signal_mining_phase`'s own docstring.
+    _run_signal_mining_phase(ctx)
 
     # Phase: finalize (spend summary + ledger, post-run push, page-size
     # guardrail, pending-merge revalidation advisor, summary emit, drain
