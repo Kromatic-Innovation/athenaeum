@@ -132,6 +132,49 @@ class TestPiiHazardGuard:
         b = _write_page(wiki_root, "b")
         assert identify_pii_hazards([a, b]) == []
 
+    def test_allowlisted_email_is_not_a_hazard(self, wiki_root: Path) -> None:
+        # Issue athenaeum#2006: an operator-adjudicated address must not flood the
+        # hazard route just because it is email/phone-shaped.
+        a = _write_page(wiki_root, "a", body="service account svc@example.com")
+        b = _write_page(wiki_root, "b")
+        reasons = identify_pii_hazards(
+            [a, b], allowlist={"svc@example.com": "service account, not a person"}
+        )
+        assert reasons == []
+
+    def test_non_allowlisted_email_still_a_hazard_alongside_allowlisted(
+        self, wiki_root: Path
+    ) -> None:
+        # The allowlist narrows the finding, it does not blank it out wholesale.
+        a = _write_page(
+            wiki_root, "a", body="service account svc@example.com, contact alice@example.com"
+        )
+        b = _write_page(wiki_root, "b")
+        reasons = identify_pii_hazards(
+            [a, b], allowlist={"svc@example.com": "service account, not a person"}
+        )
+        assert any("1 inline email" in r for r in reasons)
+
+    def test_recompare_pending_merges_consults_the_wiki_root_allowlist(
+        self, wiki_root: Path
+    ) -> None:
+        # End-to-end through recompare_pending_merges: the allowlist is loaded
+        # from wiki_root/_pii-allowlist.yml, the same conventional path
+        # lint-pii/migrate-pii read, with no caller-supplied path.
+        a = _write_page(wiki_root, "a", body="service account svc@example.com")
+        b = _write_page(wiki_root, "b")
+        _write_queue(wiki_root, [_block("hazard", [a, b])])
+        (wiki_root / "_pii-allowlist.yml").write_text(
+            "- value: svc@example.com\n  reason: service account, not a person\n",
+            encoding="utf-8",
+        )
+        client = _fake_client(_content_payload("equivalent"))
+
+        result = recompare_pending_merges(wiki_root, client=client)
+
+        assert result.pii_hazard_ids == []
+        assert result.proposals[0].route == ROUTE_LEDGER
+
     def test_a_duplicate_verdict_on_a_hazard_still_cannot_auto_apply(self) -> None:
         # The literal athenaeum#715 sentence: "If the re-run's verdict for either
         # is `duplicate`, it still routes to a human."

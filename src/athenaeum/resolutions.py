@@ -76,6 +76,7 @@ from athenaeum._retry import TransientAPIError, with_retry
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.config import _env_number
 from athenaeum.config import resolve_model as _resolve_model_knob
+from athenaeum.decision_provider import DecisionBackend as _DecisionBackend
 from athenaeum.json_utils import extract_json_object
 from athenaeum.models import (
     OPINION_CLAIM_KIND,
@@ -365,6 +366,15 @@ class ResolutionProposal:
     # deterministic fallback. merge.py marks such clusters detection-incomplete
     # so the next run's delta set re-examines them regardless of file changes.
     incomplete: bool = False
+    # Issue athenaeum#1997: True when this proposal came from the Jev
+    # typed-decision backend rather than the text provider. The auto-apply
+    # gate (``tiers._should_auto_apply``, both copies) checks this FIRST,
+    # before the per-action threshold and before the correct_*/forget_*
+    # authorship short-circuit — a Jev-routed proposal is human-review-only
+    # regardless of confidence, until a follow-up recalibrates the
+    # thresholds against Jev's probability distribution (they were set
+    # against Opus's self-reported confidence).
+    jev_routed: bool = False
 
 
 @dataclass
@@ -1688,6 +1698,158 @@ def _parse_response(
 # ---------------------------------------------------------------------------
 
 
+#: Maps a Jev-chosen action (every ``_VALID_ACTIONS`` member except
+#: ``propose_merge`` — see :func:`_jev_criteria`) to the ``recommended_winner``
+#: the text-model path would have assigned the same action (issue
+#: athenaeum#1997). Actions that leave both members active with no single
+#: winner (``not_a_conflict``, ``deprecate_both``, ``retain_both_with_context``,
+#: ``scope_a``/``scope_b``, ``attribute_both``) map to ``"neither"``.
+_JEV_WINNER_BY_ACTION: dict[str, ResolverWinner] = {
+    "keep_a": "a",
+    "keep_b": "b",
+    "merge": "merge",
+    "correct_a": "a",
+    "correct_b": "b",
+    # forget_a deletes member A cleanly -- the surviving (winning) side is B.
+    "forget_a": "b",
+    "forget_b": "a",
+    "deprecate_both": "neither",
+    "retain_both_with_context": "neither",
+    "not_a_conflict": "neither",
+    "scope_a": "neither",
+    "scope_b": "neither",
+    "attribute_both": "neither",
+}
+
+
+def _jev_criteria() -> list[str]:
+    """The Jev Choice-question option set: every ``_VALID_ACTIONS`` member
+    except ``propose_merge`` (issue athenaeum#1997).
+
+    ``propose_merge`` is excluded by construction, not by a runtime check —
+    Jev can only ever return an option from this list, so a Jev-routed
+    proposal can never be a :class:`MergeProposal` (it has no
+    ``draft_merged_body`` slot). Sorted for a deterministic prompt.
+    """
+    return sorted(_VALID_ACTIONS - {PROPOSE_MERGE_ACTION})
+
+
+def _propose_via_jev(
+    detector_result: ContradictionResult,
+    members: list[AutoMemoryFile],
+    decision_backend: "_DecisionBackend",
+    *,
+    redact_outbound: bool,
+    config: dict[str, Any] | None,
+    wiki_root: Path | None,
+) -> "ResolutionProposal":
+    """Resolve one contradiction via the Jev typed-decision backend (athenaeum#1997).
+
+    Constructs a Jev ``choice`` question over :func:`_jev_criteria` (every
+    action except ``propose_merge``) using the SAME system prompt
+    (``_RESOLVE_SYSTEM``) and user message (:func:`_build_user_message`) the
+    text-provider path sends — no new prompt text, per the issue's "no
+    accuracy claim" / eval-receipt note. On any failure (transient
+    exhaustion, non-transient error, or a response that cannot be coerced to
+    a member of :func:`_jev_criteria`) returns :func:`_fallback` — never a
+    crash, never a silently-wrong action, mirroring the text path's own
+    give-up behavior.
+
+    The returned proposal always carries ``jev_routed=True`` so the
+    auto-apply gate (``tiers._should_auto_apply``) treats it as
+    human-review-only regardless of confidence.
+    """
+    from athenaeum.outbound_pii import redact_outbound_text
+
+    instructions = _RESOLVE_SYSTEM
+    state = _build_user_message(detector_result, members, config)
+    if redact_outbound:
+        instructions, _ = redact_outbound_text(instructions)
+        state, _ = redact_outbound_text(state)
+
+    criteria = _jev_criteria()
+    question_id = f"resolve:{detector_result.conflict_type or 'unknown'}"
+
+    def _call() -> Any:
+        return decision_backend.decide(
+            question_id=question_id,
+            kind="choice",
+            instructions=instructions,
+            state=state,
+            criteria=criteria,
+        )
+
+    try:
+        result = with_retry(_call, description="jev_resolve_decide")
+    except TransientAPIError as exc:
+        log.warning(
+            "resolutions: jev decision backend gave up after transient-error "
+            "retries (%s); returning fallback, marked detection-incomplete",
+            exc,
+        )
+        return _fallback("jev-unavailable", incomplete=True)
+    except Exception as exc:  # noqa: BLE001 -- non-transient: fall back, no re-queue
+        log.warning("resolutions: jev decision call failed (%s); returning fallback", exc)
+        return _fallback("jev-unavailable")
+
+    action = result.choice
+    if not isinstance(action, str) or action not in criteria:
+        log.warning("resolutions: jev returned an uncoercible choice: %r", action)
+        return _fallback("jev-uncoercible-response")
+
+    raw_confidence = (
+        result.probability if result.probability is not None else result.confidence
+    )
+    try:
+        confidence = float(raw_confidence) if raw_confidence is not None else 0.0
+    except (TypeError, ValueError):
+        confidence = 0.0
+    confidence = max(0.0, min(1.0, confidence))
+
+    probabilities = result.probabilities or {}
+    rationale = f"jev: chose `{action}` (probability={confidence:.3f})"
+    if probabilities:
+        rationale += f" probabilities={probabilities}"
+
+    try:
+        from athenaeum import spend
+
+        # Jev's typed-answer wire contract carries no token counters (it is
+        # not a text completion) -- see this module's import of
+        # athenaeum.decision_provider's docstring "Wire shape caveat".
+        # Approximated at chars/4, mirroring this module's own
+        # _CHARS_PER_TOKEN heuristic (DEFAULT_FULL_BODY_TOKEN_CAP above) --
+        # flagged here, not presented as a measured count.
+        approx_input_tokens = (len(instructions) + len(state)) // _CHARS_PER_TOKEN
+        jev_usage = TokenUsage()
+        jev_usage.api_calls = 1
+        jev_usage.add_tokens(
+            approx_input_tokens,
+            0,
+            model="jev",
+            knob="resolve",
+            surface=SURFACE_C4_CONTRADICTION,
+        )
+        spend.record_spend(
+            jev_usage,
+            run_type=spend.RUN_TYPE_RERESOLVE,
+            provider="jev",
+            config=config,
+            wiki_root=wiki_root,
+        )
+    except Exception:
+        log.debug("resolutions: jev spend-ledger write failed", exc_info=True)
+
+    return ResolutionProposal(
+        recommended_winner=_JEV_WINNER_BY_ACTION.get(action, "neither"),
+        action=cast("ResolverAction", action),
+        rationale=rationale,
+        confidence=confidence,
+        source_precedence_used=[],
+        jev_routed=True,
+    )
+
+
 def propose_resolution(
     detector_result: ContradictionResult,
     members: list[AutoMemoryFile],
@@ -1696,6 +1858,8 @@ def propose_resolution(
     usage: TokenUsage | None = None,
     *,
     wiki_root: Path | None = None,
+    decision_backend: "_DecisionBackend | None" = None,
+    decision_redact_outbound: bool = False,
 ) -> "ResolutionProposal | MergeProposal":
     """Run one resolver call against a detected contradiction.
 
@@ -1712,6 +1876,19 @@ def propose_resolution(
             :meth:`TokenUsage.add_tokens`; ``api_calls`` is NOT bumped here
             — the orchestrating call sites (merge.py, the athenaeum#188 reresolve
             pass) count attempts.
+        decision_backend: Optional Jev :class:`~athenaeum.decision_provider.DecisionBackend`
+            (issue athenaeum#1997). When given (non-``None``), this call routes
+            ENTIRELY through Jev instead of ``client`` — see
+            :func:`_propose_via_jev`. The caller is responsible for resolving
+            ``llm.decision_providers.resolve``
+            (:func:`athenaeum.decision_provider.resolve_decision_provider`)
+            and running its startup preflight ONCE, not per call; passing
+            ``None`` here (the default) is the pre-athenaeum#1997 text-only
+            path, byte-identical.
+        decision_redact_outbound: Whether :func:`_propose_via_jev` routes
+            ``instructions``/``state`` through
+            :func:`athenaeum.outbound_pii.redact_outbound_text` before the
+            Jev call. Ignored when ``decision_backend`` is ``None``.
 
     Returns:
         A :class:`ResolutionProposal`. On any failure path (no client,
@@ -1765,6 +1942,22 @@ def propose_resolution(
     stance = _stance_attribution_verdict(detector_result, members)
     if stance is not None:
         return stance
+
+    # Issue athenaeum#1997: a Jev-configured decision backend (resolved + preflit
+    # ONCE by the caller, e.g. ``_cmd_pending.cmd_reresolve_questions``) takes
+    # over the ENTIRE text-model path below -- independent of whether
+    # ``client`` is set. Runs after every deterministic short-circuit above
+    # (disjoint validity, scope, declared supersession, opinion-attribution)
+    # so Jev is never consulted on a pair those already resolved for free.
+    if decision_backend is not None:
+        return _propose_via_jev(
+            detector_result,
+            members,
+            decision_backend,
+            redact_outbound=decision_redact_outbound,
+            config=config,
+            wiki_root=wiki_root,
+        )
 
     if client is None:
         log.warning(
