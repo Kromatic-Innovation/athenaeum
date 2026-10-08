@@ -471,6 +471,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`athenaeum decisions challenge-coordinate` returned no exit code on the
+  "already stale" / "no match" paths (issue athenaeum#1994, PR
+  athenaeum#2010).** `_cmd_challenge_coordinate`'s final `elif`/`else`
+  branches fell through without a trailing `return 0` (regression in
+  dcb49180), so the CLI command returned `None` instead of exit code `0`
+  on those two paths, breaking the issue's own
+  `test_challenge_coordinate_no_match_is_a_clean_noop` and
+  `test_challenge_coordinate_already_stale_is_distinct_from_no_match`
+  tests. Added the missing `return 0`; no behavior change on the
+  "marked_stale" success path, which already returned correctly.
+
 - **Inline phone detector no longer flags bare digit-run identifiers
   embedded in URLs, filenames, or backticks (issue athenaeum#2006).**
   `find_inline_phones` (and the mirrored `phone` sensitivity recognizer)
