@@ -547,6 +547,69 @@ class TestAC7NoConfidenceThresholds:
         assert "confidence" not in field_names
         assert not any("confidence" in n.lower() for n in field_names)
 
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#2017 AC4 — no-exemplar-channel regression test
+# ---------------------------------------------------------------------------
+#
+# Seeds a resolution claim (issue athenaeum#2017 AC1's ingestion path)
+# containing a sentinel string, then calls the REAL prompt-building call
+# site -- content_relation() itself, the actual LLM call site, never a
+# mocked builder -- and asserts the sentinel never reaches the built prompt
+# text. The comparator module has no code path that reads
+# wiki/_resolution_claims.jsonl at all; this test is the regression gate
+# that keeps that true, per comparator.py's own module docstring: "There is
+# NO channel in this module for a resolved corpus example ... to enter the
+# prompt."
+
+
+class TestNoExemplarChannelResolutionClaims:
+    def test_resolution_claim_sentinel_never_reaches_content_relation_prompt(
+        self, tmp_path: Path
+    ) -> None:
+        from athenaeum.resolution_claims import ingest_resolution_claim
+
+        sentinel = "SENTINEL-athenaeum2017-do-not-leak-into-any-prompt"
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+
+        # Seed a resolution claim whose note/verdict carries the sentinel --
+        # exactly the kind of resolved, human-provenanced text the no-
+        # exemplar invariant forbids from ever reaching a comparator prompt.
+        ingest_resolution_claim(
+            wiki_root,
+            decision_id="dp-1",
+            decision_type="dimension-proposal",
+            verdict=f"approve: {sentinel}",
+            dimension_name="jurisdiction",
+            note=sentinel,
+        )
+        from athenaeum.resolution_claims import read_resolution_claims
+
+        claims = read_resolution_claims(wiki_root)
+        assert any(sentinel in str(c) for c in claims), "sentinel claim was not ingested"
+
+        # Two ordinary pages, neither mentioning the sentinel at all.
+        page_a = _page("alpha", subject="acme-corp", body="claim one")
+        page_b = _page("beta", subject="acme-corp", body="claim two")
+
+        client = _fake_client(_content_payload(ContentRelation.COMPATIBLE))
+        content_relation(page_a, page_b, client=client)
+
+        assert client.messages.create.called
+        _, kwargs = client.messages.create.call_args
+        system_blocks = kwargs.get("system") or []
+        system_text = "".join(
+            block.get("text", "") if isinstance(block, dict) else str(block)
+            for block in system_blocks
+        )
+        messages = kwargs.get("messages") or []
+        messages_text = "".join(
+            str(m.get("content", "")) if isinstance(m, dict) else str(m) for m in messages
+        )
+        assert sentinel not in system_text
+        assert sentinel not in messages_text
+
     def test_confidence_key_in_response_is_ignored(self) -> None:
         import json
 
