@@ -93,7 +93,7 @@ READINGS: tuple[str, ...] = (
 
 _EXPLANATIONS: dict[str, str] = {
     "insufficient_data": (
-        "Fewer than two completed quarters of history exist yet; no reading " "can be drawn."
+        "Fewer than two completed quarters of history exist yet; no reading can be drawn."
     ),
     "convergence": (
         "Both ratifications (supply) and the missing-dimension signal "

@@ -6852,19 +6852,30 @@ def _run_signal_mining_phase(ctx: RunContext) -> None:
     try:
         from athenaeum.dimension_proposals import run_dimension_proposal_drafting
         from athenaeum.signal_mining import (
+            coord_origins_for_decision_shapes,
             mine_decision_shapes,
             mine_underdetermined_shapes,
         )
 
-        shapes = mine_underdetermined_shapes(
+        verdict_shapes = mine_underdetermined_shapes(
             ctx.wiki_root, config=ctx.config, now=ctx.now
-        ) + mine_decision_shapes(ctx.wiki_root, config=ctx.config, now=ctx.now)
+        )
+        decision_shapes = mine_decision_shapes(ctx.wiki_root, config=ctx.config, now=ctx.now)
+        shapes = verdict_shapes + decision_shapes
+        # Decision-sourced shapes' `example_pairs` holds decision ids, not
+        # comparator pair keys (see `coord_origins_for_decision_shapes`'s own
+        # docstring, Sentry PRRT_kwDOSEs9CM6qiPZL) -- without this, every
+        # decision-sourced proposal would draft with empty `coord_origins`,
+        # making it unfindable by `mark_proposals_stale_for_decision` if the
+        # backing resolution is later revoked (issue athenaeum#2017 AC5).
+        coord_origins_by_pair = coord_origins_for_decision_shapes(decision_shapes)
 
         dry_run = bool(ctx.dry_run) or resolve_signal_mining_dry_run(ctx.config)
         summary = run_dimension_proposal_drafting(
             shapes,
             wiki_root=ctx.wiki_root,
             config=ctx.config,
+            coord_origins_by_pair=coord_origins_by_pair,
             dry_run=dry_run,
             now=ctx.now,
         )

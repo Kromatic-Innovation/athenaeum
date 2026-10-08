@@ -228,6 +228,11 @@ MODULE_LAYER: dict[str, int] = {
     # ingestion -- a peer L4 module to decision_budget.py/retraction_cascade.py,
     # whose stale-marking it reuses (verdicts.py L2, dimension_proposals.py L4).
     "resolution_claims": 4,
+    # Issue athenaeum#2020 (athenaeum#719 Plan steps 7-8): quarterly
+    # supply/demand convergence report over the dimension-proposals ledger
+    # (L4) and the verdict ledger (L2) -- a read-only L4 peer to
+    # signal_mining.py/resolution_claims.py.
+    "convergence": 4,
     "sensitivity_lint": 4,
     "shadow_linkage": 4,
     "shadow_parity": 4,
@@ -252,6 +257,7 @@ MODULE_LAYER: dict[str, int] = {
     "_cmd_bounce_contract": 5,
     "_cmd_calibration": 5,
     "_cmd_context": 5,
+    "_cmd_convergence": 5,
     "_cmd_curate": 5,
     "_cmd_decay": 5,
     "_cmd_decisions": 5,
