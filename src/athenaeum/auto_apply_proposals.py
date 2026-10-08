@@ -33,7 +33,7 @@ either — there is no floor to widen.
 decisions.** Approving a drafted proposal
 (:func:`approve_auto_apply_threshold_proposal`) appends an ``approve``
 record to this module's OWN ledger; :func:`athenaeum.config.
-resolve_auto_apply_threshold_ledger_override` reads that ledger back as a
+auto_apply_threshold_ledger_override_for` reads that ledger back as a
 new, lower-precedence-than-explicit-config layer inside
 :func:`athenaeum.resolutions.resolve_auto_apply_threshold_for`. Both
 ``resolutions.py``'s and ``verdict_effects.py``'s auto-apply gates decide
@@ -86,7 +86,7 @@ AUTO_APPLY_PROPOSALS_LEDGER_VERSION = 1
 
 #: Sidecar filename under ``wiki_root``. Consulted directly (as plain
 #: JSONL, not through this module) by :func:`athenaeum.config.
-#: resolve_auto_apply_threshold_ledger_override` -- keep the literal in
+#: auto_apply_threshold_ledger_override_for` -- keep the literal in
 #: sync if this ever changes.
 AUTO_APPLY_PROPOSALS_LEDGER_FILENAME = "_auto_apply_proposals.jsonl"
 
@@ -388,7 +388,7 @@ def approve_auto_apply_threshold_proposal(
     **Widens config only — never bypasses in-flight decisions** (see
     module docstring). This appends an ``approve`` record carrying the
     proposal's own ``action``/``proposed_threshold``; that record is what
-    :func:`athenaeum.config.resolve_auto_apply_threshold_ledger_override`
+    :func:`athenaeum.config.auto_apply_threshold_ledger_override_for`
     reads back as the new floor. It never touches
     ``_pending_questions.md``, ``_pending_merges.md``, or any ALREADY
     DECIDED verdict — those were finalized at the moment the verdict was

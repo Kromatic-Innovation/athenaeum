@@ -6499,7 +6499,7 @@ def resolve_auto_apply_proposals_widen_step(config: dict[str, Any] | None) -> fl
     )
 
 
-def resolve_auto_apply_threshold_ledger_override(
+def auto_apply_threshold_ledger_override_for(
     action: str, *, wiki_root: Path | None, config: dict[str, Any] | None = None
 ) -> float | None:
     """A ledger-backed override for one resolver action's auto-apply floor

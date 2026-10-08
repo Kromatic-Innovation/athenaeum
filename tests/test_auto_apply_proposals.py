@@ -20,7 +20,7 @@ from athenaeum.auto_apply_proposals import (
     run_auto_apply_proposal_detection,
 )
 from athenaeum.calibration import read_calibration_ledger, record_audit_review, sample_tier_decision
-from athenaeum.config import resolve_auto_apply_threshold_ledger_override
+from athenaeum.config import auto_apply_threshold_ledger_override_for
 from athenaeum.resolutions import (
     DEFAULT_AUTO_APPLY_THRESHOLD_PER_ACTION,
     resolve_auto_apply_threshold_for,
@@ -328,7 +328,7 @@ class TestLedgerOverrideResolver:
         run_auto_apply_proposal_detection(["not_a_conflict"], wiki_root=wiki_root, config=config)
         pending = list_pending_auto_apply_threshold_proposals(wiki_root)
         approve_auto_apply_threshold_proposal(wiki_root, proposal_id=pending[0]["id"])
-        first_override = resolve_auto_apply_threshold_ledger_override(
+        first_override = auto_apply_threshold_ledger_override_for(
             "not_a_conflict", wiki_root=wiki_root
         )
         assert first_override is not None
@@ -337,7 +337,7 @@ class TestLedgerOverrideResolver:
         wiki_root = tmp_path / "wiki"
         wiki_root.mkdir()
         assert (
-            resolve_auto_apply_threshold_ledger_override("not_a_conflict", wiki_root=wiki_root)
+            auto_apply_threshold_ledger_override_for("not_a_conflict", wiki_root=wiki_root)
             is None
         )
 

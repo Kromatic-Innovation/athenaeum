@@ -9,6 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Self-tuning loop, Plan step 6 (half): page-split + auto-apply-threshold
+  proposals (issue athenaeum#2018).** Two more trigger sources on the same
+  drafter/ledger/decision-type rail issue athenaeum#2015 built (reused, not
+  reinvented): **page-split** — new `src/athenaeum/page_split_proposals.py`
+  drafts a proposal when a `page_decompose.DecomposeReport`'s new
+  `measure_coordinate_heterogeneity()` (count of distinct resolved subject
+  uids among its bullets) crosses a configurable trigger
+  (`librarian.page_split_proposals.heterogeneity_threshold`, default 5).
+  Proposal-only: approving never calls `page_decompose.apply_report` — it
+  only records the approval and hands the plan back as a human-triggered
+  follow-up, proven by a regression that monkeypatches `apply_report` to
+  fail if called and asserts the source page's bytes are unchanged after
+  approval. **auto-apply-threshold** — new
+  `src/athenaeum/auto_apply_proposals.py` drafts a proposal to widen
+  (lower) one resolver action's auto-apply confidence floor
+  (`resolutions.resolve_auto_apply_threshold_for`) when the tier
+  audit-sampling lane's (`calibration.py`, issue athenaeum#438) T1
+  reviewed-but-overturned rate crosses a configurable trigger
+  (`librarian.auto_apply_proposals.disagreement_trigger`, default 0.2),
+  widening by a configurable step (`librarian.auto_apply_proposals.widen_step`,
+  default 0.05). Never narrows — a draft only emits when the proposed
+  value is strictly lower than the current one. Approving only appends to
+  this proposal type's own ledger; `config.auto_apply_threshold_ledger_override_for()`
+  reads it back as a new precedence layer in
+  `resolve_auto_apply_threshold_for()` (below explicit per-action config,
+  above the legacy scalar fallback — an operator's own explicit setting
+  always wins), gated behind a new, additive, default-`None` `wiki_root`
+  keyword that every pre-existing call site omits. Proven by regressions
+  that the approval never touches an already-written
+  `_pending_questions.md` / `_pending_merges.md`, and that an explicit
+  `resolve.auto_apply_threshold_per_action.<action>` config entry always
+  wins over the ledger override. Both types get their own two-way
+  approve/reject `_TYPE_FRAMING` entries (`"page-split"` /
+  `"auto-apply-threshold"`), `*_to_decision` builders wired into
+  `list_pending_decisions`, and — unlike `dimension-proposal` — real
+  inbound appliers (`VALID_DECISION_TYPES`, `_apply_page_split_proposal_answer`
+  / `_apply_auto_apply_threshold_proposal_answer`), since each AC requires
+  one. New ledgers `wiki/_page_split_proposals.jsonl` /
+  `wiki/_auto_apply_proposals.jsonl`.
 - **Self-tuning loop, Plan step 3: dimension-proposal drafter + decision
   type (issue athenaeum#2015).** New `src/athenaeum/dimension_proposals.py`
   (L4): `run_dimension_proposal_drafting()` turns a triggered

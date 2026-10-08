@@ -74,8 +74,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal, cast
 
 from athenaeum._retry import TransientAPIError, with_retry
 from athenaeum.atomic_io import atomic_write_text
-from athenaeum.config import _env_number
-from athenaeum.config import resolve_auto_apply_threshold_ledger_override
+from athenaeum.config import _env_number, auto_apply_threshold_ledger_override_for
 from athenaeum.config import resolve_model as _resolve_model_knob
 from athenaeum.decision_provider import DecisionBackend as _DecisionBackend
 from athenaeum.json_utils import extract_json_object
@@ -819,7 +818,7 @@ def resolve_auto_apply_threshold_for(
     2. Per-action explicit override (``resolve.auto_apply_threshold_per_action.<action>``).
     3. Issue athenaeum#2018 (athenaeum#719 Plan step 6): a ledger-backed override
        from an APPROVED auto-apply-threshold proposal (see
-       :func:`athenaeum.config.resolve_auto_apply_threshold_ledger_override`),
+       :func:`athenaeum.config.auto_apply_threshold_ledger_override_for`),
        when *wiki_root* is given. An operator's own explicit per-action
        config (layer 2) always wins over a proposal the operator merely
        approved — this layer only fires when layer 2 named nothing for
@@ -866,7 +865,7 @@ def resolve_auto_apply_threshold_for(
     # a wiki_root; every pre-athenaeum#2018 call site omits it, so this layer
     # is a pure no-op for them.
     if wiki_root is not None:
-        ledger_override = resolve_auto_apply_threshold_ledger_override(
+        ledger_override = auto_apply_threshold_ledger_override_for(
             action, wiki_root=wiki_root, config=config
         )
         if ledger_override is not None:
