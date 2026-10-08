@@ -508,6 +508,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fixed on this branch but not yet re-run, so this report withholds their
   tables pending the next dispatch.
 
+### Fixed
+
+- **Phone detector's second false-positive class: slug ids, epoch-ms
+  timestamps, labeled run/comment ids (issue athenaeum#2027).** After
+  athenaeum#2006, `find_inline_phones`/the `phone` sensitivity recogniser
+  still over-matched a hyphen-joined digit-group token embedded in a
+  larger slug containing letters, a date-number-hash id pattern, a bare
+  13-digit epoch-millisecond timestamp (standalone or after a dotted
+  prefix), and a bare 10-11 digit run with a `run`/`runs`/`comment`/
+  `job`/`id` label but no joiner. `src/athenaeum/pii.py` gains
+  `_is_embedded_slug_digit_run` (a `-`-joiner-only, grouped-token sibling
+  of `_is_embedded_bare_digit_run` that leaves that function's
+  URL-embedded-formatted-phone contract untouched),
+  `_has_bare_run_id_label_prefix` +
+  `BARE_RUN_ID_LABEL_PREFIXES` (a label list restricted to bare 10-11
+  digit runs so a labeled, formatted phone like `mobile 917-231-6130`
+  is unaffected), and `_is_epoch_millis` / `_has_epoch_millis_group` +
+  `_is_yyyymmdd` / `_has_date_group` (value-based checks folded into
+  `_is_excluded_phone_shape`, gated on no `+`/parens/whitespace).
+  `sensitivity.py`'s `_PhoneRecognizer` and `outbound_pii.py`'s egress
+  lint (which calls through `sensitivity.classify`) both inherit the fix
+  with no further code change, since all three share the same
+  `athenaeum.pii` exclusion helpers. No public signature changed;
+  `lint-pii`, `is_pii_flagged`, and `identify_pii_hazards` are unaffected
+  except as a direct consequence of fewer phone-shaped false positives.
+
 ### Changed
 
 - **`cli_tool_bridge.py` now targets the `mcp` 2.x API, and the `mcp<2.0` pin
