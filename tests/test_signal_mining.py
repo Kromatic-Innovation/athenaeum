@@ -128,6 +128,26 @@ class TestTypedClustering:
         assert len(shapes) == 2
         assert all(s.count == 1 for s in shapes)
 
+    def test_sort_tolerates_mixed_none_and_string_coordinates(self, tmp_path: Path) -> None:
+        """Sentry finding (PR#2021): un-backfilled pages leave memory_class/
+        scope as None on one shape while another shape has string values —
+        sorting must not raise TypeError comparing NoneType to str."""
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        _write_page(wiki_root, name="alpha")
+        _write_page(wiki_root, name="beta")
+        _write_page(wiki_root, name="gamma", memory_class="fact", scope="team-a")
+        _write_page(wiki_root, name="delta", memory_class="fact", scope="team-a")
+        _seed_underdetermined(
+            wiki_root, id_a="alpha", id_b="beta", missing=["source-authority"], at="2026-10-01"
+        )
+        _seed_underdetermined(
+            wiki_root, id_a="gamma", id_b="delta", missing=["source-authority"], at="2026-10-02"
+        )
+        # Must not raise — this is what reproduced the Sentry-flagged crash.
+        shapes = mine_underdetermined_shapes(wiki_root, config=_config(), now=_NOW)
+        assert len(shapes) == 2
+
     def test_side_order_does_not_fragment_a_shape(self, tmp_path: Path) -> None:
         """Comparing (a, b) and (b, a) must produce the SAME shape key."""
         wiki_root = tmp_path / "wiki"
@@ -349,3 +369,59 @@ class TestDecisionQueueShapeMining:
         assert summary.proposed == 0  # dry run
         assert len(summary.drafts) == 1
         assert summary.drafts[0].name == "jurisdiction"
+
+    def test_decision_sourced_proposal_coord_origins_and_revocation_stale_mark(
+        self, tmp_path: Path
+    ) -> None:
+        """Sentry PRRT_kwDOSEs9CM6qiPZL: a decision-sourced proposal's
+        coord_origins must be non-empty (the decision itself is the
+        provenance for the axis it named), and revoking the backing
+        resolution claim must then stale-mark that proposal -- closing the
+        loop the empty-coord_origins bug previously broke."""
+        from athenaeum.dimension_proposals import (
+            mark_proposals_stale_for_decision,
+            run_dimension_proposal_drafting,
+        )
+        from athenaeum.resolution_claims import revoke_resolution_claim
+        from athenaeum.signal_mining import coord_origins_for_decision_shapes
+
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        for i in range(3):
+            ingest_resolution_claim(
+                wiki_root,
+                decision_id=f"dp-{i}",
+                decision_type="dimension-proposal",
+                verdict="approve",
+                dimension_name="jurisdiction",
+            )
+        shapes = mine_decision_shapes(wiki_root, config=_config(threshold=2), now=_NOW)
+        assert len(shapes) == 1
+        example_decision_ids = set(shapes[0].example_pairs)
+
+        origins_by_pair = coord_origins_for_decision_shapes(shapes)
+        for did in example_decision_ids:
+            assert origins_by_pair[did] == {"jurisdiction": did}
+
+        summary = run_dimension_proposal_drafting(
+            shapes, wiki_root=wiki_root, coord_origins_by_pair=origins_by_pair
+        )
+        assert summary.proposed == 1
+        draft = summary.drafts[0]
+        # Non-empty, and the decision id it names is one of this shape's
+        # own example decisions -- which one wins is the drafter's own
+        # last-example-wins merge order (run_dimension_proposal_drafting),
+        # not something this regression test needs to pin further.
+        assert draft.coord_origins
+        decision_id = draft.coord_origins["jurisdiction"]
+        assert decision_id in example_decision_ids
+
+        proposal_id = draft.id
+        with RunLock(wiki_root.parent) as lock:
+            revoke_resolution_claim(
+                wiki_root, decision_id, reason="ratification reversed", lock=lock
+            )
+        marked = mark_proposals_stale_for_decision(
+            wiki_root, decision_id, reason="resolution claim revoked"
+        )
+        assert marked == [proposal_id]

@@ -7,10 +7,12 @@ from pathlib import Path
 
 from athenaeum.dimension_proposals import (
     DIMENSION_PROPOSALS_LEDGER_FILENAME,
+    PROPOSAL_KIND,
     default_dimension_proposals_ledger_path,
     draft_dimension_proposal,
     enforce_ask_budget,
     list_pending_dimension_proposals,
+    mark_proposals_stale_for_decision,
     plan_backfill,
     proposal_item_id,
     read_dimension_proposals_ledger,
@@ -180,6 +182,95 @@ class TestDraftDimensionProposal:
         draft = draft_dimension_proposal(shape, "jurisdiction")
         assert draft.coord_origins == {}
         assert draft.to_ledger_record()["coord_origins"] == {}
+
+
+class TestStaleProposalsExcludedFromPendingListing:
+    """Sentry PRRT_kwDOSEs9CM6qiPZE: a proposal stale-marked by a revoked
+    resolution claim must not keep listing as pending — it would otherwise
+    still reach a human for ratification on provenance that is no longer
+    live."""
+
+    def test_revoke_then_stale_mark_removes_it_from_pending(self, tmp_path: Path) -> None:
+        from athenaeum.resolution_claims import ingest_resolution_claim, revoke_resolution_claim
+        from athenaeum.runlock import RunLock
+
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        ingest_resolution_claim(
+            wiki_root,
+            decision_id="dec-coord-3",
+            decision_type="coordinate",
+            verdict='{"answers": []}',
+        )
+        shape = _shape(missing=("jurisdiction",), count=10, threshold=5)
+        run_dimension_proposal_drafting(
+            [shape],
+            wiki_root=wiki_root,
+            coord_origins_by_pair={"alpha+beta": {"jurisdiction": "dec-coord-3"}},
+        )
+        pending_before = list_pending_dimension_proposals(wiki_root)
+        assert len(pending_before) == 1
+        proposal_id = pending_before[0]["id"]
+
+        with RunLock(wiki_root.parent) as lock:
+            revoke_resolution_claim(
+                wiki_root, "dec-coord-3", reason="answer reversed", lock=lock
+            )
+        marked = mark_proposals_stale_for_decision(
+            wiki_root, "dec-coord-3", reason="resolution claim revoked"
+        )
+        assert marked == [proposal_id]
+
+        pending_after = list_pending_dimension_proposals(wiki_root)
+        assert pending_after == []
+
+        # Never deleted -- still present in the raw ledger, just excluded
+        # from the pending view.
+        all_records = read_dimension_proposals_ledger(wiki_root)
+        assert any(r["kind"] == PROPOSAL_KIND and r["id"] == proposal_id for r in all_records)
+
+    def test_list_pending_decisions_inherits_the_exclusion(self, tmp_path: Path) -> None:
+        """The decision-queue surface (`athenaeum.decisions.list_pending_decisions`,
+        which calls `dimension_proposal_to_decision` over
+        `list_pending_dimension_proposals`'s own output) needs no change of
+        its own -- it inherits the stale exclusion for free."""
+        from athenaeum.decisions import list_pending_decisions
+
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        shape = _shape(missing=("jurisdiction",), count=10, threshold=5)
+        run_dimension_proposal_drafting([shape], wiki_root=wiki_root)
+        proposal_id = list_pending_dimension_proposals(wiki_root)[0]["id"]
+
+        # Directly append a stale-mark event (isolating the read-side fix
+        # from the coord_origins-matching path, which the previous test
+        # already covers end to end).
+        import json
+
+        from athenaeum.dimension_proposals import (
+            DIMENSION_PROPOSALS_LEDGER_VERSION,
+            STALE_KIND,
+            default_dimension_proposals_ledger_path,
+        )
+        from athenaeum.store import append_line_durable, now_iso
+
+        event = {
+            "v": DIMENSION_PROPOSALS_LEDGER_VERSION,
+            "kind": STALE_KIND,
+            "id": proposal_id,
+            "decision_id": "dec-x",
+            "reason": "test",
+            "created_at": now_iso(),
+        }
+        append_line_durable(
+            default_dimension_proposals_ledger_path(wiki_root),
+            (json.dumps(event, sort_keys=True) + "\n").encode("utf-8"),
+        )
+
+        dp_items = [
+            i for i in list_pending_decisions(wiki_root) if i["type"] == "dimension-proposal"
+        ]
+        assert dp_items == []
 
 
 # ---------------------------------------------------------------------------

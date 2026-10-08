@@ -213,7 +213,12 @@ def mine_underdetermined_shapes(
         )
 
     shapes.sort(
-        key=lambda s: (-s.count, s.key.missing_dimensions, s.key.memory_classes, s.key.scopes)
+        key=lambda s: (
+            -s.count,
+            s.key.missing_dimensions,
+            tuple(v or "" for v in s.key.memory_classes),
+            tuple(v or "" for v in s.key.scopes),
+        )
     )
     return shapes
 
@@ -243,6 +248,29 @@ def triggered_shapes(shapes: list[MinedShape]) -> list[MinedShape]:
 # when none), and ``memory_classes``/``scopes`` are always ``(None, None)`` —
 # a decision-queue resolution carries no page-pair coordinates to cluster on,
 # only the two sides already named above.
+#
+# **Data model decision (Sentry PRRT_kwDOSEs9CM6qiPZL):** a VERDICT-ledger
+# shape's ``example_pairs`` holds real comparator pair keys
+# (``"<idA>+<idB>"``) because an underdetermined verdict IS a decided pair.
+# A resolution claim has no comparator pair of its own — a
+# ``dimension-proposal`` ratification or an ``audit`` call names a
+# DECISION, not two compared pages — so a decision-sourced
+# :class:`MinedShape`'s ``example_pairs`` holds **decision ids**, not pair
+# keys. This is a deliberate, reversible choice, not an oversight: the
+# drafter's own ``coord_origins_by_pair`` lookup
+# (:func:`athenaeum.dimension_proposals.run_dimension_proposal_drafting`) is
+# a generic ``{key: {dimension_name: answer_id}}`` map keyed by whatever
+# ``shape.example_pairs`` holds — it never inspects the key's shape, so a
+# decision id works as that key exactly as well as a pair key does.
+# :func:`coord_origins_for_decision_shapes` is the one function that builds
+# this map for decision-sourced shapes: each example decision id maps to
+# ``{dimension_name: that same decision_id}`` — the decision itself IS the
+# provenance for the one axis its own :class:`ShapeKey` names. Pass its
+# result as ``coord_origins_by_pair`` whenever a decision-sourced shape is
+# drafted, so the resulting proposal's ``coord_origins`` is non-empty and
+# therefore findable by
+# :func:`athenaeum.dimension_proposals.mark_proposals_stale_for_decision`
+# when the backing resolution is later revoked (issue athenaeum#2017 AC5).
 
 
 def _within_claim_window(record: dict[str, Any], *, now: datetime, window_days: int) -> bool:
@@ -321,6 +349,36 @@ def mine_decision_shapes(
     return shapes
 
 
+def coord_origins_for_decision_shapes(
+    shapes: list[MinedShape],
+) -> dict[str, dict[str, str]]:
+    """Derive ``coord_origins_by_pair`` for decision-sourced shapes (AC3,
+    Sentry PRRT_kwDOSEs9CM6qiPZL).
+
+    See this section's module-level comment ("Data model decision") for
+    why a decision-sourced shape's ``example_pairs`` holds decision ids
+    rather than comparator pair keys, and why that is sufficient for the
+    drafter's generic lookup. Non-decision shapes (``verdict_type`` not
+    prefixed ``"decision:"``) and shapes naming no dimension
+    (``missing_dimensions == ()``) are skipped — there is no axis to
+    record provenance for.
+
+    Pass the result straight through to
+    :func:`athenaeum.dimension_proposals.run_dimension_proposal_drafting`'s
+    ``coord_origins_by_pair`` parameter.
+    """
+    out: dict[str, dict[str, str]] = {}
+    for shape in shapes:
+        if not shape.key.verdict_type.startswith("decision:"):
+            continue
+        if not shape.key.missing_dimensions:
+            continue
+        dimension_name = shape.key.missing_dimensions[0]
+        for decision_id in shape.example_pairs:
+            out[decision_id] = {dimension_name: decision_id}
+    return out
+
+
 __all__ = [
     "UNDERDETERMINED",
     "ShapeKey",
@@ -330,4 +388,5 @@ __all__ = [
     "triggered_shapes",
     "decision_shape_key",
     "mine_decision_shapes",
+    "coord_origins_for_decision_shapes",
 ]
