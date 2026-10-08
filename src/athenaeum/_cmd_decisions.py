@@ -298,6 +298,9 @@ def _cmd_challenge_coordinate(args: argparse.Namespace) -> int:
         )
     else:
         print(f"no live verdict names answer {args.answer_id!r} in coord_origins")
+    return 0
+
+
 def _cmd_migrate(args: argparse.Namespace) -> int:
     """``athenaeum decisions migrate`` — materialize the legacy queues (issue athenaeum#1992).
 
