@@ -410,7 +410,7 @@ def test_cmd_decisions_budget_surfaces_the_rate_via_the_shared_rendering(
 
 class TestRatchetGuard:
     """Issue athenaeum#2019 (athenaeum#719 Plan step 6, Ratchet guard 1): ratifying a
-    policy-pack-edit (or the sibling athenaeum#2018's auto-apply-threshold-proposal)
+    policy-pack-edit (or the sibling athenaeum#2018's auto-apply-threshold)
     is refused outright while the queue's effort budget is in breach.
     """
 
@@ -436,11 +436,11 @@ class TestRatchetGuard:
     def test_sibling_auto_apply_threshold_literal_is_guarded_by_name(self) -> None:
         """athenaeum#2018's sibling type, named by string so this module gains no
         import edge toward whatever module lands its drafter (see the
-        constant's own comment). If athenaeum#2018 merges under a different
-        literal, this assertion -- not a passing test elsewhere -- is
-        where the drift surfaces.
+        constant's own comment). athenaeum#2018 landed as ``"auto-apply-threshold"``
+        (no ``-proposal`` suffix) -- reconciled here at merge time, per this
+        test's own stated contingency.
         """
-        assert "auto-apply-threshold-proposal" in RATCHET_GUARDED_DECISION_TYPES
+        assert "auto-apply-threshold" in RATCHET_GUARDED_DECISION_TYPES
 
     def test_every_guard_worthy_framing_entry_is_covered(self) -> None:
         """Every ``_TYPE_FRAMING`` key naming 'auto-apply' or 'policy-pack'
