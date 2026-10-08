@@ -202,6 +202,13 @@ def record_is_pii(
       — the exact pre-athenaeum#984 contract
       :func:`athenaeum.verdicts.record_pair_decision` documents for the
       same case.
+    * the off-corpus write itself raises (disk/fsync failure, or a
+      misconfigured adapter caught only at write time): returns
+      ``{"ok": False, "error_code": "off_corpus_write_failed", "pair": None}``
+      — this function's documented contract is to never raise and always
+      return a result dict (Seer finding, PR athenaeum#2013), so a write
+      failure is reported through the same shape as every other refusal
+      rather than propagated as an exception.
     """
     pair_key = _pii_pair_key(page_id, value)
     entry = VerdictEntry(
@@ -222,7 +229,10 @@ def record_is_pii(
         except OffCorpusConfigError:
             root = None
         if root is not None:
-            append_verdict_off_corpus(config, knowledge_root, entry.to_dict(), at=entry.at)
+            try:
+                append_verdict_off_corpus(config, knowledge_root, entry.to_dict(), at=entry.at)
+            except Exception:  # noqa: BLE001 - never-raise contract; reported via error_code
+                return {"ok": False, "error_code": "off_corpus_write_failed", "pair": None}
             return {"ok": True, "error_code": None, "pair": pair_key}
 
     return {"ok": False, "error_code": "erasure_class_refused", "pair": None}
@@ -395,11 +405,19 @@ def load_is_pii_values(
     question, it is already judged and already migrated. ``frozenset()``
     when off-corpus is not configured, exactly as :func:`record_is_pii`
     would refuse to write one in that case.
+
+    Filters explicitly by ``CLASS_IS_PII`` (not just "any PII_CLASSES
+    entry", which ``_iter_off_corpus_pii_entries`` already narrows to) —
+    today the off-corpus ledger only ever receives ``CLASS_IS_PII``
+    entries via :func:`record_is_pii`, but this keeps the guarantee
+    explicit rather than incidental if a future writer ever appends a
+    different PII class to the same shard (Seer finding, PR
+    athenaeum#2013).
     """
     return frozenset(
         e.separator[0]
         for e in _iter_off_corpus_pii_entries(config, knowledge_root)
-        if e.separator
+        if e.separator and e.verdict == CLASS_IS_PII
     )
 
 
