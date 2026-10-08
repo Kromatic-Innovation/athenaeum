@@ -657,10 +657,7 @@ must reach this rate before
 `athenaeum.auto_apply_proposals.run_auto_apply_proposal_detection`
 drafts a proposal to widen the corresponding
 `athenaeum.resolutions.resolve_auto_apply_threshold_for` floor.
-Clamped to ``[0.0, 1.0]`` via the same sampling-rate resolver the
- sampler knobs use (`resolve_audit_sample_rate_t1_rejects`
-and friends) -- this is a rate, not a count, so it belongs to the same
-family.
+Clamped to ``[0.0, 1.0]`` -- this is a rate, not a count.
 
 ### `resolve_auto_apply_proposals_widen_step`
 
@@ -680,8 +677,7 @@ rate is crossed. Deliberately small and additive, never multiplicative:
 a single approved proposal moves the floor one conservative step, not
 all the way to the disagreement rate itself -- the next detection pass
 proposes the next step if the signal persists. Clamped to ``[0.0,
-1.0]`` via the same sampling-rate resolver shape as
-`resolve_auto_apply_proposals_disagreement_trigger`.
+1.0]``.
 
 ### `resolve_auto_supersession_enabled`
 

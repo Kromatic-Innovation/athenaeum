@@ -85,7 +85,7 @@ class TestDraftAutoApplyThresholdProposal:
         draft = draft_auto_apply_threshold_proposal(
             "not_a_conflict",
             wiki_root=wiki_root,
-            config={"librarian": {"auto_apply_proposals_disagreement_trigger": 0.2}},
+            config={"librarian": {"auto_apply_proposals": {"disagreement_trigger": 0.2}}},
         )
         assert draft is None
 
@@ -98,11 +98,13 @@ class TestDraftAutoApplyThresholdProposal:
             "not_a_conflict",
             wiki_root=wiki_root,
             config={
-                "librarian": {
-                    "auto_apply_proposals_disagreement_trigger": 0.2,
-                    "auto_apply_proposals_widen_step": 0.05,
+            "librarian": {
+                "auto_apply_proposals": {
+                    "disagreement_trigger": 0.2,
+                    "widen_step": 0.05,
                 }
-            },
+            }
+        },
         )
         assert draft is not None
         assert draft.current_threshold == pytest.approx(current)
@@ -116,7 +118,7 @@ class TestDraftAutoApplyThresholdProposal:
         draft = draft_auto_apply_threshold_proposal(
             "propose_merge",
             wiki_root=wiki_root,
-            config={"librarian": {"auto_apply_proposals_disagreement_trigger": 0.2}},
+            config={"librarian": {"auto_apply_proposals": {"disagreement_trigger": 0.2}}},
         )
         assert draft is None  # propose_merge never auto-applies -- nothing to widen
 
@@ -130,11 +132,13 @@ class TestDraftAutoApplyThresholdProposal:
             "not_a_conflict",
             wiki_root=wiki_root,
             config={
-                "librarian": {
-                    "auto_apply_proposals_disagreement_trigger": 0.2,
-                    "auto_apply_proposals_widen_step": 5.0,
+            "librarian": {
+                "auto_apply_proposals": {
+                    "disagreement_trigger": 0.2,
+                    "widen_step": 5.0,
                 }
-            },
+            }
+        },
         )
         assert draft is not None
         assert draft.proposed_threshold == 0.0
@@ -154,8 +158,10 @@ class TestRunAutoApplyProposalDetection:
         _seed_t1_disagreement(wiki_root, overturned=3, confirmed=1)
         config = {
             "librarian": {
-                "auto_apply_proposals_disagreement_trigger": 0.2,
-                "auto_apply_proposals_widen_step": 0.05,
+                "auto_apply_proposals": {
+                    "disagreement_trigger": 0.2,
+                    "widen_step": 0.05,
+                }
             }
         }
         first = run_auto_apply_proposal_detection(
@@ -176,8 +182,10 @@ class TestRunAutoApplyProposalDetection:
         _seed_t1_disagreement(wiki_root, overturned=3, confirmed=1)
         config_a = {
             "librarian": {
-                "auto_apply_proposals_disagreement_trigger": 0.2,
-                "auto_apply_proposals_widen_step": 0.05,
+                "auto_apply_proposals": {
+                    "disagreement_trigger": 0.2,
+                    "widen_step": 0.05,
+                }
             }
         }
         run_auto_apply_proposal_detection(["not_a_conflict"], wiki_root=wiki_root, config=config_a)
@@ -187,8 +195,10 @@ class TestRunAutoApplyProposalDetection:
 
         config_b = {
             "librarian": {
-                "auto_apply_proposals_disagreement_trigger": 0.2,
-                "auto_apply_proposals_widen_step": 0.10,  # different step
+                "auto_apply_proposals": {
+                    "disagreement_trigger": 0.2,
+                    "widen_step": 0.10,  # different step
+                }
             }
         }
         again = run_auto_apply_proposal_detection(
@@ -207,8 +217,10 @@ class TestApproveWidensConfigOnlyNeverBypassesInFlight:
         _seed_t1_disagreement(wiki_root, overturned=3, confirmed=1)
         config = {
             "librarian": {
-                "auto_apply_proposals_disagreement_trigger": 0.2,
-                "auto_apply_proposals_widen_step": 0.05,
+                "auto_apply_proposals": {
+                    "disagreement_trigger": 0.2,
+                    "widen_step": 0.05,
+                }
             }
         }
         before = resolve_auto_apply_threshold_for(config, "not_a_conflict", wiki_root=wiki_root)
@@ -231,8 +243,10 @@ class TestApproveWidensConfigOnlyNeverBypassesInFlight:
         _seed_t1_disagreement(wiki_root, overturned=3, confirmed=1)
         config = {
             "librarian": {
-                "auto_apply_proposals_disagreement_trigger": 0.2,
-                "auto_apply_proposals_widen_step": 0.05,
+                "auto_apply_proposals": {
+                    "disagreement_trigger": 0.2,
+                    "widen_step": 0.05,
+                }
             }
         }
         run_auto_apply_proposal_detection(["not_a_conflict"], wiki_root=wiki_root, config=config)
@@ -248,8 +262,10 @@ class TestApproveWidensConfigOnlyNeverBypassesInFlight:
         _seed_t1_disagreement(wiki_root, overturned=3, confirmed=1)
         config = {
             "librarian": {
-                "auto_apply_proposals_disagreement_trigger": 0.2,
-                "auto_apply_proposals_widen_step": 0.05,
+                "auto_apply_proposals": {
+                    "disagreement_trigger": 0.2,
+                    "widen_step": 0.05,
+                }
             }
         }
         run_auto_apply_proposal_detection(["not_a_conflict"], wiki_root=wiki_root, config=config)
@@ -279,8 +295,10 @@ class TestApproveWidensConfigOnlyNeverBypassesInFlight:
         _seed_t1_disagreement(wiki_root, overturned=3, confirmed=1)
         config = {
             "librarian": {
-                "auto_apply_proposals_disagreement_trigger": 0.2,
-                "auto_apply_proposals_widen_step": 0.05,
+                "auto_apply_proposals": {
+                    "disagreement_trigger": 0.2,
+                    "widen_step": 0.05,
+                }
             }
         }
         run_auto_apply_proposal_detection(["not_a_conflict"], wiki_root=wiki_root, config=config)
@@ -302,8 +320,10 @@ class TestApproveWidensConfigOnlyNeverBypassesInFlight:
         _seed_t1_disagreement(wiki_root, overturned=3, confirmed=1)
         config = {
             "librarian": {
-                "auto_apply_proposals_disagreement_trigger": 0.2,
-                "auto_apply_proposals_widen_step": 0.05,
+                "auto_apply_proposals": {
+                    "disagreement_trigger": 0.2,
+                    "widen_step": 0.05,
+                }
             }
         }
         run_auto_apply_proposal_detection(["not_a_conflict"], wiki_root=wiki_root, config=config)
@@ -321,8 +341,10 @@ class TestLedgerOverrideResolver:
         _seed_t1_disagreement(wiki_root, overturned=3, confirmed=1)
         config = {
             "librarian": {
-                "auto_apply_proposals_disagreement_trigger": 0.2,
-                "auto_apply_proposals_widen_step": 0.05,
+                "auto_apply_proposals": {
+                    "disagreement_trigger": 0.2,
+                    "widen_step": 0.05,
+                }
             }
         }
         run_auto_apply_proposal_detection(["not_a_conflict"], wiki_root=wiki_root, config=config)

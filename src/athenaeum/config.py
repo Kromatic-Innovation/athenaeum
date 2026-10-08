@@ -6453,6 +6453,48 @@ def resolve_page_split_proposals_heterogeneity_threshold(config: dict[str, Any] 
     )
 
 
+def _resolve_nested_rate(
+    config: dict[str, Any] | None,
+    *,
+    env_var: str,
+    section: str,
+    subsection: str,
+    yaml_key: str,
+    default: float,
+) -> float:
+    """Shared body for a TWO-level-nested ``<section>.<subsection>.<yaml_key>``
+    rate knob -- the float equivalent of :func:`_resolve_corrections_int`'s
+    nesting, for a ``[0.0, 1.0]``-clamped value rather than a positive int.
+    ``section``/``subsection``/``yaml_key`` are always passed as explicit
+    literal arguments AT EACH CALLER'S OWN CALL SITE (mirroring
+    :func:`_resolve_corrections_int`'s own docstring rationale exactly) so
+    ``tests/test_config_resolver_parity_generic.py``'s static discovery
+    sees the full chain in the correct parent-to-leaf order from a single
+    call, rather than only the leaf (with the parent/section literals
+    hidden inside this helper's own body, where discovery still finds them
+    but in the wrong order).
+    """
+
+    def _clamp(value: float) -> float:
+        return max(0.0, min(1.0, value))
+
+    value = _env_number(env_var, float)
+    if value is not None:
+        return _clamp(value)
+    if isinstance(config, dict):
+        section_cfg = config.get(section)
+        if isinstance(section_cfg, dict):
+            subsection_cfg = section_cfg.get(subsection)
+            if isinstance(subsection_cfg, dict):
+                raw = subsection_cfg.get(yaml_key)
+                if raw is not None and not isinstance(raw, bool):
+                    try:
+                        return _clamp(float(raw))
+                    except (TypeError, ValueError):
+                        pass
+    return default
+
+
 def resolve_auto_apply_proposals_disagreement_trigger(config: dict[str, Any] | None) -> float:
     """``librarian.auto_apply_proposals.disagreement_trigger`` (default 0.2).
 
@@ -6464,15 +6506,14 @@ def resolve_auto_apply_proposals_disagreement_trigger(config: dict[str, Any] | N
     :func:`athenaeum.auto_apply_proposals.run_auto_apply_proposal_detection`
     drafts a proposal to widen the corresponding
     :func:`athenaeum.resolutions.resolve_auto_apply_threshold_for` floor.
-    Clamped to ``[0.0, 1.0]`` via the same sampling-rate resolver the
-    athenaeum#438 sampler knobs use (:func:`resolve_audit_sample_rate_t1_rejects`
-    and friends) -- this is a rate, not a count, so it belongs to the same
-    family.
+    Clamped to ``[0.0, 1.0]`` -- this is a rate, not a count.
     """
-    return _resolve_sample_rate(
+    return _resolve_nested_rate(
         config,
         env_var="ATHENAEUM_AUTO_APPLY_PROPOSALS_DISAGREEMENT_TRIGGER",
-        key="auto_apply_proposals_disagreement_trigger",
+        section="librarian",
+        subsection="auto_apply_proposals",
+        yaml_key="disagreement_trigger",
         default=0.2,
     )
 
@@ -6488,13 +6529,14 @@ def resolve_auto_apply_proposals_widen_step(config: dict[str, Any] | None) -> fl
     a single approved proposal moves the floor one conservative step, not
     all the way to the disagreement rate itself -- the next detection pass
     proposes the next step if the signal persists. Clamped to ``[0.0,
-    1.0]`` via the same sampling-rate resolver shape as
-    :func:`resolve_auto_apply_proposals_disagreement_trigger`.
+    1.0]``.
     """
-    return _resolve_sample_rate(
+    return _resolve_nested_rate(
         config,
         env_var="ATHENAEUM_AUTO_APPLY_PROPOSALS_WIDEN_STEP",
-        key="auto_apply_proposals_widen_step",
+        section="librarian",
+        subsection="auto_apply_proposals",
+        yaml_key="widen_step",
         default=0.05,
     )
 
