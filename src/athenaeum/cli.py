@@ -165,6 +165,7 @@ _SUBCOMMAND_LOADERS: dict[str, tuple[str, str]] = {
     "verdicts": ("athenaeum._cmd_verdicts", "add_verdicts_subparser"),
     "dimensions": ("athenaeum._cmd_dimensions", "add_dimensions_subparser"),
     "context": ("athenaeum._cmd_context", "add_context_subparser"),
+    "convergence": ("athenaeum._cmd_convergence", "add_convergence_subparser"),
     "reindex": ("athenaeum._cmd_index", "add_index_subparsers"),
     "rebuild-index": ("athenaeum._cmd_index", "add_index_subparsers"),
     "compile": ("athenaeum._cmd_index", "add_index_subparsers"),
@@ -197,6 +198,7 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_bounce_contract import add_bounce_contract_subparser
     from athenaeum._cmd_calibration import add_calibration_subparser
     from athenaeum._cmd_context import add_context_subparser
+    from athenaeum._cmd_convergence import add_convergence_subparser
     from athenaeum._cmd_correct_notes import add_correct_notes_subparser
     from athenaeum._cmd_curate import add_curate_subparsers
     from athenaeum._cmd_decay import add_decay_subparser
@@ -274,6 +276,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_axiom_subparser(subparsers)  # axiom
     add_calibration_subparser(subparsers)  # calibration
     add_context_subparser(subparsers)  # context (issue athenaeum#1358)
+    add_convergence_subparser(subparsers)  # convergence (issue athenaeum#2020)
     add_outbound_subparser(subparsers)  # outbound-lint
     add_bounce_contract_subparser(subparsers)  # bounce-contract
     add_surface_divergence_subparser(subparsers)  # surface-divergence
