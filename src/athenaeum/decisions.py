@@ -110,10 +110,12 @@ from pathlib import Path
 
 from athenaeum.answers import PendingQuestion, parse_pending_questions
 from athenaeum.atomic_io import atomic_write_text
+from athenaeum.auto_apply_proposals import list_pending_auto_apply_threshold_proposals
 from athenaeum.calibration import AUDIT_KIND, REVIEW_KIND, read_calibration_ledger
 from athenaeum.decision_framing import frame_decision
 from athenaeum.dimension_proposals import list_pending_dimension_proposals
 from athenaeum.models import parse_frontmatter
+from athenaeum.page_split_proposals import list_pending_page_split_proposals
 from athenaeum.pagination import paginate
 from athenaeum.pending_merges import PendingMerge, parse_pending_merges
 from athenaeum.policy_pack_edit_proposals import list_pending_policy_pack_edit_proposals
@@ -691,6 +693,97 @@ def dimension_proposal_to_decision(rec: dict) -> dict:
     }
 
 
+def page_split_proposal_to_decision(rec: dict) -> dict:
+    """Convert a page-split-proposal ledger record to a unified decision
+    dict (issue athenaeum#2018, athenaeum#719 Plan step 6).
+
+    A ``type: "page-split"`` item: the self-tuning loop's drafter
+    (:mod:`athenaeum.page_split_proposals`) found a page whose
+    coordinate-heterogeneity crossed the configured trigger. ``confidence``
+    is ``None`` -- deterministically derived, mirroring
+    :func:`proposed_rule_to_decision`. Approving this item never performs
+    the split (see that module's own docstring) -- it only authorizes a
+    human-triggered follow-up.
+    """
+    source_name = rec.get("source_name", "")
+    heterogeneity = rec.get("heterogeneity", 0)
+    threshold = rec.get("threshold")
+    bullet_count = rec.get("bullet_count", 0)
+    summary = (
+        f'The self-tuning loop flagged "{source_name}" as an aggregate '
+        f"page: its bullets resolve to {heterogeneity} distinct subject(s) "
+        f"(trigger: {threshold}) across {bullet_count} bullet(s) -- "
+        f"approve to authorize a split plan (a human still runs the split "
+        f"separately), or reject to leave the page as-is."
+    )
+    return {
+        "type": "page-split",
+        "id": rec.get("id"),
+        "created_at": rec.get("created_at"),
+        "summary": summary,
+        "confidence": None,
+        "payload": {
+            "source_uid": rec.get("source_uid"),
+            "source_name": source_name,
+            "source_path": rec.get("source_path"),
+            "subject_until": rec.get("subject_until"),
+            "heterogeneity": heterogeneity,
+            "threshold": threshold,
+            "subject_uids": rec.get("subject_uids", []),
+            "subjects_resolved": rec.get("subjects_resolved", 0),
+            "subjects_unresolved": rec.get("subjects_unresolved", 0),
+            "bullet_count": bullet_count,
+        },
+    }
+
+
+def auto_apply_threshold_proposal_to_decision(rec: dict) -> dict:
+    """Convert an auto-apply-threshold-proposal ledger record to a unified
+    decision dict (issue athenaeum#2018, athenaeum#719 Plan step 6).
+
+    A ``type: "auto-apply-threshold"`` item: the self-tuning loop's
+    drafter (:mod:`athenaeum.auto_apply_proposals`) found that audited
+    disagreement with a resolver action's auto-apply verdicts crossed the
+    configured trigger, and drafted a proposal to widen (lower) that
+    action's confidence floor. ``confidence`` is ``None`` --
+    deterministically derived. Approving this item only widens a
+    config-resolved floor (see that module's own docstring) -- it never
+    bypasses a decision already in flight.
+    """
+    action = rec.get("action", "")
+    current = rec.get("current_threshold")
+    proposed = rec.get("proposed_threshold")
+    rate = rec.get("disagreement_rate")
+    reviewed = rec.get("reviewed", 0)
+    overturned = rec.get("overturned", 0)
+    summary = (
+        f'The self-tuning loop found {overturned} of {reviewed} reviewed '
+        f'"{rec.get("tier", "T1")}" audits overturned ({rate:.0%} '
+        f"disagreement) and proposes widening the \"{action}\" auto-apply "
+        f"floor from {current} to {proposed} -- approve to widen it, or "
+        f"reject to keep the current floor."
+    )
+    return {
+        "type": "auto-apply-threshold",
+        "id": rec.get("id"),
+        "created_at": rec.get("created_at"),
+        "summary": summary,
+        "confidence": None,
+        "payload": {
+            "action": action,
+            "tier": rec.get("tier"),
+            "current_threshold": current,
+            "proposed_threshold": proposed,
+            "step": rec.get("step"),
+            "disagreement_rate": rate,
+            "trigger": rec.get("trigger"),
+            "sampled": rec.get("sampled", 0),
+            "reviewed": reviewed,
+            "overturned": overturned,
+        },
+    }
+
+
 def tier_movement_proposal_to_decision(rec: dict) -> dict:
     """Convert a tier-movement-proposal ledger record to a unified decision
     dict (issue athenaeum#2019, athenaeum#719 Plan step 6).
@@ -940,6 +1033,18 @@ def list_pending_decisions(
         decisions += [
             dimension_proposal_to_decision(rec)
             for rec in list_pending_dimension_proposals(wiki_root)
+        ]
+        # Issue athenaeum#2018 (athenaeum#719 Plan step 6): drafted
+        # page-split and auto-apply-threshold proposals awaiting an
+        # operator's approve/reject decision -- unlike dimension-proposal,
+        # both ARE answerable today (see decision_framing.ANSWERABLE_AS).
+        decisions += [
+            page_split_proposal_to_decision(rec)
+            for rec in list_pending_page_split_proposals(wiki_root)
+        ]
+        decisions += [
+            auto_apply_threshold_proposal_to_decision(rec)
+            for rec in list_pending_auto_apply_threshold_proposals(wiki_root)
         ]
         # Issue athenaeum#2019 (athenaeum#719 Plan step 6): drafted
         # tier-movement and policy-pack-edit proposals, same

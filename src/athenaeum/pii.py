@@ -492,6 +492,41 @@ def _has_labeled_identifier_prefix(preceding_text: str) -> bool:
     return bool(_LABELED_PREFIX_RE.search(preceding_text[-64:]))
 
 
+#: Preceding-token labels that type a BARE (unformatted) 10-15 digit run as
+#: a non-phone record id — a CI run id, a PR/issue comment id, a job id, or a
+#: generic ``id`` field (issue athenaeum#2027) — when the label sits directly
+#: before the run with NO joiner between them (``run 12345678901``, ``comment
+#: id: 1234567890``). This is a SEPARATE tuple/regex from
+#: :data:`LABELED_IDENTIFIER_PREFIXES`, restricted to bare runs only
+#: (:func:`_has_bare_run_id_label_prefix` is only called when the token is a
+#: pure digit run) — folding these words into the general label list would
+#: also suppress a genuinely labeled, FORMATTED phone number such as
+#: ``mobile 917-231-6130`` or ``job +1-555-0100``, which must still match.
+BARE_RUN_ID_LABEL_PREFIXES: tuple[str, ...] = ("run", "runs", "comment", "job", "id")
+
+#: Same anchor shape as :data:`_LABELED_PREFIX_RE` but for
+#: :data:`BARE_RUN_ID_LABEL_PREFIXES`, with ``#`` added to the punctuation gap
+#: so ``run #12345678901`` matches (a GitHub Actions run referenced by its
+#: ``#`` shorthand).
+_BARE_RUN_ID_PREFIX_RE = re.compile(
+    r"(?:^|[^A-Za-z0-9])(?:"
+    + "|".join(re.escape(label) for label in BARE_RUN_ID_LABEL_PREFIXES)
+    + r")[\s`'\"(:=\-#]*$",
+    re.IGNORECASE,
+)
+
+
+def _has_bare_run_id_label_prefix(preceding_text: str) -> bool:
+    """True when *preceding_text* ends with a bare-run-id label (issue athenaeum#2027).
+
+    Mirrors :func:`_has_labeled_identifier_prefix`'s shape but over
+    :data:`BARE_RUN_ID_LABEL_PREFIXES`. Callers apply this only to a token
+    that is a pure digit run (no ``+``, parens, or internal separators) so a
+    labeled, formatted phone number is never affected.
+    """
+    return bool(_BARE_RUN_ID_PREFIX_RE.search(preceding_text[-64:]))
+
+
 #: Joiner characters that can glue a bare digit run directly onto an
 #: adjacent identifier token with no intervening whitespace — URL path
 #: separators, filename/slug joiners, and query-string joiners. Deliberately
@@ -584,6 +619,151 @@ def _is_isbn13(candidate: str) -> bool:
     )
 
 
+#: Epoch-millisecond timestamps in current use fall in this range — roughly
+#: 2011-01-01 (1.3e12) through 2033-05-18 (2.0e12). A bare 13-digit run in this
+#: band (`1600000000000`, issue athenaeum#2027) sits INSIDE the E.164-plausible
+#: band `_is_bare_id_fragment` checks, so that rule does not catch it; this one
+#: does, the same way :func:`_is_isbn13` catches a 13-digit Bookland prefix the
+#: length band alone misses.
+_EPOCH_MILLIS_MIN = 1_300_000_000_000
+_EPOCH_MILLIS_MAX = 2_000_000_000_000
+
+
+def _is_epoch_millis(candidate: str) -> bool:
+    """True when *candidate* is a bare 13-digit epoch-millisecond timestamp.
+
+    A dotted alphanumeric prefix (``deploy5164.1600000000000``) never reaches
+    this check in the first place: ``_PHONE_RE``'s lookbehind requires a
+    non-word character immediately before the match, and the letters in
+    ``deploy5164`` are themselves word characters with no separator before the
+    digits, so the regex can only start matching at the digit run after the
+    ``.`` — the captured token is already the bare 13 digits by the time it
+    gets here (issue athenaeum#2027).
+    """
+    return (
+        len(candidate) == 13
+        and candidate.isdigit()
+        and _EPOCH_MILLIS_MIN <= int(candidate) <= _EPOCH_MILLIS_MAX
+    )
+
+
+#: One digit GROUP (not the whole token) that parses as a plausible calendar
+#: date in ``YYYYMMDD`` form — an 8-digit run whose first 4 digits are a
+#: 19xx/20xx year and whose next 2+2 digits are a valid month/day. Shared by
+#: :func:`_has_date_group` to retire a hyphen-joined slug/id token
+#: (``deploy-alpha-back-709-20250101``, ``20250101-42-ab12cd34``, issue
+#: athenaeum#2027) where the DATE sits in one group of a multi-group token
+#: rather than spanning the whole token the way :func:`_looks_like_date`
+#: checks for.
+_YYYYMMDD_RE = re.compile(r"^(19|20)\d{2}(\d{2})(\d{2})$")
+
+
+def _is_yyyymmdd(group: str) -> bool:
+    m = _YYYYMMDD_RE.match(group)
+    if not m:
+        return False
+    month, day = int(m.group(2)), int(m.group(3))
+    return 1 <= month <= 12 and 1 <= day <= 31
+
+
+def _has_epoch_millis_group(candidate: str) -> bool:
+    """True when any ``-``/``.``-separated digit group of *candidate* is a
+    bare 13-digit epoch-millisecond timestamp (issue athenaeum#2027).
+
+    :func:`_is_epoch_millis` alone only catches a candidate that IS a bare
+    13-digit run end to end; a digits-only dotted prefix (``5164.1600000000000``)
+    is captured as ONE multi-group token (the ``.`` is a digit-adjacent
+    character the phone regex's class allows, and nothing blocks the match
+    from starting at the prefix digits when they are themselves preceded by
+    whitespace rather than a letter) — same false-positive this issue closes,
+    just without the letter that routes ``kromatic5164.1600000000000`` through
+    :func:`_has_date_group`'s sibling slug-embedding check instead. Shares
+    :func:`_has_date_group`'s gate (no ``+``/parens/whitespace) at the call
+    site, so a formatted phone is never affected.
+    """
+    groups = re.split(r"[-.]", candidate)
+    return any(_is_epoch_millis(g) for g in groups)
+
+
+def _has_date_group(candidate: str) -> bool:
+    """True when any ``-``/``.``-separated digit group of *candidate* is a
+    plausible ``YYYYMMDD`` date (issue athenaeum#2027).
+
+    Catches a slug/id token where the phone regex's permissive character
+    class has captured a date GROUP alongside other digit groups —
+    ``709-20250101`` (a lane-slug suffix) or ``20250101-42`` (a
+    date-issue-hash id, captured up to but not including the hex hash a
+    letter breaks the match on) — neither of which is excluded by
+    :func:`_looks_like_date`, which only recognizes a date spanning the
+    ENTIRE candidate. Only applies to a candidate with no ``+``/parens/
+    whitespace (callers gate on that), so a genuine formatted phone
+    (``+1-555-0100``) is never affected even if one of its groups happens to
+    look like a year.
+    """
+    groups = re.split(r"[-.]", candidate)
+    return any(_is_yyyymmdd(g) for g in groups)
+
+
+def _is_embedded_slug_digit_run(source: str, start: int, end: int) -> bool:
+    """True when the digit-group token ``source[start:end]`` is glued via a
+    ``-`` onto a letter-containing slug segment (issue athenaeum#2027).
+
+    Narrower than :func:`_is_embedded_bare_digit_run` in two ways, so it adds
+    a new false-positive class without touching that function's existing
+    contract (its docstring promises a URL-embedded *formatted* phone is
+    unaffected, and a test asserts that):
+
+    * Only the ``-`` joiner counts here, not the full
+      :data:`_EMBEDDED_IDENTIFIER_JOINERS` set — so ``example.com/555-123-4567``
+      (joined via ``/``) is untouched.
+    * Only applies when the token itself contains no ``+``, parens, or
+      whitespace — i.e. it is a bare or hyphen/dot-grouped digit run, never a
+      formatted phone (``+1-555-0100``, ``(555) 010-0100``) — so AC(d)'s
+      labeled/parenthesized/plus-prefixed phones can never trip it.
+    * Only applies when the token ITSELF also looks like a slug/id shape —
+      carries a ``YYYYMMDD`` date group (:func:`_has_date_group`) or an
+      epoch-millis group (:func:`_has_epoch_millis_group`) — never merely
+      because it sits next to a lettered segment. Without this gate a
+      genuine hyphen-formatted phone (``555-123-4567``) glued onto an
+      ordinary label (``sales-555-123-4567``) would be suppressed outright,
+      a false-NEGATIVE on real PII — the opposite failure from the one
+      athenaeum#2027 closes (caught by Seer finding 17625842 on this PR).
+
+    Catches a lane/job slug (``deploy-alpha-back-709-20250101``): the
+    captured token ``709-20250101`` sits directly against a ``-`` whose other
+    side (``...-back-``) contains letters, AND ``20250101`` is itself a
+    ``YYYYMMDD`` group.
+    """
+    token = source[start:end]
+    if any(ch in token for ch in "+() \t\n\r"):
+        return False
+    if not (_has_date_group(token) or _has_epoch_millis_group(token)):
+        return False
+
+    def _segment_has_letter(seg_start: int, seg_end: int) -> bool:
+        return any(ch.isalpha() for ch in source[seg_start:seg_end])
+
+    def _is_slug_char(ch: str) -> bool:
+        return ch.isalnum() or ch in "-_"
+
+    if start > 0 and source[start - 1] == "-":
+        pos = start - 1
+        while pos > 0 and _is_slug_char(source[pos - 1]):
+            pos -= 1
+        if _segment_has_letter(pos, start - 1):
+            return True
+
+    if end < len(source) and source[end] == "-":
+        n = len(source)
+        pos = end + 1
+        while pos < n and _is_slug_char(source[pos]):
+            pos += 1
+        if _segment_has_letter(end + 1, pos):
+            return True
+
+    return False
+
+
 def _normalize_phone_token(token: str) -> str:
     """Strip a single leading ``+``/``(`` and a single trailing ``)`` from *token*.
 
@@ -630,6 +810,21 @@ def _is_excluded_phone_shape(token: str) -> bool:
     * **Bare ISBN-13** — 13 digits with a ``978``/``979`` Bookland prefix
       (:func:`_is_isbn13`, athenaeum#732), caught structurally so an unlabeled
       ISBN needs no adjacent ``ISBN`` prose.
+    * **Bare epoch-millisecond timestamp** — 13 digits in the current
+      epoch-ms range (:func:`_is_epoch_millis`, athenaeum#2027), caught the same
+      way as the ISBN-13 case: inside the E.164-plausible band, but a value no
+      genuine phone number would be. Gated on no ``+`` so a 13-digit
+      international number is never affected.
+    * **Hyphen/dot-joined digit group that is itself a calendar date** — a
+      slug/id token with a ``YYYYMMDD`` group (:func:`_has_date_group`,
+      athenaeum#2027) such as ``709-20250101`` or ``20250101-42``. Gated on no
+      ``+``/parens/whitespace so a formatted phone is never affected.
+    * **Dot-joined digit group that is itself an epoch-millisecond
+      timestamp** — a digits-only dotted prefix (``5164.1600000000000``,
+      :func:`_has_epoch_millis_group`, athenaeum#2027) captured as one
+      multi-group token because nothing blocks the match starting at the
+      prefix digits when they sit after whitespace rather than a letter.
+      Same gate as the date-group check.
     * **Multi-character separator run** between digit groups (``--``, ``..``) —
       list or range punctuation, never phone grouping (``445--436--435--374``).
     * **Four or more groups without a ``+``** — a phone has at most four digit
@@ -653,10 +848,19 @@ def _is_excluded_phone_shape(token: str) -> bool:
         return True
 
     candidate = _normalize_phone_token(token)
+    has_plus = token.startswith("+")
     if (
         _looks_like_date(candidate)
         or _is_bare_id_fragment(candidate)
         or _is_isbn13(candidate)
+        or (not has_plus and _is_epoch_millis(candidate))
+        or (
+            not has_plus
+            and "(" not in candidate
+            and ")" not in candidate
+            and " " not in candidate
+            and (_has_date_group(candidate) or _has_epoch_millis_group(candidate))
+        )
     ):
         return True
 
@@ -676,7 +880,6 @@ def _is_excluded_phone_shape(token: str) -> bool:
 
     if any(len(sep) > 1 for sep in internal_seps):
         return True
-    has_plus = token.startswith("+")
     total_digits = sum(len(g) for g in groups)
     # A phone has at most four digit groups (country/area/prefix/line), and a
     # genuine four-group run carries the international '+' a country code
@@ -750,6 +953,13 @@ def find_inline_phones(text: str) -> list[str]:
     a GitHub comment/run id inside a URL or filename, or a digit run inside
     backticks (:func:`_is_embedded_bare_digit_run`, issue athenaeum#2006) — which
     likewise needs the match position.
+
+    Also excludes a hyphen-joined digit-group token glued onto a
+    letter-containing slug segment (:func:`_is_embedded_slug_digit_run`,
+    issue athenaeum#2027), and a BARE 10-11 digit run preceded by a
+    run/comment/job/id label with no joiner
+    (:func:`_has_bare_run_id_label_prefix`, issue athenaeum#2027) — both
+    position-dependent.
     """
     source = text or ""
     seen: list[str] = []
@@ -768,6 +978,19 @@ def find_inline_phones(text: str) -> list[str]:
         # sitting inside backticks, is an embedded id, not a phone
         # (issue athenaeum#2006).
         if _is_embedded_bare_digit_run(source, m.start(1), m.end(1)):
+            continue
+        # A hyphen-joined digit-group token glued onto a letter-containing
+        # slug segment — a lane/job slug id, not a phone (issue athenaeum#2027).
+        if _is_embedded_slug_digit_run(source, m.start(1), m.end(1)):
+            continue
+        # A bare 10-11 digit run labeled as a run/comment/job/id with no
+        # joiner between the label and the run (issue athenaeum#2027).
+        candidate = _normalize_phone_token(token)
+        if (
+            candidate.isdigit()
+            and _BARE_PHONE_MIN_DIGITS <= len(candidate) <= 11
+            and _has_bare_run_id_label_prefix(source[: m.start(1)])
+        ):
             continue
         if token not in seen:
             seen.append(token)

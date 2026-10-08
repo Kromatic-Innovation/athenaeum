@@ -57,6 +57,7 @@ shared parse and is unaffected by this policy.
 from __future__ import annotations
 
 import copy
+import json
 import logging
 import os
 from collections.abc import Callable, Iterable
@@ -6657,6 +6658,200 @@ def resolve_person_registry_root(knowledge_root: Path, config: dict[str, Any] | 
     return knowledge_root / "wiki"
 
 
+def resolve_page_split_proposals_heterogeneity_threshold(config: dict[str, Any] | None) -> int:
+    """``librarian.page_split_proposals.heterogeneity_threshold`` (default 5).
+
+    Issue athenaeum#2018 (athenaeum#719 Plan step 6): the page-split proposal
+    drafter's trigger. A page's
+    :func:`athenaeum.page_decompose.measure_coordinate_heterogeneity` --
+    the count of DISTINCT resolved subject uids among its bullets -- must
+    reach this many before :func:`athenaeum.page_split_proposals.run_page_split_proposal_detection`
+    drafts a proposal for it. A small default: a page already flagged as an
+    aggregate by :mod:`athenaeum.page_decompose` naming even a handful of
+    distinct subjects is worth surfacing, not something to wait on.
+    """
+    return _resolve_corrections_int(
+        config,
+        "ATHENAEUM_PAGE_SPLIT_PROPOSALS_HETEROGENEITY_THRESHOLD",
+        "librarian",
+        "page_split_proposals",
+        "heterogeneity_threshold",
+        5,
+    )
+
+
+def _resolve_nested_rate(
+    config: dict[str, Any] | None,
+    *,
+    env_var: str,
+    section: str,
+    subsection: str,
+    yaml_key: str,
+    default: float,
+) -> float:
+    """Shared body for a TWO-level-nested ``<section>.<subsection>.<yaml_key>``
+    rate knob -- the float equivalent of :func:`_resolve_corrections_int`'s
+    nesting, for a ``[0.0, 1.0]``-clamped value rather than a positive int.
+    ``section``/``subsection``/``yaml_key`` are always passed as explicit
+    literal arguments AT EACH CALLER'S OWN CALL SITE (mirroring
+    :func:`_resolve_corrections_int`'s own docstring rationale exactly) so
+    ``tests/test_config_resolver_parity_generic.py``'s static discovery
+    sees the full chain in the correct parent-to-leaf order from a single
+    call, rather than only the leaf (with the parent/section literals
+    hidden inside this helper's own body, where discovery still finds them
+    but in the wrong order).
+    """
+
+    def _clamp(value: float) -> float:
+        return max(0.0, min(1.0, value))
+
+    value = _env_number(env_var, float)
+    if value is not None:
+        return _clamp(value)
+    if isinstance(config, dict):
+        section_cfg = config.get(section)
+        if isinstance(section_cfg, dict):
+            subsection_cfg = section_cfg.get(subsection)
+            if isinstance(subsection_cfg, dict):
+                raw = subsection_cfg.get(yaml_key)
+                if raw is not None and not isinstance(raw, bool):
+                    try:
+                        return _clamp(float(raw))
+                    except (TypeError, ValueError):
+                        pass
+    return default
+
+
+def resolve_auto_apply_proposals_disagreement_trigger(config: dict[str, Any] | None) -> float:
+    """``librarian.auto_apply_proposals.disagreement_trigger`` (default 0.2).
+
+    Issue athenaeum#2018 (athenaeum#719 Plan step 6): the auto-apply-threshold
+    proposal drafter's trigger. :func:`athenaeum.calibration.calibration_summary`'s
+    per-tier ``overturned / reviewed`` rate -- the share of audited T1-reject
+    verdicts a human later overturned, i.e. judged the reject too strict --
+    must reach this rate before
+    :func:`athenaeum.auto_apply_proposals.run_auto_apply_proposal_detection`
+    drafts a proposal to widen the corresponding
+    :func:`athenaeum.resolutions.resolve_auto_apply_threshold_for` floor.
+    Clamped to ``[0.0, 1.0]`` -- this is a rate, not a count.
+    """
+    return _resolve_nested_rate(
+        config,
+        env_var="ATHENAEUM_AUTO_APPLY_PROPOSALS_DISAGREEMENT_TRIGGER",
+        section="librarian",
+        subsection="auto_apply_proposals",
+        yaml_key="disagreement_trigger",
+        default=0.2,
+    )
+
+
+def resolve_auto_apply_proposals_widen_step(config: dict[str, Any] | None) -> float:
+    """``librarian.auto_apply_proposals.widen_step`` (default 0.05).
+
+    Issue athenaeum#2018 (athenaeum#719 Plan step 6): how far a single
+    auto-apply-threshold proposal widens (LOWERS) the resolver action's
+    current :func:`athenaeum.resolutions.resolve_auto_apply_threshold_for`
+    floor when :func:`resolve_auto_apply_proposals_disagreement_trigger`'s
+    rate is crossed. Deliberately small and additive, never multiplicative:
+    a single approved proposal moves the floor one conservative step, not
+    all the way to the disagreement rate itself -- the next detection pass
+    proposes the next step if the signal persists. Clamped to ``[0.0,
+    1.0]``.
+    """
+    return _resolve_nested_rate(
+        config,
+        env_var="ATHENAEUM_AUTO_APPLY_PROPOSALS_WIDEN_STEP",
+        section="librarian",
+        subsection="auto_apply_proposals",
+        yaml_key="widen_step",
+        default=0.05,
+    )
+
+
+def auto_apply_threshold_ledger_override_for(
+    action: str, *, wiki_root: Path | None, config: dict[str, Any] | None = None
+) -> float | None:
+    """A ledger-backed override for one resolver action's auto-apply floor
+    (issue athenaeum#2018, athenaeum#719 Plan step 6).
+
+    "Widening the threshold in config" (the issue AC's own phrase) has no
+    pre-existing operator-config WRITER anywhere in this codebase (grepped;
+    see this issue's PR body) -- :func:`athenaeum.resolutions.resolve_auto_apply_threshold_for`
+    only ever READS ``athenaeum.yaml`` / env, never writes it, and inventing
+    a YAML-rewriting mechanism here would be new, unreviewed surface for a
+    single proposal type. So "widen" is a ledger-backed override instead:
+    approving an auto-apply-threshold proposal
+    (:func:`athenaeum.auto_apply_proposals.approve_auto_apply_threshold_proposal`)
+    appends an ``approve`` record to ``wiki_root/_auto_apply_proposals.jsonl``
+    carrying the new, wider ``proposed_threshold``; this function reads that
+    ledger back for the MOST RECENT approved, not-yet-superseded record for
+    *action* and returns its value.
+
+    Returns ``None`` when *wiki_root* is ``None``, the ledger does not
+    exist, or no approved record names *action* -- the caller
+    (:func:`athenaeum.resolutions.resolve_auto_apply_threshold_for`) treats
+    ``None`` as "no override", falling through to its own lower-precedence
+    layers. Explicit operator config (``resolve.auto_apply_threshold_per_action.<action>``
+    in ``athenaeum.yaml``, or the ``ATHENAEUM_RESOLVE_AUTO_APPLY_THRESHOLD``
+    env var) is consulted by the caller BEFORE this override, by design --
+    an operator's own explicit setting always wins over a proposal the
+    operator merely approved.
+
+    *config* is accepted for signature symmetry with every other
+    ``resolve_*`` function but is not consulted today -- there is no env
+    override for THIS function itself (the override source is the ledger,
+    not env/yaml); kept for forward compatibility with a future "disable
+    ledger overrides" knob.
+    """
+    del config  # unused today; see docstring
+    if wiki_root is None:
+        return None
+    ledger_path = Path(wiki_root) / "_auto_apply_proposals.jsonl"
+    if not ledger_path.is_file():
+        return None
+    try:
+        raw_text = ledger_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+    approved: dict[str, float] = {}
+    resolved_ids: set[str] = set()
+    pending_by_id: dict[str, dict[str, Any]] = {}
+    for line in raw_text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        kind = record.get("kind")
+        rec_id = str(record.get("id"))
+        if kind == "proposal":
+            pending_by_id[rec_id] = record
+        elif kind == "approve":
+            resolved_ids.add(rec_id)
+            proposal = pending_by_id.get(rec_id)
+            if proposal and proposal.get("action") == action:
+                raw_threshold = proposal.get("proposed_threshold")
+                if raw_threshold is None:
+                    continue
+                try:
+                    approved[rec_id] = float(raw_threshold)
+                except (TypeError, ValueError):
+                    continue
+        elif kind == "reject":
+            resolved_ids.add(rec_id)
+
+    if not approved:
+        return None
+    # Most-recently-approved wins -- JSONL append order IS chronological
+    # order (durable append-only ledger, see athenaeum.store.append_line_durable),
+    # so the LAST matching approved record in file order is the latest.
+    last_id = list(approved.keys())[-1]
+    return approved[last_id]
 # ---------------------------------------------------------------------------
 # Tier-movement + policy-pack-edit proposals (issue athenaeum#2019, athenaeum#719 Plan step 6)
 # ---------------------------------------------------------------------------

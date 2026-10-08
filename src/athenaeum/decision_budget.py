@@ -497,7 +497,7 @@ def format_budget_report(report: dict[str, Any]) -> str:
 #: :func:`budget_report`'s ``breach`` is ``True``.
 #:
 #: ``"policy-pack-edit"`` is this issue's own type (see
-#: :mod:`athenaeum.policy_pack_edit_proposals`). ``"auto-apply-threshold-proposal"``
+#: :mod:`athenaeum.policy_pack_edit_proposals`). ``"auto-apply-threshold"``
 #: is the SIBLING child's type (athenaeum#2018, "Memory model v6 self-tuning loop:
 #: page-split + auto-apply-threshold proposals") -- named here BY STRING, not
 #: by importing that child's module, so this module gains no edge toward
@@ -505,13 +505,15 @@ def format_budget_report(report: dict[str, Any]) -> str:
 #: sits at the bottom of the decision_budget/decisions/quarantine cycle
 #: risk the module docstring describes; a new import edge toward a
 #: sibling-authored module built concurrently is exactly the kind of risk
-#: that discipline exists to avoid). If athenaeum#2018 lands under a different literal, this
-#: constant and that module's literal must be reconciled at merge --
+#: that discipline exists to avoid). Reconciled at merge time (this merge):
+#: athenaeum#2018 landed its ``_TYPE_FRAMING`` / ``VALID_DECISION_TYPES`` key
+#: as ``"auto-apply-threshold"`` (no ``-proposal`` suffix) -- this constant
+#: is updated to match, per this comment's own stated contingency.
 #: ``tests/test_decision_budget.py``'s
 #: ``test_every_guard_worthy_framing_entry_is_covered`` fails loudly if the
-#: two ever drift, rather than silently leaving one type unguarded.
+#: two ever drift again, rather than silently leaving one type unguarded.
 RATCHET_GUARDED_DECISION_TYPES: frozenset[str] = frozenset(
-    {"policy-pack-edit", "auto-apply-threshold-proposal"}
+    {"policy-pack-edit", "auto-apply-threshold"}
 )
 
 #: The named refusal reason :func:`ratification_refusal` returns. A single
