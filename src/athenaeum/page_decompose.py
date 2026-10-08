@@ -1209,6 +1209,32 @@ def apply_report(
     return result
 
 
+def measure_coordinate_heterogeneity(report: DecomposeReport) -> int:
+    """The page-split trigger's measure (issue athenaeum#2018, athenaeum#719 Plan
+    step 6): the number of DISTINCT resolved subject uids among *report*'s
+    bullets.
+
+    A page this module flags as an aggregate is, by construction, naming
+    facts about OTHER pages' subjects rather than its own — that is exactly
+    what :func:`build_report` / :func:`apply_report` exist to undo. This
+    measure is the "how heterogeneous" half of that diagnosis: a report
+    whose bullets resolve to only one or two distinct companies/people is a
+    narrow, probably-fine page; one resolving to many distinct subjects is
+    the aggregate-page shape the split proposal (see
+    :mod:`athenaeum.page_split_proposals`) exists to flag for an operator.
+
+    Deliberately counts DISTINCT ``bullet.uid`` values, never
+    ``len(report.bullets)`` or :attr:`DecomposeReport.subjects_resolved`
+    (which counts resolved bullets, not distinct subjects) -- ten bullets
+    about the same two companies is not heterogeneous; two bullets each
+    about a different company is. A bullet with no resolved subject
+    (``uid`` falsy -- ``unresolved``/``no-source``/``ambiguous-source``)
+    contributes nothing to this count, mirroring
+    :attr:`DecomposeReport.subjects_resolved`'s own ``if b.uid`` filter.
+    """
+    return len({b.uid for b in report.bullets if b.uid})
+
+
 __all__ = [
     "BLOCKING_DISPOSITIONS",
     "CLAUSE_MARKER_RUN_RE",
@@ -1231,6 +1257,7 @@ __all__ = [
     "clause_id",
     "extract_subject",
     "load_resolutions",
+    "measure_coordinate_heterogeneity",
     "parse_bullets",
     "parse_definitions",
     "resolve_subject",

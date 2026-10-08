@@ -228,6 +228,16 @@ MODULE_LAYER: dict[str, int] = {
     # ingestion -- a peer L4 module to decision_budget.py/retraction_cascade.py,
     # whose stale-marking it reuses (verdicts.py L2, dimension_proposals.py L4).
     "resolution_claims": 4,
+    # Issue athenaeum#2018 (athenaeum#719 Plan step 6): page-split proposal
+    # drafter -- a deterministic peer of dimension_proposals.py/
+    # rule_proposals.py, draws on page_decompose's DecomposeReport (L4,
+    # same-layer import allowed).
+    "page_split_proposals": 4,
+    # Issue athenaeum#2018 (athenaeum#719 Plan step 6): auto-apply-threshold
+    # proposal drafter -- a deterministic peer of dimension_proposals.py/
+    # rule_proposals.py, draws on calibration.py (L3) and resolutions.py
+    # (undeclared; see the UNDECLARED set below).
+    "auto_apply_proposals": 4,
     "sensitivity_lint": 4,
     "shadow_linkage": 4,
     "shadow_parity": 4,
