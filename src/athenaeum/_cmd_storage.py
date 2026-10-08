@@ -77,6 +77,7 @@ from athenaeum.pii import (
 )
 from athenaeum.pii_h1_audit import MARKER_LEADING, find_h1_marker_pages
 from athenaeum.pii_h1_audit import render_report as render_h1_audit_report
+from athenaeum.pii_verdicts import ledger_scan_exclusions, load_not_pii_allowlist
 from athenaeum.rules import (
     DispositionPruneMismatchError,
     default_shape_rule_dispositions_path,
@@ -1032,6 +1033,18 @@ def _cmd_storage_lint_pii(args: argparse.Namespace) -> int:
         wiki_root / PII_ALLOWLIST_FILENAME
     )
     entries, errors = load_pii_allowlist(allowlist_path)
+    # Issue athenaeum#689 AC3/AC4: a value with a sticky "not PII" verdict in
+    # the athenaeum#712 ledger is adjudicated exactly like an explicit
+    # `_pii-allowlist.yml` entry -- merged in here, never a second gate.
+    # The YAML allowlist wins on a value present in both (it is the
+    # operator's own explicit, human-authored artifact); the ledger only
+    # fills in values the allowlist does not already cover, so a value once
+    # judged "not PII" through this issue's classifier never resurfaces as
+    # an unexplained finding on a later sweep.
+    ledger_not_pii = load_not_pii_allowlist(wiki_root)
+    for value, reason in ledger_not_pii.items():
+        if value not in {e.value for e in entries}:
+            entries.append(PiiAllowlistEntry(value=value, reason=reason))
     # Machine-generated audit logs (issue athenaeum#1273): a filename-only
     # exclusion for logs like _shape_rule_dispositions.jsonl that regenerate
     # nightly under a stable name but unstable content, so no allowlist entry
@@ -1047,9 +1060,15 @@ def _cmd_storage_lint_pii(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
     # Self-exclusion: scanning the allowlist would make every adjudicated value
-    # a fresh finding and put exit 0 permanently out of reach.
+    # a fresh finding and put exit 0 permanently out of reach. Issue
+    # athenaeum#689: the athenaeum#712 verdict ledger's own files get the same
+    # self-exclusion -- a sticky not-PII verdict's pair key embeds the value
+    # (see athenaeum.pii_verdicts.ledger_scan_exclusions), so scanning the
+    # ledger would otherwise turn every recorded verdict into a fresh,
+    # unexplained finding about itself.
+    ledger_exclude_paths = [allowlist_path, *ledger_scan_exclusions(wiki_root)]
     findings = scan_corpus_pii(
-        wiki_root, exclude=[allowlist_path], exclude_names=scan_exclude_names
+        wiki_root, exclude=ledger_exclude_paths, exclude_names=scan_exclude_names
     )
     result = adjudicate_corpus_pii(findings, entries, errors=errors)
     # raw/ is scanned with the same self-exclusion (defensive: the allowlist
@@ -1057,7 +1076,7 @@ def _cmd_storage_lint_pii(args: argparse.Namespace) -> int:
     # could in principle point elsewhere) and NO adjudication — it is a raw
     # count, not a second gate.
     raw_findings = scan_corpus_pii(
-        raw_root, exclude=[allowlist_path], exclude_names=scan_exclude_names
+        raw_root, exclude=ledger_exclude_paths, exclude_names=scan_exclude_names
     )
 
     for err in result.errors:
