@@ -15,6 +15,7 @@ from athenaeum.decision_answers import apply_decision_answers, write_decision_an
 from athenaeum.decision_budget import (
     budget_report,
     context_size_distribution,
+    format_budget_report,
     item_age_p95_days,
     items_per_day,
     queue_depth_trend,
@@ -303,3 +304,102 @@ def test_quarantine_release_records_budget_event(tmp_path: Path) -> None:
     assert len(events) == 1
     assert events[0]["decision_type"] == "quarantine"
     assert events[0]["decision_id"] == qid
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#1996 ratchet guard 2: format_budget_report's extension to
+# carry the measured default-acceptance rubber-stamp rate -- OPTIONAL key,
+# same shared rendering, never a third surface. budget_report() itself is
+# untouched by athenaeum#1996 (its five figures + breach logic are out of
+# scope); these tests only exercise the rendering extension.
+# ---------------------------------------------------------------------------
+
+
+def _minimal_report(**overrides: object) -> dict:
+    report = budget_report(
+        overrides.pop("wiki_root"),
+        pending_items=[],
+        items_per_day_max=20,
+        decision_minutes_p50_max=30,
+        decision_minutes_p95_max=60,
+        item_age_p95_days_max=7,
+        window_days=30,
+        now=_NOW,
+    )
+    report.update(overrides)
+    return report
+
+
+def test_format_budget_report_omits_rubber_stamp_line_when_key_absent(
+    tmp_path: Path,
+) -> None:
+    wiki_root = tmp_path / "wiki"
+    wiki_root.mkdir()
+    report = _minimal_report(wiki_root=wiki_root)
+    assert "default_acceptance_rubber_stamp" not in report
+    rendered = format_budget_report(report)
+    assert "rubber-stamp" not in rendered.lower()
+
+
+def test_format_budget_report_renders_rubber_stamp_when_present(tmp_path: Path) -> None:
+    wiki_root = tmp_path / "wiki"
+    wiki_root.mkdir()
+    report = _minimal_report(
+        wiki_root=wiki_root,
+        default_acceptance_rubber_stamp={
+            "sampled": 10,
+            "reviewed": 10,
+            "overturned": 3,
+            "rate": 0.7,
+        },
+    )
+    rendered = format_budget_report(report)
+    assert "Default-acceptance rubber-stamp rate: 70%" in rendered
+    assert "sampled=10" in rendered
+    assert "reviewed=10" in rendered
+    assert "overturned=3" in rendered
+
+
+def test_format_budget_report_rate_none_renders_as_not_yet_reviewed(
+    tmp_path: Path,
+) -> None:
+    wiki_root = tmp_path / "wiki"
+    wiki_root.mkdir()
+    report = _minimal_report(
+        wiki_root=wiki_root,
+        default_acceptance_rubber_stamp={
+            "sampled": 2,
+            "reviewed": 0,
+            "overturned": 0,
+            "rate": None,
+        },
+    )
+    rendered = format_budget_report(report)
+    assert "n/a (none reviewed yet)" in rendered
+
+
+def test_cmd_decisions_budget_surfaces_the_rate_via_the_shared_rendering(
+    tmp_path: Path,
+) -> None:
+    """The real `athenaeum decisions budget` surface (issue athenaeum#1996):
+    extends the SAME shared format_budget_report call with the measured
+    rate, never a second rendering."""
+    from athenaeum.calibration import sample_default_acceptance
+
+    wiki_root = tmp_path / "wiki"
+    wiki_root.mkdir()
+    sample_default_acceptance(
+        wiki_root,
+        decision_id="merge-1",
+        config={"librarian": {"default_acceptance_audit_sample_rate": 1.0}},
+    )
+    report = _minimal_report(wiki_root=wiki_root)
+
+    from athenaeum.calibration import default_acceptance_rubber_stamp_rate
+
+    report["default_acceptance_rubber_stamp"] = default_acceptance_rubber_stamp_rate(
+        wiki_root
+    )
+    rendered = format_budget_report(report)
+    assert "Default-acceptance rubber-stamp rate: n/a (none reviewed yet)" in rendered
+    assert "sampled=1" in rendered

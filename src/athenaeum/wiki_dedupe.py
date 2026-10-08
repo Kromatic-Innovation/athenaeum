@@ -764,6 +764,79 @@ def propose_wiki_page_merges(
         heartbeat.done()
         return []
 
+    # Issue athenaeum#1996 (delegation ratchet guard 1): resolve the decision
+    # queue's effort-budget breach state ONCE for this whole run, not once
+    # per pair -- `enact_verdict_effect`'s auto-apply authorization check
+    # needs it, but re-deriving it inside that per-pair call would mean
+    # re-listing the entire pending-decisions queue for every candidate pair
+    # this cluster pass examines. Only computed for a run that can actually
+    # enact a fold (`writes_attribution`, the same "really running" gate the
+    # attribution snapshot above already uses) -- a dry run never calls
+    # `enact_verdict_effect` with auto-apply armed, so there is nothing for
+    # this value to gate.
+    effort_budget_breach = False
+    if writes_attribution:
+        try:
+            from athenaeum.config import (
+                resolve_decisions_budget_decision_minutes_p50_max,
+                resolve_decisions_budget_decision_minutes_p95_max,
+                resolve_decisions_budget_item_age_p95_days_max,
+                resolve_decisions_budget_items_per_day_max,
+                resolve_decisions_budget_window_days,
+                resolve_decisions_max_item_context_tokens,
+                resolve_decisions_max_sources_per_merge,
+            )
+            from athenaeum.decision_budget import budget_report
+            from athenaeum.decisions import list_pending_decisions
+
+            pending_items = list_pending_decisions(
+                wiki_root,
+                max_sources_per_merge=resolve_decisions_max_sources_per_merge(
+                    resolved_config
+                ),
+                max_item_context_tokens=resolve_decisions_max_item_context_tokens(
+                    resolved_config
+                ),
+            )
+            budget = budget_report(
+                wiki_root,
+                pending_items,
+                items_per_day_max=resolve_decisions_budget_items_per_day_max(
+                    resolved_config
+                ),
+                decision_minutes_p50_max=resolve_decisions_budget_decision_minutes_p50_max(
+                    resolved_config
+                ),
+                decision_minutes_p95_max=resolve_decisions_budget_decision_minutes_p95_max(
+                    resolved_config
+                ),
+                item_age_p95_days_max=resolve_decisions_budget_item_age_p95_days_max(
+                    resolved_config
+                ),
+                window_days=resolve_decisions_budget_window_days(resolved_config),
+                # The authoritative recording of overflow shapes belongs to
+                # the operator-facing surfaces (`athenaeum decisions budget` /
+                # `athenaeum status`, issue athenaeum#1990) that already call
+                # `budget_report` for every figure, not to this dedupe pass
+                # reading just the one `breach` boolean it needs.
+                record_shapes=False,
+            )
+            effort_budget_breach = bool(budget.get("breach"))
+        except Exception as exc:  # noqa: BLE001 — best-effort, same discipline
+            # as the attribution-snapshot writer above: a read hiccup here
+            # must never take the whole dedupe pass down. Failing OPEN
+            # (breach=False, i.e. no extra refusal) rather than failing
+            # closed matches every other budget-instrumentation call site's
+            # "must never break the pipeline" posture (see status.py) --
+            # this guard only ever makes auto-apply MORE conservative, never
+            # less, so a missed breach signal degrades to pre-athenaeum#1996
+            # behavior rather than a new outage.
+            log.warning(
+                "wiki-page dedup: effort-budget breach check skipped (%s): %s",
+                type(exc).__name__,
+                exc,
+            )
+
     results: list[dict[str, Any]] = []
 
     # Issue athenaeum#1991: one shared sink for every ``underdetermined``
@@ -967,6 +1040,7 @@ def propose_wiki_page_merges(
                     path_b=path_b,
                     config=resolved_config,
                     coordinate_sink=coordinate_members,
+                    effort_budget_breach=effort_budget_breach,
                 )
                 if effect.action == "coordinate-pending" and coordinate_members:
                     coordinate_members[-1]["cluster_id"] = cluster.cluster_id

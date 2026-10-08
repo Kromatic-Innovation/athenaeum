@@ -161,6 +161,52 @@ class TestRenderParseRoundTrip:
         assert parsed.decision_type == decision_type
         assert parsed.note == "an operator note"
         assert parsed.resolved_at
+        # Issue athenaeum#1996: omitted origin_decision_type defaults to the
+        # applier type — correct for every writer that does not know the
+        # two diverge.
+        assert parsed.origin_decision_type == decision_type
+
+    def test_origin_decision_type_round_trips_when_it_diverges_from_applier(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue athenaeum#1996 (Seer finding on PR athenaeum#2005): confirmation's
+        applier is "question" — origin_decision_type must survive the
+        round trip distinctly from decision_type."""
+        path = tmp_path / "answer.md"
+        path.write_text(
+            render_decision_answer(
+                decision_id="c1",
+                decision_type="question",
+                verdict="approve",
+                origin_decision_type="confirmation",
+            ),
+            encoding="utf-8",
+        )
+        parsed = _load_decision_answer(path)
+        assert parsed is not None
+        assert parsed.decision_type == "question"
+        assert parsed.origin_decision_type == "confirmation"
+
+    def test_legacy_file_with_no_origin_decision_type_key_falls_back(
+        self, tmp_path: Path
+    ) -> None:
+        """A pre-athenaeum#1996 answer file has no `origin_decision_type` key
+        at all — must fall back to the applier type, not raise or go
+        missing."""
+        path = tmp_path / "answer.md"
+        path.write_text(
+            "---\n"
+            "source: decision-answer\n"
+            "decision_id: legacy1\n"
+            "decision_type: merge\n"
+            "verdict: approve\n"
+            "resolved_at: '2026-01-01T00:00:00Z'\n"
+            "---\n",
+            encoding="utf-8",
+        )
+        parsed = _load_decision_answer(path)
+        assert parsed is not None
+        assert parsed.origin_decision_type == "merge"
 
     def test_multiline_verdict_round_trips(self, tmp_path: Path) -> None:
         """A free-text question answer body can be multi-line markdown —
@@ -387,6 +433,299 @@ class TestApplyMerge:
 
         report = apply_decision_answers(wiki_root, raw_root)
         assert report.applied == 1
+
+
+# ---------------------------------------------------------------------------
+# TestDefaultAcceptanceTaggedAtAnswerTime — issue athenaeum#1996 ratchet guard 2.
+#
+# A human answering a merge item with "reject" (merge's proposed_default) is
+# a default-acceptance, tagged right here in apply_decision_answers (the
+# SAME call site athenaeum.decisions answer / athenaeum ingest-answers
+# drives) and offered to calibration's deterministic sampler. Answering
+# "approve" (overriding the default) must never be sampled.
+# ---------------------------------------------------------------------------
+
+
+class TestDefaultAcceptanceTaggedAtAnswerTime:
+    _SAMPLE_ALL_CONFIG = {"librarian": {"default_acceptance_audit_sample_rate": 1.0}}
+
+    def test_accepting_the_default_is_sampled(self, wiki_root: Path, raw_root: Path) -> None:
+        from athenaeum.calibration import DEFAULT_ACCEPTANCE_TIER, read_calibration_ledger
+
+        merges_path = wiki_root / "_pending_merges.md"
+        mid = _write_merge(
+            merges_path,
+            target="rubber-stamp-topic",
+            src_a=wiki_root / "feedback_rs_a.md",
+            src_b=wiki_root / "feedback_rs_b.md",
+        )
+        # merge's proposed_default is "reject (keep the pages separate)" —
+        # answering reject accepts it unmodified.
+        write_decision_answer(
+            raw_root, decision_id=mid, decision_type="merge", verdict="reject"
+        )
+
+        report = apply_decision_answers(
+            wiki_root, raw_root, config=self._SAMPLE_ALL_CONFIG
+        )
+        assert report.applied == 1
+
+        ledger = read_calibration_ledger(wiki_root)
+        audit_records = [r for r in ledger if r.get("kind") == "audit"]
+        assert len(audit_records) == 1
+        assert audit_records[0]["tier"] == DEFAULT_ACCEPTANCE_TIER
+        assert audit_records[0]["proposal_id"] == mid
+
+    def test_overriding_the_default_is_never_sampled(
+        self, wiki_root: Path, raw_root: Path
+    ) -> None:
+        from athenaeum.calibration import read_calibration_ledger
+
+        merges_path = wiki_root / "_pending_merges.md"
+        mid = _write_merge(
+            merges_path,
+            target="overridden-topic",
+            src_a=wiki_root / "feedback_ov_a.md",
+            src_b=wiki_root / "feedback_ov_b.md",
+        )
+        # "approve" OVERRIDES merge's "reject" default — never a
+        # default-acceptance, so it must never be sampled, even at rate 1.0.
+        write_decision_answer(
+            raw_root, decision_id=mid, decision_type="merge", verdict="approve"
+        )
+
+        report = apply_decision_answers(
+            wiki_root, raw_root, config=self._SAMPLE_ALL_CONFIG
+        )
+        assert report.applied == 1
+        assert read_calibration_ledger(wiki_root) == []
+
+    def test_a_free_text_question_answer_is_never_sampled(
+        self, wiki_root: Path, raw_root: Path
+    ) -> None:
+        """question is free-text — there is no discrete default a free-text
+        answer could match unmodified, so it can never register as a
+        default-acceptance, no matter what the human wrote."""
+        from athenaeum.calibration import read_calibration_ledger
+
+        pending_path = wiki_root / "_pending_questions.md"
+        qid = _write_question_block(pending_path)
+        write_decision_answer(
+            raw_root,
+            decision_id=qid,
+            decision_type="question",
+            verdict="leave unresolved",
+        )
+
+        report = apply_decision_answers(
+            wiki_root, raw_root, config=self._SAMPLE_ALL_CONFIG
+        )
+        assert report.applied == 1
+        assert read_calibration_ledger(wiki_root) == []
+
+
+# ---------------------------------------------------------------------------
+# TestEveryDeclaredDefaultAcceptanceTypeIsReachable — Seer finding on PR athenaeum#2005
+# (issue athenaeum#1996).
+#
+# `is_default_acceptance` was being called with `answer.decision_type` — the
+# INBOUND APPLIER type — not the ORIGINAL outbound-queue type.
+# `answerable_as` translates "confirmation" -> applier "question" before the
+# answer file is ever written (see `_cmd_decisions.py::_cmd_answer`), so a
+# confirmation default-acceptance was silently UNREACHABLE: the fixture-rate
+# test above never caught this because it only ever samples from decisions
+# the test itself hands to the sampler directly, bypassing the real
+# `decision_type` vs `origin_decision_type` distinction entirely. This test
+# instead drives each of the THREE now-declared types
+# (`_DEFAULT_ACCEPTANCE_VERDICT` in `decision_framing.py` — `quarantine` was
+# dropped as genuinely unreachable, having no applier at all) through the
+# SAME write_decision_answer(..., origin_decision_type=...) shape
+# `_cmd_answer` produces, end to end through `apply_decision_answers`, and
+# asserts each one IS tagged and sampled. Parametrized so a future type
+# dropped from reachability without dropping its table entry fails loudly
+# here rather than quietly biasing the measured rate.
+# ---------------------------------------------------------------------------
+
+
+class TestEveryDeclaredDefaultAcceptanceTypeIsReachable:
+    _SAMPLE_ALL_CONFIG = {"librarian": {"default_acceptance_audit_sample_rate": 1.0}}
+
+    def test_confirmation_default_acceptance_is_tagged_through_its_real_applier(
+        self, wiki_root: Path, raw_root: Path
+    ) -> None:
+        """The exact Seer-found regression: a confirmation item is answered
+        through its REAL applier (`answerable_as("confirmation") ==
+        "question"`), carrying `origin_decision_type="confirmation"`
+        separately — exactly what `_cmd_decisions.py::_cmd_answer` writes."""
+        from athenaeum.calibration import DEFAULT_ACCEPTANCE_TIER, read_calibration_ledger
+        from athenaeum.decision_framing import answerable_as
+
+        applier_type = answerable_as("confirmation")
+        assert applier_type == "question"  # pins the translation this guards
+
+        pending_path = wiki_root / "_pending_questions.md"
+        qid = _write_question_block(pending_path)
+        # confirmation's proposed_default is "accept the narrowed scope" —
+        # answering "approve" accepts it unmodified.
+        write_decision_answer(
+            raw_root,
+            decision_id=qid,
+            decision_type=applier_type,
+            verdict="approve",
+            origin_decision_type="confirmation",
+        )
+
+        report = apply_decision_answers(
+            wiki_root, raw_root, config=self._SAMPLE_ALL_CONFIG
+        )
+        assert report.applied == 1
+
+        ledger = read_calibration_ledger(wiki_root)
+        audit_records = [r for r in ledger if r.get("kind") == "audit"]
+        assert len(audit_records) == 1, (
+            "confirmation default-acceptance was not tagged — the "
+            "origin_decision_type vs decision_type regression is back"
+        )
+        assert audit_records[0]["tier"] == DEFAULT_ACCEPTANCE_TIER
+        assert audit_records[0]["proposal_id"] == qid
+
+    @pytest.mark.parametrize(
+        "decision_type,origin_decision_type,accepting_verdict",
+        [
+            ("question", "confirmation", "approve"),
+            ("merge", "merge", "reject"),
+            ("proposed-rule", "proposed-rule", "reject"),
+        ],
+    )
+    def test_every_declared_type_is_tagged_via_its_real_write_shape(
+        self,
+        wiki_root: Path,
+        raw_root: Path,
+        decision_type: str,
+        origin_decision_type: str,
+        accepting_verdict: str,
+    ) -> None:
+        from athenaeum.calibration import read_calibration_ledger
+
+        if origin_decision_type == "merge":
+            merges_path = wiki_root / "_pending_merges.md"
+            decision_id = _write_merge(
+                merges_path,
+                target=f"topic-{origin_decision_type}",
+                src_a=wiki_root / f"feedback_{origin_decision_type}_a.md",
+                src_b=wiki_root / f"feedback_{origin_decision_type}_b.md",
+            )
+        elif origin_decision_type == "proposed-rule":
+            decision_id = _seed_rule_proposal(wiki_root, source=f"src-{origin_decision_type}")
+        else:  # confirmation, via its real "question" applier
+            pending_path = wiki_root / "_pending_questions.md"
+            decision_id = _write_question_block(pending_path)
+
+        write_decision_answer(
+            raw_root,
+            decision_id=decision_id,
+            decision_type=decision_type,
+            verdict=accepting_verdict,
+            origin_decision_type=origin_decision_type,
+        )
+
+        report = apply_decision_answers(
+            wiki_root, raw_root, config=self._SAMPLE_ALL_CONFIG
+        )
+        assert report.applied == 1
+
+        ledger = read_calibration_ledger(wiki_root)
+        audit_records = [r for r in ledger if r.get("kind") == "audit"]
+        assert len(audit_records) == 1, (
+            f"{origin_decision_type!r} default-acceptance was not tagged "
+            f"(applier type {decision_type!r})"
+        )
+        assert audit_records[0]["proposal_id"] == decision_id
+
+
+# ---------------------------------------------------------------------------
+# TestConfirmationGuard2ThroughTheRealCliPath — issue athenaeum#1996.
+#
+# The two classes above prove the mechanism (`is_default_acceptance` checked
+# against `origin_decision_type`) by calling `write_decision_answer(...,
+# origin_decision_type=...)` directly. That proves the applier-side fix but
+# not the writer side: the only thing that forwards `origin_decision_type`
+# for a real confirmation answer is `_cmd_decisions.py::_cmd_answer`, one
+# specific call site. If that forwarding were ever dropped, every test above
+# would stay green (they hand `origin_decision_type` in by hand), and only
+# this test — which drives the real CLI entry point, exactly as an operator
+# or agent would — would catch it.
+# ---------------------------------------------------------------------------
+
+
+class TestConfirmationGuard2ThroughTheRealCliPath:
+    _SAMPLE_ALL_CONFIG = {"librarian": {"default_acceptance_audit_sample_rate": 1.0}}
+
+    @staticmethod
+    def _cli_answer(store: Path, *, decision_id: str, verdict: str) -> int:
+        from athenaeum.cli import main as cli_main
+
+        return cli_main(
+            [
+                "decisions", "answer", "--path", str(store), "--id", decision_id,
+                "--type", "confirmation", "--answer", f'{{"verdict": "{verdict}"}}',
+            ]
+        )
+
+    def test_accepting_the_default_through_the_cli_is_tagged(
+        self, tmp_path: Path, wiki_root: Path, raw_root: Path
+    ) -> None:
+        """confirmation's default_action is "accept the narrowed scope" —
+        answering "approve" through the real CLI must round-trip
+        `origin_decision_type="confirmation"` into the written answer file
+        and be tagged as a default-acceptance when applied."""
+        from athenaeum.calibration import DEFAULT_ACCEPTANCE_TIER, read_calibration_ledger
+
+        pending_path = wiki_root / "_pending_questions.md"
+        qid = _write_question_block(pending_path)
+
+        rc = self._cli_answer(tmp_path, decision_id=qid, verdict="approve")
+        assert rc == 0
+
+        written = sorted((raw_root / "answers").glob("*.md"))
+        assert len(written) == 1
+        parsed = _load_decision_answer(written[0])
+        assert parsed is not None
+        assert parsed.decision_type == "question"  # the real applier type
+        assert parsed.origin_decision_type == "confirmation"
+
+        report = apply_decision_answers(
+            wiki_root, raw_root, config=self._SAMPLE_ALL_CONFIG
+        )
+        assert report.applied == 1
+
+        ledger = read_calibration_ledger(wiki_root)
+        audit_records = [r for r in ledger if r.get("kind") == "audit"]
+        assert len(audit_records) == 1, (
+            "a confirmation answered 'approve' via the real CLI was not "
+            "tagged as a default-acceptance"
+        )
+        assert audit_records[0]["tier"] == DEFAULT_ACCEPTANCE_TIER
+        assert audit_records[0]["proposal_id"] == qid
+
+    def test_overriding_the_default_through_the_cli_is_not_tagged(
+        self, tmp_path: Path, wiki_root: Path, raw_root: Path
+    ) -> None:
+        """Answering with "reject" overrides confirmation's default — must
+        NOT be tagged as a default-acceptance."""
+        from athenaeum.calibration import read_calibration_ledger
+
+        pending_path = wiki_root / "_pending_questions.md"
+        qid = _write_question_block(pending_path)
+
+        rc = self._cli_answer(tmp_path, decision_id=qid, verdict="reject")
+        assert rc == 0
+
+        report = apply_decision_answers(
+            wiki_root, raw_root, config=self._SAMPLE_ALL_CONFIG
+        )
+        assert report.applied == 1
+        assert read_calibration_ledger(wiki_root) == []
 
 
 # ---------------------------------------------------------------------------
