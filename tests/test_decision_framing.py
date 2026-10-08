@@ -50,6 +50,8 @@ LIVE_DECISION_TYPES = (
     "proposed-rule",
     # Issue athenaeum#1993.
     "coordinate",
+    # Issue athenaeum#2015 (athenaeum#719 Plan step 3).
+    "dimension-proposal",
 )
 
 
@@ -496,7 +498,9 @@ class TestAnswerableTypeTranslation:
         """A confirmation IS a question block -- same store, same resolution."""
         assert answerable_as("confirmation") == "question"
 
-    @pytest.mark.parametrize("decision_type", ["retraction", "quarantine", "nonsense"])
+    @pytest.mark.parametrize(
+        "decision_type", ["retraction", "quarantine", "dimension-proposal", "nonsense"]
+    )
     def test_a_type_with_no_applier_is_absent_rather_than_guessed(
         self, decision_type: str
     ) -> None:
@@ -520,7 +524,9 @@ class TestAnswerCommandRefusals:
         answers_dir = store / "raw" / "answers"
         return sorted(answers_dir.glob("*.md")) if answers_dir.exists() else []
 
-    @pytest.mark.parametrize("decision_type", ["retraction", "quarantine", "nonsense"])
+    @pytest.mark.parametrize(
+        "decision_type", ["retraction", "quarantine", "dimension-proposal", "nonsense"]
+    )
     def test_an_unroutable_type_is_refused_nonzero_and_writes_nothing(
         self, store: Path, decision_type: str
     ) -> None:

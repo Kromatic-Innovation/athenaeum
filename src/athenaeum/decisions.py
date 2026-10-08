@@ -112,6 +112,7 @@ from athenaeum.answers import PendingQuestion, parse_pending_questions
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.calibration import AUDIT_KIND, REVIEW_KIND, read_calibration_ledger
 from athenaeum.decision_framing import frame_decision
+from athenaeum.dimension_proposals import list_pending_dimension_proposals
 from athenaeum.models import parse_frontmatter
 from athenaeum.pagination import paginate
 from athenaeum.pending_merges import PendingMerge, parse_pending_merges
@@ -640,6 +641,54 @@ def proposed_rule_to_decision(rec: dict) -> dict:
     }
 
 
+def dimension_proposal_to_decision(rec: dict) -> dict:
+    """Convert a dimension-proposal ledger record to a unified decision dict
+    (issue athenaeum#2015, athenaeum#719 Plan step 3).
+
+    A ``type: "dimension-proposal"`` item: the self-tuning loop's
+    drafter (:mod:`athenaeum.dimension_proposals`) found a recurring
+    missing-dimension shape and mechanically drafted a candidate axis for
+    it. ``confidence`` is ``None`` -- there is no model score behind a
+    deterministically-derived draft, mirroring
+    :func:`proposed_rule_to_decision`. This item is deliberately visible
+    but NOT YET answerable -- see
+    :data:`athenaeum.decision_framing.ANSWERABLE_AS`'s own comment for why
+    -- ratifying it is the next child's applier, not this one's.
+    """
+    name = rec.get("name", "")
+    count = rec.get("count", 0)
+    window_days = rec.get("window_days")
+    ask_count = rec.get("ask_count", 0)
+    summary = (
+        f'The self-tuning loop drafted a candidate dimension "{name}" from '
+        f"{count} recurring underdetermined pair(s) over the last "
+        f"{window_days} day(s) -- approve to register it, rename to adopt "
+        f"it under a different name, or reject to discard the proposal. "
+        f"Backfilling it would cost {ask_count} human ask(s)."
+    )
+    return {
+        "type": "dimension-proposal",
+        "id": rec.get("id"),
+        "created_at": rec.get("created_at"),
+        "summary": summary,
+        "confidence": None,
+        "payload": {
+            "name": name,
+            "dimension_kind": rec.get("dimension_kind"),
+            "null_semantics": rec.get("null_semantics"),
+            "separates": rec.get("separates"),
+            "applies_to": rec.get("applies_to", {}),
+            "applies_to_narrowed": rec.get("applies_to_narrowed", False),
+            "example_pairs": rec.get("example_pairs", []),
+            "backfill_plan": rec.get("backfill_plan", {}),
+            "ask_count": ask_count,
+            "count": count,
+            "window_days": window_days,
+            "threshold": rec.get("threshold"),
+        },
+    }
+
+
 def list_pending_merges_rich(merges_path: Path) -> list[dict]:
     """Unresolved merges as decidable dicts (title + gist + question)."""
     return [
@@ -678,9 +727,10 @@ def list_pending_decisions(
     the same fail-closed predicate ``recall`` applies. A question is withheld
     unless its ``source`` memory authorizes; a merge unless EVERY source page
     authorizes (checked over the FULL source set, before the athenaeum#431 render cap);
-    and ``retraction`` / ``audit`` / ``quarantine`` / ``proposed-rule`` items —
-    which reference pages, raw-intake files, or a shape's exemplar refs by
-    slug/proposal-id/ref rather than a readable compiled-wiki source path —
+    and ``retraction`` / ``audit`` / ``quarantine`` / ``proposed-rule`` /
+    ``dimension-proposal`` items — which reference pages, raw-intake files,
+    or a shape's exemplar refs by slug/proposal-id/ref rather than a
+    readable compiled-wiki source path —
     are withheld wholesale from a restricted caller (adjudicating them is
     owner-only, mirroring the write-side guard on ``review_audit_item``).
     Owner (``None``, the default) sees everything, preserving existing
@@ -785,7 +835,7 @@ def list_pending_decisions(
         decisions.append(rec["item"])
 
     if caller_audience is None:
-        # Retraction/quarantine/proposed-rule items are owner-only for a
+        # Retraction/quarantine/proposed-rule/dimension-proposal items are owner-only for a
         # restricted caller (no readable source-page path to authorize
         # against, athenaeum#538). Ledger-derived, ephemeral by design, no
         # comparable legacy CLI to deprecate — outside athenaeum#1992's
@@ -803,6 +853,14 @@ def list_pending_decisions(
         # operator's approve/reject decision.
         decisions += [
             proposed_rule_to_decision(rec) for rec in list_pending_rule_proposals(wiki_root)
+        ]
+        # Issue athenaeum#2015 (athenaeum#719 Plan step 3): drafted
+        # dimension proposals awaiting ratification -- visible in the
+        # queue, framed, but not yet answerable (see
+        # decision_framing.ANSWERABLE_AS's comment).
+        decisions += [
+            dimension_proposal_to_decision(rec)
+            for rec in list_pending_dimension_proposals(wiki_root)
         ]
     # Issue athenaeum#717: framing is applied to the WHOLE union, at the one
     # point every item passes through, so no item can enter the queue unframed
