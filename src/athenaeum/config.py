@@ -5575,6 +5575,100 @@ def resolve_verdict_ledger_enabled(config: dict[str, Any] | None) -> bool:
     return False
 
 
+def resolve_signal_mining_threshold(config: dict[str, Any] | None) -> int:
+    """``librarian.signal_mining.threshold`` (default 5).
+
+    Issue athenaeum#719 AC1: the self-tuning loop's shape-mining pass groups
+    the verdict ledger's ``underdetermined`` entries by typed shape (missing
+    dimensions + memory class + scope pattern — see
+    :mod:`athenaeum.signal_mining`). A shape recurring across at least this
+    many DISTINCT pairs within :func:`resolve_signal_mining_window_days` is
+    the trigger for a dimension proposal. Deliberately a small default: the
+    loop's own convergence-reporting AC requires this to be low enough that
+    real recurrence is visible quickly, not tuned only after a huge backlog
+    accumulates.
+    """
+    return _resolve_corrections_int(
+        config,
+        "ATHENAEUM_SIGNAL_MINING_THRESHOLD",
+        "librarian",
+        "signal_mining",
+        "threshold",
+        5,
+    )
+
+
+def resolve_signal_mining_window_days(config: dict[str, Any] | None) -> int:
+    """``librarian.signal_mining.window_days`` (default 30).
+
+    Issue athenaeum#719 AC1's "configurable window": the shape-mining pass
+    only counts verdict-ledger entries whose ``at`` timestamp falls within
+    this many days of "now".
+    """
+    return _resolve_corrections_int(
+        config,
+        "ATHENAEUM_SIGNAL_MINING_WINDOW_DAYS",
+        "librarian",
+        "signal_mining",
+        "window_days",
+        30,
+    )
+
+
+def resolve_signal_mining_enabled(config: dict[str, Any] | None) -> bool:
+    """``librarian.signal_mining.enabled`` (default False). DEFAULT OFF.
+
+    Issue athenaeum#719's self-tuning loop (mining -> dimension proposals ->
+    ratification -> convergence reporting): with this off, the nightly
+    librarian's mining phase is not invoked at all and nothing about an
+    existing deployment's behavior changes. Mirrors
+    :func:`resolve_comparator_enabled`'s shape exactly: env
+    ``ATHENAEUM_SIGNAL_MINING_ENABLED`` (``1``/``true``/``yes``/``on``,
+    case-insensitive) > yaml ``librarian.signal_mining.enabled`` > default
+    ``False``. An operator enables this deliberately, after seeing what the
+    loop would have proposed via :func:`resolve_signal_mining_dry_run`.
+    """
+    env = os.environ.get("ATHENAEUM_SIGNAL_MINING_ENABLED")
+    if env is not None:
+        return env.strip().lower() in ("1", "true", "yes", "on")
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            section_cfg = cfg.get("signal_mining")
+            if isinstance(section_cfg, dict):
+                raw = section_cfg.get("enabled")
+                if isinstance(raw, bool):
+                    return raw
+    return False
+
+
+def resolve_signal_mining_dry_run(config: dict[str, Any] | None) -> bool:
+    """``librarian.signal_mining.dry_run`` (default True).
+
+    Issue athenaeum#719's wiring AC: "Provide a dry-run mode that lists
+    proposals without queueing them." Consulted only when
+    :func:`resolve_signal_mining_enabled` is True. Defaulting to True means
+    the first time an operator flips the master switch on, the loop lists
+    what it would have proposed rather than immediately queueing anything —
+    the operator must take a second, explicit step
+    (``librarian.signal_mining.dry_run: false``) to let proposals reach the
+    queue. Mirrors :func:`resolve_signal_mining_enabled`'s env/yaml/default
+    precedence.
+    """
+    env = os.environ.get("ATHENAEUM_SIGNAL_MINING_DRY_RUN")
+    if env is not None:
+        return env.strip().lower() in ("1", "true", "yes", "on")
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            section_cfg = cfg.get("signal_mining")
+            if isinstance(section_cfg, dict):
+                raw = section_cfg.get("dry_run")
+                if isinstance(raw, bool):
+                    return raw
+    return True
+
+
 def resolve_comparator_enabled(config: dict[str, Any] | None) -> bool:
     """Resolve the five-verdict comparator opt-in (issue athenaeum#715). DEFAULT OFF.
 
