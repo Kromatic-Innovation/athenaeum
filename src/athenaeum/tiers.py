@@ -7037,10 +7037,22 @@ def tier4_escalate(
 
         When ``config is None`` (legacy / test callers) we also return ``None``
         to preserve the pre-athenaeum#170 "no config → no auto-apply" behavior.
+
+        Issue athenaeum#2032: ``wiki_root=pending_path.parent`` is threaded
+        through so layer 3's ledger-backed override (issue athenaeum#2018)
+        is live on this gating path, not just the drafter's read path. No
+        ``as_of`` is passed — every item reaching this function is a FRESH
+        verdict being produced right now (a newly-detected contradiction,
+        never an already-pending block being re-decided; that path is
+        :func:`reresolve_open_questions`), so the "decisions already in
+        flight" protection does not apply here and the latest approved
+        override is safe to honor directly.
         """
         if config is None:
             return None
-        return resolve_auto_apply_threshold_for(config, action)
+        return resolve_auto_apply_threshold_for(
+            config, action, wiki_root=pending_path.parent
+        )
 
     def _should_auto_apply(
         prop: Any, members: list[str] | None = None
@@ -7992,7 +8004,18 @@ def reresolve_open_questions(
     auto_apply_enabled = resolve_auto_apply(resolved_config)
     resolver_model_id = _resolver_model(resolved_config)
 
-    def _should_auto_apply(prop: Any, members: list[str] | None = None) -> bool:
+    def _should_auto_apply(
+        prop: Any, members: list[str] | None = None, *, as_of: str | None = None
+    ) -> bool:
+        """Issue athenaeum#2032: ``as_of`` must be the re-decided block's own
+        ``PendingQuestion.raised_at`` -- this block was ALREADY pending before
+        "now", so the ledger-backed override (layer 3, issue athenaeum#2018) must
+        only be honored if it was approved no later than that raise time (see
+        :func:`athenaeum.config.auto_apply_threshold_ledger_override_for`'s
+        ``as_of`` contract). This is the one gate in this module that
+        re-decides something already in flight; the fresh-verdict gate in
+        :func:`tier4_escalate` never passes ``as_of``.
+        """
         # Issue athenaeum#1997: a Jev-routed proposal is human-review-only
         # regardless of confidence -- see the sibling gate's identical check
         # in tier4_escalate above for the full rationale.
@@ -8023,7 +8046,9 @@ def reresolve_open_questions(
                     channel_ref,
                 )
             return authorized
-        thr = resolve_auto_apply_threshold_for(resolved_config, action)
+        thr = resolve_auto_apply_threshold_for(
+            resolved_config, action, wiki_root=pending_path.parent, as_of=as_of
+        )
         if thr is None:
             return False
         return getattr(prop, "confidence", 0.0) >= thr
@@ -8123,7 +8148,19 @@ def reresolve_open_questions(
             block = block + "\n" + rendered
 
         member_paths = [str(m.path) for m in members]
-        if auto_apply_enabled and _should_auto_apply(proposal, member_paths):
+        # Issue athenaeum#2032: this block was already raised (sitting in
+        # pending_path) before this re-resolve pass ran -- pass its own
+        # raised_at (even when empty) so a ledger override approved after
+        # the fact (or one we cannot prove predates the block) cannot
+        # retroactively widen the floor that gates it. Passing the empty
+        # string through (rather than normalizing it to ``None``) is
+        # deliberate: ``None`` means "no as_of filter, trust the latest
+        # approval," which is the OPPOSITE of the fail-closed behavior an
+        # unparseable timestamp must get -- see
+        # ``auto_apply_threshold_ledger_override_for``'s ``as_of`` contract.
+        if auto_apply_enabled and _should_auto_apply(
+            proposal, member_paths, as_of=pq.raised_at
+        ):
             applied = apply_auto_resolution(block, proposal, model=resolver_model_id)
             if applied != block:
                 log.info(
