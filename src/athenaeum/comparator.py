@@ -1033,9 +1033,19 @@ def record_comparison(
     authority_basis: str = "implicit-superuser",
     registry_epoch: int | None = None,
     tree_epoch: int | None = None,
+    coord_origins: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Compare *page_a*/*page_b*, memoized via the ledger, and append the
     resulting verdict.
+
+    *coord_origins* (issue athenaeum#1994, optional, ``None`` by default):
+    an honest ``{dimension_name: answer_id}`` mapping naming, for every
+    dimension in this pair's coordinates that came from an answered
+    decision (e.g. :func:`athenaeum.decision_answers._apply_coordinate_answer`),
+    the id of the answer that supplied it. ``None``/omitted -- every other
+    caller (the no-LLM Gate 1 auto-dedup pass, ``wiki_dedupe``, ``recompare``,
+    ...) -- stays the empty mapping this field always was; never fabricate
+    an id for a coordinate that did not come from an answer.
 
     Issue athenaeum#715 AC5: a pair whose verdict is FRESH
     (:func:`athenaeum.verdicts.get_verdict_status`) is not re-compared --
@@ -1113,7 +1123,7 @@ def record_comparison(
     basis = Basis(
         content_hashes=[content_hash(page_a.text), content_hash(page_b.text)],
         coords=[_coord_snapshot(registry, page_a.meta), _coord_snapshot(registry, page_b.meta)],
-        coord_origins={},
+        coord_origins=dict(coord_origins or {}),
         registry_epoch=registry_epoch,
         tree_epoch=tree_epoch,
         authority_basis=authority_basis,
