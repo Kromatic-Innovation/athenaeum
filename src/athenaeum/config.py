@@ -4375,7 +4375,7 @@ search_backend: vector
 #     separates: true            # separator (may yield DISTINCT) vs sequencer
 #     applies_to:                # selector bounding which claims carry this
 #       memory_class: [entity]   # axis; {} / omitted = applies to every claim
-#     state: backfill            # backfill | enforced
+#     state: backfill            # backfill | enforced | retired
 #     origin: operator           # builtin | operator | proposed:<id>
 #     since: 2026-08-01
 # librarian:
