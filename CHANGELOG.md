@@ -42,6 +42,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rather than adding a third surface. This measures; it never overrides a
   human's answer.
 
+- **Agent triage lane + confirmed-wrong audit threshold (issue athenaeum#1995).**
+  New `src/athenaeum/triage.py`: `run_triage()` walks the unified decision
+  queue (`athenaeum.decisions.list_pending_decisions`) once per pass.
+  Authority-routed items (`confirmation`/`retraction`/`quarantine`/
+  `proposed-rule`, and anything unrecognized) are only PREPARED — never
+  auto-answered, a safety boundary tested explicitly, including under
+  prompt-injection pressure. Competence-routed `question`/`coordinate`
+  items are offered to a pluggable `TriageResearcher`; the shipped default
+  (`coordinate_request_researcher`) only ever resolves `coordinate` items
+  (issue athenaeum#1993's structured separator-dimension decision type —
+  every `question` is declined, since free text carries no structural
+  contract a deterministic reader can safely act on): for each named
+  pair/dimension it reads BOTH sides' CURRENT frontmatter coordinate value
+  (`athenaeum.dimensions.coordinate_value`) and, when every named
+  dimension already has a value on both sides, resupplies those same
+  already-asserted values through the SAME `coordinate` applier issue
+  athenaeum#1993 added (`decision_answers._apply_coordinate_answer`),
+  which mechanically re-compares the pair via the real comparator entry
+  point — no LLM call, and this module never re-judges that comparator
+  verdict itself. `merge` and `audit` items are deliberately excluded from
+  absorption even though they are competence-routed and answerable (see
+  the module docstring, "Why only `question`/`coordinate`"). A resolved
+  item is submitted through `triage.submit_answer()`, which reuses the
+  EXACT validate-then-write primitives `athenaeum decisions answer` uses
+  (`decision_framing.answerable_as`/`validate_answer`,
+  `decision_answers.write_decision_answer`) — no parallel write path,
+  unchanged by the `coordinate` type since those primitives are already
+  generic over decision type. `decided_by: agent:<ref>` is stamped
+  directly onto a `question` answer's submitted verdict text (the one
+  place the attribution survives into that type's durable record); a
+  `coordinate` answer's verdict is a JSON payload the applier parses and
+  discards after writing its own fixed summary, so `decided_by` for that
+  type is recorded in this module's own run report and, when sampled, the
+  calibration ledger instead — see the module docstring, "decided_by
+  stamping". New CLI: `athenaeum triage run [--dry-run] [--json]` and
+  `athenaeum triage report [--json]`.
+  `athenaeum.calibration` gains additive-only sampling for this channel —
+  `TRIAGE_TIER_NAME`, `sample_triage_decision()`,
+  `triage_confirmed_wrong_count()`, `triage_confirmed_wrong_threshold_breached()`
+  (≥2 confirmed-wrong triage resolutions in a rolling 92-day quarter trips a
+  review) — built entirely on the EXISTING `should_sample`/
+  `record_audit_review`/`calibration_summary` primitives; none of their
+  signatures changed. New config knob
+  `librarian.audit_sample_rate_agent_triage` (env
+  `ATHENAEUM_AUDIT_SAMPLE_RATE_AGENT_TRIAGE`, default `0.15`). Authority vs.
+  competence items reaching the human are counted separately in the run
+  report. Budget instrumentation (items/day, decision time) needs no new
+  wiring — `decision_answers.apply_decision_answers` already records every
+  applied decision answer into the budget ledger regardless of submitter.
+  Prompt-injection hardening: any corpus-page-body snippet this module
+  surfaces goes through `triage.render_research_digest()`
+  (`athenaeum.prompt_safety.fence_untrusted`), and the routing/attribution
+  gates are derived only from code, never from parsed page or question
+  text — proven by `tests/test_triage.py`'s `TestInjectionHardening`.
 - **Jev typed-decision backend for the `resolve` knob's action-choice path
   (issue athenaeum#1997, Option A).** A new `DecisionBackend` Protocol +
   `DecisionResult` dataclass (`decision_provider.py`, a sibling L3 module to

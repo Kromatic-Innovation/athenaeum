@@ -524,6 +524,30 @@ at pack-build time, with the pack name in the message.
 
 ## `librarian`
 
+### `resolve_audit_sample_rate_agent_triage`
+
+- **YAML path:** `librarian.audit_sample_rate_agent_triage`
+- **Environment variable:** `ATHENAEUM_AUDIT_SAMPLE_RATE_AGENT_TRIAGE`
+- **CLI flag:** —
+- **Default:** `0.15`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the share of agent-triage resolutions sampled for human audit.
+
+A second calibration-sampling channel alongside the T1/T2 ones above,
+for `athenaeum.triage`'s research-resolved ``decisions answer``
+submissions — reusing the SAME ``should_sample`` primitive
+(`athenaeum.calibration.sample_triage_decision`) against the SAME
+ledger, keyed to a distinct tier name
+(`athenaeum.calibration.TRIAGE_TIER_NAME`) rather than a new
+mechanism. Env ``ATHENAEUM_AUDIT_SAMPLE_RATE_AGENT_TRIAGE`` > yaml
+``librarian.audit_sample_rate_agent_triage`` > default ``0.15`` (15%,
+roughly double the settled T1/T2 band — this is a brand-new automated
+channel with no track record yet, so a higher initial sampling share is
+the conservative choice until the confirmed-wrong rate
+(`athenaeum.calibration.triage_confirmed_wrong_threshold_breached`)
+says otherwise). Clamped to ``[0.0, 1.0]``.
+
 ### `resolve_audit_sample_rate_t1_rejects`
 
 - **YAML path:** `librarian.audit_sample_rate_t1_rejects`
