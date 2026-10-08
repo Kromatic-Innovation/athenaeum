@@ -83,12 +83,16 @@ from typing import Any, Protocol, runtime_checkable
 
 from athenaeum.config import resolve_sensitivity_classes
 from athenaeum.pii import (
+    _BARE_PHONE_MIN_DIGITS,
     _EMAIL_RE,
     _PHONE_RE,
+    _has_bare_run_id_label_prefix,
     _has_enough_digits,
     _has_labeled_identifier_prefix,
     _is_embedded_bare_digit_run,
+    _is_embedded_slug_digit_run,
     _is_excluded_phone_shape,
+    _normalize_phone_token,
 )
 from athenaeum.screening import _ACCESS_RANK
 
@@ -245,7 +249,12 @@ class _PhoneRecognizer:
     is skipped, and a bare digit run embedded in a URL/path/filename
     identifier or inside backticks (:func:`athenaeum.pii._is_embedded_bare_digit_run`;
     athenaeum#2006) is skipped — so migrating a caller onto this registry cannot
-    regress any of those fixes. Unlike :func:`~athenaeum.pii.find_inline_phones` this
+    regress any of those fixes. Also skips a hyphen-joined digit-group token
+    glued onto a letter-containing slug segment
+    (:func:`athenaeum.pii._is_embedded_slug_digit_run`; athenaeum#2027) and a bare
+    10-11 digit run labeled run/comment/job/id with no joiner
+    (:func:`athenaeum.pii._has_bare_run_id_label_prefix`; athenaeum#2027).
+    Unlike :func:`~athenaeum.pii.find_inline_phones` this
     does not dedupe: each occurrence of a repeated value is its own match,
     carrying its own span. Scans ``text`` only; ``frontmatter`` is accepted
     for protocol conformance but not consulted.
@@ -267,6 +276,15 @@ class _PhoneRecognizer:
             if _has_labeled_identifier_prefix(source[: m.start(1)]):
                 continue
             if _is_embedded_bare_digit_run(source, m.start(1), m.end(1)):
+                continue
+            if _is_embedded_slug_digit_run(source, m.start(1), m.end(1)):
+                continue
+            candidate = _normalize_phone_token(token)
+            if (
+                candidate.isdigit()
+                and _BARE_PHONE_MIN_DIGITS <= len(candidate) <= 11
+                and _has_bare_run_id_label_prefix(source[: m.start(1)])
+            ):
                 continue
             matches.append(
                 SensitivityMatch(

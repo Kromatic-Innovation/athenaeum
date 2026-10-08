@@ -639,6 +639,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fixed on this branch but not yet re-run, so this report withholds their
   tables pending the next dispatch.
 
+### Fixed
+
+- **Phone detector's second false-positive class: slug ids, epoch-ms
+  timestamps, labeled run/comment ids (issue athenaeum#2027).** After
+  athenaeum#2006, `find_inline_phones`/the `phone` sensitivity recogniser
+  still over-matched a hyphen-joined digit-group token embedded in a
+  larger slug containing letters, a date-number-hash id pattern, a bare
+  13-digit epoch-millisecond timestamp (standalone or after a dotted
+  prefix), and a bare 10-11 digit run with a `run`/`runs`/`comment`/
+  `job`/`id` label but no joiner. `src/athenaeum/pii.py` gains
+  `_is_embedded_slug_digit_run` (a `-`-joiner-only, grouped-token sibling
+  of `_is_embedded_bare_digit_run` that leaves that function's
+  URL-embedded-formatted-phone contract untouched),
+  `_has_bare_run_id_label_prefix` +
+  `BARE_RUN_ID_LABEL_PREFIXES` (a label list restricted to bare 10-11
+  digit runs so a labeled, formatted phone like `mobile 917-231-6130`
+  is unaffected), and `_is_epoch_millis` / `_has_epoch_millis_group` +
+  `_is_yyyymmdd` / `_has_date_group` (value-based checks folded into
+  `_is_excluded_phone_shape`, gated on no `+`/parens/whitespace).
+  `sensitivity.py`'s `_PhoneRecognizer` and `outbound_pii.py`'s egress
+  lint (which calls through `sensitivity.classify`) both inherit the fix
+  with no further code change, since all three share the same
+  `athenaeum.pii` exclusion helpers. No public signature changed;
+  `lint-pii`, `is_pii_flagged`, and `identify_pii_hazards` are unaffected
+  except as a direct consequence of fewer phone-shaped false positives.
+  **`_is_embedded_slug_digit_run` additionally requires the matched token
+  itself to carry a `YYYYMMDD` date group or an epoch-millis group**
+  (Seer finding 17625842 on athenaeum#2028's own review) — without that
+  gate, any hyphen-formatted phone glued onto an ordinary lettered label
+  (`sales-555-123-4567`) was suppressed outright, a false-NEGATIVE on real
+  PII and the opposite failure from the one this entry closes. Both
+  existing slug fixtures already carry a date group, so the added gate
+  changes no prior case; a new `STILL_MATCHES` fixture
+  (`sales-555-123-4567` → `555-123-4567`) locks the regression closed.
+
 ### Changed
 
 - **`cli_tool_bridge.py` now targets the `mcp` 2.x API, and the `mcp<2.0` pin
