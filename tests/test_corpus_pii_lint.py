@@ -22,6 +22,7 @@ from athenaeum.pii import (
     PII_ALLOWLIST_FILENAME,
     PiiAllowlistEntry,
     adjudicate_corpus_pii,
+    allowlist_matches,
     iter_corpus_files,
     load_pii_allowlist,
     scan_corpus_pii,
@@ -405,6 +406,77 @@ class TestLoadPiiAllowlist:
         assert load_pii_allowlist(p) == ([], [])
 
 
+class TestLoadPiiAllowlistPatterns:
+    """Domain-level `pattern` entries (issue athenaeum#2007). Synthetic only."""
+
+    def test_loads_pattern_and_reason(self, tmp_path: Path) -> None:
+        p = tmp_path / "a.yml"
+        p.write_text(
+            "- pattern: \"[^@]+@example\\\\.invalid\"\n"
+            "  reason: example-domain placeholder, not a person\n",
+            encoding="utf-8",
+        )
+        entries, errors = load_pii_allowlist(p)
+        assert errors == []
+        assert entries == [
+            PiiAllowlistEntry(
+                pattern=r"[^@]+@example\.invalid",
+                reason="example-domain placeholder, not a person",
+            )
+        ]
+
+    def test_value_and_pattern_together_is_rejected(self, tmp_path: Path) -> None:
+        p = tmp_path / "a.yml"
+        p.write_text(
+            "- value: a@example.invalid\n"
+            "  pattern: \"[^@]+@example\\\\.invalid\"\n"
+            "  reason: not allowed\n",
+            encoding="utf-8",
+        )
+        entries, errors = load_pii_allowlist(p)
+        assert entries == []
+        assert len(errors) == 1
+        assert "exactly one" in errors[0]
+
+    def test_neither_value_nor_pattern_is_rejected(self, tmp_path: Path) -> None:
+        p = tmp_path / "a.yml"
+        p.write_text("- reason: not allowed\n", encoding="utf-8")
+        entries, errors = load_pii_allowlist(p)
+        assert entries == []
+        assert len(errors) == 1
+        assert "value" in errors[0] and "pattern" in errors[0]
+
+    def test_pattern_missing_reason_is_reported_and_skipped(self, tmp_path: Path) -> None:
+        p = tmp_path / "a.yml"
+        p.write_text("- pattern: \"[^@]+@example\\\\.invalid\"\n", encoding="utf-8")
+        entries, errors = load_pii_allowlist(p)
+        assert entries == []
+        assert len(errors) == 1
+        assert "reason" in errors[0]
+
+    def test_invalid_regex_is_reported_and_skipped_not_raised(self, tmp_path: Path) -> None:
+        p = tmp_path / "a.yml"
+        p.write_text(
+            "- pattern: \"[unclosed\"\n  reason: bad pattern\n", encoding="utf-8"
+        )
+        entries, errors = load_pii_allowlist(p)
+        assert entries == []
+        assert len(errors) == 1
+        assert "invalid regex" in errors[0]
+
+    def test_duplicate_pattern_is_rejected(self, tmp_path: Path) -> None:
+        p = tmp_path / "a.yml"
+        p.write_text(
+            "- pattern: \"[^@]+@example\\\\.invalid\"\n  reason: one\n"
+            "- pattern: \"[^@]+@example\\\\.invalid\"\n  reason: two\n",
+            encoding="utf-8",
+        )
+        entries, errors = load_pii_allowlist(p)
+        assert len(entries) == 1
+        assert len(errors) == 1
+        assert "duplicate pattern" in errors[0]
+
+
 class TestSelfScanExclusion:
     def test_allowlist_is_excluded_from_its_own_scan(self, tmp_path: Path) -> None:
         # THE load-bearing case: without this, authoring the artifact athenaeum#437
@@ -494,6 +566,113 @@ class TestAdjudication:
         assert not result.is_clean
         assert result.unexplained_count == 1
         assert result.adjudicated_count == 0
+
+
+class TestAdjudicationPatterns:
+    """Domain-level `pattern` entries adjudicate lint-pii findings (athenaeum#2007).
+
+    Synthetic fixtures only: the `example.invalid` domain (RFC 2606) and
+    made-up names.
+    """
+
+    def test_pattern_adjudicates_every_localpart_at_the_domain(
+        self, tmp_path: Path
+    ) -> None:
+        root = _wiki(tmp_path)
+        (root / "wiki" / "_queue.md").write_text(
+            "alpha@example.invalid and beta@example.invalid\n", encoding="utf-8"
+        )
+        findings = scan_corpus_pii(root / "wiki")
+        entries = [
+            PiiAllowlistEntry(
+                pattern=r"[^@]+@example\.invalid",
+                reason="example-domain placeholder, not a person",
+            )
+        ]
+
+        result = adjudicate_corpus_pii(findings, entries)
+
+        assert result.is_clean
+        assert result.adjudicated_count == 2
+        assert result.stale == []
+
+    def test_pattern_must_match_the_whole_token(self, tmp_path: Path) -> None:
+        # re.fullmatch -- a pattern that only matches part of the token must
+        # not adjudicate it (mirrors the exact-value "no substring match"
+        # contract).
+        root = _wiki(tmp_path)
+        (root / "wiki" / "_queue.md").write_text(
+            "alpha@notexample.invalid.example.com\n", encoding="utf-8"
+        )
+        findings = scan_corpus_pii(root / "wiki")
+        entries = [
+            PiiAllowlistEntry(
+                pattern=r"[^@]+@example\.invalid",
+                reason="example-domain placeholder, not a person",
+            )
+        ]
+
+        result = adjudicate_corpus_pii(findings, entries)
+
+        assert not result.is_clean
+        assert result.unexplained_count == 1
+
+    def test_pattern_matching_nothing_is_stale(self, tmp_path: Path) -> None:
+        root = _wiki(tmp_path)
+        (root / "wiki" / "_queue.md").write_text(
+            "real.person@corp.example\n", encoding="utf-8"
+        )
+        findings = scan_corpus_pii(root / "wiki")
+        entries = [
+            PiiAllowlistEntry(
+                pattern=r"[^@]+@example\.invalid",
+                reason="example-domain placeholder, not a person",
+            )
+        ]
+
+        result = adjudicate_corpus_pii(findings, entries)
+
+        assert not result.is_clean
+        assert len(result.stale) == 1
+        assert result.stale[0].pattern == r"[^@]+@example\.invalid"
+
+    def test_value_and_pattern_entries_combine(self, tmp_path: Path) -> None:
+        root = _wiki(tmp_path)
+        (root / "wiki" / "_queue.md").write_text(
+            "noreply@example.com and tagged@example.invalid\n", encoding="utf-8"
+        )
+        findings = scan_corpus_pii(root / "wiki")
+        entries = [
+            PiiAllowlistEntry(value="noreply@example.com", reason="service account"),
+            PiiAllowlistEntry(
+                pattern=r"[^@]+@example\.invalid", reason="example-domain placeholder"
+            ),
+        ]
+
+        result = adjudicate_corpus_pii(findings, entries)
+
+        assert result.is_clean
+        assert result.adjudicated_count == 2
+        assert result.stale == []
+
+
+class TestAllowlistMatches:
+    """Direct coverage of the shared helper (issue athenaeum#2007)."""
+
+    def test_exact_value_match(self) -> None:
+        entries = [PiiAllowlistEntry(value="a@example.invalid", reason="r")]
+        assert allowlist_matches("a@example.invalid", entries)
+        assert not allowlist_matches("b@example.invalid", entries)
+
+    def test_pattern_match(self) -> None:
+        entries = [
+            PiiAllowlistEntry(pattern=r"[^@]+@example\.invalid", reason="r")
+        ]
+        assert allowlist_matches("anyone@example.invalid", entries)
+        assert not allowlist_matches("anyone@other.invalid", entries)
+
+    def test_empty_allowlist_matches_nothing(self) -> None:
+        assert not allowlist_matches("a@example.invalid", [])
 
 
 class TestLintPiiAllowlistCLI:

@@ -62,6 +62,7 @@ written unless ``apply=True``.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -71,6 +72,7 @@ from athenaeum.atomic_io import atomic_write_text
 from athenaeum.pending_merges import _parse_block, _split_blocks
 from athenaeum.pii import (
     PII_ALLOWLIST_FILENAME,
+    PiiAllowlistEntry,
     find_inline_emails,
     find_inline_phones,
     is_service_address,
@@ -189,23 +191,44 @@ def _redact(text: str, values: Iterable[str]) -> str:
     return out
 
 
-def _detect_values(text: str, allowed: frozenset[str]) -> list[str]:
+def _allowed_match(value: str, allowed: tuple[PiiAllowlistEntry, ...]) -> bool:
+    """True when *value* is adjudicated by an entry in *allowed*.
+
+    Preserves this module's pre-existing exact-``value`` contract exactly
+    (case-INSENSITIVE equality, via ``casefold()`` — unlike
+    :func:`athenaeum.pii.allowlist_matches`'s case-sensitive exact match) and
+    adds ``pattern`` entries (issue athenaeum#2007), matched via
+    ``re.fullmatch`` against the whole value, same as every other pattern
+    consumer.
+    """
+    folded = value.casefold()
+    for entry in allowed:
+        if entry.value is not None:
+            if entry.value.casefold() == folded:
+                return True
+        elif entry.pattern is not None and re.fullmatch(entry.pattern, value):
+            return True
+    return False
+
+
+def _detect_values(text: str, allowed: tuple[PiiAllowlistEntry, ...]) -> list[str]:
     """Contact values in *text* that are genuine, unadjudicated PII.
 
     Uses the detectors ``lint-pii`` gates on (:func:`scan_corpus_pii`'s pair),
     minus service identifiers (``git@github.com``, calendar group ids — issue
-    athenaeum#507) and minus anything the allowlist has adjudicated.
+    athenaeum#507) and minus anything the allowlist has adjudicated (exact
+    value, case-insensitive, or a ``pattern`` entry — issue athenaeum#2007).
     """
     found: list[str] = []
     for email in find_inline_emails(text):
         if is_service_address(email):
             continue
-        if email.casefold() in allowed:
+        if _allowed_match(email, allowed):
             continue
         if email not in found:
             found.append(email)
     for phone in find_inline_phones(text):
-        if phone.casefold() in allowed:
+        if _allowed_match(phone, allowed):
             continue
         if phone not in found:
             found.append(phone)
@@ -213,7 +236,7 @@ def _detect_values(text: str, allowed: frozenset[str]) -> list[str]:
 
 
 def _scrub_one_block(
-    block_text: str, *, values: list[str] | None, allowed: frozenset[str]
+    block_text: str, *, values: list[str] | None, allowed: tuple[PiiAllowlistEntry, ...]
 ) -> tuple[str, list[str], list[str]]:
     """Scrub one block. Returns ``(new_text, redacted, residual)``."""
     lines, flags = _partition_block_lines(block_text)
@@ -239,14 +262,14 @@ def _scrub_one_block(
 
 def _resolve_allowed(
     merges_path: Path, allowlist_path: Path | None, *, consult: bool
-) -> frozenset[str]:
+) -> tuple[PiiAllowlistEntry, ...]:
     if not consult:
-        return frozenset()
+        return ()
     path = allowlist_path or (merges_path.parent / PII_ALLOWLIST_FILENAME)
     entries, errors = load_pii_allowlist(path)
     for err in errors:
         log.warning("pending_merges_pii: allowlist entry ignored -- %s", err)
-    return frozenset(entry.value.casefold() for entry in entries)
+    return tuple(entries)
 
 
 def scrub_pending_merges(

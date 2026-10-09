@@ -996,7 +996,7 @@ Redact contact data out of merge-proposal bodies in place. The zero-LLM purge pa
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--allowlist` | — | — | Adjudicated PII allowlist (default: `wiki/_pii-allowlist.yml`). A value with a reasoned entry there is not PII and is left untouched. |
+| `--allowlist` | — | — | Adjudicated PII allowlist (default: `wiki/_pii-allowlist.yml`). A value with a reasoned entry there is not PII and is left untouched; an anchored regex `pattern` entry is honoured the same way. |
 | `--apply` | `False` | — | Redact the detected values in place. Default: dry-run — report only, write nothing. |
 | `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
@@ -1474,7 +1474,7 @@ Corpus-wide PII gate: scan EVERY file under wiki/ (queue/index/archive/_-prefixe
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
-| `--allowlist` | — | — | Adjudicated allowlist of values that are NOT PII (service accounts, tagged test addresses, example-domain placeholders, identifier/timestamp digit runs the phone axis misreads). Each entry needs a non-empty reason. Default: <knowledge-root>/wiki/_pii-allowlist.yml. A missing file means nothing is adjudicated. The allowlist is excluded from its own scan (unblocking). |
+| `--allowlist` | — | — | Adjudicated allowlist of values that are NOT PII (service accounts, tagged test addresses, example-domain placeholders, identifier/timestamp digit runs the phone axis misreads). Each entry needs a non-empty reason, and is either an exact `value` or an anchored regex `pattern` matched via re.fullmatch -- e.g. a domain-level entry covering every localpart at that domain with one entry. Default: <knowledge-root>/wiki/_pii-allowlist.yml. A missing file means nothing is adjudicated. The allowlist is excluded from its own scan (unblocking). |
 | `--json` | `False` | — | Emit machine-readable JSON findings instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge root (default: ~/knowledge). |
 

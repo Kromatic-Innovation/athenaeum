@@ -312,7 +312,12 @@ def recompare_pending_merges(
     # human". A missing or malformed allowlist degrades to "nothing
     # adjudicated" (fails toward MORE hazards flagged, never fewer).
     allowlist_entries, _allowlist_errors = load_pii_allowlist(wiki_root / PII_ALLOWLIST_FILENAME)
-    allowlist = {e.value: e.reason for e in allowlist_entries}
+    # identify_pii_hazards() adjudicates by exact value only -- a pattern
+    # entry (issue athenaeum#2007) has no `value` and is excluded from this
+    # mapping rather than polluting it with a `None` key. Propagating
+    # pattern adjudication into this hazard check is out of scope here; see
+    # athenaeum.pii.load_pii_allowlist's docstring.
+    allowlist = {e.value: e.reason for e in allowlist_entries if e.value is not None}
     # Issue athenaeum#689 AC3/AC4: a value with a sticky "not PII" verdict in
     # the athenaeum#712 ledger is merged into the SAME allowlist mapping
     # identify_pii_hazards() already consults -- no second hazard-exclusion

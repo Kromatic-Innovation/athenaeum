@@ -204,6 +204,30 @@ class TestScrubPendingMerges:
         assert PHONE not in text
         assert result.scrubbed[0].values == (PHONE,)
 
+    def test_leaves_pattern_allowlisted_values_alone(self, tmp_path: Path) -> None:
+        """A domain-level `pattern` entry (issue athenaeum#2007) adjudicates
+        every localpart at that domain, same as :func:`scrub_pending_merges`'s
+        existing exact-`value` adjudication."""
+        root = _seed_root(tmp_path)
+        draft = (
+            f"Real contact: {EMAIL}. Account marker: tag1@example.invalid "
+            "and tag2@example.invalid."
+        )
+        merges_path = _queue_proposal(root, draft=draft)
+        (root / "wiki" / "_pii-allowlist.yml").write_text(
+            "- pattern: \"[^@]+@example\\\\.invalid\"\n"
+            '  reason: "example-domain placeholder, not a person"\n',
+            encoding="utf-8",
+        )
+
+        result = scrub_pending_merges(merges_path, apply=True)
+
+        text = merges_path.read_text(encoding="utf-8")
+        assert "tag1@example.invalid" in text
+        assert "tag2@example.invalid" in text
+        assert EMAIL not in text
+        assert result.scrubbed[0].values == (EMAIL,)
+
     def test_allowlist_covers_phones_too(self, tmp_path: Path) -> None:
         """The phone axis carries athenaeum#500's false positives (a 13-digit
         record id reads as a phone), so adjudication has to reach it."""

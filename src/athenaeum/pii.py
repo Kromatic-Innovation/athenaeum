@@ -1700,10 +1700,21 @@ PII_ALLOWLIST_FILENAME = "_pii-allowlist.yml"
 
 @dataclass(frozen=True)
 class PiiAllowlistEntry:
-    """One adjudicated value: "this token is not PII, and here is why"."""
+    """One adjudicated entry: "this token (or shape of token) is not PII".
 
-    value: str
+    Exactly one of ``value``/``pattern`` is set (issue athenaeum#2007) — never
+    both, never neither; :func:`load_pii_allowlist` enforces this at parse
+    time and :func:`allowlist_matches` is the single place that interprets
+    either form. ``value`` is the original exact-match form (equality only,
+    no case-folding, no substring match). ``pattern`` is a regex matched via
+    ``re.fullmatch`` against a whole candidate token — e.g. a domain-level
+    entry like ``[^@]+@example\\.invalid`` adjudicates every localpart at
+    that domain with one entry instead of one per address.
+    """
+
     reason: str
+    value: str | None = None
+    pattern: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1759,11 +1770,21 @@ def load_pii_allowlist(path: Path) -> tuple[list[PiiAllowlistEntry], list[str]]:
     "nothing adjudicated", so behaviour is exactly as it was before athenaeum#936
     (``([], [])``).
 
-    Schema — one entry per distinct value, each carrying a required non-empty
-    ``reason``::
+    Schema — one entry per distinct value, OR one entry per anchored regex
+    pattern (issue athenaeum#2007, e.g. a domain-level allowlisting), each
+    carrying a required non-empty ``reason``::
 
         - value: "noreply@example.com"
           reason: "service account, not a person"
+        - pattern: "[^@]+@example\\.invalid"
+          reason: "example-domain placeholder, not a person"
+
+    An entry must name exactly one of ``value``/``pattern`` — both or
+    neither is malformed. A ``pattern`` is matched via ``re.fullmatch``
+    against a whole candidate token (:func:`allowlist_matches`), never a
+    partial/substring match — the same "no near-miss" contract the existing
+    exact-``value`` form already has. An invalid regex is reported and
+    skipped, same as any other malformed entry.
 
     Malformed input is REPORTED AND SKIPPED, never raised and never partially
     trusted (mirroring :func:`athenaeum.rules.load_shape_rules`). This fails
@@ -1788,28 +1809,70 @@ def load_pii_allowlist(path: Path) -> tuple[list[PiiAllowlistEntry], list[str]]:
         ]
 
     entries: list[PiiAllowlistEntry] = []
-    seen: set[str] = set()
+    seen_values: set[str] = set()
+    seen_patterns: set[str] = set()
     for i, item in enumerate(raw):
         where = f"{path}: entry {i}"
         if not isinstance(item, dict):
             errors.append(f"{where}: must be a mapping, got {type(item).__name__}")
             continue
         value = item.get("value")
+        pattern = item.get("pattern")
         reason = item.get("reason")
-        if not isinstance(value, str) or not value.strip():
-            errors.append(f"{where}: missing a non-empty 'value'")
+        has_value = isinstance(value, str) and bool(value.strip())
+        has_pattern = isinstance(pattern, str) and bool(pattern.strip())
+        if has_value and has_pattern:
+            errors.append(
+                f"{where}: entry must have exactly one of 'value'/'pattern', got both"
+            )
+            continue
+        if not has_value and not has_pattern:
+            errors.append(f"{where}: missing a non-empty 'value' or 'pattern'")
             continue
         if not isinstance(reason, str) or not reason.strip():
             # A value cannot be tolerated by omission: an entry with no stated
             # reason adjudicates nothing, so its value stays unexplained.
-            errors.append(f"{where} ({value!r}): missing a non-empty 'reason'")
+            label = value if has_value else pattern
+            errors.append(f"{where} ({label!r}): missing a non-empty 'reason'")
             continue
-        if value in seen:
-            errors.append(f"{where} ({value!r}): duplicate value")
-            continue
-        seen.add(value)
-        entries.append(PiiAllowlistEntry(value=value, reason=reason.strip()))
+        if has_value:
+            if value in seen_values:
+                errors.append(f"{where} ({value!r}): duplicate value")
+                continue
+            seen_values.add(value)
+            entries.append(PiiAllowlistEntry(value=value, reason=reason.strip()))
+        else:
+            if pattern in seen_patterns:
+                errors.append(f"{where} ({pattern!r}): duplicate pattern")
+                continue
+            try:
+                re.compile(pattern)
+            except re.error as exc:
+                errors.append(f"{where} ({pattern!r}): invalid regex -- {exc}")
+                continue
+            seen_patterns.add(pattern)
+            entries.append(PiiAllowlistEntry(pattern=pattern, reason=reason.strip()))
     return entries, errors
+
+
+def allowlist_matches(value: str, allowlist: Iterable[PiiAllowlistEntry]) -> bool:
+    """True when *value* is adjudicated by any entry in *allowlist* (issue athenaeum#2007).
+
+    An exact-``value`` entry matches by equality only — no case-folding, no
+    substring match, mirroring :func:`adjudicate_corpus_pii`'s pre-existing
+    contract. A ``pattern`` entry matches via ``re.fullmatch`` against the
+    WHOLE value — a pattern that only matches a prefix or suffix of *value*
+    is not a match. Single source of truth for "is this token adjudicated"
+    so every caller that consults the allowlist — today, :func:`lint-pii`'s
+    :func:`adjudicate_corpus_pii` — can never disagree about what counts.
+    """
+    for entry in allowlist:
+        if entry.value is not None:
+            if entry.value == value:
+                return True
+        elif entry.pattern is not None and re.fullmatch(entry.pattern, value):
+            return True
+    return False
 
 
 def adjudicate_corpus_pii(
@@ -1820,33 +1883,49 @@ def adjudicate_corpus_pii(
 ) -> PiiAdjudication:
     """Split *findings* into adjudicated vs unexplained against *entries*.
 
-    A token is adjudicated when an entry's ``value`` matches it exactly. Every
-    file keeps an entry in the result (so the two populations stay countable
-    per file) — read :attr:`PiiAdjudicatedFinding.is_adjudicated` rather than
-    the presence of the record.
+    A token is adjudicated when an entry's ``value`` matches it exactly, or
+    (issue athenaeum#2007) an entry's ``pattern`` matches it via
+    ``re.fullmatch`` — see :func:`allowlist_matches`, the single definition
+    both this function and any other caller use. Every file keeps an entry
+    in the result (so the two populations stay countable per file) — read
+    :attr:`PiiAdjudicatedFinding.is_adjudicated` rather than the presence of
+    the record.
 
     Any entry that matched nothing anywhere in the corpus is returned in
     ``stale``, so the artifact is kept honest as the corpus changes instead of
-    quietly becoming a blanket over values that are no longer there.
+    quietly becoming a blanket over values that are no longer there. Tracked
+    per ENTRY (not per matched value) so a ``pattern`` entry that matches
+    nothing is reported stale exactly like an unmatched ``value`` entry.
     """
-    allowed = {e.value: e for e in entries}
-    matched: set[str] = set()
-    out: list[PiiAdjudicatedFinding] = []
+    entries = list(entries)
+    matched_idx: set[int] = set()
 
+    def _find(token: str) -> int | None:
+        for idx, entry in enumerate(entries):
+            if entry.value is not None:
+                if entry.value == token:
+                    return idx
+            elif entry.pattern is not None and re.fullmatch(entry.pattern, token):
+                return idx
+        return None
+
+    out: list[PiiAdjudicatedFinding] = []
     for f in findings:
         allowlisted: list[str] = []
         unexplained_emails: list[str] = []
         unexplained_phones: list[str] = []
         for token in f.emails:
-            if token in allowed:
+            idx = _find(token)
+            if idx is not None:
                 allowlisted.append(token)
-                matched.add(token)
+                matched_idx.add(idx)
             else:
                 unexplained_emails.append(token)
         for token in f.phones:
-            if token in allowed:
+            idx = _find(token)
+            if idx is not None:
                 allowlisted.append(token)
-                matched.add(token)
+                matched_idx.add(idx)
             else:
                 unexplained_phones.append(token)
         out.append(
@@ -1858,7 +1937,7 @@ def adjudicate_corpus_pii(
             )
         )
 
-    stale = [e for v, e in allowed.items() if v not in matched]
+    stale = [e for idx, e in enumerate(entries) if idx not in matched_idx]
     return PiiAdjudication(findings=out, stale=stale, errors=list(errors))
 
 

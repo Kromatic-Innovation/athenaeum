@@ -41,6 +41,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`_pii-allowlist.yml` supports domain-level `pattern` entries (issue
+  athenaeum#2007).** Alongside the existing exact-`value`/`reason` entry,
+  `athenaeum.pii.load_pii_allowlist` now also accepts `{pattern, reason}` —
+  an anchored regex matched via `re.fullmatch` (never a partial/substring
+  match), so one entry can adjudicate every localpart at an allowlisted
+  domain instead of one entry per address. An entry must name exactly one
+  of `value`/`pattern`; both, neither, or an invalid regex is reported and
+  skipped, same fail-closed contract as a missing `reason`. New shared
+  helper `athenaeum.pii.allowlist_matches(value, allowlist)` is the single
+  place that interprets either form; `lint-pii`'s `adjudicate_corpus_pii`
+  and `merges scrub-pii` route through it (including per-entry `stale`
+  tracking for an unmatched pattern). `migrate-pii` and
+  `recompare.identify_pii_hazards` continue to adjudicate by exact value
+  only — their existing `{value: reason}`-mapping contracts are unchanged
+  for files with no pattern entries, and pattern entries are simply
+  excluded from those mappings rather than propagated (left for a follow-up
+  if needed).
 - **Self-tuning loop: the two remaining sibling proposal rails now actually
   run, behind the same master key (issue athenaeum#719 AC11/AC15).**
   `tier_movement_proposals.py` (issue athenaeum#2019) and

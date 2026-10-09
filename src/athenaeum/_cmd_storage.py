@@ -281,7 +281,10 @@ def add_storage_subparser(subparsers: argparse._SubParsersAction) -> None:
             "Adjudicated allowlist of values that are NOT PII (service "
             "accounts, tagged test addresses, example-domain placeholders, "
             "identifier/timestamp digit runs the phone axis misreads). Each "
-            "entry needs a non-empty reason. Default: "
+            "entry needs a non-empty reason, and is either an exact `value` "
+            "or (issue athenaeum#2007) an anchored regex `pattern` matched "
+            "via re.fullmatch -- e.g. a domain-level entry covering every "
+            "localpart at that domain with one entry. Default: "
             f"<knowledge-root>/wiki/{PII_ALLOWLIST_FILENAME}. A missing file "
             "means nothing is adjudicated. The allowlist is excluded from its "
             "own scan (issue athenaeum#936, unblocking athenaeum#437)."
@@ -671,7 +674,12 @@ def _load_migrate_pii_allowlist(wiki_root: Path) -> dict[str, str] | None:
             file=sys.stderr,
         )
         return None
-    return {e.value: e.reason for e in entries}
+    # migrate-pii adjudicates by exact value only (issue athenaeum#2007 added
+    # pattern entries to the allowlist schema for lint-pii; propagating
+    # pattern adjudication into migrate-pii's own flattened mapping is out of
+    # scope here) -- a pattern-only entry has no `value` and is simply
+    # excluded from this mapping rather than polluting it with a `None` key.
+    return {e.value: e.reason for e in entries if e.value is not None}
 
 
 def _print_skipped_allowlisted(skipped: tuple[PiiAllowlistEntry, ...]) -> None:
@@ -1082,9 +1090,12 @@ def _cmd_storage_lint_pii(args: argparse.Namespace) -> int:
     for err in result.errors:
         print(f"warning: allowlist entry ignored -- {err}", file=sys.stderr)
     for entry in result.stale:
+        label = (
+            f"value={entry.value!r}" if entry.value is not None else f"pattern={entry.pattern!r}"
+        )
         print(
             f"warning: stale allowlist entry (matches nothing in the corpus): "
-            f"{entry.value!r} -- {entry.reason}",
+            f"{label} -- {entry.reason}",
             file=sys.stderr,
         )
 
