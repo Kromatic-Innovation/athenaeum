@@ -60,6 +60,10 @@ one this issue cites, scored 2/5 or 1/5.
 
 ## What changed
 
+Two commits on `occam/2043`. The first (`575d581b`) covered the causes the
+`record=true` run named; the second (`8cbe3166`) covered the two residuals
+the runs after it exposed.
+
 1. `tiers._locate_anchor` (new, used by `apply_merge_ops`): exact match
    first, unchanged; when the exact form occurs **zero** times, a
    whitespace-tolerant match (each whitespace run in the anchor matches any
@@ -69,12 +73,30 @@ one this issue cites, scored 2/5 or 1/5.
    Pinned by `tests/test_2043_anchor_line_wrap.py`.
 2. `tiers._coerce_merge_ops`: a top-level `"footnotes"` list of
    `[^label]: ...` definitions is folded into one trailing `append_section`,
-   skipping definitions already present in an op. Pinned in the same file.
-3. `prompts/person_hint_classify.md`: a rule that being present is not a
+   skipping definitions already present in an op.
+3. `tiers.define_dangling_footnotes` (new, run after `apply_merge_ops` on
+   both transports): every footnote marker the merge introduced but did not
+   define is resolved to the merge's own `source_ref`. A marker that was
+   already dangling before the merge is left alone. This is the deterministic
+   answer to the dominant residual — three of the four live runs at
+   `575d581b` read `uncited_change` on one or more person pages, and the
+   recording at run 37933459953 shows why: Sonnet emitted the `[^1]`
+   markers inside the ops and the `[^1]:` definition *outside* the JSON
+   object (after the closing fence), or omitted it. Eight exact-byte pins in
+   `tests/test_tiers.py` / `tests/test_prompt_safety.py` whose canned ops
+   added `New.[^2]` with no definition now expect `[^2]: ref`.
+4. `prompts/person_hint_classify.md`: a rule that being present is not a
    claim — an attendee list, a sign-off, "sat in", "had nothing to add" — and
    that in a file naming several people only the ones it says something
-   about are emitted. Goldens regenerated.
-4. `tests/evals/data/person_hint/raw/memo_names_four_asserts_two.md`: the
+   about are emitted. This fixed Selmire and Pelloway in case C on every run
+   after it, but Haiku still emitted "sat in for the floor handover" as a
+   hint for Oakmoor in case A on three of four runs. So:
+5. `prompts/person_hint_verify.md`: the write model is asked the same
+   question against the full page; a `"presence_only": true` reply leaves
+   the page byte-identical and is recorded as `not_asserted`. Scoped to
+   hint-derived actions; an ordinary merge ignores the key. Goldens
+   regenerated for both prompts.
+6. `tests/evals/data/person_hint/raw/memo_names_four_asserts_two.md`: the
    title now reads "Memo — Draymouth Relining review: ...", naming the
    programme page the way the retrospective fixture already does. The case's
    `require_non_person_pointer` check is a claim about compiling the rest of
@@ -82,21 +104,21 @@ one this issue cites, scored 2/5 or 1/5.
    a file that never names the page was testing name-matching recall, not
    person-hint selectivity.
 
-Not changed: the floor, the grader, the other four fixtures, the verify
-prompt, the models.
+Not changed: the floor, the grader, the other four fixtures, the models.
 
-## Post-fix runs (branch `occam/2043` @ `575d581b`)
+## Post-fix runs
 
-| Run | person_hint | Per-case |
-|---|---|---|
-| [37931770585](https://github.com/Kromatic-Innovation/athenaeum/actions/runs/37931770585) | **4/5 PASSED** | A pass, B pass, C **fail** (Vantry `uncited_change`: merged, no citation to the ref), D pass, E pass |
-| [37932595871](https://github.com/Kromatic-Innovation/athenaeum/actions/runs/37932595871) | _pending_ | _pending_ |
+| Run | Head | person_hint | Per-case |
+|---|---|---|---|
+| [37931770585](https://github.com/Kromatic-Innovation/athenaeum/actions/runs/37931770585) | `575d581b` | 4/5 PASSED | C: Vantry `uncited_change` |
+| [37932595871](https://github.com/Kromatic-Innovation/athenaeum/actions/runs/37932595871) | `575d581b` | 2/5 FAILED | A: Oakmoor claimed; C: Vantry `uncited_change`; E: Oakmoor `uncited_change` |
+| [37933459953](https://github.com/Kromatic-Innovation/athenaeum/actions/runs/37933459953), `record=true` | `575d581b` | 1/5 FAILED | A claimed; B, C, E `uncited_change` — the recording that named cause 3 and motivated cause 5 |
+| [37934843834](https://github.com/Kromatic-Innovation/athenaeum/actions/runs/37934843834) | `8cbe3166` | **5/5 PASSED** | all cases ok; every other floor in the suite green on this run too |
+| [37935669187](https://github.com/Kromatic-Innovation/athenaeum/actions/runs/37935669187) | `8cbe3166` | **5/5 PASSED** | all cases ok; whole workflow green |
 
-The residual miss on C is the citation shape, not selectivity: Selmire and
-Pelloway were left `unchanged` and Vantry's claim merged, but the merge did
-not define the footnote it referenced. That is the same shape as D/E's
-occasional miss and is the one-case slack the floor carries.
+The two runs at `8cbe3166` are the AC's "two consecutive runs".
 
-Unrelated on run 37931770585: `audit_retirement` scored 4/6 against its
-floor of 5 (`name_only_person_stub`, the pinned known miss, plus
-`name_plus_one_affiliation_line`). That layer's prompt is not on this diff.
+Unrelated: `audit_retirement` scored 4/6 against its floor of 5 on runs
+37931770585 and 37932595871 (`name_only_person_stub`, the pinned known miss,
+plus `name_plus_one_affiliation_line`) and 5/6 on 37934843834. That layer's
+prompt is not on this diff; it is the sampling noise athenaeum#1877 measured.
