@@ -214,7 +214,7 @@ def _dedupe_allowlist_entries(
     entries: list[PiiAllowlistEntry],
 ) -> tuple[PiiAllowlistEntry, ...]:
     """Dedupe skipped-allowlist entries by value, first-seen order, page-wide."""
-    seen: set[str] = set()
+    seen: set[str | None] = set()
     out: list[PiiAllowlistEntry] = []
     for e in entries:
         if e.value in seen:
