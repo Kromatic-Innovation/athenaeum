@@ -159,4 +159,4 @@ def test_clean_body_uses_patch_path_and_wraps_body_verbatim() -> None:
     # Wrapped in the fence, byte-for-byte unchanged inside it.
     assert f"<existing_page>\n{body}\n</existing_page>" in user_msg
     assert esc is None
-    assert result == "# Acme\n\nFintech, Series B.[^1]\n\nSeries C.[^2]"
+    assert result == "# Acme\n\nFintech, Series B.[^1]\n\nSeries C.[^2]\n\n[^2]: ref\n"

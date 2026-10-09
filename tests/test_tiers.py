@@ -3413,6 +3413,12 @@ class TestTier3MergePatchOps:
     These pin (a) the deterministic apply logic, (b) byte-identical
     equivalence to a full-echo merge on the acceptance-criteria fixture set,
     and (c) the fallback triggers (unparseable JSON, anchor miss, truncation).
+
+    Issue athenaeum#2043: every canned response below adds ``New.[^2]`` and
+    never defines ``[^2]``. ``define_dangling_footnotes`` now resolves a
+    marker the merge introduced to the merge's own source, so the expected
+    body carries ``[^2]: ref`` — the parse-path property each test pins is
+    unchanged.
     """
 
     @staticmethod
@@ -3557,7 +3563,7 @@ class TestTier3MergePatchOps:
         )
         assert needs_fallback is False
         assert esc is None
-        assert body == "# Acme\n\nOld.\n\nNew.[^2]"
+        assert body == "# Acme\n\nOld.\n\nNew.[^2]\n\n[^2]: ref\n"
 
     def test_parse_signals_fallback_on_op_missing_the_op_key(self) -> None:
         # M17 phase 2a (athenaeum#1035): a JSON-valid ops list whose single op is
@@ -3592,7 +3598,7 @@ class TestTier3MergePatchOps:
         )
         assert needs_fallback is False
         assert esc is None
-        assert body == "# Acme\n\nOld.\n\nNew.[^2]"
+        assert body == "# Acme\n\nOld.\n\nNew.[^2]\n\n[^2]: ref\n"
 
     # --- athenaeum#490 (slice A): each fallback names the page + a distinct cause ------
 
@@ -3689,7 +3695,7 @@ class TestTier3MergePatchOps:
         )
         assert needs_fallback is False
         assert esc is None
-        assert body == "# Acme\n\nOld.\n\nNew.[^2]"
+        assert body == "# Acme\n\nOld.\n\nNew.[^2]\n\n[^2]: ref\n"
 
     def test_fix_b_wraps_dict_valued_ops(self) -> None:
         # A single op emitted as a bare dict (not wrapped in a list). Fix (b)
@@ -3702,7 +3708,7 @@ class TestTier3MergePatchOps:
         )
         assert needs_fallback is False
         assert esc is None
-        assert body == "# Acme\n\nOld.\n\nNew.[^2]"
+        assert body == "# Acme\n\nOld.\n\nNew.[^2]\n\n[^2]: ref\n"
 
     def test_fix_b_accepts_operations_alternate_key(self) -> None:
         body, esc, needs_fallback = parse_merge_ops_response(
@@ -3712,7 +3718,7 @@ class TestTier3MergePatchOps:
             "# Acme\n\nOld.",
         )
         assert needs_fallback is False
-        assert body == "# Acme\n\nOld.\n\nNew.[^2]"
+        assert body == "# Acme\n\nOld.\n\nNew.[^2]\n\n[^2]: ref\n"
 
     def test_ambiguous_no_ops_candidate_warns_sub_cause_and_falls_back(
         self, caplog: pytest.LogCaptureFixture
@@ -3793,7 +3799,7 @@ class TestTier3MergePatchOps:
             "# Acme\n\nOld.",
         )
         assert needs_fallback is False
-        assert body == "# Acme\n\nOld.\n\nNew.[^2]"
+        assert body == "# Acme\n\nOld.\n\nNew.[^2]\n\n[^2]: ref\n"
 
     # --- tier3_merge: patch primary + full-echo fallback wiring --------------
 
@@ -3807,7 +3813,7 @@ class TestTier3MergePatchOps:
             self._action(), "# Acme Corp\n\nFintech, Series B.", "ref", client
         )
         assert esc is None
-        assert body == "# Acme Corp\n\nFintech, Series B.\n\nRaised Series C.[^2]"
+        assert body == "# Acme Corp\n\nFintech, Series B.\n\nRaised Series C.[^2]\n\n[^2]: ref\n"
         assert client.messages.create.call_count == 1  # patch only, no fallback
 
     def test_dedup_no_op_through_tier3_merge(self) -> None:

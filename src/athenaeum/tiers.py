@@ -4994,6 +4994,15 @@ MERGE_CITATION_ONLY_LOG_PREFIX = "tier3-merge-citation-only"
 #: The page is left byte-identical: no body edit, no citation.
 MERGE_SUBJECT_MISMATCH_LOG_PREFIX = "tier3-merge-subject-mismatch"
 
+#: Stable, greppable log prefix for the hint-derived presence-only decision
+#: (issue athenaeum#2043): a merge verify for an
+#: ``EntityAction.from_person_hint`` action reported ``"presence_only":
+#: true`` — the proposed observation records that the person was present
+#: (attended, sat in, was listed) and states no role, decision, action or
+#: fact of theirs. Recorded as ``not_asserted``; the page is left
+#: byte-identical: no body edit, no citation.
+MERGE_NOT_ASSERTED_LOG_PREFIX = "tier3-merge-not-asserted"
+
 #: Stable, greppable prefix for the WARNING each patch-mode → full-echo
 #: fallback emits (issue athenaeum#490, slice A). The full-page-echo fallback is a
 #: ~10x output-token cost multiplier that until now degraded silently; every
@@ -5074,6 +5083,56 @@ def _coerce_merge_ops(obj: dict[str, Any]) -> list[Any] | None:
 #: (``[^1]: sessions/...``); labels are not restricted to digits here because
 #: :func:`_reallocate_op_footnote_labels` renumbers whatever the batch defines.
 _FOOTNOTE_DEF_LINE_RE = re.compile(r"^\[\^[^\]]+\]:\s*\S")
+
+#: An INLINE footnote marker (``[^1]`` in prose) — one NOT followed by a
+#: colon, which is what separates a claim's marker from the definition that
+#: resolves it. Mirrors ``tests/evals/person_hint.py``'s ``_FOOTNOTE_MARKER_RE``.
+_FOOTNOTE_INLINE_MARKER_RE = re.compile(r"\[\^([^\]\s]+)\](?!:)")
+
+
+def _dangling_footnote_labels(body: str) -> list[str]:
+    """Labels *body* references inline but never defines, in first-seen order."""
+    defined = set(_FOOTNOTE_OP_DEF_RE.findall(body))
+    seen: list[str] = []
+    for label in _FOOTNOTE_INLINE_MARKER_RE.findall(body):
+        if label not in defined and label not in seen:
+            seen.append(label)
+    return seen
+
+
+def define_dangling_footnotes(existing_body: str, applied_body: str, source_ref: str) -> str:
+    """Resolve every footnote marker a merge introduced but did not define.
+
+    Issue athenaeum#2043. The merge prompt asks for an inline ``[^n]`` at the
+    end of every sentence an op adds AND a ``[^n]: <source_ref>`` definition,
+    but the recorded live responses show the definition going missing in
+    several shapes — under a top-level ``"footnotes"`` key instead of an op
+    (see :func:`_coerce_merge_ops`), or simply omitted — while the inline
+    markers land. The page then carries a claim with a marker that resolves
+    to nothing, and no pointer to the source at all; the ``person_hint``
+    eval grades that ``uncited_change``.
+
+    The fix is deterministic because the answer is known: a marker that is
+    dangling AFTER the merge and was NOT dangling BEFORE it was introduced by
+    this merge, and this merge has exactly one source. Each such label gets
+    ``[^label]: <source_ref>`` appended, in first-seen order. A marker that
+    was already dangling on the page is a pre-existing defect of unknown
+    provenance and is left alone — inventing a source for it would be the
+    very thing a citation exists to prevent.
+    """
+    before = set(_dangling_footnote_labels(existing_body))
+    new_dangling = [lbl for lbl in _dangling_footnote_labels(applied_body) if lbl not in before]
+    if not new_dangling:
+        return applied_body
+    log.info(
+        "tier3-merge-footnote-defined labels=%s source=%s — merge referenced "
+        "footnote(s) it never defined; defining them from the merge's own "
+        "source (issue athenaeum#2043)",
+        new_dangling,
+        source_ref,
+    )
+    block = "\n".join(f"[^{lbl}]: {source_ref}" for lbl in new_dangling)
+    return applied_body.rstrip("\n") + "\n\n" + block + "\n"
 
 
 def parse_merge_ops_response(
@@ -5212,6 +5271,29 @@ def parse_merge_ops_response(
             )
             return None, None, False
 
+        # Issue athenaeum#2043: a second gate at the WRITE model, after the
+        # subject check and before adds_new_claim. The tier-2 classifier
+        # (Haiku) kept emitting a hint for "sat in for the handover and had
+        # nothing to add" on every live run even after its prompt named
+        # presence as a non-claim; the merge model (Sonnet) is asked the same
+        # question against the full page and the proposed observation. Scoped
+        # to hint-derived actions, unlike subject_mismatch above: an ordinary
+        # merge's observation is never a bare name match, so the key has no
+        # meaning there and a stray one must not no-op a real merge.
+        if obj.get("presence_only") is True and action.from_person_hint:
+            if usage is not None and action.existing_uid:
+                usage.person_hint_decisions.append(
+                    (action.existing_uid, "write_merge", "not_asserted")
+                )
+            log.info(
+                "%s page=%s source=%s — hint-derived merge reported the "
+                "observation records only presence; leaving the page unchanged",
+                MERGE_NOT_ASSERTED_LOG_PREFIX,
+                action.name,
+                source_ref,
+            )
+            return None, None, False
+
         # Issue athenaeum#1463: read BEFORE ops shape validation — when the
         # model says false, ops are never applied, so they need not even
         # parse cleanly. Only an exact JSON `false` (Python `False`) takes
@@ -5249,7 +5331,9 @@ def parse_merge_ops_response(
                 ops, call_site="tiers.parse_merge_ops_response", wiki_root=wiki_root
             )
             try:
-                applied = apply_merge_ops(existing_body, ops)
+                applied = define_dangling_footnotes(
+                    existing_body, apply_merge_ops(existing_body, ops), source_ref
+                )
                 if usage is not None:
                     usage.full_merges += 1
                     if action.from_person_hint and action.existing_uid:

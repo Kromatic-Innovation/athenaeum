@@ -29,11 +29,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its footnote definitions under a top-level `"footnotes"` list instead of
   an `append_section` op, so the page gained `[^1]` markers with no
   definition and lost its pointer to the source; `_coerce_merge_ops` folds
-  such definitions into a trailing `append_section`. (3)
+  such definitions into a trailing `append_section`, and a new post-apply
+  guard `define_dangling_footnotes` resolves every marker a merge introduced
+  but never defined to that merge's own `source_ref` (a marker already
+  dangling before the merge is left alone) — three later runs read
+  `uncited_change` on person pages for exactly this shape, including a
+  response whose definition was emitted outside the JSON entirely. (3)
   `prompts/person_hint_classify.md` now says in terms that presence is not a
   claim — an attendee list, "sat in", "had nothing to add" — after the
   classifier emitted "attended the review" for two of four named people and
-  a sat-in note as a claim. The `memo_names_four_asserts_two` fixture now
+  a sat-in note as a claim; because Haiku kept emitting that hint on every
+  run regardless, `prompts/person_hint_verify.md` now asks the write model
+  the same question and a `"presence_only": true` reply leaves the page
+  byte-identical, recorded as `not_asserted` (hint-derived actions only).
+  The `memo_names_four_asserts_two` fixture now
   names the programme page in its title (as the retrospective case already
   did) so its "rest of the file is compiled" check is reachable by tier-1
   name matching. Measurement: `docs/measurements/person-hint-strict-floor-2026-10-09.md`.

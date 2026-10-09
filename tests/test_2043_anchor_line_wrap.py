@@ -19,7 +19,18 @@ from __future__ import annotations
 
 import pytest
 
-from athenaeum.tiers import MergeOpsError, _coerce_merge_ops, apply_merge_ops
+import json
+import logging
+
+from athenaeum.models import EntityAction, TokenUsage
+from athenaeum.tiers import (
+    MERGE_NOT_ASSERTED_LOG_PREFIX,
+    MergeOpsError,
+    _coerce_merge_ops,
+    apply_merge_ops,
+    define_dangling_footnotes,
+    parse_merge_ops_response,
+)
 
 # The real Vantry fixture page shape (tests/evals/data/person_hint/wiki):
 # one sentence broken across two lines by the author's editor.
@@ -167,3 +178,109 @@ class TestTopLevelFootnotesKeyIsFoldedIntoAnAppend:
 
     def test_footnotes_without_any_ops_field_is_still_a_shape_failure(self) -> None:
         assert _coerce_merge_ops({"footnotes": ["[^1]: s.md"]}) is None
+
+
+class TestDanglingFootnotesAreDefinedFromTheMergeSource:
+    """Runs 37931770585 / 37932595871 (athenaeum#2043) read ``uncited_change``
+    on three person pages: the merge added ``[^1]`` markers and no
+    definition. A marker this merge introduced resolves to this merge's
+    source; nothing else can be its provenance."""
+
+    SRC = "sessions/20260701T120000Z-memo_nam.md"
+
+    def test_marker_without_definition_gains_one_naming_the_source(self) -> None:
+        before = "# Page\n\nOld fact.\n"
+        after = "# Page\n\nOld fact. New fact.[^1]\n"
+        out = define_dangling_footnotes(before, after, self.SRC)
+        assert out == f"# Page\n\nOld fact. New fact.[^1]\n\n[^1]: {self.SRC}\n"
+
+    def test_two_markers_two_definitions_in_first_seen_order(self) -> None:
+        after = "A.[^2] B.[^1] C.[^2]\n"
+        out = define_dangling_footnotes("", after, self.SRC)
+        assert out.endswith(f"\n\n[^2]: {self.SRC}\n[^1]: {self.SRC}\n")
+
+    def test_already_defined_marker_is_untouched(self) -> None:
+        after = "New.[^1]\n\n[^1]: sessions/x.md\n"
+        assert define_dangling_footnotes("", after, self.SRC) == after
+
+    def test_pre_existing_dangling_marker_is_not_given_a_source(self) -> None:
+        before = "Legacy claim.[^7]\n"
+        after = "Legacy claim.[^7] New.[^1]\n"
+        out = define_dangling_footnotes(before, after, self.SRC)
+        assert f"[^1]: {self.SRC}" in out
+        assert "[^7]:" not in out
+
+    def test_no_markers_means_byte_identical(self) -> None:
+        after = "Plain edit, no citation at all.\n"
+        assert define_dangling_footnotes("", after, self.SRC) == after
+
+    def test_indented_definition_counts_as_defined(self) -> None:
+        after = "New.[^1]\n  [^1]: sessions/x.md\n"
+        assert define_dangling_footnotes("", after, self.SRC) == after
+
+
+class TestPresenceOnlyVerifyGate:
+    """athenaeum#2043: the write model is asked whether a hint-derived
+    observation records only presence. Three live runs after the classify
+    prompt named presence as a non-claim still produced a claim for "sat in
+    for the floor handover and had nothing to add"; this is the second gate."""
+
+    _HINT = EntityAction(
+        kind="update",
+        name="Thessa Oakmoor",
+        entity_type="",
+        tags=[],
+        access="",
+        existing_uid="ph-person-oakmoor",
+        observations="Sat in for the floor handover section.",
+        from_person_hint=True,
+    )
+    _ORDINARY = EntityAction(
+        kind="update",
+        name="Acme Corp",
+        entity_type="",
+        tags=[],
+        access="",
+        existing_uid="acme",
+        observations="Some claim.",
+    )
+    _BODY = "# Thessa Oakmoor\n\nSupervises the kiln floor.\n"
+    _RESPONSE = json.dumps({"ops": [], "adds_new_claim": False, "presence_only": True})
+
+    def test_hint_action_leaves_page_untouched_and_records_not_asserted(self) -> None:
+        usage = TokenUsage()
+        body, esc, needs_fallback = parse_merge_ops_response(
+            self._RESPONSE, self._HINT, "sessions/a.md", self._BODY, usage=usage
+        )
+        assert body is None
+        assert esc is None
+        assert needs_fallback is False
+        assert usage.citation_only_merges == 0
+        assert usage.person_hint_decisions == [("ph-person-oakmoor", "write_merge", "not_asserted")]
+
+    def test_is_logged_under_the_stable_prefix(self, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level(logging.INFO):
+            parse_merge_ops_response(self._RESPONSE, self._HINT, "sessions/a.md", self._BODY)
+        assert MERGE_NOT_ASSERTED_LOG_PREFIX in caplog.text
+
+    def test_ordinary_action_ignores_the_key_and_takes_the_citation_path(self) -> None:
+        usage = TokenUsage()
+        body, esc, needs_fallback = parse_merge_ops_response(
+            self._RESPONSE, self._ORDINARY, "sessions/a.md", "# Acme Corp\n\nBody.", usage=usage
+        )
+        # adds_new_claim:false is the operative field for a non-hint merge.
+        assert body is not None and "[^1]: sessions/a.md" in body
+        assert needs_fallback is False
+        assert usage.citation_only_merges == 1
+        assert usage.person_hint_decisions == []
+
+    def test_non_boolean_value_does_not_trigger(self) -> None:
+        response = json.dumps({"ops": [], "adds_new_claim": False, "presence_only": "true"})
+        usage = TokenUsage()
+        body, _, _ = parse_merge_ops_response(
+            response, self._HINT, "sessions/a.md", self._BODY, usage=usage
+        )
+        assert body is not None  # fell through to the citation-only path
+        assert usage.person_hint_decisions == [
+            ("ph-person-oakmoor", "write_merge", "citation_only")
+        ]
