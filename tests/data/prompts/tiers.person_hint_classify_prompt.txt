@@ -21,6 +21,12 @@ Rules:
 - A passing mention ("talked to Alice") with no further content about that
   person is NOT enough — emit nothing for that candidate, exactly like the
   general "passing mention" rule above.
+- Being present is not a claim. A name in an attendee list, a sign-off, a
+  greeting, or a note that someone "sat in", "was there", "joined", or "had
+  nothing to add" says nothing about that person — emit nothing for them
+  unless the text ALSO states a role, decision, action, or fact of theirs.
+  In a file naming several people, emit only for the ones it says something
+  about; the rest are omitted even though they were matched.
 - Never invent a `candidate_uid` that is not in the list below.
 - Never re-extract a candidate from this list as a NEW entity (a
   `name`/`entity_type` object) — if the text is about them, use the

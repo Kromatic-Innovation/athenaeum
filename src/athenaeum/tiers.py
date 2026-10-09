@@ -4768,13 +4768,68 @@ class MergeOpsError(Exception):
     """
 
 
+def _locate_anchor(existing_body: str, anchor: str, *, op_index: int) -> tuple[int, int]:
+    """Return the ``(start, end)`` span of *anchor* in *existing_body*, exactly once.
+
+    Issue athenaeum#2043. The model copies anchors from the page body it is
+    shown, and a hand-authored or editor-wrapped page breaks sentences
+    across hard line wraps. A model quoting a sentence verbatim "as a
+    sentence" — ``has no signing authority of his own and routes every order
+    through the works manager`` — produces an anchor whose only difference
+    from the body is a ``\\n`` where the body wraps, and the bare
+    ``str.find`` this applier used until now called that ``anchor not
+    found``. On an ordinary merge that miss costs a ~10x full-page echo
+    (``cause=anchor-miss``, issue athenaeum#490); on a hint-derived action
+    (issue athenaeum#1866) it is a silent DROP, which is how the
+    ``person_hint`` eval's two replace-a-wrapped-sentence cases read
+    ``dropped`` on every live run.
+
+    Resolution is in two tiers and the second never widens the first:
+
+    1. **Exact** — the anchor occurs byte-for-byte. Unchanged contract: it
+       must occur exactly once, or ``MergeOpsError`` is raised.
+    2. **Whitespace-tolerant** — ONLY when the exact form occurs zero times.
+       Each run of whitespace in the anchor matches any run of whitespace
+       (including a line break) in the body, and the match must still be
+       unique. The returned span covers the body's ORIGINAL bytes, so a
+       ``replace`` consumes the wrapped text and an ``insert_after`` lands
+       after it, exactly as if the page had not been wrapped.
+
+    An anchor that is only whitespace has no tokens to match and is reported
+    as not found rather than matching everywhere.
+    """
+    first = existing_body.find(anchor)
+    if first != -1:
+        if existing_body.find(anchor, first + 1) != -1:
+            raise MergeOpsError(f"op {op_index} anchor is not unique: {anchor!r}")
+        return first, first + len(anchor)
+
+    tokens = anchor.split()
+    if not tokens:
+        raise MergeOpsError(f"op {op_index} anchor not found: {anchor!r}")
+    pattern = re.compile(r"\s+".join(re.escape(tok) for tok in tokens))
+    matches = list(pattern.finditer(existing_body))
+    if not matches:
+        raise MergeOpsError(f"op {op_index} anchor not found: {anchor!r}")
+    if len(matches) > 1:
+        raise MergeOpsError(f"op {op_index} anchor is not unique: {anchor!r}")
+    log.info(
+        "tier3-merge-anchor-wrapped op=%d — anchor matched across a line wrap "
+        "(whitespace-tolerant fallback, issue athenaeum#2043)",
+        op_index,
+    )
+    return matches[0].start(), matches[0].end()
+
+
 def apply_merge_ops(existing_body: str, ops: list[dict[str, Any]]) -> str:
     """Apply anchored edit operations to ``existing_body`` deterministically.
 
     Issue athenaeum#469. Each op is validated against the ORIGINAL body — anchors
-    must match EXACTLY ONCE — and converted to a ``(start, end, replacement)``
-    span; all spans are applied in a single non-overlapping pass. Application
-    is all-or-nothing: any failure raises :class:`MergeOpsError`.
+    must match EXACTLY ONCE (:func:`_locate_anchor`; issue athenaeum#2043 lets
+    an anchor cross a hard line wrap when its exact form is absent) — and
+    converted to a ``(start, end, replacement)`` span; all spans are applied
+    in a single non-overlapping pass. Application is all-or-nothing: any
+    failure raises :class:`MergeOpsError`.
 
     An empty ``ops`` list is a valid no-op (issue athenaeum#297 dedup): the body is
     returned unchanged.
@@ -4832,14 +4887,10 @@ def apply_merge_ops(existing_body: str, ops: list[dict[str, Any]]) -> str:
             raise MergeOpsError(f"op {i} ({kind}) missing or empty anchor")
         if not isinstance(text, str):
             raise MergeOpsError(f"op {i} ({kind}) missing text")
-        first = existing_body.find(anchor)
-        if first == -1:
-            raise MergeOpsError(f"op {i} anchor not found: {anchor!r}")
-        if existing_body.find(anchor, first + 1) != -1:
-            raise MergeOpsError(f"op {i} anchor is not unique: {anchor!r}")
+        span = _locate_anchor(existing_body, anchor, op_index=i)
         kinds.append(kind)
         texts.append(text)
-        anchor_spans.append((first, first + len(anchor)))
+        anchor_spans.append(span)
 
     # Issue athenaeum#1942: fresh footnote labels, decided against the page
     # MINUS the spans the replaces are about to consume.
@@ -4985,15 +5036,44 @@ def _coerce_merge_ops(obj: dict[str, Any]) -> list[Any] | None:
     still validates every op and raises :class:`MergeOpsError` on a bad shape,
     so a wrong guess degrades to ``anchor-miss`` + full-echo, never a bad write.
     Returns ``None`` when no recognizable ops field is present (shape failure).
+
+    Issue athenaeum#2043: a response observed on a live ``person_hint`` run
+    put its footnote DEFINITIONS under a top-level ``"footnotes"`` list
+    (``["[^1]: sessions/....md"]``) instead of an ``append_section`` op, so
+    the page gained inline ``[^1]`` markers with no definition and no
+    pointer to the source. Such a list is folded into one trailing
+    ``append_section`` here — only entries that look like a footnote
+    definition (``[^label]: ...``) and are not already present verbatim in
+    an op's text; anything else under that key is ignored.
     """
     ops = obj.get("ops")
     if ops is None:
         ops = obj.get("operations")
-    if isinstance(ops, list):
-        return ops
     if isinstance(ops, dict):
-        return [ops]
-    return None
+        ops = [ops]
+    if not isinstance(ops, list):
+        return None
+    footnotes = obj.get("footnotes")
+    if isinstance(footnotes, list):
+        already = "\n".join(
+            str(op.get("text", "")) for op in ops if isinstance(op, dict)
+        )
+        defs = [
+            fn.strip()
+            for fn in footnotes
+            if isinstance(fn, str)
+            and _FOOTNOTE_DEF_LINE_RE.match(fn.strip())
+            and fn.strip() not in already
+        ]
+        if defs:
+            ops = [*ops, {"op": "append_section", "text": "\n".join(defs)}]
+    return ops
+
+
+#: A footnote definition line as the merge prompt asks for it
+#: (``[^1]: sessions/...``); labels are not restricted to digits here because
+#: :func:`_reallocate_op_footnote_labels` renumbers whatever the batch defines.
+_FOOTNOTE_DEF_LINE_RE = re.compile(r"^\[\^[^\]]+\]:\s*\S")
 
 
 def parse_merge_ops_response(
