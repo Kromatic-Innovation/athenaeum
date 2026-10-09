@@ -638,7 +638,7 @@ def _cmd_storage_migrate_pii(args: argparse.Namespace) -> int:
     return _cmd_storage_migrate_pii_single(args)
 
 
-def _load_migrate_pii_allowlist(wiki_root: Path) -> dict[str, str] | None:
+def _load_migrate_pii_allowlist(wiki_root: Path) -> list[PiiAllowlistEntry] | None:
     """Load the adjudicated allowlist ``migrate-pii`` must never override (issue athenaeum#1275).
 
     Reuses :func:`athenaeum.pii.load_pii_allowlist` — the exact reader
@@ -658,8 +658,14 @@ def _load_migrate_pii_allowlist(wiki_root: Path) -> dict[str, str] | None:
     protection) or allow-everything (unsafe the other way: would tolerate a
     broken allowlist file forever).
 
-    Returns ``{value: reason}`` on success (possibly empty), or ``None`` if
-    the caller must abort (the errors are already printed to stderr).
+    Returns the full entry list (exact AND ``pattern`` entries, issue
+    athenaeum#2007) on success (possibly empty), or ``None`` if the caller
+    must abort (the errors are already printed to stderr). Issue athenaeum#2042:
+    previously flattened to ``{value: reason}`` here, which silently dropped
+    every ``pattern`` entry before :func:`~athenaeum.storage_migrate.plan_pii_migration`
+    ever saw it; the full list is passed through unchanged now, and that
+    function's own :func:`~athenaeum.pii.coerce_pii_allowlist` call accepts
+    it directly.
     """
     allowlist_path = wiki_root / PII_ALLOWLIST_FILENAME
     entries, errors = load_pii_allowlist(allowlist_path)
@@ -674,12 +680,7 @@ def _load_migrate_pii_allowlist(wiki_root: Path) -> dict[str, str] | None:
             file=sys.stderr,
         )
         return None
-    # migrate-pii adjudicates by exact value only (issue athenaeum#2007 added
-    # pattern entries to the allowlist schema for lint-pii; propagating
-    # pattern adjudication into migrate-pii's own flattened mapping is out of
-    # scope here) -- a pattern-only entry has no `value` and is simply
-    # excluded from this mapping rather than polluting it with a `None` key.
-    return {e.value: e.reason for e in entries if e.value is not None}
+    return entries
 
 
 def _print_skipped_allowlisted(skipped: tuple[PiiAllowlistEntry, ...]) -> None:

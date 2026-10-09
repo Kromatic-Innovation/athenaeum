@@ -51,15 +51,20 @@ directly, since that is identity/field policy, not detection.
 A detected token is never migrated when it carries an entry in
 ``wiki/_pii-allowlist.yml`` — the same adjudicated allowlist ``lint-pii``
 already consults (issue athenaeum#1275, unblocking the athenaeum#936 artifact from
-being overridden by the migrator it exists to police). Matching is EXACT
-value equality only, via the shared :func:`athenaeum.pii.load_pii_allowlist`
-reader — no case-folding, no substring/fuzzy matching — so this module and
-``lint-pii`` can never disagree about which token is adjudicated. Callers
-resolve the allowlist file (a missing file means nothing has been
-adjudicated yet; a file that exists but fails to parse is refused rather
-than silently treated as empty) and pass a ``{value: reason}`` mapping in;
-this module stays a pure transform and never reads the allowlist file
-itself.
+being overridden by the migrator it exists to police), via the shared
+:func:`athenaeum.pii.allowlist_matches` (issue athenaeum#2042): an exact
+``value`` entry matches by equality only — no case-folding, no
+substring/fuzzy matching — and a ``pattern`` entry (issue athenaeum#2007) matches
+via ``re.fullmatch`` against the whole token, so this module, ``lint-pii``
+and ``recompare.identify_pii_hazards`` can never disagree about which token
+is adjudicated. Callers resolve the allowlist file (a missing file means
+nothing has been adjudicated yet; a file that exists but fails to parse is
+refused rather than silently treated as empty) and pass either the raw
+``{value: reason}`` mapping or the full entry list
+:func:`athenaeum.pii.load_pii_allowlist` returns —
+:func:`athenaeum.pii.coerce_pii_allowlist` normalizes either shape at the
+top of :func:`plan_pii_migration`; this module stays a pure transform and
+never reads the allowlist file itself.
 
 Layering: L4 domain/pipeline module. May import L3 services (``models``,
 ``pii``, ``storage``) freely. Factoring rule: this module is a PURE
@@ -71,7 +76,7 @@ writes to disk. Applying a plan (dry-run vs. ``--apply``) is the L5 CLI's job
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Collection, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -82,6 +87,8 @@ from athenaeum.pii import (
     PII_ENTITY_CLASS,
     PII_FLAG,
     PiiAllowlistEntry,
+    allowlist_reason,
+    coerce_pii_allowlist,
     is_pii_class_excluded,
     is_service_address,
     name_field_pii_values,
@@ -187,11 +194,12 @@ class PiiMigrationPlan:
     #: (issue athenaeum#1108, AC1: surfaced, never silently resolved).
     excluded_record_conflicts: tuple[ExcludedRecordConflict, ...] = ()
     #: Detected email/phone tokens that were NOT migrated because they carry
-    #: an adjudicated entry in the allowlist (issue athenaeum#1275) — exact-value
-    #: matches only, deduped by value across the whole page (frontmatter +
-    #: body), in first-seen order. A value here is left byte-identical
-    #: wherever it appeared: never redacted inline, never dropped from
-    #: frontmatter, never added to the excluded contact record. Reported so a
+    #: an adjudicated entry in the allowlist (issue athenaeum#1275, widened to
+    #: `pattern` entries by issue athenaeum#2042) — an exact-``value`` match or a
+    #: ``pattern`` match via ``re.fullmatch``, deduped by value across the
+    #: whole page (frontmatter + body), in first-seen order. A value here is
+    #: left byte-identical wherever it appeared: never redacted inline, never
+    #: dropped from frontmatter, never added to the excluded contact record. Reported so a
     #: skip is never silent (the same principle as athenaeum#1273's exclusion
     #: reporting) — the CLI prints these in both dry-run and ``--apply``.
     skipped_allowlisted: tuple[PiiAllowlistEntry, ...] = ()
@@ -225,15 +233,18 @@ def _dedupe_allowlist_entries(
 
 
 def _split_allowlisted(
-    tokens: list[str], allowlist: Mapping[str, str]
+    tokens: list[str], allowlist: Collection[PiiAllowlistEntry]
 ) -> tuple[list[str], list[PiiAllowlistEntry]]:
     """Split detected *tokens* into (migratable, skipped) against *allowlist*.
 
-    *allowlist* is a ``{value: reason}`` mapping built from the adjudicated
-    allowlist (issue athenaeum#1275) — matching is EXACT value equality only, no
-    case-folding, no substring/fuzzy matching, mirroring
-    :func:`athenaeum.pii.adjudicate_corpus_pii`'s matching semantics exactly
-    so this module and ``lint-pii`` can never disagree about which token
+    *allowlist* is the full adjudicated entry list (issue athenaeum#1275, widened
+    by issue athenaeum#2042 to also honour ``pattern`` entries) — matched via the
+    shared :func:`athenaeum.pii.allowlist_reason`: an exact-``value`` entry by
+    equality only, no case-folding, no substring/fuzzy matching; a
+    ``pattern`` entry (issue athenaeum#2007) via ``re.fullmatch`` against the
+    whole token. Mirrors :func:`athenaeum.pii.adjudicate_corpus_pii`'s
+    matching semantics exactly so this module, ``lint-pii`` and
+    ``recompare.identify_pii_hazards`` can never disagree about which token
     counts as adjudicated. A skipped token is returned with its reason
     (never migrated, never redacted, left byte-identical) so the caller can
     report it — a silent skip in a PII tool is its own hazard.
@@ -243,7 +254,7 @@ def _split_allowlisted(
     migratable: list[str] = []
     skipped: list[PiiAllowlistEntry] = []
     for t in tokens:
-        reason = allowlist.get(t)
+        reason = allowlist_reason(t, allowlist)
         if reason is not None:
             skipped.append(PiiAllowlistEntry(value=t, reason=reason))
         else:
@@ -267,7 +278,7 @@ def _redact_inline_tokens(body: str, tokens: list[str]) -> str:
 def _migratable_emails(
     text: str,
     config: dict[str, Any] | None,
-    allowlist: Mapping[str, str] | None = None,
+    allowlist: Collection[PiiAllowlistEntry] | None = None,
 ) -> tuple[list[str], list[PiiAllowlistEntry]]:
     """Email-shaped tokens in *text* that are genuine contact data, split against *allowlist*.
 
@@ -283,13 +294,13 @@ def _migratable_emails(
     candidates = [
         e for e in _classified_values(text, "email", config) if not is_service_address(e)
     ]
-    return _split_allowlisted(candidates, allowlist or {})
+    return _split_allowlisted(candidates, allowlist or [])
 
 
 def _migrate_str_value(
     value: str,
     config: dict[str, Any] | None,
-    allowlist: Mapping[str, str] | None = None,
+    allowlist: Collection[PiiAllowlistEntry] | None = None,
 ) -> tuple[str | None, list[str], list[str], list[PiiAllowlistEntry]]:
     """Extract contact tokens from one frontmatter string value.
 
@@ -317,7 +328,7 @@ def _migrate_str_value(
     """
     emails, skipped_emails = _migratable_emails(value, config, allowlist)
     raw_phones = _classified_values(value, "phone", config)
-    phones, skipped_phones = _split_allowlisted(raw_phones, allowlist or {})
+    phones, skipped_phones = _split_allowlisted(raw_phones, allowlist or [])
     skipped = skipped_emails + skipped_phones
     if not (emails or phones):
         return value, [], [], skipped
@@ -333,7 +344,7 @@ def _migrate_str_value(
 def _migrate_value(
     value: Any,
     config: dict[str, Any] | None,
-    allowlist: Mapping[str, str] | None = None,
+    allowlist: Collection[PiiAllowlistEntry] | None = None,
 ) -> tuple[Any, list[str], list[str], list[PiiAllowlistEntry]]:
     """Recursively migrate one frontmatter value of arbitrary nesting depth.
 
@@ -398,7 +409,7 @@ def _migrate_value(
 def _migrate_frontmatter(
     meta: dict[str, Any],
     config: dict[str, Any] | None,
-    allowlist: Mapping[str, str] | None = None,
+    allowlist: Collection[PiiAllowlistEntry] | None = None,
 ) -> tuple[dict[str, Any], list[str], list[str], list[PiiAllowlistEntry]]:
     """Rewrite frontmatter, extracting contact data from every non-durable field.
 
@@ -555,7 +566,7 @@ def plan_pii_migration(
     page_path: Path,
     config: dict[str, Any] | None,
     knowledge_root: Path,
-    allowlist: Mapping[str, str] | None = None,
+    allowlist: Mapping[str, str] | Iterable[PiiAllowlistEntry] | None = None,
 ) -> PiiMigrationPlan:
     """Compute the migration for one entity page — pure, writes nothing.
 
@@ -566,15 +577,23 @@ def plan_pii_migration(
     data the plan's :attr:`~PiiMigrationPlan.changed` is False and both texts
     are ``None`` (a no-op the CLI reports rather than writing an empty record).
 
-    *allowlist* (issue athenaeum#1275) is an optional ``{value: reason}`` mapping —
-    a detected token matching a key EXACTLY is never migrated (not redacted,
-    not dropped, not added to the excluded record) and is instead reported in
-    :attr:`~PiiMigrationPlan.skipped_allowlisted`. This function does not
-    resolve or read the allowlist file itself (that is the CLI's job, via
-    :func:`athenaeum.pii.load_pii_allowlist` — the same reader ``lint-pii``
-    uses); omitting *allowlist* preserves this function's pre-athenaeum#1275
-    behaviour exactly.
+    *allowlist* (issue athenaeum#1275, widened to pattern entries by issue
+    athenaeum#2042) accepts either calling convention: the original
+    ``{value: reason}`` mapping, or the full entry list
+    :func:`athenaeum.pii.load_pii_allowlist` returns (exact AND ``pattern``
+    entries, issue athenaeum#2007). :func:`athenaeum.pii.coerce_pii_allowlist`
+    normalizes whichever shape was passed once, here, and every downstream
+    match goes through the shared :func:`athenaeum.pii.allowlist_reason` —
+    an exact-``value`` entry matches by equality only, a ``pattern`` entry via
+    ``re.fullmatch`` against the whole token. A matching token is never
+    migrated (not redacted, not dropped, not added to the excluded record)
+    and is instead reported in :attr:`~PiiMigrationPlan.skipped_allowlisted`.
+    This function does not resolve or read the allowlist file itself (that is
+    the CLI's job, via :func:`athenaeum.pii.load_pii_allowlist` — the same
+    reader ``lint-pii`` uses); omitting *allowlist* preserves this function's
+    pre-athenaeum#1275 behaviour exactly.
     """
+    entries = coerce_pii_allowlist(allowlist)
     text = page_path.read_text(encoding="utf-8")
     meta, body = parse_frontmatter(text)
     if not isinstance(meta, dict):
@@ -583,12 +602,12 @@ def plan_pii_migration(
     # Detector-driven frontmatter scan (athenaeum#502): pull contact tokens from EVERY
     # non-durable field, preserving durable identifiers and the name-is-an-email
     # carve-out. Then the body inline tokens.
-    new_meta, fm_emails, fm_phones, fm_skipped = _migrate_frontmatter(meta, config, allowlist)
+    new_meta, fm_emails, fm_phones, fm_skipped = _migrate_frontmatter(meta, config, entries)
     # Body: same service-identifier exclusion as the frontmatter path (athenaeum#507) —
     # a `git@github.com` in prose is left byte-identical, not redacted.
-    inline_emails, inline_skipped_emails = _migratable_emails(body, config, allowlist)
+    inline_emails, inline_skipped_emails = _migratable_emails(body, config, entries)
     raw_inline_phones = _classified_values(body, "phone", config)
-    inline_phones, inline_skipped_phones = _split_allowlisted(raw_inline_phones, allowlist or {})
+    inline_phones, inline_skipped_phones = _split_allowlisted(raw_inline_phones, entries)
 
     emails = _dedupe_preserving_order(fm_emails + inline_emails)
     phones = _dedupe_preserving_order(fm_phones + inline_phones)
