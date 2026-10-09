@@ -148,7 +148,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   key is absent entirely.
 - **`migrate-pii` and `recompare.identify_pii_hazards` now honour `pattern`
   allowlist entries too (issue athenaeum#2042, follow-up to athenaeum#2007 /
-  PR #2037).** Both previously flattened the loaded allowlist to a
+  PR athenaeum#2037).** Both previously flattened the loaded allowlist to a
   `{value: reason}` mapping before use, which silently dropped every
   `pattern` entry — a domain-level allowlisting adjudicated the corpus lint
   (`lint-pii`) but not the migrator or the merge-recompare hazard check, the
