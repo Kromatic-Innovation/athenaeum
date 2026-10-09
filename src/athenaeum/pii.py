@@ -1902,14 +1902,19 @@ def adjudicate_corpus_pii(
     entries = list(entries)
     matched_idx: set[int] = set()
 
-    def _find(token: str) -> int | None:
-        for idx, entry in enumerate(entries):
-            if entry.value is not None:
-                if entry.value == token:
-                    return idx
-            elif entry.pattern is not None and re.fullmatch(entry.pattern, token):
-                return idx
-        return None
+    def _find_all(token: str) -> list[int]:
+        # Every entry that matches *token* must be recorded as used, not
+        # just the first one found -- when a broad pattern and a more
+        # specific value both match the same token, stopping at the first
+        # match left every later-listed matching entry permanently
+        # "unused" and wrongly reported `stale` regardless of the fact that
+        # it does match something in the corpus.
+        return [
+            idx
+            for idx, entry in enumerate(entries)
+            if (entry.value is not None and entry.value == token)
+            or (entry.pattern is not None and re.fullmatch(entry.pattern, token))
+        ]
 
     out: list[PiiAdjudicatedFinding] = []
     for f in findings:
@@ -1917,17 +1922,17 @@ def adjudicate_corpus_pii(
         unexplained_emails: list[str] = []
         unexplained_phones: list[str] = []
         for token in f.emails:
-            idx = _find(token)
-            if idx is not None:
+            idxs = _find_all(token)
+            if idxs:
                 allowlisted.append(token)
-                matched_idx.add(idx)
+                matched_idx.update(idxs)
             else:
                 unexplained_emails.append(token)
         for token in f.phones:
-            idx = _find(token)
-            if idx is not None:
+            idxs = _find_all(token)
+            if idxs:
                 allowlisted.append(token)
-                matched_idx.add(idx)
+                matched_idx.update(idxs)
             else:
                 unexplained_phones.append(token)
         out.append(
