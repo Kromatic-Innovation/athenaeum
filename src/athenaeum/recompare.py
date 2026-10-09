@@ -54,6 +54,7 @@ comparator, writes only to the verdict ledger. The CLI wrapper lives in
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from itertools import combinations
@@ -77,6 +78,9 @@ from athenaeum.models import TokenUsage, parse_frontmatter
 from athenaeum.pending_merges import PendingMerge, parse_pending_merges
 from athenaeum.pii import (
     PII_ALLOWLIST_FILENAME,
+    PiiAllowlistEntry,
+    allowlist_matches,
+    coerce_pii_allowlist,
     find_inline_emails,
     find_inline_phones,
     is_pii_flagged,
@@ -183,7 +187,9 @@ def resolve_source_path(source: str, wiki_root: Path) -> Path | None:
 
 
 def identify_pii_hazards(
-    paths: list[Path], *, allowlist: dict[str, str] | None = None
+    paths: list[Path],
+    *,
+    allowlist: Mapping[str, str] | Iterable[PiiAllowlistEntry] | None = None,
 ) -> list[str]:
     """Return human-readable reasons this proposal is a PII hazard, or ``[]``.
 
@@ -198,18 +204,23 @@ def identify_pii_hazards(
       body, which is the shape that makes a fold irreversible in a way a
       later erasure request cannot undo.
 
-    *allowlist* (issue athenaeum#2006) is an optional ``{value: reason}`` mapping —
-    the same adjudicated allowlist ``lint-pii``/``migrate-pii`` read via
-    :func:`athenaeum.pii.load_pii_allowlist`. A detected email/phone token
-    matching a key EXACTLY was already operator-adjudicated as "not a way to
-    contact a specific human" and is excluded from the hazard count; the
+    *allowlist* (issue athenaeum#2006, widened to pattern entries by issue
+    athenaeum#2042) accepts either calling convention: the original
+    ``{value: reason}`` mapping, or the full entry list
+    :func:`athenaeum.pii.load_pii_allowlist` returns (exact AND ``pattern``
+    entries, issue athenaeum#2007) — :func:`athenaeum.pii.coerce_pii_allowlist`
+    normalizes whichever shape was passed. A detected email/phone token
+    matching an exact-``value`` entry, or matching a ``pattern`` entry via
+    ``re.fullmatch`` against the whole token, was already operator-adjudicated
+    as "not a way to contact a specific human" and is excluded from the
+    hazard count via the shared :func:`athenaeum.pii.allowlist_matches`; the
     ``pii:`` frontmatter flag is NOT consulted against the allowlist (a flag
     the operator set stays a hazard signal regardless). Omitting *allowlist*
     preserves this function's pre-athenaeum#2006 behaviour exactly.
 
     A reason names the file, so the operator can go and look.
     """
-    allowlist = allowlist or {}
+    entries = coerce_pii_allowlist(allowlist)
     reasons: list[str] = []
     for path in paths:
         try:
@@ -220,10 +231,10 @@ def identify_pii_hazards(
         meta, body = parse_frontmatter(text)
         if is_pii_flagged(meta):
             reasons.append(f"{path.name}: pii: frontmatter flag")
-        emails = [e for e in find_inline_emails(body) if e not in allowlist]
+        emails = [e for e in find_inline_emails(body) if not allowlist_matches(e, entries)]
         if emails:
             reasons.append(f"{path.name}: {len(emails)} inline email address(es)")
-        phones = [p for p in find_inline_phones(body) if p not in allowlist]
+        phones = [p for p in find_inline_phones(body) if not allowlist_matches(p, entries)]
         if phones:
             reasons.append(f"{path.name}: {len(phones)} inline phone number(s)")
     return reasons
@@ -312,19 +323,22 @@ def recompare_pending_merges(
     # human". A missing or malformed allowlist degrades to "nothing
     # adjudicated" (fails toward MORE hazards flagged, never fewer).
     allowlist_entries, _allowlist_errors = load_pii_allowlist(wiki_root / PII_ALLOWLIST_FILENAME)
-    # identify_pii_hazards() adjudicates by exact value only -- a pattern
-    # entry (issue athenaeum#2007) has no `value` and is excluded from this
-    # mapping rather than polluting it with a `None` key. Propagating
-    # pattern adjudication into this hazard check is out of scope here; see
-    # athenaeum.pii.load_pii_allowlist's docstring.
-    allowlist = {e.value: e.reason for e in allowlist_entries if e.value is not None}
+    # Issue athenaeum#2042: the full entry list is passed through unchanged --
+    # exact AND `pattern` entries (issue athenaeum#2007) -- so
+    # identify_pii_hazards() honours a pattern-adjudicated value too, via the
+    # shared athenaeum.pii.allowlist_matches. Previously flattened to
+    # `{value: reason}` here, which silently dropped every pattern entry
+    # before the hazard check ever saw it.
+    allowlist: list[PiiAllowlistEntry] = list(allowlist_entries)
+    existing_values = {e.value for e in allowlist_entries if e.value is not None}
     # Issue athenaeum#689 AC3/AC4: a value with a sticky "not PII" verdict in
-    # the athenaeum#712 ledger is merged into the SAME allowlist mapping
+    # the athenaeum#712 ledger is merged into the SAME allowlist entries
     # identify_pii_hazards() already consults -- no second hazard-exclusion
     # path. The YAML allowlist (the operator's own explicit artifact) wins
     # on any value present in both.
     for value, reason in load_not_pii_allowlist(wiki_root).items():
-        allowlist.setdefault(value, reason)
+        if value not in existing_values:
+            allowlist.append(PiiAllowlistEntry(value=value, reason=reason))
     all_proposals: list[PendingMerge] = parse_pending_merges(merges_path)
     unresolved = [p for p in all_proposals if not p.resolved]
     if limit is not None and limit > 0:

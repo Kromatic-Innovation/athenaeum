@@ -2170,6 +2170,36 @@ class TestPlanPiiMigrationAllowlist:
         assert [e.value for e in plan.skipped_allowlisted] == ["+1-555-020-0200"]
         assert "+1-555-020-0200" in (plan.rewritten_page_text or "")
 
+    def test_pattern_allowlist_entry_survives_genuine_pii_on_same_page_migrates(
+        self, tmp_path: Path
+    ) -> None:
+        # Issue athenaeum#2042 (follow-up to athenaeum#2007): a domain-level
+        # `pattern` entry must be honoured by plan_pii_migration exactly like
+        # an exact-`value` entry -- the pre-athenaeum#2042 code silently dropped
+        # every pattern entry before it ever reached this function.
+        root = tmp_path / "knowledge"
+        page = _write_page(
+            root / "wiki",
+            "pattern.md",
+            "uid: a2\nname: Pattern Case\ntype: person\n",
+            "Real contact: real.person@corp.example. "
+            "Placeholder: tk@example.invalid.",
+        )
+        entries = [
+            PiiAllowlistEntry(
+                pattern=r"[a-z.]+@example\.invalid",
+                reason="synthetic placeholder domain, not a person",
+            )
+        ]
+
+        plan = plan_pii_migration(page, EXCLUDED_CONFIG, root, allowlist=entries)
+
+        assert plan.emails == ["real.person@corp.example"]
+        assert [e.value for e in plan.skipped_allowlisted] == ["tk@example.invalid"]
+        assert "tk@example.invalid" in (plan.rewritten_page_text or "")
+        assert "tk@example.invalid" not in (plan.excluded_page_text or "")
+        assert "real.person@corp.example" in (plan.excluded_page_text or "")
+
     def test_case_variant_is_not_allowlisted_and_is_migrated(self, tmp_path: Path) -> None:
         # Matching is EXACT value equality (mirrors adjudicate_corpus_pii) --
         # no case-folding. A differently-cased occurrence of an allowlisted
@@ -2288,6 +2318,49 @@ class TestMigratePiiCliAllowlist:
         excluded_text = excluded.read_text(encoding="utf-8")
         assert "real.person@corp.example" in excluded_text
         assert "tk@allowlisted.example" not in excluded_text
+
+    def test_pattern_entry_in_yaml_allowlist_is_honoured_end_to_end(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        # Issue athenaeum#2042: a `pattern` entry in the YAML allowlist must
+        # survive the full CLI path -- _load_migrate_pii_allowlist() used to
+        # flatten the loaded entries to {value: reason} before this point,
+        # which silently dropped every pattern entry before plan_pii_migration
+        # ever saw it.
+        root = tmp_path / "knowledge"
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "athenaeum.yaml").write_text(
+            "storage:\n  mapping:\n    pii: excluded\n", encoding="utf-8"
+        )
+        page = _write_page(
+            root / "wiki",
+            "pattern2.md",
+            "uid: a3\nname: Pattern CLI\ntype: person\n",
+            "Real contact: real.person@corp.example. "
+            "Placeholder: tk@example.invalid.",
+        )
+        (root / "wiki" / "_pii-allowlist.yml").write_text(
+            "- pattern: '[a-z.]+@example\\.invalid'\n"
+            "  reason: synthetic placeholder domain, not a person\n",
+            encoding="utf-8",
+        )
+
+        rc = main(
+            ["storage", "migrate-pii", "--path", str(root), "--page", str(page), "--apply"]
+        )
+        assert rc == 0
+        apply_out = capsys.readouterr().out
+        assert "Skipped 1 allowlisted value(s) on this page, with reasons:" in apply_out
+        assert "'tk@example.invalid'" in apply_out
+
+        final_text = page.read_text(encoding="utf-8")
+        assert "tk@example.invalid" in final_text
+        assert "real.person@corp.example" not in final_text
+
+        excluded = surface_root_for_class("pii", EXCLUDED_CONFIG, root) / "pattern2.md"
+        excluded_text = excluded.read_text(encoding="utf-8")
+        assert "real.person@corp.example" in excluded_text
+        assert "tk@example.invalid" not in excluded_text
 
     def test_missing_allowlist_migrates_everything_same_as_before(
         self, tmp_path: Path

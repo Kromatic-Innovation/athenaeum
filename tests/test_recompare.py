@@ -155,6 +155,69 @@ class TestPiiHazardGuard:
         )
         assert any("1 inline email" in r for r in reasons)
 
+    def test_pattern_allowlist_entry_is_not_a_hazard(self, wiki_root: Path) -> None:
+        # Issue athenaeum#2042 (follow-up to athenaeum#2007): a domain-level
+        # `pattern` entry must adjudicate a matching inline address exactly
+        # like an exact-`value` entry does -- identify_pii_hazards() must not
+        # silently drop pattern entries the way the pre-athenaeum#2042 code did.
+        from athenaeum.pii import PiiAllowlistEntry
+
+        a = _write_page(wiki_root, "a", body="reach the test fixture at tk@example.invalid")
+        b = _write_page(wiki_root, "b")
+        entries = [
+            PiiAllowlistEntry(
+                pattern=r"[a-z]+@example\.invalid",
+                reason="synthetic placeholder domain, not a person",
+            )
+        ]
+
+        reasons = identify_pii_hazards([a, b], allowlist=entries)
+
+        assert reasons == []
+
+    def test_pattern_allowlist_entry_narrows_but_does_not_blank_other_hazards(
+        self, wiki_root: Path
+    ) -> None:
+        from athenaeum.pii import PiiAllowlistEntry
+
+        a = _write_page(
+            wiki_root,
+            "a",
+            body="placeholder tk@example.invalid, contact alice@example.com",
+        )
+        b = _write_page(wiki_root, "b")
+        entries = [
+            PiiAllowlistEntry(
+                pattern=r"[a-z]+@example\.invalid",
+                reason="synthetic placeholder domain, not a person",
+            )
+        ]
+
+        reasons = identify_pii_hazards([a, b], allowlist=entries)
+
+        assert any("1 inline email" in r for r in reasons)
+
+    def test_recompare_pending_merges_consults_a_pattern_entry_in_the_yaml_allowlist(
+        self, wiki_root: Path
+    ) -> None:
+        # End-to-end through recompare_pending_merges, mirroring
+        # test_recompare_pending_merges_consults_the_wiki_root_allowlist but
+        # with a `pattern` entry instead of an exact `value` one.
+        a = _write_page(wiki_root, "a", body="placeholder contact tk@example.invalid")
+        b = _write_page(wiki_root, "b")
+        _write_queue(wiki_root, [_block("hazard", [a, b])])
+        (wiki_root / "_pii-allowlist.yml").write_text(
+            "- pattern: '[a-z]+@example\\.invalid'\n"
+            "  reason: synthetic placeholder domain, not a person\n",
+            encoding="utf-8",
+        )
+        client = _fake_client(_content_payload("equivalent"))
+
+        result = recompare_pending_merges(wiki_root, client=client)
+
+        assert result.pii_hazard_ids == []
+        assert result.proposals[0].route == ROUTE_LEDGER
+
     def test_recompare_pending_merges_consults_the_wiki_root_allowlist(
         self, wiki_root: Path
     ) -> None:

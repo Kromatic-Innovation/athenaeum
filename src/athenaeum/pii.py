@@ -1857,6 +1857,27 @@ def load_pii_allowlist(path: Path) -> tuple[list[PiiAllowlistEntry], list[str]]:
     return entries, errors
 
 
+def allowlist_reason(value: str, allowlist: Iterable[PiiAllowlistEntry]) -> str | None:
+    """The adjudicating entry's reason for *value*, or ``None`` if unadjudicated.
+
+    Shared lookup behind :func:`allowlist_matches`: an exact-``value`` entry
+    matches by equality only — no case-folding, no substring match — and a
+    ``pattern`` entry matches via ``re.fullmatch`` against the WHOLE value
+    (issue athenaeum#2007). Exposed separately (not just the boolean) because a
+    caller that reports *why* a value was skipped — ``migrate-pii``'s
+    per-page allowlist-skip report, :func:`recompare.identify_pii_hazards`'s
+    hazard exclusion — needs the matched reason, not only whether a match
+    occurred.
+    """
+    for entry in allowlist:
+        if entry.value is not None:
+            if entry.value == value:
+                return entry.reason
+        elif entry.pattern is not None and re.fullmatch(entry.pattern, value):
+            return entry.reason
+    return None
+
+
 def allowlist_matches(value: str, allowlist: Iterable[PiiAllowlistEntry]) -> bool:
     """True when *value* is adjudicated by any entry in *allowlist* (issue athenaeum#2007).
 
@@ -1865,16 +1886,40 @@ def allowlist_matches(value: str, allowlist: Iterable[PiiAllowlistEntry]) -> boo
     contract. A ``pattern`` entry matches via ``re.fullmatch`` against the
     WHOLE value — a pattern that only matches a prefix or suffix of *value*
     is not a match. Single source of truth for "is this token adjudicated"
-    so every caller that consults the allowlist — today, :func:`lint-pii`'s
-    :func:`adjudicate_corpus_pii` — can never disagree about what counts.
+    so every caller that consults the allowlist — :func:`lint-pii`'s
+    :func:`adjudicate_corpus_pii`, ``migrate-pii``'s
+    :func:`athenaeum.storage_migrate.plan_pii_migration`, and
+    :func:`athenaeum.recompare.identify_pii_hazards` (issue athenaeum#2042) —
+    can never disagree about what counts.
     """
-    for entry in allowlist:
-        if entry.value is not None:
-            if entry.value == value:
-                return True
-        elif entry.pattern is not None and re.fullmatch(entry.pattern, value):
-            return True
-    return False
+    return allowlist_reason(value, allowlist) is not None
+
+
+def coerce_pii_allowlist(
+    allowlist: "Mapping[str, str] | Iterable[PiiAllowlistEntry] | None",
+) -> list[PiiAllowlistEntry]:
+    """Normalize either calling convention into a list of entries (issue athenaeum#2042).
+
+    Two shapes exist in the wild: the original pre-athenaeum#2007 ``{value:
+    reason}`` mapping a caller builds by hand (and the ~15 existing tests
+    that still construct one literally), and the full entry list
+    :func:`load_pii_allowlist` returns, which also carries ``pattern``
+    entries. A caller that wants pattern adjudication honoured end to end —
+    ``migrate-pii`` and :func:`athenaeum.recompare.identify_pii_hazards` —
+    accepts either shape and normalizes through this function once, rather
+    than forking its matching logic by input type.
+
+    A :class:`~collections.abc.Mapping` is wrapped one exact-``value`` entry
+    per item; anything else iterable is assumed to already be
+    :class:`PiiAllowlistEntry` instances and is read through unchanged (not
+    re-validated — that is :func:`load_pii_allowlist`'s job). ``None``
+    becomes ``[]``.
+    """
+    if allowlist is None:
+        return []
+    if isinstance(allowlist, Mapping):
+        return [PiiAllowlistEntry(value=k, reason=v) for k, v in allowlist.items()]
+    return list(allowlist)
 
 
 def adjudicate_corpus_pii(
