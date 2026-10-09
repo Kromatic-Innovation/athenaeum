@@ -66,7 +66,14 @@ athenaeum#2027 second false-positive class whole — not just
 checks, but the position-dependent ones too
 (:func:`athenaeum.pii._is_embedded_slug_digit_run`,
 :func:`athenaeum.pii._has_bare_run_id_label_prefix`). No code change was
-needed in this module for that fix to take effect.
+needed in this module for that fix to take effect. The same is true of
+athenaeum#2031's third false-positive class (run/job/workflow ids separated
+from their label by other tokens, decimal thresholds, port ranges, and
+labeled account/receipt/approval/decision ids) — it lands entirely inside
+``_is_excluded_phone_shape``, the now also gapped-scanning
+``_has_bare_run_id_label_prefix``, and the new, shape-gated
+:func:`athenaeum.pii._has_account_record_id_label_prefix`, so this module
+inherits it the same way.
 
 Allowlist / fail-safe (the "isn't already known to the recipient" qualifier in
 athenaeum#428): a caller that can establish an address is already known to the recipient

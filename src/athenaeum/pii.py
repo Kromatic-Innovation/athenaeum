@@ -492,6 +492,49 @@ def _has_labeled_identifier_prefix(preceding_text: str) -> bool:
     return bool(_LABELED_PREFIX_RE.search(preceding_text[-64:]))
 
 
+#: Preceding-token labels that type an UNFORMATTED digit-group run — one
+#: with no ``+``, parens, or whitespace, so a bare run or a hyphen-grouped
+#: run like the North American ``NNN-NNN-NNNN`` shape, but never a
+#: plus-prefixed, parenthesized, or space-grouped phone — as a record id
+#: (issue athenaeum#2031): a receipt, invoice, approval, or merge-``decision``
+#: id, or an ``account`` id (the Google Ads `NNN-NNN-NNNN` shape is
+#: identical to a North American phone number, AC(b) — it is excluded only
+#: when it follows one of these labels; the SAME unlabeled shape, and the
+#: same digits with a ``+``/parens/spaces, still matches as a phone). This
+#: is a SEPARATE tuple/regex from :data:`LABELED_IDENTIFIER_PREFIXES` for
+#: exactly the reason :data:`BARE_RUN_ID_LABEL_PREFIXES` already is one:
+#: folding these words into the general, shape-unaware label list would also
+#: suppress ``account +1-555-0100`` or ``invoice (555) 010-0100``, which
+#: AC(b) requires to still match.
+ACCOUNT_RECORD_ID_LABEL_PREFIXES: tuple[str, ...] = (
+    "receipt",
+    "invoice",
+    "approval",
+    "decision",
+    "account",
+)
+
+#: Same anchor shape as :data:`_LABELED_PREFIX_RE` but for
+#: :data:`ACCOUNT_RECORD_ID_LABEL_PREFIXES`.
+_ACCOUNT_RECORD_ID_PREFIX_RE = re.compile(
+    r"(?:^|[^A-Za-z0-9])(?:"
+    + "|".join(re.escape(label) for label in ACCOUNT_RECORD_ID_LABEL_PREFIXES)
+    + r")[\s`'\"(:=\-]*$",
+    re.IGNORECASE,
+)
+
+
+def _has_account_record_id_label_prefix(preceding_text: str) -> bool:
+    """True when *preceding_text* ends with an account/record-id label.
+
+    Mirrors :func:`_has_labeled_identifier_prefix`'s shape but over
+    :data:`ACCOUNT_RECORD_ID_LABEL_PREFIXES`. Callers apply this only to an
+    UNFORMATTED token (no ``+``, parens, or whitespace — see that data's
+    docstring) so a labeled, formatted phone number is never affected.
+    """
+    return bool(_ACCOUNT_RECORD_ID_PREFIX_RE.search(preceding_text[-64:]))
+
+
 #: Preceding-token labels that type a BARE (unformatted) 10-15 digit run as
 #: a non-phone record id — a CI run id, a PR/issue comment id, a job id, or a
 #: generic ``id`` field (issue athenaeum#2027) — when the label sits directly
@@ -502,12 +545,53 @@ def _has_labeled_identifier_prefix(preceding_text: str) -> bool:
 #: pure digit run) — folding these words into the general label list would
 #: also suppress a genuinely labeled, FORMATTED phone number such as
 #: ``mobile 917-231-6130`` or ``job +1-555-0100``, which must still match.
-BARE_RUN_ID_LABEL_PREFIXES: tuple[str, ...] = ("run", "runs", "comment", "job", "id")
+#: Extended by issue athenaeum#2031 with ``workflow`` — a GitHub Actions
+#: workflow id/run is labeled by either word interchangeably in the wild.
+#: This is the ADJACENT-label set (no token gap, only punctuation between
+#: the label and the run — unchanged athenaeum#2027 shape); the narrower
+#: :data:`_RUN_ID_GAP_LABEL_PREFIXES` below is the subset AC(a) names for
+#: the separated-by-other-tokens case, so ``comment``/``id`` (generic
+#: enough that a gapped match would eat an unrelated nearby phone, e.g.
+#: ``caller id showed 5551234567``) stay adjacent-only.
+BARE_RUN_ID_LABEL_PREFIXES: tuple[str, ...] = (
+    "run",
+    "runs",
+    "comment",
+    "job",
+    "id",
+    "workflow",
+)
 
-#: Same anchor shape as :data:`_LABELED_PREFIX_RE` but for
-#: :data:`BARE_RUN_ID_LABEL_PREFIXES`, with ``#`` added to the punctuation gap
-#: so ``run #12345678901`` matches (a GitHub Actions run referenced by its
-#: ``#`` shorthand).
+#: The issue athenaeum#2031 AC(a) subset of :data:`BARE_RUN_ID_LABEL_PREFIXES`
+#: that also retires a run a FEW TOKENS away, not just directly adjacent:
+#: "GitHub Actions run ids written after the word 'run' or 'runs' but
+#: separated by other tokens" names only run/runs/job/workflow — deliberately
+#: excludes the more generic ``comment``/``id``, which stay adjacent-only
+#: (see :data:`BARE_RUN_ID_LABEL_PREFIXES`'s docstring) so a gapped scan
+#: cannot eat an unrelated nearby genuine phone.
+_RUN_ID_GAP_LABEL_PREFIXES: frozenset[str] = frozenset({"run", "runs", "job", "workflow"})
+
+#: A nearer, more specific phone label that must win over a farther
+#: run-id-shaped label in the same gapped window (issue athenaeum#2031):
+#: ``mobile for the job: 5551234567`` is still excluded by ``job``'s
+#: adjacency match above, but ``tel``/``phone``/``mobile``/``cell`` appearing
+#: ANYWHERE in the gap window means the window is already describing a
+#: phone, not a run id, so the gapped match must not fire (AC(b): a
+#: ``tel``/``phone``/``mobile``-labeled number must still match).
+_RUN_ID_GAP_STOP_LABELS: frozenset[str] = frozenset({"tel", "phone", "mobile", "cell"})
+
+#: How many tokens back from the digit run, ON THE SAME LINE, the gapped
+#: check will look for a :data:`_RUN_ID_GAP_LABEL_PREFIXES` label (issue
+#: athenaeum#2031) — "a few tokens". Bounded to the current line (a
+#: paragraph break resets context — a label before a blank line must not
+#: reach across it to retire an unrelated number after it).
+_BARE_RUN_ID_LABEL_GAP_TOKENS = 6
+
+#: Unchanged athenaeum#2027 anchor shape for the ADJACENT case: an optional
+#: run of separator punctuation (with ``#`` added so ``run #12345678901``
+#: matches a GitHub Actions run referenced by its ``#`` shorthand), then one
+#: of :data:`BARE_RUN_ID_LABEL_PREFIXES`, bounded on its left by a
+#: non-alphanumeric.
 _BARE_RUN_ID_PREFIX_RE = re.compile(
     r"(?:^|[^A-Za-z0-9])(?:"
     + "|".join(re.escape(label) for label in BARE_RUN_ID_LABEL_PREFIXES)
@@ -517,14 +601,36 @@ _BARE_RUN_ID_PREFIX_RE = re.compile(
 
 
 def _has_bare_run_id_label_prefix(preceding_text: str) -> bool:
-    """True when *preceding_text* ends with a bare-run-id label (issue athenaeum#2027).
+    """True when a bare-run-id label types the run that follows
+    *preceding_text* (issues athenaeum#2027, athenaeum#2031).
 
-    Mirrors :func:`_has_labeled_identifier_prefix`'s shape but over
-    :data:`BARE_RUN_ID_LABEL_PREFIXES`. Callers apply this only to a token
-    that is a pure digit run (no ``+``, parens, or internal separators) so a
-    labeled, formatted phone number is never affected.
+    Two independent checks, either sufficient:
+
+    * **Adjacent** (unchanged athenaeum#2027 shape) — one of
+      :data:`BARE_RUN_ID_LABEL_PREFIXES` directly against the run, tolerating
+      only punctuation between them (``run 12345678901``, ``run
+      #12345678901``).
+    * **Gapped** (issue athenaeum#2031) — one of the narrower
+      :data:`_RUN_ID_GAP_LABEL_PREFIXES` within the last
+      :data:`_BARE_RUN_ID_LABEL_GAP_TOKENS` tokens of the SAME LINE, provided
+      no :data:`_RUN_ID_GAP_STOP_LABELS` phone label also appears in that
+      window (a closer, more specific phone label always wins — AC(b)).
+
+    Callers apply this only to a token that is a pure digit run (no ``+``,
+    parens, or internal separators) so a labeled, formatted phone number is
+    never affected.
     """
-    return bool(_BARE_RUN_ID_PREFIX_RE.search(preceding_text[-64:]))
+    if _BARE_RUN_ID_PREFIX_RE.search(preceding_text[-64:]):
+        return True
+
+    line = preceding_text.rsplit("\n", 1)[-1][-160:]
+    tokens = [tok.lower() for tok in re.findall(r"[A-Za-z0-9]+", line)]
+    if not tokens:
+        return False
+    recent = tokens[-_BARE_RUN_ID_LABEL_GAP_TOKENS:]
+    if any(tok in _RUN_ID_GAP_STOP_LABELS for tok in recent):
+        return False
+    return any(tok in _RUN_ID_GAP_LABEL_PREFIXES for tok in recent)
 
 
 #: Joiner characters that can glue a bare digit run directly onto an
@@ -787,6 +893,41 @@ def _normalize_phone_token(token: str) -> str:
     return normalized
 
 
+def _is_decimal_number(candidate: str) -> bool:
+    """True when *candidate* is a bare decimal number (issue athenaeum#2031).
+
+    Exactly one ``.`` with an all-digit group on each side and nothing
+    else — a floating-point value (``3.14159265358979``), not a phone. The
+    existing short-run exclusion (``len(groups) >= 2 and total_digits < 10``
+    in :func:`_is_excluded_phone_shape`) already catches a SHORT decimal
+    (``3.14``); it does not catch a many-decimal-place threshold whose total
+    digit count reaches double digits, which is exactly the shape this issue's
+    measurement found. No genuine phone fixture uses a bare ``.`` as its only
+    grouping separator (real ones use ``+``, parens, spaces, or ``-``), so
+    this is unconditional on digit count.
+    """
+    parts = candidate.split(".")
+    return len(parts) == 2 and all(p.isdigit() and p for p in parts)
+
+
+def _is_port_range(candidate: str) -> bool:
+    """True when *candidate* is an ``NNNN-NNNN`` port range (issue athenaeum#2031).
+
+    Exactly two hyphen-separated all-digit groups, each parsing as a port
+    number below 65536 — the issue's literal shape. A SHORT port range
+    (``8000-8010``, 8 total digits) is already caught by the existing
+    ``total_digits < 10`` short-run rule; this exists for the pair of 5-digit
+    ports near the top of the range (``60000-65000``, 10 total digits) that
+    rule does not reach. Gated at the call site alongside the date/epoch
+    group checks (no ``+``/parens/whitespace) so a formatted phone is never
+    affected.
+    """
+    parts = candidate.split("-")
+    if len(parts) != 2 or not all(p.isdigit() and p for p in parts):
+        return False
+    return int(parts[0]) < 65536 and int(parts[1]) < 65536
+
+
 def _is_excluded_phone_shape(token: str) -> bool:
     """True when *token* is a provably-non-phone shape.
 
@@ -838,6 +979,12 @@ def _is_excluded_phone_shape(token: str) -> bool:
       with no ``+`` and fewer than a full national number's digits (10) is an
       issue-number / reference list, not a phone (``256-257-280`` = 9 digits).
       ``+1-555-0100`` (``+`` prefix) and ``917-231-6130`` (10 digits) are kept.
+    * **Bare decimal number** — a single ``.`` with an all-digit group on
+      each side (:func:`_is_decimal_number`, athenaeum#2031) — a
+      floating-point threshold, never a phone.
+    * **Port range** — two hyphen-separated digit groups that both parse as
+      a port number below 65536 (:func:`_is_port_range`, athenaeum#2031).
+      Same gate as the date/epoch-group checks.
 
     None of these can be a genuine phone, so applying the rule on the egress
     path removes false positives without dropping any real number.
@@ -854,12 +1001,17 @@ def _is_excluded_phone_shape(token: str) -> bool:
         or _is_bare_id_fragment(candidate)
         or _is_isbn13(candidate)
         or (not has_plus and _is_epoch_millis(candidate))
+        or (not has_plus and _is_decimal_number(candidate))
         or (
             not has_plus
             and "(" not in candidate
             and ")" not in candidate
             and " " not in candidate
-            and (_has_date_group(candidate) or _has_epoch_millis_group(candidate))
+            and (
+                _has_date_group(candidate)
+                or _has_epoch_millis_group(candidate)
+                or _is_port_range(candidate)
+            )
         )
     ):
         return True
@@ -956,10 +1108,15 @@ def find_inline_phones(text: str) -> list[str]:
 
     Also excludes a hyphen-joined digit-group token glued onto a
     letter-containing slug segment (:func:`_is_embedded_slug_digit_run`,
-    issue athenaeum#2027), and a BARE 10-11 digit run preceded by a
-    run/comment/job/id label with no joiner
-    (:func:`_has_bare_run_id_label_prefix`, issue athenaeum#2027) — both
-    position-dependent.
+    issue athenaeum#2027), an UNFORMATTED run (no ``+``/parens/whitespace)
+    preceded by a receipt/invoice/approval/decision/account label
+    (:func:`_has_account_record_id_label_prefix`, issue athenaeum#2031), and
+    a BARE 10-11 digit run preceded — within a few tokens for
+    run/runs/job/workflow, directly adjacent only for comment/id — by one of
+    those labels (:func:`_has_bare_run_id_label_prefix`, issues athenaeum#2027 /
+    athenaeum#2031). All three are position-dependent. The token-only
+    :func:`_is_excluded_phone_shape` additionally excludes a bare decimal
+    number and an ``NNNN-NNNN`` port range (issue athenaeum#2031).
     """
     source = text or ""
     seen: list[str] = []
@@ -982,6 +1139,18 @@ def find_inline_phones(text: str) -> list[str]:
         # A hyphen-joined digit-group token glued onto a letter-containing
         # slug segment — a lane/job slug id, not a phone (issue athenaeum#2027).
         if _is_embedded_slug_digit_run(source, m.start(1), m.end(1)):
+            continue
+        # An UNFORMATTED run (no '+', parens, or whitespace — so a bare run
+        # or a hyphen-grouped NNN-NNN-NNNN run, but never a plus-prefixed,
+        # parenthesized, or space-grouped phone) labeled as a receipt,
+        # invoice, approval, decision, or account id (issue athenaeum#2031).
+        if (
+            not token.startswith("+")
+            and "(" not in token
+            and ")" not in token
+            and " " not in token
+            and _has_account_record_id_label_prefix(source[: m.start(1)])
+        ):
             continue
         # A bare 10-11 digit run labeled as a run/comment/job/id with no
         # joiner between the label and the run (issue athenaeum#2027).
