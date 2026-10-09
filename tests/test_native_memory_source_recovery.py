@@ -1125,7 +1125,7 @@ class TestPersistRecoveredOriginSessionId:
     def test_falsy_existing_key_is_replaced_not_duplicated(
         self, tmp_path: Path, existing_value: str
     ) -> None:
-        """Review finding (PR #2044, Sentry): ``originSessionId: null`` /
+        """Review finding (athenaeum#2044, Sentry): ``originSessionId: null`` /
         ``originSessionId: ""`` are falsy, so the no-op guard above does not
         short-circuit on them -- the write path must REPLACE that line in
         place rather than append a second ``originSessionId:`` key, which
