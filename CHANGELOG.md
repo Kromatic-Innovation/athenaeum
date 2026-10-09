@@ -124,6 +124,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for files with no pattern entries, and pattern entries are simply
   excluded from those mappings rather than propagated (left for a follow-up
   if needed).
+- **Intake persists a recovered `originSessionId` back into memory
+  frontmatter, so `correct_*` can read it on the next run (issue
+  athenaeum#2038).** `discover_auto_memory_files` already RECOVERED an
+  origin session for a natively-written memory that declared none
+  (issue athenaeum#1452), but kept it in memory only — nothing wrote it
+  back to disk, so the `correct_*` provenance gate
+  (`resolutions._member_origin_and_claim`) read the file's own frontmatter
+  on the next run, found nothing, and refused with "no origin session
+  recorded" even while the authorizing transcript still existed. A new
+  `intake.persist_recovered_origin_session_id` back-fills
+  `originSessionId: <id>` via a textual insertion (mirrors
+  `memory_class_backfill.insert_memory_class`) — every other frontmatter
+  key and the body stay byte-identical, a file that already carries the
+  key is never rewritten, and an unresolved recovery writes nothing. The
+  write runs only under the caller's own already-acquired `RunLock`
+  (`discover_auto_memory_files(..., lock=...)`, wired through the nightly
+  librarian run's `ctx.lock`) and raises otherwise, mirroring
+  `athenaeum.verdicts`'s single-appender guard. **Review fix (PR
+  athenaeum#2044):** a file carrying a falsy existing key
+  (`originSessionId: null` / `originSessionId: ""`) was not caught by the
+  non-empty idempotency check, so the write path appended a SECOND
+  `originSessionId:` line rather than replacing the first, leaving a
+  duplicate key in the block. The write path now replaces that line in
+  place when a (falsy) key is already present, and only appends when the
+  key is absent entirely.
 - **Self-tuning loop: the two remaining sibling proposal rails now actually
   run, behind the same master key (issue athenaeum#719 AC11/AC15).**
   `tier_movement_proposals.py` (issue athenaeum#2019) and

@@ -34,11 +34,16 @@ from pathlib import Path
 
 import pytest
 
-from athenaeum.intake import discover_auto_memory_files
+from athenaeum.intake import (
+    OriginSessionWriteNotLocked,
+    discover_auto_memory_files,
+    persist_recovered_origin_session_id,
+)
 from athenaeum.merge import AUTO_WIKI_PREFIX, merge_clusters_to_wiki
 from athenaeum.models import DEFAULT_SOURCE_TYPE
 from athenaeum.recovery_yield import load_state as load_recovery_yield_state
 from athenaeum.recovery_yield import write_state as write_recovery_yield_state
+from athenaeum.runlock import RunLock
 from athenaeum.session_recovery import (
     BASIS_TIME_WINDOW,
     BASIS_WRITE_CITED,
@@ -1019,3 +1024,147 @@ class TestRecoveryYieldSignalCoversEveryExit:
             assert discover_auto_memory_files(knowledge_root, projects_root=tmp_path) == []
 
         assert "below threshold" not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#2038: persisting the recovered originSessionId to disk
+
+
+class TestPersistRecoveredOriginSessionId:
+    """``persist_recovered_origin_session_id`` and its wiring into
+    ``discover_auto_memory_files`` (issue athenaeum#2038 acceptance criteria).
+    """
+
+    def test_recovery_persists_into_frontmatter_under_lock(
+        self, native_corpus: tuple[Path, Path]
+    ) -> None:
+        knowledge_root, projects_root = native_corpus
+        member_path = knowledge_root / "raw" / "auto-memory" / SCOPE / MEMORY_NAME
+        before = member_path.read_text(encoding="utf-8")
+        assert "originSessionId" not in before
+
+        with RunLock(knowledge_root) as lock:
+            (am,) = discover_auto_memory_files(
+                knowledge_root, projects_root=projects_root, lock=lock
+            )
+        assert am.origin_session_id == WRITER_SESSION
+
+        after = member_path.read_text(encoding="utf-8")
+        assert f"originSessionId: {WRITER_SESSION}" in after
+        # Textual insertion only, appended at the END of the frontmatter
+        # block (right before the closing delimiter) -- every other
+        # frontmatter key and the body are byte-identical to before.
+        closing_delim = "\n---\n"
+        split_at = before.index(closing_delim)
+        expected = before[:split_at] + f"\noriginSessionId: {WRITER_SESSION}" + before[split_at:]
+        assert after == expected
+
+    def test_no_lock_keeps_pre_athenaeum_2038_memory_only_behavior(
+        self, native_corpus: tuple[Path, Path]
+    ) -> None:
+        """``lock=None`` (the default) must change nothing on disk."""
+        knowledge_root, projects_root = native_corpus
+        member_path = knowledge_root / "raw" / "auto-memory" / SCOPE / MEMORY_NAME
+        before = member_path.read_text(encoding="utf-8")
+
+        (am,) = discover_auto_memory_files(knowledge_root, projects_root=projects_root)
+        assert am.origin_session_id == WRITER_SESSION  # still recovered in memory
+
+        after = member_path.read_text(encoding="utf-8")
+        assert after == before, "lock=None must never write to disk"
+
+    def test_unresolved_recovery_writes_nothing(self, tmp_path: Path) -> None:
+        """A recovery that resolves to ``None`` must leave the file untouched."""
+        knowledge_root = tmp_path / "knowledge"
+        empty_projects = tmp_path / "empty-projects"
+        empty_projects.mkdir()
+        _write_native_memory(knowledge_root, mtime_offset_minutes=5)
+        _write_config(knowledge_root)
+        member_path = knowledge_root / "raw" / "auto-memory" / SCOPE / MEMORY_NAME
+        before = member_path.read_text(encoding="utf-8")
+
+        with RunLock(knowledge_root) as lock:
+            (am,) = discover_auto_memory_files(
+                knowledge_root, projects_root=empty_projects, lock=lock
+            )
+        assert am.origin_session_id is None
+
+        after = member_path.read_text(encoding="utf-8")
+        assert after == before
+
+    def test_file_already_carrying_originSessionId_is_never_rewritten(self, tmp_path: Path) -> None:
+        """Idempotent: pinned by comparing both bytes AND mtime (issue athenaeum#2038 AC2)."""
+        knowledge_root = tmp_path / "knowledge"
+        scope_dir = knowledge_root / "raw" / "auto-memory" / SCOPE
+        scope_dir.mkdir(parents=True)
+        path = scope_dir / MEMORY_NAME
+        path.write_text(
+            "---\n"
+            "name: already-cited\n"
+            "originSessionId: pre-existing-session\n"
+            "description: already has provenance.\n"
+            "---\n"
+            "body text\n",
+            encoding="utf-8",
+        )
+        stamp = (T0 + timedelta(minutes=5)).timestamp()
+        os.utime(path, (stamp, stamp))
+        before_bytes = path.read_bytes()
+        before_mtime = path.stat().st_mtime_ns
+
+        with RunLock(knowledge_root) as lock:
+            changed = persist_recovered_origin_session_id(
+                path, "a-different-recovered-session", lock=lock
+            )
+
+        assert changed is False
+        assert path.read_bytes() == before_bytes
+        assert path.stat().st_mtime_ns == before_mtime
+
+    @pytest.mark.parametrize("existing_value", ["null", '""', "''"])
+    def test_falsy_existing_key_is_replaced_not_duplicated(
+        self, tmp_path: Path, existing_value: str
+    ) -> None:
+        """Review finding (athenaeum#2044, Sentry): ``originSessionId: null`` /
+        ``originSessionId: ""`` are falsy, so the no-op guard above does not
+        short-circuit on them -- the write path must REPLACE that line in
+        place rather than append a second ``originSessionId:`` key, which
+        would otherwise produce a frontmatter block with a duplicate key.
+        """
+        knowledge_root = tmp_path / "knowledge"
+        scope_dir = knowledge_root / "raw" / "auto-memory" / SCOPE
+        scope_dir.mkdir(parents=True)
+        path = scope_dir / MEMORY_NAME
+        path.write_text(
+            "---\n"
+            "name: falsy-origin\n"
+            f"originSessionId: {existing_value}\n"
+            "description: declares the key but with no usable value.\n"
+            "---\n"
+            "body text\n",
+            encoding="utf-8",
+        )
+
+        with RunLock(knowledge_root) as lock:
+            changed = persist_recovered_origin_session_id(path, "recovered-session", lock=lock)
+
+        assert changed is True
+        after = path.read_text(encoding="utf-8")
+        assert after.count("originSessionId:") == 1
+        assert "originSessionId: recovered-session" in after
+        assert "name: falsy-origin" in after
+        assert "description: declares the key but with no usable value." in after
+
+    def test_raises_without_an_acquired_lock(self, tmp_path: Path) -> None:
+        """The mutating call must refuse to run outside a held RunLock."""
+        knowledge_root = tmp_path / "knowledge"
+        scope_dir = knowledge_root / "raw" / "auto-memory" / SCOPE
+        scope_dir.mkdir(parents=True)
+        path = scope_dir / MEMORY_NAME
+        path.write_text("---\nname: unlocked\n---\nbody\n", encoding="utf-8")
+        unacquired_lock = RunLock(knowledge_root)  # never .acquire()'d
+
+        with pytest.raises(OriginSessionWriteNotLocked):
+            persist_recovered_origin_session_id(path, "some-session", lock=unacquired_lock)
+        # And nothing was written.
+        assert path.read_text(encoding="utf-8") == "---\nname: unlocked\n---\nbody\n"

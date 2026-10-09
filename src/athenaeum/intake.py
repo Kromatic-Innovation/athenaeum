@@ -19,8 +19,10 @@ Layering: L2 primitive. Imports only leaf/service modules that do NOT import
 any SCC member back — :mod:`athenaeum.models`, :mod:`athenaeum.config`,
 :mod:`athenaeum.ephemeral`, :mod:`athenaeum._lint`, :mod:`athenaeum.schemas`,
 :mod:`athenaeum.atomic_io`, (issue athenaeum#797) :mod:`athenaeum.corrections`, a
-peer L2 primitive, and (issue athenaeum#1452) :mod:`athenaeum.session_recovery`,
-a stdlib-only L0/L1 primitive. It must NEVER import ``librarian``, ``merge``,
+peer L2 primitive, (issue athenaeum#1452) :mod:`athenaeum.session_recovery`,
+a stdlib-only L0/L1 primitive, and (issue athenaeum#2038)
+:mod:`athenaeum.runlock`, which imports only :mod:`athenaeum.store` (L0/L1)
+and never any SCC member. It must NEVER import ``librarian``, ``merge``,
 ``tiers``, ``pending_merges``, ``batch``, ``status``, ``retire``, or
 ``wiki_dedupe`` (that would re-introduce the cycle this module exists to
 break). ``librarian`` re-exports these three names for backward compatibility,
@@ -97,6 +99,7 @@ from athenaeum.person_registry import PERSON_TYPE, PersonRegistry, PersonRegistr
 from athenaeum.recovery_yield import evaluate as evaluate_recovery_yield
 from athenaeum.recovery_yield import resolve_threshold as resolve_recovery_yield_threshold
 from athenaeum.recovery_yield import write_state as write_recovery_yield_state
+from athenaeum.runlock import RunLock
 from athenaeum.schemas import validate_wiki_meta
 from athenaeum.session_recovery import (
     BASIS_TIME_WINDOW,
@@ -106,6 +109,123 @@ from athenaeum.session_recovery import (
 )
 
 log = logging.getLogger(__name__)
+
+#: Matches a leading YAML frontmatter block, capturing its interior (group 1)
+#: so a caller can insert a line at its END without re-rendering the whole
+#: block. Re-declared rather than imported from
+#: :mod:`athenaeum.memory_class_backfill` (same shape as that module's own
+#: ``_FRONTMATTER_RE`` and as ``models._FM_RE``) because this module's layering
+#: rule (above) forbids importing a sibling L2 module that is not on the
+#: allow-list, and the pattern itself is a one-line stdlib regex, not shared
+#: state.
+_ORIGIN_SESSION_FRONTMATTER_RE = re.compile(r"^---\s*\r?\n(.*?)\r?\n---\s*\r?\n", re.DOTALL)
+#: Matches an existing (but falsy -- null or empty-string) ``originSessionId``
+#: key line within the frontmatter block, so a backfill can REPLACE it rather
+#: than append a second key (athenaeum#2044 review finding): the
+#: ``existing is not None and str(existing).strip()`` check below only
+#: short-circuits on a non-empty value, so ``originSessionId: null`` /
+#: ``originSessionId: ""`` both fall through to the write path, and a blind
+#: end-of-block append would otherwise leave two ``originSessionId:`` lines
+#: in the same block.
+_ORIGIN_SESSION_KEY_LINE_RE = re.compile(r"^originSessionId\s*:[^\r\n]*", re.MULTILINE)
+
+
+class OriginSessionWriteNotLocked(RuntimeError):
+    """Raised by :func:`persist_recovered_origin_session_id` when called
+    without an acquired :class:`athenaeum.runlock.RunLock` (issue athenaeum#2038).
+
+    Mirrors :mod:`athenaeum.verdicts`'s ``_require_lock`` / ``LockNotHeld``
+    single-appender guard (issue athenaeum#712): this module reuses
+    :mod:`athenaeum.runlock` rather than inventing a second lock, and enforces
+    the requirement at the API boundary rather than leaving it an unstated
+    convention.
+    """
+
+
+def persist_recovered_origin_session_id(
+    path: Path, session_id: str, *, lock: RunLock
+) -> bool:
+    """Back-fill ``originSessionId: <session_id>`` into *path*'s frontmatter.
+
+    Issue athenaeum#2038: :func:`discover_auto_memory_files` RECOVERS an origin
+    session for a memory file that declares none, but (before this function
+    existed) kept the recovered value in memory only -- nothing wrote it back
+    to disk, so the ``correct_*`` provenance gate
+    (:func:`athenaeum.resolutions._member_origin_and_claim`) read the
+    file's own frontmatter on the NEXT run and found nothing there again,
+    refusing with "no origin session recorded" even though the transcript
+    that would authorize it still existed.
+
+    Mirrors :func:`athenaeum.memory_class_backfill.insert_memory_class`'s
+    textual-insertion approach rather than a ``parse_frontmatter`` ->
+    :func:`athenaeum.models.render_frontmatter` round trip: the latter would
+    reflow key order/quoting on every OTHER key in the block, so a second run
+    would differ from the first on bytes this function never meant to touch.
+    The new key is appended as a single plain (unquoted) ``key: value`` line
+    at the end of the existing block -- every other byte, including the body,
+    is untouched.
+
+    Returns ``True`` iff the file was rewritten, ``False`` for every
+    no-op case:
+
+    * *path* has no YAML frontmatter block at all (never synthesize one).
+    * *path* already carries a non-empty ``originSessionId`` (idempotent --
+      the file's own existing claim always outranks a re-recovered one, and a
+      file that already has the key is never rewritten -- byte- and
+      mtime-identical on a second call).
+    * The read fails (``OSError``/``UnicodeDecodeError``) -- best-effort,
+      same tolerance :func:`discover_auto_memory_files` already applies to
+      every other per-file read in this module.
+
+    Requires an ALREADY-ACQUIRED *lock* -- raises
+    :class:`OriginSessionWriteNotLocked` otherwise, checked FIRST, before any
+    of the no-op conditions above, so a caller that passes an unacquired lock
+    learns that it is misusing the API even on an input that would have been
+    a no-op anyway. This function does not itself call :meth:`RunLock.acquire`
+    (mirrors :mod:`athenaeum.verdicts`'s writers) -- a second, independent
+    acquire from within an already-locked run would deadlock on the same-
+    process ``flock`` (see ``runlock.py``'s own module docstring).
+    """
+    if not getattr(lock, "acquired", False):
+        raise OriginSessionWriteNotLocked(
+            "intake: persisting a recovered originSessionId requires an "
+            "acquired RunLock (issue athenaeum#2038); the caller must hold "
+            "the same lock the mutating command acquired, not a fresh, "
+            "unacquired RunLock instance."
+        )
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    meta, _body = parse_frontmatter(text)
+    meta = meta if isinstance(meta, dict) else {}
+    existing = meta.get("originSessionId")
+    if existing is not None and str(existing).strip():
+        return False
+    match = _ORIGIN_SESSION_FRONTMATTER_RE.match(text)
+    if match is None:
+        return False
+    newline = "\r\n" if "\r\n" in text[: match.end()] else "\n"
+    block_start, block_end = match.start(1), match.end(1)
+    block = text[block_start:block_end]
+    key_match = _ORIGIN_SESSION_KEY_LINE_RE.search(block)
+    if key_match is not None:
+        # A falsy key (null/empty) is already present in the block -- replace
+        # that line in place instead of appending a duplicate key.
+        new_block = (
+            block[: key_match.start()]
+            + f"originSessionId: {session_id}"
+            + block[key_match.end() :]
+        )
+        updated = text[:block_start] + new_block + text[block_end:]
+    else:
+        updated = (
+            f"{text[:block_end]}{newline}originSessionId: {session_id}{text[block_end:]}"
+        )
+    if updated == text:
+        return False
+    atomic_write_text(path, updated)
+    return True
 
 # Raw file naming: {timestamp}-{uuid8}.md or (issue athenaeum#797) {timestamp}-{uuid8}.jsonl
 # -- the same filename convention a correction batch uses
@@ -335,6 +455,7 @@ def discover_auto_memory_files(
     knowledge_root: Path | None = None,
     config: dict[str, object] | None = None,
     projects_root: Path | None = None,
+    lock: RunLock | None = None,
 ) -> list[AutoMemoryFile]:
     """Find all auto-memory intake files under ``raw/auto-memory/<scope>/``.
 
@@ -395,6 +516,22 @@ def discover_auto_memory_files(
     :func:`athenaeum.transcript_verify.verify_user_stated` confirms it against
     the transcript. Defaults to ``~/.claude/projects`` (honoring
     ``CLAUDE_CONFIG_DIR``); inject a temp dir in tests.
+
+    ``lock`` (issue athenaeum#2038) is the caller's already-acquired
+    :class:`athenaeum.runlock.RunLock`, when it holds one. ``None`` (the
+    default, preserving the pre-athenaeum#2038 call signature) means a
+    recovered origin session is kept in memory only, exactly as before --
+    nothing on disk changes. When a RECOVERY succeeds (see above) AND ``lock``
+    is not ``None``, the recovered session id is additionally persisted into
+    the file's own frontmatter via
+    :func:`persist_recovered_origin_session_id`, so the ``correct_*``
+    provenance gate can read it directly on the NEXT run instead of refusing
+    with "no origin session recorded" while the transcript that would
+    authorize it still exists. Persisting is best-effort with respect to
+    filesystem errors (the same tolerance this loop already applies to every
+    other per-file read) but NOT with respect to a caller-supplied lock that
+    is not actually acquired -- that is a caller bug and is allowed to raise
+    (see :func:`persist_recovered_origin_session_id`).
     """
     if knowledge_root is None:
         knowledge_root = Path.home() / "knowledge"
@@ -558,6 +695,18 @@ def discover_auto_memory_files(
                             fpath,
                             recovered.basis,
                         )
+                        # Issue athenaeum#2038: persist the recovery onto disk so
+                        # the correct_* gate can read it on the NEXT run instead
+                        # of refusing "no origin session recorded" forever.
+                        # Only under an ALREADY-ACQUIRED lock -- a caller with
+                        # no lock (``lock=None``, the default) gets exactly the
+                        # pre-athenaeum#2038 in-memory-only behavior; an
+                        # unacquired lock instance is a caller bug and raises
+                        # (see persist_recovered_origin_session_id).
+                        if lock is not None:
+                            persist_recovered_origin_session_id(
+                                fpath, recovered.session_id, lock=lock
+                            )
                 # Issue athenaeum#260 (slice A of athenaeum#259): origin-traced provenance.
                 # Missing source_type defaults to ``inferred``; source_ref is
                 # the ultimate reference and is never this file's own name.
