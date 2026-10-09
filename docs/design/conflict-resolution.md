@@ -548,6 +548,60 @@ overlaps with the dedupe path's per-field merge but the surfaces are disjoint.
   kind of record-the-model-didn't-author this gate exists to require, and is
   a stronger signal than a transcript substring match.
 
+### Durable transcript receipts (issue athenaeum#753) — surviving roll-off
+
+Opt-in (`librarian.transcript_receipts_enabled`, default **off**; see
+`docs/reference/configuration.md`). With it off, nightly intake never
+touches `wiki/_transcript_receipts/` and the gate above is byte-identical to
+the original athenaeum#752 behaviour — this section only describes what
+changes when an operator turns it on.
+
+**Mechanism.** During nightly intake (`librarian._run_auto_memory_phase`,
+under the SAME `RunLock` the run already holds), for each auto-memory file
+with a resolvable origin session and a present transcript,
+`transcript_receipts.write_receipt_for_origin` re-runs the exact athenaeum#752
+classification and, unless the transcript is `unavailable`, appends a
+**receipt** to `wiki/_transcript_receipts/<YYYY-MM>.jsonl`
+(`store.append_line_durable`, monthly partitions — same shape as
+`wiki/_verdicts/`). A receipt carries **no plaintext**: only the classified
+channel, origin coordinates, a `memory_digest` (SHA-256 of the claim text —
+the ONE function `transcript_receipts.memory_digest` that both the writer
+and the gate call, so they can never derive the lookup key differently), an
+`utterance_digest` (for `user-stated` only), and a `transcript_prefix_digest`
++ `transcript_line_count` snapshot of the transcript as of receipt time.
+
+**At the gate** (`resolutions._transcript_authorizes_correct`, via
+`transcript_receipts.classify_for_correct_gate`), looked up by
+`(origin_scope, memory_digest(claim))` — never by frontmatter
+`originSessionId`, so a memory whose session was only ever RECOVERED (issue
+athenaeum#2038's gap) can still be found:
+
+- Transcript present, no receipt, or the receipt's recorded prefix still
+  matches the live file: **unchanged** — the live classification decides,
+  exactly as athenaeum#752 always did.
+- Transcript present, receipt's prefix **mismatches**: refuse, logged
+  `transcript-modified <ref>` — the tamper signal. A session RESUMED (lines
+  appended after the receipt was written) is NOT flagged — only the first
+  `transcript_line_count` lines are re-hashed.
+- Transcript absent (rolled off) and a `"user-stated"` receipt matches:
+  **authorize**, logged `receipt <ref>` — this is what lets a `correct_*`
+  survive roll-off.
+- Transcript absent and no receipt, or the receipt's `memory_digest` no
+  longer matches the member's current claim (the memory was edited since):
+  refuse, same `unavailable <ref>` athenaeum#752 always returned.
+- The athenaeum#752 frontmatter-forgery pin is unchanged and extends to this
+  path: `source_type` is never consulted, with or without a receipt.
+
+**The sealer seam.** Git history of the knowledge repo is the ONLY
+tamper-evidence layer for the receipt ledger itself — the operator
+confirmed (2026-10-09) the remote cannot refuse force-push, so that history
+is a log, not a cryptographic seal. `transcript_receipts.Sealer` is a small
+interface (`seal` a contiguous range of just-appended lines, `verify` a
+previously-sealed range) whose default, `NoopSealer`, records nothing beyond
+the ledger line itself. Two deferred sealers — an operator-held signing key
+(issue athenaeum#2039) and external timestamp anchoring (issue athenaeum#2040) —
+are meant to implement that interface without this module changing.
+
 ### Known limits — do not mistake this for a verified-identity guarantee
 
 - **Substring matching establishes that the user typed these words, not that
@@ -556,10 +610,13 @@ overlaps with the dedupe path's per-field merge but the surfaces are disjoint.
   user-authored transcript message. Pasting an error log containing "the
   Heroku page is wrong" produces a user-authored turn containing those words.
   This is a limit on what the mechanism can *mean*, not a gap in its rigor.
+  Unchanged by the receipt ledger: a receipt records the SAME substring
+  match, just earlier.
 - **Transcripts roll off.** The failure mode is safe (`unavailable` →
   escalate, never delete), but authority that expires is not durable
   authority — a legitimately user-stated claim whose transcript has aged out
-  will escalate exactly like an unverifiable one.
+  will escalate exactly like an unverifiable one, UNLESS the opt-in
+  transcript-receipt ledger (above) already captured a receipt for it.
 - **The transcript is not immutable.** Session transcripts are plain JSONL
   under `~/.claude/projects/` (or `$CLAUDE_CONFIG_DIR/projects/`),
   user-owned, with no signature and no hash chain. A process with filesystem
@@ -567,8 +624,36 @@ overlaps with the dedupe path's per-field merge but the surfaces are disjoint.
   raises self-authorization from "emit a string in a memory's frontmatter" to
   "deliberately write to a file outside the memory channel" — a real
   escalation in difficulty and deliberateness, but not a cryptographic
-  guarantee. Transcript durability/retention/tamper-evidence is tracked as a
-  separate, not-yet-filed follow-up (see the athenaeum#752 issue body).
+  guarantee.
+- **Receipts detect tampering only from the moment they are written, never
+  before.** An agent that forges a transcript line, or edits a memory to
+  match an existing human line, BEFORE the next nightly intake pass gets
+  that forgery minted into a genuine-looking receipt — intake has no way to
+  distinguish a forged `type: "user"` record from a real one. The window
+  between a session ending and the next nightly run is also unprotected
+  (receipts are written under `RunLock` at nightly intake, not at
+  session_end). Only the two deferred sealers (athenaeum#2039, athenaeum#2040)
+  — and, upstream of this repo, harness-side signing of the transcript
+  itself — would close this. A forged human turn APPENDED after a
+  legitimate receipt was already written is structurally indistinguishable
+  from an ordinary resumed session — both are "more complete lines after
+  the recorded prefix" — so the prefix-digest check cannot catch a forgery
+  that only ever appends, by design (appending is exactly what a resumed
+  session legitimately does).
+- **A forger with filesystem access can also append a fake receipt line
+  directly to the ledger.** Appending bypasses the classification step
+  entirely. With the default `NoopSealer`, nothing beyond "it shows up as an
+  addition in a git diff" catches this — git history is a log, not a seal
+  (the knowledge remote cannot refuse force-push). This is the same
+  limitation the ledger's own design review flagged for a hand-rolled
+  commit-provenance check, which is why that candidate criterion was
+  dropped rather than built.
+- **Receipt digests are dictionary-recoverable.** Human utterances are
+  short; a `memory_digest`/`utterance_digest` published anywhere outside the
+  knowledge repo (a public mirror, a shared export) is attackable by
+  dictionary. Receipts are not designed to be published, and travel
+  wherever the knowledge repo itself is pushed — treat the repo's own
+  visibility as the receipt ledger's visibility.
 
 ---
 

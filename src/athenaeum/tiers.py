@@ -7090,7 +7090,7 @@ def tier4_escalate(
             return (False, None)
         if action in _CORRECT_ACTIONS:
             authorized, channel_ref = _transcript_authorizes_correct(
-                prop, members, config, projects_root
+                prop, members, config, projects_root, pending_path.parent
             )
             if authorized:
                 log.info(
@@ -8029,7 +8029,7 @@ def reresolve_open_questions(
         # consulted for these two actions. See resolutions._transcript_authorizes_correct.
         if action in _CORRECT_ACTIONS:
             authorized, channel_ref = _transcript_authorizes_correct(
-                prop, members, resolved_config, projects_root
+                prop, members, resolved_config, projects_root, pending_path.parent
             )
             if authorized:
                 log.info(

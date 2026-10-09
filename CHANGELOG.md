@@ -41,6 +41,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Durable transcript-provenance receipts (issue athenaeum#753).** The
+  athenaeum#752 `correct_a`/`correct_b` authorship gate only ever checked the
+  LIVE origin-session transcript, so a legitimately user-stated claim whose
+  transcript rolled off escalated to a human exactly like an unverifiable
+  one — authority that existed at intake was gone by enact time. A new
+  opt-in ledger (`librarian.transcript_receipts_enabled`, default **off**)
+  writes a no-plaintext receipt per memory at nightly intake, while the
+  transcript is still checkable, to `wiki/_transcript_receipts/<YYYY-MM>.jsonl`
+  (`athenaeum.transcript_receipts`, same append-only/`RunLock` shape as
+  `wiki/_verdicts/`). The athenaeum#752 gate
+  (`resolutions._transcript_authorizes_correct`) now additionally authorizes
+  a rolled-off memory against a matching `"user-stated"` receipt and
+  refuses — logging `transcript-modified <ref>` — when a receipt's recorded
+  transcript prefix no longer matches the live file; a session simply
+  RESUMED (lines appended after the receipt) is not flagged. Receipts are
+  looked up by `(origin_scope, memory_digest(claim))`, never by frontmatter
+  `originSessionId`, so a memory whose session was only ever recovered
+  (issue athenaeum#2038's separate gap) can still reach the check. Includes
+  a `Sealer` seam (default `NoopSealer`, records nothing beyond the ledger
+  line) that the two deferred sealers — an operator-held signing key (issue
+  athenaeum#2039) and external timestamp anchoring (issue athenaeum#2040) —
+  are meant to implement without touching the ledger module. With the flag
+  off, intake writes nothing and the gate's decisions are byte-identical to
+  before this issue, pinned by `tests/test_transcript_receipts.py`. See
+  `docs/design/conflict-resolution.md`'s "Durable transcript receipts"
+  section for the full decision table and known limits.
+
+
 - **`_pii-allowlist.yml` supports domain-level `pattern` entries (issue
   athenaeum#2007).** Alongside the existing exact-`value`/`reason` entry,
   `athenaeum.pii.load_pii_allowlist` now also accepts `{pattern, reason}` —

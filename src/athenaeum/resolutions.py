@@ -74,7 +74,11 @@ from typing import TYPE_CHECKING, Any, Final, Literal, cast
 
 from athenaeum._retry import TransientAPIError, with_retry
 from athenaeum.atomic_io import atomic_write_text
-from athenaeum.config import _env_number, auto_apply_threshold_ledger_override_for
+from athenaeum.config import (
+    _env_number,
+    auto_apply_threshold_ledger_override_for,
+    resolve_transcript_receipts_enabled,
+)
 from athenaeum.config import resolve_model as _resolve_model_knob
 from athenaeum.decision_provider import DecisionBackend as _DecisionBackend
 from athenaeum.json_utils import extract_json_object
@@ -101,7 +105,10 @@ from athenaeum.provider import (
     response_text,
 )
 from athenaeum.scoped_claims import ScopeTree, ScopeVerdict, scope_comparison
-from athenaeum.transcript_verify import classify_backfill_claim
+from athenaeum.transcript_receipts import (
+    classify_for_correct_gate,
+    member_claim_and_origin,
+)
 
 if TYPE_CHECKING:
     from anthropic.types import MessageParam, TextBlockParam, ThinkingConfigParam
@@ -2619,28 +2626,13 @@ def _member_origin_and_claim(path: Path) -> tuple[str, str | None, int | None, s
     — it is always the member's PARENT DIRECTORY name
     (``raw/auto-memory/<scope>/<file>.md``), so it is derived from the path,
     matching every other reader of this convention.
+
+    Issue athenaeum#753 addendum item 2: this is now a thin wrapper over
+    :func:`athenaeum.transcript_receipts.member_claim_and_origin` — the
+    SAME function the receipt writer calls to derive a memory_digest lookup
+    key, so the gate and the writer can never derive the claim differently.
     """
-    origin_scope = path.parent.name
-    try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return origin_scope, None, None, ""
-    meta, body = parse_frontmatter(text)
-    meta = meta if isinstance(meta, dict) else {}
-    origin_session_id = meta.get("originSessionId")
-    origin_session_id = str(origin_session_id) if origin_session_id is not None else None
-    origin_turn_raw = meta.get("originTurn")
-    origin_turn: int | None
-    try:
-        origin_turn = int(cast(str, origin_turn_raw)) if origin_turn_raw is not None else None
-    except (TypeError, ValueError):
-        origin_turn = None
-    claim = body.strip()
-    if not claim:
-        name = meta.get("name")
-        description = meta.get("description")
-        claim = str(description or name or "")
-    return origin_scope, origin_session_id, origin_turn, claim
+    return member_claim_and_origin(path)
 
 
 def _transcript_authorizes_correct(
@@ -2648,6 +2640,7 @@ def _transcript_authorizes_correct(
     member_paths: list[Path] | list[str] | None,
     config: dict[str, Any] | None = None,
     projects_root: Path | None = None,
+    wiki_root: Path | None = None,
 ) -> tuple[bool, str]:
     """Gate a ``correct_a``/``correct_b`` delete on transcript-verified authorship.
 
@@ -2662,17 +2655,25 @@ def _transcript_authorizes_correct(
     unresolvable winner/member) refuses.
 
     This function deliberately does NOT consult ``member.source_type`` —
-    only the live transcript read decides. ``config`` is currently unused
-    (present so a future config-driven transcript root or opt-out can be
-    threaded through without changing the call sites); ``projects_root`` is
-    the injectable transcript root tests point at a tmp directory.
+    only the live transcript read (or, with issue athenaeum#753's receipt
+    ledger opted in, a durable receipt of that same live-transcript read)
+    decides.
+
+    Issue athenaeum#753: with ``librarian.transcript_receipts_enabled`` ON
+    (``config``) and a ``wiki_root`` supplied, this additionally (a)
+    authorizes a rolled-off memory (transcript gone) against a matching
+    ``"user-stated"`` receipt, logged as ``"receipt <ref>"``, and (b)
+    refuses — logged as ``"transcript-modified <ref>"`` — when a receipt
+    exists but the live transcript's recorded prefix no longer matches it.
+    See :func:`athenaeum.transcript_receipts.classify_for_correct_gate` for
+    the full decision table. With the flag off, or ``wiki_root`` omitted,
+    this is BYTE-IDENTICAL to the original athenaeum#752 gate.
 
     Returns ``(authorized, channel_ref)`` where ``channel_ref`` is a
     human-readable ``"<channel> <ref>"`` string suitable for logging — always
     populated (even on refusal) so a refusal is diagnosable without
     re-running the resolver.
     """
-    del config  # unused for now — reserved for a future opt-out knob.
     if not member_paths:
         return False, "no member_paths supplied"
     paths = [Path(p) for p in member_paths]
@@ -2682,18 +2683,21 @@ def _transcript_authorizes_correct(
     origin_scope, origin_session_id, origin_turn, claim = _member_origin_and_claim(
         winner_path
     )
-    if not origin_session_id:
+
+    receipts_enabled = wiki_root is not None and resolve_transcript_receipts_enabled(config)
+
+    if not origin_session_id and not receipts_enabled:
         return False, f"{winner_path}: no origin session recorded"
-    classification = classify_backfill_claim(
+
+    return classify_for_correct_gate(
         origin_scope,
         origin_session_id,
         origin_turn,
-        claim=claim,
+        claim,
         projects_root=projects_root,
+        wiki_root=wiki_root,
+        receipts_enabled=receipts_enabled,
     )
-    channel_ref = f"{classification.channel} {classification.ref}".strip()
-    authorized = classification.channel == "user-stated"
-    return authorized, channel_ref
 
 
 def enact_resolution(

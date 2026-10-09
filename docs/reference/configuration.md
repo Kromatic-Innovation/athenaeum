@@ -3137,6 +3137,35 @@ drafter's threshold. Precedence:
 ``librarian.tier_movement_window_days`` > ``30``. See
 `_resolve_positive_int_knob` for the coercion contract.
 
+### `resolve_transcript_receipts_enabled`
+
+- **YAML path:** `librarian.transcript_receipts_enabled`
+- **Environment variable:** `ATHENAEUM_TRANSCRIPT_RECEIPTS_ENABLED`
+- **CLI flag:** —
+- **Default:** `False`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the transcript-receipt ledger opt-in. DEFAULT OFF.
+
+Gates the ENTIRE durable-transcript-receipt subsystem
+(`athenaeum.transcript_receipts`): with this off, nightly intake
+never touches ``wiki/_transcript_receipts/`` (no new file, no new
+run-summary line) and the ``correct_*`` authorship gate
+(``resolutions._transcript_authorizes_correct``) makes the EXACT same
+decision it always did — byte-identical to before this issue existed,
+pinned by ``tests/test_transcript_receipts.py::TestGateFlagOffByteIdentical``.
+With it on, intake writes one no-plaintext receipt per memory with a
+resolvable origin and a present transcript, and the gate additionally
+authorizes a rolled-off memory against a matching ``"user-stated"``
+receipt and refuses when a receipt's recorded transcript prefix no
+longer matches the live file (tamper detection).
+
+Mirrors `resolve_verdict_ledger_enabled`'s shape exactly: env
+``ATHENAEUM_TRANSCRIPT_RECEIPTS_ENABLED`` (``1``/``true``/``yes``/``on``,
+case-insensitive) > yaml ``librarian.transcript_receipts_enabled`` >
+default ``False``. No seed in ``_DEFAULTS``.
+Non-bool yaml values and unrecognized env strings fall through to off.
+
 ### `resolve_unmarked_sentence_max_ratio`
 
 - **YAML path:** `librarian.unmarked_sentence_max_ratio`

@@ -9536,6 +9536,38 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
     if not auto_memory_files:
         return None
 
+    # Issue athenaeum#753: durable transcript-receipt ledger. OFF by default
+    # (``librarian.transcript_receipts_enabled``) — with the flag off, or
+    # with no caller-held lock (e.g. ``--dry-run``), this block does not run
+    # at all and the rest of this phase is byte-identical to before this
+    # issue existed. Reuses the SAME lock the CLI caller already holds
+    # around this whole run (mirrors the athenaeum#712 verdict-ledger
+    # advisor's gating immediately above its own call sites) — never
+    # acquires a second one. Writes one no-plaintext receipt per memory with
+    # a resolvable origin session and a present transcript; a memory whose
+    # transcript has already rolled off or that declares no origin at all
+    # yields no receipt. Best-effort: never breaks a run.
+    if not ctx.dry_run and ctx.lock is not None:
+        try:
+            from athenaeum.transcript_receipts import write_receipts_for_files
+
+            _receipts_processed = write_receipts_for_files(
+                ctx.wiki_root,
+                auto_memory_files,
+                config=ctx.config,
+                projects_root=ctx.projects_root,
+                lock=ctx.lock,
+            )
+            if _receipts_processed:
+                log.info(
+                    "transcript receipts: processed %d receipt(s) this run",
+                    _receipts_processed,
+                )
+        except Exception as exc:  # noqa: BLE001 — advisor must never break a run
+            log.warning(
+                "transcript-receipts writer failed (non-fatal): %s", exc
+            )
+
     by_scope: dict[str, int] = {}
     for am in auto_memory_files:
         by_scope[am.origin_scope] = by_scope.get(am.origin_scope, 0) + 1
