@@ -1836,12 +1836,14 @@ def load_pii_allowlist(path: Path) -> tuple[list[PiiAllowlistEntry], list[str]]:
             errors.append(f"{where} ({label!r}): missing a non-empty 'reason'")
             continue
         if has_value:
+            assert isinstance(value, str)  # narrowed by has_value, for mypy
             if value in seen_values:
                 errors.append(f"{where} ({value!r}): duplicate value")
                 continue
             seen_values.add(value)
             entries.append(PiiAllowlistEntry(value=value, reason=reason.strip()))
         else:
+            assert isinstance(pattern, str)  # narrowed by has_pattern, for mypy
             if pattern in seen_patterns:
                 errors.append(f"{where} ({pattern!r}): duplicate pattern")
                 continue
