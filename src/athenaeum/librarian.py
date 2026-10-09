@@ -9501,6 +9501,7 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
         ctx.knowledge_root,
         config=ctx.config,
         projects_root=ctx.projects_root,  # issue athenaeum#1452
+        lock=ctx.lock,  # issue athenaeum#2038: persist a recovered origin session
     )
     if not auto_memory_files:
         return None

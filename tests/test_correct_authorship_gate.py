@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -508,3 +509,93 @@ class TestReresolveCorrectGateIntegration:
 
         assert a.exists()
         assert not b.exists()
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#2038: a session recovered + persisted on run 1 authorizes
+# on run 2, with the transcript present.
+# ---------------------------------------------------------------------------
+
+
+class TestRecoveredAndPersistedSessionAuthorizesOnNextRun:
+    def test_run1_persists_run2_authorizes(self, tmp_path: Path) -> None:
+        from athenaeum.intake import discover_auto_memory_files
+        from athenaeum.runlock import RunLock
+
+        scope = "scopeA"
+        knowledge_root = tmp_path / "knowledge"
+        scope_dir = knowledge_root / "raw" / "auto-memory" / scope
+        scope_dir.mkdir(parents=True)
+
+        # A natively-written winning member -- no originSessionId, exactly
+        # the shape discover_auto_memory_files's recovery branch targets.
+        a = scope_dir / "reference_winning.md"
+        a.write_text(
+            "---\n"
+            "name: winning\n"
+            "description: the winning claim.\n"
+            "metadata:\n"
+            "  type: reference\n"
+            "---\n"
+            "the winning claim\n",
+            encoding="utf-8",
+        )
+        # Set the member's mtime inside the single transcript session's
+        # write-time window, so recovery resolves unambiguously via the
+        # BASIS_TIME_WINDOW rung (no Write tool-use needed).
+        import os as _os
+
+        write_time = datetime(2026, 10, 9, 12, 5, tzinfo=timezone.utc)
+        stamp = write_time.timestamp()
+        _os.utime(a, (stamp, stamp))
+
+        # The losing member -- already declares its own session, untouched
+        # by recovery, present only so member_paths has two entries.
+        b = _write_member(scope_dir, "b.md", body="the losing claim", session_id="sess-b", turn=1)
+
+        pr = tmp_path / "projects"
+        _write_transcript(
+            pr,
+            scope,
+            "sess1",
+            [
+                {
+                    "type": "user",
+                    "message": {"role": "user", "content": "start"},
+                    "timestamp": "2026-10-09T12:00:00Z",
+                },
+                _user_record("the winning claim")
+                | {"timestamp": "2026-10-09T12:05:00Z"},
+                {
+                    "type": "user",
+                    "message": {"role": "user", "content": "end"},
+                    "timestamp": "2026-10-09T12:10:00Z",
+                },
+            ],
+        )
+
+        proposal = _proposal("correct_a", "a")
+
+        # Run 1 (today, pre-persist): refused -- no origin session recorded.
+        authorized_before, ref_before = _transcript_authorizes_correct(
+            proposal, [a, b], projects_root=pr
+        )
+        assert authorized_before is False
+        assert "no origin session" in ref_before
+
+        # Intake recovers the origin session AND persists it under a held
+        # RunLock (issue athenaeum#2038).
+        with RunLock(knowledge_root) as lock:
+            discovered = discover_auto_memory_files(
+                knowledge_root, projects_root=pr, lock=lock
+            )
+        recovered_names = {am.name: am.origin_session_id for am in discovered}
+        assert recovered_names.get("winning") == "sess1"
+        assert "originSessionId: sess1" in a.read_text(encoding="utf-8")
+
+        # Run 2, same transcript still present: authorized.
+        authorized_after, ref_after = _transcript_authorizes_correct(
+            proposal, [a, b], projects_root=pr
+        )
+        assert authorized_after is True
+        assert ref_after.startswith("user-stated")

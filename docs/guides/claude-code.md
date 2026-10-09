@@ -168,6 +168,21 @@ verbatim into the consolidated wiki entry.
 > Recovery supplies an **origin, not a verdict**: the claim keeps the honest
 > `inferred` `source_type` until `transcript_verify.verify_user_stated`
 > confirms it against the transcript itself.
+>
+> **Intake back-fills the recovered `originSessionId` onto the file itself**,
+> not only into the in-memory record discovery returns. Before this, a
+> successful recovery helped only the SAME run's
+> merge/compile pass — the file on disk still declared no session, so the
+> `correct_*` provenance gate (which reads a member's own frontmatter, not a
+> recomputed recovery) refused it with "no origin session recorded" on every
+> later run, even while the originating transcript still existed. Now, the
+> first run that recovers a session for a file also writes
+> `originSessionId: <id>` into that file's frontmatter — a plain textual
+> insertion that touches no other key or body byte, so a file already
+> carrying the key is never rewritten (idempotent) and a run that resolves
+> nothing writes nothing. The write only happens under the caller's own
+> already-held `RunLock` (never dry-run), mirroring the single-appender
+> guard `athenaeum.verdicts` already enforces.
 
 Required/recommended fields:
 
