@@ -9536,6 +9536,52 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
     if not auto_memory_files:
         return None
 
+    # Issue athenaeum#753: durable transcript-receipt ledger. OFF by default
+    # (``librarian.transcript_receipts_enabled``) — with the flag off, or
+    # with no caller-held lock (e.g. ``--dry-run``), this block does not run
+    # at all and the rest of this phase is byte-identical to before this
+    # issue existed. Reuses the SAME lock the CLI caller already holds
+    # around this whole run (mirrors the athenaeum#712 verdict-ledger
+    # advisor's gating immediately above its own call sites) — never
+    # acquires a second one. Writes one no-plaintext receipt per memory with
+    # a resolvable origin session and a present transcript; a memory whose
+    # transcript has already rolled off or that declares no origin at all
+    # yields no receipt. Best-effort: never breaks a run.
+    if not ctx.dry_run and ctx.lock is not None:
+        try:
+            from athenaeum.config import resolve_transcript_receipts_enabled
+            from athenaeum.transcript_receipts import (
+                member_claim_and_origin,
+                write_receipt_for_origin,
+            )
+
+            if resolve_transcript_receipts_enabled(ctx.config):
+                _receipts_written = 0
+                for am in auto_memory_files:
+                    if not am.origin_session_id:
+                        continue
+                    _, _, _, claim = member_claim_and_origin(am.path)
+                    receipt = write_receipt_for_origin(
+                        ctx.wiki_root,
+                        origin_scope=am.origin_scope,
+                        origin_session_id=am.origin_session_id,
+                        origin_turn=am.origin_turn,
+                        claim=claim,
+                        projects_root=ctx.projects_root,
+                        lock=ctx.lock,
+                    )
+                    if receipt is not None:
+                        _receipts_written += 1
+                if _receipts_written:
+                    log.info(
+                        "transcript receipts: wrote %d receipt(s) this run",
+                        _receipts_written,
+                    )
+        except Exception as exc:  # noqa: BLE001 — advisor must never break a run
+            log.warning(
+                "transcript-receipts writer failed (non-fatal): %s", exc
+            )
+
     by_scope: dict[str, int] = {}
     for am in auto_memory_files:
         by_scope[am.origin_scope] = by_scope.get(am.origin_scope, 0) + 1
