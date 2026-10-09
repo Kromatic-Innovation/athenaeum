@@ -840,7 +840,8 @@ def add_merges_subparser(subparsers: argparse._SubParsersAction) -> None:
         help=(
             "Adjudicated PII allowlist (default: `wiki/_pii-allowlist.yml`, "
             "issue athenaeum#936). A value with a reasoned entry there is not "
-            "PII and is left untouched."
+            "PII and is left untouched; an anchored regex `pattern` entry "
+            "(issue athenaeum#2007) is honoured the same way."
         ),
     )
 
