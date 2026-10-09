@@ -67,12 +67,14 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, cast, runtime_checkable
 
-from athenaeum.models import parse_frontmatter
+from athenaeum.config import resolve_transcript_receipts_enabled
+from athenaeum.models import AutoMemoryFile, parse_frontmatter
 from athenaeum.runlock import RunLock
 from athenaeum.store import append_line_durable
 from athenaeum.transcript_verify import (
@@ -155,7 +157,7 @@ def member_claim_and_origin(path: Path) -> tuple[str, str | None, int | None, st
     origin_turn_raw = meta.get("originTurn")
     origin_turn: int | None
     try:
-        origin_turn = int(origin_turn_raw) if origin_turn_raw is not None else None
+        origin_turn = int(cast(str, origin_turn_raw)) if origin_turn_raw is not None else None
     except (TypeError, ValueError):
         origin_turn = None
     claim = body.strip()
@@ -396,6 +398,23 @@ def prefix_matches_receipt(path: Path, receipt: ReceiptEntry) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _raw_line_count(path: Path) -> int:
+    """Physical newline-terminated line count of *path*, ``0`` if unreadable.
+
+    Deliberately NOT ``len(_read_jsonl_tolerant(path))`` — that counts
+    successfully PARSED JSON records, which undercounts against a torn or
+    hand-edited line earlier in the partition and would hand the sealer the
+    wrong line-number range for the range it actually just appended (every
+    append here writes exactly one well-formed, newline-terminated line, so
+    the physical count is always correct for OUR OWN appends).
+    """
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return 0
+    return len(_complete_lines(raw))
+
+
 def append_receipt(
     wiki_root: Path,
     entry: ReceiptEntry,
@@ -411,13 +430,17 @@ def append_receipt(
     transcript_prefix_digest, transcript_line_count)`` already exists in any
     partition, nothing is written and the existing partition path is
     returned — a re-run of the same intake pass never duplicates a line.
-    Deliberately does NOT key idempotency on ``transcript_prefix_digest``
-    alone extending the identity (a tampered transcript re-running the
-    writer must NOT silently mint a fresh receipt that launders the old
-    mismatch away — the identity key is the ``(origin_scope, memory_digest)``
-    pair's FULL content tuple, so a changed prefix digest for the SAME
-    ``(scope, digest)`` is a genuinely new entry, append it; the gate below
-    always prefers the receipt whose content it can still verify).
+
+    This function trusts its caller to have already verified *entry* is
+    safe to append — it is NOT where tamper detection happens.
+    :func:`write_receipt_for_origin` is the one caller, and it refuses to
+    build or pass an *entry* at all when an EXISTING receipt for the same
+    ``(origin_scope, memory_digest)`` no longer matches the live transcript
+    (see that function's docstring) — appending a fresh, differently-keyed
+    receipt in that situation would mint a new, legitimate-looking prefix
+    over tampered content and LAUNDER the mismatch away on the very next
+    run. This function's own idempotency key therefore only needs to stop
+    identical re-writes, not detect tampering.
     """
     _require_lock(lock)
     month = entry.recorded_at[:7] if entry.recorded_at else _now_iso()[:7]
@@ -449,7 +472,7 @@ def append_receipt(
     append_line_durable(path, line.encode("utf-8"))
 
     try:
-        current_count = len(_read_jsonl_tolerant(path))
+        current_count = _raw_line_count(path)
         sealer.seal(path, current_count, current_count, [line.rstrip("\n")])
     except Exception as exc:  # noqa: BLE001 — a sealer must never break intake.
         log.warning("transcript_receipts: sealer %r failed (non-fatal): %s", sealer, exc)
@@ -488,19 +511,35 @@ def iter_receipts(wiki_root: Path) -> list[ReceiptEntry]:
     return out
 
 
-def lookup_receipt(wiki_root: Path, origin_scope: str, digest: str) -> ReceiptEntry | None:
+def lookup_receipt(
+    wiki_root: Path,
+    origin_scope: str,
+    digest: str,
+    *,
+    origin_session_id: str | None = None,
+) -> ReceiptEntry | None:
     """The most recently recorded receipt for ``(origin_scope, digest)``, or ``None``.
 
     Looked up by ``(origin_scope, memory_digest)`` — NEVER by frontmatter
     ``originSessionId`` (issue athenaeum#753 addendum item 1), so a member
     whose session was only ever RECOVERED (never written to frontmatter —
-    issue athenaeum#2038's gap) can still be found.
+    issue athenaeum#2038's gap) can still be found when the caller passes
+    ``origin_session_id=None``.
+
+    When the caller DOES have a frontmatter session (``origin_session_id``
+    is not ``None``), candidates are filtered to receipts recorded against
+    that EXACT session — a receipt minted for a different session must
+    never authorize a member that names this one, even if both happen to
+    share a ``memory_digest`` (two members with byte-identical claim text
+    in the same scope, originating from different sessions).
     """
     candidates = [
         r
         for r in iter_receipts(wiki_root)
         if r.origin_scope == origin_scope and r.memory_digest == digest
     ]
+    if origin_session_id is not None:
+        candidates = [r for r in candidates if r.origin_session_id == origin_session_id]
     if not candidates:
         return None
     candidates.sort(key=lambda r: r.recorded_at)
@@ -549,6 +588,23 @@ def write_receipt_for_origin(
     Writes NOTHING when the transcript is absent/rolled off — a receipt is
     never minted from absence (``classify_backfill_claim`` returning
     ``"unavailable"``), and nothing when ``origin_session_id`` is unset.
+
+    **Anti-laundering check (run BEFORE any classification).** If a receipt
+    already exists for ``(origin_scope, memory_digest(claim), origin_session_id)``,
+    its recorded transcript prefix is checked against the LIVE transcript
+    FIRST. If it no longer matches, this function refuses to write anything
+    and returns ``None`` — it does NOT reclassify and mint a fresh receipt
+    over the tampered content. Without this check, a transcript edited
+    between two nightly runs would get a brand-new, legitimate-looking
+    prefix on the second run (over the tampered file), which would silently
+    REPLACE the "latest receipt wins" tamper signal the gate relies on —
+    the mismatch would be visible for exactly one night and then laundered
+    away. Only when the existing receipt's prefix still verifies (including
+    the ordinary "session resumed, more lines appended" case) does this
+    function go on to reclassify and, if anything changed, append a
+    successor — which is itself always checked by the SAME prefix
+    verification before being trusted.
+
     Otherwise appends exactly one receipt (idempotent — see
     :func:`append_receipt`) carrying the classified ``channel`` (one of
     ``"user-stated"``, ``"agent-observed"``, ``"inferred"``) and returns it.
@@ -557,6 +613,24 @@ def write_receipt_for_origin(
         return None
     root = projects_root if projects_root is not None else default_projects_root()
     transcript_path = root / origin_scope / f"{origin_session_id}.jsonl"
+    digest = memory_digest(claim)
+
+    existing = lookup_receipt(wiki_root, origin_scope, digest, origin_session_id=origin_session_id)
+    if existing is not None:
+        if not transcript_path.is_file():
+            # Already rolled off since the last receipt was written —
+            # nothing new to check or append; the existing receipt stands.
+            return existing
+        if not prefix_matches_receipt(transcript_path, existing):
+            log.warning(
+                "transcript_receipts: transcript-modified for %s/%s since the "
+                "last receipt — refusing to write a new one (issue athenaeum#753)",
+                origin_scope,
+                origin_session_id,
+            )
+            return None
+        # Prefix still verifies (identical, or a resumed session with more
+        # lines appended) — safe to reclassify and consider a successor.
 
     classification: BackfillClassification = classify_backfill_claim(
         origin_scope,
@@ -566,7 +640,7 @@ def write_receipt_for_origin(
         projects_root=projects_root,
     )
     if classification.channel == "unavailable":
-        return None
+        return existing
 
     records = _iter_session_records(root / origin_scope, origin_session_id)
     utterance_digest = ""
@@ -577,12 +651,12 @@ def write_receipt_for_origin(
 
     prefix = compute_transcript_prefix(transcript_path)
     if prefix is None:
-        return None
+        return existing
     prefix_digest, line_count = prefix
 
     entry = ReceiptEntry(
         origin_scope=origin_scope,
-        memory_digest=memory_digest(claim),
+        memory_digest=digest,
         channel=classification.channel,
         origin_session_id=origin_session_id,
         origin_turn=origin_turn,
@@ -593,6 +667,62 @@ def write_receipt_for_origin(
     )
     append_receipt(wiki_root, entry, lock=lock, sealer=sealer)
     return entry
+
+
+def write_receipts_for_files(
+    wiki_root: Path,
+    files: Sequence[AutoMemoryFile],
+    *,
+    config: dict[str, Any] | None,
+    projects_root: Path | None,
+    lock: RunLock,
+    sealer: Sealer = DEFAULT_SEALER,
+) -> int:
+    """Write one receipt per *files* entry with a resolvable origin session.
+
+    THE single entrypoint nightly intake calls
+    (``librarian._run_auto_memory_phase``) — checks the
+    ``librarian.transcript_receipts_enabled`` flag ITSELF (via
+    :func:`athenaeum.config.resolve_transcript_receipts_enabled`), so the
+    call site in ``librarian.py`` is a one-line delegation rather than the
+    flag check and the loop living there, which is what let this whole path
+    go untested in the first cut of this module (issue athenaeum#753 review).
+    With the flag off, this reads ``config`` and returns ``0`` — no file I/O
+    beyond that.
+
+    ``files`` is typically :func:`athenaeum.intake.discover_auto_memory_files`'s
+    return value; each entry's ``.origin_session_id`` may be a RECOVERED
+    session (``athenaeum.session_recovery.SessionRecoverer``, issue
+    athenaeum#1452) rather than one declared in frontmatter — the receipt
+    captures whichever one the caller resolved, which is exactly what lets
+    the gate reach a live-transcript check for a member with no
+    ``originSessionId`` in frontmatter (addendum item 1).
+
+    Returns the number of calls to :func:`write_receipt_for_origin` that
+    returned a non-``None`` entry — includes both a genuinely NEW line and
+    an idempotent re-touch of an unchanged existing one; it is a
+    "processed successfully" count, not a "new lines written" count.
+    """
+    if not resolve_transcript_receipts_enabled(config):
+        return 0
+    processed = 0
+    for am in files:
+        if not am.origin_session_id:
+            continue
+        _, _, _, claim = member_claim_and_origin(am.path)
+        entry = write_receipt_for_origin(
+            wiki_root,
+            origin_scope=am.origin_scope,
+            origin_session_id=am.origin_session_id,
+            origin_turn=am.origin_turn,
+            claim=claim,
+            projects_root=projects_root,
+            lock=lock,
+            sealer=sealer,
+        )
+        if entry is not None:
+            processed += 1
+    return processed
 
 
 # ---------------------------------------------------------------------------
@@ -639,11 +769,26 @@ def classify_for_correct_gate(
     With ``receipts_enabled=False`` (the default) or ``wiki_root=None``, no
     receipt lookup happens at all and the return is byte-identical to
     athenaeum#752's original ``_transcript_authorizes_correct`` body.
+
+    **"Present" is decided by the transcript FILE existing on disk**
+    (``Path.is_file()``), never by whether ``classify_backfill_claim``
+    happened to return ``"unavailable"``. Those are not the same thing: a
+    transcript truncated to zero bytes (or overwritten with unparseable
+    content) still ``is_file()`` — and ``classify_backfill_claim`` sees no
+    records and returns ``"unavailable"`` for it, exactly as it would for a
+    genuinely MISSING file. Branching on the classification alone would
+    route a truncated-but-present transcript into the "absent" arm below,
+    where a matching receipt would authorize it with no prefix check at
+    all — the receipt's prefix-mismatch tamper signal exists precisely to
+    catch this, and it only fires when this function checks file presence
+    for itself.
     """
     receipt: ReceiptEntry | None = None
+    digest = memory_digest(claim)
     if receipts_enabled and wiki_root is not None:
-        digest = memory_digest(claim)
-        receipt = lookup_receipt(wiki_root, origin_scope, digest)
+        receipt = lookup_receipt(
+            wiki_root, origin_scope, digest, origin_session_id=origin_session_id
+        )
 
     effective_session = origin_session_id or (receipt.origin_session_id if receipt else None)
     effective_turn = (
@@ -653,24 +798,23 @@ def classify_for_correct_gate(
     if not effective_session:
         return False, "no origin session recorded"
 
-    classification = classify_backfill_claim(
-        origin_scope,
-        effective_session,
-        effective_turn,
-        claim=claim,
-        projects_root=projects_root,
-    )
-    channel_ref = f"{classification.channel} {classification.ref}".strip()
+    root = projects_root if projects_root is not None else default_projects_root()
+    transcript_path = root / origin_scope / f"{effective_session}.jsonl"
 
-    if classification.channel != "unavailable":
-        # Transcript present: today's live-classification result wins,
-        # UNLESS a receipt exists and its recorded prefix no longer matches
-        # — that is the tamper signal.
-        if receipt is not None:
-            root = projects_root if projects_root is not None else default_projects_root()
-            transcript_path = root / origin_scope / f"{effective_session}.jsonl"
-            if not prefix_matches_receipt(transcript_path, receipt):
-                return False, f"transcript-modified {effective_session}"
+    if transcript_path.is_file():
+        # Transcript present (regardless of whether its content turns out
+        # to be empty/unparseable): a receipt's prefix must still verify
+        # BEFORE the live classification is trusted.
+        if receipt is not None and not prefix_matches_receipt(transcript_path, receipt):
+            return False, f"transcript-modified {effective_session}"
+        classification = classify_backfill_claim(
+            origin_scope,
+            effective_session,
+            effective_turn,
+            claim=claim,
+            projects_root=projects_root,
+        )
+        channel_ref = f"{classification.channel} {classification.ref}".strip()
         return classification.channel == "user-stated", channel_ref
 
     # Transcript absent (rolled off / never captured).
@@ -681,4 +825,12 @@ def classify_for_correct_gate(
             else str(effective_session)
         )
         return True, f"receipt {ref}"
+    classification = classify_backfill_claim(
+        origin_scope,
+        effective_session,
+        effective_turn,
+        claim=claim,
+        projects_root=projects_root,
+    )
+    channel_ref = f"{classification.channel} {classification.ref}".strip()
     return False, channel_ref

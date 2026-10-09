@@ -634,7 +634,12 @@ are meant to implement that interface without this module changing.
   (receipts are written under `RunLock` at nightly intake, not at
   session_end). Only the two deferred sealers (athenaeum#2039, athenaeum#2040)
   — and, upstream of this repo, harness-side signing of the transcript
-  itself — would close this.
+  itself — would close this. A forged human turn APPENDED after a
+  legitimate receipt was already written is structurally indistinguishable
+  from an ordinary resumed session — both are "more complete lines after
+  the recorded prefix" — so the prefix-digest check cannot catch a forgery
+  that only ever appends, by design (appending is exactly what a resumed
+  session legitimately does).
 - **A forger with filesystem access can also append a fake receipt line
   directly to the ledger.** Appending bypasses the classification step
   entirely. With the default `NoopSealer`, nothing beyond "it shows up as an

@@ -74,9 +74,12 @@ from typing import TYPE_CHECKING, Any, Final, Literal, cast
 
 from athenaeum._retry import TransientAPIError, with_retry
 from athenaeum.atomic_io import atomic_write_text
-from athenaeum.config import _env_number, auto_apply_threshold_ledger_override_for
+from athenaeum.config import (
+    _env_number,
+    auto_apply_threshold_ledger_override_for,
+    resolve_transcript_receipts_enabled,
+)
 from athenaeum.config import resolve_model as _resolve_model_knob
-from athenaeum.config import resolve_transcript_receipts_enabled
 from athenaeum.decision_provider import DecisionBackend as _DecisionBackend
 from athenaeum.json_utils import extract_json_object
 from athenaeum.models import (

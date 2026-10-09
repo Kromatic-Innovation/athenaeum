@@ -9549,34 +9549,20 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
     # yields no receipt. Best-effort: never breaks a run.
     if not ctx.dry_run and ctx.lock is not None:
         try:
-            from athenaeum.config import resolve_transcript_receipts_enabled
-            from athenaeum.transcript_receipts import (
-                member_claim_and_origin,
-                write_receipt_for_origin,
-            )
+            from athenaeum.transcript_receipts import write_receipts_for_files
 
-            if resolve_transcript_receipts_enabled(ctx.config):
-                _receipts_written = 0
-                for am in auto_memory_files:
-                    if not am.origin_session_id:
-                        continue
-                    _, _, _, claim = member_claim_and_origin(am.path)
-                    receipt = write_receipt_for_origin(
-                        ctx.wiki_root,
-                        origin_scope=am.origin_scope,
-                        origin_session_id=am.origin_session_id,
-                        origin_turn=am.origin_turn,
-                        claim=claim,
-                        projects_root=ctx.projects_root,
-                        lock=ctx.lock,
-                    )
-                    if receipt is not None:
-                        _receipts_written += 1
-                if _receipts_written:
-                    log.info(
-                        "transcript receipts: wrote %d receipt(s) this run",
-                        _receipts_written,
-                    )
+            _receipts_processed = write_receipts_for_files(
+                ctx.wiki_root,
+                auto_memory_files,
+                config=ctx.config,
+                projects_root=ctx.projects_root,
+                lock=ctx.lock,
+            )
+            if _receipts_processed:
+                log.info(
+                    "transcript receipts: processed %d receipt(s) this run",
+                    _receipts_processed,
+                )
         except Exception as exc:  # noqa: BLE001 — advisor must never break a run
             log.warning(
                 "transcript-receipts writer failed (non-fatal): %s", exc
