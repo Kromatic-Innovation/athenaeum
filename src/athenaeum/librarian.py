@@ -4996,6 +4996,19 @@ class RunContext:
     # "disabled phase never touches this field" contract as
     # ``rule_proposals_summary``/``audit_nightly_drain_summary`` above).
     signal_mining_summary: dict[str, Any] | None = None
+    # Issue athenaeum#2019: run-summary counts from
+    # ``_run_tier_movement_proposals_phase`` (``None`` until that phase runs,
+    # including when its gate -- the SAME ``resolve_signal_mining_enabled``
+    # master key `signal_mining_summary` above shares -- is off, same
+    # "disabled phase never touches this field" contract.
+    tier_movement_proposals_summary: dict[str, Any] | None = None
+    # Issue athenaeum#2018: run-summary counts from
+    # ``_run_auto_apply_proposals_phase`` (``None`` until that phase runs,
+    # including when its gate -- again the shared
+    # ``resolve_signal_mining_enabled`` master key, this module's ONLY
+    # gate -- is off, same "disabled phase never touches this field"
+    # contract as its siblings above).
+    auto_apply_proposals_summary: dict[str, Any] | None = None
     # Issue athenaeum#1679 (§3.10): comparator-domain (five-verdict
     # comparator, reached only via ``athenaeum.wiki_dedupe`` -- see that
     # module's own docstring) counts from ``_run_wiki_dedup_phase`` (``None``
@@ -6901,6 +6914,165 @@ def _run_signal_mining_phase(ctx: RunContext) -> None:
             summary.candidates_seen,
             len(summary.drafts),
             "listed (dry-run)" if dry_run else "queued",
+            summary.skipped_pending,
+            summary.skipped_suppressed,
+        )
+
+
+def _run_tier_movement_proposals_phase(ctx: RunContext) -> None:
+    """Tier-movement advisory-review proposal drafting (issue athenaeum#2019,
+    athenaeum#719 Plan step 6), threaded through the self-tuning loop's ONE
+    master gate -- mirrors `_run_signal_mining_phase` immediately above.
+
+    **Config-gated OFF by default**
+    (:func:`~athenaeum.config.resolve_signal_mining_enabled`, the SAME
+    master key `_run_signal_mining_phase` checks -- not a key of this
+    phase's own). Off (the default), this function returns immediately --
+    no usage-report read, no ledger touch,
+    ``ctx.tier_movement_proposals_summary`` stays ``None``.
+
+    :func:`athenaeum.tier_movement_proposals.run_tier_movement_proposal_drafting`
+    carries its OWN second, independent gate
+    (:func:`~athenaeum.config.resolve_tier_movement_proposals_enabled`,
+    default OFF), which it checks internally and returns an empty summary
+    when off -- this phase deliberately does NOT duplicate that check: the
+    drafter owns its own gate, this phase only owns whether the drafter is
+    invoked at all this run (the master key).
+
+    **Dry-run** (``ctx.dry_run`` OR'd with
+    :func:`~athenaeum.config.resolve_signal_mining_dry_run`, identical
+    precedence to `_run_signal_mining_phase`): drafted proposals are
+    computed and reported in the summary but never appended to
+    ``_tier_movement_proposals.jsonl``.
+
+    Deterministic -- no LLM, no client (see the drafter module's own
+    docstring) -- so, like `_run_signal_mining_phase`, there is no
+    knob-provider/model to record and no spend-ledger entry.
+
+    Called from ``run()`` immediately after `_run_signal_mining_phase` --
+    same position, same ``ctx.deadline_tripped`` guard.
+    """
+    if not resolve_signal_mining_enabled(ctx.config):
+        return
+    if ctx.deadline_tripped or ctx.deadline_exceeded():
+        ctx.tier_movement_proposals_summary = {"skipped_deadline_tripped": True}
+        return
+
+    try:
+        from athenaeum.tier_movement_proposals import run_tier_movement_proposal_drafting
+
+        dry_run = bool(ctx.dry_run) or resolve_signal_mining_dry_run(ctx.config)
+        summary = run_tier_movement_proposal_drafting(
+            wiki_root=ctx.wiki_root,
+            config=ctx.config,
+            dry_run=dry_run,
+            now=ctx.now,
+        )
+    except Exception:
+        log.exception("tier-movement-proposals phase failed; continuing run")
+        ctx.tier_movement_proposals_summary = {"skipped_failed": True}
+        return
+
+    ctx.tier_movement_proposals_summary = {
+        "candidates_seen": summary.candidates_seen,
+        "proposed": summary.proposed,
+        "skipped_pending": summary.skipped_pending,
+        "skipped_suppressed": summary.skipped_suppressed,
+        "skipped_below_threshold": summary.skipped_below_threshold,
+        "dry_run": dry_run,
+        "drafted_ids": [d.id for d in summary.drafts],
+    }
+    if summary.proposed or summary.drafts:
+        log.info(
+            "tier-movement-proposals: %d candidate(s), %d proposal(s) "
+            "%s (%d pending, %d suppressed, %d below threshold)",
+            summary.candidates_seen,
+            len(summary.drafts),
+            "listed (dry-run)" if dry_run else "queued",
+            summary.skipped_pending,
+            summary.skipped_suppressed,
+            summary.skipped_below_threshold,
+        )
+
+
+def _run_auto_apply_proposals_phase(ctx: RunContext) -> None:
+    """Auto-apply-threshold widen proposal drafting (issue athenaeum#2018,
+    athenaeum#719 Plan step 6), threaded through the self-tuning loop's ONE
+    master gate -- mirrors `_run_tier_movement_proposals_phase` immediately
+    above.
+
+    **Config-gated OFF by default**
+    (:func:`~athenaeum.config.resolve_signal_mining_enabled`, the master
+    key). Unlike the tier-movement sibling, this module has NO gate of its
+    own at all --
+    :func:`athenaeum.auto_apply_proposals.run_auto_apply_proposal_detection`
+    checks nothing before drafting -- so the master key IS this phase's
+    ONLY gate; this phase must apply it directly rather than delegate to
+    the drafter, which is exactly why the master key matters here.
+
+    The *actions* list passed to the drafter is
+    ``sorted(athenaeum.resolutions.DEFAULT_AUTO_APPLY_THRESHOLD_PER_ACTION)``
+    -- the canonical per-action vocabulary the auto-apply gate itself
+    resolves thresholds for
+    (:func:`~athenaeum.resolutions.resolve_auto_apply_threshold_for`) --
+    rather than a hand-written list, so a newly-added resolver action is
+    covered automatically the next time this phase runs, with no second
+    edit required here.
+
+    **Ordering: must run AFTER `_run_audit_nightly_drain_phase`** (and, by
+    virtue of this phase's call position in ``run()``, after
+    `_run_signal_mining_phase`/`_run_tier_movement_proposals_phase` too):
+    this rail reads the tier audit-sampling/calibration ledgers
+    (:func:`athenaeum.calibration.calibration_summary`, consumed via
+    :func:`athenaeum.auto_apply_proposals.disagreement_rate`) that the
+    nightly drain's own audit sampling may have just written this same run.
+
+    **Dry-run**: identical precedence to the two phases above (``ctx.dry_run``
+    OR'd with :func:`~athenaeum.config.resolve_signal_mining_dry_run`).
+
+    Deterministic -- no LLM, no client -- same as the two phases above.
+    """
+    if not resolve_signal_mining_enabled(ctx.config):
+        return
+    if ctx.deadline_tripped or ctx.deadline_exceeded():
+        ctx.auto_apply_proposals_summary = {"skipped_deadline_tripped": True}
+        return
+
+    try:
+        from athenaeum.auto_apply_proposals import run_auto_apply_proposal_detection
+        from athenaeum.resolutions import DEFAULT_AUTO_APPLY_THRESHOLD_PER_ACTION
+
+        actions = sorted(DEFAULT_AUTO_APPLY_THRESHOLD_PER_ACTION)
+        dry_run = bool(ctx.dry_run) or resolve_signal_mining_dry_run(ctx.config)
+        summary = run_auto_apply_proposal_detection(
+            actions,
+            wiki_root=ctx.wiki_root,
+            config=ctx.config,
+            dry_run=dry_run,
+            now=ctx.now,
+        )
+    except Exception:
+        log.exception("auto-apply-proposals phase failed; continuing run")
+        ctx.auto_apply_proposals_summary = {"skipped_failed": True}
+        return
+
+    ctx.auto_apply_proposals_summary = {
+        "actions_seen": summary.actions_seen,
+        "not_warranted": summary.not_warranted,
+        "proposed": summary.proposed,
+        "skipped_pending": summary.skipped_pending,
+        "skipped_suppressed": summary.skipped_suppressed,
+        "dry_run": dry_run,
+        "drafted_ids": [d.id for d in summary.drafts],
+    }
+    if summary.proposed or summary.drafts:
+        log.info(
+            "auto-apply-proposals: %d action(s), %d proposal(s) %s "
+            "(%d not warranted, %d pending, %d suppressed)",
+            summary.actions_seen,
+            len(summary.drafts),
+            "listed (dry-run)" if dry_run else "queued",
+            summary.not_warranted,
             summary.skipped_pending,
             summary.skipped_suppressed,
         )
@@ -10553,6 +10725,13 @@ def run(
     # already spent whatever `ctx.run_deadline` allowed — see
     # `_run_signal_mining_phase`'s own docstring.
     _run_signal_mining_phase(ctx)
+
+    # Phase: sibling self-tuning-loop drafters (issues athenaeum#2019 /
+    # athenaeum#2018) -- same master key as `_run_signal_mining_phase`
+    # directly above, run right after it for the identical reason (both
+    # opt-in, zero-cost-until-enabled, LAST in the run).
+    _run_tier_movement_proposals_phase(ctx)
+    _run_auto_apply_proposals_phase(ctx)
 
     # Phase: finalize (spend summary + ledger, post-run push, page-size
     # guardrail, pending-merge revalidation advisor, summary emit, drain
