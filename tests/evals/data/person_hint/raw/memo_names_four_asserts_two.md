@@ -1,4 +1,4 @@
-# Memo — relining programme, purchasing and controller training
+# Memo — Draymouth Relining review: purchasing and controller training
 
 Attending the programme review: Thessa Oakmoor, Corwin Vantry, Nerida Selmire,
 Ivo Pelloway.

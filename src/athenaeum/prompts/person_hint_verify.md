@@ -12,4 +12,13 @@ exactly:
 {"ops": [], "adds_new_claim": false, "subject_mismatch": true}
 ```
 
+If it IS this person but the observation records only that they were
+present — attended, sat in, joined, were listed, signed off, had nothing to
+add — and states no role, decision, action, relationship, or fact of theirs,
+that is not a claim worth a page edit. Do not edit the page. Return exactly:
+
+```json
+{"ops": [], "adds_new_claim": false, "presence_only": true}
+```
+
 Otherwise, proceed with the ordinary merge instructions below.

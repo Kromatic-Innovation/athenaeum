@@ -9,6 +9,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Merge anchors survive a hard line wrap; the `person_hint` eval floor is
+  now measured, not assumed (issue athenaeum#2043).** The floor
+  (`PERSON_HINT_FLOOR = 4`) was asserted strictly by athenaeum#1866 (PR
+  athenaeum#1876, 2026-09-19) without a live `evals.yml` dispatch, and every strict run
+  since — 2f8b8383 (2026-09-24), 853f1f9b (2026-09-25), 9d6ee351 (2026-10-09),
+  and a `record=true` run at e7331780 — scored 2/5 or 1/5. It never had a
+  green run to regress from. The recordings show two deterministic causes
+  and one prompt gap. (1) `tiers.apply_merge_ops` located anchors with a bare
+  `str.find`; a page wrapped at ~80 columns, as every hand-authored fixture
+  page is, made a sentence-shaped anchor (`He has no signing authority of
+  his own and routes every order through the works manager.`) miss on the
+  `\n` the body carries — a ~10x full-echo on an ordinary merge
+  (athenaeum#490 `cause=anchor-miss`) and a silent DROP on a hint-derived
+  action (athenaeum#1866). Whether the model preserved the literal newline
+  decided the case, which is why `role_change_note` flipped between runs.
+  `_locate_anchor` now falls back to a whitespace-tolerant match ONLY when
+  the exact form is absent, still requiring uniqueness. (2) A response put
+  its footnote definitions under a top-level `"footnotes"` list instead of
+  an `append_section` op, so the page gained `[^1]` markers with no
+  definition and lost its pointer to the source; `_coerce_merge_ops` folds
+  such definitions into a trailing `append_section`, and a new post-apply
+  guard `define_dangling_footnotes` resolves every marker a merge introduced
+  but never defined to that merge's own `source_ref` (a marker already
+  dangling before the merge is left alone) — three later runs read
+  `uncited_change` on person pages for exactly this shape, including a
+  response whose definition was emitted outside the JSON entirely. (3)
+  `prompts/person_hint_classify.md` now says in terms that presence is not a
+  claim — an attendee list, "sat in", "had nothing to add" — after the
+  classifier emitted "attended the review" for two of four named people and
+  a sat-in note as a claim; because Haiku kept emitting that hint on every
+  run regardless, `prompts/person_hint_verify.md` now asks the write model
+  the same question and a `"presence_only": true` reply leaves the page
+  byte-identical, recorded as `not_asserted` (hint-derived actions only).
+  The `memo_names_four_asserts_two` fixture now
+  names the programme page in its title (as the retrospective case already
+  did) so its "rest of the file is compiled" check is reachable by tier-1
+  name matching. Measurement: `docs/measurements/person-hint-strict-floor-2026-10-09.md`.
+
 - **Vector recall is now exact, not approximate, for personal-sized
   collections (issue athenaeum#2023).** `VectorBackend.build_index` creates
   the chromadb collection with `hnsw:search_ef` widened from chromadb's
