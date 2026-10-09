@@ -9,6 +9,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Self-tuning loop: the two remaining sibling proposal rails now actually
+  run, behind the same master key (issue athenaeum#719 AC11/AC15).**
+  `tier_movement_proposals.py` (issue athenaeum#2019) and
+  `auto_apply_proposals.py` (issue athenaeum#2018) shipped working drafters
+  with **zero production call sites** — nothing in the nightly librarian or
+  any CLI command invoked them, so "tier-movement thresholds (from usage
+  metrics)" and "auto-apply thresholds (from the calibration/audit sampling
+  lane)" were true of the code but not of the running system. Both are now
+  nightly phases — `librarian._run_tier_movement_proposals_phase` and
+  `librarian._run_auto_apply_proposals_phase` — called from `run()`
+  immediately after `_run_signal_mining_phase`, gated by the SAME master key
+  (`librarian.signal_mining.enabled`, default **off**) and honoring the same
+  dry-run precedence (`librarian.signal_mining.dry_run`, default **true**,
+  OR'd with the run's own `--dry-run`). **No new config key**: the master key
+  and each module's own existing gate are the whole surface, so an existing
+  deployment's behavior is unchanged until an operator opts in. The
+  auto-apply rail derives its action list from
+  `resolutions.DEFAULT_AUTO_APPLY_THRESHOLD_PER_ACTION` rather than a
+  hand-written list, so a newly-added resolver action is covered with no
+  second edit; the tier-movement rail keeps its own independent
+  `librarian.tier_movement_proposals_enabled` sub-gate, which the phase
+  deliberately does not duplicate.
+- **`tests/test_self_tuning_loop_master_gate.py` is now a real passing CENSUS
+  guard instead of an `xfail(strict=True)` TODO (issue athenaeum#719).** It
+  globs every `src/athenaeum/*_proposals.py` module at test time and requires
+  each to be either wired through a master-key-gated `_run_<module>_phase`
+  (`tier_movement_proposals`, `auto_apply_proposals`, plus
+  `dimension_proposals` via `_run_signal_mining_phase`) or present in an
+  explicit exclusion table with a substantive reason — so a newly-added
+  `*_proposals` module can no longer silently join the unwired set, and a
+  `TODO` placeholder can no longer stand in for a reason. Two modules are
+  excluded on stated grounds, not deferred silently: `page_split_proposals`
+  (its detector consumes `page_decompose.DecomposeReport` objects, which no
+  nightly phase produces — scheduling it means deciding the cost of
+  decomposing every page nightly, an open product decision) and
+  `policy_pack_edit_proposals` (no detector exists by design; its drafter
+  takes caller-supplied candidates only). The gate assertion reads the phase
+  body with its docstring and comments stripped via `ast`, because a bare
+  substring check over `inspect.getsource` was satisfied by the phase's own
+  docstring naming the key — verified by mutation (replacing the real guard
+  with `if False:` passed the substring version and fails this one). New
+  tests: `tests/test_sibling_proposal_rail_phases.py` (both phases: master
+  gate off, deadline-tripped, dry-run-lists-without-writing paired with a
+  `dry_run=false` run over identical input that DOES write, global
+  `--dry-run` override, and the derived-action-list spy).
 - **Auto-apply-threshold ledger override: thread through `tiers.py`'s
   gating call sites, fix the documented precedence (issue athenaeum#2032,
   follow-up to athenaeum#2018/#2024).** `tier4_escalate` and
@@ -816,6 +861,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tests/fixtures/phone_2031_fixtures.py`, shared by
   `test_pii_off_corpus.py` and `test_sensitivity.py` so the two detection
   paths cannot drift.
+- **`TestPhase2StaysDark`'s dark-module guard was a substring scan, and
+  `athenaeum.auto_apply` is a prefix of `athenaeum.auto_apply_proposals`
+  (issue athenaeum#719).** `test_no_pipeline_entry_point_imports_a_phase_2_module`
+  asserted `f"athenaeum.{module}" not in source` over a pipeline entry
+  point's whole file text, so it fired on **any** module whose name merely
+  STARTS with a dark module's name — a false positive, not a finding, and one
+  that made it structurally impossible for `librarian.py` to import
+  `auto_apply_proposals.py` (a different module, a different epic, a
+  different layer) at all. The same scan also could not tell a docstring
+  MENTION from an import, the exact defect
+  `TestCoordinateAnswerLoopIsANarrowAuthorizedException.test_the_remaining_dark_modules_are_still_dark`
+  had already been rewritten (AST-based) to avoid in this same file. The
+  blanket guard now follows that precedent: a new `_imported_module_names`
+  helper collects the dotted names a file actually imports via `ast.walk`
+  — `walk`, not `iter_child_nodes`, so a FUNCTION-LOCAL import (the shape
+  every late nightly phase in `librarian.py` uses) is caught exactly as a
+  module-level one is. Nothing is weakened: a dotted reference with no
+  backing import cannot resolve at runtime. Verified by mutation in both
+  directions — planting `from athenaeum.auto_apply import ...` inside the
+  new phase fails the guard; the `auto_apply`/`auto_apply_proposals` pair is
+  not conflated — and the new `test_the_import_probe_can_actually_fail`
+  pins both directions, superseding (and absorbing the assertion of) the
+  old substring-era `test_the_probe_can_actually_fail`.
 
 - **Phone detector's second false-positive class: slug ids, epoch-ms
   timestamps, labeled run/comment ids (issue athenaeum#2027).** After
