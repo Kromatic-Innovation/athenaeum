@@ -141,7 +141,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   write runs only under the caller's own already-acquired `RunLock`
   (`discover_auto_memory_files(..., lock=...)`, wired through the nightly
   librarian run's `ctx.lock`) and raises otherwise, mirroring
-  `athenaeum.verdicts`'s single-appender guard.
+  `athenaeum.verdicts`'s single-appender guard. **Review fix (PR
+  athenaeum#2044):** a file carrying a falsy existing key
+  (`originSessionId: null` / `originSessionId: ""`) was not caught by the
+  non-empty idempotency check, so the write path appended a SECOND
+  `originSessionId:` line rather than replacing the first, leaving a
+  duplicate key in the block. The write path now replaces that line in
+  place when a (falsy) key is already present, and only appends when the
+  key is absent entirely.
 - **Self-tuning loop: the two remaining sibling proposal rails now actually
   run, behind the same master key (issue athenaeum#719 AC11/AC15).**
   `tier_movement_proposals.py` (issue athenaeum#2019) and

@@ -1121,6 +1121,40 @@ class TestPersistRecoveredOriginSessionId:
         assert path.read_bytes() == before_bytes
         assert path.stat().st_mtime_ns == before_mtime
 
+    @pytest.mark.parametrize("existing_value", ["null", '""', "''"])
+    def test_falsy_existing_key_is_replaced_not_duplicated(
+        self, tmp_path: Path, existing_value: str
+    ) -> None:
+        """Review finding (PR #2044, Sentry): ``originSessionId: null`` /
+        ``originSessionId: ""`` are falsy, so the no-op guard above does not
+        short-circuit on them -- the write path must REPLACE that line in
+        place rather than append a second ``originSessionId:`` key, which
+        would otherwise produce a frontmatter block with a duplicate key.
+        """
+        knowledge_root = tmp_path / "knowledge"
+        scope_dir = knowledge_root / "raw" / "auto-memory" / SCOPE
+        scope_dir.mkdir(parents=True)
+        path = scope_dir / MEMORY_NAME
+        path.write_text(
+            "---\n"
+            "name: falsy-origin\n"
+            f"originSessionId: {existing_value}\n"
+            "description: declares the key but with no usable value.\n"
+            "---\n"
+            "body text\n",
+            encoding="utf-8",
+        )
+
+        with RunLock(knowledge_root) as lock:
+            changed = persist_recovered_origin_session_id(path, "recovered-session", lock=lock)
+
+        assert changed is True
+        after = path.read_text(encoding="utf-8")
+        assert after.count("originSessionId:") == 1
+        assert "originSessionId: recovered-session" in after
+        assert "name: falsy-origin" in after
+        assert "description: declares the key but with no usable value." in after
+
     def test_raises_without_an_acquired_lock(self, tmp_path: Path) -> None:
         """The mutating call must refuse to run outside a held RunLock."""
         knowledge_root = tmp_path / "knowledge"

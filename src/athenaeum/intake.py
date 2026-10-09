@@ -119,6 +119,15 @@ log = logging.getLogger(__name__)
 #: allow-list, and the pattern itself is a one-line stdlib regex, not shared
 #: state.
 _ORIGIN_SESSION_FRONTMATTER_RE = re.compile(r"^---\s*\r?\n(.*?)\r?\n---\s*\r?\n", re.DOTALL)
+#: Matches an existing (but falsy -- null or empty-string) ``originSessionId``
+#: key line within the frontmatter block, so a backfill can REPLACE it rather
+#: than append a second key (athenaeum#2044 review finding): the
+#: ``existing is not None and str(existing).strip()`` check below only
+#: short-circuits on a non-empty value, so ``originSessionId: null`` /
+#: ``originSessionId: ""`` both fall through to the write path, and a blind
+#: end-of-block append would otherwise leave two ``originSessionId:`` lines
+#: in the same block.
+_ORIGIN_SESSION_KEY_LINE_RE = re.compile(r"^originSessionId\s*:[^\r\n]*", re.MULTILINE)
 
 
 class OriginSessionWriteNotLocked(RuntimeError):
@@ -196,9 +205,23 @@ def persist_recovered_origin_session_id(
     match = _ORIGIN_SESSION_FRONTMATTER_RE.match(text)
     if match is None:
         return False
-    end = match.end(1)
     newline = "\r\n" if "\r\n" in text[: match.end()] else "\n"
-    updated = f"{text[:end]}{newline}originSessionId: {session_id}{text[end:]}"
+    block_start, block_end = match.start(1), match.end(1)
+    block = text[block_start:block_end]
+    key_match = _ORIGIN_SESSION_KEY_LINE_RE.search(block)
+    if key_match is not None:
+        # A falsy key (null/empty) is already present in the block -- replace
+        # that line in place instead of appending a duplicate key.
+        new_block = (
+            block[: key_match.start()]
+            + f"originSessionId: {session_id}"
+            + block[key_match.end() :]
+        )
+        updated = text[:block_start] + new_block + text[block_end:]
+    else:
+        updated = (
+            f"{text[:block_end]}{newline}originSessionId: {session_id}{text[block_end:]}"
+        )
     if updated == text:
         return False
     atomic_write_text(path, updated)
