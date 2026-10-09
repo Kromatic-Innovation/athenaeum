@@ -1042,98 +1042,122 @@ class TestWriteReceiptsForFiles:
 
 # ---------------------------------------------------------------------------
 # Recovered-session integration — issue athenaeum#753 addendum item 1, via
-# the REAL discover_auto_memory_files + SessionRecoverer path (not a
-# hand-built receipt), mirroring tests/test_native_memory_source_recovery.py.
+# the REAL discover_auto_memory_files + SessionRecoverer path. Reuses the
+# EXACT fixture builders tests/test_native_memory_source_recovery.py uses to
+# prove write-cited recovery (not a hand-rolled transcript shape) — a
+# hand-rolled transcript silently missed the citation-time/mtime window the
+# recoverer actually requires and hit the "recovery failed" branch while
+# still reporting green (issue athenaeum#753 review).
 # ---------------------------------------------------------------------------
-
-
-_RECOVERY_SCOPE = "-Users-alice-Code-projectx"
-_RECOVERY_SESSION = "11111111-2222-3333-4444-555555555555"
-
-
-def _native_memory_text() -> str:
-    """Exactly the frontmatter Claude Code's native writer emits — no
-    ``sources``, no ``originSessionId``."""
-    return (
-        "---\n"
-        "name: native-example\n"
-        "description: the winning claim\n"
-        "metadata:\n"
-        "  type: reference\n"
-        "---\n"
-        "the winning claim\n"
-    )
-
-
-def _tool_use_record(path: str) -> dict[str, object]:
-    return {
-        "type": "assistant",
-        "message": {
-            "role": "assistant",
-            "content": [
-                {
-                    "type": "tool_use",
-                    "id": "toolu_1",
-                    "name": "Write",
-                    "input": {"file_path": path, "content": "..."},
-                }
-            ],
-        },
-    }
 
 
 class TestRecoveredSessionIntegration:
     def test_recovered_session_receipt_reaches_the_gate(self, tmp_path: Path) -> None:
         from athenaeum.intake import discover_auto_memory_files
         from athenaeum.resolutions import _transcript_authorizes_correct
+        from tests.test_native_memory_source_recovery import (
+            MEMORY_NAME as _N_MEMORY_NAME,
+        )
+        from tests.test_native_memory_source_recovery import (
+            OTHER_SESSION as _N_OTHER_SESSION,
+        )
+        from tests.test_native_memory_source_recovery import SCOPE as _N_SCOPE
+        from tests.test_native_memory_source_recovery import (
+            WRITER_SESSION as _N_WRITER_SESSION,
+        )
+        from tests.test_native_memory_source_recovery import _native_path as _n_native_path
+        from tests.test_native_memory_source_recovery import _text_record as _n_text_record
+        from tests.test_native_memory_source_recovery import (
+            _tool_use_record as _n_tool_use_record,
+        )
+        from tests.test_native_memory_source_recovery import _write_cluster as _n_write_cluster
+        from tests.test_native_memory_source_recovery import _write_config as _n_write_config
+        from tests.test_native_memory_source_recovery import (
+            _write_native_memory as _n_write_native_memory,
+        )
+        from tests.test_native_memory_source_recovery import (
+            _write_transcript as _n_write_transcript,
+        )
 
+        claim_text = "the winning claim, stated by the human"
         knowledge_root = tmp_path / "knowledge"
-        _write_config(knowledge_root)
-        scope_dir = knowledge_root / "raw" / "auto-memory" / _RECOVERY_SCOPE
-        scope_dir.mkdir(parents=True)
-        member = scope_dir / "native-example.md"
-        member.write_text(_native_memory_text(), encoding="utf-8")
+        projects_root = tmp_path / "projects"
+        member = _n_write_native_memory(
+            knowledge_root,
+            mtime_offset_minutes=5,
+            text=(
+                "---\n"
+                "name: native-example\n"
+                f"description: {claim_text}\n"
+                "metadata:\n"
+                "  type: reference\n"
+                "---\n"
+                f"{claim_text}\n"
+            ),
+        )
+        _n_write_config(knowledge_root)
+        _n_write_cluster(knowledge_root, [f"{_N_SCOPE}/{_N_MEMORY_NAME}"])
 
-        pr = tmp_path / "projects"
-        # A Write tool-use naming this exact file is what resolves the
-        # write-cited rung (session_recovery.BASIS_WRITE_CITED) — the SAME
-        # file both the native writer and the transcript reference.
-        _write_transcript(
-            pr,
-            _RECOVERY_SCOPE,
-            _RECOVERY_SESSION,
+        native_path = _n_native_path(projects_root)
+        # A SECOND, concurrent session in the same scope — with no Write
+        # tool-use naming the file — is what forces resolution through the
+        # write-cited rung specifically rather than the (also-correct-here,
+        # but weaker) single-unambiguous-time-window rung: with only one
+        # session's transcript on disk, the window match alone would have
+        # resolved to the same session id and this test would have passed
+        # for the wrong reason (issue athenaeum#753 review).
+        _n_write_transcript(
+            projects_root,
+            _N_WRITER_SESSION,
             [
-                _tool_use_record(str(member)),
-                _user_record("the winning claim"),
+                _n_text_record(claim_text, 0),
+                _n_tool_use_record("Write", native_path, 5),
+                _n_text_record("thanks", 8),
+            ],
+        )
+        _n_write_transcript(
+            projects_root,
+            _N_OTHER_SESSION,
+            [
+                _n_text_record("unrelated work in the same project", 0),
+                _n_text_record("still unrelated", 9),
             ],
         )
 
-        files = discover_auto_memory_files(knowledge_root, projects_root=pr)
+        files = discover_auto_memory_files(knowledge_root, projects_root=projects_root)
         assert len(files) == 1
-        assert files[0].origin_session_id is None or isinstance(
-            files[0].origin_session_id, str
-        )
+        # Pin that recovery actually resolved via the WRITE-CITED rung
+        # specifically (session_recovery.BASIS_WRITE_CITED) — not the
+        # escape hatch this test hit before this fix, and not merely the
+        # weaker time-window rung the concurrent session above rules out.
+        assert files[0].origin_session_id == _N_WRITER_SESSION
 
         wiki = knowledge_root / "wiki"
         lock = RunLock(knowledge_root)
         config = {"librarian": {"transcript_receipts_enabled": True}}
         with lock:
             processed = write_receipts_for_files(
-                wiki, files, config=config, projects_root=pr, lock=lock
+                wiki, files, config=config, projects_root=projects_root, lock=lock
             )
-
-        if files[0].origin_session_id is None:
-            # Recovery did not resolve for this fixture shape — nothing to
-            # assert about the gate; the writer must have been a no-op.
-            assert processed == 0
-            return
-
         assert processed == 1
 
-        # Now roll the transcript off and confirm the GATE (using only the
-        # member's path and the FRONTMATTER it actually carries — no
-        # originSessionId there) reaches the transcript check via the
-        # receipt's recovered session, per addendum item 1.
+        # Transcript still present: the gate reaches a REAL "user-stated"
+        # live classification via the recovered session — a member with no
+        # originSessionId in frontmatter reaches the transcript check
+        # instead of being refused with "no origin session recorded"
+        # (addendum item 1's own wording).
+        authorized_live, ref_live = _transcript_authorizes_correct(
+            _proposal("correct_a", "a"),
+            [member, member],
+            config=config,
+            projects_root=projects_root,
+            wiki_root=wiki,
+        )
+        assert authorized_live is True
+        assert ref_live.startswith("user-stated")
+
+        # Roll the transcript off: the gate now authorizes via the receipt,
+        # still keyed off the session the receipt captured at intake time.
         pr_rolled_off = tmp_path / "projects_rolled_off"
         pr_rolled_off.mkdir()
         authorized, channel_ref = _transcript_authorizes_correct(
