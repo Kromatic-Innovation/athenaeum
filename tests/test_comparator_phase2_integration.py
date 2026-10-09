@@ -243,15 +243,77 @@ class TestPhase2StaysDark:
         "auto_apply",
     )
 
+    @staticmethod
+    def _imported_module_names(source: str) -> set[str]:
+        """Every dotted module name *source* actually IMPORTS, at any depth.
+
+        AST-based rather than a substring scan, for the two reasons the
+        sibling guard below
+        (``TestCoordinateAnswerLoopIsANarrowAuthorizedException.
+        test_the_remaining_dark_modules_are_still_dark``) already records for
+        itself -- plus one this guard hit first:
+
+        * a substring check cannot tell "mentioned in a docstring" from
+          "imported" (issue athenaeum#1993's own reason);
+        * ``"athenaeum.auto_apply" in source`` is **also true of
+          ``athenaeum.auto_apply_proposals``** -- a different module, in a
+          different epic (the athenaeum#719 self-tuning loop), on a
+          different layer. The prefix collision made the old check
+          structurally unable to allow ANY module whose name merely starts
+          with a dark module's name, which is a false positive, not a
+          finding. Caught 2026-10-09 wiring
+          ``librarian._run_auto_apply_proposals_phase`` (issue
+          athenaeum#719).
+
+        ``ast.walk`` (not ``iter_child_nodes``) so a FUNCTION-LOCAL import --
+        the shape every late nightly phase in ``librarian.py`` uses -- is
+        caught exactly as a module-level one is. Nothing is weakened: a
+        dotted reference that is not backed by an import cannot resolve at
+        runtime, so "imports it" remains the only way to wire a module in.
+        """
+        import ast
+
+        names: set[str] = set()
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                names.add(node.module)
+            elif isinstance(node, ast.Import):
+                names.update(alias.name for alias in node.names)
+        return names
+
     @pytest.mark.parametrize("entry_point", PIPELINE_ENTRY_POINTS)
     def test_no_pipeline_entry_point_imports_a_phase_2_module(self, entry_point: str) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         source = (repo_root / entry_point).read_text(encoding="utf-8")
+        imported = self._imported_module_names(source)
         for module in self.DARK_MODULES:
-            assert f"athenaeum.{module}" not in source, (
+            assert f"athenaeum.{module}" not in imported, (
                 f"{entry_point} imports athenaeum.{module} -- athenaeum#715's "
                 "cut-over must REPLACE the old split paths, not run beside them"
             )
+
+    def test_the_import_probe_can_actually_fail(self) -> None:
+        """Positive control for the AST probe above, in both directions.
+
+        A real import of a dark module IS detected, and the
+        ``auto_apply`` / ``auto_apply_proposals`` prefix pair is NOT
+        conflated -- so the fix that made this guard AST-based cannot have
+        turned it into a check that passes no matter what.
+        """
+        repo_root = Path(__file__).resolve().parents[1]
+        effects = (repo_root / "src/athenaeum/verdict_effects.py").read_text(encoding="utf-8")
+        assert "athenaeum.supersession" in self._imported_module_names(effects)
+
+        planted = self._imported_module_names(
+            "from athenaeum.auto_apply import enact_verdict_effect\n"
+        )
+        assert "athenaeum.auto_apply" in planted
+
+        sibling_only = self._imported_module_names(
+            "from athenaeum.auto_apply_proposals import run_auto_apply_proposal_detection\n"
+        )
+        assert "athenaeum.auto_apply_proposals" in sibling_only
+        assert "athenaeum.auto_apply" not in sibling_only
 
 
 class TestCoordinateAnswerLoopIsANarrowAuthorizedException:
@@ -323,13 +385,6 @@ class TestCoordinateAnswerLoopIsANarrowAuthorizedException:
                     alias.name in ("athenaeum.comparator", "athenaeum.verdict_effects")
                     for alias in node.names
                 )
-
-    def test_the_probe_can_actually_fail(self) -> None:
-        # Positive control: the substring check above must be able to detect a
-        # real import, or it is a test that cannot fail.
-        repo_root = Path(__file__).resolve().parents[1]
-        effects = (repo_root / "src/athenaeum/verdict_effects.py").read_text(encoding="utf-8")
-        assert "athenaeum.supersession" in effects
 
     def test_wiki_dedupe_is_the_one_authorized_cut_over_wiring(self) -> None:
         """Issue athenaeum#715's cut-over: ``wiki_dedupe.py`` now imports the
