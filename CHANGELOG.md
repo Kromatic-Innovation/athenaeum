@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Vector recall is now exact, not approximate, for personal-sized
+  collections (issue athenaeum#2023).** `VectorBackend.build_index` creates
+  the chromadb collection with `hnsw:search_ef` widened from chromadb's
+  default of 100 to `VectorBackend._HNSW_SEARCH_EF` (10 000). The default
+  was an approximate nearest-neighbour search whose misses depended on the
+  (non-deterministic) build order: measured on the 1000-page `medium` eval
+  corpus with the real `all-MiniLM-L6-v2` embedder, **5 of 5 fresh builds
+  dropped at least one true top-15 neighbour** (13 of 225 probe cells),
+  including a rank-2 page while rank 15 was returned — characteristically a
+  near-duplicate of another page (a stale page and its correction, a
+  distractor and its target), the exact shape recall exists to surface. At
+  the new width every probe matched an exhaustive brute-force ranking (0 of
+  5 builds, 0 of 225 cells) with no measurable query-latency change. The
+  setting only takes effect at collection creation, so
+  `_METADATA_SCHEMA_VERSION` is bumped to 3: an existing index is rebuilt in
+  full once on its next build instead of being reused incrementally at the
+  old width. This was also the root cause of
+  `tests/evals/test_recall_covers_grep.py::test_recall_covers_grep_reachable_expected_pages_vector[medium-spend_approver_named]`
+  failing on identical SHAs in CI — the embeddings were deterministic; the
+  index's neighbour set was not.
+- **`tests/evals/test_rollout_push_breadcrumb_spike.py` no longer races a
+  30 s timeout against a cold hook build (issue athenaeum#2023).** The
+  hand-built side built `session-start-recall.sh`'s index once per probe
+  under a fresh `HOME` — a 79 MB ONNX model download plus a full real-model
+  re-embed each time, measured at 14–21 s locally — inside the same 30 s
+  budget as its query. Each side now builds once before the probe loop
+  (`HOOK_INDEX_BUILD_TIMEOUT_SECONDS`) and the probes query the warm index
+  (`HOOK_QUERY_TIMEOUT_SECONDS`), the same two-budget shape the harness
+  under test already uses.
+
 ### Added
 
 - **Self-tuning loop: the two remaining sibling proposal rails now actually

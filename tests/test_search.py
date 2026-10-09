@@ -2553,6 +2553,97 @@ class TestFullReHashBackstopVector:
         assert hash_spy["n"] == 0  # fresh again → fast-path
 
 
+class TestVectorExactSearchWidth:
+    """Issue athenaeum#2023: the vector collection is created with an HNSW
+    candidate width (``hnsw:search_ef``) wide enough that nearest-neighbour
+    search is exact for a personal-sized corpus. chromadb's default (100)
+    is approximate and build-order dependent -- measured dropping true
+    top-15 neighbours in 5 of 5 fresh builds with the real embedder on the
+    1000-page eval corpus -- and the setting only takes effect at
+    ``create_collection`` time, so these pin (a) that a fresh build writes
+    it and (b) that an index created before this change is rebuilt rather
+    than reused incrementally with the old width.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _require_chromadb(self) -> None:
+        pytest.importorskip("chromadb")
+
+    @staticmethod
+    def _persisted_search_ef(cache: Path) -> int | None:
+        import chromadb
+        from chromadb.api.client import SharedSystemClient
+
+        from athenaeum.search import _VECTOR_COLLECTION, _VECTOR_DIR
+
+        SharedSystemClient.clear_system_cache()
+        client = chromadb.PersistentClient(path=str(cache / _VECTOR_DIR))
+        col = client.get_collection(_VECTOR_COLLECTION, embedding_function=None)
+        # The legacy ``hnsw:*`` metadata key is the one form every chromadb
+        # release in our supported range persists; 1.x additionally mirrors
+        # it into ``configuration_json`` -- checked when present so a release
+        # that stopped honouring the legacy key would fail here, not in prod.
+        value = (col.metadata or {}).get("hnsw:search_ef")
+        config = getattr(col, "configuration_json", None)
+        if value is not None and isinstance(config, dict) and isinstance(config.get("hnsw"), dict):
+            assert config["hnsw"].get("ef_search") == value, (
+                f"chromadb persisted hnsw:search_ef={value!r} as metadata but "
+                f"ef_search={config['hnsw'].get('ef_search')!r} in its configuration"
+            )
+        return value
+
+    def test_fresh_build_sets_exact_search_width(
+        self, wiki_with_pages: Path, tmp_path: Path
+    ) -> None:
+        cache = tmp_path / "cache"
+        VectorBackend().build_index(wiki_with_pages, cache)
+        assert self._persisted_search_ef(cache) == VectorBackend._HNSW_SEARCH_EF
+        # The width is a ceiling that must dominate any personal corpus the
+        # hybrid pool queries over; a regression to chromadb's default would
+        # reintroduce the approximate search this issue removed.
+        assert VectorBackend._HNSW_SEARCH_EF >= 1000
+
+    def test_index_built_under_old_width_is_fully_rebuilt(
+        self, wiki_with_pages: Path, tmp_path: Path
+    ) -> None:
+        """A pre-athenaeum#2023 index: manifest stamped with the previous
+        metadata schema version, collection created WITHOUT the width.
+        The next (incremental-by-default) build must not reuse it."""
+        import json
+        import shutil
+
+        import chromadb
+        from chromadb.api.client import SharedSystemClient
+
+        from athenaeum.search import _VECTOR_COLLECTION, _VECTOR_DIR, _VECTOR_MANIFEST
+
+        cache = tmp_path / "cache"
+        VectorBackend().build_index(wiki_with_pages, cache)
+        manifest_path = cache / _VECTOR_MANIFEST
+        manifest = json.loads(manifest_path.read_text())
+        manifest["metadata_schema_version"] = VectorBackend._METADATA_SCHEMA_VERSION - 1
+        manifest_path.write_text(json.dumps(manifest))
+
+        # Recreate the collection the way the previous release did: same
+        # name, no hnsw:* metadata, chromadb's default width.
+        vector_dir = cache / _VECTOR_DIR
+        SharedSystemClient.clear_system_cache()
+        shutil.rmtree(vector_dir)
+        vector_dir.mkdir(parents=True)
+        client = chromadb.PersistentClient(path=str(vector_dir))
+        col = client.create_collection(_VECTOR_COLLECTION, embedding_function=None)
+        col.add(ids=["stale.md"], embeddings=[[0.1, 0.2, 0.3]], documents=["stale"])
+        assert self._persisted_search_ef(cache) is None
+
+        assert VectorBackend().incremental_reuse_blocker(cache, manifest) is not None
+        VectorBackend().build_index(wiki_with_pages, cache)  # incremental=True default
+
+        assert self._persisted_search_ef(cache) == VectorBackend._HNSW_SEARCH_EF
+        rebuilt = json.loads(manifest_path.read_text())
+        assert rebuilt["metadata_schema_version"] == VectorBackend._METADATA_SCHEMA_VERSION
+        assert "stale.md" not in rebuilt["hashes"]  # the old collection was wiped, not accreted
+
+
 class TestFetchEmbeddingsNoModelLoad:
     """fetch_embeddings is a pure read; it must not attach the default (ONNX) EF."""
 

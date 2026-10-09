@@ -758,6 +758,22 @@ _FTS5_XFAIL: frozenset[tuple[str, str]] = frozenset(
 #: hashing-trick BAG-OF-WORDS embedding, lexical like FTS5, just scored
 #: differently.
 #:
+#: Issue athenaeum#2023 (why ``[medium-spend_approver_named]`` once ranked
+#: differently on identical SHAs): the embeddings above were always
+#: deterministic -- every per-page distance was byte-identical across the
+#: two CI attempts -- but chromadb's HNSW index was built with its default
+#: ``hnsw:search_ef`` of 100, an APPROXIMATE search whose misses depend on
+#: the (non-deterministic, even single-threaded) graph build order. Five
+#: fresh builds of the ``medium`` index here returned five different
+#: top-8 neighbour sets for that probe's query, one of them missing the
+#: three closest pages outright. ``VectorBackend.build_index`` now creates
+#: the collection with ``VectorBackend._HNSW_SEARCH_EF`` (exact for a
+#: corpus this size; five fresh builds now return the identical set and
+#: match an exhaustive brute-force ranking), so no fixture-side seeding or
+#: tie-breaking is needed. The set below was re-measured under that exact
+#: search via ``pytest -rA``: every entry still fails on its own terms and
+#: none XPASSes, so it is unchanged.
+#:
 #: Before athenaeum#1851: ``scale_fixture`` is module-scoped, but the
 #: conftest patch above is function-scoped autouse -- pytest instantiates
 #: a broader-scope fixture before the narrower-scope autouse fixtures of
