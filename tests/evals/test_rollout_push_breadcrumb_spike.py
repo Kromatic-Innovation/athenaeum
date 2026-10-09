@@ -57,6 +57,8 @@ import pytest
 
 from tests.evals.corpus import build_corpus
 from tests.evals.rollout import (
+    HOOK_INDEX_BUILD_TIMEOUT_SECONDS,
+    HOOK_QUERY_TIMEOUT_SECONDS,
     SESSION_START_HOOK,
     SHELL_USER_PROMPT_HOOK,
     build_push_breadcrumb_context,
@@ -108,33 +110,63 @@ def _hand_built_hook_env(knowledge_root: Path, home: Path) -> dict[str, str]:
     }
 
 
-def _run_hook_directly(knowledge_root: Path, home: Path, query: str, session_id: str) -> str:
-    """Hand-rolled hook invocation: run ``session-start-recall.sh`` then
-    ``user-prompt-recall.sh`` directly via ``subprocess``, exactly the
-    two-step shape ``tests/test_shell_hooks.py::TestUserPromptRecall``
-    uses, and return ``hookSpecificOutput.additionalContext`` verbatim."""
+def _build_hook_index_directly(knowledge_root: Path, home: Path) -> None:
+    """Hand-rolled ``session-start-recall.sh`` run: build the hook's own
+    index under *home* as a throwaway ``HOME``.
+
+    Issue athenaeum#2023: this is the COLD half, and it is far heavier than
+    the query half. The materialized corpus carries no ``athenaeum.yaml``,
+    so the hook resolves ``SEARCH_BACKEND=vector`` (its default) and
+    builds a vector index with chromadb's REAL default embedder -- which,
+    under a fresh ``HOME``, first downloads the 79 MB ONNX model into
+    ``$HOME/.cache/chroma`` and then embeds every page with it. Measured
+    locally at 14-21 s per cold build (12-core machine, 13 MB/s link);
+    on a 4-vCPU CI runner that is a coin flip against the 30 s this
+    helper used to share with the query. It therefore gets the SAME
+    budget the implementation under test gives its own one-time build
+    (:data:`HOOK_INDEX_BUILD_TIMEOUT_SECONDS`, issue athenaeum#1834) --
+    a budget constant, not ranking logic, so sharing it cannot let a bug
+    in the implementation leak into the expected side.
+    """
     env = _hand_built_hook_env(knowledge_root, home)
     start = subprocess.run(
         ["bash", str(SESSION_START_HOOK)],
         env=env,
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=HOOK_INDEX_BUILD_TIMEOUT_SECONDS,
     )
     assert start.returncode == 0, f"session-start-recall.sh failed: {start.stderr}"
 
+
+def _query_hook_directly(knowledge_root: Path, home: Path, query: str, session_id: str) -> str:
+    """Hand-rolled ``user-prompt-recall.sh`` run against an index
+    :func:`_build_hook_index_directly` already built under *home*; returns
+    ``hookSpecificOutput.additionalContext`` verbatim. Measured at 1.5-4 s
+    warm, so :data:`HOOK_QUERY_TIMEOUT_SECONDS` (30 s) is real headroom
+    once the build is no longer inside it (issue athenaeum#2023)."""
+    env = _hand_built_hook_env(knowledge_root, home)
     result = subprocess.run(
         ["bash", str(SHELL_USER_PROMPT_HOOK)],
         input=json.dumps({"prompt": query, "session_id": session_id}),
         env=env,
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=HOOK_QUERY_TIMEOUT_SECONDS,
     )
     assert result.returncode == 0, f"user-prompt-recall.sh failed: {result.stderr}"
     assert result.stdout, "expected hookSpecificOutput JSON on stdout"
     payload = json.loads(result.stdout)
     return str(payload["hookSpecificOutput"]["additionalContext"])
+
+
+def _run_hook_directly(knowledge_root: Path, home: Path, query: str, session_id: str) -> str:
+    """Hand-rolled hook invocation: run ``session-start-recall.sh`` then
+    ``user-prompt-recall.sh`` directly via ``subprocess``, exactly the
+    two-step shape ``tests/test_shell_hooks.py::TestUserPromptRecall``
+    uses, and return ``hookSpecificOutput.additionalContext`` verbatim."""
+    _build_hook_index_directly(knowledge_root, home)
+    return _query_hook_directly(knowledge_root, home, query, session_id)
 
 
 def test_push_breadcrumb_arm_is_byte_equivalent_to_the_real_hook(
@@ -195,6 +227,18 @@ def test_push_breadcrumb_arm_matches_the_real_hook_across_multiple_probes(
 
     Issue athenaeum#1887: same ``ATHENAEUM_EVAL_HOOK=shell`` pin as the
     single-probe test above, and for the same reason.
+
+    Issue athenaeum#2023: each side's hook index is built ONCE, before the
+    probe loop, and the probes then query that warm index. The previous
+    shape gave every probe its own fresh ``HOME`` on both sides, which
+    meant ten cold index builds per run -- each a model download plus a
+    full re-embed (see :func:`_build_hook_index_directly`) -- with the
+    hand-built side's build sharing a 30 s budget with its query; that
+    tripped once on CI. Sharing one ``HOME`` per side across probes is
+    safe for what this test asserts: the hook's session-dedup bookkeeping
+    is keyed on ``session_id``, which stays unique per probe AND per side
+    below, and the implementation under test already memoizes its build
+    per knowledge root the same way (``rollout.build_hook_index``).
     """
     monkeypatch.setenv("ATHENAEUM_EVAL_HOOK", "shell")
     _require("bash")
@@ -207,17 +251,21 @@ def test_push_breadcrumb_arm_matches_the_real_hook_across_multiple_probes(
     probe_ids = [p.id for p in corpus.probes[:5]]
     assert probe_ids, "test setup bug: core corpus has no probes"
 
+    hand_built_home = tmp_path / "hand_built_home"
+    implementation_home = tmp_path / "implementation_home"
+    _build_hook_index_directly(knowledge_root, hand_built_home)
+
     for probe_id in probe_ids:
         probe = next(p for p in corpus.probes if p.id == probe_id)
-        expected = _run_hook_directly(
+        expected = _query_hook_directly(
             knowledge_root,
-            tmp_path / f"hand_built_home-{probe_id}",
+            hand_built_home,
             probe.query,
             session_id=f"expected-{uuid.uuid4().hex}",
         )
         actual = build_push_breadcrumb_context(
             knowledge_root,
-            tmp_path / f"implementation_home-{probe_id}",
+            implementation_home,
             probe.query,
             session_id=f"actual-{uuid.uuid4().hex}",
         )

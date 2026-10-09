@@ -2148,8 +2148,39 @@ class VectorBackend:
     # reinterpreted. A mismatch (including a pre-athenaeum#964 manifest, which has
     # no key at all) forces a FULL rebuild — the athenaeum#370 stat pre-filter would
     # otherwise leave every untouched page's metadata on the old shape
-    # forever. Version 2 == the ``type``-aware shape.
-    _METADATA_SCHEMA_VERSION = 2
+    # forever. Version 2 == the ``type``-aware shape. Version 3 == the
+    # ``hnsw:search_ef`` collection setting below (issue athenaeum#2023):
+    # chromadb fixes that setting at ``create_collection`` time and the
+    # live HNSW segment ignores a later ``modify`` until reopened, so an
+    # index created under the old default can only pick the new width up
+    # through a full rebuild -- exactly what a version mismatch forces.
+    _METADATA_SCHEMA_VERSION = 3
+    # Issue athenaeum#2023: HNSW candidate-list width for every query
+    # (chromadb's ``hnsw:search_ef``). chromadb's default (100) is an
+    # APPROXIMATE search: measured on the 1000-page ``medium`` eval corpus
+    # with the real ``all-MiniLM-L6-v2`` embedder, 5 of 5 fresh builds
+    # dropped at least one true top-15 neighbour (13 of 225 probe cells),
+    # including a rank-2 page at squared-L2 1.06 while rank 15 sat at
+    # 1.34 -- and WHICH pages drop varies build to build because the
+    # graph construction is not deterministic (same miss pattern with
+    # ``hnsw:num_threads: 1``). The pages lost are characteristically a
+    # near-duplicate of another page -- a stale page and its correction,
+    # a distractor and its target -- which is the exact shape the recall
+    # layer exists to surface. Widening the search to this many
+    # candidates per query made every one of the same probes match an
+    # exhaustive brute-force ranking exactly (0 of 5 builds, 0 of 225
+    # cells, at both 1 000 and 10 000) with no measurable query-latency
+    # change (0.8 ms vs 1.0 ms on 1000 pages): hnswlib stops expanding
+    # once no closer candidate remains, so on a personal-sized collection
+    # the width is a ceiling, not a cost. Collections larger than this
+    # stay approximate above the ceiling -- deliberately bounded rather
+    # than ``count`` so a very large corpus cannot turn every recall
+    # into a full scan. Must be set at CREATE time (see the schema
+    # version note above); chromadb honours the legacy ``hnsw:*``
+    # metadata keys on every release in our supported range
+    # (``>=0.5.0,<2.0``), mapping them onto its configuration object
+    # from 1.x on.
+    _HNSW_SEARCH_EF = 10_000
 
     def __init__(self, embedding_model: str | None = None) -> None:
         """Construct the backend.
@@ -2528,6 +2559,11 @@ class VectorBackend:
                 collection = client.create_collection(
                     _VECTOR_COLLECTION,
                     embedding_function=self._embedding_function(),
+                    # Issue athenaeum#2023: exact (not approximate) nearest-
+                    # neighbour search for personal-sized collections -- see
+                    # ``_HNSW_SEARCH_EF``. Create-time only: chromadb ignores
+                    # a post-hoc ``modify`` on the already-open segment.
+                    metadata={"hnsw:search_ef": self._HNSW_SEARCH_EF},
                 )
             self._add_records(collection, current)
             _write_manifest(
