@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Merge anchors survive a hard line wrap; the `person_hint` eval floor is
   now measured, not assumed (issue athenaeum#2043).** The floor
   (`PERSON_HINT_FLOOR = 4`) was asserted strictly by athenaeum#1866 (PR
-  #1876, 2026-09-19) without a live `evals.yml` dispatch, and every strict run
+  athenaeum#1876, 2026-09-19) without a live `evals.yml` dispatch, and every strict run
   since — 2f8b8383 (2026-09-24), 853f1f9b (2026-09-25), 9d6ee351 (2026-10-09),
   and a `record=true` run at e7331780 — scored 2/5 or 1/5. It never had a
   green run to regress from. The recordings show two deterministic causes

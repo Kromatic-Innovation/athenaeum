@@ -17,10 +17,10 @@ uniqueness check, never matching an all-whitespace anchor anywhere.
 
 from __future__ import annotations
 
-import pytest
-
 import json
 import logging
+
+import pytest
 
 from athenaeum.models import EntityAction, TokenUsage
 from athenaeum.tiers import (

@@ -23,7 +23,7 @@ changed" — and the floor now clears on two consecutive live runs.
 
 **There was never a strict green run to regress from.** The `xfail` marker
 came off in commit `150af132` ("un-xfail floor"), merged to `develop` as PR
-#1876 at `d49bb46a` on 2026-09-19 22:02Z, and that PR's body records that no
+athenaeum#1876 at `d49bb46a` on 2026-09-19 22:02Z, and that PR's body records that no
 `evals.yml` dispatch was made ("Not done by this lane"). Every live
 measurement of the strict floor, from the first one five days later to the
 one this issue cites, scored 2/5 or 1/5.
