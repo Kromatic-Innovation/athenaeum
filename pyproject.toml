@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "athenaeum"
-version = "0.22.17"
+version = "0.22.18"
 description = "Open source knowledge management pipeline — append-only intake, tiered compilation, configurable schemas"
 readme = "README.md"
 license = "Apache-2.0"
@@ -65,6 +65,16 @@ vector = [
     # (`import numpy as np  # noqa: PLC0415`) was previously an undeclared
     # dependency, riding in only transitively via chromadb.
     "numpy>=1.24",
+]
+# Issue athenaeum#2049: the Maya PII-hazard eval (`scripts/eval_maya_pii_hazard.py`)
+# loads a local DeBERTa-v3-large-based cross-encoder; a host-side, opt-in eval
+# tool, never the default install, so this extra is NOT in `dev` and not in
+# `DIRECT_EXTRAS` (tests/test_ci_lock_parity.py) -- the deploy worktree never
+# installs it. Upper-bounded like every other third-party dep this project caps
+# explicitly (see the top-of-file `dependencies` comment).
+maya-eval = [
+    "transformers>=4.40,<5.0",
+    "torch>=2.2,<3.0",
 ]
 dev = [
     "pytest>=8.0",
