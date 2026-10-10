@@ -97,10 +97,16 @@ in a deployed gate rather than receive an automatic verdict):
 | precision | 0.929 | 0.659 |
 | recall | 0.996 | 0.982 |
 | TP / FP / TN / FN | 236 / 18 / 386 / 1 | 270 / 140 / 407 / 5 |
-| Brier score | 0.0897 | n/a |
+| Brier score (all 822 rows, not band-filtered)\* | 0.0897 | n/a |
 | mean latency (s/row) | 0.1293 | 0.0000 |
 | p95 latency (s/row) | 0.1426 | 0.0001 |
 | wall clock (822 rows) | 110 s | (included above) |
+
+\* `compute_metrics` does not exclude abstained rows from the Brier
+calculation, unlike the confusion-matrix metrics above it, so this number is
+identical to Run 1's and should not be read as "scored rows only." A
+scored-rows-only Brier score would need a rerun with a fixed script; tracked
+as follow-on work, not blocking this measurement doc.
 
 (Jev, athenaeum#2009's hosted sibling, is pending — no comparable column
 exists yet.)
