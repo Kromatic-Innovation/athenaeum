@@ -33,6 +33,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   maya-pii-hazard-eval-2026-10.md` is a stub pending a host-side run with
   real weights.
 
+### Changed
+
+- **Maya PII-hazard eval (athenaeum#2049): stub replaced with a real
+  host-side measurement.** `docs/measurements/maya-pii-hazard-eval-2026-10.md`
+  now reports a 822-row fixture run (275 positive / 547 negative) at the
+  default 0.5 threshold and with a [0.3, 0.7] abstention band, comparing
+  Maya against the existing regex gate. Docs-only — no fixture content in
+  this repo, aggregate counts/rates only. Recommendation: candidate for the
+  hazard gate, conditional on a licence check (Maya's base model training
+  data reportedly includes non-commercial sets).
+
 ### Fixed
 
 - **Merge anchors survive a hard line wrap; the `person_hint` eval floor is
