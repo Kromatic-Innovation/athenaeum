@@ -132,7 +132,13 @@ class MayaAdapter:
             str(self._weights_path), local_files_only=True
         )
         self._model.eval()
-        self._yes_index = self._resolve_yes_index()
+        # Single-logit heads (num_labels == 1) carry no "yes"/"no" label
+        # pair -- p_yes handles them via sigmoid on the lone logit, so
+        # resolving a yes-index would spuriously raise on models whose
+        # config declares a generic LABEL_0-style id2label.
+        num_labels = getattr(self._model.config, "num_labels", None)
+        if num_labels != 1:
+            self._yes_index = self._resolve_yes_index()
 
     def _resolve_yes_index(self) -> int:
         """Find the "yes" class index from the model's own ``id2label``.
@@ -252,6 +258,13 @@ def run_eval(
     Timing covers only the inference call for each path -- not fixture
     loading, not model construction.
     """
+    if fixtures:
+        # Warm-up call, result discarded and untimed: MayaAdapter lazily
+        # loads the model (and imports torch/transformers) on the FIRST
+        # p_yes call, so without this the first fixture's measured latency
+        # would include that one-time load cost and skew mean/p95.
+        scorer.p_yes(question, fixtures[0].text)
+
     results: list[RowResult] = []
     for fx in fixtures:
         start = time.perf_counter()
