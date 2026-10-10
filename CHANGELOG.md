@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Offline eval: Maya (local yes/no cross-encoder) vs. the PII-hazard regex
+  gate (issue athenaeum#2049).** No-egress sibling of athenaeum#2009 (Jev, a
+  hosted classifier evaluated for the same question): `scripts/
+  eval_maya_pii_hazard.py` asks a local Maya (DeBERTa-v3-large-based) model
+  the yes/no hazard question "is this string a way to contact a specific
+  human?" against a labelled fixture set, and records the SAME question's
+  answer from the existing regex gate (`athenaeum.sensitivity.classify`)
+  on the same strings, so the two columns are comparable on one fixture
+  set. Fixture sources: a JSON-Lines `{text, label}` file for positives/
+  synthetic rows, and/or `athenaeum.pii.load_pii_allowlist` (the sanctioned
+  loader) for adjudicated true negatives. Model loading sits behind a thin
+  `MayaScorer` adapter seam so the smoke test injects a fake model with no
+  `transformers`/`torch` import; the real adapter resolves its "yes" class
+  index from `config.id2label` rather than hardcoding one, and refuses to
+  run — never falling through to a Hugging Face Hub download — when
+  `ATHENAEUM_MAYA_WEIGHTS_PATH` is unset or not a local directory (zero
+  spend). `transformers`/`torch` are declared only in the new optional
+  `maya-eval` extra, never in `dev` or the deploy worktree's installed
+  extras. The emitted markdown table (accuracy, precision/recall, Brier
+  score, mean/p95 latency for both Maya and the regex gate, plus an
+  optional abstention band) carries no fixture strings. `docs/measurements/
+  maya-pii-hazard-eval-2026-10.md` is a stub pending a host-side run with
+  real weights.
+
 ### Fixed
 
 - **Merge anchors survive a hard line wrap; the `person_hint` eval floor is
