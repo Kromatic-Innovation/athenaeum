@@ -42,7 +42,7 @@ _spec.loader.exec_module(eval_maya_pii_hazard)
 # Fabricated, never corpus-derived. `.invalid` is the reserved TLD for exactly
 # this purpose (RFC 2606) -- it plainly cannot resolve to a real contact.
 _FAKE_CONTACT_TEXT = "You can reach Jordan Reyes at jordan.reyes@example.invalid for the handoff."
-_FAKE_NONCONTACT_TEXT = "Order #48213 shipped yesterday via the usual courier."
+_FAKE_NONCONTACT_TEXT = "Order no. 48213 shipped yesterday via the usual courier."
 _FAKE_ALLOWLISTED_VALUE = "noreply@example.invalid"
 
 
