@@ -56,15 +56,19 @@ callable rather than adding a new HTTP dependency (`anthropic` is already
 optional; `httpx` is not guaranteed) — tests monkeypatch the transport, no
 network call is ever made in a test.
 
-**Wire shape caveat:** Jev's request/response JSON shape below is
-constructed from TypeSafe's published description (flaviocopes.com/jev/)
-as read during this issue's Specify pass; it was not independently
-re-verified against a live Jev endpoint while implementing this PR (no
-account/key was available — see the issue's "Operator host step"). The
+**Wire shape verification:** Noul and Choice were verified against the live
+endpoint on 2026-10-11 (issue athenaeum#2054) with a single Noul plus
+Choice call (HTTP 200, 627 ms, 347 input tokens). The old
+published-description guess (``https://api.jev.ai/v1``, path ``/decide``)
+does not resolve; the live API is ``https://api.typesafe.ai/v1/systemone``
+with no sub-path. The Score shape (``score``/``confidence``/``legend``/
+``probabilities``, criteria as a list of level labels) is taken from the
+same issue's table but was NOT independently re-verified against a live
+Score call while implementing this PR — same caveat class this section
+previously carried for the whole module, now narrowed to Score only. The
 translation is isolated in :meth:`JevDecisionBackend._build_payload` /
-:meth:`JevDecisionBackend._parse_payload` so it can be corrected in one
-place once a live credential is available; flag this explicitly in the PR
-description.
+:meth:`JevDecisionBackend._parse_payload` so a future shape change can be
+corrected in one place.
 """
 
 from __future__ import annotations
@@ -94,8 +98,11 @@ class DecisionResult:
 
     - ``noul`` (yes/no) populates ``probability`` only.
     - ``choice`` populates ``choice``, ``probabilities``, ``confidence``.
-    - ``score`` populates ``score``, ``legend``-equivalent ``probabilities``,
-      ``confidence``.
+    - ``score`` populates ``score``, ``confidence``, ``legend``,
+      ``probabilities``.
+
+    ``input_tokens`` / ``output_tokens`` come from the response's top-level
+    ``usage`` object (athenaeum#2054) and are populated for every kind.
     """
 
     choice: str | None = None
@@ -103,6 +110,9 @@ class DecisionResult:
     probabilities: dict[str, float] | None = None
     confidence: float | None = None
     score: float | None = None
+    legend: Any = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
 
 
 @runtime_checkable
@@ -242,31 +252,40 @@ def _default_transport(url: str, body: bytes, headers: dict[str, str], timeout: 
         return response.read()
 
 
-#: Unverified at build time (no live credential available — see this
-#: module's docstring). Re-verify against TypeSafe's current docs before
-#: turning a decision knob on for live traffic.
-DEFAULT_JEV_BASE_URL = "https://api.jev.ai/v1"
+#: Live endpoint, verified 2026-10-11 (issue athenaeum#2054). ``JEV_BASE_URL``
+#: overrides this when the ``base_url`` constructor argument is not given
+#: explicitly. No ``/decide`` (or other) sub-path — the endpoint itself is
+#: the call target.
+DEFAULT_JEV_BASE_URL = "https://api.typesafe.ai/v1/systemone"
 DEFAULT_JEV_TIMEOUT = 30.0
+
+#: The only model id the live API accepts today (athenaeum#2054).
+_JEV_MODEL = "jev-latest"
 
 
 class JevDecisionBackend:
     """:class:`DecisionBackend` over Jev's HTTP API (issue athenaeum#1997).
 
-    See this module's docstring "Wire shape caveat" — the request/response
-    JSON shape here is read from TypeSafe's published description, not
-    re-verified against a live endpoint.
+    Noul/Choice wire shape verified against the live endpoint; Score is not
+    — see this module's docstring "Wire shape verification" (issue
+    athenaeum#2054).
     """
 
     def __init__(
         self,
         *,
         api_key: str | None = None,
-        base_url: str = DEFAULT_JEV_BASE_URL,
+        base_url: str | None = None,
         timeout: float = DEFAULT_JEV_TIMEOUT,
         transport: Transport = _default_transport,
     ) -> None:
         self._api_key = api_key if api_key is not None else os.environ.get("JEV_API_KEY", "")
-        self._base_url = base_url.rstrip("/")
+        resolved_base_url = (
+            base_url
+            if base_url is not None
+            else os.environ.get("JEV_BASE_URL", DEFAULT_JEV_BASE_URL)
+        )
+        self._base_url = resolved_base_url.rstrip("/")
         self._timeout = timeout
         self._transport = transport
 
@@ -279,21 +298,44 @@ class JevDecisionBackend:
         state: str | dict[str, Any] | list[Any],
         criteria: dict[str, str] | list[str] | None,
     ) -> dict[str, Any]:
-        return {
-            "question_id": question_id,
+        question: dict[str, Any] = {
             "type": kind,
             "instructions": instructions,
+        }
+        # Noul questions must carry no `criteria` key at all (athenaeum#2054
+        # acceptance criteria) -- the live API rejects it. Choice and score
+        # pass through whatever shape the caller supplied (a list of choice
+        # ids for choice, a list of level labels for score); this backend
+        # does not coerce one shape into the other.
+        if kind != "noul" and criteria is not None:
+            question["criteria"] = criteria
+        return {
+            "model": _JEV_MODEL,
             "state": state,
-            "criteria": criteria,
+            "questions": {question_id: question},
         }
 
-    def _parse_payload(self, data: dict[str, Any]) -> DecisionResult:
+    def _parse_payload(self, data: dict[str, Any], *, question_id: str) -> DecisionResult:
+        answers = data.get("answers")
+        if not isinstance(answers, dict):
+            raise ValueError(f"jev: response has no 'answers' object: {data!r}")
+        answer = answers.get(question_id)
+        if not isinstance(answer, dict):
+            raise ValueError(f"jev: no answer for question_id {question_id!r}: {data!r}")
+
+        usage = data.get("usage")
+        input_tokens = usage.get("input_tokens") if isinstance(usage, dict) else None
+        output_tokens = usage.get("output_tokens") if isinstance(usage, dict) else None
+
         return DecisionResult(
-            choice=data.get("choice"),
-            probability=data.get("probability"),
-            probabilities=data.get("probabilities"),
-            confidence=data.get("confidence"),
-            score=data.get("score"),
+            choice=answer.get("choice"),
+            probability=answer.get("noul"),
+            probabilities=answer.get("probabilities"),
+            confidence=answer.get("confidence"),
+            score=answer.get("score"),
+            legend=answer.get("legend"),
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
         )
 
     def decide(
@@ -318,7 +360,7 @@ class JevDecisionBackend:
             "Authorization": f"Bearer {self._api_key}",
         }
         try:
-            raw = self._transport(f"{self._base_url}/decide", body, headers, self._timeout)
+            raw = self._transport(self._base_url, body, headers, self._timeout)
         except urllib.error.HTTPError as exc:
             if exc.code == 429 or exc.code >= 500:
                 raise TransientError(f"jev http {exc.code}") from exc
@@ -332,7 +374,7 @@ class JevDecisionBackend:
             raise ValueError(f"jev: unparseable response: {exc}") from exc
         if not isinstance(data, dict):
             raise ValueError(f"jev: response is not a JSON object: {data!r}")
-        return self._parse_payload(data)
+        return self._parse_payload(data, question_id=question_id)
 
 
 def build_decision_client(

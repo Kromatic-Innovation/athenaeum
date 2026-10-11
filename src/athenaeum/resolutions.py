@@ -1854,18 +1854,21 @@ def _propose_via_jev(
     try:
         from athenaeum import spend
 
-        # Jev's typed-answer wire contract carries no token counters (it is
-        # not a text completion) -- see this module's import of
-        # athenaeum.decision_provider's docstring "Wire shape caveat".
-        # Approximated at chars/4, mirroring this module's own
-        # _CHARS_PER_TOKEN heuristic (DEFAULT_FULL_BODY_TOKEN_CAP above) --
-        # flagged here, not presented as a measured count.
-        approx_input_tokens = (len(instructions) + len(state)) // _CHARS_PER_TOKEN
+        # The live Jev API returns usage.input_tokens/output_tokens
+        # (athenaeum#2054) -- prefer the measured count, falling back to
+        # the chars/4 approximation (mirroring this module's own
+        # _CHARS_PER_TOKEN heuristic, DEFAULT_FULL_BODY_TOKEN_CAP above)
+        # only when a response carries no usage (e.g. an older stub).
+        if result.input_tokens is not None:
+            jev_input_tokens = result.input_tokens
+        else:
+            jev_input_tokens = (len(instructions) + len(state)) // _CHARS_PER_TOKEN
+        jev_output_tokens = result.output_tokens if result.output_tokens is not None else 0
         jev_usage = TokenUsage()
         jev_usage.api_calls = 1
         jev_usage.add_tokens(
-            approx_input_tokens,
-            0,
+            jev_input_tokens,
+            jev_output_tokens,
             model="jev",
             knob="resolve",
             surface=SURFACE_C4_CONTRADICTION,
