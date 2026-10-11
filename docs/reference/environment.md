@@ -34,6 +34,8 @@ yaml key, and CLI flag with its code default and precedence chain — lives in
 | `ATHENAEUM_CACHE_DIR` | No | Cache root for the librarian's embedding/cluster pass (default: `~/.cache/athenaeum`) |
 | `ATHENAEUM_TOPIC_MODEL` | No | Override query-topic model. Precedence: env > `models.topic` in `athenaeum.yaml` > default `claude-haiku-4-5-20251001` |
 | `ATHENAEUM_OP_KEY_PATH` | No | 1Password path for the session-start `ANTHROPIC_API_KEY` bootstrap (default: `op://Agent Tools/Anthropic API Key/credential`) |
+| `JEV_API_KEY` | No | API key for the Jev decision provider (athenaeum#1997). Cached in `~/.cache/athenaeum/config.env` by the session-start hook, same preserve/refetch handling as `ANTHROPIC_API_KEY`; optional — a missing 1Password item produces no warning |
+| `ATHENAEUM_OP_JEV_KEY_PATH` | No | 1Password path for the session-start `JEV_API_KEY` bootstrap (default: `op://Agent Tools/Jev Athenaeum Key/credential`) |
 | `ATHENAEUM_PQ_SNOOZE_HOURS` | No | Snooze TTL in hours for pending-questions surfacing (default: `24`; consumed by the `resolve-questions` skill) |
 | `ATHENAEUM_PYTHON` | No | Python interpreter used by the example hooks (default: `python3`) |
 | `AUTO_RECALL` | No | Per-turn recall on/off (hook shell env; overrides `athenaeum.yaml`'s `auto_recall`). Default: `true` |
