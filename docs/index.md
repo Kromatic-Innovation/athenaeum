@@ -119,9 +119,9 @@ does not answer.
 Evidence, kept out of the reading path.
 
 - [Evals inventory](measurements/evals-inventory.md)
-- [Maya PII-hazard eval (stub)](measurements/maya-pii-hazard-eval-2026-10.md) — a local
-  yes/no cross-encoder measured against the regex PII-hazard gate; table pending a
-  host-side run.
+- [Maya and Jev PII-hazard eval](measurements/maya-pii-hazard-eval-2026-10.md) — a local
+  yes/no cross-encoder (Maya) and a hosted classifier (Jev) measured against the
+  regex PII-hazard gate on the same fixture set.
 - [Memory-model measurements](measurements/memory-model-measurements.md)
 - [Reasoning-tier measurements](measurements/reasoning-tier-measurements.md)
 - [Retrieval entry-point measurements](measurements/retrieval-entry-point-measurements.md)
