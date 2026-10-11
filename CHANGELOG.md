@@ -49,7 +49,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`JevDecisionBackend` aligned with the live TypeSafe API (issue
   athenaeum#2054).** The adapter (athenaeum#1997) was built from TypeSafe's
   published description before an account existed and did not match the
-  live service, verified against it on 2026-10-11. Fixed: base URL is now
+  live service — Noul and Choice were verified against it on 2026-10-11
+  (Score is taken from the issue's table, not independently re-verified
+  live). Fixed: base URL is now
   `https://api.typesafe.ai/v1/systemone` (`JEV_BASE_URL` env override; the
   old `https://api.jev.ai/v1` never resolved) with no `/decide` sub-path;
   the request body is now `{model: "jev-latest", state, questions:

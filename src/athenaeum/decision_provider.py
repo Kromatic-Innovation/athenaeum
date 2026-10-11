@@ -56,11 +56,16 @@ callable rather than adding a new HTTP dependency (`anthropic` is already
 optional; `httpx` is not guaranteed) — tests monkeypatch the transport, no
 network call is ever made in a test.
 
-**Wire shape verification:** verified against the live endpoint on
-2026-10-11 (issue athenaeum#2054) with a Noul plus Choice call (HTTP 200,
-627 ms, 347 input tokens). The old published-description guess
-(``https://api.jev.ai/v1``, path ``/decide``) does not resolve; the live
-API is ``https://api.typesafe.ai/v1/systemone`` with no sub-path. The
+**Wire shape verification:** Noul and Choice were verified against the live
+endpoint on 2026-10-11 (issue athenaeum#2054) with a single Noul plus
+Choice call (HTTP 200, 627 ms, 347 input tokens). The old
+published-description guess (``https://api.jev.ai/v1``, path ``/decide``)
+does not resolve; the live API is ``https://api.typesafe.ai/v1/systemone``
+with no sub-path. The Score shape (``score``/``confidence``/``legend``/
+``probabilities``, criteria as a list of level labels) is taken from the
+same issue's table but was NOT independently re-verified against a live
+Score call while implementing this PR — same caveat class this section
+previously carried for the whole module, now narrowed to Score only. The
 translation is isolated in :meth:`JevDecisionBackend._build_payload` /
 :meth:`JevDecisionBackend._parse_payload` so a future shape change can be
 corrected in one place.
@@ -261,8 +266,9 @@ _JEV_MODEL = "jev-latest"
 class JevDecisionBackend:
     """:class:`DecisionBackend` over Jev's HTTP API (issue athenaeum#1997).
 
-    Wire shape verified against the live endpoint — see this module's
-    docstring "Wire shape verification" (issue athenaeum#2054).
+    Noul/Choice wire shape verified against the live endpoint; Score is not
+    — see this module's docstring "Wire shape verification" (issue
+    athenaeum#2054).
     """
 
     def __init__(

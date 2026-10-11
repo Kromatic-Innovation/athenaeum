@@ -270,7 +270,8 @@ def _ok_transport(payload: dict) -> "object":
     return _transport
 
 
-def test_decide_success_choice() -> None:
+def test_decide_success_choice(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("JEV_BASE_URL", raising=False)
     backend = JevDecisionBackend(
         api_key="test-key",
         transport=_ok_transport(
@@ -300,7 +301,8 @@ def test_decide_success_choice() -> None:
     assert result.output_tokens == 4
 
 
-def test_decide_url_is_default_base_url_no_subpath() -> None:
+def test_decide_url_is_default_base_url_no_subpath(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("JEV_BASE_URL", raising=False)
     seen: dict = {}
 
     def _transport(url: str, body: bytes, headers: dict, timeout: float) -> bytes:
@@ -310,6 +312,136 @@ def test_decide_url_is_default_base_url_no_subpath() -> None:
     backend = JevDecisionBackend(api_key="k", transport=_transport)
     backend.decide(question_id="q1", kind="noul", instructions="i", state="s")
     assert seen["url"] == DEFAULT_JEV_BASE_URL == "https://api.typesafe.ai/v1/systemone"
+
+
+# ---------------------------------------------------------------------------
+# JevDecisionBackend.decide — end-to-end byte-pinned bodies through the
+# real transport boundary (issue athenaeum#2054 acceptance criterion 2:
+# "a unit test with a fake transport pins all three request bodies
+# byte-for-byte"). Unlike the `_build_payload`-level tests above, these
+# capture exactly what `decide()` hands the transport, so a regression in
+# `decide()`'s own serialization (separators, encoding) would be caught
+# here even if `_build_payload` in isolation looked fine.
+# ---------------------------------------------------------------------------
+
+
+def _capturing_transport(response_payload: dict, captured: dict) -> "object":
+    def _transport(url: str, body: bytes, headers: dict, timeout: float) -> bytes:
+        captured["url"] = url
+        captured["body"] = body
+        captured["headers"] = headers
+        return json.dumps(response_payload).encode("utf-8")
+
+    return _transport
+
+
+def test_decide_end_to_end_noul_pinned(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("JEV_BASE_URL", raising=False)
+    captured: dict = {}
+    backend = JevDecisionBackend(
+        api_key="test-key",
+        transport=_capturing_transport(
+            {"answers": {"q1": {"noul": 0.13}}, "usage": {"input_tokens": 50, "output_tokens": 2}},
+            captured,
+        ),
+    )
+    # Pass criteria anyway, to prove decide() drops it for noul end-to-end,
+    # not just at the _build_payload unit level.
+    result = backend.decide(
+        question_id="q1",
+        kind="noul",
+        instructions="is it true",
+        state="the state",
+        criteria=["should", "be", "dropped"],
+    )
+    assert captured["url"] == DEFAULT_JEV_BASE_URL
+    assert captured["body"] == (
+        b'{"model": "jev-latest", "state": "the state", '
+        b'"questions": {"q1": {"type": "noul", "instructions": "is it true"}}}'
+    )
+    assert result.probability == 0.13
+    assert result.input_tokens == 50
+    assert result.output_tokens == 2
+
+
+def test_decide_end_to_end_choice_pinned(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("JEV_BASE_URL", raising=False)
+    captured: dict = {}
+    backend = JevDecisionBackend(
+        api_key="test-key",
+        transport=_capturing_transport(
+            {
+                "answers": {
+                    "q1": {
+                        "choice": "keep_a",
+                        "probabilities": {"keep_a": 0.87, "keep_b": 0.13},
+                        "confidence": 0.87,
+                    }
+                },
+                "usage": {"input_tokens": 100, "output_tokens": 4},
+            },
+            captured,
+        ),
+    )
+    result = backend.decide(
+        question_id="q1",
+        kind="choice",
+        instructions="pick one",
+        state="the state",
+        criteria=["keep_a", "keep_b"],
+    )
+    assert captured["url"] == DEFAULT_JEV_BASE_URL
+    assert captured["body"] == (
+        b'{"model": "jev-latest", "state": "the state", '
+        b'"questions": {"q1": {"type": "choice", "instructions": "pick one", '
+        b'"criteria": ["keep_a", "keep_b"]}}}'
+    )
+    assert result.choice == "keep_a"
+    assert result.probabilities == {"keep_a": 0.87, "keep_b": 0.13}
+    assert result.confidence == 0.87
+    assert result.input_tokens == 100
+    assert result.output_tokens == 4
+
+
+def test_decide_end_to_end_score_pinned(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("JEV_BASE_URL", raising=False)
+    captured: dict = {}
+    backend = JevDecisionBackend(
+        api_key="test-key",
+        transport=_capturing_transport(
+            {
+                "answers": {
+                    "q1": {
+                        "score": 0.62,
+                        "confidence": 0.9,
+                        "legend": ["low", "medium", "high"],
+                        "probabilities": {"low": 0.1, "medium": 0.3, "high": 0.6},
+                    }
+                },
+                "usage": {"input_tokens": 150, "output_tokens": 8},
+            },
+            captured,
+        ),
+    )
+    result = backend.decide(
+        question_id="q1",
+        kind="score",
+        instructions="rate it",
+        state="the state",
+        criteria=["low", "medium", "high"],
+    )
+    assert captured["url"] == DEFAULT_JEV_BASE_URL
+    assert captured["body"] == (
+        b'{"model": "jev-latest", "state": "the state", '
+        b'"questions": {"q1": {"type": "score", "instructions": "rate it", '
+        b'"criteria": ["low", "medium", "high"]}}}'
+    )
+    assert result.score == 0.62
+    assert result.confidence == 0.9
+    assert result.legend == ["low", "medium", "high"]
+    assert result.probabilities == {"low": 0.1, "medium": 0.3, "high": 0.6}
+    assert result.input_tokens == 150
+    assert result.output_tokens == 8
 
 
 def test_jev_base_url_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
