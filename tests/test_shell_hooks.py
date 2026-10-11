@@ -106,6 +106,43 @@ def _write_fake_op(tmp_path: Path, fetched_key: str) -> Path:
     return bin_dir
 
 
+def _write_fake_op_table(
+    tmp_path: Path, *, jev_present: bool, jev_key: str = "synthetic-jev-key-from-op"
+) -> Path:
+    """A stub `op` binary that distinguishes `op read <path>` arguments.
+
+    Needed for athenaeum#2056: `_write_fake_op` above echoes the same value
+    regardless of which 1Password path it was asked for, which can't tell
+    the ANTHROPIC_API_KEY fetch apart from the JEV_API_KEY fetch or
+    simulate one succeeding while the other's 1Password item is missing.
+    This stub matches the exact default `op://` paths the hook falls back
+    to (pinning `ATHENAEUM_OP_JEV_KEY_PATH`'s default in the process) and
+    exits non-zero with nothing on stdout for any other path, mirroring
+    `op read`'s behaviour against a missing item.
+    """
+    bin_dir = tmp_path / "fake-op-table-bin"
+    bin_dir.mkdir(exist_ok=True)
+    op_stub = bin_dir / "op"
+    jev_branch = (
+        f'    echo {shlex.quote(jev_key)} ;;\n'
+        if jev_present
+        else '    echo "item not found" >&2; exit 1 ;;\n'
+    )
+    op_stub.write_text(
+        "#!/usr/bin/env bash\n"
+        'case "$2" in\n'
+        '  "op://Agent Tools/Anthropic API Key/credential")\n'
+        "    echo synthetic-anthropic-key-from-op ;;\n"
+        '  "op://Agent Tools/Jev Athenaeum Key/credential")\n'
+        f"{jev_branch}"
+        "  *)\n"
+        '    echo "unknown item" >&2; exit 1 ;;\n'
+        "esac\n"
+    )
+    op_stub.chmod(0o755)
+    return bin_dir
+
+
 def _write_shadow_athenaeum_package(tmp_path: Path) -> Path:
     """athenaeum#1826: a directory holding a SHADOW ``athenaeum`` package
     whose ``__init__.py`` unconditionally raises ``ImportError`` -- put
@@ -665,6 +702,115 @@ class TestSessionStartRecall:
         assert result.stderr.count("No ANTHROPIC_API_KEY cached") == 1, (
             f"expected exactly one warning line, got stderr: {result.stderr!r}"
         )
+
+    def test_op_present_fetches_both_anthropic_and_jev_keys(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """athenaeum#2056 AC1: with `op` signed in, config.env ends up with
+        both an ANTHROPIC_API_KEY line and a JEV_API_KEY line, each fetched
+        from its own default 1Password path. Pins
+        `ATHENAEUM_OP_JEV_KEY_PATH`'s default of `op://Agent Tools/Jev
+        Athenaeum Key/credential` via the stub's exact-path match."""
+        _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        env = _env_without_op(hook_env)
+        fake_op_dir = _write_fake_op_table(tmp_path, jev_present=True)
+        env["PATH"] = f"{fake_op_dir}{os.pathsep}{env['PATH']}"
+        assert shutil.which("op", path=env["PATH"]) == str(fake_op_dir / "op")
+
+        result = subprocess.run(
+            ["bash", str(SESSION_START)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+
+        cache_dir = tmp_path / ".cache" / "athenaeum"
+        body = (cache_dir / "config.env").read_text()
+        lines = body.splitlines()
+        assert lines.count("ANTHROPIC_API_KEY=synthetic-anthropic-key-from-op") == 1
+        assert lines.count("JEV_API_KEY=synthetic-jev-key-from-op") == 1
+        assert "No ANTHROPIC_API_KEY cached" not in result.stderr
+
+    def test_cached_jev_key_preserved_when_op_fetch_fails(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """athenaeum#2056 AC2: a previously cached JEV_API_KEY line must
+        survive a run where `op` is entirely absent from PATH — same
+        preserve/restore contract as the athenaeum#1886
+        ANTHROPIC_API_KEY-only pins above, generalised to this credential."""
+        _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        cache_dir = tmp_path / ".cache" / "athenaeum"
+        cache_dir.mkdir(parents=True)
+        (cache_dir / "config.env").write_text(
+            "AUTO_RECALL=true\n"
+            "SEARCH_BACKEND=fts5\n"
+            "ANTHROPIC_API_KEY=synthetic-cached-anthropic-key\n"
+            "JEV_API_KEY=synthetic-cached-jev-key\n"
+        )
+
+        env = _env_without_op(hook_env)
+        assert shutil.which("op", path=env["PATH"]) is None, (
+            "test setup bug: `op` still reachable on the filtered PATH"
+        )
+
+        result = subprocess.run(
+            ["bash", str(SESSION_START)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+
+        body = (cache_dir / "config.env").read_text()
+        lines = body.splitlines()
+        assert [
+            line for line in lines if line.startswith("ANTHROPIC_API_KEY=")
+        ] == ["ANTHROPIC_API_KEY=synthetic-cached-anthropic-key"]
+        assert [line for line in lines if line.startswith("JEV_API_KEY=")] == [
+            "JEV_API_KEY=synthetic-cached-jev-key"
+        ]
+        assert "No ANTHROPIC_API_KEY cached" not in result.stderr
+
+    def test_missing_jev_item_yields_no_line_and_no_warning(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """athenaeum#2056 AC3: when `op` is signed in but the Jev 1Password
+        item does not exist and nothing is cached, config.env must get no
+        JEV_API_KEY line at all, and stderr must carry no warning about it
+        -- Jev is optional. The ANTHROPIC_API_KEY fetch must still succeed
+        normally, and the existing no-key warning (which only ever checks
+        ANTHROPIC_API_KEY) must not fire for ANTHROPIC either, since that
+        fetch succeeds here."""
+        _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        env = _env_without_op(hook_env)
+        fake_op_dir = _write_fake_op_table(tmp_path, jev_present=False)
+        env["PATH"] = f"{fake_op_dir}{os.pathsep}{env['PATH']}"
+        assert shutil.which("op", path=env["PATH"]) == str(fake_op_dir / "op")
+
+        result = subprocess.run(
+            ["bash", str(SESSION_START)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+
+        cache_dir = tmp_path / ".cache" / "athenaeum"
+        body = (cache_dir / "config.env").read_text()
+        assert "JEV_API_KEY=" not in body
+        assert "ANTHROPIC_API_KEY=synthetic-anthropic-key-from-op" in body.splitlines()
+        assert "JEV" not in result.stderr
+        assert "No ANTHROPIC_API_KEY cached" not in result.stderr
 
 
 class TestUserPromptRecall:
