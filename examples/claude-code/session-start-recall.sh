@@ -37,6 +37,7 @@
 #   ATHENAEUM_PYTHON     Python interpreter with athenaeum deps
 #   ATHENAEUM_SRC        Path to athenaeum source checkout (optional)
 #   ATHENAEUM_OP_KEY_PATH  1Password path (default: op://Agent Tools/Anthropic API Key/credential)
+#   ATHENAEUM_OP_JEV_KEY_PATH  1Password path for JEV_API_KEY (default: op://Agent Tools/Jev Athenaeum Key/credential)
 
 set -euo pipefail
 
@@ -79,30 +80,59 @@ mkdir -p "$CACHE_DIR"
 chmod 700 "$CACHE_DIR"
 umask 077
 
-# ── Preserve a cached ANTHROPIC_API_KEY across the rewrite below ───────────
+# ── Preserve cached credentials across the rewrite below ───────────────────
 # Issue athenaeum#1886: both config.env writers below (the python path and
-# the bash fallback) truncate the file from scratch and neither carries the
-# key forward -- only a *fresh* `op read`, later in this script, re-adds it.
-# Any run where that fetch fails or is skipped (expired `op` session, no
-# `op` on PATH, a non-interactive spawn, or the variable already being
-# exported so the fetch branch never runs) was silently dropping the key.
-# Capture whatever is cached on disk now, before either writer runs, so it
-# can be restored unless a fresh fetch supersedes it.
-_cached_api_key_line=""
-if [ -f "$CONFIG_ENV" ]; then
-  _cached_api_key_line="$(grep '^ANTHROPIC_API_KEY=' "$CONFIG_ENV" 2>/dev/null | tail -n 1 || true)"
-fi
+# the bash fallback) truncate the file from scratch and neither carries a
+# credential forward -- only a *fresh* `op read`, later in this script,
+# re-adds it. Any run where that fetch fails or is skipped (expired `op`
+# session, no `op` on PATH, a non-interactive spawn, or the variable already
+# being exported so the fetch branch never runs) was silently dropping the
+# key. Capture whatever is cached on disk now, before either writer runs, so
+# each one can be restored unless a fresh fetch supersedes it.
+#
+# Issue athenaeum#2056 generalises this from a single ANTHROPIC_API_KEY
+# special case to a small table of (ENV_NAME, default op path, override env)
+# entries, so a credential appended to config.env by something other than
+# this hook's own ANTHROPIC fetch (e.g. JEV_API_KEY, cached by athenaeum#1997
+# / athenaeum#2054's Jev decision provider) survives the rewrite too.
+# Parallel indexed arrays, not an associative array: stock macOS ships bash
+# 3.2.57, which has no `declare -A`.
+_CRED_ENV_NAMES=(ANTHROPIC_API_KEY JEV_API_KEY)
+_CRED_DEFAULT_PATHS=("op://Agent Tools/Anthropic API Key/credential" "op://Agent Tools/Jev Athenaeum Key/credential")
+_CRED_OVERRIDE_VARS=(ATHENAEUM_OP_KEY_PATH ATHENAEUM_OP_JEV_KEY_PATH)
+# No warn-on-missing entry here: the no-key warning at the end of this
+# script stays hardcoded to ANTHROPIC_API_KEY only (Jev is optional,
+# athenaeum#2056 AC) -- see the comment on that block below.
 
-# Same issue, plan step 2: if the caller's own process already exported
-# ANTHROPIC_API_KEY, that value is scoped to this process, not to the
-# cache -- remember it so it can be restored after `source "$CONFIG_ENV"`
-# below, which would otherwise silently overwrite it with whatever the
-# cached line above says (stale, or empty).
-_had_live_api_key=false
-_live_api_key="${ANTHROPIC_API_KEY:-}"
-if [ -n "$_live_api_key" ]; then
-  _had_live_api_key=true
-fi
+_cached_cred_lines=()
+_had_live_cred=()
+_live_cred_values=()
+_cred_count=${#_CRED_ENV_NAMES[@]}
+_i=0
+while [ "$_i" -lt "$_cred_count" ]; do
+  _name="${_CRED_ENV_NAMES[$_i]}"
+
+  _line=""
+  if [ -f "$CONFIG_ENV" ]; then
+    _line="$(grep "^${_name}=" "$CONFIG_ENV" 2>/dev/null | tail -n 1 || true)"
+  fi
+  _cached_cred_lines[_i]="$_line"
+
+  # Same issue, plan step 2: if the caller's own process already exported
+  # this credential, that value is scoped to this process, not to the
+  # cache -- remember it so it can be restored after `source "$CONFIG_ENV"`
+  # below, which would otherwise silently overwrite it with whatever the
+  # cached line above says (stale, or empty).
+  _live_val="${!_name:-}"
+  if [ -n "$_live_val" ]; then
+    _had_live_cred[_i]=true
+  else
+    _had_live_cred[_i]=false
+  fi
+  _live_cred_values[_i]="$_live_val"
+
+  _i=$((_i + 1))
+done
 
 # ── Read config ────────────────────────────────────────────────────────────
 _read_config_ok=false
@@ -267,14 +297,20 @@ if [ "$_read_config_ok" = false ]; then
   } > "$CONFIG_ENV"
 fi
 
-# Restore the cached key both writers above just truncated away. A fresh
-# `op read` below supersedes this by rewriting the line itself; if that
+# Restore each cached credential both writers above just truncated away. A
+# fresh `op read` below supersedes a given line by rewriting it; if that
 # fetch fails or is skipped, this cached line is what stops the hook from
-# silently degrading every downstream recall to regex-only extraction
-# (athenaeum#1886).
-if [ -n "$_cached_api_key_line" ]; then
-  printf '%s\n' "$_cached_api_key_line" >> "$CONFIG_ENV"
-fi
+# silently dropping the credential (athenaeum#1886, generalised by
+# athenaeum#2056 to every entry in the table above, not just
+# ANTHROPIC_API_KEY).
+_i=0
+while [ "$_i" -lt "$_cred_count" ]; do
+  _line="${_cached_cred_lines[$_i]}"
+  if [ -n "$_line" ]; then
+    printf '%s\n' "$_line" >> "$CONFIG_ENV"
+  fi
+  _i=$((_i + 1))
+done
 
 # Re-assert the file mode explicitly (athenaeum#1179): `umask 077` above only
 # governs permissions at file *creation*. Both writers above use `open(...,
@@ -289,48 +325,73 @@ chmod 600 "$CONFIG_ENV"
 # shellcheck disable=SC1090
 source "$CONFIG_ENV"
 
-# Restore the caller's own exported value if it had one: `source` above
-# just assigned ANTHROPIC_API_KEY from config.env's cached/restored line
-# (or unset it, if there was none), which must not clobber a value that
-# belongs to this process rather than the cache (athenaeum#1886 plan step 2).
-if [ "$_had_live_api_key" = true ]; then
-  ANTHROPIC_API_KEY="$_live_api_key"
-fi
+# Restore the caller's own exported value for each credential that had one:
+# `source` above just assigned it from config.env's cached/restored line (or
+# unset it, if there was none), which must not clobber a value that belongs
+# to this process rather than the cache (athenaeum#1886 plan step 2,
+# generalised by athenaeum#2056 to the whole table).
+_i=0
+while [ "$_i" -lt "$_cred_count" ]; do
+  if [ "${_had_live_cred[$_i]}" = true ]; then
+    printf -v "${_CRED_ENV_NAMES[$_i]}" '%s' "${_live_cred_values[$_i]}"
+  fi
+  _i=$((_i + 1))
+done
 
-# ── Optional: bootstrap ANTHROPIC_API_KEY from 1Password ────────────────
+# ── Optional: bootstrap each credential from 1Password ─────────────────────
 # Claude Code authenticates with CLAUDE_CODE_OAUTH_TOKEN, which the
 # general Messages API rejects (401). The LLM topic extractor in
-# user-prompt-recall.sh needs a real console key. When `op` is signed
-# in and ANTHROPIC_API_KEY isn't already set, fetch + cache it.
-# Override path via ATHENAEUM_OP_KEY_PATH. Silent on any failure -- when
-# ANTHROPIC_API_KEY is already exported (fetch branch skipped, athenaeum#1886
-# plan step 2) or `op` is missing/fails, the cached line restored above is
-# left as-is; that cached value belongs to the file, not to this process's
-# already-exported one.
+# user-prompt-recall.sh needs a real console key, and the Jev decision
+# provider (athenaeum#1997, athenaeum#2054) needs its own. For each
+# credential in the table above: when `op` is signed in and the variable
+# isn't already exported, fetch + cache it. Override path via the entry's
+# own override env (ATHENAEUM_OP_KEY_PATH / ATHENAEUM_OP_JEV_KEY_PATH).
+# Silent on any failure -- when the variable is already exported (fetch
+# branch skipped, athenaeum#1886 plan step 2) or `op` is missing/fails or
+# the 1Password item does not exist, the cached line restored above is left
+# as-is; that cached value belongs to the file, not to this process's
+# already-exported one. A missing Jev item in particular must produce no
+# line and no warning (athenaeum#2056 AC) -- this silent-failure shape
+# already delivers that for free, since the warning block below only ever
+# checks ANTHROPIC_API_KEY.
 #
-# Gates on `_had_live_api_key` (captured before config.env was even read),
-# NOT on `${ANTHROPIC_API_KEY:-}` here -- the cache-restore above just
-# sourced a cached/preserved line into that same variable, so testing it
-# directly would make a run that ever cached a key skip every future fetch
-# forever, permanently defeating "a fresh `op read` still replaces the
-# cached value" (athenaeum#1886 AC2).
-_KEY_PATH="${ATHENAEUM_OP_KEY_PATH:-op://Agent Tools/Anthropic API Key/credential}"
-if [ "$_had_live_api_key" = false ] && command -v op >/dev/null 2>&1; then
-  if _fetched_key="$(op read "$_KEY_PATH" 2>/dev/null)" && [ -n "$_fetched_key" ]; then
-    # mktemp inside the (already-restricted) cache dir — gives us an
-    # unpredictable path mode 600 atomically, closing the window where
-    # `${CONFIG_ENV}.tmp` could have been pre-created as a symlink or
-    # read in the gap between open() and chmod().
-    tmp_env=$(mktemp "${CACHE_DIR}/config.env.XXXXXX")
-    # Belt-and-suspenders: mktemp's mkstemp() already creates the file at
-    # 0600, but assert it explicitly rather than relying on that being true
-    # on every mktemp implementation this hook might run under.
-    chmod 600 "$tmp_env"
-    grep -v '^ANTHROPIC_API_KEY=' "$CONFIG_ENV" > "$tmp_env" 2>/dev/null || true
-    printf 'ANTHROPIC_API_KEY=%s\n' "$_fetched_key" >> "$tmp_env"
-    mv "$tmp_env" "$CONFIG_ENV"
+# Gates on `_had_live_cred[$_i]` (captured before config.env was even read),
+# NOT on the live variable here -- the cache-restore above just sourced a
+# cached/preserved line into that same variable, so testing it directly
+# would make a run that ever cached a key skip every future fetch forever,
+# permanently defeating "a fresh `op read` still replaces the cached value"
+# (athenaeum#1886 AC2).
+_i=0
+while [ "$_i" -lt "$_cred_count" ]; do
+  _name="${_CRED_ENV_NAMES[$_i]}"
+  _default_path="${_CRED_DEFAULT_PATHS[$_i]}"
+  _override_var="${_CRED_OVERRIDE_VARS[$_i]}"
+  _override_val="${!_override_var:-}"
+  if [ -n "$_override_val" ]; then
+    _key_path="$_override_val"
+  else
+    _key_path="$_default_path"
   fi
-fi
+
+  if [ "${_had_live_cred[$_i]}" = false ] && command -v op >/dev/null 2>&1; then
+    if _fetched_key="$(op read "$_key_path" 2>/dev/null)" && [ -n "$_fetched_key" ]; then
+      # mktemp inside the (already-restricted) cache dir — gives us an
+      # unpredictable path mode 600 atomically, closing the window where
+      # `${CONFIG_ENV}.tmp` could have been pre-created as a symlink or
+      # read in the gap between open() and chmod().
+      tmp_env=$(mktemp "${CACHE_DIR}/config.env.XXXXXX")
+      # Belt-and-suspenders: mktemp's mkstemp() already creates the file at
+      # 0600, but assert it explicitly rather than relying on that being
+      # true on every mktemp implementation this hook might run under.
+      chmod 600 "$tmp_env"
+      grep -v "^${_name}=" "$CONFIG_ENV" > "$tmp_env" 2>/dev/null || true
+      printf '%s=%s\n' "$_name" "$_fetched_key" >> "$tmp_env"
+      mv "$tmp_env" "$CONFIG_ENV"
+    fi
+  fi
+
+  _i=$((_i + 1))
+done
 
 # Issue athenaeum#1886 (plan step 3): make the degrade visible. Every
 # recall hook that wants the LLM topic extractor reads this cache, not the

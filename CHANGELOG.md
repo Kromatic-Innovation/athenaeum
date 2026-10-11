@@ -46,6 +46,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`session-start-recall.sh` dropped every cached credential except
+  `ANTHROPIC_API_KEY` on the `config.env` rewrite (issue athenaeum#2056).**
+  The preserve/refetch logic added by athenaeum#1886 special-cased
+  `ANTHROPIC_API_KEY`; a `JEV_API_KEY` line appended by the Jev decision
+  provider (athenaeum#1997, athenaeum#2054) was silently gone by the next
+  session start. Generalised to a small table of `(ENV_NAME, default op
+  path, override env)` entries — `ANTHROPIC_API_KEY` /
+  `ATHENAEUM_OP_KEY_PATH` unchanged, plus `JEV_API_KEY` /
+  `ATHENAEUM_OP_JEV_KEY_PATH` (default `op://Agent Tools/Jev Athenaeum Key/
+  credential`). Each credential's cached line is preserved before the
+  rewrite, refetched when `op` is available and the variable isn't already
+  exported, and restored otherwise; a missing Jev item in 1Password yields
+  no line and no warning (the no-key warning stays ANTHROPIC-only, since
+  Jev is optional). Shell tests with a fake `op` pin all three acceptance
+  paths. `docs/reference/environment.md` lists the two new names.
+
 - **`eval_maya_pii_hazard.py`: Brier score now excludes the abstention band
   (issue athenaeum#2052, follow-up to PR athenaeum#2051).** `compute_metrics`
   computed the Brier score over every row even when an abstention band was
