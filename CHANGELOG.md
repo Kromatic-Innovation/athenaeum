@@ -87,6 +87,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`JevDecisionBackend` choice criteria is now a `{label: description}`
+  mapping, not a list (issue athenaeum#2060, follow-up to athenaeum#2054).**
+  `_build_payload` sent `choice` criteria as a bare list for every kind —
+  the live API accepts that shape for `score` (a list of level labels) but
+  rejects it for `choice`, which requires a `{label: description}` object
+  per the vendor quickstart. `_build_payload` now passes a caller-supplied
+  dict through unchanged and coerces a plain list of labels into
+  `{label: label}` so callers that only have labels (such as
+  `resolutions.py`'s `_jev_criteria()`) still work without a code change.
+  `score` and `noul` are unaffected. The byte-pinned `choice` payload test
+  is updated and a new test covers the list-to-mapping coercion. Both
+  shapes were verified against the live endpoint on 2026-10-11 (dict
+  input via the new `scripts/jev_smoke.py --choice`, HTTP 200; list input
+  via a one-off call, HTTP 200). `scripts/jev_smoke.py` gains a `--choice`
+  flag that exercises a two-option Choice question live, skipped (refuses
+  to run) without `JEV_API_KEY`.
+
 - **`JevDecisionBackend` aligned with the live TypeSafe API (issue
   athenaeum#2054).** The adapter (athenaeum#1997) was built from TypeSafe's
   published description before an account existed and did not match the
