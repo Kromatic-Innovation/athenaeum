@@ -33,6 +33,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   maya-pii-hazard-eval-2026-10.md` is a stub pending a host-side run with
   real weights.
 
+- **Offline eval: Jev (hosted Noul classifier) vs. the PII-hazard regex
+  gate, measured on the same fixture set as Maya (issue athenaeum#2009).**
+  `scripts/eval_jev_pii_hazard.py` asks the live Jev API (TypeSafe AI's
+  Noul yes/no question type, via `athenaeum.decision_provider.JevDecisionBackend`)
+  the same hazard question `eval_maya_pii_hazard.py` asks Maya, against the
+  same fixture sources (a JSON-Lines `{text, label}` file and/or the
+  adjudicated allowlist via `athenaeum.pii.load_pii_allowlist`), and reuses
+  that sibling script's `Fixture`/`RowResult`/`compute_metrics`/
+  `render_markdown` by import rather than copying them. Every fixture
+  string is sent to Jev unredacted — deliberate, not an oversight: see the
+  script's own docstring and the measurement doc's "Unredacted" section.
+  Unlike Maya, this is real network egress and real (capped) spend:
+  `--max-spend-usd` (default 5, the operator's 2026-10-10 disposition lane
+  cap) stops the run before a call that would exceed it; token usage is
+  summed from every response's `usage.input_tokens`. Backend calls go
+  through `athenaeum._retry.with_retry` (issue athenaeum#782) and a failed
+  row is retried, never dropped, before the regex comparison runs — a row
+  still erroring after retries is reported, never silently excluded. No
+  row's exception message (which could echo request content back) is ever
+  printed or written; only the exception's class name and row index are
+  recorded. A `JevBackend` adapter seam (mirroring `MayaScorer`) lets the
+  unit tests exercise the full script path — CLI parsing, fixture loading,
+  the retry loop, spend-cap enforcement, metrics, and the JSON write — with
+  a fake backend and fabricated `example.invalid` strings, no network
+  call, no `JEV_API_KEY` required.
+
 ### Changed
 
 - **Maya PII-hazard eval (athenaeum#2049): stub replaced with a real
@@ -43,6 +69,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   this repo, aggregate counts/rates only. Recommendation: candidate for the
   hazard gate, conditional on a licence check (Maya's base model training
   data reportedly includes non-commercial sets).
+
+- **Jev PII-hazard eval added to the same doc (issue athenaeum#2009).**
+  `docs/measurements/maya-pii-hazard-eval-2026-10.md` now also reports a
+  live Jev run against the IDENTICAL 822-row fixture set, at the default
+  threshold and the same [0.3, 0.7] abstention band, plus a Maya-vs-Jev-
+  vs-regex comparison paragraph covering accuracy, precision, recall,
+  latency, cost, and egress. Headline: 0 of 822 calls errored; 236,464
+  total input tokens for an estimated USD 0.0099 (well under the USD 5
+  lane cap); mean/median/p95 latency 432/422/476 ms measured over a slow
+  link. On this fixture set Maya remains the stronger candidate on
+  accuracy and precision at both operating points and has no egress; Jev
+  clears the regex gate on precision but does not clear Maya, and sends
+  every fixture string to a third party. Recommendation unchanged: Maya
+  first, Jev as a fallback if local inference is unavailable, regex stays
+  the live gate either way.
 
 ### Fixed
 
