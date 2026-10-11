@@ -184,6 +184,68 @@ class TestRunEvalAndMetrics:
         assert metrics.n_abstained == 1
         assert metrics.n_scored == 1
 
+    def test_brier_scored_vs_all_hand_computed(self) -> None:
+        """athenaeum#2052: Brier must exclude abstained rows in one line and
+        report the all-rows figure separately, pinned on a hand-computed
+        example.
+
+        Fixtures (band [0.4, 0.6]):
+          - p=0.75, label=True  -> scored, squared error (0.75-1)^2 = 0.0625
+          - p=0.25, label=False -> scored, squared error (0.25-0)^2 = 0.0625
+          - p=0.50, label=True  -> abstained (in band)
+          - p=0.50, label=False -> abstained (in band)
+
+        brier_scored = mean(0.0625, 0.0625) = 0.0625
+        brier_all = mean(0.0625, 0.0625, 0.25, 0.25) = 0.15625
+        """
+        Fixture = eval_maya_pii_hazard.Fixture
+        text_scored_pos = "Reach Dana Price at dana.price@example.invalid for the handoff."
+        text_scored_neg = "Shipment reference 90213 cleared customs this morning."
+        text_abstained_pos = "Call Alex Chen for the invoice at the usual number."
+        text_abstained_neg = "Batch job 77451 finished with zero errors overnight."
+        fixtures = [
+            Fixture(text=text_scored_pos, label=True, source="jsonl"),
+            Fixture(text=text_scored_neg, label=False, source="jsonl"),
+            Fixture(text=text_abstained_pos, label=True, source="jsonl"),
+            Fixture(text=text_abstained_neg, label=False, source="jsonl"),
+        ]
+        scorer = FakeScorer(
+            {
+                text_scored_pos: 0.75,
+                text_scored_neg: 0.25,
+                text_abstained_pos: 0.50,
+                text_abstained_neg: 0.50,
+            }
+        )
+        results = eval_maya_pii_hazard.run_eval(scorer, fixtures, threshold=0.5)
+        metrics = eval_maya_pii_hazard.compute_metrics(results, abstain_low=0.4, abstain_high=0.6)
+
+        assert metrics.n_abstained == 2
+        assert metrics.n_scored == 2
+        assert metrics.brier_scored == pytest.approx(0.0625)
+        assert metrics.brier_all == pytest.approx(0.15625)
+
+        markdown = eval_maya_pii_hazard.render_markdown(
+            metrics, threshold=0.5, abstain_band=(0.4, 0.6)
+        )
+        assert "brier_scored" in markdown
+        assert "brier_all" in markdown
+        assert markdown.count("Brier score") == 2
+
+    def test_brier_scored_equals_all_without_band(self) -> None:
+        """Without an abstention band, brier_scored == brier_all and the
+        rendered table prints exactly one Brier line (athenaeum#2052)."""
+        scorer = FakeScorer({_FAKE_CONTACT_TEXT: 0.9, _FAKE_NONCONTACT_TEXT: 0.1})
+        results = eval_maya_pii_hazard.run_eval(scorer, self._fixtures(), threshold=0.5)
+        metrics = eval_maya_pii_hazard.compute_metrics(results)
+
+        assert metrics.brier_scored == pytest.approx(metrics.brier_all)
+
+        markdown = eval_maya_pii_hazard.render_markdown(metrics, threshold=0.5, abstain_band=None)
+        assert markdown.count("Brier score") == 1
+        assert "brier_scored" not in markdown
+        assert "brier_all" not in markdown
+
     def test_percentile_handles_single_value(self) -> None:
         assert eval_maya_pii_hazard._percentile([3.0], 0.95) == 3.0
 

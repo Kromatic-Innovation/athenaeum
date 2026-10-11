@@ -314,7 +314,8 @@ class Metrics:
     accuracy: float | None
     precision: float | None
     recall: float | None
-    brier: float
+    brier_scored: float | None
+    brier_all: float
     regex_tp: int
     regex_fp: int
     regex_tn: int
@@ -365,10 +366,13 @@ def compute_metrics(
     regex_tn = sum(1 for r in results if not r.regex_verdict and not r.label)
     regex_fn = sum(1 for r in results if not r.regex_verdict and r.label)
 
-    brier = (
-        statistics.fmean((r.p_yes - (1.0 if r.label else 0.0)) ** 2 for r in results)
-        if results
-        else 0.0
+    def _squared_error(r: RowResult) -> float:
+        return (r.p_yes - (1.0 if r.label else 0.0)) ** 2
+
+    brier_all = statistics.fmean(_squared_error(r) for r in results) if results else 0.0
+    scored_results = [r for r in results if not in_band(r.p_yes)]
+    brier_scored = (
+        statistics.fmean(_squared_error(r) for r in scored_results) if scored_results else None
     )
 
     maya_latencies = sorted(r.maya_latency_s for r in results)
@@ -387,7 +391,8 @@ def compute_metrics(
         accuracy=_safe_div(tp + tn, n_scored),
         precision=_safe_div(tp, tp + fp),
         recall=_safe_div(tp, tp + fn),
-        brier=brier,
+        brier_scored=brier_scored,
+        brier_all=brier_all,
         regex_tp=regex_tp,
         regex_fp=regex_fp,
         regex_tn=regex_tn,
@@ -442,7 +447,16 @@ def render_markdown(
         f"| precision | {_fmt(metrics.precision)} |",
         f"| recall | {_fmt(metrics.recall)} |",
         f"| TP / FP / TN / FN | {metrics.tp} / {metrics.fp} / {metrics.tn} / {metrics.fn} |",
-        f"| Brier score | {metrics.brier:.4f} |",
+    ]
+    if abstain_band is not None:
+        lines.append(
+            f"| Brier score, scored rows only (`brier_scored`) | "
+            f"{_fmt(metrics.brier_scored, 4)} |"
+        )
+        lines.append(f"| Brier score, all rows (`brier_all`) | {_fmt(metrics.brier_all, 4)} |")
+    else:
+        lines.append(f"| Brier score | {metrics.brier_all:.4f} |")
+    lines += [
         f"| mean latency (s) | {metrics.mean_latency_s:.4f} |",
         f"| p95 latency (s) | {metrics.p95_latency_s:.4f} |",
         "",
