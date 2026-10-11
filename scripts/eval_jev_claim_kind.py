@@ -4,7 +4,7 @@
 
 athenaeum#1987's desk comparison deliberately excluded accuracy ("a cheaper
 wrong answer is not a saving") and found no latency instrumentation anywhere
-in the ledger; this script is the first point in the #1987/#1997/#1998 chain
+in the ledger; this script is the first point in the athenaeum#1987/athenaeum#1997/athenaeum#1998 chain
 that measures both directly. It runs the SAME 50 (or fewer, if the labelled
 corpus is smaller) memory snippets through:
 
@@ -567,7 +567,7 @@ def render_markdown(
         "specific call count. The dispatching issue named `claim_kind` as the "
         "*expected* highest-volume knob pending this confirmation; this run "
         "does not independently establish that ranking and reports it as "
-        "unconfirmed from #1987's table, not as verified.",
+        "unconfirmed from athenaeum#1987's table, not as verified.",
         "",
         "## Results",
         "",

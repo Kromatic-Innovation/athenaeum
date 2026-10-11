@@ -21,7 +21,7 @@ Offline comparison of Jev (TypeSafe AI) against athenaeum's current `classify` k
 
 ### Volume confirmation
 
-athenaeum#1987's inventory bundles `claim_kind` inside the `classify` knob's `librarian` run_type rows and marks per-knob volume **not separable** from that table -- it does not itself state a `claim_kind`-specific call count. The dispatching issue named `claim_kind` as the *expected* highest-volume knob pending this confirmation; this run does not independently establish that ranking and reports it as unconfirmed from #1987's table, not as verified.
+athenaeum#1987's inventory bundles `claim_kind` inside the `classify` knob's `librarian` run_type rows and marks per-knob volume **not separable** from that table -- it does not itself state a `claim_kind`-specific call count. The dispatching issue named `claim_kind` as the *expected* highest-volume knob pending this confirmation; this run does not independently establish that ranking and reports it as unconfirmed from athenaeum#1987's table, not as verified.
 
 ## Results
 
@@ -96,7 +96,7 @@ either direction; (2) athenaeum#1987 could not separate `claim_kind`'s volume
 from the bundled `classify`/`librarian` figures, so this result answers "is
 Jev accurate enough on this knob" without independently confirming the
 dispatching issue's volume premise for *why* this knob was chosen first.
-Read together with #1987: that issue already recommended **keep** for the
+Read together with athenaeum#1987: that issue already recommended **keep** for the
 bundled `classify`/`write` core pending call-site-level cost instrumentation;
 this eval's accuracy result reinforces the same keep recommendation from the
 quality side rather than cutting against it.
