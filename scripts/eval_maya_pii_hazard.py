@@ -416,12 +416,22 @@ def render_markdown(
     *,
     threshold: float,
     abstain_band: tuple[float, float] | None,
+    model_name: str = "Maya",
+    model_description: str = "the local Maya yes/no cross-encoder (issue athenaeum#2049)",
 ) -> str:
-    """Render the aggregate measurement table. NEVER includes a fixture string."""
+    """Render the aggregate measurement table. NEVER includes a fixture string.
+
+    ``model_name``/``model_description`` default to Maya's own identity so
+    every existing caller (this script's own CLI, both test modules) keeps
+    its current headings unchanged; the Jev sibling
+    (``eval_jev_pii_hazard.py``) passes ``model_name="Jev"`` and its own
+    description so its report is not mislabeled as a Maya run
+    (athenaeum#2058 review).
+    """
     lines = [
-        "# Maya PII-hazard eval",
+        f"# {model_name} PII-hazard eval",
         "",
-        "Measured against the local Maya yes/no cross-encoder (issue athenaeum#2049). "
+        f"Measured against {model_description}. "
         "No fixture strings appear below -- only aggregate counts and rates.",
         "",
         f"- Question: `{QUESTION}`",
@@ -438,7 +448,7 @@ def render_markdown(
         )
     lines += [
         "",
-        "## Maya",
+        f"## {model_name}",
         "",
         "| metric | value |",
         "|---|---|",

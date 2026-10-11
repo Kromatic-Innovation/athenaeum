@@ -200,10 +200,14 @@ def run_jev_eval(
     Never raises on a single row's backend error -- records it as
     ``error_type`` (the exception's class name only, never its message)
     and continues, so one malformed/unreachable row cannot zero out the
-    whole run. Raises :class:`SpendCapExceeded` BEFORE placing a call that
-    would push the running spend total over *max_spend_usd* -- the cap is
-    enforced before the call, not after, so the overage is bounded by the
-    cost of at most zero extra calls.
+    whole run. Raises :class:`SpendCapExceeded` as soon as the running
+    spend total (summed from each call's actual ``usage.input_tokens``,
+    never estimated from fixture-string length) exceeds *max_spend_usd* --
+    checked before each call is placed, so at most ONE call beyond the cap
+    ever runs (the call that pushes the total over the cap is already in
+    flight when the overage becomes knowable; the row *after* it is the
+    first one actually skipped). The real run in athenaeum#2058 spent USD
+    0.0099 against a USD 5.0 cap, so this bound is immaterial in practice.
     """
     outcomes: list[JevRowOutcome] = []
     total_input_tokens = 0
@@ -485,7 +489,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.abstain_low is not None and args.abstain_high is not None
         else None
     )
-    markdown = maya.render_markdown(metrics, threshold=args.threshold, abstain_band=abstain_band)
+    markdown = maya.render_markdown(
+        metrics,
+        threshold=args.threshold,
+        abstain_band=abstain_band,
+        model_name="Jev",
+        model_description="the hosted Jev API (TypeSafe AI, Noul classifier; issue athenaeum#2009)",
+    )
 
     raw_rows = [
         {
