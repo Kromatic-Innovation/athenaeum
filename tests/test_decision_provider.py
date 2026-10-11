@@ -140,6 +140,28 @@ def test_build_payload_noul_drops_criteria_even_if_given() -> None:
 
 
 def test_build_payload_choice_pinned() -> None:
+    """athenaeum#2060: choice criteria is a {label: description} mapping,
+    passed through unchanged when the caller already supplies a dict."""
+    backend = JevDecisionBackend(api_key="k")
+    payload = backend._build_payload(
+        question_id="q1",
+        kind="choice",
+        instructions="pick one",
+        state="the state",
+        criteria={"keep_a": "keep option a", "keep_b": "keep option b"},
+    )
+    body = json.dumps(payload).encode("utf-8")
+    assert body == (
+        b'{"model": "jev-latest", "state": "the state", '
+        b'"questions": {"q1": {"type": "choice", "instructions": "pick one", '
+        b'"criteria": {"keep_a": "keep option a", "keep_b": "keep option b"}}}}'
+    )
+
+
+def test_build_payload_choice_list_maps_each_label_to_itself() -> None:
+    """athenaeum#2060: a caller that only has labels (no descriptions) can
+    still pass a plain list; it is coerced into a {label: label} mapping
+    rather than sent as a bare list, which the live API rejects."""
     backend = JevDecisionBackend(api_key="k")
     payload = backend._build_payload(
         question_id="q1",
@@ -152,7 +174,7 @@ def test_build_payload_choice_pinned() -> None:
     assert body == (
         b'{"model": "jev-latest", "state": "the state", '
         b'"questions": {"q1": {"type": "choice", "instructions": "pick one", '
-        b'"criteria": ["keep_a", "keep_b"]}}}'
+        b'"criteria": {"keep_a": "keep_a", "keep_b": "keep_b"}}}}'
     )
 
 
@@ -388,13 +410,13 @@ def test_decide_end_to_end_choice_pinned(monkeypatch: pytest.MonkeyPatch) -> Non
         kind="choice",
         instructions="pick one",
         state="the state",
-        criteria=["keep_a", "keep_b"],
+        criteria={"keep_a": "keep option a", "keep_b": "keep option b"},
     )
     assert captured["url"] == DEFAULT_JEV_BASE_URL
     assert captured["body"] == (
         b'{"model": "jev-latest", "state": "the state", '
         b'"questions": {"q1": {"type": "choice", "instructions": "pick one", '
-        b'"criteria": ["keep_a", "keep_b"]}}}'
+        b'"criteria": {"keep_a": "keep option a", "keep_b": "keep option b"}}}}'
     )
     assert result.choice == "keep_a"
     assert result.probabilities == {"keep_a": 0.87, "keep_b": 0.13}
