@@ -69,6 +69,20 @@ previously carried for the whole module, now narrowed to Score only. The
 translation is isolated in :meth:`JevDecisionBackend._build_payload` /
 :meth:`JevDecisionBackend._parse_payload` so a future shape change can be
 corrected in one place.
+
+**Choice criteria shape (issue athenaeum#2060):** athenaeum#2054 got this
+wrong — it sent `choice` criteria as a bare list, which the live API
+rejects. The vendor quickstart's `choice` example sends `criteria` as a
+`{label: description}` object (e.g. `{"positive": "happy or hopeful",
+...}`). `_build_payload` now accepts either shape for `choice`: a
+caller-supplied dict passes through unchanged, and a plain list of labels
+is coerced to `{label: label}` so a caller that only has labels (such as
+`resolutions.py`'s `_jev_criteria()`) still works unchanged. Both paths
+were independently verified against the live endpoint on 2026-10-11 via
+`scripts/jev_smoke.py --choice` (dict input, HTTP 200, 528 ms, 328 input
+tokens) and a one-off list-input call (HTTP 200, 323 input tokens) made
+while implementing this fix. `score` is unaffected — it still takes a
+list of level labels, never a mapping.
 """
 
 from __future__ import annotations
@@ -303,10 +317,20 @@ class JevDecisionBackend:
             "instructions": instructions,
         }
         # Noul questions must carry no `criteria` key at all (athenaeum#2054
-        # acceptance criteria) -- the live API rejects it. Choice and score
-        # pass through whatever shape the caller supplied (a list of choice
-        # ids for choice, a list of level labels for score); this backend
-        # does not coerce one shape into the other.
+        # acceptance criteria) -- the live API rejects it. Score sends the
+        # list of level labels through unchanged. Choice requires a
+        # `{label: description}` mapping (athenaeum#2060) -- the live API
+        # rejects a bare list -- so a plain list of labels is coerced into a
+        # mapping of each label to itself; a caller-supplied dict passes
+        # through untouched.
+        if kind == "choice" and criteria is not None and not isinstance(criteria, dict):
+            # `scripts/eval_jev_claim_kind.py` (athenaeum#1998) and
+            # `scripts/eval_jev_comparator.py` (athenaeum#2008) carried a
+            # caller-side workaround for this same bare-list bug before this
+            # fix landed. Remove the workaround from each script once its PR
+            # is on develop and this coercion is in place -- see
+            # athenaeum#2060.
+            criteria = {label: label for label in criteria}
         if kind != "noul" and criteria is not None:
             question["criteria"] = criteria
         return {
