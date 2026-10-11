@@ -46,6 +46,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`JevDecisionBackend` aligned with the live TypeSafe API (issue
+  athenaeum#2054).** The adapter (athenaeum#1997) was built from TypeSafe's
+  published description before an account existed and did not match the
+  live service, verified against it on 2026-10-11. Fixed: base URL is now
+  `https://api.typesafe.ai/v1/systemone` (`JEV_BASE_URL` env override; the
+  old `https://api.jev.ai/v1` never resolved) with no `/decide` sub-path;
+  the request body is now `{model: "jev-latest", state, questions:
+  {<question_id>: {type, instructions, criteria?}}}` instead of one
+  question per call, with `criteria` omitted entirely for `noul` (the live
+  API rejects it) and sent as a list of level labels for `score`; the
+  response is parsed from `answers[question_id]` (`noul` → `probability`,
+  `choice` → `choice`/`probabilities`/`confidence`, `score` →
+  `score`/`confidence`/`legend`/`probabilities`). `DecisionResult` now
+  exposes `input_tokens`/`output_tokens` from the response's `usage`
+  object, which `resolutions.py`'s spend-ledger hook now records instead of
+  the chars/4 approximation when present. `scripts/jev_smoke.py` makes one
+  live Noul call and prints probability, latency and usage; it refuses to
+  run without `JEV_API_KEY` and is not run in CI. The `decide(question_id,
+  kind, instructions, state, criteria)` signature and the `DecisionBackend`
+  seam are unchanged; still raw HTTP via stdlib `urllib`, no new SDK
+  dependency. Unit tests with a fake transport pin all three request
+  bodies byte-for-byte and all three response parsers.
+
 - **`eval_maya_pii_hazard.py`: Brier score now excludes the abstention band
   (issue athenaeum#2052, follow-up to PR athenaeum#2051).** `compute_metrics`
   computed the Brier score over every row even when an abstention band was
