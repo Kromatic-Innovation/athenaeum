@@ -102,11 +102,14 @@ in a deployed gate rather than receive an automatic verdict):
 | p95 latency (s/row) | 0.1426 | 0.0001 |
 | wall clock (822 rows) | 110 s | (included above) |
 
-\* `compute_metrics` does not exclude abstained rows from the Brier
-calculation, unlike the confusion-matrix metrics above it, so this number is
-identical to Run 1's and should not be read as "scored rows only." A
-scored-rows-only Brier score would need a rerun with a fixed script; tracked
-as follow-on work, not blocking this measurement doc.
+\* This figure predates the athenaeum#2052 fix. At the time of this run,
+`compute_metrics` did not exclude abstained rows from the Brier calculation,
+unlike the confusion-matrix metrics above it, so this number is identical to
+Run 1's `brier_all` and was never a scored-rows-only figure. The script now
+reports `brier_scored` (scored rows only) and `brier_all` (every row)
+separately when an abstention band is active; no rerun was performed for
+athenaeum#2052, so no scored-rows-only Brier score exists for this fixture
+set.
 
 (Jev, athenaeum#2009's hosted sibling, is pending — no comparable column
 exists yet.)

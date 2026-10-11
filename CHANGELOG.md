@@ -46,6 +46,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`eval_maya_pii_hazard.py`: Brier score now excludes the abstention band
+  (issue athenaeum#2052, follow-up to PR athenaeum#2051).** `compute_metrics`
+  computed the Brier score over every row even when an abstention band was
+  active, while accuracy/precision/recall correctly excluded abstained rows
+  — the bug landed with PR athenaeum#2050 and left the two runs in
+  `docs/measurements/maya-pii-hazard-eval-2026-10.md` showing an identical
+  Brier value for the default run and the [0.3, 0.7] abstention run. The
+  markdown table now reports `brier_scored` (scored rows only) and
+  `brier_all` (every row) as two separate lines when a band is active;
+  without a band the two are equal and only one `Brier score` line prints,
+  so the output format is unchanged for the no-band case. A synthetic unit
+  test with a fake scorer and a band pins both values on a hand-computed
+  example. The measurement doc's footnote on the Run 2 Brier row now notes
+  the figure predates this fix — no re-run was performed.
+
 - **Merge anchors survive a hard line wrap; the `person_hint` eval floor is
   now measured, not assumed (issue athenaeum#2043).** The floor
   (`PERSON_HINT_FLOOR = 4`) was asserted strictly by athenaeum#1866 (PR
