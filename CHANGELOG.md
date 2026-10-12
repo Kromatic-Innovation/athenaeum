@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Eval: Jev vs. the current model on `claim_kind` (issue athenaeum#1998).**
+  `scripts/eval_jev_claim_kind.py` runs 43 labelled memory snippets (every
+  file under `~/knowledge/raw/auto-memory/` carrying an author-supplied
+  `claim_kind:` — fewer than the 50 requested) through both
+  `athenaeum.claim_kind.classify_claim_kind` (unchanged, read-only — never
+  `stamp_claim_kind`) and `JevDecisionBackend.decide(kind="choice")` with
+  the six `claim_kind` labels as criteria, alternating call order per case
+  and measuring real wall-clock latency for both arms over the same session
+  and link. Result, recorded in `docs/measurements/jev-claim-kind-eval-2026-10.md`:
+  the current model scores 0.814 accuracy vs. Jev's 0.581 against a 0.605
+  majority-class baseline (69.8% inter-arm agreement) — **recommendation:
+  keep the current model on `claim_kind`**, read together with
+  athenaeum#1987's own keep recommendation for the bundled `classify`/`write`
+  core. `opinion` and `definition` have zero cases in the available answer
+  key, so that gap is flagged explicitly rather than assumed covered. Along
+  the way, found that the live Jev endpoint rejects a `choice` question's
+  `criteria` as a list (`HTTP 422`) and requires a `{label: description}`
+  dict — a shape gap in `JevDecisionBackend`'s own byte-pinned test
+  (`test_build_payload_choice_pinned`, athenaeum#2054), worked around at this
+  script's call site and reported upward, not patched here.
 - **Offline eval: Maya (local yes/no cross-encoder) vs. the PII-hazard regex
   gate (issue athenaeum#2049).** No-egress sibling of athenaeum#2009 (Jev, a
   hosted classifier evaluated for the same question): `scripts/
