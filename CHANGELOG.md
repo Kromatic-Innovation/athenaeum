@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Offline eval: Jev (TypeSafe AI) as a Gate-2-equivalent five-verdict
+  comparator (issue athenaeum#2008).** `scripts/eval_jev_comparator.py`
+  reads the verdict ledger (`athenaeum.verdicts`) for every pair the live
+  five-verdict comparator (`athenaeum.comparator`) decided via an actual
+  Gate 2 (content-relation) LLM call -- the `v1.gate2` population, distinct
+  from the much larger `v1.gate1` typed-exit population that never called
+  an LLM at all -- and asks Jev a single Choice question per pair, with the
+  five verdict values (`duplicate`/`contradiction`/`specialization`/
+  `distinct`/`underdetermined`) as criteria, over a state holding both
+  pages' bodies. Scores Jev's choice against the already-recorded Claude
+  verdict for the same pair: overall and per-verdict agreement, a 5x5
+  confusion matrix, duplicate/contradiction agreement specifically, how
+  often Jev's top choice probability is below 0.5, and per-call latency/
+  token usage/cost (Jev input is billed; output is free). A page whose
+  current content has drifted since the verdict was decided is recovered
+  from its git history when an earlier revision's content hash matches the
+  ledger's recorded basis, rather than silently scored against the wrong
+  text; a page that cannot be recovered, is missing, or is a PII hazard is
+  skipped and counted, never silently dropped. Offline and read-only: no
+  change to the live comparator, no ledger write, no corpus mutation.
+  Unit-tested against a fake Choice backend and synthetic pairs; the live
+  path is skipped (and says so in the rendered report) without
+  `JEV_API_KEY`. `docs/measurements/jev-comparator-eval-2026-10.md` reports
+  the agreement/latency/cost figures and a pre-screen/replacement/not-
+  suitable recommendation.
+
 - **Offline eval: Maya (local yes/no cross-encoder) vs. the PII-hazard regex
   gate (issue athenaeum#2049).** No-egress sibling of athenaeum#2009 (Jev, a
   hosted classifier evaluated for the same question): `scripts/

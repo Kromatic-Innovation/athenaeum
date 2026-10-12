@@ -122,6 +122,9 @@ Evidence, kept out of the reading path.
 - [Maya and Jev PII-hazard eval](measurements/maya-pii-hazard-eval-2026-10.md) — a local
   yes/no cross-encoder (Maya) and a hosted classifier (Jev) measured against the
   regex PII-hazard gate on the same fixture set.
+- [Jev comparator eval](measurements/jev-comparator-eval-2026-10.md) — a hosted
+  Choice-question classifier measured against the five-verdict comparator's recorded
+  verdicts for the same source pairs.
 - [Memory-model measurements](measurements/memory-model-measurements.md)
 - [Reasoning-tier measurements](measurements/reasoning-tier-measurements.md)
 - [Retrieval entry-point measurements](measurements/retrieval-entry-point-measurements.md)
