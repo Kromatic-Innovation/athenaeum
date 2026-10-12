@@ -114,6 +114,7 @@ from athenaeum.pii_verdicts import load_not_pii_allowlist
 from athenaeum.recompare import identify_pii_hazards
 from athenaeum.verdicts import (
     VERDICT_VALUES,
+    VerdictEntry,
     content_hash,
     iter_live_entries,
     page_id_for_path,
@@ -251,11 +252,20 @@ def _wiki_slug_index(wiki_root: Path) -> dict[str, Path]:
     ``wiki_root`` only -- ``page_from_path`` (and the comparator's own,
     non-cluster call site) compute a page's id with no ``root`` argument,
     i.e. the bare filename stem's slug (see ``page_id_for_path``'s
-    docstring), so the index must match that exactly."""
+    docstring), so the index must match that exactly.
+
+    Keyed by ``page_id_for_path(path)`` -- NOT ``path.stem.lower()`` -- so
+    the key uses the identical ``slugify`` transform (lowercase, non-
+    alnum runs collapsed to one hyphen, 60-char cap) that produced the
+    ledger's own pair-member ids. A bare ``.lower()`` leaves underscores
+    and other non-alnum characters untouched and never caps length, so any
+    page whose stem contains ``_`` (or exceeds 60 chars) would silently
+    miss every lookup and be mis-counted as ``skipped_missing_source``
+    (Sentry finding on PR athenaeum#2062)."""
     index: dict[str, Path] = {}
     for path in sorted(wiki_root.glob("*.md")):
         if path.is_file():
-            index[path.stem.lower()] = path
+            index[page_id_for_path(path)] = path
     return index
 
 
@@ -373,11 +383,26 @@ def select_gate2_pairs(
     slug_index = _wiki_slug_index(wiki_root)
     stats = SelectionStats()
 
-    gate2_entries = [
+    raw_entries = [
         e
         for _month, e in iter_live_entries(wiki_root)
         if e.decided_by == "comparator" and e.basis.comparator_version == GATE2_COMPARATOR_VERSION
     ]
+    # Collapse to one entry per pair -- the LAST one in iter_live_entries's
+    # own (month, then on-disk append) order wins. Before compaction runs,
+    # iter_live_entries can return multiple entries for the same pair (an
+    # old, superseded entry alongside the fresh one that replaced it); left
+    # undeduped, this script would score the same pair more than once and
+    # skew every rate in Metrics toward whichever pairs happen to have
+    # stale duplicates (Sentry finding on PR athenaeum#2062). This mirrors
+    # athenaeum.verdicts.challenge_coordinate_answer's own dedup rule and
+    # its reason for NOT using lookup_pair's max(key=at): ``at`` is
+    # date-only, so same-day ties under max() would silently keep the
+    # FIRST (oldest) entry instead of the latest.
+    gate2_by_pair: dict[str, VerdictEntry] = {}
+    for e in raw_entries:
+        gate2_by_pair[e.pair] = e
+    gate2_entries = list(gate2_by_pair.values())
     stats.total_gate2_entries = len(gate2_entries)
 
     samples: list[PairSample] = []
@@ -645,6 +670,18 @@ def _fmt_rate(pair: tuple[int, int] | None) -> str:
     return f"{agree}/{total} ({agree / total:.1%})"
 
 
+#: Default latency caveat, describing THIS run's own measurement
+#: conditions. Passed as a parameter (not inlined in render_markdown)
+#: so a re-run under different conditions can supply an accurate
+#: replacement instead of silently reusing this run's description
+#: (Sentry finding on PR athenaeum#2062).
+DEFAULT_NETWORK_NOTE = (
+    "These figures were measured over a slow hotel internet connection abroad; "
+    "treat the absolute latency numbers as an upper bound on what a normal "
+    "connection would show, not a clean model-only measurement."
+)
+
+
 def render_markdown(
     *,
     stats: SelectionStats,
@@ -652,6 +689,7 @@ def render_markdown(
     metrics: Metrics,
     live: bool,
     cost_cap_usd: float,
+    network_note: str = DEFAULT_NETWORK_NOTE,
 ) -> str:
     lines: list[str] = []
     lines.append("# Jev comparator eval (athenaeum#2008)")
@@ -711,10 +749,18 @@ def render_markdown(
     for v in VERDICT_VALUES:
         lines.append(f"| {v} | {_fmt_rate(metrics.per_verdict_agreement.get(v))} |")
     lines.append("")
+    contradiction_total = (
+        metrics.contradiction_agreement[1] if metrics.contradiction_agreement is not None else 0
+    )
+    contradiction_note = (
+        f"({contradiction_total} pair(s) carry this ground-truth verdict in this sample"
+        + (" -- see scope note" if contradiction_total == 0 else "")
+        + ")."
+    )
     lines.append(
         f"High-stakes verdicts -- **duplicate**: {_fmt_rate(metrics.duplicate_agreement)}; "
         f"**contradiction**: {_fmt_rate(metrics.contradiction_agreement)} "
-        "(0 pairs carry this ground-truth verdict in this sample -- see scope note)."
+        f"{contradiction_note}"
     )
     lines.append("")
     lines.append(
@@ -740,13 +786,13 @@ def render_markdown(
             f"Jev per-call wall-clock: mean {metrics.mean_latency_s:.3f}s, "
             f"p95 {metrics.p95_latency_s:.3f}s, over {len(run.answers)} call(s)."
         )
+        # Only emit the network caveat when there are actual latency figures
+        # to caveat -- otherwise it reads as a contradiction of the "No live
+        # calls were made" line above it (Sentry finding on PR
+        # athenaeum#2062).
+        lines.append(network_note)
     else:
         lines.append("No live calls were made.")
-    lines.append(
-        "These figures were measured over a slow hotel internet connection abroad; "
-        "treat the absolute latency numbers as an upper bound on what a normal "
-        "connection would show, not a clean model-only measurement."
-    )
     lines.append(
         "Claude's per-pair latency is not recorded in the verdict ledger "
         "(`VerdictEntry` has no latency field) and re-running the Claude comparator "
