@@ -123,6 +123,9 @@ Evidence, kept out of the reading path.
   yes/no cross-encoder (Maya) and a hosted classifier (Jev) measured against the
   regex PII-hazard gate on the same fixture set.
 - [Jev vs. current-model eval: `claim_kind`](measurements/jev-claim-kind-eval-2026-10.md) — accuracy, latency, and cost comparison on the `claim_kind` classify-knob question; recommends keeping the current model.
+- [Jev comparator eval](measurements/jev-comparator-eval-2026-10.md) — a hosted
+  Choice-question classifier measured against the five-verdict comparator's recorded
+  verdicts for the same source pairs.
 - [Memory-model measurements](measurements/memory-model-measurements.md)
 - [Reasoning-tier measurements](measurements/reasoning-tier-measurements.md)
 - [Retrieval entry-point measurements](measurements/retrieval-entry-point-measurements.md)
