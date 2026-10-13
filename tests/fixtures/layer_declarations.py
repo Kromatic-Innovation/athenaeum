@@ -126,6 +126,9 @@ MODULE_LAYER: dict[str, int] = {
     # Issue athenaeum#1997: typed-decision backend seam (Jev). Sibling L3 to
     # provider.py / outbound_pii.py -- see its own "Layering:" docstring note.
     "decision_provider": 3,
+    # Issue athenaeum#2063: YesNoScorer seam (Maya), kept separate from
+    # decision_provider.py's DecisionBackend. Sibling L3.
+    "yesno": 3,
     "delta": 3,
     "erasure": 3,
     "fingerprint": 3,
@@ -198,6 +201,9 @@ MODULE_LAYER: dict[str, int] = {
     "pending_merges": 4,
     "pii_classification_decision": 4,
     "pii_h1_audit": 4,
+    # Issue athenaeum#2063: L4 glue wiring the yesno.py YesNoScorer seam into
+    # storage lint-pii / merges recompare. Sibling of pii_verdicts.py.
+    "pii_hazard_classifier": 4,
     "pii_restore": 4,
     "pii_verdicts": 4,
     "quarantine": 4,
@@ -322,6 +328,12 @@ MODULE_LAYER: dict[str, int] = {
 # stems against :data:`MODULE_LAYER`'s keys.
 UNDECLARED: frozenset[str] = frozenset(
     {
+        # Issue athenaeum#2063: a self-contained subprocess worker with NO
+        # athenaeum imports at all (checked by AST scan,
+        # tests/test_yesno_worker.py) -- it runs standalone in a separate,
+        # operator-named interpreter and does not participate in this
+        # repo's own import-layer graph.
+        "_yesno_worker",
         "claim_kind",
         "compiled_exempt",
         # athenaeum#1837: structural mirror of ``claim_kind`` above, including

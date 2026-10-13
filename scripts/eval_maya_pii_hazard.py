@@ -64,8 +64,22 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+
+def _load_question() -> str:
+    # Function-level import: this script must stay importable with no
+    # athenaeum.pii_hazard_classifier side effects until the first real
+    # call -- mirrors every other lazy athenaeum.* import in this module.
+    from athenaeum.pii_hazard_classifier import load_pii_hazard_question
+
+    return load_pii_hazard_question()
+
+
 #: The exact yes/no hazard question, mirroring athenaeum#2009's Jev sibling.
-QUESTION = "Is this string a way to contact a specific human?"
+#: Issue athenaeum#2063 AC10: loaded from the SAME packaged prompt file
+#: production reads (`athenaeum.pii_hazard_classifier.load_pii_hazard_question`)
+#: so `question_sha` is comparable between an eval run and a production
+#: shadow-ledger row.
+QUESTION = _load_question().strip()
 
 #: Env var naming the local Maya weights directory. No implicit download:
 #: unset or missing is a refusal (zero spend, athenaeum#2049).
@@ -106,10 +120,19 @@ class MayaAdapter:
         self._model: Any = None
         self._torch: Any = None
         self._yes_index: int | None = None
+        # Issue athenaeum#2063 AC9: the transform temperature is read from
+        # the weights' own `maya_config.json` via the SAME function the
+        # production worker uses (`athenaeum._yesno_worker.read_temperature`),
+        # defaulting to 1.0 when the file is absent -- never hand-rolled
+        # here a second time.
+        self._temperature: float = 1.0
 
     def _ensure_loaded(self) -> None:
         if self._model is not None:
             return
+        from athenaeum._yesno_worker import read_temperature
+
+        self._temperature = read_temperature(self._weights_path)
         try:
             import torch
             from transformers import (
@@ -159,6 +182,13 @@ class MayaAdapter:
         )
 
     def p_yes(self, question: str, text: str) -> float:
+        # Issue athenaeum#2063 AC9: the two-logit transform is imported from
+        # `athenaeum._yesno_worker.p_yes_from_logits` -- no duplicate
+        # softmax here. At temperature 1.0 (no `maya_config.json`) this is
+        # numerically identical to the prior plain-softmax behaviour, which
+        # is why this script's own eval tests pass unchanged.
+        from athenaeum._yesno_worker import p_yes_from_logits
+
         self._ensure_loaded()
         torch = self._torch
         inputs = self._tokenizer(question, text, return_tensors="pt", truncation=True)
@@ -166,11 +196,14 @@ class MayaAdapter:
             logits = self._model(**inputs).logits
         num_labels = logits.shape[-1]
         if num_labels == 1:
-            # Single-logit head: the logit itself is the yes-score.
+            # Single-logit head: the logit itself is the yes-score. No
+            # yes/no logit pair exists to apply a temperature to.
             return float(torch.sigmoid(logits)[0, 0])
-        probs = torch.softmax(logits, dim=-1)
         assert self._yes_index is not None
-        return float(probs[0, self._yes_index])
+        others = [float(logits[0, i]) for i in range(num_labels) if i != self._yes_index]
+        logit_yes = float(logits[0, self._yes_index])
+        logit_no = max(others)
+        return p_yes_from_logits(logit_yes, logit_no, self._temperature)
 
 
 @dataclass(frozen=True)

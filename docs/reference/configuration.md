@@ -3333,6 +3333,82 @@ corpus-layout fact an operator sets once (if ever), not a per-invocation
 dial — mirrors `resolve_authority_grant_implications`'s yaml-only
 posture for the same reason.
 
+## `pii`
+
+### `resolve_pii_hazard_classifier_interpreter`
+
+- **YAML path:** `pii.hazard_classifier.interpreter`
+- **Environment variable:** `ATHENAEUM_MAYA_PYTHON`
+- **CLI flag:** —
+- **Default:** `None`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+``pii.hazard_classifier.interpreter`` (env ``ATHENAEUM_MAYA_PYTHON``, default unset).
+
+A Python interpreter with ``torch``/``transformers`` installed, that
+`athenaeum.yesno.SubprocessYesNoScorer` launches as a CHILD
+process — keeps those packages out of the deploy
+venv and out of this process's own crash domain. Unset means the
+classifier is unavailable and every mode falls back to regex-only.
+
+### `resolve_pii_hazard_classifier_mode`
+
+- **YAML path:** `pii.hazard_classifier.mode`
+- **Environment variable:** `ATHENAEUM_PII_HAZARD_CLASSIFIER_MODE`
+- **CLI flag:** —
+- **Default:** `'none'`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+``pii.hazard_classifier.mode`` (env ``ATHENAEUM_PII_HAZARD_CLASSIFIER_MODE``,
+default ``"none"``).
+
+ (Vitruvius design): gates whether Maya (a local
+yes/no cross-encoder) scores the post-allowlist email/phone tokens
+``storage lint-pii`` and ``merges recompare`` already found via regex.
+``"none"`` is byte-identical to pre- behaviour and is the
+default. ``"shadow"`` scores those tokens and appends one ledger line
+per token under the cache directory — it never changes a verdict or the
+gate's exit code. An unrecognized value (including ``"prefilter"``,
+this slice's follow-on, not yet built) raises
+`PiiHazardClassifierConfigError` naming the key — env beats yaml
+beats default, mirroring `athenaeum.decision_provider.resolve_decision_provider`.
+
+### `resolve_pii_hazard_classifier_timeout_secs`
+
+- **YAML path:** `pii.hazard_classifier.timeout_secs`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `300.0`
+- **Precedence:** `athenaeum.yaml` > code default
+
+``pii.hazard_classifier.timeout_secs`` (yaml only, default ``300.0``).
+
+A whole-batch bound on the out-of-process Maya worker — expiry means the batch is unavailable, never a partial
+score. No env override is offered for this knob (the interpreter and
+weights paths are the operator-facing knobs that matter at startup; this
+is a tuning value). A non-numeric yaml value falls back to the default
+with a WARNING, mirroring `_env_number`'s malformed-value policy
+for every other numeric knob in this module.
+
+### `resolve_pii_hazard_classifier_weights_path`
+
+- **YAML path:** `pii.hazard_classifier.weights_path`
+- **Environment variable:** `ATHENAEUM_MAYA_WEIGHTS_PATH`
+- **CLI flag:** —
+- **Default:** `None`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+``pii.hazard_classifier.weights_path`` (env ``ATHENAEUM_MAYA_WEIGHTS_PATH``, default unset).
+
+The local Maya weights directory. Reuses the
+eval script's existing env var name
+(``scripts/eval_maya_pii_hazard.py:WEIGHTS_PATH_ENV``) rather than
+inventing a second one for the same artifact. Unset means the classifier
+is unavailable and every mode falls back to regex-only — there is no
+implicit download, ever, and no path default: the only paths that exist
+today sit under lane scratch (``~/.local/state/occam-lanes/``), which
+must never become a code default.
+
 ## `push_budget`
 
 ### `resolve_push_token_budget`

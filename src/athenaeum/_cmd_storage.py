@@ -63,7 +63,14 @@ if TYPE_CHECKING:
 
 from athenaeum._cli_shared import _acquire_or_exit, _add_lock_args, _resolve_knowledge_root
 from athenaeum.atomic_io import atomic_write_text
-from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT, load_config
+from athenaeum.config import (
+    DEFAULT_KNOWLEDGE_ROOT,
+    load_config,
+    resolve_pii_hazard_classifier_interpreter,
+    resolve_pii_hazard_classifier_mode,
+    resolve_pii_hazard_classifier_timeout_secs,
+    resolve_pii_hazard_classifier_weights_path,
+)
 from athenaeum.pending_merges_pii import scrub_pending_merges
 from athenaeum.pii import (
     PII_ALLOWLIST_FILENAME,
@@ -77,7 +84,18 @@ from athenaeum.pii import (
 )
 from athenaeum.pii_h1_audit import MARKER_LEADING, find_h1_marker_pages
 from athenaeum.pii_h1_audit import render_report as render_h1_audit_report
-from athenaeum.pii_verdicts import ledger_scan_exclusions, load_not_pii_allowlist
+from athenaeum.pii_hazard_classifier import (
+    MODE_SHADOW,
+    RECOGNIZER_EMAIL,
+    RECOGNIZER_PHONE,
+    ShadowCollector,
+    run_shadow_scoring,
+)
+from athenaeum.pii_verdicts import (
+    ledger_scan_exclusions,
+    load_is_pii_values,
+    load_not_pii_allowlist,
+)
 from athenaeum.rules import (
     DispositionPruneMismatchError,
     default_shape_rule_dispositions_path,
@@ -990,6 +1008,26 @@ def _cmd_storage_migrate_pii_bulk(args: argparse.Namespace) -> int:
     return 1 if conflicted else 0
 
 
+def _annotate_shadow_p_yes(
+    tokens: list[str], recognizer: str, shadow_p_yes: dict[tuple[str, str], float]
+) -> list[str]:
+    """Annotate *tokens* with a shadow-mode ``P(yes)`` when one was scored.
+
+    Human-text output only (issue athenaeum#2063's "operator view" -- the
+    per-token detail is printed, never persisted beyond what the ledger
+    already records). ``shadow_p_yes`` is empty in mode ``"none"`` or on any
+    fail-closed path, so this is a no-op then -- the gate's text output is
+    unchanged apart from this annotation (AC3).
+    """
+    if not shadow_p_yes:
+        return tokens
+    out = []
+    for token in tokens:
+        p_yes = shadow_p_yes.get((recognizer, token))
+        out.append(f"{token} (p_yes={p_yes:.4f})" if p_yes is not None else token)
+    return out
+
+
 def _cmd_storage_lint_pii(args: argparse.Namespace) -> int:
     """Corpus-wide PII gate (issue athenaeum#495): non-zero exit on any inline finding.
 
@@ -1080,6 +1118,38 @@ def _cmd_storage_lint_pii(args: argparse.Namespace) -> int:
         wiki_root, exclude=ledger_exclude_paths, exclude_names=scan_exclude_names
     )
     result = adjudicate_corpus_pii(findings, entries, errors=errors)
+
+    # Issue athenaeum#2063 (Vitruvius design): mode "shadow" scores the
+    # post-allowlist residue -- unexplained emails/phones -- with Maya,
+    # after ALSO excluding any value already carrying a sticky off-corpus
+    # "is PII" verdict (operator authority is always read before the model).
+    # Mode "none" (the default) does none of this and is byte-identical to
+    # pre-athenaeum#2063 behaviour: no extra config lookup side effects, no
+    # ledger file, no classifier import.
+    hazard_mode = resolve_pii_hazard_classifier_mode(config)
+    shadow_p_yes: dict[tuple[str, str], float] = {}
+    if hazard_mode == MODE_SHADOW:
+        is_pii_values = load_is_pii_values(knowledge_root=knowledge_root, config=config)
+        collector = ShadowCollector(surface="lint-pii")
+        for finding in result.findings:
+            for email in finding.unexplained_emails:
+                if email in is_pii_values:
+                    collector.n_skipped_is_pii += 1
+                    continue
+                collector.add(RECOGNIZER_EMAIL, email)
+            for phone in finding.unexplained_phones:
+                if phone in is_pii_values:
+                    collector.n_skipped_is_pii += 1
+                    continue
+                collector.add(RECOGNIZER_PHONE, phone)
+        shadow_p_yes = run_shadow_scoring(
+            collector,
+            mode=hazard_mode,
+            weights_path=resolve_pii_hazard_classifier_weights_path(config),
+            interpreter=resolve_pii_hazard_classifier_interpreter(config),
+            timeout_secs=resolve_pii_hazard_classifier_timeout_secs(config),
+        )
+
     # raw/ is scanned with the same self-exclusion (defensive: the allowlist
     # is conventionally under wiki/, but an operator-supplied --allowlist
     # could in principle point elsewhere) and NO adjudication — it is a raw
@@ -1154,9 +1224,15 @@ def _cmd_storage_lint_pii(args: argparse.Namespace) -> int:
         for f in unexplained_files:
             parts: list[str] = []
             if f.unexplained_emails:
-                parts.append(f"emails={f.unexplained_emails}")
+                annotated_emails = _annotate_shadow_p_yes(
+                    f.unexplained_emails, RECOGNIZER_EMAIL, shadow_p_yes
+                )
+                parts.append(f"emails={annotated_emails}")
             if f.unexplained_phones:
-                parts.append(f"phones={f.unexplained_phones}")
+                annotated_phones = _annotate_shadow_p_yes(
+                    f.unexplained_phones, RECOGNIZER_PHONE, shadow_p_yes
+                )
+                parts.append(f"phones={annotated_phones}")
             print(f"  {f.path}: {'; '.join(parts)}")
         wiki_rc = EXIT_PII_FOUND
 

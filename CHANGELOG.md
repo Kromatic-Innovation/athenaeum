@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Maya PII-hazard classifier, modes `none` | `shadow` (issue athenaeum#2063).**
+  A new `YesNoScorer` seam (`src/athenaeum/yesno.py`) runs Maya (a local
+  yes/no cross-encoder) out of process via an operator-named interpreter
+  and weights directory (`pii.hazard_classifier.interpreter` /
+  `.weights_path`, env `ATHENAEUM_MAYA_PYTHON` / `ATHENAEUM_MAYA_WEIGHTS_PATH`);
+  the worker (`_yesno_worker.py`) has no `athenaeum` import at all, forces
+  offline env vars before any model import, and ships the one shared
+  logit-to-probability transform (`p_yes_from_logits`,
+  temperature-aware) that `scripts/eval_maya_pii_hazard.py` now imports
+  too, so eval and production can no longer disagree on the weights' own
+  `maya_config.json` temperature (1.65). `pii.hazard_classifier.mode`
+  (default `none`) gates two operator commands only — `storage lint-pii`
+  and `merges recompare` — scoring the post-allowlist, post-sticky-verdict
+  email/phone tokens they already found via regex. `mode: none` is
+  byte-identical to today (pinned); `mode: shadow` never changes a verdict
+  or the gate's exit code (pinned) and appends one no-plaintext ledger
+  line per scored token plus a run summary to
+  `<cache_dir>/pii_hazard_shadow/<YYYY-MM>.jsonl`, beside `spend.jsonl`.
+  Any missing piece (weights, interpreter, a worker crash/timeout/bad
+  output) fails closed to regex-only with one loud stderr message, never
+  an exception into the command. `docs/reference/configuration.md`
+  regenerated with the new key family;
+  `docs/measurements/maya-pii-hazard-eval-2026-10.md` gains a note that
+  the abstention band must be re-measured at temperature 1.65 before any
+  default is quoted. The `prefilter` mode from the original issue body is
+  re-sliced to a follow-on child, not built here.
+
 - **Eval: Jev vs. the current model on `claim_kind` (issue athenaeum#1998).**
   `scripts/eval_jev_claim_kind.py` runs 43 labelled memory snippets (every
   file under `~/knowledge/raw/auto-memory/` carrying an author-supplied

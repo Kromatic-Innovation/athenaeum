@@ -73,6 +73,12 @@ from athenaeum.comparator import (
     page_from_path,
     record_comparison,
 )
+from athenaeum.config import (
+    resolve_pii_hazard_classifier_interpreter,
+    resolve_pii_hazard_classifier_mode,
+    resolve_pii_hazard_classifier_timeout_secs,
+    resolve_pii_hazard_classifier_weights_path,
+)
 from athenaeum.dimensions import DEFAULT_REGISTRY, DimensionRegistry
 from athenaeum.models import TokenUsage, parse_frontmatter
 from athenaeum.pending_merges import PendingMerge, parse_pending_merges
@@ -86,7 +92,14 @@ from athenaeum.pii import (
     is_pii_flagged,
     load_pii_allowlist,
 )
-from athenaeum.pii_verdicts import load_not_pii_allowlist
+from athenaeum.pii_hazard_classifier import (
+    MODE_SHADOW,
+    RECOGNIZER_EMAIL,
+    RECOGNIZER_PHONE,
+    ShadowCollector,
+    run_shadow_scoring,
+)
+from athenaeum.pii_verdicts import load_is_pii_values, load_not_pii_allowlist
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from athenaeum.provider import LLMBackend
@@ -190,6 +203,8 @@ def identify_pii_hazards(
     paths: list[Path],
     *,
     allowlist: Mapping[str, str] | Iterable[PiiAllowlistEntry] | None = None,
+    classifier_collector: "ShadowCollector | None" = None,
+    is_pii_values: frozenset[str] | None = None,
 ) -> list[str]:
     """Return human-readable reasons this proposal is a PII hazard, or ``[]``.
 
@@ -218,6 +233,18 @@ def identify_pii_hazards(
     the operator set stays a hazard signal regardless). Omitting *allowlist*
     preserves this function's pre-athenaeum#2006 behaviour exactly.
 
+    *classifier_collector* (issue athenaeum#2063, shadow mode only) is an
+    optional :class:`athenaeum.pii_hazard_classifier.ShadowCollector` this
+    function FEEDS but never scores -- scoring happens once, after the
+    whole recompare loop, in :func:`recompare_pending_merges`, so a single
+    command invocation launches the Maya worker at most once rather than
+    once per proposal. Omitting it (the default) is byte-identical to this
+    function's pre-athenaeum#2063 behaviour: nothing new is called, nothing
+    new runs. *is_pii_values*, when given alongside the collector, excludes
+    any token already carrying a sticky off-corpus "is PII" verdict from
+    being collected (counted in ``classifier_collector.n_skipped_is_pii``
+    instead) -- operator authority is always read before the model.
+
     A reason names the file, so the operator can go and look.
     """
     entries = coerce_pii_allowlist(allowlist)
@@ -237,6 +264,17 @@ def identify_pii_hazards(
         phones = [p for p in find_inline_phones(body) if not allowlist_matches(p, entries)]
         if phones:
             reasons.append(f"{path.name}: {len(phones)} inline phone number(s)")
+        if classifier_collector is not None:
+            for email in emails:
+                if is_pii_values is not None and email in is_pii_values:
+                    classifier_collector.n_skipped_is_pii += 1
+                    continue
+                classifier_collector.add(RECOGNIZER_EMAIL, email)
+            for phone in phones:
+                if is_pii_values is not None and phone in is_pii_values:
+                    classifier_collector.n_skipped_is_pii += 1
+                    continue
+                classifier_collector.add(RECOGNIZER_PHONE, phone)
     return reasons
 
 
@@ -344,6 +382,18 @@ def recompare_pending_merges(
     if limit is not None and limit > 0:
         unresolved = unresolved[:limit]
 
+    # Issue athenaeum#2063 (Vitruvius design): mode "shadow" scores the
+    # post-allowlist hazard tokens this loop finds -- once, after the loop,
+    # not once per proposal. Mode "none" (default) resolves no is-PII
+    # ledger and builds no collector contents, matching this function's
+    # byte-identical-by-default contract.
+    hazard_mode = resolve_pii_hazard_classifier_mode(config)
+    classifier_collector: ShadowCollector | None = None
+    is_pii_values: frozenset[str] | None = None
+    if hazard_mode == MODE_SHADOW:
+        classifier_collector = ShadowCollector(surface="recompare")
+        is_pii_values = load_is_pii_values(knowledge_root=wiki_root.parent, config=config)
+
     results: list[ProposalRecompare] = []
     compared = 0
     skipped_fresh = 0
@@ -376,7 +426,12 @@ def recompare_pending_merges(
                     continue
                 paths.append(resolved)
 
-            hazard_reasons = identify_pii_hazards(paths, allowlist=allowlist)
+            hazard_reasons = identify_pii_hazards(
+                paths,
+                allowlist=allowlist,
+                classifier_collector=classifier_collector,
+                is_pii_values=is_pii_values,
+            )
             is_hazard = bool(hazard_reasons)
 
             pair_verdicts: dict[str, str | None] = {}
@@ -456,6 +511,15 @@ def recompare_pending_merges(
         # summary WARNING of whatever this partial pass accumulated, instead of
         # silently discarding the count along with the exception.
         flush_content_relation_unavailable_warning()
+
+    if classifier_collector is not None:
+        run_shadow_scoring(
+            classifier_collector,
+            mode=hazard_mode,
+            weights_path=resolve_pii_hazard_classifier_weights_path(config),
+            interpreter=resolve_pii_hazard_classifier_interpreter(config),
+            timeout_secs=resolve_pii_hazard_classifier_timeout_secs(config),
+        )
 
     return RecompareResult(
         applied=apply,

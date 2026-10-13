@@ -5229,6 +5229,144 @@ def resolve_pii_scan_exclude(config: dict[str, Any] | None) -> list[str]:
     return [n.strip() for n in raw if isinstance(n, str) and n.strip()]
 
 
+class PiiHazardClassifierConfigError(ValueError):
+    """Raised by :func:`resolve_pii_hazard_classifier_mode` on an unknown mode.
+
+    Mirrors :class:`SensitivityRoutingConfigError` / ``ScreeningConfigError``
+    / ``StorageConfigError``: a misrouted knob must be unconfigurable, not
+    silently broken (issue athenaeum#2063).
+    """
+
+
+#: Mode vocabulary this slice resolves to. ``prefilter`` is the follow-on
+#: child (issue athenaeum#2063's re-slice) and is deliberately absent here —
+#: naming it raises :class:`PiiHazardClassifierConfigError` exactly like any
+#: other unknown value, until that child lands.
+_PII_HAZARD_CLASSIFIER_VALID_MODES = ("none", "shadow")
+
+
+def resolve_pii_hazard_classifier_mode(config: dict[str, Any] | None) -> str:
+    """``pii.hazard_classifier.mode`` (env ``ATHENAEUM_PII_HAZARD_CLASSIFIER_MODE``,
+    default ``"none"``).
+
+    Issue athenaeum#2063 (Vitruvius design): gates whether Maya (a local
+    yes/no cross-encoder) scores the post-allowlist email/phone tokens
+    ``storage lint-pii`` and ``merges recompare`` already found via regex.
+    ``"none"`` is byte-identical to pre-athenaeum#2063 behaviour and is the
+    default. ``"shadow"`` scores those tokens and appends one ledger line
+    per token under the cache directory — it never changes a verdict or the
+    gate's exit code. An unrecognized value (including ``"prefilter"``,
+    this slice's follow-on, not yet built) raises
+    :class:`PiiHazardClassifierConfigError` naming the key — env beats yaml
+    beats default, mirroring :func:`athenaeum.decision_provider.resolve_decision_provider`.
+    """
+    env = os.environ.get("ATHENAEUM_PII_HAZARD_CLASSIFIER_MODE")
+    if env is not None and env.strip():
+        mode = env.strip().lower()
+        source = "env ATHENAEUM_PII_HAZARD_CLASSIFIER_MODE"
+    else:
+        mode = "none"
+        source = "default"
+        if isinstance(config, dict):
+            pii_cfg = config.get("pii")
+            if isinstance(pii_cfg, dict):
+                hazard_cfg = pii_cfg.get("hazard_classifier")
+                if isinstance(hazard_cfg, dict):
+                    raw_mode = hazard_cfg.get("mode")
+                    if isinstance(raw_mode, str) and raw_mode.strip():
+                        mode = raw_mode.strip().lower()
+                        source = "yaml pii.hazard_classifier.mode"
+    if mode not in _PII_HAZARD_CLASSIFIER_VALID_MODES:
+        raise PiiHazardClassifierConfigError(
+            f"unknown pii.hazard_classifier.mode {mode!r} (from {source}); "
+            f"valid values are: {', '.join(_PII_HAZARD_CLASSIFIER_VALID_MODES)}"
+        )
+    return mode
+
+
+def resolve_pii_hazard_classifier_weights_path(config: dict[str, Any] | None) -> str | None:
+    """``pii.hazard_classifier.weights_path`` (env ``ATHENAEUM_MAYA_WEIGHTS_PATH``, default unset).
+
+    The local Maya weights directory (issue athenaeum#2063). Reuses the
+    eval script's existing env var name
+    (``scripts/eval_maya_pii_hazard.py:WEIGHTS_PATH_ENV``) rather than
+    inventing a second one for the same artifact. Unset means the classifier
+    is unavailable and every mode falls back to regex-only — there is no
+    implicit download, ever, and no path default: the only paths that exist
+    today sit under lane scratch (``~/.local/state/occam-lanes/``), which
+    must never become a code default.
+    """
+    env = os.environ.get("ATHENAEUM_MAYA_WEIGHTS_PATH")
+    if env is not None and env.strip():
+        return env.strip()
+    if isinstance(config, dict):
+        pii_cfg = config.get("pii")
+        if isinstance(pii_cfg, dict):
+            hazard_cfg = pii_cfg.get("hazard_classifier")
+            if isinstance(hazard_cfg, dict):
+                raw = hazard_cfg.get("weights_path")
+                if isinstance(raw, str) and raw.strip():
+                    return raw.strip()
+    return None
+
+
+def resolve_pii_hazard_classifier_interpreter(config: dict[str, Any] | None) -> str | None:
+    """``pii.hazard_classifier.interpreter`` (env ``ATHENAEUM_MAYA_PYTHON``, default unset).
+
+    A Python interpreter with ``torch``/``transformers`` installed, that
+    :class:`athenaeum.yesno.SubprocessYesNoScorer` launches as a CHILD
+    process (issue athenaeum#2063) — keeps those packages out of the deploy
+    venv and out of this process's own crash domain. Unset means the
+    classifier is unavailable and every mode falls back to regex-only.
+    """
+    env = os.environ.get("ATHENAEUM_MAYA_PYTHON")
+    if env is not None and env.strip():
+        return env.strip()
+    if isinstance(config, dict):
+        pii_cfg = config.get("pii")
+        if isinstance(pii_cfg, dict):
+            hazard_cfg = pii_cfg.get("hazard_classifier")
+            if isinstance(hazard_cfg, dict):
+                raw = hazard_cfg.get("interpreter")
+                if isinstance(raw, str) and raw.strip():
+                    return raw.strip()
+    return None
+
+
+def resolve_pii_hazard_classifier_timeout_secs(config: dict[str, Any] | None) -> float:
+    """``pii.hazard_classifier.timeout_secs`` (yaml only, default ``300.0``).
+
+    A whole-batch bound on the out-of-process Maya worker (issue
+    athenaeum#2063) — expiry means the batch is unavailable, never a partial
+    score. No env override is offered for this knob (the interpreter and
+    weights paths are the operator-facing knobs that matter at startup; this
+    is a tuning value). A non-numeric yaml value falls back to the default
+    with a WARNING, mirroring :func:`_env_number`'s malformed-value policy
+    for every other numeric knob in this module.
+    """
+    default = 300.0
+    if not isinstance(config, dict):
+        return default
+    pii_cfg = config.get("pii")
+    if not isinstance(pii_cfg, dict):
+        return default
+    hazard_cfg = pii_cfg.get("hazard_classifier")
+    if not isinstance(hazard_cfg, dict):
+        return default
+    raw = hazard_cfg.get("timeout_secs")
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "Ignoring malformed pii.hazard_classifier.timeout_secs=%r (expected a "
+            "number); falling back to the default.",
+            raw,
+        )
+        return default
+
+
 def resolve_excluded_fields_config(
     config: dict[str, Any] | None,
 ) -> dict[str, tuple[str, ...]]:
