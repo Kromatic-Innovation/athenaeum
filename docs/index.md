@@ -122,6 +122,7 @@ Evidence, kept out of the reading path.
 - [Maya and Jev PII-hazard eval](measurements/maya-pii-hazard-eval-2026-10.md) — a local
   yes/no cross-encoder (Maya) and a hosted classifier (Jev) measured against the
   regex PII-hazard gate on the same fixture set.
+- [Maya as an ordering signal for the name-collision queue](measurements/maya-collision-triage-eval-2026-10.md) — ordering-only eval against the resolved name-collision ledger; inconclusive, 0 usable labelled pairs in the live corpus as of this run; Maya never authorises a merge.
 - [Jev vs. current-model eval: `claim_kind`](measurements/jev-claim-kind-eval-2026-10.md) — accuracy, latency, and cost comparison on the `claim_kind` classify-knob question; recommends keeping the current model.
 - [Jev comparator eval](measurements/jev-comparator-eval-2026-10.md) — a hosted
   Choice-question classifier measured against the five-verdict comparator's recorded
