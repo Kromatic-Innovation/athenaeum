@@ -36,7 +36,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Literal
 
 from athenaeum.models import is_tombstone, parse_frontmatter, resolve_page_type, slugify
-from athenaeum.pending_merges import parse_pending_merges, resolve_merge, write_pending_merge
+from athenaeum.pending_merges import (
+    NAME_COLLISION_RATIONALE_PREFIX,
+    parse_pending_merges,
+    resolve_merge,
+    write_pending_merge,
+)
 from athenaeum.t1_census import T1_UNSCREENED_NAME_COLLISION, get_t1_census
 
 if TYPE_CHECKING:
@@ -491,7 +496,7 @@ def resolve_name_collisions(
             verdict = "ambiguous"
         type_note = f" (type: {collision.type})" if collision.type else " (type: unknown)"
         rationale = (
-            f"athenaeum#1170 nightly name-collision scan: {len(collision.pages)} pages "
+            f"{NAME_COLLISION_RATIONALE_PREFIX}: {len(collision.pages)} pages "
             f"share the name {collision.name!r}{type_note}; classified {verdict} "
             f"(canonical: {canonical.path.name})."
         )

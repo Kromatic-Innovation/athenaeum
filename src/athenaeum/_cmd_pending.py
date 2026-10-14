@@ -256,9 +256,25 @@ def cmd_ingest_answers(args: argparse.Namespace) -> int:
         lock.release()
 
     if decision_report.applied or decision_report.skipped:
+        # Issue athenaeum#2069: the per-item ``error_code`` (``fold_narrows_coordinate``,
+        # ``fold_widen_impossible``, ``already_resolved``, ...) is already on
+        # every skipped outcome (`DecisionAnswerOutcome.error_code`) but was
+        # only ever logged at INFO — invisible to anyone reading just this
+        # summary line, so a guard refusal and every other skip reason looked
+        # identical ("N skipped (see log)"). Break the count down by code
+        # instead of asking the operator to go find the log.
+        skipped_by_code: dict[str, int] = {}
+        for outcome in decision_report.outcomes:
+            if outcome.applied:
+                continue
+            code = outcome.error_code or "unknown"
+            skipped_by_code[code] = skipped_by_code.get(code, 0) + 1
+        breakdown = ", ".join(f"{code}: {n}" for code, n in sorted(skipped_by_code.items()))
         print(
             f"Applied {decision_report.applied} decision answer(s), "
-            f"{decision_report.skipped} skipped (see log)."
+            f"{decision_report.skipped} skipped"
+            + (f" ({breakdown})" if breakdown else " (see log)")
+            + "."
         )
     print(f"Ingested {count} answered question(s).")
 

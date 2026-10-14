@@ -85,8 +85,6 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Literal
 
-from athenaeum.atomic_io import atomic_write_text
-
 # Issue athenaeum#716 (lane 716-B): reuse the ALREADY-EXISTING coordinate
 # widening primitive rather than writing a second one (comparator.py's own
 # docstring, athenaeum#715 AC9). `comparator` and `pending_merges` are both
@@ -95,12 +93,16 @@ from athenaeum.atomic_io import atomic_write_text
 # < imported_layer), and comparator.py never imports pending_merges (or
 # anything that transitively does), so this introduces no cycle either --
 # see tests/test_import_graph_acyclic.py, which this change keeps green.
-from athenaeum.comparator import _widen_dimension
+from athenaeum.answers import raise_pending_question
+from athenaeum.atomic_io import atomic_write_text
+from athenaeum.comparator import CoordinateWidenImpossible, _widen_dimension
 from athenaeum.dimensions import (
     DEFAULT_REGISTRY,
+    UNIVERSAL_MARKER,
     Dimension,
     DimensionKind,
     DimensionRegistry,
+    NullMeans,
     coordinate_value,
     parsed_coordinate,
 )
@@ -234,6 +236,14 @@ class PendingMerge:
 
 
 WRITE_KINDS = ("create-merged", "fold-into-existing")
+
+#: Rationale prefix :func:`athenaeum.name_collisions.resolve_name_collisions`
+#: stamps on every proposal it writes (issue athenaeum#1170). Exported here
+#: (name_collisions.py already imports this module, so the constant lives
+#: on this side of that one-way edge) so the fold-apply coordinate-widening
+#: gate below (issue athenaeum#2069) can recognize a name-collision-scan
+#: proposal without re-deriving the exact string in two places.
+NAME_COLLISION_RATIONALE_PREFIX = "athenaeum#1170 nightly name-collision scan"
 
 
 def identity_slug(path: Path, meta: object) -> str | None:
@@ -1458,6 +1468,13 @@ def _coordinate_is_at_least_as_wide(
     raw_narrow = coordinate_value(dimension, narrow_meta)
     if raw_wide is None or raw_narrow is None:
         return True
+    if raw_wide == UNIVERSAL_MARKER:
+        # The explicit "applies everywhere" escape already covers any
+        # concrete *raw_narrow*, independent of dimension kind -- mirrors
+        # _widen_dimension's own UNIVERSAL_MARKER short-circuit, so a
+        # widen that substituted this value always passes its own
+        # narrowing check back.
+        return True
     if dimension.kind == DimensionKind.HIERARCHY:
         wide_parts = str(raw_wide).strip().lower().split("/")
         narrow_parts = str(raw_narrow).strip().lower().split("/")
@@ -1693,6 +1710,25 @@ def _apply_fold_into_existing(
     # implementation), patch that into the draft's frontmatter, and THEN
     # verify the result is not narrower than any folded source — refusing
     # the fold outright (nothing written, no commit taken) if it is.
+    #
+    # Issue athenaeum#2069: `_widen_over_metas` can now raise
+    # `CoordinateWidenImpossible` — two sides that are genuinely
+    # incompatible (HIERARCHY siblings; differing ENUM/IDENTITY values) —
+    # rather than silently returning a value that LOOKS widened but still
+    # fails the narrowing check below for the wrong reason. A
+    # name-collision-scan proposal (`NAME_COLLISION_RATIONALE_PREFIX`) has
+    # already been through a human `approve` specifically because the
+    # pages are the SAME real-world thing described at independently
+    # compiled, differently-worded scopes — for THAT origin only, this
+    # function completes the widen itself: substitute the dimension's own
+    # universal escape when `null_means` declares that safe, or raise a
+    # pending decision and refuse with a distinct error code when it does
+    # not (no silent re-refusal loop on the next `ingest-answers` tick). A
+    # fold proposed through any OTHER path keeps the pre-existing hard
+    # refusal — the narrowing invariant is still the fold-bug detector it
+    # was written to be for that case (see TestCoordinateWidening in
+    # tests/test_merge_fold_write_paths.py).
+    is_name_collision_fold = pm.rationale.startswith(NAME_COLLISION_RATIONALE_PREFIX)
     draft_meta, draft_body_text = parse_frontmatter(pm.draft_merged_body)
     if not isinstance(draft_meta, dict):
         draft_meta = {}
@@ -1704,7 +1740,58 @@ def _apply_fold_into_existing(
         metas_in_order = [prior_meta, draft_meta] + [
             source_metas[s] for s in folded_sources
         ]
-        widened_value = _widen_over_metas(dimension, metas_in_order)
+        try:
+            widened_value = _widen_over_metas(dimension, metas_in_order)
+        except CoordinateWidenImpossible as exc:
+            if is_name_collision_fold and dimension.null_means == NullMeans.UNIVERSAL:
+                widened_value = UNIVERSAL_MARKER
+            elif is_name_collision_fold:
+                pending_path = wiki_root / "_pending_questions.md"
+                raise_pending_question(
+                    pending_path,
+                    question=(
+                        f"Fold of {target_slug!r} cannot auto-widen its "
+                        f"{dimension.name!r} coordinate — what should the "
+                        "canonical's value be?"
+                    ),
+                    context=(
+                        f"{NAME_COLLISION_RATIONALE_PREFIX} fold into "
+                        f"{target_slug!r} found incompatible {dimension.name!r} "
+                        f"values ({exc.value_a!r} vs {exc.value_b!r}) across "
+                        "the folded sources that cannot be automatically "
+                        "widened into a single covering coordinate. Decide "
+                        "what the canonical page's coordinate should be, then "
+                        "re-approve the proposal."
+                    ),
+                    entity=target_slug,
+                    source=str(target_path),
+                )
+                return {
+                    "ok": False,
+                    "error_code": "fold_widen_impossible",
+                    "message": (
+                        f"fold refused: cannot auto-widen {dimension.name!r} "
+                        f"across folded sources ({exc.value_a!r} vs "
+                        f"{exc.value_b!r}); a pending decision has been raised "
+                        "in _pending_questions.md — answer that instead of "
+                        "re-approving this proposal unchanged, or ingest-answers "
+                        "will keep refusing it identically on every tick."
+                    ),
+                }
+            else:
+                # Not a name-collision-scan proposal: preserve the
+                # pre-athenaeum#2069 narrowing refusal for this case. Use the
+                # widest value `_widen_over_metas` DID manage to accumulate
+                # before hitting the incompatible pair (`exc.value_a` — the
+                # running fold, never the draft's own possibly-absent
+                # coordinate, which would under-report what was already
+                # folded and let an absent-coordinate pass trivially
+                # through `_coordinate_is_at_least_as_wide`). This is
+                # itself still narrower than the offending source by
+                # construction (that is WHY `_widen_dimension` raised), so
+                # the narrowing-invariant loop below correctly refuses with
+                # `fold_narrows_coordinate`, exactly as before athenaeum#2069.
+                widened_value = exc.value_a
         current_value = (
             parsed_coordinate(dimension, draft_meta)
             if dimension.kind == DimensionKind.INTERVAL
