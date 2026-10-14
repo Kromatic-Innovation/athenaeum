@@ -93,7 +93,7 @@ from typing import TYPE_CHECKING, Any, Callable, Literal
 # < imported_layer), and comparator.py never imports pending_merges (or
 # anything that transitively does), so this introduces no cycle either --
 # see tests/test_import_graph_acyclic.py, which this change keeps green.
-from athenaeum.answers import raise_pending_question
+from athenaeum.answers import parse_pending_questions, raise_pending_question, resolve_by_id
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.comparator import CoordinateWidenImpossible, _widen_dimension
 from athenaeum.dimensions import (
@@ -244,6 +244,54 @@ WRITE_KINDS = ("create-merged", "fold-into-existing")
 #: gate below (issue athenaeum#2069) can recognize a name-collision-scan
 #: proposal without re-deriving the exact string in two places.
 NAME_COLLISION_RATIONALE_PREFIX = "athenaeum#1170 nightly name-collision scan"
+
+
+def _withdraw_stale_widen_question(
+    pending_path: Path, target_slug: str, dimension_name: str, resolved_value: Any
+) -> None:
+    """Resolve (not re-raise) an EARLIER ``fold_widen_impossible`` pending
+    question this exact fold previously raised against *dimension_name* —
+    issue athenaeum#2071: once the IDENTITY-coordinate case below applies the
+    fold automatically, the question athenaeum#2069 raised asking a human
+    "what should the canonical's value be?" is now stale (the answer
+    already landed on disk). Reuses :func:`athenaeum.answers.resolve_by_id`
+    — the SAME flip-checkbox-and-archive-on-next-tick path a human
+    answering by hand goes through — rather than inventing a second
+    "withdraw" mechanism; a block this resolves gets archived on the next
+    ``ingest-answers`` run exactly like any other answered question.
+
+    Matches by ``entity == target_slug`` and the dimension name embedded in
+    the question text (the exact phrasing the pending-decision branch below
+    raises) rather than by id, since this fold has no record of which id a
+    PRIOR run (athenaeum#2069, pre-fix) minted for it.
+
+    Best-effort and silent on any failure (file missing, no matching
+    question, a human already answered it in the meantime, ...) — this is
+    cleanup of a now-stale question, never a precondition for the fold
+    itself, which has already succeeded by the time this is called.
+    """
+    if not pending_path.exists():
+        return
+    try:
+        questions = parse_pending_questions(pending_path)
+    except (OSError, UnicodeDecodeError, ValueError):
+        return
+    marker = f"its {dimension_name!r} coordinate"
+    for pq in questions:
+        if pq.answered or pq.entity != target_slug or marker not in pq.question:
+            continue
+        resolve_by_id(
+            pending_path,
+            pq.id,
+            (
+                f"Resolved automatically (athenaeum#2071): the fold now "
+                f"applies with the canonical's {dimension_name!r} coordinate "
+                f"set to {resolved_value!r} — opaque-identifier dimension, "
+                "folded sources' ids preserved as aliases on the canonical. "
+                "No human adjudication needed for a name-collision-scan "
+                "approval."
+            ),
+        )
 
 
 def identity_slug(path: Path, meta: object) -> str | None:
@@ -1734,6 +1782,15 @@ def _apply_fold_into_existing(
         draft_meta = {}
     widened_draft_meta = dict(draft_meta)
     coordinates_widened: dict[str, Any] = {}
+    # Issue athenaeum#2071: dimension names resolved via the IDENTITY-kind
+    # branch just below — the narrowing-invariant loop that follows this one
+    # must NOT re-refuse these (a folded source's own differing opaque id is
+    # deliberately preserved as an alias, not required to equal the
+    # canonical's chosen id) — and the stale `fold_widen_impossible` pending
+    # question athenaeum#2069 raised for each gets withdrawn once the whole
+    # fold actually succeeds.
+    identity_resolved_dimensions: dict[str, Any] = {}
+    identity_aliases: list[str] = []
     for dimension in registry:
         if not dimension.separates:
             continue
@@ -1743,7 +1800,48 @@ def _apply_fold_into_existing(
         try:
             widened_value = _widen_over_metas(dimension, metas_in_order)
         except CoordinateWidenImpossible as exc:
-            if is_name_collision_fold and dimension.null_means == NullMeans.UNIVERSAL:
+            if is_name_collision_fold and dimension.kind == DimensionKind.IDENTITY:
+                # An opaque per-page identifier (``subject`` is the only
+                # IDENTITY-kind dimension today, but this branches on the
+                # KIND — a Dimension-registry property — rather than the
+                # name string, so any future IDENTITY dimension gets the
+                # same treatment) has no universal escape. But a
+                # name-collision-scan proposal has already been through a
+                # human `approve` ruling the pages the SAME real-world
+                # thing, so "what single id covers both?" has exactly one
+                # right answer: the canonical's own concrete id when it has
+                # one (never overridden by a differing source), else the
+                # one concrete id a source carries. `parsed_coordinate`
+                # already normalizes each IDENTITY dimension's own
+                # "no real identity" sentinel (``undeterminable`` for
+                # ``subject``, via `UNDETERMINABLE_SUBJECT`) to `None` —
+                # generically, by kind, not by re-deriving that constant
+                # here — so every OTHER concrete id collected below is a
+                # genuine, asserted identity, never a degraded placeholder.
+                concrete_values: list[Any] = []
+                for m in metas_in_order:
+                    v = parsed_coordinate(dimension, m)
+                    if v is not None and v not in concrete_values:
+                        concrete_values.append(v)
+                canonical_concrete = parsed_coordinate(dimension, prior_meta)
+                chosen = (
+                    canonical_concrete
+                    if canonical_concrete is not None
+                    else (concrete_values[0] if concrete_values else None)
+                )
+                if chosen is not None:
+                    widened_value = chosen
+                    identity_resolved_dimensions[dimension.name] = chosen
+                    identity_aliases.extend(v for v in concrete_values if v != chosen)
+                else:
+                    # Every side the widen saw is the sentinel/null —
+                    # CoordinateWidenImpossible requires two concrete,
+                    # differing raw values, so this should be unreachable
+                    # in practice. Fall through to the pre-existing
+                    # pending-decision path below rather than ever writing
+                    # a `None` coordinate.
+                    widened_value = exc.value_a
+            elif is_name_collision_fold and dimension.null_means == NullMeans.UNIVERSAL:
                 widened_value = UNIVERSAL_MARKER
             elif is_name_collision_fold:
                 pending_path = wiki_root / "_pending_questions.md"
@@ -1803,6 +1901,15 @@ def _apply_fold_into_existing(
 
     for dimension in registry:
         if not dimension.separates:
+            continue
+        if dimension.name in identity_resolved_dimensions:
+            # Issue athenaeum#2071: this dimension's post-fold value was
+            # DELIBERATELY chosen as the canonical's (or the one source's)
+            # concrete opaque id rather than required to equal every
+            # source's own — a differing source id is preserved as an
+            # alias (see `identity_aliases` below), not a narrowing bug.
+            # `_coordinate_is_at_least_as_wide`'s IDENTITY branch demands
+            # exact equality, which this case never satisfies by design.
             continue
         for src in folded_sources:
             if not _coordinate_is_at_least_as_wide(
@@ -1882,13 +1989,23 @@ def _apply_fold_into_existing(
     carried_meta = _add_aliases_to_frontmatter(
         target_meta, list(prior_aliases_list)
     )
-    new_meta = _add_aliases_to_frontmatter(carried_meta, folded_slugs)
+    # Issue athenaeum#2071: a folded source's differing opaque-identifier
+    # value (``identity_aliases``, collected in the widen loop above) goes
+    # into the SAME ``aliases:`` frontmatter list as a folded source's
+    # name slug — the existing alias mechanism, reused rather than a new
+    # frontmatter key, so an inbound reference by either the page's name
+    # or its superseded subject id still resolves to the canonical.
+    new_meta = _add_aliases_to_frontmatter(
+        carried_meta, folded_slugs + identity_aliases
+    )
     if new_meta != target_meta:
         final_target_text = render_frontmatter(new_meta) + target_body
         atomic_write_text(target_path, final_target_text)
     else:
         final_target_text = target_text
-    aliases_added = [s for s in folded_slugs if s not in existing_alias_slugs]
+    aliases_added = [
+        s for s in folded_slugs + identity_aliases if s not in existing_alias_slugs
+    ]
 
     # Issue athenaeum#716: the canonical's post-fold content hash, taken
     # HERE — after the step-1 body write and the step-3 alias write, not
@@ -2011,6 +2128,19 @@ def _apply_fold_into_existing(
                 f"librarian: fold {folded_slug_desc} into {target_slug} (athenaeum#947)",
                 "--",
                 *commit_b_rel_paths,
+            )
+
+    # Issue athenaeum#2071: now that the fold has actually succeeded, resolve
+    # any STALE `fold_widen_impossible` pending question a prior
+    # (pre-athenaeum#2071) ingest-answers tick raised against one of the
+    # dimensions this fold just resolved automatically — done here, after
+    # every refusal point above, so a fold that ends up refused for an
+    # UNRELATED reason never withdraws a question that is still live.
+    if identity_resolved_dimensions:
+        pending_path = wiki_root / "_pending_questions.md"
+        for dim_name, resolved_value in identity_resolved_dimensions.items():
+            _withdraw_stale_widen_question(
+                pending_path, target_slug, dim_name, resolved_value
             )
 
     return {
