@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Eval: Maya as an ordering signal for the name-collision queue (issue
+  athenaeum#2066).** `scripts/eval_maya_collision_triage.py` asks Maya
+  (local yes/no cross-encoder) "Are these two records about the same
+  person?" for pairs built from resolved `_pending_merges.md` /
+  `_pending_merges_archive.md` name-collision blocks
+  (`scripts/build_collision_triage_fixtures.py`, reading the ledger
+  through `athenaeum.pending_merges.parse_pending_merges` only — host-side
+  fixtures, never committed, mode 600), and reports AUROC, precision at k
+  against the queue's current (`created_at`-ordered) order, latency, and
+  the fraction of pairs exceeding Maya's 512-token input. Result, recorded
+  in `docs/measurements/maya-collision-triage-eval-2026-10.md`:
+  **inconclusive** — the live ledger carries 357 name-collision blocks but
+  only 2 are resolved by a human (both `reject`, the same underlying
+  judgment recorded twice), and both referenced source pages have since
+  been retired, leaving 0 usable labelled pairs. The real local Maya
+  adapter was still smoke-verified end to end against the real weights
+  on synthetic, non-corpus text. athenaeum#2063 (the shared `YesNoScorer`
+  seam) merged during this lane, so this script's `MayaAdapter` reuse was
+  updated to apply the SAME shared, temperature-aware transform
+  (`athenaeum._yesno_worker.p_yes_from_logits` / `read_temperature`,
+  temperature 1.65 from the weights' own `maya_config.json`) the
+  production worker uses, rather than a second hand-rolled one.
+  **Recommendation: do not wire Maya into the queue yet (insufficient
+  resolved population to validate it); re-run once more collisions are
+  resolved. Maya never authorises a merge — ordering only**, per the
+  architecture boundary the athenaeum#2049 survey comment drew for
+  identity confirmation.
+
 - **Maya PII-hazard classifier, modes `none` | `shadow` (issue athenaeum#2063).**
   A new `YesNoScorer` seam (`src/athenaeum/yesno.py`) runs Maya (a local
   yes/no cross-encoder) out of process via an operator-named interpreter
