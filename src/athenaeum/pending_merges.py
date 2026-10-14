@@ -274,7 +274,7 @@ def _withdraw_stale_widen_question(
         return
     try:
         questions = parse_pending_questions(pending_path)
-    except Exception:
+    except (OSError, UnicodeDecodeError, ValueError):
         return
     marker = f"its {dimension_name!r} coordinate"
     for pq in questions:
