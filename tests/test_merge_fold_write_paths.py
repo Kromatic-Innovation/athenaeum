@@ -32,6 +32,7 @@ import pytest
 
 from athenaeum.models import is_tombstone, parse_frontmatter, slugify, tombstone_target
 from athenaeum.pending_merges import (
+    NAME_COLLISION_RATIONALE_PREFIX,
     _apply_fold_into_existing,
     parse_pending_merges,
     resolve_alias_slug,
@@ -1137,6 +1138,126 @@ class TestCoordinateWidening:
         md = merges_path.read_text(encoding="utf-8")
         assert "- [ ]" in md
         assert "- [x]" not in md
+
+    def test_name_collision_fold_widens_disjoint_scope_to_universal(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue athenaeum#2069 reproduction + fix. Two independently
+        compiled name-collision pages carry different free-text
+        ``claimed_scope`` strings that are siblings, not ancestor/
+        descendant ("team-a" vs "team-b", same shape the real corpus hit
+        162/177 times) -- the pre-fix widen silently picked one side
+        (not a real union) and the narrowing check then refused every
+        single one. For a proposal whose rationale carries the
+        name-collision-scan prefix, a human `approve` must now actually
+        apply: the canonical's scope widens to the explicit universal
+        marker (the only value guaranteed to cover two disjoint siblings
+        on a single-string HIERARCHY coordinate), and the provenance
+        records what was widened."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        target = wiki / "canonical.md"
+        _write_wiki_page(
+            target, name="Canonical", body="OLD BODY\n", extra={"claimed_scope": "team-a"}
+        )
+        src_a = wiki / "old-a.md"
+        _write_wiki_page(
+            src_a, name="Old A", body="a\n", extra={"claimed_scope": "team-b"}
+        )
+
+        init_git_repo(wiki)
+        merges_path = wiki / "_pending_merges.md"
+        write_pending_merge(
+            merges_path,
+            merge_target_name="Canonical",
+            sources=[str(src_a)],
+            rationale=(
+                f"{NAME_COLLISION_RATIONALE_PREFIX}: 2 pages share the name "
+                "'Canonical' (type: concept); classified ambiguous "
+                "(canonical: canonical.md)."
+            ),
+            draft_merged_body="NEW BODY\n",
+            confidence=0.9,
+            write_kind="fold-into-existing",
+        )
+        pm_id = parse_pending_merges(merges_path)[0].id
+        result = resolve_merge(merges_path, pm_id, "approve", wiki_root=wiki)
+
+        assert result["ok"] is True, result
+        meta, _ = parse_frontmatter(target.read_text(encoding="utf-8"))
+        assert meta["claimed_scope"] == "*"
+        records = read_merge_provenance(wiki)
+        assert records[0]["coordinates_widened"]["scope"] == "*"
+        assert src_a.exists()
+        src_meta, _ = parse_frontmatter(src_a.read_text(encoding="utf-8"))
+        assert is_tombstone(src_meta)
+        md = merges_path.read_text(encoding="utf-8")
+        assert "- [x]" in md
+
+    def test_name_collision_fold_raises_pending_decision_when_widen_genuinely_impossible(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue athenaeum#2069 AC2: an IDENTITY dimension (``subject``,
+        ``null_means=unknown``) has no universal escape -- two different
+        subject values across a name-collision fold cannot be auto-widened
+        without inventing a claim neither side made. Refuse with a
+        DISTINCT error code (never the generic `fold_narrows_coordinate`,
+        so `ingest-answers` does not re-refuse the same answer file
+        identically forever) and raise a pending human decision instead of
+        looping silently."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        target = wiki / "canonical.md"
+        _write_wiki_page(
+            target, name="Canonical", body="OLD BODY\n", extra={"subject": "subject-a"}
+        )
+        src_a = wiki / "old-a.md"
+        _write_wiki_page(
+            src_a, name="Old A", body="a\n", extra={"subject": "subject-b"}
+        )
+
+        init_git_repo(wiki)
+        merges_path = wiki / "_pending_merges.md"
+        write_pending_merge(
+            merges_path,
+            merge_target_name="Canonical",
+            sources=[str(src_a)],
+            rationale=(
+                f"{NAME_COLLISION_RATIONALE_PREFIX}: 2 pages share the name "
+                "'Canonical' (type: concept); classified ambiguous "
+                "(canonical: canonical.md)."
+            ),
+            draft_merged_body="NEW BODY\n",
+            confidence=0.9,
+            write_kind="fold-into-existing",
+        )
+        pm_id = parse_pending_merges(merges_path)[0].id
+        result = resolve_merge(merges_path, pm_id, "approve", wiki_root=wiki)
+
+        assert result["ok"] is False
+        assert result["error_code"] == "fold_widen_impossible"
+        assert result["resolved_block"] is None
+        # Nothing mutated -- same no-op-on-refusal contract as
+        # fold_narrows_coordinate.
+        assert target.read_text(encoding="utf-8") == (
+            "---\nname: Canonical\ntype: concept\nsubject: subject-a\n"
+            "---\nOLD BODY\n"
+        )
+        assert src_a.exists()
+        src_meta, _ = parse_frontmatter(src_a.read_text(encoding="utf-8"))
+        assert not is_tombstone(src_meta)
+
+        from athenaeum.answers import parse_pending_questions
+
+        pending_path = wiki / "_pending_questions.md"
+        assert pending_path.exists()
+        questions = parse_pending_questions(pending_path)
+        assert len(questions) == 1
+        assert "subject" in questions[0].question
+        assert (
+            "subject-a" in questions[0].description
+            or "subject-b" in questions[0].description
+        )
 
 
 # ---------------------------------------------------------------------------

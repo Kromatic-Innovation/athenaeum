@@ -177,6 +177,7 @@ from athenaeum.config import DEFAULT_CLASSIFY_MODEL, resolve_model
 from athenaeum.declared_relationships import DeclaredRelationshipFacts, declared_relationship
 from athenaeum.dimensions import (
     DEFAULT_REGISTRY,
+    UNIVERSAL_MARKER,
     Dimension,
     DimensionKind,
     DimensionRegistry,
@@ -473,10 +474,49 @@ def _specific_side(
 # ---------------------------------------------------------------------------
 
 
+class CoordinateWidenImpossible(Exception):
+    """Raised by :func:`_widen_dimension` when *meta_a* and *meta_b* carry
+    genuinely incompatible coordinates on *dimension* -- neither an
+    ancestor of the other (HIERARCHY) nor equal (ENUM/IDENTITY), and
+    neither side is the explicit :data:`athenaeum.dimensions.UNIVERSAL_MARKER`
+    escape -- so no single coordinate value can cover both without
+    inventing information neither side asserted.
+
+    :func:`compare_pages` never triggers this (Gate 1's ``disjoint_dims``
+    exit means :func:`_widen_dimension` is only ever reached there on
+    EQUAL/CONTAINS relations, issue athenaeum#715). It IS reachable from
+    :mod:`athenaeum.pending_merges`' fold-apply widening
+    (:func:`athenaeum.pending_merges._widen_over_metas`), which widens
+    across whatever coordinates a fold's sources happen to carry with no
+    Gate-1 pre-filter -- see issue athenaeum#2069. Callers there catch this
+    and either substitute :data:`athenaeum.dimensions.UNIVERSAL_MARKER`
+    (only when the dimension's own ``null_means`` is
+    :data:`athenaeum.dimensions.NullMeans.UNIVERSAL`, which already
+    declares the universal state semantically safe for it) or raise a
+    pending human decision rather than guess.
+    """
+
+    def __init__(self, dimension: Dimension, value_a: Any, value_b: Any) -> None:
+        self.dimension = dimension
+        self.value_a = value_a
+        self.value_b = value_b
+        super().__init__(
+            f"dimension {dimension.name!r}: cannot widen {value_a!r} and "
+            f"{value_b!r} into a single covering coordinate"
+        )
+
+
 def _widen_dimension(dimension: Dimension, meta_a: dict[str, Any], meta_b: dict[str, Any]) -> Any:
     """The WIDEST coordinate covering both sides on *dimension* -- never narrower
     than either input (issue athenaeum#715 AC9). See module docstring, "Coordinates
-    widen, never narrow"."""
+    widen, never narrow".
+
+    Raises :class:`CoordinateWidenImpossible` when *meta_a* and *meta_b*
+    genuinely cannot be covered by one coordinate (HIERARCHY siblings,
+    neither an ancestor of the other; or ENUM/IDENTITY values that differ)
+    -- see that exception's docstring for why :func:`compare_pages` never
+    hits this but :mod:`athenaeum.pending_merges` can.
+    """
     if dimension.kind == DimensionKind.INTERVAL:
         a = parsed_coordinate(dimension, meta_a)
         b = parsed_coordinate(dimension, meta_b)
@@ -501,16 +541,39 @@ def _widen_dimension(dimension: Dimension, meta_a: dict[str, Any], meta_b: dict[
         return raw_b
     if raw_b is None:
         return raw_a
+    if raw_a == UNIVERSAL_MARKER or raw_b == UNIVERSAL_MARKER:
+        # Either side already asserts "applies everywhere" explicitly --
+        # that already covers the other side, whatever it is (mirrors
+        # athenaeum.dimensions._universal_marker_relation's undirected
+        # CONTAINS-on-either-side handling).
+        return UNIVERSAL_MARKER
     if dimension.kind == DimensionKind.HIERARCHY:
         a_parts = str(raw_a).strip().lower().split("/")
         b_parts = str(raw_b).strip().lower().split("/")
-        # The ancestor (shorter prefix) is the wider scope; ties (equal
-        # coordinates) return either side unchanged.
-        return raw_a if len(a_parts) <= len(b_parts) else raw_b
-    # ENUM / IDENTITY: only ever reach here on EQUAL (DISJOINT exited at
-    # Gate 1; UNKNOWN dimensions are never widened -- they are named in
-    # ``assumed`` instead, see compare_pages). Either side is identical.
-    return raw_a
+        if a_parts == b_parts:
+            return raw_a
+        # The ancestor (shorter prefix) is the wider scope -- but only when
+        # it genuinely IS a prefix of the other side. A naive depth
+        # comparison (the pre-athenaeum#2069 bug) picked the shorter side
+        # unconditionally, which silently returns a value that is NOT an
+        # ancestor of the other for two unrelated (sibling) free-text
+        # coordinates -- the widen looks like it ran, but the result still
+        # fails `_coordinate_is_at_least_as_wide`'s real ancestor-prefix
+        # check against the side it didn't pick.
+        if b_parts[: len(a_parts)] == a_parts:
+            return raw_a
+        if a_parts[: len(b_parts)] == b_parts:
+            return raw_b
+        raise CoordinateWidenImpossible(dimension, raw_a, raw_b)
+    # ENUM / IDENTITY: no graduated width -- only EQUAL (or the
+    # UNIVERSAL_MARKER case above) can be widened without inventing
+    # information. A real mismatch here (DISJOINT exited at Gate 1 for
+    # compare_pages; UNKNOWN dimensions are never widened there either --
+    # see compare_pages) can still reach this function from the fold-apply
+    # path, which has no Gate-1 pre-filter.
+    if raw_a == raw_b:
+        return raw_a
+    raise CoordinateWidenImpossible(dimension, raw_a, raw_b)
 
 
 def _coord_snapshot(registry: DimensionRegistry, meta: dict[str, Any]) -> dict[str, Any]:
