@@ -128,6 +128,11 @@ see "Jev run notes" below).
 
 ### Run 2 — abstention band [0.3, 0.7]
 
+**This run and the table below are temperature-1 and superseded for Maya**
+— see "Re-measured at temperature 1.65" below, where the same [0.3, 0.7]
+band abstains on 77.1% of Maya's rows at the weights' own temperature,
+versus the 22.0% quoted here.
+
 181 of 822 Maya rows (22.0%) and 171 of 822 Jev rows (20.8%) fell inside the
 abstention band and were excluded from the confusion counts below (they
 would route to a fallback/manual path in a deployed gate rather than
@@ -200,7 +205,10 @@ Supporting observations:
 - Adding a [0.3, 0.7] abstention band pushes both precision and recall higher
   on the rows it does score (0.929 / 0.996), at the cost of routing 22% of
   rows to a fallback path — worth sizing against how expensive that fallback
-  is before picking a deployed abstention width.
+  is before picking a deployed abstention width. **This 22% figure is
+  temperature-1 and superseded** — see "Re-measured at temperature 1.65"
+  below, where the same [0.3, 0.7] band abstains on 77.1% of rows at the
+  weights' own temperature.
 - Per-row latency (~130 ms mean on CPU, no GPU used) is far higher than the
   regex gate's but well within range for a batch/offline gate; a live
   per-request gate would need to confirm this against its own latency budget.
@@ -226,6 +234,9 @@ comparison below is direct.
   band applied, the gap narrows but does not close: Maya 0.970/0.929/0.996
   vs. Jev 0.954/0.922/0.970 on each model's own scored subset. On this
   fixture set, Maya is the stronger classifier at both operating points.
+  **Maya's banded figures here are temperature-1 and superseded** — see
+  "Re-measured at temperature 1.65" below for the band's behavior at the
+  weights' own temperature.
 - **Latency:** Maya (~130 ms mean, CPU, no network) is roughly 3x faster
   than Jev (~432 ms mean, real network round trip over a slow link) and
   both are far slower than the regex gate's effectively-zero latency. Jev's
