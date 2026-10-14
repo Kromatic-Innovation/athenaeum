@@ -159,6 +159,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   first, Jev as a fallback if local inference is unavailable, regex stays
   the live gate either way.
 
+- **Maya PII-hazard eval re-measured at the weights' own temperature,
+  1.65, plus shadow-run tracking (issue athenaeum#2064, follow-up to
+  athenaeum#2063).** `docs/measurements/maya-pii-hazard-eval-2026-10.md`
+  closes the "not yet re-measured" caveat it previously carried: the
+  822-row fixture set was re-run through the production transform at
+  temperature 1.65 at the 0.5 cut and at two abstention bands, [0.3, 0.7]
+  and [0.4, 0.6]. The 0.5-cut figures are unchanged from the earlier
+  temperature-1 measurement. The original [0.3, 0.7] band's 22%
+  abstention rate was an artefact of temperature 1 and is superseded —
+  at temperature 1.65 the same band abstains on 77.1% of rows. [0.4, 0.6]
+  at temperature 1.65 (7.7% abstention, 0.974/0.928/0.996
+  accuracy/precision/recall) is now the candidate default abstention band
+  for prefilter mode. The doc also gains a "Shadow runs" section recording
+  `storage lint-pii` mode-`shadow` run 1's counts (27 regex-flagged
+  candidates after allowlist, 19 email-shaped/8 phone-shaped, 19 at or
+  above and 8 below the 0.5 cut, 14 inside [0.3, 0.7], 7 inside [0.4, 0.6]);
+  runs 2 and 3 to follow. Docs-only — no fixture content in this repo,
+  counts only.
+
 ### Fixed
 
 - **`JevDecisionBackend` choice criteria is now a `{label: description}`
