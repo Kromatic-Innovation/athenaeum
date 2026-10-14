@@ -1194,26 +1194,25 @@ class TestCoordinateWidening:
         md = merges_path.read_text(encoding="utf-8")
         assert "- [x]" in md
 
-    def test_name_collision_fold_raises_pending_decision_when_widen_genuinely_impossible(
+    def test_name_collision_fold_keeps_canonical_subject_and_aliases_source(
         self, tmp_path: Path
     ) -> None:
-        """Issue athenaeum#2069 AC2: an IDENTITY dimension (``subject``,
-        ``null_means=unknown``) has no universal escape -- two different
-        subject values across a name-collision fold cannot be auto-widened
-        without inventing a claim neither side made. Refuse with a
-        DISTINCT error code (never the generic `fold_narrows_coordinate`,
-        so `ingest-answers` does not re-refuse the same answer file
-        identically forever) and raise a pending human decision instead of
-        looping silently."""
+        """Issue athenaeum#2071 AC: ``subject`` is an opaque per-page
+        IDENTITY-kind id with no universal escape, but a name-collision
+        ``approve`` has already ruled the two pages the SAME real-world
+        thing -- the only correct answer is the canonical's own id, with
+        the folded source's differing id preserved as an alias rather than
+        a pending human decision (athenaeum#2069's behaviour for this one
+        dimension/origin combination)."""
         wiki = tmp_path / "wiki"
         wiki.mkdir()
         target = wiki / "canonical.md"
         _write_wiki_page(
-            target, name="Canonical", body="OLD BODY\n", extra={"subject": "subject-a"}
+            target, name="Canonical", body="OLD BODY\n", extra={"subject": "subject-x"}
         )
         src_a = wiki / "old-a.md"
         _write_wiki_page(
-            src_a, name="Old A", body="a\n", extra={"subject": "subject-b"}
+            src_a, name="Old A", body="a\n", extra={"subject": "subject-y"}
         )
 
         init_git_repo(wiki)
@@ -1234,11 +1233,111 @@ class TestCoordinateWidening:
         pm_id = parse_pending_merges(merges_path)[0].id
         result = resolve_merge(merges_path, pm_id, "approve", wiki_root=wiki)
 
+        assert result["ok"] is True, result
+        meta, _ = parse_frontmatter(target.read_text(encoding="utf-8"))
+        assert meta["subject"] == "subject-x"
+        assert "subject-y" in meta.get("aliases", [])
+        records = read_merge_provenance(wiki)
+        assert "subject-y" in records[0]["aliases_added"]
+        # The draft body carries no frontmatter of its own, so the
+        # canonical's resolved value is recorded as widened even though
+        # it is unchanged from the PRIOR canonical's own "subject-x".
+        assert records[0]["coordinates_widened"]["subject"] == "subject-x"
+        assert src_a.exists()
+        src_meta, _ = parse_frontmatter(src_a.read_text(encoding="utf-8"))
+        assert is_tombstone(src_meta)
+        md = merges_path.read_text(encoding="utf-8")
+        assert "- [x]" in md
+        # No pending decision raised for this case.
+        pending_path = wiki / "_pending_questions.md"
+        if pending_path.exists():
+            from athenaeum.answers import parse_pending_questions
+
+            assert parse_pending_questions(pending_path) == []
+
+    def test_name_collision_fold_undeterminable_canonical_takes_source_subject(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue athenaeum#2071 AC: when the canonical's own ``subject`` is
+        ``undeterminable`` (the degraded-resolver sentinel,
+        ``parsed_coordinate`` normalizes it to ``None``) and exactly one
+        concrete id exists among the folded sources, the canonical ends up
+        carrying that one concrete id rather than staying undeterminable."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        target = wiki / "canonical.md"
+        _write_wiki_page(
+            target,
+            name="Canonical",
+            body="OLD BODY\n",
+            extra={"subject": "undeterminable"},
+        )
+        src_a = wiki / "old-a.md"
+        _write_wiki_page(
+            src_a, name="Old A", body="a\n", extra={"subject": "subject-x"}
+        )
+
+        init_git_repo(wiki)
+        merges_path = wiki / "_pending_merges.md"
+        write_pending_merge(
+            merges_path,
+            merge_target_name="Canonical",
+            sources=[str(src_a)],
+            rationale=(
+                f"{NAME_COLLISION_RATIONALE_PREFIX}: 2 pages share the name "
+                "'Canonical' (type: concept); classified ambiguous "
+                "(canonical: canonical.md)."
+            ),
+            draft_merged_body="NEW BODY\n",
+            confidence=0.9,
+            write_kind="fold-into-existing",
+        )
+        pm_id = parse_pending_merges(merges_path)[0].id
+        result = resolve_merge(merges_path, pm_id, "approve", wiki_root=wiki)
+
+        assert result["ok"] is True, result
+        meta, _ = parse_frontmatter(target.read_text(encoding="utf-8"))
+        assert meta["subject"] == "subject-x"
+        records = read_merge_provenance(wiki)
+        assert records[0]["coordinates_widened"]["subject"] == "subject-x"
+
+    def test_non_collision_fold_with_differing_subject_still_refuses(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue athenaeum#2069 AC2 (kept, athenaeum#2071 scope boundary): the
+        IDENTITY-kind auto-apply above is gated on
+        ``NAME_COLLISION_RATIONALE_PREFIX`` -- a fold proposed through any
+        OTHER path (no human ruling that the pages are the same real-world
+        thing) still hits the pre-existing hard refusal for a differing
+        ``subject``, with no pending decision auto-applied."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        target = wiki / "canonical.md"
+        _write_wiki_page(
+            target, name="Canonical", body="OLD BODY\n", extra={"subject": "subject-a"}
+        )
+        src_a = wiki / "old-a.md"
+        _write_wiki_page(
+            src_a, name="Old A", body="a\n", extra={"subject": "subject-b"}
+        )
+
+        init_git_repo(wiki)
+        merges_path = wiki / "_pending_merges.md"
+        write_pending_merge(
+            merges_path,
+            merge_target_name="Canonical",
+            sources=[str(src_a)],
+            rationale="some other detector scan found these two related",
+            draft_merged_body="NEW BODY\n",
+            confidence=0.9,
+            write_kind="fold-into-existing",
+        )
+        pm_id = parse_pending_merges(merges_path)[0].id
+        result = resolve_merge(merges_path, pm_id, "approve", wiki_root=wiki)
+
         assert result["ok"] is False
-        assert result["error_code"] == "fold_widen_impossible"
-        assert result["resolved_block"] is None
-        # Nothing mutated -- same no-op-on-refusal contract as
-        # fold_narrows_coordinate.
+        assert result["error_code"] == "fold_narrows_coordinate"
+        # Nothing mutated -- same no-op-on-refusal contract as before.
         assert target.read_text(encoding="utf-8") == (
             "---\nname: Canonical\ntype: concept\nsubject: subject-a\n"
             "---\nOLD BODY\n"
@@ -1247,17 +1346,64 @@ class TestCoordinateWidening:
         src_meta, _ = parse_frontmatter(src_a.read_text(encoding="utf-8"))
         assert not is_tombstone(src_meta)
 
-        from athenaeum.answers import parse_pending_questions
+    def test_name_collision_fold_withdraws_stale_subject_widen_question(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue athenaeum#2071 AC: a ``fold_widen_impossible`` pending
+        question a PRIOR (pre-athenaeum#2071) ``ingest-answers`` tick raised
+        for this exact fold's ``subject`` coordinate must be withdrawn
+        (resolved, never re-raised) once the fold applies automatically --
+        reuses :func:`athenaeum.answers.resolve_by_id`, the same path a
+        human answering by hand goes through."""
+        from athenaeum.answers import parse_pending_questions, raise_pending_question
 
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        target = wiki / "canonical.md"
+        _write_wiki_page(
+            target, name="Canonical", body="OLD BODY\n", extra={"subject": "subject-x"}
+        )
+        src_a = wiki / "old-a.md"
+        _write_wiki_page(
+            src_a, name="Old A", body="a\n", extra={"subject": "subject-y"}
+        )
+
+        init_git_repo(wiki)
         pending_path = wiki / "_pending_questions.md"
-        assert pending_path.exists()
+        raise_pending_question(
+            pending_path,
+            question=(
+                "Fold of 'canonical' cannot auto-widen its 'subject' "
+                "coordinate — what should the canonical's value be?"
+            ),
+            context="pre-fix athenaeum#2069 question, stale once athenaeum#2071 ships",
+            entity="canonical",
+            source=str(target),
+        )
+        assert len(parse_pending_questions(pending_path)) == 1
+        assert parse_pending_questions(pending_path)[0].answered is False
+
+        merges_path = wiki / "_pending_merges.md"
+        write_pending_merge(
+            merges_path,
+            merge_target_name="Canonical",
+            sources=[str(src_a)],
+            rationale=(
+                f"{NAME_COLLISION_RATIONALE_PREFIX}: 2 pages share the name "
+                "'Canonical' (type: concept); classified ambiguous "
+                "(canonical: canonical.md)."
+            ),
+            draft_merged_body="NEW BODY\n",
+            confidence=0.9,
+            write_kind="fold-into-existing",
+        )
+        pm_id = parse_pending_merges(merges_path)[0].id
+        result = resolve_merge(merges_path, pm_id, "approve", wiki_root=wiki)
+
+        assert result["ok"] is True, result
         questions = parse_pending_questions(pending_path)
         assert len(questions) == 1
-        assert "subject" in questions[0].question
-        assert (
-            "subject-a" in questions[0].description
-            or "subject-b" in questions[0].description
-        )
+        assert questions[0].answered is True
 
 
 # ---------------------------------------------------------------------------
