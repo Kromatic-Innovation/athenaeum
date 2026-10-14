@@ -67,6 +67,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -126,6 +127,30 @@ def _is_name_collision_block(pm: PendingMerge) -> bool:
     return pm.rationale.startswith(_NAME_COLLISION_RATIONALE_PREFIX)
 
 
+#: Matches the ``(type: <value>)`` / ``(type: unknown)`` parenthetical that
+#: :func:`athenaeum.name_collisions.resolve_name_collisions` writes into
+#: every name-collision rationale (see that module's ``type_note``). This is
+#: the ONLY place a block's collision-group type survives into
+#: ``_pending_merges.md`` -- ``PendingMerge`` has no dedicated type field --
+#: so filtering on it (rather than re-reading page frontmatter here, which
+#: `_page_text` deliberately never exposes outside its own return value) is
+#: the non-leaking way to restrict fixtures to person-vs-person pairs.
+_TYPE_NOTE_RE = re.compile(r"\(type: ([^)]+)\)")
+
+
+def _collision_block_type(pm: PendingMerge) -> str | None:
+    """Return the ``type:`` value recorded in *pm*'s rationale, if any.
+
+    ``None`` for "unknown" (pages with no ``type:`` frontmatter, grouped
+    under the sentinel key -- see ``scan_name_collisions``) or when the
+    rationale predates this marker.
+    """
+    m = _TYPE_NOTE_RE.search(pm.rationale)
+    if m is None or m.group(1) == "unknown":
+        return None
+    return m.group(1)
+
+
 @dataclass(frozen=True)
 class BuildReport:
     total_blocks_read: int
@@ -133,6 +158,7 @@ class BuildReport:
     resolved: int
     auto_applied_excluded: int
     multi_source_excluded: int
+    non_person_excluded: int
     unreadable_page_excluded: int
     duplicate_pair_excluded: int
     rows_written: int
@@ -149,15 +175,25 @@ def build_fixtures(wiki_root: Path) -> tuple[list[FixtureRow], BuildReport]:
 
     nc_blocks = [pm for pm in all_blocks if _is_name_collision_block(pm)]
     resolved = [pm for pm in nc_blocks if pm.resolved]
+    # Stable sort by created_at ascending -- `_pending_merges.md` and
+    # `_pending_merges_archive.md` are each append-ordered on their own, but
+    # concatenating the two (above) does not interleave them by time, so a
+    # resolved-but-archived block can sort after a later still-live one.
+    # The eval script's "current queue order" baseline depends on fixtures
+    # being written in actual created_at order, not file-concatenation
+    # order; `sorted` is stable, so same-timestamp blocks keep their
+    # relative (file-then-append) order.
+    resolved = sorted(resolved, key=lambda pm: pm.created_at)
 
     auto_applied_excluded = 0
     multi_source_excluded = 0
+    non_person_excluded = 0
     unreadable_page_excluded = 0
     duplicate_pair_excluded = 0
 
-    # Single pass, preserving ledger (created_at) order of first occurrence
-    # per unordered source pair -- the eval script's "current queue order"
-    # baseline depends on fixtures being written in that same order.
+    # Single pass, preserving created_at order established above -- the
+    # eval script's "current queue order" baseline depends on fixtures
+    # being written in that same order.
     seen: set[frozenset[str]] = set()
     rows: list[FixtureRow] = []
     for pm in resolved:
@@ -168,6 +204,10 @@ def build_fixtures(wiki_root: Path) -> tuple[list[FixtureRow], BuildReport]:
             continue
         if len(pm.sources) != 2:
             multi_source_excluded += 1
+            continue
+        block_type = _collision_block_type(pm)
+        if block_type is not None and block_type != "person":
+            non_person_excluded += 1
             continue
         key = frozenset(pm.sources)
         if key in seen:
@@ -187,6 +227,7 @@ def build_fixtures(wiki_root: Path) -> tuple[list[FixtureRow], BuildReport]:
         resolved=len(resolved),
         auto_applied_excluded=auto_applied_excluded,
         multi_source_excluded=multi_source_excluded,
+        non_person_excluded=non_person_excluded,
         unreadable_page_excluded=unreadable_page_excluded,
         duplicate_pair_excluded=duplicate_pair_excluded,
         rows_written=len(rows),
@@ -240,6 +281,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"resolved name-collision blocks: {report.resolved}")
     print(f"excluded (auto_applied, not a human judgment): {report.auto_applied_excluded}")
     print(f"excluded (more than 2 sources in the group): {report.multi_source_excluded}")
+    print(f"excluded (non-person collision-group type): {report.non_person_excluded}")
     print(f"excluded (source page unreadable/no name:): {report.unreadable_page_excluded}")
     print(f"excluded (duplicate unordered source pair): {report.duplicate_pair_excluded}")
     print(f"fixture rows written: {report.rows_written}")
