@@ -266,12 +266,54 @@ in the issue's acceptance criteria) must use that declared value, not 1.
 threshold are monotonic-transform invariant, so the headline numbers above
 are unaffected by this correction.
 
-**What is NOT yet re-measured:** the [0.3, 0.7] abstention band, its 22%
-abstention rate, the 0.970 scored-row accuracy, and the Brier score above
-were all computed at temperature 1 and are **transform-dependent**. No
-abstention-band default may be quoted from this document until the 822-row
-eval is re-run through the production transform at temperature 1.65. At
-the same 0.3 cut, temperature 1.65 is stricter (it clears fewer tokens),
-so the expected direction of the error is safe, but that is not itself a
-measurement — the re-run is athenaeum#2063's shadow-mode exit criterion,
-not a step this document's own measurement run performed.
+## Re-measured at temperature 1.65 (athenaeum#2064)
+
+The 822-row eval has now been re-run through the production transform at
+the weights' own temperature (1.65), closing the gap this document
+previously flagged as "not yet re-measured." Three runs, same 822-row
+fixture set (275 positive / 547 negative):
+
+| metric | 0.5 cut, no band | band [0.3, 0.7] | band [0.4, 0.6] |
+|---|---|---|---|
+| scored rows | 822 / 822 | 188 / 822 | 759 / 822 |
+| abstained | 0 (0%) | 634 (77.1%) | 63 (7.7%) |
+| accuracy | 0.951 | 0.931 | 0.974 |
+| precision | 0.904 | 0.927 | 0.928 |
+| recall | 0.956 | 1.000 | 0.996 |
+| TP / FP / TN / FN | 263 / 28 / 519 / 12 | 164 / 13 / 11 / 0 | 244 / 19 / 495 / 1 |
+| mean latency (s/row) | 0.198 | n/a | n/a |
+
+The 0.5-cut figures (accuracy 0.951, precision 0.904, recall 0.956,
+TP/FP/TN/FN 263/28/519/12) are **unchanged** from the temperature-1
+measurement earlier in this document — confirming the "monotonic-transform
+invariant at the 0.5 threshold" note above held in practice, not just in
+theory.
+
+The original [0.3, 0.7] abstention band's 22% abstention rate, quoted
+earlier in this document, was measured at temperature 1 and is an
+**artefact of that temperature** — at the weights' own temperature 1.65,
+the same [0.3, 0.7] band abstains on 77.1% of rows (634 of 822), a far
+larger fraction. That earlier 22%/0.970-accuracy figure is **superseded**
+and must not be read as temperature-1.65 behavior.
+
+**[0.4, 0.6] at temperature 1.65 is the candidate default abstention band
+for prefilter mode** (athenaeum#2064): 7.7% abstention (63 of 822 rows) with
+0.974 accuracy / 0.928 precision / 0.996 recall on the scored rows — a
+narrower band than [0.3, 0.7] with a lower abstention cost, now that both
+are measured at the correct temperature. This remains subject to the same
+licence precondition as the rest of this document's Maya recommendation
+(see "Licence note" above).
+
+## Shadow runs
+
+`storage lint-pii` in mode `shadow` (athenaeum#2063), run against the live
+corpus rather than the fixture set above.
+
+**Run 1** (2026-10-14, athenaeum 0.22.27): 27 regex-flagged candidates
+survived the allowlist (19 email-shaped, 8 phone-shaped); all 27 were
+scored (load 5.2 s, score 6.2 s). 19 of 27 had P(yes) >= 0.5, 8 below. 14
+of 27 fell inside the [0.3, 0.7] band; 7 of 27 fell inside the [0.4, 0.6]
+band (6 below 0.4, 14 above 0.6). Counts only — no candidate values are
+recorded here, per this document's existing fixture-provenance discipline.
+
+Runs 2 and 3 follow.
