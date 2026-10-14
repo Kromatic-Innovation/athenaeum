@@ -172,7 +172,18 @@ def _ledger_partition_path(cache_dir: Path, *, now: datetime | None = None) -> P
 
 
 def _write_ledger_line(path: Path, row: dict[str, Any]) -> None:
-    append_line_durable(path, (json.dumps(row, sort_keys=True) + "\n").encode("utf-8"))
+    # Fail closed, never into the caller (run_shadow_scoring's own "Never
+    # raises" contract): a disk-full, permission, or read-only-filesystem
+    # OSError here must not abort the gate command the classifier is wired
+    # into -- it is strictly better to lose one shadow-ledger row than to
+    # crash `storage lint-pii` / `merges recompare` over telemetry.
+    try:
+        append_line_durable(path, (json.dumps(row, sort_keys=True) + "\n").encode("utf-8"))
+    except OSError as exc:
+        print(
+            f"pii hazard classifier: shadow ledger write failed ({exc.__class__.__name__}): {path}",
+            file=sys.stderr,
+        )
 
 
 def _write_summary_row(
@@ -285,7 +296,14 @@ def run_shadow_scoring(
             return {}
         assert weights_path is not None and interpreter is not None
         scorer = SubprocessYesNoScorer(
-            interpreter=interpreter,
+            # Expand ~ the same way weights_path is expanded two lines
+            # below. preflight_yesno_scorer tolerates a tilde path (it
+            # expands its own local `candidate` to run the is_file/X_OK
+            # check) but returns only a pass/fail message, never the
+            # resolved string -- so the raw `interpreter` reaching here
+            # unexpanded passes preflight and then fails at
+            # subprocess.run, which (unlike a shell) never expands `~`.
+            interpreter=str(Path(interpreter).expanduser()),
             weights_path=Path(weights_path).expanduser(),
             timeout_secs=timeout_secs,
         )
