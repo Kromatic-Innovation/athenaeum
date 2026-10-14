@@ -561,3 +561,100 @@ class TestCli:
         )
         assert cmd_merges(args) == 2
         assert "comparator is disabled" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# Maya PII-hazard classifier shadow mode (issue athenaeum#2063)
+# ---------------------------------------------------------------------------
+
+
+class _FakeRecompareScorer:
+    def __init__(self, *args, **kwargs) -> None:
+        self.last_load_secs = 0.0
+
+    def score(self, question: str, texts):
+        return [0.0 for _ in texts]
+
+
+class TestRecompareModeNoneGolden:
+    """AC1 golden: mode "none" recompare results are byte-identical."""
+
+    def test_byte_identical_hazard_result(
+        self, wiki_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("ATHENAEUM_PII_HAZARD_CLASSIFIER_MODE", raising=False)
+        a = _write_page(wiki_root, "a", body="contact liam@example.com for details")
+        b = _write_page(wiki_root, "b")
+        _write_queue(wiki_root, [_block("hazard", [a, b])])
+
+        result = recompare_pending_merges(
+            wiki_root, client=_fake_client(_content_payload("equivalent"))
+        )
+
+        assert len(result.pii_hazard_ids) == 1
+        proposal = result.proposals[0]
+        assert proposal.route == ROUTE_HUMAN
+        assert proposal.pair_verdicts == {}
+
+    def test_mode_none_writes_no_ledger(
+        self, wiki_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cache_dir = tmp_path / "cache"
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(cache_dir))
+        monkeypatch.delenv("ATHENAEUM_PII_HAZARD_CLASSIFIER_MODE", raising=False)
+        monkeypatch.setattr(
+            "athenaeum.pii_hazard_classifier.SubprocessYesNoScorer",
+            lambda *a, **k: (_ for _ in ()).throw(
+                AssertionError("mode=none must never construct a real scorer")
+            ),
+        )
+        a = _write_page(wiki_root, "a", body="contact liam@example.com for details")
+        b = _write_page(wiki_root, "b")
+        _write_queue(wiki_root, [_block("hazard", [a, b])])
+
+        recompare_pending_merges(wiki_root, client=_fake_client(_content_payload("equivalent")))
+
+        assert not cache_dir.exists()
+
+
+class TestRecompareShadowMode:
+    def test_shadow_scores_the_hazard_token_once_and_never_changes_the_route(
+        self, wiki_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cache_dir = tmp_path / "cache"
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(cache_dir))
+        monkeypatch.setenv("ATHENAEUM_PII_HAZARD_CLASSIFIER_MODE", "shadow")
+        monkeypatch.setenv("ATHENAEUM_MAYA_WEIGHTS_PATH", str(tmp_path))
+        monkeypatch.setenv("ATHENAEUM_MAYA_PYTHON", __import__("sys").executable)
+        monkeypatch.setattr(
+            "athenaeum.pii_hazard_classifier.SubprocessYesNoScorer", _FakeRecompareScorer
+        )
+
+        a = _write_page(wiki_root, "a", body="contact mia@example.com for details")
+        b = _write_page(wiki_root, "b")
+        _write_queue(wiki_root, [_block("hazard", [a, b])])
+
+        result = recompare_pending_merges(
+            wiki_root, client=_fake_client(_content_payload("equivalent"))
+        )
+
+        assert len(result.pii_hazard_ids) == 1
+        assert result.proposals[0].route == ROUTE_HUMAN
+        assert result.proposals[0].pair_verdicts == {}
+
+        ledger_dir = cache_dir / "pii_hazard_shadow"
+        rows = [
+            __import__("json").loads(line)
+            for p in ledger_dir.glob("*.jsonl")
+            for line in p.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        token_rows = [r for r in rows if r["kind"] == "token"]
+        assert len(token_rows) == 1
+        assert token_rows[0]["surface"] == "recompare"
+        assert token_rows[0]["recognizer"] == "email"
+
+    def test_identify_pii_hazards_without_collector_is_unchanged(self, wiki_root: Path) -> None:
+        a = _write_page(wiki_root, "a", body="contact nina@example.com for details")
+        reasons = identify_pii_hazards([a])
+        assert any("inline email" in r for r in reasons)

@@ -17,6 +17,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from athenaeum.cli import main
 from athenaeum.pii import (
     PII_ALLOWLIST_FILENAME,
@@ -843,3 +845,180 @@ class TestLintPiiAllowlistCLI:
         out = capsys.readouterr().out
         assert rc == 0
         assert "1 adjudicated residue" in out
+
+
+# ---------------------------------------------------------------------------
+# Maya PII-hazard classifier shadow mode (issue athenaeum#2063)
+# ---------------------------------------------------------------------------
+
+
+class _FakeShadowScorer:
+    """Mirrors ``athenaeum.yesno.YesNoScorer`` without a real model."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        self.last_load_secs = 0.0
+
+    def score(self, question: str, texts):
+        return [0.0 for _ in texts]
+
+
+class TestLintPiiModeNoneGolden:
+    """AC1: mode "none" is byte-identical to pre-athenaeum#2063 behaviour.
+
+    Each test here is a frozen pre-change golden -- text, ``--json``, and
+    exit code -- over a corpus with an unexplained email, an unexplained
+    phone, and an allowlisted token, captured before this issue's wiring
+    was added to ``_cmd_storage_lint_pii``.
+    """
+
+    def _corpus(self, tmp_path: Path) -> Path:
+        root = _wiki(tmp_path)
+        (root / "wiki" / "_queue.md").write_text(
+            "reach hank@example.com or +1-555-0177\n", encoding="utf-8"
+        )
+        return root
+
+    def test_text_output_unchanged(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.delenv("ATHENAEUM_PII_HAZARD_CLASSIFIER_MODE", raising=False)
+        root = self._corpus(tmp_path)
+
+        rc = main(["storage", "lint-pii", "--path", str(root)])
+
+        out = capsys.readouterr().out
+        assert rc == EXIT_PII_FOUND
+        assert "hank@example.com" in out
+        assert "+1-555-0177" in out
+        assert "p_yes" not in out
+
+    def test_json_output_unchanged(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        import json
+
+        monkeypatch.delenv("ATHENAEUM_PII_HAZARD_CLASSIFIER_MODE", raising=False)
+        root = self._corpus(tmp_path)
+
+        rc = main(["storage", "lint-pii", "--path", str(root), "--json"])
+
+        payload = json.loads(capsys.readouterr().out)
+        assert rc == EXIT_PII_FOUND
+        assert payload["wiki"][0]["emails"] == ["hank@example.com"]
+        assert payload["wiki"][0]["phones"] == ["+1-555-0177"]
+
+    def test_mode_none_calls_no_scorer_and_writes_no_ledger(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cache_dir = tmp_path / "cache"
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(cache_dir))
+        monkeypatch.delenv("ATHENAEUM_PII_HAZARD_CLASSIFIER_MODE", raising=False)
+        monkeypatch.setattr(
+            "athenaeum.pii_hazard_classifier.SubprocessYesNoScorer",
+            lambda *a, **k: (_ for _ in ()).throw(
+                AssertionError("mode=none must never construct a real scorer")
+            ),
+        )
+        root = self._corpus(tmp_path)
+
+        main(["storage", "lint-pii", "--path", str(root)])
+
+        assert not cache_dir.exists()
+        assert "torch" not in __import__("sys").modules
+        assert "transformers" not in __import__("sys").modules
+
+
+class TestLintPiiShadowMode:
+    def test_shadow_mode_annotates_unexplained_tokens_with_p_yes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        cache_dir = tmp_path / "cache"
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(cache_dir))
+        monkeypatch.setenv("ATHENAEUM_PII_HAZARD_CLASSIFIER_MODE", "shadow")
+        monkeypatch.setenv("ATHENAEUM_MAYA_WEIGHTS_PATH", str(tmp_path))
+        monkeypatch.setenv("ATHENAEUM_MAYA_PYTHON", __import__("sys").executable)
+        monkeypatch.setattr(
+            "athenaeum.pii_hazard_classifier.SubprocessYesNoScorer", _FakeShadowScorer
+        )
+
+        root = _wiki(tmp_path)
+        (root / "wiki" / "_queue.md").write_text(
+            "reach ivy@example.com\n", encoding="utf-8"
+        )
+
+        rc = main(["storage", "lint-pii", "--path", str(root)])
+
+        out = capsys.readouterr().out
+        assert rc == EXIT_PII_FOUND
+        assert "ivy@example.com (p_yes=0.0000)" in out
+
+        ledger_dir = cache_dir / "pii_hazard_shadow"
+        assert ledger_dir.exists()
+        rows = [
+            __import__("json").loads(line)
+            for p in ledger_dir.glob("*.jsonl")
+            for line in p.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        token_rows = [r for r in rows if r["kind"] == "token"]
+        assert len(token_rows) == 1
+        assert token_rows[0]["surface"] == "lint-pii"
+        assert token_rows[0]["recognizer"] == "email"
+
+    def test_shadow_mode_never_changes_the_verdict_or_exit_code(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Pin: same corpus, same exit code and same finding count whether
+        # mode is "none" or "shadow" -- shadow mode only ANNOTATES text
+        # output, never routes or suppresses a finding.
+        cache_dir = tmp_path / "cache"
+        root = _wiki(tmp_path)
+        (root / "wiki" / "_queue.md").write_text(
+            "reach jack@example.com\n", encoding="utf-8"
+        )
+
+        monkeypatch.delenv("ATHENAEUM_PII_HAZARD_CLASSIFIER_MODE", raising=False)
+        rc_none = main(["storage", "lint-pii", "--path", str(root)])
+
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(cache_dir))
+        monkeypatch.setenv("ATHENAEUM_PII_HAZARD_CLASSIFIER_MODE", "shadow")
+        monkeypatch.setenv("ATHENAEUM_MAYA_WEIGHTS_PATH", str(tmp_path))
+        monkeypatch.setenv("ATHENAEUM_MAYA_PYTHON", __import__("sys").executable)
+        monkeypatch.setattr(
+            "athenaeum.pii_hazard_classifier.SubprocessYesNoScorer", _FakeShadowScorer
+        )
+        rc_shadow = main(["storage", "lint-pii", "--path", str(root)])
+
+        assert rc_none == rc_shadow == EXIT_PII_FOUND
+
+    def test_unknown_mode_raises_config_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from athenaeum.config import (
+            PiiHazardClassifierConfigError,
+            resolve_pii_hazard_classifier_mode,
+        )
+
+        monkeypatch.setenv("ATHENAEUM_PII_HAZARD_CLASSIFIER_MODE", "prefilter")
+        with pytest.raises(PiiHazardClassifierConfigError):
+            resolve_pii_hazard_classifier_mode(None)
+
+    def test_shadow_mode_weights_unavailable_falls_back_to_regex_only(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        cache_dir = tmp_path / "cache"
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(cache_dir))
+        monkeypatch.setenv("ATHENAEUM_PII_HAZARD_CLASSIFIER_MODE", "shadow")
+        monkeypatch.delenv("ATHENAEUM_MAYA_WEIGHTS_PATH", raising=False)
+        monkeypatch.delenv("ATHENAEUM_MAYA_PYTHON", raising=False)
+
+        root = _wiki(tmp_path)
+        (root / "wiki" / "_queue.md").write_text(
+            "reach kay@example.com\n", encoding="utf-8"
+        )
+
+        rc = main(["storage", "lint-pii", "--path", str(root)])
+
+        out_err = capsys.readouterr()
+        assert rc == EXIT_PII_FOUND
+        assert "kay@example.com" in out_err.out
+        assert "p_yes" not in out_err.out
+        assert "weights_path" in out_err.err

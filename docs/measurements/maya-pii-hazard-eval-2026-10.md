@@ -251,3 +251,27 @@ comparison below is direct.
   alone. This eval's recommendation is unchanged from athenaeum#2049: Maya
   is the stronger candidate, Jev is a viable fallback if local inference is
   unavailable, and the regex gate stays the live gate either way.
+
+## Temperature correction (athenaeum#2063)
+
+The numbers above were measured through this script's own ``p_yes`` method,
+which computed a plain two-class softmax over Maya's logits (temperature
+1). The Vitruvius design for athenaeum#2063 found that the weights' own
+``maya_config.json`` defines ``P(yes)`` at a different temperature (1.65),
+and that production's shared transform (now `athenaeum._yesno_worker.p_yes_from_logits`,
+imported by this script too — see the "one shared scoring function" note
+in the issue's acceptance criteria) must use that declared value, not 1.
+
+**What is unaffected:** accuracy, precision, and recall AT THE 0.5
+threshold are monotonic-transform invariant, so the headline numbers above
+are unaffected by this correction.
+
+**What is NOT yet re-measured:** the [0.3, 0.7] abstention band, its 22%
+abstention rate, the 0.970 scored-row accuracy, and the Brier score above
+were all computed at temperature 1 and are **transform-dependent**. No
+abstention-band default may be quoted from this document until the 822-row
+eval is re-run through the production transform at temperature 1.65. At
+the same 0.3 cut, temperature 1.65 is stricter (it clears fewer tokens),
+so the expected direction of the error is safe, but that is not itself a
+measurement — the re-run is athenaeum#2063's shadow-mode exit criterion,
+not a step this document's own measurement run performed.
