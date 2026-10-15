@@ -236,6 +236,24 @@ class TestQueuedMissingPinnedFields:
         assert result.details["reason"] == "ledger_record_missing_unfold_fields"
 
 
+class TestRefusedRecordIsNotAFoldRecord:
+    def test_applied_false_record_is_skipped(self, tmp_path: Path) -> None:
+        """Issue athenaeum#2072: a ``fold_source_already_tombstoned`` refusal is
+        recorded with ``applied: false``; ``find_fold_record`` must not return
+        it as the record that folded the tombstone."""
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        source_path = wiki_root / "source.md"
+        _write_tombstone(source_path, name="Source", folded_into="canonical")
+
+        refused = dict(_base_record())
+        refused["applied"] = False
+        refused["error_code"] = "fold_source_already_tombstoned"
+        _write_fold_record(wiki_root, refused)
+
+        assert find_fold_record(wiki_root, source_path, "canonical") is None
+
+
 class TestQueuedNoLedgerRecord:
     def test_no_matching_record_at_all_queues(self, tmp_path: Path) -> None:
         wiki_root = tmp_path / "wiki"
