@@ -238,9 +238,13 @@ def _over_cap_sidecar(tmp_path: Path) -> Path:
         confidence=0.33,
         created_at="2026-06-20",
     )
+    # The legal block's sources must really exist: athenaeum#2072 made a
+    # proposal with a missing source page stale in its own right.
+    for stem in ("a", "b"):
+        _source_page(wiki / f"{stem}.md", name="acme-corp", description=None, body="body")
     legal = render_block(
         merge_target_name="acme-corp",
-        sources=["/k/a.md", "/k/b.md"],
+        sources=[str(wiki / "a.md"), str(wiki / "b.md")],
         rationale="tight",
         draft_merged_body="draft",
         confidence=0.9,
