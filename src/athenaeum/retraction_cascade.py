@@ -192,6 +192,14 @@ def scan_retraction_cascade(
     for sup in supersessions:
         retracted = sup.retracts
         for rec in provenance:
+            # Issue athenaeum#2072: a record with ``applied: false`` (today,
+            # only `resolve_merge`'s ``fold_source_already_tombstoned``
+            # refusal) documents a merge that was REFUSED, not executed —
+            # its `source_paths` were never folded into anything, so
+            # flagging a retraction-cascade review for it would be a false
+            # positive (nothing to review; no content was ever written).
+            if rec.get("applied") is False:
+                continue
             source_paths = rec.get("source_paths")
             if not isinstance(source_paths, list) or retracted not in source_paths:
                 continue

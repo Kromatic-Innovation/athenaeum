@@ -45,12 +45,20 @@ def _over_cap_block() -> str:
     )
 
 
-def _legal_block() -> str:
+def _legal_block(wiki: Path) -> str:
     # 2 sources, high confidence → passes the size cap and (at the permissive
-    # similarity defaults) every other recoverable gate arm.
+    # similarity defaults) every other recoverable gate arm. Issue athenaeum#2072:
+    # both sources must be REAL, live files — revalidate now also retires a
+    # block with a missing/tombstoned source, so a "stays kept" fixture must
+    # point at pages that actually exist.
+    wiki.mkdir(parents=True, exist_ok=True)
+    src_a = wiki / "acme-a.md"
+    src_b = wiki / "acme-b.md"
+    src_a.write_text("acme a\n", encoding="utf-8")
+    src_b.write_text("acme b\n", encoding="utf-8")
     return render_block(
         merge_target_name="acme-corp",
-        sources=["/k/acme-a.md", "/k/acme-b.md"],
+        sources=[str(src_a), str(src_b)],
         rationale="cosine 0.92 topic overlap",
         draft_merged_body="draft",
         confidence=0.92,
@@ -81,8 +89,9 @@ def _write_sidecar(wiki: Path, *blocks: str) -> Path:
 
 
 def test_dry_run_reports_over_cap_but_writes_nothing(tmp_path: Path) -> None:
+    wiki = tmp_path / "wiki"
     merges_path = _write_sidecar(
-        tmp_path / "wiki", _over_cap_block(), _legal_block()
+        wiki, _over_cap_block(), _legal_block(wiki)
     )
     before = merges_path.read_text(encoding="utf-8")
 
@@ -101,10 +110,11 @@ def test_dry_run_reports_over_cap_but_writes_nothing(tmp_path: Path) -> None:
 def test_apply_archives_over_cap_and_keeps_legal_and_resolved(
     tmp_path: Path,
 ) -> None:
+    wiki = tmp_path / "wiki"
     merges_path = _write_sidecar(
-        tmp_path / "wiki",
+        wiki,
         _over_cap_block(),
-        _legal_block(),
+        _legal_block(wiki),
         _resolved_block(),
     )
 
@@ -130,8 +140,9 @@ def test_apply_archives_over_cap_and_keeps_legal_and_resolved(
 
 
 def test_apply_is_idempotent(tmp_path: Path) -> None:
+    wiki = tmp_path / "wiki"
     merges_path = _write_sidecar(
-        tmp_path / "wiki", _over_cap_block(), _legal_block()
+        wiki, _over_cap_block(), _legal_block(wiki)
     )
     first = revalidate_pending_merges(merges_path, apply=True, now=_FIXED_NOW)
     assert first.applied is True and len(first.retired) == 1
@@ -155,7 +166,8 @@ def test_confidence_floor_retires_low_confidence_block(tmp_path: Path) -> None:
         confidence=0.20,
         created_at="2026-07-10",
     )
-    merges_path = _write_sidecar(tmp_path / "wiki", low_conf, _legal_block())
+    wiki = tmp_path / "wiki"
+    merges_path = _write_sidecar(wiki, low_conf, _legal_block(wiki))
 
     config = {"librarian": {"min_merge_confidence": 0.5}}
     result = revalidate_pending_merges(
@@ -172,3 +184,90 @@ def test_missing_sidecar_is_a_clean_noop(tmp_path: Path) -> None:
     assert result.retired == []
     assert result.kept == 0
     assert result.applied is False
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#2072 — a name-collision proposal (or any proposal) whose
+# source page no longer exists under `wiki/` by revalidation time (folded,
+# retired, or renamed by a later run) is stale with a distinct reason, and
+# `--apply` archives it exactly like the over-cluster case.
+# ---------------------------------------------------------------------------
+
+
+def _write_tombstone(path: Path, *, name: str, folded_into: str) -> None:
+    path.write_text(
+        "---\n"
+        f"name: {name}\n"
+        "type: concept\n"
+        "status: folded\n"
+        f"folded_into: {folded_into}\n"
+        "embedded: false\n"
+        "---\nbody\n",
+        encoding="utf-8",
+    )
+
+
+def test_missing_source_page_is_stale_with_distinct_reason(tmp_path: Path) -> None:
+    wiki = tmp_path / "wiki"
+    wiki.mkdir(parents=True, exist_ok=True)
+    present = wiki / "present.md"
+    present.write_text("present\n", encoding="utf-8")
+    deleted_path = wiki / "deleted.md"  # never written — simulates a page
+    # retired/renamed by a later run after this proposal was queued.
+
+    block = render_block(
+        merge_target_name="orphaned-pair",
+        sources=[str(present), str(deleted_path)],
+        rationale="athenaeum#1170 nightly name-collision scan: 2 pages share the name",
+        draft_merged_body="draft",
+        confidence=1.0,
+        created_at="2026-10-01",
+    )
+    merges_path = _write_sidecar(wiki, block)
+
+    result = revalidate_pending_merges(merges_path, apply=False, now=_FIXED_NOW)
+
+    assert [r.merge_target_name for r in result.retired] == ["orphaned-pair"]
+    assert result.retired[0].reason == "source page missing: 1 of 2"
+    # Dry-run: nothing written.
+    assert not (wiki / "_pending_merges_archive.md").exists()
+
+
+def test_tombstoned_source_also_counts_as_missing(tmp_path: Path) -> None:
+    wiki = tmp_path / "wiki"
+    wiki.mkdir(parents=True, exist_ok=True)
+    folded_elsewhere = wiki / "folded-elsewhere.md"
+    _write_tombstone(folded_elsewhere, name="Folded Elsewhere", folded_into="somewhere-else")
+    other = wiki / "other.md"
+    other.write_text("other\n", encoding="utf-8")
+
+    block = render_block(
+        merge_target_name="stale-tombstoned-pair",
+        sources=[str(folded_elsewhere), str(other)],
+        rationale="r",
+        draft_merged_body="draft",
+        confidence=1.0,
+        created_at="2026-10-01",
+    )
+    merges_path = _write_sidecar(wiki, block)
+
+    result = revalidate_pending_merges(merges_path, apply=True, now=_FIXED_NOW)
+
+    assert [r.merge_target_name for r in result.retired] == ["stale-tombstoned-pair"]
+    assert result.retired[0].reason == "source page missing: 1 of 2"
+    archive_text = (wiki / "_pending_merges_archive.md").read_text(encoding="utf-8")
+    assert "stale-tombstoned-pair" in archive_text
+    assert "source page missing: 1 of 2" in archive_text
+    assert parse_pending_merges(merges_path) == []
+
+
+def test_both_sources_present_is_untouched(tmp_path: Path) -> None:
+    wiki = tmp_path / "wiki"
+    merges_path = _write_sidecar(wiki, _legal_block(wiki))
+
+    result = revalidate_pending_merges(merges_path, apply=True, now=_FIXED_NOW)
+
+    assert result.retired == []
+    remaining = parse_pending_merges(merges_path)
+    assert {pm.merge_target_name for pm in remaining} == {"acme-corp"}
+    assert not (wiki / "_pending_merges_archive.md").exists()

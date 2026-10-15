@@ -455,8 +455,22 @@ def build_merge_provenance_record(
     links_rewritten: list[dict[str, str]] | None = None,
     canonical_content_hash: str | None = None,
     coordinates_widened: dict[str, Any] | None = None,
+    applied: bool = True,
+    error_code: str | None = None,
 ) -> dict[str, Any]:
     """Build one merge-provenance record.
+
+    ``applied``/``error_code`` (issue athenaeum#2072): record a RESOLUTION
+    that did not actually write the fold — today, only the
+    ``fold_source_already_tombstoned`` case (a tombstoned source's
+    ``folded_into`` is set once and can never be re-pointed at a different
+    canonical, so the fold is permanently refused and the stale proposal is
+    archived without ever running). ``applied=True`` (the default — every
+    pre-athenaeum#2072 caller) omits both keys entirely, so every existing
+    record stays byte-identical; a caller that passes ``applied=False``
+    gets ``"applied": false`` plus the refusal's ``error_code`` written so
+    an auditor reading the ledger can tell this entry apart from a record
+    of an actual mutation.
 
     ``canonical_slug`` is the target wiki page's slug (the page the sources
     were folded/merged into). ``source_paths`` are the source memory/page
@@ -517,6 +531,10 @@ def build_merge_provenance_record(
         record["links_rewritten"] = list(links_rewritten)
     if canonical_content_hash is not None:
         record["canonical_content_hash"] = canonical_content_hash
+    if not applied:
+        record["applied"] = False
+        if error_code is not None:
+            record["error_code"] = error_code
     if coordinates_widened is not None:
         record["coordinates_widened"] = dict(coordinates_widened)
     return record
@@ -545,8 +563,15 @@ def record_merge_provenance(
     links_rewritten: list[dict[str, str]] | None = None,
     canonical_content_hash: str | None = None,
     coordinates_widened: dict[str, Any] | None = None,
+    applied: bool = True,
+    error_code: str | None = None,
 ) -> bool:
     """Append one provenance record for an executed merge. Best-effort.
+
+    ``applied``/``error_code`` (issue athenaeum#2072): forwarded verbatim to
+    :func:`build_merge_provenance_record` — see that function's docstring.
+    ``applied=True`` (the default) omits both from the record, so every
+    pre-athenaeum#2072 caller is unaffected.
 
     Called from :func:`athenaeum.pending_merges.resolve_merge` on a
     successful ``approve`` (both write kinds). Never raises — a provenance
@@ -577,6 +602,8 @@ def record_merge_provenance(
             links_rewritten=links_rewritten,
             canonical_content_hash=canonical_content_hash,
             coordinates_widened=coordinates_widened,
+            applied=applied,
+            error_code=error_code,
         )
         target = (
             provenance_path

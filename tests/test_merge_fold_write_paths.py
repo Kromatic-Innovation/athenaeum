@@ -1492,6 +1492,31 @@ class TestFoldGraphInvariants:
             "---\nname: Canonical\ntype: concept\n---\nc\n"
         )
 
+        # Issue athenaeum#2072: this refusal is PERMANENT (a tombstone's
+        # folded_into never re-points), so the block is archived — not left
+        # queued to be re-refused identically forever.
+        assert result["archived"] is True
+        assert pm_id not in {pm.id for pm in parse_pending_merges(merges_path)}
+        archive_text = (wiki / "_pending_merges_archive.md").read_text(encoding="utf-8")
+        assert "fold_source_already_tombstoned" in archive_text
+        assert "already-folded-elsewhere.md" in archive_text
+
+        # The outcome is recorded on the provenance ledger like any other
+        # resolution, but explicitly marked as NOT applied.
+        records = read_merge_provenance(wiki)
+        assert len(records) == 1
+        assert records[0]["merge_id"] == pm_id
+        assert records[0]["applied"] is False
+        assert records[0]["error_code"] == "fold_source_already_tombstoned"
+
+        # A second attempt at the SAME merge id no longer re-emits
+        # `fold_source_already_tombstoned` — the block is gone from the
+        # primary file, so it is a clean, distinct `id_not_found` instead
+        # of an endless identical refusal.
+        second = resolve_merge(merges_path, pm_id, "approve", wiki_root=wiki)
+        assert second["ok"] is False
+        assert second["error_code"] == "id_not_found"
+
     def test_chained_fold_leaves_exactly_one_live_canonical(self, tmp_path: Path) -> None:
         """A folds into B, B LATER folds into C — both steps are legitimate
         (B is live at the time it absorbs A, and still live at the time IT

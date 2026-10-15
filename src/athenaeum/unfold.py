@@ -251,6 +251,11 @@ def find_fold_record(
     for record in records:
         if record.get("write_kind") != "fold-into-existing":
             continue
+        # Issue athenaeum#2072: a refused fold (``fold_source_already_tombstoned``)
+        # is recorded with ``applied: false`` so the ledger shows the outcome,
+        # but it never folded anything -- it can never be the record to unfold.
+        if record.get("applied") is False:
+            continue
         candidates = record.get("folded_sources")
         if not isinstance(candidates, list):
             candidates = record.get("source_paths")
