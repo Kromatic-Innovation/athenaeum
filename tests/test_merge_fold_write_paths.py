@@ -1093,7 +1093,15 @@ class TestCoordinateWidening:
         malformed-proposal case the narrowing invariant exists to catch —
         the widening step cannot manufacture a common ancestor between
         siblings, so it must refuse rather than silently pick one.
-        Refusal happens BEFORE any mutation: no commit, no checkbox flip."""
+        Refusal happens BEFORE any mutation: no commit, no checkbox flip.
+
+        Issue athenaeum#2076: the athenaeum#2069/athenaeum#2076 widen path
+        now applies to every HUMAN-approved fold regardless of rationale,
+        so this narrowing-invariant coverage moved to a non-human
+        (``auto_applied=True``) apply through a detector other than
+        issue athenaeum#1170's name-collision scan — a
+        T2-auto-finalize-shaped apply is the only case left that still
+        hits the pre-athenaeum#2069 hard refusal."""
         wiki = tmp_path / "wiki"
         wiki.mkdir()
         target = wiki / "canonical.md"
@@ -1117,7 +1125,9 @@ class TestCoordinateWidening:
             write_kind="fold-into-existing",
         )
         pm_id = parse_pending_merges(merges_path)[0].id
-        result = resolve_merge(merges_path, pm_id, "approve", wiki_root=wiki)
+        result = resolve_merge(
+            merges_path, pm_id, "approve", wiki_root=wiki, auto_applied=True
+        )
 
         assert result["ok"] is False
         assert result["error_code"] == "fold_narrows_coordinate"
@@ -1301,15 +1311,19 @@ class TestCoordinateWidening:
         records = read_merge_provenance(wiki)
         assert records[0]["coordinates_widened"]["subject"] == "subject-x"
 
-    def test_non_collision_fold_with_differing_subject_still_refuses(
+    def test_non_human_non_collision_fold_with_differing_subject_still_refuses(
         self, tmp_path: Path
     ) -> None:
-        """Issue athenaeum#2069 AC2 (kept, athenaeum#2071 scope boundary): the
-        IDENTITY-kind auto-apply above is gated on
-        ``NAME_COLLISION_RATIONALE_PREFIX`` -- a fold proposed through any
-        OTHER path (no human ruling that the pages are the same real-world
-        thing) still hits the pre-existing hard refusal for a differing
-        ``subject``, with no pending decision auto-applied."""
+        """Issue athenaeum#2069 AC2 (kept, athenaeum#2071 scope boundary),
+        narrowed by athenaeum#2076: the IDENTITY-kind pick-one-and-alias
+        shortcut above is gated on ``NAME_COLLISION_RATIONALE_PREFIX`` --
+        a fold proposed through any OTHER path still hits the pre-existing
+        hard refusal for a differing ``subject``, with no pending decision
+        auto-applied, but ONLY when it is also non-human
+        (``auto_applied=True``) -- a human approval of this same proposal
+        instead raises ``fold_widen_impossible`` (see
+        ``test_qualified_name_scan_fold_subject_mismatch_raises_fold_widen_impossible``
+        below), never this narrowing refusal."""
         wiki = tmp_path / "wiki"
         wiki.mkdir()
         target = wiki / "canonical.md"
@@ -1333,7 +1347,9 @@ class TestCoordinateWidening:
             write_kind="fold-into-existing",
         )
         pm_id = parse_pending_merges(merges_path)[0].id
-        result = resolve_merge(merges_path, pm_id, "approve", wiki_root=wiki)
+        result = resolve_merge(
+            merges_path, pm_id, "approve", wiki_root=wiki, auto_applied=True
+        )
 
         assert result["ok"] is False
         assert result["error_code"] == "fold_narrows_coordinate"
@@ -1342,6 +1358,142 @@ class TestCoordinateWidening:
             "---\nname: Canonical\ntype: concept\nsubject: subject-a\n"
             "---\nOLD BODY\n"
         )
+        assert src_a.exists()
+        src_meta, _ = parse_frontmatter(src_a.read_text(encoding="utf-8"))
+        assert not is_tombstone(src_meta)
+
+    def test_qualified_name_scan_fold_widens_disjoint_scope_to_universal(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue athenaeum#2076 AC1/AC4: a HUMAN-approved fold proposed by
+        the qualified-name scan (athenaeum#1577) -- no
+        ``NAME_COLLISION_RATIONALE_PREFIX`` rationale -- widens a disjoint
+        ``claimed_scope`` to the universal marker exactly like a
+        name-collision-scan proposal does, because the proposal's origin
+        does not change the fold algebra once a human has ruled on it."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        target = wiki / "canonical.md"
+        _write_wiki_page(
+            target, name="Canonical", body="OLD BODY\n", extra={"claimed_scope": "team-a"}
+        )
+        src_a = wiki / "old-a.md"
+        _write_wiki_page(
+            src_a, name="Old A", body="a\n", extra={"claimed_scope": "team-b"}
+        )
+
+        init_git_repo(wiki)
+        merges_path = wiki / "_pending_merges.md"
+        write_pending_merge(
+            merges_path,
+            merge_target_name="Canonical",
+            sources=[str(src_a)],
+            rationale="athenaeum#1577 qualified-name scan: same qualified name",
+            draft_merged_body="NEW BODY\n",
+            confidence=0.9,
+            write_kind="fold-into-existing",
+        )
+        pm_id = parse_pending_merges(merges_path)[0].id
+        result = resolve_merge(merges_path, pm_id, "approve", wiki_root=wiki)
+
+        assert result["ok"] is True, result
+        meta, _ = parse_frontmatter(target.read_text(encoding="utf-8"))
+        assert meta["claimed_scope"] == "*"
+        records = read_merge_provenance(wiki)
+        assert records[0]["coordinates_widened"]["scope"] == "*"
+        src_meta, _ = parse_frontmatter(src_a.read_text(encoding="utf-8"))
+        assert is_tombstone(src_meta)
+
+    def test_wiki_dedupe_cluster_fold_widens_disjoint_scope_to_universal(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue athenaeum#2076 AC1/AC4: a HUMAN-approved wiki-dedupe
+        cluster proposal -- also no name-collision rationale -- widens a
+        disjoint ``claimed_scope`` to the universal marker, same as the
+        qualified-name-scan class above."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        target = wiki / "canonical.md"
+        _write_wiki_page(
+            target, name="Canonical", body="OLD BODY\n", extra={"claimed_scope": "team-a"}
+        )
+        src_a = wiki / "old-a.md"
+        _write_wiki_page(
+            src_a, name="Old A", body="a\n", extra={"claimed_scope": "team-b"}
+        )
+
+        init_git_repo(wiki)
+        merges_path = wiki / "_pending_merges.md"
+        write_pending_merge(
+            merges_path,
+            merge_target_name="Canonical",
+            sources=[str(src_a)],
+            rationale="wiki-dedupe cluster: 2 pages in the same semantic cluster",
+            draft_merged_body="NEW BODY\n",
+            confidence=0.9,
+            write_kind="fold-into-existing",
+        )
+        pm_id = parse_pending_merges(merges_path)[0].id
+        result = resolve_merge(merges_path, pm_id, "approve", wiki_root=wiki)
+
+        assert result["ok"] is True, result
+        meta, _ = parse_frontmatter(target.read_text(encoding="utf-8"))
+        assert meta["claimed_scope"] == "*"
+        records = read_merge_provenance(wiki)
+        assert records[0]["coordinates_widened"]["scope"] == "*"
+        src_meta, _ = parse_frontmatter(src_a.read_text(encoding="utf-8"))
+        assert is_tombstone(src_meta)
+
+    @pytest.mark.parametrize(
+        "rationale",
+        [
+            "athenaeum#1577 qualified-name scan: same qualified name",
+            "wiki-dedupe cluster: 2 pages in the same semantic cluster",
+        ],
+    )
+    def test_non_collision_human_approved_fold_subject_mismatch_raises_fold_widen_impossible(
+        self, tmp_path: Path, rationale: str
+    ) -> None:
+        """Issue athenaeum#2076 AC4: a HUMAN-approved fold of a class OTHER
+        than the name-collision scan does NOT get the IDENTITY-kind
+        pick-one-and-alias shortcut (that shortcut relies specifically on
+        the name-collision detector's "same real-world thing" guarantee,
+        which neither the qualified-name scan nor a wiki-dedupe cluster
+        proposal makes) -- an incompatible ``subject`` instead raises
+        ``fold_widen_impossible`` with a pending decision, for both
+        classes, and the structured skip detail (proposal id, dimension,
+        both values) is present on the refusal."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        target = wiki / "canonical.md"
+        _write_wiki_page(
+            target, name="Canonical", body="OLD BODY\n", extra={"subject": "subject-a"}
+        )
+        src_a = wiki / "old-a.md"
+        _write_wiki_page(
+            src_a, name="Old A", body="a\n", extra={"subject": "subject-b"}
+        )
+
+        init_git_repo(wiki)
+        merges_path = wiki / "_pending_merges.md"
+        write_pending_merge(
+            merges_path,
+            merge_target_name="Canonical",
+            sources=[str(src_a)],
+            rationale=rationale,
+            draft_merged_body="NEW BODY\n",
+            confidence=0.9,
+            write_kind="fold-into-existing",
+        )
+        pm_id = parse_pending_merges(merges_path)[0].id
+        result = resolve_merge(merges_path, pm_id, "approve", wiki_root=wiki)
+
+        assert result["ok"] is False
+        assert result["error_code"] == "fold_widen_impossible"
+        assert result["proposal_id"] == pm_id
+        assert result["dimension"] == "subject"
+        assert {result["value_a"], result["value_b"]} == {"subject-a", "subject-b"}
+        # No mutation on refusal.
         assert src_a.exists()
         src_meta, _ = parse_frontmatter(src_a.read_text(encoding="utf-8"))
         assert not is_tombstone(src_meta)

@@ -1556,6 +1556,7 @@ def _apply_fold_into_existing(
     search_backend: str | None,
     embedding_model: str | None,
     registry: DimensionRegistry = DEFAULT_REGISTRY,
+    human_approved: bool = True,
 ) -> dict:
     """Execute the ``fold-into-existing`` write path (issue athenaeum#425; issue
     athenaeum#716 lane 716-B turned step 5 from a delete into a tombstone and
@@ -1759,24 +1760,48 @@ def _apply_fold_into_existing(
     # verify the result is not narrower than any folded source — refusing
     # the fold outright (nothing written, no commit taken) if it is.
     #
-    # Issue athenaeum#2069: `_widen_over_metas` can now raise
-    # `CoordinateWidenImpossible` — two sides that are genuinely
+    # Issue athenaeum#2069, extended by athenaeum#2076: `_widen_over_metas` can
+    # now raise `CoordinateWidenImpossible` — two sides that are genuinely
     # incompatible (HIERARCHY siblings; differing ENUM/IDENTITY values) —
     # rather than silently returning a value that LOOKS widened but still
-    # fails the narrowing check below for the wrong reason. A
-    # name-collision-scan proposal (`NAME_COLLISION_RATIONALE_PREFIX`) has
-    # already been through a human `approve` specifically because the
-    # pages are the SAME real-world thing described at independently
-    # compiled, differently-worded scopes — for THAT origin only, this
+    # fails the narrowing check below for the wrong reason. ANY proposal a
+    # human has `approve`d — name-collision-scan (`NAME_COLLISION_RATIONALE_
+    # PREFIX`), qualified-name scan (athenaeum#1577), wiki-dedupe cluster, or a
+    # manually proposed fold — has already been through a human ruling that
+    # the pages are the SAME real-world thing described at independently
+    # compiled, differently-worded scopes; the proposal's ORIGIN does not
+    # change that fold algebra (athenaeum#2076). For a human approval, this
     # function completes the widen itself: substitute the dimension's own
     # universal escape when `null_means` declares that safe, or raise a
     # pending decision and refuse with a distinct error code when it does
-    # not (no silent re-refusal loop on the next `ingest-answers` tick). A
-    # fold proposed through any OTHER path keeps the pre-existing hard
+    # not (no silent re-refusal loop on the next `ingest-answers` tick).
+    # ONLY a non-human (auto-applied — issue athenaeum#602's T2 auto-finalize,
+    # athenaeum#1170's unambiguous-collision auto-merge, or the reversible-
+    # verdict fold-on-duplicate auto-apply) fold keeps the pre-existing hard
     # refusal — the narrowing invariant is still the fold-bug detector it
-    # was written to be for that case (see TestCoordinateWidening in
-    # tests/test_merge_fold_write_paths.py).
+    # was written to be for an apply no human has reviewed (see
+    # TestCoordinateWidening in tests/test_merge_fold_write_paths.py).
+    # Issue athenaeum#2076: the IDENTITY-kind pick-one-and-alias shortcut
+    # just below stays reserved for a name-collision-scan proposal
+    # specifically — it relies on that detector's distinct guarantee ("the
+    # pages are the SAME real-world thing", so an opaque id mismatch is
+    # safe to resolve by picking one and aliasing the other). A human
+    # approving a qualified-name-scan / wiki-dedupe-cluster / manual fold
+    # makes no such identity-specific guarantee, so an incompatible
+    # IDENTITY dimension on THOSE classes falls through to the generic
+    # `widen_path_eligible` branch below (`fold_widen_impossible`), same as
+    # any other non-universal dimension. `widen_path_eligible` is true for
+    # ANY human-approved fold (any rationale — athenaeum#2076 AC1) OR a
+    # name-collision-scan fold even when it was auto-applied (issue
+    # athenaeum#1170's unambiguous-collision auto-merge passes
+    # `auto_applied=True` and has always taken this path — "auto applies
+    # exactly as before" means precisely that, not a new refusal for a
+    # class that never refused). A non-human apply through any OTHER
+    # detector (T2 auto-finalize issue athenaeum#602, the fold-on-duplicate
+    # reversible-verdict auto-apply) is neither, so it keeps hitting the
+    # pre-athenaeum#2069 narrowing refusal below, unchanged.
     is_name_collision_fold = pm.rationale.startswith(NAME_COLLISION_RATIONALE_PREFIX)
+    widen_path_eligible = human_approved or is_name_collision_fold
     draft_meta, draft_body_text = parse_frontmatter(pm.draft_merged_body)
     if not isinstance(draft_meta, dict):
         draft_meta = {}
@@ -1841,9 +1866,9 @@ def _apply_fold_into_existing(
                     # pending-decision path below rather than ever writing
                     # a `None` coordinate.
                     widened_value = exc.value_a
-            elif is_name_collision_fold and dimension.null_means == NullMeans.UNIVERSAL:
+            elif widen_path_eligible and dimension.null_means == NullMeans.UNIVERSAL:
                 widened_value = UNIVERSAL_MARKER
-            elif is_name_collision_fold:
+            elif widen_path_eligible:
                 pending_path = wiki_root / "_pending_questions.md"
                 raise_pending_question(
                     pending_path,
@@ -1853,7 +1878,12 @@ def _apply_fold_into_existing(
                         "canonical's value be?"
                     ),
                     context=(
-                        f"{NAME_COLLISION_RATIONALE_PREFIX} fold into "
+                        # Issue athenaeum#2076: a one-line, single-sentence
+                        # context — never the raw `pm.rationale` verbatim,
+                        # which can be multi-line for a wiki-dedupe-cluster
+                        # proposal and would corrupt this sidecar's
+                        # single-field-per-line block format.
+                        f"Human-approved fold (proposal {pm.id}) into "
                         f"{target_slug!r} found incompatible {dimension.name!r} "
                         f"values ({exc.value_a!r} vs {exc.value_b!r}) across "
                         "the folded sources that cannot be automatically "
@@ -1875,11 +1905,20 @@ def _apply_fold_into_existing(
                         "re-approving this proposal unchanged, or ingest-answers "
                         "will keep refusing it identically on every tick."
                     ),
+                    "proposal_id": pm.id,
+                    "dimension": dimension.name,
+                    "value_a": _json_safe_coordinate(exc.value_a),
+                    "value_b": _json_safe_coordinate(exc.value_b),
                 }
             else:
-                # Not a name-collision-scan proposal: preserve the
-                # pre-athenaeum#2069 narrowing refusal for this case. Use the
-                # widest value `_widen_over_metas` DID manage to accumulate
+                # Issue athenaeum#2076: neither a name-collision-scan
+                # proposal NOR a human-approved fold of any other class —
+                # i.e. a non-human auto-apply (T2 auto-finalize issue
+                # athenaeum#602, the fold-on-duplicate reversible-verdict
+                # auto-apply) through a detector other than issue athenaeum#1170's
+                # name-collision scan. Preserve the pre-athenaeum#2069 narrowing
+                # refusal for this case. Use the widest value
+                # `_widen_over_metas` DID manage to accumulate
                 # before hitting the incompatible pair (`exc.value_a` — the
                 # running fold, never the draft's own possibly-absent
                 # coordinate, which would under-report what was already
@@ -1915,18 +1954,34 @@ def _apply_fold_into_existing(
             if not _coordinate_is_at_least_as_wide(
                 dimension, widened_draft_meta, source_metas[src]
             ):
+                canonical_value = (
+                    parsed_coordinate(dimension, widened_draft_meta)
+                    if dimension.kind == DimensionKind.INTERVAL
+                    else coordinate_value(dimension, widened_draft_meta)
+                )
+                source_value = (
+                    parsed_coordinate(dimension, source_metas[src])
+                    if dimension.kind == DimensionKind.INTERVAL
+                    else coordinate_value(dimension, source_metas[src])
+                )
                 return {
                     "ok": False,
                     "error_code": "fold_narrows_coordinate",
                     "message": (
                         f"fold refused: canonical {target_slug!r}'s post-fold "
-                        f"{dimension.name!r} coordinate would be narrower "
-                        f"than folded source {src!r}'s — coordinates widen "
-                        "on a fold, they never narrow (silent scope collapse "
-                        "is a fold bug by definition). If these are meant to "
-                        "diverge, specialize a new narrow claim instead of "
-                        "narrowing the canonical."
+                        f"{dimension.name!r} coordinate "
+                        f"({canonical_value!r}) would be narrower than "
+                        f"folded source {src!r}'s ({source_value!r}) — "
+                        "coordinates widen on a fold, they never narrow "
+                        "(silent scope collapse is a fold bug by "
+                        "definition). If these are meant to diverge, "
+                        "specialize a new narrow claim instead of narrowing "
+                        "the canonical."
                     ),
+                    "proposal_id": pm.id,
+                    "dimension": dimension.name,
+                    "value_a": _json_safe_coordinate(canonical_value),
+                    "value_b": _json_safe_coordinate(source_value),
                 }
 
     if widened_draft_meta != draft_meta:
@@ -2485,6 +2540,17 @@ def resolve_merge(
                 search_backend=search_backend,
                 embedding_model=embedding_model,
                 registry=registry,
+                # Issue athenaeum#2076: the athenaeum#2069 widen path (universal
+                # marker / fold_widen_impossible decision) now applies to
+                # any proposal a HUMAN has approved, regardless of origin
+                # (name-collision scan, qualified-name scan athenaeum#1577,
+                # wiki-dedupe cluster, manual propose-fold) — never to a
+                # non-human auto-apply (`auto_applied=True`: T2
+                # auto-finalize athenaeum#602, unambiguous-collision
+                # auto-merge athenaeum#1170, fold-on-duplicate reversible-
+                # verdict auto-apply), which keeps the pre-existing hard
+                # narrowing refusal.
+                human_approved=not auto_applied,
             )
             if not fold_result["ok"]:
                 if fold_result["error_code"] == "fold_source_already_tombstoned":
@@ -2532,6 +2598,14 @@ def resolve_merge(
                     "error_code": fold_result["error_code"],
                     "message": fold_result["message"],
                     "resolved_block": None,
+                    # Issue athenaeum#2076 (AC2): per-skip detail for
+                    # `fold_narrows_coordinate` / `fold_widen_impossible` —
+                    # present only on those two error codes, ``None``
+                    # otherwise, never a guess.
+                    "proposal_id": fold_result.get("proposal_id"),
+                    "dimension": fold_result.get("dimension"),
+                    "value_a": fold_result.get("value_a"),
+                    "value_b": fold_result.get("value_b"),
                 }
             extra_response = {
                 "folded_sources": fold_result["folded_sources"],

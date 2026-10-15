@@ -65,6 +65,20 @@ def add_pending_subparsers(subparsers: argparse._SubParsersAction) -> None:
         help="Suppress per-block malformed-block warnings; print only the "
         "final summary line(s) (issue athenaeum#1446).",
     )
+    # Issue athenaeum#2076 (AC2): the per-code skipped-count breakdown names
+    # only the error code, never the proposal — ``--verbose`` prints, for
+    # every `fold_narrows_coordinate` / `fold_widen_impossible` skip, the
+    # proposal id, dimension name, and the two values that could not be
+    # widened. Additive only: without the flag, output is byte-for-byte
+    # unchanged.
+    ingest_answers_parser.add_argument(
+        "--verbose",
+        action="store_true",
+        default=False,
+        help="Print per-skip detail (proposal id, dimension, values) for "
+        "fold_narrows_coordinate / fold_widen_impossible skips "
+        "(issue athenaeum#2076).",
+    )
     _add_lock_args(ingest_answers_parser)
     ingest_answers_parser.set_defaults(func=cmd_ingest_answers)
 
@@ -180,6 +194,7 @@ def cmd_ingest_answers(args: argparse.Namespace) -> int:
     raw_root = target / "raw"
 
     quiet = getattr(args, "quiet", False)  # issue athenaeum#1446
+    verbose = getattr(args, "verbose", False)  # issue athenaeum#2076
 
     cfg = load_config(target)
 
@@ -276,6 +291,25 @@ def cmd_ingest_answers(args: argparse.Namespace) -> int:
             + (f" ({breakdown})" if breakdown else " (see log)")
             + "."
         )
+        # Issue athenaeum#2076 (AC2): `--verbose` names the proposal, the
+        # dimension, and the two values for each `fold_narrows_coordinate` /
+        # `fold_widen_impossible` skip — the summary line above only ever
+        # carries a per-code count. Additive only: without the flag this
+        # block prints nothing, matching the pre-athenaeum#2076 output.
+        if verbose:
+            for outcome in decision_report.outcomes:
+                if outcome.applied:
+                    continue
+                if outcome.error_code not in (
+                    "fold_narrows_coordinate",
+                    "fold_widen_impossible",
+                ):
+                    continue
+                print(
+                    f"  - {outcome.error_code}: proposal={outcome.decision_id} "
+                    f"dimension={outcome.dimension_name!r} "
+                    f"value_a={outcome.value_a!r} value_b={outcome.value_b!r}"
+                )
     print(f"Ingested {count} answered question(s).")
 
     # Issue athenaeum#1804: a second summary line separating source files
