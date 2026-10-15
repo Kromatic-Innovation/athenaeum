@@ -618,6 +618,123 @@ class TestAutoMergeFailureModesAreLogged:
 
 
 # ---------------------------------------------------------------------------
+# Issue athenaeum#2072 — a page that vanished (deleted/renamed, or
+# folded/tombstoned by an earlier writer sharing the same run) between
+# `scan_name_collisions`'s snapshot and this collision's own write-time turn
+# must never get a merge proposal written naming it.
+# ---------------------------------------------------------------------------
+
+
+class TestResolveNameCollisionsSkipsVanishedPair:
+    def test_collision_pages_still_live_detects_missing_file(
+        self, tmp_path: Path
+    ) -> None:
+        from athenaeum.name_collisions import _collision_pages_still_live
+
+        wiki = tmp_path / "wiki"
+        page_a = _write_page(wiki, "a.md", uid="u1", name="Ghost", type_="concept")
+        collision = NameCollision(
+            name="Ghost",
+            type="concept",
+            pages=(
+                CollisionPage(path=page_a, uid="u1", name="Ghost", type="concept", body=""),
+                CollisionPage(
+                    path=wiki / "never-written.md",
+                    uid="u2",
+                    name="Ghost",
+                    type="concept",
+                    body="",
+                ),
+            ),
+        )
+        assert _collision_pages_still_live(collision) is False
+
+    def test_collision_pages_still_live_true_for_an_already_tombstoned_page(
+        self, tmp_path: Path
+    ) -> None:
+        """Deliberately NOT treated as vanished — the file still exists on
+        disk (issue athenaeum#716 never deletes a folded page). This check
+        only closes the "page deleted/renamed between scan and write" gap;
+        catching an already-folded source is `classify_collision`'s/
+        `scan_name_collisions`'s job, not this one (see this function's
+        docstring for why re-reading frontmatter here is deliberately
+        avoided)."""
+        from athenaeum.name_collisions import _collision_pages_still_live
+
+        wiki = tmp_path / "wiki"
+        page_a = _write_page(wiki, "a.md", uid="u1", name="Ghost", type_="concept")
+        page_b = wiki / "folded-away.md"
+        page_b.write_text(
+            "---\nname: Ghost\nuid: u2\ntype: concept\nstatus: folded\n"
+            "folded_into: elsewhere\nembedded: false\n---\n\n",
+            encoding="utf-8",
+        )
+        collision = NameCollision(
+            name="Ghost",
+            type="concept",
+            pages=(
+                CollisionPage(path=page_a, uid="u1", name="Ghost", type="concept", body=""),
+                CollisionPage(path=page_b, uid="u2", name="Ghost", type="concept", body=""),
+            ),
+        )
+        assert _collision_pages_still_live(collision) is True
+
+    def test_collision_pages_still_live_true_when_both_present(
+        self, tmp_path: Path
+    ) -> None:
+        from athenaeum.name_collisions import _collision_pages_still_live
+
+        wiki = tmp_path / "wiki"
+        page_a = _write_page(wiki, "a.md", uid="u1", name="Ghost", type_="concept")
+        page_b = _write_page(wiki, "b.md", uid="u2", name="Ghost", type_="concept")
+        collision = NameCollision(
+            name="Ghost",
+            type="concept",
+            pages=(
+                CollisionPage(path=page_a, uid="u1", name="Ghost", type="concept", body=""),
+                CollisionPage(path=page_b, uid="u2", name="Ghost", type="concept", body=""),
+            ),
+        )
+        assert _collision_pages_still_live(collision) is True
+
+    def test_resolve_name_collisions_never_writes_a_proposal_for_a_vanished_pair(
+        self, tmp_path: Path
+    ) -> None:
+        """Simulates the scan-to-write race directly: `scan_name_collisions`
+        returns a stale snapshot naming a page that no longer exists by the
+        time the write loop reaches it (an earlier iteration's auto-merge,
+        or any other writer sharing the run lock, folded it away first)."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir(parents=True, exist_ok=True)
+        page_b = _write_page(wiki, "b.md", uid="u2", name="Ghost", type_="concept")
+        stale_collision = NameCollision(
+            name="Ghost",
+            type="concept",
+            pages=(
+                CollisionPage(
+                    path=wiki / "vanished.md",
+                    uid="u1",
+                    name="Ghost",
+                    type="concept",
+                    body="",
+                ),
+                CollisionPage(path=page_b, uid="u2", name="Ghost", type="concept", body=""),
+            ),
+        )
+
+        with patch(
+            "athenaeum.name_collisions.scan_name_collisions",
+            return_value=[stale_collision],
+        ):
+            result = resolve_name_collisions(wiki, auto_merge=False, dry_run=False)
+
+        assert result["collisions"] == 1
+        assert result["vanished"] == 1
+        assert result["queued"] == 0
+        assert not (wiki / "_pending_merges.md").exists()
+
+
+# ---------------------------------------------------------------------------
 # AC3 — idempotency
 # ---------------------------------------------------------------------------
 

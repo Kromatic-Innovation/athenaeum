@@ -434,6 +434,60 @@ class TestApplyMerge:
         report = apply_decision_answers(wiki_root, raw_root)
         assert report.applied == 1
 
+    def test_tombstoned_source_archives_block_and_is_not_rerefused(
+        self, wiki_root: Path, raw_root: Path
+    ) -> None:
+        """Issue athenaeum#2072: a fold-into-existing approve whose source was
+        already tombstoned by a DIFFERENT fold in the meantime is refused
+        with ``fold_source_already_tombstoned`` on the first
+        ``ingest-answers`` tick — but, unlike a transient refusal, the
+        block is archived right then so the SAME never-deleted
+        decision-answer file is not re-refused identically on every future
+        tick."""
+        from athenaeum.pending_merges import write_pending_merge
+
+        target = wiki_root / "canonical.md"
+        target.write_text("---\nname: Canonical\ntype: concept\n---\nc\n", encoding="utf-8")
+        src_a = wiki_root / "already-folded-elsewhere.md"
+        src_a.write_text(
+            "---\nname: Already Folded Elsewhere\ntype: concept\nstatus: folded\n"
+            "folded_into: other\nembedded: false\n---\na\n",
+            encoding="utf-8",
+        )
+        init_git_repo(wiki_root)
+
+        merges_path = wiki_root / "_pending_merges.md"
+        write_pending_merge(
+            merges_path,
+            merge_target_name="Canonical",
+            sources=[str(src_a)],
+            rationale="r",
+            draft_merged_body="merged\n",
+            confidence=0.9,
+            write_kind="fold-into-existing",
+        )
+        from athenaeum.pending_merges import parse_pending_merges
+
+        mid = parse_pending_merges(merges_path)[0].id
+        write_decision_answer(
+            raw_root, decision_id=mid, decision_type="merge", verdict="approve"
+        )
+
+        first = apply_decision_answers(wiki_root, raw_root)
+        first_outcome = next(o for o in first.outcomes if o.decision_id == mid)
+        assert first_outcome.applied is False
+        assert first_outcome.error_code == "fold_source_already_tombstoned"
+        assert mid not in {pm.id for pm in parse_pending_merges(merges_path)}
+        assert (wiki_root / "_pending_merges_archive.md").exists()
+
+        # The SAME answer file is still sitting under raw/answers/ (never
+        # deleted) — a second tick must NOT re-emit the identical refusal.
+        second = apply_decision_answers(wiki_root, raw_root)
+        second_outcome = next(o for o in second.outcomes if o.decision_id == mid)
+        assert second_outcome.applied is False
+        assert second_outcome.error_code != "fold_source_already_tombstoned"
+        assert second_outcome.error_code == "id_not_found"
+
 
 # ---------------------------------------------------------------------------
 # TestDefaultAcceptanceTaggedAtAnswerTime — issue athenaeum#1996 ratchet guard 2.

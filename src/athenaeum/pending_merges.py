@@ -2154,6 +2154,60 @@ def _apply_fold_into_existing(
     }
 
 
+def _archive_stale_merge_block(
+    merges_path: Path,
+    block_text: str,
+    *,
+    remaining_blocks: list[str],
+    reason: str,
+    now: datetime | None = None,
+) -> None:
+    """Move one unresolved block straight to ``_pending_merges_archive.md``.
+
+    Issue athenaeum#2072: used by :func:`resolve_merge`'s
+    ``fold_source_already_tombstoned`` handling. That refusal is
+    PERMANENT — a tombstone's ``folded_into`` is set once and never
+    re-pointed at a different canonical (see
+    :func:`_apply_fold_into_existing`'s step -1b) — so leaving the block
+    queued would make every subsequent ``ingest-answers`` tick re-attempt
+    the identical, never-succeeding fold forever (the triggering
+    decision-answer file under ``raw/answers/`` is never deleted — see
+    :func:`athenaeum.decision_answers.apply_decision_answers`). Mirrors
+    :func:`revalidate_pending_merges`'s "append a ``**Retired**:`` line,
+    move to ``_pending_merges_archive.md``, never delete" discipline
+    exactly, for one block identified by its caller-computed replacement
+    primary-file contents (*remaining_blocks* — every OTHER block,
+    untouched) rather than re-deriving them here.
+    """
+    ts = now_iso(now)
+    archived_block = f"{block_text}\n\n**Retired**: {ts} — {reason}\n"
+
+    primary_parts = ["# Pending Merges", *remaining_blocks]
+    new_primary = "\n\n---\n\n".join(primary_parts) + "\n"
+    atomic_write_text(merges_path, new_primary)
+
+    archive_path = merges_path.parent / "_pending_merges_archive.md"
+    existing_archive = ""
+    if archive_path.exists():
+        existing_archive = archive_path.read_text(encoding="utf-8")
+    if existing_archive.strip():
+        if existing_archive.startswith("# Archived Merges"):
+            _, _, rest = existing_archive.partition("\n")
+            combined = (
+                "# Archived Merges\n\n" + archived_block + "\n\n---\n\n" + rest.lstrip()
+            )
+        else:
+            combined = (
+                "# Archived Merges\n\n"
+                + archived_block
+                + "\n\n---\n\n"
+                + existing_archive.lstrip()
+            )
+    else:
+        combined = "# Archived Merges\n\n" + archived_block + "\n"
+    atomic_write_text(archive_path, combined)
+
+
 def resolve_merge(
     merges_path: Path,
     merge_id: str,
@@ -2300,6 +2354,7 @@ def resolve_merge(
 
     target_pm: PendingMerge | None = None
     resolved_text: str | None = None
+    target_index: int | None = None
     rewritten: list[str] = []
     for block_text in blocks:
         pm = _parse_block(block_text)
@@ -2321,6 +2376,7 @@ def resolve_merge(
             auto_applied=auto_applied and decision == "approve",
             answered_at=answered_at,
         )
+        target_index = len(rewritten)
         rewritten.append(resolved_text)
 
     if target_pm is None:
@@ -2431,6 +2487,46 @@ def resolve_merge(
                 registry=registry,
             )
             if not fold_result["ok"]:
+                if fold_result["error_code"] == "fold_source_already_tombstoned":
+                    # Issue athenaeum#2072: this refusal is PERMANENT, unlike
+                    # fold_target_missing/no_git_repo (transient/fixable by
+                    # a human) — a tombstone's folded_into is set once and
+                    # never re-pointed, so retrying on every future tick
+                    # can never succeed. Archive the block now (never
+                    # delete), note the outcome on the provenance ledger,
+                    # and still report ok=False/unapplied — the fold did
+                    # NOT run, so no caller may count this as a successful
+                    # merge.
+                    assert target_index is not None  # set wherever target_pm is
+                    remaining_blocks = [
+                        b for i, b in enumerate(rewritten) if i != target_index
+                    ]
+                    archive_reason = (
+                        f"fold_source_already_tombstoned: {fold_result['message']}"
+                    )
+                    _archive_stale_merge_block(
+                        merges_path,
+                        target_pm.raw_block,
+                        remaining_blocks=remaining_blocks,
+                        reason=archive_reason,
+                    )
+                    record_merge_provenance(
+                        root,
+                        merge_id=target_pm.id,
+                        write_kind=write_kind,
+                        canonical_slug=target_slug,
+                        source_paths=list(target_pm.sources),
+                        auto_applied=False,
+                        applied=False,
+                        error_code=fold_result["error_code"],
+                    )
+                    return {
+                        "ok": False,
+                        "error_code": fold_result["error_code"],
+                        "message": fold_result["message"],
+                        "resolved_block": None,
+                        "archived": True,
+                    }
                 return {
                     "ok": False,
                     "error_code": fold_result["error_code"],
@@ -2668,6 +2764,42 @@ class RevalidationResult:
     applied: bool
 
 
+def _source_page_missing(src: str, *, base: Path | None = None) -> bool:
+    """True iff *src* no longer names a live page (issue athenaeum#2072).
+
+    A queued proposal's source can go stale between queue-time and
+    revalidation-time in two ways: the page may have been deleted or
+    renamed outright (the file no longer exists at that path), or it may
+    have been FOLDED AWAY by an unrelated merge in the meantime — the file
+    still exists on disk but now carries the issue athenaeum#716 tombstone
+    stamp (``status: folded`` — see :func:`athenaeum.models.is_tombstone`).
+    Either way the source is no longer something a human reviewing this
+    proposal can meaningfully act on, so both count as "missing" here. A
+    file that cannot be read at all (``OSError``/``UnicodeDecodeError``) is
+    conservatively treated as missing too — this function cannot prove it
+    is still a live page.
+
+    ``base`` resolves a RELATIVE *src* the same way
+    :func:`athenaeum.models.is_page_authorized_at` does (joined to ``base``;
+    an absolute ``src`` is used as-is) — a source is not guaranteed to be
+    stored as an absolute path (the module docstring's convention is the
+    common case, not an enforced invariant), so resolving only against the
+    process cwd would misclassify a legitimately relative, still-live
+    source as missing.
+    """
+    path = Path(src).expanduser()
+    if base is not None and not path.is_absolute():
+        path = Path(base).expanduser() / path
+    if not path.is_file():
+        return True
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return True
+    meta, _ = parse_frontmatter(text)
+    return bool(meta) and is_tombstone(meta)
+
+
 def revalidate_pending_merges(
     merges_path: Path,
     *,
@@ -2677,6 +2809,18 @@ def revalidate_pending_merges(
 ) -> RevalidationResult:
     """Re-validate EXISTING unresolved ``_pending_merges.md`` blocks against
     the CURRENT suppression gate and archive ones that now fail it (issue athenaeum#481).
+
+    Issue athenaeum#2072: also retires a block when at least one of its
+    ``**Sources**:`` entries no longer names a live page (see
+    :func:`_source_page_missing` — deleted/renamed, or folded/tombstoned by
+    a later run). This is a DISTINCT reason from the over-cluster gate
+    below (``source page missing: N of M``, not the suppression-gate
+    reason string), recorded and archived the same way. A name-collision-
+    scan proposal (:mod:`athenaeum.name_collisions`) is the driving case —
+    its canonical/source pages can be folded or retired by a LATER run
+    before a human answers the original proposal — but the check applies
+    to every proposal's sources, not just name-collision ones, since a
+    dangling source is equally unreviewable regardless of origin.
 
     athenaeum#480 closed the write-path bypass, so no NEW degenerate over-cluster
     proposal can be appended. This is the complement: it retires entries that
@@ -2732,6 +2876,16 @@ def revalidate_pending_merges(
             confidence=pm.confidence,
             config=config,
         )
+        if reason is None:
+            # base = knowledge_root (wiki_root's parent) — the same base
+            # `list_pending_merges` resolves a relative source against via
+            # `all_sources_authorized`/`is_page_authorized_at`.
+            knowledge_root = merges_path.parent.parent
+            missing_count = sum(
+                1 for s in pm.sources if _source_page_missing(s, base=knowledge_root)
+            )
+            if missing_count:
+                reason = f"source page missing: {missing_count} of {len(pm.sources)}"
         if reason is None:
             remaining.append(block_text)
             continue

@@ -291,6 +291,36 @@ def classify_collision(collision: NameCollision) -> Literal["unambiguous", "ambi
     return "unambiguous"
 
 
+def _collision_pages_still_live(collision: NameCollision) -> bool:
+    """True iff every page in *collision* still exists on disk.
+
+    Issue athenaeum#2072: :func:`scan_name_collisions` takes a single
+    snapshot of the wiki at the START of a run. By the time the write loop
+    in :func:`resolve_name_collisions` reaches a given collision, an
+    EARLIER iteration of that same loop (an unambiguous auto-merge) — or
+    any other writer sharing the run lock — may already have deleted,
+    renamed, or folded away one of this collision's pages. Writing a merge
+    proposal naming a source that no longer exists at that path is exactly
+    the stale-proposal class
+    :func:`athenaeum.pending_merges.revalidate_pending_merges` retires
+    after the fact; this check closes the scan-to-write window so the
+    proposal is never queued in the first place.
+
+    Deliberately an existence check only (``Path.is_file()``, no read) —
+    not a tombstone re-check. A page already folded by an EARLIER
+    iteration still exists on disk (issue athenaeum#716 never deletes), so
+    re-reading its frontmatter here would cost an extra read per source on
+    every collision, including the common case where nothing raced at
+    all. ``classify_collision``'s own re-read of each source already
+    degrades to ``ambiguous`` (fail-safe, never auto-merges) when a source
+    cannot be read, and :func:`scan_name_collisions` itself never groups a
+    tombstone into a collision in the first place — the only gap this
+    closes is the page vanishing from disk entirely between scan and
+    write.
+    """
+    return all(page.path.is_file() for page in collision.pages)
+
+
 def _fold_target_matches_canonical(wiki_root: Path, canonical: CollisionPage) -> bool:
     """Backstop check: does the fold TARGET :func:`resolve_name_collisions`
     is about to pass actually resolve to the canonical page's own file
@@ -446,10 +476,13 @@ def resolve_name_collisions(
     machine run lock (see :func:`athenaeum._cmd_run.cmd_run`).
 
     Returns a dict with ``collisions``, ``unambiguous``, ``ambiguous``,
-    ``merged``, and ``queued`` counts (``queued`` = collisions whose
-    proposal is still sitting unresolved in the pending-merges sidecar after
-    this call — every ambiguous collision, plus any unambiguous collision
-    not auto-merged this run).
+    ``merged``, ``vanished`` (issue athenaeum#2072 — collisions skipped because
+    a page vanished between scan and write; see
+    :func:`_collision_pages_still_live`), and ``queued`` counts (``queued``
+    = collisions whose proposal is still sitting unresolved in the
+    pending-merges sidecar after this call — every ambiguous collision,
+    plus any unambiguous collision not auto-merged this run, MINUS any
+    vanished collision, which was never written at all).
     """
     collisions = scan_name_collisions(wiki_root)
     unambiguous = 0
@@ -477,7 +510,22 @@ def resolve_name_collisions(
         }
 
     merges_path = wiki_root / "_pending_merges.md"
+    vanished = 0
     for collision in collisions:
+        if not _collision_pages_still_live(collision):
+            # Issue athenaeum#2072: a page this collision named at scan
+            # time vanished (deleted/renamed) or was folded/tombstoned by
+            # an earlier iteration of THIS SAME loop before this iteration
+            # ran. Never write a proposal naming a source that is no
+            # longer live — see `_collision_pages_still_live`'s docstring.
+            vanished += 1
+            log.info(
+                "name-collision-scan-skip-vanished name=%r — a page vanished "
+                "between scan and write; skipping this run (will be "
+                "re-scanned and re-evaluated on the next run)",
+                collision.name,
+            )
+            continue
         canonical = canonical_page(collision)
         sources = [str(page.path) for page in collision.pages]
         verdict = classify_collision(collision)
@@ -598,5 +646,6 @@ def resolve_name_collisions(
         "unambiguous": unambiguous,
         "ambiguous": ambiguous,
         "merged": merged,
-        "queued": len(collisions) - merged,
+        "vanished": vanished,
+        "queued": len(collisions) - merged - vanished,
     }
