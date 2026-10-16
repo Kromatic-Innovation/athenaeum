@@ -1549,7 +1549,7 @@ def _json_safe_coordinate(value: Any) -> Any:
 def _widen_question_already_open(pending_path: Path, question: str) -> bool:
     """True when ``pending_path`` holds an UNRESOLVED block asking ``question``.
 
-    Seer review on athenaeum#2076: the ``fold_widen_impossible`` refusal
+    Seer review on Kromatic-Innovation/athenaeum#2076: the ``fold_widen_impossible`` refusal
     leaves the approval unconsumed, so the same fold is retried on every
     ``ingest-answers`` tick. The question must be raised once per open
     decision, not once per tick. A resolved block (``- [x]``) does not count:
@@ -1892,7 +1892,7 @@ def _apply_fold_into_existing(
                     f"{dimension.name!r} coordinate — what should the "
                     "canonical's value be?"
                 )
-                # Seer review on athenaeum#2076 (PR #2081): a refused fold
+                # Seer review on Kromatic-Innovation/athenaeum#2076 (Kromatic-Innovation/athenaeum#2081): a refused fold
                 # does NOT consume the approval, so `ingest-answers` retries
                 # it every tick. Without this guard each tick appended one
                 # more identical block to _pending_questions.md. Raise the

@@ -1501,7 +1501,7 @@ class TestCoordinateWidening:
     def test_fold_widen_impossible_raises_its_question_once_across_retries(
         self, tmp_path: Path
     ) -> None:
-        """Seer review on athenaeum#2076 (PR #2081): a refused fold does not
+        """Seer review on Kromatic-Innovation/athenaeum#2076 (Kromatic-Innovation/athenaeum#2081): a refused fold does not
         consume the approval, so ``ingest-answers`` retries it on every tick.
         The pending question must be raised ONCE while it is open -- a second
         identical refusal appends no second block."""
