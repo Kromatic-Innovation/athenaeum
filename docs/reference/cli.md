@@ -758,6 +758,7 @@ Ingest answered pending questions from _pending_questions.md
 | `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--quiet`, `-q` | `False` | — | Suppress per-block malformed-block warnings; print only the final summary line(s). |
+| `--verbose` | `False` | — | Print per-skip detail (proposal id, dimension, values) for fold_narrows_coordinate / fold_widen_impossible skips. |
 | `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 
 ## `athenaeum ingest-merges`
