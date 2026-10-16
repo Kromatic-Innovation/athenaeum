@@ -1498,6 +1498,45 @@ class TestCoordinateWidening:
         src_meta, _ = parse_frontmatter(src_a.read_text(encoding="utf-8"))
         assert not is_tombstone(src_meta)
 
+    def test_fold_widen_impossible_raises_its_question_once_across_retries(
+        self, tmp_path: Path
+    ) -> None:
+        """Seer review on athenaeum#2076 (PR #2081): a refused fold does not
+        consume the approval, so ``ingest-answers`` retries it on every tick.
+        The pending question must be raised ONCE while it is open -- a second
+        identical refusal appends no second block."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        target = wiki / "canonical.md"
+        _write_wiki_page(
+            target, name="Canonical", body="OLD BODY\n", extra={"subject": "subject-a"}
+        )
+        src_a = wiki / "old-a.md"
+        _write_wiki_page(
+            src_a, name="Old A", body="a\n", extra={"subject": "subject-b"}
+        )
+
+        init_git_repo(wiki)
+        merges_path = wiki / "_pending_merges.md"
+        write_pending_merge(
+            merges_path,
+            merge_target_name="Canonical",
+            sources=[str(src_a)],
+            rationale="wiki pages cluster on the same topic",
+            draft_merged_body="NEW BODY\n",
+            confidence=0.9,
+            write_kind="fold-into-existing",
+        )
+        pm_id = parse_pending_merges(merges_path)[0].id
+        first = resolve_merge(merges_path, pm_id, "approve", wiki_root=wiki)
+        second = resolve_merge(merges_path, pm_id, "approve", wiki_root=wiki)
+
+        assert first["error_code"] == "fold_widen_impossible"
+        assert second["error_code"] == "fold_widen_impossible"
+        pending = (wiki / "_pending_questions.md").read_text(encoding="utf-8")
+        question = "Fold of 'canonical' cannot auto-widen its 'subject' coordinate"
+        assert pending.count(question) == 1, pending
+
     def test_name_collision_fold_withdraws_stale_subject_widen_question(
         self, tmp_path: Path
     ) -> None:

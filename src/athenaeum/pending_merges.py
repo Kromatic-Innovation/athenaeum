@@ -1545,6 +1545,23 @@ def _json_safe_coordinate(value: Any) -> Any:
     return value
 
 
+
+def _widen_question_already_open(pending_path: Path, question: str) -> bool:
+    """True when ``pending_path`` holds an UNRESOLVED block asking ``question``.
+
+    Seer review on athenaeum#2076: the ``fold_widen_impossible`` refusal
+    leaves the approval unconsumed, so the same fold is retried on every
+    ``ingest-answers`` tick. The question must be raised once per open
+    decision, not once per tick. A resolved block (``- [x]``) does not count:
+    if the operator answered and the fold still cannot widen, a fresh
+    question is the right outcome.
+    """
+    try:
+        text = pending_path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return f"- [ ] {question}" in text
+
 def _apply_fold_into_existing(
     pm: PendingMerge,
     *,
@@ -1870,30 +1887,38 @@ def _apply_fold_into_existing(
                 widened_value = UNIVERSAL_MARKER
             elif widen_path_eligible:
                 pending_path = wiki_root / "_pending_questions.md"
-                raise_pending_question(
-                    pending_path,
-                    question=(
-                        f"Fold of {target_slug!r} cannot auto-widen its "
-                        f"{dimension.name!r} coordinate — what should the "
-                        "canonical's value be?"
-                    ),
-                    context=(
-                        # Issue athenaeum#2076: a one-line, single-sentence
-                        # context — never the raw `pm.rationale` verbatim,
-                        # which can be multi-line for a wiki-dedupe-cluster
-                        # proposal and would corrupt this sidecar's
-                        # single-field-per-line block format.
-                        f"Human-approved fold (proposal {pm.id}) into "
-                        f"{target_slug!r} found incompatible {dimension.name!r} "
-                        f"values ({exc.value_a!r} vs {exc.value_b!r}) across "
-                        "the folded sources that cannot be automatically "
-                        "widened into a single covering coordinate. Decide "
-                        "what the canonical page's coordinate should be, then "
-                        "re-approve the proposal."
-                    ),
-                    entity=target_slug,
-                    source=str(target_path),
+                widen_question = (
+                    f"Fold of {target_slug!r} cannot auto-widen its "
+                    f"{dimension.name!r} coordinate — what should the "
+                    "canonical's value be?"
                 )
+                # Seer review on athenaeum#2076 (PR #2081): a refused fold
+                # does NOT consume the approval, so `ingest-answers` retries
+                # it every tick. Without this guard each tick appended one
+                # more identical block to _pending_questions.md. Raise the
+                # question once; while an UNRESOLVED block with this exact
+                # question text is open, just refuse again.
+                if not _widen_question_already_open(pending_path, widen_question):
+                    raise_pending_question(
+                        pending_path,
+                        question=widen_question,
+                        context=(
+                            # Issue athenaeum#2076: a one-line, single-sentence
+                            # context — never the raw `pm.rationale` verbatim,
+                            # which can be multi-line for a wiki-dedupe-cluster
+                            # proposal and would corrupt this sidecar's
+                            # single-field-per-line block format.
+                            f"Human-approved fold (proposal {pm.id}) into "
+                            f"{target_slug!r} found incompatible {dimension.name!r} "
+                            f"values ({exc.value_a!r} vs {exc.value_b!r}) across "
+                            "the folded sources that cannot be automatically "
+                            "widened into a single covering coordinate. Decide "
+                            "what the canonical page's coordinate should be, then "
+                            "re-approve the proposal."
+                        ),
+                        entity=target_slug,
+                        source=str(target_path),
+                    )
                 return {
                     "ok": False,
                     "error_code": "fold_widen_impossible",
