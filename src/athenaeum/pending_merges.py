@@ -1892,7 +1892,8 @@ def _apply_fold_into_existing(
                     f"{dimension.name!r} coordinate — what should the "
                     "canonical's value be?"
                 )
-                # Seer review on Kromatic-Innovation/athenaeum#2076 (Kromatic-Innovation/athenaeum#2081): a refused fold
+                # Seer review on Kromatic-Innovation/athenaeum#2076
+                # (Kromatic-Innovation/athenaeum#2081): a refused fold
                 # does NOT consume the approval, so `ingest-answers` retries
                 # it every tick. Without this guard each tick appended one
                 # more identical block to _pending_questions.md. Raise the
