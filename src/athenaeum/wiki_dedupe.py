@@ -157,6 +157,7 @@ from athenaeum.clusters import (
     resolve_cluster_threshold,
 )
 from athenaeum.comparator import (
+    VERDICT_DUPLICATE,
     VERDICT_UNDERDETERMINED,
     begin_content_relation_unavailable_tracking,
     flush_content_relation_unavailable_warning,
@@ -168,6 +169,7 @@ from athenaeum.config import (
     resolve_comparator_enabled,
     resolve_heartbeat_interval,
     resolve_wiki_dedupe_min_body_chars,
+    resolve_wiki_dedupe_min_confidence,
 )
 from athenaeum.merge_type_gate import cross_class_precheck
 from athenaeum.models import AutoMemoryFile, TokenUsage, parse_frontmatter, validity_bound_str
@@ -176,10 +178,11 @@ from athenaeum.progress import PhaseHeartbeat
 from athenaeum.runlock import RunLock
 from athenaeum.search import embed_texts
 from athenaeum.storage import is_merge_eligible
-from athenaeum.vecmath import mean_pool
+from athenaeum.vecmath import cosine, mean_pool
 from athenaeum.verdict_effects import queue_coordinate_batch
 from athenaeum.wiki_dedupe_attribution import (
     ERASURE_CLASS_REFUSED_REASON,
+    OUTCOME_BELOW_CONFIDENCE_FLOOR,
     OUTCOME_CROSS_CLASS_REJECTED,
     OUTCOME_DECIDED,
     OUTCOME_FRESH,
@@ -510,8 +513,16 @@ def find_wiki_page_clusters(
     threshold: float,
     embedding_provider: EmbeddingProvider | None = None,
     config: dict[str, Any] | None = None,
+    out_embeddings: dict[str, list[float]] | None = None,
 ) -> list[Cluster]:
     """Cluster eligible wiki pages; returns only clusters of size >= 2.
+
+    *out_embeddings* (issue athenaeum#2080, optional out-param in the style of
+    :func:`athenaeum.clusters.cluster_auto_memory_files`'s
+    ``out_embedder_counts``): when given, it is filled with the
+    ``{str(path): vector}`` map this call resolved, so a caller can compute a
+    pair's cosine ``confidence`` without a second embedding round-trip.
+    ``None`` (the default) leaves every existing caller byte-identical.
 
     Singletons are dropped here (unlike the raw auto-memory C2 pass,
     which returns them for a uniform report shape) — the wiki-page pass
@@ -529,6 +540,8 @@ def find_wiki_page_clusters(
     embeddings, embedder_sources = _resolve_wiki_embeddings(
         files, embedding_provider=embedding_provider
     )
+    if out_embeddings is not None:
+        out_embeddings.update(embeddings)
     clusters = cluster_auto_memory_files(
         files,
         extra_roots=[wiki_root],
@@ -701,11 +714,18 @@ def propose_wiki_page_merges(
             relpath = am.path.name
         by_relpath[relpath] = am
 
+    # Issue athenaeum#2080 AC3: the cosine floor is a queue-side filter on a
+    # decided ``duplicate`` -- it is read here, applied after the comparator
+    # has ruled, and never reaches the comparator itself (athenaeum#715 bans
+    # confidence as a verdict input).
+    confidence_floor = resolve_wiki_dedupe_min_confidence(resolved_config)
+    pair_embeddings: dict[str, list[float]] = {}
     clusters = find_wiki_page_clusters(
         wiki_root,
         threshold=resolved_threshold,
         embedding_provider=embedding_provider,
         config=resolved_config,
+        out_embeddings=pair_embeddings,
     )
 
     # Issue athenaeum#398: this pass (athenaeum#290) is one of the post-compile dark zones —
@@ -878,6 +898,16 @@ def propose_wiki_page_merges(
             for am_a, am_b in combinations(members, 2):
                 path_a, path_b = am_a.path.resolve(), am_b.path.resolve()
                 sources = [str(path_a), str(path_b)]
+                # Issue athenaeum#2080 AC3: this pair's embedding cosine,
+                # recorded on every result/attribution row. ``None`` only when
+                # a vector is missing, which clustering makes unreachable.
+                vec_a = pair_embeddings.get(str(am_a.path))
+                vec_b = pair_embeddings.get(str(am_b.path))
+                pair_confidence: float | None = (
+                    round(cosine(vec_a, vec_b), 4)
+                    if vec_a is not None and vec_b is not None
+                    else None
+                )
 
                 # Issue athenaeum#433: type-compatibility precheck, kept as a
                 # pre-comparator filter (see module docstring) since the
@@ -973,6 +1003,7 @@ def propose_wiki_page_merges(
                             {
                                 "pair": "|".join(sorted((page_a.id, page_b.id))),
                                 "verdict": dry_outcome.verdict,
+                                "confidence": pair_confidence,
                                 "sources": sources,
                             }
                         )
@@ -998,6 +1029,7 @@ def propose_wiki_page_merges(
                     "cluster_threshold": resolved_threshold,
                     "n_cluster_members": len(members),
                     "pair": record.get("pair"),
+                    "confidence": pair_confidence,
                 }
                 if not record["ok"]:
                     # AC1's sharper half. ``record_comparison``'s own docstring
@@ -1049,6 +1081,55 @@ def propose_wiki_page_merges(
                         )
                     )
                     continue
+                # Issue athenaeum#2080 AC3: a freshly-decided ``duplicate`` whose
+                # pair cosine is below the configured floor is ARCHIVED, not
+                # enacted -- no fold evidence, no queue item, and (crucially) no
+                # auto-apply authorization to evaluate. The verdict is already
+                # ledgered above; the attribution snapshot row below is the
+                # provenance note. Only the real embedder's cosines are gated
+                # on: the hashing-trick fallback embedder's scores are on a
+                # different scale, so a floor calibrated on MiniLM vectors
+                # would be meaningless against them (recorded, never gated).
+                if (
+                    record["verdict"] == VERDICT_DUPLICATE
+                    and pair_confidence is not None
+                    and confidence_floor > 0.0
+                    and cluster.embedder == EMBEDDER_CHROMADB_DEFAULT
+                    and pair_confidence < confidence_floor
+                ):
+                    attribution_rows.append(
+                        build_attribution_row(
+                            path_a,
+                            path_b,
+                            OUTCOME_BELOW_CONFIDENCE_FLOOR,
+                            reason=OUTCOME_BELOW_CONFIDENCE_FLOOR,
+                            detail=(
+                                f"duplicate verdict archived: pair cosine "
+                                f"{pair_confidence:.4f} < "
+                                f"wiki_dedupe_min_confidence {confidence_floor:.4f}"
+                            ),
+                            verdict=record.get("verdict"),
+                            action="archived",
+                            **row_kwargs,
+                        )
+                    )
+                    results.append(
+                        {
+                            "pair": record["pair"],
+                            "verdict": record["verdict"],
+                            "action": "archived-below-confidence-floor",
+                            "confidence": pair_confidence,
+                            "sources": sources,
+                        }
+                    )
+                    log.info(
+                        "wiki-page dedup: duplicate %s archived, below_confidence_floor "
+                        "(%.4f < %.4f)",
+                        record["pair"],
+                        pair_confidence,
+                        confidence_floor,
+                    )
+                    continue
                 # Issue athenaeum#716: enact_verdict_effect is apply_verdict_effect
                 # plus the authorized-duplicate auto-fold execution (see
                 # athenaeum.auto_apply's module docstring) -- same shape,
@@ -1093,6 +1174,7 @@ def propose_wiki_page_merges(
                         "pair": record["pair"],
                         "verdict": record["verdict"],
                         "action": effect.action,
+                        "confidence": pair_confidence,
                         "sources": sources,
                     }
                 )
