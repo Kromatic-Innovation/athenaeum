@@ -87,6 +87,10 @@ QUARANTINE_DIR_NAME = "_quarantine"
 #: Record kinds in the single quarantine ledger.
 QUARANTINE_KIND = "quarantine"
 RELEASE_KIND = "release"
+#: Issue athenaeum#2075: one tripped attempt on the retry schedule. Informational
+#: only — never a pending decision (``list_pending_quarantine`` filters on
+#: ``QUARANTINE_KIND``), and never released.
+ATTEMPT_KIND = "attempt"
 
 #: Surface names for the private, per-call default store (issue athenaeum#982).
 #: Internal to this module only — never registered with :mod:`athenaeum.storage`
@@ -248,6 +252,7 @@ def quarantine_file(
     violations: int,
     ledger_path: Any = None,
     store: Store | None = None,
+    attempts: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Move *raw* out of the discovery set and record the quarantine (issue athenaeum#898, AC 4).
 
@@ -265,6 +270,12 @@ def quarantine_file(
     requires. Both the ``original_path`` (for :func:`release_quarantine`) and
     the ``quarantine_path`` are recorded, ``wiki_root``-relative and
     ``raw_root``-relative respectively.
+
+    ``attempts`` (issue athenaeum#2075) is the retry-schedule history that led
+    here (one dict per tripped attempt: ``attempt``, ``at``, ``bound``,
+    ``detail``, ``used``, ``limit``, ``outcome``). When given it is stored on
+    the record so the decision item can state it; a record WITHOUT it is a
+    legacy one-shot park that :func:`requeue_legacy_quarantine` may re-queue.
 
     Returns the appended record (also the shape :func:`list_pending_quarantine`
     and :func:`athenaeum.decisions.quarantine_to_decision` consume).
@@ -317,6 +328,8 @@ def quarantine_file(
         "original_path": original_relpath,
         "quarantine_path": quarantine_key,
     }
+    if attempts:
+        record["attempts"] = list(attempts)
     ledger_key = _ledger_key(wiki_root, ledger_path)
     store.append(
         StoreKey(surface=_WIKI_SURFACE, key=ledger_key),
@@ -336,6 +349,88 @@ def quarantine_file(
         violations,
     )
     return record
+
+
+def record_attempt(
+    raw: Any,
+    *,
+    wiki_root: Any,
+    attempt: dict[str, Any],
+    ledger_path: Any = None,
+    store: Store | None = None,
+) -> dict[str, Any]:
+    """Append one tripped-attempt record to the quarantine ledger (athenaeum#2075 AC2).
+
+    *attempt* is the history dict the librarian built (``attempt``, ``at``,
+    ``bound``, ``detail``, ``used``, ``limit``, ``outcome``). The file is NOT
+    moved: during the retry schedule it stays in ``raw/``. Informational only —
+    the record has ``kind == "attempt"`` and never surfaces as a decision.
+    """
+    store = store if store is not None else _default_store(wiki_root)
+    created_at = now_iso()
+    record = {
+        "v": QUARANTINE_LEDGER_VERSION,
+        "kind": ATTEMPT_KIND,
+        "id": quarantine_item_id(raw.ref, created_at),
+        "created_at": created_at,
+        "ref": raw.ref,
+        "source": raw.source,
+        **attempt,
+    }
+    store.append(
+        StoreKey(surface=_WIKI_SURFACE, key=_ledger_key(wiki_root, ledger_path)),
+        (json.dumps(record, separators=(",", ":")) + "\n").encode("utf-8"),
+    )
+    return record
+
+
+def requeue_legacy_quarantine(
+    wiki_root: Any,
+    raw_root: Any,
+    *,
+    apply: bool,
+    bounds: tuple[str, ...] = ("llm_calls", "wall_clock"),
+    note: str = "requeued under the athenaeum#2075 retry schedule",
+    ledger_path: Any = None,
+    store: Store | None = None,
+) -> list[dict[str, Any]]:
+    """Re-queue pre-schedule quarantine entries once (athenaeum#2075 AC5).
+
+    Eligible: a pending quarantine record whose ``bound`` is in *bounds* and
+    that carries no ``attempts`` history, i.e. a legacy one-shot park. A
+    record written by the retry schedule has already used its attempts, so it
+    is never eligible; that is what makes a second invocation a no-op for
+    anything that failed the schedule. Eligible files are released via
+    :func:`release_quarantine`; the next librarian run then processes them with
+    a fresh attempt count. Returns one dict per considered record:
+    ``{id, ref, bound, status}`` with status ``eligible`` (dry run),
+    ``requeued``, ``skipped`` or ``error:<ExcType>``.
+    """
+    store = store if store is not None else _default_store(wiki_root, raw_root)
+    out: list[dict[str, Any]] = []
+    for rec in list_pending_quarantine(wiki_root, ledger_path=ledger_path, store=store):
+        row = {"id": rec.get("id"), "ref": rec.get("ref"), "bound": rec.get("bound")}
+        if rec.get("bound") not in bounds or rec.get("attempts"):
+            out.append({**row, "status": "skipped"})
+            continue
+        if not apply:
+            out.append({**row, "status": "eligible"})
+            continue
+        try:
+            release_quarantine(
+                wiki_root,
+                raw_root,
+                quarantine_id=str(rec.get("id")),
+                note=note,
+                ledger_path=ledger_path,
+                store=store,
+            )
+        except Exception as exc:  # noqa: BLE001 - one bad entry must not stop the rest
+            log.warning("athenaeum#2075: requeue of %s failed: %s", rec.get("ref"), exc)
+            out.append({**row, "status": f"error:{type(exc).__name__}"})
+            continue
+        out.append({**row, "status": "requeued"})
+    return out
 
 
 def release_quarantine(
@@ -457,10 +552,13 @@ __all__ = [
     "QUARANTINE_DIR_NAME",
     "QUARANTINE_KIND",
     "RELEASE_KIND",
+    "ATTEMPT_KIND",
     "default_quarantine_ledger_path",
     "quarantine_item_id",
     "read_quarantine_ledger",
     "list_pending_quarantine",
     "quarantine_file",
+    "record_attempt",
+    "requeue_legacy_quarantine",
     "release_quarantine",
 ]

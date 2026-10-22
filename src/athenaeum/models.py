@@ -1438,10 +1438,17 @@ class RawFileOverBudgetError(Exception):
         pending_updates: list[tuple[Path, str]] | None = None,
         updated_uids: list[str] | None = None,
         escalations: list[EscalationItem] | None = None,
+        used: float | None = None,
+        limit: float | None = None,
     ) -> None:
         self.ref = ref
         self.bound = bound
         self.detail = detail
+        # Issue athenaeum#2075: the measured value and the bound it failed,
+        # as numbers, so the quarantine attempt history can state "46 calls
+        # vs 24 allowed" without parsing ``detail``.
+        self.used = used
+        self.limit = limit
         # Issue athenaeum#994: partial durable progress — everything derived
         # (LLM calls already made) before the bound tripped, not yet
         # written by tier3_derive_actions itself (it never writes) but

@@ -436,6 +436,16 @@ def _make_over_budget_client(n_creates: int) -> MagicMock:
     return client
 
 
+def _two_immediate_attempts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the athenaeum#2075 retry schedule to the old two-strikes shape:
+    park on the 2nd tripped attempt, no wait between attempts, no relaxation
+    of the bound on the retry. Lets the pre-athenaeum#2075 end-to-end tests keep
+    asserting their original cycle."""
+    monkeypatch.setenv("ATHENAEUM_QUARANTINE_MAX_ATTEMPTS", "2")
+    monkeypatch.setenv("ATHENAEUM_QUARANTINE_RETRY_DELAYS_DAYS", "0")
+    monkeypatch.setenv("ATHENAEUM_QUARANTINE_BOUND_RELAX_FACTOR", "1.0")
+
+
 def _entity_pages(wiki_root: Path) -> list[Path]:
     return [p for p in wiki_root.glob("*.md") if not p.name.startswith("_")]
 
@@ -463,6 +473,7 @@ def test_budget_looping_file_lands_partial_progress_and_is_quarantined_after_n_r
     monkeypatch.delenv("ATHENAEUM_MAX_API_CALLS", raising=False)
     monkeypatch.setenv("ATHENAEUM_QUARANTINE_THRESHOLD", "2")
     monkeypatch.setenv("ATHENAEUM_RAW_FILE_MAX_API_CALLS", "2")
+    _two_immediate_attempts(monkeypatch)
 
     raw_file = next((root / "raw" / "sessions").glob("*.md"))
     # 1 classify call + 4 create calls = 5 calls for this one file — well
@@ -556,6 +567,7 @@ def test_wall_clock_bound_full_cycle_to_quarantine_and_release(
     monkeypatch.delenv("ATHENAEUM_MAX_API_CALLS", raising=False)
     monkeypatch.setenv("ATHENAEUM_QUARANTINE_THRESHOLD", "2")
     monkeypatch.setenv("ATHENAEUM_RAW_FILE_MAX_RUNTIME_SECONDS", "10")
+    _two_immediate_attempts(monkeypatch)
 
     raw_file = next((root / "raw" / "sessions").glob("*.md"))
 
@@ -638,21 +650,29 @@ def test_wall_clock_bound_full_cycle_to_quarantine_and_release(
         )
         return stats
 
-    # Run 1: one recorded violation, not yet quarantined — and, per
-    # athenaeum#994, "Slow Entity" (the one action that completed before the
-    # bound tripped) IS written; there is simply nothing further to land.
+    # Run 1: the FIRST wall-clock trip is transient (athenaeum#2075 AC3): it
+    # is recorded but not counted. Per athenaeum#994, "Slow Entity" (the one
+    # action that completed before the bound tripped) IS written; there is
+    # simply nothing further to land.
     stats1 = _run()
     assert stats1["quarantined_files"] == []
     candidates = _load_quarantine_candidates(root / "wiki")
     entry = candidates[next(iter(candidates))]
     assert entry["last_bound"] == "wall_clock"
-    assert entry["violations"] == 1
+    assert entry["violations"] == 0
+    assert entry["history"][0]["outcome"] == "transient"
     assert raw_file.exists()
     pages1 = _entity_pages(root / "wiki")
     assert len(pages1) == 1
     assert pages1[0].name.endswith("slow-entity.md")
 
-    # Run 2: the raw file is re-derived from scratch and crosses the
+    # Run 2: the repeat counts as attempt 1 of 2 — not yet quarantined.
+    stats_mid = _run()
+    assert stats_mid["quarantined_files"] == []
+    candidates = _load_quarantine_candidates(root / "wiki")
+    assert candidates[next(iter(candidates))]["violations"] == 1
+
+    # Run 3: the raw file is re-derived from scratch and crosses the
     # threshold — quarantined. The partial progress from run 1 stays landed
     # regardless. Per athenaeum#1170, Tier-2 proposing "Slow Entity" again
     # is now DISAMBIGUATED into an update against run 1's page rather than

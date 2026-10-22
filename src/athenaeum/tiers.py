@@ -7077,6 +7077,8 @@ def tier3_derive_actions(
                     pending_updates=pending_updates,
                     updated_uids=updated_uids,
                     escalations=escalations,
+                    used=_calls_used_for_file,
+                    limit=max_api_calls_for_file,
                 )
         if max_runtime_for_file is not None and started_at_file is not None:
             _elapsed_for_file = time.monotonic() - started_at_file
@@ -7089,6 +7091,8 @@ def tier3_derive_actions(
                     pending_updates=pending_updates,
                     updated_uids=updated_uids,
                     escalations=escalations,
+                    used=_elapsed_for_file,
+                    limit=max_runtime_for_file,
                 )
 
     return new_entities, pending_updates, updated_uids, escalations

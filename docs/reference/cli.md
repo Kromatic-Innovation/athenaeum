@@ -90,6 +90,7 @@ Every subcommand is registered top-level on one `parser.add_subparsers()` in `cl
 - [`athenaeum push-metrics liveness`](#athenaeum-push-metrics-liveness) (command) — Read-only assertion: PASS if any of the most recent --window rows is sidecar-tagged, FAIL (exit 1) if --window rows exist and none is, INCONCLUSIVE (exit 0) if fewer than --window rows are recorded (including an absent ledger).
 - [`athenaeum push-metrics record`](#athenaeum-push-metrics-record) (command) — Record one hook-path push: the fire-and-forget entry point the per-turn UserPromptSubmit recall hook calls with the session id and the ids it actually injected. Writes a push record tagged source=hook, distinct from an explicit MCP `recall` push (no source key) and the `athenaeum context` sidecar adapter (source=sidecar). Always exits 0 — see this subcommand's own docstring.
 - [`athenaeum push-metrics tail`](#athenaeum-push-metrics-tail) (command) — Stream NDJSON — one object per push record and per reference-determination record, newest-last. Read-only; never mutates the ledgers. See docs/reference/configuration.md ('push-metrics tail — the public NDJSON contract') for the documented --json record shape, schema version, and compatibility note.
+- [`athenaeum quarantine`](#athenaeum-quarantine) (command) — Quarantine maintenance. 'requeue' releases legacy one-shot quarantine entries (LLM-call / wall-clock bound, no attempt history) back into raw/ so they run under the retry schedule. Dry-run unless --apply.
 - [`athenaeum query-topics`](#athenaeum-query-topics) (command) — Extract substantive search topics from a prompt (Haiku). Used by the UserPromptSubmit hook to rewrite queries before FTS5/vector search. Prints one topic per line to stdout; empty output means fall back to the caller's built-in extractor.
 - [`athenaeum questions`](#athenaeum-questions) (group) — Inspect unresolved entries in `_pending_questions.md`. Three modes: list, next, count. Used by the example SessionStart hook and the resolve-questions skill.
 - [`athenaeum questions count`](#athenaeum-questions-count) (command) — Print `N unresolved (oldest: <iso-date>)`.
@@ -1132,6 +1133,21 @@ Stream NDJSON — one object per push record and per reference-determination rec
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--session` | — | — | Only emit records for this consuming session id (exact match). Without this, a viewer process that itself calls recall observes its own pushes mixed into the stream. |
 | `--since` | — | — | Only emit records timestamped at/after this bound: relative (7d/24h/30m/2w) or absolute ISO-8601. Default: the whole ledger. |
+
+## `athenaeum quarantine`
+
+Quarantine maintenance. 'requeue' releases legacy one-shot quarantine entries (LLM-call / wall-clock bound, no attempt history) back into raw/ so they run under the retry schedule. Dry-run unless --apply.
+
+**Positional arguments:**
+
+- `action` (choices: requeue)
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--apply` | `False` | — | Write changes. |
+| `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+| `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 
 ## `athenaeum query-topics`
 
