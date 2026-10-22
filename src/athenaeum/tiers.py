@@ -8345,19 +8345,30 @@ def archive_pending_blocks(
 
     Shared by the athenaeum#2078 moot-closure (AC6) and the parked-observation
     recovery (AC5): the audit trail is preserved in
-    ``_pending_questions_archive.md``, never silently deleted. *questions* is
-    the parse the caller selected from, so the rewrite preserves every other
-    block verbatim. Returns the number of blocks archived.
+    ``_pending_questions_archive.md``, never silently deleted.
+
+    The rewrite works from the file's own block split, NOT from *questions*:
+    ``parse_pending_questions`` silently drops a block whose header is
+    malformed, so rebuilding the file from the parse would delete it. Every
+    block that is not being archived -- parseable or not -- is kept
+    byte-for-byte in its original position. *questions* is accepted for
+    call-site compatibility only. Returns the number of blocks archived.
     """
+    del questions
     if not raw_blocks:
         return 0
+    from athenaeum.answers import _split_blocks
+
+    text = pending_path.read_text(encoding="utf-8")
     archived: list[str] = []
     parts = ["# Pending Questions"]
-    for pq in questions:
-        if pq.raw_block in raw_blocks:
-            archived.append(pq.raw_block)
+    for block in _split_blocks(text):
+        if block in raw_blocks:
+            archived.append(block)
             continue
-        parts.append(pq.raw_block)
+        parts.append(block)
+    if not archived:
+        return 0
     atomic_write_text(pending_path, "\n\n---\n\n".join(parts) + "\n")
     _append_dropped_to_archive(pending_path, archived, reason=reason)
     return len(archived)

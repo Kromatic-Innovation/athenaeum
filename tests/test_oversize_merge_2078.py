@@ -476,3 +476,81 @@ class TestAC5RecoverParked:
         )
         assert rc == 1
         assert "raw/" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------
+# Review fixes (Seer, PR 2084)
+# --------------------------------------------------------------------------
+
+
+class TestMalformedBlocksSurviveMootClosure:
+    def test_unparseable_block_is_preserved_when_a_moot_block_is_archived(
+        self, tmp_path: Path
+    ) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        (tmp_path / "raw").mkdir()
+        malformed = (
+            "## Session Retrospective: some heading with no entity header\n"
+            "free-form body that must not be lost\n"
+            "- a bullet\n"
+        )
+        moot = _legacy_block("drive/gone.md")
+        keep = _legacy_block("drive/gone2.md", tail="has the observation")
+        pending = wiki / "_pending_questions.md"
+        pending.write_text(
+            "# Pending Questions\n\n"
+            + "\n\n---\n\n".join([malformed.rstrip("\n"), moot.rstrip("\n"), keep.rstrip("\n")])
+            + "\n"
+        )
+        assert close_moot_notices(pending) == 1
+        after = pending.read_text()
+        assert malformed.rstrip("\n") in after  # byte-for-byte
+        assert after.index("Session Retrospective") < after.index("gone2.md")  # same place
+        assert "drive/gone.md" not in after
+        assert "drive/gone.md" in (wiki / "_pending_questions_archive.md").read_text()
+        assert [p.source for p in parse_pending_questions(pending)] == ["drive/gone2.md"]
+
+
+class TestSpilledWriteBatchKeepsNeedsSplit:
+    def test_work_document_round_trips_the_flag(self, tmp_path: Path) -> None:
+        from athenaeum import batch_state
+        from athenaeum.batch import (
+            BatchCollectResult,
+            _FileState,
+            _states_for_write_handle,
+            _tier3_work_document,
+        )
+        from athenaeum.intake import discover_raw_files
+
+        raw_dir = tmp_path / "raw" / "sessions"
+        raw_dir.mkdir(parents=True)
+        (raw_dir / "20240410T120000Z-aabbccd0.md").write_text("Acme did a thing.")
+        (raw,) = discover_raw_files(tmp_path / "raw")
+        page = tmp_path / "wiki" / "a1b2c3d4-acme-corp.md"
+        page.parent.mkdir()
+        page.write_text("---\nuid: a1b2c3d4\nname: Acme Corp\n---\n\nbody\n")
+
+        flagged_meta: dict = {"uid": "a1b2c3d4", "needs_split": True}
+        plain_meta: dict = {"uid": "a1b2c3d4"}
+        for meta, expected in ((flagged_meta, True), (plain_meta, False)):
+            st = _FileState(raw=raw)
+            st.merge_ids.append(("t3-0-m0", _action(), page, meta, "body\n"))
+            doc = json.loads(json.dumps(_tier3_work_document([st])))  # spill = JSON
+            handle = batch_state.PendingBatch(
+                batch_id="b1",
+                knob="write",
+                submitted_at="2026-10-22T00:00:00Z",
+                refs={
+                    "t3-0-m0": batch_state.RefRecord(
+                        ref=raw.ref,
+                        path=str(raw.path),
+                        content_hash=batch_state.content_hash(raw.path),
+                    )
+                },
+                work=doc,
+            )
+            states, dropped = _states_for_write_handle(handle, out=BatchCollectResult())
+            assert dropped == []
+            restored_meta = states[0].merge_ids[0][3]
+            assert (restored_meta.get("needs_split") is True) is expected

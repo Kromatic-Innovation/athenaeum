@@ -1054,7 +1054,8 @@ def _tier3_work_document(states: list["_FileState"]) -> dict[str, Any]:
     merge into, and the body the merge ops were generated against) exists
     nowhere else once that run exits.
 
-    ``meta`` is deliberately NOT stored. It is re-parsed from the target page
+    ``meta`` is deliberately NOT stored (only the ``needs_split`` bool the
+    athenaeum#2078 size gate sets on it). It is re-parsed from the target page
     at collect time, so no YAML scalar (a date, most commonly) has to survive
     a JSON round-trip and come back as a string that ``render_frontmatter``
     would then write back differently. The body the ops apply to IS stored,
@@ -1078,6 +1079,10 @@ def _tier3_work_document(states: list["_FileState"]) -> dict[str, Any]:
                     "action": _action_to_json(action),
                     "page_path": str(page_path),
                     "existing_body": existing_body,
+                    # Issue athenaeum#2078 AC1: the oversize gate flags ``meta``
+                    # in memory at assembly; ``meta`` is re-parsed at collect
+                    # time, so the flag (a plain bool, JSON-safe) rides here.
+                    "needs_split": _meta.get("needs_split") is True,
                 }
                 for cid, action, page_path, _meta, existing_body in st.merge_ids
             },
@@ -2611,6 +2616,8 @@ def _states_for_write_handle(
                 meta, _current_body = parse_frontmatter(
                     page.read_text(encoding="utf-8")
                 )
+                if spec.get("needs_split") is True:
+                    meta["needs_split"] = True
                 st.merge_ids.append(
                     (
                         cid,
