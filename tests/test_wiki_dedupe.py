@@ -1767,3 +1767,105 @@ class TestCoordinateBatchesForCluster:
         from athenaeum.wiki_dedupe import _coordinate_batches_for_cluster
 
         assert _coordinate_batches_for_cluster([]) == []
+
+
+_LOW_BODY_X = "Alpha topic body used for the confidence-floor fixture."
+_LOW_BODY_Y = "Beta topic body used for the confidence-floor fixture."
+_LOW_VECS = {_LOW_BODY_X: [1.0, 0.0], _LOW_BODY_Y: [0.6, 0.8]}  # cosine 0.60
+
+
+def _low_cosine_embed(texts: list[str]) -> list[list[float]]:
+    return [_LOW_VECS[t.strip()] for t in texts]
+
+
+def _seed_low_cosine_pair(root: Path) -> Path:
+    wiki_root = root / "knowledge" / "wiki"
+    _write_page(wiki_root, "low-x.md", body=_LOW_BODY_X)
+    _write_page(wiki_root, "low-y.md", body=_LOW_BODY_Y)
+    return wiki_root.parent
+
+
+class TestAthenaeum2080ConfidenceFloor:
+    """athenaeum#2080 AC3: pair cosine is a first-class field, and a
+    ``duplicate`` below the configured floor is archived, not queued."""
+
+    def _run(self, knowledge_root: Path, **kw):
+        kw.setdefault("embedding_provider", _low_cosine_embed)
+        kw.setdefault("threshold", 0.55)
+        kw.setdefault("client", _fake_llm_client(_content_payload("equivalent")))
+        return _run_pass(knowledge_root, **kw)
+
+    def test_below_floor_duplicate_is_archived_not_queued(self, tmp_path: Path) -> None:
+        from athenaeum.verdict_effects import FOLD_EVIDENCE_DIRNAME
+        from athenaeum.verdicts import lookup_pair
+        from athenaeum.wiki_dedupe_attribution import OUTCOME_BELOW_CONFIDENCE_FLOOR
+
+        knowledge_root = _seed_low_cosine_pair(tmp_path)
+        results = self._run(knowledge_root)
+
+        assert len(results) == 1
+        assert results[0]["action"] == "archived-below-confidence-floor"
+        assert results[0]["confidence"] == pytest.approx(0.6)
+        wiki_root = knowledge_root / "wiki"
+        assert not (wiki_root / FOLD_EVIDENCE_DIRNAME).exists()
+        assert not (wiki_root / "_pending_questions.md").exists()
+        # The verdict itself is still ledgered.
+        entry = lookup_pair(wiki_root, "low-x+low-y")
+        assert entry is not None and entry.verdict == "duplicate"
+        (row,) = _rows(knowledge_root)
+        assert row.outcome == OUTCOME_BELOW_CONFIDENCE_FLOOR
+        assert row.reason == "below_confidence_floor"
+        assert row.confidence == pytest.approx(0.6)
+        assert row.verdict == "duplicate"
+
+    def test_floor_is_configurable_and_zero_disables(self, tmp_path: Path) -> None:
+        from athenaeum.verdict_effects import FOLD_EVIDENCE_DIRNAME
+
+        knowledge_root = _seed_low_cosine_pair(tmp_path)
+        config = {"librarian": {"comparator_enabled": True, "wiki_dedupe_min_confidence": 0}}
+        results = self._run(knowledge_root, config=config)
+        assert results[0]["action"] != "archived-below-confidence-floor"
+        assert (knowledge_root / "wiki" / FOLD_EVIDENCE_DIRNAME).is_dir()
+
+    def test_floor_lowered_below_cosine_queues(self, tmp_path: Path) -> None:
+        knowledge_root = _seed_low_cosine_pair(tmp_path)
+        config = {"librarian": {"comparator_enabled": True, "wiki_dedupe_min_confidence": 0.5}}
+        results = self._run(knowledge_root, config=config)
+        assert results[0]["action"] != "archived-below-confidence-floor"
+        assert results[0]["confidence"] == pytest.approx(0.6)
+
+    def test_confidence_is_recorded_on_every_row_even_above_floor(self, tmp_path: Path) -> None:
+        knowledge_root = _seed_identical_pages(tmp_path, n=2)
+        results = _run_pass(knowledge_root, client=_fake_llm_client(_content_payload("equivalent")))
+        assert results[0]["confidence"] == pytest.approx(1.0)
+        assert results[0]["action"] != "archived-below-confidence-floor"
+        assert all(r.confidence == pytest.approx(1.0) for r in _rows(knowledge_root))
+
+    def test_non_duplicate_verdicts_are_not_gated(self, tmp_path: Path) -> None:
+        knowledge_root = _seed_low_cosine_pair(tmp_path)
+        results = self._run(
+            knowledge_root, client=_fake_llm_client(_content_payload("compatible"))
+        )
+        assert results[0]["verdict"] == "distinct"
+        assert results[0]["action"] != "archived-below-confidence-floor"
+
+    def test_fallback_embedder_cosines_are_recorded_but_never_gated(
+        self, tmp_path: Path
+    ) -> None:
+        knowledge_root = _seed_low_cosine_pair(tmp_path)
+        results = self._run(knowledge_root, embedding_provider=lambda texts: None)
+        for r in results:
+            assert r["action"] != "archived-below-confidence-floor"
+            assert r["confidence"] is not None
+
+    def test_resolver_default_env_and_yaml(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from athenaeum.config import resolve_wiki_dedupe_min_confidence as resolve
+
+        monkeypatch.delenv("ATHENAEUM_WIKI_DEDUPE_MIN_CONFIDENCE", raising=False)
+        assert resolve(None) == 0.75
+        assert resolve({"librarian": {"wiki_dedupe_min_confidence": 0.9}}) == 0.9
+        assert resolve({"librarian": {"wiki_dedupe_min_confidence": True}}) == 0.75
+        assert resolve({"librarian": {"wiki_dedupe_min_confidence": "x"}}) == 0.75
+        assert resolve({"librarian": {"wiki_dedupe_min_confidence": -1}}) == 0.0
+        monkeypatch.setenv("ATHENAEUM_WIKI_DEDUPE_MIN_CONFIDENCE", "0")
+        assert resolve({"librarian": {"wiki_dedupe_min_confidence": 0.9}}) == 0.0

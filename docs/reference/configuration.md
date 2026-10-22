@@ -3253,6 +3253,32 @@ machinery via the merge approve/reject decisions the pipeline already
 makes. Non-bool yaml values and unrecognized env strings fall through to
 off.
 
+### `resolve_wiki_dedupe_min_confidence`
+
+- **YAML path:** `librarian.wiki_dedupe_min_confidence`
+- **Environment variable:** `ATHENAEUM_WIKI_DEDUPE_MIN_CONFIDENCE`
+- **CLI flag:** —
+- **Default:** `0.75`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the wiki-dedupe proposal cosine-confidence floor.
+
+The wiki-dedupe pass records each candidate pair's embedding cosine as its
+``confidence``. A pair the comparator rules ``duplicate`` whose confidence
+is strictly below this floor is NOT queued for a human: it is archived with
+a ``below_confidence_floor`` outcome in the dedupe attribution snapshot
+(the verdict itself is still ledgered). The floor is a queue-side filter,
+never a verdict input -- the comparator never sees it. It is only applied
+to cosines from the real embedder; the hashing-trick fallback embedder's
+scores are on a different scale and are recorded but never gated on.
+
+DEFAULT 0.75. Env ``ATHENAEUM_WIKI_DEDUPE_MIN_CONFIDENCE`` > yaml
+``librarian.wiki_dedupe_min_confidence`` > this default. A parsed env value
+is authoritative over yaml (``0`` or negative disables the floor); a
+malformed env value logs a WARNING and falls back to yaml. A ``bool`` or
+non-numeric yaml value falls back to the default; ``0`` or negative yaml
+disables the floor.
+
 ## `models`
 
 ### `resolve_model`

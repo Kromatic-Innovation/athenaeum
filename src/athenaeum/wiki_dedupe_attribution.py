@@ -144,12 +144,23 @@ OUTCOME_FRESH = "fresh"
 #: ``verdict`` and ``action`` are populated and ``pair`` is the ledger key.
 OUTCOME_DECIDED = "decided"
 
+#: Issue athenaeum#2080 AC3: the pair was freshly ruled ``duplicate`` (the
+#: verdict IS in ``wiki/_verdicts/``) but its embedding cosine ``confidence``
+#: is below ``librarian.wiki_dedupe_min_confidence``, so the fold proposal was
+#: archived here instead of queued for a human. ``verdict`` is ``duplicate``,
+#: ``confidence`` is the cosine, and ``reason`` is this same code. Deliberately
+#: NOT in :data:`NON_PROPOSAL_OUTCOMES`: that set (and ``became_proposal``) means
+#: "reached no durable verdict", and this pair did -- read ``outcome`` to tell it
+#: apart from a queued duplicate.
+OUTCOME_BELOW_CONFIDENCE_FLOOR = "below_confidence_floor"
+
 OUTCOME_VALUES: tuple[str, ...] = (
     OUTCOME_CROSS_CLASS_REJECTED,
     OUTCOME_NO_VERDICT,
     OUTCOME_READ_ERROR,
     OUTCOME_FRESH,
     OUTCOME_DECIDED,
+    OUTCOME_BELOW_CONFIDENCE_FLOOR,
 )
 
 #: The outcomes that mean "this candidate pair did NOT become a proposal" —
@@ -182,6 +193,11 @@ class AttributionRow:
     action: str | None = None
     at: str = ""
     schema_version: int = SCHEMA_VERSION
+    #: Issue athenaeum#2080 AC3: the pair's embedding cosine similarity, a
+    #: first-class field a queue consumer can gate on. ``None`` when the pass
+    #: never computed one for this row (pre-athenaeum#2080 rows, or a pair
+    #: rejected before embeddings were consulted).
+    confidence: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -198,6 +214,7 @@ class AttributionRow:
             "action": self.action,
             "at": self.at,
             "schema_version": self.schema_version,
+            "confidence": self.confidence,
         }
 
     @classmethod
@@ -216,6 +233,7 @@ class AttributionRow:
             action=d.get("action"),
             at=str(d.get("at") or ""),
             schema_version=int(d.get("schema_version", SCHEMA_VERSION)),
+            confidence=d.get("confidence"),
         )
 
     @property
@@ -244,6 +262,7 @@ def build_attribution_row(
     action: str | None = None,
     pair: str | None = None,
     at: str | None = None,
+    confidence: float | None = None,
 ) -> AttributionRow:
     """Build one :class:`AttributionRow`, validating *outcome*.
 
@@ -273,6 +292,7 @@ def build_attribution_row(
         verdict=verdict,
         action=action,
         at=at or datetime.now(timezone.utc).isoformat(),
+        confidence=confidence,
     )
 
 
@@ -386,6 +406,7 @@ def explain_pair(
                 "reason": row.reason,
                 "detail": row.detail,
                 "verdict": row.verdict,
+                "confidence": row.confidence,
                 "sources": list(row.sources),
                 "cluster_id": row.cluster_id,
                 "cluster_threshold": row.cluster_threshold,
