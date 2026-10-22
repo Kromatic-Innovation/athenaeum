@@ -560,6 +560,18 @@ def _cmd_scrub_pii(args: argparse.Namespace) -> int:
     return 0
 
 
+def _verdict_counts(result) -> dict[str, int]:
+    """Per-aggregate-verdict proposal counts for ``merges recompare`` output
+    (``no-verdict`` for a proposal that reached none), so a re-run can be
+    scored against external labels without re-parsing every row
+    (issue athenaeum#2080 AC2)."""
+    counts: dict[str, int] = {}
+    for r in result.proposals:
+        key = r.aggregate or "no-verdict"
+        counts[key] = counts.get(key, 0) + 1
+    return dict(sorted(counts.items()))
+
+
 def _cmd_recompare(args: argparse.Namespace) -> int:
     """``athenaeum merges recompare [--apply]`` — issue athenaeum#715.
 
@@ -642,6 +654,8 @@ def _cmd_recompare(args: argparse.Namespace) -> int:
                     "compared": result.compared,
                     "skipped_fresh": result.skipped_fresh,
                     "skipped_missing_source": result.skipped_missing_source,
+                    "reopened_legacy_scope": result.reopened_legacy_scope,
+                    "verdict_counts": _verdict_counts(result),
                     "pii_hazard_ids": result.pii_hazard_ids,
                     "proposals": [
                         {
@@ -668,6 +682,17 @@ def _cmd_recompare(args: argparse.Namespace) -> int:
         f"{verb} verdicts for {result.total} unresolved proposal(s): "
         f"{result.compared} pair comparison(s), {result.skipped_fresh} skipped "
         f"as already-fresh, {result.skipped_missing_source} unreadable source(s)."
+    )
+    if result.reopened_legacy_scope:
+        print(
+            f"{result.reopened_legacy_scope} pair(s) re-decided: their memoized "
+            "verdict was a Gate-1 scope separator from before athenaeum#2080's fix."
+        )
+    counts = _verdict_counts(result)
+    print(
+        "Aggregate verdicts: "
+        + (", ".join(f"{k}={v}" for k, v in counts.items()) or "none")
+        + "."
     )
     if result.pii_hazard_ids:
         print(

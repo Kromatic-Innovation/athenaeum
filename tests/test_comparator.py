@@ -1317,3 +1317,104 @@ class TestErasureClassRefusal:
             result = record_comparison(tmp_path, page_a, page_b, client=client, lock=lock)
         assert result["ok"] is False
         assert result["reason"] == "erasure_class_refused"
+
+
+# ---------------------------------------------------------------------------
+# athenaeum#2080 AC1 — free-text claimed_scope is not a hierarchy
+# ---------------------------------------------------------------------------
+
+_PROSE_A = "intake loop for job-hunt automation redesign; classifies board digests"
+_PROSE_B = "triage of recruiter email threads for the job-hunt pipeline"
+
+
+class TestAthenaeum2080ProseScope:
+    def test_prose_vs_prose_scope_is_unknown_not_disjoint(self) -> None:
+        rels = gate1_separator_relations(
+            DEFAULT_REGISTRY,
+            _page("alpha", claimed_scope=f'"{_PROSE_A}"').meta,
+            _page("beta", claimed_scope=f'"{_PROSE_B}"').meta,
+        )
+        assert rels["scope"] == "unknown"
+
+    def test_prose_vs_path_scope_is_unknown(self) -> None:
+        rels = gate1_separator_relations(
+            DEFAULT_REGISTRY,
+            _page("alpha", claimed_scope=f'"{_PROSE_A}"').meta,
+            _page("beta", claimed_scope="org-b").meta,
+        )
+        assert rels["scope"] == "unknown"
+
+    def test_prose_scope_pair_reaches_gate2_and_can_be_duplicate(self) -> None:
+        client = _fake_client(_content_payload(ContentRelation.EQUIVALENT))
+        outcome = compare_pages(
+            _page("alpha", claimed_scope=f'"{_PROSE_A}"'),
+            _page("beta", claimed_scope=f'"{_PROSE_B}"'),
+            client=client,
+        )
+        client.messages.create.assert_called_once()
+        assert outcome.verdict == VERDICT_DUPLICATE
+        assert "scope" in outcome.assumed  # unresolved, named -- not silently dropped
+
+    def test_real_sibling_paths_still_separate(self) -> None:
+        outcome = compare_pages(
+            _page("alpha", claimed_scope="org/a"),
+            _page("beta", claimed_scope="org/b"),
+            client=None,
+        )
+        assert outcome.verdict == VERDICT_DISTINCT
+        assert outcome.separator == ["scope"]
+        assert outcome.comparator_version == COMPARATOR_VERSION_GATE1
+
+    def test_legacy_prose_scope_distinct_is_reopened_not_memoized(self, tmp_path: Path) -> None:
+        from athenaeum.comparator import LEGACY_COMPARATOR_VERSION_GATE1
+        from athenaeum.verdicts import Basis, append_verdict, build_verdict_entry
+
+        page_a = _page("alpha", claimed_scope=f'"{_PROSE_A}"')
+        page_b = _page("beta", claimed_scope=f'"{_PROSE_B}"')
+        lock = RunLock(tmp_path)
+        with lock:
+            append_verdict(
+                tmp_path,
+                build_verdict_entry(
+                    "alpha",
+                    "beta",
+                    VERDICT_DISTINCT,
+                    basis=Basis(comparator_version=LEGACY_COMPARATOR_VERSION_GATE1),
+                    separator=["scope"],
+                    at="2026-01-01T00:00:00+00:00",
+                    decided_by="comparator",
+                ),
+                lock=lock,
+            )
+            client = _fake_client(_content_payload(ContentRelation.EQUIVALENT))
+            rec = record_comparison(tmp_path, page_a, page_b, client=client, lock=lock)
+            assert rec["skipped"] is None
+            assert rec["reopened"] == "legacy-gate1-scope"
+            assert rec["verdict"] == VERDICT_DUPLICATE
+            # The re-decided verdict is now the live one and memoizes normally.
+            again = record_comparison(tmp_path, page_a, page_b, client=client, lock=lock)
+            assert again["skipped"] == "fresh"
+            assert client.messages.create.call_count == 1
+
+    def test_other_legacy_gate1_distinct_stays_fresh(self, tmp_path: Path) -> None:
+        from athenaeum.comparator import LEGACY_COMPARATOR_VERSION_GATE1
+        from athenaeum.verdicts import Basis, append_verdict, build_verdict_entry
+
+        lock = RunLock(tmp_path)
+        with lock:
+            append_verdict(
+                tmp_path,
+                build_verdict_entry(
+                    "alpha",
+                    "beta",
+                    VERDICT_DISTINCT,
+                    basis=Basis(comparator_version=LEGACY_COMPARATOR_VERSION_GATE1),
+                    separator=["valid-time"],
+                    decided_by="comparator",
+                ),
+                lock=lock,
+            )
+            rec = record_comparison(
+                tmp_path, _page("alpha"), _page("beta"), client=None, lock=lock
+            )
+            assert rec["skipped"] == "fresh"

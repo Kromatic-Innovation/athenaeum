@@ -209,6 +209,7 @@ from athenaeum.verdicts import (
     build_verdict_entry,
     content_hash,
     get_verdict_status,
+    lookup_pair,
     make_pair_key,
     page_id_for_path,
 )
@@ -271,8 +272,19 @@ assert set(VERDICT_VALUES) == {
 #: exits). Bump the branch suffix (never the shared "v1" base) when that
 #: branch's decision logic changes in a way that should re-open verdicts
 #: decided under the old logic.
-COMPARATOR_VERSION_GATE1 = "v1.gate1"
+COMPARATOR_VERSION_GATE1 = "v1.gate1.1"
 COMPARATOR_VERSION_GATE2 = "v1.gate2"
+
+#: The Gate-1 version stamped before athenaeum#2080's AC1 fix. Gate 1 then
+#: treated free-text ``claimed_scope`` prose as a hierarchy, so a ``distinct``
+#: verdict from this branch whose ``separator`` names ``scope`` was decided by
+#: a defect, not by evidence. :func:`record_comparison` therefore refuses to
+#: memoize exactly that shape (:func:`_is_legacy_prose_scope_verdict`); every
+#: other legacy Gate-1 verdict (declared-relationship, a real disjoint
+#: ``valid-time`` window, ...) stays fresh. ``select_stale_for_comparator_epoch_bump``
+#: prefix-matches ``"v1.gate1"``, so the new ``"v1.gate1.1"`` stamp is still
+#: inside the same branch for that selector.
+LEGACY_COMPARATOR_VERSION_GATE1 = "v1.gate1"
 
 #: Synthetic separator marker for the ``compatible`` -> DISTINCT exit (see
 #: module docstring, "content:coexist separator marker").
@@ -1082,6 +1094,17 @@ def compare_pages(
 # ---------------------------------------------------------------------------
 
 
+def _is_legacy_prose_scope_verdict(entry: Any) -> bool:
+    """True for a Gate-1 ``distinct`` verdict decided by the pre-athenaeum#2080
+    prose-scope defect (see :data:`LEGACY_COMPARATOR_VERSION_GATE1`)."""
+    return bool(
+        entry is not None
+        and entry.verdict == VERDICT_DISTINCT
+        and entry.basis.comparator_version == LEGACY_COMPARATOR_VERSION_GATE1
+        and "scope" in (entry.separator or [])
+    )
+
+
 def record_comparison(
     wiki_root: Path,
     page_a: ComparatorPage,
@@ -1138,15 +1161,23 @@ def record_comparison(
     """
     pair_key = make_pair_key(page_a.id, page_b.id)
     status = get_verdict_status(wiki_root, pair_key)
+    reopened: str | None = None
     if status["decided"] and status["fresh"]:
-        return {
-            "ok": True,
-            "pair": pair_key,
-            "verdict": status["verdict"],
-            "skipped": "fresh",
-            "reason": None,
-            "outcome": None,
-        }
+        # Issue athenaeum#2080: a legacy scope-separated ``distinct`` is not a
+        # memoizable decision -- re-decide it under the fixed Gate 1.
+        if status["verdict"] == VERDICT_DISTINCT and _is_legacy_prose_scope_verdict(
+            lookup_pair(wiki_root, pair_key)
+        ):
+            reopened = "legacy-gate1-scope"
+        else:
+            return {
+                "ok": True,
+                "pair": pair_key,
+                "verdict": status["verdict"],
+                "skipped": "fresh",
+                "reason": None,
+                "outcome": None,
+            }
 
     if is_pii_flagged(page_a.meta) or is_pii_flagged(page_b.meta):
         log.warning(
@@ -1211,6 +1242,7 @@ def record_comparison(
         "skipped": None,
         "reason": None,
         "outcome": outcome,
+        "reopened": reopened,
     }
 
 
@@ -1219,6 +1251,7 @@ __all__ = [
     "COMPARATOR_VERSION_GATE1",
     "COMPARATOR_VERSION_GATE2",
     "DECIDED_BY",
+    "LEGACY_COMPARATOR_VERSION_GATE1",
     "VERDICT_CONTRADICTION",
     "VERDICT_DISTINCT",
     "VERDICT_DUPLICATE",
