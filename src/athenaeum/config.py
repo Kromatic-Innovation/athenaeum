@@ -1195,7 +1195,10 @@ def resolve_default_acceptance_audit_sample_rate(config: dict[str, Any] | None) 
     A "default acceptance" is a human answer to a queue item that accepts
     the item's ``proposed_default`` unmodified (see
     :func:`athenaeum.decision_framing.is_default_acceptance`) rather than
-    overriding it. This is the rubber-stamp-rate measurement's own sample
+    overriding it. Issue athenaeum#2079: only acceptances produced by a model
+    or rule are sampled -- an acceptance that originated from a human
+    ``decision_answer`` is excluded (reviewing your own ruling is circular).
+    This is the rubber-stamp-rate measurement's own sample
     rate -- deliberately a SEPARATE knob from
     :func:`resolve_audit_sample_rate_t1_rejects` /
     :func:`resolve_audit_sample_rate_t2_approvals`, even though all three

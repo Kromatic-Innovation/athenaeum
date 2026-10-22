@@ -86,6 +86,19 @@ _WATCHED_VERDICT: dict[str, str] = {"T1": "reject", "T2": "approve"}
 #: DIFFERENT population on a concurrent lane.
 DEFAULT_ACCEPTANCE_TIER = "default_acceptance"
 
+#: Issue athenaeum#2079 AC1: ``source:`` frontmatter values that mark a verdict
+#: as originating from a HUMAN answer (``athenaeum decisions answer`` and the
+#: MCP/triage answer writers all stamp
+#: :data:`athenaeum.decision_answers.DECISION_ANSWER_SOURCE_TAG`, which
+#: ``tests/test_calibration_default_acceptance_source.py`` pins equal to this).
+#: A human cannot overturn their own ruling by reviewing it later, so such an
+#: acceptance is never part of the default-acceptance calibration population.
+HUMAN_ANSWER_SOURCES = frozenset({"decision_answer"})
+
+#: Issue athenaeum#2079 AC3: ``human_verdict`` stamped on a review record that
+#: closes an audit item as not applicable (excluded from every rate).
+NOT_APPLICABLE_VERDICT = "not_applicable"
+
 #: ``tier`` value stamped on every agent-triage audit record (issue
 #: athenaeum#1995). A distinct string from ``"T1"``/``"T2"`` so
 #: :func:`calibration_summary`'s per-tier bucketing separates this
@@ -265,10 +278,11 @@ def sample_default_acceptance(
     wiki_root: Path,
     *,
     decision_id: str,
+    answer_source: str,
     config: dict[str, Any] | None = None,
     ledger_path: Path | None = None,
 ) -> dict[str, Any] | None:
-    """Sample one recorded human DEFAULT-ACCEPTANCE for second review (issue
+    """Sample one recorded DEFAULT-ACCEPTANCE for second review (issue
     athenaeum#1996 ratchet guard 2).
 
     Called right after ``athenaeum decisions answer`` tags an answer as a
@@ -296,13 +310,27 @@ def sample_default_acceptance(
     ``human_verdict`` of anything else as an overturn: the human's
     acceptance did not match what the reviewer would have chosen.
 
+    **Human answers are excluded (issue athenaeum#2079 AC1).** *answer_source*
+    is the ``source:`` of the answer file the acceptance came from. A verdict
+    that originated from a human answer (:data:`HUMAN_ANSWER_SOURCES`) is
+    never sampled: the audit would ask the operator to confirm their own
+    ruling, the only possible outcome is "confirm", and the measured rate
+    would be a constant 100%. An empty/unknown source is treated as human
+    (fail closed) -- only an acceptance positively attributed to a model or
+    rule producer enters the population.
+
     Returns the audit record when sampled and newly recorded, ``None`` when
-    not selected by :func:`should_sample` at the configured rate
+    the source is a human answer, when not selected by :func:`should_sample`
+    at the configured rate
     (:func:`athenaeum.config.resolve_default_acceptance_audit_sample_rate`),
     or when this exact *decision_id* was already sampled on a prior run
     (idempotent, same discipline as :func:`sample_tier_decision`).
     """
     from athenaeum.config import resolve_default_acceptance_audit_sample_rate
+
+    source = (answer_source or "").strip()
+    if not source or source in HUMAN_ANSWER_SOURCES:
+        return None
 
     rate = resolve_default_acceptance_audit_sample_rate(config)
     if not should_sample(DEFAULT_ACCEPTANCE_TIER, decision_id, rate=rate):
@@ -467,6 +495,62 @@ def record_audit_review(
     return record
 
 
+def record_audit_not_applicable(
+    wiki_root: Path,
+    *,
+    audit_id: str,
+    note: str,
+    ledger_path: Path | None = None,
+) -> dict[str, Any]:
+    """Close an audit item as NOT APPLICABLE (issue athenaeum#2079 AC3).
+
+    Appends a :data:`REVIEW_KIND` record carrying ``not_applicable: true`` so
+    every existing reader (the pending queue, ``preflight_audit``,
+    :func:`list_pending_audit`) sees the item as resolved with no change,
+    while :func:`calibration_summary` drops it from ``sampled`` and never
+    counts it as reviewed or overturned -- it feeds no rate. *note* is the
+    ledger rationale and must be non-blank.
+
+    Raises ``ValueError`` for an unknown or already-reviewed id.
+    """
+    if not note or not note.strip():
+        raise ValueError("a not-applicable closure needs a non-blank ledger note")
+    records = read_calibration_ledger(wiki_root, ledger_path=ledger_path)
+    audit = next(
+        (
+            r
+            for r in records
+            if r.get("kind") == AUDIT_KIND and str(r.get("id")) == audit_id
+        ),
+        None,
+    )
+    if audit is None:
+        raise ValueError(f"unknown audit item id: {audit_id!r}")
+    if audit_id in _reviewed_ids(records):
+        raise ValueError(f"audit item already reviewed: {audit_id!r}")
+    closed_at = now_iso()
+    record = {
+        "v": CALIBRATION_LEDGER_VERSION,
+        "kind": REVIEW_KIND,
+        "id": audit_id,
+        "created_at": closed_at,
+        "answered_at": closed_at,
+        "tier": audit.get("tier"),
+        "original_verdict": audit.get("verdict"),
+        "human_verdict": NOT_APPLICABLE_VERDICT,
+        "not_applicable": True,
+        "overturned": False,
+        "applied": bool(audit.get("applied")),
+        "overturned_applied": False,
+        "note": note.strip(),
+    }
+    target = (
+        ledger_path if ledger_path is not None else default_calibration_ledger_path(wiki_root)
+    )
+    _append_jsonl_line(target, json.dumps(record, separators=(",", ":")) + "\n")
+    return record
+
+
 def calibration_summary(
     wiki_root: Path, *, ledger_path: Path | None = None
 ) -> dict[str, dict[str, int]]:
@@ -505,6 +589,12 @@ def calibration_summary(
             bucket["sampled"] += 1
             if r.get("applied"):
                 bucket["applied"] += 1
+        elif r.get("kind") == REVIEW_KIND and r.get("not_applicable"):
+            # Issue athenaeum#2079 AC3: closed as not applicable -- the sample
+            # never counts toward ``sampled`` or any rate.
+            bucket["sampled"] = max(0, bucket["sampled"] - 1)
+            if r.get("applied"):
+                bucket["applied"] = max(0, bucket["applied"] - 1)
         elif r.get("kind") == REVIEW_KIND:
             bucket["reviewed"] += 1
             if r.get("overturned"):
@@ -711,6 +801,9 @@ __all__ = [
     "record_audit_review",
     "calibration_summary",
     "DEFAULT_ACCEPTANCE_TIER",
+    "HUMAN_ANSWER_SOURCES",
+    "NOT_APPLICABLE_VERDICT",
+    "record_audit_not_applicable",
     "sample_default_acceptance",
     "default_acceptance_rubber_stamp_rate",
 ]

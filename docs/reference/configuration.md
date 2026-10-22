@@ -1147,7 +1147,10 @@ review (ratchet guard 2).
 A "default acceptance" is a human answer to a queue item that accepts
 the item's ``proposed_default`` unmodified (see
 `athenaeum.decision_framing.is_default_acceptance`) rather than
-overriding it. This is the rubber-stamp-rate measurement's own sample
+overriding it.: only acceptances produced by a model
+or rule are sampled -- an acceptance that originated from a human
+``decision_answer`` is excluded (reviewing your own ruling is circular).
+This is the rubber-stamp-rate measurement's own sample
 rate -- deliberately a SEPARATE knob from
 `resolve_audit_sample_rate_t1_rejects` /
 `resolve_audit_sample_rate_t2_approvals`, even though all three

@@ -394,6 +394,7 @@ def test_cmd_decisions_budget_surfaces_the_rate_via_the_shared_rendering(
     sample_default_acceptance(
         wiki_root,
         decision_id="merge-1",
+        answer_source="rule",
         config={"librarian": {"default_acceptance_audit_sample_rate": 1.0}},
     )
     report = _minimal_report(wiki_root=wiki_root)

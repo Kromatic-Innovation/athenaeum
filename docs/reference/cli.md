@@ -24,6 +24,7 @@ Every subcommand is registered top-level on one `parser.add_subparsers()` in `cl
 - [`athenaeum axiom promote`](#athenaeum-axiom-promote) (command) — Record a human-approved axiom promotion for a wiki page slug.
 - [`athenaeum bounce-contract`](#athenaeum-bounce-contract) (command) — Check whether a candidate raw-intake note would be recognized by the Tier-0 hard-bounce gate, before submitting it. Read-only, offline, deterministic.
 - [`athenaeum calibration`](#athenaeum-calibration) (group) — Tier-audit calibration: per-tier sampled/reviewed/overturned summary, and record a human confirm/overturn of an audit item.
+- [`athenaeum calibration close-not-applicable`](#athenaeum-calibration-close-not-applicable) (command) — Close pending default_acceptance audit items as not applicable (dry run unless --apply); they then count toward no rate.
 - [`athenaeum calibration review`](#athenaeum-calibration-review) (command) — Record a human confirm/overturn of a sampled audit item.
 - [`athenaeum calibration summary`](#athenaeum-calibration-summary) (command) — Per-tier calibration counts (sampled / reviewed / overturned).
 - [`athenaeum claims`](#athenaeum-claims) (command) — Detect claims restated across distinct wiki entities (read-only). Default --find prints a YAML report.
@@ -290,8 +291,21 @@ Tier-audit calibration: per-tier sampled/reviewed/overturned summary, and record
 
 Subcommands:
 
+- `athenaeum calibration close-not-applicable` — Close pending default_acceptance audit items as not applicable (dry run unless --apply); they then count toward no rate.
 - `athenaeum calibration review` — Record a human confirm/overturn of a sampled audit item.
 - `athenaeum calibration summary` — Per-tier calibration counts (sampled / reviewed / overturned).
+
+## `athenaeum calibration close-not-applicable`
+
+Close pending default_acceptance audit items as not applicable (dry run unless --apply); they then count toward no rate.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--apply` | `False` | — | Write the closures to the ledger (default is a dry run). |
+| `--id` | — | — | Restrict to this audit item id (repeatable). Default: every pending default_acceptance item. |
+| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--note` | `not applicable: circular sample of the operator's own answer (athenaeum#2079)` | — | Ledger note recorded on each closure. |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 
 ## `athenaeum calibration review`
 

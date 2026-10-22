@@ -150,6 +150,10 @@ class DecisionAnswer:
     #: answer (the schema's own ``allOf`` conditional forbids it alongside
     #: ``approve``/``reject`` — see ``decision_framing._approve_rename_reject_schema``).
     name: str = ""
+    #: Issue athenaeum#2079: the answer file's ``source:`` frontmatter tag
+    #: (:data:`DECISION_ANSWER_SOURCE_TAG` for every file this module writes).
+    #: Empty for a file with no ``source`` key.
+    source: str = ""
 
 
 @dataclass
@@ -464,6 +468,7 @@ def _load_decision_answer(path: Path) -> DecisionAnswer | None:
         path=path,
         origin_decision_type=origin_decision_type,
         name=str(raw_name),
+        source=str(meta.get("source") or "").strip(),
     )
 
 
@@ -1640,9 +1645,13 @@ def apply_decision_answers(
                 from athenaeum.decision_framing import is_default_acceptance
 
                 if is_default_acceptance(answer.origin_decision_type, answer.verdict):
+                    # Issue athenaeum#2079 AC1: the sampler refuses an answer
+                    # whose source is a human decision_answer (the operator
+                    # cannot meaningfully re-review their own ruling).
                     sample_default_acceptance(
                         wiki_root,
                         decision_id=answer.decision_id,
+                        answer_source=answer.source,
                         config=config,
                     )
             except Exception as exc:  # noqa: BLE001 - must never break apply
