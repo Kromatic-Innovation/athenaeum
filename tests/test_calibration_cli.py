@@ -324,3 +324,18 @@ def test_close_not_applicable_rejects_non_default_acceptance_id(tmp_path: Path) 
          "--id", t1_id, "--apply"]
     )
     assert rc == 1
+
+
+def test_armed_but_silent_claude_cli_without_binary_is_not_callable(
+    tmp_path: Path, _tiers_enabled: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Seer finding on #2092: claude-cli always builds a client, so the check
+    must also require the binary."""
+    monkeypatch.setenv("ATHENAEUM_LLM_PROVIDER", "claude-cli")
+    monkeypatch.setenv("ATHENAEUM_CLAUDE_CLI_BIN", "/nonexistent/claude-bin")
+    (tmp_path / "wiki").mkdir()
+    rc, out = _run(["calibration", "summary", "--path", str(tmp_path), "--json"])
+    check = json.loads(out)["T1"]["armed_but_silent_check"]
+    assert rc == 0
+    assert check["state"] == "tier_not_callable"
+    assert check["provider"] == "claude-cli"
