@@ -837,6 +837,15 @@ def propose_wiki_page_merges(
                 exc,
             )
 
+    # Issue athenaeum#2077: pairs a human already ruled on. Loaded once per run;
+    # applied per pair below, before any comparison (and so before any LLM
+    # call, ledger write or queue item) is spent on a pair already answered.
+    from athenaeum.config import resolve_rejected_merge_cooldown_days
+    from athenaeum.prior_rulings import load_prior_rulings, match_rulings
+
+    prior_rulings = load_prior_rulings(wiki_root)
+    rejected_cooldown_days = resolve_rejected_merge_cooldown_days(resolved_config)
+
     results: list[dict[str, Any]] = []
 
     # Issue athenaeum#1991: one shared sink for every ``underdetermined``
@@ -895,6 +904,31 @@ def propose_wiki_page_merges(
                             embedder=cluster.embedder,
                             reason=rejection.reason,
                             detail=rejection.detail,
+                            cluster_id=cluster.cluster_id,
+                            cluster_threshold=resolved_threshold,
+                            n_cluster_members=len(members),
+                        )
+                    )
+                    continue
+
+                ruling = match_rulings(
+                    prior_rulings, sources, cooldown_days=rejected_cooldown_days
+                ).in_force
+                if ruling is not None:
+                    log.info(
+                        "wiki-page dedup: pair not re-proposed (%s): %s / %s",
+                        ruling.describe(),
+                        path_a,
+                        path_b,
+                    )
+                    attribution_rows.append(
+                        build_attribution_row(
+                            path_a,
+                            path_b,
+                            OUTCOME_NO_VERDICT,
+                            embedder=cluster.embedder,
+                            reason="prior-human-ruling",
+                            detail=ruling.describe(),
                             cluster_id=cluster.cluster_id,
                             cluster_threshold=resolved_threshold,
                             n_cluster_members=len(members),

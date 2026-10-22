@@ -90,11 +90,17 @@ import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import TYPE_CHECKING, Any, Sequence
 
-from athenaeum.config import resolve_page_size_threshold_chars
+from athenaeum.config import (
+    resolve_page_size_threshold_chars,
+    resolve_rejected_merge_cooldown_days,
+)
 from athenaeum.models import parse_frontmatter, resolve_page_type
 from athenaeum.t1_census import T1_UNSCREENED_NAME_STRUCTURE, get_t1_census
+
+if TYPE_CHECKING:
+    from athenaeum.prior_rulings import PriorRuling
 
 log = logging.getLogger(__name__)
 
@@ -482,6 +488,49 @@ def fold_target_resolves(wiki_root: Path, bare_path: Path) -> bool:
         return False
 
 
+def _prior_ruling_for_split(
+    split: QualifiedNameSplit,
+    rulings: "Sequence[PriorRuling]",
+    *,
+    cooldown_days: int,
+) -> "tuple[PriorRuling | None, PriorRuling | None]":
+    """``(in_force, expired)`` human rulings that cover *split* (issue athenaeum#2077).
+
+    Covers the exact source set, and (AC2) a rejection of the SAME qualified
+    page against another base page of the same base name and type. Those base
+    pages are the ones :func:`scan_qualified_name_splits` groups by
+    ``(normalize_name(name), type)`` -- duplicates of each other by
+    construction -- so a human who rejected ``Q`` against one of them has
+    already ruled on ``Q`` against all of them. The variant match is
+    rejections only: an approval folds ``Q`` away, after which it is no longer
+    a candidate.
+    """
+    from athenaeum.prior_rulings import match_rulings, ruling_in_force, source_key
+
+    exact = match_rulings(rulings, split.sources, cooldown_days=cooldown_days)
+    in_force, expired = exact.in_force, exact.expired
+    if in_force is not None:
+        return in_force, expired
+
+    qualified_file = split.qualified_path.name
+    bare_norm = normalize_name(split.bare_name)
+    own_key = source_key(split.sources)
+    for r in rulings:
+        if (
+            r.decision != "reject"
+            or r.sources == own_key
+            or len(r.sources) != 2
+            or qualified_file not in r.sources
+            or normalize_name(r.base_name) != bare_norm
+        ):
+            continue
+        if ruling_in_force(r, cooldown_days=cooldown_days):
+            return r, expired
+        if expired is None:
+            expired = r
+    return None, expired
+
+
 def propose_qualified_name_merges(
     wiki_root: Path,
     *,
@@ -514,19 +563,34 @@ def propose_qualified_name_merges(
     (:func:`fold_target_resolves`) is counted and logged but NOT queued —
     see that function for why such a proposal could only fail at approve.
 
-    Returns ``{"splits": n, "queued": n, "unfoldable": n}`` — ``queued`` is 0
-    on a dry run, and ``splits == queued + unfoldable`` on a real one.
+    A split a human already ruled on is NOT queued (issue athenaeum#2077):
+    the exact source set, or the same qualified page against another base
+    page of the same base name, rejected within
+    :func:`athenaeum.config.resolve_rejected_merge_cooldown_days` (default:
+    forever), or approved at any time. Read from the pending-merges sidecar
+    and its archive via :mod:`athenaeum.prior_rulings`. Once the cooldown
+    lapses the pair is proposed again with the earlier rejection named in the
+    rationale.
+
+    Returns ``{"splits": n, "queued": n, "unfoldable": n, "ruled_out": n}`` —
+    ``queued`` is 0 on a dry run, and
+    ``splits == queued + unfoldable + ruled_out`` on a real one.
     """
     from athenaeum.pending_merges import write_pending_merge
 
     splits = scan_qualified_name_splits(wiki_root, config=config)
     if dry_run or not splits:
-        return {"splits": len(splits), "queued": 0, "unfoldable": 0}
+        return {"splits": len(splits), "queued": 0, "unfoldable": 0, "ruled_out": 0}
 
     merges_path = wiki_root / "_pending_merges.md"
     by_path = {page.path: page for page in _load_candidates(wiki_root, config=config)}
+    from athenaeum.prior_rulings import load_prior_rulings
+
+    rulings = load_prior_rulings(wiki_root)
+    cooldown_days = resolve_rejected_merge_cooldown_days(config)
     queued = 0
     unfoldable = 0
+    ruled_out = 0
     for split in splits:
         bare = by_path.get(split.bare_path)
         qualified = by_path.get(split.qualified_path)
@@ -544,6 +608,19 @@ def propose_qualified_name_merges(
                 split.bare_path.stem,
             )
             continue
+        in_force, expired = _prior_ruling_for_split(
+            split, rulings, cooldown_days=cooldown_days
+        )
+        if in_force is not None:
+            # Issue athenaeum#2077 AC1/AC2: a human already ruled on this.
+            ruled_out += 1
+            log.info(
+                "qualified-name scan: %s / %s not re-proposed -- %s",
+                split.bare_path.name,
+                split.qualified_path.name,
+                in_force.describe(),
+            )
+            continue
         rationale = (
             f"athenaeum#1577 qualified-name scan: {split.qualified_name!r} is "
             f"{split.bare_name!r} plus the qualifier {split.qualifier!r}, and both "
@@ -553,6 +630,13 @@ def propose_qualified_name_merges(
             "those apart, so a human decides. The draft below concatenates both "
             "bodies verbatim — nothing was summarised."
         )
+        if expired is not None:
+            # Issue athenaeum#2077: the cooldown lapsed, so this is a fresh
+            # question -- but the reviewer should see the earlier answer.
+            rationale += (
+                f" Earlier ruling on this pair ({expired.merge_id}): "
+                f"{expired.describe()}; the rejection cooldown has since lapsed."
+            )
         # Issue athenaeum#1620: deliberately unscreened by T1. This module's own
         # rationale text two lines up says it plainly: the scan "cannot tell
         # those apart, so a human decides" — it exists precisely to route an
@@ -581,14 +665,20 @@ def propose_qualified_name_merges(
         queued += 1
 
     log.info(
-        "qualified-name scan: %d split(s) found, %d queued to %s, %d unfoldable "
-        "(never auto-applied)",
+        "qualified-name scan: %d split(s) found, %d queued to %s, %d unfoldable, "
+        "%d already ruled on by a human (never auto-applied)",
         len(splits),
         queued,
         merges_path,
         unfoldable,
+        ruled_out,
     )
-    return {"splits": len(splits), "queued": queued, "unfoldable": unfoldable}
+    return {
+        "splits": len(splits),
+        "queued": queued,
+        "unfoldable": unfoldable,
+        "ruled_out": ruled_out,
+    }
 
 
 def merged_body_within_page_size_threshold(

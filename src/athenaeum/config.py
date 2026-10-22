@@ -6261,6 +6261,34 @@ def resolve_qualified_name_scan_enabled(config: dict[str, Any] | None) -> bool:
     return True
 
 
+def resolve_rejected_merge_cooldown_days(config: dict[str, Any] | None) -> int:
+    """Resolve how long a HUMAN merge rejection suppresses re-proposal (issue athenaeum#2077).
+
+    The merge proposers (:func:`athenaeum.name_structure.propose_qualified_name_merges`
+    and :func:`athenaeum.wiki_dedupe.propose_wiki_page_merges`) skip any
+    source set a human rejected in ``_pending_merges.md`` /
+    ``_pending_merges_archive.md``. This knob is the decay: after this many
+    days since the rejection the pair may be proposed again (the new
+    proposal's rationale names the earlier rejection). ``0`` (the default)
+    means a rejection never expires, mirroring
+    ``contradiction.not_a_conflict_ttl_days``'s "0 = no decay" convention.
+    An approved-then-folded source set is never re-proposed regardless of
+    this value.
+
+    Precedence: yaml ``librarian.rejected_merge_cooldown_days`` (a
+    non-negative ``int``) > default ``0``. Negative, non-integer and
+    boolean values fall through to the default. No seed in ``_DEFAULTS``
+    (issue athenaeum#231).
+    """
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("rejected_merge_cooldown_days")
+            if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
+                return raw
+    return 0
+
+
 def resolve_name_collision_automerge_enabled(config: dict[str, Any] | None) -> bool:
     """Resolve the name-collision auto-merge opt-in (issue athenaeum#1170). DEFAULT OFF.
 

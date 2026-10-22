@@ -361,7 +361,12 @@ def test_the_shipped_scan_over_proposes_on_the_long_family(tmp_path):
     # (`fold_target_resolves`, the slugify 60-char cap). Asserting only the
     # scan would let the contradiction be reported as reaching a reviewer
     # when it might never have. It does reach one.
-    assert propose_qualified_name_merges(wiki) == {"splits": 1, "queued": 1, "unfoldable": 0}
+    assert propose_qualified_name_merges(wiki) == {
+        "splits": 1,
+        "queued": 1,
+        "unfoldable": 0,
+        "ruled_out": 0,
+    }
     assert qualified.name in (wiki / "_pending_merges.md").read_text(encoding="utf-8")
 
     assert boundary_verdict("long", [bare.body(), qualified.body()]).verdict == "decompose"

@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Merge proposers no longer re-propose pairs a human already ruled on
+  (issue athenaeum#2077).** The qualified-name scan and the wiki-dedupe pair
+  loop now read the resolved blocks of `_pending_merges.md` and
+  `_pending_merges_archive.md` (via `athenaeum.prior_rulings`, on top of
+  `parse_pending_merges`) and skip any source set a human rejected, or that
+  was approved and folded. A rejection of the same qualified page against
+  another base page of the same base name counts as the same ruling.
+  `librarian.rejected_merge_cooldown_days` (default `0` = never expires)
+  lets a rejection lapse; the re-proposal's rationale then names the earlier
+  rejection. `propose_qualified_name_merges` reports a new `ruled_out` count.
 - **Tier-3 merges into oversized pages land instead of raising a question;
   parked observations are recoverable (issue athenaeum#2078).** A merge
   into a page over the page-size threshold now appends (an append-mode
