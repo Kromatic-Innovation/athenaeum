@@ -181,6 +181,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Transcript-receipt writer reads the ledger once and each transcript once per
+  memory (issue athenaeum#2048).** `write_receipts_for_files` now indexes the
+  receipt ledger a single time per run (previously two full scans per memory),
+  reads each transcript once to derive its prefix digest and classification
+  (previously up to four reads), and no longer mints a successor receipt when a
+  resumed session's matching utterance is unchanged; a changed utterance or
+  channel still does. No schema or gate change. Synthetic before/after in
+  `docs/measurements/transcript-receipts-writer-2026-10.md`; reproduce with
+  `scripts/measure_transcript_receipts.py`.
+
 - **Fold widen: the IDENTITY pick-and-alias shortcut now covers every
   human-approved fold (issue athenaeum#2083).** A human-approved
   qualified-name-scan, wiki-dedupe-cluster, or manual fold whose sides carry

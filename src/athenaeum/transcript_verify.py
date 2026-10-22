@@ -152,6 +152,17 @@ def _iter_session_records(scope_dir: Path, session_id: str) -> list[object]:
         text = jsonl.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return []
+    return _parse_session_text(text)
+
+
+def _parse_session_text(text: str) -> list[object]:
+    """Parse transcript JSONL *text* into record dicts, skipping malformed lines.
+
+    Split out of :func:`_iter_session_records` so a caller that already holds
+    the file's text (athenaeum#2048: the receipt writer reads each transcript
+    once and derives records, prefix digest and classification from that one
+    read) parses it identically without a second file open.
+    """
     records: list[object] = []
     for line in text.splitlines():
         line = line.strip()
@@ -389,9 +400,22 @@ def classify_backfill_claim(
         projects_root: transcript root; defaults to ``~/.claude/projects``.
     """
     root = projects_root if projects_root is not None else default_projects_root()
-    ref = _best_effort_ref(session_id, turn)
-
     records = _iter_session_records(root / scope, session_id)
+    return classify_backfill_records(records, session_id, turn, claim=claim)
+
+
+def classify_backfill_records(
+    records: list[object],
+    session_id: str,
+    turn: int | None = None,
+    claim: str = "",
+) -> BackfillClassification:
+    """:func:`classify_backfill_claim` over already-parsed transcript *records*.
+
+    Identical classification; the caller owns the (single) transcript read
+    (athenaeum#2048). An empty *records* list is the ``"unavailable"`` case.
+    """
+    ref = _best_effort_ref(session_id, turn)
     if not records:
         # Transcript missing or rolled off — we cannot verify. SKIP (never
         # guess): this is distinct from "confirm inferred" (transcript present,
