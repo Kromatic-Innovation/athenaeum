@@ -130,6 +130,14 @@ _SUBCOMMAND_LOADERS: dict[str, tuple[str, str]] = {
         "add_correct_notes_subparser",
     ),
     "retire-pages": ("athenaeum._cmd_retire", "add_retire_subparser"),
+    "split-oversize": (
+        "athenaeum._cmd_split_oversize",
+        "add_split_oversize_subparser",
+    ),
+    "recover-parked": (
+        "athenaeum._cmd_recover_parked",
+        "add_recover_parked_subparser",
+    ),
     "reconcile": ("athenaeum._cmd_reconcile", "add_reconcile_subparser"),
     "repair": ("athenaeum._cmd_repair", "add_repair_subparser"),
     "fold-lint": ("athenaeum._cmd_fold_lint", "add_fold_lint_subparser"),
@@ -225,12 +233,14 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_questions import add_questions_subparser
     from athenaeum._cmd_quiesce import add_quiesce_subparser
     from athenaeum._cmd_reconcile import add_reconcile_subparser
+    from athenaeum._cmd_recover_parked import add_recover_parked_subparser
     from athenaeum._cmd_recovery_yield import add_recovery_yield_subparser
     from athenaeum._cmd_repair import add_repair_subparser
     from athenaeum._cmd_retire import add_retire_subparser
     from athenaeum._cmd_run import add_run_subparser
     from athenaeum._cmd_schema import add_schema_subparser
     from athenaeum._cmd_serve import add_serve_subparser
+    from athenaeum._cmd_split_oversize import add_split_oversize_subparser
     from athenaeum._cmd_storage import add_storage_subparser
     from athenaeum._cmd_subject_population import add_subject_population_subparser
     from athenaeum._cmd_surface_divergence import add_surface_divergence_subparser
@@ -259,6 +269,8 @@ def build_parser() -> argparse.ArgumentParser:
     add_curate_subparsers(subparsers)  # dedupe, claims, auto-memory
     add_decay_subparser(subparsers)  # decay-sweep
     add_retire_subparser(subparsers)  # retire-pages (issue athenaeum#1625)
+    add_split_oversize_subparser(subparsers)  # split-oversize (issue athenaeum#2078)
+    add_recover_parked_subparser(subparsers)  # recover-parked (issue athenaeum#2078)
     add_decompose_page_subparser(subparsers)  # decompose-page (issue athenaeum#1914)
     add_correct_notes_subparser(subparsers)  # correct-notes (issue athenaeum#1976)
     add_reconcile_subparser(subparsers)  # reconcile (issue athenaeum#1143)

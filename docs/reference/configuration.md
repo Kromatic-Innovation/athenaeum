@@ -1863,6 +1863,23 @@ architecture note. DEFAULT-EMPTY: a fresh install never classifies on
 markers -- only the operator opts in via ``librarian.operational_markers``.
 No seed in ``_DEFAULTS``.
 
+### `resolve_oversize_hard_ceiling_chars`
+
+- **YAML path:** `librarian.oversize_hard_ceiling_chars`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `40000`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve ``librarian.oversize_hard_ceiling_chars``.
+
+The body size above which ``athenaeum split-oversize --auto`` splits a
+page without per-page approval; pages between the page-size threshold and
+this ceiling are split only when the operator names them with ``--uid``.
+Same validation contract as `resolve_page_size_threshold_chars`:
+must be ``>= 1`` (bool rejected as an int subclass); anything else falls
+back to `DEFAULT_OVERSIZE_HARD_CEILING_CHARS`.
+
 ### `resolve_page_flag_bytes`
 
 - **YAML path:** `librarian.page_flag_bytes`

@@ -86,6 +86,10 @@ KNOWN_GIT_ARGV_MODULES: dict[str, int] = {
     "librarian": 3,  # git_push, git_pull, _capture_head's rev-parse — NOT snapshot
     "memory_index": 1,
     "pending_merges": 2,
+    "parked_recovery": 1,  # athenaeum#2078 AC5: `git show <commit>:<path>` reads
+    # of the knowledge store's OWN history to restore consumed raw files --
+    # pii_restore/reconcile's read-only-history shape, no snapshot/commit,
+    # so no FilesystemStore primitive to route it through.
     "pii_restore": 1,  # athenaeum#1037: reads the knowledge store's OWN history
     # (git log --follow / git show) to locate a marker's pre-image and to
     # resolve a retro filename by timestamp key — read-only history lookups,
