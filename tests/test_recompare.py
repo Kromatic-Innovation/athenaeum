@@ -697,3 +697,25 @@ class TestAthenaeum2080Reopen:
         assert result.compared == 1
         assert result.reopened_legacy_scope == 1
         assert list(result.proposals[0].pair_verdicts.values()) == [VERDICT_DUPLICATE]
+
+    def test_lookup_pair_same_day_tie_prefers_last_appended(self, wiki_root: Path) -> None:
+        """Review fix: ``at`` is date-only, so a same-day re-decision must win."""
+        from athenaeum.verdicts import Basis, append_verdict, build_verdict_entry, lookup_pair
+
+        lock = RunLock(wiki_root)
+        with lock:
+            for verdict in (VERDICT_DISTINCT, VERDICT_DUPLICATE):
+                append_verdict(
+                    wiki_root,
+                    build_verdict_entry(
+                        "a",
+                        "b",
+                        verdict,
+                        basis=Basis(),
+                        at="2026-01-01",
+                        decided_by="comparator",
+                    ),
+                    lock=lock,
+                )
+            entry = lookup_pair(wiki_root, "a+b")
+        assert entry is not None and entry.verdict == VERDICT_DUPLICATE

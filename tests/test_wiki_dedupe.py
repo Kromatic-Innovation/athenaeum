@@ -1834,6 +1834,32 @@ class TestAthenaeum2080ConfidenceFloor:
         assert results[0]["action"] != "archived-below-confidence-floor"
         assert results[0]["confidence"] == pytest.approx(0.6)
 
+    def test_memoized_duplicate_below_floor_is_rearchived_then_enacted_when_floor_drops(
+        self, tmp_path: Path
+    ) -> None:
+        """Review fix: the floor is re-applied to a memoized-fresh duplicate."""
+        from athenaeum.verdict_effects import FOLD_EVIDENCE_DIRNAME
+
+        knowledge_root = _seed_low_cosine_pair(tmp_path)
+        wiki_root = knowledge_root / "wiki"
+        high = {"librarian": {"comparator_enabled": True, "wiki_dedupe_min_confidence": 0.9}}
+        low = {"librarian": {"comparator_enabled": True, "wiki_dedupe_min_confidence": 0.5}}
+
+        first = self._run(knowledge_root, config=high)
+        assert first[0]["action"] == "archived-below-confidence-floor"
+        # Second run, floor unchanged: verdict is memoized-fresh but the pair
+        # is still archived (and the archive row re-recorded), not "fresh".
+        second = self._run(knowledge_root, config=high)
+        assert second[0]["action"] == "archived-below-confidence-floor"
+        assert not (wiki_root / FOLD_EVIDENCE_DIRNAME).exists()
+        # Third run, floor lowered under the pair's 0.6 cosine: now enacted.
+        third = self._run(knowledge_root, config=low)
+        assert third[0]["action"] != "archived-below-confidence-floor"
+        assert third[0]["action"] == "fold-proposal"
+        assert (wiki_root / FOLD_EVIDENCE_DIRNAME / "low-x+low-y.md").is_file()
+        # Fourth run: enacted pair is genuinely memoized now.
+        assert self._run(knowledge_root, config=low) == []
+
     def test_confidence_is_recorded_on_every_row_even_above_floor(self, tmp_path: Path) -> None:
         knowledge_root = _seed_identical_pages(tmp_path, n=2)
         results = _run_pass(knowledge_root, client=_fake_llm_client(_content_payload("equivalent")))
