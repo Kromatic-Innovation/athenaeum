@@ -3589,6 +3589,75 @@ the conflict, then provide the merged body below a `---` separator.
     "user_document", "existing_page"
 )
 
+# Issue athenaeum#2078 AC2: append-mode system/template pair for a page whose
+# body exceeds _MAX_EXISTING_BODY_CHARS. MERGE_SYSTEM_FULL's contract
+# ("preserve all existing content", "return the updated body") is unsafe once
+# the model cannot see the whole page -- it would echo back only the tail it
+# was shown and that echo would REPLACE the file. This contract instead asks
+# for ONLY the delta to append; the existing body is never sent back and
+# never replaced -- the caller (:func:`tier3_merge_full`) appends the
+# returned delta onto the real, untruncated existing_body itself.
+MERGE_SYSTEM_FULL_APPEND = (
+    """You are a knowledge librarian. The existing page is too large to
+safely reproduce in full, so you will NOT receive the whole page and must
+NOT attempt to rewrite or echo it. You receive a bounded TAIL (the end) of
+the existing page body and a new observation. Return ONLY the new markdown
+to APPEND to the very end of the page -- never any existing content, never
+a rewritten page.
+
+Before anything else, always begin your ENTIRE response with exactly one
+line reporting whether the observation adds any new claim at all:
+`ADDS_NEW_CLAIM: true` or `ADDS_NEW_CLAIM: false` -- true when the
+observation states at least one claim not visible in the tail you were
+shown (even a small one), false when it is a pure re-confirmation of
+content you can see or is not genuinely new information. Put the delta (or
+NO_MERGE:/ESCALATE: below) on the following line(s). When false, nothing
+further is needed -- only the source is recorded as a citation.
+
+Rules:
+- Return ONLY the new markdown to append. Do not echo, summarize, or
+  reproduce any existing content, and do not include frontmatter.
+- Add a footnote for the new claim, citing the source, numbered starting
+  from `[^1]` (the caller renumbers it to whatever is actually free on the
+  page -- you cannot see the rest of the page's footnotes), and put an
+  inline `[^n]` marker at the end of every sentence you add that derives
+  from the new observation, after its closing punctuation.
+- If the observation merely re-confirms content visible in the tail you
+  were shown, do NOT append a near-duplicate bullet -- return `NO_MERGE:`
+  followed by a brief reason, and nothing else. If you suspect the fact may
+  already be stated OUTSIDE the tail you were shown, still append a brief
+  new bullet citing the new source rather than guessing at content you
+  cannot see.
+- If the new observation contradicts content visible in the tail you were
+  shown and the contradiction is a principled tension needing human
+  review, return `ESCALATE:` followed by a description of the conflict, and
+  nothing else -- do not append anything in that case.
+"""
+    + _human_confirmed_clause(
+        "A new observation", "appended", _hc_consequence_merge("the tail shown above")
+    )
+    + """
+- Do NOT modify YAML frontmatter -- return only the new body delta."""
+)
+
+MERGE_TEMPLATE_FULL_APPEND = """## Tail of the existing page ({tail_chars} of {total_chars} chars)
+{existing_tail}
+
+## New observation (source: {source_ref})
+{observations}
+
+## Instructions
+Begin your response with exactly `ADDS_NEW_CLAIM: true` or
+`ADDS_NEW_CLAIM: false` on its own line (see system instructions), then
+return ONLY the new markdown to append to the end of the page on the
+following line(s) -- never the existing content shown above. If you detect
+a principled contradiction that needs human review, follow the
+`ADDS_NEW_CLAIM:` line with exactly `ESCALATE:` followed by a description of
+the conflict, and nothing else.
+""" + data_only_clause(
+    "user_document", "existing_page"
+)
+
 
 def tier3_create_params(
     action: EntityAction,
@@ -4530,6 +4599,147 @@ def tier3_merge_full_params(
         "system": MERGE_SYSTEM_FULL,
         "messages": [{"role": "user", "content": user_msg}],
     }
+
+
+def tier3_merge_append_params(
+    action: EntityAction,
+    existing_body: str,
+    source_ref: str,
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build the Messages API kwargs for the append-mode full-echo call.
+
+    Issue athenaeum#2078 AC2: used instead of :func:`tier3_merge_full_params`
+    once *existing_body* exceeds :data:`_MAX_EXISTING_BODY_CHARS` -- the
+    model never sees the whole page (so it must not be asked to reproduce
+    it) and only receives a bounded TAIL for re-confirmation context. The
+    caller appends the response to the REAL, untruncated *existing_body*
+    rather than ever replacing it.
+    """
+    tail = existing_body[-_MAX_EXISTING_BODY_CHARS:]
+    user_msg = MERGE_TEMPLATE_FULL_APPEND.format(
+        existing_tail=fence_untrusted(
+            tail, tag=_EXISTING_PAGE_TAG, max_chars=_MAX_EXISTING_BODY_CHARS
+        ),
+        tail_chars=len(tail),
+        total_chars=len(existing_body),
+        source_ref=source_ref,
+        observations=fence_untrusted(
+            action.observations, tag="user_document", max_chars=3000
+        ),
+    )
+    model = _get_write_model(config)
+    return {
+        "model": model,
+        "max_tokens": resolve_max_tokens(
+            "merge_full", "ATHENAEUM_MERGE_FULL_MAX_TOKENS", _MERGE_MAX_TOKENS, config
+        ),
+        "thinking": resolve_thinking(
+            "merge_full", "ATHENAEUM_MERGE_FULL_THINKING", "adaptive", config, model=model
+        ),
+        "system": MERGE_SYSTEM_FULL_APPEND,
+        "messages": [{"role": "user", "content": user_msg}],
+    }
+
+
+def parse_tier3_merge_append(
+    text: str,
+    action: EntityAction,
+    source_ref: str,
+    existing_body: str,
+    *,
+    stop_reason: str | None = None,
+    usage: TokenUsage | None = None,
+) -> tuple[str | None, EscalationItem | None]:
+    """Parse an append-mode merge response into (updated_body, escalation).
+
+    Issue athenaeum#2078 AC2: the data-loss guard an oversized page used to
+    get from a flat refusal (issue athenaeum#1180) is preserved here in a
+    different shape -- this function NEVER returns anything but
+    ``existing_body + delta``, so the returned body always starts with the
+    untouched existing content byte-for-byte (``merged.startswith(
+    existing_body)``). The model's response is treated purely as the delta
+    to append; it is never allowed to replace the body.
+    """
+    text = text.strip()
+
+    if stop_reason == "max_tokens":
+        return None, EscalationItem(
+            raw_ref=source_ref,
+            entity_name=action.name,
+            conflict_type="principled",
+            description=(
+                "Tier 3 append-mode merge response was truncated "
+                "(max_tokens) before completing the delta; refusing to "
+                "apply a partial append. Existing page left unchanged "
+                "pending human review (issue athenaeum#2078)."
+            ),
+        )
+
+    first_line, _sep, rest = text.partition("\n")
+    if first_line.strip().upper().startswith("ADDS_NEW_CLAIM:"):
+        verdict = first_line.split(":", 1)[1].strip().lower()
+        text = rest.strip()
+        if verdict == "false":
+            if usage is not None:
+                usage.citation_only_merges += 1
+            log.info(
+                "%s page=%s source=%s — append-mode model reported no new "
+                "claim; recording only the source citation, body otherwise "
+                "unchanged",
+                MERGE_CITATION_ONLY_LOG_PREFIX,
+                action.name,
+                source_ref,
+            )
+            return _append_source_citation(existing_body, source_ref), None
+
+    if text.startswith("NO_MERGE:"):
+        reason = text[len("NO_MERGE:"):].strip()
+        log.info(
+            "%s page=%s source=%s reason=%r — append-mode model reported no "
+            "merge-worthy delta; existing page left unchanged",
+            MERGE_FULL_NOOP_LOG_PREFIX,
+            action.name,
+            source_ref,
+            reason[:MERGE_FULL_RESP_PREFIX_CHARS],
+        )
+        return None, None
+
+    if text.startswith("ESCALATE:"):
+        esc_desc = text[len("ESCALATE:"):].strip()
+        return None, EscalationItem(
+            raw_ref=source_ref,
+            entity_name=action.name,
+            conflict_type="principled",
+            description=esc_desc,
+        )
+
+    delta = text.strip()
+    if not delta:
+        return None, EscalationItem(
+            raw_ref=source_ref,
+            entity_name=action.name,
+            conflict_type="principled",
+            description=(
+                "Tier 3 append-mode merge returned an empty delta with no "
+                "ADDS_NEW_CLAIM:/NO_MERGE:/ESCALATE: sentinel; refusing to "
+                "apply. Existing page left unchanged pending human review "
+                "(issue athenaeum#2078)."
+            ),
+        )
+
+    # Issue athenaeum#1942: the model numbers its own footnote(s) from [^1]
+    # since it cannot see the rest of the page's labels -- reuse the same
+    # reallocation helper the patch-mode op applier uses, with an empty
+    # `consumed` (append-mode deletes nothing) so every label the delta
+    # DEFINES is renumbered to whatever the real existing_body has not
+    # already spent.
+    (delta,) = _reallocate_op_footnote_labels(existing_body, [delta], [])
+
+    if usage is not None:
+        usage.full_merges += 1
+    merged = existing_body.rstrip("\n") + "\n\n" + delta.strip() + "\n"
+    return merged, None
 
 
 #: A markdown list-item line: indent, marker, and the whitespace separating
@@ -5537,30 +5747,47 @@ def tier3_merge_full(
     fallback); that guard was withdrawn and removed (athenaeum#1597 AC1).
     """
     if _existing_body_truncated(existing_body):
-        log.warning(
+        # Issue athenaeum#2078 AC2: this used to REFUSE outright (issue
+        # athenaeum#1180) rather than risk the full-echo response silently
+        # amputating everything past the merge window. The data-loss risk
+        # is real but was specific to full-echo's replace-the-whole-body
+        # contract -- it does not apply to an APPEND. Take the append path
+        # instead: the model receives the new observation plus a bounded
+        # tail of the existing body and returns ONLY the delta; the real,
+        # untruncated existing body is never replaced, only appended to.
+        log.info(
             "%s page=%s source=%s cause=input-truncated existing_body_chars=%d "
-            "window=%d — full-echo would only see a truncated prefix of the "
-            "page yet its response replaces the WHOLE body; refusing to call "
-            "the model and escalating instead of risking silent content loss",
+            "window=%d — switching to append-mode merge instead of full-echo "
+            "(issue athenaeum#2078): the model sees only a bounded tail and "
+            "returns a delta, which is appended to the real, untruncated body",
             MERGE_FALLBACK_LOG_PREFIX,
             action.name,
             source_ref,
             len(existing_body),
             _MAX_EXISTING_BODY_CHARS,
         )
-        return None, EscalationItem(
-            raw_ref=source_ref,
-            entity_name=action.name,
-            conflict_type="principled",
-            description=(
-                f"Tier 3 full-echo merge refused: existing page body is "
-                f"{len(existing_body)} chars, exceeding the "
-                f"{_MAX_EXISTING_BODY_CHARS}-char merge input window. The model "
-                "would only receive a truncated prefix of the page yet its "
-                "response replaces the WHOLE body — applying it would "
-                "silently discard everything past the window. Existing page "
-                "left unchanged pending human review (see athenaeum#1180)."
-            ),
+        append_params = tier3_merge_append_params(action, existing_body, source_ref, config=config)
+        append_response = _timed_llm_call(
+            lambda: client.messages.create(**append_params),
+            f"tier3_merge_append {source_ref}",
+            usage=usage,
+        )
+        _record_usage(
+            append_response,
+            usage,
+            model=append_params["model"],
+            knob="write",
+            surface=SURFACE_TIER3_FULL_ECHO_FALLBACK,
+        )
+        if usage is not None:
+            usage.record_merge_echo(min(len(existing_body), _MAX_EXISTING_BODY_CHARS))
+        return parse_tier3_merge_append(
+            response_text(append_response),
+            action,
+            source_ref,
+            existing_body,
+            stop_reason=reported_stop_reason(append_response, _capabilities(config)),
+            usage=usage,
         )
 
     params = tier3_merge_full_params(action, existing_body, source_ref, config=config)
@@ -6154,6 +6381,9 @@ def _perform_oversize_page_split(
 
         hub_meta = dict(existing_meta)
         hub_meta["updated"] = today
+        # Issue athenaeum#2078: the split IS the disposition the
+        # ``needs_split`` flag asked for; the hub no longer needs one.
+        hub_meta.pop("needs_split", None)
         hub_meta["related"] = parent_related + child_related
         hub_content = render_frontmatter(hub_meta) + "\n" + hub_body
         atomic_write_text(existing_path, hub_content)
@@ -6422,9 +6652,42 @@ def check_page_size_gate(
         # untouched either way.
 
     # "review" (the shipped default), OR split/log_demote was requested but
-    # could not proceed for any of the reasons documented above -- always
-    # the safe, non-destructive path: the page is left completely
-    # unmodified.
+    # could not proceed for any of the reasons documented above.
+    #
+    # Issue athenaeum#2078 AC1 (operator ruling, 2026-10-15): the merge is no
+    # longer suppressed here. "Allow the merges, even when the pages are
+    # oversized. Then get the issue to split the pages done. Merges happen
+    # first, then splitting into sub-pages." When the caller gave us the
+    # real on-disk frontmatter dict (``existing_meta`` -- every production
+    # call site does; see ``tier3_derive_actions`` and both ``batch.py``
+    # sites), we flag it ``needs_split: true`` IN PLACE (the same
+    # mutate-then-let-the-caller-render pattern the athenaeum#1627
+    # audit_hook already uses on this exact dict) and return ``None`` so
+    # the merge proceeds normally. The flag only ever reaches disk if the
+    # merge itself produces a body the caller writes -- a failed/declined
+    # merge never persists this local ``meta`` mutation. ``decompose-page
+    # --flagged`` (issue athenaeum#2078 AC3) is the operator-facing split
+    # pass over pages carrying this flag; this gate never splits anything
+    # itself.
+    #
+    # A caller that does not pass ``existing_meta`` (e.g. the module's own
+    # older/simpler tests) cannot have the flag land anywhere real, so it
+    # keeps the pre-athenaeum#2078 "review" behaviour: escalate, page
+    # untouched.
+    if existing_meta is not None:
+        meta["needs_split"] = True
+        log.info(
+            "T3 merge allowed into oversized page, flagged needs_split "
+            "(issue athenaeum#2078): page=%s source=%s "
+            "existing_body_chars=%d threshold=%d action=%s",
+            action.name,
+            source_ref,
+            len(existing_body),
+            threshold,
+            configured_action,
+        )
+        return None
+
     log.info(
         "T3 merge suppressed by page-size gate (issue athenaeum#1182): "
         "page=%s source=%s existing_body_chars=%d threshold=%d action=%s",
@@ -7292,7 +7555,7 @@ def tier4_escalate(
     # Build the open-pair index from the file's currently-open ([ ]) blocks.
     # Archived/[x] blocks are deliberately excluded — a previously-answered
     # pair that re-fires deserves a fresh block (resurrection case).
-    from athenaeum.answers import parse_pending_questions
+    from athenaeum.answers import parse_pending_questions, render_observation_field
 
     open_index: dict[tuple[str, ...], str] = {}
     # Issue athenaeum#1430: entities that already have an unanswered
@@ -7629,11 +7892,22 @@ def tier4_escalate(
             if item.decision_kind and item.decision_kind != "question"
             else ""
         )
+        # Issue athenaeum#2078 AC4: the parked observation follows the first
+        # blank line of the description ("... follows so the fact is not
+        # lost:\n\n<text>"). The parser's description window closes at that
+        # blank line, so rendering it inline lost the text on read-back (it
+        # leaked into the block's answer lines). Everything after the first
+        # blank line goes into its own fenced ``**Observation**:`` field.
+        _desc_head, _blank, _desc_tail = item.description.partition("\n\n")
+        observation_field = (
+            f"{render_observation_field(_desc_tail)}\n" if _desc_tail.strip() else ""
+        )
         block = (
             f'## [{today}] Entity: "{escaped_entity}" (from {item.raw_ref})\n'
             f"- [ ] {question}\n\n"
             f"**Conflict type**: {item.conflict_type}\n"
-            f"**Description**: {item.description}\n"
+            f"**Description**: {_desc_head}\n"
+            f"{observation_field}"
             f"{fingerprint_line}"
             f"{decision_kind_line}"
         )
@@ -8044,7 +8318,122 @@ def _resolve_members_for_block(
     return out
 
 
+#: Issue athenaeum#2078 AC6: conflict types that are NOTICES -- a record that
+#: something was refused or parked -- rather than a question a human can
+#: answer. Every one of them carries (or carried) the parked observation text
+#: so the fact is not lost.
+NOTICE_CLASS_CONFLICT_TYPES = OVERSIZE_ESCALATION_CONFLICT_TYPES | frozenset(
+    {"name_collision", "name_demoted", "short_name_escalated", "classification_failed"}
+)
+
+#: The full-echo refusal (athenaeum#1180) was filed as ``principled`` -- the
+#: same type as a genuine contradiction -- so it is recognised by its text.
+_FULL_ECHO_REFUSAL_MARKER = "full-echo merge refused"
+
+
+def is_notice_class_block(pq: "PendingQuestion") -> bool:
+    """True for a pending block that is a refusal/park NOTICE (athenaeum#2078)."""
+    if pq.conflict_type in NOTICE_CLASS_CONFLICT_TYPES:
+        return True
+    return pq.conflict_type == "principled" and _FULL_ECHO_REFUSAL_MARKER in pq.description
+
+
+def archive_pending_blocks(
+    pending_path: Path, questions: "list[PendingQuestion]", raw_blocks: set[str], *, reason: str
+) -> int:
+    """Remove *raw_blocks* from the primary file and archive them with *reason*.
+
+    Shared by the athenaeum#2078 moot-closure (AC6) and the parked-observation
+    recovery (AC5): the audit trail is preserved in
+    ``_pending_questions_archive.md``, never silently deleted. *questions* is
+    the parse the caller selected from, so the rewrite preserves every other
+    block verbatim. Returns the number of blocks archived.
+    """
+    if not raw_blocks:
+        return 0
+    archived: list[str] = []
+    parts = ["# Pending Questions"]
+    for pq in questions:
+        if pq.raw_block in raw_blocks:
+            archived.append(pq.raw_block)
+            continue
+        parts.append(pq.raw_block)
+    atomic_write_text(pending_path, "\n\n---\n\n".join(parts) + "\n")
+    _append_dropped_to_archive(pending_path, archived, reason=reason)
+    return len(archived)
+
+
+def close_moot_notices(pending_path: Path) -> int:
+    """Close notice-class blocks that carry no observation and no live source.
+
+    Issue athenaeum#2078 AC6. A notice-class block (:func:`is_notice_class_block`)
+    exists to keep a parked observation from being lost. When it carries no
+    observation text AND the raw file it points at is gone, there is nothing
+    left to act on: ``reresolve`` previously logged "not reconstructable" and
+    left it open forever (oldest 69 days). Such a block is archived as
+    ``moot``. A block whose source file still exists, or that carries any
+    observation text, is left open -- the source/observation is the thing a
+    re-ingest can still use. Deterministic, no LLM call.
+    """
+    if not pending_path.exists():
+        return 0
+    from athenaeum.answers import parse_pending_questions
+
+    questions = parse_pending_questions(pending_path)
+    raw_root = knowledge_root_from_pending(pending_path) / "raw"
+    moot: set[str] = set()
+    for pq in questions:
+        if pq.answered or not is_notice_class_block(pq) or _block_has_proposal(pq.raw_block):
+            continue
+        if pq.recovered_observation:
+            continue
+        ref = pq.source.strip()
+        if ref and (raw_root / ref).exists():
+            continue
+        moot.add(pq.raw_block)
+    if not moot:
+        return 0
+    n = archive_pending_blocks(
+        pending_path,
+        questions,
+        moot,
+        reason="closed as moot: notice carries no observation and its source is gone, "
+        "issue athenaeum#2078",
+    )
+    log.info("reresolve: closed %d notice-class block(s) as moot (athenaeum#2078)", n)
+    return n
+
+
 def reresolve_open_questions(
+    pending_path: Path,
+    *,
+    client: "LLMBackend | None",
+    config: dict[str, Any] | None = None,
+    usage: TokenUsage | None = None,
+    projects_root: Path | None = None,
+    decision_backend: "DecisionBackend | None" = None,
+    decision_redact_outbound: bool = False,
+) -> int:
+    """Re-resolve open proposal-less questions; first close moot notices.
+
+    Issue athenaeum#2078 AC6: the deterministic moot closure runs BEFORE the
+    offline short-circuit in :func:`_reresolve_open_questions_impl`, so it
+    works on a run with no resolver client. The return value adds the number
+    of moot-closed blocks to the impl's count.
+    """
+    closed = close_moot_notices(pending_path)
+    return closed + _reresolve_open_questions_impl(
+        pending_path,
+        client=client,
+        config=config,
+        usage=usage,
+        projects_root=projects_root,
+        decision_backend=decision_backend,
+        decision_redact_outbound=decision_redact_outbound,
+    )
+
+
+def _reresolve_open_questions_impl(
     pending_path: Path,
     *,
     client: "LLMBackend | None",
@@ -8383,7 +8772,9 @@ def reresolve_open_questions(
     return reresolved + dropped
 
 
-def _append_dropped_to_archive(pending_path: Path, blocks: list[str]) -> None:
+def _append_dropped_to_archive(
+    pending_path: Path, blocks: list[str], *, reason: str | None = None
+) -> None:
     """Append auto-dropped not-a-conflict blocks to the archive (newest-first).
 
     Mirrors :func:`athenaeum.answers.ingest_answers`'s archive append so the
@@ -8403,7 +8794,8 @@ def _append_dropped_to_archive(pending_path: Path, blocks: list[str]) -> None:
             continue
         rendered.append(
             f"{raw_block.rstrip()}\n\n"
-            f"**Auto-dropped**: {today} (re-resolved as not_a_conflict, issue athenaeum#188)\n"
+            f"**Auto-dropped**: {today} "
+            f"({reason or 're-resolved as not_a_conflict, issue athenaeum#188'})\n"
         )
     if not rendered:
         return
