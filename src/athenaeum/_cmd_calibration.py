@@ -371,7 +371,7 @@ def cmd_calibration(args: argparse.Namespace) -> int:
                             "screen. ***"
                         )
                 reach = tier_activity.get("armed_but_silent_check")
-                if reach:
+                if isinstance(reach, dict):
                     print(_render_reach_check(tier, reach))
         return 0
 
