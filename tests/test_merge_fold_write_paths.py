@@ -1451,27 +1451,25 @@ class TestCoordinateWidening:
             "wiki-dedupe cluster: 2 pages in the same semantic cluster",
         ],
     )
-    def test_non_collision_human_approved_fold_subject_mismatch_raises_fold_widen_impossible(
+    def test_non_collision_human_approved_fold_enum_mismatch_raises_fold_widen_impossible(
         self, tmp_path: Path, rationale: str
     ) -> None:
-        """Issue athenaeum#2076 AC4: a HUMAN-approved fold of a class OTHER
-        than the name-collision scan does NOT get the IDENTITY-kind
-        pick-one-and-alias shortcut (that shortcut relies specifically on
-        the name-collision detector's "same real-world thing" guarantee,
-        which neither the qualified-name scan nor a wiki-dedupe cluster
-        proposal makes) -- an incompatible ``subject`` instead raises
-        ``fold_widen_impossible`` with a pending decision, for both
-        classes, and the structured skip detail (proposal id, dimension,
-        both values) is present on the refusal."""
+        """Issue athenaeum#2076 AC4 (retargeted by athenaeum#2083): a
+        HUMAN-approved fold of any class still raises ``fold_widen_impossible``
+        with a pending decision for an incompatible NON-identity dimension
+        with no universal escape (here the ENUM ``memory-class``). The
+        IDENTITY-kind shortcut (athenaeum#2083) does not cover it. The
+        structured skip detail (proposal id, dimension, both values) is
+        present on the refusal."""
         wiki = tmp_path / "wiki"
         wiki.mkdir()
         target = wiki / "canonical.md"
         _write_wiki_page(
-            target, name="Canonical", body="OLD BODY\n", extra={"subject": "subject-a"}
+            target, name="Canonical", body="OLD BODY\n", extra={"memory_class": "fact"}
         )
         src_a = wiki / "old-a.md"
         _write_wiki_page(
-            src_a, name="Old A", body="a\n", extra={"subject": "subject-b"}
+            src_a, name="Old A", body="a\n", extra={"memory_class": "guideline"}
         )
 
         init_git_repo(wiki)
@@ -1491,8 +1489,8 @@ class TestCoordinateWidening:
         assert result["ok"] is False
         assert result["error_code"] == "fold_widen_impossible"
         assert result["proposal_id"] == pm_id
-        assert result["dimension"] == "subject"
-        assert {result["value_a"], result["value_b"]} == {"subject-a", "subject-b"}
+        assert result["dimension"] == "memory-class"
+        assert {result["value_a"], result["value_b"]} == {"fact", "guideline"}
         # No mutation on refusal.
         assert src_a.exists()
         src_meta, _ = parse_frontmatter(src_a.read_text(encoding="utf-8"))
@@ -1510,11 +1508,11 @@ class TestCoordinateWidening:
         wiki.mkdir()
         target = wiki / "canonical.md"
         _write_wiki_page(
-            target, name="Canonical", body="OLD BODY\n", extra={"subject": "subject-a"}
+            target, name="Canonical", body="OLD BODY\n", extra={"memory_class": "fact"}
         )
         src_a = wiki / "old-a.md"
         _write_wiki_page(
-            src_a, name="Old A", body="a\n", extra={"subject": "subject-b"}
+            src_a, name="Old A", body="a\n", extra={"memory_class": "guideline"}
         )
 
         init_git_repo(wiki)
@@ -1535,7 +1533,7 @@ class TestCoordinateWidening:
         assert first["error_code"] == "fold_widen_impossible"
         assert second["error_code"] == "fold_widen_impossible"
         pending = (wiki / "_pending_questions.md").read_text(encoding="utf-8")
-        question = "Fold of 'canonical' cannot auto-widen its 'subject' coordinate"
+        question = "Fold of 'canonical' cannot auto-widen its 'memory-class' coordinate"
         assert pending.count(question) == 1, pending
 
     def test_name_collision_fold_withdraws_stale_subject_widen_question(
@@ -1593,6 +1591,113 @@ class TestCoordinateWidening:
         result = resolve_merge(merges_path, pm_id, "approve", wiki_root=wiki)
 
         assert result["ok"] is True, result
+        questions = parse_pending_questions(pending_path)
+        assert len(questions) == 1
+        assert questions[0].answered is True
+
+    @pytest.mark.parametrize(
+        "rationale",
+        [
+            "athenaeum#1577 qualified-name scan: same qualified name",
+            "operator ruling 2026-10-15",
+        ],
+    )
+    def test_human_approved_non_collision_fold_picks_canonical_subject_and_aliases(
+        self, tmp_path: Path, rationale: str
+    ) -> None:
+        """Issue athenaeum#2083 AC1/AC3 (operator ruling 2026-10-22): a
+        HUMAN-approved qualified-name-scan or manual fold with differing
+        concrete ``subject`` ids applies -- the canonical's id wins, the
+        source's id is kept as an alias, and the provenance ledger records
+        the chosen id and the alias exactly as for a name-collision fold."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        target = wiki / "canonical.md"
+        _write_wiki_page(
+            target, name="Canonical", body="OLD BODY\n", extra={"subject": "subject-x"}
+        )
+        src_a = wiki / "old-a.md"
+        _write_wiki_page(
+            src_a, name="Old A", body="a\n", extra={"subject": "subject-y"}
+        )
+
+        init_git_repo(wiki)
+        merges_path = wiki / "_pending_merges.md"
+        write_pending_merge(
+            merges_path,
+            merge_target_name="Canonical",
+            sources=[str(src_a)],
+            rationale=rationale,
+            draft_merged_body="NEW BODY\n",
+            confidence=0.9,
+            write_kind="fold-into-existing",
+        )
+        pm_id = parse_pending_merges(merges_path)[0].id
+        result = resolve_merge(merges_path, pm_id, "approve", wiki_root=wiki)
+
+        assert result["ok"] is True, result
+        meta, _ = parse_frontmatter(target.read_text(encoding="utf-8"))
+        assert meta["subject"] == "subject-x"
+        assert "subject-y" in meta.get("aliases", [])
+        records = read_merge_provenance(wiki)
+        assert "subject-y" in records[0]["aliases_added"]
+        assert records[0]["coordinates_widened"]["subject"] == "subject-x"
+        src_meta, _ = parse_frontmatter(src_a.read_text(encoding="utf-8"))
+        assert is_tombstone(src_meta)
+
+    def test_human_approved_non_collision_fold_withdraws_stale_subject_widen_question(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue athenaeum#2083 AC2: the stale ``fold_widen_impossible``
+        question a prior tick raised is withdrawn through the existing
+        athenaeum#2071 path when a human-approved non-collision fold
+        now succeeds."""
+        from athenaeum.answers import parse_pending_questions, raise_pending_question
+
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        target = wiki / "canonical.md"
+        _write_wiki_page(
+            target, name="Canonical", body="OLD BODY\n", extra={"subject": "subject-x"}
+        )
+        src_a = wiki / "old-a.md"
+        _write_wiki_page(
+            src_a, name="Old A", body="a\n", extra={"subject": "undeterminable"}
+        )
+        src_b = wiki / "old-b.md"
+        _write_wiki_page(
+            src_b, name="Old B", body="b\n", extra={"subject": "subject-z"}
+        )
+
+        init_git_repo(wiki)
+        pending_path = wiki / "_pending_questions.md"
+        raise_pending_question(
+            pending_path,
+            question=(
+                "Fold of 'canonical' cannot auto-widen its 'subject' "
+                "coordinate — what should the canonical's value be?"
+            ),
+            context="stale fold_widen_impossible question",
+            entity="canonical",
+            source=str(target),
+        )
+        merges_path = wiki / "_pending_merges.md"
+        write_pending_merge(
+            merges_path,
+            merge_target_name="Canonical",
+            sources=[str(src_a), str(src_b)],
+            rationale="athenaeum#1577 qualified-name scan: same qualified name",
+            draft_merged_body="NEW BODY\n",
+            confidence=0.9,
+            write_kind="fold-into-existing",
+        )
+        pm_id = parse_pending_merges(merges_path)[0].id
+        result = resolve_merge(merges_path, pm_id, "approve", wiki_root=wiki)
+
+        assert result["ok"] is True, result
+        meta, _ = parse_frontmatter(target.read_text(encoding="utf-8"))
+        assert meta["subject"] == "subject-x"
+        assert "subject-z" in meta.get("aliases", [])
         questions = parse_pending_questions(pending_path)
         assert len(questions) == 1
         assert questions[0].answered is True

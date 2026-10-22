@@ -163,6 +163,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Fold widen: the IDENTITY pick-and-alias shortcut now covers every
+  human-approved fold (issue athenaeum#2083).** A human-approved
+  qualified-name-scan, wiki-dedupe-cluster, or manual fold whose sides carry
+  differing concrete `subject` ids now applies (the canonical's id wins, the
+  other ids are kept as aliases, the stale `fold_widen_impossible` question
+  is withdrawn) instead of refusing, per the 2026-10-22 operator ruling that
+  a human `approve` is itself the identity ruling. Non-human auto-applied
+  folds through other detectors keep their refusal.
+
 - **Maya PII-hazard eval (athenaeum#2049): stub replaced with a real
   host-side measurement.** `docs/measurements/maya-pii-hazard-eval-2026-10.md`
   now reports a 822-row fixture run (275 positive / 547 negative) at the
