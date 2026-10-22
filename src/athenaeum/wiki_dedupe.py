@@ -179,7 +179,7 @@ from athenaeum.runlock import RunLock
 from athenaeum.search import embed_texts
 from athenaeum.storage import is_merge_eligible
 from athenaeum.vecmath import cosine, mean_pool
-from athenaeum.verdict_effects import queue_coordinate_batch
+from athenaeum.verdict_effects import FOLD_EVIDENCE_DIRNAME, queue_coordinate_batch
 from athenaeum.wiki_dedupe_attribution import (
     ERASURE_CLASS_REFUSED_REASON,
     OUTCOME_BELOW_CONFIDENCE_FLOOR,
@@ -1050,7 +1050,49 @@ def propose_wiki_page_merges(
                             )
                         )
                     continue
-                if record.get("skipped") == "fresh":
+                # Issue athenaeum#2080 AC3 (review fix): the confidence floor is a
+                # QUEUE-side gate over a DURABLE verdict (athenaeum#715 bans
+                # confidence as a verdict input), so it must be re-applied to a
+                # memoized-fresh ``duplicate`` too -- otherwise a pair archived
+                # under a high floor stays "fresh" and a later lowered floor can
+                # never resurface it. "Archived, not yet enacted" is read off the
+                # absence of the pair's fold-evidence file (the first thing
+                # ``_apply_duplicate`` writes).
+                below_floor = bool(
+                    pair_confidence is not None
+                    and confidence_floor > 0.0
+                    and cluster.embedder == EMBEDDER_CHROMADB_DEFAULT
+                    and pair_confidence < confidence_floor
+                )
+                fresh_unenacted_duplicate = (
+                    record.get("skipped") == "fresh"
+                    and record.get("verdict") == VERDICT_DUPLICATE
+                    and not (
+                        wiki_root / FOLD_EVIDENCE_DIRNAME / f"{record['pair']}.md"
+                    ).exists()
+                )
+                if fresh_unenacted_duplicate and not below_floor:
+                    # Floor now passes (lowered, or the pair's cosine rose): the
+                    # memoized verdict carries no CompareOutcome, so recompute
+                    # it WITHOUT re-ledgering and enact only if it is still a
+                    # duplicate.
+                    from athenaeum.comparator import compare_pages
+
+                    redo = compare_pages(
+                        page_a,
+                        page_b,
+                        client=client,
+                        config=resolved_config,
+                        usage=usage,
+                    )
+                    if redo.verdict == VERDICT_DUPLICATE:
+                        record["outcome"] = redo
+                        record["skipped"] = None
+                # Still below the floor: fall past the fresh branch so the
+                # archive row is re-recorded below.
+                if record.get("skipped") == "fresh" and not (
+                    fresh_unenacted_duplicate and below_floor
+                ):
                     # Decided on a PRIOR run and still fresh, so this run
                     # deliberately did not re-decide it. Recorded so a reader
                     # can tell "examined, memoized" apart from "not examined"
@@ -1066,22 +1108,7 @@ def propose_wiki_page_merges(
                         )
                     )
                     continue
-                outcome = record.get("outcome")
-                if outcome is None:
-                    # Defensive: ``ok=True`` and not fresh should always carry
-                    # an outcome. If that contract ever breaks, the pair is
-                    # still accounted for rather than vanishing.
-                    attribution_rows.append(
-                        build_attribution_row(
-                            path_a,
-                            path_b,
-                            OUTCOME_NO_VERDICT,
-                            reason="no-outcome-returned",
-                            **row_kwargs,
-                        )
-                    )
-                    continue
-                # Issue athenaeum#2080 AC3: a freshly-decided ``duplicate`` whose
+                # Issue athenaeum#2080 AC3: a ``duplicate`` (fresh-decided or memoized) whose
                 # pair cosine is below the configured floor is ARCHIVED, not
                 # enacted -- no fold evidence, no queue item, and (crucially) no
                 # auto-apply authorization to evaluate. The verdict is already
@@ -1090,13 +1117,7 @@ def propose_wiki_page_merges(
                 # on: the hashing-trick fallback embedder's scores are on a
                 # different scale, so a floor calibrated on MiniLM vectors
                 # would be meaningless against them (recorded, never gated).
-                if (
-                    record["verdict"] == VERDICT_DUPLICATE
-                    and pair_confidence is not None
-                    and confidence_floor > 0.0
-                    and cluster.embedder == EMBEDDER_CHROMADB_DEFAULT
-                    and pair_confidence < confidence_floor
-                ):
+                if record["verdict"] == VERDICT_DUPLICATE and below_floor:
                     attribution_rows.append(
                         build_attribution_row(
                             path_a,
@@ -1128,6 +1149,21 @@ def propose_wiki_page_merges(
                         record["pair"],
                         pair_confidence,
                         confidence_floor,
+                    )
+                    continue
+                outcome = record.get("outcome")
+                if outcome is None:
+                    # Defensive: ``ok=True`` and not fresh should always carry
+                    # an outcome. If that contract ever breaks, the pair is
+                    # still accounted for rather than vanishing.
+                    attribution_rows.append(
+                        build_attribution_row(
+                            path_a,
+                            path_b,
+                            OUTCOME_NO_VERDICT,
+                            reason="no-outcome-returned",
+                            **row_kwargs,
+                        )
                     )
                     continue
                 # Issue athenaeum#716: enact_verdict_effect is apply_verdict_effect
