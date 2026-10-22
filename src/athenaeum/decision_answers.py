@@ -167,11 +167,17 @@ class DecisionAnswerOutcome:
     error_code: str | None
     message: str
     #: Issue athenaeum#2017 (AC1): the dimension this resolution concerned,
-    #: when the applier can name one unambiguously (today only
-    #: ``dimension-proposal``'s own registered/rejected name). Empty for
-    #: every other type and for every pre-athenaeum#2017 call site — an absent
-    #: dimension name is honest, never a guess.
+    #: when the applier can name one unambiguously (today ``dimension-
+    #: proposal``'s own registered/rejected name, or — issue athenaeum#2076 —
+    #: a merge's ``fold_narrows_coordinate``/``fold_widen_impossible`` skip
+    #: detail). Empty for every other type and for every pre-athenaeum#2017
+    #: call site — an absent dimension name is honest, never a guess.
     dimension_name: str = ""
+    #: Issue athenaeum#2076 (AC2): the two coordinate values that could not
+    #: be widened, for a ``fold_narrows_coordinate``/``fold_widen_impossible``
+    #: skip only. Empty for every other outcome.
+    value_a: str = ""
+    value_b: str = ""
 
 
 @dataclass
@@ -576,6 +582,14 @@ def _apply_merge_answer(
         applied=bool(result.get("ok")),
         error_code=result.get("error_code"),
         message=result.get("message", ""),
+        # Issue athenaeum#2076 (AC2): ``dimension``/``value_a``/``value_b`` are
+        # only ever present on a ``fold_narrows_coordinate`` /
+        # ``fold_widen_impossible`` refusal — ``None`` on every other
+        # outcome, which `str(None or "")` below honestly renders as empty
+        # rather than the literal text "None".
+        dimension_name=str(result.get("dimension") or ""),
+        value_a=str(result.get("value_a")) if result.get("value_a") is not None else "",
+        value_b=str(result.get("value_b")) if result.get("value_b") is not None else "",
     )
 
 

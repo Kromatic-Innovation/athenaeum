@@ -488,6 +488,98 @@ class TestApplyMerge:
         assert second_outcome.error_code != "fold_source_already_tombstoned"
         assert second_outcome.error_code == "id_not_found"
 
+    def test_non_collision_approve_with_incompatible_scope_applies_via_ingest_answers(
+        self, wiki_root: Path, raw_root: Path
+    ) -> None:
+        """Issue athenaeum#2076 AC1/AC3: a human-approved fold proposed by
+        a detector OTHER than the name-collision scan, whose sources carry
+        a disjoint ``claimed_scope``, folds through the real
+        ``apply_decision_answers`` entry point (the same one
+        ``athenaeum ingest-answers`` drives) on the FIRST tick — it is
+        never left re-refusing the same never-deleted answer file."""
+        from athenaeum.pending_merges import parse_pending_merges, write_pending_merge
+
+        target = wiki_root / "canonical.md"
+        target.write_text(
+            "---\nname: Canonical\ntype: concept\nclaimed_scope: team-a\n---\nOLD\n",
+            encoding="utf-8",
+        )
+        src_a = wiki_root / "old-a.md"
+        src_a.write_text(
+            "---\nname: Old A\ntype: concept\nclaimed_scope: team-b\n---\na\n",
+            encoding="utf-8",
+        )
+        init_git_repo(wiki_root)
+
+        merges_path = wiki_root / "_pending_merges.md"
+        write_pending_merge(
+            merges_path,
+            merge_target_name="Canonical",
+            sources=[str(src_a)],
+            rationale="athenaeum#1577 qualified-name scan: same qualified name",
+            draft_merged_body="NEW\n",
+            confidence=0.9,
+            write_kind="fold-into-existing",
+        )
+        mid = parse_pending_merges(merges_path)[0].id
+        write_decision_answer(
+            raw_root, decision_id=mid, decision_type="merge", verdict="approve"
+        )
+
+        report = apply_decision_answers(wiki_root, raw_root)
+        outcome = next(o for o in report.outcomes if o.decision_id == mid)
+
+        assert outcome.applied is True, outcome.message
+        from athenaeum.models import parse_frontmatter
+
+        meta, _ = parse_frontmatter(target.read_text(encoding="utf-8"))
+        assert meta["claimed_scope"] == "*"
+
+    def test_non_collision_approve_with_incompatible_identity_reports_skip_detail(
+        self, wiki_root: Path, raw_root: Path
+    ) -> None:
+        """Issue athenaeum#2076 AC2/AC4: a human-approved, non-collision
+        fold with an incompatible ``subject`` raises ``fold_widen_impossible``
+        through ``apply_decision_answers``, and the outcome carries the
+        structured skip detail (proposal id via ``decision_id``, dimension
+        name, both values) — not just a count."""
+        from athenaeum.pending_merges import parse_pending_merges, write_pending_merge
+
+        target = wiki_root / "canonical.md"
+        target.write_text(
+            "---\nname: Canonical\ntype: concept\nsubject: subject-a\n---\nOLD\n",
+            encoding="utf-8",
+        )
+        src_a = wiki_root / "old-a.md"
+        src_a.write_text(
+            "---\nname: Old A\ntype: concept\nsubject: subject-b\n---\na\n",
+            encoding="utf-8",
+        )
+        init_git_repo(wiki_root)
+
+        merges_path = wiki_root / "_pending_merges.md"
+        write_pending_merge(
+            merges_path,
+            merge_target_name="Canonical",
+            sources=[str(src_a)],
+            rationale="wiki-dedupe cluster: 2 pages in the same semantic cluster",
+            draft_merged_body="NEW\n",
+            confidence=0.9,
+            write_kind="fold-into-existing",
+        )
+        mid = parse_pending_merges(merges_path)[0].id
+        write_decision_answer(
+            raw_root, decision_id=mid, decision_type="merge", verdict="approve"
+        )
+
+        report = apply_decision_answers(wiki_root, raw_root)
+        outcome = next(o for o in report.outcomes if o.decision_id == mid)
+
+        assert outcome.applied is False
+        assert outcome.error_code == "fold_widen_impossible"
+        assert outcome.dimension_name == "subject"
+        assert {outcome.value_a, outcome.value_b} == {"subject-a", "subject-b"}
+
 
 # ---------------------------------------------------------------------------
 # TestDefaultAcceptanceTaggedAtAnswerTime — issue athenaeum#1996 ratchet guard 2.
@@ -1323,6 +1415,56 @@ class TestBatch:
 
         assert rc == 0
         assert (wiki / "_pending_questions_archive.md").exists()
+
+    def test_ingest_answers_verbose_prints_fold_skip_detail(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Issue athenaeum#2076 AC2: ``--verbose`` prints the proposal id,
+        dimension, and both values for a ``fold_widen_impossible`` skip —
+        absent without the flag, present with it, additive only."""
+        import argparse
+
+        from athenaeum._cmd_pending import cmd_ingest_answers
+        from athenaeum.pending_merges import parse_pending_merges, write_pending_merge
+
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        raw = tmp_path / "raw"
+        raw.mkdir()
+        target = wiki / "canonical.md"
+        target.write_text(
+            "---\nname: Canonical\ntype: concept\nsubject: subject-a\n---\nOLD\n",
+            encoding="utf-8",
+        )
+        src_a = wiki / "old-a.md"
+        src_a.write_text(
+            "---\nname: Old A\ntype: concept\nsubject: subject-b\n---\na\n",
+            encoding="utf-8",
+        )
+        init_git_repo(wiki)
+
+        merges_path = wiki / "_pending_merges.md"
+        write_pending_merge(
+            merges_path,
+            merge_target_name="Canonical",
+            sources=[str(src_a)],
+            rationale="athenaeum#1577 qualified-name scan: same qualified name",
+            draft_merged_body="NEW\n",
+            confidence=0.9,
+            write_kind="fold-into-existing",
+        )
+        mid = parse_pending_merges(merges_path)[0].id
+        write_decision_answer(
+            raw, decision_id=mid, decision_type="merge", verdict="approve"
+        )
+
+        rc = cmd_ingest_answers(argparse.Namespace(path=tmp_path, verbose=True))
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "fold_widen_impossible" in out
+        assert f"proposal={mid}" in out
+        assert "dimension='subject'" in out
+        assert "value_a='subject-a'" in out or "value_b='subject-a'" in out
 
 
 # ---------------------------------------------------------------------------

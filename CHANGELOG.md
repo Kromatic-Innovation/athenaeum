@@ -208,6 +208,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`fold_narrows_coordinate` no longer blocks a human-approved fold
+  outside the name-collision scan (issue athenaeum#2076, follow-up to
+  athenaeum#2069).** The athenaeum#2069 widen path (substitute the
+  dimension's universal marker where `null_means=universal`, else raise a
+  `fold_widen_impossible` pending decision with the athenaeum#2071
+  stale-question withdrawal) was gated to name-collision-scan proposals
+  only; a human-approved qualified-name-scan (athenaeum#1577), wiki-dedupe
+  cluster, or manually proposed fold still hit the pre-athenaeum#2069 hard
+  narrowing refusal with no decision raised. Any proposal a human has
+  approved now takes the same widen path regardless of origin — the
+  approval is the ruling, not the detector that proposed it. The
+  IDENTITY-kind pick-one-and-alias shortcut (athenaeum#2071) stays
+  reserved for the name-collision scan specifically, since it relies on
+  that detector's own "same real-world thing" guarantee; an incompatible
+  IDENTITY dimension on any other human-approved class raises
+  `fold_widen_impossible` instead. A non-human auto-apply (T2
+  auto-finalize athenaeum#602, the fold-on-duplicate reversible-verdict
+  auto-apply) keeps the pre-athenaeum#2069 narrowing refusal unchanged;
+  issue athenaeum#1170's unambiguous-collision auto-merge is unaffected
+  (it already carried the name-collision rationale and already took the
+  widen path). `athenaeum ingest-answers --verbose` now prints, for every
+  `fold_narrows_coordinate` / `fold_widen_impossible` skip, the proposal
+  id, dimension name, and the two values that could not be widened — the
+  existing per-code summary line is unchanged.
+
 - **`JevDecisionBackend` choice criteria is now a `{label: description}`
   mapping, not a list (issue athenaeum#2060, follow-up to athenaeum#2054).**
   `_build_payload` sent `choice` criteria as a bare list for every kind —
