@@ -1328,3 +1328,24 @@ class TestRetiredLifecycle:
         # Restoring the REGISTRY entry does not touch any page.
         assert "engagement: null" in page.read_text()
 
+
+
+class TestProseScopeIsNotHierarchy:
+    """athenaeum#2080 AC1."""
+
+    def test_is_prose_scope(self) -> None:
+        from athenaeum.dimensions import is_prose_scope
+
+        assert is_prose_scope("intake loop for job-hunt; classifies digests")
+        assert is_prose_scope("one two")
+        assert not is_prose_scope("org/team/project")
+        assert not is_prose_scope("engineering")
+        assert not is_prose_scope(None)
+
+    def test_compare_scope_degrades_prose_disjoint_to_unknown(self) -> None:
+        from athenaeum.dimensions import Relation, compare_scope
+
+        assert compare_scope("alpha beta", "gamma delta") == Relation.UNKNOWN
+        assert compare_scope("org/a", "org/b") == Relation.DISJOINT
+        assert compare_scope("org", "org/b") == Relation.CONTAINS
+        assert compare_scope("alpha beta", "alpha beta") == Relation.EQUAL

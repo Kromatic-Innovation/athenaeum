@@ -658,3 +658,42 @@ class TestRecompareShadowMode:
         a = _write_page(wiki_root, "a", body="contact nina@example.com for details")
         reasons = identify_pii_hazards([a])
         assert any("inline email" in r for r in reasons)
+
+
+class TestAthenaeum2080Reopen:
+    """athenaeum#2080 AC2 plumbing: a stale prose-scope ``distinct`` is re-run."""
+
+    def test_legacy_prose_scope_distinct_is_reopened_and_counted(self, wiki_root: Path) -> None:
+        from athenaeum.comparator import LEGACY_COMPARATOR_VERSION_GATE1
+        from athenaeum.verdicts import Basis, append_verdict, build_verdict_entry
+
+        extra_a = 'claimed_scope: "intake loop for job-hunt; classifies digests"'
+        extra_b = 'claimed_scope: "triage of recruiter threads for the pipeline"'
+        a = _write_page(wiki_root, "a", extra=extra_a)
+        b = _write_page(wiki_root, "b", extra=extra_b)
+        _write_queue(wiki_root, [_block("clean", [a, b])])
+        lock = RunLock(wiki_root)
+        with lock:
+            append_verdict(
+                wiki_root,
+                build_verdict_entry(
+                    "a",
+                    "b",
+                    VERDICT_DISTINCT,
+                    basis=Basis(comparator_version=LEGACY_COMPARATOR_VERSION_GATE1),
+                    separator=["scope"],
+                    at="2026-01-01T00:00:00+00:00",
+                    decided_by="comparator",
+                ),
+                lock=lock,
+            )
+            result = recompare_pending_merges(
+                wiki_root,
+                client=_fake_client(_content_payload("equivalent")),
+                apply=True,
+                lock=lock,
+            )
+        assert result.skipped_fresh == 0
+        assert result.compared == 1
+        assert result.reopened_legacy_scope == 1
+        assert list(result.proposals[0].pair_verdicts.values()) == [VERDICT_DUPLICATE]

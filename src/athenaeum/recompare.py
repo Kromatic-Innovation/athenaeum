@@ -161,6 +161,11 @@ class RecompareResult:
     skipped_missing_source: int
     pii_hazard_ids: list[str]
     proposals: list[ProposalRecompare] = field(default_factory=list)
+    #: Issue athenaeum#2080: pairs whose memoized Gate-1 ``distinct`` verdict
+    #: was decided by the prose-scope defect and so was re-decided this run
+    #: (``--apply`` only; a dry run never consults the memo). Already counted
+    #: in ``compared``.
+    reopened_legacy_scope: int = 0
 
 
 def can_auto_apply(proposal: ProposalRecompare) -> bool:
@@ -398,6 +403,7 @@ def recompare_pending_merges(
     compared = 0
     skipped_fresh = 0
     skipped_missing = 0
+    reopened_legacy_scope = 0
 
     # Issue athenaeum#1245 (QA review finding 2): reset this pass's own
     # content_relation-unavailable count/latch before the loop starts, so this
@@ -469,6 +475,8 @@ def recompare_pending_merges(
                             skipped_fresh += 1
                         else:
                             compared += 1
+                            if outcome.get("reopened"):
+                                reopened_legacy_scope += 1
                         pair_verdicts[key] = outcome.get("verdict")
                     else:
                         from athenaeum.comparator import compare_pages
@@ -529,4 +537,5 @@ def recompare_pending_merges(
         skipped_missing_source=skipped_missing,
         pii_hazard_ids=[r.proposal_id for r in results if r.pii_hazard],
         proposals=results,
+        reopened_legacy_scope=reopened_legacy_scope,
     )

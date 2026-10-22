@@ -723,11 +723,57 @@ def compare_identity(
     return Relation.DISJOINT if ratified else Relation.UNKNOWN
 
 
+_PROSE_SCOPE_RE = re.compile(r"\s|[,;()]")
+
+
+def is_prose_scope(value: Any) -> bool:
+    """True when *value* is free-text prose rather than a ``/``-separated path.
+
+    Issue athenaeum#2080. ``claimed_scope`` is registered as a HIERARCHY
+    coordinate, but the librarian's LLM-written values are often a sentence
+    ("intake loop for job-hunt automation redesign; classifies board digests
+    ..."). Two sentences are never ancestor/descendant of each other, so
+    :func:`compare_hierarchy` called every such pair DISJOINT and Gate 1
+    exited ``distinct`` without ever reaching Gate 2 (2 of 12 real duplicates
+    found in the operator's 60-item eval).
+
+    A real hierarchy path is a run of ``/``-separated tokens with no
+    whitespace and no sentence punctuation; anything carrying whitespace or
+    ``, ; ( )`` is prose. The check is deliberately syntactic (no vocabulary
+    lookup): a deployment-declared vocabulary is not required for a prose
+    string to be recognized as "not a path".
+    """
+    return isinstance(value, str) and bool(_PROSE_SCOPE_RE.search(value.strip()))
+
+
+def compare_scope(
+    a: str | None,
+    b: str | None,
+    *,
+    null_means: str = NullMeans.UNKNOWN,
+) -> str:
+    """:func:`compare_hierarchy` for the ``scope`` dimension, prose-safe.
+
+    A DISJOINT result that rests on a free-text (prose) scope on EITHER side
+    is not evidence of disjoint territory -- two prose strings simply are not
+    in a prefix relation -- so it degrades to UNKNOWN, which lets Gate 1 fall
+    through to Gate 2 instead of exiting ``distinct`` (issue athenaeum#2080
+    AC1). EQUAL, CONTAINS, and the null/universal relations are untouched, and
+    two genuine paths that are siblings are still DISJOINT.
+    """
+    rel = compare_hierarchy(a, b, null_means=null_means)
+    if rel == Relation.DISJOINT and (is_prose_scope(a) or is_prose_scope(b)):
+        return Relation.UNKNOWN
+    return rel
+
+
 def compare(dimension: Dimension, a: Any, b: Any, **kwargs: Any) -> str:
     """Dispatch to the comparator matching ``dimension.kind``."""
     if dimension.kind == DimensionKind.INTERVAL:
         return compare_interval(a, b, null_means=dimension.null_means)
     if dimension.kind == DimensionKind.HIERARCHY:
+        if dimension.name == SCOPE.name:
+            return compare_scope(a, b, null_means=dimension.null_means)
         return compare_hierarchy(a, b, null_means=dimension.null_means)
     if dimension.kind == DimensionKind.ENUM:
         return compare_enum(a, b, null_means=dimension.null_means)
@@ -1223,7 +1269,7 @@ def scope_relation(fm: dict[str, Any] | None, session_scope: str | None) -> str 
     page_scope = coordinate_value(SCOPE, fm)
     if not isinstance(page_scope, str) or not page_scope.strip():
         return None
-    return compare_hierarchy(page_scope, session_scope)
+    return compare_scope(page_scope, session_scope)
 
 
 __all__ = [
@@ -1254,11 +1300,13 @@ __all__ = [
     "compare_hierarchy",
     "compare_identity",
     "compare_interval",
+    "compare_scope",
     "coordinate_value",
     "coverage_ratio",
     "cross_corpus_compare",
     "dimension_applies",
     "hierarchy_contains",
+    "is_prose_scope",
     "maybe_flip_to_enforced",
     "parse_dimension_entry",
     "parsed_coordinate",
