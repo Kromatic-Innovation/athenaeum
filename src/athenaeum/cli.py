@@ -138,6 +138,7 @@ _SUBCOMMAND_LOADERS: dict[str, tuple[str, str]] = {
         "athenaeum._cmd_recover_parked",
         "add_recover_parked_subparser",
     ),
+    "quarantine": ("athenaeum._cmd_quarantine", "add_quarantine_subparser"),
     "reconcile": ("athenaeum._cmd_reconcile", "add_reconcile_subparser"),
     "repair": ("athenaeum._cmd_repair", "add_repair_subparser"),
     "fold-lint": ("athenaeum._cmd_fold_lint", "add_fold_lint_subparser"),
@@ -229,6 +230,7 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_pending import add_pending_subparsers
     from athenaeum._cmd_pii_restore import add_pii_restore_subparser
     from athenaeum._cmd_push_metrics import add_push_metrics_subparser
+    from athenaeum._cmd_quarantine import add_quarantine_subparser
     from athenaeum._cmd_query import add_query_subparsers
     from athenaeum._cmd_questions import add_questions_subparser
     from athenaeum._cmd_quiesce import add_quiesce_subparser
@@ -271,6 +273,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_retire_subparser(subparsers)  # retire-pages (issue athenaeum#1625)
     add_split_oversize_subparser(subparsers)  # split-oversize (issue athenaeum#2078)
     add_recover_parked_subparser(subparsers)  # recover-parked (issue athenaeum#2078)
+    add_quarantine_subparser(subparsers)  # quarantine requeue (issue athenaeum#2075)
     add_decompose_page_subparser(subparsers)  # decompose-page (issue athenaeum#1914)
     add_correct_notes_subparser(subparsers)  # correct-notes (issue athenaeum#1976)
     add_reconcile_subparser(subparsers)  # reconcile (issue athenaeum#1143)

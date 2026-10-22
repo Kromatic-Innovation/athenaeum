@@ -2161,6 +2161,61 @@ docstring for the measured populations). AC2 pins
 "queued, never auto-applied" as an invariant, so the knob that could
 break it does not exist rather than defaulting off.
 
+### `resolve_quarantine_bound_relax_factor`
+
+- **YAML path:** `librarian.quarantine_bound_relax_factor`
+- **Environment variable:** `ATHENAEUM_QUARANTINE_BOUND_RELAX_FACTOR`
+- **CLI flag:** —
+- **Default:** `1.5`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the per-retry relaxation of the LLM-call and wall-clock bounds.
+
+Precedence: ``ATHENAEUM_QUARANTINE_BOUND_RELAX_FACTOR`` env >
+``librarian.quarantine_bound_relax_factor`` yaml > ``1.5``. A file on its
+``n``-th retry (``n`` = tripped attempts so far) is allowed
+``factor ** n`` times its normal LLM-call and wall-clock bound. Must be
+``>= 1.0``; anything lower, non-numeric or ``bool`` falls through.
+
+### `resolve_quarantine_max_attempts`
+
+- **YAML path:** `librarian.quarantine_max_attempts`
+- **Environment variable:** `ATHENAEUM_QUARANTINE_MAX_ATTEMPTS`
+- **CLI flag:** —
+- **Default:** `3`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve how many tripped attempts precede a human-parked quarantine.
+
+Precedence: ``ATHENAEUM_QUARANTINE_MAX_ATTEMPTS`` env >
+``librarian.quarantine_max_attempts`` yaml > ``3``. A raw file that trips
+its LLM-call or wall-clock bound is retried on the backoff schedule of
+`resolve_quarantine_retry_delays_days`, each retry with the bound
+relaxed one step, and is only quarantined for a human after this many
+tripped attempts. ``1`` restores the old park-on-first-trip behaviour. The
+byte-size bound is deterministic and keeps the plain
+``librarian.quarantine_threshold`` consecutive-run rule. See
+`_resolve_positive_int_knob` for the coercion contract.
+
+### `resolve_quarantine_retry_delays_days`
+
+- **YAML path:** `librarian.quarantine_retry_delays_days`
+- **Environment variable:** `ATHENAEUM_QUARANTINE_RETRY_DELAYS_DAYS`
+- **CLI flag:** —
+- **Default:** `[3, 4]`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the days to wait after each tripped attempt.
+
+Precedence: ``ATHENAEUM_QUARANTINE_RETRY_DELAYS_DAYS`` env (comma-separated
+ints) > ``librarian.quarantine_retry_delays_days`` yaml (list of ints) >
+``[3, 4]``. Entry ``i`` is the wait after tripped attempt ``i + 1`` before
+the next attempt; the last entry repeats when
+``quarantine_max_attempts`` needs more. The default spreads the default 3
+attempts over seven days. During the wait the file stays in ``raw/`` and is
+skipped by the entity phase without spending an LLM call. Invalid entries
+(non-int, bool, ``< 0``) make the whole value fall through.
+
 ### `resolve_quiesce_max_hours`
 
 - **YAML path:** `librarian.quiesce.max_hours`
@@ -2182,6 +2237,47 @@ hatch, because an unbounded quiesce window would let one crashed lane's
 forgotten sentinel silently pause the scheduler forever, exactly the
 ``launchctl bootout`` fragility replaces. ``bool``
 and non-positive / non-int values fall through to the default.
+
+### `resolve_raw_file_llm_calls_chunk_chars`
+
+- **YAML path:** `librarian.raw_file_llm_calls_chunk_chars`
+- **Environment variable:** `ATHENAEUM_RAW_FILE_LLM_CALLS_CHUNK_CHARS`
+- **CLI flag:** —
+- **Default:** `2000`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the size step of the size-aware per-file LLM-call bound.
+
+Precedence: ``ATHENAEUM_RAW_FILE_LLM_CALLS_CHUNK_CHARS`` env >
+``librarian.raw_file_llm_calls_chunk_chars`` yaml > ``2000``. The per-file
+LLM-call bound is a SIZE proxy, not a failure signal: a large multi-entity
+retro legitimately spends more calls than a one-line note. The effective
+bound for a file is ``base + (len(content) // chunk_chars) *
+raw_file_llm_calls_per_chunk``, where ``base`` is
+``librarian.raw_file_max_api_calls_by_source[<source>]`` when that source is
+listed, else ``raw_file_max_api_calls`` (see
+`resolve_raw_file_max_api_calls`). Each retry of a quarantined file
+then relaxes the result by ``librarian.quarantine_bound_relax_factor`` (see
+`resolve_quarantine_bound_relax_factor`). See
+`_resolve_positive_int_knob` for the coercion contract.
+
+### `resolve_raw_file_llm_calls_per_chunk`
+
+- **YAML path:** `librarian.raw_file_llm_calls_per_chunk`
+- **Environment variable:** `ATHENAEUM_RAW_FILE_LLM_CALLS_PER_CHUNK`
+- **CLI flag:** —
+- **Default:** `1`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the LLM calls allowed per size step.
+
+Precedence: ``ATHENAEUM_RAW_FILE_LLM_CALLS_PER_CHUNK`` env >
+``librarian.raw_file_llm_calls_per_chunk`` yaml > ``1``. The call allowance
+added to the per-file bound for every
+``librarian.raw_file_llm_calls_chunk_chars`` characters of raw content; see
+`resolve_raw_file_llm_calls_chunk_chars` for the formula. To switch
+the size scaling off, set ``raw_file_llm_calls_chunk_chars`` very large.
+See `_resolve_positive_int_knob` for the coercion contract.
 
 ### `resolve_raw_file_max_api_calls`
 
@@ -2212,6 +2308,23 @@ input rather than catching loopers. ``60`` covers the measured
 distribution with headroom while still catching a file whose action set
 genuinely loops. See `_resolve_positive_int_knob` for the coercion
 contract.
+
+### `resolve_raw_file_max_api_calls_by_source`
+
+- **YAML path:** `librarian.raw_file_max_api_calls_by_source`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `{}`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve the per-source base LLM-call bound overrides.
+
+Precedence: ``librarian.raw_file_max_api_calls_by_source`` yaml > empty
+(no env var; a mapping does not fit one). A ``source: calls`` mapping, for
+example ``{retros: 120}``: a raw file from a listed source uses that value
+as the BASE of its size-aware LLM-call bound instead of
+``raw_file_max_api_calls``. Entries that are not a positive int (``bool``,
+zero, negative, non-numeric) are dropped individually.
 
 ### `resolve_raw_file_max_bytes`
 

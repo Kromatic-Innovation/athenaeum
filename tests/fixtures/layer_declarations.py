@@ -298,6 +298,7 @@ MODULE_LAYER: dict[str, int] = {
     "_cmd_pii_restore": 5,
     "_cmd_push_metrics": 5,
     "_cmd_query": 5,
+    "_cmd_quarantine": 5,  # issue athenaeum#2075
     "_cmd_questions": 5,
     "_cmd_quiesce": 5,
     "_cmd_reconcile": 5,

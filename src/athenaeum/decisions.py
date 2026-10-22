@@ -552,6 +552,57 @@ def audit_to_decision(rec: dict) -> dict:
     }
 
 
+def _fmt_bound_value(bound: str, value: object) -> str:
+    """Render a measured bound value: ``46 calls`` / ``912s`` / the bare value."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return str(value)
+    if bound == "llm_calls":
+        return f"{value:g} call(s)"
+    if bound == "wall_clock":
+        return f"{value:.0f}s"
+    return f"{value:g}"
+
+
+def _quarantine_attempt_history(rec: dict) -> str:
+    """One-sentence retry history for a quarantine record (athenaeum#2075 AC4).
+
+    Empty for a legacy record with no ``attempts``. Otherwise e.g. ``3
+    attempts over 7 days, last 46 calls vs 24 allowed (llm_calls)``.
+    """
+    attempts = [a for a in (rec.get("attempts") or []) if isinstance(a, dict)]
+    if not attempts:
+        return ""
+    last = attempts[-1]
+    bound = str(last.get("bound") or rec.get("bound") or "")
+    span = ""
+    try:
+        from datetime import datetime
+
+        fmt = "%Y-%m-%dT%H:%M:%SZ"
+        first_at = datetime.strptime(str(attempts[0].get("at")), fmt)
+        last_at = datetime.strptime(str(last.get("at")), fmt)
+        days = round((last_at - first_at).total_seconds() / 86400)
+        span = f" over {days} day(s)" if days >= 1 else " on one day"
+    except (TypeError, ValueError):
+        pass
+    final = ""
+    if last.get("used") is not None and last.get("limit") is not None:
+        final = (
+            f", last {_fmt_bound_value(bound, last['used'])} vs "
+            f"{_fmt_bound_value(bound, last['limit'])} allowed ({bound})"
+        )
+    n = len(attempts)
+    steps = "; ".join(
+        f"#{a.get('attempt', i + 1)} {a.get('bound', '?')} "
+        f"{_fmt_bound_value(str(a.get('bound', '')), a.get('used'))}/"
+        f"{_fmt_bound_value(str(a.get('bound', '')), a.get('limit'))}"
+        for i, a in enumerate(attempts)
+        if a.get("used") is not None
+    )
+    hist = f" Attempt history: {steps}." if steps else ""
+    return f"{n} attempt(s){span}{final}.{hist}"
+
+
 def quarantine_to_decision(rec: dict) -> dict:
     """Convert a quarantine ledger record to a unified decision dict (issue athenaeum#898).
 
@@ -570,11 +621,21 @@ def quarantine_to_decision(rec: dict) -> dict:
     detail = rec.get("detail", "")
     violations = rec.get("violations", 0)
     detail_tail = f" ({_one_line(detail)})" if detail else ""
-    summary = (
-        f'Raw intake file "{ref}" was quarantined after exceeding its {bound} '
-        f"bound on {violations} consecutive run(s){detail_tail} — release it "
-        "to return it to the discovery set, or leave it quarantined."
-    )
+    history = _quarantine_attempt_history(rec)
+    if history:
+        # Issue athenaeum#2075 AC4: state the retry history and the bound it
+        # finally failed, not a bare consecutive-run count.
+        summary = (
+            f'Raw intake file "{ref}" was quarantined after exhausting its retry '
+            f"schedule: {history} Release it to return it to the discovery set "
+            "(with a fresh schedule), or leave it quarantined."
+        )
+    else:
+        summary = (
+            f'Raw intake file "{ref}" was quarantined after exceeding its {bound} '
+            f"bound on {violations} consecutive run(s){detail_tail} — release it "
+            "to return it to the discovery set, or leave it quarantined."
+        )
     return {
         "type": "quarantine",
         "id": rec.get("id"),
@@ -589,6 +650,7 @@ def quarantine_to_decision(rec: dict) -> dict:
             "violations": violations,
             "quarantine_path": rec.get("quarantine_path"),
             "original_path": rec.get("original_path"),
+            "attempts": rec.get("attempts") or [],
         },
     }
 
