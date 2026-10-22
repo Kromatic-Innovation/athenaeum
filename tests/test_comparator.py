@@ -1355,6 +1355,19 @@ class TestAthenaeum2080ProseScope:
         assert outcome.verdict == VERDICT_DUPLICATE
         assert "scope" in outcome.assumed  # unresolved, named -- not silently dropped
 
+    def test_prose_scope_conflicting_content_is_underdetermined_on_scope(self) -> None:
+        """A conflicting pair that used to exit ``distinct`` at Gate 1 now asks
+        for the unresolved scope coordinate instead of being silently separated
+        (this is the path that creates coordinate-batch queue items)."""
+        client = _fake_client(_content_payload(ContentRelation.CONFLICTING, passages=["x", "y"]))
+        outcome = compare_pages(
+            _page("alpha", claimed_scope=f'"{_PROSE_A}"'),
+            _page("beta", claimed_scope=f'"{_PROSE_B}"'),
+            client=client,
+        )
+        assert outcome.verdict == VERDICT_UNDERDETERMINED
+        assert outcome.missing == ["scope"]
+
     def test_real_sibling_paths_still_separate(self) -> None:
         outcome = compare_pages(
             _page("alpha", claimed_scope="org/a"),

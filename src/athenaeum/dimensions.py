@@ -1269,7 +1269,7 @@ def scope_relation(fm: dict[str, Any] | None, session_scope: str | None) -> str 
     page_scope = coordinate_value(SCOPE, fm)
     if not isinstance(page_scope, str) or not page_scope.strip():
         return None
-    return compare_scope(page_scope, session_scope)
+    return compare_hierarchy(page_scope, session_scope)
 
 
 __all__ = [
