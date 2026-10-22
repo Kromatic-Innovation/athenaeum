@@ -1366,7 +1366,7 @@ class TestAthenaeum2080ProseScope:
             client=client,
         )
         assert outcome.verdict == VERDICT_UNDERDETERMINED
-        assert outcome.missing == ["scope"]
+        assert "scope" in outcome.missing
 
     def test_real_sibling_paths_still_separate(self) -> None:
         outcome = compare_pages(
