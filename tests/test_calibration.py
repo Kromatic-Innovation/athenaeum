@@ -307,7 +307,7 @@ class TestDefaultAcceptanceSampling:
         wiki = tmp_path / "wiki"
         wiki.mkdir()
         record = sample_default_acceptance(
-            wiki, decision_id="merge-1", config=_sample_all_default_acceptance_config()
+            wiki, decision_id="merge-1", answer_source="rule", config=_sample_all_default_acceptance_config()
         )
         assert record is not None
         assert record["tier"] == DEFAULT_ACCEPTANCE_TIER
@@ -323,7 +323,7 @@ class TestDefaultAcceptanceSampling:
         wiki.mkdir()
         record = sample_default_acceptance(
             wiki,
-            decision_id="merge-1",
+            decision_id="merge-1", answer_source="rule",
             config={"librarian": {"default_acceptance_audit_sample_rate": 0.0}},
         )
         assert record is None
@@ -333,8 +333,8 @@ class TestDefaultAcceptanceSampling:
         wiki = tmp_path / "wiki"
         wiki.mkdir()
         config = _sample_all_default_acceptance_config()
-        first = sample_default_acceptance(wiki, decision_id="merge-1", config=config)
-        second = sample_default_acceptance(wiki, decision_id="merge-1", config=config)
+        first = sample_default_acceptance(wiki, decision_id="merge-1", answer_source="rule", config=config)
+        second = sample_default_acceptance(wiki, decision_id="merge-1", answer_source="rule", config=config)
         assert first is not None
         assert second is None  # already recorded — no duplicate row
         assert len(read_calibration_ledger(wiki)) == 1
@@ -351,7 +351,7 @@ class TestDefaultAcceptanceSampling:
             config=_sample_all_config(),
         )
         sample_default_acceptance(
-            wiki, decision_id="merge-1", config=_sample_all_default_acceptance_config()
+            wiki, decision_id="merge-1", answer_source="rule", config=_sample_all_default_acceptance_config()
         )
         summary = calibration_summary(wiki)
         assert summary["T2"]["sampled"] == 1
@@ -364,7 +364,7 @@ class TestDefaultAcceptanceRubberStampRate:
         wiki = tmp_path / "wiki"
         wiki.mkdir()
         sample_default_acceptance(
-            wiki, decision_id="merge-1", config=_sample_all_default_acceptance_config()
+            wiki, decision_id="merge-1", answer_source="rule", config=_sample_all_default_acceptance_config()
         )
         result = default_acceptance_rubber_stamp_rate(wiki)
         assert result["sampled"] == 1
@@ -392,7 +392,7 @@ class TestDefaultAcceptanceRubberStampRate:
         audit_ids = []
         for i in range(10):
             record = sample_default_acceptance(
-                wiki, decision_id=f"merge-{i}", config=config
+                wiki, decision_id=f"merge-{i}", answer_source="rule", config=config
             )
             assert record is not None
             audit_ids.append(record["id"])
@@ -414,7 +414,7 @@ class TestDefaultAcceptanceRubberStampRate:
         wiki = tmp_path / "wiki"
         wiki.mkdir()
         config = _sample_all_default_acceptance_config()
-        record = sample_default_acceptance(wiki, decision_id="merge-1", config=config)
+        record = sample_default_acceptance(wiki, decision_id="merge-1", answer_source="rule", config=config)
         assert record is not None
         record_audit_review(wiki, audit_id=record["id"], human_verdict="accept")
 

@@ -32,7 +32,13 @@ import sys
 from pathlib import Path
 
 from athenaeum._cli_shared import _resolve_wiki_root
-from athenaeum.calibration import calibration_summary, record_audit_review
+from athenaeum.calibration import (
+    DEFAULT_ACCEPTANCE_TIER,
+    calibration_summary,
+    list_pending_audit,
+    record_audit_not_applicable,
+    record_audit_review,
+)
 from athenaeum.config import (
     DEFAULT_KNOWLEDGE_ROOT,
     load_config,
@@ -40,9 +46,12 @@ from athenaeum.config import (
     resolve_reasoning_tier_auditing_enabled,
     resolve_reasoning_tier_t2_auto_apply_enabled,
 )
+from athenaeum.provider import ProviderConfigError, build_llm_client, resolve_provider
 from athenaeum.reasoning_tiers import (
     T1_TIER_NAME,
     T2_TIER_NAME,
+    get_t1_model,
+    get_t2_model,
     read_reasoning_tier_decisions,
 )
 
@@ -160,12 +169,133 @@ def _reasoning_tier_activity(
     return activity
 
 
+#: Per-tier (model knob, model resolver) for the reach check below.
+_TIER_REACH_PROBES = {
+    T1_TIER_NAME: ("reasoning_t1", get_t1_model),
+    T2_TIER_NAME: ("reasoning_t2", get_t2_model),
+}
+
+#: Issue athenaeum#2079 AC2 reach-check outcomes for an armed-but-silent tier.
+REACH_TIER_NOT_CALLABLE = "tier_not_callable"
+REACH_NO_DECISIONS_REACHED = "no_decisions_reached_tier"
+
+
+def _tier_reach_check(tier: str, config: dict | None) -> dict[str, object]:
+    """Checked condition behind "armed, zero decisions" (issue athenaeum#2079 AC2).
+
+    Distinguishes two states the old generic hint conflated:
+
+    * ``tier_not_callable`` -- the call precondition fails: the tier's LLM
+      client cannot be built for the provider/model it would use (e.g. no
+      ``ANTHROPIC_API_KEY`` for the ``api`` provider), so the tier CANNOT have
+      been called. Names the provider and model it tried.
+    * ``no_decisions_reached_tier`` -- the client builds fine, so the tier is
+      callable; zero logged decisions then means no proposal reached it (a
+      wiring/inflow question, not a credentials one).
+
+    Constructing a client makes no network call. This is a probe of the
+    CURRENT config/environment, not a replay of past runs.
+    """
+    knob, model_fn = _TIER_REACH_PROBES[tier]
+    model = model_fn(config)
+    try:
+        provider = resolve_provider(config, knob)
+    except ProviderConfigError as exc:
+        return {
+            "state": REACH_TIER_NOT_CALLABLE,
+            "provider": None,
+            "model": model,
+            "detail": f"provider misconfigured: {exc}",
+        }
+    try:
+        client = build_llm_client(config, knob=knob)
+        error = None
+    except Exception as exc:  # noqa: BLE001 - a probe must never crash the summary
+        client, error = None, f"{type(exc).__name__}: {exc}"
+    if client is None:
+        return {
+            "state": REACH_TIER_NOT_CALLABLE,
+            "provider": provider,
+            "model": model,
+            "detail": error or f"no LLM client available for provider {provider!r}",
+        }
+    return {
+        "state": REACH_NO_DECISIONS_REACHED,
+        "provider": provider,
+        "model": model,
+        "detail": "client builds; no proposal reached the tier",
+    }
+
+
+def _render_reach_check(tier: str, check: dict[str, object]) -> str:
+    where = f"provider {check['provider']!r}, model {check['model']!r}"
+    if check["state"] == REACH_TIER_NOT_CALLABLE:
+        return (
+            f" *** {tier}: TIER NOT CALLABLE ({where}) -- {check['detail']}. "
+            "It cannot have been called. ***"
+        )
+    return (
+        f" *** {tier}: tier is callable ({where}) but NO DECISIONS REACHED IT "
+        "-- no proposal arrived; this is an inflow/wiring gap, not a "
+        "credentials problem. ***"
+    )
+
+
+def _cmd_close_not_applicable(args: argparse.Namespace) -> int:
+    """Issue athenaeum#2079 AC3: close pending default_acceptance audit items as
+    not applicable. Dry-run unless ``--apply``."""
+    wiki_root = _resolve_wiki_root(args)
+    wanted = set(getattr(args, "id", None) or [])
+    pending = [
+        r
+        for r in list_pending_audit(wiki_root)
+        if r.get("tier") == DEFAULT_ACCEPTANCE_TIER
+        and (not wanted or str(r.get("id")) in wanted)
+    ]
+    unknown = wanted - {str(r.get("id")) for r in pending}
+    if unknown:
+        print(
+            "error: not a pending default_acceptance audit item: "
+            + ", ".join(sorted(unknown)),
+            file=sys.stderr,
+        )
+        return 1
+    apply = bool(getattr(args, "apply", False))
+    closed = []
+    for r in pending:
+        if apply:
+            record_audit_not_applicable(
+                wiki_root, audit_id=str(r["id"]), note=args.note
+            )
+        closed.append(str(r["id"]))
+    if args.json:
+        sys.stdout.write(
+            json.dumps({"applied": apply, "closed": closed, "note": args.note}) + "\n"
+        )
+    else:
+        verb = "closed" if apply else "would close"
+        for audit_id in closed:
+            print(f"{verb} {audit_id} as not applicable")
+        if not closed:
+            print("no pending default_acceptance audit items")
+        elif not apply:
+            print("dry run: re-run with --apply to write the ledger records")
+    return 0
+
+
 def cmd_calibration(args: argparse.Namespace) -> int:
     """Dispatch ``athenaeum calibration {summary,review}``."""
     sub = getattr(args, "calibration_target", None)
-    if sub not in ("summary", "review"):
-        print("usage: athenaeum calibration {summary,review} [...]", file=sys.stderr)
+    if sub not in ("summary", "review", "close-not-applicable"):
+        print(
+            "usage: athenaeum calibration {summary,review,close-not-applicable} [...]",
+            file=sys.stderr,
+        )
         return 2
+    if sub == "close-not-applicable":
+        # Ledger hygiene, not a tier surface: deliberately NOT behind the
+        # reasoning-tier opt-in gate below.
+        return _cmd_close_not_applicable(args)
 
     wiki_root = _resolve_wiki_root(args)
     config = load_config(wiki_root.parent)
@@ -190,6 +320,9 @@ def cmd_calibration(args: argparse.Namespace) -> int:
         # `sampled`/`reviewed` alone cannot tell "armed and quietly passing
         # everything up" apart from "armed but never actually invoked".
         activity = _reasoning_tier_activity(wiki_root, config)
+        for _tier, _act in activity.items():
+            if _act["armed_but_silent"] and _tier in _TIER_REACH_PROBES:
+                _act["armed_but_silent_check"] = _tier_reach_check(_tier, config)
         if args.json:
             merged = {
                 tier: {**counts, **activity.get(tier, {})}
@@ -237,6 +370,9 @@ def cmd_calibration(args: argparse.Namespace) -> int:
                             "key) and that merge proposals are reaching the "
                             "screen. ***"
                         )
+                reach = tier_activity.get("armed_but_silent_check")
+                if reach:
+                    print(_render_reach_check(tier, reach))
         return 0
 
     # sub == "review"
@@ -300,6 +436,31 @@ def add_calibration_subparser(subparsers: argparse._SubParsersAction) -> None:
         help="Per-tier calibration counts (sampled / reviewed / overturned).",
     )
     _add_common(summary_p)
+
+    na_p = c_sub.add_parser(
+        "close-not-applicable",
+        help="Close pending default_acceptance audit items as not applicable "
+        "(dry run unless --apply); they then count toward no rate "
+        "(issue athenaeum#2079).",
+    )
+    _add_common(na_p)
+    na_p.add_argument(
+        "--id",
+        action="append",
+        help="Restrict to this audit item id (repeatable). Default: every "
+        "pending default_acceptance item.",
+    )
+    na_p.add_argument(
+        "--note",
+        default="not applicable: circular sample of the operator's own answer "
+        "(athenaeum#2079)",
+        help="Ledger note recorded on each closure.",
+    )
+    na_p.add_argument(
+        "--apply",
+        action="store_true",
+        help="Write the closures to the ledger (default is a dry run).",
+    )
 
     review_p = c_sub.add_parser(
         "review",
