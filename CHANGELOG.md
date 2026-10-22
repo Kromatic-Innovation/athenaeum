@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Tier-3 merges into oversized pages land instead of raising a question;
+  parked observations are recoverable (issue athenaeum#2078).** A merge
+  into a page over the page-size threshold now appends (an append-mode
+  prompt that only ever returns the delta, never the whole body) and flags
+  the page `needs_split`; `athenaeum split-oversize` (dry-run by default,
+  `--apply --uid`, `--auto` above `librarian.oversize_hard_ceiling_chars`,
+  default 40000) splits flagged pages afterwards; escalation writers carry
+  the observation text intact and the parser reads it back;
+  notice-class blocks with no observation and no live source close as
+  `moot`; `athenaeum recover-parked restore|resolve --manifest` restores the
+  dropped raw files from git history and resolves the matching questions.
+- **`merges propose-fold` resolves past folded tombstones and renamed
+  canonicals (issue athenaeum#2082).** Target and source resolution skips
+  pages whose frontmatter is `status: folded`; a bare uid or an exact
+  `<uid>-<slug>.md` path matching one live page is unambiguous; a canonical
+  whose `name:` slug drifted from its filename is accepted when the filename
+  uid matches its `uid:` (identity is the uid), with the drift recorded as a
+  note on the proposal.
 - **Eval: Maya as an ordering signal for the name-collision queue (issue
   athenaeum#2066).** `scripts/eval_maya_collision_triage.py` asks Maya
   (local yes/no cross-encoder) "Are these two records about the same
