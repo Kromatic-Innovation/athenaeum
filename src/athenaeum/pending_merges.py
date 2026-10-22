@@ -1798,16 +1798,21 @@ def _apply_fold_into_existing(
     # refusal — the narrowing invariant is still the fold-bug detector it
     # was written to be for an apply no human has reviewed (see
     # TestCoordinateWidening in tests/test_merge_fold_write_paths.py).
-    # Issue athenaeum#2076: the IDENTITY-kind pick-one-and-alias shortcut
-    # just below stays reserved for a name-collision-scan proposal
-    # specifically — it relies on that detector's distinct guarantee ("the
-    # pages are the SAME real-world thing", so an opaque id mismatch is
-    # safe to resolve by picking one and aliasing the other). A human
-    # approving a qualified-name-scan / wiki-dedupe-cluster / manual fold
-    # makes no such identity-specific guarantee, so an incompatible
-    # IDENTITY dimension on THOSE classes falls through to the generic
-    # `widen_path_eligible` branch below (`fold_widen_impossible`), same as
-    # any other non-universal dimension. `widen_path_eligible` is true for
+    # Issue athenaeum#2083 (operator ruling 2026-10-22): the IDENTITY-kind
+    # pick-one-and-alias shortcut just below applies to EVERY
+    # `widen_path_eligible` fold, not only name-collision-scan proposals.
+    # The earlier athenaeum#2076 rationale — that only a name-collision
+    # detector carries an "identity guarantee" — is superseded: "A human
+    # approving any fold has ruled the pages are the same thing; the
+    # proposal class does not change that." The human `approve` IS the
+    # identity ruling, so an opaque id mismatch on a qualified-name-scan /
+    # wiki-dedupe-cluster / manual fold is resolved by picking one id and
+    # aliasing the other, exactly as for a name-collision fold. The first
+    # post-deploy `ingest-answers` pass (2026-10-22) refused 25 such
+    # human-approved folds with `fold_widen_impossible` before this change.
+    # The restriction remains only for a non-human fold through any other
+    # detector, which still falls to the narrowing refusal below.
+    # `widen_path_eligible` is true for
     # ANY human-approved fold (any rationale — athenaeum#2076 AC1) OR a
     # name-collision-scan fold even when it was auto-applied (issue
     # athenaeum#1170's unambiguous-collision auto-merge passes
@@ -1842,17 +1847,17 @@ def _apply_fold_into_existing(
         try:
             widened_value = _widen_over_metas(dimension, metas_in_order)
         except CoordinateWidenImpossible as exc:
-            if is_name_collision_fold and dimension.kind == DimensionKind.IDENTITY:
+            if widen_path_eligible and dimension.kind == DimensionKind.IDENTITY:
                 # An opaque per-page identifier (``subject`` is the only
                 # IDENTITY-kind dimension today, but this branches on the
                 # KIND — a Dimension-registry property — rather than the
                 # name string, so any future IDENTITY dimension gets the
                 # same treatment) has no universal escape. But a
-                # name-collision-scan proposal has already been through a
-                # human `approve` ruling the pages the SAME real-world
-                # thing, so "what single id covers both?" has exactly one
-                # right answer: the canonical's own concrete id when it has
-                # one (never overridden by a differing source), else the
+                # human-approved (or name-collision-scan) fold has already
+                # been ruled the SAME real-world thing (athenaeum#2083), so
+                # "what single id covers both?" has exactly one right answer:
+                # the canonical's own concrete id when it has one (never
+                # overridden by a differing source), else the
                 # one concrete id a source carries. `parsed_coordinate`
                 # already normalizes each IDENTITY dimension's own
                 # "no real identity" sentinel (``undeterminable`` for

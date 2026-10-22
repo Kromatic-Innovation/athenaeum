@@ -535,24 +535,25 @@ class TestApplyMerge:
         meta, _ = parse_frontmatter(target.read_text(encoding="utf-8"))
         assert meta["claimed_scope"] == "*"
 
-    def test_non_collision_approve_with_incompatible_identity_reports_skip_detail(
+    def test_non_collision_approve_with_incompatible_enum_reports_skip_detail(
         self, wiki_root: Path, raw_root: Path
     ) -> None:
         """Issue athenaeum#2076 AC2/AC4: a human-approved, non-collision
-        fold with an incompatible ``subject`` raises ``fold_widen_impossible``
-        through ``apply_decision_answers``, and the outcome carries the
+        fold with an incompatible ENUM ``memory-class`` (athenaeum#2083 moved
+        the IDENTITY ``subject`` case to the pick-and-alias shortcut) raises
+        ``fold_widen_impossible`` through ``apply_decision_answers``, and the outcome carries the
         structured skip detail (proposal id via ``decision_id``, dimension
         name, both values) — not just a count."""
         from athenaeum.pending_merges import parse_pending_merges, write_pending_merge
 
         target = wiki_root / "canonical.md"
         target.write_text(
-            "---\nname: Canonical\ntype: concept\nsubject: subject-a\n---\nOLD\n",
+            "---\nname: Canonical\ntype: concept\nmemory_class: fact\n---\nOLD\n",
             encoding="utf-8",
         )
         src_a = wiki_root / "old-a.md"
         src_a.write_text(
-            "---\nname: Old A\ntype: concept\nsubject: subject-b\n---\na\n",
+            "---\nname: Old A\ntype: concept\nmemory_class: guideline\n---\na\n",
             encoding="utf-8",
         )
         init_git_repo(wiki_root)
@@ -577,8 +578,8 @@ class TestApplyMerge:
 
         assert outcome.applied is False
         assert outcome.error_code == "fold_widen_impossible"
-        assert outcome.dimension_name == "subject"
-        assert {outcome.value_a, outcome.value_b} == {"subject-a", "subject-b"}
+        assert outcome.dimension_name == "memory-class"
+        assert {outcome.value_a, outcome.value_b} == {"fact", "guideline"}
 
 
 # ---------------------------------------------------------------------------
@@ -1433,12 +1434,12 @@ class TestBatch:
         raw.mkdir()
         target = wiki / "canonical.md"
         target.write_text(
-            "---\nname: Canonical\ntype: concept\nsubject: subject-a\n---\nOLD\n",
+            "---\nname: Canonical\ntype: concept\nmemory_class: fact\n---\nOLD\n",
             encoding="utf-8",
         )
         src_a = wiki / "old-a.md"
         src_a.write_text(
-            "---\nname: Old A\ntype: concept\nsubject: subject-b\n---\na\n",
+            "---\nname: Old A\ntype: concept\nmemory_class: guideline\n---\na\n",
             encoding="utf-8",
         )
         init_git_repo(wiki)
@@ -1463,8 +1464,8 @@ class TestBatch:
         out = capsys.readouterr().out
         assert "fold_widen_impossible" in out
         assert f"proposal={mid}" in out
-        assert "dimension='subject'" in out
-        assert "value_a='subject-a'" in out or "value_b='subject-a'" in out
+        assert "dimension='memory-class'" in out
+        assert "value_a='fact'" in out or "value_b='fact'" in out
 
 
 # ---------------------------------------------------------------------------
