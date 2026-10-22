@@ -99,6 +99,7 @@ Every subcommand is registered top-level on one `parser.add_subparsers()` in `cl
 - [`athenaeum rebuild-index`](#athenaeum-rebuild-index) (command)
 - [`athenaeum recall`](#athenaeum-recall) (command) — Search the wiki from the shell (one tab-separated hit per line)
 - [`athenaeum reconcile`](#athenaeum-reconcile) (command) — Retire pending raw-intake files whose content is already materialized in the wiki (dual-write cleanup). Default is dry-run; pass --apply to remove.
+- [`athenaeum recover-parked`](#athenaeum-recover-parked) (command) — One-shot recovery of observations parked by refused oversize merges: 'restore' writes the raw files listed in a manifest back from git history so the next librarian run ingests them; 'resolve' then archives the matching pending questions once their files have been consumed. Dry-run unless --apply. Counts only on stdout.
 - [`athenaeum recovery-yield`](#athenaeum-recovery-yield) (command) — Read-only readout of the auto-memory origin-recovery yield signal: recovered/uncited counters, basis split, resolved threshold, and (AC4) the corpus share of type:auto-memory pages with sources:[]. One JSON object on stdout, exit 0 always, no side effects.
 - [`athenaeum registry`](#athenaeum-registry) (command) — : compile the source-handle registry.json (entity uid → handle set) from wiki entity frontmatter. Deterministic, no LLM; emits a well-formed registry even when no handles are populated yet.
 - [`athenaeum reindex`](#athenaeum-reindex) (command) — Rebuild the search index (FTS5 or vector, per config). --incremental (default) applies only the hash-diff delta; --full rebuilds from scratch. The incremental delta is keyed off each file's whole-content hash, not off how its frontmatter is parsed, so a page whose on-disk text has not changed since it was last indexed is hash-matched and skipped even after a parser fix lands -- an index built before the block-list aliases:/tags: parser fix (commit 324bb3c4) keeps stale, empty aliases/tags columns for any page an --incremental run does not otherwise touch. Only --full re-parses every page from scratch and refills them. To check the result, run `SELECT COUNT(*) FROM wiki WHERE aliases != ''` against cache-dir/wiki-index.db (swap in tags for the other column). The vector backend disables onnxruntime's telemetry client at import, before it can start its background worker thread, to prevent a shutdown-time crash in that thread.
@@ -111,6 +112,7 @@ Every subcommand is registered top-level on one `parser.add_subparsers()` in `cl
 - [`athenaeum serve`](#athenaeum-serve) (command) — Start the MCP memory server
 - [`athenaeum session-end`](#athenaeum-session-end) (command) — Change-gated ingest + reindex for SessionEnd: compile this session's new raw intake, then refresh the index — a fast no-op (no LLM, no reindex) when nothing changed.
 - [`athenaeum spend`](#athenaeum-spend) (command) — Report LLM spend from the durable ledger ($ for API, tokens for subscription — never blended)
+- [`athenaeum split-oversize`](#athenaeum-split-oversize) (command) — Split oversized pages (flagged needs_split after a merge, or over the hard ceiling) into a hub plus linked atomic pages. Default is dry-run. --apply splits the pages named with --uid; --auto also splits every page over librarian.oversize_hard_ceiling_chars. Makes no LLM call.
 - [`athenaeum status`](#athenaeum-status) (command) — Show knowledge base status
 - [`athenaeum stopwords`](#athenaeum-stopwords) (command) — Print the stopword list (one word per line). Used by the example UserPromptSubmit hook's regex fallback to stay in sync with the FTS5 query filter.
 - [`athenaeum storage`](#athenaeum-storage) (group) — Storage-surface operator tasks (migrate a page's PII off-corpus).
@@ -1244,6 +1246,23 @@ Retire pending raw-intake files whose content is already materialized in the wik
 | `--source` | `drive` | — | raw/<source>/ tree to reconcile (default: drive). |
 | `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 
+## `athenaeum recover-parked`
+
+One-shot recovery of observations parked by refused oversize merges: 'restore' writes the raw files listed in a manifest back from git history so the next librarian run ingests them; 'resolve' then archives the matching pending questions once their files have been consumed. Dry-run unless --apply. Counts only on stdout.
+
+**Positional arguments:**
+
+- `phase` (choices: restore, resolve)
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--apply` | `False` | — | Write changes. |
+| `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--manifest` | — | — | JSON list of {question_id, conflict_type, entity, raw_path, last_commit} rows. Host-side file; never commit it. |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+| `--state` | — | — | Recovery state file (default: recovery-state.json beside the manifest). |
+| `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
+
 ## `athenaeum recovery-yield`
 
 Read-only readout of the auto-memory origin-recovery yield signal: recovered/uncited counters, basis split, resolved threshold, and (AC4) the corpus share of type:auto-memory pages with sources:[]. One JSON object on stdout, exit 0 always, no side effects.
@@ -1422,6 +1441,20 @@ Report LLM spend from the durable ledger ($ for API, tokens for subscription —
 | `--path` | `~/knowledge` | — | Knowledge directory for config resolution (default: ~/knowledge). |
 | `--reprice` | `False` | — | Recompute historical rows from their per-model token attribution at the CURRENT rates and report the delta against the stored figures. READ-ONLY — the ledger file is never modified. |
 | `--since` | `7d` | — | Lower bound: a window (7d / 24h / 30m / 2w) or an ISO date (2026-07-01). Default: 7d. |
+
+## `athenaeum split-oversize`
+
+Split oversized pages (flagged needs_split after a merge, or over the hard ceiling) into a hub plus linked atomic pages. Default is dry-run. --apply splits the pages named with --uid; --auto also splits every page over librarian.oversize_hard_ceiling_chars. Makes no LLM call.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--apply` | `False` | — | Perform the splits. Without this flag nothing is written except --report. |
+| `--auto` | `False` | — | Also split every candidate over the hard ceiling without per-page approval. |
+| `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+| `--report` | — | — | Write per-page JSON detail here (never printed to stdout). |
+| `--uid` | `[]` | — | Operator-approved page to split (repeatable). |
+| `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
 
 ## `athenaeum status`
 

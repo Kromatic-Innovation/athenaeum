@@ -85,7 +85,7 @@ from athenaeum.fingerprint import (
     record_resolution,
 )
 from athenaeum.pagination import paginate
-from athenaeum.sidecar_blocks import GENERIC_FENCE_OPEN_RE, split_blocks
+from athenaeum.sidecar_blocks import FENCE_CLOSE_RE, GENERIC_FENCE_OPEN_RE, split_blocks
 from athenaeum.store import now_iso
 
 log = logging.getLogger(__name__)
@@ -153,6 +153,28 @@ _META_PREFIXES = ("**Conflict type**:", "**Description**:")
 # line.
 _RAISED_BY_PREFIX = "**Raised by**:"
 _RAISED_BY_AGENT = "agent"
+
+# Issue athenaeum#2078 AC4: a dedicated, fenced ``**Observation**:`` field. The
+# ``**Description**:`` line is single-paragraph by construction (the parser's
+# continuation window closes at the first blank line), so an escalation that
+# carried the parked observation after a blank line ("... the observation
+# follows so the fact is not lost:\n\n<text>") lost that text on read-back --
+# it fell through into ``answer_lines``. The observation now rides in its own
+# backtick-fenced block, which ``split_blocks`` already treats as opaque body
+# content (blank lines, ``---``, ``## `` and ``**Key**:`` lines inside it are
+# all safe).
+_OBSERVATION_PREFIX = "**Observation**:"
+
+
+def render_observation_field(text: str) -> str:
+    """Render *text* as a fenced ``**Observation**:`` field (no trailing newline).
+
+    The fence is one backtick longer than the longest backtick run in the
+    text, so no line of the observation can close it early.
+    """
+    longest = max((len(m) for m in re.findall(r"`+", text)), default=0)
+    fence = "`" * max(3, longest + 1)
+    return f"{_OBSERVATION_PREFIX}\n{fence}text\n{text.strip(chr(10))}\n{fence}"
 
 # Issue athenaeum#1990: the moment ``resolve_by_id`` flips a block's checkbox
 # to ``[x]`` — the decision-time metric's paired counterpart to the header's
@@ -260,6 +282,25 @@ class PendingQuestion:
     # ``created_at`` (date-only, from the header), which the confirmation
     # AC's "a timestamp" field maps onto.
     raised_at: str = ""
+    # Issue athenaeum#2078 AC4: the parked observation text recovered off the
+    # fenced ``**Observation**:`` field. Empty on every block that predates
+    # the field -- see :attr:`recovered_observation` for the legacy fallback.
+    observation: str = ""
+
+    @property
+    def recovered_observation(self) -> str:
+        """The parked observation text, from the field or (legacy) the tail.
+
+        Blocks written before athenaeum#2078 emitted the observation after a
+        blank line, which the parser reads as the (unanswered) block's
+        ``answer_lines``. An UNANSWERED block's answer lines are therefore
+        the observation text for those legacy notice blocks.
+        """
+        if self.observation:
+            return self.observation
+        if not self.answered:
+            return "\n".join(self.answer_lines).strip()
+        return ""
 
 
 def _make_id(header_line: str, question_text: str) -> str:
@@ -453,6 +494,10 @@ def _parse_block(block_text: str, *, quiet: bool = False) -> PendingQuestion | N
     # PendingQuestion attribute name — see `_CONFIRMATION_FIELD_PREFIXES`.
     # Absent (empty dict) on every ordinary question block.
     confirmation_fields: dict[str, str] = {}
+    # Issue athenaeum#2078 AC4: fenced ``**Observation**:`` field state.
+    observation_lines: list[str] = []
+    observation_fence = 0  # open fence's backtick length, 0 when none
+    observation_pending = False  # saw the key, awaiting the fence opener
 
     def _match_confirmation_key(stripped_line: str) -> bool:
         """Recognize a `**<Confirmation key>**:` line; record it if found.
@@ -481,6 +526,27 @@ def _parse_block(block_text: str, *, quiet: bool = False) -> PendingQuestion | N
     remaining = lines[checkbox_idx + 1 :]
     for raw_line in remaining:
         stripped = raw_line.strip()
+        if observation_fence:
+            close = FENCE_CLOSE_RE.match(stripped)
+            if close and len(close.group("fence")) == observation_fence:
+                observation_fence = 0
+            else:
+                observation_lines.append(raw_line)
+            continue
+        if observation_pending:
+            observation_pending = False
+            open_match = GENERIC_FENCE_OPEN_RE.match(stripped)
+            if open_match:
+                observation_fence = len(open_match.group("fence"))
+                continue
+        if stripped.startswith(_OBSERVATION_PREFIX):
+            in_description = False
+            inline = stripped.removeprefix(_OBSERVATION_PREFIX).strip()
+            if inline:
+                observation_lines.append(inline)
+            else:
+                observation_pending = True
+            continue
         if stripped.startswith("**Conflict type**:"):
             in_description = False
             conflict_type = stripped.removeprefix("**Conflict type**:").strip()
@@ -592,6 +658,7 @@ def _parse_block(block_text: str, *, quiet: bool = False) -> PendingQuestion | N
         implemented_behavior=confirmation_fields.get("implemented_behavior", ""),
         alternative=confirmation_fields.get("alternative", ""),
         raised_at=confirmation_fields.get("raised_at", ""),
+        observation="\n".join(observation_lines).strip("\n"),
     )
 
 

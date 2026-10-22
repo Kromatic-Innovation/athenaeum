@@ -60,7 +60,7 @@ from athenaeum.librarian import (
     librarian_batch_mode,
     run,
 )
-from athenaeum.models import EntityIndex, TokenUsage
+from athenaeum.models import EntityIndex, TokenUsage, parse_frontmatter
 from athenaeum.schemas import KNOWN_TYPES
 from athenaeum.tiers import (
     DEFAULT_CLASSIFY_MODEL,
@@ -4057,19 +4057,17 @@ def _seed_oversized_acme_root(
 
 
 class TestPageSizeGateBatchTransport:
-    def test_oversized_page_produces_no_batch_merge_item(
+    def test_oversized_page_is_merged_and_flagged_on_the_batched_write_path(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """batch_write=True: the gate fires at ASSEMBLY — an over-threshold
-        page never becomes a batch request, so the tier-3 write batch's
-        only candidate item is suppressed before ``t3_requests`` ever gets
-        an entry for it, and no write batch is submitted at all."""
+        """Issue athenaeum#2078 AC1: batch_write=True. The gate no longer
+        refuses at ASSEMBLY -- the over-threshold page becomes a normal
+        batch merge item, lands, and carries ``needs_split: true``."""
         _patch_uids(monkeypatch)
         root = _seed_oversized_acme_root(
             tmp_path, "p-batch-oversize", ["Acme Corp shipped a thing.\n"]
         )
         client = _FakeClient(_scripted_responder, allow_sync=False)
-        before = (root / "wiki" / "acme1234-acme-corp.md").read_text(encoding="utf-8")
 
         result = process_batch_run(
             discover_raw_files(root / "raw"),
@@ -4087,29 +4085,25 @@ class TestPageSizeGateBatchTransport:
             batch_write=True,
         )
 
-        assert result.updated == 0
-        assert result.oversize_suppressed == 1
-        assert result.escalated == 1
-        # Only the tier-2 classify batch was submitted — the tier-3 write
-        # batch's only candidate item was suppressed before assembly, so
-        # t3_requests stayed empty and that batch was never submitted.
-        assert len(client.batches.submitted) == 1
+        assert result.updated == 1
+        assert result.oversize_suppressed == 0
+        assert result.escalated == 0
         after = (root / "wiki" / "acme1234-acme-corp.md").read_text(encoding="utf-8")
-        assert after == before
+        assert "Merged note from" in after
+        meta, _body = parse_frontmatter(after)
+        assert meta["needs_split"] is True
 
-    def test_oversized_page_never_reaches_sync_merges_call(
+    def test_oversized_page_is_merged_and_flagged_on_the_sync_merges_path(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """batch_write=False routes the merge to the finalize-time
-        sync_merges fallback. ``allow_sync=False`` means ANY
-        ``messages.create`` call (the merge this gate must suppress) raises
-        immediately — the strongest possible proof no model call was made."""
+        """Issue athenaeum#2078 AC1: batch_write=False routes the merge to
+        the finalize-time sync_merges fallback, which must also merge into
+        the oversized page and flag it."""
         _patch_uids(monkeypatch)
         root = _seed_oversized_acme_root(
             tmp_path, "p-sync-oversize", ["Acme Corp shipped a thing.\n"]
         )
-        client = _FakeClient(_scripted_responder, allow_sync=False)
-        before = (root / "wiki" / "acme1234-acme-corp.md").read_text(encoding="utf-8")
+        client = _FakeClient(_scripted_responder, allow_sync=True)
 
         result = process_batch_run(
             discover_raw_files(root / "raw"),
@@ -4127,12 +4121,13 @@ class TestPageSizeGateBatchTransport:
             batch_write=False,
         )
 
-        assert result.updated == 0
-        assert result.oversize_suppressed == 1
-        assert result.escalated == 1
-        assert client.sync_calls == []
+        assert result.updated == 1
+        assert result.oversize_suppressed == 0
+        assert result.escalated == 0
         after = (root / "wiki" / "acme1234-acme-corp.md").read_text(encoding="utf-8")
-        assert after == before
+        assert "Merged note from" in after
+        meta, _body = parse_frontmatter(after)
+        assert meta["needs_split"] is True
 
     def test_under_threshold_page_still_merges_on_both_sub_transports(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

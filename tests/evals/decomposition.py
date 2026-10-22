@@ -305,6 +305,8 @@ class Outcome:
     children: dict[str, str] = field(default_factory=dict)  # uid -> body
     child_names: dict[str, str] = field(default_factory=dict)
     edges: list[tuple[str, str, str]] = field(default_factory=list)  # (source, target, role)
+    #: athenaeum#2078: the gate let the merge through and flagged the page.
+    flagged_needs_split: bool = False
 
     @property
     def conflict_type(self) -> str:
@@ -363,10 +365,12 @@ def observe_default_disposition(case: Case, root: Path) -> Outcome:
 
     athenaeum#1581 AC4. ``oversize_page_action`` is left unset, so
     :func:`~athenaeum.tiers.resolve_oversize_page_action` resolves ``review``:
-    an over-threshold page yields an ``oversize_page`` escalation for the
-    pending queue and is left byte-for-byte unmodified, and an under-threshold
-    page yields nothing at all. Either way no page is restructured, which is
-    the invariant -- the proposal is what the operator sees.
+    an over-threshold page is no longer refused (athenaeum#2078): the gate
+    returns no escalation, flags the page ``needs_split`` in the in-memory
+    frontmatter the merge will render, and leaves the file byte-for-byte
+    unmodified; an under-threshold page yields nothing at all. Either way no
+    page is restructured here, which is the invariant -- the split is the
+    operator-approved ``split-oversize`` pass that runs after the merge.
     """
     wiki = materialize(case, root)
     path = wiki / f"{case.page.uid}.md"
@@ -391,6 +395,7 @@ def observe_default_disposition(case: Case, root: Path) -> Outcome:
         decomposed=False,
         escalation=escalation,
         hub_body=body,
+        flagged_needs_split=meta.get("needs_split") is True,
     )
 
 
@@ -437,6 +442,7 @@ def run_split_disposition(case: Case, root: Path) -> Outcome:
         children=children,
         child_names=child_names,
         edges=_read_edges(wiki),
+        flagged_needs_split=meta.get("needs_split") is True,
     )
 
 

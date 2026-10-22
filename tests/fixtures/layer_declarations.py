@@ -214,6 +214,8 @@ MODULE_LAYER: dict[str, int] = {
     "repair": 4,
     "retention_policy": 4,
     "retire": 4,
+    "oversize_split": 4,  # athenaeum#2078 AC3: split pass over flagged pages
+    "parked_recovery": 4,  # athenaeum#2078 AC5: one-shot manifest-driven recovery
     "retire_pages": 4,
     "retraction_cascade": 4,
     "name_structure": 4,
@@ -301,6 +303,8 @@ MODULE_LAYER: dict[str, int] = {
     "_cmd_recovery_yield": 5,
     "_cmd_repair": 5,
     "_cmd_retire": 5,
+    "_cmd_recover_parked": 5,  # issue athenaeum#2078
+    "_cmd_split_oversize": 5,  # issue athenaeum#2078
     "_cmd_run": 5,
     "_cmd_schema": 5,
     "_cmd_serve": 5,

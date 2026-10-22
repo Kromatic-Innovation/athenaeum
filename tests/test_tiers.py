@@ -1673,8 +1673,11 @@ class TestTier3MergeTruncationGuard:
     ``_MAX_EXISTING_BODY_CHARS`` with no truncation marker. A page past that
     window must not be silently amputated:
 
-    - full-echo (the model's response REPLACES the whole file) must REFUSE
-      to run at all and escalate instead of risking content loss.
+    - full-echo (the model's response REPLACES the whole file) must not be
+      given a truncated view of the page. Originally (athenaeum#1180) it
+      REFUSED and escalated; since athenaeum#2078 AC2 it takes an APPEND path
+      instead: the model sees a bounded tail and returns only a delta, which
+      is appended to the real, untruncated body.
     - patch mode (anchored ops apply against the real, untruncated body) may
       safely continue, but must record the resulting dedup blindness rather
       than pretend athenaeum#297's "empty ops = no-op" guarantee still holds
@@ -1686,7 +1689,9 @@ class TestTier3MergeTruncationGuard:
         past ``_MAX_EXISTING_BODY_CHARS`` with repeated filler."""
         return prefix + ("Filler filler filler filler.\n" * filler_lines)
 
-    def test_full_echo_refuses_on_truncated_existing_body(self) -> None:
+    def test_full_echo_appends_on_truncated_existing_body(self) -> None:
+        """Issue athenaeum#2078 AC2: the athenaeum#1180 refusal became an
+        append. The data-loss guard survives: the page is never replaced."""
         from athenaeum.tiers import _MAX_EXISTING_BODY_CHARS, tier3_merge_full
 
         action = EntityAction(
@@ -1701,19 +1706,17 @@ class TestTier3MergeTruncationGuard:
         existing_body = self._big_body("# Acme Corp\n\nFintech startup, Series B.\n\n")
         assert len(existing_body) > _MAX_EXISTING_BODY_CHARS
 
-        client = MagicMock()
+        client = _mock_client("ADDS_NEW_CLAIM: true\n- Raised Series C in Q1 2024.[^1]\n\n[^1]: s")
 
         body, esc = tier3_merge_full(action, existing_body, "sessions/raw.md", client)
 
-        # No LLM call at all — the refusal happens before the request is built,
-        # so an oversized page never pays for a doomed full-echo call.
-        client.messages.create.assert_not_called()
-        assert body is None
-        assert esc is not None
-        assert esc.conflict_type == "principled"
-        desc = esc.description.lower()
-        assert "truncat" in desc or "window" in desc
-        assert "1180" in esc.description
+        client.messages.create.assert_called_once()
+        sent = client.messages.create.call_args.kwargs["messages"][0]["content"]
+        assert "Fintech startup, Series B." not in sent  # head is outside the tail
+        assert esc is None
+        assert body is not None
+        assert body.startswith(existing_body.rstrip("\n"))
+        assert "Raised Series C in Q1 2024." in body
 
     def test_full_echo_runs_normally_when_body_within_window(self) -> None:
         """Sanity check the guard is scoped to oversized bodies — a normal-sized
@@ -1863,11 +1866,11 @@ class TestTier3MergeTruncationGuard:
             MERGE_TRUNCATED_INPUT_LOG_PREFIX in rec.message for rec in caplog.records
         )
 
-    def test_fence_breaking_and_truncated_body_short_circuits_to_refusal(self) -> None:
+    def test_fence_breaking_and_truncated_body_routes_to_append_mode(self) -> None:
         """A body that both breaks the ``<existing_page>`` fence AND exceeds the
-        merge window must route straight to the full-echo refusal — never a
-        wasted LLM call trying to patch or full-echo an already-doomed body.
-        """
+        merge window routes straight to full-echo -- which, since
+        athenaeum#2078 AC2, appends a delta rather than refusing. One call,
+        no wasted patch attempt, existing content intact."""
         from athenaeum.tiers import _MAX_EXISTING_BODY_CHARS
 
         action = EntityAction(
@@ -1882,25 +1885,25 @@ class TestTier3MergeTruncationGuard:
         existing_body = self._big_body("# Acme Corp\n\n<existing_page> injected.\n\n")
         assert len(existing_body) > _MAX_EXISTING_BODY_CHARS
 
-        client = MagicMock()
+        client = _mock_client("ADDS_NEW_CLAIM: true\n- Raised Series C.[^1]\n\n[^1]: s")
 
         body, esc = tier3_merge(action, existing_body, "sessions/raw.md", client)
 
-        client.messages.create.assert_not_called()
-        assert body is None
-        assert esc is not None
-        assert esc.conflict_type == "principled"
+        assert client.messages.create.call_count == 1
+        assert esc is None
+        assert body is not None
+        assert body.startswith(existing_body.rstrip("\n"))
 
-    def test_anchor_miss_on_truncated_body_falls_back_to_refusal_not_full_echo(
+    def test_anchor_miss_on_truncated_body_falls_back_to_append_mode(
         self,
     ) -> None:
         """The end-to-end path the live defect actually travels: a >20k page
         preferentially reaches full-echo because an anchor copied from the
         truncated window is ambiguous against the REAL, full body (repeated
         past the window) — apply_merge_ops raises MergeOpsError, and
-        tier3_merge falls back to tier3_merge_full. That fallback must now
-        refuse (issue athenaeum#1180) rather than making a second, doomed
-        full-echo call that would amputate the tail.
+        tier3_merge falls back to tier3_merge_full. That fallback used to
+        refuse (issue athenaeum#1180); since athenaeum#2078 AC2 it makes an
+        append-mode call whose delta lands on the real, full body.
         """
         from athenaeum.tiers import _MAX_EXISTING_BODY_CHARS
 
@@ -1939,17 +1942,18 @@ class TestTier3MergeTruncationGuard:
                 ]
             }
         )
-        client = _mock_client(ops_response)
+        client = _sequenced_client(
+            [ops_response, "ADDS_NEW_CLAIM: true\n- Raised Series C.[^1]\n\n[^1]: s"]
+        )
 
         body, esc = tier3_merge(action, existing_body, "sessions/raw.md", client)
 
-        # Exactly one call: the patch attempt. No second, wasted full-echo
-        # call — tier3_merge_full refuses before building a request.
-        assert client.messages.create.call_count == 1
-        assert body is None
-        assert esc is not None
-        assert esc.conflict_type == "principled"
-        assert "1180" in esc.description
+        # Two calls: the patch attempt, then the append-mode fallback.
+        assert client.messages.create.call_count == 2
+        assert esc is None
+        assert body is not None
+        assert body.startswith(existing_body.rstrip("\n"))
+        assert "Raised Series C." in body
 
 
 def _build_multi_section_page(*, filler_bullets: int) -> str:

@@ -132,9 +132,10 @@ def test_the_shipped_default_proposes_and_never_applies(cases, tmp_path, case_id
     """athenaeum#1581 AC4, ``docs/north-star.md`` §2.7-2.8.
 
     At the shipped default (``oversize_page_action: review``) no page is
-    restructured for any of these cases. The over-threshold ones raise an
-    ``oversize_page`` escalation for the pending queue; the under-threshold
-    one raises nothing at all. ``observe_default_disposition`` re-reads the
+    restructured for any of these cases. The over-threshold ones raise no
+    escalation (athenaeum#2078: the merge is allowed, the page is flagged
+    ``needs_split``); the under-threshold one raises nothing and is not
+    flagged. ``observe_default_disposition`` re-reads the
     page after the call and fails if a single byte moved, so this is an
     assertion about the disk, not about the return value.
     """
@@ -142,11 +143,8 @@ def test_the_shipped_default_proposes_and_never_applies(cases, tmp_path, case_id
     assert outcome.decomposed is False
     assert not outcome.children
     over_threshold = len(cases[case_id].page.body()) > DEFAULT_PAGE_SIZE_THRESHOLD_CHARS
-    if over_threshold:
-        assert outcome.escalation is not None
-        assert outcome.escalation.conflict_type == "oversize_page"
-    else:
-        assert outcome.escalation is None
+    assert outcome.escalation is None
+    assert outcome.flagged_needs_split is over_threshold
 
 
 # ---------------------------------------------------------------------------
@@ -212,16 +210,15 @@ def test_case_c_is_not_passing_by_accident(cases, tmp_path):
     """C is over the threshold, so it is genuinely offered to the split path.
 
     A negative control that the mechanism never even reaches is not a
-    control. The gate DOES fire on C -- it escalates -- and declines to
-    decompose it, which is the correct verdict for the wrong reason (no
-    heading to cut on, rather than one facet). Both halves are pinned so a
-    future facet-aware path is not credited with a result the heading check
-    is producing.
+    control. The gate DOES fire on C -- it flags the page for splitting
+    (athenaeum#2078) -- and declines to decompose it, which is the correct
+    verdict for the wrong reason (no heading to cut on, rather than one
+    facet). Both halves are pinned so a future facet-aware path is not
+    credited with a result the heading check is producing.
     """
     outcome = _outcome(cases[CASE_C], tmp_path)
     assert len(cases[CASE_C].page.body()) > DEFAULT_PAGE_SIZE_THRESHOLD_CHARS
-    assert outcome.escalation is not None
-    assert outcome.escalation.conflict_type == "oversize_page"
+    assert outcome.flagged_needs_split is True
     assert outcome.children == {}
 
 

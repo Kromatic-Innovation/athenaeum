@@ -3955,6 +3955,33 @@ def resolve_page_size_threshold_chars(config: dict[str, Any] | None = None) -> i
     return DEFAULT_PAGE_SIZE_THRESHOLD_CHARS
 
 
+#: Issue athenaeum#2078 AC3: the body size above which ``athenaeum
+#: split-oversize --auto`` splits a page WITHOUT per-page operator approval.
+#: Four times :data:`DEFAULT_PAGE_SIZE_THRESHOLD_CHARS`: a page this far past
+#: the 10,000-char invariant has outgrown any plausible atomic form, whereas
+#: one just over it is a judgement call the operator approves by uid.
+DEFAULT_OVERSIZE_HARD_CEILING_CHARS = 40_000
+
+
+def resolve_oversize_hard_ceiling_chars(config: dict[str, Any] | None = None) -> int:
+    """Resolve ``librarian.oversize_hard_ceiling_chars`` (issue athenaeum#2078).
+
+    The body size above which ``athenaeum split-oversize --auto`` splits a
+    page without per-page approval; pages between the page-size threshold and
+    this ceiling are split only when the operator names them with ``--uid``.
+    Same validation contract as :func:`resolve_page_size_threshold_chars`:
+    must be ``>= 1`` (bool rejected as an int subclass); anything else falls
+    back to :data:`DEFAULT_OVERSIZE_HARD_CEILING_CHARS`.
+    """
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("oversize_hard_ceiling_chars")
+            if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 1:
+                return raw
+    return DEFAULT_OVERSIZE_HARD_CEILING_CHARS
+
+
 def resolve_model_rates(
     config: dict[str, Any] | None,
 ) -> dict[str, tuple[float, float]]:

@@ -253,11 +253,12 @@ class TestCheckPageSizeGate:
 
 
 class TestTier3DeriveActionsPageSizeGate:
-    def test_oversize_page_never_dispatches_a_merge_call(self, wiki_dir: Path) -> None:
-        """The core proof: an over-threshold existing page gets NO LLM call
-        at all -- not a patch-mode attempt, not a full-echo fallback. The
-        mock client has no configured response/side_effect, so any call
-        would raise immediately and fail this test."""
+    def test_oversize_page_is_merged_and_flagged_needs_split(self, wiki_dir: Path) -> None:
+        """Issue athenaeum#2078 AC1 (operator ruling 2026-10-15): an
+        over-threshold existing page is no longer refused. The merge runs
+        and the page is flagged ``needs_split: true`` for the split pass."""
+        import json
+
         oversized_body = "Fintech startup, Series B. " * 500  # well over 10,000 chars
         assert len(oversized_body) > DEFAULT_PAGE_SIZE_THRESHOLD_CHARS
         (wiki_dir / "a1b2c3d4-acme-corp.md").write_text(
@@ -277,25 +278,29 @@ class TestTier3DeriveActionsPageSizeGate:
         raw = _make_raw("New note about Acme Corp.")
         actions = [_update_action()]
 
-        client = MagicMock()  # no return_value/side_effect configured
+        client = MagicMock()
+        response = MagicMock()
+        response.content = [
+            MagicMock(
+                text=json.dumps(
+                    {"ops": [{"op": "append_section", "text": "New info landed."}]}
+                )
+            )
+        ]
+        response.stop_reason = "end_turn"
+        client.messages.create.return_value = response
 
-        new_entities, pending_updates, updated_uids, escalations = tier3_derive_actions(
+        _new, pending_updates, updated_uids, escalations = tier3_derive_actions(
             raw, actions, index, wiki_dir, client
         )
 
-        client.messages.create.assert_not_called()
-        assert new_entities == []
-        assert pending_updates == []
-        assert updated_uids == []
-        assert len(escalations) == 1
-        assert escalations[0].conflict_type == "oversize_page"
-        assert escalations[0].entity_name == "Acme Corp"
-
-        # The page itself is untouched (tier3_derive_actions never writes,
-        # but pending_updates being empty above already proves nothing WILL
-        # be written for it either).
-        on_disk = (wiki_dir / "a1b2c3d4-acme-corp.md").read_text()
-        assert oversized_body.strip() in on_disk
+        client.messages.create.assert_called_once()
+        assert escalations == []
+        assert updated_uids == ["a1b2c3d4"]
+        meta, body = parse_frontmatter(pending_updates[0][1])
+        assert meta["needs_split"] is True
+        assert "New info landed." in body
+        assert oversized_body.strip() in body  # nothing dropped
 
     def test_under_threshold_page_merges_normally(self, wiki_dir: Path) -> None:
         """Regression guard: the default fixture page (well under 10,000
@@ -573,8 +578,9 @@ class TestOversizePageSplit:
             wiki_root=wiki,
         )
 
-        assert isinstance(result, EscalationItem)
-        assert result.conflict_type == "oversize_page"
+        # athenaeum#2078: the degraded path flags the page and lets the merge run.
+        assert result is None
+        assert meta["needs_split"] is True
         assert path.read_text() == before
         assert list(wiki.glob("*.md")) == [path]
 
@@ -616,8 +622,9 @@ class TestOversizePageSplit:
             wiki_root=wiki,
         )
 
-        assert isinstance(result, EscalationItem)
-        assert result.conflict_type == "oversize_page"  # degraded, did NOT split
+        # athenaeum#2078: a failed split degrades to flag-and-merge, not a refusal.
+        assert result is None  # did NOT split
+        assert meta["needs_split"] is True
         assert path.read_text() == before  # byte-identical — hub never touched
         # The rollback removed the one child that WAS written — no orphans.
         assert list(wiki.glob("*.md")) == [path]
@@ -727,8 +734,9 @@ class TestOversizePageLogDemote:
             wiki_root=wiki,
         )
 
-        assert isinstance(result, EscalationItem)
-        assert result.conflict_type == "oversize_page"
+        # athenaeum#2078: the degraded path flags the page and lets the merge run.
+        assert result is None
+        assert meta["needs_split"] is True
         assert path.exists()
         assert path.read_text() == before
 
@@ -766,8 +774,9 @@ class TestOversizePageLogDemote:
             wiki_root=wiki,
         )
 
-        assert isinstance(result, EscalationItem)
-        assert result.conflict_type == "oversize_page"
+        # athenaeum#2078: the degraded path flags the page and lets the merge run.
+        assert result is None
+        assert meta["needs_split"] is True
         assert path.exists()
         assert path.read_text() == before
         assert not (tmp_path / "logs").exists() or not list(
