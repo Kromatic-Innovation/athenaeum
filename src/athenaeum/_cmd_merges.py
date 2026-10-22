@@ -122,6 +122,37 @@ def _resolve_wiki_page(wiki_root: Path, ref: str) -> Path | None:
     return None
 
 
+def _resolve_page_by_uid(wiki_root: Path, ref: str) -> list[Path]:
+    """Live pages whose own ``uid:`` equals *ref* (issue athenaeum#2082).
+
+    Looks only at ``<ref>-*.md`` files and ignores tombstones (``status:
+    folded``), so a bare uid names the one live page it identifies. Returns
+    every live match so the caller can refuse a genuinely ambiguous uid.
+    """
+    from athenaeum.models import is_tombstone, parse_frontmatter
+
+    if not ref or "/" in ref or ref.endswith(".md"):
+        return []
+    live: list[Path] = []
+    try:
+        matches = sorted(wiki_root.glob(f"{ref}-*.md"))
+    except OSError:
+        return []
+    for m in matches:
+        if m.name.startswith("_") or not m.is_file():
+            continue
+        try:
+            meta, _ = parse_frontmatter(m.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError):
+            continue
+        if not isinstance(meta, dict) or str(meta.get("uid", "")).strip() != ref:
+            continue
+        if is_tombstone(meta):
+            continue
+        live.append(m.resolve())
+    return live
+
+
 def _cmd_propose_fold(args: argparse.Namespace) -> int:
     """``athenaeum merges propose-fold --into A --source B [--source C ...]``.
 
@@ -145,10 +176,11 @@ def _cmd_propose_fold(args: argparse.Namespace) -> int:
     stays the separate, unchanged ``resolve_merge`` step — no second write
     path is introduced.
     """
-    from athenaeum.models import parse_frontmatter, slugify
+    from athenaeum.models import is_tombstone, parse_frontmatter, slugify
     from athenaeum.pending_merges import (
         _make_id,
         classify_write_kind,
+        filename_slug_by_uid,
         find_identity_pages,
         identity_slug,
         write_pending_merge,
@@ -164,9 +196,38 @@ def _cmd_propose_fold(args: argparse.Namespace) -> int:
         return 2
 
     # 1. Resolve the canonical --into page.
-    into_path = _resolve_wiki_page(wiki_root, args.into)
-    if into_path is None:
-        return _fail(f"--into {args.into!r} is not an existing wiki page under {wiki_root}")
+    def _resolve_ref(flag: str, ref: str) -> Path | str:
+        """Path of the live page *ref* names, or an error message string.
+
+        Issue athenaeum#2082: an exact path/slug resolves as before; failing
+        that a bare ``uid:`` resolves to the ONE live page carrying it
+        (tombstones ignored). A tombstone named explicitly is refused — it
+        is a redirect, never a fold participant.
+        """
+        found = _resolve_wiki_page(wiki_root, ref)
+        if found is None:
+            by_uid = _resolve_page_by_uid(wiki_root, ref)
+            if len(by_uid) > 1:
+                return (
+                    f"{flag} {ref!r} is ambiguous: uid matches "
+                    + ", ".join(p.name for p in by_uid)
+                    + ". Pass the exact `<uid>-<slug>.md` path."
+                )
+            if not by_uid:
+                return f"{flag} {ref!r} is not an existing wiki page under {wiki_root}"
+            found = by_uid[0]
+        found_meta, _ = parse_frontmatter(found.read_text(encoding="utf-8"))
+        if is_tombstone(found_meta):
+            return (
+                f"{flag} {ref!r} is a tombstone ({found.name} has `status: folded`); "
+                "point it at the live page it was folded into."
+            )
+        return found
+
+    resolved_into = _resolve_ref("--into", args.into)
+    if isinstance(resolved_into, str):
+        return _fail(resolved_into)
+    into_path = resolved_into
 
     into_meta, _ = parse_frontmatter(into_path.read_text(encoding="utf-8"))
     name = into_meta.get("name") if isinstance(into_meta, dict) else None
@@ -177,6 +238,7 @@ def _cmd_propose_fold(args: argparse.Namespace) -> int:
         )
     merge_target_name = str(name)
     target_slug = slugify(merge_target_name)
+    notes: list[str] = []
 
     # The fold classifies by slugify(name); the canonical page's own
     # filename must resolve back to this SAME page by identity (bare-slug,
@@ -185,15 +247,30 @@ def _cmd_propose_fold(args: argparse.Namespace) -> int:
     # slug — refuse with a clear, actionable error rather than queue a
     # proposal that will not fold — this is the athenaeum#748 misclassification,
     # prevented at proposal time.
+    #
+    # Issue athenaeum#2082: identity is the uid, not the slug. A page renamed
+    # in place (`81461ddb-alissa.md`, now `name: Alissa Hsu Lynch`) whose
+    # filename prefix is its OWN `uid:` is accepted; the fold is then keyed on
+    # the FILENAME slug — the one `resolve_merge` can find it by — and the
+    # drift is recorded as a note on the proposal.
     if identity_slug(into_path, into_meta) != target_slug:
-        bare_form = f"{target_slug}.md"
-        return _fail(
-            f"canonical page {into_path.name} has name {merge_target_name!r}, "
-            f"which slugifies to {target_slug!r}, but the page's filename is "
-            f"neither {bare_form!r} nor `<uid>-{target_slug}.md` for its own "
-            "`uid:` frontmatter. Point --into at the page whose filename "
-            "matches its own `uid:`/`name:` identity before folding."
+        drift_slug = filename_slug_by_uid(into_path, into_meta)
+        if drift_slug is None:
+            bare_form = f"{target_slug}.md"
+            return _fail(
+                f"canonical page {into_path.name} has name {merge_target_name!r}, "
+                f"which slugifies to {target_slug!r}, but the page's filename is "
+                f"neither {bare_form!r} nor `<uid>-{target_slug}.md` for its own "
+                "`uid:` frontmatter. Point --into at the page whose filename "
+                "matches its own `uid:`/`name:` identity before folding."
+            )
+        notes.append(
+            f"name/slug drift: canonical {into_path.name} has name "
+            f"{merge_target_name!r} (slug {target_slug!r}) but its filename slug "
+            f"is {drift_slug!r}; identified by uid, fold keyed on {drift_slug!r}."
         )
+        merge_target_name = drift_slug
+        target_slug = drift_slug
 
     # Ambiguity guard (issue athenaeum#1635): refuse if ANOTHER live page also
     # identity-resolves to this same slug — e.g. both a bare-slug file and a
@@ -201,6 +278,7 @@ def _cmd_propose_fold(args: argparse.Namespace) -> int:
     # share a name. Only one file can be the fold target for this slug, so a
     # second candidate makes the target genuinely ambiguous: name both
     # colliding pages rather than silently picking one.
+    # ``find_identity_pages`` already skips tombstones (issue athenaeum#2082).
     colliding = [
         fpath.name
         for fpath in find_identity_pages(merge_target_name, wiki_root)
@@ -217,9 +295,10 @@ def _cmd_propose_fold(args: argparse.Namespace) -> int:
     # 2. Resolve the source pages.
     source_paths: list[Path] = []
     for s in args.source:
-        sp = _resolve_wiki_page(wiki_root, s)
-        if sp is None:
-            return _fail(f"--source {s!r} is not an existing wiki page under {wiki_root}")
+        resolved_sp = _resolve_ref("--source", s)
+        if isinstance(resolved_sp, str):
+            return _fail(resolved_sp)
+        sp = resolved_sp
         if sp == into_path:
             return _fail(
                 f"--source {s!r} is the same page as --into; a page cannot be folded into itself"
@@ -248,6 +327,8 @@ def _cmd_propose_fold(args: argparse.Namespace) -> int:
         or f"Operator-proposed fold of {len(source_paths)} page(s) into "
         f"{merge_target_name!r} via `merges propose-fold`."
     )
+    if notes:
+        rationale = rationale + " Note: " + " ".join(notes)
 
     plan = {
         "ok": True,
@@ -260,6 +341,7 @@ def _cmd_propose_fold(args: argparse.Namespace) -> int:
         "write_kind": derived_write_kind,
         "draft_source": draft_source,
         "rationale": rationale,
+        "notes": notes,
     }
 
     if not args.apply:
@@ -269,6 +351,8 @@ def _cmd_propose_fold(args: argparse.Namespace) -> int:
         print(f"Dry-run — proposing fold into {merge_target_name!r}:")
         print(f"  canonical page: {into_path}")
         print(f"  derived write_kind: {derived_write_kind}")
+        for note in notes:
+            print(f"  note: {note}")
         print(f"  draft body: {draft_source}")
         print("  folded sources:")
         for p in source_paths:
