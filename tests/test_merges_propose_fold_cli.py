@@ -498,3 +498,146 @@ def test_queued_uid_prefixed_fold_actually_folds_on_approve(tmp_path: Path) -> N
     # (which is what the slug-only exclusion used to let through).
     assert set(result["aliases_added"]) == {"learn-simple", "simple-method"}
     assert "f351b6a1-learn-s-i-m-p-l-e" not in set(result["aliases_added"])
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#2082 — tombstone siblings, uid references, renamed canonical.
+# ---------------------------------------------------------------------------
+
+
+def _tombstone_page(path: Path, *, uid: str, name: str, into: str) -> None:
+    path.write_text(
+        "---\n"
+        f"uid: {uid}\n"
+        f"name: {name}\n"
+        "type: concept\n"
+        "status: folded\n"
+        f"folded_into: {into}\n"
+        "---\nredirect\n",
+        encoding="utf-8",
+    )
+
+
+def _propose(tmp_path: Path, *argv: str) -> tuple[int, dict]:
+    rc, out = _run(["merges", "propose-fold", "--path", str(tmp_path), "--json", *argv])
+    return rc, json.loads(out)
+
+
+def test_tombstone_siblings_do_not_make_target_ambiguous(tmp_path: Path) -> None:
+    """AC1: pages sharing the slug only as `status: folded` tombstones neither
+    collide with the live canonical nor block it; approve folds into it."""
+    wiki = tmp_path / "wiki"
+    wiki.mkdir()
+    canonical = wiki / "d330fd98-csv-exception.md"
+    _uid_wiki_page(canonical, uid="d330fd98", name="CSV Exception", body="LIVE body\n")
+    # Tombstones sort both before and after the live page.
+    _tombstone_page(
+        wiki / "05d6bfad-csv-exception.md", uid="05d6bfad", name="CSV Exception", into="x"
+    )
+    _tombstone_page(
+        wiki / "e94cfb6c-csv-exception.md", uid="e94cfb6c", name="CSV Exception", into="x"
+    )
+    src = wiki / "dup.md"
+    _wiki_page(src, name="Dup", body="d\n")
+    init_git_repo(wiki)
+
+    rc, plan = _propose(
+        tmp_path, "--into", "d330fd98-csv-exception.md", "--source", "dup", "--apply"
+    )
+    assert rc == 0, plan
+    assert plan["canonical_page"] == str(canonical)
+    assert plan["write_kind"] == "fold-into-existing"
+
+    merges_path = wiki / "_pending_merges.md"
+    queued = parse_pending_merges(merges_path)[0]
+    result = resolve_merge(merges_path, queued.id, "approve", wiki_root=wiki)
+    assert result["ok"] is True, result
+    assert is_tombstone(parse_frontmatter(src.read_text(encoding="utf-8"))[0])
+    assert "LIVE body" in canonical.read_text(encoding="utf-8")
+
+
+def test_two_live_pages_still_ambiguous_beside_tombstones(tmp_path: Path) -> None:
+    wiki = tmp_path / "wiki"
+    wiki.mkdir()
+    _uid_wiki_page(wiki / "aaaa1111-csv.md", uid="aaaa1111", name="CSV", body="a\n")
+    _uid_wiki_page(wiki / "bbbb2222-csv.md", uid="bbbb2222", name="CSV", body="b\n")
+    _tombstone_page(wiki / "cccc3333-csv.md", uid="cccc3333", name="CSV", into="x")
+    _wiki_page(wiki / "dup.md", name="Dup", body="d\n")
+    rc, payload = _propose(tmp_path, "--into", "aaaa1111-csv", "--source", "dup")
+    assert rc == 2
+    assert "ambiguous" in payload["error"]
+    assert "bbbb2222-csv.md" in payload["error"]
+    assert "cccc3333" not in payload["error"]
+
+
+def test_bare_uid_resolves_the_one_live_page(tmp_path: Path) -> None:
+    """AC1: `--into <uid>` / `--source <uid>` name the single live page."""
+    wiki = tmp_path / "wiki"
+    wiki.mkdir()
+    canonical = wiki / "d330fd98-csv-exception.md"
+    _uid_wiki_page(canonical, uid="d330fd98", name="CSV Exception", body="LIVE\n")
+    _tombstone_page(
+        wiki / "05d6bfad-csv-exception.md", uid="05d6bfad", name="CSV Exception", into="x"
+    )
+    other = wiki / "9f9f9f9f-other-thing.md"
+    _uid_wiki_page(other, uid="9f9f9f9f", name="Other Thing", body="o\n")
+    rc, plan = _propose(tmp_path, "--into", "d330fd98", "--source", "9f9f9f9f")
+    assert rc == 0, plan
+    assert plan["canonical_page"] == str(canonical)
+    assert plan["folded_sources"] == [str(other.resolve())]
+
+
+def test_bare_uid_naming_only_a_tombstone_is_refused(tmp_path: Path) -> None:
+    wiki = tmp_path / "wiki"
+    wiki.mkdir()
+    _uid_wiki_page(wiki / "d330fd98-csv.md", uid="d330fd98", name="CSV", body="L\n")
+    _tombstone_page(wiki / "05d6bfad-csv.md", uid="05d6bfad", name="CSV", into="x")
+    rc, payload = _propose(tmp_path, "--into", "d330fd98", "--source", "05d6bfad")
+    assert rc == 2
+    assert "not an existing wiki page" in payload["error"]
+    # An explicit path to a tombstone is refused as a tombstone.
+    rc, payload = _propose(tmp_path, "--into", "d330fd98", "--source", "05d6bfad-csv.md")
+    assert rc == 2
+    assert "tombstone" in payload["error"]
+
+
+def test_renamed_canonical_accepted_by_uid_and_records_drift(tmp_path: Path) -> None:
+    """AC2: `81461ddb-alissa.md` with `name: Alissa Hsu Lynch` is accepted
+    (filename prefix == own uid); drift is noted; approve folds into THAT
+    page rather than creating a duplicate."""
+    wiki = tmp_path / "wiki"
+    wiki.mkdir()
+    canonical = wiki / "81461ddb-alissa.md"
+    _uid_wiki_page(canonical, uid="81461ddb", name="Alissa Hsu Lynch", body="RICH\n")
+    src = wiki / "alissa-lynch.md"
+    _wiki_page(src, name="Alissa Lynch", body="thin\n")
+    init_git_repo(wiki)
+
+    rc, plan = _propose(
+        tmp_path, "--into", "81461ddb-alissa.md", "--source", "alissa-lynch", "--apply"
+    )
+    assert rc == 0, plan
+    assert plan["write_kind"] == "fold-into-existing"
+    assert len(plan["notes"]) == 1
+    assert "drift" in plan["notes"][0]
+    assert "Alissa Hsu Lynch" in plan["notes"][0]
+
+    merges_path = wiki / "_pending_merges.md"
+    queued = parse_pending_merges(merges_path)[0]
+    assert "drift" in queued.rationale
+    result = resolve_merge(merges_path, queued.id, "approve", wiki_root=wiki)
+    assert result["ok"] is True, result
+    assert is_tombstone(parse_frontmatter(src.read_text(encoding="utf-8"))[0])
+    assert not (wiki / "alissa.md").exists()
+    assert "RICH" in canonical.read_text(encoding="utf-8")
+
+
+def test_renamed_canonical_with_foreign_uid_prefix_still_refused(tmp_path: Path) -> None:
+    """AC2 guard: the filename prefix must be the page's OWN uid."""
+    wiki = tmp_path / "wiki"
+    wiki.mkdir()
+    _uid_wiki_page(wiki / "deadbeef-alissa.md", uid="81461ddb", name="Alissa Hsu Lynch", body="b\n")
+    _wiki_page(wiki / "dup.md", name="Dup", body="d\n")
+    rc, payload = _propose(tmp_path, "--into", "deadbeef-alissa", "--source", "dup")
+    assert rc == 2
+    assert "slugifies" in payload["error"]

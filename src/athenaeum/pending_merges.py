@@ -325,7 +325,31 @@ def identity_slug(path: Path, meta: object) -> str | None:
     p_uid = meta.get("uid") if isinstance(meta, dict) else None
     if p_uid and str(p_uid).strip() and path.name == f"{p_uid}-{slug}.md":
         return slug
-    return None
+    return filename_slug_by_uid(path, meta)
+
+
+def filename_slug_by_uid(path: Path, meta: object) -> str | None:
+    """The slug in ``<uid>-<slug>.md`` when the prefix is the page's own ``uid:``.
+
+    Issue athenaeum#2082: a page renamed in place keeps its ``<uid>-<old-slug>.md``
+    filename while its ``name:`` moves on (``81461ddb-alissa.md`` with
+    ``name: Alissa Hsu Lynch``). Identity is the uid, not the slug, so a
+    filename whose prefix equals the page's own ``uid:`` frontmatter still
+    identifies the page, under its FILENAME slug. An arbitrary prefix (the
+    ``auto-`` case of athenaeum#1635) never matches: the uid must be the page's
+    own. ``None`` when *path* is not of that form or the slug is not already
+    in canonical slugified shape.
+    """
+    p_uid = meta.get("uid") if isinstance(meta, dict) else None
+    if not p_uid or not str(p_uid).strip():
+        return None
+    prefix = f"{p_uid}-"
+    if not (path.name.startswith(prefix) and path.name.endswith(".md")):
+        return None
+    rest = path.name[len(prefix) : -len(".md")]
+    if not rest or slugify(rest) != rest:
+        return None
+    return rest
 
 
 def find_identity_pages(merge_target_name: str, wiki_root: Path) -> list[Path]:
@@ -368,6 +392,11 @@ def find_identity_pages(merge_target_name: str, wiki_root: Path) -> list[Path]:
         except (OSError, UnicodeDecodeError):
             continue
         f_meta, _ = parse_frontmatter(f_text)
+        # Issue athenaeum#2082: a tombstone (``status: folded``) is a redirect
+        # left by an earlier fold, not a live page — it neither owns the slug
+        # nor makes it ambiguous, and can never be a fold target.
+        if is_tombstone(f_meta):
+            continue
         if identity_slug(fpath, f_meta) == target_slug:
             found.append(fpath)
     return found
