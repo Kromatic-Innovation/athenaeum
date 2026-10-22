@@ -37,6 +37,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   legacy one-shot entries back into `raw/` once, so they run under the new
   schedule.
 
+- **Comparator Gate 1 no longer treats free-text `claimed_scope` as a
+  hierarchy (issue athenaeum#2080).** A DISJOINT `scope` relation resting on
+  a prose scope (whitespace or `, ; ( )`) on either side degrades to
+  UNKNOWN, so the pair falls through to Gate 2 instead of exiting `distinct`
+  at Gate 1; sibling real paths still separate. Gate 1's version stamp is now
+  `v1.gate1.1`, and a legacy `v1.gate1` `distinct` that separated on `scope`
+  is no longer memoized, so `athenaeum merges recompare --apply` re-decides
+  it; the recompare summary and `--json` now report `reopened_legacy_scope`
+  and per-verdict totals. The wiki-dedupe pass records each pair's embedding
+  cosine as `confidence` on its results and attribution rows, and archives a
+  `duplicate` below `librarian.wiki_dedupe_min_confidence` (default `0.75`,
+  `0` disables; env `ATHENAEUM_WIKI_DEDUPE_MIN_CONFIDENCE`) as a
+  `below_confidence_floor` attribution outcome instead of queueing it.
+  `athenaeum calibration summary` now names the T1 wiring defect
+  (`armed_but_silent_reason`) when T1 is armed with zero decisions.
 - **Tier-3 merges into oversized pages land instead of raising a question;
   parked observations are recoverable (issue athenaeum#2078).** A merge
   into a page over the page-size threshold now appends (an append-mode

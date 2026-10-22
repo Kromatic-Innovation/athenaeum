@@ -59,6 +59,8 @@ def test_summary_gated_off_by_default(tmp_path: Path) -> None:
 
 
 def test_summary_empty(tmp_path: Path, _tiers_enabled: None) -> None:
+    from athenaeum._cmd_calibration import T1_UNWIRED_NOTE
+
     (tmp_path / "wiki").mkdir()
     rc, out = _run(["calibration", "summary", "--path", str(tmp_path), "--json"])
     assert rc == 0
@@ -72,6 +74,7 @@ def test_summary_empty(tmp_path: Path, _tiers_enabled: None) -> None:
         "applied": 0, "overturned_applied": 0,
         "decisions_logged": 0, "last_decision_at": None,
         "armed": True, "armed_but_silent": True,
+        "armed_but_silent_reason": T1_UNWIRED_NOTE,
     }
     empty_bucket_t2 = {
         "sampled": 0, "reviewed": 0, "overturned": 0,
@@ -213,3 +216,35 @@ def test_summary_not_armed_but_silent_once_a_decision_is_logged(
     assert rc == 0
     assert "1 decision(s) logged" in text_out
     assert "ARMED but has recorded ZERO decisions" not in text_out
+
+
+def test_armed_but_silent_t1_names_the_wiring_defect(
+    tmp_path: Path, _tiers_enabled: None
+) -> None:
+    """athenaeum#2080 AC4: an armed T1 with zero decisions names the structural
+    wiring defect (T1's only call site is unwired) instead of only blaming the
+    LLM client, in both JSON and text."""
+    from athenaeum._cmd_calibration import T1_UNWIRED_NOTE
+
+    (tmp_path / "wiki").mkdir()
+    rc, out = _run(["calibration", "summary", "--path", str(tmp_path), "--json"])
+    assert rc == 0
+    assert json.loads(out)["T1"]["armed_but_silent_reason"] == T1_UNWIRED_NOTE
+
+    rc, text_out = _run(["calibration", "summary", "--path", str(tmp_path)])
+    assert "known wiring defect" in text_out
+    assert "run_cluster_comparator" in text_out
+
+
+def test_t1_unwired_note_premise_still_holds() -> None:
+    """The note is only true while no production code constructs the
+    ``ClusterScreenContext`` that arms T1 in the cluster driver. When this
+    fails, T1 has been wired in: retire ``T1_UNWIRED_NOTE`` (and this test)
+    rather than weakening the assertion."""
+    src = Path(__file__).resolve().parents[1] / "src" / "athenaeum"
+    constructors = []
+    for p in src.rglob("*.py"):
+        text = p.read_text("utf-8")
+        if "ClusterScreenContext(" in text and "class ClusterScreenContext" not in text:
+            constructors.append(p.name)
+    assert constructors == []
