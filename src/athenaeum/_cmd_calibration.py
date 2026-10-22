@@ -46,7 +46,12 @@ from athenaeum.config import (
     resolve_reasoning_tier_auditing_enabled,
     resolve_reasoning_tier_t2_auto_apply_enabled,
 )
-from athenaeum.provider import ProviderConfigError, build_llm_client, resolve_provider
+from athenaeum.provider import (
+    ProviderConfigError,
+    build_llm_client,
+    preflight_provider,
+    resolve_provider,
+)
 from athenaeum.reasoning_tiers import (
     T1_TIER_NAME,
     T2_TIER_NAME,
@@ -206,6 +211,16 @@ def _tier_reach_check(tier: str, config: dict | None) -> dict[str, object]:
             "provider": None,
             "model": model,
             "detail": f"provider misconfigured: {exc}",
+        }
+    # claude-cli builds a client unconditionally; its binary's presence is the
+    # only checkable call precondition (provider.preflight_provider).
+    preflight_error = preflight_provider(provider)
+    if preflight_error:
+        return {
+            "state": REACH_TIER_NOT_CALLABLE,
+            "provider": provider,
+            "model": model,
+            "detail": preflight_error,
         }
     try:
         client = build_llm_client(config, knob=knob)
