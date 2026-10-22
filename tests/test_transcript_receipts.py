@@ -17,10 +17,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from athenaeum.config import resolve_transcript_receipts_enabled
+from athenaeum.models import AutoMemoryFile
 from athenaeum.resolutions import ResolutionProposal, _transcript_authorizes_correct
 from athenaeum.runlock import RunLock
 from athenaeum.transcript_receipts import (
@@ -282,35 +284,55 @@ class TestWriteReceiptForOrigin:
             )
         assert len(iter_receipts(wiki)) == 1
 
-    def test_resumed_session_rerun_appends_a_new_verified_receipt(self, tmp_path: Path) -> None:
+    def test_resumed_session_unchanged_utterance_mints_no_second_receipt(
+        self, tmp_path: Path
+    ) -> None:
+        """athenaeum#2048 AC3: growth elsewhere in the transcript, with the
+        matching utterance unchanged, must not accrete a receipt per night."""
         pr = tmp_path / "projects"
         path = _write_transcript(pr, "scopeA", "sess1", [_user_record("the winning claim")])
         wiki = tmp_path / "wiki"
         lock = RunLock(tmp_path)
+        kwargs: dict[str, Any] = dict(
+            origin_scope="scopeA",
+            origin_session_id="sess1",
+            origin_turn=3,
+            claim="the winning claim",
+            projects_root=pr,
+            lock=lock,
+        )
         with lock:
-            first = write_receipt_for_origin(
-                wiki,
-                origin_scope="scopeA",
-                origin_session_id="sess1",
-                origin_turn=3,
-                claim="the winning claim",
-                projects_root=pr,
-                lock=lock,
-            )
+            first = write_receipt_for_origin(wiki, **kwargs)
             with path.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(_user_record("a later turn")) + "\n")
-            second = write_receipt_for_origin(
-                wiki,
-                origin_scope="scopeA",
-                origin_session_id="sess1",
-                origin_turn=3,
-                claim="the winning claim",
-                projects_root=pr,
-                lock=lock,
-            )
+            second = write_receipt_for_origin(wiki, **kwargs)
+        assert first is not None and second == first
+        assert len(iter_receipts(wiki)) == 1
+        # The old receipt still verifies against the grown transcript.
+        assert prefix_matches_receipt(path, first)
+
+    def test_resumed_session_changed_utterance_mints_a_successor(self, tmp_path: Path) -> None:
+        """athenaeum#2048 AC3: once the matching utterance appears (channel and
+        utterance digest change), a new, larger verified receipt is minted."""
+        pr = tmp_path / "projects"
+        path = _write_transcript(pr, "scopeA", "sess1", [_user_record("unrelated")])
+        wiki = tmp_path / "wiki"
+        lock = RunLock(tmp_path)
+        kwargs: dict[str, Any] = dict(
+            origin_scope="scopeA",
+            origin_session_id="sess1",
+            origin_turn=3,
+            claim="the winning claim",
+            projects_root=pr,
+            lock=lock,
+        )
+        with lock:
+            first = write_receipt_for_origin(wiki, **kwargs)
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(_user_record("the winning claim")) + "\n")
+            second = write_receipt_for_origin(wiki, **kwargs)
         assert first is not None and second is not None
-        # Legitimate growth mints a new, LARGER verified prefix rather than
-        # being treated as a no-op or a tamper.
+        assert first.channel == "inferred" and second.channel == "user-stated"
         assert second.transcript_line_count > first.transcript_line_count
         assert len(iter_receipts(wiki)) == 2
 
@@ -1038,6 +1060,66 @@ class TestWriteReceiptsForFiles:
         assert first == 1
         assert second == 1  # processed again, idempotently — no new line.
         assert len(iter_receipts(wiki)) == 1
+
+
+class TestRunReadBudget:
+    """athenaeum#2048 AC1/AC2: bounded ledger and transcript reads per run."""
+
+    def test_one_ledger_read_per_run_and_one_transcript_read_per_memory(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        n = 12
+        pr = tmp_path / "projects"
+        wiki = tmp_path / "wiki"
+        files = []
+        for i in range(n):
+            _write_transcript(pr, "scopeA", f"sess{i}", [_user_record(f"claim number {i}")])
+            member = tmp_path / "mem" / f"m{i}.md"
+            member.parent.mkdir(exist_ok=True)
+            member.write_text(f"---\nname: m{i}\n---\nclaim number {i}\n", encoding="utf-8")
+            files.append(
+                AutoMemoryFile(
+                    path=member,
+                    origin_scope="scopeA",
+                    memory_type="feedback",
+                    origin_session_id=f"sess{i}",
+                    origin_turn=1,
+                )
+            )
+        opens: dict[str, int] = {"ledger": 0, "transcript": 0}
+        real_read_bytes, real_read_text = Path.read_bytes, Path.read_text
+
+        def _count(path: Path) -> None:
+            if "_transcript_receipts" in path.parts:
+                opens["ledger"] += 1
+            elif path.is_relative_to(pr):
+                opens["transcript"] += 1
+
+        def read_bytes(self: Path) -> bytes:
+            _count(self)
+            return real_read_bytes(self)
+
+        def read_text(self: Path, *a: Any, **k: Any) -> str:
+            _count(self)
+            return real_read_text(self, *a, **k)
+
+        monkeypatch.setattr(Path, "read_bytes", read_bytes)
+        monkeypatch.setattr(Path, "read_text", read_text)
+        config = {"librarian": {"transcript_receipts_enabled": True}}
+        lock = RunLock(tmp_path)
+        with lock:
+            for _night in range(3):
+                opens.update(ledger=0, transcript=0)
+                processed = write_receipts_for_files(
+                    wiki, files, config=config, projects_root=pr, lock=lock
+                )
+                assert processed == n
+                # One monthly partition => exactly one ledger open per run
+                # (zero on the first run, when no partition exists yet) —
+                # independent of the number of memories.
+                assert opens["ledger"] <= 1
+                assert opens["transcript"] == n
+        assert len(iter_receipts(wiki)) == n
 
 
 # ---------------------------------------------------------------------------
