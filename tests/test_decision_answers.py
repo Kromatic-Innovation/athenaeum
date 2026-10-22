@@ -596,7 +596,9 @@ class TestApplyMerge:
 class TestDefaultAcceptanceTaggedAtAnswerTime:
     _SAMPLE_ALL_CONFIG = {"librarian": {"default_acceptance_audit_sample_rate": 1.0}}
 
-    def test_accepting_the_default_is_not_sampled_for_a_human_answer(self, wiki_root: Path, raw_root: Path) -> None:
+    def test_accepting_the_default_is_not_sampled_for_a_human_answer(
+        self, wiki_root: Path, raw_root: Path
+    ) -> None:
         from athenaeum.calibration import read_calibration_ledger
 
         merges_path = wiki_root / "_pending_merges.md"

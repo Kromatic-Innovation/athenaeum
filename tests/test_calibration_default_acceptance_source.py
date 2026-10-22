@@ -35,12 +35,17 @@ def test_unknown_or_empty_source_fails_closed(tmp_path: Path) -> None:
     wiki = tmp_path / "wiki"
     wiki.mkdir()
     for src in ("", "   "):
-        assert sample_default_acceptance(wiki, decision_id="m1", answer_source=src, config=_ALL) is None
+        assert (
+            sample_default_acceptance(wiki, decision_id="m1", answer_source=src, config=_ALL)
+            is None
+        )
     assert read_calibration_ledger(wiki) == []
 
 
 def test_model_or_rule_source_is_sampled(tmp_path: Path) -> None:
     wiki = tmp_path / "wiki"
     wiki.mkdir()
-    rec = sample_default_acceptance(wiki, decision_id="m1", answer_source="t2_auto_apply", config=_ALL)
+    rec = sample_default_acceptance(
+        wiki, decision_id="m1", answer_source="t2_auto_apply", config=_ALL
+    )
     assert rec is not None and rec["tier"] == "default_acceptance"
