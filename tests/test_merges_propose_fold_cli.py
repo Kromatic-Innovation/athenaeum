@@ -641,3 +641,32 @@ def test_renamed_canonical_with_foreign_uid_prefix_still_refused(tmp_path: Path)
     rc, payload = _propose(tmp_path, "--into", "deadbeef-alissa", "--source", "dup")
     assert rc == 2
     assert "slugifies" in payload["error"]
+
+
+def test_bare_slug_tombstone_beside_live_uid_canonical_folds_on_approve(
+    tmp_path: Path,
+) -> None:
+    """Seer finding on #2085: a bare-slug tombstone must not be picked as the
+    approve-time target (fold_target_is_tombstone would wedge the proposal)."""
+    wiki = tmp_path / "wiki"
+    wiki.mkdir()
+    bare_tomb = wiki / "csv-exception.md"
+    _tombstone_page(bare_tomb, uid="05d6bfad", name="CSV Exception", into="x")
+    canonical = wiki / "d330fd98-csv-exception.md"
+    _uid_wiki_page(canonical, uid="d330fd98", name="CSV Exception", body="LIVE body\n")
+    src = wiki / "dup.md"
+    _wiki_page(src, name="Dup", body="d\n")
+    init_git_repo(wiki)
+
+    rc, plan = _propose(
+        tmp_path, "--into", "d330fd98-csv-exception.md", "--source", "dup", "--apply"
+    )
+    assert rc == 0, plan
+    merges_path = wiki / "_pending_merges.md"
+    queued = parse_pending_merges(merges_path)[0]
+    assert queued.write_kind == "fold-into-existing"
+    result = resolve_merge(merges_path, queued.id, "approve", wiki_root=wiki)
+    assert result["ok"] is True, result
+    assert is_tombstone(parse_frontmatter(src.read_text(encoding="utf-8"))[0])
+    assert "LIVE body" in canonical.read_text(encoding="utf-8")
+    assert "redirect" in bare_tomb.read_text(encoding="utf-8")

@@ -278,13 +278,11 @@ def _cmd_propose_fold(args: argparse.Namespace) -> int:
     # share a name. Only one file can be the fold target for this slug, so a
     # second candidate makes the target genuinely ambiguous: name both
     # colliding pages rather than silently picking one.
-    # Tombstones left by earlier folds (``status: folded``) are not live
-    # pages and never make a slug ambiguous (issue athenaeum#2082).
+    # ``find_identity_pages`` already skips tombstones (issue athenaeum#2082).
     colliding = [
         fpath.name
         for fpath in find_identity_pages(merge_target_name, wiki_root)
         if fpath.resolve() != into_path
-        and not is_tombstone(parse_frontmatter(fpath.read_text(encoding="utf-8"))[0])
     ]
     if colliding:
         others = ", ".join(colliding)

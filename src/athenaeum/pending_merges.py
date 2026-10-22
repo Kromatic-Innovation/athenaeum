@@ -352,6 +352,15 @@ def filename_slug_by_uid(path: Path, meta: object) -> str | None:
     return rest
 
 
+def _is_tombstone_file(path: Path) -> bool:
+    """Whether the page at *path* is a ``status: folded`` tombstone (athenaeum#2082)."""
+    try:
+        meta, _ = parse_frontmatter(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        return False
+    return is_tombstone(meta)
+
+
 def find_identity_pages(merge_target_name: str, wiki_root: Path) -> list[Path]:
     """Every live page under *wiki_root* that owns ``merge_target_name``'s slug.
 
@@ -362,7 +371,8 @@ def find_identity_pages(merge_target_name: str, wiki_root: Path) -> list[Path]:
     uid-prefixed page exist for one name, or two uid-prefixed pages share a
     name), which ``merges propose-fold`` refuses at proposal time.
 
-    **The bare-slug page is matched on filename alone, deliberately.** That is
+    **A live bare-slug page is matched on filename alone, deliberately**
+    (a ``status: folded`` tombstone is skipped, issue athenaeum#2082). That is
     exactly what :func:`classify_write_kind` / :func:`resolve_merge` did before
     issue athenaeum#1642, so every pre-existing corpus shape classifies and
     approves byte-identically; the uid-prefixed form is a pure ADDITION,
@@ -378,7 +388,7 @@ def find_identity_pages(merge_target_name: str, wiki_root: Path) -> list[Path]:
         return []
     found: list[Path] = []
     bare = wiki_root / f"{target_slug}.md"
-    if bare.is_file():
+    if bare.is_file() and not _is_tombstone_file(bare):
         found.append(bare)
     try:
         candidates = sorted(wiki_root.glob(f"*-{target_slug}.md"))
@@ -417,7 +427,17 @@ def resolve_target_page(merge_target_name: str, wiki_root: Path) -> Path | None:
     queue an ambiguous fold in the first place.
     """
     pages = find_identity_pages(merge_target_name, wiki_root)
-    return pages[0] if pages else None
+    if pages:
+        return pages[0]
+    # Issue athenaeum#2082: live pages win over tombstones. With NO live page,
+    # a bare-slug tombstone is still returned, exactly as before, so the
+    # fold's ``fold_target_is_tombstone`` guard keeps refusing it rather than
+    # the slug silently reading as "create a new page".
+    slug = slugify(merge_target_name)
+    bare = wiki_root / f"{slug}.md" if slug else None
+    if bare is not None and bare.is_file() and _is_tombstone_file(bare):
+        return bare
+    return None
 
 
 def classify_write_kind(merge_target_name: str, wiki_root: Path) -> str:
