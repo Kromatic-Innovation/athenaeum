@@ -646,7 +646,7 @@ def test_renamed_canonical_with_foreign_uid_prefix_still_refused(tmp_path: Path)
 def test_bare_slug_tombstone_beside_live_uid_canonical_folds_on_approve(
     tmp_path: Path,
 ) -> None:
-    """Seer finding on #2085: a bare-slug tombstone must not be picked as the
+    """Review finding on athenaeum#2082: a bare-slug tombstone must not be picked as the
     approve-time target (fold_target_is_tombstone would wedge the proposal)."""
     wiki = tmp_path / "wiki"
     wiki.mkdir()
