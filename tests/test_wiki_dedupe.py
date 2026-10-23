@@ -1888,8 +1888,21 @@ class TestAthenaeum2080ConfidenceFloor:
         assert entry is not None and entry.verdict == "distinct"
         assert not (wiki_root / FOLD_EVIDENCE_DIRNAME).exists()
 
-    def test_redo_conflict_on_tombstone_is_ledgered_not_enacted(self, tmp_path: Path) -> None:
-        """Review fix: a folded page is never re-flagged by the redo's effect."""
+    def _queue_artifacts(self, knowledge_root: Path) -> list[Path]:
+        return sorted(
+            p
+            for name in ("_decisions_queue.jsonl", "_pending_questions.md")
+            for p in knowledge_root.rglob(name)
+        )
+
+    def test_redo_non_duplicate_on_tombstone_is_ledgered_not_enacted(
+        self, tmp_path: Path
+    ) -> None:
+        """Review fix: a folded page is never re-flagged by the redo's effect.
+
+        ``_content_payload("conflicting")`` on these coordinate-less pages
+        yields ``underdetermined`` -- a verdict that WOULD queue a decision if
+        enacted -- so any enactment shows up as a queue artifact."""
         from athenaeum.verdicts import lookup_pair
 
         knowledge_root = _seed_low_cosine_pair(tmp_path)
@@ -1900,13 +1913,39 @@ class TestAthenaeum2080ConfidenceFloor:
         page = next(wiki_root.glob("low-x*.md"))
         text = page.read_text()
         page.write_text(text.replace("---\n", "---\nstatus: folded\nfolded_into: low-y\n", 1))
+        before = self._queue_artifacts(knowledge_root)
         client = _fake_llm_client(_content_payload("conflicting", passages=["p"]))
-        for _ in range(2):
-            self._run(knowledge_root, config=low, client=client)
-        assert client.messages.create.call_count <= 1
+        runs = [self._run(knowledge_root, config=low, client=client) for _ in range(2)]
+        assert runs == [[], []]
+        assert client.messages.create.call_count == 1
         entry = lookup_pair(wiki_root, "low-x+low-y")
-        assert entry is not None and entry.verdict != "duplicate"
+        assert entry is not None and entry.verdict == "underdetermined"
+        assert self._queue_artifacts(knowledge_root) == before
         assert "folded" in page.read_text()
+
+    def test_redo_without_verdict_is_not_memoized_and_retries(self, tmp_path: Path) -> None:
+        """A redo with no verdict (no client) writes nothing and is retried."""
+        from athenaeum.verdict_effects import FOLD_EVIDENCE_DIRNAME
+        from athenaeum.verdicts import lookup_pair
+
+        knowledge_root = _seed_low_cosine_pair(tmp_path)
+        wiki_root = knowledge_root / "wiki"
+        high = {"librarian": {"comparator_enabled": True, "wiki_dedupe_min_confidence": 0.9}}
+        low = {"librarian": {"comparator_enabled": True, "wiki_dedupe_min_confidence": 0.5}}
+        self._run(knowledge_root, config=high)
+        ledger_before = lookup_pair(wiki_root, "low-x+low-y")
+        assert ledger_before is not None and ledger_before.verdict == "duplicate"
+        queue_before = self._queue_artifacts(knowledge_root)
+
+        for _ in range(2):
+            self._run(knowledge_root, config=low, client=None)
+            assert lookup_pair(wiki_root, "low-x+low-y") == ledger_before
+            assert not (wiki_root / FOLD_EVIDENCE_DIRNAME).exists()
+            assert self._queue_artifacts(knowledge_root) == queue_before
+
+        # Retried: once a client is available the pair is enacted, not stuck.
+        results = self._run(knowledge_root, config=low)
+        assert results[0]["action"] == "fold-proposal"
 
     def test_confidence_is_recorded_on_every_row_even_above_floor(self, tmp_path: Path) -> None:
         knowledge_root = _seed_identical_pages(tmp_path, n=2)
