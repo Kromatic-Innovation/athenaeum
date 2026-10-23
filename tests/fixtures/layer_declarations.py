@@ -277,6 +277,7 @@ MODULE_LAYER: dict[str, int] = {
     "_cmd_axiom": 5,
     "_cmd_bounce_contract": 5,
     "_cmd_calibration": 5,
+    "_cmd_codex_context": 5,
     "_cmd_context": 5,
     "_cmd_convergence": 5,
     "_cmd_curate": 5,
@@ -320,6 +321,7 @@ MODULE_LAYER: dict[str, int] = {
     "_cmd_viewer": 5,
     "viewer_corpus": 4,
     "claude_code_adapter": 5,
+    "codex_adapter": 5,
     "cli": 5,
     # Above L5 -- the package root, which the design's own docstring says
     # "sits above L5 by necessity" (imports the CLI-adjacent librarian

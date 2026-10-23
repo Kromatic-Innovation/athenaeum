@@ -247,7 +247,7 @@ working on claude."*).
 | Tier | Injection mechanism | Staleness accepted | Example |
 |---|---|---|---|
 | **1 — Per-turn push** | The adapter runs once per user turn and pushes fresh context into that turn. | None — every turn sees a fresh `build_context()` call against the current prompt. | Claude Code's `UserPromptSubmit` hook. |
-| **2 — Periodic / static push** | The adapter runs on a schedule (or once, at session/process start) and refreshes a **context file** the host reads from — not a per-turn hook. | Bounded by the refresh interval — a caller reading the file between refreshes sees context that is up to one interval stale. | A host with no per-turn injection point (see the worked design below). |
+| **2 — Periodic / static push** | The adapter runs on a schedule (or once, at session/process start) and refreshes a **context file** the host reads from — not a per-turn hook. Two kinds exist: a file the **host** loads itself, and a file the **agent is told** to read (an instruction-mediated read, which leans toward Tier 3 pull). | Bounded by the refresh interval — a caller reading the file between refreshes sees context that is up to one interval stale. | A host with no per-turn injection point (see the worked design below). |
 | **3 — Pull only** | The agent explicitly CHOOSES to call a retrieval surface. **Not the sidecar — named here to be excluded, not designed for.** | N/A — pull is always as fresh as the moment it's called, by definition; staleness isn't the axis that matters for a pull surface. | The MCP `recall` tool. |
 
 **Why Tier 3 has to be named out of scope, not just omitted.** MCP is a pull
@@ -261,6 +261,9 @@ what keeps that swap from being mistaken, later, for having converged the
 epic.
 
 ### 3.1 Worked Tier-2 adapter design (paper design, not code)
+
+> Implemented by `athenaeum codex-context` (`src/athenaeum/codex_adapter.py`,
+> athenaeum#1364); see [the Codex guide](../guides/codex.md).
 
 A host with no per-turn injection point — for example, a runtime that only
 reads a fixed context file at session start, or on some coarser cadence, and
@@ -328,8 +331,9 @@ strip or hash `query` first, per §1.1.
 
 - **Writing any adapter.** This document specifies the contract; building a
   Claude Code adapter and a non-Claude proof adapter are separate issues
-  (athenaeum#1361, athenaeum#1364 respectively — the operator decision
-  recorded in athenaeum#1359 sets the second at `moscow:could`, deferred).
+  (athenaeum#1361, athenaeum#1364 respectively). Status: the Tier-2 Codex
+  adapter (athenaeum#1364) is implemented as `athenaeum codex-context`; see
+  [the Codex guide](../guides/codex.md).
 - **Changing the core's behaviour.** This document pins and documents an
   interface. Where writing it down revealed the interface has a rough edge
   (§1.1's `query`-naming finding), that is reported here as a finding, not

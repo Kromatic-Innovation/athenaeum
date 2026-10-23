@@ -34,6 +34,7 @@ Task-shaped. *"I want to ___."* Each guide names the module page that backs it.
 - [Sidecar](guides/sidecar.md) — passive recall on every turn.
 - [Field constraints](guides/field-constraints.md) — declaring a per-type field
   constraint in `wiki/_schema/` and what happens when a write violates it.
+- [Codex context file](guides/codex.md) — Tier-2 snapshot adapter for OpenAI Codex.
 - [Claude Code integration](guides/claude-code.md) — wiring the MCP server and the example hooks.
 - [Vector search](guides/vector-search.md) — optional embedding backends and query-topic extraction.
 - [Upgrading](guides/upgrading.md) — data lifecycle and what a version bump does to an existing wiki.

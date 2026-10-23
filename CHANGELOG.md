@@ -17,6 +17,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Tier-2 static context-file adapter for OpenAI Codex, `athenaeum
+  codex-context` (issue athenaeum#1364).** Renders one recall snapshot to
+  `~/.codex/athenaeum-context.md` with its own refresh interval, `generated_at`
+  and `stale_after` header; a failed refresh writes a stale tombstone and exits
+  1, the kill switch clears the snapshot, and any non-public matching page
+  withholds the whole snapshot (fail closed). Built against the sidecar
+  contract with zero core changes; ships an example launchd unit and
+  `docs/guides/codex.md`.
+
 - **T1 reasoning screen is wired into the wiki-dedupe pair loop (issue
   athenaeum#2093).** With `librarian.reasoning_tier_auditing_enabled` on,
   `propose_wiki_page_merges` builds one `ClusterScreenContext` per run (reusing
