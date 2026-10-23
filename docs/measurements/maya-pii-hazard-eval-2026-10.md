@@ -327,4 +327,37 @@ of 27 fell inside the [0.3, 0.7] band; 7 of 27 fell inside the [0.4, 0.6]
 band (6 below 0.4, 14 above 0.6). Counts only — no candidate values are
 recorded here, per this document's existing fixture-provenance discipline.
 
-Runs 2 and 3 follow.
+**Runs 2 and 3** (2026-10-23, athenaeum 0.22.36, same live corpus, back to
+back, operator ruling on athenaeum#2064 "6) Do it"): 40 regex-flagged
+candidates survived the allowlist (30 email-shaped, 10 phone-shaped, up from
+27 on 2026-10-14 as the corpus grew); all 40 were scored on each run at the
+weights' own temperature (1.65). The two runs agree exactly, as they must
+for a deterministic scorer over an unchanged candidate set:
+
+| | run 2 | run 3 |
+|---|---|---|
+| scored | 40 / 40 | 40 / 40 |
+| P(yes) >= 0.5 (agrees with the regex flag) | 26 | 26 |
+| P(yes) < 0.5 (disagrees) | 14 | 14 |
+| inside [0.3, 0.7] | 20 | 20 |
+| inside [0.4, 0.6] | 7 | 7 |
+| below 0.4 / above 0.6 | 12 / 21 | 12 / 21 |
+| model load | 6.2 s | 1.9 s (OS file cache warm) |
+| scoring | 7.4 s | 5.4 s |
+| whole `lint-pii` wall clock (`/usr/bin/time -l`) | 104.6 s | 98.8 s |
+| peak resident memory, whole process | 2.74 GB | 2.74 GB |
+
+The wall clock and memory are for the entire `storage lint-pii` process over
+127 wiki, 996 raw and 1 excluded surface, not for Maya alone; the two
+regex-only baseline runs taken the same day (weights path unset, scorer
+fell back) measured 91.7 s and 90.8 s at 2.87 GB peak, so Maya adds roughly
+8 to 13 s and no measurable resident memory at this candidate volume. The
+14 of 40 regex-flagged tokens that Maya scores below 0.5 (35%) have NOT been
+adjudicated by a human yet; the prefilter exit criterion that no shadow "no"
+is a real contact value is therefore still open, and this is the next
+operator step before athenaeum#2064 is readied. Four `scorer: unavailable`
+summary rows dated 2026-10-23 also sit in the shadow ledger
+(`<cache_dir>/pii_hazard_shadow/2026-10.jsonl`): they are the regex-only
+fallback runs made while the two environment variables
+(`ATHENAEUM_MAYA_WEIGHTS_PATH`, `ATHENAEUM_MAYA_PYTHON`) were still being
+set, and carry no token rows. Counts only, per this document's discipline.

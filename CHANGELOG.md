@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- docs(measurements): record Maya shadow runs 2 and 3 of `storage lint-pii`
+  (2026-10-23, 40 candidates each, load/score/wall-clock/memory) in
+  `docs/measurements/maya-pii-hazard-eval-2026-10.md`, closing the
+  three-run exit criterion of athenaeum#2064 except for the human
+  adjudication of the 14 shadow "no" tokens.
+
 ### Added
 
 - **T1 reasoning screen is wired into the wiki-dedupe pair loop (issue
