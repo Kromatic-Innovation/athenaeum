@@ -240,7 +240,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **`default_acceptance` calibration population documented as retired; Quine
-  follow-ups from #2088/#2090/#2091/#2092 closed (issue athenaeum#2096).** The
+  follow-ups from athenaeum#2088, athenaeum#2090, athenaeum#2091, athenaeum#2092 closed (issue athenaeum#2096).** The
   population only ever sampled the operator's own answers (circular audit,
   athenaeum#2079), so `athenaeum calibration summary` help, the CLI module
   docs and the `default_acceptance_audit_sample_rate` resolver docstring now
@@ -251,7 +251,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `quarantine requeue` `error:` exit-1 path are pinned, the `ReceiptRun`
   docstring states the single-appender assumption, and the prior-rulings
   dry-run test now asserts a ruling-dependent outcome. No behaviour change.
-
 
 - **Transcript-receipt writer reads the ledger once and each transcript once per
   memory (issue athenaeum#2048).** `write_receipts_for_files` now indexes the
