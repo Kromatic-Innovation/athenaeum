@@ -315,3 +315,14 @@ class TestWikiDedupeHonoursRulings:
         # distinct without the LLM -- what matters here is that it is no
         # longer skipped as a prior ruling).
         assert len(results) == 1
+
+        # Issue athenaeum#2094 AC2/AC3: the lapsed rejection is named in the
+        # pair's attribution row (earlier merge id + the human's note), not
+        # dropped. Fails if the proposer discards ``.expired``.
+        from athenaeum.wiki_dedupe_attribution import read_attribution_report
+
+        details = " ".join(r.detail for r in read_attribution_report(wiki))
+        assert "Earlier ruling on this pair (" in details
+        assert "not the same thing" in details
+        assert "previously rejected by a human" in details
+        assert "cooldown has since lapsed" in details
