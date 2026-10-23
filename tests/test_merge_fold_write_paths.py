@@ -1457,19 +1457,23 @@ class TestCoordinateWidening:
         """Issue athenaeum#2076 AC4 (retargeted by athenaeum#2083): a
         HUMAN-approved fold of any class still raises ``fold_widen_impossible``
         with a pending decision for an incompatible NON-identity dimension
-        with no universal escape (here the ENUM ``memory-class``). The
+        with no universal escape (here the ENUM ``memory-class``) when the
+        canonical carries no class of its own (athenaeum#2115: a canonical
+        that does keeps it). The
         IDENTITY-kind shortcut (athenaeum#2083) does not cover it. The
         structured skip detail (proposal id, dimension, both values) is
         present on the refusal."""
         wiki = tmp_path / "wiki"
         wiki.mkdir()
         target = wiki / "canonical.md"
-        _write_wiki_page(
-            target, name="Canonical", body="OLD BODY\n", extra={"memory_class": "fact"}
-        )
+        _write_wiki_page(target, name="Canonical", body="OLD BODY\n")
         src_a = wiki / "old-a.md"
         _write_wiki_page(
             src_a, name="Old A", body="a\n", extra={"memory_class": "guideline"}
+        )
+        src_b = wiki / "old-b.md"
+        _write_wiki_page(
+            src_b, name="Old B", body="b\n", extra={"memory_class": "fact"}
         )
 
         init_git_repo(wiki)
@@ -1477,7 +1481,7 @@ class TestCoordinateWidening:
         write_pending_merge(
             merges_path,
             merge_target_name="Canonical",
-            sources=[str(src_a)],
+            sources=[str(src_a), str(src_b)],
             rationale=rationale,
             draft_merged_body="NEW BODY\n",
             confidence=0.9,
@@ -1507,12 +1511,14 @@ class TestCoordinateWidening:
         wiki = tmp_path / "wiki"
         wiki.mkdir()
         target = wiki / "canonical.md"
-        _write_wiki_page(
-            target, name="Canonical", body="OLD BODY\n", extra={"memory_class": "fact"}
-        )
+        _write_wiki_page(target, name="Canonical", body="OLD BODY\n")
         src_a = wiki / "old-a.md"
         _write_wiki_page(
             src_a, name="Old A", body="a\n", extra={"memory_class": "guideline"}
+        )
+        src_b = wiki / "old-b.md"
+        _write_wiki_page(
+            src_b, name="Old B", body="b\n", extra={"memory_class": "fact"}
         )
 
         init_git_repo(wiki)
@@ -1520,7 +1526,7 @@ class TestCoordinateWidening:
         write_pending_merge(
             merges_path,
             merge_target_name="Canonical",
-            sources=[str(src_a)],
+            sources=[str(src_a), str(src_b)],
             rationale="wiki pages cluster on the same topic",
             draft_merged_body="NEW BODY\n",
             confidence=0.9,
@@ -1701,6 +1707,295 @@ class TestCoordinateWidening:
         questions = parse_pending_questions(pending_path)
         assert len(questions) == 1
         assert questions[0].answered is True
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#2115 — widen-question read-back, canonical-keeps-class rule,
+# superseded-question withdrawal, stub-canonical coordinates.
+# ---------------------------------------------------------------------------
+
+
+def _fold_setup(
+    wiki: Path,
+    *,
+    canonical_extra: dict | None,
+    source_classes: list[str],
+    rationale: str = "athenaeum#1577 qualified-name scan: same qualified name",
+    canonical_text: str | None = None,
+) -> tuple[Path, Path, str, list[Path]]:
+    """A wiki with one canonical page, one source per entry of
+    *source_classes*, git-initialised, and one fold-into-existing proposal.
+    Returns ``(target, merges_path, proposal_id, sources)``."""
+    wiki.mkdir()
+    target = wiki / "canonical.md"
+    if canonical_text is not None:
+        target.write_text(canonical_text, encoding="utf-8")
+    else:
+        _write_wiki_page(target, name="Canonical", body="OLD BODY\n", extra=canonical_extra)
+    sources: list[Path] = []
+    for i, cls in enumerate(source_classes):
+        src = wiki / f"old-{i}.md"
+        _write_wiki_page(src, name=f"Old {i}", body=f"{i}\n", extra={"memory_class": cls})
+        sources.append(src)
+    init_git_repo(wiki)
+    merges_path = wiki / "_pending_merges.md"
+    write_pending_merge(
+        merges_path,
+        merge_target_name="Canonical",
+        sources=[str(s) for s in sources],
+        rationale=rationale,
+        draft_merged_body="NEW BODY\n",
+        confidence=0.9,
+        write_kind="fold-into-existing",
+    )
+    return target, merges_path, parse_pending_merges(merges_path)[0].id, sources
+
+
+class TestWidenQuestionReadBack:
+    def test_answered_widen_question_is_consumed_and_recorded(
+        self, tmp_path: Path
+    ) -> None:
+        """AC1: once the question raised for (proposal, dimension) is
+        answered, the fold applies with the canonical's value set to the
+        answer and the ledger names the answer id. Counter-example (the old
+        behaviour): the fold is refused again after the answer."""
+        from athenaeum.answers import parse_pending_questions, resolve_by_id
+
+        wiki = tmp_path / "wiki"
+        target, merges_path, pm_id, _ = _fold_setup(
+            wiki, canonical_extra=None, source_classes=["guideline", "fact"]
+        )
+        first = resolve_merge(merges_path, pm_id, "approve", wiki_root=wiki)
+        assert first["error_code"] == "fold_widen_impossible"
+        pending = wiki / "_pending_questions.md"
+        (question,) = parse_pending_questions(pending)
+        assert resolve_by_id(pending, question.id, "fact")["ok"]
+
+        result = resolve_merge(merges_path, pm_id, "approve", wiki_root=wiki)
+
+        assert result["ok"] is True, result
+        meta, _ = parse_frontmatter(target.read_text(encoding="utf-8"))
+        assert meta["memory_class"] == "fact"
+        record = read_merge_provenance(wiki)[0]
+        assert record["coordinates_widened"]["memory-class"] == "fact"
+        assert record["widen_answers"] == {"memory-class": question.id}
+
+    def test_answer_already_archived_is_still_consumed(self, tmp_path: Path) -> None:
+        """AC1: an ingest-answers tick archives an answered block; the
+        read-back must find the answer in the archive too."""
+        from athenaeum.answers import (
+            ingest_answers,
+            parse_pending_questions,
+            resolve_by_id,
+        )
+
+        wiki = tmp_path / "wiki"
+        target, merges_path, pm_id, _ = _fold_setup(
+            wiki, canonical_extra=None, source_classes=["guideline", "fact"]
+        )
+        resolve_merge(merges_path, pm_id, "approve", wiki_root=wiki)
+        pending = wiki / "_pending_questions.md"
+        (question,) = parse_pending_questions(pending)
+        resolve_by_id(pending, question.id, "guideline")
+        ingest_answers(pending, tmp_path / "raw", quiet=True)
+        assert (wiki / "_pending_questions_archive.md").exists()
+        assert parse_pending_questions(pending) == []
+
+        result = resolve_merge(merges_path, pm_id, "approve", wiki_root=wiki)
+
+        assert result["ok"] is True, result
+        meta, _ = parse_frontmatter(target.read_text(encoding="utf-8"))
+        assert meta["memory_class"] == "guideline"
+
+    def test_free_text_answer_never_lands_in_frontmatter(self, tmp_path: Path) -> None:
+        """AC2 counter-example: an answer that is not one of the offered
+        values is not written onto the page; the fold stays refused and a
+        fresh question is raised."""
+        from athenaeum.answers import parse_pending_questions, resolve_by_id
+
+        wiki = tmp_path / "wiki"
+        target, merges_path, pm_id, _ = _fold_setup(
+            wiki, canonical_extra=None, source_classes=["guideline", "fact"]
+        )
+        resolve_merge(merges_path, pm_id, "approve", wiki_root=wiki)
+        pending = wiki / "_pending_questions.md"
+        (question,) = parse_pending_questions(pending)
+        resolve_by_id(pending, question.id, "make it pirate-flavoured")
+
+        result = resolve_merge(merges_path, pm_id, "approve", wiki_root=wiki)
+
+        assert result["error_code"] == "fold_widen_impossible"
+        assert "pirate" not in target.read_text(encoding="utf-8")
+        assert len([q for q in parse_pending_questions(pending) if not q.answered]) == 1
+
+    def test_widen_question_offers_both_source_values_and_canonical_value(
+        self, tmp_path: Path
+    ) -> None:
+        """AC2: the item's published response_schema is an enum of the two
+        source values plus the canonical's current value when it has one."""
+        from athenaeum.answers import parse_pending_questions
+        from athenaeum.decision_framing import frame_decision, widen_candidates
+        from athenaeum.decisions import question_to_decision
+
+        wiki = tmp_path / "wiki"
+        # An auto-applied name-collision fold is widen-eligible but not a
+        # human approve, so the canonical's own class is offered, not kept.
+        _, merges_path, pm_id, _ = _fold_setup(
+            wiki,
+            canonical_extra={"memory_class": "fact"},
+            source_classes=["guideline", "reference"],
+            rationale=f"{NAME_COLLISION_RATIONALE_PREFIX}: 3 pages share a name",
+        )
+        result = resolve_merge(
+            merges_path, pm_id, "approve", wiki_root=wiki, auto_applied=True
+        )
+        assert result["error_code"] == "fold_widen_impossible"
+        (question,) = parse_pending_questions(wiki / "_pending_questions.md")
+        assert widen_candidates(question.description) == ["fact", "guideline", "reference"]
+
+        framed = frame_decision(question_to_decision(question), max_context_tokens=4000)
+        verdict = framed["response_schema"]["properties"]["verdict"]
+        assert verdict["enum"] == ["fact", "guideline", "reference"]
+
+    def test_canonical_class_kept_on_human_approved_fold(self, tmp_path: Path) -> None:
+        """AC3: a canonical carrying a memory_class keeps it on a human
+        approve and the differing source values are recorded in provenance."""
+        wiki = tmp_path / "wiki"
+        target, merges_path, pm_id, _ = _fold_setup(
+            wiki, canonical_extra={"memory_class": "fact"}, source_classes=["guideline"]
+        )
+
+        result = resolve_merge(merges_path, pm_id, "approve", wiki_root=wiki)
+
+        assert result["ok"] is True, result
+        meta, _ = parse_frontmatter(target.read_text(encoding="utf-8"))
+        assert meta["memory_class"] == "fact"
+        record = read_merge_provenance(wiki)[0]
+        assert record["coordinates_kept"] == {
+            "memory-class": {"kept": "fact", "differing": ["guideline"]}
+        }
+        assert not (wiki / "_pending_questions.md").exists()
+
+    def test_classless_canonical_raises_the_question(self, tmp_path: Path) -> None:
+        """AC3: only a canonical with no class gets the widen question."""
+        wiki = tmp_path / "wiki"
+        _, merges_path, pm_id, _ = _fold_setup(
+            wiki, canonical_extra=None, source_classes=["guideline", "fact"]
+        )
+
+        result = resolve_merge(merges_path, pm_id, "approve", wiki_root=wiki)
+
+        assert result["error_code"] == "fold_widen_impossible"
+        assert result["dimension"] == "memory-class"
+        assert (wiki / "_pending_questions.md").exists()
+
+    def test_auto_applied_fold_keeps_the_hard_refusal(self, tmp_path: Path) -> None:
+        """AC3 counter-example: an auto-applied (non-human) fold must not
+        silently widen memory-class even when the canonical carries one."""
+        wiki = tmp_path / "wiki"
+        target, merges_path, pm_id, _ = _fold_setup(
+            wiki,
+            canonical_extra={"memory_class": "fact"},
+            source_classes=["guideline"],
+            rationale="T2 auto-finalize",
+        )
+
+        result = resolve_merge(
+            merges_path, pm_id, "approve", wiki_root=wiki, auto_applied=True
+        )
+
+        assert result["ok"] is False
+        assert result["error_code"] == "fold_narrows_coordinate"
+        meta, _ = parse_frontmatter(target.read_text(encoding="utf-8"))
+        assert meta["memory_class"] == "fact"
+        assert "coordinates_kept" not in (read_merge_provenance(wiki) or [{}])[0]
+
+    def test_applied_fold_withdraws_every_open_widen_question(
+        self, tmp_path: Path
+    ) -> None:
+        """AC4: the 2026-10-22 ``subject`` question shape (open, naming the
+        proposal) is closed with a superseded outcome once the fold applies.
+        Counter-example: it staying open forever."""
+        from athenaeum.answers import parse_pending_questions, raise_pending_question
+
+        wiki = tmp_path / "wiki"
+        target, merges_path, pm_id, _ = _fold_setup(
+            wiki, canonical_extra={"subject": "subject-x"}, source_classes=["fact"]
+        )
+        pending = wiki / "_pending_questions.md"
+        raise_pending_question(
+            pending,
+            question=(
+                "Fold of 'canonical' cannot auto-widen its 'subject' "
+                "coordinate — what should the canonical's value be?"
+            ),
+            context=f"Human-approved fold (proposal {pm_id}) into 'canonical' x.",
+            entity="canonical",
+            source=str(target),
+        )
+        raise_pending_question(
+            pending,
+            question=(
+                "Fold of 'canonical' cannot auto-widen its 'memory-class' "
+                "coordinate — what should the canonical's value be?"
+            ),
+            context="Human-approved fold (proposal ffffffffffff) into 'canonical' x.",
+            entity="canonical",
+            source=str(target),
+        )
+
+        result = resolve_merge(merges_path, pm_id, "approve", wiki_root=wiki)
+
+        assert result["ok"] is True, result
+        by_text = {q.question: q for q in parse_pending_questions(pending)}
+        ours = next(q for t, q in by_text.items() if "'subject'" in t)
+        other = next(q for t, q in by_text.items() if "'memory-class'" in t)
+        assert ours.answered is True
+        assert "Superseded" in "\n".join(ours.answer_lines)
+        # A question for a DIFFERENT proposal is untouched.
+        assert other.answered is False
+
+    def test_archived_proposal_withdraws_its_widen_question(
+        self, tmp_path: Path
+    ) -> None:
+        """AC4: archiving a (here rejected) proposal supersedes its open
+        widen question."""
+        from athenaeum.answers import parse_pending_questions
+        from athenaeum.pending_merges import ingest_resolved_merges
+
+        wiki = tmp_path / "wiki"
+        _, merges_path, pm_id, _ = _fold_setup(
+            wiki, canonical_extra=None, source_classes=["guideline", "fact"]
+        )
+        resolve_merge(merges_path, pm_id, "approve", wiki_root=wiki)
+        pending = wiki / "_pending_questions.md"
+        assert parse_pending_questions(pending)[0].answered is False
+        resolve_merge(merges_path, pm_id, "reject", wiki_root=wiki)
+
+        assert ingest_resolved_merges(merges_path) == 1
+
+        assert parse_pending_questions(pending)[0].answered is True
+
+    def test_stub_canonical_is_never_left_without_a_class(self, tmp_path: Path) -> None:
+        """AC5: a "From wiki/..." stub canonical with no frontmatter takes
+        the class from the sources that carry one, and the ledger records
+        it. Counter-example: a stub left with empty frontmatter."""
+        wiki = tmp_path / "wiki"
+        target, merges_path, pm_id, _ = _fold_setup(
+            wiki,
+            canonical_extra=None,
+            canonical_text="From `wiki/old-0.md`\n",
+            source_classes=["guideline", "guideline"],
+        )
+
+        result = resolve_merge(merges_path, pm_id, "approve", wiki_root=wiki)
+
+        assert result["ok"] is True, result
+        meta, _ = parse_frontmatter(target.read_text(encoding="utf-8"))
+        assert meta["memory_class"] == "guideline"
+        assert read_merge_provenance(wiki)[0]["coordinates_widened"] == {
+            "memory-class": "guideline"
+        }
 
 
 # ---------------------------------------------------------------------------

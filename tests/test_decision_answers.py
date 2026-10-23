@@ -548,12 +548,16 @@ class TestApplyMerge:
 
         target = wiki_root / "canonical.md"
         target.write_text(
-            "---\nname: Canonical\ntype: concept\nmemory_class: fact\n---\nOLD\n",
-            encoding="utf-8",
+            "---\nname: Canonical\ntype: concept\n---\nOLD\n", encoding="utf-8"
         )
         src_a = wiki_root / "old-a.md"
         src_a.write_text(
             "---\nname: Old A\ntype: concept\nmemory_class: guideline\n---\na\n",
+            encoding="utf-8",
+        )
+        src_b = wiki_root / "old-b.md"
+        src_b.write_text(
+            "---\nname: Old B\ntype: concept\nmemory_class: fact\n---\nb\n",
             encoding="utf-8",
         )
         init_git_repo(wiki_root)
@@ -562,7 +566,7 @@ class TestApplyMerge:
         write_pending_merge(
             merges_path,
             merge_target_name="Canonical",
-            sources=[str(src_a)],
+            sources=[str(src_a), str(src_b)],
             rationale="wiki-dedupe cluster: 2 pages in the same semantic cluster",
             draft_merged_body="NEW\n",
             confidence=0.9,
@@ -1456,12 +1460,16 @@ class TestBatch:
         raw.mkdir()
         target = wiki / "canonical.md"
         target.write_text(
-            "---\nname: Canonical\ntype: concept\nmemory_class: fact\n---\nOLD\n",
-            encoding="utf-8",
+            "---\nname: Canonical\ntype: concept\n---\nOLD\n", encoding="utf-8"
         )
         src_a = wiki / "old-a.md"
         src_a.write_text(
             "---\nname: Old A\ntype: concept\nmemory_class: guideline\n---\na\n",
+            encoding="utf-8",
+        )
+        src_b = wiki / "old-b.md"
+        src_b.write_text(
+            "---\nname: Old B\ntype: concept\nmemory_class: fact\n---\nb\n",
             encoding="utf-8",
         )
         init_git_repo(wiki)
@@ -1470,7 +1478,7 @@ class TestBatch:
         write_pending_merge(
             merges_path,
             merge_target_name="Canonical",
-            sources=[str(src_a)],
+            sources=[str(src_a), str(src_b)],
             rationale="athenaeum#1577 qualified-name scan: same qualified name",
             draft_merged_body="NEW\n",
             confidence=0.9,
@@ -1488,6 +1496,105 @@ class TestBatch:
         assert f"proposal={mid}" in out
         assert "dimension='memory-class'" in out
         assert "value_a='fact'" in out or "value_b='fact'" in out
+
+
+class TestWidenQuestionAnswerPath:
+    """Issue athenaeum#2115 AC1/AC2: an approved fold that hit
+    ``fold_widen_impossible`` is unblocked by answering its question through
+    the real ``ingest-answers`` entry point."""
+
+    @staticmethod
+    def _setup(tmp_path: Path) -> tuple[Path, Path, Path, str]:
+        from athenaeum.pending_merges import parse_pending_merges, write_pending_merge
+
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        raw = tmp_path / "raw"
+        raw.mkdir()
+        target = wiki / "canonical.md"
+        target.write_text(
+            "---\nname: Canonical\ntype: concept\n---\nOLD\n", encoding="utf-8"
+        )
+        sources = []
+        for name, cls in (("old-a", "guideline"), ("old-b", "fact")):
+            src = wiki / f"{name}.md"
+            src.write_text(
+                f"---\nname: {name}\ntype: concept\nmemory_class: {cls}\n---\nx\n",
+                encoding="utf-8",
+            )
+            sources.append(str(src))
+        init_git_repo(wiki)
+        merges_path = wiki / "_pending_merges.md"
+        write_pending_merge(
+            merges_path,
+            merge_target_name="Canonical",
+            sources=sources,
+            rationale="athenaeum#1577 qualified-name scan: same qualified name",
+            draft_merged_body="NEW\n",
+            confidence=0.9,
+            write_kind="fold-into-existing",
+        )
+        mid = parse_pending_merges(merges_path)[0].id
+        write_decision_answer(
+            raw, decision_id=mid, decision_type="merge", verdict="approve"
+        )
+        return wiki, raw, target, mid
+
+    @staticmethod
+    def _tick(tmp_path: Path) -> None:
+        import argparse
+
+        from athenaeum._cmd_pending import cmd_ingest_answers
+
+        assert cmd_ingest_answers(argparse.Namespace(path=tmp_path, verbose=True)) == 0
+
+    def test_answering_the_question_unblocks_the_approved_fold(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from athenaeum.answers import parse_pending_questions
+        from athenaeum.provenance import read_merge_provenance
+
+        monkeypatch.delenv("ATHENAEUM_LLM_PROVIDER", raising=False)
+        wiki, raw, target, mid = self._setup(tmp_path)
+
+        self._tick(tmp_path)  # refused; raises the question
+        (question,) = parse_pending_questions(wiki / "_pending_questions.md")
+        assert "memory_class" not in target.read_text(encoding="utf-8")
+
+        write_decision_answer(
+            raw, decision_id=question.id, decision_type="question", verdict="guideline"
+        )
+        self._tick(tmp_path)  # answer recorded + archived
+        self._tick(tmp_path)  # the approved fold now applies
+
+        meta, _ = parse_frontmatter(target.read_text(encoding="utf-8"))
+        assert meta["memory_class"] == "guideline"
+        record = read_merge_provenance(wiki)[0]
+        assert record["widen_answers"] == {"memory-class": question.id}
+
+    def test_free_text_answer_is_refused_and_not_recorded(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from athenaeum.answers import parse_pending_questions
+
+        monkeypatch.delenv("ATHENAEUM_LLM_PROVIDER", raising=False)
+        wiki, raw, target, mid = self._setup(tmp_path)
+        self._tick(tmp_path)
+        (question,) = parse_pending_questions(wiki / "_pending_questions.md")
+        write_decision_answer(
+            raw,
+            decision_id=question.id,
+            decision_type="question",
+            verdict="whatever you think is best",
+        )
+
+        report = apply_decision_answers(wiki, raw)
+
+        outcome = next(o for o in report.outcomes if o.decision_id == question.id)
+        assert outcome.applied is False
+        assert outcome.error_code == "invalid_decision"
+        (still_open,) = parse_pending_questions(wiki / "_pending_questions.md")
+        assert still_open.answered is False
 
 
 # ---------------------------------------------------------------------------
