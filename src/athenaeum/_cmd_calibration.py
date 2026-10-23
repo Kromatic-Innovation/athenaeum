@@ -13,6 +13,12 @@ human's side of that loop:
                  records a calibration signal only; it does NOT re-execute or
                  unwind the tier's merge decision.
 
+Retired tier (issue athenaeum#2079): the ``default_acceptance`` population is
+retired, not rewired. It only ever sampled the human's own answers (a circular
+audit), so ``summary`` rows for that tier are historical and no new items are
+sampled. ``close-not-applicable`` stays as ledger hygiene for leftover pending
+items; the sampling code path is kept but unreachable from a human answer.
+
 A thin dispatcher over :mod:`athenaeum.calibration`, mirroring
 :mod:`athenaeum._cmd_axiom`'s shape.
 
@@ -448,7 +454,9 @@ def add_calibration_subparser(subparsers: argparse._SubParsersAction) -> None:
 
     summary_p = c_sub.add_parser(
         "summary",
-        help="Per-tier calibration counts (sampled / reviewed / overturned).",
+        help="Per-tier calibration counts (sampled / reviewed / overturned). "
+        "The default_acceptance tier is retired: human answers are no longer "
+        "sampled, so any default_acceptance rows are historical.",
     )
     _add_common(summary_p)
 

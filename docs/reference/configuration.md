@@ -1147,9 +1147,12 @@ review (ratchet guard 2).
 A "default acceptance" is a human answer to a queue item that accepts
 the item's ``proposed_default`` unmodified (see
 `athenaeum.decision_framing.is_default_acceptance`) rather than
-overriding it.: only acceptances produced by a model
-or rule are sampled -- an acceptance that originated from a human
-``decision_answer`` is excluded (reviewing your own ruling is circular).
+overriding it. This population is RETIRED: an acceptance that originated
+from a human ``decision_answer`` is never sampled (reviewing your own
+ruling is circular), and every answer file reaches the sampler carrying
+that source, so in practice nothing is sampled. The knob and the sampling
+code path are kept; ``athenaeum calibration close-not-applicable`` closes
+any leftover pending audit items.
 This is the rubber-stamp-rate measurement's own sample
 rate -- deliberately a SEPARATE knob from
 `resolve_audit_sample_rate_t1_rejects` /
@@ -1162,7 +1165,7 @@ reasonably want to sample it at a different rate.
 Env ``ATHENAEUM_DEFAULT_ACCEPTANCE_AUDIT_SAMPLE_RATE`` > yaml
 ``librarian.default_acceptance_audit_sample_rate`` > default ``0.1``
 (10% -- a looser default than the T1/T2 7.5%: this population is
-expected to be smaller per 's own effort-budget bounds, so a
+expected to be smaller per the effort-budget bounds, so a
 slightly higher rate still keeps the absolute review volume small).
 Clamped to ``[0.0, 1.0]``.
 

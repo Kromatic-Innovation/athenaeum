@@ -439,6 +439,10 @@ class ReceiptRun:
     caller holds the :class:`RunLock` for the whole run (single appender), so
     nothing else changes the ledger underneath it. Also keeps a few recent
     transcript snapshots so memories sharing a session read it once.
+
+    Assumes this run is the only appender to every ledger partition: a future
+    sealer that also appended mid-run would skew the cached line counts and
+    therefore the seal ranges.
     """
 
     def __init__(self, wiki_root: Path) -> None:

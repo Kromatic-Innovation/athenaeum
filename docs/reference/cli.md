@@ -26,7 +26,7 @@ Every subcommand is registered top-level on one `parser.add_subparsers()` in `cl
 - [`athenaeum calibration`](#athenaeum-calibration) (group) — Tier-audit calibration: per-tier sampled/reviewed/overturned summary, and record a human confirm/overturn of an audit item.
 - [`athenaeum calibration close-not-applicable`](#athenaeum-calibration-close-not-applicable) (command) — Close pending default_acceptance audit items as not applicable (dry run unless --apply); they then count toward no rate.
 - [`athenaeum calibration review`](#athenaeum-calibration-review) (command) — Record a human confirm/overturn of a sampled audit item.
-- [`athenaeum calibration summary`](#athenaeum-calibration-summary) (command) — Per-tier calibration counts (sampled / reviewed / overturned).
+- [`athenaeum calibration summary`](#athenaeum-calibration-summary) (command) — Per-tier calibration counts (sampled / reviewed / overturned). The default_acceptance tier is retired: human answers are no longer sampled, so any default_acceptance rows are historical.
 - [`athenaeum claims`](#athenaeum-claims) (command) — Detect claims restated across distinct wiki entities (read-only). Default --find prints a YAML report.
 - [`athenaeum compile`](#athenaeum-compile) (command) — : recompile a historical wiki snapshot as-of a past date into a scratch --out dir (compile-as-of). Distinct from the read-time `recall/reindex --as-of` filter — this re-runs the C3 blend so members expired now but valid then are re-included. Deterministic (no LLM); never mutates the live wiki or raw tree.
 - [`athenaeum context`](#athenaeum-context) (command) — Build one sidecar context envelope (ranked candidates + rendered text) for a prompt — the agent-neutral core,
@@ -294,7 +294,7 @@ Subcommands:
 
 - `athenaeum calibration close-not-applicable` — Close pending default_acceptance audit items as not applicable (dry run unless --apply); they then count toward no rate.
 - `athenaeum calibration review` — Record a human confirm/overturn of a sampled audit item.
-- `athenaeum calibration summary` — Per-tier calibration counts (sampled / reviewed / overturned).
+- `athenaeum calibration summary` — Per-tier calibration counts (sampled / reviewed / overturned). The default_acceptance tier is retired: human answers are no longer sampled, so any default_acceptance rows are historical.
 
 ## `athenaeum calibration close-not-applicable`
 
@@ -322,7 +322,7 @@ Record a human confirm/overturn of a sampled audit item.
 
 ## `athenaeum calibration summary`
 
-Per-tier calibration counts (sampled / reviewed / overturned).
+Per-tier calibration counts (sampled / reviewed / overturned). The default_acceptance tier is retired: human answers are no longer sampled, so any default_acceptance rows are historical.
 
 | Flag | Default | Choices | Help |
 |---|---|---|---|
