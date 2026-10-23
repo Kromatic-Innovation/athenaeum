@@ -891,7 +891,8 @@ def propose_wiki_page_merges(
     rejected_cooldown_days = resolve_rejected_merge_cooldown_days(resolved_config)
 
     # Issue athenaeum#2093: T1 reasoning screen, armed only by its OWN
-    # default-OFF knob (and never in a dry run, which spends nothing). The
+    # default-OFF knob (a dry run never reaches the T1 call: the pair loop
+    # ``continue``s before it). The
     # context is built once per run and REUSES this pass's own ``client`` (the
     # ``classify``-knob client the caller already built) -- no second client
     # construction. T1 is consulted per pair only AFTER the prior-ruling check
@@ -899,7 +900,7 @@ def propose_wiki_page_merges(
     t1_screen: ClusterScreenContext | None = None
     t1_manifest: Any = None
     t1_known_rejects: set[str] = set()
-    if not dry_run and resolve_reasoning_tier_auditing_enabled(resolved_config):
+    if resolve_reasoning_tier_auditing_enabled(resolved_config):
         from athenaeum.provider import ProviderConfigError, resolve_provider
         from athenaeum.reasoning_tiers import (
             T1_TIER_NAME,
@@ -908,7 +909,7 @@ def propose_wiki_page_merges(
         )
 
         try:
-            t1_provider = resolve_provider(resolved_config, knob="classify")
+            t1_provider = resolve_provider(resolved_config, knob="reasoning_t1")
         except ProviderConfigError:
             t1_provider = ""
         t1_screen = ClusterScreenContext(
@@ -916,7 +917,7 @@ def propose_wiki_page_merges(
             knowledge_root=knowledge_root,
             provider=t1_provider,
             client=None,
-            dry_run=False,
+            dry_run=dry_run,
         )
         t1_manifest = load_authority_manifest_for_pipeline(knowledge_root)
         # A pair T1 already rejected stays a ledgered ``duplicate`` with no

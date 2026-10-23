@@ -117,7 +117,9 @@ def test_t1_not_run_in_dry_run(tmp_path: Path) -> None:
     root = _seed_identical_pages(tmp_path, n=2)
     client = _client("reject")
     _run_pass(root, config=_T1_ON, client=client, dry_run=True)
+    assert client.messages.create.call_count == 1  # the dry-run Gate 2 preview only
     assert _t1_log(root) == []
+    assert not (root / "wiki" / FOLD_EVIDENCE_DIRNAME).exists()
 
 
 def test_t1_error_degrades_to_unscreened_and_does_not_abort(tmp_path: Path) -> None:
