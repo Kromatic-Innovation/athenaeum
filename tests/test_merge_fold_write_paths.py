@@ -1828,6 +1828,54 @@ class TestWidenQuestionReadBack:
         assert "pirate" not in target.read_text(encoding="utf-8")
         assert len([q for q in parse_pending_questions(pending) if not q.answered]) == 1
 
+    def test_answer_is_not_inherited_by_another_proposal_into_same_canonical(
+        self, tmp_path: Path
+    ) -> None:
+        """Two proposals fold into the same class-less canonical; answering
+        P1's question must not unblock P2, whose own question stays open."""
+        from athenaeum.answers import parse_pending_questions, resolve_by_id
+
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        target = wiki / "canonical.md"
+        _write_wiki_page(target, name="Canonical", body="OLD BODY\n")
+        srcs = {}
+        for n, cls in (("a", "guideline"), ("b", "fact"), ("c", "reference"), ("d", "fact")):
+            p = wiki / f"old-{n}.md"
+            _write_wiki_page(p, name=f"Old {n}", body=f"{n}\n", extra={"memory_class": cls})
+            srcs[n] = p
+        init_git_repo(wiki)
+        merges = wiki / "_pending_merges.md"
+        for pair, label in ((("a", "b"), "P1"), (("c", "d"), "P2")):
+            write_pending_merge(
+                merges,
+                merge_target_name="Canonical",
+                sources=[str(srcs[k]) for k in pair],
+                rationale=f"athenaeum#1577 qualified-name scan: {label}",
+                draft_merged_body=f"NEW {label}\n",
+                confidence=0.9,
+                write_kind="fold-into-existing",
+            )
+        p1, p2 = [pm.id for pm in parse_pending_merges(merges)]
+        assert p1 != p2
+        pending = wiki / "_pending_questions.md"
+
+        first = resolve_merge(merges, p1, "approve", wiki_root=wiki)
+        assert first["error_code"] == "fold_widen_impossible"
+        (q1,) = parse_pending_questions(pending)
+        assert f"(proposal {p1})" in q1.description
+        assert resolve_by_id(pending, q1.id, "fact")["ok"]
+
+        second = resolve_merge(merges, p2, "approve", wiki_root=wiki)
+
+        assert second["ok"] is False
+        assert second["error_code"] == "fold_widen_impossible"
+        meta, _ = parse_frontmatter(target.read_text(encoding="utf-8"))
+        assert "memory_class" not in meta
+        open_qs = [q for q in parse_pending_questions(pending) if not q.answered]
+        assert len(open_qs) == 1
+        assert f"(proposal {p2})" in open_qs[0].description
+
     def test_widen_question_offers_both_source_values_and_canonical_value(
         self, tmp_path: Path
     ) -> None:
@@ -1908,7 +1956,8 @@ class TestWidenQuestionReadBack:
         assert result["error_code"] == "fold_narrows_coordinate"
         meta, _ = parse_frontmatter(target.read_text(encoding="utf-8"))
         assert meta["memory_class"] == "fact"
-        assert "coordinates_kept" not in (read_merge_provenance(wiki) or [{}])[0]
+        # A refusal writes no ledger row at all.
+        assert read_merge_provenance(wiki) == []
 
     def test_applied_fold_withdraws_every_open_widen_question(
         self, tmp_path: Path
@@ -1993,9 +2042,10 @@ class TestWidenQuestionReadBack:
         assert result["ok"] is True, result
         meta, _ = parse_frontmatter(target.read_text(encoding="utf-8"))
         assert meta["memory_class"] == "guideline"
-        assert read_merge_provenance(wiki)[0]["coordinates_widened"] == {
-            "memory-class": "guideline"
-        }
+        record = read_merge_provenance(wiki)[0]
+        assert record["coordinates_widened"] == {"memory-class": "guideline"}
+        # The new ledger fields are omitted unless non-empty.
+        assert "widen_answers" not in record and "coordinates_kept" not in record
 
 
 # ---------------------------------------------------------------------------
