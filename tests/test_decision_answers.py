@@ -599,6 +599,13 @@ class TestDefaultAcceptanceTaggedAtAnswerTime:
     def test_accepting_the_default_is_not_sampled_for_a_human_answer(
         self, wiki_root: Path, raw_root: Path
     ) -> None:
+        """
+        RETIRED: the default_acceptance calibration population is retired
+        (athenaeum#2079; ruling recorded on athenaeum#2096). Every answer file reaching
+        apply_decision_answers carries source: decision_answer, and a human cannot audit
+        their own ruling, so this test pins that NOTHING is sampled -- it does not
+        exercise a live sampling path.
+        """
         from athenaeum.calibration import read_calibration_ledger
 
         merges_path = wiki_root / "_pending_merges.md"
@@ -622,8 +629,8 @@ class TestDefaultAcceptanceTaggedAtAnswerTime:
         ledger = read_calibration_ledger(wiki_root)
         audit_records = [r for r in ledger if r.get("kind") == "audit"]
         assert audit_records == [], (
-            "issue athenaeum#2079 AC1: a human decision_answer must never be "
-            "sampled as a default-acceptance audit"
+            "default_acceptance is RETIRED (athenaeum#2079): a human "
+            "decision_answer must never be sampled as a default-acceptance audit"
         )
 
     def test_overriding_the_default_is_never_sampled(
@@ -706,7 +713,13 @@ class TestEveryDeclaredDefaultAcceptanceTypeIsReachable:
         """The exact Seer-found regression: a confirmation item is answered
         through its REAL applier (`answerable_as("confirmation") ==
         "question"`), carrying `origin_decision_type="confirmation"`
-        separately — exactly what `_cmd_decisions.py::_cmd_answer` writes."""
+        separately — exactly what `_cmd_decisions.py::_cmd_answer` writes.
+
+        RETIRED population (athenaeum#2079, ruling on athenaeum#2096): every answer file
+        reaching apply_decision_answers carries source: decision_answer and a human cannot
+        audit their own ruling, so this pins that NOTHING is sampled -- it is not a live
+        sampling path.
+        """
         from athenaeum.calibration import read_calibration_ledger
         from athenaeum.decision_framing import answerable_as
 
@@ -733,8 +746,8 @@ class TestEveryDeclaredDefaultAcceptanceTypeIsReachable:
         ledger = read_calibration_ledger(wiki_root)
         audit_records = [r for r in ledger if r.get("kind") == "audit"]
         assert audit_records == [], (
-            "issue athenaeum#2079 AC1: a human decision_answer must never be "
-            "sampled as a default-acceptance audit"
+            "default_acceptance is RETIRED (athenaeum#2079): a human "
+            "decision_answer must never be sampled as a default-acceptance audit"
         )
 
     @pytest.mark.parametrize(
@@ -753,6 +766,11 @@ class TestEveryDeclaredDefaultAcceptanceTypeIsReachable:
         origin_decision_type: str,
         accepting_verdict: str,
     ) -> None:
+        """RETIRED population (athenaeum#2079, ruling on athenaeum#2096): every answer file
+        reaching apply_decision_answers carries source: decision_answer and a human cannot
+        audit their own ruling, so this pins that NOTHING is sampled -- it is not a live
+        sampling path.
+        """
         from athenaeum.calibration import read_calibration_ledger
 
         if origin_decision_type == "merge":
@@ -785,8 +803,8 @@ class TestEveryDeclaredDefaultAcceptanceTypeIsReachable:
         ledger = read_calibration_ledger(wiki_root)
         audit_records = [r for r in ledger if r.get("kind") == "audit"]
         assert audit_records == [], (
-            "issue athenaeum#2079 AC1: a human decision_answer must never be "
-            "sampled as a default-acceptance audit"
+            "default_acceptance is RETIRED (athenaeum#2079): a human "
+            "decision_answer must never be sampled as a default-acceptance audit"
         )
 
 
@@ -825,7 +843,13 @@ class TestConfirmationGuard2ThroughTheRealCliPath:
         """confirmation's default_action is "accept the narrowed scope" —
         answering "approve" through the real CLI must round-trip
         `origin_decision_type="confirmation"` into the written answer file
-        and be tagged as a default-acceptance when applied."""
+        and be tagged as a default-acceptance when applied.
+
+        RETIRED population (athenaeum#2079, ruling on athenaeum#2096): every answer file
+        reaching apply_decision_answers carries source: decision_answer and a human cannot
+        audit their own ruling, so this pins that NOTHING is sampled -- it is not a live
+        sampling path.
+        """
         from athenaeum.calibration import read_calibration_ledger
 
         pending_path = wiki_root / "_pending_questions.md"
@@ -849,8 +873,8 @@ class TestConfirmationGuard2ThroughTheRealCliPath:
         ledger = read_calibration_ledger(wiki_root)
         audit_records = [r for r in ledger if r.get("kind") == "audit"]
         assert audit_records == [], (
-            "issue athenaeum#2079 AC1: a human decision_answer must never be "
-            "sampled as a default-acceptance audit"
+            "default_acceptance is RETIRED (athenaeum#2079): a human "
+            "decision_answer must never be sampled as a default-acceptance audit"
         )
 
     def test_overriding_the_default_through_the_cli_is_not_tagged(

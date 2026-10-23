@@ -166,6 +166,24 @@ class TestRecordBoundViolationSchedule:
         assert ledger[raw.ref]["violations"] == 1
         assert "retry_after" in ledger[raw.ref]
 
+    def test_wall_clock_trip_after_llm_calls_cancels_pending_retry(self, tmp_path: Path) -> None:
+        """Pins current behaviour (athenaeum#2096): the first wall-clock trip is
+        transient and pops an existing ``retry_after``, so an llm_calls attempt
+        followed by a transient wall-clock trip cancels the scheduled wait
+        without consuming an attempt. The next librarian run may retry at once.
+        """
+        raw, ledger = _raw(tmp_path), {}
+        t0 = datetime(2026, 10, 1, tzinfo=timezone.utc)
+        assert self._violate(ledger, raw, bound="llm_calls", now=t0) is None
+        assert ledger[raw.ref]["retry_after"] == "2026-10-04T00:00:00Z"
+
+        assert self._violate(ledger, raw, bound="wall_clock", now=t0) is None
+        e = ledger[raw.ref]
+        assert "retry_after" not in e
+        assert e["violations"] == 1  # the transient trip consumed no attempt
+        assert e["wall_clock_seen"] is True
+        assert [h["outcome"] for h in e["history"]] == ["retry_scheduled", "transient"]
+
     def test_content_change_resets_attempts(self, tmp_path: Path) -> None:
         raw, ledger = _raw(tmp_path), {}
         self._violate(ledger, raw)
@@ -327,3 +345,22 @@ class TestRequeue:
         assert "APPLY" in capsys.readouterr().out
         assert list_pending_quarantine(tmp_path / "wiki") == []
         assert (tmp_path / "raw" / "retros" / "20240407T120000Z-aaaaaaaa.md").exists()
+
+    def test_cli_exits_1_when_a_release_errors(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        a = _legacy_park(tmp_path, "20240407T120000Z-aaaaaaaa.md", "llm_calls")
+
+        def _boom(*args: object, **kwargs: object) -> None:
+            raise RuntimeError("disk on fire")
+
+        monkeypatch.setattr("athenaeum.quarantine.release_quarantine", _boom)
+        rc = main(["quarantine", "requeue", "--path", str(tmp_path), "--apply"])
+        out = capsys.readouterr().out
+        assert rc == 1
+        assert "error:RuntimeError" in out
+        # the failed entry is left pending, not silently dropped
+        assert [r["id"] for r in list_pending_quarantine(tmp_path / "wiki")] == [a["id"]]

@@ -126,9 +126,20 @@ class TestRejectedPairNotReproposed:
         )
         assert propose_qualified_name_merges(wiki)["ruled_out"] == 1
 
-    def test_dry_run_reports_without_writing(self, wiki: Path) -> None:
+    def test_dry_run_writes_nothing_and_leaves_the_ruling_in_force(self, wiki: Path) -> None:
         _rule(wiki, wiki / "orca.md", wiki / "orca-coaching.md", "reject", answered_at=RECENT)
-        assert propose_qualified_name_merges(wiki, dry_run=True)["queued"] == 0
+        merges = wiki / "_pending_merges.md"
+        before = merges.read_bytes()
+
+        dry = propose_qualified_name_merges(wiki, dry_run=True)
+
+        assert dry["splits"] == 1 and dry["queued"] == 0
+        assert merges.read_bytes() == before
+        assert _open_ids(wiki) == []
+        # A later real run is still governed by the ruling: the dry run neither
+        # queued the pair nor consumed anything.
+        real = propose_qualified_name_merges(wiki)
+        assert real == {"splits": 1, "queued": 0, "unfoldable": 0, "ruled_out": 1}
 
 
 class TestCooldown:

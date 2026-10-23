@@ -239,6 +239,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`default_acceptance` calibration population documented as retired; Quine
+  follow-ups from #2088/#2090/#2091/#2092 closed (issue athenaeum#2096).** The
+  population only ever sampled the operator's own answers (circular audit,
+  athenaeum#2079), so `athenaeum calibration summary` help, the CLI module
+  docs and the `default_acceptance_audit_sample_rate` resolver docstring now
+  say it is retired; `calibration close-not-applicable` stays as ledger
+  hygiene and the sampling code path is kept. The resolver docstring no longer
+  renders `overriding it.: only` in `docs/reference/configuration.md`. Tests
+  only otherwise: the wall-clock-after-llm_calls `retry_after` pop and the
+  `quarantine requeue` `error:` exit-1 path are pinned, the `ReceiptRun`
+  docstring states the single-appender assumption, and the prior-rulings
+  dry-run test now asserts a ruling-dependent outcome. No behaviour change.
+
+
 - **Transcript-receipt writer reads the ledger once and each transcript once per
   memory (issue athenaeum#2048).** `write_receipts_for_files` now indexes the
   receipt ledger a single time per run (previously two full scans per memory),
