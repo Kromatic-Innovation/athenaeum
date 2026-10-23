@@ -266,7 +266,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **`default_acceptance` calibration population documented as retired; Quine
-  follow-ups from athenaeum#2088, athenaeum#2090, athenaeum#2091, athenaeum#2092 closed (issue athenaeum#2096).** The
+  follow-ups from athenaeum#2088, athenaeum#2090, athenaeum#2091 and
+  athenaeum#2092 closed (issue athenaeum#2096).** The
   population only ever sampled the operator's own answers (circular audit,
   athenaeum#2079), so `athenaeum calibration summary` help, the CLI module
   docs and the `default_acceptance_audit_sample_rate` resolver docstring now
