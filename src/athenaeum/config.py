@@ -59,6 +59,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import math
 import os
 from collections.abc import Callable, Iterable
 from datetime import datetime, timezone, tzinfo
@@ -2449,6 +2450,180 @@ def resolve_raw_file_max_runtime_seconds(config: dict[str, Any] | None) -> int:
         "ATHENAEUM_RAW_FILE_MAX_RUNTIME_SECONDS",
         900,
     )
+
+
+def resolve_raw_file_llm_calls_chunk_chars(config: dict[str, Any] | None) -> int:
+    """Resolve the size step of the size-aware per-file LLM-call bound (athenaeum#2075).
+
+    Precedence: ``ATHENAEUM_RAW_FILE_LLM_CALLS_CHUNK_CHARS`` env >
+    ``librarian.raw_file_llm_calls_chunk_chars`` yaml > ``2000``. The per-file
+    LLM-call bound is a SIZE proxy, not a failure signal: a large multi-entity
+    retro legitimately spends more calls than a one-line note. The effective
+    bound for a file is ``base + (len(content) // chunk_chars) *
+    raw_file_llm_calls_per_chunk``, where ``base`` is
+    ``librarian.raw_file_max_api_calls_by_source[<source>]`` when that source is
+    listed, else ``raw_file_max_api_calls`` (see
+    :func:`resolve_raw_file_max_api_calls`). Each retry of a quarantined file
+    then relaxes the result by ``librarian.quarantine_bound_relax_factor`` (see
+    :func:`resolve_quarantine_bound_relax_factor`). See
+    :func:`_resolve_positive_int_knob` for the coercion contract.
+    """
+    return _resolve_positive_int_knob(
+        config,
+        "raw_file_llm_calls_chunk_chars",
+        "ATHENAEUM_RAW_FILE_LLM_CALLS_CHUNK_CHARS",
+        2000,
+    )
+
+
+def resolve_raw_file_llm_calls_per_chunk(config: dict[str, Any] | None) -> int:
+    """Resolve the LLM calls allowed per size step (athenaeum#2075).
+
+    Precedence: ``ATHENAEUM_RAW_FILE_LLM_CALLS_PER_CHUNK`` env >
+    ``librarian.raw_file_llm_calls_per_chunk`` yaml > ``1``. The call allowance
+    added to the per-file bound for every
+    ``librarian.raw_file_llm_calls_chunk_chars`` characters of raw content; see
+    :func:`resolve_raw_file_llm_calls_chunk_chars` for the formula. To switch
+    the size scaling off, set ``raw_file_llm_calls_chunk_chars`` very large.
+    See :func:`_resolve_positive_int_knob` for the coercion contract.
+    """
+    return _resolve_positive_int_knob(
+        config,
+        "raw_file_llm_calls_per_chunk",
+        "ATHENAEUM_RAW_FILE_LLM_CALLS_PER_CHUNK",
+        1,
+    )
+
+
+def resolve_raw_file_max_api_calls_by_source(
+    config: dict[str, Any] | None,
+) -> dict[str, int]:
+    """Resolve the per-source base LLM-call bound overrides (athenaeum#2075).
+
+    Precedence: ``librarian.raw_file_max_api_calls_by_source`` yaml > empty
+    (no env var; a mapping does not fit one). A ``source: calls`` mapping, for
+    example ``{retros: 120}``: a raw file from a listed source uses that value
+    as the BASE of its size-aware LLM-call bound instead of
+    ``raw_file_max_api_calls``. Entries that are not a positive int (``bool``,
+    zero, negative, non-numeric) are dropped individually.
+    """
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("raw_file_max_api_calls_by_source")
+            if isinstance(raw, dict):
+                return {
+                    str(k): v
+                    for k, v in raw.items()
+                    if isinstance(v, int) and not isinstance(v, bool) and v > 0
+                }
+    return {}
+
+
+def resolve_quarantine_max_attempts(config: dict[str, Any] | None) -> int:
+    """Resolve how many tripped attempts precede a human-parked quarantine (athenaeum#2075).
+
+    Precedence: ``ATHENAEUM_QUARANTINE_MAX_ATTEMPTS`` env >
+    ``librarian.quarantine_max_attempts`` yaml > ``3``. A raw file that trips
+    its LLM-call or wall-clock bound is retried on the backoff schedule of
+    :func:`resolve_quarantine_retry_delays_days`, each retry with the bound
+    relaxed one step, and is only quarantined for a human after this many
+    tripped attempts. ``1`` restores the old park-on-first-trip behaviour. The
+    byte-size bound is deterministic and keeps the plain
+    ``librarian.quarantine_threshold`` consecutive-run rule. See
+    :func:`_resolve_positive_int_knob` for the coercion contract.
+    """
+    return _resolve_positive_int_knob(
+        config, "quarantine_max_attempts", "ATHENAEUM_QUARANTINE_MAX_ATTEMPTS", 3
+    )
+
+
+def resolve_quarantine_retry_delays_days(config: dict[str, Any] | None) -> list[int]:
+    """Resolve the days to wait after each tripped attempt (athenaeum#2075).
+
+    Precedence: ``ATHENAEUM_QUARANTINE_RETRY_DELAYS_DAYS`` env (comma-separated
+    ints) > ``librarian.quarantine_retry_delays_days`` yaml (list of ints) >
+    ``[3, 4]``. Entry ``i`` is the wait after tripped attempt ``i + 1`` before
+    the next attempt; the last entry repeats when
+    ``quarantine_max_attempts`` needs more. The default spreads the default 3
+    attempts over seven days. During the wait the file stays in ``raw/`` and is
+    skipped by the entity phase without spending an LLM call. Invalid entries
+    (non-int, bool, ``< 0``) make the whole value fall through.
+    """
+
+    def _valid(seq: Any) -> list[int] | None:
+        if not isinstance(seq, (list, tuple)) or not seq:
+            return None
+        out: list[int] = []
+        for v in seq:
+            if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+                return None
+            out.append(v)
+        return out
+
+    env = os.environ.get("ATHENAEUM_QUARANTINE_RETRY_DELAYS_DAYS")
+    if env is not None:
+        try:
+            parsed = _valid([int(p) for p in env.split(",") if p.strip()])
+        except ValueError:
+            parsed = None
+        if parsed is not None:
+            return parsed
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            parsed = _valid(cfg.get("quarantine_retry_delays_days"))
+            if parsed is not None:
+                return parsed
+    return [3, 4]
+
+
+def resolve_quarantine_bound_relax_factor(config: dict[str, Any] | None) -> float:
+    """Resolve the per-retry relaxation of the LLM-call and wall-clock bounds (athenaeum#2075).
+
+    Precedence: ``ATHENAEUM_QUARANTINE_BOUND_RELAX_FACTOR`` env >
+    ``librarian.quarantine_bound_relax_factor`` yaml > ``1.5``. A file on its
+    ``n``-th retry (``n`` = tripped attempts so far) is allowed
+    ``factor ** n`` times its normal LLM-call and wall-clock bound. Must be
+    ``>= 1.0``; anything lower, non-numeric or ``bool`` falls through.
+    """
+    value = _env_number("ATHENAEUM_QUARANTINE_BOUND_RELAX_FACTOR", float)
+    if value is not None and value >= 1.0:
+        return value
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("quarantine_bound_relax_factor")
+            if isinstance(raw, (int, float)) and not isinstance(raw, bool) and raw >= 1.0:
+                return float(raw)
+    return 1.5
+
+
+def effective_raw_file_llm_call_limit(
+    config: dict[str, Any] | None, *, source: str, chars: int, attempts: int = 0
+) -> int:
+    """Size-aware LLM-call bound for one raw file (athenaeum#2075 AC1/AC2).
+
+    ``base(source) + (chars // chunk_chars) * per_chunk``, relaxed by
+    ``relax_factor ** attempts``. Not a ``resolve_*`` function: it combines
+    several documented knobs and takes per-file arguments.
+    """
+    base = resolve_raw_file_max_api_calls_by_source(config).get(
+        source, resolve_raw_file_max_api_calls(config)
+    )
+    allowance = (max(chars, 0) // resolve_raw_file_llm_calls_chunk_chars(config)) * (
+        resolve_raw_file_llm_calls_per_chunk(config)
+    )
+    factor = resolve_quarantine_bound_relax_factor(config) ** max(attempts, 0)
+    return int(math.ceil((base + allowance) * factor))
+
+
+def effective_raw_file_runtime_limit(
+    config: dict[str, Any] | None, *, attempts: int = 0
+) -> int:
+    """Wall-clock bound for one raw file, relaxed per retry (athenaeum#2075 AC2)."""
+    factor = resolve_quarantine_bound_relax_factor(config) ** max(attempts, 0)
+    return int(math.ceil(resolve_raw_file_max_runtime_seconds(config) * factor))
 
 
 def resolve_merge_body_preview_chars(config: dict[str, Any] | None) -> int:

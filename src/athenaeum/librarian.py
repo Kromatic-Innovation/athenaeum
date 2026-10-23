@@ -86,7 +86,7 @@ import sys
 import time
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -133,6 +133,8 @@ from athenaeum.config import (
     DEFAULT_KNOWLEDGE_ROOT as _DEFAULT_KNOWLEDGE_ROOT_TEMPLATE,
 )
 from athenaeum.config import (
+    effective_raw_file_llm_call_limit,
+    effective_raw_file_runtime_limit,
     load_config,
     preflight_model_rates,
     resolve_audit_on_touch_freshness_hours,
@@ -153,8 +155,8 @@ from athenaeum.config import (
     resolve_push_after_run,
     resolve_push_branch,
     resolve_push_remote,
-    resolve_raw_file_max_api_calls,
-    resolve_raw_file_max_runtime_seconds,
+    resolve_quarantine_max_attempts,
+    resolve_quarantine_retry_delays_days,
     resolve_retire,
     resolve_rule_proposals_enabled,
     resolve_shape_rules_runtime_share,
@@ -244,6 +246,7 @@ from athenaeum.provider import (
     resolve_provider,
 )
 from athenaeum.quarantine import quarantine_file as _quarantine_file
+from athenaeum.quarantine import record_attempt as _record_quarantine_attempt
 from athenaeum.registry import assert_handles_placed, collect_handles
 from athenaeum.relatedness import run_index as relatedness_run_index
 from athenaeum.relatedness import stamp_related_edges
@@ -4283,8 +4286,24 @@ def _record_bound_violation(
     bound: str,
     detail: str,
     threshold: int,
+    max_attempts: int | None = None,
+    retry_delays_days: list[int] | None = None,
+    now: datetime | None = None,
+    used: float | None = None,
+    limit: float | None = None,
 ) -> dict[str, Any] | None:
     """Increment a raw file's consecutive-bound-violation count (athenaeum#898).
+
+    Retry schedule (issue athenaeum#2075). When ``max_attempts`` is given and
+    ``bound`` is ``"llm_calls"`` or ``"wall_clock"``, a violation is one
+    tripped ATTEMPT instead of one step toward ``threshold``: the entry gets a
+    ``history`` row, a ``retry_after`` stamp ``retry_delays_days[attempt - 1]``
+    days out (the entity loop skips the file until then), and the entry is
+    returned for quarantine only once ``max_attempts`` attempts have tripped.
+    The FIRST wall-clock trip on given content is transient (host load,
+    network): it is recorded in ``history`` with ``outcome: "transient"`` but
+    neither counted nor delayed, and only a repeat counts. ``"bytes"`` and
+    callers that pass no ``max_attempts`` keep the plain contract below.
 
     Mirrors :func:`_record_stuck_failure`'s contract exactly: keyed by
     ``raw.ref`` + content hash (a content change resets the count), returns
@@ -4299,18 +4318,57 @@ def _record_bound_violation(
     """
     key = raw.ref
     content_hash = _quarantine_content_hash(raw, bound=bound)
-    now = now_iso()
+    now_s = now_iso()
     entry = ledger.get(key)
     if not isinstance(entry, dict) or entry.get("hash") != content_hash:
         # New file, or the content changed since the last violation — fresh count.
         entry = {
             "hash": content_hash,
             "violations": 0,
-            "first_violated": now,
+            "first_violated": now_s,
             "escalated": False,
         }
+    scheduled = max_attempts is not None and bound in ("llm_calls", "wall_clock")
+    if scheduled:
+        assert max_attempts is not None
+        history = entry.setdefault("history", [])
+        row: dict[str, Any] = {
+            "attempt": int(entry.get("violations", 0)) + 1,
+            "at": now_s,
+            "bound": bound,
+            "detail": detail,
+            "used": used,
+            "limit": limit,
+        }
+        entry["last_violated"] = now_s
+        entry["last_bound"] = bound
+        entry["last_detail"] = detail
+        if bound == "wall_clock" and not entry.get("wall_clock_seen"):
+            entry["wall_clock_seen"] = True
+            row["attempt"] = int(entry.get("violations", 0))
+            row["outcome"] = "transient"
+            entry.pop("retry_after", None)
+            history.append(row)
+            ledger[key] = entry
+            return None
+        entry["violations"] = row["attempt"]
+        if entry["violations"] >= max_attempts and not entry.get("escalated"):
+            row["outcome"] = "parked"
+            history.append(row)
+            entry["escalated"] = True
+            ledger[key] = entry
+            return entry
+        delays = retry_delays_days or [0]
+        delay = delays[min(entry["violations"] - 1, len(delays) - 1)]
+        base = now if now is not None else datetime.now(timezone.utc)
+        entry["retry_after"] = (base + timedelta(days=delay)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        row["outcome"] = "retry_scheduled"
+        row["retry_after"] = entry["retry_after"]
+        history.append(row)
+        ledger[key] = entry
+        return None
     entry["violations"] = int(entry.get("violations", 0)) + 1
-    entry["last_violated"] = now
+    entry["last_violated"] = now_s
     entry["last_bound"] = bound
     entry["last_detail"] = detail
     ledger[key] = entry
@@ -4359,6 +4417,10 @@ def _quarantine_and_surface(
             bound=bound,
             detail=detail,
             violations=int(entry.get("violations", 0)),
+            attempts=[
+                a for a in entry.get("history", []) if a.get("outcome") != "transient"
+            ]
+            or None,
         )
     except Exception:
         log.exception(
@@ -4374,16 +4436,67 @@ def _quarantine_and_surface(
 
     ctx.quarantined_files.append(record)
     log.warning(
-        "%s: %s exceeded its %s bound on %d consecutive run(s) (%s) — QUARANTINED; "
+        "%s: %s exceeded its %s bound on %d %s (%s) — QUARANTINED; "
         "moved out of the discovery set and a pending decision was created to "
-        "review it (issue athenaeum#898)",
+        "review it (issues athenaeum#898, athenaeum#2075)",
         QUARANTINE_FILE_PREFIX,
         raw.ref,
         bound,
         int(entry.get("violations", 0)),
+        "retry-schedule attempt(s)" if record.get("attempts") else "consecutive run(s)",
         detail,
     )
     return True
+
+
+def _handle_bound_violation(
+    ctx: "RunContext",
+    candidates: dict[str, dict[str, Any]],
+    raw: Any,
+    *,
+    bound: str,
+    detail: str,
+    threshold: int,
+    max_attempts: int,
+    retry_delays_days: list[int],
+    used: float | None = None,
+    limit: float | None = None,
+) -> None:
+    """Record one bound violation and quarantine the file when its schedule is spent.
+
+    The single entry-loop call site for all three bounds (athenaeum#898), plus
+    the retry schedule (athenaeum#2075): ledgers the attempt in the
+    quarantine ledger (``kind: "attempt"``, AC2) and parks the file for a human
+    only once :func:`_record_bound_violation` says the schedule is exhausted.
+    """
+    crossed = _record_bound_violation(
+        candidates,
+        raw,
+        bound=bound,
+        detail=detail,
+        threshold=threshold,
+        max_attempts=max_attempts,
+        retry_delays_days=retry_delays_days,
+        now=ctx.now,
+        used=used,
+        limit=limit,
+    )
+    entry = candidates.get(raw.ref)
+    if entry and entry.get("history") and bound in ("llm_calls", "wall_clock"):
+        try:
+            _record_quarantine_attempt(
+                raw,
+                wiki_root=ctx.wiki_root,
+                attempt={**entry["history"][-1], "max_attempts": max_attempts},
+            )
+        except Exception:
+            # Audit-trail write must never fail the run; the candidate
+            # manifest still carries the history.
+            log.exception("athenaeum#2075: failed to ledger attempt for %s", raw.ref)
+    if crossed is not None and _quarantine_and_surface(
+        ctx, raw, crossed, bound=bound, detail=detail
+    ):
+        candidates.pop(raw.ref, None)
 
 
 def _sweep_pending_batch_leases() -> None:
@@ -8216,8 +8329,11 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                     # below: physically moved out of the discovery set.
                     quarantine_candidates = _load_quarantine_candidates(ctx.wiki_root)
                     quarantine_threshold = librarian_quarantine_threshold(ctx.config)
-                    raw_file_max_api_calls = resolve_raw_file_max_api_calls(ctx.config)
-                    raw_file_max_runtime_seconds = resolve_raw_file_max_runtime_seconds(
+                    # Issue athenaeum#2075: the retry schedule for LLM-call /
+                    # wall-clock trips (the byte bound keeps the plain
+                    # threshold above).
+                    quarantine_max_attempts = resolve_quarantine_max_attempts(ctx.config)
+                    quarantine_retry_delays = resolve_quarantine_retry_delays_days(
                         ctx.config
                     )
                     # Issue athenaeum#800: the entity phase was the one dark zone left
@@ -8336,6 +8452,52 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                 int(_stuck.get("failures", 0)),
                             )
                             continue
+                        # Issue athenaeum#2075: a file waiting out its quarantine
+                        # retry delay (same content, ``retry_after`` still in the
+                        # future) is skipped this run at no LLM cost, exactly like
+                        # the athenaeum#1185 stuck-file backoff above.
+                        _qc = quarantine_candidates.get(raw.ref)
+                        _attempts_used = 0
+                        if _qc is not None and _qc.get("history"):
+                            if _qc.get("hash") == _quarantine_content_hash(
+                                raw, bound="llm_calls"
+                            ):
+                                _attempts_used = int(_qc.get("violations", 0))
+                                _retry_after = _qc.get("retry_after")
+                                if (
+                                    not ctx.dry_run
+                                    and isinstance(_retry_after, str)
+                                    and _retry_after
+                                    > (
+                                        ctx.now
+                                        if ctx.now is not None
+                                        else datetime.now(timezone.utc)
+                                    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+                                ):
+                                    ctx.backoff_skipped_files.append(raw.ref)
+                                    log.info(
+                                        "librarian-quarantine-retry: skipping %s "
+                                        "until %s - attempt %d of %d tripped its "
+                                        "bound (issue athenaeum#2075)",
+                                        raw.ref,
+                                        _retry_after,
+                                        _attempts_used,
+                                        quarantine_max_attempts,
+                                    )
+                                    continue
+                        try:
+                            _raw_chars = len(raw.content)
+                        except Exception:  # noqa: BLE001 - oversize/unreadable: byte bound owns it
+                            _raw_chars = 0
+                        raw_file_max_api_calls = effective_raw_file_llm_call_limit(
+                            ctx.config,
+                            source=raw.source,
+                            chars=_raw_chars,
+                            attempts=_attempts_used,
+                        )
+                        raw_file_max_runtime_seconds = effective_raw_file_runtime_limit(
+                            ctx.config, attempts=_attempts_used
+                        )
                         if not ctx.dry_run and ctx.usage.api_calls >= ctx.max_api_calls:
                             log.warning(
                                 "API call budget exhausted (%d/%d) — stopping early",
@@ -8493,17 +8655,16 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                             )
                             entity_heartbeat.tick(raw.ref, error=1)
                             if not ctx.dry_run:
-                                _crossed = _record_bound_violation(
+                                _handle_bound_violation(
+                                    ctx,
                                     quarantine_candidates,
                                     raw,
                                     bound="bytes",
                                     detail=str(exc),
                                     threshold=quarantine_threshold,
+                                    max_attempts=quarantine_max_attempts,
+                                    retry_delays_days=quarantine_retry_delays,
                                 )
-                                if _crossed is not None and _quarantine_and_surface(
-                                    ctx, raw, _crossed, bound="bytes", detail=str(exc)
-                                ):
-                                    quarantine_candidates.pop(raw.ref, None)
                             continue
                         except RawFileOverBudgetError as exc:
                             # Issue athenaeum#994 (was athenaeum#898): the per-file
@@ -8557,21 +8718,18 @@ def _run_entity_tier_phase(ctx: RunContext) -> None:
                                 error=1,
                             )
                             if not ctx.dry_run:
-                                _crossed = _record_bound_violation(
+                                _handle_bound_violation(
+                                    ctx,
                                     quarantine_candidates,
                                     raw,
                                     bound=exc.bound,
                                     detail=exc.detail,
                                     threshold=quarantine_threshold,
+                                    max_attempts=quarantine_max_attempts,
+                                    retry_delays_days=quarantine_retry_delays,
+                                    used=exc.used,
+                                    limit=exc.limit,
                                 )
-                                if _crossed is not None and _quarantine_and_surface(
-                                    ctx,
-                                    raw,
-                                    _crossed,
-                                    bound=exc.bound,
-                                    detail=exc.detail,
-                                ):
-                                    quarantine_candidates.pop(raw.ref, None)
                             continue
                         except TransientAPIError as exc:
                             # Issue athenaeum#193: the Anthropic API was overloaded

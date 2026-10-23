@@ -181,7 +181,15 @@ _GENERIC_HELPER_SIGNATURE = frozenset(
         "resolve_decay_horizon_days",
     }
 )
-_STRUCTURED_CONTAINER_VALUE = frozenset({"resolve_model_rates"})
+# Issue athenaeum#2075: the two list/mapping-valued quarantine knobs are covered
+# directly in tests/test_quarantine_retry_2075.py.
+_STRUCTURED_CONTAINER_VALUE = frozenset(
+    {
+        "resolve_model_rates",
+        "resolve_quarantine_retry_delays_days",
+        "resolve_raw_file_max_api_calls_by_source",
+    }
+)
 # Issue athenaeum#715: returns a frozenset filtered against a CLOSED vocabulary,
 # so every out-of-vocabulary sentinel correctly returns the default. Covered
 # directly by TestClosedVocabularyResolversDirect (see module docstring).

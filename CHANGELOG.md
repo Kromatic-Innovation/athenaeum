@@ -19,6 +19,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `librarian.rejected_merge_cooldown_days` (default `0` = never expires)
   lets a rejection lapse; the re-proposal's rationale then names the earlier
   rejection. `propose_qualified_name_merges` reports a new `ruled_out` count.
+- **Quarantine: size-aware `llm_calls` bound and retries over days instead of
+  a one-shot park (issue athenaeum#2075).** The per-file LLM-call bound is now
+  `base + (chars // librarian.raw_file_llm_calls_chunk_chars) *
+  librarian.raw_file_llm_calls_per_chunk`, with a per-source base in
+  `librarian.raw_file_max_api_calls_by_source`. A file that trips its LLM-call or
+  wall-clock bound is retried on `librarian.quarantine_retry_delays_days`
+  (default 3 then 4 days) up to `librarian.quarantine_max_attempts` (default 3)
+  with the bound relaxed by `librarian.quarantine_bound_relax_factor` (default
+  1.5) per attempt, staying in `raw/` and skipped at no LLM cost between
+  attempts; each attempt is recorded in the candidate manifest and as a
+  `kind: "attempt"` row in `_quarantine.jsonl`. The first wall-clock trip on a
+  given content is transient and not counted. Only after the schedule is spent
+  does the file park, and the quarantine decision item now states the attempt
+  history and the bound it finally failed. The byte bound is unchanged.
+  `athenaeum quarantine requeue [--apply]` (dry-run by default) releases the
+  legacy one-shot entries back into `raw/` once, so they run under the new
+  schedule.
+
 - **Tier-3 merges into oversized pages land instead of raising a question;
   parked observations are recoverable (issue athenaeum#2078).** A merge
   into a page over the page-size threshold now appends (an append-mode
