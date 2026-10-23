@@ -80,3 +80,9 @@ names and short descriptions, which can name people. The adapter fails closed
 (operator ruling 2026-10-23): if any matching page has a non-public audience,
 the whole snapshot is withheld with status `withheld` and no bullets. There is no
 per-page filtering. Public pages are rendered as the core ranked them.
+
+An untagged page counts as non-public: a page without `access: open` is stored
+with audience `|`, which parses as not public, so one such page among the
+candidates withholds the snapshot. Most pages are untagged until tagged, so
+expect `withheld` for many seeds. To get bullets, tag the pages your seed
+matches with `access: open`, and only if they are safe to send to OpenAI.

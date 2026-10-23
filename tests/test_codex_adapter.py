@@ -161,6 +161,13 @@ def test_compile_only_scope_leaves_snapshot_live(cache: Path, tmp_path: Path) ->
     assert _header(text, "status") == "ok"
 
 
+def test_compile_scope_with_no_match_is_empty_not_disabled(cache: Path, tmp_path: Path) -> None:
+    (cache / "disabled").write_text("compile")
+    out = tmp_path / "o.md"
+    assert refresh("nomatchtoken", cache_dir=cache, output=out, now=_clock) == 0
+    assert _header(out.read_text(), "status") == "empty"
+
+
 def test_empty_when_nothing_matches(cache: Path, tmp_path: Path) -> None:
     out = tmp_path / "o.md"
     assert refresh("nomatchtoken", cache_dir=cache, output=out, now=_clock) == 0
@@ -354,6 +361,21 @@ def test_non_public_audience_withholds_whole_snapshot(tmp_path: Path) -> None:
     assert "Alpha Page" not in text and "Secret Page" not in text
 
 
+def test_untagged_page_is_non_public_and_withholds(tmp_path: Path) -> None:
+    d = tmp_path / "cache"
+    d.mkdir()
+    _build_index(
+        d / "wiki-index.db",
+        [("alpha.md", "Alpha Page", PUBLIC), ("untagged.md", "Untagged Page", "|")],
+    )
+    out = tmp_path / "o.md"
+    _run(d, out)
+    text = out.read_text()
+    assert _header(text, "status") == "withheld"
+    assert _bullets(text) == []
+    assert "Untagged Page" not in text
+
+
 def test_all_public_audience_renders(tmp_path: Path) -> None:
     d = tmp_path / "cache"
     d.mkdir()
@@ -399,3 +421,19 @@ def test_cli_requires_seed() -> None:
     with pytest.raises(SystemExit) as exc:
         main(["codex-context"])
     assert exc.value.code == 2
+
+
+def test_cli_forwards_interval_max_age_and_n(
+    cache: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from athenaeum.cli import main
+
+    argv = [
+        "codex-context", "--seed", SEED, "--output", "-", "--cache-dir", str(cache),
+        "--interval-seconds", "60", "--max-age-seconds", "45", "--n", "1",
+    ]  # fmt: skip
+    assert main(argv) == 0
+    text = capsys.readouterr().out
+    assert _header(text, "refresh_interval_seconds") == "60"
+    assert _ts(text, "stale_after") - _ts(text, "generated_at") == timedelta(seconds=45)
+    assert len(_bullets(text)) == 1
