@@ -81,6 +81,7 @@ MODULE_LAYER: dict[str, int] = {
     # under a hard import-weight contract.
     "recall_overflow": 1,
     "registry": 1,
+    "writer_registry": 1,
     "schemas": 1,
     "scoped_claims": 1,    # "L0/L1-boundary primitive" -> upper bound
     "storage": 1,

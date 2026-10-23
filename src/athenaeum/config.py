@@ -6261,6 +6261,80 @@ def resolve_transcript_receipts_enabled(config: dict[str, Any] | None) -> bool:
     return False
 
 
+def resolve_writer_identity_enforced(config: dict[str, Any] | None) -> bool:
+    """Resolve the writer-identity enforcement opt-in (issue athenaeum#2041). DEFAULT OFF.
+
+    **Off (the default)**: behaviour is byte-identical to before this flag
+    existed. Auto-supersession still honours a memory's self-declared
+    ``asserter`` block and ``asserter.grants``, and the ``ingest-answers``
+    path still records ``resolved_by="human"`` for an escalation answer
+    (the channel-implied label), which ``tier4_escalate`` then auto-applies
+    to a re-surfaced fingerprint.
+
+    **On**: self-declared identity grants no authority. ``asserter.grants``
+    count as "none declared" in :func:`athenaeum.asserter_authority.compare_authority`;
+    supersession's asserter comparisons answer ``"unknown"`` so route (a)
+    never fires and route (c) finds no corroboration; and ``ingest-answers``
+    records ``resolved_by="human-unverified"``, which ``tier4_escalate``
+    does not auto-apply and which decays like ``"auto"``. Records already on
+    disk as ``"human"`` keep their treatment. The ``correct_*`` transcript
+    gate already derives authority and is the same in both states.
+
+    Nothing here VERIFIES a writer; see ``docs/design/writer-identity.md``.
+
+    Mirrors :func:`resolve_transcript_receipts_enabled`'s shape exactly: env
+    ``ATHENAEUM_WRITER_IDENTITY_ENFORCED`` (``1``/``true``/``yes``/``on``,
+    case-insensitive) > yaml ``librarian.writer_identity_enforced`` >
+    default ``False``. No seed in ``_DEFAULTS`` (issue athenaeum#231).
+    Non-bool yaml values and unrecognized env strings fall through to off.
+    """
+    env = os.environ.get("ATHENAEUM_WRITER_IDENTITY_ENFORCED")
+    if env is not None:
+        return env.strip().lower() in ("1", "true", "yes", "on")
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("writer_identity_enforced")
+            if isinstance(raw, bool):
+                return raw
+    return False
+
+
+def resolve_writer_registry_path(
+    knowledge_root: Path,
+    config: dict[str, Any] | None = None,
+) -> Path:
+    """Resolve the writer registry path (issue athenaeum#2041).
+
+    The writer registry (:mod:`athenaeum.writer_registry`) LABELS named
+    writers; it does not verify them and never confers authority. Mirrors
+    :func:`resolve_authority_manifest_path`:
+
+    - ``ATHENAEUM_WRITER_REGISTRY`` env -- explicit path (highest).
+    - ``librarian.writer_registry_path`` yaml -- relative values resolve
+      against ``knowledge_root``; absolute values pass through.
+    - default: ``<knowledge_root>/writer-registry.yaml``.
+
+    Does not check for existence: a missing file is an empty registry. No
+    seed in ``_DEFAULTS`` (issue athenaeum#231).
+    """
+    env = os.environ.get("ATHENAEUM_WRITER_REGISTRY")
+    if env is not None and env.strip():
+        return Path(env).expanduser()
+
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("writer_registry_path")
+            if isinstance(raw, str) and raw.strip():
+                candidate = Path(raw.strip()).expanduser()
+                if not candidate.is_absolute():
+                    candidate = knowledge_root / candidate
+                return candidate
+
+    return knowledge_root / "writer-registry.yaml"
+
+
 def resolve_signal_mining_threshold(config: dict[str, Any] | None) -> int:
     """``librarian.signal_mining.threshold`` (default 5).
 

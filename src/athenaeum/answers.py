@@ -78,6 +78,7 @@ if TYPE_CHECKING:
 
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.fingerprint import (
+    RESOLVED_BY_HUMAN_UNVERIFIED,
     _member_key_str,
     _pair_text_from_passages,
     extract_passages,
@@ -1382,6 +1383,7 @@ def ingest_answers(
     # auto-memory root and any configured extra intake roots so those refs
     # resolve to the real source files instead of nothing.
     source_roots = [raw_root, raw_root / "auto-memory", pending_path.parent]
+    cfg: dict | None = config
     try:
         from athenaeum.config import load_config, resolve_extra_intake_roots
 
@@ -1392,6 +1394,13 @@ def ingest_answers(
                 source_roots.append(extra)
     except Exception:  # noqa: BLE001 -- config is best-effort; defaults suffice
         pass
+
+    # athenaeum#2041: read ONCE per run. On, the ``resolved_by`` recorded below
+    # is "human-unverified" -- the answer arrives on the human channel but the
+    # speaker is unverified. Off (default): "human", byte-identical to before.
+    from athenaeum.config import resolve_writer_identity_enforced
+
+    writer_identity_enforced = resolve_writer_identity_enforced(cfg)
 
     # athenaeum#248: meter the LLM calls this run makes (the free-text proposer is the
     # only API call on the ingest-answers path). The accumulator is threaded
@@ -1711,7 +1720,9 @@ def ingest_answers(
                 raw_root.parent,
                 fingerprint=pq.fingerprint,
                 verdict=verdict or "human-answered",
-                resolved_by="human",
+                resolved_by=(
+                    RESOLVED_BY_HUMAN_UNVERIFIED if writer_identity_enforced else "human"
+                ),
                 source_verdict_id=pq.id,
                 resolved_at=iso_ts,
                 side_a_norm=side_a_norm,
