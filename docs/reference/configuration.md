@@ -3436,27 +3436,9 @@ unrecognized env strings fall through to off.
 
 ## `owner`
 
-### `resolve_owner_asserter`
-
-- **YAML path:** `owner.asserter`
-- **Environment variable:** —
-- **CLI flag:** —
-- **Default:** `None`
-- **Precedence:** `athenaeum.yaml` > code default
-
-Return the owner's OIDC ``asserter`` identity block, or ``None``.
-
-Read from ``owner.asserter`` in ``athenaeum.yaml``. Used by
-``repair --backfill-sources`` to stamp ``on_behalf_of`` on a
-``user-stated`` upgrade WHEN a durable identity is configured. Transcripts
-carry no OIDC identity, so an unset block leaves ``on_behalf_of`` absent
-(the fallback). Returns the raw dict unchanged for
-`athenaeum.models.asserter_identity_key` to key on; a non-dict or
-empty block is inert.
-
 ### `resolve_owner`
 
-- **YAML path:** `owner.uid.google_contact.aliases.emails`
+- **YAML path:** `owner`
 - **Environment variable:** —
 - **CLI flag:** —
 - **Default:** `None`
@@ -3491,6 +3473,24 @@ when at least one usable field is set, else ``None``. A ``None`` return
 makes every owner-aware behavior (auto-bind, owner join keys, ``user_*``
 routing, the merge address guard) inert so the package works for any user
 with no owner configured. No default is seeded into ``_DEFAULTS`` — an unset owner is genuinely empty.
+
+### `resolve_owner_asserter`
+
+- **YAML path:** `owner.asserter`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `None`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Return the owner's OIDC ``asserter`` identity block, or ``None``.
+
+Read from ``owner.asserter`` in ``athenaeum.yaml``. Used by
+``repair --backfill-sources`` to stamp ``on_behalf_of`` on a
+``user-stated`` upgrade WHEN a durable identity is configured. Transcripts
+carry no OIDC identity, so an unset block leaves ``on_behalf_of`` absent
+(the fallback). Returns the raw dict unchanged for
+`athenaeum.models.asserter_identity_key` to key on; a non-dict or
+empty block is inert.
 
 ## `person_registry`
 

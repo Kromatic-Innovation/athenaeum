@@ -612,6 +612,15 @@ def _select_exact_key(name: str, docstring: str) -> str | None:
     return best
 
 
+#: Resolvers with no backticked key whose call-site-literal fallback (step c)
+#: would join SIBLING sub-keys into one bogus dotted path. The value is the
+#: real top-level key.
+_YAML_PATH_FALLBACK_OVERRIDES: dict[str, str] = {
+    # reads owner.uid / owner.google_contact / owner.aliases / owner.emails
+    "resolve_owner": "owner",
+}
+
+
 def _find_yaml_path(
     info: _ResolverInfo, known_sections: set[str]
 ) -> str | None:
@@ -625,6 +634,8 @@ def _find_yaml_path(
             continue
         if first_seg in known_sections:
             return candidate
+    if info.name in _YAML_PATH_FALLBACK_OVERRIDES:
+        return _YAML_PATH_FALLBACK_OVERRIDES[info.name]
     own_literals = _own_call_site_literals(info.node)
     yaml_candidates = [
         s

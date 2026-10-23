@@ -386,7 +386,9 @@ class TestYamlKeySelection:
         def resolve_zzz_probe_knob(config: dict[str, Any] | None) -> int:
             return 1
 
-        monkeypatch.setattr(config_mod, "resolve_zzz_probe_knob", resolve_zzz_probe_knob, raising=False)
+        monkeypatch.setattr(
+            config_mod, "resolve_zzz_probe_knob", resolve_zzz_probe_knob, raising=False
+        )
         synthetic_source = (
             gen_config_reference.CONFIG_PY.read_text(encoding="utf-8")
             + "\n\n"
