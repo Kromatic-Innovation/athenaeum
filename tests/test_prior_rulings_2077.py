@@ -141,6 +141,21 @@ class TestRejectedPairNotReproposed:
         real = propose_qualified_name_merges(wiki)
         assert real == {"splits": 1, "queued": 0, "unfoldable": 0, "ruled_out": 1}
 
+    def test_dry_run_on_an_unruled_pair_queues_nothing(self, wiki: Path) -> None:
+        # No ruling exists, so the only thing standing between this pair and
+        # a queued block is the ``dry_run`` guard itself (athenaeum#2101).
+        merges = wiki / "_pending_merges.md"
+        assert not merges.exists()
+
+        dry = propose_qualified_name_merges(wiki, dry_run=True)
+
+        assert dry == {"splits": 1, "queued": 0, "unfoldable": 0, "ruled_out": 0}
+        assert not merges.exists()
+        assert _open_ids(wiki) == []
+        # The same pair IS queued by a real run, so the dry run was the
+        # difference, not an unqueueable fixture.
+        assert propose_qualified_name_merges(wiki)["queued"] == 1
+
 
 class TestCooldown:
     def test_reproposed_after_cooldown_with_earlier_rejection_named(self, wiki: Path) -> None:
@@ -337,3 +352,63 @@ class TestWikiDedupeHonoursRulings:
         assert "not the same thing" in details
         assert "previously rejected by a human" in details
         assert "cooldown has since lapsed" in details
+
+
+class TestQueuedDuplicateNamesEarlierRuling:
+    """Issue athenaeum#2101: the ``_pending_merges.md`` block, not only the
+    attribution row, names the lapsed rejection."""
+
+    def test_duplicate_block_rationale_names_the_lapsed_rejection(self, tmp_path: Path) -> None:
+        from athenaeum.runlock import RunLock
+        from athenaeum.wiki_dedupe import propose_wiki_page_merges
+        from tests.test_wiki_dedupe import (
+            _BODY_A,
+            _BODY_B,
+            _content_payload,
+            _fake_embed,
+            _fake_llm_client,
+            _write_page,
+        )
+
+        root = tmp_path / "knowledge"
+        wiki = root / "wiki"
+        a = _write_page(wiki, "venture-a.md", body=_BODY_A)
+        b = _write_page(wiki, "venture-b.md", body=_BODY_B)
+        _rule(wiki, a, b, "reject", answered_at=OLD, base_name="venture-a")
+        # A human rejection also stamps a declared-merge-rejection on the
+        # pages, which lets Gate 1 settle the pair as distinct before the
+        # comparator runs. Strip it so the pair reaches a ``duplicate``.
+        a.write_text(
+            a.read_text(encoding="utf-8").replace("merge_rejected_with:\n- venture-b\n", ""),
+            encoding="utf-8",
+        )
+        assert "merge_rejected_with" not in a.read_text(encoding="utf-8")
+        cfg = {
+            "librarian": {
+                "comparator_enabled": True,
+                "rejected_merge_cooldown_days": 30,
+                "verdict_ledger_enabled": True,
+                "reversible_verdict_auto_apply_enabled": True,
+            }
+        }
+        client = _fake_llm_client(_content_payload("equivalent"))
+        lock = RunLock(root)
+        with lock:
+            results = propose_wiki_page_merges(
+                root,
+                config=cfg,
+                threshold=0.8,
+                embedding_provider=_fake_embed,
+                client=client,
+                lock=lock,
+            )
+        assert [r["verdict"] for r in results] == ["duplicate"]
+        rationales = [
+            m["rationale"] for m in list_pending_merges(wiki / "_pending_merges.md")
+        ]
+        assert len(rationales) == 1
+        assert "athenaeum#716 reversible-verdict auto-apply" in rationales[0]
+        assert "Earlier ruling on this pair (" in rationales[0]
+        assert "previously rejected by a human on 2026-01-01" in rationales[0]
+        assert "not the same thing" in rationales[0]
+        assert "the rejection cooldown has since lapsed." in rationales[0]
