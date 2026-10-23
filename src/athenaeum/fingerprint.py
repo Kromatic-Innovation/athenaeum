@@ -132,6 +132,14 @@ def knowledge_root_from_pending(pending_path: Path) -> Path:
     return pending_path.parent
 
 
+#: ``resolved_by`` value written by the ``ingest-answers`` path when
+#: ``librarian.writer_identity_enforced`` is on (issue athenaeum#2041). The
+#: answer arrived on the human channel but the speaker is unverified, so it
+#: is NOT ``"human"``: ``tier4_escalate`` does not auto-apply it and it
+#: decays like ``"auto"``.
+RESOLVED_BY_HUMAN_UNVERIFIED = "human-unverified"
+
+
 def record_resolution(
     knowledge_root: Path,
     *,
@@ -149,8 +157,10 @@ def record_resolution(
 
     Best-effort: a write failure is logged and swallowed — recording the
     fingerprint must never block the human-answer or auto-apply path. The
-    ``resolved_by`` value MUST be ``"human"`` or ``"auto"`` (load-bearing for
-    sibling athenaeum#199).
+    ``resolved_by`` value MUST be ``"human"``, ``"auto"`` or
+    :data:`RESOLVED_BY_HUMAN_UNVERIFIED` (load-bearing for sibling
+    athenaeum#199; the last is written only with
+    ``librarian.writer_identity_enforced`` on, athenaeum#2041).
 
     ``side_a_norm`` / ``side_b_norm`` (issue athenaeum#199) persist the per-side
     NORMALIZED claim text in the verdict's ORIGINAL a/b orientation. The
@@ -491,7 +501,8 @@ def is_stale_auto_suppression(
     Returns True only when ALL hold:
 
     * ``ttl_days > 0`` (0 == disabled; current no-decay behavior).
-    * ``resolved_by == "auto"`` — human verdicts NEVER decay.
+    * ``resolved_by`` is ``"auto"`` or ``"human-unverified"`` (athenaeum#2041) —
+      human verdicts NEVER decay.
     * ``(action or verdict) == "not_a_conflict"`` — enacting auto verdicts
       (``keep_*`` / ``correct_*`` / ``forget_*`` / ``deprecate_both``) NEVER
       decay; only suppressions do.
@@ -510,7 +521,8 @@ def is_stale_auto_suppression(
     """
     if ttl_days <= 0:
         return False
-    if record.get("resolved_by") != "auto":
+    # athenaeum#2041: an unverified-human record decays like an auto one.
+    if record.get("resolved_by") not in ("auto", RESOLVED_BY_HUMAN_UNVERIFIED):
         return False
     if (record.get("action") or record.get("verdict")) != _SUPPRESS_VERDICT:
         return False

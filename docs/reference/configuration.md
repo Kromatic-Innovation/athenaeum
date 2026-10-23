@@ -3424,6 +3424,62 @@ malformed env value logs a WARNING and falls back to yaml. A ``bool`` or
 non-numeric yaml value falls back to the default; ``0`` or negative yaml
 disables the floor.
 
+### `resolve_writer_identity_enforced`
+
+- **YAML path:** `librarian.writer_identity_enforced`
+- **Environment variable:** `ATHENAEUM_WRITER_IDENTITY_ENFORCED`
+- **CLI flag:** —
+- **Default:** `False`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the writer-identity enforcement opt-in. DEFAULT OFF.
+
+**Off (the default)**: behaviour is byte-identical to before this flag
+existed. Auto-supersession still honours a memory's self-declared
+``asserter`` block and its grants list, and the ``ingest-answers``
+path still records ``resolved_by="human"`` for an escalation answer
+(the channel-implied label), which ``tier4_escalate`` then auto-applies
+to a re-surfaced fingerprint.
+
+**On**: self-declared identity grants no authority. the asserter grants
+count as "none declared" in `athenaeum.asserter_authority.compare_authority`;
+supersession's asserter comparisons answer ``"unknown"`` so route (a)
+never fires and route (c) finds no corroboration; and ``ingest-answers``
+records ``resolved_by="human-unverified"``, which ``tier4_escalate``
+does not auto-apply and which decays like ``"auto"``. Records already on
+disk as ``"human"`` keep their treatment. The ``correct_*`` transcript
+gate already derives authority and is the same in both states.
+
+Nothing here VERIFIES a writer; see ``docs/design/writer-identity.md``.
+
+Mirrors `resolve_transcript_receipts_enabled`'s shape exactly: env
+``ATHENAEUM_WRITER_IDENTITY_ENFORCED`` (``1``/``true``/``yes``/``on``,
+case-insensitive) > yaml ``librarian.writer_identity_enforced`` >
+default ``False``. No seed in ``_DEFAULTS``.
+Non-bool yaml values and unrecognized env strings fall through to off.
+
+### `resolve_writer_registry_path`
+
+- **YAML path:** `librarian.writer_registry_path`
+- **Environment variable:** `ATHENAEUM_WRITER_REGISTRY`
+- **CLI flag:** —
+- **Default:** `<knowledge_root>/writer-registry.yaml`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the writer registry path.
+
+The writer registry (`athenaeum.writer_registry`) LABELS named
+writers; it does not verify them and never confers authority. Mirrors
+`resolve_authority_manifest_path`:
+
+- ``ATHENAEUM_WRITER_REGISTRY`` env -- explicit path (highest).
+- ``librarian.writer_registry_path`` yaml -- relative values resolve
+ against ``knowledge_root``; absolute values pass through.
+- default: ``<knowledge_root>/writer-registry.yaml``.
+
+Does not check for existence: a missing file is an empty registry. No
+seed in ``_DEFAULTS``.
+
 ## `models`
 
 ### `resolve_model`

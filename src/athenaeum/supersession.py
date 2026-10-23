@@ -162,6 +162,7 @@ from athenaeum.config import (
     resolve_supersession_asserter_weekly_max,
     resolve_supersession_claim_window_max,
     resolve_supersession_self_revision_window_days,
+    resolve_writer_identity_enforced,
 )
 from athenaeum.dimensions import (
     DEFAULT_REGISTRY,
@@ -378,6 +379,24 @@ def _same_coordinates(
     return True
 
 
+def _compare_asserters(
+    a: dict[str, Any] | None,
+    b: dict[str, Any] | None,
+    writer_identity_enforced: bool,
+) -> str:
+    """:func:`athenaeum.models.compare_asserters`, gated by athenaeum#2041.
+
+    With ``librarian.writer_identity_enforced`` on, an ``asserter`` block is
+    self-declared by whoever wrote the memory and proves nothing, so the
+    answer is always ``"unknown"`` -- route (a) never fires and route (c)
+    finds no corroboration. Off (the default), this is exactly
+    ``compare_asserters``.
+    """
+    if writer_identity_enforced:
+        return "unknown"
+    return compare_asserters(a, b)
+
+
 def _third_party_signals(
     *,
     registry: DimensionRegistry,
@@ -385,6 +404,7 @@ def _third_party_signals(
     loser: ComparatorPage,
     live_claims: tuple[ComparatorPage, ...],
     exclude_ids: frozenset[str],
+    writer_identity_enforced: bool,
 ) -> tuple[bool, bool]:
     """Return ``(no_third_conflicting_live_claim, route_c_corroborated_signal)``.
 
@@ -405,8 +425,12 @@ def _third_party_signals(
         if not _same_coordinates(registry, winner.meta, candidate.meta):
             continue
         asserter_candidate = parse_asserter(candidate.meta)
-        loser_cmp = compare_asserters(asserter_loser, asserter_candidate)
-        winner_cmp = compare_asserters(asserter_winner, asserter_candidate)
+        loser_cmp = _compare_asserters(
+            asserter_loser, asserter_candidate, writer_identity_enforced
+        )
+        winner_cmp = _compare_asserters(
+            asserter_winner, asserter_candidate, writer_identity_enforced
+        )
         # AC9: queue on doubt -- "same" AND "unknown" both count as NOT
         # confirmed different from the loser.
         if loser_cmp != "different":
@@ -455,6 +479,8 @@ def decide_supersession(
 
     # --- AC1/AC2/AC3: cheap, winner-independent preconditions ---
     cond_enabled = resolve_auto_supersession_enabled(config)
+    # athenaeum#2041: read ONCE here and passed down; helpers never re-read env.
+    enforced = resolve_writer_identity_enforced(config)
     cond_contradiction = outcome.verdict == VERDICT_CONTRADICTION
     located_passages = list(outcome.conflicting_passages)
     cond_located = bool(located_passages)
@@ -506,11 +532,21 @@ def decide_supersession(
     # --- AC8: asserter route (a) / (b) / (c) ---
     asserter_put_winner = parse_asserter(put_winner.meta)
     asserter_put_loser = parse_asserter(put_loser.meta)
-    route_a_same_asserter = compare_asserters(asserter_put_winner, asserter_put_loser) == "same"
-    route_b_greater_authority = strictly_greater_authority(
-        put_winner.meta, put_loser.meta, config=config
+    route_a_same_asserter = (
+        _compare_asserters(asserter_put_winner, asserter_put_loser, enforced) == "same"
     )
-    authority_relation = compare_authority(put_winner.meta, put_loser.meta, config=config)
+    route_b_greater_authority = strictly_greater_authority(
+        put_winner.meta,
+        put_loser.meta,
+        config=config,
+        writer_identity_enforced=enforced,
+    )
+    authority_relation = compare_authority(
+        put_winner.meta,
+        put_loser.meta,
+        config=config,
+        writer_identity_enforced=enforced,
+    )
     equal_or_incomparable = treated_as_equal_authority(authority_relation)
 
     cond_no_third_conflicting, corroboration_signal = _third_party_signals(
@@ -519,6 +555,7 @@ def decide_supersession(
         loser=put_loser,
         live_claims=live_claims_tuple,
         exclude_ids=exclude_ids,
+        writer_identity_enforced=enforced,
     )
     route_c_corroborated = equal_or_incomparable and corroboration_signal
 
