@@ -448,7 +448,14 @@ class TestStampDoesNotOutliveCooldown:
     leaves on the pages must follow the cooldown, not outlive it."""
 
     @staticmethod
-    def _run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, cooldown: int, days: float):
+    def _run(
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        cooldown: int,
+        days: float,
+        seed=None,
+    ):
         from athenaeum.runlock import RunLock
         from athenaeum.wiki_dedupe import propose_wiki_page_merges
         from tests.test_wiki_dedupe import (
@@ -473,6 +480,8 @@ class TestStampDoesNotOutliveCooldown:
             answered_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             base_name="venture-a",
         )
+        if seed is not None:
+            seed(root, a, b)
         _advance_clock(monkeypatch, days)
         cfg = {"librarian": {"comparator_enabled": True, "rejected_merge_cooldown_days": cooldown}}
         client = _fake_llm_client(_content_payload("equivalent"))
@@ -492,6 +501,30 @@ class TestStampDoesNotOutliveCooldown:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         results, client = self._run(tmp_path, monkeypatch, cooldown=30, days=31)
+        assert [r["verdict"] for r in results] == ["duplicate"]
+        client.messages.create.assert_called()
+
+    def test_memoized_gate_1_distinct_does_not_pin_a_lapsed_pair(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A ``distinct`` the stamp already earned in the verdict ledger
+        (e.g. from another comparator caller) is re-decided after the lapse."""
+        from athenaeum.comparator import page_from_path, record_comparison
+        from athenaeum.runlock import RunLock
+
+        def seed(root: Path, a: Path, b: Path) -> None:
+            lock = RunLock(root)
+            with lock:
+                rec = record_comparison(
+                    root / "wiki",
+                    page_from_path(a),
+                    page_from_path(b),
+                    client=None,
+                    lock=lock,
+                )
+            assert rec["verdict"] == "distinct"
+
+        results, client = self._run(tmp_path, monkeypatch, cooldown=30, days=31, seed=seed)
         assert [r["verdict"] for r in results] == ["duplicate"]
         client.messages.create.assert_called()
 

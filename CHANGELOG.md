@@ -365,7 +365,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prior-ruling lookup reports the rejection `expired`. A rejection still in
   force, or any rejection with `rejected_merge_cooldown_days: 0`, is still
   skipped with no LLM call; a re-proposed pair goes through the T1 screen like
-  any other.
+  any other. `record_comparison` gained `reopen_declared_rejection` so a
+  memoized stamp-only `distinct` in the verdict ledger is re-decided too.
 - **The queued `duplicate` merge block names a lapsed human rejection (issue
   athenaeum#2101).** After athenaeum#2094 the earlier rejection reached only the
   wiki-dedupe attribution row; the `_pending_merges.md` block a reviewer

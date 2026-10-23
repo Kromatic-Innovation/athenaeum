@@ -1134,6 +1134,7 @@ def propose_wiki_page_merges(
                     config=resolved_config,
                     usage=usage,
                     lock=lock,
+                    reopen_declared_rejection=matched.expired is not None,
                 )
                 # Issue athenaeum#1243 AC1/AC2: one row per examined pair, on
                 # EVERY branch below. ``embedder`` is ``Cluster.embedder``,
