@@ -20,32 +20,15 @@ Design (see :func:`generate` for the pipeline):
    ``athenaeum.config`` (not re-exported), via ``inspect.getmembers`` — the
    same non-hand-maintained enumeration
    ``tests/test_config_resolver_parity_generic.py`` uses.
-2. **YAML path** — resolved via a three-step fallback, each one only
-   consulted if the previous found nothing:
-
-   a. An exact ``` ``dotted.key`` ``` backtick span in the function's own
-      docstring (covers the large majority: these docstrings already state
-      the key precisely, because ``config.py``'s own module docstring makes
-      "resolver function + docs entry are two halves of one change" a
-      FACTORING RULE).
-   b. A looser dotted-identifier match anywhere in the docstring, accepted
-      only when its first segment is a section name already seen via (a)
-      elsewhere in the module (:data:`_KNOWN_SECTIONS`) — this catches a key
-      mentioned inline without exact backtick wrapping (e.g. followed by
-      ``: true`` or ``.<name>``) without accidentally matching an unrelated
-      dotted reference like a module path (``athenaeum.foo.bar``) or a doc
-      path, since those don't share a section name with any real yaml key.
-   c. A static-analysis fallback: every string-literal argument passed to a
-      ``.get(...)``-shaped call (or a private ``_resolve*`` helper call) IN
-      THE RESOLVER'S OWN BODY, in source order, filtered to
-      yaml-key-identifier shape. This is intentionally narrower than
-      ``test_config_resolver_parity_generic.py``'s own literal walk (which
-      also follows one level into a delegate's body and therefore reorders
-      section-before-key ambiguously — fine for THAT module's job of proving
-      "some nesting changes the result", wrong for THIS module's job of
-      printing one correct nesting) — for every resolver this fallback
-      actually fires on, the section+key are both literal arguments at the
-      resolver's OWN call site, in the right order.
+2. **YAML path** — the backticked ``dotted.key`` in the resolver's own
+   docstring whose leaf best matches ``resolve_<leaf>`` (see
+   :func:`_select_exact_key`; issue athenaeum#2104). A key that does not
+   match, or two keys that tie, is an error, never a guess by citation order.
+   A resolver that cites no key must be declared in
+   :data:`_YAML_PATH_DECLARED` (``None`` = genuinely no yaml key), and one
+   whose key legitimately does not mirror its name goes in
+   :data:`_YAML_KEY_OVERRIDES`. Prose and call-site literals are no longer
+   consulted: both mis-sectioned entries in the past.
 
 3. **Env var** — a ``ATHENAEUM_[A-Z0-9_]+`` literal found in the resolver's
    own source, falling back one level into a called private ``_resolve*``
@@ -550,45 +533,60 @@ def _singular(token: str) -> str:
 
 
 def _leaf_match_len(leaf_tokens: list[str], key: str) -> int:
-    """How strongly *key*'s own leaf matches the resolver leaf, or 0 for none.
+    """How strongly *key* matches the resolver leaf, or 0 for no match.
 
     ``resolve_<leaf>`` is named for its key's last segment, but the resolver
-    name often spells the section's tail too (``resolve_spend_max_tokens_per_run``
-    -> ``spend.max_tokens_per_run``) or carries a suffix (``resolve_delta_enabled``
-    -> ``librarian.delta``). So a key matches when its last segment's
-    ``_``-separated tokens appear as a contiguous run in the resolver leaf's
-    tokens. The score is the run length, plus a bonus for an exact leaf match.
+    name often spells more of the path (``resolve_spend_max_tokens_per_run``
+    -> ``spend.max_tokens_per_run``; ``resolve_off_corpus_adapter_name`` ->
+    ``off_corpus.adapter``) or carries a suffix (``resolve_delta_enabled`` ->
+    ``librarian.delta``). The key's last segment must appear as a contiguous
+    run of ``_``-separated tokens in the leaf; each further trailing segment
+    that still extends the contiguous run adds its tokens, so the key that
+    explains MORE of the resolver name outranks one that shares only the final
+    word. An exact last-segment match earns a bonus. Equal scores are the
+    caller's problem to reject, never to break by citation order.
     """
-    leaf_tokens = [_singular(t) for t in leaf_tokens]
-    key_tokens = [_singular(t) for t in key.rsplit(".", 1)[-1].split("_")]
-    n = len(key_tokens)
-    for i in range(len(leaf_tokens) - n + 1):
-        if leaf_tokens[i : i + n] == key_tokens:
-            return n + (100 if key_tokens == leaf_tokens else 0)
-    return 0
+    leaf = [_singular(t) for t in leaf_tokens]
+    segments = [[_singular(t) for t in seg.split("_")] for seg in key.split(".")]
+
+    def contains(run: list[str]) -> bool:
+        n = len(run)
+        return any(leaf[i : i + n] == run for i in range(len(leaf) - n + 1))
+
+    best = 0
+    run: list[str] = []
+    for seg in reversed(segments):
+        run = seg + run
+        if not contains(run):
+            break
+        best = len(run)
+    if best and segments[-1] == leaf:
+        best += 100
+    return best
 
 
 def _select_exact_key(name: str, docstring: str) -> str | None:
     """Pick the backticked dotted key in *docstring* that belongs to resolver *name*.
 
-    A resolver ``resolve_<leaf>`` owns the key whose leaf matches ``<leaf>``
+    A resolver ``resolve_<leaf>`` owns the key that best explains ``<leaf>``
     (see :func:`_leaf_match_len`). Picking the FIRST backticked key instead
     mis-sectioned any knob whose docstring cites a precedent key before its
-    own (issue athenaeum#2104). Ties go to the earliest-cited key.
+    own (issue athenaeum#2104).
 
-    Returns ``None`` when the docstring cites no candidate key at all (the
-    caller then falls back to the looser steps; ``athenaeum.yaml`` is the
-    config file, not a key). Raises :class:`AmbiguousYamlKeyError` -- naming
-    the resolver and the keys seen -- when keys are cited but none matches,
-    rather than guessing.
+    Returns ``None`` when the docstring cites no candidate key at all
+    (``athenaeum.*`` is the config file or a module path, not a key); the
+    caller then requires an explicit declaration. Raises
+    :class:`AmbiguousYamlKeyError` -- naming the resolver and the keys seen --
+    when keys are cited but none matches, or when two DISTINCT keys tie for
+    best: the citation order of a precedent mention must never decide.
     """
-    keys = [
-        k
-        for k in _EXACT_BACKTICK_DOTTED.findall(docstring)
-        if k.split(".")[0] != "athenaeum"
-    ]
-    if not keys:
-        return None
+    keys = list(
+        dict.fromkeys(
+            k
+            for k in _EXACT_BACKTICK_DOTTED.findall(docstring)
+            if k.split(".")[0] != "athenaeum"
+        )
+    )
     override = _YAML_KEY_OVERRIDES.get(name)
     if override is not None:
         if override not in keys:
@@ -597,54 +595,62 @@ def _select_exact_key(name: str, docstring: str) -> str | None:
                 f"docstring cites only {keys!r}."
             )
         return override
+    if not keys:
+        return None
     leaf_tokens = name.removeprefix("resolve_").split("_")
-    best, best_score = None, 0
-    for key in keys:
-        score = _leaf_match_len(leaf_tokens, key)
-        if score > best_score:
-            best, best_score = key, score
-    if best is None:
+    scores = {k: _leaf_match_len(leaf_tokens, k) for k in keys}
+    top = max(scores.values())
+    if top == 0:
         raise AmbiguousYamlKeyError(
             f"{name}: no backticked dotted key in its docstring matches the "
             f"resolver's leaf {'_'.join(leaf_tokens)!r}; keys seen: {keys!r}. "
-            "Cite the resolver's own key in the docstring."
+            "Cite the resolver's own key in the docstring, or add the "
+            "resolver to _YAML_KEY_OVERRIDES."
         )
-    return best
+    tied = [k for k in keys if scores[k] == top]
+    if len(tied) > 1:
+        raise AmbiguousYamlKeyError(
+            f"{name}: keys {tied!r} tie as the best match for leaf "
+            f"{'_'.join(leaf_tokens)!r}; reword the docstring so only the "
+            "resolver's own key is backticked, or add the resolver to "
+            "_YAML_KEY_OVERRIDES."
+        )
+    return tied[0]
 
 
-#: Resolvers with no backticked key whose call-site-literal fallback (step c)
-#: would join SIBLING sub-keys into one bogus dotted path. The value is the
-#: real top-level key.
-_YAML_PATH_FALLBACK_OVERRIDES: dict[str, str] = {
+#: Resolvers whose docstring cites NO backticked dotted key of their own. The
+#: generator will not guess a path from prose or call-site literals: each must
+#: be declared here (value ``None`` = genuinely no yaml key), or cite its key
+#: in backticks. Paths below are the keys the resolver bodies actually read.
+_YAML_PATH_DECLARED: dict[str, str | None] = {
     # reads owner.uid / owner.google_contact / owner.aliases / owner.emails
     "resolve_owner": "owner",
+    "resolve_google_contact_keys": "dedupe.google_contact_keys",
+    "resolve_push_after_run": "librarian.push_after_run",
+    "resolve_pull_before_run": "librarian.pull_before_run",
+    "resolve_min_cluster_cohesion_scopes": "librarian.min_cluster_cohesion_scopes",
+    "resolve_reasoning_tier_any_screen_enabled": None,  # env-only
+    "resolve_search_backend": "search_backend",
+    "resolve_model_rates": "pricing",
+    "resolve_dimensions": "dimensions",
+    "resolve_embedding_model": "vector.embedding_model",
+    "resolve_qualified_name_scan_enabled": "librarian.qualified_name_scan",
+    "resolve_retention_pack_overrides": "erasure.retention_packs",
+    "resolve_authority_grant_implications": "librarian.authority_grant_implications",
 }
 
 
-def _find_yaml_path(
-    info: _ResolverInfo, known_sections: set[str]
-) -> str | None:
+def _find_yaml_path(info: _ResolverInfo) -> str | None:
     exact = _select_exact_key(info.name, info.docstring)
     if exact:
         return exact
-    for m in _DOTTED_RE.finditer(info.docstring):
-        candidate = m.group(0)
-        first_seg = candidate.split(".")[0]
-        if first_seg == "athenaeum":
-            continue
-        if first_seg in known_sections:
-            return candidate
-    if info.name in _YAML_PATH_FALLBACK_OVERRIDES:
-        return _YAML_PATH_FALLBACK_OVERRIDES[info.name]
-    own_literals = _own_call_site_literals(info.node)
-    yaml_candidates = [
-        s
-        for s in own_literals
-        if _YAML_KEY_RE.match(s) and not _ENV_VAR_RE.match(s)
-    ]
-    if yaml_candidates:
-        return ".".join(yaml_candidates)
-    return None
+    if info.name in _YAML_PATH_DECLARED:
+        return _YAML_PATH_DECLARED[info.name]
+    raise AmbiguousYamlKeyError(
+        f"{info.name}: docstring cites no backticked dotted yaml key and the "
+        "resolver is not in _YAML_PATH_DECLARED. Cite the key in backticks "
+        "(e.g. ``section.leaf``) or declare it."
+    )
 
 
 def _invoke_default(info: _ResolverInfo, config_mod: Any) -> Any:
@@ -752,16 +758,6 @@ def generate() -> str:
         import athenaeum.config as config_mod
 
         resolvers, all_funcs = _collect_resolvers()
-        # Pass 1: exact-backtick yaml paths only, to seed the known-section
-        # vocabulary the loose-match fallback (step b) uses.
-        known_sections: set[str] = set()
-        for r in resolvers:
-            if r.name in _CURATED:
-                continue
-            exact = _select_exact_key(r.name, r.docstring)
-            if exact:
-                known_sections.add(exact.split(".")[0])
-
         rows: list[dict[str, str]] = []
         for r in resolvers:
             curated = _CURATED.get(r.name)
@@ -796,7 +792,7 @@ def generate() -> str:
                 )
                 continue
 
-            yaml_path = _find_yaml_path(r, known_sections)
+            yaml_path = _find_yaml_path(r)
             env_var = _find_env_var(r, all_funcs)
             default_value = _invoke_default(r, config_mod)
 

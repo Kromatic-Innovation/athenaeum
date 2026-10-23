@@ -355,6 +355,52 @@ class TestYamlKeySelection:
             == "librarian.writer_identity_enforced"
         )
 
+    def test_two_keys_tying_raises_naming_both(self) -> None:
+        # Same last segment, same score: citation order must not decide.
+        doc = "Like ``dedupe.min_merge_confidence``; reads ``librarian.min_merge_confidence``."
+        with pytest.raises(gen_config_reference.AmbiguousYamlKeyError) as exc:
+            gen_config_reference._select_exact_key("resolve_min_merge_confidence", doc)
+        assert "dedupe.min_merge_confidence" in str(exc.value)
+        assert "librarian.min_merge_confidence" in str(exc.value)
+        assert "tie" in str(exc.value)
+
+    def test_key_explaining_more_of_the_name_beats_a_shared_final_word(self) -> None:
+        doc = (
+            "Mirrors ``librarian.corrections.max_records_per_run``; "
+            "reads ``librarian.shape_rules.max_records_per_run``."
+        )
+        assert (
+            gen_config_reference._select_exact_key("resolve_shape_rules_max_records_per_run", doc)
+            == "librarian.shape_rules.max_records_per_run"
+        )
+        doc = "Names ``storage.adapters`` for ``off_corpus.adapter``."
+        assert (
+            gen_config_reference._select_exact_key("resolve_off_corpus_adapter_name", doc)
+            == "off_corpus.adapter"
+        )
+
+    def test_resolver_with_no_key_and_no_declaration_raises(self) -> None:
+        info = gen_config_reference._ResolverInfo(
+            "resolve_undeclared_knob", None, None, "Resolve a knob. See ``athenaeum.yaml``."  # type: ignore[arg-type]
+        )
+        with pytest.raises(
+            gen_config_reference.AmbiguousYamlKeyError, match="resolve_undeclared_knob"
+        ):
+            gen_config_reference._find_yaml_path(info)
+
+    def test_declared_resolver_without_key_uses_declaration(self) -> None:
+        info = gen_config_reference._ResolverInfo(
+            "resolve_owner", None, None, "Reads ``athenaeum.yaml``."  # type: ignore[arg-type]
+        )
+        assert gen_config_reference._find_yaml_path(info) == "owner"
+        assert gen_config_reference._YAML_PATH_DECLARED["resolve_owner"] == "owner"
+
+    def test_declared_paths_are_real_resolvers(self) -> None:
+        import athenaeum.config as config_mod
+
+        for name in gen_config_reference._YAML_PATH_DECLARED:
+            assert callable(getattr(config_mod, name, None)), name
+
     def test_exact_leaf_beats_partial_token_match(self) -> None:
         doc = "Cites ``librarian.delta`` then ``librarian.delta.max_affected_clusters``."
         assert (
@@ -446,8 +492,14 @@ def _section_path_mismatches(text: str) -> list[str]:
 
 
 class TestSectionMatchesYamlPath:
-    """Issue athenaeum#2104: independent of the generator's own selection logic,
-    an entry's YAML path must start with the section it is filed under."""
+    """Issue athenaeum#2104: an entry's YAML path must start with the section
+    it is filed under, checked against the committed document.
+
+    Scope note: the generator derives the section from the path's first
+    segment, so for generated output this is close to tautological. It guards
+    a hand-edited or generator-bypassing document, not a wrong key; the wrong
+    -key defect is caught by :class:`TestYamlKeySelection`.
+    """
 
     def test_committed_reference_has_no_mis_sectioned_entry(self) -> None:
         text = CONFIG_REFERENCE_DOC.read_text(encoding="utf-8")
