@@ -161,6 +161,7 @@ from athenaeum.comparator import (
     VERDICT_UNDERDETERMINED,
     begin_content_relation_unavailable_tracking,
     flush_content_relation_unavailable_warning,
+    ledger_outcome,
     page_from_path,
     record_comparison,
 )
@@ -1106,6 +1107,20 @@ def propose_wiki_page_merges(
                     if redo.verdict == VERDICT_DUPLICATE:
                         record["outcome"] = redo
                         record["skipped"] = None
+                    elif redo.verdict is not None:
+                        # Issue athenaeum#2095: the redo disagrees. Ledger it
+                        # (newest entry wins) and enact it as the fresh
+                        # decision it is, so the pair stops being a
+                        # memoized-unenacted ``duplicate`` and the next run
+                        # does not spend another Gate 2 call on it. The
+                        # verdict is the comparator's; confidence stays out
+                        # (athenaeum#715). ``verdict is None`` (Gate 2
+                        # unavailable) makes no call worth memoizing and
+                        # stays retryable.
+                        ledger_outcome(wiki_root, page_a, page_b, redo, lock=lock)
+                        record["outcome"] = redo
+                        record["skipped"] = None
+                        record["verdict"] = redo.verdict
                 # Still below the floor: fall past the fresh branch so the
                 # archive row is re-recorded below.
                 if record.get("skipped") == "fresh" and not (

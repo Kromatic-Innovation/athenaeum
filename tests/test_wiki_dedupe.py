@@ -1857,8 +1857,36 @@ class TestAthenaeum2080ConfidenceFloor:
         assert third[0]["action"] != "archived-below-confidence-floor"
         assert third[0]["action"] == "fold-proposal"
         assert (wiki_root / FOLD_EVIDENCE_DIRNAME / "low-x+low-y.md").is_file()
-        # Fourth run: enacted pair is genuinely memoized now.
-        assert self._run(knowledge_root, config=low) == []
+        # Fourth run: enacted pair is genuinely memoized now, and spends no
+        # LLM call (issue athenaeum#2095 AC2).
+        fourth_client = _fake_llm_client(_content_payload("equivalent"))
+        assert self._run(knowledge_root, config=low, client=fourth_client) == []
+        assert fourth_client.messages.create.call_count == 0
+
+    def test_memoized_duplicate_redo_not_duplicate_converges(self, tmp_path: Path) -> None:
+        """Issue athenaeum#2095 AC1: a memoized ``duplicate`` whose floor
+        re-check recompute is NOT a duplicate is ledgered, so only the first
+        re-check spends an LLM call."""
+        from athenaeum.verdict_effects import FOLD_EVIDENCE_DIRNAME
+        from athenaeum.verdicts import lookup_pair
+
+        knowledge_root = _seed_low_cosine_pair(tmp_path)
+        wiki_root = knowledge_root / "wiki"
+        high = {"librarian": {"comparator_enabled": True, "wiki_dedupe_min_confidence": 0.9}}
+        low = {"librarian": {"comparator_enabled": True, "wiki_dedupe_min_confidence": 0.5}}
+
+        # Run 0 archives a ``duplicate`` under the high floor.
+        first = self._run(knowledge_root, config=high)
+        assert first[0]["action"] == "archived-below-confidence-floor"
+
+        distinct_client = _fake_llm_client(_content_payload("compatible"))
+        for _ in range(3):
+            self._run(knowledge_root, config=low, client=distinct_client)
+
+        assert distinct_client.messages.create.call_count == 1
+        entry = lookup_pair(wiki_root, "low-x+low-y")
+        assert entry is not None and entry.verdict == "distinct"
+        assert not (wiki_root / FOLD_EVIDENCE_DIRNAME).exists()
 
     def test_confidence_is_recorded_on_every_row_even_above_floor(self, tmp_path: Path) -> None:
         knowledge_root = _seed_identical_pages(tmp_path, n=2)

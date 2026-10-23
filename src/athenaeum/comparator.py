@@ -1105,6 +1105,51 @@ def _is_legacy_prose_scope_verdict(entry: Any) -> bool:
     )
 
 
+def ledger_outcome(
+    wiki_root: Path,
+    page_a: ComparatorPage,
+    page_b: ComparatorPage,
+    outcome: CompareOutcome,
+    *,
+    registry: DimensionRegistry = DEFAULT_REGISTRY,
+    lock: RunLock,
+    authority_basis: str = "implicit-superuser",
+    registry_epoch: int | None = None,
+    tree_epoch: int | None = None,
+    coord_origins: dict[str, str] | None = None,
+) -> None:
+    """Append *outcome* (``verdict`` not ``None``) to the verdict ledger.
+
+    The write half of :func:`record_comparison`, split out (issue
+    athenaeum#2095) so a caller that already holds a freshly computed
+    :class:`CompareOutcome` -- ``wiki_dedupe``'s floor re-check of a memoized
+    ``duplicate`` -- can ledger it without a second comparison. The newest
+    entry for a pair wins (:func:`athenaeum.verdicts.lookup_pair`).
+    """
+    assert outcome.verdict is not None
+    basis = Basis(
+        content_hashes=[content_hash(page_a.text), content_hash(page_b.text)],
+        coords=[_coord_snapshot(registry, page_a.meta), _coord_snapshot(registry, page_b.meta)],
+        coord_origins=dict(coord_origins or {}),
+        registry_epoch=registry_epoch,
+        tree_epoch=tree_epoch,
+        authority_basis=authority_basis,
+        predicate_instrument=outcome.predicate_instrument,
+        comparator_version=outcome.comparator_version,
+    )
+    entry = build_verdict_entry(
+        page_a.id,
+        page_b.id,
+        outcome.verdict,
+        basis=basis,
+        separator=outcome.separator,
+        missing=outcome.missing,
+        assumed=outcome.assumed,
+        decided_by=DECIDED_BY,
+    )
+    append_verdict(wiki_root, entry, lock=lock)
+
+
 def record_comparison(
     wiki_root: Path,
     page_a: ComparatorPage,
@@ -1214,27 +1259,18 @@ def record_comparison(
             "outcome": None,
         }
 
-    basis = Basis(
-        content_hashes=[content_hash(page_a.text), content_hash(page_b.text)],
-        coords=[_coord_snapshot(registry, page_a.meta), _coord_snapshot(registry, page_b.meta)],
-        coord_origins=dict(coord_origins or {}),
+    ledger_outcome(
+        wiki_root,
+        page_a,
+        page_b,
+        outcome,
+        registry=registry,
+        lock=lock,
+        authority_basis=authority_basis,
         registry_epoch=registry_epoch,
         tree_epoch=tree_epoch,
-        authority_basis=authority_basis,
-        predicate_instrument=outcome.predicate_instrument,
-        comparator_version=outcome.comparator_version,
+        coord_origins=coord_origins,
     )
-    entry = build_verdict_entry(
-        page_a.id,
-        page_b.id,
-        outcome.verdict,
-        basis=basis,
-        separator=outcome.separator,
-        missing=outcome.missing,
-        assumed=outcome.assumed,
-        decided_by=DECIDED_BY,
-    )
-    append_verdict(wiki_root, entry, lock=lock)
     return {
         "ok": True,
         "pair": pair_key,
@@ -1266,6 +1302,7 @@ __all__ = [
     "content_relation",
     "flush_content_relation_unavailable_warning",
     "gate1_separator_relations",
+    "ledger_outcome",
     "page_from_path",
     "page_from_text",
     "record_comparison",
