@@ -165,6 +165,7 @@ from athenaeum.clusters import (
 from athenaeum.comparator import (
     VERDICT_DUPLICATE,
     VERDICT_UNDERDETERMINED,
+    ComparatorPage,
     begin_content_relation_unavailable_tracking,
     flush_content_relation_unavailable_warning,
     ledger_outcome,
@@ -185,6 +186,7 @@ from athenaeum.models import (
     TokenUsage,
     is_tombstone,
     parse_frontmatter,
+    slugify,
     validity_bound_str,
 )
 from athenaeum.pii import is_pii_flagged
@@ -624,6 +626,37 @@ def _coordinate_batches_for_cluster(
     if len(dimension_sets) == 1:
         return [members]
     return _group_coordinate_members_by_claim(members)
+
+
+def _lift_lapsed_rejection(
+    page_a: ComparatorPage, page_b: ComparatorPage
+) -> tuple[ComparatorPage, ComparatorPage]:
+    """Hide the pair's own ``merge_rejected_with`` stamp from the comparator.
+
+    Issue athenaeum#2107: ``resolve_merge(reject)`` stamps each page with the
+    other's name and nothing clears it, so comparator Gate 1 would settle a
+    pair whose rejection cooldown has LAPSED as ``distinct`` forever. The pair
+    loop calls this only for a pair whose ruling is ``expired`` (it is the one
+    place that knows the cooldown), so Gate 1 stays a pure function of the
+    pages it is handed. Only the entry naming the counterpart is dropped, from
+    the in-memory ``meta`` only: ``text`` (the ledger's basis hash) and the
+    files on disk are untouched, and a rejection of a third page still holds.
+    """
+
+    def lifted(page: ComparatorPage, other: ComparatorPage) -> ComparatorPage:
+        raw = page.meta.get("merge_rejected_with")
+        other_slug = slugify(str(other.meta.get("name") or ""))
+        if not isinstance(raw, list) or not other_slug:
+            return page
+        kept = [n for n in raw if slugify(str(n)) != other_slug]
+        if len(kept) == len(raw):
+            return page
+        meta = {k: v for k, v in page.meta.items() if k != "merge_rejected_with"}
+        if kept:
+            meta["merge_rejected_with"] = kept
+        return replace(page, meta=meta)
+
+    return lifted(page_a, page_b), lifted(page_b, page_a)
 
 
 def _t1_target_name(page: Any, path: Path) -> str:
@@ -1072,6 +1105,9 @@ def propose_wiki_page_merges(
                     )
                     continue
 
+                if matched.expired is not None:
+                    page_a, page_b = _lift_lapsed_rejection(page_a, page_b)
+
                 if dry_run:
                     from athenaeum.comparator import compare_pages
 
@@ -1098,6 +1134,7 @@ def propose_wiki_page_merges(
                     config=resolved_config,
                     usage=usage,
                     lock=lock,
+                    reopen_declared_rejection=matched.expired is not None,
                 )
                 # Issue athenaeum#1243 AC1/AC2: one row per examined pair, on
                 # EVERY branch below. ``embedder`` is ``Cluster.embedder``,

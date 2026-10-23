@@ -1105,6 +1105,11 @@ def _is_legacy_prose_scope_verdict(entry: Any) -> bool:
     )
 
 
+def _is_declared_rejection_verdict(entry: Any) -> bool:
+    """True for a Gate-1 ``distinct`` settled only by a ``merge_rejected_with`` stamp."""
+    return bool(entry is not None and (entry.separator or []) == ["declared-merge-rejection"])
+
+
 def ledger_outcome(
     wiki_root: Path,
     page_a: ComparatorPage,
@@ -1165,9 +1170,17 @@ def record_comparison(
     registry_epoch: int | None = None,
     tree_epoch: int | None = None,
     coord_origins: dict[str, str] | None = None,
+    reopen_declared_rejection: bool = False,
 ) -> dict[str, Any]:
     """Compare *page_a*/*page_b*, memoized via the ledger, and append the
     resulting verdict.
+
+    *reopen_declared_rejection* (issue athenaeum#2107, default ``False``): the
+    caller has established that the human rejection behind a
+    ``declared-merge-rejection`` Gate-1 ``distinct`` has since lapsed (and
+    handed in pages with that stamp lifted), so such a memoized verdict is
+    re-decided instead of returned as fresh. Any other fresh verdict is
+    still honoured.
 
     *coord_origins* (issue athenaeum#1994, optional, ``None`` by default):
     an honest ``{dimension_name: answer_id}`` mapping naming, for every
@@ -1214,6 +1227,12 @@ def record_comparison(
             lookup_pair(wiki_root, pair_key)
         ):
             reopened = "legacy-gate1-scope"
+        elif (
+            reopen_declared_rejection
+            and status["verdict"] == VERDICT_DISTINCT
+            and _is_declared_rejection_verdict(lookup_pair(wiki_root, pair_key))
+        ):
+            reopened = "lapsed-merge-rejection"
         else:
             return {
                 "ok": True,
