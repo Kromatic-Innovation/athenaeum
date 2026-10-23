@@ -303,6 +303,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`librarian.rejected_merge_cooldown_days` is documented under the right
+  config section, and a wiki-dedupe re-proposal after a lapsed cooldown names
+  the earlier rejection (issue athenaeum#2094, follow-up to athenaeum#2077).**
+  The resolver docstring cited `contradiction.not_a_conflict_ttl_days` before
+  the real key, so the generated `docs/reference/configuration.md` listed the
+  knob under `## contradiction`; it now lands under `## librarian` with
+  `YAML path: librarian.rejected_merge_cooldown_days`.
+  `propose_wiki_page_merges` keeps the expired prior ruling and writes the
+  earlier rejection's id and note into the pair's attribution row `detail`.
+
 - **`fold_narrows_coordinate` no longer blocks a human-approved fold
   outside the name-collision scan (issue athenaeum#2076, follow-up to
   athenaeum#2069).** The athenaeum#2069 widen path (substitute the

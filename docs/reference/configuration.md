@@ -402,33 +402,6 @@ configures. No seed in ``_DEFAULTS``. This default
 DEFAULT_FRESHNESS_HOURS` — kept as a separate literal rather than an
 import since this module (L2) may not import that one (L4, layering).
 
-## `contradiction`
-
-### `resolve_rejected_merge_cooldown_days`
-
-- **YAML path:** `contradiction.not_a_conflict_ttl_days`
-- **Environment variable:** —
-- **CLI flag:** —
-- **Default:** `0`
-- **Precedence:** `athenaeum.yaml` > code default
-
-Resolve how long a HUMAN merge rejection suppresses re-proposal.
-
-The merge proposers (`athenaeum.name_structure.propose_qualified_name_merges`
-and `athenaeum.wiki_dedupe.propose_wiki_page_merges`) skip any
-source set a human rejected in ``_pending_merges.md`` /
-``_pending_merges_archive.md``. This knob is the decay: after this many
-days since the rejection the pair may be proposed again (the new
-proposal's rationale names the earlier rejection). ``0`` (the default)
-means a rejection never expires, mirroring
-``contradiction.not_a_conflict_ttl_days``'s "0 = no decay" convention.
-An approved-then-folded source set is never re-proposed regardless of
-this value.
-
-Precedence: yaml ``librarian.rejected_merge_cooldown_days`` (a
-non-negative ``int``) > default ``0``. Negative, non-integer and
-boolean values fall through to the default. No seed in ``_DEFAULTS``
-
 ## `decay`
 
 ### `resolve_decay_horizon_days`
@@ -2605,6 +2578,32 @@ change delta incrementally — no full re-embed / FTS5 rebuild). Read from
 ``0`` or negative => always re-hash; a very large value => effectively never.
 ``bool`` (an ``int`` subclass) and non-numeric values fall through to the
 default so ``full_rehash_max_age_days: yes`` cannot read as ``1``.
+
+### `resolve_rejected_merge_cooldown_days`
+
+- **YAML path:** `librarian.rejected_merge_cooldown_days`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `0`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve how long a HUMAN merge rejection suppresses re-proposal.
+
+The merge proposers (`athenaeum.name_structure.propose_qualified_name_merges`
+and `athenaeum.wiki_dedupe.propose_wiki_page_merges`) skip any
+source set a human rejected in ``_pending_merges.md`` /
+``_pending_merges_archive.md``.
+``librarian.rejected_merge_cooldown_days`` is the decay: after this many
+days since the rejection the pair may be proposed again (the new
+proposal's rationale names the earlier rejection). ``0`` (the default)
+means a rejection never expires, mirroring
+``contradiction.not_a_conflict_ttl_days``'s "0 = no decay" convention.
+An approved-then-folded source set is never re-proposed regardless of
+this value.
+
+Precedence: yaml ``librarian.rejected_merge_cooldown_days`` (a
+non-negative ``int``) > default ``0``. Negative, non-integer and
+boolean values fall through to the default. No seed in ``_DEFAULTS``
 
 ### `resolve_relatedness_writer_enabled`
 

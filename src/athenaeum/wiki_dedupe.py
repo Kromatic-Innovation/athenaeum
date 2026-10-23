@@ -941,9 +941,10 @@ def propose_wiki_page_merges(
                     )
                     continue
 
-                ruling = match_rulings(
+                matched = match_rulings(
                     prior_rulings, sources, cooldown_days=rejected_cooldown_days
-                ).in_force
+                )
+                ruling = matched.in_force
                 if ruling is not None:
                     log.info(
                         "wiki-page dedup: pair not re-proposed (%s): %s / %s",
@@ -966,6 +967,21 @@ def propose_wiki_page_merges(
                     )
                     continue
 
+                # Issue athenaeum#2094 (AC2): the cooldown lapsed, so this pair is
+                # a fresh question -- but every attribution row it produces
+                # names the earlier rejection and its note, the way
+                # ``propose_qualified_name_merges`` does in its rationale.
+                earlier_ruling = (
+                    f"Earlier ruling on this pair ({matched.expired.merge_id}): "
+                    f"{matched.expired.describe()}; the rejection cooldown has "
+                    "since lapsed."
+                    if matched.expired is not None
+                    else ""
+                )
+
+                def _with_earlier(detail: str, _earlier: str = earlier_ruling) -> str:
+                    return f"{detail} {_earlier}".strip() if _earlier else detail
+
                 try:
                     page_a = page_from_path(path_a)
                     page_b = page_from_path(path_b)
@@ -984,7 +1000,7 @@ def propose_wiki_page_merges(
                             OUTCOME_READ_ERROR,
                             embedder=cluster.embedder,
                             reason="page-read-failed",
-                            detail=str(exc),
+                            detail=_with_earlier(str(exc)),
                             cluster_id=cluster.cluster_id,
                             cluster_threshold=resolved_threshold,
                             n_cluster_members=len(members),
@@ -1031,6 +1047,8 @@ def propose_wiki_page_merges(
                     "pair": record.get("pair"),
                     "confidence": pair_confidence,
                 }
+                if earlier_ruling:
+                    row_kwargs["detail"] = earlier_ruling
                 if not record["ok"]:
                     # AC1's sharper half. ``record_comparison``'s own docstring
                     # says "nothing ledgered" here and this caller used to
@@ -1124,14 +1142,16 @@ def propose_wiki_page_merges(
                             path_b,
                             OUTCOME_BELOW_CONFIDENCE_FLOOR,
                             reason=OUTCOME_BELOW_CONFIDENCE_FLOOR,
-                            detail=(
-                                f"duplicate verdict archived: pair cosine "
-                                f"{pair_confidence:.4f} < "
-                                f"wiki_dedupe_min_confidence {confidence_floor:.4f}"
-                            ),
                             verdict=record.get("verdict"),
                             action="archived",
-                            **row_kwargs,
+                            **{
+                                **row_kwargs,
+                                "detail": _with_earlier(
+                                    f"duplicate verdict archived: pair cosine "
+                                    f"{pair_confidence:.4f} < "
+                                    f"wiki_dedupe_min_confidence {confidence_floor:.4f}"
+                                ),
+                            },
                         )
                     )
                     results.append(
