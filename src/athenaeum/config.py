@@ -1021,6 +1021,48 @@ def resolve_min_merge_confidence(config: dict[str, Any] | None) -> float:
     return 0.0
 
 
+#: Default for :func:`resolve_wiki_dedupe_min_confidence` -- the pair-cosine
+#: floor below which the wiki-dedupe pass archives a ``duplicate`` proposal
+#: instead of queueing it. Set from the operator-labeled 60-item eval in
+#: athenaeum#2080: 0 of 35 proposals below 0.70 and 1 of 40 below 0.75 were
+#: real duplicates, while 11 of 20 at 0.75+ were.
+DEFAULT_WIKI_DEDUPE_MIN_CONFIDENCE = 0.75
+
+
+def resolve_wiki_dedupe_min_confidence(config: dict[str, Any] | None) -> float:
+    """Resolve the wiki-dedupe proposal cosine-confidence floor (athenaeum#2080).
+
+    The wiki-dedupe pass records each candidate pair's embedding cosine as its
+    ``confidence``. A pair the comparator rules ``duplicate`` whose confidence
+    is strictly below this floor is NOT queued for a human: it is archived with
+    a ``below_confidence_floor`` outcome in the dedupe attribution snapshot
+    (the verdict itself is still ledgered). The floor is a queue-side filter,
+    never a verdict input -- the comparator never sees it. It is only applied
+    to cosines from the real embedder; the hashing-trick fallback embedder's
+    scores are on a different scale and are recorded but never gated on.
+
+    DEFAULT 0.75. Env ``ATHENAEUM_WIKI_DEDUPE_MIN_CONFIDENCE`` > yaml
+    ``librarian.wiki_dedupe_min_confidence`` > this default. A parsed env value
+    is authoritative over yaml (``0`` or negative disables the floor); a
+    malformed env value logs a WARNING and falls back to yaml. A ``bool`` or
+    non-numeric yaml value falls back to the default; ``0`` or negative yaml
+    disables the floor.
+    """
+    value = _env_number("ATHENAEUM_WIKI_DEDUPE_MIN_CONFIDENCE", float)
+    if value is not None:
+        return max(0.0, value)
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("wiki_dedupe_min_confidence")
+            if raw is not None and not isinstance(raw, bool):
+                try:
+                    return max(0.0, float(raw))
+                except (TypeError, ValueError):
+                    pass
+    return DEFAULT_WIKI_DEDUPE_MIN_CONFIDENCE
+
+
 def resolve_intake_runtime_floor(config: dict[str, Any] | None) -> float:
     """Resolve ``librarian.intake_runtime_floor`` (issue athenaeum#1102).
 
@@ -4847,6 +4889,11 @@ search_backend: vector
 # min_merge_confidence: optional merge-PROPOSAL resolver-confidence floor
 #   (athenaeum#400). DEFAULT 0.0 (OFF); opt-in. env ATHENAEUM_MIN_MERGE_CONFIDENCE >
 #   this key > default.
+# wiki_dedupe_min_confidence: pair-cosine floor for wiki-dedupe `duplicate`
+#   proposals (athenaeum#2080). DEFAULT 0.75. A duplicate verdict whose pair
+#   cosine is below it is archived (`below_confidence_floor` in the dedupe
+#   attribution snapshot) instead of queued. 0 disables. env
+#   ATHENAEUM_WIKI_DEDUPE_MIN_CONFIDENCE > this key > default.
 # page_warn_bytes: soft byte threshold above which a wiki entity page is
 #   reported as a WARN-level oversized page in `athenaeum status` (athenaeum#310).
 #   Warn-only -- nothing is blocked or modified. Precedence:

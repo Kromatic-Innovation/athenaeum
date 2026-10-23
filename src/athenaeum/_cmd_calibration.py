@@ -90,6 +90,29 @@ _TIER_ARM_RESOLVERS = {
 }
 
 
+#: Issue athenaeum#2080 AC4: the NAMED wiring defect behind a T1 that is armed
+#: and records zero decisions. T1 runs only inside
+#: :func:`athenaeum.cluster_comparator.run_cluster_comparator`, and only when
+#: that driver is handed a :class:`~athenaeum.cluster_comparator.ClusterScreenContext`
+#: (athenaeum#1257). No production code constructs one: the driver's only
+#: non-test caller is the shadow-parity measurement harness, which passes none,
+#: and :mod:`athenaeum.wiki_dedupe` -- the pass that actually reaches Gate 2 --
+#: never calls T1. So "armed, zero decisions" is a structural gap, not a
+#: misconfigured client. Surfaced in the summary instead of the generic
+#: client/key advice. ``tests/test_calibration_cli.py`` pins that the premise
+#: still holds; when someone wires T1 in, that test fails and this note must be
+#: retired with it.
+T1_UNWIRED_NOTE = (
+    "T1 only runs when cluster_comparator.run_cluster_comparator is handed a "
+    "ClusterScreenContext, and no production code constructs one (the wiki-dedupe "
+    "pass does not run T1). Zero decisions is expected until T1 is wired into a "
+    "live pass; it does not indicate a bad LLM client or API key."
+)
+
+#: Per-tier named reason an armed tier can be silent for a structural reason.
+_ARMED_SILENT_STRUCTURAL_NOTES: dict[str, str] = {T1_TIER_NAME: T1_UNWIRED_NOTE}
+
+
 def _reasoning_tier_activity(
     wiki_root: Path, config: dict | None
 ) -> dict[str, dict[str, object]]:
@@ -131,6 +154,9 @@ def _reasoning_tier_activity(
             "armed": armed[tier],
             "armed_but_silent": bool(armed[tier] and decisions_logged == 0),
         }
+        note = _ARMED_SILENT_STRUCTURAL_NOTES.get(tier)
+        if note and activity[tier]["armed_but_silent"]:
+            activity[tier]["armed_but_silent_reason"] = note
     return activity
 
 
@@ -197,13 +223,20 @@ def cmd_calibration(args: argparse.Namespace) -> int:
                     f"logged (unsampled), last {last_at}"
                 )
                 if tier_activity["armed_but_silent"]:
-                    print(
-                        f" *** {tier} is ARMED but has recorded ZERO decisions "
-                        "— it may never actually be reaching a proposal. Check "
-                        f"the reasoning_{tier.lower()} LLM client (provider/API "
-                        "key) and that merge proposals are reaching the "
-                        "screen. ***"
-                    )
+                    structural = tier_activity.get("armed_but_silent_reason")
+                    if structural:
+                        print(
+                            f" *** {tier} is ARMED but has recorded ZERO decisions "
+                            f"— known wiring defect: {structural} ***"
+                        )
+                    else:
+                        print(
+                            f" *** {tier} is ARMED but has recorded ZERO decisions "
+                            "— it may never actually be reaching a proposal. Check "
+                            f"the reasoning_{tier.lower()} LLM client (provider/API "
+                            "key) and that merge proposals are reaching the "
+                            "screen. ***"
+                        )
         return 0
 
     # sub == "review"

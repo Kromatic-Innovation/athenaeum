@@ -652,7 +652,10 @@ def lookup_pair(wiki_root: Path, pair_key: str) -> VerdictEntry | None:
     candidates = [e for _, e in iter_live_entries(wiki_root) if e.pair == pair_key]
     if not candidates:
         return None
-    return max(candidates, key=lambda e: e.at)
+    # ``at`` is date-only, so same-day entries tie: break the tie by ledger
+    # order (last appended wins) -- a same-day re-decision must beat the
+    # earlier entry it superseded.
+    return max(enumerate(candidates), key=lambda p: (p[1].at, p[0]))[1]
 
 
 def get_verdict_status(wiki_root: Path, pair_key: str) -> dict[str, Any]:
