@@ -6492,7 +6492,8 @@ def resolve_rejected_merge_cooldown_days(config: dict[str, Any] | None) -> int:
     The merge proposers (:func:`athenaeum.name_structure.propose_qualified_name_merges`
     and :func:`athenaeum.wiki_dedupe.propose_wiki_page_merges`) skip any
     source set a human rejected in ``_pending_merges.md`` /
-    ``_pending_merges_archive.md``. This knob is the decay: after this many
+    ``_pending_merges_archive.md``.
+    ``librarian.rejected_merge_cooldown_days`` is the decay: after this many
     days since the rejection the pair may be proposed again (the new
     proposal's rationale names the earlier rejection). ``0`` (the default)
     means a rejection never expires, mirroring
