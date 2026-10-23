@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -331,3 +332,131 @@ class TestCoverage:
         committed = CLI_REFERENCE_DOC.read_text(encoding="utf-8")
         missing = [name for name in top_level_names if f"`athenaeum {name}`" not in committed]
         assert not missing, f"top-level subcommands missing from cli.md: {missing}"
+
+
+class TestYamlKeySelection:
+    """Issue athenaeum#2104: a resolver is filed under the key whose leaf
+    matches ``resolve_<leaf>``, never merely the first key its docstring cites."""
+
+    def test_precedent_key_cited_first_does_not_win(self) -> None:
+        doc = (
+            "Resolve the cooldown. Mirrors ``librarian.min_merge_confidence`` in\n"
+            "shape. Set ``librarian.rejected_merge_cooldown_days`` in yaml."
+        )
+        assert (
+            gen_config_reference._select_exact_key("resolve_rejected_merge_cooldown_days", doc)
+            == "librarian.rejected_merge_cooldown_days"
+        )
+
+    def test_writer_identity_shape_picks_own_key(self) -> None:
+        doc = "Like ``asserter.grants``. Reads ``librarian.writer_identity_enforced``."
+        assert (
+            gen_config_reference._select_exact_key("resolve_writer_identity_enforced", doc)
+            == "librarian.writer_identity_enforced"
+        )
+
+    def test_exact_leaf_beats_partial_token_match(self) -> None:
+        doc = "Cites ``librarian.delta`` then ``librarian.delta.max_affected_clusters``."
+        assert (
+            gen_config_reference._select_exact_key("resolve_delta_max_affected_clusters", doc)
+            == "librarian.delta.max_affected_clusters"
+        )
+
+    def test_no_matching_key_fails_loudly_naming_resolver_and_keys(self) -> None:
+        doc = "Mirrors ``librarian.other_knob`` and ``spend.max_usd_per_run``."
+        with pytest.raises(gen_config_reference.AmbiguousYamlKeyError) as exc:
+            gen_config_reference._select_exact_key("resolve_brand_new_knob", doc)
+        msg = str(exc.value)
+        assert "resolve_brand_new_knob" in msg
+        assert "librarian.other_knob" in msg and "spend.max_usd_per_run" in msg
+
+    def test_no_backticked_key_defers_to_fallbacks(self) -> None:
+        assert gen_config_reference._select_exact_key("resolve_x", "No keys here.") is None
+        # The config file name is not a key.
+        assert (
+            gen_config_reference._select_exact_key("resolve_x", "See ``athenaeum.yaml``.")
+            is None
+        )
+
+    def test_generator_raises_on_a_mis_documented_resolver(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from athenaeum import config as config_mod
+
+        def resolve_zzz_probe_knob(config: dict[str, Any] | None) -> int:
+            return 1
+
+        monkeypatch.setattr(config_mod, "resolve_zzz_probe_knob", resolve_zzz_probe_knob, raising=False)
+        synthetic_source = (
+            gen_config_reference.CONFIG_PY.read_text(encoding="utf-8")
+            + "\n\n"
+            + "def resolve_zzz_probe_knob(config):\n"
+            '    """Resolve the probe, like ``librarian.some_precedent``."""\n'
+            "    return None\n"
+        )
+        real_config_py = gen_config_reference.CONFIG_PY
+
+        class _FakePath:
+            def read_text(self, encoding: str = "utf-8") -> str:
+                return synthetic_source
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(real_config_py, name)
+
+        monkeypatch.setattr(gen_config_reference, "CONFIG_PY", _FakePath())
+        with pytest.raises(
+            gen_config_reference.AmbiguousYamlKeyError, match="resolve_zzz_probe_knob"
+        ):
+            gen_config_reference.generate()
+
+    def test_overrides_are_cited_in_their_docstring(self) -> None:
+        import athenaeum.config as config_mod
+
+        for name, key in gen_config_reference._YAML_KEY_OVERRIDES.items():
+            doc = getattr(config_mod, name).__doc__ or ""
+            assert f"``{key}``" in doc, f"{name}: override {key!r} not cited in docstring"
+
+
+_SECTION_RE = re.compile(r"^## `([^`]+)`\s*$")
+_ENTRY_RE = re.compile(r"^### `(resolve_[^`]+)`")
+_YAML_PATH_RE = re.compile(r"^- \*\*YAML path:\*\* `([^`]+)`")
+
+
+def _section_path_mismatches(text: str) -> list[str]:
+    """Every entry whose YAML path's first segment is not its ``## section``."""
+    section: str | None = None
+    entry: str | None = None
+    bad: list[str] = []
+    for line in text.splitlines():
+        if line.startswith("## "):
+            m = _SECTION_RE.match(line)
+            section = m.group(1) if m else None
+            continue
+        m = _ENTRY_RE.match(line)
+        if m:
+            entry = m.group(1)
+            continue
+        m = _YAML_PATH_RE.match(line)
+        if m and section is not None and entry is not None:
+            if m.group(1).split(".")[0] != section:
+                bad.append(f"{entry}: {m.group(1)!r} filed under ## {section}")
+    return bad
+
+
+class TestSectionMatchesYamlPath:
+    """Issue athenaeum#2104: independent of the generator's own selection logic,
+    an entry's YAML path must start with the section it is filed under."""
+
+    def test_committed_reference_has_no_mis_sectioned_entry(self) -> None:
+        text = CONFIG_REFERENCE_DOC.read_text(encoding="utf-8")
+        assert "### `resolve_" in text  # the walk is not vacuous
+        assert _section_path_mismatches(text) == []
+
+    def test_check_detects_a_mis_sectioned_entry(self) -> None:
+        text = (
+            "## `librarian`\n\n### `resolve_ok`\n\n- **YAML path:** `librarian.ok`\n\n"
+            "### `resolve_bad`\n\n- **YAML path:** `asserter.grants`\n"
+        )
+        assert _section_path_mismatches(text) == [
+            "resolve_bad: 'asserter.grants' filed under ## librarian"
+        ]

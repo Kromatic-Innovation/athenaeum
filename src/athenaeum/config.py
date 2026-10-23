@@ -631,7 +631,8 @@ def resolve_operational_markers(config: dict[str, Any] | None) -> list[str]:
 
 
 def resolve_non_intake_sources(config: dict[str, Any] | None) -> set[str]:
-    """Resolve `raw/<source>/` dirs excluded from entity intake (issue athenaeum#843).
+    """Resolve `raw/<source>/` dirs excluded from entity intake, from
+    ``librarian.non_intake_sources`` (issue athenaeum#843).
 
     A source directory named here is skipped WHOLE by
     :func:`athenaeum.intake.discover_raw_files` — none of its files become
@@ -837,7 +838,8 @@ def resolve_min_cluster_cohesion_scopes(config: dict[str, Any] | None) -> int:
 
 
 def resolve_wiki_dedupe_min_body_chars(config: dict[str, Any] | None) -> int:
-    """Resolve the wiki-dedupe eligibility body-length floor (issue athenaeum#1252).
+    """Resolve the wiki-dedupe eligibility body-length floor from
+    ``librarian.wiki_dedupe_min_body_chars`` (issue athenaeum#1252).
 
     ``athenaeum.wiki_dedupe.discover_wiki_dedupe_candidates`` excludes a
     candidate page whose body (post-frontmatter, stripped) is shorter than
@@ -6644,7 +6646,8 @@ def resolve_off_corpus_enabled(config: dict[str, Any] | None) -> bool:
 
 
 def resolve_off_corpus_adapter_name(config: dict[str, Any] | None) -> str | None:
-    """Resolve the ``storage.adapters`` entry name that backs the off-corpus
+    """Resolve the off-corpus adapter name from ``off_corpus.adapter``: the
+    ``storage.adapters`` entry name that backs the off-corpus
     purgeable surface (issue athenaeum#984). yaml-only, no env var — a physical
     surface name is not the shape of knob this repo's env-var convention
     covers (mirrors ``storage.mapping``/``storage.adapters`` themselves,
