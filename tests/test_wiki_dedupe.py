@@ -1888,6 +1888,26 @@ class TestAthenaeum2080ConfidenceFloor:
         assert entry is not None and entry.verdict == "distinct"
         assert not (wiki_root / FOLD_EVIDENCE_DIRNAME).exists()
 
+    def test_redo_conflict_on_tombstone_is_ledgered_not_enacted(self, tmp_path: Path) -> None:
+        """Review fix: a folded page is never re-flagged by the redo's effect."""
+        from athenaeum.verdicts import lookup_pair
+
+        knowledge_root = _seed_low_cosine_pair(tmp_path)
+        wiki_root = knowledge_root / "wiki"
+        high = {"librarian": {"comparator_enabled": True, "wiki_dedupe_min_confidence": 0.9}}
+        low = {"librarian": {"comparator_enabled": True, "wiki_dedupe_min_confidence": 0.5}}
+        self._run(knowledge_root, config=high)
+        page = next(wiki_root.glob("low-x*.md"))
+        text = page.read_text()
+        page.write_text(text.replace("---\n", "---\nstatus: folded\nfolded_into: low-y\n", 1))
+        client = _fake_llm_client(_content_payload("conflicting", passages=["p"]))
+        for _ in range(2):
+            self._run(knowledge_root, config=low, client=client)
+        assert client.messages.create.call_count <= 1
+        entry = lookup_pair(wiki_root, "low-x+low-y")
+        assert entry is not None and entry.verdict != "duplicate"
+        assert "folded" in page.read_text()
+
     def test_confidence_is_recorded_on_every_row_even_above_floor(self, tmp_path: Path) -> None:
         knowledge_root = _seed_identical_pages(tmp_path, n=2)
         results = _run_pass(knowledge_root, client=_fake_llm_client(_content_payload("equivalent")))

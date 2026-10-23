@@ -173,7 +173,13 @@ from athenaeum.config import (
     resolve_wiki_dedupe_min_confidence,
 )
 from athenaeum.merge_type_gate import cross_class_precheck
-from athenaeum.models import AutoMemoryFile, TokenUsage, parse_frontmatter, validity_bound_str
+from athenaeum.models import (
+    AutoMemoryFile,
+    TokenUsage,
+    is_tombstone,
+    parse_frontmatter,
+    validity_bound_str,
+)
 from athenaeum.pii import is_pii_flagged
 from athenaeum.progress import PhaseHeartbeat
 from athenaeum.runlock import RunLock
@@ -1118,9 +1124,13 @@ def propose_wiki_page_merges(
                         # unavailable) makes no call worth memoizing and
                         # stays retryable.
                         ledger_outcome(wiki_root, page_a, page_b, redo, lock=lock)
-                        record["outcome"] = redo
-                        record["skipped"] = None
                         record["verdict"] = redo.verdict
+                        # A folded tombstone must not be re-flagged live by
+                        # enacting a queue effect (review finding): ledger
+                        # only, and fall through as memoized-fresh.
+                        if not (is_tombstone(page_a.meta) or is_tombstone(page_b.meta)):
+                            record["outcome"] = redo
+                            record["skipped"] = None
                 # Still below the floor: fall past the fresh branch so the
                 # archive row is re-recorded below.
                 if record.get("skipped") == "fresh" and not (
