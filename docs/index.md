@@ -127,6 +127,7 @@ Evidence, kept out of the reading path.
 - [Jev comparator eval](measurements/jev-comparator-eval-2026-10.md) — a hosted
   Choice-question classifier measured against the five-verdict comparator's recorded
   verdicts for the same source pairs.
+- [Transcript-receipts writer: ledger scans and transcript reads](measurements/transcript-receipts-writer-2026-10.md) — synthetic before/after for the nightly receipts phase.
 - [Memory-model measurements](measurements/memory-model-measurements.md)
 - [Reasoning-tier measurements](measurements/reasoning-tier-measurements.md)
 - [Retrieval entry-point measurements](measurements/retrieval-entry-point-measurements.md)

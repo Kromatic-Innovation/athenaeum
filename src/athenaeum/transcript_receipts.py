@@ -67,6 +67,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -80,10 +81,11 @@ from athenaeum.store import append_line_durable
 from athenaeum.transcript_verify import (
     BackfillClassification,
     _is_user_record,
-    _iter_session_records,
     _normalize,
+    _parse_session_text,
     _user_authored_text,
     classify_backfill_claim,
+    classify_backfill_records,
     default_projects_root,
 )
 
@@ -322,6 +324,10 @@ def _read_jsonl_tolerant(path: Path) -> list[dict[str, Any]]:
         raw_text = path.read_text(encoding="utf-8")
     except OSError:
         return []
+    return _parse_jsonl_text(raw_text)
+
+
+def _parse_jsonl_text(raw_text: str) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for line in raw_text.splitlines():
         line = line.strip()
@@ -385,7 +391,11 @@ def prefix_matches_receipt(path: Path, receipt: ReceiptEntry) -> bool:
         raw = path.read_bytes()
     except OSError:
         return False
-    lines = _complete_lines(raw)
+    return _prefix_matches_lines(_complete_lines(raw), receipt)
+
+
+def _prefix_matches_lines(lines: list[bytes], receipt: ReceiptEntry) -> bool:
+    """:func:`prefix_matches_receipt` over already-split complete *lines*."""
     if len(lines) < receipt.transcript_line_count:
         return False
     prefix = lines[: receipt.transcript_line_count]
@@ -393,26 +403,113 @@ def prefix_matches_receipt(path: Path, receipt: ReceiptEntry) -> bool:
     return digest == receipt.transcript_prefix_digest
 
 
-# ---------------------------------------------------------------------------
-# Writer — append (single-appender enforced via RunLock)
-# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class _TranscriptSnapshot:
+    """One read of a transcript: complete lines (prefix digest) + parsed records."""
+
+    lines: list[bytes]
+    records: list[object]
 
 
-def _raw_line_count(path: Path) -> int:
-    """Physical newline-terminated line count of *path*, ``0`` if unreadable.
-
-    Deliberately NOT ``len(_read_jsonl_tolerant(path))`` — that counts
-    successfully PARSED JSON records, which undercounts against a torn or
-    hand-edited line earlier in the partition and would hand the sealer the
-    wrong line-number range for the range it actually just appended (every
-    append here writes exactly one well-formed, newline-terminated line, so
-    the physical count is always correct for OUR OWN appends).
-    """
+def _read_transcript(path: Path) -> _TranscriptSnapshot | None:
+    """Read *path* ONCE; ``None`` when it cannot be read (athenaeum#2048)."""
     try:
         raw = path.read_bytes()
     except OSError:
-        return 0
-    return len(_complete_lines(raw))
+        return None
+    try:
+        records = _parse_session_text(raw.decode("utf-8"))
+    except UnicodeDecodeError:
+        records = []  # same as _iter_session_records on undecodable text
+    return _TranscriptSnapshot(_complete_lines(raw), records)
+
+
+#: Transcript snapshots a :class:`ReceiptRun` keeps for memories that share a
+#: session; small so a run over thousands of memories never holds them all.
+_TRANSCRIPT_CACHE_SIZE = 8
+
+
+class ReceiptRun:
+    """Per-run state for the writer (athenaeum#2048): one ledger read, cached transcripts.
+
+    Loads every receipt partition ONCE (a single ``read_bytes`` each) into an
+    index keyed by ``(origin_scope, memory_digest)``, plus the append
+    idempotency-key set and each partition's physical line count, then keeps
+    all three current as :func:`append_receipt` appends. Valid because the
+    caller holds the :class:`RunLock` for the whole run (single appender), so
+    nothing else changes the ledger underneath it. Also keeps a few recent
+    transcript snapshots so memories sharing a session read it once.
+    """
+
+    def __init__(self, wiki_root: Path) -> None:
+        self.wiki_root = Path(wiki_root)
+        self._by_digest: dict[tuple[str, str], list[ReceiptEntry]] = {}
+        self._keys: set[tuple[Any, ...]] = set()
+        self._line_counts: dict[Path, int] = {}
+        self._transcripts: OrderedDict[Path, _TranscriptSnapshot | None] = OrderedDict()
+        d = ledger_dir(self.wiki_root)
+        if not d.is_dir():
+            return
+        for p in sorted(d.glob("*.jsonl")):
+            try:
+                raw = p.read_bytes()
+            except OSError:
+                continue
+            self._line_counts[p] = len(_complete_lines(raw))
+            for record in _parse_jsonl_text(raw.decode("utf-8", errors="replace")):
+                self._index(ReceiptEntry.from_dict(record))
+
+    @staticmethod
+    def _key(e: ReceiptEntry) -> tuple[Any, ...]:
+        return (
+            e.origin_scope,
+            e.memory_digest,
+            e.channel,
+            e.origin_session_id,
+            e.origin_turn,
+            e.transcript_prefix_digest,
+            e.transcript_line_count,
+        )
+
+    def _index(self, e: ReceiptEntry) -> None:
+        self._by_digest.setdefault((e.origin_scope, e.memory_digest), []).append(e)
+        self._keys.add(self._key(e))
+
+    def has(self, entry: ReceiptEntry) -> bool:
+        return self._key(entry) in self._keys
+
+    def record_append(self, entry: ReceiptEntry, path: Path) -> int:
+        """Index a just-appended *entry*; returns *path*'s new physical line count."""
+        self._index(entry)
+        self._line_counts[path] = self._line_counts.get(path, 0) + 1
+        return self._line_counts[path]
+
+    def lookup(
+        self, origin_scope: str, digest: str, *, origin_session_id: str | None = None
+    ) -> ReceiptEntry | None:
+        """Indexed :func:`lookup_receipt` (same selection rules)."""
+        candidates = list(self._by_digest.get((origin_scope, digest), ()))
+        if origin_session_id is not None:
+            candidates = [r for r in candidates if r.origin_session_id == origin_session_id]
+        if not candidates:
+            return None
+        candidates.sort(key=lambda r: r.recorded_at)
+        return candidates[-1]
+
+    def transcript(self, path: Path) -> _TranscriptSnapshot | None:
+        if path in self._transcripts:
+            self._transcripts.move_to_end(path)
+            return self._transcripts[path]
+        snap = _read_transcript(path)
+        self._transcripts[path] = snap
+        if len(self._transcripts) > _TRANSCRIPT_CACHE_SIZE:
+            self._transcripts.popitem(last=False)
+        return snap
+
+
+# ---------------------------------------------------------------------------
+# Writer — append (single-appender enforced via RunLock)
+# ---------------------------------------------------------------------------
 
 
 def append_receipt(
@@ -421,6 +518,7 @@ def append_receipt(
     *,
     lock: RunLock,
     sealer: Sealer = DEFAULT_SEALER,
+    run: ReceiptRun | None = None,
 ) -> Path:
     """Append *entry* to its month's partition. Returns the partition path.
 
@@ -446,33 +544,20 @@ def append_receipt(
     month = entry.recorded_at[:7] if entry.recorded_at else _now_iso()[:7]
     path = partition_path(wiki_root, month)
 
-    existing_key = (
-        entry.origin_scope,
-        entry.memory_digest,
-        entry.channel,
-        entry.origin_session_id,
-        entry.origin_turn,
-        entry.transcript_prefix_digest,
-        entry.transcript_line_count,
-    )
-    for existing in iter_receipts(wiki_root):
-        key = (
-            existing.origin_scope,
-            existing.memory_digest,
-            existing.channel,
-            existing.origin_session_id,
-            existing.origin_turn,
-            existing.transcript_prefix_digest,
-            existing.transcript_line_count,
-        )
-        if key == existing_key:
-            return path
+    if run is None:
+        run = ReceiptRun(wiki_root)
+    if run.has(entry):
+        return path
 
     line = json.dumps(entry.to_dict(), separators=(",", ":")) + "\n"
     append_line_durable(path, line.encode("utf-8"))
+    # The physical (newline-terminated) line count of our own just-appended
+    # range, tracked in the run index so no re-read of the partition is needed
+    # (athenaeum#2048). Deliberately a PHYSICAL count, not parsed records: a
+    # torn or hand-edited earlier line would undercount parsed records.
+    current_count = run.record_append(entry, path)
 
     try:
-        current_count = _raw_line_count(path)
         sealer.seal(path, current_count, current_count, [line.rstrip("\n")])
     except Exception as exc:  # noqa: BLE001 — a sealer must never break intake.
         log.warning("transcript_receipts: sealer %r failed (non-fatal): %s", sealer, exc)
@@ -582,6 +667,7 @@ def write_receipt_for_origin(
     lock: RunLock,
     sealer: Sealer = DEFAULT_SEALER,
     now: str | None = None,
+    run: ReceiptRun | None = None,
 ) -> ReceiptEntry | None:
     """Classify *claim* against its origin transcript and append a receipt.
 
@@ -605,54 +691,66 @@ def write_receipt_for_origin(
     successor — which is itself always checked by the SAME prefix
     verification before being trusted.
 
+    **No re-minting for an unchanged utterance (athenaeum#2048).** When the
+    existing receipt's prefix verified and the reclassification yields the
+    SAME ``channel`` and ``utterance_digest``, nothing is appended and the
+    existing receipt is returned: a resumed session that only grew elsewhere
+    would otherwise accrete one line per night. The old receipt stays
+    sufficient — its prefix still verifies against the grown transcript, which
+    is all the gate checks. A changed utterance (or channel) mints a successor.
+
     Otherwise appends exactly one receipt (idempotent — see
     :func:`append_receipt`) carrying the classified ``channel`` (one of
     ``"user-stated"``, ``"agent-observed"``, ``"inferred"``) and returns it.
+
+    *run* is the per-run :class:`ReceiptRun` (ledger index + transcript cache);
+    ``None`` builds a throwaway one. The transcript is read once per call.
     """
     if not origin_session_id:
         return None
     root = projects_root if projects_root is not None else default_projects_root()
     transcript_path = root / origin_scope / f"{origin_session_id}.jsonl"
     digest = memory_digest(claim)
+    if run is None:
+        run = ReceiptRun(wiki_root)
 
-    existing = lookup_receipt(wiki_root, origin_scope, digest, origin_session_id=origin_session_id)
-    if existing is not None:
-        if not transcript_path.is_file():
-            # Already rolled off since the last receipt was written —
-            # nothing new to check or append; the existing receipt stands.
-            return existing
-        if not prefix_matches_receipt(transcript_path, existing):
-            log.warning(
-                "transcript_receipts: transcript-modified for %s/%s since the "
-                "last receipt — refusing to write a new one (issue athenaeum#753)",
-                origin_scope,
-                origin_session_id,
-            )
-            return None
-        # Prefix still verifies (identical, or a resumed session with more
-        # lines appended) — safe to reclassify and consider a successor.
+    existing = run.lookup(origin_scope, digest, origin_session_id=origin_session_id)
+    if not transcript_path.is_file():
+        # Absent/rolled off: never mint from absence; an existing receipt stands.
+        return existing
+    snap = run.transcript(transcript_path)  # None: present but unreadable
+    if existing is not None and (snap is None or not _prefix_matches_lines(snap.lines, existing)):
+        log.warning(
+            "transcript_receipts: transcript-modified for %s/%s since the "
+            "last receipt — refusing to write a new one (issue athenaeum#753)",
+            origin_scope,
+            origin_session_id,
+        )
+        return None
+    if snap is None:
+        return existing
+    # Prefix still verifies (or no receipt yet) — identical, or a resumed
+    # session with more lines appended: safe to reclassify and consider a
+    # successor.
 
-    classification: BackfillClassification = classify_backfill_claim(
-        origin_scope,
-        origin_session_id,
-        origin_turn,
-        claim=claim,
-        projects_root=projects_root,
+    classification: BackfillClassification = classify_backfill_records(
+        snap.records, origin_session_id, origin_turn, claim=claim
     )
     if classification.channel == "unavailable":
         return existing
 
-    records = _iter_session_records(root / origin_scope, origin_session_id)
     utterance_digest = ""
     if classification.channel == "user-stated":
-        matched = _matching_human_utterance(records, claim)
+        matched = _matching_human_utterance(snap.records, claim)
         if matched:
             utterance_digest = hashlib.sha256(matched.encode("utf-8")).hexdigest()
 
-    prefix = compute_transcript_prefix(transcript_path)
-    if prefix is None:
+    if (
+        existing is not None
+        and existing.channel == classification.channel
+        and existing.utterance_digest == utterance_digest
+    ):
         return existing
-    prefix_digest, line_count = prefix
 
     entry = ReceiptEntry(
         origin_scope=origin_scope,
@@ -661,11 +759,11 @@ def write_receipt_for_origin(
         origin_session_id=origin_session_id,
         origin_turn=origin_turn,
         utterance_digest=utterance_digest,
-        transcript_prefix_digest=prefix_digest,
-        transcript_line_count=line_count,
+        transcript_prefix_digest=hashlib.sha256(b"\n".join(snap.lines)).hexdigest(),
+        transcript_line_count=len(snap.lines),
         recorded_at=now if now is not None else _now_iso(),
     )
-    append_receipt(wiki_root, entry, lock=lock, sealer=sealer)
+    append_receipt(wiki_root, entry, lock=lock, sealer=sealer, run=run)
     return entry
 
 
@@ -706,6 +804,7 @@ def write_receipts_for_files(
     if not resolve_transcript_receipts_enabled(config):
         return 0
     processed = 0
+    run = ReceiptRun(wiki_root)  # ONE ledger read for the whole run (athenaeum#2048)
     for am in files:
         if not am.origin_session_id:
             continue
@@ -719,6 +818,7 @@ def write_receipts_for_files(
             projects_root=projects_root,
             lock=lock,
             sealer=sealer,
+            run=run,
         )
         if entry is not None:
             processed += 1
