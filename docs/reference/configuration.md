@@ -24,248 +24,6 @@ All model values are free-form model-id strings passed to the Anthropic SDK. One
 | Reasoning tier 2 | `ATHENAEUM_REASONING_T2_MODEL` | `models.reasoning_t2` | `claude-opus-4-8` | Escalation model for the reasoning-tier chain. |
 | Rule proposals | `ATHENAEUM_RULE_PROPOSALS_MODEL` | `models.rule_proposals` | `claude-opus-4-8` | Rule-proposal drafting call. |
 
-## `athenaeum`
-
-### `resolve_wiki_dedupe_min_body_chars`
-
-- **YAML path:** `athenaeum.wiki_dedupe.discover_wiki_dedupe_candidates`
-- **Environment variable:** —
-- **CLI flag:** —
-- **Default:** `0`
-- **Precedence:** `athenaeum.yaml` > code default
-
-Resolve the wiki-dedupe eligibility body-length floor.
-
-``athenaeum.wiki_dedupe.discover_wiki_dedupe_candidates`` excludes a
-candidate page whose body (post-frontmatter, stripped) is shorter than
-this many characters. Rationale, from 's corpus-level
-characterization (counts only, see the issue and the module docstring
-of ``wiki_dedupe.py`` for the full measurement): 's
-chunk-and-mean-pool fix only DILUTES a structurally uniform lede's
-contribution to a page's pooled vector when there is a SECOND chunk to
-average it against. A page short enough to fit in one
-`athenaeum.wiki_dedupe._CHUNK_CHARS`-sized chunk gets a mean-pool
-of exactly one vector -- a mathematical no-op, byte-identical to the
-pre- whole-page embedding -- so this provides it
-ZERO protection against boilerplate-lede dominance. A two-chunk page
-(one lede chunk + one body chunk, the modal shape in the operator's
-live corpus) gets only 50% dilution, the weakest non-zero case. This
-floor lets an operator exclude that short end of the eligible
-population from vector-similarity candidacy entirely -- a
-deterministic, LLM-free gate -- rather than trust a similarity score
-computed over one or two chunks where the boilerplate signal
-dominates.
-
-DEFAULT 0 (OFF): whether a given corpus's short pages are actually
-driving over-clustering is corpus-specific and was NOT re-measured
-against the live embedder (blocked in the environment that produced
-this fix -- see the issue). Shipping a non-zero default would silently
-change which pages are eligible for merge/dedup comparison across the
-operator's whole corpus without a live re-measurement to justify a
-specific cutoff. Operators opt in via ``athenaeum.yaml`` once they can
-re-measure cluster composition at a chosen floor. No seed in
-``_DEFAULTS`` so the code default stays reachable.
-``bool`` (an ``int`` subclass) and non-int / ``<= 0`` yaml values fall
-through to 0 (off) -- mirrors `resolve_min_cluster_cohesion`'s
-coercion contract.
-
-### `resolve_dimensions`
-
-- **YAML path:** `athenaeum.yaml`
-- **Environment variable:** —
-- **CLI flag:** —
-- **Default:** `DimensionRegistry(dimensions=(Dimension(name='recorded-time', kind='interval', null_means='unknown', values=None, separates=False, applies_to={}, state='enforced', origin='builtin', since=None, coverage_threshold=1.0), Dimension(name='observed-time', kind='interval', null_means='unknown', values=None, separates=False, applies_to={}, state='enforced', origin='builtin', since=None, coverage_threshold=1.0), Dimension(name='valid-time', kind='interval', null_means='universal', values=None, separates=True, applies_to={}, state='enforced', origin='builtin', since=None, coverage_threshold=1.0), Dimension(name='scope', kind='hierarchy', null_means='universal', values=None, separates=True, applies_to={}, state='enforced', origin='builtin', since=None, coverage_threshold=1.0), Dimension(name='subject', kind='identity', null_means='unknown', values=None, separates=True, applies_to={}, state='enforced', origin='builtin', since=None, coverage_threshold=1.0), Dimension(name='memory-class', kind='enum', null_means='unknown', values=('axiom', 'decision', 'entity', 'fact', 'guideline', 'procedure', 'reference'), separates=True, applies_to={}, state='backfill', origin='builtin', since=None, coverage_threshold=1.0)))`
-- **Precedence:** `athenaeum.yaml` > code default
-
-Resolve the ``dimensions:`` config block into a validated registry.
-
-Returns a `athenaeum.dimensions.DimensionRegistry` — always
-non-empty: the six kernel dimensions (recorded-time, observed-time,
-valid-time, scope, subject, memory-class) are builtin and present
-regardless of config. ``dimensions:`` in ``athenaeum.yaml`` is a list of
-ADDITIONAL, deployment-declared dimensions (``engagement``, ``repo``,
-``maturity``,...) layered on top; a fresh install with no ``dimensions:``
-key gets the kernel-only registry, and ``athenaeum run`` behaves
-unchanged either way (nothing in the librarian pipeline consults a
-deployment dimension's ``applies_to`` unless one is declared).
-
-No env var: ``dimensions:`` is a structural block (a list of typed
-entries), not a scalar knob — there is no single value an env override
-could sensibly replace. Raises
-`athenaeum.dimensions.DimensionRegistryError` on a malformed
-entry (unknown ``kind``/``null_means``/``state``, non-kebab-case name,
-duplicate name, an ``enum`` kind missing ``values``, or a name colliding
-with a kernel dimension) — a mis-declared dimension is a real config
-error, not something to silently drop, matching ``resolve_screening``'s
-fail-loud posture for a structural (not scalar) knob.
-
-### `resolve_google_contact_keys`
-
-- **YAML path:** `athenaeum.yaml`
-- **Environment variable:** —
-- **CLI flag:** —
-- **Default:** `[]`
-- **Precedence:** `athenaeum.yaml` > code default
-
-Resolve extra Google-contact dedup join-key field-names.
-
-The dedupe merge always treats the generic ``google_contact`` frontmatter
-field as a join/merge key. Some operators carry the same Google contact id
-under additional namespace-specific field names (e.g. a separate field per
-Google Workspace account). Those EXTRA field names are operator-specific
-and must never be hardcoded in shipped source -- they come entirely from
-``athenaeum.yaml``:
-```
-dedupe:
-  google_contact_keys:
-    - google_contact_<namespace>
-```
-
-Returns the configured list of extra field names (the base
-``google_contact`` key is implicit and not included here). Returns an
-empty list when unset -- a fresh install dedups on the generic
-``google_contact`` key only, with no personal namespace literal in source.
-No seed in ``_DEFAULTS``.
-
-### `resolve_min_merge_confidence`
-
-- **YAML path:** `athenaeum.yaml`
-- **Environment variable:** `ATHENAEUM_MIN_MERGE_CONFIDENCE`
-- **CLI flag:** —
-- **Default:** `0.0`
-- **Precedence:** environment variable > `athenaeum.yaml` > code default
-
-Resolve the resolver merge-proposal confidence floor.
-
-A second, opt-in gate on the merge-proposal path: a proposal whose resolver
-confidence is strictly below this floor is suppressed before it reaches
-``_pending_merges.md``. Complements `resolve_max_merge_sources` — the
-size cap catches the degenerate over-clusters by shape, this lets an operator
-additionally keep low-confidence small merges out of the human queue.
-
-DEFAULT 0.0 (OFF): a baked-in confidence floor is a corpus-specific product
-call (what confidence a human wants to review is deployment-dependent), so it
-ships disabled and is opt-in via ``athenaeum.yaml`` — mirroring
-`resolve_min_cluster_cohesion`. Env ``ATHENAEUM_MIN_MERGE_CONFIDENCE`` >
-yaml ``librarian.min_merge_confidence`` > this default. No seed in
-``_DEFAULTS``. (M1): a parsed env value is authoritative
-over yaml — ``ATHENAEUM_MIN_MERGE_CONFIDENCE=0`` (or negative) disables the
-floor even when yaml sets one, instead of silently falling through. A
-malformed env value logs a WARNING (M2, via `_env_number`) and falls
-back to yaml. A ``bool`` / non-numeric / ``<= 0`` yaml value falls through
-to 0.0 (off).
-
-### `resolve_model_rates`
-
-- **YAML path:** `athenaeum.yaml`
-- **Environment variable:** —
-- **CLI flag:** —
-- **Default:** `{}`
-- **Precedence:** `athenaeum.yaml` > code default
-
-Resolve the per-MTok pricing table from ``athenaeum.yaml``'s ``pricing:``
-section.
-
-``pricing.<prefix>: [input_usd_per_mtok, output_usd_per_mtok]`` — the SAME
-longest-prefix-match convention `athenaeum.models._rates_for_model`
-already uses for the code-default table, so a dated model id
-(``claude-sonnet-4-6-20260301``) still resolves via the shortest prefix
-that matches. Only a yaml layer exists for this knob — no env-var
-override (a whole pricing TABLE is not the single scalar the existing
-``ATHENAEUM_*`` env convention fits) and, deliberately, no per-prefix code
-default merged in HERE: this function returns EXACTLY what
-``athenaeum.yaml`` says, nothing more. See
-`athenaeum.models.configure_model_rates` for what an empty return
-does at the call site (falls back to the code-default table WHOLESALE,
-not per missing prefix) and the issue's "Design decision" for why a
-per-prefix merge (yaml overlaying the code table, which stays the floor
-for anything yaml omits) was rejected: an omission in yaml would keep
-silently reading the code default — the invisible second source of truth
-the startup preflight (`preflight_model_rates`) exists to kill
-for a model a run actually resolves to.
-
-Schema contract ("Schema note for the implementer"): **one rate per
-prefix, no mode dimension.** A prefix key cannot express a time-boxed
-promo rate (Sonnet 5's introductory $2/$10 through 2026-08-31 — Occam
-decision 2026-07-31, deliberately not encoded: a prefix-keyed rate cannot
-expire, so a promo would go silently wrong the day it ends) or a
-per-request-mode rate (Opus 5's ``speed: "fast"`` $10/$50 — athenaeum does
-not use fast mode). Both are explicitly out of scope for; if either is
-ever needed, it is a schema change here (e.g. a mode-keyed sub-block), not
-a workaround layered on top of this function.
-
-Malformed entries WARN and are REJECTED (excluded from the returned
-dict — treated as unset for that prefix), mirroring
-`athenaeum.provider.resolve_max_tokens`'s malformed-override
-convention rather than inventing a new one: wrong arity (not exactly 2
-elements), a non-numeric element, a ``bool`` element (``bool`` is an
-``int`` subclass — ``[true, false]`` must not silently become
-``[1.0, 0.0]``), or a negative rate.
-
-### `resolve_owner`
-
-- **YAML path:** `athenaeum.yaml`
-- **Environment variable:** —
-- **CLI flag:** —
-- **Default:** `None`
-- **Precedence:** `athenaeum.yaml` > code default
-
-Resolve the workspace owner identity from config.
-
-The owner is the single canonical person the knowledge base belongs to.
-Athenaeum ships to PyPI, so the owner identity must NEVER be hardcoded in
-source — it comes entirely from ``athenaeum.yaml``:
-```
-owner:
-  uid: <owner-person-uid>                # canonical owner person UID
-  google_contact: people/<contact-id>    # owner Google contact id
-  aliases: ["<your_user_handle>", ...]   # optional name/handle aliases
-  emails: ["<you@example.com>", ...]     # optional owner addresses
-```
-
-Aliases used for name matching must be FULL names (≥2 tokens); a
-single-token alias is ignored for name matching so it cannot absorb
-every stranger who shares that one name.
-
-``emails`` lists the owner's OWN mailbox addresses. It is not a match
-signal — nothing binds a page to the owner because it shares an address.
-It is an EXCLUSION list: the person merge refuses to union one of these
-onto a page that is not the owner's, so a contaminated import fragment
-cannot silently attribute the operator's mailbox to an unrelated contact
-Addresses are lowercased and blanks dropped.
-
-Returns a normalized dict ``{"uid", "google_contact", "aliases", "emails"}``
-when at least one usable field is set, else ``None``. A ``None`` return
-makes every owner-aware behavior (auto-bind, owner join keys, ``user_*``
-routing, the merge address guard) inert so the package works for any user
-with no owner configured. No default is seeded into ``_DEFAULTS`` — an unset owner is genuinely empty.
-
-### `resolve_pull_before_run`
-
-- **YAML path:** `athenaeum.yaml`
-- **Environment variable:** —
-- **CLI flag:** —
-- **Default:** `False`
-- **Precedence:** `athenaeum.yaml` > code default
-
-Resolve the pre-run ``git pull`` opt-in.
-
-Symmetric to `resolve_push_after_run`: with
-``librarian.pull_before_run: true`` (or the ``athenaeum run --pull`` CLI
-override), the librarian invokes ``git pull --ff-only --autostash`` on
-the knowledge repo BEFORE the run starts, so the run compiles against
-origin's latest instead of a possibly-stale local checkout. Default OFF:
-a fresh install must never side-effect an operator's git remote, and
-athenaeum itself handles no credentials — pulls (like pushes) rely
-entirely on the operator's ambient git auth (credential helper / SSH).
-
-There is no shipped nightly cron wrapper in this repo, so pull and push
-both stay independently opt-in via yaml/CLI rather than being bundled
-into an assumed scheduler script. An operator wanting full bidirectional
-sync sets both ``pull_before_run: true`` and ``push_after_run: true`` in
-``athenaeum.yaml``. Non-bool yaml values fall through to the default
-(off).
-
 ## `audit`
 
 ### `resolve_audit_date_fill`
@@ -372,36 +130,6 @@ alongside it per this issue's own plan. A non-positive, non-numeric, or
 ``bool`` override (env or yaml) falls back to the default rather than
 producing a zero-or-negative (or immediately-expired) window.
 
-## `audit_on_touch`
-
-### `resolve_audit_on_touch_freshness_hours`
-
-- **YAML path:** `audit_on_touch.skipped_fresh`
-- **Environment variable:** `ATHENAEUM_AUDIT_ON_TOUCH_FRESHNESS_HOURS`
-- **CLI flag:** —
-- **Default:** `24.0`
-- **Precedence:** environment variable > `athenaeum.yaml` > code default
-
-Resolve the audit-on-touch freshness window in hours.
-
-A page whose ``last_audited`` falls inside this window of "now" is
-skipped by `athenaeum.audit_on_touch.audit_on_touch` (counted
-``audit_on_touch.skipped_fresh``) rather than re-audited before the
-librarian touches it again — the plan's "a page touched repeatedly in
-one run is audited once" rule, generalized to any window an operator
-configures, not just a single run.
-
-Precedence: ``ATHENAEUM_AUDIT_ON_TOUCH_FRESHNESS_HOURS`` env > yaml
-``librarian.audit_on_touch_freshness_hours`` > the issue's suggested
-default, ``24.0``. A non-positive value (env or yaml) falls through to
-the default — mirrors `_resolve_positive_int_knob`'s "cannot
-silently disable the guardrail" reasoning: a zero/negative window would
-make every touch re-audit, defeating the freshness gate this knob
-configures. No seed in ``_DEFAULTS``. This default
-(``24.0``) intentionally mirrors `athenaeum.audit_on_touch.
-DEFAULT_FRESHNESS_HOURS` — kept as a separate literal rather than an
-import since this module (L2) may not import that one (L4, layering).
-
 ## `decay`
 
 ### `resolve_decay_horizon_days`
@@ -440,6 +168,68 @@ accident.
 ``bucket``-first signature: the bucket is the knob SELECTOR (which of the
 two horizon families to resolve), not a value read out of *config* — the
 same shape `resolve_retention_policy` uses for its retention family.
+
+## `dedupe`
+
+### `resolve_google_contact_keys`
+
+- **YAML path:** `dedupe.google_contact_keys`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `[]`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve extra Google-contact dedup join-key field-names.
+
+The dedupe merge always treats the generic ``google_contact`` frontmatter
+field as a join/merge key. Some operators carry the same Google contact id
+under additional namespace-specific field names (e.g. a separate field per
+Google Workspace account). Those EXTRA field names are operator-specific
+and must never be hardcoded in shipped source -- they come entirely from
+``athenaeum.yaml``:
+```
+dedupe:
+  google_contact_keys:
+    - google_contact_<namespace>
+```
+
+Returns the configured list of extra field names (the base
+``google_contact`` key is implicit and not included here). Returns an
+empty list when unset -- a fresh install dedups on the generic
+``google_contact`` key only, with no personal namespace literal in source.
+No seed in ``_DEFAULTS``.
+
+## `dimensions`
+
+### `resolve_dimensions`
+
+- **YAML path:** `dimensions`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `DimensionRegistry(dimensions=(Dimension(name='recorded-time', kind='interval', null_means='unknown', values=None, separates=False, applies_to={}, state='enforced', origin='builtin', since=None, coverage_threshold=1.0), Dimension(name='observed-time', kind='interval', null_means='unknown', values=None, separates=False, applies_to={}, state='enforced', origin='builtin', since=None, coverage_threshold=1.0), Dimension(name='valid-time', kind='interval', null_means='universal', values=None, separates=True, applies_to={}, state='enforced', origin='builtin', since=None, coverage_threshold=1.0), Dimension(name='scope', kind='hierarchy', null_means='universal', values=None, separates=True, applies_to={}, state='enforced', origin='builtin', since=None, coverage_threshold=1.0), Dimension(name='subject', kind='identity', null_means='unknown', values=None, separates=True, applies_to={}, state='enforced', origin='builtin', since=None, coverage_threshold=1.0), Dimension(name='memory-class', kind='enum', null_means='unknown', values=('axiom', 'decision', 'entity', 'fact', 'guideline', 'procedure', 'reference'), separates=True, applies_to={}, state='backfill', origin='builtin', since=None, coverage_threshold=1.0)))`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve the ``dimensions:`` config block into a validated registry.
+
+Returns a `athenaeum.dimensions.DimensionRegistry` — always
+non-empty: the six kernel dimensions (recorded-time, observed-time,
+valid-time, scope, subject, memory-class) are builtin and present
+regardless of config. ``dimensions:`` in ``athenaeum.yaml`` is a list of
+ADDITIONAL, deployment-declared dimensions (``engagement``, ``repo``,
+``maturity``,...) layered on top; a fresh install with no ``dimensions:``
+key gets the kernel-only registry, and ``athenaeum run`` behaves
+unchanged either way (nothing in the librarian pipeline consults a
+deployment dimension's ``applies_to`` unless one is declared).
+
+No env var: ``dimensions:`` is a structural block (a list of typed
+entries), not a scalar knob — there is no single value an env override
+could sensibly replace. Raises
+`athenaeum.dimensions.DimensionRegistryError` on a malformed
+entry (unknown ``kind``/``null_means``/``state``, non-kebab-case name,
+duplicate name, an ``enum`` kind missing ``values``, or a name colliding
+with a kernel dimension) — a mis-declared dimension is a real config
+error, not something to silently drop, matching ``resolve_screening``'s
+fail-loud posture for a structural (not scalar) knob.
 
 ## `entity_resolution`
 
@@ -523,6 +313,34 @@ values are dropped defensively; a malformed entry surfaces loudly later,
 at pack-build time, with the pack name in the message.
 
 ## `librarian`
+
+### `resolve_audit_on_touch_freshness_hours`
+
+- **YAML path:** `librarian.audit_on_touch_freshness_hours`
+- **Environment variable:** `ATHENAEUM_AUDIT_ON_TOUCH_FRESHNESS_HOURS`
+- **CLI flag:** —
+- **Default:** `24.0`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the audit-on-touch freshness window in hours.
+
+A page whose ``last_audited`` falls inside this window of "now" is
+skipped by `athenaeum.audit_on_touch.audit_on_touch` (counted
+``audit_on_touch.skipped_fresh``) rather than re-audited before the
+librarian touches it again — the plan's "a page touched repeatedly in
+one run is audited once" rule, generalized to any window an operator
+configures, not just a single run.
+
+Precedence: ``ATHENAEUM_AUDIT_ON_TOUCH_FRESHNESS_HOURS`` env > yaml
+``librarian.audit_on_touch_freshness_hours`` > the issue's suggested
+default, ``24.0``. A non-positive value (env or yaml) falls through to
+the default — mirrors `_resolve_positive_int_knob`'s "cannot
+silently disable the guardrail" reasoning: a zero/negative window would
+make every touch re-audit, defeating the freshness gate this knob
+configures. No seed in ``_DEFAULTS``. This default
+(``24.0``) intentionally mirrors `athenaeum.audit_on_touch.
+DEFAULT_FRESHNESS_HOURS` — kept as a separate literal rather than an
+import since this module (L2) may not import that one (L4, layering).
 
 ### `resolve_audit_sample_rate_agent_triage`
 
@@ -1766,6 +1584,34 @@ auto-memory pages span 1-3, so a floor of 4 sits in the clean margin. No
 seed in ``_DEFAULTS``. ``bool`` and non-int / ``< 2`` yaml values
 fall through to the default.
 
+### `resolve_min_merge_confidence`
+
+- **YAML path:** `librarian.min_merge_confidence`
+- **Environment variable:** `ATHENAEUM_MIN_MERGE_CONFIDENCE`
+- **CLI flag:** —
+- **Default:** `0.0`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the resolver merge-proposal confidence floor.
+
+A second, opt-in gate on the merge-proposal path: a proposal whose resolver
+confidence is strictly below this floor is suppressed before it reaches
+``_pending_merges.md``. Complements `resolve_max_merge_sources` — the
+size cap catches the degenerate over-clusters by shape, this lets an operator
+additionally keep low-confidence small merges out of the human queue.
+
+DEFAULT 0.0 (OFF): a baked-in confidence floor is a corpus-specific product
+call (what confidence a human wants to review is deployment-dependent), so it
+ships disabled and is opt-in via ``athenaeum.yaml`` — mirroring
+`resolve_min_cluster_cohesion`. Env ``ATHENAEUM_MIN_MERGE_CONFIDENCE`` >
+yaml ``librarian.min_merge_confidence`` > this default. No seed in
+``_DEFAULTS``. (M1): a parsed env value is authoritative
+over yaml — ``ATHENAEUM_MIN_MERGE_CONFIDENCE=0`` (or negative) disables the
+floor even when yaml sets one, instead of silently falling through. A
+malformed env value logs a WARNING (M2, via `_env_number`) and falls
+back to yaml. A ``bool`` / non-numeric / ``<= 0`` yaml value falls through
+to 0.0 (off).
+
 ### `resolve_min_merge_mean_similarity`
 
 - **YAML path:** `librarian.min_merge_mean_similarity`
@@ -1851,6 +1697,36 @@ operator escape hatch. Mirrors `resolve_delta_enabled`'s shape:
 yaml ``librarian.name_collision_scan`` (a plain ``bool``) overrides the
 ``True`` default; anything else (missing, non-bool) falls through to
 ``True``.
+
+### `resolve_non_intake_sources`
+
+- **YAML path:** `librarian.non_intake_sources`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `set()`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve `raw/<source>/` dirs excluded from entity intake, from
+``librarian.non_intake_sources``.
+
+A source directory named here is skipped WHOLE by
+`athenaeum.intake.discover_raw_files` — none of its files become
+entity intake. This is for a tool that writes its own OPERATIONAL
+artifacts into ``raw/<source>/`` (the same tree ``remember``-authored
+content uses): action logs, launchd logs, state dumps. Those match the
+``*.md`` / ``*.jsonl`` glob and are not correction-batch envelopes, so
+without this knob they enter ``tier2_classify`` → ``tier3_write`` as if
+they were memory content, and a multi-megabyte log gets read whole and
+handed to the classifier.
+
+Generalizes the hardcoded ``source == "answers"`` skip, which stays as-is: this is a SECOND, operator-controlled
+mechanism alongside it, so the next occurrence is a config change rather
+than another patch to ``discover_raw_files``.
+
+Matched against ``source_dir.name`` exactly (no globbing, no case folding
+— a directory name on disk is what it is). DEFAULT-EMPTY: a fresh install
+excludes nothing, so unconfigured discovery is byte-identical to
+pre- behaviour. No seed in ``_DEFAULTS``.
 
 ### `resolve_operational_markers`
 
@@ -2063,6 +1939,32 @@ recoverability argument.
 DEFAULT-NONE: a fresh install has no preserved area, so a `preserve` rule
 is inert until an operator configures one (the feature is opt-in twice
 over — the area AND a rule). No seed in ``_DEFAULTS``.
+
+### `resolve_pull_before_run`
+
+- **YAML path:** `librarian.pull_before_run`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `False`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve the pre-run ``git pull`` opt-in.
+
+Symmetric to `resolve_push_after_run`: with
+``librarian.pull_before_run: true`` (or the ``athenaeum run --pull`` CLI
+override), the librarian invokes ``git pull --ff-only --autostash`` on
+the knowledge repo BEFORE the run starts, so the run compiles against
+origin's latest instead of a possibly-stale local checkout. Default OFF:
+a fresh install must never side-effect an operator's git remote, and
+athenaeum itself handles no credentials — pulls (like pushes) rely
+entirely on the operator's ambient git auth (credential helper / SSH).
+
+There is no shipped nightly cron wrapper in this repo, so pull and push
+both stay independently opt-in via yaml/CLI rather than being bundled
+into an assumed scheduler script. An operator wanting full bidirectional
+sync sets both ``pull_before_run: true`` and ``push_after_run: true`` in
+``athenaeum.yaml``. Non-bool yaml values fall through to the default
+(off).
 
 ### `resolve_push_after_run`
 
@@ -3398,6 +3300,50 @@ machinery via the merge approve/reject decisions the pipeline already
 makes. Non-bool yaml values and unrecognized env strings fall through to
 off.
 
+### `resolve_wiki_dedupe_min_body_chars`
+
+- **YAML path:** `librarian.wiki_dedupe_min_body_chars`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `0`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve the wiki-dedupe eligibility body-length floor from
+``librarian.wiki_dedupe_min_body_chars``.
+
+``athenaeum.wiki_dedupe.discover_wiki_dedupe_candidates`` excludes a
+candidate page whose body (post-frontmatter, stripped) is shorter than
+this many characters. Rationale, from 's corpus-level
+characterization (counts only, see the issue and the module docstring
+of ``wiki_dedupe.py`` for the full measurement): 's
+chunk-and-mean-pool fix only DILUTES a structurally uniform lede's
+contribution to a page's pooled vector when there is a SECOND chunk to
+average it against. A page short enough to fit in one
+`athenaeum.wiki_dedupe._CHUNK_CHARS`-sized chunk gets a mean-pool
+of exactly one vector -- a mathematical no-op, byte-identical to the
+pre- whole-page embedding -- so this provides it
+ZERO protection against boilerplate-lede dominance. A two-chunk page
+(one lede chunk + one body chunk, the modal shape in the operator's
+live corpus) gets only 50% dilution, the weakest non-zero case. This
+floor lets an operator exclude that short end of the eligible
+population from vector-similarity candidacy entirely -- a
+deterministic, LLM-free gate -- rather than trust a similarity score
+computed over one or two chunks where the boilerplate signal
+dominates.
+
+DEFAULT 0 (OFF): whether a given corpus's short pages are actually
+driving over-clustering is corpus-specific and was NOT re-measured
+against the live embedder (blocked in the environment that produced
+this fix -- see the issue). Shipping a non-zero default would silently
+change which pages are eligible for merge/dedup comparison across the
+operator's whole corpus without a live re-measurement to justify a
+specific cutoff. Operators opt in via ``athenaeum.yaml`` once they can
+re-measure cluster composition at a chosen floor. No seed in
+``_DEFAULTS`` so the code default stays reachable.
+``bool`` (an ``int`` subclass) and non-int / ``<= 0`` yaml values fall
+through to 0 (off) -- mirrors `resolve_min_cluster_cohesion`'s
+coercion contract.
+
 ### `resolve_wiki_dedupe_min_confidence`
 
 - **YAML path:** `librarian.wiki_dedupe_min_confidence`
@@ -3504,6 +3450,25 @@ so it sits below ``models.resolve`` but above the code default.
 
 ## `off_corpus`
 
+### `resolve_off_corpus_adapter_name`
+
+- **YAML path:** `off_corpus.adapter`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `None`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve the off-corpus adapter name from ``off_corpus.adapter``: the
+``storage.adapters`` entry name that backs the off-corpus
+purgeable surface. yaml-only, no env var — a physical
+surface name is not the shape of knob this repo's env-var convention
+covers (mirrors ``storage.mapping``/``storage.adapters`` themselves,
+which are also yaml-only). Returns ``None`` when unset; a ``None`` name
+with `resolve_off_corpus_enabled` true is a configuration error
+`athenaeum.off_corpus` raises loudly (D6: fail closed, loudly) —
+this resolver itself stays defensive/non-raising like every other
+resolver in this module.
+
 ### `resolve_off_corpus_enabled`
 
 - **YAML path:** `off_corpus.enabled`
@@ -3544,6 +3509,44 @@ carry no OIDC identity, so an unset block leaves ``on_behalf_of`` absent
 (the fallback). Returns the raw dict unchanged for
 `athenaeum.models.asserter_identity_key` to key on; a non-dict or
 empty block is inert.
+
+### `resolve_owner`
+
+- **YAML path:** `owner.uid.google_contact.aliases.emails`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `None`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve the workspace owner identity from config.
+
+The owner is the single canonical person the knowledge base belongs to.
+Athenaeum ships to PyPI, so the owner identity must NEVER be hardcoded in
+source — it comes entirely from ``athenaeum.yaml``:
+```
+owner:
+  uid: <owner-person-uid>                # canonical owner person UID
+  google_contact: people/<contact-id>    # owner Google contact id
+  aliases: ["<your_user_handle>", ...]   # optional name/handle aliases
+  emails: ["<you@example.com>", ...]     # optional owner addresses
+```
+
+Aliases used for name matching must be FULL names (≥2 tokens); a
+single-token alias is ignored for name matching so it cannot absorb
+every stranger who shares that one name.
+
+``emails`` lists the owner's OWN mailbox addresses. It is not a match
+signal — nothing binds a page to the owner because it shares an address.
+It is an EXCLUSION list: the person merge refuses to union one of these
+onto a page that is not the owner's, so a contaminated import fragment
+cannot silently attribute the operator's mailbox to an unrelated contact
+Addresses are lowercased and blanks dropped.
+
+Returns a normalized dict ``{"uid", "google_contact", "aliases", "emails"}``
+when at least one usable field is set, else ``None``. A ``None`` return
+makes every owner-aware behavior (auto-bind, owner join keys, ``user_*``
+routing, the merge address guard) inert so the package works for any user
+with no owner configured. No default is seeded into ``_DEFAULTS`` — an unset owner is genuinely empty.
 
 ## `person_registry`
 
@@ -3652,6 +3655,55 @@ is unavailable and every mode falls back to regex-only — there is no
 implicit download, ever, and no path default: the only paths that exist
 today sit under lane scratch (``~/.local/state/occam-lanes/``), which
 must never become a code default.
+
+## `pricing`
+
+### `resolve_model_rates`
+
+- **YAML path:** `pricing`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `{}`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve the per-MTok pricing table from ``athenaeum.yaml``'s ``pricing:``
+section.
+
+``pricing.<prefix>: [input_usd_per_mtok, output_usd_per_mtok]`` — the SAME
+longest-prefix-match convention `athenaeum.models._rates_for_model`
+already uses for the code-default table, so a dated model id
+(``claude-sonnet-4-6-20260301``) still resolves via the shortest prefix
+that matches. Only a yaml layer exists for this knob — no env-var
+override (a whole pricing TABLE is not the single scalar the existing
+``ATHENAEUM_*`` env convention fits) and, deliberately, no per-prefix code
+default merged in HERE: this function returns EXACTLY what
+``athenaeum.yaml`` says, nothing more. See
+`athenaeum.models.configure_model_rates` for what an empty return
+does at the call site (falls back to the code-default table WHOLESALE,
+not per missing prefix) and the issue's "Design decision" for why a
+per-prefix merge (yaml overlaying the code table, which stays the floor
+for anything yaml omits) was rejected: an omission in yaml would keep
+silently reading the code default — the invisible second source of truth
+the startup preflight (`preflight_model_rates`) exists to kill
+for a model a run actually resolves to.
+
+Schema contract ("Schema note for the implementer"): **one rate per
+prefix, no mode dimension.** A prefix key cannot express a time-boxed
+promo rate (Sonnet 5's introductory $2/$10 through 2026-08-31 — Occam
+decision 2026-07-31, deliberately not encoded: a prefix-keyed rate cannot
+expire, so a promo would go silently wrong the day it ends) or a
+per-request-mode rate (Opus 5's ``speed: "fast"`` $10/$50 — athenaeum does
+not use fast mode). Both are explicitly out of scope for; if either is
+ever needed, it is a schema change here (e.g. a mode-keyed sub-block), not
+a workaround layered on top of this function.
+
+Malformed entries WARN and are REJECTED (excluded from the returned
+dict — treated as unset for that prefix), mirroring
+`athenaeum.provider.resolve_max_tokens`'s malformed-override
+convention rather than inventing a new one: wrong arity (not exactly 2
+elements), a non-numeric element, a ``bool`` element (``bool`` is an
+``int`` subclass — ``[true, false]`` must not silently become
+``[1.0, 0.0]``), or a negative rate.
 
 ## `push_budget`
 
@@ -4197,37 +4249,6 @@ name at least one non-empty role. Role ids are opaque, case-folded, and
 whitespace-trimmed; athenaeum assigns them no meaning (they map onto the
 operator's external RBAC). No seed in ``_DEFAULTS``.
 
-## `source_dir`
-
-### `resolve_non_intake_sources`
-
-- **YAML path:** `source_dir.name`
-- **Environment variable:** —
-- **CLI flag:** —
-- **Default:** `set()`
-- **Precedence:** `athenaeum.yaml` > code default
-
-Resolve `raw/<source>/` dirs excluded from entity intake.
-
-A source directory named here is skipped WHOLE by
-`athenaeum.intake.discover_raw_files` — none of its files become
-entity intake. This is for a tool that writes its own OPERATIONAL
-artifacts into ``raw/<source>/`` (the same tree ``remember``-authored
-content uses): action logs, launchd logs, state dumps. Those match the
-``*.md`` / ``*.jsonl`` glob and are not correction-batch envelopes, so
-without this knob they enter ``tier2_classify`` → ``tier3_write`` as if
-they were memory content, and a multi-megabyte log gets read whole and
-handed to the classifier.
-
-Generalizes the hardcoded ``source == "answers"`` skip, which stays as-is: this is a SECOND, operator-controlled
-mechanism alongside it, so the next occurrence is a config change rather
-than another patch to ``discover_raw_files``.
-
-Matched against ``source_dir.name`` exactly (no globbing, no case folding
-— a directory name on disk is what it is). DEFAULT-EMPTY: a fresh install
-excludes nothing, so unconfigured discovery is byte-identical to
-pre- behaviour. No seed in ``_DEFAULTS``.
-
 ## `spend`
 
 ### `resolve_spend_accounting_timezone`
@@ -4437,24 +4458,6 @@ Precedence: ``ATHENAEUM_SPEND_WEEKLY_TOKEN_LIMIT`` env >
 ``spend.weekly_token_limit`` yaml > ``None`` (no ceiling).
 
 ## `storage`
-
-### `resolve_off_corpus_adapter_name`
-
-- **YAML path:** `storage.adapters`
-- **Environment variable:** —
-- **CLI flag:** —
-- **Default:** `None`
-- **Precedence:** `athenaeum.yaml` > code default
-
-Resolve the ``storage.adapters`` entry name that backs the off-corpus
-purgeable surface. yaml-only, no env var — a physical
-surface name is not the shape of knob this repo's env-var convention
-covers (mirrors ``storage.mapping``/``storage.adapters`` themselves,
-which are also yaml-only). Returns ``None`` when unset; a ``None`` name
-with `resolve_off_corpus_enabled` true is a configuration error
-`athenaeum.off_corpus` raises loudly (D6: fail closed, loudly) —
-this resolver itself stays defensive/non-raising like every other
-resolver in this module.
 
 ### `resolve_storage_adapters`
 

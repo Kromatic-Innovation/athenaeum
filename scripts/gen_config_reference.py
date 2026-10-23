@@ -528,12 +528,96 @@ def _find_env_var(info: _ResolverInfo, all_funcs: dict[str, ast.FunctionDef]) ->
     return None
 
 
+class AmbiguousYamlKeyError(ValueError):
+    """A resolver docstring cites backticked dotted keys but none is the
+    resolver's own (issue athenaeum#2104)."""
+
+
+#: Resolvers whose yaml key legitimately does NOT mirror the resolver name
+#: (a renamed knob, a nested sub-key). Each value must still be cited in the
+#: docstring; :func:`_select_exact_key` raises otherwise. Keep this tiny --
+#: a new entry is a decision to document a name/key divergence, not a way to
+#: silence the leaf-match check.
+_YAML_KEY_OVERRIDES: dict[str, str] = {
+    "resolve_live_delta_enabled": "librarian.delta.live_client",
+    "resolve_push_token_budget": "push_budget.tokens_per_turn",
+    "resolve_screening": "screening.medical.action",
+}
+
+
+def _singular(token: str) -> str:
+    return token[:-1] if len(token) > 3 and token.endswith("s") else token
+
+
+def _leaf_match_len(leaf_tokens: list[str], key: str) -> int:
+    """How strongly *key*'s own leaf matches the resolver leaf, or 0 for none.
+
+    ``resolve_<leaf>`` is named for its key's last segment, but the resolver
+    name often spells the section's tail too (``resolve_spend_max_tokens_per_run``
+    -> ``spend.max_tokens_per_run``) or carries a suffix (``resolve_delta_enabled``
+    -> ``librarian.delta``). So a key matches when its last segment's
+    ``_``-separated tokens appear as a contiguous run in the resolver leaf's
+    tokens. The score is the run length, plus a bonus for an exact leaf match.
+    """
+    leaf_tokens = [_singular(t) for t in leaf_tokens]
+    key_tokens = [_singular(t) for t in key.rsplit(".", 1)[-1].split("_")]
+    n = len(key_tokens)
+    for i in range(len(leaf_tokens) - n + 1):
+        if leaf_tokens[i : i + n] == key_tokens:
+            return n + (100 if key_tokens == leaf_tokens else 0)
+    return 0
+
+
+def _select_exact_key(name: str, docstring: str) -> str | None:
+    """Pick the backticked dotted key in *docstring* that belongs to resolver *name*.
+
+    A resolver ``resolve_<leaf>`` owns the key whose leaf matches ``<leaf>``
+    (see :func:`_leaf_match_len`). Picking the FIRST backticked key instead
+    mis-sectioned any knob whose docstring cites a precedent key before its
+    own (issue athenaeum#2104). Ties go to the earliest-cited key.
+
+    Returns ``None`` when the docstring cites no candidate key at all (the
+    caller then falls back to the looser steps; ``athenaeum.yaml`` is the
+    config file, not a key). Raises :class:`AmbiguousYamlKeyError` -- naming
+    the resolver and the keys seen -- when keys are cited but none matches,
+    rather than guessing.
+    """
+    keys = [
+        k
+        for k in _EXACT_BACKTICK_DOTTED.findall(docstring)
+        if k.split(".")[0] != "athenaeum"
+    ]
+    if not keys:
+        return None
+    override = _YAML_KEY_OVERRIDES.get(name)
+    if override is not None:
+        if override not in keys:
+            raise AmbiguousYamlKeyError(
+                f"{name}: _YAML_KEY_OVERRIDES names {override!r} but the "
+                f"docstring cites only {keys!r}."
+            )
+        return override
+    leaf_tokens = name.removeprefix("resolve_").split("_")
+    best, best_score = None, 0
+    for key in keys:
+        score = _leaf_match_len(leaf_tokens, key)
+        if score > best_score:
+            best, best_score = key, score
+    if best is None:
+        raise AmbiguousYamlKeyError(
+            f"{name}: no backticked dotted key in its docstring matches the "
+            f"resolver's leaf {'_'.join(leaf_tokens)!r}; keys seen: {keys!r}. "
+            "Cite the resolver's own key in the docstring."
+        )
+    return best
+
+
 def _find_yaml_path(
     info: _ResolverInfo, known_sections: set[str]
 ) -> str | None:
-    m = _EXACT_BACKTICK_DOTTED.search(info.docstring)
-    if m:
-        return m.group(1)
+    exact = _select_exact_key(info.name, info.docstring)
+    if exact:
+        return exact
     for m in _DOTTED_RE.finditer(info.docstring):
         candidate = m.group(0)
         first_seg = candidate.split(".")[0]
@@ -661,9 +745,11 @@ def generate() -> str:
         # vocabulary the loose-match fallback (step b) uses.
         known_sections: set[str] = set()
         for r in resolvers:
-            m = _EXACT_BACKTICK_DOTTED.search(r.docstring)
-            if m:
-                known_sections.add(m.group(1).split(".")[0])
+            if r.name in _CURATED:
+                continue
+            exact = _select_exact_key(r.name, r.docstring)
+            if exact:
+                known_sections.add(exact.split(".")[0])
 
         rows: list[dict[str, str]] = []
         for r in resolvers:

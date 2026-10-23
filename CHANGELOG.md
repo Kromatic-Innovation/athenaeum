@@ -342,6 +342,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`docs/reference/configuration.md` no longer files a knob under a
+  precedent key its docstring cites first (issue athenaeum#2104).**
+  `scripts/gen_config_reference.py` now picks the backticked key whose leaf
+  matches `resolve_<leaf>` and raises `AmbiguousYamlKeyError` (naming the
+  resolver and the keys it saw) when none matches, instead of taking the first
+  key. A new parity test asserts every entry's YAML path starts with its
+  `## <section>`. Regenerating exposed entries that were already
+  mis-sectioned: `librarian.min_merge_confidence`,
+  `librarian.audit_on_touch_freshness_hours`, `librarian.pull_before_run`,
+  `librarian.non_intake_sources`, `librarian.wiki_dedupe_min_body_chars`,
+  `off_corpus.adapter`, `dedupe.google_contact_keys`, and the `dimensions`,
+  `pricing` and `owner` tables now sit under their real sections; three
+  docstrings gained the key they were missing.
 - **`librarian.rejected_merge_cooldown_days` is documented under the right
   config section, and a wiki-dedupe re-proposal after a lapsed cooldown names
   the earlier rejection (issue athenaeum#2094, follow-up to athenaeum#2077).**
