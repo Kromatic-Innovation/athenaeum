@@ -59,8 +59,6 @@ def test_summary_gated_off_by_default(tmp_path: Path) -> None:
 
 
 def test_summary_empty(tmp_path: Path, _tiers_enabled: None) -> None:
-    from athenaeum._cmd_calibration import T1_UNWIRED_NOTE
-
     (tmp_path / "wiki").mkdir()
     rc, out = _run(["calibration", "summary", "--path", str(tmp_path), "--json"])
     assert rc == 0
@@ -74,7 +72,6 @@ def test_summary_empty(tmp_path: Path, _tiers_enabled: None) -> None:
         "applied": 0, "overturned_applied": 0,
         "decisions_logged": 0, "last_decision_at": None,
         "armed": True, "armed_but_silent": True,
-        "armed_but_silent_reason": T1_UNWIRED_NOTE,
     }
     empty_bucket_t2 = {
         "sampled": 0, "reviewed": 0, "overturned": 0,
@@ -225,38 +222,6 @@ def test_summary_not_armed_but_silent_once_a_decision_is_logged(
     assert "ARMED but has recorded ZERO decisions" not in text_out
 
 
-def test_armed_but_silent_t1_names_the_wiring_defect(
-    tmp_path: Path, _tiers_enabled: None
-) -> None:
-    """athenaeum#2080 AC4: an armed T1 with zero decisions names the structural
-    wiring defect (T1's only call site is unwired) instead of only blaming the
-    LLM client, in both JSON and text."""
-    from athenaeum._cmd_calibration import T1_UNWIRED_NOTE
-
-    (tmp_path / "wiki").mkdir()
-    rc, out = _run(["calibration", "summary", "--path", str(tmp_path), "--json"])
-    assert rc == 0
-    assert json.loads(out)["T1"]["armed_but_silent_reason"] == T1_UNWIRED_NOTE
-
-    rc, text_out = _run(["calibration", "summary", "--path", str(tmp_path)])
-    assert "known wiring defect" in text_out
-    assert "run_cluster_comparator" in text_out
-
-
-def test_t1_unwired_note_premise_still_holds() -> None:
-    """The note is only true while no production code constructs the
-    ``ClusterScreenContext`` that arms T1 in the cluster driver. When this
-    fails, T1 has been wired in: retire ``T1_UNWIRED_NOTE`` (and this test)
-    rather than weakening the assertion."""
-    src = Path(__file__).resolve().parents[1] / "src" / "athenaeum"
-    constructors = []
-    for p in src.rglob("*.py"):
-        text = p.read_text("utf-8")
-        if "ClusterScreenContext(" in text and "class ClusterScreenContext" not in text:
-            constructors.append(p.name)
-    assert constructors == []
-
-
 def test_armed_but_silent_not_callable_names_provider_and_model(
     tmp_path: Path, _tiers_enabled: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -374,3 +339,20 @@ def test_armed_but_silent_claude_cli_without_binary_is_not_callable(
     assert rc == 0
     assert check["state"] == "tier_not_callable"
     assert check["provider"] == "claude-cli"
+
+
+def test_summary_reports_t1_decision_after_a_wiki_dedupe_pass(
+    tmp_path: Path, _tiers_enabled: None
+) -> None:
+    """athenaeum#2093: a screened wiki-dedupe pair makes T1 report one decision
+    (no longer ARMED-but-silent)."""
+    from tests.test_wiki_dedupe import _run_pass, _seed_identical_pages
+    from tests.test_wiki_dedupe_t1_wiring import _T1_ON, _client
+
+    root = _seed_identical_pages(tmp_path, n=2)
+    _run_pass(root, config=_T1_ON, client=_client("pass_up"))
+    rc, out = _run(["calibration", "summary", "--path", str(root), "--json"])
+    assert rc == 0
+    t1 = json.loads(out)["T1"]
+    assert t1["decisions_logged"] == 1
+    assert t1["armed_but_silent"] is False

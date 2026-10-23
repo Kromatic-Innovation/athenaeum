@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **T1 reasoning screen is wired into the wiki-dedupe pair loop (issue
+  athenaeum#2093).** With `librarian.reasoning_tier_auditing_enabled` on,
+  `propose_wiki_page_merges` builds one `ClusterScreenContext` per run (reusing
+  the pass's own client) and screens each `duplicate` verdict that survived the
+  prior-ruling check (#2077) and the confidence floor (#2080), so T1 records
+  its decisions and spends one call only on such pairs. A confident T1 reject
+  is suppress-only: no fold evidence or queue item (result action
+  `t1-rejected`, verdict stays ledgered, not re-screened on later runs);
+  a pass-up proceeds as before. Retires `T1_UNWIRED_NOTE` and the
+  `armed_but_silent_reason` field of `calibration summary`.
 - **Merge proposers no longer re-propose pairs a human already ruled on
   (issue athenaeum#2077).** The qualified-name scan and the wiki-dedupe pair
   loop now read the resolved blocks of `_pending_merges.md` and
@@ -50,8 +60,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `duplicate` below `librarian.wiki_dedupe_min_confidence` (default `0.75`,
   `0` disables; env `ATHENAEUM_WIKI_DEDUPE_MIN_CONFIDENCE`) as a
   `below_confidence_floor` attribution outcome instead of queueing it.
-  `athenaeum calibration summary` now names the T1 wiring defect
-  (`armed_but_silent_reason`) when T1 is armed with zero decisions.
 - **Default-acceptance calibration no longer samples the operator's own
   answers; `calibration summary` says why a tier is silent; circular audit
   items can be closed (issue athenaeum#2079).** `sample_default_acceptance`
