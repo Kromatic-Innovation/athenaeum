@@ -107,7 +107,7 @@ def _advance_clock(monkeypatch: pytest.MonkeyPatch, days: float) -> None:
 
     class _Later(real):  # type: ignore[misc, valid-type]
         @classmethod
-        def now(cls, tz=None):  # noqa: ANN001, ANN206
+        def now(cls, tz=None):
             return real.now(tz) + timedelta(days=days)
 
     monkeypatch.setattr(pr, "datetime", _Later)
@@ -428,18 +428,14 @@ class TestQueuedDuplicateNamesEarlierRuling:
         assert "not the same thing" in text
         assert "the rejection cooldown has since lapsed." in text
 
-    def test_auto_apply_on_block_rationale_names_the_lapsed_rejection(
-        self, tmp_path: Path
-    ) -> None:
+    def test_auto_apply_on_block_rationale_names_the_lapsed_rejection(self, tmp_path: Path) -> None:
         wiki = self._run(tmp_path, auto_apply=True)
         rationales = [m["rationale"] for m in list_pending_merges(wiki / "_pending_merges.md")]
         assert len(rationales) == 1
         assert "athenaeum#716 reversible-verdict auto-apply" in rationales[0]
         self._assert_names_ruling(rationales[0])
 
-    def test_auto_apply_off_question_item_names_the_lapsed_rejection(
-        self, tmp_path: Path
-    ) -> None:
+    def test_auto_apply_off_question_item_names_the_lapsed_rejection(self, tmp_path: Path) -> None:
         wiki = self._run(tmp_path, auto_apply=False)
         assert not (wiki / "_pending_merges.md").read_text(encoding="utf-8").count("Rationale")
         questions = (wiki / "_pending_questions.md").read_text(encoding="utf-8")
@@ -470,7 +466,10 @@ class TestStampDoesNotOutliveCooldown:
         b = _write_page(wiki, "venture-b.md", body=_BODY_B)
         # Rejected through the real ``resolve_merge`` path, stamped "now".
         _rule(
-            wiki, a, b, "reject",
+            wiki,
+            a,
+            b,
+            "reject",
             answered_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             base_name="venture-a",
         )
@@ -480,8 +479,12 @@ class TestStampDoesNotOutliveCooldown:
         lock = RunLock(root)
         with lock:
             results = propose_wiki_page_merges(
-                root, config=cfg, threshold=0.8, embedding_provider=_fake_embed,
-                client=client, lock=lock,
+                root,
+                config=cfg,
+                threshold=0.8,
+                embedding_provider=_fake_embed,
+                client=client,
+                lock=lock,
             )
         return results, client
 
