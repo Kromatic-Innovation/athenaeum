@@ -325,6 +325,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The queued `duplicate` merge block names a lapsed human rejection (issue
+  athenaeum#2101).** After #2094 the earlier rejection reached only the
+  wiki-dedupe attribution row; the `_pending_merges.md` block a reviewer
+  adjudicates kept the fixed athenaeum#716 rationale. `enact_verdict_effect`
+  takes an optional `earlier_ruling` (default `""`, rationale unchanged) and the
+  pair loop passes the same "Earlier ruling on this pair (...)" sentence the
+  attribution row and the qualified-name scan use. Also makes the dry-run test
+  in `tests/test_prior_rulings_2077.py` use an unruled pair, so dropping the
+  `dry_run` guard in `propose_qualified_name_merges` now fails a test.
+
 - **`librarian.rejected_merge_cooldown_days` is documented under the right
   config section, and a wiki-dedupe re-proposal after a lapsed cooldown names
   the earlier rejection (issue athenaeum#2094, follow-up to athenaeum#2077).**
