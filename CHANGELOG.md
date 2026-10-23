@@ -326,7 +326,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **The queued `duplicate` merge block names a lapsed human rejection (issue
-  athenaeum#2101).** After #2094 the earlier rejection reached only the
+  athenaeum#2101).** After athenaeum#2094 the earlier rejection reached only the
   wiki-dedupe attribution row; the `_pending_merges.md` block a reviewer
   adjudicates kept the fixed athenaeum#716 rationale. `enact_verdict_effect`
   takes an optional `earlier_ruling` (default `""`, rationale unchanged) and the
