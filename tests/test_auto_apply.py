@@ -373,3 +373,42 @@ class TestNothingOutsideAllowlistReachesExecution:
         for p in (a_path, b_path):
             meta, _ = parse_frontmatter(p.read_text(encoding="utf-8"))
             assert not is_tombstone(meta)
+
+
+class TestEarlierRulingRationale:
+    """Issue athenaeum#2101: ``earlier_ruling`` extends the queued block's
+    rationale; omitting it leaves the rationale exactly as before."""
+
+    def _enact(self, tmp_path: Path, **kwargs) -> str:
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        wiki, a_path, b_path, _linker = _setup_pair(tmp_path)
+        _append_entry(wiki, "alpha", "beta", stale=False)
+        outcome = CompareOutcome(verdict=VERDICT_DUPLICATE, widened_coords={})
+        enact_verdict_effect(
+            page_from_path(a_path),
+            page_from_path(b_path),
+            outcome,
+            wiki_root=wiki,
+            path_a=a_path,
+            path_b=b_path,
+            config=_AUTO_APPLY_CONFIG,
+            **kwargs,
+        )
+        # The executed fold resolves its own block, so read the rationale from
+        # the queue file text (resolved blocks stay until archived).
+        text = (wiki / "_pending_merges.md").read_text(encoding="utf-8")
+        (line,) = [ln for ln in text.splitlines() if ln.startswith("**Rationale**: ")]
+        return line.removeprefix("**Rationale**: ")
+
+    def test_default_rationale_is_unchanged(self, tmp_path: Path) -> None:
+        rationale = self._enact(tmp_path)
+        assert rationale.startswith(
+            "athenaeum#716 reversible-verdict auto-apply: duplicate verdict"
+        )
+        assert "Earlier ruling" not in rationale
+        assert self._enact(tmp_path / "again", earlier_ruling="") == rationale
+
+    def test_earlier_ruling_is_appended(self, tmp_path: Path) -> None:
+        base = self._enact(tmp_path / "base")
+        text = "Earlier ruling on this pair (abc123): rejected; cooldown lapsed."
+        assert self._enact(tmp_path / "with", earlier_ruling=text) == f"{base} {text}"
