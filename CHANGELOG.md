@@ -343,6 +343,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`tier3_merge` routes a thinking-only `max_tokens` response to the
+  full-echo fallback (issue athenaeum#2110).** Adaptive thinking could use
+  the whole output budget and leave no text block, so `response_text` raised
+  `ValueError` before the existing truncation branch ran and the raw file
+  counted toward the stuck ledger. `stop_reason` is now read first and a
+  `max_tokens` cutoff takes the same fallback as a truncated reply with text;
+  a thinking-only reply with any other stop reason still raises. Stuck-ledger
+  entries held with that `ValueError` detail are dropped at load and retried.
+
 - **`docs/reference/configuration.md` no longer files a knob under a
   precedent key its docstring cites first (issue athenaeum#2104).**
   `scripts/gen_config_reference.py` now picks the backticked key whose leaf

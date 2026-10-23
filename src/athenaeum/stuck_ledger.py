@@ -61,6 +61,26 @@ STUCK_MANIFEST_NAME = "_stuck_files.json"
 # consecutive-failure count under whatever error actually occurs now.
 _RETIRED_LAST_ERRORS = frozenset({"PersonNeverLLMRewriteError"})
 
+# Issue athenaeum#2110: a thinking-only ``max_tokens`` response used to raise
+# ``ValueError`` from ``response_text`` before the truncation fallback could
+# run, escalating raw files for a budget/ordering bug rather than a content
+# problem. ``tier3_merge`` now routes that case to the full-echo fallback, so
+# entries held with this detail prefix are dropped at load (same mechanism as
+# above) and re-attempted fresh. Matched on ``last_error_detail`` as well as
+# ``last_error`` because ``ValueError`` alone is far too broad to retire.
+_RETIRED_VALUE_ERROR_DETAIL_PREFIX = "response_text: no text block found"
+
+
+def _is_retired_entry(entry: dict[str, Any]) -> bool:
+    if entry.get("last_error") in _RETIRED_LAST_ERRORS:
+        return True
+    detail = entry.get("last_error_detail")
+    return (
+        entry.get("last_error") == "ValueError"
+        and isinstance(detail, str)
+        and detail.startswith(_RETIRED_VALUE_ERROR_DETAIL_PREFIX)
+    )
+
 
 def stuck_content_hash(raw: Any) -> str:
     """Stable short hash of a raw file's content (athenaeum#663 ledger key).
@@ -165,7 +185,7 @@ def load_stuck_ledger(wiki_root: Path) -> dict[str, dict[str, Any]]:
         for ref, entry in files.items()
         if isinstance(entry, dict)
         and isinstance(entry.get("failures"), int)
-        and entry.get("last_error") not in _RETIRED_LAST_ERRORS
+        and not _is_retired_entry(entry)
     }
 
 

@@ -5671,17 +5671,30 @@ def tier3_merge(
         response, usage, model=params["model"], knob="write", surface=surface
     )
 
-    body, escalation, needs_fallback = parse_merge_ops_response(
+    # athenaeum#574: None on a backend that cannot report stop_reason (claude-cli),
+    # so the "truncated -> fall back to full echo" branch never fires on a
+    # spurious value — the fallback would itself be a no-op there.
+    stop_reason = reported_stop_reason(response, _capabilities(config))
+    try:
         # Issue athenaeum#578: patch merge enables adaptive thinking — skip any leading
         # thinking block and read the anchored-ops JSON answer.
-        response_text(response),
+        text = response_text(response)
+    except ValueError:
+        # Issue athenaeum#2110: adaptive thinking can exhaust ``max_tokens``
+        # before any text block is emitted, so ``response_text`` raises. That
+        # is the truncation parse_merge_ops_response already routes to the
+        # full-echo fallback — read stop_reason first and let it. Any other
+        # stop_reason with no text block is still a genuine error.
+        if stop_reason != "max_tokens":
+            raise
+        text = ""
+
+    body, escalation, needs_fallback = parse_merge_ops_response(
+        text,
         action,
         source_ref,
         existing_body,
-        # athenaeum#574: None on a backend that cannot report stop_reason (claude-cli),
-        # so the "truncated -> fall back to full echo" branch never fires on a
-        # spurious value — the fallback would itself be a no-op there.
-        stop_reason=reported_stop_reason(response, _capabilities(config)),
+        stop_reason=stop_reason,
         wiki_root=wiki_root,
         usage=usage,
     )
