@@ -118,3 +118,14 @@ def test_t1_not_run_in_dry_run(tmp_path: Path) -> None:
     client = _client("reject")
     _run_pass(root, config=_T1_ON, client=client, dry_run=True)
     assert _t1_log(root) == []
+
+
+def test_t1_error_degrades_to_unscreened_and_does_not_abort(tmp_path: Path) -> None:
+    root = _seed_identical_pages(tmp_path, n=2)
+    client = MagicMock()
+    client.messages.create.side_effect = [
+        _resp(_content_payload("equivalent")),
+        RuntimeError("boom"),
+    ]
+    results = _run_pass(root, config=_T1_ON, client=client)
+    assert results[0]["action"] == "fold-proposal"

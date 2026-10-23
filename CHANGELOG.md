@@ -13,7 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   athenaeum#2093).** With `librarian.reasoning_tier_auditing_enabled` on,
   `propose_wiki_page_merges` builds one `ClusterScreenContext` per run (reusing
   the pass's own client) and screens each `duplicate` verdict that survived the
-  prior-ruling check (#2077) and the confidence floor (#2080), so T1 records
+  prior-ruling check (athenaeum#2077) and the confidence floor
+  (athenaeum#2080), so T1 records
   its decisions and spends one call only on such pairs. A confident T1 reject
   is suppress-only: no fold evidence or queue item (result action
   `t1-rejected`, verdict stays ledgered, not re-screened on later runs);

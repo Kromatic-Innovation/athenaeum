@@ -585,7 +585,7 @@ def t1_rejects_pair_paths(
     authority_manifest: Any,
     fallback_client: "LLMBackend | None",
 ) -> bool:
-    """Run T1 over one candidate pair given as paths (issues athenaeum#1257, #2093).
+    """Run T1 over one candidate pair given as paths (issues athenaeum#1257, athenaeum#2093).
 
     A thin adapter, not a second screen: it hands the pair's paths and
     ``screen.merge_target_name`` to

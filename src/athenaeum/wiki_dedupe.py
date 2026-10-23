@@ -1280,19 +1280,29 @@ def propose_wiki_page_merges(
                 # fold-evidence write and queue item (the verdict stays
                 # ledgered); a pass-up or any degradation proceeds to the
                 # normal enact below. T1 never approves or applies anything.
-                if (
-                    t1_screen is not None
-                    and record["verdict"] == VERDICT_DUPLICATE
-                    and t1_rejects_pair_paths(
-                        sources,
-                        cluster_id=cluster.cluster_id,
-                        config=resolved_config,
-                        usage=usage,
-                        screen=replace(t1_screen, merge_target_name=t1_target),
-                        authority_manifest=t1_manifest,
-                        fallback_client=client,
-                    )
-                ):
+                t1_rejected = False
+                if t1_screen is not None and record["verdict"] == VERDICT_DUPLICATE:
+                    try:
+                        t1_rejected = t1_rejects_pair_paths(
+                            sources,
+                            cluster_id=cluster.cluster_id,
+                            config=resolved_config,
+                            usage=usage,
+                            screen=replace(t1_screen, merge_target_name=t1_target),
+                            authority_manifest=t1_manifest,
+                            fallback_client=client,
+                        )
+                    except Exception as exc:  # noqa: BLE001 - T1 is advisory
+                        # A provider/transient error must never abort the pass
+                        # or drop later pairs: proceed as if unscreened.
+                        log.warning(
+                            "wiki-page dedup: T1 screen failed for %s (%s: %s); "
+                            "proceeding unscreened",
+                            record["pair"],
+                            type(exc).__name__,
+                            exc,
+                        )
+                if t1_rejected:
                     attribution_rows.append(
                         build_attribution_row(
                             path_a,
