@@ -9,7 +9,7 @@ under test is the one production writes.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -97,6 +97,20 @@ def _open_ids(wiki: Path) -> list[str]:
         if (wiki / "_pending_merges.md").exists()
         else []
     )
+
+
+def _advance_clock(monkeypatch: pytest.MonkeyPatch, days: float) -> None:
+    """Make ``prior_rulings`` see *days* more elapsed than the wall clock."""
+    import athenaeum.prior_rulings as pr
+
+    real = pr.datetime
+
+    class _Later(real):  # type: ignore[misc, valid-type]
+        @classmethod
+        def now(cls, tz=None):  # noqa: ANN001, ANN206
+            return real.now(tz) + timedelta(days=days)
+
+    monkeypatch.setattr(pr, "datetime", _Later)
 
 
 NOW = datetime(2026, 10, 16, tzinfo=timezone.utc)
@@ -336,11 +350,12 @@ class TestWikiDedupeHonoursRulings:
                 client=client,
                 lock=lock,
             )
-        # The pair was examined again (a human's rejection also stamps a
-        # declared-merge-rejection on the pages, so Gate 1 settles it as
-        # distinct without the LLM -- what matters here is that it is no
-        # longer skipped as a prior ruling).
-        assert len(results) == 1
+        # Issue athenaeum#2107: the human's rejection also stamped
+        # ``merge_rejected_with`` on the pages; once the cooldown lapsed that
+        # stamp must not settle the pair at Gate 1, so Gate 2 runs.
+        assert "merge_rejected_with" in a.read_text(encoding="utf-8")
+        assert [r["verdict"] for r in results] == ["duplicate"]
+        client.messages.create.assert_called()
 
         # Issue athenaeum#2094 AC2/AC3: the lapsed rejection is named in the
         # pair's attribution row (earlier merge id + the human's note), not
@@ -360,11 +375,9 @@ class TestQueuedDuplicateNamesEarlierRuling:
     block with auto-apply on, the ``_pending_questions.md`` item with it off
     (the live default).
 
-    Known limitation, tracked separately: ``resolve_merge(reject)`` stamps
-    ``merge_rejected_with`` on the page and nothing clears it when the
-    cooldown lapses, so in production Gate 1 settles the pair as distinct and
-    this path is never reached. The tests strip the stamp by hand to exercise
-    the path itself; they do not claim it is reachable without that.
+    The rejection's own ``merge_rejected_with`` stamp stays on the pages
+    (athenaeum#2107): the pair loop hides it from Gate 1 once the cooldown
+    has lapsed, so these tests exercise the production path unstripped.
     """
 
     def _run(self, tmp_path: Path, *, auto_apply: bool) -> Path:
@@ -384,13 +397,8 @@ class TestQueuedDuplicateNamesEarlierRuling:
         a = _write_page(wiki, "venture-a.md", body=_BODY_A)
         b = _write_page(wiki, "venture-b.md", body=_BODY_B)
         _rule(wiki, a, b, "reject", answered_at=OLD, base_name="venture-a")
-        # See the class docstring: strip the stamp so the pair reaches a
-        # ``duplicate`` instead of being settled by Gate 1.
-        a.write_text(
-            a.read_text(encoding="utf-8").replace("merge_rejected_with:\n- venture-b\n", ""),
-            encoding="utf-8",
-        )
-        assert "merge_rejected_with" not in a.read_text(encoding="utf-8")
+        # The rejection's own stamp stays on disk (issue athenaeum#2107).
+        assert "merge_rejected_with" in a.read_text(encoding="utf-8")
         cfg = {
             "librarian": {
                 "comparator_enabled": True,
@@ -437,3 +445,95 @@ class TestQueuedDuplicateNamesEarlierRuling:
         questions = (wiki / "_pending_questions.md").read_text(encoding="utf-8")
         assert "Approve folding" in questions
         self._assert_names_ruling(questions)
+
+
+class TestStampDoesNotOutliveCooldown:
+    """Issue athenaeum#2107: the ``merge_rejected_with`` stamp a rejection
+    leaves on the pages must follow the cooldown, not outlive it."""
+
+    @staticmethod
+    def _run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, cooldown: int, days: float):
+        from athenaeum.runlock import RunLock
+        from athenaeum.wiki_dedupe import propose_wiki_page_merges
+        from tests.test_wiki_dedupe import (
+            _BODY_A,
+            _BODY_B,
+            _content_payload,
+            _fake_embed,
+            _fake_llm_client,
+            _write_page,
+        )
+
+        root = tmp_path / "knowledge"
+        wiki = root / "wiki"
+        a = _write_page(wiki, "venture-a.md", body=_BODY_A)
+        b = _write_page(wiki, "venture-b.md", body=_BODY_B)
+        # Rejected through the real ``resolve_merge`` path, stamped "now".
+        _rule(
+            wiki, a, b, "reject",
+            answered_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            base_name="venture-a",
+        )
+        _advance_clock(monkeypatch, days)
+        cfg = {"librarian": {"comparator_enabled": True, "rejected_merge_cooldown_days": cooldown}}
+        client = _fake_llm_client(_content_payload("equivalent"))
+        lock = RunLock(root)
+        with lock:
+            results = propose_wiki_page_merges(
+                root, config=cfg, threshold=0.8, embedding_provider=_fake_embed,
+                client=client, lock=lock,
+            )
+        return results, client
+
+    def test_lapsed_rejection_reaches_gate_2(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        results, client = self._run(tmp_path, monkeypatch, cooldown=30, days=31)
+        assert [r["verdict"] for r in results] == ["duplicate"]
+        client.messages.create.assert_called()
+
+    def test_rejection_still_in_force_makes_no_llm_call(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        results, client = self._run(tmp_path, monkeypatch, cooldown=30, days=5)
+        assert results == []
+        client.messages.create.assert_not_called()
+
+    def test_zero_cooldown_never_lapses(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        results, client = self._run(tmp_path, monkeypatch, cooldown=0, days=3650)
+        assert results == []
+        client.messages.create.assert_not_called()
+
+    def test_gate_1_still_settles_a_stamped_pair_distinct(self) -> None:
+        """Gate 1 is unchanged: handed the stamped pages, no LLM call."""
+        from unittest.mock import MagicMock
+
+        from athenaeum.comparator import compare_pages, page_from_text
+
+        def txt(n: str, o: str) -> str:
+            return f"---\nname: {n}\ntype: project\nmerge_rejected_with:\n- {o}\n---\nfacts\n"
+
+        client = MagicMock()
+        out = compare_pages(
+            page_from_text("a", txt("venture-a", "venture-b")),
+            page_from_text("b", txt("venture-b", "venture-a")),
+            client=client,
+        )
+        assert out.verdict == "distinct"
+        assert out.separator == ["declared-merge-rejection"]
+        client.messages.create.assert_not_called()
+
+    def test_lift_only_drops_the_counterpart(self) -> None:
+        from athenaeum.comparator import page_from_text
+        from athenaeum.wiki_dedupe import _lift_lapsed_rejection
+
+        a = page_from_text(
+            "a", "---\nname: Venture A\nmerge_rejected_with:\n- venture-b\n- venture-c\n---\nx\n"
+        )
+        b = page_from_text("b", "---\nname: Venture B\nmerge_rejected_with:\n- venture-a\n---\ny\n")
+        la, lb = _lift_lapsed_rejection(a, b)
+        assert la.meta["merge_rejected_with"] == ["venture-c"]
+        assert "merge_rejected_with" not in lb.meta
+        assert la.text == a.text and lb.text == b.text

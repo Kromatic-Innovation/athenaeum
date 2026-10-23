@@ -356,6 +356,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pricing` and `owner` tables now sit under their real sections; three
   docstrings gained the key they were missing.
 
+- **A rejected merge pair can be re-proposed once its cooldown lapses (issue
+  athenaeum#2107, follow-up to athenaeum#2077).** `resolve_merge(reject)`
+  stamps `merge_rejected_with` on both pages and nothing clears it, so
+  comparator Gate 1 settled the pair `distinct` forever and the cooldown never
+  took effect on the wiki-dedupe path. The pair loop now hides the pair's own
+  stamp from the comparator (in memory only; Gate 1 is unchanged) when the
+  prior-ruling lookup reports the rejection `expired`. A rejection still in
+  force, or any rejection with `rejected_merge_cooldown_days: 0`, is still
+  skipped with no LLM call; a re-proposed pair goes through the T1 screen like
+  any other.
 - **The queued `duplicate` merge block names a lapsed human rejection (issue
   athenaeum#2101).** After athenaeum#2094 the earlier rejection reached only the
   wiki-dedupe attribution row; the `_pending_merges.md` block a reviewer
