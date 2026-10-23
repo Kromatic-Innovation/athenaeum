@@ -58,6 +58,11 @@ finding D2 recorded and athenaeum#715 banned, so T2 keeps only its
 existing C4 call site until athenaeum#1256 retires that lane.
 ``tests/test_cluster_comparator_t1_screen.py`` pins the absence.
 
+**Live T1 caller (issue athenaeum#2093).** :mod:`athenaeum.wiki_dedupe`
+builds a :class:`ClusterScreenContext` once per run and screens each
+surviving ``duplicate`` pair through :func:`t1_rejects_pair_paths`, after the
+prior-ruling check and the confidence floor.
+
 **Dark by design.** Nothing in :mod:`athenaeum.librarian` calls
 :func:`run_cluster_comparator` yet — this issue only builds the call site
 that makes the cluster domain reachable at all. ``athenaeum run`` behaviour
@@ -80,6 +85,7 @@ from typing import TYPE_CHECKING, Any
 from athenaeum.comparator import ComparatorPage, CompareOutcome, page_from_text, record_comparison
 from athenaeum.config import resolve_comparator_enabled, resolve_reasoning_tier_auditing_enabled
 from athenaeum.models import AutoMemoryFile, TokenUsage
+from athenaeum.pending_merges import _make_id
 from athenaeum.reasoning_screens import t1_screen_rejects_merge_proposal
 from athenaeum.reasoning_tiers import load_authority_manifest_for_pipeline
 from athenaeum.verdicts import page_id_for_path
@@ -96,6 +102,8 @@ __all__ = [
     "page_from_auto_memory_file",
     "planned_pair_count",
     "run_cluster_comparator",
+    "t1_pair_proposal_id",
+    "t1_rejects_pair_paths",
 ]
 
 
@@ -548,23 +556,59 @@ def _t1_rejects_pair(
 ) -> bool:
     """Run T1 over one cluster-domain candidate pair (issue athenaeum#1257).
 
-    A thin adapter, not a second screen: it converts the pair into the
-    ``member_paths`` + ``merge_target_name`` shape
+    Thin delegation to :func:`t1_rejects_pair_paths` for an
+    :class:`~athenaeum.models.AutoMemoryFile` pair; see that function.
+    """
+    return t1_rejects_pair_paths(
+        [str(member_a.path), str(member_b.path)],
+        cluster_id=cluster_id,
+        config=config,
+        usage=usage,
+        screen=screen,
+        authority_manifest=authority_manifest,
+        fallback_client=fallback_client,
+    )
+
+
+def t1_pair_proposal_id(member_paths: list[str], merge_target_name: str) -> str:
+    """The ``proposal_id`` T1 logs for this pair (same id the screen derives)."""
+    return _make_id(member_paths, merge_target_name)
+
+
+def t1_rejects_pair_paths(
+    member_paths: list[str],
+    *,
+    cluster_id: str,
+    config: dict[str, Any] | None,
+    usage: TokenUsage | None,
+    screen: ClusterScreenContext,
+    authority_manifest: Any,
+    fallback_client: "LLMBackend | None",
+) -> bool:
+    """Run T1 over one candidate pair given as paths (issues athenaeum#1257, athenaeum#2093).
+
+    A thin adapter, not a second screen: it hands the pair's paths and
+    ``screen.merge_target_name`` to
     :func:`~athenaeum.reasoning_screens.t1_screen_rejects_merge_proposal`
-    already takes, and returns that function's own boolean verbatim. Every
-    degradation path (no client, dry-run, a tripped spend ceiling, a
-    pass-up) is the screen's own and returns ``False`` — the pair is
-    compared exactly as it would be with no screen at all. Nothing here
-    can turn a screen malfunction into a dropped pair.
+    and returns that function's own boolean verbatim. Every degradation
+    path (no client, dry-run, a tripped spend ceiling, a pass-up) is the
+    screen's own and returns ``False`` — the pair proceeds exactly as it
+    would with no screen at all. Nothing here can turn a screen malfunction
+    into a dropped pair, and ``True`` only ever SUPPRESSES; T1 never
+    approves or applies anything.
 
     T1 needs neither a ``confidence`` scalar nor a ``draft_merged_body``,
     which is precisely why it — and not
     :func:`~athenaeum.reasoning_screens.t2_screen_merge_proposal` — is the
     screen this lane can carry; see this module's own docstring and
     :mod:`athenaeum.reasoning_screens`.
+
+    Public since athenaeum#2093: :mod:`athenaeum.wiki_dedupe` (wiki pages,
+    not ``AutoMemoryFile`` members) is the live caller, via a
+    :class:`ClusterScreenContext` it builds once per run.
     """
     return t1_screen_rejects_merge_proposal(
-        member_paths=[str(member_a.path), str(member_b.path)],
+        member_paths=member_paths,
         merge_target_name=screen.merge_target_name,
         cluster_id=cluster_id,
         client=screen.client if screen.client is not None else fallback_client,

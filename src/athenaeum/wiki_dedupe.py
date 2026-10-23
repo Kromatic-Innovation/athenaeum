@@ -142,12 +142,18 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from itertools import combinations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from athenaeum.authority import is_pointer_stub
 from athenaeum.auto_apply import enact_verdict_effect
+from athenaeum.cluster_comparator import (
+    ClusterScreenContext,
+    t1_pair_proposal_id,
+    t1_rejects_pair_paths,
+)
 from athenaeum.clusters import (
     EMBEDDER_CHROMADB_DEFAULT,
     EMBEDDER_FALLBACK_HASHING,
@@ -169,6 +175,7 @@ from athenaeum.config import (
     load_config,
     resolve_comparator_enabled,
     resolve_heartbeat_interval,
+    resolve_reasoning_tier_auditing_enabled,
     resolve_wiki_dedupe_min_body_chars,
     resolve_wiki_dedupe_min_confidence,
 )
@@ -619,6 +626,16 @@ def _coordinate_batches_for_cluster(
     return _group_coordinate_members_by_claim(members)
 
 
+def _t1_target_name(page: Any, path: Path) -> str:
+    """Merge-target name handed to T1 for a pair: the first page's own title.
+
+    Deterministic (``combinations`` order), supplied from the page itself,
+    never synthesized (athenaeum#1257's contract for ``merge_target_name``).
+    """
+    name = page.meta.get("name") if isinstance(page.meta, dict) else None
+    return str(name).strip() if name else path.stem
+
+
 def propose_wiki_page_merges(
     knowledge_root: Path,
     *,
@@ -873,6 +890,46 @@ def propose_wiki_page_merges(
     prior_rulings = load_prior_rulings(wiki_root)
     rejected_cooldown_days = resolve_rejected_merge_cooldown_days(resolved_config)
 
+    # Issue athenaeum#2093: T1 reasoning screen, armed only by its OWN
+    # default-OFF knob (a dry run never reaches the T1 call: the pair loop
+    # ``continue``s before it). The
+    # context is built once per run and REUSES this pass's own ``client`` (the
+    # ``classify``-knob client the caller already built) -- no second client
+    # construction. T1 is consulted per pair only AFTER the prior-ruling check
+    # (athenaeum#2077) and the confidence floor (athenaeum#2080), see below.
+    t1_screen: ClusterScreenContext | None = None
+    t1_manifest: Any = None
+    t1_known_rejects: set[str] = set()
+    if resolve_reasoning_tier_auditing_enabled(resolved_config):
+        from athenaeum.provider import ProviderConfigError, resolve_provider
+        from athenaeum.reasoning_tiers import (
+            T1_TIER_NAME,
+            load_authority_manifest_for_pipeline,
+            read_reasoning_tier_decisions,
+        )
+
+        try:
+            t1_provider = resolve_provider(resolved_config, knob="reasoning_t1")
+        except ProviderConfigError:
+            t1_provider = ""
+        t1_screen = ClusterScreenContext(
+            wiki_root=wiki_root,
+            knowledge_root=knowledge_root,
+            provider=t1_provider,
+            client=None,
+            dry_run=dry_run,
+        )
+        t1_manifest = load_authority_manifest_for_pipeline(knowledge_root)
+        # A pair T1 already rejected stays a ledgered ``duplicate`` with no
+        # fold evidence, so it would look "fresh and unenacted" on every run
+        # and re-spend a Gate 2 redo plus a T1 call each time. The decision
+        # log is the memo: skip the redo for a pair it already rejected.
+        t1_known_rejects = {
+            str(r.get("proposal_id"))
+            for r in read_reasoning_tier_decisions(wiki_root, tier=T1_TIER_NAME)
+            if r.get("decision") == "reject"
+        }
+
     results: list[dict[str, Any]] = []
 
     # Issue athenaeum#1991: one shared sink for every ``underdetermined``
@@ -1089,9 +1146,14 @@ def propose_wiki_page_merges(
                     and cluster.embedder == EMBEDDER_CHROMADB_DEFAULT
                     and pair_confidence < confidence_floor
                 )
+                t1_target = _t1_target_name(page_a, path_a)
                 fresh_unenacted_duplicate = (
                     record.get("skipped") == "fresh"
                     and record.get("verdict") == VERDICT_DUPLICATE
+                    and (
+                        t1_screen is None
+                        or t1_pair_proposal_id(sources, t1_target) not in t1_known_rejects
+                    )
                     and not (
                         wiki_root / FOLD_EVIDENCE_DIRNAME / f"{record['pair']}.md"
                     ).exists()
@@ -1209,6 +1271,63 @@ def propose_wiki_page_merges(
                             reason="no-outcome-returned",
                             **row_kwargs,
                         )
+                    )
+                    continue
+                # Issue athenaeum#2093: T1 screens a ``duplicate`` verdict that
+                # survived BOTH the prior-ruling check (athenaeum#2077, above)
+                # and the confidence floor (athenaeum#2080, above), so it spends
+                # a call only on a pair that would otherwise reach the queue.
+                # ADVISORY and suppress-only: a confident reject skips the
+                # fold-evidence write and queue item (the verdict stays
+                # ledgered); a pass-up or any degradation proceeds to the
+                # normal enact below. T1 never approves or applies anything.
+                t1_rejected = False
+                if t1_screen is not None and record["verdict"] == VERDICT_DUPLICATE:
+                    try:
+                        t1_rejected = t1_rejects_pair_paths(
+                            sources,
+                            cluster_id=cluster.cluster_id,
+                            config=resolved_config,
+                            usage=usage,
+                            screen=replace(t1_screen, merge_target_name=t1_target),
+                            authority_manifest=t1_manifest,
+                            fallback_client=client,
+                        )
+                    except Exception as exc:  # noqa: BLE001 - T1 is advisory
+                        # A provider/transient error must never abort the pass
+                        # or drop later pairs: proceed as if unscreened.
+                        log.warning(
+                            "wiki-page dedup: T1 screen failed for %s (%s: %s); "
+                            "proceeding unscreened",
+                            record["pair"],
+                            type(exc).__name__,
+                            exc,
+                        )
+                if t1_rejected:
+                    attribution_rows.append(
+                        build_attribution_row(
+                            path_a,
+                            path_b,
+                            OUTCOME_DECIDED,
+                            verdict=record.get("verdict"),
+                            action="t1-rejected",
+                            **{
+                                **row_kwargs,
+                                "detail": _with_earlier(
+                                    "duplicate verdict not queued: the T1 "
+                                    "reasoning tier rejected the merge proposal"
+                                ),
+                            },
+                        )
+                    )
+                    results.append(
+                        {
+                            "pair": record["pair"],
+                            "verdict": record["verdict"],
+                            "action": "t1-rejected",
+                            "confidence": pair_confidence,
+                            "sources": sources,
+                        }
                     )
                     continue
                 # Issue athenaeum#716: enact_verdict_effect is apply_verdict_effect
