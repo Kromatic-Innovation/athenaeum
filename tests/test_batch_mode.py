@@ -113,8 +113,12 @@ class _FakeBatches:
         expire_marker: str | None = None,
         create_error: Exception | None = None,
         truncate_marker: str | None = None,
+        thinking_only_merge: bool = False,
     ) -> None:
         self._responder = responder
+        # Issue athenaeum#2110: a merge request (``## Existing page content``)
+        # comes back as a succeeded thinking-only ``max_tokens`` message.
+        self._thinking_only_merge = thinking_only_merge
         self._polls_until_end = polls_until_end
         self._never_end = never_end
         self._fail_marker = fail_marker
@@ -193,6 +197,13 @@ class _FakeBatches:
                             stop_reason="max_tokens",
                         ),
                     ),
+                )
+            elif self._thinking_only_merge and "## Existing page content" in user_msg:
+                thinking = _msg("", stop_reason="max_tokens")
+                thinking.content = [SimpleNamespace(type="thinking")]
+                yield SimpleNamespace(
+                    custom_id=req["custom_id"],
+                    result=SimpleNamespace(type="succeeded", message=thinking),
                 )
             else:
                 yield SimpleNamespace(
@@ -4188,3 +4199,111 @@ class TestPageSizeGateBatchTransport:
             encoding="utf-8"
         )
         assert "Merged note from" in body_sync
+
+
+class TestThinkingOnlyTruncationBatchTransport:
+    def test_thinking_only_max_tokens_merge_falls_back_not_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Issue athenaeum#2110: ``process_batch_run`` reaches the same
+        ``tier3_merge`` as the sync path, so a thinking-only ``max_tokens``
+        patch response must route to the full-echo fallback and land the
+        merge -- no ValueError escapes (which would feed the stuck ledger).
+
+        Note: unlike a Tier-2 truncation, a Tier-3 merge truncation has no
+        ``BatchResult.truncated`` counter; the fallback recovering the merge
+        (``updated == 1``) is the observable.
+        """
+        _patch_uids(monkeypatch)
+        root = _seed_root(
+            tmp_path, "p-thinking-only", ["Acme Corp shipped a thing.\n"], with_acme=True
+        )
+        client = _FakeClient(_scripted_responder, allow_sync=True)
+        merge_calls: list[dict[str, Any]] = []
+
+        def create(**params: Any) -> Any:
+            merge_calls.append(params)
+            if len(merge_calls) == 1:
+                return SimpleNamespace(
+                    content=[SimpleNamespace(type="thinking")],
+                    stop_reason="max_tokens",
+                    usage=SimpleNamespace(input_tokens=0, output_tokens=0),
+                )
+            existing = parse_frontmatter(
+                (root / "wiki" / "acme1234-acme-corp.md").read_text(encoding="utf-8")
+            )[1].strip()
+            return _msg(f"{existing}\n\nMerged note from raw.")
+
+        client.messages.create = create
+
+        result = process_batch_run(
+            discover_raw_files(root / "raw"),
+            EntityIndex(root / "wiki"),
+            root / "wiki",
+            client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=TokenUsage(),
+            config=None,
+            max_api_calls=100,
+            sleep=lambda s: None,
+            batch_classify=True,
+            batch_write=False,
+        )
+
+        assert len(merge_calls) == 2  # thinking-only patch + full-echo fallback
+        assert result.updated == 1
+        assert result.escalated == 0
+        assert "Merged note from" in (
+            root / "wiki" / "acme1234-acme-corp.md"
+        ).read_text(encoding="utf-8")
+
+    def test_batched_write_thinking_only_max_tokens_merge_falls_back(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Issue athenaeum#2110: the DEFAULT ``batch_write=True`` finalize loop
+        is its own ``parse_merge_ops_response`` call site (it does not go
+        through ``tier3_merge``). A thinking-only ``max_tokens`` batch result
+        must take the sync full-echo fallback, not land in ``failed_refs``."""
+        _patch_uids(monkeypatch)
+        root = _seed_root(
+            tmp_path, "p-thinking-batched", ["Acme Corp shipped a thing.\n"], with_acme=True
+        )
+        client = _FakeClient(
+            _scripted_responder, allow_sync=True, thinking_only_merge=True
+        )
+        sync_calls: list[dict[str, Any]] = []
+
+        def create(**params: Any) -> Any:
+            sync_calls.append(params)
+            existing = parse_frontmatter(
+                (root / "wiki" / "acme1234-acme-corp.md").read_text(encoding="utf-8")
+            )[1].strip()
+            return _msg(f"{existing}\n\nMerged note from raw.")
+
+        client.messages.create = create
+
+        result = process_batch_run(
+            discover_raw_files(root / "raw"),
+            EntityIndex(root / "wiki"),
+            root / "wiki",
+            client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=TokenUsage(),
+            config=None,
+            max_api_calls=100,
+            sleep=lambda s: None,
+            batch_classify=True,
+            batch_write=True,
+        )
+
+        assert len(sync_calls) == 1  # the full-echo fallback only
+        assert result.updated == 1
+        assert result.escalated == 0
+        assert not result.failed_refs
+        assert "Merged note from" in (
+            root / "wiki" / "acme1234-acme-corp.md"
+        ).read_text(encoding="utf-8")
