@@ -40,7 +40,7 @@ from athenaeum.models import is_tombstone, parse_frontmatter, tombstone_target
 from athenaeum.provenance import read_merge_provenance
 from athenaeum.runlock import RunLock
 from athenaeum.unfold import UNFOLD_DIRECT, unfold_page
-from athenaeum.verdict_effects import _canonical_side
+from athenaeum.verdict_effects import _canonical_side, make_pair_key
 from athenaeum.verdicts import Basis, append_verdict, build_verdict_entry, mark_pairs_stale
 from tests.conftest import init_git_repo
 
@@ -401,14 +401,53 @@ class TestEarlierRulingRationale:
         return line.removeprefix("**Rationale**: ")
 
     def test_default_rationale_is_unchanged(self, tmp_path: Path) -> None:
-        rationale = self._enact(tmp_path)
-        assert rationale.startswith(
-            "athenaeum#716 reversible-verdict auto-apply: duplicate verdict"
+        (tmp_path / "expected").mkdir()
+        wiki, a_path, b_path, _linker = _setup_pair(tmp_path / "expected")
+        page_a, page_b = page_from_path(a_path), page_from_path(b_path)
+        outcome = CompareOutcome(verdict=VERDICT_DUPLICATE, widened_coords={})
+        _side, rule, _rows = _canonical_side(page_a, page_b, outcome)
+        # The literal pre-athenaeum#2101 rationale, byte for byte.
+        expected = (
+            "athenaeum#716 reversible-verdict auto-apply: duplicate verdict "
+            f"{make_pair_key(page_a.id, page_b.id)} authorized by a fresh basis in the issue "
+            "athenaeum#712 verdict ledger "
+            f"(librarian.reversible_verdict_auto_apply_enabled). {rule}"
         )
-        assert "Earlier ruling" not in rationale
-        assert self._enact(tmp_path / "again", earlier_ruling="") == rationale
+        assert self._enact(tmp_path / "default") == expected
+        assert self._enact(tmp_path / "empty", earlier_ruling="") == expected
 
     def test_earlier_ruling_is_appended(self, tmp_path: Path) -> None:
         base = self._enact(tmp_path / "base")
         text = "Earlier ruling on this pair (abc123): rejected; cooldown lapsed."
         assert self._enact(tmp_path / "with", earlier_ruling=text) == f"{base} {text}"
+
+
+class TestEarlierRulingQuestionItem:
+    """Issue athenaeum#2101: with auto-apply OFF (the live default) the
+    duplicate lands as a ``_pending_questions.md`` item; ``earlier_ruling``
+    reaches its description, and the default leaves it untouched."""
+
+    def _questions(self, tmp_path: Path, **kwargs) -> str:
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        wiki, a_path, b_path, _linker = _setup_pair(tmp_path)
+        enact_verdict_effect(
+            page_from_path(a_path),
+            page_from_path(b_path),
+            CompareOutcome(verdict=VERDICT_DUPLICATE, widened_coords={}),
+            wiki_root=wiki,
+            path_a=a_path,
+            path_b=b_path,
+            config=None,
+            **kwargs,
+        )
+        return (wiki / "_pending_questions.md").read_text(encoding="utf-8")
+
+    def test_default_description_has_no_earlier_ruling(self, tmp_path: Path) -> None:
+        default = self._questions(tmp_path / "d")
+        assert "Approve folding" in default and "Earlier ruling" not in default
+        assert "Earlier ruling" not in self._questions(tmp_path / "e", earlier_ruling="")
+
+    def test_earlier_ruling_is_appended_to_the_description(self, tmp_path: Path) -> None:
+        sentence = "Earlier ruling on this pair (abc123): rejected; cooldown lapsed."
+        text = self._questions(tmp_path, earlier_ruling=sentence)
+        assert sentence in text

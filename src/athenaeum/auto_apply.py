@@ -221,7 +221,10 @@ def enact_verdict_effect(
     reviewer sees the earlier answer where they decide -- the same wording
     :func:`athenaeum.name_structure.propose_qualified_name_merges` uses. The
     default leaves the rationale byte-for-byte unchanged for every other
-    caller, and no other verdict reads it.
+    caller, and no other verdict reads it. When the fold is NOT authorized
+    (auto-apply off, the live default) the same sentence is appended to the
+    ``_pending_questions.md`` item description instead, via
+    :func:`athenaeum.verdict_effects.apply_verdict_effect`.
     """
     wiki_root = Path(wiki_root)
 
@@ -261,6 +264,7 @@ def enact_verdict_effect(
             now=now,
             coordinate_sink=coordinate_sink,
             effort_budget_breach=effort_budget_breach,
+            earlier_ruling=earlier_ruling,
         )
         if authorized:
             # Authorized, but this caller cannot name a real on-disk path

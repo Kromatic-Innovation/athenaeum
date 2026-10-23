@@ -360,9 +360,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   athenaeum#2101).** After athenaeum#2094 the earlier rejection reached only the
   wiki-dedupe attribution row; the `_pending_merges.md` block a reviewer
   adjudicates kept the fixed athenaeum#716 rationale. `enact_verdict_effect`
-  takes an optional `earlier_ruling` (default `""`, rationale unchanged) and the
+  takes an optional `earlier_ruling` (default `""`, text unchanged) and the
   pair loop passes the same "Earlier ruling on this pair (...)" sentence the
-  attribution row and the qualified-name scan use. Also makes the dry-run test
+  attribution row and the qualified-name scan use. With auto-apply off (the
+  default) the sentence goes into the `_pending_questions.md` item description
+  via `apply_verdict_effect`; with it on, into the `_pending_merges.md` block
+  rationale. Also makes the dry-run test
   in `tests/test_prior_rulings_2077.py` use an unruled pair, so dropping the
   `dry_run` guard in `propose_qualified_name_merges` now fails a test.
 

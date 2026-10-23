@@ -355,10 +355,19 @@ class TestWikiDedupeHonoursRulings:
 
 
 class TestQueuedDuplicateNamesEarlierRuling:
-    """Issue athenaeum#2101: the ``_pending_merges.md`` block, not only the
-    attribution row, names the lapsed rejection."""
+    """Issue athenaeum#2101: what a human adjudicates names the lapsed
+    rejection, not only the attribution row -- the ``_pending_merges.md``
+    block with auto-apply on, the ``_pending_questions.md`` item with it off
+    (the live default).
 
-    def test_duplicate_block_rationale_names_the_lapsed_rejection(self, tmp_path: Path) -> None:
+    Known limitation, tracked separately: ``resolve_merge(reject)`` stamps
+    ``merge_rejected_with`` on the page and nothing clears it when the
+    cooldown lapses, so in production Gate 1 settles the pair as distinct and
+    this path is never reached. The tests strip the stamp by hand to exercise
+    the path itself; they do not claim it is reachable without that.
+    """
+
+    def _run(self, tmp_path: Path, *, auto_apply: bool) -> Path:
         from athenaeum.runlock import RunLock
         from athenaeum.wiki_dedupe import propose_wiki_page_merges
         from tests.test_wiki_dedupe import (
@@ -375,9 +384,8 @@ class TestQueuedDuplicateNamesEarlierRuling:
         a = _write_page(wiki, "venture-a.md", body=_BODY_A)
         b = _write_page(wiki, "venture-b.md", body=_BODY_B)
         _rule(wiki, a, b, "reject", answered_at=OLD, base_name="venture-a")
-        # A human rejection also stamps a declared-merge-rejection on the
-        # pages, which lets Gate 1 settle the pair as distinct before the
-        # comparator runs. Strip it so the pair reaches a ``duplicate``.
+        # See the class docstring: strip the stamp so the pair reaches a
+        # ``duplicate`` instead of being settled by Gate 1.
         a.write_text(
             a.read_text(encoding="utf-8").replace("merge_rejected_with:\n- venture-b\n", ""),
             encoding="utf-8",
@@ -388,7 +396,7 @@ class TestQueuedDuplicateNamesEarlierRuling:
                 "comparator_enabled": True,
                 "rejected_merge_cooldown_days": 30,
                 "verdict_ledger_enabled": True,
-                "reversible_verdict_auto_apply_enabled": True,
+                "reversible_verdict_auto_apply_enabled": auto_apply,
             }
         }
         client = _fake_llm_client(_content_payload("equivalent"))
@@ -403,12 +411,29 @@ class TestQueuedDuplicateNamesEarlierRuling:
                 lock=lock,
             )
         assert [r["verdict"] for r in results] == ["duplicate"]
-        rationales = [
-            m["rationale"] for m in list_pending_merges(wiki / "_pending_merges.md")
-        ]
+        return wiki
+
+    @staticmethod
+    def _assert_names_ruling(text: str) -> None:
+        assert "Earlier ruling on this pair (" in text
+        assert "previously rejected by a human on 2026-01-01" in text
+        assert "not the same thing" in text
+        assert "the rejection cooldown has since lapsed." in text
+
+    def test_auto_apply_on_block_rationale_names_the_lapsed_rejection(
+        self, tmp_path: Path
+    ) -> None:
+        wiki = self._run(tmp_path, auto_apply=True)
+        rationales = [m["rationale"] for m in list_pending_merges(wiki / "_pending_merges.md")]
         assert len(rationales) == 1
         assert "athenaeum#716 reversible-verdict auto-apply" in rationales[0]
-        assert "Earlier ruling on this pair (" in rationales[0]
-        assert "previously rejected by a human on 2026-01-01" in rationales[0]
-        assert "not the same thing" in rationales[0]
-        assert "the rejection cooldown has since lapsed." in rationales[0]
+        self._assert_names_ruling(rationales[0])
+
+    def test_auto_apply_off_question_item_names_the_lapsed_rejection(
+        self, tmp_path: Path
+    ) -> None:
+        wiki = self._run(tmp_path, auto_apply=False)
+        assert not (wiki / "_pending_merges.md").read_text(encoding="utf-8").count("Rationale")
+        questions = (wiki / "_pending_questions.md").read_text(encoding="utf-8")
+        assert "Approve folding" in questions
+        self._assert_names_ruling(questions)
