@@ -85,8 +85,16 @@ AUTHORITY_RELATIONS: frozenset[str] = frozenset(
 )
 
 
-def declared_grants(meta: dict[str, Any] | None) -> frozenset[str]:
+def declared_grants(
+    meta: dict[str, Any] | None, *, writer_identity_enforced: bool = False
+) -> frozenset[str]:
     """Return the grants declared in *meta*'s ``asserter:`` block.
+
+    With *writer_identity_enforced* (issue athenaeum#2041,
+    ``librarian.writer_identity_enforced``) the frontmatter is self-declared
+    by whoever wrote the memory, so NO grant is honoured and the result is
+    always empty -- "none declared". The default (off) is today's behaviour,
+    unchanged.
 
     Accepts a page's whole frontmatter dict (not the asserter sub-dict) so
     callers can pass a :class:`~athenaeum.comparator.ComparatorPage`'s
@@ -95,6 +103,8 @@ def declared_grants(meta: dict[str, Any] | None) -> frozenset[str]:
     non-string members all yield an empty set rather than raising. Blank and
     duplicate entries are dropped.
     """
+    if writer_identity_enforced:
+        return frozenset()
     asserter = parse_asserter(meta)
     raw = asserter.get(GRANTS_KEY)
     if isinstance(raw, str):
@@ -135,6 +145,7 @@ def compare_authority(
     meta_b: dict[str, Any] | None,
     *,
     config: dict[str, Any] | None = None,
+    writer_identity_enforced: bool = False,
 ) -> str:
     """Compare two pages' asserter authority. Returns one of :data:`AUTHORITY_RELATIONS`.
 
@@ -161,12 +172,18 @@ def compare_authority(
     form. Callers deciding whether to take the corroboration-or-queue path
     must use :func:`treated_as_equal_authority`, not an equality test against
     :data:`AUTHORITY_EQUAL`.
+
+    ``writer_identity_enforced`` (issue athenaeum#2041) is read ONCE by the
+    caller and passed down; this helper never reads env. When true every
+    grant is treated as "none declared" (see :func:`declared_grants`), so
+    the result is always ``equal`` and :func:`strictly_greater_authority`
+    is never ``True`` on grants alone.
     """
     from athenaeum.config import resolve_authority_grant_implications
 
     implications = resolve_authority_grant_implications(config)
-    raw_a = declared_grants(meta_a)
-    raw_b = declared_grants(meta_b)
+    raw_a = declared_grants(meta_a, writer_identity_enforced=writer_identity_enforced)
+    raw_b = declared_grants(meta_b, writer_identity_enforced=writer_identity_enforced)
 
     if not raw_a and not raw_b:
         return AUTHORITY_EQUAL
@@ -189,13 +206,22 @@ def strictly_greater_authority(
     meta_b: dict[str, Any] | None,
     *,
     config: dict[str, Any] | None = None,
+    writer_identity_enforced: bool = False,
 ) -> bool:
     """``True`` when *meta_a*'s asserter is STRICTLY greater than *meta_b*'s.
 
     athenaeum#715's auto-supersession condition (b). Deliberately ``False``
     for ``incomparable``: an incomparable peer is not a superior.
     """
-    return compare_authority(meta_a, meta_b, config=config) == AUTHORITY_GREATER
+    return (
+        compare_authority(
+            meta_a,
+            meta_b,
+            config=config,
+            writer_identity_enforced=writer_identity_enforced,
+        )
+        == AUTHORITY_GREATER
+    )
 
 
 def treated_as_equal_authority(relation: str) -> bool:

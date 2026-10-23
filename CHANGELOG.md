@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Writer identity: design doc, opt-in enforcement flag, label-only writer
+  registry (issue athenaeum#2041).** `docs/design/writer-identity.md`
+  inventories every authority decision about a writer (derived,
+  self-declared, or channel-implied) and is bound to the code by an AST
+  membership test. New flag `librarian.writer_identity_enforced` (env
+  `ATHENAEUM_WRITER_IDENTITY_ENFORCED`), **off by default** with behaviour
+  byte-identical to before. When on, self-declared identity grants no
+  authority: `asserter.grants` count as none declared, supersession's
+  asserter comparisons answer `unknown`, and `ingest-answers` records
+  `resolved_by="human-unverified"`, which is not auto-applied to a
+  re-surfaced fingerprint and decays like `auto`. Records already on disk as
+  `human` keep today's treatment; the `correct_*` gate is unchanged. New
+  `athenaeum.writer_registry` (path via `librarian.writer_registry_path` /
+  `ATHENAEUM_WRITER_REGISTRY`, default `writer-registry.yaml`) labels named
+  writers and does not verify them or confer authority; signing stays in
+  athenaeum#2039.
 - **Merge proposers no longer re-propose pairs a human already ruled on
   (issue athenaeum#2077).** The qualified-name scan and the wiki-dedupe pair
   loop now read the resolved blocks of `_pending_merges.md` and

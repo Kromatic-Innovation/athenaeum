@@ -654,6 +654,25 @@ are meant to implement that interface without this module changing.
   dictionary. Receipts are not designed to be published, and travel
   wherever the knowledge repo itself is pushed — treat the repo's own
   visibility as the receipt ledger's visibility.
+- **Self-declared and channel-implied identity (issue athenaeum#2041).**
+  Two other authority decisions take their authority from fields the writer
+  chose, not from a record the model did not write: auto-supersession reads
+  the frontmatter `asserter` block and `asserter.grants`, and
+  `ingest-answers` records `resolved_by="human"` for any escalation answer
+  that arrives on the owner channel, which `tier4_escalate` then auto-applies
+  to a re-surfaced fingerprint. The opt-in flag
+  `librarian.writer_identity_enforced` (env
+  `ATHENAEUM_WRITER_IDENTITY_ENFORCED`) is **OFF by default**; with it off,
+  behaviour is unchanged. With it on, `asserter.grants` count as "none
+  declared", supersession's asserter comparisons answer `"unknown"` (so route
+  (a) does not fire and route (c) finds no corroboration), and
+  `ingest-answers` records `resolved_by="human-unverified"`, which is not
+  auto-applied and decays like `"auto"`. Records already on disk as `"human"`
+  keep today's treatment, and the `correct_*` gate above is the same in both
+  states. **Even with enforcement on, no path can verify a named writer.** The
+  writer registry only labels. The limits above, including "the user typed
+  these words is not the user authorized this" and the in-session forgery
+  window, still stand. See [Writer identity](writer-identity.md).
 
 ---
 
