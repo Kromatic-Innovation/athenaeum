@@ -28,6 +28,7 @@ Every subcommand is registered top-level on one `parser.add_subparsers()` in `cl
 - [`athenaeum calibration review`](#athenaeum-calibration-review) (command) — Record a human confirm/overturn of a sampled audit item.
 - [`athenaeum calibration summary`](#athenaeum-calibration-summary) (command) — Per-tier calibration counts (sampled / reviewed / overturned). The default_acceptance tier is retired: human answers are no longer sampled, so any default_acceptance rows are historical.
 - [`athenaeum claims`](#athenaeum-claims) (command) — Detect claims restated across distinct wiki entities (read-only). Default --find prints a YAML report.
+- [`athenaeum codex-context`](#athenaeum-codex-context) (command) — Write a periodic Athenaeum knowledge snapshot for OpenAI Codex (Tier-2 static context file)
 - [`athenaeum compile`](#athenaeum-compile) (command) — : recompile a historical wiki snapshot as-of a past date into a scratch --out dir (compile-as-of). Distinct from the read-time `recall/reindex --as-of` filter — this re-runs the C3 blend so members expired now but valid then are re-included. Deterministic (no LLM); never mutates the live wiki or raw tree.
 - [`athenaeum context`](#athenaeum-context) (command) — Build one sidecar context envelope (ranked candidates + rendered text) for a prompt — the agent-neutral core,
 - [`athenaeum convergence`](#athenaeum-convergence) (command) — Quarterly self-tuning-loop convergence report: supply (dimension-proposal approvals) vs. demand (unregistered-dimension signal), labelled convergence/abandonment/cyc_failure_mode/insufficient_data.
@@ -338,6 +339,20 @@ Detect claims restated across distinct wiki entities (read-only). Default --find
 | `--find` | `False` | — | Discover recurring claims and print a YAML report. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--threshold` | — | — | Cosine similarity cutoff (default: 0.85) |
+
+## `athenaeum codex-context`
+
+Write a periodic Athenaeum knowledge snapshot for OpenAI Codex (Tier-2 static context file)
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--backend` | `fts5` | fts5, vector | Search backend (default: fts5) |
+| `--cache-dir` | — | — | Athenaeum cache directory |
+| `--interval-seconds` | `900` | — | Declared refresh cadence; must match the scheduler (default: 900) |
+| `--max-age-seconds` | — | — | Seconds until the snapshot is stale (default: twice the interval) |
+| `--n` | — | — | Max candidates (default: 7) |
+| `--output` | — | — | Snapshot path, or '-' for stdout (default: ~/.codex/athenaeum-context.md) |
+| `--seed` | — | — | Static topic string the snapshot is built for |
 
 ## `athenaeum compile`
 

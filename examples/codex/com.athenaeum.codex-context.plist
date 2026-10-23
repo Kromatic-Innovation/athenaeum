@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  EXAMPLE ONLY (athenaeum#1364). Nothing in the repo installs or loads this.
+  Edit every REPLACE_ME, copy to ~/Library/LaunchAgents/, then load it
+  yourself. StartInterval MUST equal --interval-seconds below, because the
+  snapshot declares that number as its own refresh cadence.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.athenaeum.codex-context</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/REPLACE_ME/path/to/venv/bin/athenaeum</string>
+    <string>codex-context</string>
+    <string>--seed</string>
+    <string>REPLACE_ME topics you are working on</string>
+    <string>--interval-seconds</string>
+    <string>900</string>
+    <string>--cache-dir</string>
+    <string>/Users/REPLACE_ME/.cache/athenaeum</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>900</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/REPLACE_ME/Library/Logs/athenaeum-codex-context.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/REPLACE_ME/Library/Logs/athenaeum-codex-context.log</string>
+</dict>
+</plist>

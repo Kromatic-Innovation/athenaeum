@@ -210,7 +210,7 @@ troubleshooting the hooks themselves is in [Troubleshooting](troubleshooting.md)
 
 ## See also
 
-- Guides — [Claude Code integration](claude-code.md) · [Daily operation](daily-operation.md) · [Vector search](vector-search.md) · [Troubleshooting](troubleshooting.md)
+- Guides — [Claude Code integration](claude-code.md) · [Daily operation](daily-operation.md) · [Vector search](vector-search.md) · [Troubleshooting](troubleshooting.md) · [Codex context file](codex.md)
 - Modules — [recall](../modules/recall.md) · [mcp](../modules/mcp.md)
 - Design — [recall architecture](../design/recall-architecture.md)
 - Reference — [configuration](../reference/configuration.md)
