@@ -711,6 +711,64 @@ _POINTER_KEYS: frozenset[str] = frozenset(
 )
 
 
+#: Issue athenaeum#2115: a ``fold_widen_impossible`` question carries its
+#: closed answer set on its own ``**Description**:`` line, after this label,
+#: as a one-line JSON list. Defined here (the lowest layer that needs to read
+#: it) so the raiser (:mod:`athenaeum.pending_merges`), the published schema
+#: below, and the applier (:mod:`athenaeum.decision_answers`) share one parse.
+WIDEN_CANDIDATES_LABEL = "Candidate values (answer with exactly one): "
+
+
+def widen_candidates(description: str) -> list[str] | None:
+    """The closed answer set a widen question's *description* carries, or
+    ``None`` when it carries none (every other question)."""
+    idx = description.rfind(WIDEN_CANDIDATES_LABEL)
+    if idx < 0:
+        return None
+    try:
+        parsed = json.loads(description[idx + len(WIDEN_CANDIDATES_LABEL) :].strip())
+    except ValueError:
+        return None
+    if not isinstance(parsed, list) or not parsed:
+        return None
+    if not all(isinstance(v, str) and v for v in parsed):
+        return None
+    return list(parsed)
+
+
+def match_widen_candidate(answer: str, candidates: list[str]) -> str | None:
+    """The candidate *answer* names (surrounding whitespace, quotes and
+    backticks ignored; case-insensitive), or ``None``. Free text that is not
+    a candidate never resolves to a value."""
+    cleaned = answer.strip().strip("`'\"").strip()
+    for cand in candidates:
+        if cand.casefold() == cleaned.casefold():
+            return cand
+    return None
+
+
+def response_schema_for_item(item: dict[str, Any]) -> dict[str, Any]:
+    """:func:`response_schema_for`, narrowed per item where the item carries
+    its own closed answer set (issue athenaeum#2115): a widen question's
+    ``verdict`` is an enum of its candidate values, not free text."""
+    decision_type = str(item.get("type") or "")
+    schema = response_schema_for(decision_type)
+    payload = item.get("payload")
+    if decision_type == "question" and isinstance(payload, dict):
+        candidates = widen_candidates(str(payload.get("description") or ""))
+        if candidates:
+            schema["properties"]["verdict"] = {
+                "type": "string",
+                "enum": candidates,
+                "description": (
+                    "The value the canonical page's coordinate should take: "
+                    "one of the offered values (the folded sources' values "
+                    "and the canonical's current value, when it has one)."
+                ),
+            }
+    return schema
+
+
 def response_schema_for(decision_type: str) -> dict[str, Any]:
     """JSON Schema a valid answer to a ``decision_type`` item must satisfy.
 
@@ -943,7 +1001,7 @@ def frame_decision(
     framed["reversibility"] = reversibility_for(decision_type)
     framed["routing"] = routing
     framed["proposed_default"] = proposed_default_for(decision_type)
-    framed["response_schema"] = response_schema_for(decision_type)
+    framed["response_schema"] = response_schema_for_item(item)
     framed["escalation_rationale"] = escalation_rationale_for(item)
     return framed
 

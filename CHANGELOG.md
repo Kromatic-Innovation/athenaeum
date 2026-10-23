@@ -360,6 +360,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An answered `fold_widen_impossible` question is now consumed; a canonical
+  keeps its `memory_class` on a human-approved fold (issue athenaeum#2115).**
+  The widen question was unanswerable by construction: nothing read the
+  answer back, so every `ingest-answers` tick refused the approved fold again
+  (11 stalled on the live store, with 22 open questions). The fold now reads
+  the answer for its (proposal, dimension) from the pending file or the
+  archive, applies it, and records `widen_answers` beside
+  `coordinates_widened` in the provenance ledger. The question's schema is a
+  closed enum of the offered values and free text is refused, never written
+  to frontmatter. A human-approved fold whose canonical already has a
+  `memory_class` keeps it (the sources' differing values go to
+  `coordinates_kept`); only a class-less canonical raises the question, and
+  auto-applied folds keep the hard refusal. Open widen questions naming a
+  proposal are resolved as superseded when it applies or is archived.
+
 - **`tier3_merge` routes a thinking-only `max_tokens` response to the
   full-echo fallback (issue athenaeum#2110).** Adaptive thinking could use
   the whole output budget and leave no text block, so `response_text` raised

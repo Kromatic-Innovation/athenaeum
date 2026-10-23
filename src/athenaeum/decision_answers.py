@@ -478,7 +478,30 @@ def _load_decision_answer(path: Path) -> DecisionAnswer | None:
 
 
 def _apply_question_answer(pending_path: Path, answer: DecisionAnswer) -> DecisionAnswerOutcome:
-    from athenaeum.answers import resolve_by_id
+    from athenaeum.answers import parse_pending_questions, resolve_by_id
+    from athenaeum.decision_framing import match_widen_candidate, widen_candidates
+
+    # Issue athenaeum#2115: a widen question has a closed answer set; free
+    # text is refused here rather than recorded, because the fold-apply path
+    # will read the recorded answer back as a coordinate value.
+    if pending_path.exists():
+        for pq in parse_pending_questions(pending_path):
+            if pq.id != answer.decision_id or pq.answered:
+                continue
+            candidates = widen_candidates(pq.description)
+            if candidates and match_widen_candidate(answer.verdict, candidates) is None:
+                return DecisionAnswerOutcome(
+                    path=answer.path,
+                    decision_id=answer.decision_id,
+                    decision_type=answer.decision_type,
+                    applied=False,
+                    error_code="invalid_decision",
+                    message=(
+                        f"answer {answer.verdict!r} is not one of the offered "
+                        f"values {candidates!r}"
+                    ),
+                )
+            break
 
     result = resolve_by_id(pending_path, answer.decision_id, answer.verdict)
     if result["ok"]:

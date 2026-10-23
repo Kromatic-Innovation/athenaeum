@@ -455,6 +455,8 @@ def build_merge_provenance_record(
     links_rewritten: list[dict[str, str]] | None = None,
     canonical_content_hash: str | None = None,
     coordinates_widened: dict[str, Any] | None = None,
+    widen_answers: dict[str, str] | None = None,
+    coordinates_kept: dict[str, Any] | None = None,
     applied: bool = True,
     error_code: str | None = None,
 ) -> dict[str, Any]:
@@ -510,6 +512,11 @@ def build_merge_provenance_record(
       the canonical page's text AS WRITTEN BY THIS FOLD (after the body
       write and the alias write) — the comparison basis a later unfold uses
       to decide direct-unfold vs queued-diff-proposal.
+    - ``widen_answers`` (issue athenaeum#2115): ``{dimension_name:
+      answer_id}`` for each coordinate whose value came from an answered
+      ``fold_widen_impossible`` question; ``coordinates_kept``: ``{dimension_name:
+      {"kept": value, "differing": [values]}}`` for each coordinate the
+      canonical kept on a human-approved fold while sources differed.
     - ``coordinates_widened``: ``{dimension_name: widened_coordinate}`` for
       every separator dimension this fold actually widened; ``{}`` when
       none were (e.g. all sources already shared the canonical's coordinate).
@@ -537,6 +544,12 @@ def build_merge_provenance_record(
             record["error_code"] = error_code
     if coordinates_widened is not None:
         record["coordinates_widened"] = dict(coordinates_widened)
+    # Issue athenaeum#2115: omitted unless non-empty, so every record that
+    # predates (or does not need) them stays byte-identical.
+    if widen_answers:
+        record["widen_answers"] = dict(widen_answers)
+    if coordinates_kept:
+        record["coordinates_kept"] = dict(coordinates_kept)
     return record
 
 
@@ -563,6 +576,8 @@ def record_merge_provenance(
     links_rewritten: list[dict[str, str]] | None = None,
     canonical_content_hash: str | None = None,
     coordinates_widened: dict[str, Any] | None = None,
+    widen_answers: dict[str, str] | None = None,
+    coordinates_kept: dict[str, Any] | None = None,
     applied: bool = True,
     error_code: str | None = None,
 ) -> bool:
@@ -602,6 +617,8 @@ def record_merge_provenance(
             links_rewritten=links_rewritten,
             canonical_content_hash=canonical_content_hash,
             coordinates_widened=coordinates_widened,
+            widen_answers=widen_answers,
+            coordinates_kept=coordinates_kept,
             applied=applied,
             error_code=error_code,
         )

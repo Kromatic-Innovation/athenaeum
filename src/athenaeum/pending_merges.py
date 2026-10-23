@@ -76,6 +76,7 @@ outer fence's closer. See :func:`_scan_fence_state` (athenaeum#292).
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import re
 import subprocess
@@ -93,9 +94,18 @@ from typing import TYPE_CHECKING, Any, Callable, Literal
 # < imported_layer), and comparator.py never imports pending_merges (or
 # anything that transitively does), so this introduces no cycle either --
 # see tests/test_import_graph_acyclic.py, which this change keeps green.
-from athenaeum.answers import parse_pending_questions, raise_pending_question, resolve_by_id
+from athenaeum.answers import (
+    _answer_body,
+    parse_pending_questions,
+    raise_pending_question,
+    resolve_by_id,
+)
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.comparator import CoordinateWidenImpossible, _widen_dimension
+from athenaeum.decision_framing import (
+    WIDEN_CANDIDATES_LABEL,
+    match_widen_candidate,
+)
 from athenaeum.dimensions import (
     DEFAULT_REGISTRY,
     UNIVERSAL_MARKER,
@@ -1594,22 +1604,89 @@ def _json_safe_coordinate(value: Any) -> Any:
     return value
 
 
+#: Phrase every ``fold_widen_impossible`` question carries (issue
+#: athenaeum#2069), shared by the raiser, the stale-question withdrawal and the
+#: answer read-back (issue athenaeum#2115) so the three cannot drift.
+_WIDEN_QUESTION_PHRASE = "cannot auto-widen its"
 
-def _widen_question_already_open(pending_path: Path, question: str) -> bool:
-    """True when ``pending_path`` holds an UNRESOLVED block asking ``question``.
 
-    Seer review on Kromatic-Innovation/athenaeum#2076: the ``fold_widen_impossible`` refusal
-    leaves the approval unconsumed, so the same fold is retried on every
-    ``ingest-answers`` tick. The question must be raised once per open
-    decision, not once per tick. A resolved block (``- [x]``) does not count:
-    if the operator answered and the fold still cannot widen, a fresh
-    question is the right outcome.
-    """
+def _widen_questions_for(
+    pending_path: Path, proposal_id: str, dimension_name: str | None = None
+) -> list[Any]:
+    """Every block in *pending_path* that is a widen question raised for
+    *proposal_id* (optionally narrowed to one dimension). The proposal id is
+    matched on the ``(proposal <id>)`` text the raiser writes into the
+    block's description, because one canonical can be the target of several
+    proposals and ``entity`` alone cannot tell them apart."""
+    if not pending_path.exists():
+        return []
     try:
-        text = pending_path.read_text(encoding="utf-8")
-    except OSError:
-        return False
-    return f"- [ ] {question}" in text
+        questions = parse_pending_questions(pending_path)
+    except (OSError, UnicodeDecodeError, ValueError):
+        return []
+    marker = f"its {dimension_name!r} coordinate" if dimension_name else ""
+    return [
+        pq
+        for pq in questions
+        if _WIDEN_QUESTION_PHRASE in pq.question
+        and f"(proposal {proposal_id})" in pq.description
+        and marker in pq.question
+    ]
+
+
+def _answered_widen_value(
+    pending_path: Path,
+    proposal_id: str,
+    dimension_name: str,
+    candidates: list[str],
+) -> tuple[str, str] | None:
+    """The ``(value, answer_id)`` a human gave for proposal *proposal_id*'s
+    widen question on *dimension_name*, or ``None`` (issue athenaeum#2115).
+
+    An answered block leaves ``_pending_questions.md`` for
+    ``_pending_questions_archive.md`` on the same ``ingest-answers`` tick that
+    flips it, so both files are read. Only an answer that names one of
+    *candidates* counts: free text is never turned into a coordinate value.
+    The newest matching answer wins (the pending file is read last, and
+    within each file a later block is a later answer).
+    """
+    found: tuple[str, str] | None = None
+    for path in (
+        pending_path.parent / "_pending_questions_archive.md",
+        pending_path,
+    ):
+        for pq in _widen_questions_for(path, proposal_id, dimension_name):
+            if not pq.answered:
+                continue
+            first_line = next(
+                (ln for ln in _answer_body(pq).splitlines() if ln.strip()), ""
+            )
+            value = match_widen_candidate(first_line, candidates)
+            if value is not None:
+                found = (value, pq.id)
+    return found
+
+
+def _withdraw_widen_questions_for_proposals(
+    pending_path: Path, proposal_ids: list[str], outcome: str
+) -> None:
+    """Resolve every OPEN widen question naming any of *proposal_ids* with a
+    "superseded" outcome (issue athenaeum#2115) — the proposal was applied or
+    archived, so nobody needs to answer it. Same
+    :func:`athenaeum.answers.resolve_by_id` path as a human answer, so the
+    next ``ingest-answers`` archives the block. Best-effort and silent: this
+    is cleanup, never a precondition for the apply/archive that triggered it.
+    """
+    for proposal_id in proposal_ids:
+        for pq in _widen_questions_for(pending_path, proposal_id):
+            if pq.answered:
+                continue
+            resolve_by_id(
+                pending_path,
+                pq.id,
+                f"Superseded (athenaeum#2115): proposal {proposal_id} {outcome}; "
+                "this question no longer needs an answer.",
+            )
 
 def _apply_fold_into_existing(
     pm: PendingMerge,
@@ -1685,9 +1762,10 @@ def _apply_fold_into_existing(
 
     Returns ``{"ok": True, "folded_sources", "aliases_added",
     "links_rewritten", "link_details", "canonical_content_hash",
-    "coordinates_widened"}`` on success, or ``{"ok": False, "error_code",
-    "message"}`` when the step -1 preflight refuses. ``target_exists`` is
-    unreachable from here by construction — the caller only takes this path
+    "coordinates_widened", "widen_answers", "coordinates_kept"}`` on success,
+    or ``{"ok": False, "error_code", "message"}`` when the step -1 preflight
+    refuses. ``target_exists`` is unreachable from here by construction —
+    the caller only takes this path
     for ``write_kind == "fold-into-existing"``, and athenaeum#421's
     proposal-time classification only assigns that write_kind when the slug
     already exists; this function does not re-check.
@@ -1887,6 +1965,16 @@ def _apply_fold_into_existing(
     # fold actually succeeds.
     identity_resolved_dimensions: dict[str, Any] = {}
     identity_aliases: list[str] = []
+    # Issue athenaeum#2115: dimensions whose post-fold value is a deliberate
+    # ruling rather than the algebraic widest, so the narrowing check below
+    # must not re-refuse them (it demands equality for ENUM/IDENTITY and
+    # ancestry for HIERARCHY, which a ruling never satisfies by design).
+    #   * ``answered_dimensions`` — value + answer id from a human's answer to
+    #     the widen question;
+    #   * ``kept_dimensions`` — the canonical's own value kept on a
+    #     human-approved fold, with the sources' differing values recorded.
+    answered_dimensions: dict[str, tuple[str, str]] = {}
+    kept_dimensions: dict[str, dict[str, Any]] = {}
     for dimension in registry:
         if not dimension.separates:
             continue
@@ -1937,59 +2025,109 @@ def _apply_fold_into_existing(
                     # pending-decision path below rather than ever writing
                     # a `None` coordinate.
                     widened_value = exc.value_a
+            elif (
+                human_approved
+                and dimension.name == "memory-class"
+                and isinstance(canonical_class := prior_meta.get("memory_class"), str)
+                and canonical_class.strip()
+            ):
+                # Issue athenaeum#2115 AC3: the athenaeum#2083 rule for
+                # ``subject`` extended to ``memory-class`` — a human approve
+                # is the identity ruling, so a canonical that already carries
+                # a class keeps it and the sources' differing values go to
+                # provenance instead of a refusal nobody can answer. HUMAN
+                # approvals only: a non-human (auto-applied) fold keeps the
+                # hard refusal, and a canonical with NO class falls through
+                # to the question below.
+                widened_value = canonical_class
+                kept_dimensions[dimension.name] = {
+                    "kept": canonical_class,
+                    "differing": sorted(
+                        {
+                            str(v)
+                            for m in metas_in_order
+                            if (v := m.get("memory_class")) not in (None, "")
+                            and v != canonical_class
+                        }
+                    ),
+                }
             elif widen_path_eligible and dimension.null_means == NullMeans.UNIVERSAL:
                 widened_value = UNIVERSAL_MARKER
             elif widen_path_eligible:
                 pending_path = wiki_root / "_pending_questions.md"
-                widen_question = (
-                    f"Fold of {target_slug!r} cannot auto-widen its "
-                    f"{dimension.name!r} coordinate — what should the "
-                    "canonical's value be?"
+                # Issue athenaeum#2115: the closed answer set — every
+                # distinct concrete value the canonical, the draft and the
+                # folded sources carry (the two incompatible source values
+                # plus the canonical's current one when it has one).
+                candidates: list[str] = []
+                for m in metas_in_order:
+                    cv = coordinate_value(dimension, m)
+                    if isinstance(cv, str) and cv.strip() and cv not in candidates:
+                        candidates.append(cv)
+                answered = _answered_widen_value(
+                    pending_path, pm.id, dimension.name, candidates
                 )
-                # Seer review on Kromatic-Innovation/athenaeum#2076
-                # (Kromatic-Innovation/athenaeum#2081): a refused fold
-                # does NOT consume the approval, so `ingest-answers` retries
-                # it every tick. Without this guard each tick appended one
-                # more identical block to _pending_questions.md. Raise the
-                # question once; while an UNRESOLVED block with this exact
-                # question text is open, just refuse again.
-                if not _widen_question_already_open(pending_path, widen_question):
-                    raise_pending_question(
-                        pending_path,
-                        question=widen_question,
-                        context=(
-                            # Issue athenaeum#2076: a one-line, single-sentence
-                            # context — never the raw `pm.rationale` verbatim,
-                            # which can be multi-line for a wiki-dedupe-cluster
-                            # proposal and would corrupt this sidecar's
-                            # single-field-per-line block format.
-                            f"Human-approved fold (proposal {pm.id}) into "
-                            f"{target_slug!r} found incompatible {dimension.name!r} "
-                            f"values ({exc.value_a!r} vs {exc.value_b!r}) across "
-                            "the folded sources that cannot be automatically "
-                            "widened into a single covering coordinate. Decide "
-                            "what the canonical page's coordinate should be, then "
-                            "re-approve the proposal."
-                        ),
-                        entity=target_slug,
-                        source=str(target_path),
+                if answered is not None:
+                    # Issue athenaeum#2115 AC1: the operator answered this
+                    # question — apply the fold with their value.
+                    widened_value = answered[0]
+                    answered_dimensions[dimension.name] = answered
+                else:
+                    widen_question = (
+                        f"Fold of {target_slug!r} cannot auto-widen its "
+                        f"{dimension.name!r} coordinate — what should the "
+                        "canonical's value be?"
                     )
-                return {
-                    "ok": False,
-                    "error_code": "fold_widen_impossible",
-                    "message": (
-                        f"fold refused: cannot auto-widen {dimension.name!r} "
-                        f"across folded sources ({exc.value_a!r} vs "
-                        f"{exc.value_b!r}); a pending decision has been raised "
-                        "in _pending_questions.md — answer that instead of "
-                        "re-approving this proposal unchanged, or ingest-answers "
-                        "will keep refusing it identically on every tick."
-                    ),
-                    "proposal_id": pm.id,
-                    "dimension": dimension.name,
-                    "value_a": _json_safe_coordinate(exc.value_a),
-                    "value_b": _json_safe_coordinate(exc.value_b),
-                }
+                    # Seer review on Kromatic-Innovation/athenaeum#2076
+                    # (Kromatic-Innovation/athenaeum#2081): a refused fold
+                    # does NOT consume the approval, so `ingest-answers` retries
+                    # it every tick. Without this guard each tick appended one
+                    # more identical block to _pending_questions.md. Raise the
+                    # question once; while an UNRESOLVED block with this exact
+                    # question text is open, just refuse again.
+                    if not any(
+                        not pq.answered
+                        for pq in _widen_questions_for(pending_path, pm.id, dimension.name)
+                    ):
+                        raise_pending_question(
+                            pending_path,
+                            question=widen_question,
+                            context=(
+                                # Issue athenaeum#2076: a one-line, single-sentence
+                                # context — never the raw `pm.rationale` verbatim,
+                                # which can be multi-line for a wiki-dedupe-cluster
+                                # proposal and would corrupt this sidecar's
+                                # single-field-per-line block format.
+                                f"Human-approved fold (proposal {pm.id}) into "
+                                f"{target_slug!r} found incompatible {dimension.name!r} "
+                                f"values ({exc.value_a!r} vs {exc.value_b!r}) across "
+                                "the folded sources that cannot be automatically "
+                                "widened into a single covering coordinate. Answer "
+                                "with the value the canonical page's coordinate "
+                                "should take; the approved fold then applies on the "
+                                "next ingest-answers run. "
+                                + WIDEN_CANDIDATES_LABEL
+                                + json.dumps(candidates, ensure_ascii=False)
+                            ),
+                            entity=target_slug,
+                            source=str(target_path),
+                        )
+                    return {
+                        "ok": False,
+                        "error_code": "fold_widen_impossible",
+                        "message": (
+                            f"fold refused: cannot auto-widen {dimension.name!r} "
+                            f"across folded sources ({exc.value_a!r} vs "
+                            f"{exc.value_b!r}); a pending decision has been raised "
+                            "in _pending_questions.md — answer that instead of "
+                            "re-approving this proposal unchanged, or ingest-answers "
+                            "will keep refusing it identically on every tick."
+                        ),
+                        "proposal_id": pm.id,
+                        "dimension": dimension.name,
+                        "value_a": _json_safe_coordinate(exc.value_a),
+                        "value_b": _json_safe_coordinate(exc.value_b),
+                    }
             else:
                 # Issue athenaeum#2076: neither a name-collision-scan
                 # proposal NOR a human-approved fold of any other class —
@@ -2020,6 +2158,11 @@ def _apply_fold_into_existing(
 
     for dimension in registry:
         if not dimension.separates:
+            continue
+        if dimension.name in answered_dimensions or dimension.name in kept_dimensions:
+            # Issue athenaeum#2115: a human's answer, or the canonical's own
+            # value kept on a human-approved fold, is a ruling — see the
+            # declarations above.
             continue
         if dimension.name in identity_resolved_dimensions:
             # Issue athenaeum#2071: this dimension's post-fold value was
@@ -2277,6 +2420,12 @@ def _apply_fold_into_existing(
             _withdraw_stale_widen_question(
                 pending_path, target_slug, dim_name, resolved_value
             )
+    # Issue athenaeum#2115 AC4: the fold applied, so EVERY still-open widen
+    # question naming this proposal (any dimension) is moot — withdraw it as
+    # superseded. Answered ones are left alone (their answer was consumed).
+    _withdraw_widen_questions_for_proposals(
+        wiki_root / "_pending_questions.md", [pm.id], "was applied"
+    )
 
     return {
         "ok": True,
@@ -2284,6 +2433,8 @@ def _apply_fold_into_existing(
         "link_details": link_details,
         "canonical_content_hash": canonical_content_hash,
         "coordinates_widened": coordinates_widened,
+        "widen_answers": {d: qid for d, (_v, qid) in answered_dimensions.items()},
+        "coordinates_kept": kept_dimensions,
         "aliases_added": aliases_added,
         "links_rewritten": links_rewritten,
     }
@@ -2320,6 +2471,12 @@ def _archive_stale_merge_block(
     primary_parts = ["# Pending Merges", *remaining_blocks]
     new_primary = "\n\n---\n\n".join(primary_parts) + "\n"
     atomic_write_text(merges_path, new_primary)
+
+    _withdraw_widen_questions_for_proposals(
+        merges_path.parent / "_pending_questions.md",
+        [pm.id for pm in [_parse_block(block_text)] if pm is not None],
+        "was archived",
+    )
 
     archive_path = merges_path.parent / "_pending_merges_archive.md"
     existing_archive = ""
@@ -2698,6 +2855,8 @@ def resolve_merge(
                 "links_rewritten": fold_result["link_details"],
                 "canonical_content_hash": fold_result["canonical_content_hash"],
                 "coordinates_widened": fold_result["coordinates_widened"],
+                "widen_answers": fold_result["widen_answers"],
+                "coordinates_kept": fold_result["coordinates_kept"],
             }
         else:
             # ``create-merged`` path — UNCHANGED behavior. A misclassified
@@ -2842,12 +3001,14 @@ def ingest_resolved_merges(merges_path: Path) -> int:
 
     remaining: list[str] = []
     archived: list[str] = []
+    archived_ids: list[str] = []
     for block_text in blocks:
         pm = _parse_block(block_text)
         if pm is None or not pm.resolved:
             remaining.append(block_text)
             continue
         archived.append(f"{block_text}\n\n**Archived**: {iso_ts}\n")
+        archived_ids.append(pm.id)
 
     # Recompose the primary file from recognized blocks. Any leaked orphan
     # ``## From`` fragment that _split_blocks no longer treats as a block is
@@ -2890,6 +3051,9 @@ def ingest_resolved_merges(merges_path: Path) -> int:
     else:
         combined = "# Archived Merges\n\n" + new_section + "\n"
     atomic_write_text(archive_path, combined)
+    _withdraw_widen_questions_for_proposals(
+        merges_path.parent / "_pending_questions.md", archived_ids, "was archived"
+    )
     return len(archived)
 
 
@@ -3088,6 +3252,11 @@ def revalidate_pending_merges(
         combined = "# Archived Merges\n\n" + new_section + "\n"
     atomic_write_text(archive_path, combined)
 
+    _withdraw_widen_questions_for_proposals(
+        merges_path.parent / "_pending_questions.md",
+        [r.id for r in result.retired],
+        "was retired",
+    )
     result.applied = True
     log.info(
         "pending_merges: revalidation retired %d stale proposal(s) to %s "
@@ -3226,6 +3395,11 @@ def withdraw_pending_merges_for_retired_pages(
         combined = "# Archived Merges\n\n" + new_section + "\n"
     atomic_write_text(archive_path, combined)
 
+    _withdraw_widen_questions_for_proposals(
+        merges_path.parent / "_pending_questions.md",
+        [w.id for w in result.withdrawn],
+        "was withdrawn",
+    )
     result.applied = True
     log.info(
         "pending_merges: withdrew %d proposal(s) referencing a retired page to %s",
