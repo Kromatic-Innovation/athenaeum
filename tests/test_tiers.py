@@ -3906,10 +3906,16 @@ class TestTier3MergePatchOps:
             tier3_merge(self._action(), "# Acme Corp\n\nFintech, Series B.", "ref", client)
         assert client.messages.create.call_count == 1
 
-    def test_thinking_only_none_stop_reason_still_raises(self) -> None:
+    def test_thinking_only_none_stop_reason_still_raises(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         # Issue athenaeum#2110: claude-cli cannot report stop_reason
         # (reported_stop_reason -> None), so even a response claiming
         # max_tokens must not be treated as a handled truncation.
+        # The env var outranks yaml config in resolve_provider, so pin it:
+        # a CI env exporting ATHENAEUM_LLM_PROVIDER=api would otherwise
+        # report max_tokens and take the fallback (second call).
+        monkeypatch.setenv("ATHENAEUM_LLM_PROVIDER", "claude-cli")
         client = MagicMock()
         client.messages.create.side_effect = [self._thinking_only("max_tokens")]
         with pytest.raises(ValueError, match="no text block found"):
