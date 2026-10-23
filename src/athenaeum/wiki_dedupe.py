@@ -161,6 +161,7 @@ from athenaeum.comparator import (
     VERDICT_UNDERDETERMINED,
     begin_content_relation_unavailable_tracking,
     flush_content_relation_unavailable_warning,
+    ledger_outcome,
     page_from_path,
     record_comparison,
 )
@@ -172,7 +173,13 @@ from athenaeum.config import (
     resolve_wiki_dedupe_min_confidence,
 )
 from athenaeum.merge_type_gate import cross_class_precheck
-from athenaeum.models import AutoMemoryFile, TokenUsage, parse_frontmatter, validity_bound_str
+from athenaeum.models import (
+    AutoMemoryFile,
+    TokenUsage,
+    is_tombstone,
+    parse_frontmatter,
+    validity_bound_str,
+)
 from athenaeum.pii import is_pii_flagged
 from athenaeum.progress import PhaseHeartbeat
 from athenaeum.runlock import RunLock
@@ -1106,6 +1113,24 @@ def propose_wiki_page_merges(
                     if redo.verdict == VERDICT_DUPLICATE:
                         record["outcome"] = redo
                         record["skipped"] = None
+                    elif redo.verdict is not None:
+                        # Issue athenaeum#2095: the redo disagrees. Ledger it
+                        # (newest entry wins) and enact it as the fresh
+                        # decision it is, so the pair stops being a
+                        # memoized-unenacted ``duplicate`` and the next run
+                        # does not spend another Gate 2 call on it. The
+                        # verdict is the comparator's; confidence stays out
+                        # (athenaeum#715). ``verdict is None`` (Gate 2
+                        # unavailable) makes no call worth memoizing and
+                        # stays retryable.
+                        ledger_outcome(wiki_root, page_a, page_b, redo, lock=lock)
+                        record["verdict"] = redo.verdict
+                        # A folded tombstone must not be re-flagged live by
+                        # enacting a queue effect (review finding): ledger
+                        # only, and fall through as memoized-fresh.
+                        if not (is_tombstone(page_a.meta) or is_tombstone(page_b.meta)):
+                            record["outcome"] = redo
+                            record["skipped"] = None
                 # Still below the floor: fall past the fresh branch so the
                 # archive row is re-recorded below.
                 if record.get("skipped") == "fresh" and not (

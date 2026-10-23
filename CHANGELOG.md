@@ -326,6 +326,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `propose_wiki_page_merges` keeps the expired prior ruling and writes the
   earlier rejection's id and note into the pair's attribution row `detail`.
 
+- **wiki-dedupe floor re-check converges when the redo is not `duplicate`**
+  (athenaeum#2095, follow-up to athenaeum#2080). A memoized-fresh `duplicate`
+  recomputed after the confidence floor passes, whose recompute returns another
+  verdict, is now ledgered (new `comparator.ledger_outcome`, the write half of
+  `record_comparison`) and enacted as the fresh decision, so the nightly run
+  stops spending a Gate 2 call on it. A redo with no verdict (Gate 2
+  unavailable) stays retryable. Confidence is still never a verdict input
+  (athenaeum#715).
+
 - **`fold_narrows_coordinate` no longer blocks a human-approved fold
   outside the name-collision scan (issue athenaeum#2076, follow-up to
   athenaeum#2069).** The athenaeum#2069 widen path (substitute the
