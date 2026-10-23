@@ -27,6 +27,9 @@ Findings against the contract (none needs a core change):
 Egress (option B, fail closed): if any candidate's audience is non-public the
 whole snapshot is withheld. The decision is whole-snapshot; no bullet is ever
 filtered or re-rendered (§2.2).
+
+Layering: L5 (presentation), a process-level scheduled job like the other
+adapters and every ``_cmd_*.py`` module.
 """
 
 from __future__ import annotations

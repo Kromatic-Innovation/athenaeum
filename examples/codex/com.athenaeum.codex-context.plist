@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  EXAMPLE ONLY (athenaeum#1364). Nothing in the repo installs or loads this.
-  Edit every REPLACE_ME, copy to ~/Library/LaunchAgents/, then load it
+  EXAMPLE ONLY. Nothing in the repo installs or loads this.
+  Edit every REPLACE_ME, copy to the LaunchAgents directory in your Library folder, then load it
   yourself. StartInterval MUST equal --interval-seconds below, because the
   snapshot declares that number as its own refresh cadence.
 -->
@@ -19,15 +19,15 @@
     <string>--interval-seconds</string>
     <string>900</string>
     <string>--cache-dir</string>
-    <string>/Users/REPLACE_ME/.cache/athenaeum</string>
+    <string>/REPLACE_ME/home/.cache/athenaeum</string>
   </array>
   <key>StartInterval</key>
   <integer>900</integer>
   <key>RunAtLoad</key>
   <true/>
   <key>StandardOutPath</key>
-  <string>/Users/REPLACE_ME/Library/Logs/athenaeum-codex-context.log</string>
+  <string>/REPLACE_ME/home/Library/Logs/athenaeum-codex-context.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/REPLACE_ME/Library/Logs/athenaeum-codex-context.log</string>
+  <string>/REPLACE_ME/home/Library/Logs/athenaeum-codex-context.log</string>
 </dict>
 </plist>

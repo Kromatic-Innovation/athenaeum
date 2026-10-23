@@ -1,9 +1,11 @@
+**Reference:** [recall](../modules/recall.md) · [mcp](../modules/mcp.md)
+
 # Codex context-file adapter
 
-`athenaeum codex-context` is the first non-Claude sidecar adapter (issue
-athenaeum#1364). It is a **Tier-2 static context-file adapter**
+`athenaeum codex-context` is the first non-Claude sidecar adapter. It is a
+**Tier-2 static context-file adapter**
 ([contract §3.1](../extending/sidecar-adapter-contract.md)): a scheduled job
-renders one snapshot of recall to `~/.codex/athenaeum-context.md`. There is no
+renders one snapshot of recall to `$HOME/.codex/athenaeum-context.md`. There is no
 per-turn push. It is a proof against the contract, not a supported
 integration.
 
@@ -20,9 +22,9 @@ never written to the file. No push telemetry is recorded.
 
 ## The AGENTS.md pointer (operator step)
 
-The adapter never edits `~/.codex/AGENTS.md`. Add this line yourself:
+The adapter never edits `$HOME/.codex/AGENTS.md`. Add this line yourself:
 
-> At the start of every session, read `~/.codex/athenaeum-context.md` (an
+> At the start of every session, read `$HOME/.codex/athenaeum-context.md` (an
 > Athenaeum knowledge snapshot, refreshed periodically; its header states the
 > interval) and apply the freshness rule in its header before relying on
 > anything in it.
