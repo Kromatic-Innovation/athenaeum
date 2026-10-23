@@ -3906,6 +3906,22 @@ class TestTier3MergePatchOps:
             tier3_merge(self._action(), "# Acme Corp\n\nFintech, Series B.", "ref", client)
         assert client.messages.create.call_count == 1
 
+    def test_thinking_only_none_stop_reason_still_raises(self) -> None:
+        # Issue athenaeum#2110: claude-cli cannot report stop_reason
+        # (reported_stop_reason -> None), so even a response claiming
+        # max_tokens must not be treated as a handled truncation.
+        client = MagicMock()
+        client.messages.create.side_effect = [self._thinking_only("max_tokens")]
+        with pytest.raises(ValueError, match="no text block found"):
+            tier3_merge(
+                self._action(),
+                "# Acme Corp\n\nFintech, Series B.",
+                "ref",
+                client,
+                config={"llm": {"provider": "claude-cli"}},
+            )
+        assert client.messages.create.call_count == 1
+
     def test_escalate_handled_inline_without_fallback(self) -> None:
         # A principled ESCALATE is handled in patch mode WITHOUT a fallback
         # call (so batch mode, which forbids sync calls, escalates too).

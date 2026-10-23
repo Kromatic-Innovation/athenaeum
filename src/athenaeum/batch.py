@@ -2033,14 +2033,23 @@ def process_batch_run(
                 # Issue athenaeum#469: apply the batched patch-mode ops deterministically;
                 # a live full-echo fallback runs only when the patch response is
                 # unparseable, truncated, or fails to apply.
-                updated_body, esc, needs_fallback = parse_merge_ops_response(
+                merge_stop_reason = getattr(msg, "stop_reason", None)
+                try:
                     # Issue athenaeum#578: patch merge enables adaptive thinking —
                     # response_text skips any leading thinking block.
-                    response_text(msg),
+                    merge_text = response_text(msg)
+                except ValueError:
+                    # Issue athenaeum#2110: same as tier3_merge — a thinking-only
+                    # max_tokens result is the handled truncation, not an error.
+                    if merge_stop_reason != "max_tokens":
+                        raise
+                    merge_text = ""
+                updated_body, esc, needs_fallback = parse_merge_ops_response(
+                    merge_text,
                     action,
                     st.raw.ref,
                     existing_body,
-                    stop_reason=getattr(msg, "stop_reason", None),
+                    stop_reason=merge_stop_reason,
                     wiki_root=wiki_root,
                     # Issue athenaeum#1463: same shared ``usage`` instance the
                     # synchronous transport threads through — accumulates

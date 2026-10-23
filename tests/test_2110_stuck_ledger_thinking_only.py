@@ -27,6 +27,19 @@ def test_thinking_only_value_error_entry_is_dropped_at_load(tmp_path: Path) -> N
                 "failures": 2,
                 "last_error": "ValueError",
                 "last_error_detail": _DETAIL,
+                "last_failed": "2026-10-23T03:00:00Z",
+            },
+            "s/d.md": {
+                "failures": 2,
+                "last_error": "RuntimeError",
+                "last_error_detail": _DETAIL,
+                "last_failed": "2026-10-23T03:00:00Z",
+            },
+            "s/e.md": {
+                "failures": 1,
+                "last_error": "ValueError",
+                "last_error_detail": _DETAIL,
+                "last_failed": "2026-10-24T03:00:00Z",
             },
             "s/b.md": {
                 "failures": 2,
@@ -36,4 +49,9 @@ def test_thinking_only_value_error_entry_is_dropped_at_load(tmp_path: Path) -> N
             "s/c.md": {"failures": 1, "last_error": "ValueError"},
         },
     )
-    assert set(load_stuck_ledger(tmp_path)) == {"s/b.md", "s/c.md"}
+    assert set(load_stuck_ledger(tmp_path)) == {
+        "s/b.md",
+        "s/c.md",
+        "s/d.md",  # right detail, wrong class
+        "s/e.md",  # failed after the time-box cutoff
+    }

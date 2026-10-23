@@ -69,6 +69,11 @@ _RETIRED_LAST_ERRORS = frozenset({"PersonNeverLLMRewriteError"})
 # above) and re-attempted fresh. Matched on ``last_error_detail`` as well as
 # ``last_error`` because ``ValueError`` alone is far too broad to retire.
 _RETIRED_VALUE_ERROR_DETAIL_PREFIX = "response_text: no text block found"
+# Time-boxed: only entries last failed BEFORE this date are retired. Other
+# call sites (tier3_merge_full, tier3_create; athenaeum#2112) can still raise
+# the same error, and an unbounded drop would let such a file retry forever
+# without ever reaching the stuck threshold.
+_RETIRED_VALUE_ERROR_BEFORE = "2026-10-24"
 
 
 def _is_retired_entry(entry: dict[str, Any]) -> bool:
@@ -79,6 +84,7 @@ def _is_retired_entry(entry: dict[str, Any]) -> bool:
         entry.get("last_error") == "ValueError"
         and isinstance(detail, str)
         and detail.startswith(_RETIRED_VALUE_ERROR_DETAIL_PREFIX)
+        and entry.get("last_failed", "") < _RETIRED_VALUE_ERROR_BEFORE
     )
 
 
