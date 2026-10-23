@@ -7,6 +7,12 @@ and fails if any call site's ``module:function`` is not cited in the doc as
 ``src/athenaeum/<module>.py:<function>``. It checks MEMBERSHIP, not a count,
 so adding a call site without documenting it fails, and documenting an extra
 symbol does not.
+
+Scan limits: the scan matches calls BY NAME, is non-recursive over
+``src/athenaeum/*.py`` (no subpackages), and is blind to ``import ... as``
+aliases and bound-method indirection (``f = compare_authority; f(...)``). A
+call hidden that way is not caught, so reviewers should treat the scan as a
+tripwire for the ordinary case, not a proof.
 """
 
 from __future__ import annotations

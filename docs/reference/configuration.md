@@ -24,42 +24,6 @@ All model values are free-form model-id strings passed to the Anthropic SDK. One
 | Reasoning tier 2 | `ATHENAEUM_REASONING_T2_MODEL` | `models.reasoning_t2` | `claude-opus-4-8` | Escalation model for the reasoning-tier chain. |
 | Rule proposals | `ATHENAEUM_RULE_PROPOSALS_MODEL` | `models.rule_proposals` | `claude-opus-4-8` | Rule-proposal drafting call. |
 
-## `asserter`
-
-### `resolve_writer_identity_enforced`
-
-- **YAML path:** `asserter.grants`
-- **Environment variable:** `ATHENAEUM_WRITER_IDENTITY_ENFORCED`
-- **CLI flag:** —
-- **Default:** `False`
-- **Precedence:** environment variable > `athenaeum.yaml` > code default
-
-Resolve the writer-identity enforcement opt-in. DEFAULT OFF.
-
-**Off (the default)**: behaviour is byte-identical to before this flag
-existed. Auto-supersession still honours a memory's self-declared
-``asserter`` block and ``asserter.grants``, and the ``ingest-answers``
-path still records ``resolved_by="human"`` for an escalation answer
-(the channel-implied label), which ``tier4_escalate`` then auto-applies
-to a re-surfaced fingerprint.
-
-**On**: self-declared identity grants no authority. ``asserter.grants``
-count as "none declared" in `athenaeum.asserter_authority.compare_authority`;
-supersession's asserter comparisons answer ``"unknown"`` so route (a)
-never fires and route (c) finds no corroboration; and ``ingest-answers``
-records ``resolved_by="human-unverified"``, which ``tier4_escalate``
-does not auto-apply and which decays like ``"auto"``. Records already on
-disk as ``"human"`` keep their treatment. The ``correct_*`` transcript
-gate already derives authority and is the same in both states.
-
-Nothing here VERIFIES a writer; see ``docs/design/writer-identity.md``.
-
-Mirrors `resolve_transcript_receipts_enabled`'s shape exactly: env
-``ATHENAEUM_WRITER_IDENTITY_ENFORCED`` (``1``/``true``/``yes``/``on``,
-case-insensitive) > yaml ``librarian.writer_identity_enforced`` >
-default ``False``. No seed in ``_DEFAULTS``.
-Non-bool yaml values and unrecognized env strings fall through to off.
-
 ## `athenaeum`
 
 ### `resolve_wiki_dedupe_min_body_chars`
@@ -3459,6 +3423,40 @@ is authoritative over yaml (``0`` or negative disables the floor); a
 malformed env value logs a WARNING and falls back to yaml. A ``bool`` or
 non-numeric yaml value falls back to the default; ``0`` or negative yaml
 disables the floor.
+
+### `resolve_writer_identity_enforced`
+
+- **YAML path:** `librarian.writer_identity_enforced`
+- **Environment variable:** `ATHENAEUM_WRITER_IDENTITY_ENFORCED`
+- **CLI flag:** —
+- **Default:** `False`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the writer-identity enforcement opt-in. DEFAULT OFF.
+
+**Off (the default)**: behaviour is byte-identical to before this flag
+existed. Auto-supersession still honours a memory's self-declared
+``asserter`` block and its grants list, and the ``ingest-answers``
+path still records ``resolved_by="human"`` for an escalation answer
+(the channel-implied label), which ``tier4_escalate`` then auto-applies
+to a re-surfaced fingerprint.
+
+**On**: self-declared identity grants no authority. the asserter grants
+count as "none declared" in `athenaeum.asserter_authority.compare_authority`;
+supersession's asserter comparisons answer ``"unknown"`` so route (a)
+never fires and route (c) finds no corroboration; and ``ingest-answers``
+records ``resolved_by="human-unverified"``, which ``tier4_escalate``
+does not auto-apply and which decays like ``"auto"``. Records already on
+disk as ``"human"`` keep their treatment. The ``correct_*`` transcript
+gate already derives authority and is the same in both states.
+
+Nothing here VERIFIES a writer; see ``docs/design/writer-identity.md``.
+
+Mirrors `resolve_transcript_receipts_enabled`'s shape exactly: env
+``ATHENAEUM_WRITER_IDENTITY_ENFORCED`` (``1``/``true``/``yes``/``on``,
+case-insensitive) > yaml ``librarian.writer_identity_enforced`` >
+default ``False``. No seed in ``_DEFAULTS``.
+Non-bool yaml values and unrecognized env strings fall through to off.
 
 ### `resolve_writer_registry_path`
 

@@ -6266,12 +6266,12 @@ def resolve_writer_identity_enforced(config: dict[str, Any] | None) -> bool:
 
     **Off (the default)**: behaviour is byte-identical to before this flag
     existed. Auto-supersession still honours a memory's self-declared
-    ``asserter`` block and ``asserter.grants``, and the ``ingest-answers``
+    ``asserter`` block and its grants list, and the ``ingest-answers``
     path still records ``resolved_by="human"`` for an escalation answer
     (the channel-implied label), which ``tier4_escalate`` then auto-applies
     to a re-surfaced fingerprint.
 
-    **On**: self-declared identity grants no authority. ``asserter.grants``
+    **On**: self-declared identity grants no authority. the asserter grants
     count as "none declared" in :func:`athenaeum.asserter_authority.compare_authority`;
     supersession's asserter comparisons answer ``"unknown"`` so route (a)
     never fires and route (c) finds no corroboration; and ``ingest-answers``

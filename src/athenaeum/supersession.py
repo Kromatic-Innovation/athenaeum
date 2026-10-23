@@ -404,7 +404,7 @@ def _third_party_signals(
     loser: ComparatorPage,
     live_claims: tuple[ComparatorPage, ...],
     exclude_ids: frozenset[str],
-    writer_identity_enforced: bool = False,
+    writer_identity_enforced: bool,
 ) -> tuple[bool, bool]:
     """Return ``(no_third_conflicting_live_claim, route_c_corroborated_signal)``.
 
