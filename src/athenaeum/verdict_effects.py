@@ -585,6 +585,7 @@ def _apply_duplicate(
     config: dict[str, Any] | None,
     now: datetime | None,
     effort_budget_breach: bool = False,
+    earlier_ruling: str = "",
 ) -> EffectResult:
     pair_key = make_pair_key(page_a.id, page_b.id)
     auto_apply_authorized, auto_apply_reason = _duplicate_auto_apply_authorization(
@@ -629,6 +630,9 @@ def _apply_duplicate(
         f"synthesized; a human writes the actual fold. Proposed canonical "
         f"side: {side} ({canonical_id})."
     )
+    if earlier_ruling:
+        # Issue athenaeum#2101: the reviewer sees the earlier human answer.
+        description += f" {earlier_ruling}"
     _queue(
         wiki_root,
         config=config,
@@ -1241,8 +1245,14 @@ def apply_verdict_effect(
     now: datetime | None = None,
     coordinate_sink: list[dict[str, Any]] | None = None,
     effort_budget_breach: bool = False,
+    earlier_ruling: str = "",
 ) -> EffectResult:
     """Enact the storage-side effect of one decided :class:`CompareOutcome`.
+
+    ``earlier_ruling`` (issue athenaeum#2101, keyword-only, ``""`` default) is
+    appended to the ``duplicate`` branch's ``_pending_questions.md`` item
+    description; no other verdict reads it, and the default leaves the text
+    unchanged.
 
     Dispatches on ``outcome.verdict`` to one of the five branches documented
     in the module docstring. ``path_a``/``path_b`` are the real on-disk
@@ -1288,6 +1298,7 @@ def apply_verdict_effect(
             config=config,
             now=now,
             effort_budget_breach=effort_budget_breach,
+            earlier_ruling=earlier_ruling,
         )
     if outcome.verdict == VERDICT_SPECIALIZATION:
         return _apply_specialization(

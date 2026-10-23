@@ -1356,6 +1356,10 @@ def propose_wiki_page_merges(
                     config=resolved_config,
                     coordinate_sink=coordinate_members,
                     effort_budget_breach=effort_budget_breach,
+                    # Issue athenaeum#2101: the human reviewing the queued
+                    # fold sees the earlier rejection too, not only the
+                    # attribution report.
+                    earlier_ruling=earlier_ruling,
                 )
                 if effect.action == "coordinate-pending" and coordinate_members:
                     coordinate_members[-1]["cluster_id"] = cluster.cluster_id

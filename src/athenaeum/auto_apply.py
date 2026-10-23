@@ -166,6 +166,7 @@ def enact_verdict_effect(
     now: datetime | None = None,
     coordinate_sink: list[dict[str, Any]] | None = None,
     effort_budget_breach: bool = False,
+    earlier_ruling: str = "",
 ) -> EffectResult:
     """Enact *outcome* exactly like
     :func:`athenaeum.verdict_effects.apply_verdict_effect`, additionally
@@ -212,6 +213,18 @@ def enact_verdict_effect(
     reason ``"effort_budget_breach"`` even when the operator opt-in is on
     and the verdict basis is fresh -- widening auto-apply is exactly the
     wrong move while the human queue is already over budget.
+
+    ``earlier_ruling`` (issue athenaeum#2101, keyword-only, ``""`` default) is
+    a sentence naming a human's earlier, since-lapsed rejection of this pair
+    (athenaeum#2077). When non-empty it is appended to the rationale of the
+    ``_pending_merges.md`` block an executed ``duplicate`` fold writes, so the
+    reviewer sees the earlier answer where they decide -- the same wording
+    :func:`athenaeum.name_structure.propose_qualified_name_merges` uses. The
+    default leaves the rationale byte-for-byte unchanged for every other
+    caller, and no other verdict reads it. When the fold is NOT authorized
+    (auto-apply off, the live default) the same sentence is appended to the
+    ``_pending_questions.md`` item description instead, via
+    :func:`athenaeum.verdict_effects.apply_verdict_effect`.
     """
     wiki_root = Path(wiki_root)
 
@@ -251,6 +264,7 @@ def enact_verdict_effect(
             now=now,
             coordinate_sink=coordinate_sink,
             effort_budget_breach=effort_budget_breach,
+            earlier_ruling=earlier_ruling,
         )
         if authorized:
             # Authorized, but this caller cannot name a real on-disk path
@@ -292,6 +306,7 @@ def enact_verdict_effect(
             f"{pair_key} authorized by a fresh basis in the issue athenaeum#712 "
             f"verdict ledger (librarian.reversible_verdict_auto_apply_enabled). "
             f"{rule}"
+            + (f" {earlier_ruling}" if earlier_ruling else "")
         ),
         draft_merged_body=canonical_page.text,
         confidence=1.0,
