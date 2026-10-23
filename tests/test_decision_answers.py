@@ -596,8 +596,10 @@ class TestApplyMerge:
 class TestDefaultAcceptanceTaggedAtAnswerTime:
     _SAMPLE_ALL_CONFIG = {"librarian": {"default_acceptance_audit_sample_rate": 1.0}}
 
-    def test_accepting_the_default_is_sampled(self, wiki_root: Path, raw_root: Path) -> None:
-        from athenaeum.calibration import DEFAULT_ACCEPTANCE_TIER, read_calibration_ledger
+    def test_accepting_the_default_is_not_sampled_for_a_human_answer(
+        self, wiki_root: Path, raw_root: Path
+    ) -> None:
+        from athenaeum.calibration import read_calibration_ledger
 
         merges_path = wiki_root / "_pending_merges.md"
         mid = _write_merge(
@@ -619,9 +621,10 @@ class TestDefaultAcceptanceTaggedAtAnswerTime:
 
         ledger = read_calibration_ledger(wiki_root)
         audit_records = [r for r in ledger if r.get("kind") == "audit"]
-        assert len(audit_records) == 1
-        assert audit_records[0]["tier"] == DEFAULT_ACCEPTANCE_TIER
-        assert audit_records[0]["proposal_id"] == mid
+        assert audit_records == [], (
+            "issue athenaeum#2079 AC1: a human decision_answer must never be "
+            "sampled as a default-acceptance audit"
+        )
 
     def test_overriding_the_default_is_never_sampled(
         self, wiki_root: Path, raw_root: Path
@@ -704,7 +707,7 @@ class TestEveryDeclaredDefaultAcceptanceTypeIsReachable:
         through its REAL applier (`answerable_as("confirmation") ==
         "question"`), carrying `origin_decision_type="confirmation"`
         separately — exactly what `_cmd_decisions.py::_cmd_answer` writes."""
-        from athenaeum.calibration import DEFAULT_ACCEPTANCE_TIER, read_calibration_ledger
+        from athenaeum.calibration import read_calibration_ledger
         from athenaeum.decision_framing import answerable_as
 
         applier_type = answerable_as("confirmation")
@@ -729,12 +732,10 @@ class TestEveryDeclaredDefaultAcceptanceTypeIsReachable:
 
         ledger = read_calibration_ledger(wiki_root)
         audit_records = [r for r in ledger if r.get("kind") == "audit"]
-        assert len(audit_records) == 1, (
-            "confirmation default-acceptance was not tagged — the "
-            "origin_decision_type vs decision_type regression is back"
+        assert audit_records == [], (
+            "issue athenaeum#2079 AC1: a human decision_answer must never be "
+            "sampled as a default-acceptance audit"
         )
-        assert audit_records[0]["tier"] == DEFAULT_ACCEPTANCE_TIER
-        assert audit_records[0]["proposal_id"] == qid
 
     @pytest.mark.parametrize(
         "decision_type,origin_decision_type,accepting_verdict",
@@ -783,11 +784,10 @@ class TestEveryDeclaredDefaultAcceptanceTypeIsReachable:
 
         ledger = read_calibration_ledger(wiki_root)
         audit_records = [r for r in ledger if r.get("kind") == "audit"]
-        assert len(audit_records) == 1, (
-            f"{origin_decision_type!r} default-acceptance was not tagged "
-            f"(applier type {decision_type!r})"
+        assert audit_records == [], (
+            "issue athenaeum#2079 AC1: a human decision_answer must never be "
+            "sampled as a default-acceptance audit"
         )
-        assert audit_records[0]["proposal_id"] == decision_id
 
 
 # ---------------------------------------------------------------------------
@@ -826,7 +826,7 @@ class TestConfirmationGuard2ThroughTheRealCliPath:
         answering "approve" through the real CLI must round-trip
         `origin_decision_type="confirmation"` into the written answer file
         and be tagged as a default-acceptance when applied."""
-        from athenaeum.calibration import DEFAULT_ACCEPTANCE_TIER, read_calibration_ledger
+        from athenaeum.calibration import read_calibration_ledger
 
         pending_path = wiki_root / "_pending_questions.md"
         qid = _write_question_block(pending_path)
@@ -848,12 +848,10 @@ class TestConfirmationGuard2ThroughTheRealCliPath:
 
         ledger = read_calibration_ledger(wiki_root)
         audit_records = [r for r in ledger if r.get("kind") == "audit"]
-        assert len(audit_records) == 1, (
-            "a confirmation answered 'approve' via the real CLI was not "
-            "tagged as a default-acceptance"
+        assert audit_records == [], (
+            "issue athenaeum#2079 AC1: a human decision_answer must never be "
+            "sampled as a default-acceptance audit"
         )
-        assert audit_records[0]["tier"] == DEFAULT_ACCEPTANCE_TIER
-        assert audit_records[0]["proposal_id"] == qid
 
     def test_overriding_the_default_through_the_cli_is_not_tagged(
         self, tmp_path: Path, wiki_root: Path, raw_root: Path

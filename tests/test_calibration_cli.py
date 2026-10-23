@@ -82,7 +82,14 @@ def test_summary_empty(tmp_path: Path, _tiers_enabled: None) -> None:
         "decisions_logged": 0, "last_decision_at": None,
         "armed": False, "armed_but_silent": False,
     }
-    assert json.loads(out) == {"T1": empty_bucket_t1, "T2": empty_bucket_t2}
+    payload = json.loads(out)
+    # athenaeum#2079 AC2: the reach check is environment-dependent (API key);
+    # its content is pinned in the dedicated tests below.
+    assert payload["T1"].pop("armed_but_silent_check")["state"] in {
+        "tier_not_callable",
+        "no_decisions_reached_tier",
+    }
+    assert payload == {"T1": empty_bucket_t1, "T2": empty_bucket_t2}
 
 
 def test_summary_after_sampling(tmp_path: Path, _tiers_enabled: None) -> None:
@@ -248,3 +255,122 @@ def test_t1_unwired_note_premise_still_holds() -> None:
         if "ClusterScreenContext(" in text and "class ClusterScreenContext" not in text:
             constructors.append(p.name)
     assert constructors == []
+
+
+def test_armed_but_silent_not_callable_names_provider_and_model(
+    tmp_path: Path, _tiers_enabled: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """athenaeum#2079 AC2: no API key => the tier cannot have been called; the
+    checked condition names the provider and model it tried."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ATHENAEUM_LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("ATHENAEUM_REASONING_T1_LLM_PROVIDER", raising=False)
+    (tmp_path / "wiki").mkdir()
+    rc, out = _run(["calibration", "summary", "--path", str(tmp_path), "--json"])
+    check = json.loads(out)["T1"]["armed_but_silent_check"]
+    assert rc == 0
+    assert check["state"] == "tier_not_callable"
+    assert check["provider"] == "api"
+    assert check["model"]
+
+    rc, text_out = _run(["calibration", "summary", "--path", str(tmp_path)])
+    assert "TIER NOT CALLABLE" in text_out
+    assert "provider 'api'" in text_out
+
+
+def test_armed_but_silent_callable_means_no_decisions_reached(
+    tmp_path: Path, _tiers_enabled: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """athenaeum#2079 AC2: a buildable client => the tier is callable and the
+    zero count means nothing reached it."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-not-real")
+    monkeypatch.delenv("ATHENAEUM_LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("ATHENAEUM_REASONING_T1_LLM_PROVIDER", raising=False)
+    (tmp_path / "wiki").mkdir()
+    rc, out = _run(["calibration", "summary", "--path", str(tmp_path), "--json"])
+    check = json.loads(out)["T1"]["armed_but_silent_check"]
+    assert rc == 0
+    assert check["state"] == "no_decisions_reached_tier"
+    assert check["provider"] == "api"
+
+    rc, text_out = _run(["calibration", "summary", "--path", str(tmp_path)])
+    assert "NO DECISIONS REACHED IT" in text_out
+
+
+def _seed_default_acceptance_audit(wiki: Path, pid: str) -> str:
+    from athenaeum.calibration import sample_default_acceptance
+
+    wiki.mkdir(exist_ok=True)
+    rec = sample_default_acceptance(
+        wiki,
+        decision_id=pid,
+        answer_source="rule",
+        config={"librarian": {"default_acceptance_audit_sample_rate": 1.0}},
+    )
+    assert rec is not None
+    return rec["id"]
+
+
+def test_close_not_applicable_dry_run_then_apply(tmp_path: Path) -> None:
+    """athenaeum#2079 AC3: dry-run by default; --apply closes the items so they
+    count toward no rate and leave the pending queue. Works with the tier gate
+    OFF (ledger hygiene is not a tier surface)."""
+    from athenaeum.calibration import (
+        calibration_summary,
+        list_pending_audit,
+        read_calibration_ledger,
+    )
+
+    wiki = tmp_path / "wiki"
+    ids = [_seed_default_acceptance_audit(wiki, f"merge-{i}") for i in range(3)]
+    t1_id = _seed_audit(tmp_path, tier="T1", verdict="reject", pid="keep-me")
+
+    rc, out = _run(["calibration", "close-not-applicable", "--path", str(tmp_path)])
+    assert rc == 0
+    assert out.count("would close") == 3
+    assert len(list_pending_audit(wiki)) == 4  # nothing written
+
+    rc, out = _run(
+        ["calibration", "close-not-applicable", "--path", str(tmp_path), "--apply"]
+    )
+    assert rc == 0
+    assert out.count("closed ") == 3
+    pending = {r["id"] for r in list_pending_audit(wiki)}
+    assert pending == {t1_id}  # T1 item untouched, circular ones resolved
+    summary = calibration_summary(wiki)
+    assert summary["default_acceptance"] == {
+        "sampled": 0, "reviewed": 0, "overturned": 0,
+        "applied": 0, "overturned_applied": 0,
+    }
+    assert summary["T1"]["sampled"] == 1
+    ledger_notes = [
+        r["note"]
+        for r in read_calibration_ledger(wiki)
+        if r.get("not_applicable")
+    ]
+    assert len(ledger_notes) == 3 and all("athenaeum#2079" in n for n in ledger_notes)
+    assert {r["id"] for r in read_calibration_ledger(wiki) if r.get("not_applicable")} == set(ids)
+
+
+def test_close_not_applicable_rejects_non_default_acceptance_id(tmp_path: Path) -> None:
+    t1_id = _seed_audit(tmp_path, tier="T1", verdict="reject", pid="p")
+    rc, _ = _run(
+        ["calibration", "close-not-applicable", "--path", str(tmp_path),
+         "--id", t1_id, "--apply"]
+    )
+    assert rc == 1
+
+
+def test_armed_but_silent_claude_cli_without_binary_is_not_callable(
+    tmp_path: Path, _tiers_enabled: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Seer finding on PR athenaeum#2092: claude-cli always builds a client, so the check
+    must also require the binary."""
+    monkeypatch.setenv("ATHENAEUM_LLM_PROVIDER", "claude-cli")
+    monkeypatch.setenv("ATHENAEUM_CLAUDE_CLI_BIN", "/nonexistent/claude-bin")
+    (tmp_path / "wiki").mkdir()
+    rc, out = _run(["calibration", "summary", "--path", str(tmp_path), "--json"])
+    check = json.loads(out)["T1"]["armed_but_silent_check"]
+    assert rc == 0
+    assert check["state"] == "tier_not_callable"
+    assert check["provider"] == "claude-cli"

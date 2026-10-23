@@ -52,6 +52,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `below_confidence_floor` attribution outcome instead of queueing it.
   `athenaeum calibration summary` now names the T1 wiring defect
   (`armed_but_silent_reason`) when T1 is armed with zero decisions.
+- **Default-acceptance calibration no longer samples the operator's own
+  answers; `calibration summary` says why a tier is silent; circular audit
+  items can be closed (issue athenaeum#2079).** `sample_default_acceptance`
+  takes the answer file's `source` and skips human `decision_answer`
+  verdicts (and, fail-closed, unknown sources), so only model- or
+  rule-produced acceptances enter the `default_acceptance` population.
+  For an armed tier with zero logged decisions, `calibration summary` now
+  runs a checked reach condition and names the provider and model it tried:
+  `tier_not_callable` (no client can be built) versus
+  `no_decisions_reached_tier` (callable, nothing arrived), in text and as
+  `armed_but_silent_check` in `--json`. New
+  `athenaeum calibration close-not-applicable [--id ID]... [--note TEXT]
+  [--apply]` (dry run by default) closes pending `default_acceptance` audit
+  items as `not applicable` with a ledger note; closed items count toward no
+  rate.
 - **Tier-3 merges into oversized pages land instead of raising a question;
   parked observations are recoverable (issue athenaeum#2078).** A merge
   into a page over the page-size threshold now appends (an append-mode
