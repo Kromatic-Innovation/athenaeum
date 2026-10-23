@@ -219,6 +219,7 @@ MODULE_LAYER: dict[str, int] = {
     "retire_pages": 4,
     "retraction_cascade": 4,
     "name_structure": 4,
+    "prior_rulings": 4,  # athenaeum#2077: prior human merge rulings for the proposers
     "rule_proposals": 4,
     # Issue athenaeum#2015 (athenaeum#719 Plan step 3): dimension-proposal
     # drafter -- a deterministic peer of rule_proposals.py/signal_mining.py,
