@@ -556,7 +556,10 @@ def test_tombstone_siblings_do_not_make_target_ambiguous(tmp_path: Path) -> None
     assert "LIVE body" in canonical.read_text(encoding="utf-8")
 
 
-def test_two_live_pages_still_ambiguous_beside_tombstones(tmp_path: Path) -> None:
+def test_two_live_pages_keyed_on_stem_beside_tombstones(tmp_path: Path) -> None:
+    # Issue athenaeum#2118: an exact `<uid>-<slug>.md` canonical with a live
+    # same-slug page is no longer refused; it is keyed on its filename stem.
+    # The tombstone sibling is still never named as a collision.
     wiki = tmp_path / "wiki"
     wiki.mkdir()
     _uid_wiki_page(wiki / "aaaa1111-csv.md", uid="aaaa1111", name="CSV", body="a\n")
@@ -564,10 +567,10 @@ def test_two_live_pages_still_ambiguous_beside_tombstones(tmp_path: Path) -> Non
     _tombstone_page(wiki / "cccc3333-csv.md", uid="cccc3333", name="CSV", into="x")
     _wiki_page(wiki / "dup.md", name="Dup", body="d\n")
     rc, payload = _propose(tmp_path, "--into", "aaaa1111-csv", "--source", "dup")
-    assert rc == 2
-    assert "ambiguous" in payload["error"]
-    assert "bbbb2222-csv.md" in payload["error"]
-    assert "cccc3333" not in payload["error"]
+    assert rc == 0, payload
+    assert payload["merge_target_name"] == "aaaa1111-csv"
+    assert any("bbbb2222-csv.md" in n for n in payload["notes"])
+    assert "cccc3333" not in " ".join(payload["notes"])
 
 
 def test_bare_uid_resolves_the_one_live_page(tmp_path: Path) -> None:
@@ -670,3 +673,134 @@ def test_bare_slug_tombstone_beside_live_uid_canonical_folds_on_approve(
     assert is_tombstone(parse_frontmatter(src.read_text(encoding="utf-8"))[0])
     assert "LIVE body" in canonical.read_text(encoding="utf-8")
     assert "redirect" in bare_tomb.read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#2118 — sources never make their own target ambiguous, and a
+# `<uid>-<slug>.md` canonical with live same-slug pages is keyed on its
+# filename stem (as the nightly name-collision path does).
+# ---------------------------------------------------------------------------
+
+
+def _orca_wiki(tmp_path: Path, *, with_third: bool) -> tuple[Path, Path, Path, Path, Path | None]:
+    wiki = tmp_path / "wiki"
+    wiki.mkdir()
+    canonical = wiki / "63c79893-orca.md"
+    _uid_wiki_page(canonical, uid="63c79893", name="ORCA", body="CANON body\n")
+    src_a = wiki / "11f97c0c-orca.md"
+    _uid_wiki_page(src_a, uid="11f97c0c", name="ORCA", body="A body\n")
+    src_b = wiki / "15de74cc-orca.md"
+    _uid_wiki_page(src_b, uid="15de74cc", name="ORCA", body="B body\n")
+    third = None
+    if with_third:
+        third = wiki / "dde43798-orca.md"
+        _uid_wiki_page(third, uid="dde43798", name="ORCA", body="C body\n")
+    return wiki, canonical, src_a, src_b, third
+
+
+_ORCA_ARGS = (
+    "--into",
+    "63c79893-orca.md",
+    "--source",
+    "11f97c0c-orca.md",
+    "--source",
+    "15de74cc-orca.md",
+)
+
+
+def test_sources_sharing_slug_do_not_make_target_ambiguous(tmp_path: Path) -> None:
+    """AC1: A and B share the slug but are sources; keyed on the slug as before."""
+    wiki, canonical, _a, _b, _c = _orca_wiki(tmp_path, with_third=False)
+    rc, plan = _propose(tmp_path, *_ORCA_ARGS, "--apply")
+    assert rc == 0, plan
+    assert plan["merge_target_name"] == "ORCA"
+    assert plan["notes"] == []
+    queued = parse_pending_merges(wiki / "_pending_merges.md")[0]
+    assert queued.merge_target_name == "ORCA"
+    assert queued.write_kind == "fold-into-existing"
+
+
+def test_live_same_slug_page_keys_fold_on_filename_stem(tmp_path: Path) -> None:
+    """AC2: a third live same-slug page C -> stem-keyed, display_name, note."""
+    wiki, canonical, _a, _b, third = _orca_wiki(tmp_path, with_third=True)
+
+    rc, plan = _propose(tmp_path, *_ORCA_ARGS)
+    assert rc == 0, plan
+    assert plan["merge_target_name"] == "63c79893-orca"
+    assert plan["display_name"] == "ORCA"
+    assert plan["write_kind"] == "fold-into-existing"
+    assert any("dde43798-orca.md" in n and "63c79893-orca" in n for n in plan["notes"])
+    assert "dde43798-orca.md" in plan["rationale"]
+    assert "63c79893-orca" in plan["rationale"]  # the stem key is named too
+    assert not (wiki / "_pending_merges.md").exists()
+
+    rc, plan = _propose(tmp_path, *_ORCA_ARGS, "--apply")
+    assert rc == 0, plan
+    text = (wiki / "_pending_merges.md").read_text(encoding="utf-8")
+    assert 'Merge: "63c79893-orca"' in text
+    queued = parse_pending_merges(wiki / "_pending_merges.md")[0]
+    assert queued.merge_target_name == "63c79893-orca"
+    assert queued.display_name == "ORCA"
+    assert queued.write_kind == "fold-into-existing"
+    assert "dde43798-orca.md" in queued.rationale
+    assert third is not None
+
+
+def test_stem_keyed_proposal_approves_and_leaves_third_page_untouched(
+    tmp_path: Path,
+) -> None:
+    """AC3 + AC6: approve folds A and B, canonical body == --draft-file, C untouched."""
+    wiki, canonical, src_a, src_b, third = _orca_wiki(tmp_path, with_third=True)
+    assert third is not None
+    third_before = third.read_text(encoding="utf-8")
+    draft = tmp_path / "draft.md"
+    draft_text = (
+        "---\nuid: 63c79893\nname: ORCA\ntype: concept\n---\nMERGED draft body\n"
+    )
+    draft.write_text(draft_text, encoding="utf-8")
+    init_git_repo(wiki)
+
+    rc, plan = _propose(tmp_path, *_ORCA_ARGS, "--draft-file", str(draft), "--apply")
+    assert rc == 0, plan
+    merges_path = wiki / "_pending_merges.md"
+    queued = parse_pending_merges(merges_path)[0]
+    assert queued.draft_merged_body == draft_text.rstrip("\n")  # AC6 verbatim
+
+    result = resolve_merge(merges_path, queued.id, "approve", wiki_root=wiki)
+    assert result["ok"] is True, result
+    for src in (src_a, src_b):
+        assert is_tombstone(parse_frontmatter(src.read_text(encoding="utf-8"))[0])
+    # The fold appends source aliases to the frontmatter; the body is the draft's.
+    _, canon_body = parse_frontmatter(canonical.read_text(encoding="utf-8"))
+    assert canon_body.strip() == "MERGED draft body"
+    assert third.read_text(encoding="utf-8") == third_before
+    assert not (wiki / "orca.md").exists()  # no spurious bare-slug page minted
+    assert not is_tombstone(parse_frontmatter(third_before)[0])
+
+
+def test_bare_slug_canonical_with_uid_collision_still_refused(tmp_path: Path) -> None:
+    """AC4: --into a bare slug with a colliding live uid page keeps the refusal."""
+    wiki = tmp_path / "wiki"
+    wiki.mkdir()
+    _wiki_page(wiki / "orca.md", name="ORCA", body="bare\n")
+    _uid_wiki_page(wiki / "dde43798-orca.md", uid="dde43798", name="ORCA", body="C\n")
+    _wiki_page(wiki / "dup.md", name="Dup", body="d\n")
+    rc, payload = _propose(tmp_path, "--into", "orca", "--source", "dup")
+    assert rc == 2
+    assert payload["ok"] is False
+    assert "is ambiguous" in payload["error"]
+    assert "dde43798-orca.md" in payload["error"]
+    assert not (wiki / "_pending_merges.md").exists()
+
+
+def test_tombstone_into_still_refused_with_same_slug_pages(tmp_path: Path) -> None:
+    """AC5: --into naming a tombstone is refused exactly as before."""
+    wiki, _canonical, _a, _b, _c = _orca_wiki(tmp_path, with_third=True)
+    _tombstone_page(
+        wiki / "aaaa1111-orca.md", uid="aaaa1111", name="ORCA", into="63c79893-orca"
+    )
+    rc, payload = _propose(
+        tmp_path, "--into", "aaaa1111-orca.md", "--source", "11f97c0c-orca.md"
+    )
+    assert rc == 2
+    assert "tombstone" in payload["error"]
