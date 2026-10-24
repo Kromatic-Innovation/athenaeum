@@ -17,6 +17,7 @@ import json
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 import pytest
 
@@ -138,22 +139,33 @@ def _member(root: Path, relname: str, body: str) -> Path:
     return p
 
 
+class _PinnedDate(date):
+    """``date`` whose ``today()`` is fixed, so the question header date is stable."""
+
+    @classmethod
+    def today(cls) -> date:  # type: ignore[override]
+        return date(2026, 1, 1)
+
+
 def _answer_through_ingest(root: Path, config: dict[str, Any] | None) -> None:
     """Escalate CLAIM_A/CLAIM_B on a first page, answer it, run ingest-answers."""
     pending = root / "wiki" / "_pending_questions.md"
     (root / "raw" / "wiki").mkdir(parents=True, exist_ok=True)
     (root / "raw" / "wiki" / "x.md").write_text("Acme notes.\n", encoding="utf-8")
-    tier4_escalate(
-        [
-            EscalationItem(
-                raw_ref="wiki/x.md",
-                entity_name="Acme",
-                conflict_type="factual",
-                description=_desc(CLAIM_A, CLAIM_B),
-            )
-        ],
-        pending,
-    )
+    # athenaeum#2120: pin the header date; the block id hashes it, so today's date
+    # made the golden rot daily.
+    with mock.patch("athenaeum.tiers.date", _PinnedDate):
+        tier4_escalate(
+            [
+                EscalationItem(
+                    raw_ref="wiki/x.md",
+                    entity_name="Acme",
+                    conflict_type="factual",
+                    description=_desc(CLAIM_A, CLAIM_B),
+                )
+            ],
+            pending,
+        )
     text = pending.read_text().replace("- [ ]", "- [x]", 1) + "\nnot_a_conflict Both are fine.\n"
     pending.write_text(text, encoding="utf-8")
     ingest_answers(pending, root / "raw", config=config)
@@ -247,7 +259,7 @@ GOLDEN_FLAG_OFF: dict[str, Any] = json.loads(
    "resolved_by": "human",
    "side_a_norm": "acme is headquartered in boston.",
    "side_b_norm": "acme is headquartered in austin.",
-   "source_verdict_id": "2c76a8fe5c73"
+   "source_verdict_id": "7af7d1776734"
   }
  ],
  "supersession:different_no_corroborator": [

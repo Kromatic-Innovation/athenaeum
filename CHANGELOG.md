@@ -360,6 +360,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- test: pin the question header date in `tests/test_writer_identity_enforcement.py` and regenerate
+  `GOLDEN_FLAG_OFF` from the pre-athenaeum#2041 checkout, so
+  `test_flag_off_matches_pre_change_golden` no longer goes red the day after the golden was
+  recorded (athenaeum#2120).
 - **An answered `fold_widen_impossible` question is now consumed; a canonical
   keeps its `memory_class` on a human-approved fold (issue athenaeum#2115).**
   The widen question was unanswerable by construction: nothing read the
