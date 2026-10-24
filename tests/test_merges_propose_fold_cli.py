@@ -141,7 +141,12 @@ def test_default_draft_is_canonical_current_text(tmp_path: Path) -> None:
 
 
 def test_draft_file_overrides(tmp_path: Path) -> None:
-    wiki, _canonical, _src_b, _src_c = _seed(tmp_path)
+    """A body-only ``--draft-file`` overrides the body and KEEPS the canonical's
+    frontmatter (issue athenaeum#2125). Before that fix this stored the file
+    verbatim, so approving wiped `uid`/`type`/`access`/`tags` off the page."""
+    wiki, canonical, _src_b, _src_c = _seed(tmp_path)
+    canonical_frontmatter = "---\nname: Maria Springer\ntype: concept\n---\n"
+    assert canonical.read_text(encoding="utf-8").startswith(canonical_frontmatter)
     draft = tmp_path / "merged.md"
     draft.write_text("genuinely content-merged body\n", encoding="utf-8")
     rc, _out = _run(
@@ -161,7 +166,202 @@ def test_draft_file_overrides(tmp_path: Path) -> None:
     )
     assert rc == 0
     pm = parse_pending_merges(wiki / "_pending_merges.md")[0]
-    assert pm.draft_merged_body == "genuinely content-merged body"
+    assert pm.draft_merged_body == (
+        canonical_frontmatter + "genuinely content-merged body"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#2125 — `--draft-file` is whole PAGE text, so the two shapes
+# are explicit: a body-only file inherits the canonical's frontmatter, and a
+# full-page file must keep the canonical's `uid:`.
+# ---------------------------------------------------------------------------
+
+
+def _frontmatter_keys_wiki(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """A canonical page carrying the full key set the live folds lost, plus one
+    unambiguously foldable source (no shared slug, so approve writes the
+    canonical rather than hitting the athenaeum#2118 collision path)."""
+    wiki = tmp_path / "wiki"
+    wiki.mkdir()
+    canonical = wiki / "orca.md"
+    canonical.write_text(
+        "---\n"
+        "uid: 63c79893\n"
+        "type: concept\n"
+        "name: ORCA\n"
+        "access: public\n"
+        "tags:\n"
+        "  - program\n"
+        "description: The ORCA program.\n"
+        "---\n"
+        "CANON body\n",
+        encoding="utf-8",
+    )
+    src = wiki / "11f97c0c-orca-program.md"
+    _uid_wiki_page(src, uid="11f97c0c", name="ORCA Program", body="A body\n")
+    return wiki, canonical, src
+
+
+#: ``--into``/``--source`` for :func:`_frontmatter_keys_wiki`.
+_FM_KEYS_ARGS = ("--into", "orca", "--source", "11f97c0c-orca-program.md")
+
+
+def test_body_only_draft_inherits_frontmatter_and_survives_approve(
+    tmp_path: Path,
+) -> None:
+    """AC1: a frontmatter-less draft queues with the canonical's frontmatter
+    prepended, and approving keeps every identity key while gaining aliases."""
+    wiki, canonical, src = _frontmatter_keys_wiki(tmp_path)
+    before_meta, _ = parse_frontmatter(canonical.read_text(encoding="utf-8"))
+    draft = tmp_path / "body.md"
+    draft.write_text("# ORCA\n\nMERGED body only\n", encoding="utf-8")
+    init_git_repo(wiki)
+
+    rc, plan = _propose(
+        tmp_path,
+        *_FM_KEYS_ARGS,
+        "--draft-file",
+        str(draft),
+        "--apply",
+    )
+    assert rc == 0, plan
+
+    merges_path = wiki / "_pending_merges.md"
+    queued = parse_pending_merges(merges_path)[0]
+    # The queued draft is PAGE text: the canonical's frontmatter verbatim,
+    # then the file's body.
+    assert queued.draft_merged_body.startswith(
+        "---\nuid: 63c79893\ntype: concept\nname: ORCA\n"
+    )
+    queued_meta, queued_body = parse_frontmatter(queued.draft_merged_body)
+    assert queued_body.strip() == "# ORCA\n\nMERGED body only".strip()
+    for key in ("uid", "type", "name", "access", "tags", "description"):
+        assert queued_meta[key] == before_meta[key], key
+
+    result = resolve_merge(merges_path, queued.id, "approve", wiki_root=wiki)
+    assert result["ok"] is True, result
+    after_meta, after_body = parse_frontmatter(canonical.read_text(encoding="utf-8"))
+    for key in ("uid", "type", "name", "access", "tags", "description"):
+        assert after_meta[key] == before_meta[key], key
+    assert "MERGED body only" in after_body
+    # ...and the fold still did its own job: the source is a tombstone and its
+    # name is recorded as an alias on the canonical.
+    assert is_tombstone(parse_frontmatter(src.read_text(encoding="utf-8"))[0])
+    assert after_meta.get("aliases")
+
+
+def test_full_page_draft_with_mismatched_uid_is_refused(tmp_path: Path) -> None:
+    """AC2: a draft whose frontmatter `uid` is not the canonical's is refused
+    with rc 2, naming both uids, and nothing is written."""
+    wiki, _canonical, _src = _frontmatter_keys_wiki(tmp_path)
+    draft = tmp_path / "draft.md"
+    draft.write_text(
+        "---\nuid: deadbeef\nname: ORCA\ntype: concept\n---\nMERGED\n",
+        encoding="utf-8",
+    )
+    rc, payload = _propose(
+        tmp_path,
+        *_FM_KEYS_ARGS,
+        "--draft-file",
+        str(draft),
+        "--apply",
+    )
+    assert rc == 2
+    assert payload["ok"] is False
+    assert "deadbeef" in payload["error"]  # the draft's uid
+    assert "63c79893" in payload["error"]  # the canonical's uid
+    assert not (wiki / "_pending_merges.md").exists()
+
+
+def test_full_page_draft_without_uid_is_refused_against_uid_canonical(
+    tmp_path: Path,
+) -> None:
+    """AC2, the absent-vs-present case: a frontmatter block that simply omits
+    `uid:` differs from the canonical's uid just as much as a wrong one."""
+    wiki, _canonical, _src = _frontmatter_keys_wiki(tmp_path)
+    draft = tmp_path / "draft.md"
+    draft.write_text("---\nname: ORCA\ntype: concept\n---\nMERGED\n", encoding="utf-8")
+    rc, payload = _propose(
+        tmp_path,
+        *_FM_KEYS_ARGS,
+        "--draft-file",
+        str(draft),
+        "--apply",
+    )
+    assert rc == 2
+    assert "(none)" in payload["error"]
+    assert "63c79893" in payload["error"]
+    assert not (wiki / "_pending_merges.md").exists()
+
+
+def test_dry_run_reports_draft_source_shape_in_text_and_json(tmp_path: Path) -> None:
+    """AC4: both dry-run renderings name which shape the draft file is."""
+    wiki, _canonical, _src = _frontmatter_keys_wiki(tmp_path)
+    body_only = tmp_path / "body.md"
+    body_only.write_text("MERGED body only\n", encoding="utf-8")
+    full_page = tmp_path / "page.md"
+    full_page.write_text(
+        "---\nuid: 63c79893\nname: ORCA\ntype: concept\n---\nMERGED\n",
+        encoding="utf-8",
+    )
+    args = _FM_KEYS_ARGS
+
+    _, plan = _propose(tmp_path, *args, "--draft-file", str(body_only))
+    assert plan["draft_source"].endswith("body-only (canonical frontmatter inherited)")
+    assert str(body_only) in plan["draft_source"]
+
+    _, plan = _propose(tmp_path, *args, "--draft-file", str(full_page))
+    assert plan["draft_source"].endswith("full page")
+    assert str(full_page) in plan["draft_source"]
+
+    rc, out = _run(
+        [
+            "merges",
+            "propose-fold",
+            "--path",
+            str(tmp_path),
+            *args,
+            "--draft-file",
+            str(body_only),
+        ]
+    )
+    assert rc == 0
+    assert "body-only (canonical frontmatter inherited)" in out
+
+    rc, out = _run(
+        [
+            "merges",
+            "propose-fold",
+            "--path",
+            str(tmp_path),
+            *args,
+            "--draft-file",
+            str(full_page),
+        ]
+    )
+    assert rc == 0
+    assert "full page" in out
+    assert not (wiki / "_pending_merges.md").exists()
+
+
+def test_frontmatterless_canonical_is_refused_before_any_draft_handling(
+    tmp_path: Path,
+) -> None:
+    """Why the body-only path can assume there IS frontmatter to inherit: a
+    canonical with no loadable frontmatter block has no `name:` either, so it
+    is refused before the draft is read at all."""
+    wiki = tmp_path / "wiki"
+    wiki.mkdir()
+    (wiki / "orca.md").write_text("no frontmatter at all\n", encoding="utf-8")
+    _wiki_page(wiki / "dup.md", name="Dup", body="d\n")
+    draft = tmp_path / "body.md"
+    draft.write_text("MERGED body only\n", encoding="utf-8")
+    rc, payload = _propose(
+        tmp_path, "--into", "orca", "--source", "dup", "--draft-file", str(draft)
+    )
+    assert rc == 2
+    assert "name:" in payload["error"]
 
 
 # ---------------------------------------------------------------------------

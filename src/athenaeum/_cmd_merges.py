@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -62,6 +63,39 @@ from athenaeum.config import (
 )
 from athenaeum.decisions import list_pending_merges_rich
 from athenaeum.provenance import read_merge_provenance
+
+#: Same shape as ``models._FM_RE``, re-declared rather than imported per the
+#: established convention in ``memory_class_backfill`` / ``page_description`` /
+#: ``schema_migrate``. It is needed here for a reason ``parse_frontmatter``
+#: cannot serve: that function returns the PARSED mapping plus the body, so a
+#: page with no frontmatter and a page whose frontmatter block failed to load
+#: are indistinguishable (both come back as ``({}, text)``). ``propose-fold``
+#: has to tell those apart to decide whether a ``--draft-file`` is a body-only
+#: override or a full page (issue athenaeum#2125).
+_FRONTMATTER_RE = re.compile(r"^---\s*\r?\n(.*?)\r?\n---\s*\r?\n", re.DOTALL)
+
+
+def _frontmatter_block(text: str) -> str | None:
+    """The leading ``---`` frontmatter block of *text* VERBATIM, or ``None``.
+
+    The returned block includes its closing ``---`` delimiter line, so
+    ``block + body`` reconstructs a page byte-for-byte. ``None`` means *text*
+    carries no leading frontmatter block at all — the body-only shape
+    (issue athenaeum#2125).
+    """
+    match = _FRONTMATTER_RE.match(text)
+    return None if match is None else text[: match.end()]
+
+
+def _uid_text(value: object) -> str:
+    """A frontmatter ``uid:`` as comparable text — ``""`` when absent.
+
+    ``parse_frontmatter`` already coerces an all-decimal uid loaded as ``int``
+    back to ``str``; this only normalises surrounding whitespace and the
+    absent case, so "no uid" compares equal to "no uid" and unequal to any
+    real one (issue athenaeum#2125 AC2).
+    """
+    return "" if value is None else str(value).strip()
 
 
 def _resolve_merges_path(args: argparse.Namespace) -> Path:
@@ -170,6 +204,11 @@ def _cmd_propose_fold(args: argparse.Namespace) -> int:
     - ``draft_merged_body`` defaults to the canonical page's current text
       VERBATIM (a fold's value is alias bookkeeping + source deletion, not a
       body rewrite); ``--draft-file`` overrides for a genuine content merge.
+      That draft is whole PAGE text — frontmatter included — because
+      ``resolve_merge`` writes it as the page; issue athenaeum#2125 therefore
+      accepts both shapes explicitly: a frontmatter-less file is a body-only
+      override that INHERITS the canonical's frontmatter verbatim, and a file
+      that does carry frontmatter must agree with the canonical on ``uid:``.
 
     Dry-run by default (writes nothing, prints the plan); ``--apply`` queues
     the proposal via the existing :func:`write_pending_merge` path. Approval
@@ -338,15 +377,50 @@ def _cmd_propose_fold(args: argparse.Namespace) -> int:
     # source set (harmless: the fold write path excludes it from deletion).
     sources = [str(into_path)] + [str(p) for p in source_paths]
 
-    # 3. Draft body — verbatim canonical text unless overridden.
+    # 3. Draft page text — verbatim canonical text unless overridden.
+    #
+    # Issue athenaeum#2125: ``draft_merged_body`` is whole PAGE text
+    # (frontmatter + body), not the body — ``resolve_merge`` writes it as the
+    # page before stamping aliases. The flag's help called it a "body", so a
+    # body-only ``--draft-file`` silently dropped the canonical's ``uid``,
+    # ``type``, ``access``, ``tags`` and friends on approve, which makes the
+    # page invisible to typed recall and non-public to the egress gate. Both
+    # shapes are now explicit: a frontmatter-less draft inherits the
+    # canonical's frontmatter verbatim, and a draft that carries frontmatter
+    # must keep the canonical's identity (``uid:``) or it is refused here,
+    # at proposal time, rather than degrading a page at approve time.
+    canonical_text = into_path.read_text(encoding="utf-8")
     if args.draft_file:
         draft_path = Path(args.draft_file).expanduser()
         if not draft_path.is_file():
             return _fail(f"--draft-file {args.draft_file!r} does not exist")
-        draft_merged_body = draft_path.read_text(encoding="utf-8")
-        draft_source = str(draft_path)
+        draft_text = draft_path.read_text(encoding="utf-8")
+        if _frontmatter_block(draft_text) is None:
+            # The `name:` guard above already refused any canonical without a
+            # loadable frontmatter block, so there is always one to inherit;
+            # the `or ""` keeps that an inheritance of nothing rather than a
+            # second refusal path nothing can reach.
+            canonical_block = _frontmatter_block(canonical_text) or ""
+            draft_merged_body = canonical_block + draft_text
+            draft_source = f"{draft_path} — body-only (canonical frontmatter inherited)"
+        else:
+            draft_meta, _ = parse_frontmatter(draft_text)
+            draft_uid = _uid_text(draft_meta.get("uid") if isinstance(draft_meta, dict) else None)
+            canonical_uid = _uid_text(
+                into_meta.get("uid") if isinstance(into_meta, dict) else None
+            )
+            if draft_uid != canonical_uid:
+                return _fail(
+                    f"--draft-file {args.draft_file!r} carries frontmatter with uid "
+                    f"{draft_uid or '(none)'}, but canonical page {into_path.name} has uid "
+                    f"{canonical_uid or '(none)'}. A full-page draft must keep the "
+                    "canonical's identity; drop the draft's frontmatter block to pass a "
+                    "body-only draft that inherits it instead."
+                )
+            draft_merged_body = draft_text
+            draft_source = f"{draft_path} — full page"
     else:
-        draft_merged_body = into_path.read_text(encoding="utf-8")
+        draft_merged_body = canonical_text
         draft_source = "canonical page (verbatim)"
 
     derived_write_kind = classify_write_kind(merge_target_name, wiki_root)
@@ -383,7 +457,7 @@ def _cmd_propose_fold(args: argparse.Namespace) -> int:
         print(f"  derived write_kind: {derived_write_kind}")
         for note in notes:
             print(f"  note: {note}")
-        print(f"  draft body: {draft_source}")
+        print(f"  draft page text: {draft_source}")
         print("  folded sources:")
         for p in source_paths:
             print(f"    - {p}")
@@ -1023,9 +1097,13 @@ def add_merges_subparser(subparsers: argparse._SubParsersAction) -> None:
         "--draft-file",
         default=None,
         help=(
-            "Override the merged draft body with this file's contents (for a "
-            "genuine content merge). Default: the canonical page's current "
-            "text VERBATIM."
+            "Override the merged draft PAGE TEXT (frontmatter + body) with this "
+            "file's contents, for a genuine content merge. A file that starts "
+            "with a `---` frontmatter block is stored verbatim and must carry "
+            "the canonical page's own `uid:`, or it is refused. A file with no "
+            "frontmatter block is a body-only override and inherits the "
+            "canonical page's current frontmatter verbatim. Default: the "
+            "canonical page's current text VERBATIM."
         ),
     )
     fold_p.add_argument(
