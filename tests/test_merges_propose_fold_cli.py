@@ -804,3 +804,69 @@ def test_tombstone_into_still_refused_with_same_slug_pages(tmp_path: Path) -> No
     )
     assert rc == 2
     assert "tombstone" in payload["error"]
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#2122 (Quine follow-up to athenaeum#2119) — the stem-keyed fold's
+# unreachable-stem refusal, and the --source/ambiguity error precedence.
+# ---------------------------------------------------------------------------
+
+
+def test_underscore_uid_canonical_hits_unreachable_stem_refusal(tmp_path: Path) -> None:
+    """AC1: a uid containing `_` (e.g. ``63c7_9893``) passes
+    ``filename_slug_by_uid`` -- the SLUG part (``orca``) is slug-stable -- but
+    the re-derived stem check does not, because ``slugify(stem)`` turns `_`
+    into `-` while the real filename keeps the `_`: ``slugify("63c7_9893-orca")``
+    is ``"63c7-9893-orca"``, which never names an existing file. The guard at
+    the bottom of the stem-keyed fold path (``_cmd_merges.py``, around
+    ``stem_path.resolve() != into_path or classify_write_kind(...) !=
+    "fold-into-existing"``) must refuse rather than guess. Quine's mutation
+    battery on athenaeum#2119 found this exact branch reachable but untested: forcing
+    that condition to ``False`` left all 53 shipped tests green (measured at
+    worktree head b8c5cb69; re-confirmed at 2e5363d per this issue).
+
+    Deliberately an underscore, not uppercase: a case-insensitive filesystem
+    (macOS default) would fold an uppercase variant back onto a lowercase
+    name and make this fixture flaky.
+    """
+    wiki = tmp_path / "wiki"
+    wiki.mkdir()
+    canonical = wiki / "63c7_9893-orca.md"
+    _uid_wiki_page(canonical, uid="63c7_9893", name="ORCA", body="CANON body\n")
+    # A second live page sharing the "orca" slug makes the target ambiguous,
+    # which is what reaches the stem-fallback guard in the first place.
+    third = wiki / "dde43798-orca.md"
+    _uid_wiki_page(third, uid="dde43798", name="ORCA", body="C body\n")
+    src = wiki / "dup.md"
+    _wiki_page(src, name="Dup", body="d\n")
+
+    rc, payload = _propose(tmp_path, "--into", "63c7_9893-orca.md", "--source", "dup")
+
+    assert rc == 2
+    assert payload["ok"] is False
+    assert "is ambiguous" in payload["error"]
+    assert "dde43798-orca.md" in payload["error"]
+    assert "does not resolve to 63c7_9893-orca.md" in payload["error"]
+    assert "refusing to guess which page is canonical" in payload["error"]
+    assert not (wiki / "_pending_merges.md").exists()
+
+
+def test_unresolvable_source_wins_over_bare_slug_ambiguity_error(tmp_path: Path) -> None:
+    """AC3: pins the athenaeum#2119 error-precedence change. ``--source`` refs are
+    resolved (and can fail) before the bare-slug ambiguity check ever runs --
+    an unresolvable ``--source`` must report ITS OWN error, never the
+    ambiguity error, even when ``--into`` would otherwise hit the
+    ambiguous-bare-slug refusal once sources resolved."""
+    wiki = tmp_path / "wiki"
+    wiki.mkdir()
+    _wiki_page(wiki / "orca.md", name="ORCA", body="bare\n")
+    _uid_wiki_page(wiki / "dde43798-orca.md", uid="dde43798", name="ORCA", body="C\n")
+
+    rc, payload = _propose(tmp_path, "--into", "orca", "--source", "does-not-exist")
+
+    assert rc == 2
+    assert payload["ok"] is False
+    assert "--source" in payload["error"]
+    assert "is not an existing wiki page" in payload["error"]
+    assert "is ambiguous" not in payload["error"]
+    assert not (wiki / "_pending_merges.md").exists()
