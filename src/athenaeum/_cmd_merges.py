@@ -239,6 +239,7 @@ def _cmd_propose_fold(args: argparse.Namespace) -> int:
     merge_target_name = str(name)
     target_slug = slugify(merge_target_name)
     notes: list[str] = []
+    display_name: str | None = None
 
     # The fold classifies by slugify(name); the canonical page's own
     # filename must resolve back to this SAME page by identity (bare-slug,
@@ -272,26 +273,6 @@ def _cmd_propose_fold(args: argparse.Namespace) -> int:
         merge_target_name = drift_slug
         target_slug = drift_slug
 
-    # Ambiguity guard (issue athenaeum#1635): refuse if ANOTHER live page also
-    # identity-resolves to this same slug — e.g. both a bare-slug file and a
-    # uid-prefixed file exist for the same name, or two uid-prefixed pages
-    # share a name. Only one file can be the fold target for this slug, so a
-    # second candidate makes the target genuinely ambiguous: name both
-    # colliding pages rather than silently picking one.
-    # ``find_identity_pages`` already skips tombstones (issue athenaeum#2082).
-    colliding = [
-        fpath.name
-        for fpath in find_identity_pages(merge_target_name, wiki_root)
-        if fpath.resolve() != into_path
-    ]
-    if colliding:
-        others = ", ".join(colliding)
-        return _fail(
-            f"canonical target {target_slug!r} is ambiguous: {into_path.name} "
-            f"and {others} both resolve to it. Refusing to guess which page "
-            "is canonical."
-        )
-
     # 2. Resolve the source pages.
     source_paths: list[Path] = []
     for s in args.source:
@@ -304,6 +285,54 @@ def _cmd_propose_fold(args: argparse.Namespace) -> int:
                 f"--source {s!r} is the same page as --into; a page cannot be folded into itself"
             )
         source_paths.append(sp)
+
+    # Ambiguity guard (issue athenaeum#1635): refuse if ANOTHER live page also
+    # identity-resolves to this same slug — e.g. both a bare-slug file and a
+    # uid-prefixed file exist for the same name, or two uid-prefixed pages
+    # share a name. Only one file can be the fold target for this slug, so a
+    # second candidate makes the target genuinely ambiguous: name both
+    # colliding pages rather than silently picking one.
+    # ``find_identity_pages`` already skips tombstones (issue athenaeum#2082).
+    # Issue athenaeum#2118: the ``--source`` pages are being folded away, so
+    # they cannot make their own target ambiguous and are excluded.
+    source_resolved = {p.resolve() for p in source_paths}
+    colliding = [
+        fpath.name
+        for fpath in find_identity_pages(merge_target_name, wiki_root)
+        if fpath.resolve() != into_path and fpath.resolve() not in source_resolved
+    ]
+    if colliding:
+        others = ", ".join(colliding)
+        # Issue athenaeum#2118: a canonical named by its exact `<uid>-<slug>.md`
+        # filename (prefix == its own `uid:`) is unambiguous by filename STEM,
+        # which is how the nightly name-collision path keys the same shape.
+        # A bare-slug canonical has no such handle and stays refused.
+        if filename_slug_by_uid(into_path, into_meta) is None:
+            return _fail(
+                f"canonical target {target_slug!r} is ambiguous: {into_path.name} "
+                f"and {others} both resolve to it. Refusing to guess which page "
+                "is canonical."
+            )
+        stem = into_path.stem
+        # Mirror name_collisions._canonical_resolves_by_stem: the stem must
+        # resolve back to the canonical's own file at approve time.
+        stem_path = wiki_root / f"{slugify(stem)}.md"
+        if (
+            stem_path.resolve() != into_path
+            or classify_write_kind(stem, wiki_root) != "fold-into-existing"
+        ):
+            return _fail(
+                f"canonical target {target_slug!r} is ambiguous ({others} also "
+                f"resolve to it) and the filename stem {stem!r} does not resolve "
+                f"to {into_path.name}; refusing to guess which page is canonical."
+            )
+        notes.append(
+            f"name collision: live page(s) {others} also own slug "
+            f"{target_slug!r}; fold keyed on filename stem {stem!r} "
+            "(as the nightly name-collision path does)."
+        )
+        merge_target_name = stem
+        display_name = str(name)
 
     # Sources are [canonical, *folded] — the canonical reappears in its own
     # source set (harmless: the fold write path excludes it from deletion).
@@ -335,6 +364,7 @@ def _cmd_propose_fold(args: argparse.Namespace) -> int:
         "applied": bool(args.apply),
         "id": merge_id,
         "merge_target_name": merge_target_name,
+        "display_name": display_name,
         "canonical_page": str(into_path),
         "sources": sources,
         "folded_sources": [str(p) for p in source_paths],
@@ -368,6 +398,7 @@ def _cmd_propose_fold(args: argparse.Namespace) -> int:
         draft_merged_body=draft_merged_body,
         confidence=1.0,
         write_kind=None,  # derived (athenaeum#748) — never taken from the caller
+        display_name=display_name,
     )
 
     if args.json:
@@ -972,7 +1003,9 @@ def add_merges_subparser(subparsers: argparse._SubParsersAction) -> None:
             "filename, or a path). Must be an existing wiki page whose "
             "filename identity-resolves to its `name:` slug: either "
             "`<slug>.md`, or `<uid>-<slug>.md` where `<uid>` is that page's "
-            "own `uid:` frontmatter."
+            "own `uid:` frontmatter. When other live pages share that slug, a "
+            "`<uid>-<slug>.md` canonical is keyed on its filename stem instead "
+            "of being refused (as the nightly name-collision path does)."
         ),
     )
     fold_p.add_argument(

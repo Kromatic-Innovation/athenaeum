@@ -364,6 +364,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `GOLDEN_FLAG_OFF` from the pre-athenaeum#2041 checkout, so
   `test_flag_off_matches_pre_change_golden` no longer goes red the day after the golden was
   recorded (athenaeum#2120).
+- **`merges propose-fold` no longer refuses a `<uid>-<slug>.md` canonical because
+  other live pages share its slug (issue athenaeum#2118).** `--source` pages are
+  excluded from the ambiguity guard, and when a distinct live same-slug page
+  remains the proposal is keyed on the canonical's filename stem with
+  `display_name` set to its `name:` (as the nightly name-collision path does),
+  with a note naming the colliding pages. A bare-slug `--into` keeps the refusal.
 - **An answered `fold_widen_impossible` question is now consumed; a canonical
   keeps its `memory_class` on a human-approved fold (issue athenaeum#2115).**
   The widen question was unanswerable by construction: nothing read the
