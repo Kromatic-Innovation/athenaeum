@@ -731,6 +731,7 @@ def test_live_same_slug_page_keys_fold_on_filename_stem(tmp_path: Path) -> None:
     assert plan["write_kind"] == "fold-into-existing"
     assert any("dde43798-orca.md" in n and "63c79893-orca" in n for n in plan["notes"])
     assert "dde43798-orca.md" in plan["rationale"]
+    assert "63c79893-orca" in plan["rationale"]  # the stem key is named too
     assert not (wiki / "_pending_merges.md").exists()
 
     rc, plan = _propose(tmp_path, *_ORCA_ARGS, "--apply")
@@ -763,7 +764,7 @@ def test_stem_keyed_proposal_approves_and_leaves_third_page_untouched(
     assert rc == 0, plan
     merges_path = wiki / "_pending_merges.md"
     queued = parse_pending_merges(merges_path)[0]
-    assert queued.draft_merged_body.strip() == draft_text.strip()  # AC6 verbatim
+    assert queued.draft_merged_body == draft_text.rstrip("\n")  # AC6 verbatim
 
     result = resolve_merge(merges_path, queued.id, "approve", wiki_root=wiki)
     assert result["ok"] is True, result
@@ -773,6 +774,7 @@ def test_stem_keyed_proposal_approves_and_leaves_third_page_untouched(
     _, canon_body = parse_frontmatter(canonical.read_text(encoding="utf-8"))
     assert canon_body.strip() == "MERGED draft body"
     assert third.read_text(encoding="utf-8") == third_before
+    assert not (wiki / "orca.md").exists()  # no spurious bare-slug page minted
     assert not is_tombstone(parse_frontmatter(third_before)[0])
 
 
