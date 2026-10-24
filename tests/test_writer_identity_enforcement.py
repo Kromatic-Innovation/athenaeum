@@ -152,7 +152,8 @@ def _answer_through_ingest(root: Path, config: dict[str, Any] | None) -> None:
     pending = root / "wiki" / "_pending_questions.md"
     (root / "raw" / "wiki").mkdir(parents=True, exist_ok=True)
     (root / "raw" / "wiki" / "x.md").write_text("Acme notes.\n", encoding="utf-8")
-    # athenaeum#2120: pin the header date; the block id hashes it, so today's date made the golden rot daily.
+    # athenaeum#2120: pin the header date; the block id hashes it, so today's date
+    # made the golden rot daily.
     with mock.patch("athenaeum.tiers.date", _PinnedDate):
         tier4_escalate(
             [
