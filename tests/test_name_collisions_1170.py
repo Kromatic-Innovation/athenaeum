@@ -108,9 +108,13 @@ class TestScanNameCollisions:
         assert len(collisions[0].pages) == 2
 
     def test_case_insensitive_grouping(self, tmp_path: Path) -> None:
+        # athenaeum#2123: filenames differ by more than case (the scanner
+        # groups on frontmatter `name:`, not filename) -- "acme.md"/"ACME.md"
+        # collapse to one file on a case-insensitive filesystem (default
+        # macOS APFS), silently losing the second page before the scan runs.
         wiki = tmp_path / "wiki"
         _write_page(wiki, "acme.md", uid="u1", name="Acme", type_="company")
-        _write_page(wiki, "ACME.md", uid="u2", name="ACME", type_="company")
+        _write_page(wiki, "acme-alt.md", uid="u2", name="ACME", type_="company")
         collisions = scan_name_collisions(wiki)
         assert len(collisions) == 1
 
