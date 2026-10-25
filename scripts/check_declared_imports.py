@@ -142,7 +142,10 @@ def scan_source(text: str, path: str) -> list[ImportSite]:
     sites: list[ImportSite] = []
 
     def walk(node: ast.AST, guarded: bool) -> None:
-        if isinstance(node, ast.Try):
+        # `ast.TryStar` (PEP 654 `except*`) is a distinct node type, not a
+        # subclass of `ast.Try`; the repo has no `except*` today, but omitting
+        # it would silently report a guarded import there as unguarded.
+        if isinstance(node, (ast.Try, ast.TryStar)):
             inner_guarded = guarded or _guarding_handlers_catch_importerror(node.handlers)
             for child in node.body:
                 walk(child, inner_guarded)
@@ -238,11 +241,11 @@ def violations(
     stdlib: set[str] | None = None,
 ) -> list[Violation]:
     """The undeclared, unguarded, third-party imports among `sites`."""
-    stdlib = sys.stdlib_module_names if stdlib is None else stdlib  # type: ignore[assignment]
+    standard = set(sys.stdlib_module_names) if stdlib is None else stdlib
     by_name: dict[str, list[ImportSite]] = {}
     for site in sites:
         name = site.name
-        if name in stdlib or name in first_party or name.startswith("_"):
+        if name in standard or name in first_party or name.startswith("_"):
             continue
         if canonicalize_name(name) in declared:
             continue

@@ -129,6 +129,13 @@ def test_a_try_except_importerror_guard_is_not_a_violation() -> None:
     )
 
 
+def test_an_except_star_guard_is_recognised() -> None:
+    """`ast.TryStar` is a distinct node type, not an `ast.Try` subclass."""
+    source = "try:\n    import httpx\nexcept* ImportError:\n    pass\n"
+    sites = check_declared_imports.scan_source(source, "tests/test_x.py")
+    assert [(s.name, s.guarded) for s in sites] == [("httpx", True)]
+
+
 def test_a_guard_that_does_not_absorb_importerror_is_still_a_violation() -> None:
     source = "try:\n    import httpx\nexcept ValueError:\n    pass\n"
     sites = check_declared_imports.scan_source(source, "tests/test_x.py")
