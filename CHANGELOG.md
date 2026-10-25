@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Transcript-receipt writer counts are logged and summarised on every run
+  (issue athenaeum#2129).** `transcript_receipts.write_receipts_for_files` now
+  returns a `ReceiptsRunStats` — files seen, files with an origin session,
+  receipts processed, and files skipped per reason (`no_origin`,
+  `transcript_missing`, `not_classified`, `flag_off`) — instead of a bare
+  `int` that could not tell "the flag is off" from "nothing had an origin
+  session" from "every transcript had rolled off". The librarian call site
+  logs ONE `INFO` line with those counts on every run that reaches the writer
+  with the flag on, **including when every count is zero** (it previously
+  logged only a non-zero count, so the 2026-10-24/25 nightlies that wrote no
+  receipts left no record at all), and appends them as a
+  `transcript-receipts` entry in the run-summary phases block and the durable
+  athenaeum#1102 ledger record. With the flag off — or on a dry run, or with
+  no caller-held lock — nothing is logged and no entry is written, so the run
+  summary is unchanged; a raising writer keeps its non-fatal `WARNING` and
+  records `reason: failed`. `int(stats)` still yields the processed count for
+  a count-only caller.
+
 - docs(measurements): record Maya shadow runs 2 and 3 of `storage lint-pii`
   (2026-10-23, 40 candidates each, load/score/wall-clock/memory) in
   `docs/measurements/maya-pii-hazard-eval-2026-10.md`, closing the
