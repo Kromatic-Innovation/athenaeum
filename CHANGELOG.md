@@ -52,6 +52,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is tagged and published, MINOR is the pre-1.0 breaking-change signal and is
   derived from whether the span's changelog entries contain a removal or a
   breaking change, and MAJOR is reserved for 1.0.
+  - It also says **where the bump happens**, so a contributor does not go
+    looking for a workflow that is not here: only the publish half
+    (`release.yml`, triggered by pushing the `v*` tag) lives in this
+    repository, and the per-merge PATCH bump and the weekly cut are applied by
+    shared merge/release tooling outside it.
   - The same section documents the **changelog shape** `[0.22.43]` established
     and every release section is expected to follow — an
     `Upgrading from <previous tag>` block, then `Highlights`, then the

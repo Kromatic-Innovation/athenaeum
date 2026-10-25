@@ -157,16 +157,18 @@ The running MCP server records the commit it is on in `dist/.build-sha`, kept in
 Athenaeum's version number is **not** a release count, and reading it as one is
 the single most common way to misread this project's history.
 
-- **PATCH is a build number.** Every merge to `develop` bumps the PATCH digit
-  automatically. Most of those versions are never tagged and never published —
-  `0.22.43` means "the forty-third merge since the MINOR bump", not "the
-  forty-third release". Do not bump the version by hand in a PR, and do not
-  read a large PATCH digit as a long release history.
+- **PATCH is a build number.** Every merge to `develop` bumps the PATCH digit.
+  Most of those versions are never tagged and never published — `0.22.43`
+  means "the forty-third merge since the MINOR bump", not "the forty-third
+  release". Do not bump the version by hand in a PR, and do not read a large
+  PATCH digit as a long release history.
 - **Releases are cut weekly**, from whatever `develop` reads at the time of the
   cut. There is no separate release-numbering step: the cut tags the version
-  already in `pyproject.toml`, and every cut is tagged on `main` and published
-  to PyPI by [`release.yml`](.github/workflows/release.yml). A week with no
-  merges produces no cut.
+  already in `pyproject.toml`, and the tag is what publishes — pushing a `v*`
+  tag is the only trigger on
+  [`release.yml`](.github/workflows/release.yml), which builds from the tag and
+  publishes to PyPI with provenance attestations. A week with no merges
+  produces no cut.
 - **MINOR increments when the span being cut removed or broke public surface.**
   Athenaeum is pre-1.0, so under semver a MINOR bump is the breaking-change
   signal (`0.y.z` gives MAJOR no such role). The decision is derived from the
@@ -180,6 +182,15 @@ So a reader comparing two published versions should look at the MINOR digit to
 ask "could this break me?", and ignore the PATCH digit except as an ordering
 key. The same applies to the floor in a dependency pin: pin on MINOR, not on a
 PATCH you happened to install.
+
+**Where the bump happens, so you do not go looking for it here.** Only the
+publish half is in this repository — `release.yml`, triggered by the tag. The
+per-merge PATCH bump and the weekly cut are applied by the maintainer's merge
+and release tooling, which is shared across repositories and lives outside this
+one; there is deliberately no workflow or script here that does either. The
+practical consequence for a contributor is the same either way: leave
+`version` in `pyproject.toml` alone, and write the changelog entry — the cut
+reads your entry, not your version number.
 
 ### Changelog rules
 
