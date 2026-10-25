@@ -1726,3 +1726,47 @@ class TestStarvedPhasesAreNamedNotOmitted:
 
         total = sum(secs for _phase, secs, _fields in ctx.run_profile)
         assert total == pytest.approx(16386.371)
+
+    def test_the_starved_night_is_visible_in_the_rendered_line_and_the_ledger(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue athenaeum#2132 AC2/AC3 at the surfaces the issue actually names
+        — the ``librarian-run-summary`` line and the ``run_summary.jsonl``
+        record — rather than only on the in-memory profile."""
+        from athenaeum.librarian import _render_run_summary
+        from athenaeum.run_summary_log import build_run_summary_ledger_record
+
+        knowledge_root = tmp_path / "knowledge"
+        knowledge_root.mkdir()
+        ctx = _make_ctx(tmp_path, knowledge_root=knowledge_root, dry_run=True)
+        ctx.max_runtime = 3600
+        ctx.run_profile.append(
+            (
+                "wiki-dedup",
+                16386.371,
+                {"reason": "deadline", "pairs_examined": 3193, "pairs_remaining": 18847},
+            )
+        )
+
+        ctx.stop_on_deadline("post-compile (after athenaeum#290 wiki-dedup)")
+
+        line = _render_run_summary(ctx.run_profile)
+        assert (
+            "wiki-dedup secs=16386.371 reason=deadline pairs_examined=3193 "
+            "pairs_remaining=18847" in line
+        )
+        for starved in ("entity", "auto-memory", "retire", "reresolve",
+                        "audit-nightly-drain"):
+            assert f"{starved} secs=0.000 reason=skipped-deadline" in line, starved
+
+        record = build_run_summary_ledger_record(ctx.run_profile)
+        assert record["phases"]["wiki-dedup"] == {
+            "secs": 16386.371,
+            "reason": "deadline",
+            "pairs_examined": 3193,
+            "pairs_remaining": 18847,
+        }
+        assert record["phases"]["entity"] == {
+            "secs": 0.0,
+            "reason": REASON_SKIPPED_DEADLINE,
+        }
