@@ -712,8 +712,9 @@ def write_receipt_for_origin(
     """
     if not origin_session_id:
         return None
-    root = projects_root if projects_root is not None else default_projects_root()
-    transcript_path = root / origin_scope / f"{origin_session_id}.jsonl"
+    transcript_path = transcript_path_for(
+        origin_scope, origin_session_id, projects_root=projects_root
+    )
     digest = memory_digest(claim)
     if run is None:
         run = ReceiptRun(wiki_root)
@@ -771,6 +772,97 @@ def write_receipt_for_origin(
     return entry
 
 
+@dataclass(frozen=True)
+class ReceiptsRunStats:
+    """What one :func:`write_receipts_for_files` call actually did.
+
+    Issue athenaeum#2129: the writer used to return a bare ``int`` (the
+    processed count), which cannot distinguish "the flag is off" from
+    "nothing had an origin session" from "every transcript had rolled off" —
+    all three are ``0``. Two nightlies (2026-10-24/25) processed zero
+    receipts with the flag on and nothing anywhere recorded why, because a
+    zero was the one result the call site did not log.
+
+    The counts partition exactly, which is what makes a zero readable and is
+    pinned by a test:
+
+    * ``files_seen == files_with_origin + skipped_no_origin``
+    * with the flag ON, ``files_with_origin == receipts_processed +
+      skipped_transcript_missing + skipped_not_classified``
+    * with the flag OFF, nothing is examined at all:
+      ``skipped_flag_off == files_seen`` and every other count is ``0``.
+
+    ``flag_off`` is the authoritative flag signal rather than
+    ``skipped_flag_off > 0``: a flag-off run over an EMPTY ``files`` list
+    skips nothing, so the count alone cannot tell that case from a flag-on
+    run with nothing to do — and those are exactly the two states this
+    issue exists to separate.
+
+    ``__int__`` keeps the historical "processed count" reading available for
+    a caller (or a one-off measurement script) that only wants the number.
+    """
+
+    files_seen: int = 0
+    files_with_origin: int = 0
+    receipts_processed: int = 0
+    skipped_no_origin: int = 0
+    skipped_transcript_missing: int = 0
+    #: A file with an origin session whose transcript was PRESENT but which
+    #: yielded no receipt: an ``"unavailable"`` classification, or the
+    #: anti-laundering prefix-mismatch refusal. Not one of the three reasons
+    #: issue athenaeum#2129 names, but counted so the three above plus this
+    #: one account for every file — an unexplained remainder would leave the
+    #: same "why zero?" question this instrumentation exists to answer.
+    skipped_not_classified: int = 0
+    #: Every file skipped because the flag is off. Deliberately NOT in
+    #: :meth:`as_profile_fields`: the flag-off path writes no run-summary
+    #: entry at all (see ``librarian._write_transcript_receipts``), so this
+    #: count would be a constant zero in every entry that IS written.
+    skipped_flag_off: int = 0
+    flag_off: bool = False
+
+    def __int__(self) -> int:
+        return self.receipts_processed
+
+    def as_profile_fields(self) -> dict[str, int]:
+        """The counts as a run-summary phase-entry field dict.
+
+        Mirrors ``t1_census.as_profile_fields`` /
+        ``audit_on_touch_counters.as_profile_fields`` (the same convention
+        every other ``RunContext.run_profile`` contributor uses), so the
+        librarian call site appends one entry and both the prose renderer
+        and the durable athenaeum#1102 ledger record pick it up with no
+        further wiring.
+        """
+        return {
+            "files_seen": self.files_seen,
+            "files_with_origin": self.files_with_origin,
+            "receipts_processed": self.receipts_processed,
+            "skipped_no_origin": self.skipped_no_origin,
+            "skipped_transcript_missing": self.skipped_transcript_missing,
+            "skipped_not_classified": self.skipped_not_classified,
+        }
+
+
+def transcript_path_for(
+    origin_scope: str,
+    origin_session_id: str,
+    *,
+    projects_root: Path | None,
+) -> Path:
+    """The transcript path for one origin coordinate.
+
+    ONE derivation, called by every site that needs it
+    (:func:`write_receipt_for_origin`, :func:`classify_for_correct_gate`, and
+    :func:`write_receipts_for_files`'s skip-reason attribution) — the same
+    reason :func:`member_claim_and_origin` and :func:`memory_digest` are
+    shared rather than re-derived per caller: three copies of this join
+    would drift and the symptom would be a silently empty ledger.
+    """
+    root = projects_root if projects_root is not None else default_projects_root()
+    return root / origin_scope / f"{origin_session_id}.jsonl"
+
+
 def write_receipts_for_files(
     wiki_root: Path,
     files: Sequence[AutoMemoryFile],
@@ -779,7 +871,7 @@ def write_receipts_for_files(
     projects_root: Path | None,
     lock: RunLock,
     sealer: Sealer = DEFAULT_SEALER,
-) -> int:
+) -> ReceiptsRunStats:
     """Write one receipt per *files* entry with a resolvable origin session.
 
     THE single entrypoint nightly intake calls
@@ -800,19 +892,41 @@ def write_receipts_for_files(
     the gate reach a live-transcript check for a member with no
     ``originSessionId`` in frontmatter (addendum item 1).
 
-    Returns the number of calls to :func:`write_receipt_for_origin` that
-    returned a non-``None`` entry — includes both a genuinely NEW line and
-    an idempotent re-touch of an unchanged existing one; it is a
-    "processed successfully" count, not a "new lines written" count.
+    Returns a :class:`ReceiptsRunStats` (issue athenaeum#2129) whose
+    ``receipts_processed`` is the number of calls to
+    :func:`write_receipt_for_origin` that returned a non-``None`` entry —
+    includes both a genuinely NEW line and an idempotent re-touch of an
+    unchanged existing one; it is a "processed successfully" count, not a
+    "new lines written" count. ``int(stats)`` is that same number, for a
+    caller that wants only the count.
+
+    The other counts exist so a ZERO is readable: before athenaeum#2129 this
+    returned a bare ``int`` and a nightly that processed nothing was
+    indistinguishable from one with the flag off (observed 2026-10-24/25).
     """
     if not resolve_transcript_receipts_enabled(config):
-        return 0
+        # Nothing is examined on this path (not even a stat() per file), so
+        # every file counts as skipped for exactly one reason.
+        return ReceiptsRunStats(
+            files_seen=len(files), skipped_flag_off=len(files), flag_off=True
+        )
     processed = 0
+    no_origin = 0
+    transcript_missing = 0
+    not_classified = 0
     run = ReceiptRun(wiki_root)  # ONE ledger read for the whole run (athenaeum#2048)
     for am in files:
         if not am.origin_session_id:
+            no_origin += 1
             continue
         _, _, _, claim = member_claim_and_origin(am.path)
+        # Read for skip attribution only; `write_receipt_for_origin` does its
+        # own presence check, and a `stat()` is not a transcript READ, so the
+        # athenaeum#2048 per-run read budget is unchanged (pinned by
+        # tests/test_transcript_receipts.py::TestRunReadBudget).
+        transcript_present = transcript_path_for(
+            am.origin_scope, am.origin_session_id, projects_root=projects_root
+        ).is_file()
         entry = write_receipt_for_origin(
             wiki_root,
             origin_scope=am.origin_scope,
@@ -825,8 +939,22 @@ def write_receipts_for_files(
             run=run,
         )
         if entry is not None:
+            # Includes the rolled-off-but-already-receipted case (an absent
+            # transcript with an existing receipt returns that receipt):
+            # the receipt stands, so it is processed, not skipped.
             processed += 1
-    return processed
+        elif not transcript_present:
+            transcript_missing += 1
+        else:
+            not_classified += 1
+    return ReceiptsRunStats(
+        files_seen=len(files),
+        files_with_origin=len(files) - no_origin,
+        receipts_processed=processed,
+        skipped_no_origin=no_origin,
+        skipped_transcript_missing=transcript_missing,
+        skipped_not_classified=not_classified,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -902,8 +1030,9 @@ def classify_for_correct_gate(
     if not effective_session:
         return False, "no origin session recorded"
 
-    root = projects_root if projects_root is not None else default_projects_root()
-    transcript_path = root / origin_scope / f"{effective_session}.jsonl"
+    transcript_path = transcript_path_for(
+        origin_scope, effective_session, projects_root=projects_root
+    )
 
     if transcript_path.is_file():
         # Transcript present (regardless of whether its content turns out

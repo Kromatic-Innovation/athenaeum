@@ -80,7 +80,9 @@ def night(label):
     counts.update(ledger=0, transcript=0)
     t = time.perf_counter()
     with lock:
-        n = tr.write_receipts_for_files(wiki, files, config=cfg, projects_root=pr, lock=lock)
+        n = int(
+            tr.write_receipts_for_files(wiki, files, config=cfg, projects_root=pr, lock=lock)
+        )
     dt = time.perf_counter() - t
     print(
         f"{label}: N={N} processed={n} secs={dt:.2f} ledger_opens={counts['ledger']} "
