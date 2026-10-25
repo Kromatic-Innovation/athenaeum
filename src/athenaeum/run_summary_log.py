@@ -869,6 +869,24 @@ def read_latest_embedder_counts(
 #: comma-joined token (the same convention the ``reconciled`` field uses).
 STARVATION_FIELD = "starved"
 
+#: The ``reason`` token a phase segment carries when the phase did NOT run
+#: because a wall-clock deadline trip starved it (issue athenaeum#2132 AC3,
+#: written by ``librarian.RunContext.stop_on_deadline``).
+#:
+#: Load-bearing for the two streak readers below, not merely cosmetic. Before
+#: athenaeum#2132 a starved phase was simply ABSENT from a record's ``phases``
+#: map, and that absence was how :func:`starved_sources_in_record` /
+#: :func:`stalled_sources_in_record` recognised "this run could not possibly
+#: have scheduled anything" and returned ``None`` so the streak survived.
+#: Naming the starved phase gave it a present-but-empty segment, which those
+#: readers would otherwise read as the opposite claim — "the entity phase ran
+#: and starved nobody" — silently resetting every source's multi-run streak
+#: on exactly the runs the instrument exists to catch. The reason token is now
+#: the explicit discriminator, so the three states (ran-and-starved-these /
+#: ran-and-starved-nobody / did-not-run) stay distinguishable whether or not
+#: the segment is present.
+REASON_SKIPPED_DEADLINE = "skipped-deadline"
+
 #: K in "K consecutive runs with pending intake and zero slots" -- the streak
 #: at which a source is named in the run summary's head segment and a WARNING
 #: fires. Three is the smallest streak that is unambiguously not a one-off
@@ -889,12 +907,23 @@ def starved_sources_in_record(record: dict[str, Any]) -> set[str] | None:
     distinct from ``set()`` ("the entity phase ran and starved nobody"):
     :func:`starvation_streaks` must not let a run that could not possibly
     schedule anything break a streak.
+
+    Issue athenaeum#2132: "never ran" is recognised two ways, because a
+    starved phase is now NAMED rather than omitted. An absent ``entity``
+    segment is the pre-athenaeum#2132 shape and every older record in the
+    ledger; a present segment whose ``reason`` is
+    :data:`REASON_SKIPPED_DEADLINE` is the new one. Both mean the same thing
+    and must answer ``None`` — reading the named-but-empty segment as
+    ran-and-starved-nobody would reset every streak on precisely the deadline
+    trips this instrument is watching for.
     """
     phases = record.get("phases")
     if not isinstance(phases, dict):
         return None
     entity = phases.get("entity")
     if not isinstance(entity, dict):
+        return None
+    if entity.get("reason") == REASON_SKIPPED_DEADLINE:
         return None
     token = entity.get(STARVATION_FIELD)
     if not isinstance(token, str):
@@ -1289,12 +1318,19 @@ def stalled_sources_in_record(record: dict[str, Any]) -> set[str] | None:
     ran and nothing stalled") for the same reason :func:`starved_sources_in_record`
     draws that distinction: :func:`stall_streaks` must not let a run that
     could not possibly process anything break a streak.
+
+    Issue athenaeum#2132: recognises the named-starved-phase shape as well as
+    an absent segment, exactly as :func:`starved_sources_in_record` does --
+    see that function's note for why reading a named-but-empty segment as
+    ran-and-nothing-stalled would reset the streaks it is meant to measure.
     """
     phases = record.get("phases")
     if not isinstance(phases, dict):
         return None
     entity = phases.get("entity")
     if not isinstance(entity, dict):
+        return None
+    if entity.get("reason") == REASON_SKIPPED_DEADLINE:
         return None
     token = entity.get(STALL_FIELD)
     if not isinstance(token, str):

@@ -256,6 +256,7 @@ from athenaeum.rule_proposals import (
 )
 from athenaeum.rules import run_shape_rule_phase
 from athenaeum.run_summary_log import (  # issue athenaeum#1102: canonical home now
+    REASON_SKIPPED_DEADLINE,
     REGRESSION_ALERT_PREFIX,
     RUN_SUMMARY_PREFIX,
     STALL_ALERT_PREFIX,
@@ -4873,7 +4874,12 @@ _DEADLINE_STARVED_PHASES: tuple[str, ...] = (
     "audit-nightly-drain",
 )
 
-REASON_SKIPPED_DEADLINE = "skipped-deadline"
+# ``REASON_SKIPPED_DEADLINE`` is imported from ``run_summary_log`` rather than
+# defined here: the two streak readers that live there
+# (``starved_sources_in_record`` / ``stalled_sources_in_record``) must
+# recognise this exact token to tell a NAMED starved phase apart from one that
+# ran and starved nobody, so the writer and the readers have to share one
+# spelling (Seer review on PR athenaeum#2134).
 
 
 def _render_run_summary(

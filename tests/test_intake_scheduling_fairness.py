@@ -37,6 +37,7 @@ from athenaeum.intake import round_robin_by_source
 from athenaeum.librarian import _render_run_summary, run
 from athenaeum.models import RawFile
 from athenaeum.run_summary_log import (
+    REASON_SKIPPED_DEADLINE,
     STALL_FIELD,
     STALL_STREAK_THRESHOLD,
     STARVATION_FIELD,
@@ -271,9 +272,22 @@ def _record(
     *,
     entity: bool = True,
     stalled: list[str] | None = None,
+    starved_phase: bool = False,
 ) -> dict:
     if not entity:
         return {"v": 2, "ts": "2026-09-01T00:00:00Z", "phases": {"retire": {"secs": 0}}}
+    if starved_phase:
+        # Issue athenaeum#2132 AC3: a deadline trip now NAMES the phases it
+        # starved instead of omitting them, so this record's entity segment is
+        # PRESENT but describes a phase that never ran.
+        return {
+            "v": 2,
+            "ts": "2026-09-01T00:00:00Z",
+            "phases": {
+                "wiki-dedup": {"secs": 16386.371, "reason": "deadline"},
+                "entity": {"secs": 0.0, "reason": REASON_SKIPPED_DEADLINE},
+            },
+        }
     fields: dict = {"secs": 1.0, "reason": "completed"}
     if starved:
         fields[STARVATION_FIELD] = ",".join(starved)
@@ -315,6 +329,27 @@ class TestStarvationStreaks:
         assert starved_sources_in_record(_record([])) == set()
         assert starved_sources_in_record(_record(["a", "b"])) == {"a", "b"}
         assert starved_sources_in_record({"phases": "not-a-dict"}) is None
+
+    def test_a_named_starved_entity_phase_neither_breaks_nor_extends(self) -> None:
+        """Seer review on PR athenaeum#2134. Issue athenaeum#2132 AC3 made a
+        deadline trip NAME the phases it starved rather than omit them, which
+        turned the ``entity``-segment ABSENCE this reader relied on into a
+        present-but-empty segment. Read naively that says the opposite thing
+        -- "the entity phase ran and starved nobody" -- which would reset
+        every source's streak on exactly the runs the instrument is watching
+        for. A starved phase is no evidence either way, same as a merge-only
+        run."""
+        history = [
+            _record(["mural"]),
+            _record(None, starved_phase=True),
+            _record(["mural"]),
+        ]
+        assert starvation_streaks(["mural"], history) == {"mural": 3}
+
+    def test_starved_sources_in_record_reads_a_named_starved_phase_as_absent(
+        self,
+    ) -> None:
+        assert starved_sources_in_record(_record(None, starved_phase=True)) is None
 
     def test_reads_the_durable_ledger(self, tmp_path: Path) -> None:
         ledger = tmp_path / "run_summary.jsonl"
@@ -461,6 +496,21 @@ class TestStallStreaks:
             "b",
         }
         assert stalled_sources_in_record({"phases": "not-a-dict"}) is None
+        # Seer review on PR athenaeum#2134: the athenaeum#2132 AC3 shape --
+        # a PRESENT entity segment naming a phase that never ran -- must read
+        # as absent here too, for the reason spelled out on
+        # ``test_a_named_starved_entity_phase_neither_breaks_nor_extends``.
+        assert stalled_sources_in_record(_record(None, starved_phase=True)) is None
+
+    def test_a_named_starved_entity_phase_neither_breaks_nor_extends_a_stall(
+        self,
+    ) -> None:
+        history = [
+            _record(None, stalled=["mural"]),
+            _record(None, starved_phase=True),
+            _record(None, stalled=["mural"]),
+        ]
+        assert stall_streaks(["mural"], history) == {"mural": 3}
 
     def test_starved_and_stalled_fields_are_read_independently(self) -> None:
         # The two channels can both be present on the SAME record without
