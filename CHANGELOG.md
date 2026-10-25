@@ -52,9 +52,11 @@ collected here so an upgrader does not have to read the whole span.
   athenaeum#2064); the inline phone detector no longer flags bare digit-run
   identifiers; `_pii-allowlist.yml` accepts domain-level `pattern` entries.
 - **Librarian run accounting:** transcript-receipt writer counts are logged
-  and summarised on every run (athenaeum#2129); quarantine bounds are
-  size-aware and retry across days; the self-tuning loop ships shape mining
-  and a quarterly convergence report.
+  and summarised on every run (athenaeum#2129); the wiki-dedup phase now
+  stops at `--max-api-calls` and `--max-runtime` instead of starving every
+  later phase (athenaeum#2132); quarantine bounds are size-aware and retry
+  across days; the self-tuning loop ships shape mining and a quarterly
+  convergence report.
 - **Decision queue:** a real `coordinate` decision type, framed
   effort-capped items, and mechanical coordinate-answer handling.
 - **Recall quality:** hybrid BM25 plus vector ranking for the vector backend,
@@ -63,6 +65,16 @@ collected here so an upgrader does not have to read the whole span.
 - **Evaluation:** north-star grid token ceilings and `--max-tokens`, temporal
   probes, and `docs/use-cases.md` decomposing the north star into the
   questions memory must answer.
+
+### Fixed
+
+- **`--max-api-calls` and `--max-runtime` now bind the wiki-dedup phase
+  (issue athenaeum#2132).** The pair loop checks the run-level call budget
+  and the run deadline between candidate pairs and returns early, leaving
+  the remaining pairs for the next run; the run summary reports the phase as
+  budget- or deadline-stopped and names every downstream phase it starved.
+  On 2026-10-25 a run capped at 150 calls spent 3,980 calls and 4.5 hours in
+  this phase and never reached intake.
 
 ### Changed
 
