@@ -361,3 +361,49 @@ summary rows dated 2026-10-23 also sit in the shadow ledger
 fallback runs made while the two environment variables
 (`ATHENAEUM_MAYA_WEIGHTS_PATH`, `ATHENAEUM_MAYA_PYTHON`) were still being
 set, and carry no token rows. Counts only, per this document's discipline.
+
+## Shadow "no" adjudication, and the prefilter mode it produced (athenaeum#2064)
+
+**Run 4** (2026-10-25, athenaeum 0.22.42, `storage lint-pii`, T=1.65): 42
+candidates scored, model load 2.2 s, scoring 7.1 s. The operator then
+adjudicated every regex-flagged token Maya scored below 0.5 — the exit
+criterion runs 1 to 3 had left open. Counts only, per this document's
+discipline; the values stay in the operator's local file and the shadow
+ledger carries only the `question_sha` per token.
+
+| axis | tokens Maya said "no" to | operator verdict |
+|---|---|---|
+| email | 5 distinct (8 rows) | **all REAL contact values**: role, no-reply and postmaster addresses. Not secret, but they are ways to reach a human and belong in the PII surface. Maya was wrong on every one. |
+| phone | 9 distinct (10 rows) | **none was PII**: GitHub Actions run ids, a merge decision id, a retire approval id, a formatted receipt number. Maya was right on every one. |
+
+The exit criterion therefore **fails on the email axis and passes on the
+phone axis**. The email-axis disagreement is a policy disagreement — Maya
+treats a role address as non-personal, Kromatic policy treats it as a
+contact value — not noise, so no band narrows it away.
+
+**Operator ruling (Tristan Kromer, 2026-10-25): phone-axis-only prefilter.**
+This supersedes the "email-only prefilter" wording of the 2026-10-13 design
+comment, which these counts contradict. As shipped in
+`athenaeum.pii_hazard_classifier`, `mode = prefilter`:
+
+- **decides only phone-shaped candidates**, and only those matching the
+  bare identifier shape (10 to 12 digits, no separators, no leading `+`) —
+  the exact shape of all nine adjudicated phone-axis "no"s. A
+  separator-formatted or `+`-prefixed candidate stays regex-decided at any
+  score, because the model was never evidenced on that population;
+- **clears below the band and keeps above it**, with the abstention band
+  `[0.4, 0.6]` — the operating point measured in "Re-measured at temperature
+  1.65" above (7.7% abstained, one false negative in 759 scored rows), not
+  the original `[0.3, 0.7]` band, which abstains on 77.1% at this
+  temperature and is unusable;
+- **never clears an email-shaped candidate, in any mode**;
+- is still beaten by an allowlist entry and by a sticky off-corpus "is PII"
+  verdict, both of which are read before the model and remove a candidate
+  from scoring altogether;
+- clears nothing at all on a `scorer: unavailable` run — the fallback is
+  regex-only, by construction rather than by a second check.
+
+Each cleared token appends one ledger row carrying `mode: prefilter`,
+`cleared: true`, `p_yes`, the recognizer and the question sha, so a clear is
+auditable without plaintext. `mode = none` and `mode = shadow` are
+unchanged.

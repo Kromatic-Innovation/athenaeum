@@ -719,3 +719,155 @@ class TestAthenaeum2080Reopen:
                 )
             entry = lookup_pair(wiki_root, "a+b")
         assert entry is not None and entry.verdict == VERDICT_DUPLICATE
+
+
+# ---------------------------------------------------------------------------
+# Maya PII-hazard classifier prefilter mode (issue athenaeum#2064)
+# ---------------------------------------------------------------------------
+
+#: A bare identifier-shaped phone candidate; see
+#: ``athenaeum.pii_hazard_classifier._CLEARABLE_PHONE_SHAPE_RE``.
+_CLEARABLE_PHONE = "33709806658"
+
+_RECOMPARE_SCORES: dict[str, float] = {}
+
+
+class _FakeRecompareScoreMapScorer:
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        self.last_load_secs = 0.0
+
+    def score(self, question: str, texts):
+        return [_RECOMPARE_SCORES.get(t, 0.99) for t in texts]
+
+
+def _prefilter_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, scores: dict[str, float]
+) -> None:
+    monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setenv("ATHENAEUM_PII_HAZARD_CLASSIFIER_MODE", "prefilter")
+    monkeypatch.setenv("ATHENAEUM_MAYA_WEIGHTS_PATH", str(tmp_path))
+    monkeypatch.setenv("ATHENAEUM_MAYA_PYTHON", __import__("sys").executable)
+    monkeypatch.setattr(
+        "athenaeum.pii_hazard_classifier.SubprocessYesNoScorer",
+        _FakeRecompareScoreMapScorer,
+    )
+    _RECOMPARE_SCORES.clear()
+    _RECOMPARE_SCORES.update(scores)
+
+
+class TestRecomparePrefilterMode:
+    """AC1: prefilter mode is accepted by ``merges recompare`` too.
+
+    Here a cleared token changes the ROUTE -- a proposal whose only hazard
+    was an identifier-shaped digit run stops being a hazard and is compared
+    and ledgered like any other, which is the whole point of the mode.
+    """
+
+    def test_a_phone_below_the_band_stops_being_a_hazard(
+        self, wiki_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _prefilter_env(monkeypatch, tmp_path, {_CLEARABLE_PHONE: 0.1})
+        a = _write_page(wiki_root, "a", body=f"call {_CLEARABLE_PHONE} now")
+        b = _write_page(wiki_root, "b")
+        _write_queue(wiki_root, [_block("hazard", [a, b])])
+
+        result = recompare_pending_merges(
+            wiki_root, client=_fake_client(_content_payload("equivalent"))
+        )
+
+        assert result.pii_hazard_ids == []
+        assert result.proposals[0].route == ROUTE_LEDGER
+        assert result.proposals[0].pair_verdicts  # it was actually compared
+
+    def test_the_same_phone_is_a_hazard_in_mode_none(
+        self, wiki_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Positive control for the test above: without it, "not a hazard"
+        # could mean the regex never flagged the token at all.
+        monkeypatch.delenv("ATHENAEUM_PII_HAZARD_CLASSIFIER_MODE", raising=False)
+        a = _write_page(wiki_root, "a", body=f"call {_CLEARABLE_PHONE} now")
+        b = _write_page(wiki_root, "b")
+        _write_queue(wiki_root, [_block("hazard", [a, b])])
+
+        result = recompare_pending_merges(
+            wiki_root, client=_fake_client(_content_payload("equivalent"))
+        )
+
+        assert len(result.pii_hazard_ids) == 1
+        assert result.proposals[0].route == ROUTE_HUMAN
+
+    def test_an_email_below_the_band_stays_a_hazard(
+        self, wiki_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # AC2 on this surface: the email axis is never cleared, so the
+        # proposal is still routed to a human and never compared.
+        _prefilter_env(monkeypatch, tmp_path, {"noreply@example.com": 0.05})
+        a = _write_page(wiki_root, "a", body="reach noreply@example.com for details")
+        b = _write_page(wiki_root, "b")
+        _write_queue(wiki_root, [_block("hazard", [a, b])])
+
+        result = recompare_pending_merges(
+            wiki_root, client=_fake_client(_content_payload("equivalent"))
+        )
+
+        assert len(result.pii_hazard_ids) == 1
+        assert result.proposals[0].route == ROUTE_HUMAN
+        assert result.proposals[0].pair_verdicts == {}
+
+    def test_the_worker_is_launched_at_most_once_per_invocation(
+        self, wiki_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The pre-pass must not turn one invocation into one scorer launch
+        # per proposal (issue athenaeum#2063's batching contract).
+        launches: list[int] = []
+
+        class _CountingScorer(_FakeRecompareScoreMapScorer):
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                super().__init__(*args, **kwargs)
+                launches.append(1)
+
+        _prefilter_env(monkeypatch, tmp_path, {_CLEARABLE_PHONE: 0.1})
+        monkeypatch.setattr(
+            "athenaeum.pii_hazard_classifier.SubprocessYesNoScorer", _CountingScorer
+        )
+        a = _write_page(wiki_root, "a", body=f"call {_CLEARABLE_PHONE} now")
+        b = _write_page(wiki_root, "b")
+        c = _write_page(wiki_root, "c", body="reach noreply@example.com for details")
+        d = _write_page(wiki_root, "d")
+        _write_queue(wiki_root, [_block("one", [a, b]), _block("two", [c, d])])
+
+        recompare_pending_merges(
+            wiki_root, client=_fake_client(_content_payload("equivalent"))
+        )
+
+        assert launches == [1]
+
+    def test_a_cleared_token_writes_a_recompare_ledger_row(
+        self, wiki_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _prefilter_env(monkeypatch, tmp_path, {_CLEARABLE_PHONE: 0.1})
+        a = _write_page(wiki_root, "a", body=f"call {_CLEARABLE_PHONE} now")
+        b = _write_page(wiki_root, "b")
+        _write_queue(wiki_root, [_block("hazard", [a, b])])
+
+        recompare_pending_merges(
+            wiki_root, client=_fake_client(_content_payload("equivalent"))
+        )
+
+        rows = [
+            json.loads(line)
+            for p in (tmp_path / "cache" / "pii_hazard_shadow").glob("*.jsonl")
+            for line in p.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        token_rows = [r for r in rows if r["kind"] == "token"]
+        assert len(token_rows) == 1
+        assert token_rows[0]["surface"] == "recompare"
+        assert token_rows[0]["mode"] == "prefilter"
+        assert token_rows[0]["cleared"] is True
+
+    def test_identify_pii_hazards_with_an_empty_cleared_set_is_unchanged(
+        self, wiki_root: Path
+    ) -> None:
+        a = _write_page(wiki_root, "a", body=f"call {_CLEARABLE_PHONE} now")
+        assert identify_pii_hazards([a], cleared_tokens=frozenset()) == identify_pii_hazards([a])

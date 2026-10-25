@@ -54,6 +54,7 @@ comparator, writes only to the verdict ledger. The CLI wrapper lives in
 from __future__ import annotations
 
 import logging
+import sys
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -93,11 +94,15 @@ from athenaeum.pii import (
     load_pii_allowlist,
 )
 from athenaeum.pii_hazard_classifier import (
-    MODE_SHADOW,
+    MODE_PREFILTER,
     RECOGNIZER_EMAIL,
     RECOGNIZER_PHONE,
+    SCORING_MODES,
     ShadowCollector,
+    format_prefilter_summary,
+    prefilter_cleared_tokens,
     run_shadow_scoring,
+    summarize_prefilter,
 )
 from athenaeum.pii_verdicts import load_is_pii_values, load_not_pii_allowlist
 
@@ -210,6 +215,7 @@ def identify_pii_hazards(
     allowlist: Mapping[str, str] | Iterable[PiiAllowlistEntry] | None = None,
     classifier_collector: "ShadowCollector | None" = None,
     is_pii_values: frozenset[str] | None = None,
+    cleared_tokens: frozenset[tuple[str, str]] | None = None,
 ) -> list[str]:
     """Return human-readable reasons this proposal is a PII hazard, or ``[]``.
 
@@ -250,6 +256,16 @@ def identify_pii_hazards(
     being collected (counted in ``classifier_collector.n_skipped_is_pii``
     instead) -- operator authority is always read before the model.
 
+    *cleared_tokens* (issue athenaeum#2064, ``prefilter`` mode only) is the
+    set of ``(recognizer, token)`` keys the model has already cleared --
+    computed once, before this loop, by
+    :func:`athenaeum.pii_hazard_classifier.prefilter_cleared_tokens`. A
+    cleared token is dropped before the hazard reason is written, so a
+    proposal whose ONLY hazard was a cleared identifier-shaped phone run
+    stops being a hazard and is compared and ledgered like any other.
+    Omitting it (the default) is byte-identical to this function's
+    pre-athenaeum#2064 behaviour.
+
     A reason names the file, so the operator can go and look.
     """
     entries = coerce_pii_allowlist(allowlist)
@@ -264,9 +280,18 @@ def identify_pii_hazards(
         if is_pii_flagged(meta):
             reasons.append(f"{path.name}: pii: frontmatter flag")
         emails = [e for e in find_inline_emails(body) if not allowlist_matches(e, entries)]
+        if cleared_tokens:
+            # Email is never cleared (athenaeum#2064's operator ruling), so
+            # this filter can only ever be a no-op on the email axis -- it
+            # is applied symmetrically so the ONE set is the single source
+            # of truth about what was cleared, rather than two axes with
+            # two different rules written in two places.
+            emails = [e for e in emails if (RECOGNIZER_EMAIL, e) not in cleared_tokens]
         if emails:
             reasons.append(f"{path.name}: {len(emails)} inline email address(es)")
         phones = [p for p in find_inline_phones(body) if not allowlist_matches(p, entries)]
+        if cleared_tokens:
+            phones = [p for p in phones if (RECOGNIZER_PHONE, p) not in cleared_tokens]
         if phones:
             reasons.append(f"{path.name}: {len(phones)} inline phone number(s)")
         if classifier_collector is not None:
@@ -395,9 +420,49 @@ def recompare_pending_merges(
     hazard_mode = resolve_pii_hazard_classifier_mode(config)
     classifier_collector: ShadowCollector | None = None
     is_pii_values: frozenset[str] | None = None
-    if hazard_mode == MODE_SHADOW:
+    cleared_tokens: frozenset[tuple[str, str]] | None = None
+    if hazard_mode in SCORING_MODES:
         classifier_collector = ShadowCollector(surface="recompare")
         is_pii_values = load_is_pii_values(knowledge_root=wiki_root.parent, config=config)
+    if hazard_mode == MODE_PREFILTER:
+        # Issue athenaeum#2064: here the model's verdict decides the ROUTE,
+        # and the route is decided inside the loop below -- so the batch has
+        # to be scored BEFORE that loop, not after it like shadow mode. One
+        # extra read-only pass over the same source files collects the
+        # tokens; it resolves paths exactly as the loop does but touches no
+        # counter, so `skipped_missing` is still counted once, by the loop.
+        # The single-batch-per-invocation contract is preserved: the worker
+        # is still launched at most once.
+        assert classifier_collector is not None
+        for proposal in unresolved:
+            prepass_paths = [
+                resolved
+                for resolved in (
+                    resolve_source_path(source, wiki_root) for source in proposal.sources
+                )
+                if resolved is not None
+            ]
+            identify_pii_hazards(
+                prepass_paths,
+                allowlist=allowlist,
+                classifier_collector=classifier_collector,
+                is_pii_values=is_pii_values,
+            )
+        prefilter_p_yes = run_shadow_scoring(
+            classifier_collector,
+            mode=hazard_mode,
+            weights_path=resolve_pii_hazard_classifier_weights_path(config),
+            interpreter=resolve_pii_hazard_classifier_interpreter(config),
+            timeout_secs=resolve_pii_hazard_classifier_timeout_secs(config),
+        )
+        cleared_tokens = prefilter_cleared_tokens(prefilter_p_yes)
+        print(
+            format_prefilter_summary(summarize_prefilter(prefilter_p_yes)),
+            file=sys.stderr,
+        )
+        # Scored already: the loop below must not re-feed this collector,
+        # and the post-loop scoring call is shadow mode's alone.
+        classifier_collector = None
 
     results: list[ProposalRecompare] = []
     compared = 0
@@ -437,6 +502,7 @@ def recompare_pending_merges(
                 allowlist=allowlist,
                 classifier_collector=classifier_collector,
                 is_pii_values=is_pii_values,
+                cleared_tokens=cleared_tokens,
             )
             is_hazard = bool(hazard_reasons)
 

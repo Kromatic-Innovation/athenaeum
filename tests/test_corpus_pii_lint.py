@@ -997,7 +997,9 @@ class TestLintPiiShadowMode:
             resolve_pii_hazard_classifier_mode,
         )
 
-        monkeypatch.setenv("ATHENAEUM_PII_HAZARD_CLASSIFIER_MODE", "prefilter")
+        # "prefilter" became a REAL mode with issue athenaeum#2064, so the
+        # unknown-value probe has to be a value that is still unknown.
+        monkeypatch.setenv("ATHENAEUM_PII_HAZARD_CLASSIFIER_MODE", "enforce")
         with pytest.raises(PiiHazardClassifierConfigError):
             resolve_pii_hazard_classifier_mode(None)
 
@@ -1022,3 +1024,239 @@ class TestLintPiiShadowMode:
         assert "kay@example.com" in out_err.out
         assert "p_yes" not in out_err.out
         assert "weights_path" in out_err.err
+
+
+# ---------------------------------------------------------------------------
+# Prefilter mode (issue athenaeum#2064, operator ruling of 2026-10-25)
+# ---------------------------------------------------------------------------
+
+#: A bare identifier-shaped phone candidate: 11 digits, no separators, no
+#: leading "+". Synthetic; the shape is the whole point.
+_CLEARABLE_PHONE = "33709806658"
+
+#: Score the fake scorer returns per candidate text. Anything unlisted scores
+#: 0.99, so a token no test spoke about can never be cleared by accident.
+_SCORES: dict[str, float] = {}
+
+
+class _FakeScoreMapScorer:
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        self.last_load_secs = 0.0
+
+    def score(self, question: str, texts):
+        return [_SCORES.get(t, 0.99) for t in texts]
+
+
+def _prefilter_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, scores: dict[str, float]
+) -> Path:
+    """Select prefilter mode with a fake scorer and a tmp cache dir."""
+    cache_dir = tmp_path / "cache"
+    monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(cache_dir))
+    monkeypatch.setenv("ATHENAEUM_PII_HAZARD_CLASSIFIER_MODE", "prefilter")
+    monkeypatch.setenv("ATHENAEUM_MAYA_WEIGHTS_PATH", str(tmp_path))
+    monkeypatch.setenv("ATHENAEUM_MAYA_PYTHON", __import__("sys").executable)
+    monkeypatch.setattr(
+        "athenaeum.pii_hazard_classifier.SubprocessYesNoScorer", _FakeScoreMapScorer
+    )
+    _SCORES.clear()
+    _SCORES.update(scores)
+    return cache_dir
+
+
+class TestLintPiiPrefilterPhoneAxis:
+    """AC1: the three P(yes) positions, end to end through the gate."""
+
+    def _corpus(self, tmp_path: Path) -> Path:
+        root = _wiki(tmp_path)
+        (root / "wiki" / "_queue.md").write_text(
+            f"call {_CLEARABLE_PHONE} now\n", encoding="utf-8"
+        )
+        return root
+
+    def test_mode_none_reports_it_the_positive_control(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Without this control a "cleared" assertion below could pass simply
+        # because the regex never flagged the token in the first place.
+        monkeypatch.delenv("ATHENAEUM_PII_HAZARD_CLASSIFIER_MODE", raising=False)
+        root = self._corpus(tmp_path)
+
+        rc = main(["storage", "lint-pii", "--path", str(root)])
+
+        assert rc == EXIT_PII_FOUND
+        assert _CLEARABLE_PHONE in capsys.readouterr().out
+
+    def test_below_the_band_the_finding_is_cleared_and_the_gate_passes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The counter-example issue athenaeum#2064 AC1 names: a phone token at
+        # P(yes)=0.1 still reported as a finding must FAIL.
+        _prefilter_env(monkeypatch, tmp_path, {_CLEARABLE_PHONE: 0.1})
+        root = self._corpus(tmp_path)
+
+        rc = main(["storage", "lint-pii", "--path", str(root)])
+
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert _CLEARABLE_PHONE not in out
+        assert "1 cleared" in out
+
+    def test_above_the_band_the_finding_is_kept_and_annotated(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _prefilter_env(monkeypatch, tmp_path, {_CLEARABLE_PHONE: 0.9})
+        root = self._corpus(tmp_path)
+
+        rc = main(["storage", "lint-pii", "--path", str(root)])
+
+        out = capsys.readouterr().out
+        assert rc == EXIT_PII_FOUND
+        assert f"{_CLEARABLE_PHONE} (p_yes=0.9000)" in out
+        assert "1 kept" in out
+
+    def test_inside_the_band_the_regex_decides(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _prefilter_env(monkeypatch, tmp_path, {_CLEARABLE_PHONE: 0.5})
+        root = self._corpus(tmp_path)
+
+        rc = main(["storage", "lint-pii", "--path", str(root)])
+
+        out = capsys.readouterr().out
+        assert rc == EXIT_PII_FOUND
+        assert _CLEARABLE_PHONE in out
+        assert "1 in band (regex decided)" in out
+
+    def test_an_unavailable_scorer_clears_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # AC6's second half: weights unset, so the run falls back to
+        # regex-only and the finding stands.
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(tmp_path / "cache"))
+        monkeypatch.setenv("ATHENAEUM_PII_HAZARD_CLASSIFIER_MODE", "prefilter")
+        monkeypatch.delenv("ATHENAEUM_MAYA_WEIGHTS_PATH", raising=False)
+        monkeypatch.delenv("ATHENAEUM_MAYA_PYTHON", raising=False)
+        root = self._corpus(tmp_path)
+
+        rc = main(["storage", "lint-pii", "--path", str(root)])
+
+        assert rc == EXIT_PII_FOUND
+        assert _CLEARABLE_PHONE in capsys.readouterr().out
+
+
+class TestLintPiiPrefilterEmailAxisUntouched:
+    """AC2: an email is reported exactly as the regex reports it, any score."""
+
+    def _corpus(self, tmp_path: Path) -> Path:
+        root = _wiki(tmp_path)
+        (root / "wiki" / "_queue.md").write_text(
+            "reach noreply@example.com\n", encoding="utf-8"
+        )
+        return root
+
+    def test_an_email_at_a_clearing_score_is_still_a_finding(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _prefilter_env(monkeypatch, tmp_path, {"noreply@example.com": 0.05})
+        root = self._corpus(tmp_path)
+
+        rc = main(["storage", "lint-pii", "--path", str(root)])
+
+        out = capsys.readouterr().out
+        assert rc == EXIT_PII_FOUND
+        assert "noreply@example.com" in out
+        assert "1 email untouched" in out
+
+    def test_json_output_still_carries_the_email(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        import json
+
+        _prefilter_env(monkeypatch, tmp_path, {"noreply@example.com": 0.05})
+        root = self._corpus(tmp_path)
+
+        rc = main(["storage", "lint-pii", "--path", str(root), "--json"])
+
+        captured = capsys.readouterr()
+        payload = json.loads(captured.out)
+        assert rc == EXIT_PII_FOUND
+        assert payload["wiki"][0]["emails"] == ["noreply@example.com"]
+        # The summary line goes to stderr so --json stays machine-readable.
+        assert "pii hazard prefilter" in captured.err
+
+
+class TestLintPiiPrefilterShapeDiscipline:
+    """AC3: a formatted or ``+``-prefixed candidate is never cleared."""
+
+    def test_a_formatted_phone_at_a_clearing_score_is_still_a_finding(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        formatted = "+1 415 555 0100"
+        _prefilter_env(monkeypatch, tmp_path, {formatted: 0.01})
+        root = _wiki(tmp_path)
+        (root / "wiki" / "_queue.md").write_text(f"ring {formatted} ok\n", encoding="utf-8")
+
+        rc = main(["storage", "lint-pii", "--path", str(root)])
+
+        out = capsys.readouterr().out
+        assert rc == EXIT_PII_FOUND
+        assert formatted in out
+        assert "1 phone-shape untouched" in out
+        assert "0 cleared" in out
+
+
+class TestLintPiiPrefilterAllowlistWins:
+    """AC4: an allowlist entry beats any score, in both directions."""
+
+    def test_an_allowlisted_phone_is_never_even_scored(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Direction 1: the allowlist already explains it, so the model is
+        # never consulted -- 0 scored, 0 cleared, and the gate passes.
+        _prefilter_env(monkeypatch, tmp_path, {_CLEARABLE_PHONE: 0.99})
+        root = _wiki(tmp_path)
+        (root / "wiki" / "_queue.md").write_text(
+            f"call {_CLEARABLE_PHONE} now\n", encoding="utf-8"
+        )
+        _allowlist(
+            root,
+            # Quoted: an unquoted digit run parses as an int and the entry is
+            # ignored, which would make this test pass for the wrong reason.
+            f'- value: "{_CLEARABLE_PHONE}"\n  reason: Actions run id, not a phone number\n',
+        )
+
+        rc = main(["storage", "lint-pii", "--path", str(root)])
+
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "0 cleared" in out
+        assert "adjudicated residue" in out
+
+    def test_an_allowlist_pattern_entry_beats_a_keeping_score(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Direction 2: a HIGH score would have kept the finding; the
+        # allowlist pattern removes it anyway.
+        _prefilter_env(monkeypatch, tmp_path, {"noreply@example.com": 0.99})
+        root = _wiki(tmp_path)
+        (root / "wiki" / "_queue.md").write_text(
+            "reach noreply@example.com\n", encoding="utf-8"
+        )
+        _allowlist(
+            root,
+            "- pattern: noreply@example\\.com\n  reason: service account, not a person\n",
+        )
+
+        rc = main(["storage", "lint-pii", "--path", str(root)])
+
+        assert rc == 0
+        assert "0 email untouched" in capsys.readouterr().out
+
+
+class TestPiiHazardModeVocabulary:
+    def test_prefilter_is_now_an_accepted_mode(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from athenaeum.config import resolve_pii_hazard_classifier_mode
+
+        monkeypatch.setenv("ATHENAEUM_PII_HAZARD_CLASSIFIER_MODE", "prefilter")
+        assert resolve_pii_hazard_classifier_mode(None) == "prefilter"

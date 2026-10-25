@@ -49,10 +49,11 @@ from __future__ import annotations
 import hashlib
 import importlib.resources
 import json
+import re
 import sys
 import time
 import uuid
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -67,12 +68,18 @@ from athenaeum.yesno import (
     preflight_yesno_scorer,
 )
 
-#: Mode vocabulary for this slice. ``prefilter`` is the follow-on child
-#: (issue athenaeum#2063's re-slice) and is deliberately NOT in this tuple --
-#: naming it in config raises, exactly like any other unknown mode.
+#: Mode vocabulary. ``none`` is inert, ``shadow`` scores and records without
+#: ever changing a verdict (issue athenaeum#2063), and ``prefilter`` lets the
+#: model decide PHONE-shaped candidates outside the abstention band while the
+#: regex keeps deciding everything else (issue athenaeum#2064).
 MODE_NONE = "none"
 MODE_SHADOW = "shadow"
-VALID_MODES: tuple[str, ...] = (MODE_NONE, MODE_SHADOW)
+MODE_PREFILTER = "prefilter"
+VALID_MODES: tuple[str, ...] = (MODE_NONE, MODE_SHADOW, MODE_PREFILTER)
+
+#: The two modes that actually call :mod:`athenaeum.yesno`. ``none`` is not
+#: here, which is what makes it inert.
+SCORING_MODES: tuple[str, ...] = (MODE_SHADOW, MODE_PREFILTER)
 
 #: Ledger directory name, a sibling of ``spend.jsonl`` under the cache dir.
 LEDGER_DIRNAME = "pii_hazard_shadow"
@@ -80,6 +87,41 @@ LEDGER_DIRNAME = "pii_hazard_shadow"
 #: Recognizer vocabulary this module ever scores.
 RECOGNIZER_EMAIL = "email"
 RECOGNIZER_PHONE = "phone"
+
+#: Decision vocabulary :func:`decide_prefilter` returns, one value per
+#: candidate. ``clear`` drops the regex finding, ``keep`` keeps it with the
+#: model's agreement recorded, and ``regex`` means the model does not decide
+#: this candidate at all -- the regex verdict stands, untouched, which is the
+#: outcome for every email-shaped candidate in every mode.
+DECISION_CLEAR = "clear"
+DECISION_KEEP = "keep"
+DECISION_REGEX = "regex"
+
+#: Abstention band for ``prefilter`` mode as ``(low, high)``, CLOSED at both
+#: ends: a score inside it is the model declining to decide, so the regex
+#: verdict stands.
+#:
+#: 0.4/0.6 is the operating point MEASURED on this feature's own shadow data
+#: (issue athenaeum#2064), not a guess. Re-scoring the 822 host-side eval
+#: fixtures at the weights' own temperature (1.65) abstains on 77.1% of rows
+#: with a [0.3, 0.7] band -- unusable -- and on 7.7% with [0.4, 0.6], which
+#: left one false negative in 759 scored rows. Changing the band is out of
+#: scope for that issue, so this is a module constant with NO config knob;
+#: a caller (the eval script) may still pass its own ``band`` without an
+#: operator-facing surface existing.
+DEFAULT_ABSTENTION_BAND: tuple[float, float] = (0.4, 0.6)
+
+#: The ONLY phone-shaped token Maya may clear: a bare digit run of 10 to 12
+#: digits, no separators and no leading ``+``.
+#:
+#: Issue athenaeum#2064's operator adjudication of 2026-10-25 is the whole
+#: basis: every phone-axis shadow "no" was an identifier of exactly this
+#: shape (Actions run ids, a merge decision id, a retire approval id, a
+#: receipt number), and Maya was right on every one. A candidate carrying a
+#: ``+`` or separators is formatted the way humans write a number they dial,
+#: so it stays regex-decided regardless of score -- the model was never
+#: evidenced on that population.
+_CLEARABLE_PHONE_SHAPE_RE = re.compile(r"[0-9]{10,12}")
 
 
 @dataclass(frozen=True)
@@ -117,6 +159,156 @@ class ShadowCollector:
     def add_many(self, recognizer: str, texts: Iterable[str]) -> None:
         for text in texts:
             self.add(recognizer, text)
+
+
+def is_clearable_phone_shape(text: str) -> bool:
+    """True when *text* is the bare identifier shape Maya is allowed to clear.
+
+    See :data:`_CLEARABLE_PHONE_SHAPE_RE` for why the shape is this narrow.
+    A separator-formatted or ``+``-prefixed candidate returns ``False`` and
+    so stays regex-decided whatever it scores (issue athenaeum#2064 AC3).
+    """
+    return _CLEARABLE_PHONE_SHAPE_RE.fullmatch(text) is not None
+
+
+def decide_prefilter(
+    recognizer: str,
+    text: str,
+    p_yes: float | None,
+    band: tuple[float, float] = DEFAULT_ABSTENTION_BAND,
+) -> str:
+    """Decide ONE candidate in ``prefilter`` mode. Pure, no I/O, no state.
+
+    The whole policy of issue athenaeum#2064 lives here, in one function, so
+    the ledger row and the gate's own behaviour cannot disagree about what
+    was decided -- both read this.
+
+    Returns :data:`DECISION_CLEAR` (drop the regex finding),
+    :data:`DECISION_KEEP` (regex finding stands, model agreed) or
+    :data:`DECISION_REGEX` (model did not decide; regex verdict stands).
+
+    Four reasons a candidate is never cleared, in the order checked:
+
+    1. **It is email-shaped.** Maya may not clear an email in ANY mode. The
+       operator's 2026-10-25 adjudication found every email-shaped shadow
+       "no" to be a real contact value under Kromatic policy (role and
+       no-reply addresses count as PII), so the model's disagreement there
+       is a policy disagreement, not noise, and no band would fix it.
+    2. **It is phone-shaped but not the identifier shape** --
+       :func:`is_clearable_phone_shape`.
+    3. **It was not scored** (``p_yes is None``): a ``scorer: unavailable``
+       run clears nothing, it falls back to regex-only.
+    4. **The score is inside the band**, which is closed at both ends.
+    """
+    if recognizer != RECOGNIZER_PHONE:
+        return DECISION_REGEX
+    if not is_clearable_phone_shape(text):
+        return DECISION_REGEX
+    if p_yes is None:
+        return DECISION_REGEX
+    low, high = band
+    if p_yes < low:
+        return DECISION_CLEAR
+    if p_yes > high:
+        return DECISION_KEEP
+    return DECISION_REGEX
+
+
+def prefilter_decisions(
+    p_yes_by_token: Mapping[tuple[str, str], float],
+    band: tuple[float, float] = DEFAULT_ABSTENTION_BAND,
+) -> dict[tuple[str, str], str]:
+    """:func:`decide_prefilter` over a whole scored batch, keyed as scored."""
+    return {
+        (recognizer, text): decide_prefilter(recognizer, text, p_yes, band)
+        for (recognizer, text), p_yes in p_yes_by_token.items()
+    }
+
+
+def prefilter_cleared_tokens(
+    p_yes_by_token: Mapping[tuple[str, str], float],
+    band: tuple[float, float] = DEFAULT_ABSTENTION_BAND,
+) -> frozenset[tuple[str, str]]:
+    """The ``(recognizer, text)`` keys ``prefilter`` mode clears.
+
+    Empty for an empty batch, so a ``scorer: unavailable`` run (which
+    returns no scores at all) clears nothing by construction rather than by
+    a second check at each call site.
+    """
+    return frozenset(
+        key
+        for key, decision in prefilter_decisions(p_yes_by_token, band).items()
+        if decision == DECISION_CLEAR
+    )
+
+
+@dataclass(frozen=True)
+class PrefilterSummary:
+    """Counts for ``prefilter`` mode's one operator-facing summary line.
+
+    The five buckets PARTITION the scored batch -- every scored candidate
+    lands in exactly one -- so the line can be read as an account of what
+    the model was allowed to do, not just of what it did.
+    """
+
+    cleared: int = 0
+    kept: int = 0
+    in_band: int = 0
+    email_untouched: int = 0
+    phone_shape_untouched: int = 0
+
+    @property
+    def total(self) -> int:
+        return (
+            self.cleared
+            + self.kept
+            + self.in_band
+            + self.email_untouched
+            + self.phone_shape_untouched
+        )
+
+
+def summarize_prefilter(
+    p_yes_by_token: Mapping[tuple[str, str], float],
+    band: tuple[float, float] = DEFAULT_ABSTENTION_BAND,
+) -> PrefilterSummary:
+    """Bucket a scored batch into :class:`PrefilterSummary`'s five counts."""
+    cleared = kept = in_band = email = phone_shape = 0
+    for (recognizer, text), p_yes in p_yes_by_token.items():
+        if recognizer != RECOGNIZER_PHONE:
+            email += 1
+            continue
+        if not is_clearable_phone_shape(text):
+            phone_shape += 1
+            continue
+        decision = decide_prefilter(recognizer, text, p_yes, band)
+        if decision == DECISION_CLEAR:
+            cleared += 1
+        elif decision == DECISION_KEEP:
+            kept += 1
+        else:
+            in_band += 1
+    return PrefilterSummary(
+        cleared=cleared,
+        kept=kept,
+        in_band=in_band,
+        email_untouched=email,
+        phone_shape_untouched=phone_shape,
+    )
+
+
+def format_prefilter_summary(
+    summary: PrefilterSummary, band: tuple[float, float] = DEFAULT_ABSTENTION_BAND
+) -> str:
+    """The single summary line both call sites print (issue athenaeum#2064)."""
+    low, high = band
+    return (
+        f"pii hazard prefilter (band [{low:g}, {high:g}]): "
+        f"{summary.cleared} cleared, {summary.kept} kept, "
+        f"{summary.in_band} in band (regex decided), "
+        f"{summary.email_untouched} email untouched, "
+        f"{summary.phone_shape_untouched} phone-shape untouched"
+    )
 
 
 def load_pii_hazard_question() -> str:
@@ -231,23 +423,33 @@ def run_shadow_scoring(
     timeout_secs: float,
     cache_dir: Path | None = None,
     scorer: YesNoScorer | None = None,
+    band: tuple[float, float] = DEFAULT_ABSTENTION_BAND,
 ) -> dict[tuple[str, str], float]:
-    """Score *collector*'s tokens and append shadow ledger rows.
+    """Score *collector*'s tokens and append hazard ledger rows.
 
-    A no-op for ``mode != "shadow"`` -- the call sites still build and pass
-    a :class:`ShadowCollector` in every mode, but this function is the ONLY
-    place that branches on mode, so ``mode="none"`` truly calls nothing in
-    :mod:`athenaeum.yesno` (issue athenaeum#2063 AC1). Never raises: every
-    failure is caught, reported on stderr naming the key, and recorded as
-    one ``scorer: "unavailable"`` summary row -- the gate's own exit code
-    and output are this function's caller's concern, never this function's.
+    A no-op for any mode outside :data:`SCORING_MODES` -- the call sites
+    still build and pass a :class:`ShadowCollector` in every mode, but this
+    function is the ONLY place that branches on mode, so ``mode="none"``
+    truly calls nothing in :mod:`athenaeum.yesno` (issue athenaeum#2063
+    AC1). Never raises: every failure is caught, reported on stderr naming
+    the key, and recorded as one ``scorer: "unavailable"`` summary row --
+    the gate's own exit code and output are this function's caller's
+    concern, never this function's.
 
     Returns ``{(recognizer, text): p_yes}`` for every token actually
     scored -- empty for ``mode="none"`` and for any fail-closed path -- so a
-    caller (``lint-pii``'s human-text output) can annotate what shadow mode
-    saw without re-reading the ledger it just wrote.
+    caller can annotate what the model saw (``lint-pii``'s human-text
+    output) and, in ``prefilter`` mode, derive the decisions via
+    :func:`prefilter_cleared_tokens` off the SAME scores this function
+    ledgered.
+
+    ``mode="prefilter"`` (issue athenaeum#2064) differs from ``"shadow"``
+    in the ledger only: each token row additionally carries ``decision`` and
+    ``cleared``, computed by :func:`decide_prefilter`. A shadow row is
+    unchanged, field for field, from issue athenaeum#2063 -- the mode's
+    golden tests pin that. *band* is only consulted in ``prefilter`` mode.
     """
-    if mode != MODE_SHADOW:
+    if mode not in SCORING_MODES:
         return {}
 
     run_id = uuid.uuid4().hex
@@ -343,24 +545,31 @@ def run_shadow_scoring(
     results: dict[tuple[str, str], float] = {}
     for token, p_yes in zip(collector.tokens, p_yes_values, strict=True):
         results[(token.recognizer, token.text)] = p_yes
-        _write_ledger_line(
-            ledger_path,
-            {
-                "kind": "token",
-                "v": 1,
-                "ts": ts,
-                "run_id": run_id,
-                "surface": collector.surface,
-                "mode": mode,
-                "recognizer": token.recognizer,
-                "p_yes": round(p_yes, 4),
-                "regex_hazard": True,
-                "would_clear_at": round(p_yes, 4),
-                "question_sha": q_sha,
-                "weights_id": weights_id,
-                "transform": transform,
-            },
-        )
+    # One pass over the whole batch, from the SAME pure function the call
+    # sites use, so a `cleared: true` row can never describe a token the
+    # gate went on to report (issue athenaeum#2064 AC6).
+    decisions = prefilter_decisions(results, band) if mode == MODE_PREFILTER else {}
+    for token, p_yes in zip(collector.tokens, p_yes_values, strict=True):
+        row = {
+            "kind": "token",
+            "v": 1,
+            "ts": ts,
+            "run_id": run_id,
+            "surface": collector.surface,
+            "mode": mode,
+            "recognizer": token.recognizer,
+            "p_yes": round(p_yes, 4),
+            "regex_hazard": True,
+            "would_clear_at": round(p_yes, 4),
+            "question_sha": q_sha,
+            "weights_id": weights_id,
+            "transform": transform,
+        }
+        if mode == MODE_PREFILTER:
+            decision = decisions[(token.recognizer, token.text)]
+            row["decision"] = decision
+            row["cleared"] = decision == DECISION_CLEAR
+        _write_ledger_line(ledger_path, row)
 
     _write_summary_row(
         ledger_path,
@@ -382,14 +591,27 @@ def run_shadow_scoring(
 __all__ = [
     "MODE_NONE",
     "MODE_SHADOW",
+    "MODE_PREFILTER",
     "VALID_MODES",
+    "SCORING_MODES",
     "LEDGER_DIRNAME",
     "RECOGNIZER_EMAIL",
     "RECOGNIZER_PHONE",
+    "DECISION_CLEAR",
+    "DECISION_KEEP",
+    "DECISION_REGEX",
+    "DEFAULT_ABSTENTION_BAND",
     "HazardToken",
     "ShadowCollector",
+    "PrefilterSummary",
     "load_pii_hazard_question",
     "question_sha256",
     "compute_weights_id",
+    "is_clearable_phone_shape",
+    "decide_prefilter",
+    "prefilter_decisions",
+    "prefilter_cleared_tokens",
+    "summarize_prefilter",
+    "format_prefilter_summary",
     "run_shadow_scoring",
 ]

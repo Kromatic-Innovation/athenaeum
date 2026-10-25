@@ -5495,11 +5495,10 @@ class PiiHazardClassifierConfigError(ValueError):
     """
 
 
-#: Mode vocabulary this slice resolves to. ``prefilter`` is the follow-on
-#: child (issue athenaeum#2063's re-slice) and is deliberately absent here —
-#: naming it raises :class:`PiiHazardClassifierConfigError` exactly like any
-#: other unknown value, until that child lands.
-_PII_HAZARD_CLASSIFIER_VALID_MODES = ("none", "shadow")
+#: Mode vocabulary this knob resolves to. ``prefilter`` landed with issue
+#: athenaeum#2064; any value outside this tuple still raises
+#: :class:`PiiHazardClassifierConfigError` naming the key.
+_PII_HAZARD_CLASSIFIER_VALID_MODES = ("none", "shadow", "prefilter")
 
 
 def resolve_pii_hazard_classifier_mode(config: dict[str, Any] | None) -> str:
@@ -5509,13 +5508,26 @@ def resolve_pii_hazard_classifier_mode(config: dict[str, Any] | None) -> str:
     Issue athenaeum#2063 (Vitruvius design): gates whether Maya (a local
     yes/no cross-encoder) scores the post-allowlist email/phone tokens
     ``storage lint-pii`` and ``merges recompare`` already found via regex.
-    ``"none"`` is byte-identical to pre-athenaeum#2063 behaviour and is the
-    default. ``"shadow"`` scores those tokens and appends one ledger line
-    per token under the cache directory — it never changes a verdict or the
-    gate's exit code. An unrecognized value (including ``"prefilter"``,
-    this slice's follow-on, not yet built) raises
-    :class:`PiiHazardClassifierConfigError` naming the key — env beats yaml
-    beats default, mirroring :func:`athenaeum.decision_provider.resolve_decision_provider`.
+
+    - ``"none"`` (the default) is byte-identical to pre-athenaeum#2063
+      behaviour: no scoring, no ledger, no classifier import.
+    - ``"shadow"`` scores those tokens and appends one ledger line per
+      token under the cache directory — it never changes a verdict or the
+      gate's exit code.
+    - ``"prefilter"`` (issue athenaeum#2064, operator ruling of 2026-10-25)
+      lets the model DECIDE a candidate, but only on the phone axis and
+      only outside the abstention band: a PHONE-shaped candidate that is a
+      bare 10-to-12-digit identifier run clears the regex flag below the
+      band and keeps it above, while anything inside the band — and every
+      EMAIL-shaped candidate, in every mode — stays regex-decided. The
+      shadow adjudication found Maya wrong on every email-axis "no" and
+      right on every phone-axis one, which is exactly why the axes differ.
+      An allowlist entry and a sticky off-corpus "is PII" verdict both
+      still win over any score.
+
+    An unrecognized value raises :class:`PiiHazardClassifierConfigError`
+    naming the key — env beats yaml beats default, mirroring
+    :func:`athenaeum.decision_provider.resolve_decision_provider`.
     """
     env = os.environ.get("ATHENAEUM_PII_HAZARD_CLASSIFIER_MODE")
     if env is not None and env.strip():
