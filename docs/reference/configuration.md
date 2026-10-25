@@ -2559,6 +2559,15 @@ machine that may verify need not be a machine that may sign. Prefer the
 inline form (see `resolve_receipt_signing_public_key_openssh`) when
 verification should run with no 1Password access at all.
 
+**Unset, it is DERIVED from the private-key reference** — the same vault
+and item, field ``public key`` — never a fixed constant (Seer review on
+PR). A constant default would pair a custom private-key
+reference with the stock item's public key, so signing and verification
+would use different keys and every seal would fail for a reason the
+output could not explain. Derivation keeps the pair coherent by
+construction; an item whose public field is named something else needs
+this key set explicitly.
+
 ### `resolve_reindex_full_rehash_max_age_days`
 
 - **YAML path:** `librarian.reindex.full_rehash_max_age_days`

@@ -310,9 +310,26 @@ class OnePasswordServiceAccountKeyProvider:
         return derive_key_id(self.public_key())
 
     def sign(self, payload: bytes) -> bytes:
-        """Sign *payload*, holding the private key for this call only."""
+        """Sign *payload*, holding the private key for this call only.
+
+        Refuses outright when an explicitly configured public key does not
+        belong to the private key just read (Seer review on PR
+        athenaeum#2137). Without the check a mismatched pair signs happily
+        and records a ``key_id`` for a key that did not sign anything —
+        every seal then fails verification for a reason the output cannot
+        explain. The whole claim that a provider "cannot mislabel the key it
+        actually holds" rests on this comparison.
+        """
         private_key = _load_private_key(self._op_read(self.op_reference))
         try:
+            if self.public_key_openssh or self.public_key_reference:
+                derived = _raw_public_bytes(private_key)
+                if derived != self.public_key():
+                    raise ValueError(
+                        "receipt signing config is inconsistent: the configured "
+                        "public key does not belong to the private key at "
+                        f"{self.op_reference!r}. Point both at the same item."
+                    )
             return bytes(private_key.sign(payload))
         finally:
             del private_key
@@ -479,27 +496,57 @@ class SigningSealer:
     provider: SigningKeyProvider
     verify_public_key: bytes | None = None
     name: str = field(default=SIGNING_SEALER_NAME, init=False)
-    _warned: bool = field(default=False, init=False, repr=False)
+    #: Set once the provider has failed. Both halves matter: it suppresses
+    #: the repeat warnings, AND it stops re-running ``op read`` once per
+    #: receipt for a failure that cannot change within a run (Seer review on
+    #: PR athenaeum#2137 — a readable-but-malformed key is deterministic, so
+    #: retrying it is pure subprocess cost).
+    _failure: str | None = field(default=None, init=False, repr=False)
+
+    @property
+    def last_error(self) -> str | None:
+        """Why this sealer stopped sealing, or ``None`` if it has not.
+
+        Lets a SUPERVISED ``athenaeum receipts seal`` report the actual
+        reason instead of a generic "unavailable" — the nightly path only
+        ever needs the one log line.
+        """
+        return self._failure
+
+    def _give_up(self, reason: str, remedy: str) -> SealRecord | None:
+        """Record *reason*, warn ONCE, and seal nothing for the rest of the run."""
+        self._failure = reason
+        log.warning(
+            "receipt_sealers: %s — appending receipts UNSEALED (%s)", reason, remedy
+        )
+        return None
 
     # -- Sealer -------------------------------------------------------------
 
     def seal(
         self, partition_path: Path, start_line: int, end_line: int, lines: list[str]
     ) -> SealRecord | None:
+        if self._failure is not None:
+            return None
         payload = seal_payload(partition_path.name, start_line, end_line, lines)
         try:
             signature = self.provider.sign(payload)
             key_id = self.provider.key_id()
         except KeyUnavailable as exc:
-            if not self._warned:
-                self._warned = True
-                log.warning(
-                    "receipt_sealers: signing key unavailable, appending receipts "
-                    "UNSEALED (run `athenaeum receipts seal` where the key is "
-                    "reachable): %s",
-                    exc,
-                )
-            return None
+            return self._give_up(
+                f"signing key unavailable ({exc})",
+                "run `athenaeum receipts seal` where the key is reachable",
+            )
+        except Exception as exc:  # noqa: BLE001 — a sealer must never break intake.
+            # A readable-but-unusable key (wrong algorithm, malformed field,
+            # mismatched pair) is a real configuration fault, but it is still
+            # not intake's problem to raise on: the ledger line is appended
+            # either way, and `receipts verify` will report the whole range
+            # unsealed. What this must NOT do is retry per receipt.
+            return self._give_up(
+                f"signing key unusable ({type(exc).__name__}: {exc})",
+                "fix librarian.receipt_signing, then run `athenaeum receipts seal`",
+            )
         stored = StoredSeal(
             month=partition_path.stem,
             start_line=start_line,
@@ -735,8 +782,8 @@ def seal_all_unsealed(wiki_root: Path, sealer: SigningSealer) -> SealAllReport:
                     sealed=sealed,
                     already_sealed=already,
                     unavailable=(
-                        "signing key unavailable — nothing further was sealed; run "
-                        "where the 1Password service-account token is set"
+                        f"{sealer.last_error or 'signing key unavailable'} — "
+                        "nothing further was sealed"
                     ),
                 )
             sealed.append(ref)

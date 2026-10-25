@@ -772,6 +772,116 @@ class TestReceiptsSealCliEndToEnd:
         assert "usage: athenaeum receipts {seal,verify}" in capsys.readouterr().err
 
 
+class TestSeerReviewFindings:
+    """Regressions the review on PR athenaeum#2137 named, each with its own pin."""
+
+    def test_custom_private_reference_derives_a_matching_public_reference(self) -> None:
+        """A custom `op_reference` must not be paired with the stock public key.
+
+        The original defaults were two independent constants, so configuring
+        only the private reference signed with one key and verified against
+        another — every seal failing for a reason the output could not
+        explain.
+        """
+        from athenaeum.config import resolve_receipt_signing_public_key_ref
+
+        derived = resolve_receipt_signing_public_key_ref(
+            {"librarian": {"receipt_signing": {"op_reference": "op://V2/Item2/private key"}}}
+        )
+        assert derived == "op://V2/Item2/public key"
+        # An explicit value still wins.
+        assert (
+            resolve_receipt_signing_public_key_ref(
+                {"librarian": {"receipt_signing": {"public_key_ref": "op://V/I/pub"}}}
+            )
+            == "op://V/I/pub"
+        )
+
+    def test_sign_refuses_a_mismatched_public_key(self, tmp_path: Path) -> None:
+        """A provider cannot mislabel the key it actually holds."""
+        signing_key = Ed25519PrivateKey.generate()
+        other_key = Ed25519PrivateKey.generate()
+        bin_dir = tmp_path / "fixture-bin"
+        _fake_op(bin_dir, private=_openssh_private(signing_key), public=_openssh_public(other_key))
+        provider = OnePasswordServiceAccountKeyProvider(
+            PRIVATE_REF,
+            public_key_reference=PUBLIC_REF,
+            env=_provider_env(bin_dir, tmp_path / "home"),
+        )
+        with pytest.raises(ValueError, match="does not belong to the private key"):
+            provider.sign(b"payload")
+
+    def test_a_malformed_key_warns_once_and_stops_shelling_out(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A readable-but-unusable key is deterministic; retrying it per receipt is cost.
+
+        Counts actual provider calls, so a future refactor that drops the
+        give-up latch fails here rather than merely getting noisier.
+        """
+
+        class _Malformed:
+            calls = 0
+
+            def key_id(self) -> str:  # pragma: no cover - never reached
+                return "unused"
+
+            def sign(self, payload: bytes) -> bytes:
+                type(self).calls += 1
+                raise ValueError("not an Ed25519 key")
+
+            def public_key(self) -> bytes:  # pragma: no cover - never reached
+                return b""
+
+        knowledge_root = tmp_path / "knowledge"
+        wiki = knowledge_root / "wiki"
+        for n in range(4):
+            _ledger_line(wiki, knowledge_root, f"digest{n}")
+        sealer = SigningSealer(_Malformed())
+
+        with caplog.at_level(logging.WARNING):
+            report = seal_all_unsealed(wiki, sealer)
+
+        assert report.sealed == []
+        assert _Malformed.calls == 1
+        assert report.unavailable is not None
+        assert "unusable" in report.unavailable
+        warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert len(warnings) == 1, [r.getMessage() for r in warnings]
+        assert sealer.last_error is not None
+        assert "ValueError" in sealer.last_error
+
+    def test_a_misconfigured_sealer_is_reported_as_config_invalid_not_failed(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A typo in a security knob must not read like a transient writer error."""
+        from athenaeum import librarian as librarian_mod
+
+        class _Ctx:
+            dry_run = False
+            lock = object()
+            wiki_root = tmp_path / "wiki"
+            projects_root = tmp_path / "projects"
+            config: dict[str, Any] = {
+                "librarian": {
+                    "transcript_receipts_enabled": True,
+                    "receipt_sealer": "signng",
+                }
+            }
+            run_profile: list[Any] = []
+
+        ctx = _Ctx()
+        with caplog.at_level(logging.ERROR):
+            librarian_mod._write_transcript_receipts(ctx, [])  # type: ignore[arg-type]
+
+        assert len(ctx.run_profile) == 1
+        name, _elapsed, fields = ctx.run_profile[0]
+        assert name == "transcript-receipts"
+        assert fields == {"reason": "sealer-config-invalid"}
+        assert any("receipt_sealer" in r.getMessage() for r in caplog.records)
+        assert not (tmp_path / "wiki" / "_transcript_receipts").exists()
+
+
 class TestKnownLimitASealDoesNotClose:
     """A verified seal attests the LEDGER, never the transcript.
 

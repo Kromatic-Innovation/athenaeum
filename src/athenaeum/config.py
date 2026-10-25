@@ -6300,7 +6300,10 @@ DEFAULT_RECEIPT_SIGNING_OP_REFERENCE = (
     "op://Agent Tools/Athenaeum Receipt Sealing Key/private key"
 )
 
-#: Default ``op://`` reference for the matching public key.
+#: Fallback ``op://`` reference for the matching public key. Normally the
+#: public reference is DERIVED from whatever private reference is configured
+#: (see :func:`resolve_receipt_signing_public_key_ref`); this constant is only
+#: reached when the private reference has no field segment to replace.
 DEFAULT_RECEIPT_SIGNING_PUBLIC_KEY_REF = (
     "op://Agent Tools/Athenaeum Receipt Sealing Key/public key"
 )
@@ -6412,6 +6415,15 @@ def resolve_receipt_signing_public_key_ref(config: dict[str, Any] | None) -> str
     machine that may verify need not be a machine that may sign. Prefer the
     inline form (see :func:`resolve_receipt_signing_public_key_openssh`) when
     verification should run with no 1Password access at all.
+
+    **Unset, it is DERIVED from the private-key reference** — the same vault
+    and item, field ``public key`` — never a fixed constant (Seer review on
+    PR athenaeum#2137). A constant default would pair a custom private-key
+    reference with the stock item's public key, so signing and verification
+    would use different keys and every seal would fail for a reason the
+    output could not explain. Derivation keeps the pair coherent by
+    construction; an item whose public field is named something else needs
+    this key set explicitly.
     """
     raw: Any = None
     # The three key segments are read INLINE, in order, rather than
@@ -6428,6 +6440,10 @@ def resolve_receipt_signing_public_key_ref(config: dict[str, Any] | None) -> str
                 raw = _signing.get("public_key_ref")
     if isinstance(raw, str) and raw.strip():
         return raw.strip()
+    private_ref = resolve_receipt_signing_op_reference(config)
+    head, sep, _field = private_ref.rpartition("/")
+    if sep and head:
+        return f"{head}/public key"
     return DEFAULT_RECEIPT_SIGNING_PUBLIC_KEY_REF
 
 
