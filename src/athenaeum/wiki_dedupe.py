@@ -141,6 +141,7 @@ calls into this module only via its own deferred import (a one-way edge).
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import replace
 from itertools import combinations
@@ -227,6 +228,18 @@ DEDUPE_CANDIDATE_TYPES: frozenset[str] = frozenset(
 WIKI_ORIGIN_SCOPE = "wiki"
 
 EmbeddingProvider = Callable[[list[str]], "list[list[float]] | None"]
+
+# Issue athenaeum#2132: the three ``reason`` tokens
+# :func:`propose_wiki_page_merges` reports for its own exit, published
+# through its ``out_stop`` output dict and rendered by the librarian's
+# ``wiki-dedup`` run-profile entry. The two early-stop tokens deliberately
+# reuse the SAME vocabulary every other budget-bounded phase already writes
+# (``athenaeum.librarian._write_deferred_manifest``'s ``reason=``), so a
+# consumer grepping ``reason=budget`` over ``run_summary.jsonl`` sees this
+# phase alongside the rest rather than having to learn a fourth spelling.
+STOP_REASON_COMPLETED = "completed"
+STOP_REASON_BUDGET = "budget"
+STOP_REASON_DEADLINE = "deadline"
 
 # Issue athenaeum#1032: one-time WARNING flag — ``_resolve_wiki_embeddings`` can be
 # called many times across a run (once per ``find_wiki_page_clusters`` /
@@ -679,6 +692,9 @@ def propose_wiki_page_merges(
     client: "LLMBackend | None" = None,
     usage: TokenUsage | None = None,
     lock: RunLock | None = None,
+    max_api_calls: int | None = None,
+    deadline: float | None = None,
+    out_stop: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Compare candidate duplicate wiki pages via the five-verdict comparator.
 
@@ -724,6 +740,41 @@ def propose_wiki_page_merges(
             ledgering a verdict is a single-appender write. When ``None`` and
             *dry_run* is also ``False``, this pass is skipped entirely
             (logged, never raised) rather than comparing without a lock.
+        max_api_calls: Optional run-level API-call ceiling (issue
+            athenaeum#2132). When set alongside *usage*, the pair loop stops
+            between candidate pairs as soon as ``usage.api_calls`` reaches
+            it. ``None`` (the default, and every caller before this issue)
+            leaves the loop unbounded, exactly as before. Unlike the
+            librarian's own raw-intake budget trip this is NOT waived in a
+            dry run: a dry run still routes every pair through
+            :func:`athenaeum.comparator.compare_pages`, so its Gate-2 calls
+            are real spend against the same ceiling.
+        deadline: Optional :func:`time.monotonic` instant (issue
+            athenaeum#2132) — the run-level wall-clock deadline
+            (``RunContext.run_deadline``). The pair loop stops between
+            candidate pairs once it is reached. ``None`` leaves the loop
+            unbounded, as before. Before this issue the librarian checked
+            its deadline only AFTER this whole pass returned, so a large
+            dedup backlog could run hours past it and starve every
+            downstream phase.
+        out_stop: Optional output dict (the same idiom as
+            ``find_wiki_page_clusters``'s ``out_embeddings``). Populated,
+            whenever the pair loop was actually entered, with ``reason``
+            (:data:`STOP_REASON_COMPLETED`, :data:`STOP_REASON_BUDGET` or
+            :data:`STOP_REASON_DEADLINE`), ``pairs_examined`` and
+            ``pairs_remaining`` so the caller's run-summary entry can say
+            that this phase stopped early and how much it left behind. Left
+            UNTOUCHED on the three paths that never enter the loop
+            (comparator disabled, no ``wiki/``, no lock on a non-dry run),
+            so a default run's rendered summary line is unchanged.
+
+    Stopping early is RESUMABLE and decides nothing by force (issue
+    athenaeum#2132 AC1): the pairs not reached are simply not examined this
+    run, so the next run sees them exactly as this one did. Everything the
+    partial pass DID decide is still flushed by the ``finally`` below — the
+    batched ``coordinate`` queue items, the attribution snapshot and the
+    comparator-unavailable warning — the same shape a mid-loop exception
+    already produced.
 
     Side effects (issue athenaeum#1243): every real (non-dry-run,
     lock-held) call writes :mod:`athenaeum.wiki_dedupe_attribution`'s
@@ -785,6 +836,45 @@ def propose_wiki_page_merges(
         out_embeddings=pair_embeddings,
     )
 
+    # Issue athenaeum#2132 (AC2): the denominator for ``pairs_remaining``, and
+    # the only place the full candidate-pair count is knowable before the
+    # loop starts spending on it. Mirrors the loop's own member filter
+    # (``relpath in by_relpath``) and its ``len(members) < 2`` skip exactly,
+    # so examined + remaining always sums to this figure.
+    total_pairs = 0
+    for _c in clusters:
+        _n_members = sum(1 for _rp in _c.member_paths if _rp in by_relpath)
+        if _n_members >= 2:
+            total_pairs += _n_members * (_n_members - 1) // 2
+    pairs_examined = 0
+    stop_reason = STOP_REASON_COMPLETED
+
+    def _publish_stop() -> None:
+        """Issue athenaeum#2132 (AC2): hand the caller this pass's exit reason
+        and what it left behind. Called from the ``finally`` below (and the
+        zero-cluster early return) so a mid-loop exception still reports
+        whatever was examined, the same discipline as ``_flush_attribution``."""
+        if out_stop is None:
+            return
+        out_stop["reason"] = stop_reason
+        out_stop["pairs_examined"] = pairs_examined
+        out_stop["pairs_remaining"] = max(total_pairs - pairs_examined, 0)
+
+    def _exhausted() -> str | None:
+        """The run-level budget/deadline check applied BETWEEN pairs (issue
+        athenaeum#2132 AC1). Returns the ``reason`` token to stop on, or
+        ``None`` to keep going. Budget before deadline only so a run that
+        tripped both reports the cheaper-to-act-on one; neither is advisory."""
+        if (
+            max_api_calls is not None
+            and usage is not None
+            and usage.api_calls >= max_api_calls
+        ):
+            return STOP_REASON_BUDGET
+        if deadline is not None and time.monotonic() >= deadline:
+            return STOP_REASON_DEADLINE
+        return None
+
     # Issue athenaeum#398: this pass (athenaeum#290) is one of the post-compile dark zones —
     # a wedge examining a candidate cluster previously produced zero log
     # output. Emit start/done even with zero candidate clusters so a
@@ -829,6 +919,7 @@ def propose_wiki_page_merges(
 
     if not clusters:
         _flush_attribution()
+        _publish_stop()  # issue athenaeum#2132: ran, examined zero pairs
         heartbeat.done()
         return []
 
@@ -993,6 +1084,30 @@ def propose_wiki_page_merges(
                 continue
 
             for am_a, am_b in combinations(members, 2):
+                # Issue athenaeum#2132 (AC1): the run-level API-call budget and
+                # the run wall-clock deadline, checked BETWEEN candidate
+                # pairs and BEFORE anything is spent on this one — so a
+                # caller that arrives already at its cap examines zero
+                # pairs rather than one more. Both caps were advisory for
+                # this phase before this issue: a single run made 3980
+                # Gate-2 calls against a cap of 150 and spent 16,386s
+                # against a 3600s deadline, because the only check was the
+                # caller's, after this whole pass returned.
+                _trip = _exhausted()
+                if _trip is not None:
+                    stop_reason = _trip
+                    log.warning(
+                        "wiki-page dedup: stopping early (reason=%s) after %d "
+                        "of %d candidate pair(s) — the remaining %d pair(s) "
+                        "are left for the next run, undecided",
+                        stop_reason,
+                        pairs_examined,
+                        total_pairs,
+                        max(total_pairs - pairs_examined, 0),
+                    )
+                    break
+                pairs_examined += 1
+
                 path_a, path_b = am_a.path.resolve(), am_b.path.resolve()
                 sources = [str(path_a), str(path_b)]
                 # Issue athenaeum#2080 AC3: this pair's embedding cosine,
@@ -1425,6 +1540,13 @@ def propose_wiki_page_merges(
                     effect.action,
                     record["pair"],
                 )
+
+            # Issue athenaeum#2132 (AC1): the inner ``break`` above only leaves
+            # THIS cluster's pair loop; carry the stop out to the cluster
+            # loop too, or an exhausted run would keep walking every
+            # remaining cluster one wasted pair at a time.
+            if stop_reason != STOP_REASON_COMPLETED:
+                break
     finally:
         # Issue athenaeum#1245 (QA review finding 1): in a `finally` so a
         # mid-loop exception (e.g. record_comparison's ledger I/O) still gets a
@@ -1486,5 +1608,9 @@ def propose_wiki_page_merges(
         # exception still snapshots whatever this partial pass accounted for,
         # instead of discarding every row along with the exception.
         _flush_attribution()
+        # Issue athenaeum#2132 (AC2): in the SAME ``finally``, for the same
+        # reason — a mid-loop exception still reports what this partial pass
+        # examined instead of discarding the count along with the exception.
+        _publish_stop()
         heartbeat.done()
     return results

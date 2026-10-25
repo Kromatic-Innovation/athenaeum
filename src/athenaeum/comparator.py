@@ -830,7 +830,26 @@ def content_relation(
 
     input_toks, output_toks, cache_creation, cache_read = cache_usage_counts(response)
     if usage is not None:
-        usage.add_tokens(
+        # Issue athenaeum#2132: ``add``, NOT ``add_tokens``. ``add_tokens``'s
+        # own contract (see :meth:`athenaeum.models.TokenUsage.add_tokens`)
+        # is "accumulate token counters WITHOUT counting an API call -- for
+        # callees whose ORCHESTRATING call site counts ``api_calls``
+        # separately", the way merge.py's C4 detector/resolver loop
+        # pre-increments before it dispatches. No call site of this function
+        # ever did that: not ``compare_pages``/``record_comparison``, not
+        # ``wiki_dedupe.propose_wiki_page_merges``, not
+        # ``comparator_instruments``. So every Gate-2 call landed its tokens
+        # and its cost into the run-level ``TokenUsage`` while leaving
+        # ``api_calls`` -- the counter ``librarian.max_api_calls`` is
+        # denominated in, and the one ``economics.calls`` reports -- exactly
+        # where it found it. That is WHY ``--max-api-calls`` was advisory for
+        # the wiki-dedup phase rather than merely unchecked: the phase's
+        # spend was invisible to the budget it was supposed to be spending
+        # against, so no ceiling placed anywhere could have bound it. ``add``
+        # calls ``add_tokens`` and then counts the one call, which is what
+        # every other LLM-serving call site does
+        # (``athenaeum.tiers._record_usage``).
+        usage.add(
             input_toks,
             output_toks,
             cache_creation,
