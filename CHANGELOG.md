@@ -35,6 +35,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`pii.hazard_classifier.mode = prefilter`: Maya may now DECIDE a PII-hazard
+  candidate, on the phone axis only (issue athenaeum#2064, operator ruling of
+  2026-10-25).** `storage lint-pii` and `merges recompare` accept the new mode
+  (env `ATHENAEUM_PII_HAZARD_CLASSIFIER_MODE`). A PHONE-shaped candidate that
+  is a bare 10-to-12-digit identifier run clears the regex flag below the
+  abstention band `[0.4, 0.6]` and keeps it above; inside the band, and for a
+  separator-formatted or `+`-prefixed candidate, the regex decides as before.
+  An EMAIL-shaped candidate is never cleared in any mode — the shadow
+  adjudication found Maya wrong on every email-axis "no" (role and no-reply
+  addresses are contact values under Kromatic policy) and right on every
+  phone-axis one, which is why the axes differ. An allowlist entry and a
+  sticky off-corpus "is PII" verdict still beat any score, and a
+  `scorer: unavailable` run falls back to regex-only and clears nothing. Each
+  cleared token appends one ledger row with `mode: prefilter`, `cleared: true`,
+  `p_yes`, the recognizer and the question sha, so a clear is auditable
+  without plaintext; the findings output prints one summary line counting
+  cleared / kept / in-band / email-untouched / phone-shape-untouched. Modes
+  `none` and `shadow` are unchanged, pinned by their existing golden tests.
+
 - **Tier-2 static context-file adapter for OpenAI Codex, `athenaeum
   codex-context` (issue athenaeum#1364).** Renders one recall snapshot to
   `~/.codex/athenaeum-context.md` with its own refresh interval, `generated_at`

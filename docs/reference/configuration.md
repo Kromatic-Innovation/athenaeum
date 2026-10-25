@@ -3612,13 +3612,26 @@ default ``"none"``).
  (Vitruvius design): gates whether Maya (a local
 yes/no cross-encoder) scores the post-allowlist email/phone tokens
 ``storage lint-pii`` and ``merges recompare`` already found via regex.
-``"none"`` is byte-identical to pre- behaviour and is the
-default. ``"shadow"`` scores those tokens and appends one ledger line
-per token under the cache directory — it never changes a verdict or the
-gate's exit code. An unrecognized value (including ``"prefilter"``,
-this slice's follow-on, not yet built) raises
-`PiiHazardClassifierConfigError` naming the key — env beats yaml
-beats default, mirroring `athenaeum.decision_provider.resolve_decision_provider`.
+
+- ``"none"`` (the default) is byte-identical to pre-
+ behaviour: no scoring, no ledger, no classifier import.
+- ``"shadow"`` scores those tokens and appends one ledger line per
+ token under the cache directory — it never changes a verdict or the
+ gate's exit code.
+- ``"prefilter"`` (operator ruling of 2026-10-25)
+ lets the model DECIDE a candidate, but only on the phone axis and
+ only outside the abstention band: a PHONE-shaped candidate that is a
+ bare 10-to-12-digit identifier run clears the regex flag below the
+ band and keeps it above, while anything inside the band — and every
+ EMAIL-shaped candidate, in every mode — stays regex-decided. The
+ shadow adjudication found Maya wrong on every email-axis "no" and
+ right on every phone-axis one, which is exactly why the axes differ.
+ An allowlist entry and a sticky off-corpus "is PII" verdict both
+ still win over any score.
+
+An unrecognized value raises `PiiHazardClassifierConfigError`
+naming the key — env beats yaml beats default, mirroring
+`athenaeum.decision_provider.resolve_decision_provider`.
 
 ### `resolve_pii_hazard_classifier_timeout_secs`
 

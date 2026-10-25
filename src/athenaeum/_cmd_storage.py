@@ -74,6 +74,8 @@ from athenaeum.config import (
 from athenaeum.pending_merges_pii import scrub_pending_merges
 from athenaeum.pii import (
     PII_ALLOWLIST_FILENAME,
+    PiiAdjudicatedFinding,
+    PiiAdjudication,
     PiiAllowlistEntry,
     adjudicate_corpus_pii,
     is_pii_class_excluded,
@@ -85,11 +87,15 @@ from athenaeum.pii import (
 from athenaeum.pii_h1_audit import MARKER_LEADING, find_h1_marker_pages
 from athenaeum.pii_h1_audit import render_report as render_h1_audit_report
 from athenaeum.pii_hazard_classifier import (
-    MODE_SHADOW,
+    MODE_PREFILTER,
     RECOGNIZER_EMAIL,
     RECOGNIZER_PHONE,
+    SCORING_MODES,
     ShadowCollector,
+    format_prefilter_summary,
+    prefilter_cleared_tokens,
     run_shadow_scoring,
+    summarize_prefilter,
 )
 from athenaeum.pii_verdicts import (
     ledger_scan_exclusions,
@@ -1008,24 +1014,63 @@ def _cmd_storage_migrate_pii_bulk(args: argparse.Namespace) -> int:
     return 1 if conflicted else 0
 
 
-def _annotate_shadow_p_yes(
-    tokens: list[str], recognizer: str, shadow_p_yes: dict[tuple[str, str], float]
+def _annotate_p_yes(
+    tokens: list[str], recognizer: str, hazard_p_yes: dict[tuple[str, str], float]
 ) -> list[str]:
-    """Annotate *tokens* with a shadow-mode ``P(yes)`` when one was scored.
+    """Annotate *tokens* with the model's ``P(yes)`` when one was scored.
 
     Human-text output only (issue athenaeum#2063's "operator view" -- the
     per-token detail is printed, never persisted beyond what the ledger
-    already records). ``shadow_p_yes`` is empty in mode ``"none"`` or on any
+    already records). ``hazard_p_yes`` is empty in mode ``"none"`` or on any
     fail-closed path, so this is a no-op then -- the gate's text output is
-    unchanged apart from this annotation (AC3).
+    unchanged apart from this annotation (athenaeum#2063 AC3).
+
+    In ``prefilter`` mode the tokens reaching here are the ones that are
+    still reported, so this is what annotates a KEPT phone token with the
+    score that kept it (issue athenaeum#2064 AC7).
     """
-    if not shadow_p_yes:
+    if not hazard_p_yes:
         return tokens
     out = []
     for token in tokens:
-        p_yes = shadow_p_yes.get((recognizer, token))
+        p_yes = hazard_p_yes.get((recognizer, token))
         out.append(f"{token} (p_yes={p_yes:.4f})" if p_yes is not None else token)
     return out
+
+
+def _drop_prefilter_cleared(
+    adjudication: PiiAdjudication, cleared: frozenset[tuple[str, str]]
+) -> PiiAdjudication:
+    """Rebuild *adjudication* without the tokens ``prefilter`` mode cleared.
+
+    A cleared token leaves the UNEXPLAINED lists (so it stops failing the
+    gate, stops appearing in the text and ``--json`` output, and stops
+    counting toward the exit code) and does NOT join ``allowlisted``: it was
+    not adjudicated by an operator, and conflating the two would inflate the
+    "adjudicated residue" count with model decisions. The model's own counts
+    are reported on their own summary line instead (issue athenaeum#2064).
+
+    ``stale``/``errors`` pass through untouched -- a cleared token says
+    nothing about whether an allowlist entry matched something.
+    """
+    if not cleared:
+        return adjudication
+    findings = [
+        PiiAdjudicatedFinding(
+            path=f.path,
+            allowlisted=f.allowlisted,
+            unexplained_emails=[
+                e for e in f.unexplained_emails if (RECOGNIZER_EMAIL, e) not in cleared
+            ],
+            unexplained_phones=[
+                t for t in f.unexplained_phones if (RECOGNIZER_PHONE, t) not in cleared
+            ],
+        )
+        for f in adjudication.findings
+    ]
+    return PiiAdjudication(
+        findings=findings, stale=adjudication.stale, errors=adjudication.errors
+    )
 
 
 def _cmd_storage_lint_pii(args: argparse.Namespace) -> int:
@@ -1127,8 +1172,9 @@ def _cmd_storage_lint_pii(args: argparse.Namespace) -> int:
     # pre-athenaeum#2063 behaviour: no extra config lookup side effects, no
     # ledger file, no classifier import.
     hazard_mode = resolve_pii_hazard_classifier_mode(config)
-    shadow_p_yes: dict[tuple[str, str], float] = {}
-    if hazard_mode == MODE_SHADOW:
+    hazard_p_yes: dict[tuple[str, str], float] = {}
+    prefilter_line: str | None = None
+    if hazard_mode in SCORING_MODES:
         is_pii_values = load_is_pii_values(knowledge_root=knowledge_root, config=config)
         collector = ShadowCollector(surface="lint-pii")
         for finding in result.findings:
@@ -1142,13 +1188,23 @@ def _cmd_storage_lint_pii(args: argparse.Namespace) -> int:
                     collector.n_skipped_is_pii += 1
                     continue
                 collector.add(RECOGNIZER_PHONE, phone)
-        shadow_p_yes = run_shadow_scoring(
+        hazard_p_yes = run_shadow_scoring(
             collector,
             mode=hazard_mode,
             weights_path=resolve_pii_hazard_classifier_weights_path(config),
             interpreter=resolve_pii_hazard_classifier_interpreter(config),
             timeout_secs=resolve_pii_hazard_classifier_timeout_secs(config),
         )
+
+    # Issue athenaeum#2064: mode "prefilter" is the ONLY mode that changes a
+    # verdict, and it changes exactly one class of them -- a bare
+    # identifier-shaped PHONE candidate scored below the band. Everything
+    # else (every email, every formatted phone, every in-band score, and
+    # every token on a `scorer: unavailable` run, which returns no scores at
+    # all) keeps the regex verdict it already had.
+    if hazard_mode == MODE_PREFILTER:
+        result = _drop_prefilter_cleared(result, prefilter_cleared_tokens(hazard_p_yes))
+        prefilter_line = format_prefilter_summary(summarize_prefilter(hazard_p_yes))
 
     # raw/ is scanned with the same self-exclusion (defensive: the allowlist
     # is conventionally under wiki/, but an operator-supplied --allowlist
@@ -1201,6 +1257,11 @@ def _cmd_storage_lint_pii(args: argparse.Namespace) -> int:
             # filename, reported rather than silently dropped.
             "excluded": [str(p) for p in excluded_wiki_paths + excluded_raw_paths],
         }
+        if prefilter_line is not None:
+            # stderr, not the payload: --json's shape is a consumer contract
+            # (athenaeum#1049 already widened it once), and the summary is
+            # operator-facing reporting, not a finding.
+            print(prefilter_line, file=sys.stderr)
         sys.stdout.write(json.dumps(payload) + "\n")
         return 0 if result.is_clean else EXIT_PII_FOUND
 
@@ -1224,17 +1285,20 @@ def _cmd_storage_lint_pii(args: argparse.Namespace) -> int:
         for f in unexplained_files:
             parts: list[str] = []
             if f.unexplained_emails:
-                annotated_emails = _annotate_shadow_p_yes(
-                    f.unexplained_emails, RECOGNIZER_EMAIL, shadow_p_yes
+                annotated_emails = _annotate_p_yes(
+                    f.unexplained_emails, RECOGNIZER_EMAIL, hazard_p_yes
                 )
                 parts.append(f"emails={annotated_emails}")
             if f.unexplained_phones:
-                annotated_phones = _annotate_shadow_p_yes(
-                    f.unexplained_phones, RECOGNIZER_PHONE, shadow_p_yes
+                annotated_phones = _annotate_p_yes(
+                    f.unexplained_phones, RECOGNIZER_PHONE, hazard_p_yes
                 )
                 parts.append(f"phones={annotated_phones}")
             print(f"  {f.path}: {'; '.join(parts)}")
         wiki_rc = EXIT_PII_FOUND
+
+    if prefilter_line is not None:
+        print(prefilter_line)
 
     # athenaeum#1049: raw/ is reported unconditionally, informational only —
     # never gates the exit code (see the docstring for why).

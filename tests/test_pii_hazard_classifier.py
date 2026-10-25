@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the Maya PII-hazard classifier glue (issue athenaeum#2063).
+"""Tests for the Maya PII-hazard classifier glue (issues athenaeum#2063,
+athenaeum#2064).
 
 Every test uses a fake :class:`~athenaeum.yesno.YesNoScorer` and a
 ``tmp_path``-rooted cache directory -- no test writes to
@@ -14,16 +15,25 @@ from pathlib import Path
 import pytest
 
 from athenaeum.pii_hazard_classifier import (
+    DECISION_CLEAR,
+    DECISION_KEEP,
+    DECISION_REGEX,
     MODE_NONE,
+    MODE_PREFILTER,
     MODE_SHADOW,
     RECOGNIZER_EMAIL,
     RECOGNIZER_PHONE,
     HazardToken,
     ShadowCollector,
     compute_weights_id,
+    decide_prefilter,
+    format_prefilter_summary,
+    is_clearable_phone_shape,
     load_pii_hazard_question,
+    prefilter_cleared_tokens,
     question_sha256,
     run_shadow_scoring,
+    summarize_prefilter,
 )
 from athenaeum.yesno import YesNoScorerUnavailable
 
@@ -250,3 +260,240 @@ class TestQuestionAndWeightsId:
         wid = compute_weights_id(tmp_path)
         assert wid is not None
         assert len(wid) == 64
+
+
+# ---------------------------------------------------------------------------
+# Prefilter mode (issue athenaeum#2064, operator ruling of 2026-10-25)
+# ---------------------------------------------------------------------------
+
+#: A bare identifier-shaped phone candidate -- 11 digits, no separators, no
+#: leading "+". Synthetic: the shape, not any real value, is what matters.
+_CLEARABLE_PHONE = "33709806658"
+
+#: A candidate formatted the way a human writes a number they dial. Never
+#: clearable at any score (AC3).
+_FORMATTED_PHONE = "+1 415 555 0100"
+
+
+class TestDecidePrefilterPhoneAxis:
+    """AC1: the three P(yes) positions on a clearable phone candidate."""
+
+    def test_below_the_band_clears(self) -> None:
+        assert (
+            decide_prefilter(RECOGNIZER_PHONE, _CLEARABLE_PHONE, 0.1) == DECISION_CLEAR
+        )
+
+    def test_inside_the_band_leaves_the_regex_to_decide(self) -> None:
+        assert (
+            decide_prefilter(RECOGNIZER_PHONE, _CLEARABLE_PHONE, 0.5) == DECISION_REGEX
+        )
+
+    def test_above_the_band_keeps(self) -> None:
+        assert (
+            decide_prefilter(RECOGNIZER_PHONE, _CLEARABLE_PHONE, 0.9) == DECISION_KEEP
+        )
+
+    @pytest.mark.parametrize("p_yes", [0.4, 0.6])
+    def test_both_band_ends_are_closed(self, p_yes: float) -> None:
+        # A score exactly ON an endpoint is the model abstaining, not
+        # deciding -- the band is [low, high], not (low, high).
+        assert (
+            decide_prefilter(RECOGNIZER_PHONE, _CLEARABLE_PHONE, p_yes)
+            == DECISION_REGEX
+        )
+
+    def test_an_unscored_candidate_is_regex_decided(self) -> None:
+        # The `scorer: unavailable` path at the single-token level: no score
+        # means no decision, never a clear.
+        assert (
+            decide_prefilter(RECOGNIZER_PHONE, _CLEARABLE_PHONE, None) == DECISION_REGEX
+        )
+
+    def test_the_band_is_a_parameter_not_a_hidden_constant(self) -> None:
+        assert (
+            decide_prefilter(RECOGNIZER_PHONE, _CLEARABLE_PHONE, 0.1, (0.05, 0.95))
+            == DECISION_REGEX
+        )
+
+
+class TestDecidePrefilterEmailAxisIsNeverCleared:
+    """AC2: Maya may not clear an email-shaped candidate in any mode."""
+
+    @pytest.mark.parametrize("p_yes", [0.0, 0.05, 0.5, 0.95])
+    def test_no_score_clears_an_email(self, p_yes: float) -> None:
+        assert (
+            decide_prefilter(RECOGNIZER_EMAIL, "role@example.invalid", p_yes)
+            == DECISION_REGEX
+        )
+
+    def test_an_email_is_never_even_reported_as_kept(self) -> None:
+        # "kept" records the model AGREEING with the regex; on the email axis
+        # the model's agreement is not consulted at all, so the decision is
+        # `regex` rather than `keep` even at a high score.
+        assert (
+            decide_prefilter(RECOGNIZER_EMAIL, "role@example.invalid", 0.99)
+            == DECISION_REGEX
+        )
+
+
+class TestClearablePhoneShape:
+    """AC3: only a bare 10-to-12-digit run is ever clearable."""
+
+    @pytest.mark.parametrize("value", ["0123456789", _CLEARABLE_PHONE, "012345678901"])
+    def test_bare_runs_of_ten_to_twelve_digits_are_clearable(self, value: str) -> None:
+        assert is_clearable_phone_shape(value)
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "012345678",  # nine digits: too short
+            "0123456789012",  # thirteen digits: too long
+            _FORMATTED_PHONE,  # leading "+" and separators
+            "+33709806658",  # leading "+" alone
+            "415-555-0100",  # separators alone
+            "(415) 5550100",  # parens
+            "337 098 06658",  # spaces
+            "3370980665a",  # not all digits
+        ],
+    )
+    def test_everything_else_is_not_clearable(self, value: str) -> None:
+        assert not is_clearable_phone_shape(value)
+
+    def test_a_formatted_phone_stays_regex_decided_at_a_clearing_score(self) -> None:
+        assert (
+            decide_prefilter(RECOGNIZER_PHONE, _FORMATTED_PHONE, 0.01) == DECISION_REGEX
+        )
+
+
+class TestPrefilterLedgerRows:
+    """AC6: every cleared token is auditable without plaintext."""
+
+    def _run(self, tmp_path: Path, tokens: list[tuple[str, str]], scores: list[float]):
+        collector = ShadowCollector(surface="lint-pii")
+        for recognizer, text in tokens:
+            collector.add(recognizer, text)
+        return run_shadow_scoring(
+            collector,
+            mode=MODE_PREFILTER,
+            weights_path=None,
+            interpreter=None,
+            timeout_secs=10.0,
+            cache_dir=tmp_path,
+            scorer=_FakeScorer(scores),
+        )
+
+    def test_a_cleared_token_writes_a_cleared_row(self, tmp_path: Path) -> None:
+        self._run(tmp_path, [(RECOGNIZER_PHONE, _CLEARABLE_PHONE)], [0.1])
+
+        token_rows = [r for r in _read_ledger_lines(tmp_path) if r["kind"] == "token"]
+        assert len(token_rows) == 1
+        row = token_rows[0]
+        assert row["mode"] == MODE_PREFILTER
+        assert row["cleared"] is True
+        assert row["decision"] == DECISION_CLEAR
+        assert row["p_yes"] == pytest.approx(0.1)
+        assert row["recognizer"] == RECOGNIZER_PHONE
+        assert row["question_sha"] == question_sha256(load_pii_hazard_question())
+        # The audit trail must carry no value and no path, exactly as in
+        # shadow mode (issue athenaeum#2063's privacy contract).
+        assert _CLEARABLE_PHONE not in json.dumps(row)
+
+    def test_kept_band_and_email_rows_record_not_cleared(self, tmp_path: Path) -> None:
+        self._run(
+            tmp_path,
+            [
+                (RECOGNIZER_PHONE, _CLEARABLE_PHONE),
+                (RECOGNIZER_PHONE, "012345678901"),
+                (RECOGNIZER_PHONE, _FORMATTED_PHONE),
+                (RECOGNIZER_EMAIL, "role@example.invalid"),
+            ],
+            [0.9, 0.5, 0.01, 0.01],
+        )
+
+        token_rows = [r for r in _read_ledger_lines(tmp_path) if r["kind"] == "token"]
+        assert [r["decision"] for r in token_rows] == [
+            DECISION_KEEP,
+            DECISION_REGEX,
+            DECISION_REGEX,
+            DECISION_REGEX,
+        ]
+        assert all(r["cleared"] is False for r in token_rows)
+
+    def test_an_unavailable_scorer_clears_nothing(self, tmp_path: Path) -> None:
+        collector = ShadowCollector(surface="lint-pii")
+        collector.add(RECOGNIZER_PHONE, _CLEARABLE_PHONE)
+
+        result = run_shadow_scoring(
+            collector,
+            mode=MODE_PREFILTER,
+            weights_path=None,
+            interpreter=None,
+            timeout_secs=10.0,
+            cache_dir=tmp_path,
+            scorer=_AlwaysUnavailableScorer(),
+        )
+
+        # No scores at all, so nothing can be cleared -- the gate falls back
+        # to regex-only by construction, not by a second check.
+        assert result == {}
+        assert prefilter_cleared_tokens(result) == frozenset()
+        rows = _read_ledger_lines(tmp_path)
+        assert [r["kind"] for r in rows] == ["summary"]
+        assert rows[0]["scorer"] == "unavailable"
+        assert rows[0]["mode"] == MODE_PREFILTER
+
+    def test_shadow_rows_carry_no_prefilter_fields(self, tmp_path: Path) -> None:
+        # AC5 pin: a shadow row is field-for-field what issue athenaeum#2063
+        # wrote. `decision`/`cleared` are prefilter-only.
+        collector = ShadowCollector(surface="lint-pii")
+        collector.add(RECOGNIZER_PHONE, _CLEARABLE_PHONE)
+
+        run_shadow_scoring(
+            collector,
+            mode=MODE_SHADOW,
+            weights_path=None,
+            interpreter=None,
+            timeout_secs=10.0,
+            cache_dir=tmp_path,
+            scorer=_FakeScorer([0.1]),
+        )
+
+        token_rows = [r for r in _read_ledger_lines(tmp_path) if r["kind"] == "token"]
+        assert "decision" not in token_rows[0]
+        assert "cleared" not in token_rows[0]
+
+
+class TestPrefilterSummary:
+    """AC7: the five counts partition the scored batch."""
+
+    def test_counts_bucket_every_scored_candidate_exactly_once(self) -> None:
+        scored = {
+            (RECOGNIZER_PHONE, _CLEARABLE_PHONE): 0.1,  # cleared
+            (RECOGNIZER_PHONE, "012345678901"): 0.95,  # kept
+            (RECOGNIZER_PHONE, "0123456789"): 0.5,  # in band
+            (RECOGNIZER_PHONE, _FORMATTED_PHONE): 0.1,  # phone shape untouched
+            (RECOGNIZER_EMAIL, "role@example.invalid"): 0.1,  # email untouched
+            (RECOGNIZER_EMAIL, "noreply@example.invalid"): 0.9,  # email untouched
+        }
+
+        summary = summarize_prefilter(scored)
+
+        assert summary.cleared == 1
+        assert summary.kept == 1
+        assert summary.in_band == 1
+        assert summary.phone_shape_untouched == 1
+        assert summary.email_untouched == 2
+        assert summary.total == len(scored)
+
+    def test_the_line_names_the_band_and_every_count(self) -> None:
+        line = format_prefilter_summary(
+            summarize_prefilter({(RECOGNIZER_PHONE, _CLEARABLE_PHONE): 0.1})
+        )
+        assert line == (
+            "pii hazard prefilter (band [0.4, 0.6]): 1 cleared, 0 kept, "
+            "0 in band (regex decided), 0 email untouched, "
+            "0 phone-shape untouched"
+        )
+
+    def test_an_empty_batch_summarizes_to_zeros(self) -> None:
+        assert summarize_prefilter({}).total == 0
