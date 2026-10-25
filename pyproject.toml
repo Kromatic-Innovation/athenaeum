@@ -90,6 +90,22 @@ signing = [
 ]
 dev = [
     "pytest>=8.0",
+    # athenaeum#2136: BOTH of these are imported DIRECTLY by the test suite and
+    # were declared nowhere, so they arrived only as transitives of whatever the
+    # resolver happened to pick. `httpx` is the one that broke: four test
+    # modules build real `anthropic` SDK error objects out of `httpx.Request`/
+    # `httpx.Response`, and it reached them only via `anthropic`'s own
+    # dependency -- until `anthropic` 1.17.0 switched to `httpx2` and a clean
+    # `pip install -e ".[dev]"` stopped collecting the suite at all (3 ERRORs,
+    # 0 tests run). CI never saw it, because CI constrains with
+    # `requirements-ci.lock`, which pins an older `anthropic` that still carries
+    # `httpx`. `packaging` is the same class, found by
+    # `scripts/check_declared_imports.py` on its first run (it rides in via
+    # pip's own build requirements). Both bounded like every other dep here.
+    # The `clean-venv` CI job now installs WITHOUT the lock so this class of
+    # drift fails a PR instead of a contributor's first run.
+    "httpx>=0.27,<1.0",
+    "packaging>=23.2,<27",
     # The signing extra, so the athenaeum#2039 sealer tests run in CI. Kept
     # identical to the `signing` extra above.
     "cryptography>=42,<51",
