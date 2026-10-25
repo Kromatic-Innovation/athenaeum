@@ -708,6 +708,65 @@ class TestLibrarianThreadsTheSelector:
         assert isinstance(seen.get("sealer"), NoopSealer)
 
 
+class TestReceiptsSealCliEndToEnd:
+    """``athenaeum receipts seal`` with a reachable key, through the real config path.
+
+    The one test that exercises every layer at once: yaml ->
+    :func:`athenaeum.receipt_sealers.select_sealer` -> the 1Password provider
+    -> ``op read`` (faked on ``PATH``) -> a signature -> a persisted seal ->
+    a clean ``receipts verify``.
+    """
+
+    def test_seals_every_unsealed_range_then_verifies_clean(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from athenaeum.cli import main
+
+        key = Ed25519PrivateKey.generate()
+        bin_dir = tmp_path / "fixture-bin"
+        _fake_op(bin_dir, private=_openssh_private(key), public=_openssh_public(key))
+        monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
+        monkeypatch.setenv(OP_SERVICE_ACCOUNT_TOKEN_ENV, "svc-token")
+
+        knowledge_root = tmp_path / "knowledge"
+        wiki = knowledge_root / "wiki"
+        for n in range(3):
+            _ledger_line(wiki, knowledge_root, f"digest{n}")
+        (knowledge_root / "athenaeum.yaml").write_text(
+            "librarian:\n"
+            "  receipt_sealer: signing\n"
+            "  receipt_signing:\n"
+            "    key_provider: onepassword\n"
+            f"    op_reference: {PRIVATE_REF}\n"
+            f"    public_key_ref: {PUBLIC_REF}\n",
+            encoding="utf-8",
+        )
+
+        assert main(["receipts", "seal", "--path", str(knowledge_root)]) == 0
+        out = capsys.readouterr().out
+        assert f"sealed:   {MONTH} lines 1-3" in out
+        assert "1 range(s) sealed" in out
+
+        stored = iter_stored_seals(wiki, MONTH)
+        assert len(stored) == 1
+        assert stored[0].key_id == derive_key_id(_raw_public(key))
+
+        assert main(["receipts", "verify", "--path", str(knowledge_root)]) == 0
+        assert "1 verified, 0 failed, 0 unsealed range(s)" in capsys.readouterr().out
+
+        # Re-running seal is a no-op, not a second signature over the same lines.
+        assert main(["receipts", "seal", "--path", str(knowledge_root)]) == 0
+        assert len(iter_stored_seals(wiki, MONTH)) == 1
+
+    def test_bare_receipts_prints_usage(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from athenaeum.cli import main
+
+        assert main(["receipts"]) == 2
+        assert "usage: athenaeum receipts {seal,verify}" in capsys.readouterr().err
+
+
 class TestKnownLimitASealDoesNotClose:
     """A verified seal attests the LEDGER, never the transcript.
 
