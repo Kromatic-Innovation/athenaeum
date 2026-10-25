@@ -102,7 +102,11 @@ from athenaeum.models import (
     render_frontmatter,
     resolve_page_type,
 )
-from athenaeum.provider import AnthropicBatchClientBackend, response_text
+from athenaeum.provider import (
+    AnthropicBatchClientBackend,
+    response_text,
+    text_or_truncated,
+)
 from athenaeum.relatedness import run_index as relatedness_run_index
 from athenaeum.relatedness import stamp_related_edges
 from athenaeum.schemas import validate_wiki_meta
@@ -112,6 +116,7 @@ from athenaeum.tiers import (
     TIER2_ADDRESS_UNRESOLVED_MARKER,
     PreambleOnlyResponseError,
     Tier2ParseStats,
+    TruncatedCreateResponseError,
     check_page_size_gate,
     existing_body_needs_full_echo,
     gate_create_name_classifications,
@@ -126,11 +131,12 @@ from athenaeum.tiers import (
     tier2_request_params,
     tier3_create,
     tier3_create_params,
-    tier3_entity_from_text,
+    tier3_entity_from_response,
     tier3_merge,
     tier3_merge_full,
     tier3_merge_params,
     tier4_escalate,
+    truncated_create_escalation,
 )
 from athenaeum.wiki_write_guard import guard_entity_write_type
 
@@ -2012,9 +2018,19 @@ def process_batch_run(
                 # the two transports must agree on this behaviour).
                 try:
                     # Issue athenaeum#578: tier-3 create enables adaptive thinking —
-                    # response_text skips any leading thinking block.
-                    new_entity = tier3_entity_from_text(
-                        action, response_text(msg), usage=usage, config=config
+                    # the text read skips any leading thinking block.
+                    # Issue athenaeum#2112: stop_reason is read FIRST (shared
+                    # helper), so a thinking-only max_tokens result escalates
+                    # instead of raising response_text's ValueError out of the
+                    # whole raw file. The batch result message carries its own
+                    # stop_reason, mirroring the merge branch below.
+                    new_entity = tier3_entity_from_response(
+                        action,
+                        msg,
+                        st.raw.ref,
+                        getattr(msg, "stop_reason", None),
+                        usage=usage,
+                        config=config,
                     )
                 except PreambleOnlyResponseError:
                     log.warning(
@@ -2022,6 +2038,14 @@ def process_batch_run(
                         "action skipped, NOT treated as a raw-file failure",
                         st.raw.ref,
                         action.name,
+                    )
+                    continue
+                except TruncatedCreateResponseError:
+                    # Issue athenaeum#2112: same per-action (never per-file)
+                    # scope as the preamble rejection above, plus an explicit
+                    # escalation — nothing was written for this entity.
+                    escalations.append(
+                        truncated_create_escalation(action, st.raw.ref)
                     )
                     continue
                 new_entities.append(new_entity)
@@ -2034,16 +2058,14 @@ def process_batch_run(
                 # a live full-echo fallback runs only when the patch response is
                 # unparseable, truncated, or fails to apply.
                 merge_stop_reason = getattr(msg, "stop_reason", None)
-                try:
-                    # Issue athenaeum#578: patch merge enables adaptive thinking —
-                    # response_text skips any leading thinking block.
-                    merge_text = response_text(msg)
-                except ValueError:
-                    # Issue athenaeum#2110: same as tier3_merge — a thinking-only
-                    # max_tokens result is the handled truncation, not an error.
-                    if merge_stop_reason != "max_tokens":
-                        raise
-                    merge_text = ""
+                # Issue athenaeum#578: patch merge enables adaptive thinking —
+                # the text read skips any leading thinking block.
+                # Issue athenaeum#2110: same as tier3_merge — a thinking-only
+                # max_tokens result is the handled truncation, not an error.
+                # Issue athenaeum#2112 replaced this site's hand-rolled
+                # try/except with the shared helper so the rule lives in
+                # exactly one place.
+                merge_text = text_or_truncated(msg, merge_stop_reason)
                 updated_body, esc, needs_fallback = parse_merge_ops_response(
                     merge_text,
                     action,
@@ -2098,6 +2120,14 @@ def process_batch_run(
                         "action skipped, NOT treated as a raw-file failure",
                         st.raw.ref,
                         action.name,
+                    )
+                    continue
+                except TruncatedCreateResponseError:
+                    # Issue athenaeum#2112: tier3_create raises this for a
+                    # thinking-only max_tokens response; same per-action scope
+                    # and explicit escalation as the batched create loop above.
+                    escalations.append(
+                        truncated_create_escalation(action, st.raw.ref)
                     )
                     continue
                 new_entities.append(new_entity)

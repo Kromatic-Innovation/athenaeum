@@ -360,6 +360,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Four more `response_text`-before-`stop_reason` sites now read the stop
+  reason first (issue athenaeum#2112).** athenaeum#2110 fixed `tier3_merge`
+  and the batched patch-merge branch; the Tier-2 classify response (and both
+  of its retries), `tier3_create`, `tier3_merge_full` (full-echo *and*
+  append-mode) and the batch finalize loop's create branch still read the
+  text first, so a thinking-only response cut off at `max_tokens` raised
+  `ValueError` instead of reaching each stage's own truncation handling —
+  turning an exhausted output budget into a hard failure counted against the
+  raw file, and for a create losing every other action derived for that file.
+  All of them (plus athenaeum#2110's two) now go through one shared
+  `provider.text_or_truncated(response, stop_reason)` helper, so the rule
+  lives in exactly one place instead of a hand-rolled `try/except` per site.
+  Classify takes its truncated-marker / larger-budget-retry path, both merge
+  paths escalate, and a truncated create raises the new
+  `TruncatedCreateResponseError`, which both transports catch per-action
+  (never per-file) and record as a `principled` escalation. A thinking-only
+  response with any other stop reason — including the `None` a backend that
+  cannot report it yields — still raises.
 - test: pin the question header date in `tests/test_writer_identity_enforcement.py` and regenerate
   `GOLDEN_FLAG_OFF` from the pre-athenaeum#2041 checkout, so
   `test_flag_off_matches_pre_change_golden` no longer goes red the day after the golden was
