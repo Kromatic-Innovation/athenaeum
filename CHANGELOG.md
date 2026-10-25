@@ -7,6 +7,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.43] - 2026-10-25
+
+First release since 0.20.0 (2026-09-04). Every intermediate `0.21.x` / `0.22.x`
+version was a per-merge patch bump on `develop` that was never tagged or
+published; this section is the whole span. The subsections below are
+grouped in merge order, newest first, so `### Added` / `### Changed` /
+`### Fixed` / `### Removed` each appear more than once.
+
+**Upgrading from 0.20.0: breaking and removed**
+
+Athenaeum is pre-1.0; a minor bump may break. Everything below is
+already detailed in the `### Removed` / `### Changed` entries further down,
+collected here so an upgrader does not have to read the whole span.
+
+- **Sidecar adapters:** the context envelope is schema `v2`.
+  `candidates[].memory_tier` is removed and `athenaeum.memory_tiers` is
+  deleted (it was metadata only). See
+  `docs/extending/sidecar-adapter-contract.md` §2.3.1. A `memory_tier:`
+  frontmatter scalar left on disk is inert; no page is rewritten.
+- **Dependency floor:** the `[mcp]` extra now requires `mcp>=2.0,<3.0`
+  alongside `fastmcp>=2.0.0,<5.0`; the MCP bridge was migrated to the 2.x
+  server API and no longer runs on `mcp` 1.x.
+- **Removed, not disabled:** the `athenaeum subject backfill` command, the
+  deterministic merge-worthiness pre-check
+  (`athenaeum.tiers.check_merge_worthiness_gate`, athenaeum#1172), and the
+  promote-on-use memory-tier sweep.
+- **Deprecated:** `athenaeum merges` and `athenaeum questions` in favour of
+  the unified `athenaeum decisions` queue; both still work in this release.
+- **Import side effect:** importing `athenaeum` now sets
+  `ORT_DISABLE_TELEMETRY=1` if unset; an explicit value is respected.
+
+**Highlights**
+
+- **Writer identity and receipts:** opt-in writer-identity enforcement flag
+  with a label-only registry, and transcript receipts for auto-memory with a
+  sealer seam.
+- **Codex adapter:** a static context-file adapter for OpenAI Codex
+  (`athenaeum codex-context`).
+- **Dedup quality:** the T1 reasoning screen is wired into the wiki-dedupe
+  pair loop; folds are stem-keyed; fold proposals carry earlier human rulings.
+- **PII hazard classification:** the Maya PII-hazard classifier gains
+  `shadow` and phone-axis-only `prefilter` modes (athenaeum#2063,
+  athenaeum#2064); the inline phone detector no longer flags bare digit-run
+  identifiers; `_pii-allowlist.yml` accepts domain-level `pattern` entries.
+- **Librarian run accounting:** transcript-receipt writer counts are logged
+  and summarised on every run (athenaeum#2129); the wiki-dedup phase now
+  stops at `--max-api-calls` and `--max-runtime` instead of starving every
+  later phase (athenaeum#2132); quarantine bounds are size-aware and retry
+  across days; the self-tuning loop ships shape mining and a quarterly
+  convergence report.
+- **Decision queue:** a real `coordinate` decision type, framed
+  effort-capped items, and mechanical coordinate-answer handling.
+- **Recall quality:** hybrid BM25 plus vector ranking for the vector backend,
+  uid-citation correctness grading (athenaeum#1793), and the per-turn context
+  core no longer matches page bodies (athenaeum#1361).
+- **Evaluation:** north-star grid token ceilings and `--max-tokens`, temporal
+  probes, and `docs/use-cases.md` decomposing the north star into the
+  questions memory must answer.
+
+### Fixed
+
+- **`--max-api-calls` and `--max-runtime` now bind the wiki-dedup phase
+  (issue athenaeum#2132).** The pair loop checks the run-level call budget
+  and the run deadline between candidate pairs and returns early, leaving
+  the remaining pairs for the next run; the run summary reports the phase as
+  budget- or deadline-stopped and names every downstream phase it starved.
+  On 2026-10-25 a run capped at 150 calls spent 3,980 calls and 4.5 hours in
+  this phase and never reached intake.
+
 ### Changed
 
 - **Transcript-receipt writer counts are logged and summarised on every run
