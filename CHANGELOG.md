@@ -633,6 +633,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`HOOK_INDEX_BUILD_TIMEOUT_SECONDS`) and the probes query the warm index
   (`HOOK_QUERY_TIMEOUT_SECONDS`), the same two-budget shape the harness
   under test already uses.
+- **`_withdraw_stale_widen_question` is no longer proposal-blind (issue
+  athenaeum#2117).** It matched an open `fold_widen_impossible` widen
+  question on `entity + dimension` only, so when two proposals folded into
+  the same canonical and each raised an open `subject` widen question,
+  resolving one through the athenaeum#2071/#2083 IDENTITY shortcut
+  withdrew the OTHER proposal's still-undecided question too. The helper
+  now takes the resolving fold's proposal id and skips a question whose
+  description names a *different* `(proposal <id>)` — the same marker
+  athenaeum#2115's `_widen_questions_for` keys on. A question with no
+  `(proposal ...)` marker at all (raised before athenaeum#2115 added it)
+  has nothing to compare against and is still withdrawn by entity +
+  dimension alone, so a legacy queue item does not strand.
 
 ### Added
 

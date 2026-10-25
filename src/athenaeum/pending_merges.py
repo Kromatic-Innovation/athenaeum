@@ -257,7 +257,11 @@ NAME_COLLISION_RATIONALE_PREFIX = "athenaeum#1170 nightly name-collision scan"
 
 
 def _withdraw_stale_widen_question(
-    pending_path: Path, target_slug: str, dimension_name: str, resolved_value: Any
+    pending_path: Path,
+    target_slug: str,
+    dimension_name: str,
+    resolved_value: Any,
+    proposal_id: str,
 ) -> None:
     """Resolve (not re-raise) an EARLIER ``fold_widen_impossible`` pending
     question this exact fold previously raised against *dimension_name* —
@@ -275,6 +279,18 @@ def _withdraw_stale_widen_question(
     raises) rather than by id, since this fold has no record of which id a
     PRIOR run (athenaeum#2069, pre-fix) minted for it.
 
+    Issue athenaeum#2117: ``entity + dimension`` alone is proposal-blind —
+    when two proposals both fold into the same canonical and each raised an
+    open ``subject`` widen question, resolving one withdrew the other's too,
+    even though the other proposal's fold was never decided. *proposal_id*
+    (the resolving fold's :attr:`PendingMerge.id`) narrows the match: a
+    question whose description names a DIFFERENT ``(proposal <id>)`` is left
+    alone. A question with no ``(proposal ...)`` marker at all — raised
+    before athenaeum#2115 added that marker to the description — has no
+    proposal to compare against, so it is still withdrawn by entity +
+    dimension alone; otherwise a legacy queue item would strand forever
+    with nothing left to resolve it.
+
     Best-effort and silent on any failure (file missing, no matching
     question, a human already answered it in the meantime, ...) — this is
     cleanup of a now-stale question, never a precondition for the fold
@@ -287,8 +303,12 @@ def _withdraw_stale_widen_question(
     except (OSError, UnicodeDecodeError, ValueError):
         return
     marker = f"its {dimension_name!r} coordinate"
+    proposal_marker = f"(proposal {proposal_id})"
     for pq in questions:
         if pq.answered or pq.entity != target_slug or marker not in pq.question:
+            continue
+        if "(proposal " in pq.description and proposal_marker not in pq.description:
+            # Names a DIFFERENT proposal's fold -- not this one's to resolve.
             continue
         resolve_by_id(
             pending_path,
@@ -2418,7 +2438,7 @@ def _apply_fold_into_existing(
         pending_path = wiki_root / "_pending_questions.md"
         for dim_name, resolved_value in identity_resolved_dimensions.items():
             _withdraw_stale_widen_question(
-                pending_path, target_slug, dim_name, resolved_value
+                pending_path, target_slug, dim_name, resolved_value, pm.id
             )
     # Issue athenaeum#2115 AC4: the fold applied, so EVERY still-open widen
     # question naming this proposal (any dimension) is moot — withdraw it as

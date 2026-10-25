@@ -1708,6 +1708,165 @@ class TestCoordinateWidening:
         assert len(questions) == 1
         assert questions[0].answered is True
 
+    def test_identity_resolved_subject_leaves_a_different_proposals_widen_question_open(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue athenaeum#2117 AC1: ``entity + dimension`` alone is
+        proposal-blind. Two proposals, P1 and P2, both fold into the same
+        canonical and each has an open ``subject`` widen question naming
+        its OWN ``(proposal <id>)`` in the description (the athenaeum#2115
+        marker). Resolving P1's subject through the athenaeum#2071/#2083
+        IDENTITY shortcut must withdraw only P1's question -- P2's fold has
+        not been decided, so its question must stay open. Against the
+        unmodified entity+dimension-only matcher this fails: both get
+        withdrawn."""
+        from athenaeum.answers import parse_pending_questions, raise_pending_question
+
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        target = wiki / "canonical.md"
+        _write_wiki_page(
+            target, name="Canonical", body="OLD BODY\n", extra={"subject": "subject-x"}
+        )
+        src_a = wiki / "old-a.md"
+        _write_wiki_page(
+            src_a, name="Old A", body="a\n", extra={"subject": "subject-y"}
+        )
+        src_b = wiki / "old-b.md"
+        _write_wiki_page(
+            src_b, name="Old B", body="b\n", extra={"subject": "subject-z"}
+        )
+
+        init_git_repo(wiki)
+        merges_path = wiki / "_pending_merges.md"
+        write_pending_merge(
+            merges_path,
+            merge_target_name="Canonical",
+            sources=[str(src_a)],
+            rationale="operator ruling 2026-10-24: P1 same real-world thing",
+            draft_merged_body="NEW BODY A\n",
+            confidence=0.9,
+            write_kind="fold-into-existing",
+        )
+        write_pending_merge(
+            merges_path,
+            merge_target_name="Canonical",
+            sources=[str(src_b)],
+            rationale="operator ruling 2026-10-24: P2 same real-world thing",
+            draft_merged_body="NEW BODY B\n",
+            confidence=0.9,
+            write_kind="fold-into-existing",
+        )
+        proposals = parse_pending_merges(merges_path)
+        assert len(proposals) == 2
+        pm1_id = next(p.id for p in proposals if "old-a.md" in p.sources[0])
+        pm2_id = next(p.id for p in proposals if "old-b.md" in p.sources[0])
+
+        pending_path = wiki / "_pending_questions.md"
+        question_text = (
+            "Fold of 'canonical' cannot auto-widen its 'subject' "
+            "coordinate — what should the canonical's value be?"
+        )
+        # Each question cites its OWN source page in the header (rather
+        # than both citing the shared canonical) so the two blocks mint
+        # distinct ids -- the real raiser always uses the same
+        # question/source text, so two widen questions against the same
+        # canonical + dimension raised the same day collide on id
+        # (:func:`athenaeum.answers._make_id` hashes header + question
+        # text only); that collision is a separate, out-of-scope concern
+        # from the proposal-blind matching this test targets, so it is
+        # avoided here rather than exercised.
+        raise_pending_question(
+            pending_path,
+            question=question_text,
+            context=(
+                f"Human-approved fold (proposal {pm1_id}) into 'canonical' "
+                "found incompatible 'subject' values ('subject-x' vs "
+                "'subject-y')."
+            ),
+            entity="canonical",
+            source=str(src_a),
+        )
+        raise_pending_question(
+            pending_path,
+            question=question_text,
+            context=(
+                f"Human-approved fold (proposal {pm2_id}) into 'canonical' "
+                "found incompatible 'subject' values ('subject-x' vs "
+                "'subject-z')."
+            ),
+            entity="canonical",
+            source=str(src_b),
+        )
+        before = parse_pending_questions(pending_path)
+        assert len(before) == 2
+        assert all(not pq.answered for pq in before)
+
+        result = resolve_merge(merges_path, pm1_id, "approve", wiki_root=wiki)
+        assert result["ok"] is True, result
+
+        after = parse_pending_questions(pending_path)
+        assert len(after) == 2
+        by_proposal = {
+            pm1_id: next(pq for pq in after if pm1_id in pq.description),
+            pm2_id: next(pq for pq in after if pm2_id in pq.description),
+        }
+        assert by_proposal[pm1_id].answered is True
+        assert by_proposal[pm2_id].answered is False
+
+    def test_identity_resolved_subject_still_withdraws_marker_less_legacy_widen_question(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue athenaeum#2117 AC2: a widen question raised before the
+        athenaeum#2115 ``(proposal <id>)`` description marker existed carries
+        no proposal id at all. The athenaeum#2117 proposal filter must not
+        strand it -- it is still withdrawn by entity + dimension, same as
+        before this fix."""
+        from athenaeum.answers import parse_pending_questions, raise_pending_question
+
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        target = wiki / "canonical.md"
+        _write_wiki_page(
+            target, name="Canonical", body="OLD BODY\n", extra={"subject": "subject-x"}
+        )
+        src_a = wiki / "old-a.md"
+        _write_wiki_page(
+            src_a, name="Old A", body="a\n", extra={"subject": "subject-y"}
+        )
+
+        init_git_repo(wiki)
+        pending_path = wiki / "_pending_questions.md"
+        raise_pending_question(
+            pending_path,
+            question=(
+                "Fold of 'canonical' cannot auto-widen its 'subject' "
+                "coordinate — what should the canonical's value be?"
+            ),
+            context="pre-athenaeum#2115 legacy question, no proposal marker",
+            entity="canonical",
+            source=str(target),
+        )
+        assert parse_pending_questions(pending_path)[0].answered is False
+
+        merges_path = wiki / "_pending_merges.md"
+        write_pending_merge(
+            merges_path,
+            merge_target_name="Canonical",
+            sources=[str(src_a)],
+            rationale="operator ruling 2026-10-24: legacy marker-less fallback",
+            draft_merged_body="NEW BODY\n",
+            confidence=0.9,
+            write_kind="fold-into-existing",
+        )
+        pm_id = parse_pending_merges(merges_path)[0].id
+        result = resolve_merge(merges_path, pm_id, "approve", wiki_root=wiki)
+
+        assert result["ok"] is True, result
+        questions = parse_pending_questions(pending_path)
+        assert len(questions) == 1
+        assert questions[0].answered is True
+
 
 # ---------------------------------------------------------------------------
 # Issue athenaeum#2115 — widen-question read-back, canonical-keeps-class rule,
