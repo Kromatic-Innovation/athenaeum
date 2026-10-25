@@ -560,8 +560,17 @@ class TestDeadlineExitSummary:
     ) -> None:
         """Reuses the athenaeum#396 wiki-dedup-phase-boundary trip: the deadline blows
         immediately after the athenaeum#290 wiki-dedup pass, so the summary must
-        contain `wiki-dedup` but NOT `entity` or `auto-memory` (they never
-        ran)."""
+        contain `wiki-dedup`, and must report `entity` / `auto-memory` as
+        STARVED by that trip rather than as phases that merely completed.
+
+        Issue athenaeum#2132 changed what "they never ran" looks like on this
+        line. Before it, the two phases were simply ABSENT, and this test
+        asserted that absence — which is exactly the silence that issue was
+        filed to end: a reader could not tell a starved night from a disabled
+        phase or from a summary schema predating it. The intent of the test is
+        unchanged (the entity phase did NOT do any work here); what it now
+        pins is the positive evidence of that, `reason=skipped-deadline` with
+        zero seconds, instead of a missing segment."""
         root = _seed_knowledge_root(tmp_path, n_files=1)
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")
         monkeypatch.delenv("ATHENAEUM_MAX_API_CALLS", raising=False)
@@ -592,10 +601,16 @@ class TestDeadlineExitSummary:
         assert "wiki-dedup secs=" in line
         # Assert on the phase SEGMENT, not a bare "entity" substring: issue athenaeum#567
         # adds a `schema_fragments=…,_entity-template:…` attribution token to the
-        # head, so "entity" now legitimately appears there. The intent here is
-        # that the entity PHASE never ran — i.e. no `entity secs=` segment.
-        assert "entity secs=" not in line
-        assert "auto-memory secs=" not in line
+        # head, so "entity" now legitimately appears there.
+        #
+        # Issue athenaeum#2132: a starved phase is NAMED, at zero seconds, with
+        # its own reason — so the thing to assert is that segment's exact
+        # shape, not its absence. An `entity secs=<non-zero>` or an `entity
+        # ... reason=completed` would still be the regression this line has
+        # always guarded against.
+        assert "entity secs=0.000 reason=skipped-deadline" in line
+        assert "auto-memory secs=0.000 reason=skipped-deadline" in line
+        assert "reason=completed" not in line.split("| entity ", 1)[1]
 
     def test_entity_loop_deadline_trip_summary_has_entity_not_automemory(
         self,

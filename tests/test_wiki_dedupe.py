@@ -1982,3 +1982,192 @@ class TestAthenaeum2080ConfidenceFloor:
         assert resolve({"librarian": {"wiki_dedupe_min_confidence": -1}}) == 0.0
         monkeypatch.setenv("ATHENAEUM_WIKI_DEDUPE_MIN_CONFIDENCE", "0")
         assert resolve({"librarian": {"wiki_dedupe_min_confidence": 0.9}}) == 0.0
+
+
+class TestRunLevelCapsBoundThePairLoop:
+    """Issue athenaeum#2132: ``--max-api-calls`` and ``--max-runtime`` were
+    ADVISORY for this pass. It accepted the run-level ``TokenUsage`` so its
+    Gate-2 calls were counted against the run budget, but took no ceiling and
+    had no stop condition, so one 2026-10-25 run made 3980 calls against a cap
+    of 150 and spent 16,386s against a 3600s deadline — starving every
+    downstream phase (entity, auto-memory, retire, reresolve, drain) for the
+    night. Both caps are now checked BETWEEN candidate pairs.
+    """
+
+    def _usage_at(self, api_calls: int):
+        from athenaeum.models import TokenUsage
+
+        return TokenUsage(api_calls=api_calls)
+
+    def test_budget_already_exhausted_examines_zero_pairs(
+        self, duplicate_topic_wiki: Path
+    ) -> None:
+        """AC4, first half: a pass handed a ``TokenUsage`` already at the cap
+        must spend NOTHING — not even the one pair a check placed after the
+        comparator call would have let through."""
+        from athenaeum.runlock import RunLock
+        from athenaeum.wiki_dedupe import STOP_REASON_BUDGET, propose_wiki_page_merges
+
+        client = _fake_llm_client(_content_payload("equivalent"))
+        stop: dict[str, Any] = {}
+        lock = RunLock(duplicate_topic_wiki)
+        with lock:
+            results = propose_wiki_page_merges(
+                duplicate_topic_wiki,
+                config=_COMPARATOR_CONFIG,
+                threshold=0.8,
+                embedding_provider=_fake_embed,
+                client=client,
+                usage=self._usage_at(150),
+                lock=lock,
+                max_api_calls=150,
+                out_stop=stop,
+            )
+
+        assert client.messages.create.call_count == 0, "zero comparator calls"
+        assert results == []
+        assert stop["reason"] == STOP_REASON_BUDGET
+        assert stop["pairs_examined"] == 0
+        # The venture-a/b/c cluster's three pairs are all left for the next
+        # run — undecided, not force-decided (AC1).
+        assert stop["pairs_remaining"] == 3
+
+    def test_expired_deadline_examines_zero_pairs(
+        self, duplicate_topic_wiki: Path
+    ) -> None:
+        """AC4, second half: same shape for the wall clock. Before this issue
+        the caller's only deadline check ran AFTER this whole pass returned,
+        which is why the live incident's trip was logged as "exceeded during
+        post-compile" 12,786s past the cap."""
+        import time
+
+        from athenaeum.runlock import RunLock
+        from athenaeum.wiki_dedupe import STOP_REASON_DEADLINE, propose_wiki_page_merges
+
+        client = _fake_llm_client(_content_payload("equivalent"))
+        stop: dict[str, Any] = {}
+        lock = RunLock(duplicate_topic_wiki)
+        with lock:
+            results = propose_wiki_page_merges(
+                duplicate_topic_wiki,
+                config=_COMPARATOR_CONFIG,
+                threshold=0.8,
+                embedding_provider=_fake_embed,
+                client=client,
+                usage=self._usage_at(0),
+                lock=lock,
+                deadline=time.monotonic() - 1.0,
+                out_stop=stop,
+            )
+
+        assert client.messages.create.call_count == 0, "zero comparator calls"
+        assert results == []
+        assert stop["reason"] == STOP_REASON_DEADLINE
+        assert stop["pairs_examined"] == 0
+        assert stop["pairs_remaining"] == 3
+
+    def test_unbounded_pass_reports_completed_and_a_full_pair_count(
+        self, duplicate_topic_wiki: Path
+    ) -> None:
+        """The positive control the two trip tests above need: with no caps
+        passed (every caller before this issue), the pass behaves exactly as
+        before and accounts for every pair. Without this, a bug that stopped
+        the loop unconditionally would pass both tests above."""
+        from athenaeum.runlock import RunLock
+        from athenaeum.wiki_dedupe import (
+            STOP_REASON_COMPLETED,
+            propose_wiki_page_merges,
+        )
+
+        client = _fake_llm_client(_content_payload("equivalent"))
+        stop: dict[str, Any] = {}
+        lock = RunLock(duplicate_topic_wiki)
+        with lock:
+            results = propose_wiki_page_merges(
+                duplicate_topic_wiki,
+                config=_COMPARATOR_CONFIG,
+                threshold=0.8,
+                embedding_provider=_fake_embed,
+                client=client,
+                lock=lock,
+                out_stop=stop,
+            )
+
+        assert results, "the venture-a/b/c cluster must yield decided pairs"
+        assert stop["reason"] == STOP_REASON_COMPLETED
+        assert stop["pairs_examined"] == 3
+        assert stop["pairs_remaining"] == 0
+
+    def test_budget_tripped_mid_loop_leaves_the_rest_for_the_next_run(
+        self, duplicate_topic_wiki: Path
+    ) -> None:
+        """AC1's resumability half, measured rather than asserted by
+        construction: a cap reached partway through stops the loop where it
+        is and reports the remainder, instead of running the cluster out."""
+        from athenaeum.runlock import RunLock
+        from athenaeum.wiki_dedupe import STOP_REASON_BUDGET, propose_wiki_page_merges
+
+        client = _fake_llm_client(_content_payload("equivalent"))
+        usage = self._usage_at(0)
+        stop: dict[str, Any] = {}
+        lock = RunLock(duplicate_topic_wiki)
+        with lock:
+            propose_wiki_page_merges(
+                duplicate_topic_wiki,
+                config=_COMPARATOR_CONFIG,
+                threshold=0.8,
+                embedding_provider=_fake_embed,
+                client=client,
+                usage=usage,
+                lock=lock,
+                # One Gate-2 call's worth of head-room: the first pair spends
+                # it, and the second pair's pre-check trips.
+                max_api_calls=1,
+                out_stop=stop,
+            )
+
+        assert usage.api_calls >= 1, "the first pair really did spend a call"
+        assert stop["reason"] == STOP_REASON_BUDGET
+        assert stop["pairs_examined"] == 1
+        assert stop["pairs_remaining"] == 2
+
+
+class TestGate2CallsCountAgainstTheRunBudget:
+    """Issue athenaeum#2132, the wiring under
+    ``TestRunLevelCapsBoundThePairLoop`` above. ``comparator.content_relation``
+    landed its Gate-2 response through ``TokenUsage.add_tokens``, whose own
+    contract reserves it for callees whose ORCHESTRATING call site counts
+    ``api_calls`` separately — and no caller of it ever did. So Gate-2 tokens
+    and cost reached the run-level ``TokenUsage`` while ``api_calls``, the
+    counter ``librarian.max_api_calls`` is denominated in, never moved: a
+    ceiling could not have bound this phase no matter where it was checked.
+    """
+
+    def test_each_gate2_call_increments_api_calls(
+        self, duplicate_topic_wiki: Path
+    ) -> None:
+        from athenaeum.models import TokenUsage
+        from athenaeum.runlock import RunLock
+        from athenaeum.wiki_dedupe import propose_wiki_page_merges
+
+        client = _fake_llm_client(_content_payload("equivalent"))
+        usage = TokenUsage()
+        lock = RunLock(duplicate_topic_wiki)
+        with lock:
+            propose_wiki_page_merges(
+                duplicate_topic_wiki,
+                config=_COMPARATOR_CONFIG,
+                threshold=0.8,
+                embedding_provider=_fake_embed,
+                client=client,
+                usage=usage,
+                lock=lock,
+            )
+
+        gate2_calls = client.messages.create.call_count
+        assert gate2_calls == 3, "the venture-a/b/c cluster's three pairs"
+        assert usage.api_calls == gate2_calls
+        # ``succeeded_calls`` (the counter that DID move before this issue)
+        # must still agree — ``add`` delegates to ``add_tokens``, so this is
+        # an addition to the accounting, never a substitution.
+        assert usage.succeeded_calls == gate2_calls

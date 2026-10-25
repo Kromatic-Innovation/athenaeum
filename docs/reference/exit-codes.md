@@ -158,6 +158,46 @@ not change. Neither path narrows what it reports beyond the exit code
 itself; `IngestResult`/`SessionEndResult`'s other fields (`compiled`,
 `new_or_changed`, etc.) are computed exactly as before.
 
+## Which phases the two run-level caps bind (issue athenaeum#2132)
+
+`--max-api-calls` and `--max-runtime` are run-level ceilings, and they bind
+**every** LLM-spending phase, including the wiki-page dedup pass. Before
+athenaeum#2132 that pass was the one exception, in two compounding ways:
+
+- Its comparator Gate-2 calls landed their tokens and cost into the run's
+  `TokenUsage` but never incremented `api_calls` — the counter
+  `--max-api-calls` is denominated in, and the one the run summary's
+  `economics.calls` reports. The phase's spend was invisible to the budget it
+  was spending against.
+- Its candidate-pair loop had no stop condition at all, and the caller checked
+  the wall-clock deadline only once the whole pass had returned.
+
+Together those let one run make 3980 calls against a cap of 150 and spend
+16,386 s against a 3600 s deadline — and because the pass runs *before* the
+entity, auto-memory, retire, reresolve and audit-drain phases, that night's
+raw intake never happened.
+
+Both caps are now checked **between candidate pairs**, before anything is
+spent on the next one:
+
+- Stopping early is resumable and decides nothing by force. The pairs not
+  reached are simply not examined; the next run sees them exactly as this one
+  did. Whatever the partial pass *did* decide is still flushed — ledgered
+  verdicts, batched `coordinate` queue items, and the per-run attribution
+  snapshot.
+- The phase's `librarian-run-summary` segment reports `reason=budget` or
+  `reason=deadline` instead of `reason=completed`, plus `pairs_examined` and
+  `pairs_remaining` so the size of the remaining backlog is on the record.
+- When a wall-clock trip ends the run at or before this phase, the summary
+  additionally names every phase the trip **starved** —
+  `entity secs=0.000 reason=skipped-deadline` and the same for `auto-memory`,
+  `retire`, `reresolve` and `audit-nightly-drain`. A starved night used to be
+  visible only as the *absence* of those segments, which reads identically to
+  "that phase is disabled".
+
+A run that stops this way still exits `75` (`EXIT_GRACEFUL_PARTIAL`) with
+partial progress committed, exactly as the table above describes.
+
 ## `athenaeum entity`
 
 A separate command family from `run()`'s cascade above — its own small

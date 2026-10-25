@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -39,6 +40,7 @@ from athenaeum.librarian import (
     DEFAULT_MAX_RUNTIME,
     DEGRADED_NO_API_KEY_PREFIX,
     EXIT_GRACEFUL_PARTIAL,
+    REASON_SKIPPED_DEADLINE,
     RunContext,
     _arm_run_deadline,
     _comparator_dual_source,
@@ -1541,3 +1543,230 @@ class TestPerKnobBatchSelectionResolution:
         ctx.provider = "api"
         ctx.config = {"llm": {"providers": {"classify": "claude-cli"}}}
         assert _resolve_run_config(ctx) == 1
+
+
+class TestWikiDedupPhaseReportsItsOwnEarlyStop:
+    """Issue athenaeum#2132 AC2: the ``wiki-dedup`` run-profile entry hard-coded
+    ``reason=completed`` because (per athenaeum#1102) the phase had no
+    yield/budget concept of its own. It has one now, and the entry must carry
+    it — plus the two counts that say how much the phase left behind — so a
+    starved night is legible in ``run_summary.jsonl`` instead of being
+    inferred from a wall-clock figure.
+    """
+
+    def _profile_fields(self, ctx: RunContext) -> dict:
+        assert len(ctx.run_profile) == 1
+        phase, _secs, fields = ctx.run_profile[0]
+        assert phase == "wiki-dedup"
+        return fields
+
+    def test_run_level_caps_are_passed_into_the_pass(self, tmp_path: Path) -> None:
+        """The caps were never handed to the pair loop at all, which is why
+        both were advisory. Pin the wiring, not just the reporting."""
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        ctx = _make_ctx(tmp_path, wiki_root=wiki_root, max_api_calls=150)
+        # Far enough ahead that the post-phase boundary check below does not
+        # trip and short-circuit the run before the assertions.
+        deadline = time.monotonic() + 3600.0
+        ctx.run_deadline = deadline
+        with patch("athenaeum.wiki_dedupe.propose_wiki_page_merges") as mock_dedup:
+            _run_wiki_dedup_phase(ctx)
+        kwargs = mock_dedup.call_args.kwargs
+        assert kwargs["max_api_calls"] == 150
+        assert kwargs["deadline"] == deadline
+        assert isinstance(kwargs["out_stop"], dict)
+
+    @pytest.mark.parametrize("reason", ["budget", "deadline"])
+    def test_early_stop_reason_and_pair_counts_reach_the_profile(
+        self, tmp_path: Path, reason: str
+    ) -> None:
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        ctx = _make_ctx(tmp_path, wiki_root=wiki_root, max_api_calls=150)
+
+        def _fake_dedup(*_a, out_stop=None, **_kw):
+            if out_stop is not None:
+                out_stop["reason"] = reason
+                out_stop["pairs_examined"] = 41
+                out_stop["pairs_remaining"] = 2278
+            return []
+
+        with patch(
+            "athenaeum.wiki_dedupe.propose_wiki_page_merges", side_effect=_fake_dedup
+        ):
+            _run_wiki_dedup_phase(ctx)
+
+        assert self._profile_fields(ctx) == {
+            "reason": reason,
+            "pairs_examined": 41,
+            "pairs_remaining": 2278,
+        }
+
+    def test_completed_pass_reports_its_pair_counts_too(self, tmp_path: Path) -> None:
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        ctx = _make_ctx(tmp_path, wiki_root=wiki_root)
+
+        def _fake_dedup(*_a, out_stop=None, **_kw):
+            if out_stop is not None:
+                out_stop.update(
+                    {"reason": "completed", "pairs_examined": 7, "pairs_remaining": 0}
+                )
+            return []
+
+        with patch(
+            "athenaeum.wiki_dedupe.propose_wiki_page_merges", side_effect=_fake_dedup
+        ):
+            _run_wiki_dedup_phase(ctx)
+
+        assert self._profile_fields(ctx) == {
+            "reason": "completed",
+            "pairs_examined": 7,
+            "pairs_remaining": 0,
+        }
+
+    def test_pass_that_never_entered_its_loop_renders_the_bare_reason(
+        self, tmp_path: Path
+    ) -> None:
+        """The default run (comparator disabled) publishes nothing, so the
+        segment stays byte-identical to its pre-athenaeum#2132 shape — no
+        ``pairs_examined=0 pairs_remaining=0`` tokens appearing on every
+        night's summary line for a phase that did not run."""
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        ctx = _make_ctx(tmp_path, wiki_root=wiki_root)
+        with patch("athenaeum.wiki_dedupe.propose_wiki_page_merges"):
+            _run_wiki_dedup_phase(ctx)
+        assert self._profile_fields(ctx) == {"reason": "completed"}
+
+    def test_exception_path_still_reports_completed(self, tmp_path: Path) -> None:
+        """Unchanged by this issue: a swallowed exception leaves the pass's
+        own reason unset, and the phase keeps reporting what it always did."""
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        ctx = _make_ctx(tmp_path, wiki_root=wiki_root)
+        with patch(
+            "athenaeum.wiki_dedupe.propose_wiki_page_merges",
+            side_effect=RuntimeError("boom"),
+        ):
+            _run_wiki_dedup_phase(ctx)
+        assert self._profile_fields(ctx) == {"reason": "completed"}
+
+
+class TestStarvedPhasesAreNamedNotOmitted:
+    """Issue athenaeum#2132 AC3: a deadline trip rendered only the phases that
+    got a turn. On the 2026-10-25 incident run that meant ``entity``,
+    ``auto-memory``, ``retire``, ``reresolve`` and ``audit-nightly-drain``
+    were simply ABSENT from ``run_summary.jsonl`` — indistinguishable from
+    "disabled" or "this schema predates them", so nothing recorded that a
+    night's raw intake never happened.
+    """
+
+    def _reasons(self, ctx: RunContext) -> dict[str, str]:
+        return {phase: fields.get("reason") for phase, _secs, fields in ctx.run_profile}
+
+    def test_trip_at_the_wiki_dedup_boundary_names_every_starved_phase(
+        self, tmp_path: Path
+    ) -> None:
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        knowledge_root = tmp_path / "knowledge"
+        knowledge_root.mkdir()
+        ctx = _make_ctx(
+            tmp_path, wiki_root=wiki_root, knowledge_root=knowledge_root, dry_run=True
+        )
+        ctx.run_deadline = 0.0  # already elapsed
+        ctx.max_runtime = 60
+        with patch("athenaeum.wiki_dedupe.propose_wiki_page_merges"):
+            result = _run_wiki_dedup_phase(ctx)
+
+        assert result == EXIT_GRACEFUL_PARTIAL
+        reasons = self._reasons(ctx)
+        assert reasons["wiki-dedup"] == "completed"  # it DID run
+        for starved in ("entity", "auto-memory", "retire", "reresolve",
+                        "audit-nightly-drain"):
+            assert reasons[starved] == REASON_SKIPPED_DEADLINE, starved
+
+    def test_a_phase_that_already_ran_is_not_re_reported_as_starved(
+        self, tmp_path: Path
+    ) -> None:
+        """A later trip (post-compile, after the entity/auto-memory phases
+        have their own entries) must report only its own starved tail — the
+        run profile is an ordered log, not a set, so a duplicate ``entity``
+        row would double-count its seconds in ``total_secs``."""
+        knowledge_root = tmp_path / "knowledge"
+        knowledge_root.mkdir()
+        ctx = _make_ctx(tmp_path, knowledge_root=knowledge_root, dry_run=True)
+        ctx.max_runtime = 60
+        ctx.run_profile.append(("entity", 4.2, {"reason": "deadline"}))
+        ctx.run_profile.append(("auto-memory", 7.8, {"reason": "completed"}))
+
+        assert ctx.stop_on_deadline("post-compile") == EXIT_GRACEFUL_PARTIAL
+
+        phases = [phase for phase, _secs, _fields in ctx.run_profile]
+        assert phases.count("entity") == 1
+        assert phases.count("auto-memory") == 1
+        reasons = self._reasons(ctx)
+        assert reasons["entity"] == "deadline"  # its OWN reason, preserved
+        assert reasons["auto-memory"] == "completed"
+        for starved in ("retire", "reresolve", "audit-nightly-drain"):
+            assert reasons[starved] == REASON_SKIPPED_DEADLINE, starved
+
+    def test_starved_entries_are_zero_seconds(self, tmp_path: Path) -> None:
+        """They consumed no wall clock, so ``total_secs`` (a plain sum over
+        the profile) must be unchanged by naming them."""
+        knowledge_root = tmp_path / "knowledge"
+        knowledge_root.mkdir()
+        ctx = _make_ctx(tmp_path, knowledge_root=knowledge_root, dry_run=True)
+        ctx.max_runtime = 60
+        ctx.run_profile.append(("wiki-dedup", 16386.371, {"reason": "deadline"}))
+
+        ctx.stop_on_deadline("post-compile (after athenaeum#290 wiki-dedup)")
+
+        total = sum(secs for _phase, secs, _fields in ctx.run_profile)
+        assert total == pytest.approx(16386.371)
+
+    def test_the_starved_night_is_visible_in_the_rendered_line_and_the_ledger(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue athenaeum#2132 AC2/AC3 at the surfaces the issue actually names
+        — the ``librarian-run-summary`` line and the ``run_summary.jsonl``
+        record — rather than only on the in-memory profile."""
+        from athenaeum.librarian import _render_run_summary
+        from athenaeum.run_summary_log import build_run_summary_ledger_record
+
+        knowledge_root = tmp_path / "knowledge"
+        knowledge_root.mkdir()
+        ctx = _make_ctx(tmp_path, knowledge_root=knowledge_root, dry_run=True)
+        ctx.max_runtime = 3600
+        ctx.run_profile.append(
+            (
+                "wiki-dedup",
+                16386.371,
+                {"reason": "deadline", "pairs_examined": 3193, "pairs_remaining": 18847},
+            )
+        )
+
+        ctx.stop_on_deadline("post-compile (after athenaeum#290 wiki-dedup)")
+
+        line = _render_run_summary(ctx.run_profile)
+        assert (
+            "wiki-dedup secs=16386.371 reason=deadline pairs_examined=3193 "
+            "pairs_remaining=18847" in line
+        )
+        for starved in ("entity", "auto-memory", "retire", "reresolve",
+                        "audit-nightly-drain"):
+            assert f"{starved} secs=0.000 reason=skipped-deadline" in line, starved
+
+        record = build_run_summary_ledger_record(ctx.run_profile)
+        assert record["phases"]["wiki-dedup"] == {
+            "secs": 16386.371,
+            "reason": "deadline",
+            "pairs_examined": 3193,
+            "pairs_remaining": 18847,
+        }
+        assert record["phases"]["entity"] == {
+            "secs": 0.0,
+            "reason": REASON_SKIPPED_DEADLINE,
+        }
