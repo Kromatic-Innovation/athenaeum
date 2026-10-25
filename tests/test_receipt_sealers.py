@@ -129,6 +129,11 @@ def _provider_env(bin_dir: Path, home: Path, *, token: str | None = "svc-token")
         "PATH": f"{bin_dir}:/usr/bin:/bin",
         "HOME": str(home),
         "XDG_CACHE_HOME": str(home / ".cache"),
+        # athenaeum#791 guard (tests/test_cache_dir_resolver.py): an env
+        # literal that redirects HOME must set this explicitly rather than
+        # rely on HOME's redirect. Kept inside `home` so the
+        # no-key-on-disk scan below still covers it.
+        "ATHENAEUM_CACHE_DIR": str(home / ".cache" / "athenaeum"),
         "TMPDIR": str(home / "tmp"),
     }
     if token is not None:

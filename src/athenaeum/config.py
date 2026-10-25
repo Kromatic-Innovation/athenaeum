@@ -6306,17 +6306,6 @@ DEFAULT_RECEIPT_SIGNING_PUBLIC_KEY_REF = (
 )
 
 
-def _receipt_signing_value(config: dict[str, Any] | None, leaf: str) -> Any:
-    """Raw ``librarian.receipt_signing.<leaf>`` value, or ``None``."""
-    if isinstance(config, dict):
-        librarian = config.get("librarian")
-        if isinstance(librarian, dict):
-            block = librarian.get("receipt_signing")
-            if isinstance(block, dict):
-                return block.get(leaf)
-    return None
-
-
 def resolve_receipt_sealer(config: dict[str, Any] | None) -> str:
     """Resolve which receipt sealer to use (issue athenaeum#2039). DEFAULT ``"noop"``.
 
@@ -6364,7 +6353,19 @@ def resolve_receipt_signing_key_provider(config: dict[str, Any] | None) -> str:
     inside the 1Password one. An unknown value raises
     :class:`ReceiptSealerConfigError`.
     """
-    raw = _receipt_signing_value(config, "key_provider")
+    raw: Any = None
+    # The three key segments are read INLINE, in order, rather than
+    # through a shared helper: `tests/test_config_resolver_parity_generic.py`
+    # discovers a resolver's yaml path from the string literals in its own
+    # body (following only `_resolve*`-named helpers), so a factored-out
+    # lookup hides `librarian`/`receipt_signing` from that gate and the
+    # key reads as dead.
+    if isinstance(config, dict):
+        _librarian = config.get("librarian")
+        if isinstance(_librarian, dict):
+            _signing = _librarian.get("receipt_signing")
+            if isinstance(_signing, dict):
+                raw = _signing.get("key_provider")
     if raw is not None:
         if not isinstance(raw, str) or raw not in RECEIPT_SIGNING_KEY_PROVIDERS:
             raise ReceiptSealerConfigError(
@@ -6385,7 +6386,19 @@ def resolve_receipt_signing_op_reference(config: dict[str, Any] | None) -> str:
     (PKCS8 PEM is also accepted, so rotating to a PEM item needs no code
     change).
     """
-    raw = _receipt_signing_value(config, "op_reference")
+    raw: Any = None
+    # The three key segments are read INLINE, in order, rather than
+    # through a shared helper: `tests/test_config_resolver_parity_generic.py`
+    # discovers a resolver's yaml path from the string literals in its own
+    # body (following only `_resolve*`-named helpers), so a factored-out
+    # lookup hides `librarian`/`receipt_signing` from that gate and the
+    # key reads as dead.
+    if isinstance(config, dict):
+        _librarian = config.get("librarian")
+        if isinstance(_librarian, dict):
+            _signing = _librarian.get("receipt_signing")
+            if isinstance(_signing, dict):
+                raw = _signing.get("op_reference")
     if isinstance(raw, str) and raw.strip():
         return raw.strip()
     return DEFAULT_RECEIPT_SIGNING_OP_REFERENCE
@@ -6400,7 +6413,19 @@ def resolve_receipt_signing_public_key_ref(config: dict[str, Any] | None) -> str
     inline form (see :func:`resolve_receipt_signing_public_key_openssh`) when
     verification should run with no 1Password access at all.
     """
-    raw = _receipt_signing_value(config, "public_key_ref")
+    raw: Any = None
+    # The three key segments are read INLINE, in order, rather than
+    # through a shared helper: `tests/test_config_resolver_parity_generic.py`
+    # discovers a resolver's yaml path from the string literals in its own
+    # body (following only `_resolve*`-named helpers), so a factored-out
+    # lookup hides `librarian`/`receipt_signing` from that gate and the
+    # key reads as dead.
+    if isinstance(config, dict):
+        _librarian = config.get("librarian")
+        if isinstance(_librarian, dict):
+            _signing = _librarian.get("receipt_signing")
+            if isinstance(_signing, dict):
+                raw = _signing.get("public_key_ref")
     if isinstance(raw, str) and raw.strip():
         return raw.strip()
     return DEFAULT_RECEIPT_SIGNING_PUBLIC_KEY_REF
@@ -6416,7 +6441,19 @@ def resolve_receipt_signing_public_key_openssh(config: dict[str, Any] | None) ->
     binary. When set it takes precedence over the ``op://`` public-key
     reference.
     """
-    raw = _receipt_signing_value(config, "public_key_openssh")
+    raw: Any = None
+    # The three key segments are read INLINE, in order, rather than
+    # through a shared helper: `tests/test_config_resolver_parity_generic.py`
+    # discovers a resolver's yaml path from the string literals in its own
+    # body (following only `_resolve*`-named helpers), so a factored-out
+    # lookup hides `librarian`/`receipt_signing` from that gate and the
+    # key reads as dead.
+    if isinstance(config, dict):
+        _librarian = config.get("librarian")
+        if isinstance(_librarian, dict):
+            _signing = _librarian.get("receipt_signing")
+            if isinstance(_signing, dict):
+                raw = _signing.get("public_key_openssh")
     if isinstance(raw, str) and raw.strip():
         return raw.strip()
     return None
