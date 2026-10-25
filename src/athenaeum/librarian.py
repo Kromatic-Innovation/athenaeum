@@ -9618,6 +9618,75 @@ def _stamp_unbucketed_auto_memory(
         )
 
 
+def _write_transcript_receipts(
+    ctx: RunContext, auto_memory_files: list[AutoMemoryFile]
+) -> None:
+    """The athenaeum#753 transcript-receipt writer call, instrumented (athenaeum#2129).
+
+    One-line delegation to
+    :func:`athenaeum.transcript_receipts.write_receipts_for_files` (which
+    owns the ``librarian.transcript_receipts_enabled`` flag check itself —
+    see its docstring for why the check lives there and not here), plus the
+    two things athenaeum#2129 adds:
+
+    * ONE ``INFO`` line carrying the writer's counts on every run that
+      reaches the writer with the flag ON — **including when every count is
+      zero**. The pre-athenaeum#2129 call site logged only a non-zero
+      processed count, so the 2026-10-24/25 nightlies that processed nothing
+      with the flag on left no record at all, and "the writer found nothing"
+      was indistinguishable from "the flag is off".
+    * A ``"transcript-receipts"`` :attr:`RunContext.run_profile` entry
+      carrying the same counts (plus ``reason``), which flows automatically
+      into both :func:`_render_run_summary` and
+      :func:`athenaeum.run_summary_log.build_run_summary_ledger_record`
+      (``record["phases"]["transcript-receipts"]``), same as every other
+      phase's entry — that is the durable readout athenaeum#2048 AC4 asks for.
+
+    Three paths write NOTHING — no log line, no profile entry — leaving the
+    run summary byte-identical to a pre-athenaeum#2129 one: ``ctx.dry_run``, no
+    caller-held lock, and the flag off (``ReceiptsRunStats.flag_off``). The
+    flag-off case is deliberately silent rather than reported as a disabled
+    phase: this writer is an opt-in advisor that is off by default, so a
+    ``{"reason": "disabled"}`` entry would appear in every default run's
+    summary and ledger record.
+
+    Best-effort, like every other observability block in this module: the
+    pre-existing non-fatal ``WARNING`` stays, and a raising writer records
+    ``reason: failed`` rather than reading as a clean zero.
+    """
+    if ctx.dry_run or ctx.lock is None:
+        return
+    _start = time.monotonic()
+    try:
+        from athenaeum.transcript_receipts import write_receipts_for_files
+
+        stats = write_receipts_for_files(
+            ctx.wiki_root,
+            auto_memory_files,
+            config=ctx.config,
+            projects_root=ctx.projects_root,
+            lock=ctx.lock,
+        )
+        if stats.flag_off:
+            return
+        log.info(
+            "transcript receipts: processed %d receipt(s) from %d auto-memory "
+            "file(s) (%d with an origin session; skipped %d no_origin, "
+            "%d transcript_missing, %d not_classified)",
+            stats.receipts_processed,
+            stats.files_seen,
+            stats.files_with_origin,
+            stats.skipped_no_origin,
+            stats.skipped_transcript_missing,
+            stats.skipped_not_classified,
+        )
+        _fields: dict[str, Any] = {"reason": "completed", **stats.as_profile_fields()}
+    except Exception as exc:  # noqa: BLE001 — advisor must never break a run
+        log.warning("transcript-receipts writer failed (non-fatal): %s", exc)
+        _fields = {"reason": "failed"}
+    ctx.run_profile.append(("transcript-receipts", time.monotonic() - _start, _fields))
+
+
 def _run_auto_memory_phase(ctx: RunContext) -> int | None:
     """The auto-memory block: C1 discover + C2 cluster / C3 merge / C4
     detect, the post-compile deadline check, retire, and athenaeum#188 reresolve.
@@ -9706,26 +9775,10 @@ def _run_auto_memory_phase(ctx: RunContext) -> int | None:
     # a resolvable origin session and a present transcript; a memory whose
     # transcript has already rolled off or that declares no origin at all
     # yields no receipt. Best-effort: never breaks a run.
-    if not ctx.dry_run and ctx.lock is not None:
-        try:
-            from athenaeum.transcript_receipts import write_receipts_for_files
-
-            _receipts_processed = write_receipts_for_files(
-                ctx.wiki_root,
-                auto_memory_files,
-                config=ctx.config,
-                projects_root=ctx.projects_root,
-                lock=ctx.lock,
-            )
-            if _receipts_processed:
-                log.info(
-                    "transcript receipts: processed %d receipt(s) this run",
-                    _receipts_processed,
-                )
-        except Exception as exc:  # noqa: BLE001 — advisor must never break a run
-            log.warning(
-                "transcript-receipts writer failed (non-fatal): %s", exc
-            )
+    # Issue athenaeum#2129: counts are logged and summarised on EVERY run
+    # that reaches the writer, including an all-zero one — see
+    # ``_write_transcript_receipts``.
+    _write_transcript_receipts(ctx, auto_memory_files)
 
     by_scope: dict[str, int] = {}
     for am in auto_memory_files:

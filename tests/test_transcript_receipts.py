@@ -11,11 +11,16 @@ Covers:
 * ``resolutions._transcript_authorizes_correct`` — the receipt-aware gate,
   including the flag-off byte-identical pin and the athenaeum#752
   frontmatter-forgery pin extended to the receipt path.
+* :class:`athenaeum.transcript_receipts.ReceiptsRunStats` and
+  ``librarian._write_transcript_receipts`` — issue athenaeum#2129: the
+  per-run counts, and the log line + run-summary phase entry that make a
+  ZERO-receipt nightly visible instead of silent.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +34,7 @@ from athenaeum.transcript_receipts import (
     LockNotHeld,
     NoopSealer,
     ReceiptEntry,
+    ReceiptsRunStats,
     SealRecord,
     append_receipt,
     classify_for_correct_gate,
@@ -1030,7 +1036,11 @@ class TestWriteReceiptsForFiles:
             processed = write_receipts_for_files(
                 wiki, files, config={}, projects_root=pr, lock=lock
             )
-        assert processed == 0
+        # athenaeum#2129: the flag-off return is a ReceiptsRunStats, and it
+        # SAYS the flag was off rather than reporting an ambiguous bare 0.
+        assert int(processed) == 0
+        assert processed.flag_off is True
+        assert processed.skipped_flag_off == 1
         assert not (wiki / "_transcript_receipts").exists()
 
     def test_flag_on_writes_one_receipt_per_resolvable_file_idempotently(
@@ -1057,9 +1067,264 @@ class TestWriteReceiptsForFiles:
             second = write_receipts_for_files(
                 wiki, files, config=config, projects_root=pr, lock=lock
             )
-        assert first == 1
-        assert second == 1  # processed again, idempotently — no new line.
+        assert int(first) == 1
+        assert int(second) == 1  # processed again, idempotently — no new line.
+        assert first.flag_off is False
         assert len(iter_receipts(wiki)) == 1
+
+
+# ---------------------------------------------------------------------------
+# ReceiptsRunStats — issue athenaeum#2129: a zero result must be readable.
+# ---------------------------------------------------------------------------
+
+
+def _stats_member(
+    tmp_path: Path, name: str, *, claim: str, session_id: str | None
+) -> AutoMemoryFile:
+    member = tmp_path / "mem" / f"{name}.md"
+    member.parent.mkdir(parents=True, exist_ok=True)
+    member.write_text(f"---\nname: {name}\n---\n{claim}\n", encoding="utf-8")
+    return AutoMemoryFile(
+        path=member,
+        origin_scope="scopeA",
+        memory_type="feedback",
+        origin_session_id=session_id,
+        origin_turn=1,
+    )
+
+
+class TestReceiptsRunStats:
+    """Issue athenaeum#2129 AC1: the writer exposes the counts it already knows."""
+
+    def test_one_file_per_category_counts_each(self, tmp_path: Path) -> None:
+        pr = tmp_path / "projects"
+        wiki = tmp_path / "wiki"
+
+        # (1) processed: origin session + a transcript carrying the claim.
+        _write_transcript(pr, "scopeA", "sess-ok", [_user_record("claim ok")])
+        ok = _stats_member(tmp_path, "ok", claim="claim ok", session_id="sess-ok")
+        # (2) no_origin: nothing to look a transcript up by.
+        no_origin = _stats_member(tmp_path, "nosess", claim="claim nosess", session_id=None)
+        # (3) transcript_missing: origin session declared, transcript rolled off.
+        gone = _stats_member(tmp_path, "gone", claim="claim gone", session_id="sess-gone")
+        # (4) not_classified: transcript PRESENT but carrying no utterance at
+        #     all, so the classification is "unavailable" and no receipt is
+        #     minted from it (the remainder this count exists to name).
+        _write_transcript(pr, "scopeA", "sess-blank", [])
+        blank = _stats_member(tmp_path, "blank", claim="claim blank", session_id="sess-blank")
+
+        lock = RunLock(tmp_path)
+        config = {"librarian": {"transcript_receipts_enabled": True}}
+        with lock:
+            stats = write_receipts_for_files(
+                wiki, [ok, no_origin, gone, blank], config=config, projects_root=pr, lock=lock
+            )
+
+        assert isinstance(stats, ReceiptsRunStats)
+        assert stats.files_seen == 4
+        assert stats.files_with_origin == 3
+        assert stats.receipts_processed == 1
+        assert stats.skipped_no_origin == 1
+        assert stats.skipped_transcript_missing == 1
+        assert stats.skipped_not_classified == 1
+        assert stats.skipped_flag_off == 0
+        assert stats.flag_off is False
+        # The historical bare-int reading still works for a count-only caller.
+        assert int(stats) == 1
+        # The counts partition exactly — an unexplained remainder would leave
+        # the same unanswerable "why zero?" this issue exists to close.
+        assert stats.files_seen == stats.files_with_origin + stats.skipped_no_origin
+        assert stats.files_with_origin == (
+            stats.receipts_processed
+            + stats.skipped_transcript_missing
+            + stats.skipped_not_classified
+        )
+        assert int(stats) == len(iter_receipts(wiki))
+
+    def test_flag_off_is_distinguishable_from_nothing_resolvable(self, tmp_path: Path) -> None:
+        """The counter-example the pre-athenaeum#2129 bare ``int`` could not express.
+
+        Both runs below returned ``0`` before this issue, which is precisely
+        why the 2026-10-24/25 nightlies' zero could not be diagnosed.
+        """
+        pr = tmp_path / "projects"
+        pr.mkdir()
+        member = _stats_member(tmp_path, "nosess", claim="claim nosess", session_id=None)
+        lock = RunLock(tmp_path)
+        with lock:
+            off = write_receipts_for_files(
+                tmp_path / "wiki_off", [member], config={}, projects_root=pr, lock=lock
+            )
+            on = write_receipts_for_files(
+                tmp_path / "wiki_on",
+                [member],
+                config={"librarian": {"transcript_receipts_enabled": True}},
+                projects_root=pr,
+                lock=lock,
+            )
+
+        assert int(off) == int(on) == 0  # indistinguishable before athenaeum#2129
+        assert off.flag_off is True
+        assert off.skipped_flag_off == 1
+        assert off.skipped_no_origin == 0  # the flag-off path examines nothing
+        assert on.flag_off is False
+        assert on.skipped_no_origin == 1
+        assert on.skipped_flag_off == 0
+
+    def test_as_profile_fields_omits_the_flag_off_count(self, tmp_path: Path) -> None:
+        fields = ReceiptsRunStats(
+            files_seen=2, files_with_origin=1, receipts_processed=1, skipped_no_origin=1
+        ).as_profile_fields()
+        assert fields == {
+            "files_seen": 2,
+            "files_with_origin": 1,
+            "receipts_processed": 1,
+            "skipped_no_origin": 1,
+            "skipped_transcript_missing": 0,
+            "skipped_not_classified": 0,
+        }
+
+
+# ---------------------------------------------------------------------------
+# librarian._write_transcript_receipts — issue athenaeum#2129 AC2/AC3: the
+# call site logs and summarises the counts on EVERY run that reaches the
+# writer, including an all-zero one, and records a failure as a failure.
+# ---------------------------------------------------------------------------
+
+
+def _receipts_ctx(tmp_path: Path, config: dict[str, Any], lock: RunLock) -> Any:
+    from datetime import datetime, timezone
+
+    from athenaeum.librarian import RunContext, TokenUsage
+
+    knowledge_root = tmp_path / "knowledge"
+    (knowledge_root / "wiki").mkdir(parents=True, exist_ok=True)
+    ctx = RunContext(
+        raw_root=knowledge_root / "raw",
+        wiki_root=knowledge_root / "wiki",
+        knowledge_root=knowledge_root,
+        dry_run=False,
+        max_files=None,
+        max_api_calls=None,
+        max_runtime=None,
+        cluster_only=False,
+        merge_only=False,
+        strict_budget=False,
+        batch_mode=None,
+        retire=None,
+        push_after_run=None,
+        pull_before_run=None,
+        projects_root=tmp_path / "projects",
+        install_signal_handlers=False,
+        changed_paths=None,
+        full_compile=False,
+        now=datetime.now(timezone.utc),
+        heartbeat=None,
+        out_run_stats=None,
+    )
+    ctx.config = config
+    ctx.usage = TokenUsage()
+    ctx.run_deadline = None
+    ctx.lock = lock
+    return ctx
+
+
+def _phases(ctx: Any) -> dict[str, Any]:
+    from athenaeum.run_summary_log import build_run_summary_ledger_record
+
+    record = build_run_summary_ledger_record(ctx.run_profile)
+    phases: dict[str, Any] = record["phases"]
+    return phases
+
+
+class TestLibrarianReceiptsInstrumentation:
+    def test_zero_receipts_still_logs_one_line_and_one_summary_entry(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from athenaeum.librarian import _write_transcript_receipts
+
+        (tmp_path / "projects").mkdir(parents=True, exist_ok=True)
+        member = _stats_member(tmp_path, "nosess", claim="claim nosess", session_id=None)
+        lock = RunLock(tmp_path)
+        ctx = _receipts_ctx(
+            tmp_path, {"librarian": {"transcript_receipts_enabled": True}}, lock
+        )
+        with lock, caplog.at_level(logging.INFO, logger="athenaeum.librarian"):
+            _write_transcript_receipts(ctx, [member])
+
+        lines = [r for r in caplog.records if r.message.startswith("transcript receipts:")]
+        assert len(lines) == 1  # exactly ONE line, and it is emitted at zero.
+        rendered = lines[0].getMessage()
+        assert "processed 0 receipt(s) from 1 auto-memory file(s)" in rendered
+        assert "1 no_origin" in rendered
+
+        entry = _phases(ctx)["transcript-receipts"]
+        assert entry["reason"] == "completed"
+        assert entry["receipts_processed"] == 0
+        assert entry["files_seen"] == 1
+        assert entry["skipped_no_origin"] == 1
+
+    def test_flag_off_logs_nothing_and_adds_no_summary_entry(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The run summary stays byte-identical to a pre-athenaeum#2129 one."""
+        from athenaeum.librarian import _write_transcript_receipts
+
+        _write_transcript(tmp_path / "projects", "scopeA", "sess-ok", [_user_record("claim ok")])
+        member = _stats_member(tmp_path, "ok", claim="claim ok", session_id="sess-ok")
+        lock = RunLock(tmp_path)
+        ctx = _receipts_ctx(tmp_path, {}, lock)  # flag resolves off
+        with lock, caplog.at_level(logging.INFO, logger="athenaeum.librarian"):
+            _write_transcript_receipts(ctx, [member])
+
+        assert not [r for r in caplog.records if r.message.startswith("transcript receipts")]
+        assert ctx.run_profile == []
+        assert "transcript-receipts" not in _phases(ctx)
+
+    def test_dry_run_and_no_lock_add_no_summary_entry(self, tmp_path: Path) -> None:
+        from athenaeum.librarian import _write_transcript_receipts
+
+        config = {"librarian": {"transcript_receipts_enabled": True}}
+        lock = RunLock(tmp_path)
+        dry = _receipts_ctx(tmp_path, config, lock)
+        dry.dry_run = True
+        _write_transcript_receipts(dry, [])
+        assert dry.run_profile == []
+
+        unlocked = _receipts_ctx(tmp_path, config, lock)
+        unlocked.lock = None
+        _write_transcript_receipts(unlocked, [])
+        assert unlocked.run_profile == []
+
+    def test_raising_writer_keeps_the_warning_and_records_failed(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import athenaeum.transcript_receipts as receipts_mod
+        from athenaeum.librarian import _write_transcript_receipts
+
+        def _boom(*_a: Any, **_k: Any) -> ReceiptsRunStats:
+            raise RuntimeError("ledger unwritable")
+
+        monkeypatch.setattr(receipts_mod, "write_receipts_for_files", _boom)
+        lock = RunLock(tmp_path)
+        ctx = _receipts_ctx(
+            tmp_path, {"librarian": {"transcript_receipts_enabled": True}}, lock
+        )
+        with lock, caplog.at_level(logging.WARNING, logger="athenaeum.librarian"):
+            _write_transcript_receipts(ctx, [])
+
+        warnings = [
+            r
+            for r in caplog.records
+            if r.levelno == logging.WARNING
+            and "transcript-receipts writer failed" in r.getMessage()
+        ]
+        assert len(warnings) == 1
+        assert "ledger unwritable" in warnings[0].getMessage()
+        entry = _phases(ctx)["transcript-receipts"]
+        assert entry["reason"] == "failed"
+        # No counts are claimed from a run whose writer never returned any.
+        assert set(entry) == {"secs", "reason"}
 
 
 class TestRunReadBudget:
@@ -1113,7 +1378,7 @@ class TestRunReadBudget:
                 processed = write_receipts_for_files(
                     wiki, files, config=config, projects_root=pr, lock=lock
                 )
-                assert processed == n
+                assert int(processed) == n
                 # One monthly partition => exactly one ledger open per run
                 # (zero on the first run, when no partition exists yet) —
                 # independent of the number of memories.
@@ -1221,7 +1486,7 @@ class TestRecoveredSessionIntegration:
             processed = write_receipts_for_files(
                 wiki, files, config=config, projects_root=projects_root, lock=lock
             )
-        assert processed == 1
+        assert int(processed) == 1
 
         # Transcript still present: the gate reaches a REAL "user-stated"
         # live classification via the recovered session — a member with no
