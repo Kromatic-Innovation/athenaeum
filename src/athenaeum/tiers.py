@@ -3729,6 +3729,13 @@ def tier3_create_params(
     }
 
 
+#: How much of a parked observation a truncated-create escalation carries
+#: into ``_pending_questions.md`` (issue athenaeum#2112). Matches the cap the
+#: athenaeum#1615 name-collision create suppression uses for the same parked
+#: text — the escalation is the only surviving copy of the claim, so this is
+#: deliberately generous rather than a log-prefix-sized peek.
+MAX_PARKED_OBSERVATION_CHARS = 2000
+
 #: Stable, greppable marker logged (WARNING) whenever a Tier-3 create
 #: response is cut off at ``max_tokens`` before emitting any text block
 #: (issue athenaeum#2112). Distinct from the preamble-rejection marker: the
@@ -4015,7 +4022,25 @@ def truncated_create_escalation(
     transports escalate identically — the same ``conflict_type="principled"``
     / "left unwritten pending human review" posture
     :func:`parse_tier3_merge` uses for an output-truncated merge.
+
+    The PARKED OBSERVATION is carried in the description after a blank line,
+    the athenaeum#2078 AC4 convention :func:`tier4_escalate` renders as a
+    fenced ``**Observation**:`` field — the same shape the athenaeum#1615
+    name-collision create suppression above uses, and for the same reason.
+    This is not decoration: both transports ``unlink()`` the raw file once
+    the tier-3 pass returns without raising, and a truncated create writes
+    no page, so the escalation is the ONLY surviving copy of the claim. The
+    entity name alone would leave a reviewer with nothing to act on.
+    ``action.observations`` is exactly what the create prompt was given, so
+    it is the right unit here rather than the whole raw file.
     """
+    observation = (action.observations or "").strip()
+    parked = (
+        f" The observation follows so the fact is not "
+        f"lost:\n\n{observation[:MAX_PARKED_OBSERVATION_CHARS]}"
+        if observation
+        else ""
+    )
     return EscalationItem(
         raw_ref=source_ref,
         entity_name=action.name,
@@ -4024,7 +4049,7 @@ def truncated_create_escalation(
             "Tier 3 create response was truncated (max_tokens) before "
             "emitting any page content; refusing to persist an empty page. "
             "Entity left unwritten pending human review (issue "
-            "athenaeum#2112)."
+            f"athenaeum#2112).{parked}"
         ),
     )
 

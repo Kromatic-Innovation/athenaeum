@@ -30,6 +30,7 @@ import pytest
 from athenaeum.models import EntityAction, EntityIndex, RawFile, TokenUsage
 from athenaeum.provider import text_or_truncated
 from athenaeum.tiers import (
+    MAX_PARKED_OBSERVATION_CHARS,
     TIER3_CREATE_TRUNCATED_MARKER,
     Tier2ParseStats,
     TruncatedCreateResponseError,
@@ -309,15 +310,47 @@ class TestTier3DeriveActionsEscalatesATruncatedCreate:
             ("WidgetTruncated", "principled")
         ]
         assert "max_tokens" in escalations[0].description
+        # The raw file is unlinked by the caller once this returns, so the
+        # parked observation in the escalation is the last copy of the claim.
+        assert "Facts about WidgetTruncated." in escalations[0].description
         assert client.messages.create.call_count == 2
 
 
-def test_truncated_create_escalation_shape() -> None:
-    esc = truncated_create_escalation(_create_action("Widget"), "sessions/ref")
-    assert esc.raw_ref == "sessions/ref"
-    assert esc.entity_name == "Widget"
-    assert esc.conflict_type == "principled"
-    assert "max_tokens" in esc.description
+class TestTruncatedCreateEscalationShape:
+    def test_names_the_entity_and_the_cause(self) -> None:
+        esc = truncated_create_escalation(_create_action("Widget"), "sessions/ref")
+        assert esc.raw_ref == "sessions/ref"
+        assert esc.entity_name == "Widget"
+        assert esc.conflict_type == "principled"
+        assert "max_tokens" in esc.description
+
+    def test_carries_the_parked_observation_after_a_blank_line(self) -> None:
+        # Seer review on PR #2128: both transports unlink the raw file once
+        # the tier-3 pass returns without raising, and a truncated create
+        # writes no page — so this escalation is the ONLY surviving copy of
+        # the claim. The blank-line convention is what tier4_escalate renders
+        # as a fenced ``**Observation**:`` field (athenaeum#2078 AC4); an
+        # inline description would lose the text on read-back.
+        action = _create_action("Widget")
+        esc = truncated_create_escalation(action, "sessions/ref")
+        head, blank, tail = esc.description.partition("\n\n")
+        assert blank == "\n\n"
+        assert tail.strip() == action.observations
+
+    def test_an_empty_observation_parks_nothing(self) -> None:
+        # No blank line, so tier4_escalate renders no Observation field at
+        # all rather than an empty fence.
+        action = _create_action("Widget")
+        action.observations = "   "
+        esc = truncated_create_escalation(action, "sessions/ref")
+        assert "\n\n" not in esc.description
+
+    def test_a_long_observation_is_bounded(self) -> None:
+        action = _create_action("Widget")
+        action.observations = "x" * (MAX_PARKED_OBSERVATION_CHARS + 500)
+        esc = truncated_create_escalation(action, "sessions/ref")
+        _head, _blank, tail = esc.description.partition("\n\n")
+        assert len(tail.strip()) == MAX_PARKED_OBSERVATION_CHARS
 
 
 # ---------------------------------------------------------------------------

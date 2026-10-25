@@ -4366,3 +4366,11 @@ class TestThinkingOnlyTruncationBatchTransport:
         )
         assert "WidgetTrunc" in questions
         assert "max_tokens" in questions
+        # Seer review on PR #2128: the raw file is unlinked at the end of a
+        # clean finalize, so the parked observation in the escalation is the
+        # only surviving copy of the claim. It must reach the queue, in the
+        # fenced ``**Observation**:`` field tier4_escalate renders from the
+        # description's post-blank-line tail (athenaeum#2078 AC4).
+        assert "**Observation**:" in questions
+        assert "Facts about WidgetTrunc." in questions
+        assert not (root / "raw" / "sessions" / "20240410T120000Z-aabbccd0.md").exists()
