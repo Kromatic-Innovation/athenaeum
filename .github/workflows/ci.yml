@@ -192,6 +192,83 @@ jobs:
       - name: Type check with mypy
         run: mypy
 
+  # athenaeum#2136 — the CONTRIBUTOR's install path, with NO
+  # `requirements-ci.lock`. Every other job here constrains to that lock, which
+  # is the right call for reproducibility but means the published, unconstrained
+  # ranges in pyproject.toml are never actually resolved by CI. That blind spot
+  # shipped a real break: four test modules `import httpx`, `httpx` was declared
+  # nowhere, and it arrived only as a transitive of `anthropic` — so when
+  # `anthropic` 1.17.0 switched to `httpx2`, a clean `pip install -e ".[dev]"`
+  # stopped collecting the suite (3 ERRORs, 0 tests run) while CI stayed green
+  # on the locked older `anthropic`. The first person to see it was a release
+  # reviewer bootstrapping the project from CONTRIBUTING.md.
+  #
+  # Deliberately NOT a second full matrix leg: `test` already covers "does the
+  # suite pass", at ~25 minutes. This job answers the narrower question "can the
+  # documented install still RUN the suite at all", in about two — collection of
+  # everything, plus a smoke subset of the modules that touch the third-party
+  # dependency surface directly, plus the declared-imports check that names an
+  # undeclared dependency instead of letting it surface as a downstream
+  # ImportError.
+  clean-venv:
+    name: Clean venv (unconstrained ranges)
+    needs: [check_duplicate]
+    if: needs.check_duplicate.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.13"
+
+      # `[dev]` only, and NO `-c requirements-ci.lock` — this is verbatim what
+      # CONTRIBUTING.md step 2 offers a contributor who is not touching search
+      # or clustering. Adding the lock here, or widening the extras to match the
+      # `test` job, would delete the entire point of this job.
+      - name: Install the documented contributor path (no lock)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      # The resolved tree, in the log, so a future drift of this kind is one
+      # click from a diagnosis instead of a bisect.
+      - name: Record the resolved dependency tree
+        run: pip freeze
+
+      - name: Every third-party import is declared
+        run: python scripts/check_declared_imports.py
+
+      # Collection is the bar the `httpx` break actually failed. It runs the
+      # whole suite's imports in seconds and needs no optional extra.
+      - name: The whole suite still collects
+        run: pytest tests/ --collect-only -q
+
+      # The modules that import the third-party dependency surface directly
+      # (`httpx` in the first four, `packaging` in the next two), the two checks
+      # that police declarations and the environment contract, and the public
+      # API surface. ATHENAEUM_TEST_ENV_CONTRACT=strict promotes an
+      # environment-contract skip (tests/env_contract.py) into a FAILURE, so a
+      # missing dependency cannot hide behind "skipped" here — which means every
+      # test listed below has to satisfy the contract properties a `[dev]`-only
+      # install provides. Do not add a test that needs `[vector]`.
+      - name: Dependency-surface smoke subset
+        env:
+          ATHENAEUM_TEST_ENV_CONTRACT: strict
+        run: |
+          pytest -q \
+            tests/test_retry.py \
+            tests/test_retry_registry.py \
+            tests/test_batch_mode.py \
+            tests/test_librarian_zero_yield.py \
+            tests/test_ci_lock_parity.py \
+            tests/test_cli_tool_bridge_mcp_api_guard.py \
+            tests/test_declared_imports.py \
+            tests/test_env_contract.py \
+            tests/test_clean_venv_ci_wiring.py \
+            tests/test_public_api.py
+
   # athenaeum#693 — org-agnostic public-safety leak scan, folded into the
   # required `CI Required` gate below (added to `needs:` + checked in the
   # aggregate) so a hit BLOCKS merge/promotion rather than being advisory, and
@@ -224,12 +301,13 @@ jobs:
   # failure here must cost a future CI saving, never a merge.
   publish_attestation:
     name: Publish CI attestation
-    needs: [check_duplicate, test, types, public-safe-lint]
+    needs: [check_duplicate, test, types, public-safe-lint, clean-venv]
     if: >-
       needs.check_duplicate.result == 'success' &&
       needs.test.result == 'success' &&
       needs.types.result == 'success' &&
-      needs.public-safe-lint.result == 'success'
+      needs.public-safe-lint.result == 'success' &&
+      needs.clean-venv.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -273,7 +351,7 @@ jobs:
   # not-yet-tested PR head).
   ci-required:
     name: CI Required
-    needs: [check_duplicate, test, types, public-safe-lint]
+    needs: [check_duplicate, test, types, public-safe-lint, clean-venv]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -283,8 +361,9 @@ jobs:
           TEST_RESULT: ${{ needs.test.result }}
           TYPES_RESULT: ${{ needs.types.result }}
           PUBLIC_SAFE_LINT_RESULT: ${{ needs.public-safe-lint.result }}
+          CLEAN_VENV_RESULT: ${{ needs.clean-venv.result }}
         run: |
-          echo "check_duplicate=$DUP_RESULT test=$TEST_RESULT types=$TYPES_RESULT public-safe-lint=$PUBLIC_SAFE_LINT_RESULT"
+          echo "check_duplicate=$DUP_RESULT test=$TEST_RESULT types=$TYPES_RESULT public-safe-lint=$PUBLIC_SAFE_LINT_RESULT clean-venv=$CLEAN_VENV_RESULT"
           # The duplicate detector must itself have succeeded; otherwise we
           # cannot trust its skip decision and must fail closed.
           if [ "$DUP_RESULT" != "success" ]; then
@@ -295,7 +374,7 @@ jobs:
           # `skipped`  → check_duplicate verified this push's tree was already
           #              tested green on the PR head; nothing new to prove.
           # anything else (failure/cancelled) → fail the gate.
-          for pair in "test:$TEST_RESULT" "types:$TYPES_RESULT" "public-safe-lint:$PUBLIC_SAFE_LINT_RESULT"; do
+          for pair in "test:$TEST_RESULT" "types:$TYPES_RESULT" "public-safe-lint:$PUBLIC_SAFE_LINT_RESULT" "clean-venv:$CLEAN_VENV_RESULT"; do
             name="${pair%%:*}"
             result="${pair#*:}"
             case "$result" in

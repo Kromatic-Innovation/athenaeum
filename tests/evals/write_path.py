@@ -58,11 +58,12 @@ Claude's judgement on the same raw notes."
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import os
 import re
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -162,6 +163,42 @@ def _usage_of(response: Any) -> dict[str, int]:
         "cache_creation_input_tokens": _get("cache_creation_input_tokens"),
         "cache_read_input_tokens": _get("cache_read_input_tokens"),
     }
+
+
+@contextlib.contextmanager
+def _dummy_api_key_if_unset() -> Iterator[None]:
+    """A non-empty ``ANTHROPIC_API_KEY`` for the duration, if there isn't one.
+
+    The patched ``anthropic.Anthropic`` constructor always returns the tracking
+    client regardless of the key's value, but some call sites resolve (and
+    validate the presence of) ``ANTHROPIC_API_KEY`` before ever constructing a
+    client -- ``athenaeum.librarian.run``'s own preflight refuses with
+    "ANTHROPIC_API_KEY not set (required unless dry_run=True)" and exits 1.
+
+    Issue athenaeum#2136: the test for "is there a key" has to be TRUTHINESS, not
+    PRESENCE. An environment that exports the variable EMPTY -- common in agent
+    containers and CI images that declare the variable without a value -- passed
+    a ``"ANTHROPIC_API_KEY" in os.environ`` check, so no dummy key was installed
+    and all six ``tests/evals/test_write_path.py`` tests failed on the
+    librarian's refusal. GitHub Actions does not export the variable at all, so
+    CI never saw it: the suite was green on CI and red on a clean venv, with no
+    defect anywhere in athenaeum.
+
+    Restores the original value EXACTLY on the way out -- including an empty
+    string -- rather than popping, so this never mutates the environment later
+    tests observe. Never overwrites a real operator key.
+    """
+    original = os.environ.get("ANTHROPIC_API_KEY")
+    if not original:
+        os.environ["ANTHROPIC_API_KEY"] = "eval-write-path-compile-not-a-real-key"
+    try:
+        yield
+    finally:
+        if not original:
+            if original is None:
+                os.environ.pop("ANTHROPIC_API_KEY", None)
+            else:
+                os.environ["ANTHROPIC_API_KEY"] = original
 
 
 class _SpendTrackingClient:
@@ -395,15 +432,6 @@ def compile_observation_stream(
 
     tracking = _SpendTrackingClient(client, session=session, model=model)
 
-    # A dummy key only when the environment carries none at all — the
-    # patched ``anthropic.Anthropic`` constructor below always returns
-    # *tracking* regardless of the key's value, but some call sites resolve
-    # (and validate the presence of) ``ANTHROPIC_API_KEY`` before ever
-    # constructing the client. Never overwrites a real operator key.
-    had_key = "ANTHROPIC_API_KEY" in os.environ
-    if not had_key:
-        os.environ["ANTHROPIC_API_KEY"] = "eval-write-path-compile-not-a-real-key"
-
     run_options: dict[str, Any] = {
         "live_session_guard": False,
         "install_signal_handlers": False,
@@ -423,7 +451,7 @@ def compile_observation_stream(
     }
     run_options.update(run_kwargs or {})
 
-    try:
+    with _dummy_api_key_if_unset():
         with patch("anthropic.Anthropic", lambda **kwargs: tracking):
             exit_code = librarian_run(
                 raw_root=knowledge_root / "raw",
@@ -431,9 +459,6 @@ def compile_observation_stream(
                 knowledge_root=knowledge_root,
                 **run_options,
             )
-    finally:
-        if not had_key:
-            os.environ.pop("ANTHROPIC_API_KEY", None)
 
     if exit_code in (1, EXIT_LIBRARIAN_REFUSAL):
         raise LibrarianCompileError(
@@ -562,10 +587,6 @@ def compile_native_memory_files(
 
     tracking = _SpendTrackingClient(client, session=session, model=model)
 
-    had_key = "ANTHROPIC_API_KEY" in os.environ
-    if not had_key:
-        os.environ["ANTHROPIC_API_KEY"] = "eval-write-path-compile-not-a-real-key"
-
     run_options: dict[str, Any] = {
         "live_session_guard": False,
         "install_signal_handlers": False,
@@ -576,7 +597,7 @@ def compile_native_memory_files(
     }
     run_options.update(run_kwargs or {})
 
-    try:
+    with _dummy_api_key_if_unset():
         with patch("anthropic.Anthropic", lambda **kwargs: tracking):
             exit_code = librarian_run(
                 raw_root=knowledge_root / "raw",
@@ -584,9 +605,6 @@ def compile_native_memory_files(
                 knowledge_root=knowledge_root,
                 **run_options,
             )
-    finally:
-        if not had_key:
-            os.environ.pop("ANTHROPIC_API_KEY", None)
 
     if exit_code in (1, EXIT_LIBRARIAN_REFUSAL):
         raise LibrarianCompileError(

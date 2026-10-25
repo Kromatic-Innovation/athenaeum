@@ -28,6 +28,7 @@ from athenaeum.runlock import (
     is_stale,
     read_holder,
 )
+from tests.env_contract import require
 
 
 class TestRunLockAcquireRelease:
@@ -765,6 +766,10 @@ class TestIngestPathHeartbeatWiring:
     def test_session_end_invokes_heartbeat_callback(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # `session_end` reindexes, and the shipped default backend is vector
+        # (athenaeum#1825), so this one needs the `[vector]` extra where the
+        # sibling `run()` tests above do not.
+        require("vector_backend")
         from athenaeum.librarian import session_end
 
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test-fake-api-key-not-real")

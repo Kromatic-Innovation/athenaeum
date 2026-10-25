@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A `clean-venv` CI job, so the documented install path is actually tested
+  (issue athenaeum#2136).** Every other CI job constrains its install to
+  `requirements-ci.lock`. That is right for reproducibility and wrong as the
+  only coverage: pyproject's PUBLISHED dependency ranges were never resolved by
+  CI, so the `httpx` break below was invisible here and surfaced first to a
+  release reviewer following `CONTRIBUTING.md`. The new job installs
+  `pip install -e ".[dev]"` with no lock, records the resolved tree, collects
+  the whole suite, and runs a smoke subset of the modules that touch the
+  third-party dependency surface directly. It is wired into the `CI Required`
+  aggregate, so a drift of this kind now fails a PR.
+  - **`scripts/check_declared_imports.py`** names an undeclared dependency
+    directly instead of letting it surface as a downstream `ImportError`: it
+    fails when `src/` or `tests/` imports a third-party package
+    `pyproject.toml` declares nowhere, printing the import and its file. A
+    genuinely optional import guarded by `try: ... except ImportError` is
+    exempt; a lazy import inside a function body is not (the ruling
+    athenaeum#542 already made for `numpy`). Offline, no new dependency,
+    runnable locally.
+  - **The test suite's environment contract is written down** — a new
+    **Test-suite environment contract** section in `CONTRIBUTING.md`, and
+    `tests/env_contract.py` as its enforcement. A test whose MACHINE
+    precondition is unmet now skips naming the precondition rather than
+    failing. Under `ATHENAEUM_TEST_ENV_CONTRACT=strict` — which the
+    `clean-venv` job sets — those skips become failures instead, so "skipped"
+    cannot mask "undeclared".
+
 - **Transcript receipts can be cryptographically sealed.** `NoopSealer` is
   still the default, so nothing changes until you opt in. Setting
   `librarian.receipt_sealer: signing` makes the intake writer sign each
@@ -80,6 +106,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Behavior is otherwise unchanged — both surfaces still work.
 
 ### Fixed
+
+- **A clean `pip install -e ".[dev]"` can collect and run the suite again
+  (issue athenaeum#2136).** The Zenodotus release panel for 0.22.43 bootstrapped
+  the project the way `CONTRIBUTING.md` says to and the documented command
+  stopped at collection: `pip` resolved `anthropic` 1.17.0, which depends on
+  `httpx2` rather than `httpx`, and `tests/test_batch_mode.py`,
+  `tests/test_retry.py`, `tests/test_retry_registry.py` and
+  `tests/test_librarian_zero_yield.py` all `import httpx` directly. `httpx` was
+  declared nowhere, so it had been arriving purely as an `anthropic` transitive
+  — three collection ERRORs and zero tests run. CI never saw it: CI constrains
+  to `requirements-ci.lock`, which pins an older `anthropic` that still carries
+  `httpx`.
+  - **`httpx` and `packaging` are now declared** in the `dev` extra, bounded
+    like every other dependency here. `packaging` is the same defect class,
+    found by the new declared-imports check on its first run — imported at
+    module level by `tests/test_ci_lock_parity.py` and
+    `tests/test_cli_tool_bridge_mcp_api_guard.py`, arriving via pip's own
+    build requirements.
+  - **Six tests that need the `[vector]` extra now skip instead of failing
+    under a `[dev]`-only install**, which is what `CONTRIBUTING.md` already
+    promised: two in `tests/test_cli.py`, two in
+    `tests/test_search.py::TestReindexUnderLiveServer`, one in
+    `tests/test_runlock.py` (`session_end` reindexes, and the shipped default
+    backend is vector) and one in `tests/test_shell_hooks.py` (`rebuild-index.sh`
+    defaults to vector and builds FTS5 only as a secondary index, so the whole
+    script exits 2 without `chromadb`).
+  - **An EMPTY `ANTHROPIC_API_KEY` is treated as no key.**
+    `tests/evals/write_path.py` installed its dummy key only when the variable
+    was ABSENT (`"ANTHROPIC_API_KEY" in os.environ`), so an environment that
+    exports it with no value — common in agent containers and CI images — got
+    no dummy key and all six `tests/evals/test_write_path.py` tests failed on
+    the librarian's "required unless dry_run=True" refusal. The check is now
+    truthiness, and the original value is restored exactly rather than popped.
+  - **`tests/test_surface_divergence.py`'s fresh-install test skips inside a
+    virtualenv.** It builds a wheel and installs it into a
+    `--system-site-packages` child venv; PEP 405 venvs do not nest, so that
+    child can only import athenaeum's runtime dependencies when they live in
+    the base interpreter — true for CI, false for the virtualenv
+    `CONTRIBUTING.md` tells contributors to create.
 
 - **The `[0.22.43]` changelog section no longer omits two deleted modules
   (issue athenaeum#2138).** `athenaeum.cross_scope` and

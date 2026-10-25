@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from athenaeum.cli import build_parser, main
+from tests.env_contract import require
 
 
 @pytest.fixture
@@ -113,6 +114,7 @@ class TestRebuildIndex:
         ``athenaeum.yaml`` names no ``search_backend`` (see
         ``test_reads_backend_from_config`` above for the ``fts5`` opt-out via
         explicit config)."""
+        require("vector_backend")
         cache = tmp_path / "cache"
         rc = main(
             [
@@ -177,6 +179,7 @@ class TestServe:
     def test_serve_reads_vector_backend_from_config(
         self, knowledge_with_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        require("vector_backend")
         (knowledge_with_wiki / "athenaeum.yaml").write_text(
             "auto_recall: true\nsearch_backend: vector\n"
         )

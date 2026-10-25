@@ -61,6 +61,7 @@ from athenaeum.push_metrics import (
     read_push_records,
     record_push,
 )
+from tests.env_contract import require
 
 HOOKS_DIR = Path(__file__).parent.parent / "examples" / "claude-code"
 SESSION_START = HOOKS_DIR / "session-start-recall.sh"
@@ -3035,6 +3036,11 @@ class TestRebuildIndex:
     ) -> None:
         _require("bash")
         _require_hook_python(hook_env, "athenaeum.search")
+        # `rebuild-index.sh` defaults to the vector backend and builds FTS5 as
+        # a SECONDARY index, so the whole script exits 2 without `chromadb` --
+        # `_require_hook_python` cannot see that, because `athenaeum.search`
+        # imports fine and defers its chromadb import to backend-open time.
+        require("vector_backend")
         result = subprocess.run(
             ["bash", str(REBUILD_INDEX)],
             env=hook_env,
