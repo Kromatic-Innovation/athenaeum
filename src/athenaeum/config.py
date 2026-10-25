@@ -6275,6 +6275,206 @@ def resolve_transcript_receipts_enabled(config: dict[str, Any] | None) -> bool:
     return False
 
 
+class ReceiptSealerConfigError(ValueError):
+    """An unknown transcript-receipt sealer or key-provider value (issue athenaeum#2039).
+
+    Raised rather than falling back to not sealing: a typo in a security
+    knob that silently disabled signing would be invisible in the ledger,
+    which is the one failure mode an operator could not detect after the
+    fact. Mirrors :class:`SensitivityRoutingConfigError`'s shape.
+    """
+
+
+#: Accepted ``librarian.receipt_sealer`` values (issue athenaeum#2039).
+RECEIPT_SEALERS = ("noop", "signing")
+
+#: Accepted key-provider values behind the signing sealer. One adapter today;
+#: a hardware key or KMS is a later ENTRY here plus its own provider class,
+#: never a variant of the 1Password one (operator ruling 2026-10-25).
+RECEIPT_SIGNING_KEY_PROVIDERS = ("onepassword",)
+
+#: Default ``op://`` reference for the private key. The operator-created
+#: 1Password **SSH Key** item (Ed25519), whose ``private key`` field arrives
+#: in OpenSSH format.
+DEFAULT_RECEIPT_SIGNING_OP_REFERENCE = (
+    "op://Agent Tools/Athenaeum Receipt Sealing Key/private key"
+)
+
+#: Fallback ``op://`` reference for the matching public key. Normally the
+#: public reference is DERIVED from whatever private reference is configured
+#: (see :func:`resolve_receipt_signing_public_key_ref`); this constant is only
+#: reached when the private reference has no field segment to replace.
+DEFAULT_RECEIPT_SIGNING_PUBLIC_KEY_REF = (
+    "op://Agent Tools/Athenaeum Receipt Sealing Key/public key"
+)
+
+
+def resolve_receipt_sealer(config: dict[str, Any] | None) -> str:
+    """Resolve which receipt sealer to use (issue athenaeum#2039). DEFAULT ``"noop"``.
+
+    ``librarian.receipt_sealer`` selects the
+    :class:`athenaeum.transcript_receipts.Sealer`
+    :func:`athenaeum.receipt_sealers.select_sealer` builds: ``noop`` (the
+    default — git history of the knowledge repo is the only tamper evidence,
+    which is a log and not a seal) or ``signing`` (Ed25519 signatures over
+    each appended receipt range, with the key held outside the nightly
+    process).
+
+    Turning this on does NOT make the nightly need the key: with ``signing``
+    set and no credential reachable, intake appends UNSEALED lines and logs
+    exactly one warning. Sealing is then ``athenaeum receipts seal``, a
+    supervised step.
+
+    yaml only, no env override — this is a durable property of a knowledge
+    repo, not a per-invocation one. Any value outside ``noop``/``signing``
+    raises :class:`ReceiptSealerConfigError`; it never falls back to off.
+    """
+    if isinstance(config, dict):
+        librarian = config.get("librarian")
+        if isinstance(librarian, dict):
+            raw = librarian.get("receipt_sealer")
+            if raw is not None:
+                if not isinstance(raw, str) or raw not in RECEIPT_SEALERS:
+                    raise ReceiptSealerConfigError(
+                        f"librarian.receipt_sealer: unknown sealer {raw!r}; "
+                        f"expected one of {list(RECEIPT_SEALERS)}"
+                    )
+                return raw
+    return "noop"
+
+
+def resolve_receipt_signing_key_provider(config: dict[str, Any] | None) -> str:
+    """Resolve where the receipt signing key lives (issue athenaeum#2039).
+
+    ``librarian.receipt_signing.key_provider`` names the adapter behind
+    :class:`athenaeum.receipt_sealers.SigningKeyProvider`. One adapter today,
+    ``onepassword`` (a 1Password service account reading an ``op://``
+    reference through the ``op`` CLI), which is therefore also the default.
+
+    Key placement is an adapter seam by operator ruling: a hardware key or a
+    KMS becomes a NEW value here with its own provider class, never a branch
+    inside the 1Password one. An unknown value raises
+    :class:`ReceiptSealerConfigError`.
+    """
+    raw: Any = None
+    # The three key segments are read INLINE, in order, rather than
+    # through a shared helper: `tests/test_config_resolver_parity_generic.py`
+    # discovers a resolver's yaml path from the string literals in its own
+    # body (following only `_resolve*`-named helpers), so a factored-out
+    # lookup hides `librarian`/`receipt_signing` from that gate and the
+    # key reads as dead.
+    if isinstance(config, dict):
+        _librarian = config.get("librarian")
+        if isinstance(_librarian, dict):
+            _signing = _librarian.get("receipt_signing")
+            if isinstance(_signing, dict):
+                raw = _signing.get("key_provider")
+    if raw is not None:
+        if not isinstance(raw, str) or raw not in RECEIPT_SIGNING_KEY_PROVIDERS:
+            raise ReceiptSealerConfigError(
+                f"librarian.receipt_signing.key_provider: unknown provider {raw!r}; "
+                f"expected one of {list(RECEIPT_SIGNING_KEY_PROVIDERS)}"
+            )
+        return raw
+    return "onepassword"
+
+
+def resolve_receipt_signing_op_reference(config: dict[str, Any] | None) -> str:
+    """Resolve the private-key ``op://`` reference (issue athenaeum#2039).
+
+    ``librarian.receipt_signing.op_reference`` is read with ``op read`` by the
+    1Password provider, inside the signing call only — the key is never
+    written to disk or cached. The default points at the operator-created
+    Ed25519 **SSH Key** item, whose private field arrives in OpenSSH format
+    (PKCS8 PEM is also accepted, so rotating to a PEM item needs no code
+    change).
+    """
+    raw: Any = None
+    # The three key segments are read INLINE, in order, rather than
+    # through a shared helper: `tests/test_config_resolver_parity_generic.py`
+    # discovers a resolver's yaml path from the string literals in its own
+    # body (following only `_resolve*`-named helpers), so a factored-out
+    # lookup hides `librarian`/`receipt_signing` from that gate and the
+    # key reads as dead.
+    if isinstance(config, dict):
+        _librarian = config.get("librarian")
+        if isinstance(_librarian, dict):
+            _signing = _librarian.get("receipt_signing")
+            if isinstance(_signing, dict):
+                raw = _signing.get("op_reference")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    return DEFAULT_RECEIPT_SIGNING_OP_REFERENCE
+
+
+def resolve_receipt_signing_public_key_ref(config: dict[str, Any] | None) -> str:
+    """Resolve the public-key ``op://`` reference (issue athenaeum#2039).
+
+    ``librarian.receipt_signing.public_key_ref`` lets verification read only
+    the PUBLIC half, which is all ``athenaeum receipts verify`` needs — so a
+    machine that may verify need not be a machine that may sign. Prefer the
+    inline form (see :func:`resolve_receipt_signing_public_key_openssh`) when
+    verification should run with no 1Password access at all.
+
+    **Unset, it is DERIVED from the private-key reference** — the same vault
+    and item, field ``public key`` — never a fixed constant (Seer review on
+    PR athenaeum#2137). A constant default would pair a custom private-key
+    reference with the stock item's public key, so signing and verification
+    would use different keys and every seal would fail for a reason the
+    output could not explain. Derivation keeps the pair coherent by
+    construction; an item whose public field is named something else needs
+    this key set explicitly.
+    """
+    raw: Any = None
+    # The three key segments are read INLINE, in order, rather than
+    # through a shared helper: `tests/test_config_resolver_parity_generic.py`
+    # discovers a resolver's yaml path from the string literals in its own
+    # body (following only `_resolve*`-named helpers), so a factored-out
+    # lookup hides `librarian`/`receipt_signing` from that gate and the
+    # key reads as dead.
+    if isinstance(config, dict):
+        _librarian = config.get("librarian")
+        if isinstance(_librarian, dict):
+            _signing = _librarian.get("receipt_signing")
+            if isinstance(_signing, dict):
+                raw = _signing.get("public_key_ref")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    private_ref = resolve_receipt_signing_op_reference(config)
+    head, sep, _field = private_ref.rpartition("/")
+    if sep and head:
+        return f"{head}/public key"
+    return DEFAULT_RECEIPT_SIGNING_PUBLIC_KEY_REF
+
+
+def resolve_receipt_signing_public_key_openssh(config: dict[str, Any] | None) -> str | None:
+    """Resolve an inline public key for verification (issue athenaeum#2039). DEFAULT none.
+
+    ``librarian.receipt_signing.public_key_openssh`` holds an
+    ``ssh-ed25519 AAAA...`` line verbatim. A public key is not a secret, and
+    committing it to the knowledge repo is what lets ``athenaeum receipts
+    verify`` run unattended, anywhere, with no credential and no ``op``
+    binary. When set it takes precedence over the ``op://`` public-key
+    reference.
+    """
+    raw: Any = None
+    # The three key segments are read INLINE, in order, rather than
+    # through a shared helper: `tests/test_config_resolver_parity_generic.py`
+    # discovers a resolver's yaml path from the string literals in its own
+    # body (following only `_resolve*`-named helpers), so a factored-out
+    # lookup hides `librarian`/`receipt_signing` from that gate and the
+    # key reads as dead.
+    if isinstance(config, dict):
+        _librarian = config.get("librarian")
+        if isinstance(_librarian, dict):
+            _signing = _librarian.get("receipt_signing")
+            if isinstance(_signing, dict):
+                raw = _signing.get("public_key_openssh")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    return None
+
+
 def resolve_writer_identity_enforced(config: dict[str, Any] | None) -> bool:
     """Resolve the writer-identity enforcement opt-in (issue athenaeum#2041). DEFAULT OFF.
 

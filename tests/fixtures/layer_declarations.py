@@ -108,6 +108,7 @@ MODULE_LAYER: dict[str, int] = {
     "quiesce": 2,
     "schema_migrate": 2,
     "push_state": 2,
+    "receipt_sealers": 2,  # receipt_sealers.py: "Layering: L2"
     "recovery_yield": 2,
     "run_summary_log": 2,
     "stuck_ledger": 2,
@@ -307,6 +308,7 @@ MODULE_LAYER: dict[str, int] = {
     "_cmd_recovery_yield": 5,
     "_cmd_repair": 5,
     "_cmd_retire": 5,
+    "_cmd_receipts": 5,  # issue athenaeum#2039
     "_cmd_recover_parked": 5,  # issue athenaeum#2078
     "_cmd_split_oversize": 5,  # issue athenaeum#2078
     "_cmd_run": 5,

@@ -2462,6 +2462,112 @@ triggered reasoning run AND no other trigger fired this evaluation (see
 primary path. ``bool`` and non-positive / non-int values fall through to
 the default.
 
+### `resolve_receipt_sealer`
+
+- **YAML path:** `librarian.receipt_sealer`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `'noop'`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve which receipt sealer to use. DEFAULT ``"noop"``.
+
+``librarian.receipt_sealer`` selects the
+`athenaeum.transcript_receipts.Sealer`
+`athenaeum.receipt_sealers.select_sealer` builds: ``noop`` (the
+default — git history of the knowledge repo is the only tamper evidence,
+which is a log and not a seal) or ``signing`` (Ed25519 signatures over
+each appended receipt range, with the key held outside the nightly
+process).
+
+Turning this on does NOT make the nightly need the key: with ``signing``
+set and no credential reachable, intake appends UNSEALED lines and logs
+exactly one warning. Sealing is then ``athenaeum receipts seal``, a
+supervised step.
+
+yaml only, no env override — this is a durable property of a knowledge
+repo, not a per-invocation one. Any value outside ``noop``/``signing``
+raises `ReceiptSealerConfigError`; it never falls back to off.
+
+### `resolve_receipt_signing_key_provider`
+
+- **YAML path:** `librarian.receipt_signing.key_provider`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `'onepassword'`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve where the receipt signing key lives.
+
+``librarian.receipt_signing.key_provider`` names the adapter behind
+`athenaeum.receipt_sealers.SigningKeyProvider`. One adapter today,
+``onepassword`` (a 1Password service account reading an ``op://``
+reference through the ``op`` CLI), which is therefore also the default.
+
+Key placement is an adapter seam by operator ruling: a hardware key or a
+KMS becomes a NEW value here with its own provider class, never a branch
+inside the 1Password one. An unknown value raises
+`ReceiptSealerConfigError`.
+
+### `resolve_receipt_signing_op_reference`
+
+- **YAML path:** `librarian.receipt_signing.op_reference`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `'op://Agent Tools/Athenaeum Receipt Sealing Key/private key'`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve the private-key ``op://`` reference.
+
+``librarian.receipt_signing.op_reference`` is read with ``op read`` by the
+1Password provider, inside the signing call only — the key is never
+written to disk or cached. The default points at the operator-created
+Ed25519 **SSH Key** item, whose private field arrives in OpenSSH format
+(PKCS8 PEM is also accepted, so rotating to a PEM item needs no code
+change).
+
+### `resolve_receipt_signing_public_key_openssh`
+
+- **YAML path:** `librarian.receipt_signing.public_key_openssh`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `None`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve an inline public key for verification. DEFAULT none.
+
+``librarian.receipt_signing.public_key_openssh`` holds an
+``ssh-ed25519 AAAA...`` line verbatim. A public key is not a secret, and
+committing it to the knowledge repo is what lets ``athenaeum receipts
+verify`` run unattended, anywhere, with no credential and no ``op``
+binary. When set it takes precedence over the ``op://`` public-key
+reference.
+
+### `resolve_receipt_signing_public_key_ref`
+
+- **YAML path:** `librarian.receipt_signing.public_key_ref`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `'op://Agent Tools/Athenaeum Receipt Sealing Key/public key'`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve the public-key ``op://`` reference.
+
+``librarian.receipt_signing.public_key_ref`` lets verification read only
+the PUBLIC half, which is all ``athenaeum receipts verify`` needs — so a
+machine that may verify need not be a machine that may sign. Prefer the
+inline form (see `resolve_receipt_signing_public_key_openssh`) when
+verification should run with no 1Password access at all.
+
+**Unset, it is DERIVED from the private-key reference** — the same vault
+and item, field ``public key`` — never a fixed constant (Seer review on
+PR). A constant default would pair a custom private-key
+reference with the stock item's public key, so signing and verification
+would use different keys and every seal would fail for a reason the
+output could not explain. Derivation keeps the pair coherent by
+construction; an item whose public field is named something else needs
+this key set explicitly.
+
 ### `resolve_reindex_full_rehash_max_age_days`
 
 - **YAML path:** `librarian.reindex.full_rehash_max_age_days`

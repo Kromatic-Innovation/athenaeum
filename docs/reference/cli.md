@@ -101,6 +101,9 @@ Every subcommand is registered top-level on one `parser.add_subparsers()` in `cl
 - [`athenaeum quiesce`](#athenaeum-quiesce) (command) — Pause `ingest --if-triggered` without touching the run lock: --for/--reason sets a sentinel, --release clears it, --status reads it. A cooperative alternative to `launchctl bootout` for corpus write lanes.
 - [`athenaeum rebuild-index`](#athenaeum-rebuild-index) (command)
 - [`athenaeum recall`](#athenaeum-recall) (command) — Search the wiki from the shell (one tab-separated hit per line)
+- [`athenaeum receipts`](#athenaeum-receipts) (group) — Seal and verify the transcript-receipt ledger. `seal` signs every unsealed line range and needs the configured signing key to be reachable; `verify` checks every seal against the live ledger and needs only the public key. Output is partitions and line ranges only, never receipt content.
+- [`athenaeum receipts seal`](#athenaeum-receipts-seal) (command) — Sign every unsealed range in every receipt partition. Requires a reachable signing key, so this is a supervised or batched step rather than part of the nightly run.
+- [`athenaeum receipts verify`](#athenaeum-receipts-verify) (command) — Report unsealed ranges and seals that no longer verify, by partition and line range. Needs only the public key.
 - [`athenaeum reconcile`](#athenaeum-reconcile) (command) — Retire pending raw-intake files whose content is already materialized in the wiki (dual-write cleanup). Default is dry-run; pass --apply to remove.
 - [`athenaeum recover-parked`](#athenaeum-recover-parked) (command) — One-shot recovery of observations parked by refused oversize merges: 'restore' writes the raw files listed in a manifest back from git history so the next librarian run ingests them; 'resolve' then archives the matching pending questions once their files have been consumed. Dry-run unless --apply. Counts only on stdout.
 - [`athenaeum recovery-yield`](#athenaeum-recovery-yield) (command) — Read-only readout of the auto-memory origin-recovery yield signal: recovered/uncited counters, basis split, resolved threshold, and (AC4) the corpus share of type:auto-memory pages with sources:[]. One JSON object on stdout, exit 0 always, no side effects.
@@ -1277,6 +1280,33 @@ Search the wiki from the shell (one tab-separated hit per line)
 | `--type` | `[]` | — | : narrow to one or more entity classes (a page's `type:`), repeatable (OR semantics). Opaque, NOT validated against wiki/_schema/types.md — see the MCP `entity_schema` tool for the declared/observed registry. Unset = every class (default, unchanged behavior). An unrecognized value prints the deployment's known classes instead of a bare 'no results'. |
 | `--usage-class` | `[]` | observed, provider, unclassified | With --with-pii, return only excluded values of this usage class (repeatable; one of observed, provider, unclassified). Matches `entity --usage-class`. Default: every value. |
 | `--with-pii` | `False` | — | : also resolve each matching entity's EXCLUDED fields — contact data for a person, and whatever else the operator routes off-corpus for any other class. Appended to each hit line as tab-separated `field=value` pairs; a withheld field appears as `field=[redacted:N]` so withheld never looks like absent. Default off, and free when off: no excluded surface is scanned at all. The join runs strictly AFTER the audience and recallable filters, so it can never widen what this command returns. |
+
+## `athenaeum receipts`
+
+Seal and verify the transcript-receipt ledger. `seal` signs every unsealed line range and needs the configured signing key to be reachable; `verify` checks every seal against the live ledger and needs only the public key. Output is partitions and line ranges only, never receipt content.
+
+Subcommands:
+
+- `athenaeum receipts seal` — Sign every unsealed range in every receipt partition. Requires a reachable signing key, so this is a supervised or batched step rather than part of the nightly run.
+- `athenaeum receipts verify` — Report unsealed ranges and seals that no longer verify, by partition and line range. Needs only the public key.
+
+## `athenaeum receipts seal`
+
+Sign every unsealed range in every receipt partition. Requires a reachable signing key, so this is a supervised or batched step rather than part of the nightly run.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+
+## `athenaeum receipts verify`
+
+Report unsealed ranges and seals that no longer verify, by partition and line range. Needs only the public key.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 
 ## `athenaeum reconcile`
 

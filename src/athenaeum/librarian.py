@@ -9730,14 +9730,49 @@ def _write_transcript_receipts(
         return
     _start = time.monotonic()
     try:
+        from athenaeum.config import ReceiptSealerConfigError
+        from athenaeum.receipt_sealers import select_sealer
         from athenaeum.transcript_receipts import write_receipts_for_files
 
+        # issue athenaeum#2039: WHICH sealer is a config decision, resolved
+        # here (the one call site) rather than inside the ledger module —
+        # `transcript_receipts` owns the seam and deliberately not the
+        # selection. The default resolves to `NoopSealer`, so this is
+        # behaviour-neutral until `librarian.receipt_sealer` says otherwise,
+        # and with `signing` set but no credential reachable the sealer
+        # itself degrades to noop with one warning (never a blocked intake).
+        #
+        # A MISCONFIGURED sealer is the one case that writes no receipt at
+        # all this run, and it gets its own reason rather than the generic
+        # `failed` below (Seer review on PR athenaeum#2137): without that,
+        # a typo in a security knob reads in the run summary exactly like a
+        # transient writer error, and the operator has no reason to look at
+        # their config. Not raising is deliberate — an advisor phase must
+        # never break the run — but it must be unmistakable in the ledger.
+        try:
+            sealer = select_sealer(ctx.config)
+        except ReceiptSealerConfigError as exc:
+            log.error(
+                "transcript-receipts: librarian.receipt_sealer / "
+                "librarian.receipt_signing is invalid, so NO receipts were "
+                "written this run: %s",
+                exc,
+            )
+            ctx.run_profile.append(
+                (
+                    "transcript-receipts",
+                    time.monotonic() - _start,
+                    {"reason": "sealer-config-invalid"},
+                )
+            )
+            return
         stats = write_receipts_for_files(
             ctx.wiki_root,
             auto_memory_files,
             config=ctx.config,
             projects_root=ctx.projects_root,
             lock=ctx.lock,
+            sealer=sealer,
         )
         if stats.flag_off:
             return

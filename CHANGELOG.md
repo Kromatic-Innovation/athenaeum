@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Transcript receipts can be cryptographically sealed.** `NoopSealer` is
+  still the default, so nothing changes until you opt in. Setting
+  `librarian.receipt_sealer: signing` makes the intake writer sign each
+  appended receipt range with an Ed25519 key that lives OUTSIDE the nightly
+  process, so a forged ledger line needs the key rather than just write
+  access to the knowledge repo.
+  - Key placement is an adapter seam (`SigningKeyProvider` in the new
+    `athenaeum.receipt_sealers`), not a hard-coded custody. The first and
+    only adapter today is a 1Password service account
+    (`librarian.receipt_signing.key_provider: onepassword`), which reads an
+    `op://` reference through the `op` CLI and holds the key in memory for
+    the signing call only — never on disk, never cached. A hardware key or a
+    KMS is a later adapter behind the same three methods.
+  - Signing needs the optional `signing` extra
+    (`pip install 'athenaeum[signing]'`); the core install is unchanged and
+    the module imports `cryptography` lazily.
+  - **The nightly never needs the key.** With `signing` configured and no
+    service-account token in the environment, intake appends its receipt
+    lines exactly as before, logs ONE warning for the whole run, and
+    produces no seal. Sealing is then a supervised step.
+  - New `athenaeum receipts seal` signs every unsealed range and needs a
+    reachable key; `athenaeum receipts verify` reports unsealed ranges and
+    seals that no longer verify, by partition and line range only — never
+    receipt content — and needs only the public key, which can be configured
+    inline (`librarian.receipt_signing.public_key_openssh`) so verification
+    runs unattended with no 1Password access at all.
+  - An unknown `receipt_sealer` or `key_provider` value RAISES rather than
+    silently falling back to not sealing.
+
+
 ## [0.22.43] - 2026-10-25
 
 First release since 0.20.0 (2026-09-04). Every intermediate `0.21.x` / `0.22.x`
