@@ -621,6 +621,41 @@ def response_text(response: Any) -> str:
     return response.content[0].text
 
 
+def text_or_truncated(response: Any, stop_reason: str | None) -> str:
+    """Return *response*'s text answer, or ``""`` when it was truncated at
+    ``max_tokens`` before any text block was emitted (issue athenaeum#2112).
+
+    :func:`response_text` raises ``ValueError`` on content made up entirely of
+    thinking / redacted-thinking blocks (issue athenaeum#1889) — the shape an
+    adaptive-thinking response takes when ``max_tokens`` is exhausted during
+    the thinking phase. That is NOT an error condition for the stages that
+    already handle truncation: every one of them routes a
+    ``stop_reason == "max_tokens"`` response to a truncated-marker, retry or
+    escalation path (``parse_tier2_entities``, ``parse_tier3_merge``,
+    ``parse_tier3_merge_append``, ``parse_merge_ops_response``), and those
+    paths are reached by passing the empty text through with the stop reason.
+    Before issue athenaeum#2112 each call site read the text FIRST, so the
+    ``ValueError`` escaped and turned a handled condition into a hard failure
+    counted against the raw file.
+
+    This is the ONE place that rule lives: *stop_reason* is read by the
+    caller before this helper is invoked, and anything other than
+    ``max_tokens`` with no text block is still a genuine error and re-raises.
+
+    *stop_reason* must be the value the caller already resolved — on the tier
+    call sites that is :func:`reported_stop_reason` (``None`` on a backend
+    that cannot report it, issue athenaeum#574), which correctly declines to
+    swallow the ``ValueError``; on the batch transport it is the batch
+    result message's own ``stop_reason``.
+    """
+    try:
+        return response_text(response)
+    except ValueError:
+        if stop_reason != "max_tokens":
+            raise
+        return ""
+
+
 def capabilities_for(provider: str) -> ProviderCapabilities:
     """Return the :class:`ProviderCapabilities` for backend *provider* (athenaeum#573).
 

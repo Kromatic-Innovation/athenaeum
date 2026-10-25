@@ -155,6 +155,7 @@ from athenaeum.provider import (
     resolve_provider,
     resolve_thinking,
     response_text,
+    text_or_truncated,
 )
 from athenaeum.search import embed_texts
 
@@ -2699,15 +2700,20 @@ def tier2_classify(
     from athenaeum.config import resolve_owner
 
     owner = resolve_owner(config)
-    # Issue athenaeum#578: response_text skips any leading thinking block. This stage
-    # runs disabled today, but the helper is text-block-equivalent for a
-    # text-only response and keeps the site robust if the posture ever changes.
-    first_text = response_text(response)
     # athenaeum#574: a backend that cannot reliably report stop_reason (claude-cli)
     # yields None here, so a dropped-all response is classed as a generic
     # degrade rather than a truncation — which avoids the futile bigger-budget
     # retry the CLI backend cannot honor (it drops max_tokens).
+    #
+    # Issue athenaeum#2112: read it BEFORE the text. A thinking-only response
+    # truncated at max_tokens has no text block at all, so reading the text
+    # first raised ValueError out of this function instead of reaching the
+    # truncated-marker path parse_tier2_entities already implements below.
     first_stop_reason = reported_stop_reason(response, _capabilities(config))
+    # Issue athenaeum#578: response_text skips any leading thinking block. This stage
+    # runs disabled today, but the helper is text-block-equivalent for a
+    # text-only response and keeps the site robust if the posture ever changes.
+    first_text = text_or_truncated(response, first_stop_reason)
     if stats is None:
         stats = Tier2ParseStats()
     # Capture baselines so the first-response outcome is detected as a delta,
@@ -2792,15 +2798,18 @@ def tier2_classify(
             retry_response, usage, model=retry_params["model"], knob="classify"
         )
         retry_stats = Tier2ParseStats()
+        # Issue athenaeum#2112: same ordering as the first response above — the
+        # RETRY can itself be a thinking-only max_tokens response.
+        retry_stop_reason = reported_stop_reason(retry_response, _capabilities(config))
         retry_entities = parse_tier2_entities(
-            response_text(retry_response),
+            text_or_truncated(retry_response, retry_stop_reason),
             raw.ref,
             valid_types,
             valid_tags,
             valid_access,
             owner=owner,
             stats=retry_stats,
-            stop_reason=reported_stop_reason(retry_response, _capabilities(config)),
+            stop_reason=retry_stop_reason,
             wiki_root=wiki_root,
             person_candidates=person_candidates,
         )
@@ -3221,15 +3230,21 @@ def tier2_reclassify_larger_budget(
         surface=SURFACE_TIER2_TRUNCATION_RETRY,
     )
     retry_stats = Tier2ParseStats()
+    # Issue athenaeum#2112: this retry is reached BECAUSE the first response
+    # truncated, so it is the likeliest of all the classify sites to be
+    # thinking-only-truncated itself. Read stop_reason first; an unrecovered
+    # truncation then stays recorded in ``retry_stats`` (the documented
+    # outcome) instead of raising out of the stage.
+    retry_stop_reason = reported_stop_reason(response, caps)
     entities = parse_tier2_entities(
-        response_text(response),
+        text_or_truncated(response, retry_stop_reason),
         raw.ref,
         valid_types,
         valid_tags,
         valid_access,
         owner=owner,
         stats=retry_stats,
-        stop_reason=reported_stop_reason(response, caps),
+        stop_reason=retry_stop_reason,
         wiki_root=wiki_root,
         person_candidates=person_candidates,
     )
@@ -3714,6 +3729,32 @@ def tier3_create_params(
     }
 
 
+#: Stable, greppable marker logged (WARNING) whenever a Tier-3 create
+#: response is cut off at ``max_tokens`` before emitting any text block
+#: (issue athenaeum#2112). Distinct from the preamble-rejection marker: the
+#: model produced nothing at all here, rather than only planning prose.
+TIER3_CREATE_TRUNCATED_MARKER = "tier3-create-truncated"
+
+
+class TruncatedCreateResponseError(Exception):
+    """Raised when a Tier-3 create response was truncated before any text.
+
+    Issue athenaeum#2112: ``tier3_create`` enables adaptive thinking, so a
+    response that exhausts ``max_tokens`` during the thinking phase carries
+    thinking blocks and NO text block. Before this issue the site read the
+    text first and :func:`athenaeum.provider.response_text`'s ``ValueError``
+    escaped as a raw-file failure, losing every other action computed for
+    that file.
+
+    Create has no further fallback to route such a response to — there is no
+    partial body worth persisting and no cheaper second contract to try — so
+    the handled outcome is an EXPLICIT escalation: the callers catch this
+    alongside :class:`PreambleOnlyResponseError` (same per-action, not
+    per-file, scope) and record an :class:`EscalationItem` so the skipped
+    page is visible for human review instead of silently absent.
+    """
+
+
 class PreambleOnlyResponseError(Exception):
     """Raised when a Tier-3 create response is ENTIRELY planning preamble.
 
@@ -3872,9 +3913,21 @@ def tier3_create(
     )
     _record_usage(response, usage, model=params["model"], knob="write")
 
-    # Issue athenaeum#578: tier3_create enables adaptive thinking — response_text skips
-    # any leading thinking block and returns the created page body.
-    return tier3_entity_from_text(action, response_text(response), usage=usage, config=config)
+    # Issue athenaeum#2112: read stop_reason BEFORE the text — this site passed
+    # no stop_reason at all, so a thinking-only max_tokens response raised
+    # response_text's ValueError as a raw-file failure. athenaeum#574: None on
+    # a backend that cannot report it, which correctly declines to treat a
+    # missing text block as the handled truncation.
+    # Issue athenaeum#578: tier3_create enables adaptive thinking — the text
+    # read skips any leading thinking block and returns the created page body.
+    return tier3_entity_from_response(
+        action,
+        response,
+        source_ref,
+        reported_stop_reason(response, _capabilities(config)),
+        usage=usage,
+        config=config,
+    )
 
 
 def tier3_entity_from_text(
@@ -3951,6 +4004,68 @@ def tier3_entity_from_text(
         source=source,
         description=description,
     )
+
+
+def truncated_create_escalation(
+    action: EntityAction, source_ref: str
+) -> EscalationItem:
+    """The escalation recorded for a truncated Tier-3 create (athenaeum#2112).
+
+    Built here rather than at each call site so the synchronous and batch
+    transports escalate identically — the same ``conflict_type="principled"``
+    / "left unwritten pending human review" posture
+    :func:`parse_tier3_merge` uses for an output-truncated merge.
+    """
+    return EscalationItem(
+        raw_ref=source_ref,
+        entity_name=action.name,
+        conflict_type="principled",
+        description=(
+            "Tier 3 create response was truncated (max_tokens) before "
+            "emitting any page content; refusing to persist an empty page. "
+            "Entity left unwritten pending human review (issue "
+            "athenaeum#2112)."
+        ),
+    )
+
+
+def tier3_entity_from_response(
+    action: EntityAction,
+    response: Any,
+    source_ref: str,
+    stop_reason: str | None,
+    usage: TokenUsage | None = None,
+    config: dict[str, Any] | None = None,
+) -> WikiEntity:
+    """Read a Tier-3 create *response* and build its :class:`WikiEntity`.
+
+    Issue athenaeum#2112: the one place both transports read a create
+    response's text, so the ``stop_reason``-before-text ordering cannot drift
+    apart between them. *stop_reason* must already be resolved by the caller
+    (:func:`reported_stop_reason` on the synchronous path, the batch result
+    message's own field on the batch path).
+
+    A response truncated at ``max_tokens`` with no text block at all raises
+    :class:`TruncatedCreateResponseError`; a truncated response that DID emit
+    text is passed through to :func:`tier3_entity_from_text` exactly as
+    before, since a partial page is this stage's pre-existing behaviour and
+    narrowing it is out of scope here.
+    """
+    text = text_or_truncated(response, stop_reason)
+    if stop_reason == "max_tokens" and not text.strip():
+        log.warning(
+            "%s name=%s ref=%s: response carried no text block "
+            "(thinking-only, cut off at max_tokens); escalating instead of "
+            "persisting an empty page",
+            TIER3_CREATE_TRUNCATED_MARKER,
+            action.name,
+            source_ref,
+        )
+        raise TruncatedCreateResponseError(
+            f"tier3 create for {action.name!r} was truncated at max_tokens "
+            "before any page content was emitted"
+        )
+    return tier3_entity_from_text(action, text, usage=usage, config=config)
 
 
 def existing_body_needs_full_echo(existing_body: str) -> bool:
@@ -5675,19 +5790,17 @@ def tier3_merge(
     # so the "truncated -> fall back to full echo" branch never fires on a
     # spurious value — the fallback would itself be a no-op there.
     stop_reason = reported_stop_reason(response, _capabilities(config))
-    try:
-        # Issue athenaeum#578: patch merge enables adaptive thinking — skip any leading
-        # thinking block and read the anchored-ops JSON answer.
-        text = response_text(response)
-    except ValueError:
-        # Issue athenaeum#2110: adaptive thinking can exhaust ``max_tokens``
-        # before any text block is emitted, so ``response_text`` raises. That
-        # is the truncation parse_merge_ops_response already routes to the
-        # full-echo fallback — read stop_reason first and let it. Any other
-        # stop_reason with no text block is still a genuine error.
-        if stop_reason != "max_tokens":
-            raise
-        text = ""
+    # Issue athenaeum#578: patch merge enables adaptive thinking — skip any leading
+    # thinking block and read the anchored-ops JSON answer.
+    #
+    # Issue athenaeum#2110 / athenaeum#2112: adaptive thinking can exhaust ``max_tokens``
+    # before any text block is emitted, so ``response_text`` raises. That is
+    # the truncation parse_merge_ops_response already routes to the full-echo
+    # fallback — ``text_or_truncated`` reads stop_reason first and lets it.
+    # Any other stop_reason with no text block is still a genuine error.
+    # Issue athenaeum#2112 replaced this site's hand-rolled try/except with
+    # the shared helper so the rule lives in exactly one place.
+    text = text_or_truncated(response, stop_reason)
 
     body, escalation, needs_fallback = parse_merge_ops_response(
         text,
@@ -5794,12 +5907,19 @@ def tier3_merge_full(
         )
         if usage is not None:
             usage.record_merge_echo(min(len(existing_body), _MAX_EXISTING_BODY_CHARS))
+        # Issue athenaeum#2112: stop_reason first — a thinking-only
+        # max_tokens append response has no text block, and
+        # parse_tier3_merge_append already escalates that truncation
+        # (refusing to apply a partial append).
+        append_stop_reason = reported_stop_reason(
+            append_response, _capabilities(config)
+        )
         return parse_tier3_merge_append(
-            response_text(append_response),
+            text_or_truncated(append_response, append_stop_reason),
             action,
             source_ref,
             existing_body,
-            stop_reason=reported_stop_reason(append_response, _capabilities(config)),
+            stop_reason=append_stop_reason,
             usage=usage,
         )
 
@@ -5832,17 +5952,23 @@ def tier3_merge_full(
     if usage is not None:
         usage.record_merge_echo(min(len(existing_body), _MAX_EXISTING_BODY_CHARS))
 
+    # athenaeum#574: None on a backend that cannot report stop_reason (claude-cli),
+    # so the truncation-refusal escalation does not fire on a spurious
+    # value; a genuinely short body still degrades through the normal path.
+    #
+    # Issue athenaeum#2112: read it BEFORE the text. This IS the full-echo
+    # fallback, so there is no further fallback behind it — a thinking-only
+    # max_tokens response here raised out of the merge entirely instead of
+    # taking parse_tier3_merge's truncation escalation.
+    full_stop_reason = reported_stop_reason(response, _capabilities(config))
     return parse_tier3_merge(
         # Issue athenaeum#578: full-echo merge enables adaptive thinking — skip any
         # leading thinking block and read the merged-body answer.
-        response_text(response),
+        text_or_truncated(response, full_stop_reason),
         action,
         source_ref,
         existing_body,
-        # athenaeum#574: None on a backend that cannot report stop_reason (claude-cli),
-        # so the truncation-refusal escalation does not fire on a spurious
-        # value; a genuinely short body still degrades through the normal path.
-        stop_reason=reported_stop_reason(response, _capabilities(config)),
+        stop_reason=full_stop_reason,
         usage=usage,
     )
 
@@ -6995,6 +7121,17 @@ def tier3_derive_actions(
                         "action skipped, NOT treated as a raw-file failure",
                         raw.ref,
                         action.name,
+                    )
+                except TruncatedCreateResponseError:
+                    # Issue athenaeum#2112: a thinking-only max_tokens create
+                    # response. Caught HERE, scoped to this one create — same
+                    # reasoning as the preamble rejection above: it must not
+                    # abort the raw file. Unlike a preamble rejection it also
+                    # ESCALATES, because nothing was written and nothing can
+                    # be retried cheaply (tier3_entity_from_response has
+                    # already logged the greppable marker).
+                    escalations.append(
+                        truncated_create_escalation(action, raw.ref)
                     )
                 else:
                     new_entities.append(new_entity)

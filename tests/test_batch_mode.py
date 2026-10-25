@@ -114,11 +114,15 @@ class _FakeBatches:
         create_error: Exception | None = None,
         truncate_marker: str | None = None,
         thinking_only_merge: bool = False,
+        thinking_only_create: bool = False,
     ) -> None:
         self._responder = responder
         # Issue athenaeum#2110: a merge request (``## Existing page content``)
         # comes back as a succeeded thinking-only ``max_tokens`` message.
         self._thinking_only_merge = thinking_only_merge
+        # Issue athenaeum#2112: the same shape for a tier-3 CREATE request
+        # (``## Entity to create``) — the finalize loop's create branch.
+        self._thinking_only_create = thinking_only_create
         self._polls_until_end = polls_until_end
         self._never_end = never_end
         self._fail_marker = fail_marker
@@ -199,6 +203,13 @@ class _FakeBatches:
                     ),
                 )
             elif self._thinking_only_merge and "## Existing page content" in user_msg:
+                thinking = _msg("", stop_reason="max_tokens")
+                thinking.content = [SimpleNamespace(type="thinking")]
+                yield SimpleNamespace(
+                    custom_id=req["custom_id"],
+                    result=SimpleNamespace(type="succeeded", message=thinking),
+                )
+            elif self._thinking_only_create and "## Entity to create" in user_msg:
                 thinking = _msg("", stop_reason="max_tokens")
                 thinking.content = [SimpleNamespace(type="thinking")]
                 yield SimpleNamespace(
@@ -4307,3 +4318,51 @@ class TestThinkingOnlyTruncationBatchTransport:
         assert "Merged note from" in (
             root / "wiki" / "acme1234-acme-corp.md"
         ).read_text(encoding="utf-8")
+
+    def test_batched_write_thinking_only_max_tokens_create_escalates(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Issue athenaeum#2112: the finalize loop's CREATE branch is its own
+        ``response_text`` call site beside the merge branch athenaeum#2110
+        fixed. A thinking-only ``max_tokens`` create result read the text
+        first, so the ``ValueError`` escaped and failed the whole raw file
+        (discarding every other action derived for it). It must instead
+        escalate that ONE create and let the run finish cleanly.
+
+        Create has no fallback contract behind it, so unlike the merge case
+        there is nothing to recover — ``escalated == 1`` with an empty
+        ``failed_refs`` is the observable, and the escalation reaches
+        ``_pending_questions.md``.
+        """
+        _patch_uids(monkeypatch)
+        root = _seed_root(
+            tmp_path, "p-thinking-create", ["WidgetTrunc was mentioned.\n"]
+        )
+        client = _FakeClient(
+            _scripted_responder, allow_sync=False, thinking_only_create=True
+        )
+
+        result = process_batch_run(
+            discover_raw_files(root / "raw"),
+            EntityIndex(root / "wiki"),
+            root / "wiki",
+            client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=TokenUsage(),
+            config=None,
+            max_api_calls=100,
+            sleep=lambda s: None,
+            batch_classify=True,
+            batch_write=True,
+        )
+
+        assert result.created == 0
+        assert result.escalated == 1
+        assert not result.failed_refs
+        questions = (root / "wiki" / "_pending_questions.md").read_text(
+            encoding="utf-8"
+        )
+        assert "WidgetTrunc" in questions
+        assert "max_tokens" in questions
