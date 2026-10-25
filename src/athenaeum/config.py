@@ -3001,22 +3001,37 @@ def resolve_ingestion_gate_enabled(config: dict[str, Any] | None) -> bool:
     return False
 
 
+#: Issue athenaeum#2138: the version the deprecated surfaces below are
+#: scheduled to be deleted in. Named in every deprecation message so the
+#: warning is a dated commitment rather than an open-ended one. Removing a
+#: public surface bumps MINOR pre-1.0 (see CONTRIBUTING "Versioning and
+#: releases"), so this is a MINOR, never a PATCH — and one MINOR of headroom
+#: past the next cut, so an unrelated removal taking 0.23.0 does not make the
+#: promise wrong.
+DEPRECATED_CLI_SURFACE_REMOVAL_VERSION = "0.24.0"
+
 #: Issue athenaeum#1992: the CLI surfaces whose data now lives in the unified
 #: ``athenaeum decisions`` queue (:mod:`athenaeum.decisions`), and the
 #: human-readable message shown when one is used while deprecated. Keyed by
 #: the surface's own registered subcommand name (``add_*_subparser`` in
 #: ``cli.py`` — ``"merges"``, ``"questions"``). A surface not listed here is
-#: simply never deprecated; nothing elsewhere needs updating to add one.
+#: simply never deprecated; nothing elsewhere needs updating to add one. Every
+#: message names :data:`DEPRECATED_CLI_SURFACE_REMOVAL_VERSION` (issue
+#: athenaeum#2138) — a deprecation with no target version tells a reader
+#: nothing about when to act.
 DEPRECATED_CLI_SURFACE_MESSAGES: dict[str, str] = {
     "merges": (
-        "'athenaeum merges' is deprecated (athenaeum#1992) in favor of "
-        "'athenaeum decisions' — pending-merge proposals are surfaced there "
-        "too, framed with a response schema you can answer directly."
+        "'athenaeum merges' is deprecated (athenaeum#1992) and is scheduled "
+        f"for removal in {DEPRECATED_CLI_SURFACE_REMOVAL_VERSION}, in favor "
+        "of 'athenaeum decisions' — pending-merge proposals are surfaced "
+        "there too, framed with a response schema you can answer directly."
     ),
     "questions": (
-        "'athenaeum questions' is deprecated (athenaeum#1992) in favor of "
-        "'athenaeum decisions' — pending questions are surfaced there too, "
-        "framed with a response schema you can answer directly."
+        "'athenaeum questions' is deprecated (athenaeum#1992) and is "
+        "scheduled for removal in "
+        f"{DEPRECATED_CLI_SURFACE_REMOVAL_VERSION}, in favor of 'athenaeum "
+        "decisions' — pending questions are surfaced there too, framed with "
+        "a response schema you can answer directly."
     ),
 }
 

@@ -124,6 +124,7 @@ update these together, in the same PR:
 
 - Open PRs against the `develop` branch. Never open a PR directly against `main` — `main` is the release branch and is only updated via the promotion workflow.
 - Include tests for new functionality
+- Add a `CHANGELOG.md` entry under `## [Unreleased]` — see [Changelog rules](#changelog-rules) for which category it belongs in and why a removal has to say so explicitly
 - Ensure all existing tests pass
 - Follow the existing code style (enforced by ruff)
 - Keep mechanical reformat commits separate from behavior changes — a reviewer (or release gate) should never have to dig a logic change out of a formatting diff
@@ -150,6 +151,74 @@ Athenaeum uses a develop-first flow, matching the rest of the Kromatic repos:
 There is no `staging` branch — unlike our deploy-pipeline repos, athenaeum is a library, and PyPI releases are handled separately via [`release.yml`](.github/workflows/release.yml).
 
 The running MCP server records the commit it is on in `dist/.build-sha`, kept in sync via [`scripts/deploy-guard.sh`](scripts/deploy-guard.sh) (the automated path `hestia redeploy` runs against the main-pinned deploy worktree at `~/local-deploys/athenaeum`) or [`scripts/deploy-sync.sh`](scripts/deploy-sync.sh) (the manual, single-checkout equivalent), so cross-repo deploy-lag reporting can see how far behind `main` the deployed instance is — see [`docs/measurements/deploy-sha-stamp.md`](docs/measurements/deploy-sha-stamp.md). Both scripts also constrain that refresh under `requirements-ci.lock` when it is present in the deploy tree, for dependency parity with CI; after a fast-forward, run the [post-ship re-sync check](docs/measurements/deploy-sha-stamp.md#post-ship-re-sync-athenaeum1960) to confirm it landed.
+
+## Versioning and releases
+
+Athenaeum's version number is **not** a release count, and reading it as one is
+the single most common way to misread this project's history.
+
+- **PATCH is a build number.** Every merge to `develop` bumps the PATCH digit.
+  Most of those versions are never tagged and never published — `0.22.43`
+  means "the forty-third merge since the MINOR bump", not "the forty-third
+  release". Do not bump the version by hand in a PR, and do not read a large
+  PATCH digit as a long release history.
+- **Releases are cut weekly**, from whatever `develop` reads at the time of the
+  cut. There is no separate release-numbering step: the cut tags the version
+  already in `pyproject.toml`, and the tag is what publishes — pushing a `v*`
+  tag is the only trigger on
+  [`release.yml`](.github/workflows/release.yml), which builds from the tag and
+  publishes to PyPI with provenance attestations. A week with no merges
+  produces no cut.
+- **MINOR increments when the span being cut removed or broke public surface.**
+  Athenaeum is pre-1.0, so under semver a MINOR bump is the breaking-change
+  signal (`0.y.z` gives MAJOR no such role). The decision is derived from the
+  changelog content for the span, not from a judgement call at cut time: if the
+  span's entries contain a `### Removed` item or an entry marked breaking, the
+  cut bumps MINOR and resets PATCH; otherwise the PATCH number stands as-is.
+- **MAJOR is reserved for 1.0.** Until then it stays at `0`, and no change
+  bumps it.
+
+So a reader comparing two published versions should look at the MINOR digit to
+ask "could this break me?", and ignore the PATCH digit except as an ordering
+key. The same applies to the floor in a dependency pin: pin on MINOR, not on a
+PATCH you happened to install.
+
+**Where the bump happens, so you do not go looking for it here.** Only the
+publish half is in this repository — `release.yml`, triggered by the tag. The
+per-merge PATCH bump and the weekly cut are applied by the maintainer's merge
+and release tooling, which is shared across repositories and lives outside this
+one; there is deliberately no workflow or script here that does either. The
+practical consequence for a contributor is the same either way: leave
+`version` in `pyproject.toml` alone, and write the changelog entry — the cut
+reads your entry, not your version number.
+
+### Changelog rules
+
+`CHANGELOG.md` is [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
+format, with one addition established by `[0.22.43]` and expected of every
+release section from here on. A release section is ordered:
+
+1. **An `Upgrading from <previous tag>: breaking and removed` block** —
+   collecting every breaking and removed item in the span, so an upgrader does
+   not have to read the whole section to find what will bite them. Each bullet
+   restates (and is also detailed in) a `### Removed` or `### Changed` entry
+   further down; the block is a summary, never the only mention.
+2. **A `Highlights` block** — a handful of bullets covering what a reader would
+   actually want to know landed, grouped by theme rather than by category.
+3. **The Keep-a-Changelog categories** — `### Added` / `### Changed` /
+   `### Fixed` / `### Removed`. Because a release section can span many merges,
+   these are grouped in merge order (newest first) and so each category may
+   appear more than once in a single release section. That is expected; do not
+   flatten a published section into one block per category.
+
+For a contributor this means: **append your entry under `## [Unreleased]`**, in
+the matching category, creating the category heading if it is not there yet. Do
+not add an `Upgrading from` or `Highlights` block to `[Unreleased]` — both are
+written at cut time, from the accumulated entries. If your change removes or
+breaks public surface, say so explicitly in a `### Removed` entry (or mark the
+`### Changed` entry as breaking), because that entry is what the cut reads to
+decide whether to bump MINOR. Tracker citations follow the
+`athenaeum#NNN` rule above.
 
 ## Project continuity
 
