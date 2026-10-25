@@ -30,7 +30,7 @@ and a silent skip there would let a genuinely missing dependency hide behind
 test added to that job's smoke subset must therefore satisfy every contract
 property a `[dev]`-only install provides; see the job's own comment.
 
-This module deliberately does NOT replace the ~30 existing
+This module deliberately does NOT replace the 44 existing
 ``pytest.importorskip("chromadb")`` call sites. Those are the same idea and
 remain correct; this adds the strict-mode-aware variant for the sites that
 were MISSING a guard, and gives the contract a documented name.

@@ -55,6 +55,54 @@ What the suite assumes:
   different thing and does not satisfy those). Each is probed by
   `tests/test_shell_hooks.py`'s `_require`, which skips naming the missing
   tool.
+- **You do NOT need to isolate `HOME` or the XDG directories.** The suite
+  isolates what it needs to: `tests/conftest.py`'s `pytest_configure` hook
+  redirects `ATHENAEUM_CACHE_DIR` and `ATHENAEUM_SPEND_LEDGER` to a throwaway
+  directory for the whole session *before collection begins* (a
+  session-scoped fixture would be too late for a module that resolves the
+  cache dir at import or parametrize time), and the `_isolate_cache_dir`
+  fixture narrows that to one directory per test. Running with your real
+  `HOME` does not touch your real `~/.cache/athenaeum`.
+- **Do NOT, however, carry ambient athenaeum or knowledge configuration in
+  your environment.** `KNOWLEDGE_ROOT`, `KNOWLEDGE_WIKI_PATH`,
+  `KNOWLEDGE_RAW_PATH` and the `ATHENAEUM_*` knobs are honoured by config
+  resolution exactly as they are in production, so an exported value wins
+  over a test's own tmp fixture and the test fails on a path it never chose.
+  Measured: with `KNOWLEDGE_WIKI_PATH` exported,
+  `tests/test_cli.py::TestServe::test_serve_reads_vector_backend_from_config`
+  resolves `wiki_root` to that value instead of its fixture and fails; unset
+  it and the same test passes. If you keep such variables in your shell
+  profile, run the suite with them cleared (`env -u KNOWLEDGE_WIKI_PATH …`).
+  This is the one respect in which a *clean* environment is genuinely
+  required, and it is the opposite of the HOME/XDG point above — the suite
+  can isolate its own outputs, but it cannot tell your deliberate
+  configuration apart from an accident.
+
+### Known environment-sensitive modules
+
+If the suite is red, check this list before anything else:
+
+- `tests/test_cli.py` — `TestServe` / `TestRebuildIndex` need the vector
+  backend, and `TestServe` is sensitive to ambient `KNOWLEDGE_*` variables.
+- `tests/test_search.py` — `TestReindexUnderLiveServer` and eleven
+  `pytest.importorskip("chromadb")` sites need the `[vector]` extra.
+- `tests/test_runlock.py` — `TestIngestPathHeartbeatWiring`'s `session_end`
+  case reindexes, so it needs the vector backend.
+- `tests/test_shell_hooks.py` — shells out to `bash`/`git`/`jq`/`sqlite3`,
+  isolates its own `HOME`, and its `rebuild-index.sh` cases drive the real
+  vector backend.
+- `tests/test_surface_divergence.py` — `TestInstalledCli` builds a wheel and
+  a child venv; see `runtime_deps_in_base_interpreter` below.
+- `tests/evals/test_write_path.py` — drives the real librarian end to end
+  against a canned client; needs no credential, but see the
+  `ANTHROPIC_API_KEY` note above.
+- `tests/test_mcp_server.py`, `tests/test_scoped_access.py`,
+  `tests/test_session_end.py`, `tests/test_delta.py`,
+  `tests/test_delta_compile_equivalence.py`,
+  `tests/test_librarian_clusters.py`, `tests/test_merge_fold_write_paths.py`,
+  `tests/test_retrieval_golden_1420.py`, `tests/test_pii_off_corpus.py`,
+  `tests/test_type_filter.py` — all carry `pytest.importorskip("chromadb")`
+  guards for the `[vector]` extra (44 sites across the suite).
 
 The properties enforced mechanically, by name, are:
 
