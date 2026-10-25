@@ -4850,6 +4850,32 @@ def _render_schema_fragment_attribution(
     return ",".join(pairs)
 
 
+# Issue athenaeum#2132 (AC3): the phases a wall-clock deadline trip at or
+# before the wiki-dedup boundary STARVES, in run order. A run that stopped
+# early used to render only the phases that got a turn, so the absence of
+# ``entity`` / ``auto-memory`` / ``retire`` / ``reresolve`` /
+# ``audit-nightly-drain`` from ``run_summary.jsonl`` was the ONLY evidence
+# that a night's raw intake never happened — and absence reads identically
+# to "that phase is disabled" or "this summary schema predates it". Naming
+# them with their own ``reason`` token makes a starved night a positive
+# observation instead of something a reader has to notice is missing.
+#
+# Deliberately the same five phases the live 2026-10-25 incident run was
+# missing. The conditionally-appended phases (``t1-screen``,
+# ``transcript-receipts``) are NOT listed: they report only when they have
+# something to report even on a healthy run, so a ``skipped-deadline`` row
+# for them could not be told apart from their ordinary silence.
+_DEADLINE_STARVED_PHASES: tuple[str, ...] = (
+    "entity",
+    "auto-memory",
+    "retire",
+    "reresolve",
+    "audit-nightly-drain",
+)
+
+REASON_SKIPPED_DEADLINE = "skipped-deadline"
+
+
 def _render_run_summary(
     profile: "list[tuple[str, float, dict]]",
     *,
@@ -5884,6 +5910,20 @@ class RunContext:
                 dry_run=self.dry_run,
                 head_at_start=self.head_at_start,
             )
+        # Issue athenaeum#2132 (AC3): and for whatever did NOT run. Every
+        # phase in `_DEADLINE_STARVED_PHASES` that has no run-profile entry
+        # yet was starved by this trip, so it is recorded as such rather
+        # than merely omitted. Appended HERE, in the one method every
+        # deadline-trip exit routes through (wiki-dedup boundary, merge_only
+        # catch, auto-memory catch, post-compile boundary), so a trip at any
+        # of them reports its own starved tail — the already-present check
+        # is what keeps a late trip from re-reporting a phase that ran.
+        _ran = {phase for phase, _secs, _fields in self.run_profile}
+        for _starved in _DEADLINE_STARVED_PHASES:
+            if _starved not in _ran:
+                self.run_profile.append(
+                    (_starved, 0.0, {"reason": REASON_SKIPPED_DEADLINE})
+                )
         # Issue athenaeum#464: emit the per-phase summary for whatever ran BEFORE the
         # trip — the EXIT_GRACEFUL_PARTIAL exit paths are exactly the case the
         # athenaeum#440 profiling epic most needs visibility into (a run that
@@ -7487,6 +7527,12 @@ def _run_wiki_dedup_phase(ctx: RunContext) -> int | None:
     """
     if ctx.wiki_root.is_dir():
         _wiki_dedup_start = time.monotonic()
+        # Issue athenaeum#2132 (AC2): declared OUTSIDE the ``try`` so the
+        # ``finally`` below can read whatever the pass published even when it
+        # raised. Left EMPTY by a pass that never entered its pair loop
+        # (comparator disabled — the default), which is what keeps an
+        # ordinary run's rendered summary segment byte-unchanged.
+        _wiki_dedup_stop: dict[str, Any] = {}
         try:
             from athenaeum.config import resolve_comparator_enabled
             from athenaeum.wiki_dedupe import propose_wiki_page_merges
@@ -7550,6 +7596,11 @@ def _run_wiki_dedup_phase(ctx: RunContext) -> int | None:
             # (`verdict_effects._queue_contradiction`), the direct analog of
             # merge.py's `escalations_written`.
             _gate2_calls_before = ctx.usage.api_calls
+            # Issue athenaeum#2132 (AC1): both run-level caps are passed IN so
+            # the pair loop itself is bounded by them. The deadline check
+            # below this phase stays exactly where it was — it is still what
+            # stops the RUN — but it is no longer the only thing standing
+            # between a large dedup backlog and the whole night's budget.
             _decided_pairs = propose_wiki_page_merges(
                 ctx.knowledge_root,
                 config=ctx.config,
@@ -7557,6 +7608,9 @@ def _run_wiki_dedup_phase(ctx: RunContext) -> int | None:
                 client=_client,
                 usage=ctx.usage,
                 lock=ctx.lock,
+                max_api_calls=ctx.max_api_calls,
+                deadline=ctx.run_deadline,
+                out_stop=_wiki_dedup_stop,
             )
             ctx.wiki_dedup_comparator_summary = {
                 "gate2_calls": ctx.usage.api_calls - _gate2_calls_before,
@@ -7569,14 +7623,26 @@ def _run_wiki_dedup_phase(ctx: RunContext) -> int | None:
         finally:
             # Issue athenaeum#464: recorded even on the swallowed-exception path so the
             # summary still reflects the wall-clock this phase actually spent.
-            # Issue athenaeum#1102 (AC1): this phase has no yield/budget concept
-            # of its own (a failure is logged and swallowed, never a partial
-            # stop), so its reason-for-exit is always "completed".
+            # Issue athenaeum#1102 (AC1) said this phase had no yield/budget
+            # concept of its own, so its reason-for-exit was always
+            # "completed". Issue athenaeum#2132 gave it one: the pair loop is
+            # now bounded by the run's own ``max_api_calls`` and
+            # ``max_runtime``, and reports ``reason=budget`` /
+            # ``reason=deadline`` plus ``pairs_examined`` /
+            # ``pairs_remaining`` when either stopped it early. A pass that
+            # never entered the loop publishes nothing and still renders the
+            # bare ``reason=completed`` this phase has always rendered.
+            _fields: dict[str, Any] = {
+                "reason": _wiki_dedup_stop.get("reason", "completed")
+            }
+            for _key in ("pairs_examined", "pairs_remaining"):
+                if _key in _wiki_dedup_stop:
+                    _fields[_key] = _wiki_dedup_stop[_key]
             ctx.run_profile.append(
                 (
                     "wiki-dedup",
                     time.monotonic() - _wiki_dedup_start,
-                    {"reason": "completed"},
+                    _fields,
                 )
             )
 
