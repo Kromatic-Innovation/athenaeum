@@ -39,6 +39,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     silently falling back to not sealing.
 
 
+### Changed
+
+- **The public surface now says what the version number means (issue
+  athenaeum#2138).** The Zenodotus release panel for 0.22.43 had all three cold
+  reviewers read the version as a release count — `pyproject.toml` said
+  `0.22.43` while the last published release was `0.20.0`, and nothing in
+  `README.md` or `CONTRIBUTING.md` said the PATCH digit is a per-merge build
+  counter. `CONTRIBUTING.md` gains a **Versioning and releases** section
+  stating it outright: PATCH bumps on every merge to `develop` and is a build
+  number, releases are cut weekly from whatever `develop` reads and every cut
+  is tagged and published, MINOR is the pre-1.0 breaking-change signal and is
+  derived from whether the span's changelog entries contain a removal or a
+  breaking change, and MAJOR is reserved for 1.0.
+  - The same section documents the **changelog shape** `[0.22.43]` established
+    and every release section is expected to follow — an
+    `Upgrading from <previous tag>` block, then `Highlights`, then the
+    Keep-a-Changelog categories (which may repeat, because a release section
+    spans many merges) — so a contributor knows where an entry goes and that a
+    removal has to be stated explicitly, since that is what the cut reads to
+    decide the MINOR bump. The pull-request checklist now points at it.
+  - **`README.md` no longer pins a version floor by hand.** The quick start
+    said "confirm 0.20.0 or newer", which went stale at the next release; it
+    now points at the live PyPI version badge, and the wrong-interpreter note
+    keys off `0.17.1` — the first release to raise the declared Python floor to
+    3.13, a fact that cannot go stale — instead of the latest release number.
+
+- **`athenaeum merges` and `athenaeum questions` deprecation warnings now name
+  a target removal version (issue athenaeum#2138).** The panel found the stderr
+  `DEPRECATED:` line correct but open-ended, so a consumer could not tell
+  whether to migrate this week or next year. Both messages now say they are
+  scheduled for removal in `0.24.0`, from a single
+  `config.DEPRECATED_CLI_SURFACE_REMOVAL_VERSION` constant that the tests
+  assert reaches the user-facing warning and is a MINOR rather than a PATCH.
+  Behavior is otherwise unchanged — both surfaces still work.
+
+### Fixed
+
+- **The `[0.22.43]` changelog section no longer omits two deleted modules
+  (issue athenaeum#2138).** `athenaeum.cross_scope` and
+  `athenaeum.detection_state` were deleted with the C4 contradiction detector
+  (issue athenaeum#1256) inside that release span, and the span described the
+  retirement but never listed the module deletions. Both now have `### Removed`
+  entries and are named in the section's `Upgrading from 0.20.0` block. Neither
+  was ever in the package root's `__all__`, so this was a changelog gap rather
+  than an unannounced break.
+
+
 ## [0.22.43] - 2026-10-25
 
 First release since 0.20.0 (2026-09-04). Every intermediate `0.21.x` / `0.22.x`
@@ -63,8 +110,10 @@ collected here so an upgrader does not have to read the whole span.
   server API and no longer runs on `mcp` 1.x.
 - **Removed, not disabled:** the `athenaeum subject backfill` command, the
   deterministic merge-worthiness pre-check
-  (`athenaeum.tiers.check_merge_worthiness_gate`, athenaeum#1172), and the
-  promote-on-use memory-tier sweep.
+  (`athenaeum.tiers.check_merge_worthiness_gate`, athenaeum#1172), the
+  promote-on-use memory-tier sweep, and the C4 contradiction detector's two
+  remaining modules, `athenaeum.cross_scope` and `athenaeum.detection_state`
+  (neither was ever in `__all__`).
 - **Deprecated:** `athenaeum merges` and `athenaeum questions` in favour of
   the unified `athenaeum decisions` queue; both still work in this release.
 - **Import side effect:** importing `athenaeum` now sets
@@ -2124,6 +2173,21 @@ collected here so an upgrader does not have to read the whole span.
   per-probe mechanism table; the four regressions remain un-xfailed (per
   athenaeum#1789's own PR, correctly refusing to silently retire the
   disambiguation guard test) pending a fix in the FTS5 arm's own ranking.
+
+### Removed
+
+- **`athenaeum.cross_scope` is deleted** (issue athenaeum#1256, PR
+  athenaeum#1974) along with the rest of the C4 contradiction detector it
+  served — `cross_scope_similarity_pairs`, `candidate_to_auto_memory_files`,
+  and the similarity sweep that fed them. The retirement is described in the
+  `### Fixed` entry above; the module deletion itself was left unlisted, and
+  this records it. The module was never in the package root's `__all__`, so it
+  was importable-but-unstable rather than public API — a changelog gap, not a
+  semver breach.
+- **`athenaeum.detection_state` is deleted** in the same retirement (issue
+  athenaeum#1256, PR athenaeum#1974). It persisted the detector's per-pair
+  "already compared" state and has no remaining reader. Also never in
+  `__all__`.
 
 ### Added
 

@@ -23,6 +23,7 @@ import pytest
 
 from athenaeum.config import (
     DEPRECATED_CLI_SURFACE_MESSAGES,
+    DEPRECATED_CLI_SURFACE_REMOVAL_VERSION,
     deprecated_cli_surface_message,
     resolve_deprecated_cli_surfaces_enabled,
 )
@@ -74,6 +75,41 @@ def test_every_declared_surface_has_a_nonempty_message() -> None:
     assert set(DEPRECATED_CLI_SURFACE_MESSAGES) == {"merges", "questions"}
     for message in DEPRECATED_CLI_SURFACE_MESSAGES.values():
         assert message and "deprecated" in message.lower()
+
+
+def test_every_declared_surface_names_its_removal_version() -> None:
+    """Issue athenaeum#2138: an open-ended deprecation tells a reader nothing.
+
+    The panel found the stderr DEPRECATED message correct but with no target
+    version, so a consumer could not tell whether to migrate this week or next
+    year. Every declared message must name
+    :data:`DEPRECATED_CLI_SURFACE_REMOVAL_VERSION`.
+    """
+    for surface, message in DEPRECATED_CLI_SURFACE_MESSAGES.items():
+        assert DEPRECATED_CLI_SURFACE_REMOVAL_VERSION in message, surface
+
+
+def test_removal_version_is_a_minor_not_a_patch() -> None:
+    """Removing public surface bumps MINOR pre-1.0, never PATCH.
+
+    PATCH is a per-merge build counter here (CONTRIBUTING, "Versioning and
+    releases"), so a removal target written as a PATCH would be meaningless.
+    """
+    parts = DEPRECATED_CLI_SURFACE_REMOVAL_VERSION.split(".")
+    assert len(parts) == 3, DEPRECATED_CLI_SURFACE_REMOVAL_VERSION
+    assert all(part.isdigit() for part in parts), DEPRECATED_CLI_SURFACE_REMOVAL_VERSION
+    assert parts[2] == "0", DEPRECATED_CLI_SURFACE_REMOVAL_VERSION
+
+
+def test_removal_version_reaches_the_user_facing_warning(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    """The version has to be in the stderr line, not merely in the constant."""
+    from athenaeum._cmd_merges import cmd_merges
+
+    args = argparse.Namespace(merges_target="count", path=tmp_path, json=True)
+    assert cmd_merges(args) == 0
+    assert DEPRECATED_CLI_SURFACE_REMOVAL_VERSION in capsys.readouterr().err
 
 
 def test_cmd_merges_warns_and_still_works(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
