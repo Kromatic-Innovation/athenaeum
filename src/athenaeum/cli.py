@@ -139,6 +139,7 @@ _SUBCOMMAND_LOADERS: dict[str, tuple[str, str]] = {
         "add_recover_parked_subparser",
     ),
     "quarantine": ("athenaeum._cmd_quarantine", "add_quarantine_subparser"),
+    "receipts": ("athenaeum._cmd_receipts", "add_receipts_subparser"),
     "reconcile": ("athenaeum._cmd_reconcile", "add_reconcile_subparser"),
     "repair": ("athenaeum._cmd_repair", "add_repair_subparser"),
     "fold-lint": ("athenaeum._cmd_fold_lint", "add_fold_lint_subparser"),
@@ -236,6 +237,7 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_query import add_query_subparsers
     from athenaeum._cmd_questions import add_questions_subparser
     from athenaeum._cmd_quiesce import add_quiesce_subparser
+    from athenaeum._cmd_receipts import add_receipts_subparser
     from athenaeum._cmd_reconcile import add_reconcile_subparser
     from athenaeum._cmd_recover_parked import add_recover_parked_subparser
     from athenaeum._cmd_recovery_yield import add_recovery_yield_subparser
@@ -279,6 +281,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_decompose_page_subparser(subparsers)  # decompose-page (issue athenaeum#1914)
     add_correct_notes_subparser(subparsers)  # correct-notes (issue athenaeum#1976)
     add_reconcile_subparser(subparsers)  # reconcile (issue athenaeum#1143)
+    add_receipts_subparser(subparsers)  # receipts seal|verify (issue athenaeum#2039)
     add_recovery_yield_subparser(subparsers)  # recovery-yield (issue athenaeum#1453)
     add_repair_subparser(subparsers)  # repair
     add_fold_lint_subparser(subparsers)  # fold-lint (issue athenaeum#716)

@@ -9730,14 +9730,23 @@ def _write_transcript_receipts(
         return
     _start = time.monotonic()
     try:
+        from athenaeum.receipt_sealers import select_sealer
         from athenaeum.transcript_receipts import write_receipts_for_files
 
+        # issue athenaeum#2039: WHICH sealer is a config decision, resolved
+        # here (the one call site) rather than inside the ledger module —
+        # `transcript_receipts` owns the seam and deliberately not the
+        # selection. The default resolves to `NoopSealer`, so this is
+        # behaviour-neutral until `librarian.receipt_sealer` says otherwise,
+        # and with `signing` set but no credential reachable the sealer
+        # itself degrades to noop with one warning (never a blocked intake).
         stats = write_receipts_for_files(
             ctx.wiki_root,
             auto_memory_files,
             config=ctx.config,
             projects_root=ctx.projects_root,
             lock=ctx.lock,
+            sealer=select_sealer(ctx.config),
         )
         if stats.flag_off:
             return
