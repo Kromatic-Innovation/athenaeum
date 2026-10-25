@@ -325,7 +325,7 @@ class TestTruncatedCreateEscalationShape:
         assert "max_tokens" in esc.description
 
     def test_carries_the_parked_observation_after_a_blank_line(self) -> None:
-        # Seer review on PR #2128: both transports unlink the raw file once
+        # Seer review on PR athenaeum#2128: both transports unlink the raw file once
         # the tier-3 pass returns without raising, and a truncated create
         # writes no page — so this escalation is the ONLY surviving copy of
         # the claim. The blank-line convention is what tier4_escalate renders

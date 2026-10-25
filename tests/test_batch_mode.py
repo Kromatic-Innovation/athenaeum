@@ -4366,7 +4366,7 @@ class TestThinkingOnlyTruncationBatchTransport:
         )
         assert "WidgetTrunc" in questions
         assert "max_tokens" in questions
-        # Seer review on PR #2128: the raw file is unlinked at the end of a
+        # Seer review on PR athenaeum#2128: the raw file is unlinked at the end of a
         # clean finalize, so the parked observation in the escalation is the
         # only surviving copy of the claim. It must reach the queue, in the
         # fenced ``**Observation**:`` field tier4_escalate renders from the
