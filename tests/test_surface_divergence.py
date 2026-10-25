@@ -57,6 +57,7 @@ from athenaeum.surface_divergence import (
     field_names,
     get_field,
 )
+from tests.env_contract import require
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -552,6 +553,12 @@ class TestInstalledCli:
         shipped `athenaeum` command.
         """
         pytest.importorskip("build", reason="`build` not installed; `pip install athenaeum[dev]`")
+        # `--system-site-packages` below chains to sys.base_prefix, not to an
+        # intermediate venv, so the installed console script can only import
+        # athenaeum's RUNTIME deps when those live in the base interpreter --
+        # true in CI, false in the venv CONTRIBUTING.md tells contributors to
+        # create (athenaeum#2136).
+        require("runtime_deps_in_base_interpreter")
 
         outdir = tmp_path / "dist"
         outdir.mkdir()

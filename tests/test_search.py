@@ -25,6 +25,7 @@ from athenaeum.search import (
     query_fts5_index,
 )
 from athenaeum.store import FilesystemStore
+from tests.env_contract import require
 
 
 @pytest.fixture
@@ -631,6 +632,7 @@ class TestReindexUnderLiveServer:
     def test_build_index_writes_generation_stamp(
         self, wiki_with_pages: Path, tmp_path: Path
     ) -> None:
+        require("vector_backend")
         from athenaeum.search import _VECTOR_DIR, _read_generation
 
         cache = tmp_path / "cache"
@@ -646,6 +648,7 @@ class TestReindexUnderLiveServer:
         # cache stays pinned to the pre-reindex collection. Without the athenaeum#489
         # re-open, the second query serves the stale (deleted) page at the
         # degenerate ~1.5 distance; with it, recall reflects the new corpus.
+        require("vector_backend")
         import subprocess
         import sys
 
