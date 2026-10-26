@@ -2522,9 +2522,18 @@ Resolve the private-key ``op://`` reference.
 ``librarian.receipt_signing.op_reference`` is read with ``op read`` by the
 1Password provider, inside the signing call only — the key is never
 written to disk or cached. The default points at the operator-created
-Ed25519 **SSH Key** item, whose private field arrives in OpenSSH format
-(PKCS8 PEM is also accepted, so rotating to a PEM item needs no code
-change).
+Ed25519 **SSH Key** item, bare ``private key`` field.
+
+**What ``op read`` actually returns for that field is PKCS8 PEM**
+(``-----BEGIN PRIVATE KEY-----``), not OpenSSH: 1Password serves the
+RFC 5958 *v2* ``OneAsymmetricKey`` encoding for an Ed25519 SSH Key item,
+168 bytes over four lines. Appending ``?ssh-format=openssh`` to the
+reference yields ``-----BEGIN OPENSSH PRIVATE KEY-----`` instead.
+
+**The query is optional.** All three encodings are accepted — OpenSSH, v1
+PKCS8 PEM, and the v2 form the bare field serves — so a reference needs
+the query only when something else downstream wants the OpenSSH shape,
+and rotating to a plain PEM item needs no code or config change.
 
 ### `resolve_receipt_signing_public_key_openssh`
 

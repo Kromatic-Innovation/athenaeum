@@ -155,12 +155,110 @@ def derive_key_id(public_key_raw: bytes) -> str:
     return f"{ALGORITHM}:{hashlib.sha256(public_key_raw).hexdigest()[:16]}"
 
 
+#: DER encoding of the RFC 8410 Ed25519 algorithm OID, ``1.3.101.112``, as it
+#: appears inside a ``OneAsymmetricKey``'s ``privateKeyAlgorithm`` SEQUENCE.
+_ED25519_OID_DER = b"\x06\x03\x2b\x65\x70"
+
+
+def _read_der_tlv(data: bytes, offset: int) -> tuple[int, bytes, int]:
+    """Read one DER tag-length-value at *offset*; return ``(tag, value, next)``.
+
+    A deliberately minimal reader: definite-length only, which is all DER
+    permits, and used on a structure that is 83 bytes long. It exists because
+    :func:`_ed25519_seed_from_one_asymmetric_key` has to look at the ASN.1
+    that ``cryptography`` refuses to parse, and ``cryptography`` exposes no
+    ASN.1 API to borrow.
+    """
+    if offset + 2 > len(data):
+        raise ValueError("truncated DER")
+    tag = data[offset]
+    first = data[offset + 1]
+    cursor = offset + 2
+    if first & 0x80:
+        width = first & 0x7F
+        if width == 0 or width > 4 or cursor + width > len(data):
+            raise ValueError("unsupported DER length")
+        length = int.from_bytes(data[cursor : cursor + width], "big")
+        cursor += width
+    else:
+        length = first
+    if cursor + length > len(data):
+        raise ValueError("truncated DER value")
+    return tag, data[cursor : cursor + length], cursor + length
+
+
+def _ed25519_seed_from_one_asymmetric_key(material: bytes) -> bytes | None:
+    """The 32-byte Ed25519 seed inside a v2 PKCS8 PEM, or ``None``.
+
+    ``op read`` on the bare ``private key`` field of a 1Password **SSH Key**
+    item returns the RFC 5958 **v2** ``OneAsymmetricKey`` encoding — the
+    private key PLUS the optional ``publicKey`` attribute, 168 bytes of PEM
+    over 83 bytes of DER — and ``cryptography`` rejects it outright with
+    ``ASN.1 parsing error: extra data`` (issue athenaeum#2142). Its own
+    ``private_bytes(PKCS8)`` only ever emits v1, so nothing in the library
+    round-trips the shape that 1Password actually serves.
+
+    Returns ``None`` — rather than raising — for anything that is not a v2
+    Ed25519 ``OneAsymmetricKey``, so the caller can re-raise
+    ``cryptography``'s own, more informative error for a key that is simply
+    malformed. A real configuration fault must still propagate.
+    """
+    try:
+        der = base64.b64decode(
+            b"".join(
+                line.strip()
+                for line in material.splitlines()
+                if line.strip() and not line.strip().startswith(b"-----")
+            ),
+            validate=True,
+        )
+    except (ValueError, TypeError):
+        return None
+    try:
+        tag, body, _ = _read_der_tlv(der, 0)
+        if tag != 0x30:  # SEQUENCE
+            return None
+        tag, version, cursor = _read_der_tlv(body, 0)
+        if tag != 0x02 or version != b"\x01":  # INTEGER, v2
+            return None
+        tag, algorithm, cursor = _read_der_tlv(body, cursor)
+        if tag != 0x30 or _ED25519_OID_DER not in algorithm:
+            return None
+        tag, private_key, _ = _read_der_tlv(body, cursor)
+        if tag != 0x04:  # OCTET STRING
+            return None
+        tag, seed, _ = _read_der_tlv(private_key, 0)
+    except ValueError:
+        return None
+    # RFC 8410: the privateKey OCTET STRING wraps a CurvePrivateKey, itself an
+    # OCTET STRING of exactly the 32 seed bytes.
+    if tag != 0x04 or len(seed) != 32:
+        return None
+    return seed
+
+
 def _load_private_key(material: bytes) -> Any:
     """Parse *material* as an Ed25519 private key, OpenSSH or PKCS8 PEM.
 
-    OpenSSH first because that is what a 1Password **SSH Key** item hands
-    back (``-----BEGIN OPENSSH PRIVATE KEY-----``); PKCS8 PEM is accepted
-    too so a later rotation to a PEM-bearing item needs no code change.
+    Three encodings, because which one a 1Password **SSH Key** item hands
+    back depends on the ``op://`` reference (issue athenaeum#2142):
+
+    * ``-----BEGIN OPENSSH PRIVATE KEY-----`` — what ``op read`` returns for
+      a reference carrying ``?ssh-format=openssh``. Tried first.
+    * ``-----BEGIN PRIVATE KEY-----`` holding the RFC 5958 **v1**
+      ``PrivateKeyInfo`` — a plain PKCS8 item, and what ``cryptography``'s own
+      ``private_bytes(PKCS8)`` emits.
+    * the same PEM header holding the RFC 5958 **v2** ``OneAsymmetricKey``,
+      which is what ``op read`` returns for the bare ``private key`` field.
+      ``cryptography`` rejects that one, so the seed is read out of the DER by
+      :func:`_ed25519_seed_from_one_asymmetric_key` and reloaded. Only reached
+      after the v1 parse has failed, so it costs a correct key nothing.
+
+    All three are accepted rather than one being mandated by configuration:
+    the shape depends on vendor query syntax the operator may legitimately
+    change on either side of a rotation, and a reference that merely LOOKS
+    right producing a parse error at first ``seal`` is the failure mode this
+    exists to remove.
     """
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
     from cryptography.hazmat.primitives.serialization import (
@@ -172,7 +270,13 @@ def _load_private_key(material: bytes) -> Any:
     if b"OPENSSH PRIVATE KEY" in material:
         key = load_ssh_private_key(material, password=None)
     else:
-        key = load_pem_private_key(material, password=None)
+        try:
+            key = load_pem_private_key(material, password=None)
+        except ValueError:
+            seed = _ed25519_seed_from_one_asymmetric_key(material)
+            if seed is None:
+                raise
+            key = Ed25519PrivateKey.from_private_bytes(seed)
     if not isinstance(key, Ed25519PrivateKey):
         raise ValueError(
             f"receipt signing key is {type(key).__name__}, not Ed25519; "
@@ -223,10 +327,13 @@ class OnePasswordServiceAccountKeyProvider:
     Only the PUBLIC key is memoised (it is not secret, and ``verify`` over a
     whole ledger would otherwise shell out once per range).
 
-    Accepts a 1Password **SSH Key** item, whose ``private key`` field arrives
-    in OpenSSH format and whose ``public key`` field arrives as an
-    ``ssh-ed25519 AAAA...`` line, and also a PKCS8 PEM item — one parse
-    attempt per format, no configuration knob (see :func:`_load_private_key`).
+    Accepts a 1Password **SSH Key** item, whose ``public key`` field arrives
+    as an ``ssh-ed25519 AAAA...`` line and whose ``private key`` field
+    arrives as PKCS8 PEM — in the RFC 5958 *v2* ``OneAsymmetricKey`` form,
+    not OpenSSH, unless the reference carries ``?ssh-format=openssh``
+    (issue athenaeum#2142). Also accepts a plain PKCS8 PEM item. One parse
+    attempt per format, no configuration knob (see
+    :func:`_load_private_key`).
     """
 
     def __init__(

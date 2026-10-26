@@ -8,8 +8,13 @@ Covers, one class per acceptance criterion:
   counter-example that must fail is a provider caching it under a home-dir
   cache), and a missing service-account token raises the named
   :class:`athenaeum.receipt_sealers.KeyUnavailable`. One test per accepted key
-  format (OpenSSH, the shape a 1Password **SSH Key** item hands back, and
-  PKCS8 PEM).
+  format (OpenSSH, what a 1Password **SSH Key** item hands back for a
+  ``?ssh-format=openssh`` reference; v1 PKCS8 PEM; and the v2
+  ``OneAsymmetricKey`` PEM that the same item's bare ``private key`` field
+  actually returns, issue athenaeum#2142).
+* :class:`TestPrivateKeyEncodings` — the loader itself, over all three
+  encodings and over material that is merely broken, so the v2 fallback
+  cannot mask a real configuration fault (issue athenaeum#2142).
 * :class:`TestSigningSealerRoundTrip` — ``seal`` then ``verify`` accepts; one
   mutation test per field of the signed payload (line content, ``start_line``,
   ``end_line``).
@@ -28,6 +33,7 @@ Covers, one class per acceptance criterion:
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -87,6 +93,45 @@ def _pkcs8_private(key: Ed25519PrivateKey) -> bytes:
     return key.private_bytes(
         Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()
     )
+
+
+def _der_tlv(tag: int, body: bytes) -> bytes:
+    """One short-form DER tag-length-value. Enough for an 83-byte key."""
+    assert len(body) < 0x80
+    return bytes([tag, len(body)]) + body
+
+
+def _pkcs8_v2_private(key: Ed25519PrivateKey) -> bytes:
+    """The RFC 5958 **v2** ``OneAsymmetricKey`` PEM, built here by hand.
+
+    This is what ``op read`` returns for the bare ``private key`` field of a
+    1Password Ed25519 **SSH Key** item: version ``1``, the Ed25519 algorithm
+    OID, the seed, and the OPTIONAL ``publicKey [1]`` attribute that makes
+    ``cryptography`` refuse the whole structure (issue athenaeum#2142).
+
+    Built from a key generated at test time rather than carried as a fixture,
+    so no real key material is ever committed — and built by hand because
+    ``cryptography``'s own ``private_bytes(PKCS8)`` emits v1 only, which is
+    precisely why the shape went unnoticed.
+    """
+    seed = key.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption())
+    public = key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    content = (
+        b"\x02\x01\x01"                                  # version = 1 (v2)
+        + _der_tlv(0x30, b"\x06\x03\x2b\x65\x70")       # Ed25519 OID
+        + _der_tlv(0x04, _der_tlv(0x04, seed))             # privateKey
+        + _der_tlv(0x81, b"\x00" + public)                 # publicKey [1]
+    )
+    return _pem_wrap(_der_tlv(0x30, content))
+
+
+def _pem_wrap(der: bytes) -> bytes:
+    """*der* inside a plain ``PRIVATE KEY`` PEM envelope, 64-column base64."""
+    body = base64.b64encode(der).decode("ascii")
+    wrapped = "\n".join(body[i : i + 64] for i in range(0, len(body), 64))
+    return (
+        f"-----BEGIN PRIVATE KEY-----\n{wrapped}\n-----END PRIVATE KEY-----\n"
+    ).encode("ascii")
 
 
 def _openssh_public(key: Ed25519PrivateKey) -> bytes:
@@ -178,7 +223,7 @@ def _ledger_line(wiki: Path, knowledge_root: Path, digest: str) -> None:
 
 
 class TestOnePasswordProvider:
-    @pytest.mark.parametrize("fmt", ["openssh", "pkcs8"])
+    @pytest.mark.parametrize("fmt", ["openssh", "pkcs8", "pkcs8-v2"])
     def test_signs_through_fake_op_and_never_writes_the_key_to_disk(
         self, tmp_path: Path, fmt: str
     ) -> None:
@@ -188,9 +233,18 @@ class TestOnePasswordProvider:
         caching the key under a home-dir cache — fails here: the scan covers
         the whole fake ``HOME`` (including ``.cache`` and ``TMPDIR``), so any
         write of the key material at all is a hit.
+
+        ``pkcs8-v2`` is the encoding the SHIPPED default reference actually
+        serves (issue athenaeum#2142); before that fix this parametrization
+        failed on the first ``op read`` with an ASN.1 parse error, which is
+        what the first supervised ``receipts seal`` hit.
         """
         key = Ed25519PrivateKey.generate()
-        private = _openssh_private(key) if fmt == "openssh" else _pkcs8_private(key)
+        private = {
+            "openssh": _openssh_private,
+            "pkcs8": _pkcs8_private,
+            "pkcs8-v2": _pkcs8_v2_private,
+        }[fmt](key)
         bin_dir = tmp_path / "fixture-bin"
         home = tmp_path / "home"
         _fake_op(bin_dir, private=private, public=_openssh_public(key))
@@ -258,6 +312,170 @@ class TestOnePasswordProvider:
         with pytest.raises(KeyUnavailable) as excinfo:
             provider.sign(b"payload")
         assert "No Such Item" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# athenaeum#2142 — the three private-key encodings, at the loader
+# ---------------------------------------------------------------------------
+
+
+class TestPrivateKeyEncodings:
+    """:func:`athenaeum.receipt_sealers._load_private_key`, encoding by encoding.
+
+    The provider test above covers the same ground end to end through a fake
+    ``op``; these go straight at the loader so a regression names the parse
+    rather than the signature.
+    """
+
+    @pytest.mark.parametrize(
+        "builder", [_openssh_private, _pkcs8_private, _pkcs8_v2_private]
+    )
+    def test_every_accepted_encoding_yields_the_same_key(self, builder: Any) -> None:
+        from athenaeum.receipt_sealers import _load_private_key
+
+        key = Ed25519PrivateKey.generate()
+
+        loaded = _load_private_key(builder(key))
+
+        assert loaded.private_bytes(
+            Encoding.Raw, PrivateFormat.Raw, NoEncryption()
+        ) == key.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption())
+        assert _raw_public(loaded) == _raw_public(key)
+
+    def test_the_v2_pem_is_the_shape_1password_serves(self) -> None:
+        """168 bytes over four lines, under the plain PKCS8 PEM header.
+
+        Pinned because the whole defect was invisible from inside
+        ``cryptography``, which emits v1 only: if this fixture ever drifts to
+        the v1 shape the parametrization above would still pass while
+        covering nothing.
+        """
+        material = _pkcs8_v2_private(Ed25519PrivateKey.generate())
+
+        assert material.startswith(b"-----BEGIN PRIVATE KEY-----")
+        assert b"OPENSSH" not in material
+        assert len(material) == 168
+        assert material.count(b"\n") == 4
+        # v1 is what the library itself emits, and is 119 bytes / 3 lines.
+        assert len(_pkcs8_private(Ed25519PrivateKey.generate())) == 119
+
+    def test_the_v2_fallback_does_not_mask_a_broken_key(self) -> None:
+        """A key that is merely malformed still raises, and says so.
+
+        The fallback is reached only after the v1 parse has failed, so it is
+        the one place a genuine configuration fault could be swallowed into a
+        confusing error. The module contract is that such a fault propagates.
+        """
+        from athenaeum.receipt_sealers import _load_private_key
+
+        garbage_pem = (
+            b"-----BEGIN PRIVATE KEY-----\nbm90IGEga2V5\n-----END PRIVATE KEY-----\n"
+        )
+        with pytest.raises(ValueError, match="Could not deserialize key data"):
+            _load_private_key(garbage_pem)
+        with pytest.raises(ValueError, match="Unable to load PEM file"):
+            _load_private_key(b"not a key at all")
+
+    @pytest.mark.parametrize(
+        ("label", "der"),
+        [
+            # A v1 PrivateKeyInfo: `load_pem_private_key` already took it, so
+            # reaching the fallback with one means something else is wrong.
+            (
+                "version-v1",
+                _der_tlv(
+                    0x30,
+                    b"\x02\x01\x00"
+                    + _der_tlv(0x30, b"\x06\x03\x2b\x65\x70")
+                    + _der_tlv(0x04, _der_tlv(0x04, b"s" * 32)),
+                ),
+            ),
+            # X25519 (1.3.101.110) in the same v2 envelope: an agreement key,
+            # not a signing key, and the OID is the only thing that says so.
+            (
+                "wrong-curve-oid",
+                _der_tlv(
+                    0x30,
+                    b"\x02\x01\x01"
+                    + _der_tlv(0x30, b"\x06\x03\x2b\x65\x6e")
+                    + _der_tlv(0x04, _der_tlv(0x04, b"s" * 32)),
+                ),
+            ),
+            (
+                "short-seed",
+                _der_tlv(
+                    0x30,
+                    b"\x02\x01\x01"
+                    + _der_tlv(0x30, b"\x06\x03\x2b\x65\x70")
+                    + _der_tlv(0x04, _der_tlv(0x04, b"s" * 31)),
+                ),
+            ),
+            (
+                "seed-not-an-octet-string",
+                _der_tlv(
+                    0x30,
+                    b"\x02\x01\x01"
+                    + _der_tlv(0x30, b"\x06\x03\x2b\x65\x70")
+                    + _der_tlv(0x04, _der_tlv(0x02, b"s" * 32)),
+                ),
+            ),
+            (
+                "private-key-not-an-octet-string",
+                _der_tlv(
+                    0x30,
+                    b"\x02\x01\x01"
+                    + _der_tlv(0x30, b"\x06\x03\x2b\x65\x70")
+                    + _der_tlv(0x02, _der_tlv(0x04, b"s" * 32)),
+                ),
+            ),
+            ("outer-not-a-sequence", _der_tlv(0x31, b"\x02\x01\x01")),
+            ("version-not-an-integer", _der_tlv(0x30, _der_tlv(0x04, b"\x01"))),
+            ("truncated", b"\x30\x51\x02\x01"),
+        ],
+    )
+    def test_the_v2_reader_accepts_nothing_but_an_ed25519_v2_key(
+        self, label: str, der: bytes
+    ) -> None:
+        """The fallback is conservative: anything else is ``None``, not a key.
+
+        It runs on material ``cryptography`` has already refused, in a
+        signing path, so "nearly a key" must not become "a key". ``None``
+        hands the caller back ``cryptography``'s own error.
+        """
+        from athenaeum.receipt_sealers import _ed25519_seed_from_one_asymmetric_key
+
+        assert _ed25519_seed_from_one_asymmetric_key(_pem_wrap(der)) is None, label
+
+    def test_the_der_reader_handles_long_form_lengths_and_refuses_truncation(
+        self,
+    ) -> None:
+        """Long-form lengths are legal DER even though a key never needs them."""
+        from athenaeum.receipt_sealers import _read_der_tlv
+
+        payload = b"x" * 200
+        long_form = bytes([0x04, 0x81, len(payload)]) + payload
+
+        assert _read_der_tlv(long_form, 0) == (0x04, payload, len(long_form))
+
+        with pytest.raises(ValueError, match="truncated DER"):
+            _read_der_tlv(b"\x04", 0)
+        with pytest.raises(ValueError, match="truncated DER value"):
+            _read_der_tlv(b"\x04\x08\x00", 0)
+        with pytest.raises(ValueError, match="unsupported DER length"):
+            _read_der_tlv(b"\x04\x80", 0)
+
+    def test_a_non_ed25519_key_is_still_named_as_such(self) -> None:
+        """The pre-existing Ed25519 check is not bypassed by the new branch."""
+        from cryptography.hazmat.primitives.asymmetric import rsa
+
+        from athenaeum.receipt_sealers import _load_private_key
+
+        rsa_pem = rsa.generate_private_key(
+            public_exponent=65537, key_size=2048
+        ).private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption())
+
+        with pytest.raises(ValueError, match="not Ed25519"):
+            _load_private_key(rsa_pem)
 
 
 # ---------------------------------------------------------------------------
