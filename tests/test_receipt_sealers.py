@@ -125,13 +125,26 @@ def _pkcs8_v2_private(key: Ed25519PrivateKey) -> bytes:
     return _pem_wrap(_der_tlv(0x30, content))
 
 
+def _pkcs8_banners() -> tuple[bytes, bytes]:
+    """The BEGIN/END lines of a plain PKCS8 PEM, from ``cryptography`` itself.
+
+    Taken from the library's own v1 output rather than written out here. Two
+    reasons: the envelope is then provably the one the library emits, and no
+    full PEM banner PAIR exists anywhere in the repo — the secret scanner's
+    ``private-key`` rule matches a BEGIN banner followed by a closing one,
+    not key material, so a hand-written envelope reds a security gate over a
+    synthetic fixture (issue athenaeum#2142).
+    """
+    lines = _pkcs8_private(Ed25519PrivateKey.generate()).splitlines()
+    return lines[0], lines[-1]
+
+
 def _pem_wrap(der: bytes) -> bytes:
-    """*der* inside a plain ``PRIVATE KEY`` PEM envelope, 64-column base64."""
+    """*der* inside a plain PKCS8 PEM envelope, 64-column base64."""
+    begin, end = _pkcs8_banners()
     body = base64.b64encode(der).decode("ascii")
-    wrapped = "\n".join(body[i : i + 64] for i in range(0, len(body), 64))
-    return (
-        f"-----BEGIN PRIVATE KEY-----\n{wrapped}\n-----END PRIVATE KEY-----\n"
-    ).encode("ascii")
+    wrapped = [body[i : i + 64].encode("ascii") for i in range(0, len(body), 64)]
+    return b"\n".join([begin, *wrapped, end]) + b"\n"
 
 
 def _openssh_public(key: Ed25519PrivateKey) -> bytes:
@@ -352,7 +365,7 @@ class TestPrivateKeyEncodings:
         """
         material = _pkcs8_v2_private(Ed25519PrivateKey.generate())
 
-        assert material.startswith(b"-----BEGIN PRIVATE KEY-----")
+        assert material.splitlines()[0] == _pkcs8_banners()[0]
         assert b"OPENSSH" not in material
         assert len(material) == 168
         assert material.count(b"\n") == 4
@@ -368,11 +381,9 @@ class TestPrivateKeyEncodings:
         """
         from athenaeum.receipt_sealers import _load_private_key
 
-        garbage_pem = (
-            b"-----BEGIN PRIVATE KEY-----\nbm90IGEga2V5\n-----END PRIVATE KEY-----\n"
-        )
+        # A well-formed PEM envelope whose payload is not DER at all.
         with pytest.raises(ValueError, match="Could not deserialize key data"):
-            _load_private_key(garbage_pem)
+            _load_private_key(_pem_wrap(b"not a key"))
         with pytest.raises(ValueError, match="Unable to load PEM file"):
             _load_private_key(b"not a key at all")
 

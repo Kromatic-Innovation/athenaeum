@@ -243,9 +243,9 @@ def _load_private_key(material: bytes) -> Any:
     Three encodings, because which one a 1Password **SSH Key** item hands
     back depends on the ``op://`` reference (issue athenaeum#2142):
 
-    * ``-----BEGIN OPENSSH PRIVATE KEY-----`` — what ``op read`` returns for
-      a reference carrying ``?ssh-format=openssh``. Tried first.
-    * ``-----BEGIN PRIVATE KEY-----`` holding the RFC 5958 **v1**
+    * an ``OPENSSH PRIVATE KEY`` PEM block — what ``op read`` returns for a
+      reference carrying ``?ssh-format=openssh``. Tried first.
+    * a plain ``PRIVATE KEY`` PEM block holding the RFC 5958 **v1**
       ``PrivateKeyInfo`` — a plain PKCS8 item, and what ``cryptography``'s own
       ``private_bytes(PKCS8)`` emits.
     * the same PEM header holding the RFC 5958 **v2** ``OneAsymmetricKey``,

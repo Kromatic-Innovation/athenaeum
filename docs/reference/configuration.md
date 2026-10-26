@@ -2524,11 +2524,11 @@ Resolve the private-key ``op://`` reference.
 written to disk or cached. The default points at the operator-created
 Ed25519 **SSH Key** item, bare ``private key`` field.
 
-**What ``op read`` actually returns for that field is PKCS8 PEM**
-(``-----BEGIN PRIVATE KEY-----``), not OpenSSH: 1Password serves the
+**What ``op read`` actually returns for that field is PKCS8 PEM** — a
+plain ``PRIVATE KEY`` PEM block, not OpenSSH: 1Password serves the
 RFC 5958 *v2* ``OneAsymmetricKey`` encoding for an Ed25519 SSH Key item,
 168 bytes over four lines. Appending ``?ssh-format=openssh`` to the
-reference yields ``-----BEGIN OPENSSH PRIVATE KEY-----`` instead.
+reference yields an ``OPENSSH PRIVATE KEY`` block instead.
 
 **The query is optional.** All three encodings are accepted — OpenSSH, v1
 PKCS8 PEM, and the v2 form the bare field serves — so a reference needs

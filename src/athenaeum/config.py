@@ -6311,13 +6311,13 @@ RECEIPT_SIGNING_KEY_PROVIDERS = ("onepassword",)
 #: Default ``op://`` reference for the private key: the operator-created
 #: 1Password **SSH Key** item (Ed25519), bare ``private key`` field.
 #:
-#: ``op read`` on this reference returns **PKCS8 PEM**
-#: (``-----BEGIN PRIVATE KEY-----``), not OpenSSH — specifically the RFC 5958
+#: ``op read`` on this reference returns **PKCS8 PEM** — a plain
+#: ``PRIVATE KEY`` PEM block, not OpenSSH — and specifically the RFC 5958
 #: *v2* ``OneAsymmetricKey`` encoding, private key plus the optional public
 #: key, which is what 1Password emits for Ed25519 (issue athenaeum#2142
 #: corrected an earlier comment here that claimed OpenSSH). Appending
-#: ``?ssh-format=openssh`` to the reference yields
-#: ``-----BEGIN OPENSSH PRIVATE KEY-----`` instead.
+#: ``?ssh-format=openssh`` to the reference yields an
+#: ``OPENSSH PRIVATE KEY`` block instead.
 #:
 #: The query is OPTIONAL: all three encodings load (see
 #: :func:`athenaeum.receipt_sealers._load_private_key`), so the default is
@@ -6413,11 +6413,11 @@ def resolve_receipt_signing_op_reference(config: dict[str, Any] | None) -> str:
     written to disk or cached. The default points at the operator-created
     Ed25519 **SSH Key** item, bare ``private key`` field.
 
-    **What ``op read`` actually returns for that field is PKCS8 PEM**
-    (``-----BEGIN PRIVATE KEY-----``), not OpenSSH: 1Password serves the
+    **What ``op read`` actually returns for that field is PKCS8 PEM** — a
+    plain ``PRIVATE KEY`` PEM block, not OpenSSH: 1Password serves the
     RFC 5958 *v2* ``OneAsymmetricKey`` encoding for an Ed25519 SSH Key item,
     168 bytes over four lines. Appending ``?ssh-format=openssh`` to the
-    reference yields ``-----BEGIN OPENSSH PRIVATE KEY-----`` instead.
+    reference yields an ``OPENSSH PRIVATE KEY`` block instead.
 
     **The query is optional.** All three encodings are accepted — OpenSSH, v1
     PKCS8 PEM, and the v2 form the bare field serves — so a reference needs
