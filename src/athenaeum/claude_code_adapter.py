@@ -157,12 +157,23 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from athenaeum.config import RECALL_CAP_CEILING_DEFAULT, resolve_cache_dir
+
+#: Default periodic in-session anchor interval, in minutes (issue
+#: athenaeum#2156), read hook-time via ``ATHENAEUM_WITNESS_ANCHOR_INTERVAL_MINUTES``
+#: (see :func:`_witness_anchor_interval_minutes`). ``0`` disables periodic
+#: anchoring entirely. Mirrors the yaml default
+#: ``librarian.receipt_anchor.anchor_interval_minutes`` resolves to
+#: (:func:`athenaeum.config.resolve_receipt_anchor_anchor_interval_minutes`)
+#: -- the two are deliberately independent knobs (the hook never loads
+#: athenaeum.yaml) but share the same default on purpose.
+_WITNESS_ANCHOR_INTERVAL_MINUTES_DEFAULT = 15
 
 
 def _load_config_env(cache_dir: Path) -> None:
@@ -256,6 +267,71 @@ def _witness_ledger_enabled() -> bool:
     return os.environ.get("ATHENAEUM_WITNESS_LEDGER_ENABLED", "false") == "true"
 
 
+def _witness_anchor_interval_minutes() -> int:
+    """``ATHENAEUM_WITNESS_ANCHOR_INTERVAL_MINUTES`` (issue athenaeum#2156),
+    read the same way as :func:`_auto_recall_enabled` /
+    :func:`_witness_ledger_enabled`: must run AFTER :func:`_load_config_env`,
+    so a value cached in ``config.env`` is honoured the same as one set
+    directly in the launcher's environment -- the hook never loads
+    ``athenaeum.yaml`` at all, so this env var (not the yaml resolver
+    ``librarian.receipt_anchor.anchor_interval_minutes``,
+    :func:`athenaeum.config.resolve_receipt_anchor_anchor_interval_minutes`)
+    is this knob's ONLY home at hook time.
+
+    Default 15 minutes; ``0`` disables periodic in-session anchoring
+    entirely. A non-numeric or negative override falls back to the
+    default rather than raising -- this is a hook-time env knob, not a
+    yaml resolver, so it must degrade exactly like
+    :func:`_resolve_recall_cap_ceiling` rather than ever becoming a second
+    way for this adapter to fail a turn.
+    """
+    raw = os.environ.get("ATHENAEUM_WITNESS_ANCHOR_INTERVAL_MINUTES")
+    if not raw:
+        return _WITNESS_ANCHOR_INTERVAL_MINUTES_DEFAULT
+    try:
+        value = int(raw)
+    except ValueError:
+        return _WITNESS_ANCHOR_INTERVAL_MINUTES_DEFAULT
+    return value if value >= 0 else _WITNESS_ANCHOR_INTERVAL_MINUTES_DEFAULT
+
+
+def _spawn_detached_anchor(ledger_dir: Path) -> None:
+    """Spawn a fully detached ``promptwitness anchor`` process anchoring
+    the current witness chain head only (issue athenaeum#2156; one
+    subject, no Merkle batching, no per-turn proofs). Zero added prompt
+    latency: stdio is closed (no pipe for this process to ever read or
+    flush), ``start_new_session=True`` detaches the child into its own
+    session, and this function never calls ``.wait()``/``.communicate()``
+    on the returned :class:`subprocess.Popen` -- it is discarded
+    immediately, so the caller can return without waiting on it. This
+    process itself does no network I/O; any network call the child makes
+    happens entirely after this function has already returned.
+    """
+    subprocess.Popen(
+        [sys.executable, "-m", "promptwitness.cli", "anchor", "--dir", str(ledger_dir)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+
+def _check_and_spawn_periodic_anchor(ledger_dir: Path) -> None:
+    """The periodic in-session anchor check (issue athenaeum#2156):
+    compare the age of the newest anchor activity with the configured
+    interval, and spawn at most one detached anchor process per interval
+    across concurrent sessions. A single delegation to
+    :func:`promptwitness.anchor_schedule.claim_periodic_anchor_slot` plus
+    :func:`_spawn_detached_anchor` -- no arithmetic of its own beyond
+    reading the interval, matching this module's AC2 guard.
+    """
+    from promptwitness.anchor_schedule import claim_periodic_anchor_slot
+
+    interval = _witness_anchor_interval_minutes()
+    if claim_periodic_anchor_slot(ledger_dir, interval):
+        _spawn_detached_anchor(ledger_dir)
+
+
 def _log_witness_error(cache_dir: Path, exc: BaseException) -> None:
     """Append one ``{ts, error: <ExceptionClassName>}`` line to
     ``<cache_dir>/witness_hook_errors.jsonl`` (issue athenaeum#2149's silent
@@ -292,18 +368,22 @@ def _read_hook_input(raw: str) -> tuple[str, str]:
 def _witness_turn(cache_dir: Path, raw: str) -> None:
     """Gate, import, and delegate to
     :func:`promptwitness.harness.claude_code.record_turn` for one
-    ``UserPromptSubmit`` turn — one delegation call, no arithmetic (issue
-    athenaeum#2149; the same ``TestAC2NoRetrievalLogic`` guard issue
-    athenaeum#1621 AC2 established). Any exception — including
-    ``promptwitness`` failing to import — is caught and logged via
-    :func:`_log_witness_error`; this function itself never raises.
+    ``UserPromptSubmit`` turn, then run the periodic in-session anchor
+    check (issue athenaeum#2156) AFTER that ledger line has been appended
+    -- the age comparison is always against the chain this very turn just
+    extended. Any exception from either step — including ``promptwitness``
+    failing to import — is caught and logged via :func:`_log_witness_error`;
+    this function itself never raises, and a periodic-anchor failure can
+    no more block a prompt than the witness write it follows.
     """
     if not _witness_ledger_enabled():
         return
     try:
+        from promptwitness import ledger as pw_ledger
         from promptwitness.harness.claude_code import record_turn
 
         record_turn(raw, os.environ)
+        _check_and_spawn_periodic_anchor(pw_ledger.resolve_ledger_dir("claude-code"))
     except Exception as exc:  # noqa: BLE001 - a witness failure must never block a prompt
         _log_witness_error(cache_dir, exc)
 
@@ -331,6 +411,41 @@ def witness_session_end(cache_dir: Path) -> None:
         from promptwitness.harness.claude_code import session_close
 
         session_close(os.environ)
+    except Exception as exc:  # noqa: BLE001 - a witness failure must never block SessionEnd
+        _log_witness_error(cache_dir, exc)
+
+
+def witness_session_end_anchor(cache_dir: Path, wiki_root: Path) -> None:
+    """The SessionEnd anchor step (issue athenaeum#2156): anchors the
+    current witness chain head, plus every receipt partition under
+    *wiki_root* that changed since its own last anchor, as ``anchor``
+    lines in the local witness ledger. Takes NO run lock — mirrors the
+    design's lock rule that the hook path and SessionEnd both record
+    anchors lock-free — and is self-gated/guarded exactly like
+    :func:`witness_session_end`: ``ATHENAEUM_WITNESS_LEDGER_ENABLED`` (read
+    after :func:`_load_config_env`), and any exception from either the
+    gate read or the delegated anchor work is caught and logged via
+    :func:`_log_witness_error` rather than ever affecting SessionEnd's own
+    exit code.
+
+    The actual work -- budget/deadline tracking, receipt-partition
+    digesting, and the anchor calls themselves -- lives in
+    :mod:`athenaeum.witness_anchor`, a SEPARATE module from this one,
+    deliberately: this module's own AC2 guard
+    (``tests/test_claude_code_adapter.py::TestAC2NoRetrievalLogic``)
+    forbids any arithmetic expression (``ast.BinOp``) anywhere in its
+    source, and a wall-clock budget is unavoidably arithmetic. This
+    function is therefore, like :func:`witness_session_end`, a single
+    delegation call with no arithmetic of its own.
+    """
+    try:
+        _load_config_env(cache_dir)
+        if not _witness_ledger_enabled():
+            return
+        from athenaeum.witness_anchor import run_session_end_anchor
+        from promptwitness import ledger as pw_ledger
+
+        run_session_end_anchor(pw_ledger.resolve_ledger_dir("claude-code"), wiki_root)
     except Exception as exc:  # noqa: BLE001 - a witness failure must never block SessionEnd
         _log_witness_error(cache_dir, exc)
 

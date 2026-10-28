@@ -268,6 +268,15 @@ MODULE_LAYER: dict[str, int] = {
     "wiki_dedupe": 4,
     # issue athenaeum#1995: "Layering: L4 domain/pipeline module" (own docstring).
     "triage": 4,
+    # issue athenaeum#2156: SessionEnd anchor-step orchestration (budget/deadline
+    # arithmetic, receipt-partition digesting via receipt_sealers.py L2, and
+    # promptwitness anchoring) -- kept OUT of claude_code_adapter.py (L5)
+    # deliberately, since that module's own AC2 guard
+    # (tests/test_claude_code_adapter.py::TestAC2NoRetrievalLogic) forbids
+    # any `ast.BinOp` anywhere in its source, and a wall-clock deadline
+    # computation is unavoidably arithmetic. Sibling L4 to librarian.py,
+    # which claude_code_adapter.py also calls into for the same reason.
+    "witness_anchor": 4,
     # L5 -- presentation (CLI).
     "_cli_shared": 5,
     "_cmd_audit": 5,
