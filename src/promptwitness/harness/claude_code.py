@@ -30,6 +30,7 @@ import re
 import shlex
 import subprocess
 import sys
+import unicodedata
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -383,6 +384,21 @@ def _save_state(ledger_dir: Path, session: str, data: Mapping[str, Any]) -> None
 # ---------------------------------------------------------------------------
 
 
+def _sanitise_launcher(raw: str | None) -> str | None:
+    """Sanitise a ``PROMPTWITNESS_LAUNCHER`` value for ``signals["launcher"]``
+    (athenaeum#2172). Free text -- no allow-list, no vocabulary check.
+
+    Order matters: strip every character in Unicode category ``C*``
+    (control and format, including newlines, tabs and NUL), then strip
+    surrounding whitespace, then cap at 64 characters, then return ``None``
+    if nothing is left."""
+    if raw is None:
+        return None
+    cleaned = "".join(ch for ch in raw if not unicodedata.category(ch).startswith("C"))
+    cleaned = cleaned.strip()[:64]
+    return cleaned or None
+
+
 def record_turn(raw: str, env: Mapping[str, str]) -> ledger.WitnessLine:
     """Parse one ``UserPromptSubmit`` hook stdin payload and append a
     ``kind="turn"`` witness line.
@@ -443,6 +459,9 @@ def record_turn(raw: str, env: Mapping[str, str]) -> ledger.WitnessLine:
     signals: dict[str, Any] = dict(channel_signals)
     signals["agent_id"] = agent_id
     signals["agent_type"] = agent_type
+    launcher = _sanitise_launcher(env.get("PROMPTWITNESS_LAUNCHER"))
+    if launcher:
+        signals["launcher"] = launcher
     if truncated:
         signals["segments_truncated"] = True
 

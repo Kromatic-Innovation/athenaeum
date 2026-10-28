@@ -178,7 +178,11 @@ never human, checked first); `interactive` requires
 `CLAUDE_CODE_ENTRYPOINT == "cli"`, `CLAUDE_CODE_SESSION_ATTENDED == "1"`, a
 controlling tty on the `CLAUDE_PID` process, and `CLAUDE_CODE_CHILD_SESSION`
 not `"1"`; `headless` when the entrypoint starts with `sdk` or attended is
-`"0"`; anything else is `unknown`. Raw values always go in `signals`.
+`"0"`; anything else is `unknown`. Raw values always go in `signals`. An
+optional `signals["launcher"]` (sanitised free text, capped at 64 chars,
+set from `PROMPTWITNESS_LAUNCHER` when non-empty) lets a caller that starts
+`claude` label its lines; it is a label only and never affects channel,
+`prompt_kind` or human-ness (athenaeum#2172).
 **Headless and bridge are never human.**
 
 ### Signing
@@ -311,8 +315,9 @@ tiers, no rank shifts (ruling 9, athenaeum#2159).
 Hook-time env (honoring `config.env`): `ATHENAEUM_WITNESS_LEDGER_ENABLED`
 (off), `ATHENAEUM_WITNESS_ANCHOR_INTERVAL_MINUTES` (15), `PROMPTWITNESS_DIR`,
 `PROMPTWITNESS_KEY_PROVIDER` (`none`), `PROMPTWITNESS_KEY_PATH`,
-`PROMPTWITNESS_OTS_BLOCK_SOURCE`, `PROMPTWITNESS_RFC3161_URL` (unset by
-default — unset means the RFC 3161 adapter is not offered),
+`PROMPTWITNESS_OTS_BLOCK_SOURCE`, `PROMPTWITNESS_LAUNCHER` (unset; optional
+`signals.launcher` label), `PROMPTWITNESS_RFC3161_URL` (unset by default —
+unset means the RFC 3161 adapter is not offered),
 `PROMPTWITNESS_RFC3161_CA_BUNDLE`. Nightly yaml:
 `librarian.witness_ledger_enabled`, `librarian.witness.dir`,
 `librarian.witness.key_provider`, `librarian.witness_attestation_enabled`,

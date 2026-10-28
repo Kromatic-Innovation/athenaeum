@@ -161,6 +161,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (athenaeum#2157) and athenaeum wiring (athenaeum#2156, athenaeum#2040) are
   separate, later issues.
 
+- **The Claude Code harness adapter records an optional `signals.launcher`
+  label** (issue athenaeum#2172), read from a new `PROMPTWITNESS_LAUNCHER`
+  env var: a program that starts `claude` (a scheduler, a CI runner) can tag
+  its ledger lines with its own name. The value is sanitised (Unicode
+  control/format characters stripped, trimmed, capped at 64 characters) and
+  the `launcher` key is omitted entirely when empty, unset, or empty after
+  sanitising. It is a label only — it never affects `channel`,
+  `prompt_kind`, or `LedgerIndex.is_witnessable_human`, and no ledger schema
+  bump is needed. No launcher identifier is named in `src/promptwitness/`.
+
 - **`promptwitness` RFC 3161 anchoring: an optional, immediate second
   attestation source alongside OpenTimestamps (issue athenaeum#2157).**
   `Rfc3161Anchorer` (`promptwitness.anchor_rfc3161`) builds a timestamp
