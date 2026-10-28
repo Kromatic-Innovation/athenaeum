@@ -349,6 +349,133 @@ class TestLedgerIndexRejectsNonInteractive:
 
 
 # ---------------------------------------------------------------------------
+# AC — athenaeum#2172: signals.launcher from PROMPTWITNESS_LAUNCHER, read by
+# record_turn (the real hook-record path), is a label only and never affects
+# channel / prompt_kind / human-ness.
+# ---------------------------------------------------------------------------
+
+
+class TestRecordTurnLauncherSignal:
+    def test_headless_launcher_is_recorded_and_excluded_from_human_lines(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(tmp_path))
+        raw = (
+            '{"prompt": "run the nightly sweep", "session_id": "s-launcher-headless",'
+            ' "prompt_id": "pw-headless-1"}'
+        )
+        env = {"CLAUDE_CODE_ENTRYPOINT": "sdk-cli", "PROMPTWITNESS_LAUNCHER": "hestia"}
+
+        line = claude_code.record_turn(raw, env)
+
+        assert line.channel == "headless"
+        assert line.signals["launcher"] == "hestia"
+        assert ledger.LedgerIndex.is_witnessable_human(line) is False
+        index = ledger.LedgerIndex.build(tmp_path)
+        assert "pw-headless-1" not in {ln.prompt_id for ln in index.human_lines()}
+
+    def test_interactive_negative_control_same_launcher_is_witnessable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Negative control, required by the issue: the SAME launcher value
+        on an interactive-signal call must still be witnessable, or the
+        headless assertion above would be vacuous. ``launcher`` is a label
+        only -- it neither grants nor removes human-ness. Mirrors
+        ``TestLedgerIndexRejectsNonInteractive`` but drives the real
+        hook-record path (``record_turn``) instead of ``append_line``
+        directly, so the module-level tty probe needs stubbing (``record_turn``
+        calls ``detect_channel`` without an explicit ``tty_probe``)."""
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(tmp_path))
+        monkeypatch.setattr(claude_code, "_probe_has_tty", lambda pid: True)
+        raw = (
+            '{"prompt": "please help me with this", "session_id": "s-launcher-interactive",'
+            ' "prompt_id": "pw-interactive-1"}'
+        )
+        env = {
+            "CLAUDE_CODE_ENTRYPOINT": "cli",
+            "CLAUDE_CODE_SESSION_ATTENDED": "1",
+            "PROMPTWITNESS_LAUNCHER": "hestia",
+        }
+
+        line = claude_code.record_turn(raw, env)
+
+        assert line.channel == "interactive"
+        assert line.signals["launcher"] == "hestia"
+        assert ledger.LedgerIndex.is_witnessable_human(line) is True
+        index = ledger.LedgerIndex.build(tmp_path)
+        assert "pw-interactive-1" in {ln.prompt_id for ln in index.human_lines()}
+
+    def test_unset_launcher_gives_no_launcher_key(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(tmp_path))
+        raw = '{"prompt": "hello", "session_id": "s-launcher-unset"}'
+
+        line = claude_code.record_turn(raw, {})
+
+        assert "launcher" not in line.signals
+
+    @pytest.mark.parametrize(
+        "launcher_value",
+        ["", "   \t  ", "\x00\x01\x02", "\n\n\t"],
+        ids=["empty", "whitespace-only", "control-only", "newlines-and-tabs-only"],
+    )
+    def test_empty_or_control_only_launcher_gives_no_launcher_key(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launcher_value: str
+    ) -> None:
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(tmp_path))
+        raw = '{"prompt": "hello", "session_id": "s-launcher-empty"}'
+        env = {"PROMPTWITNESS_LAUNCHER": launcher_value}
+
+        line = claude_code.record_turn(raw, env)
+
+        assert "launcher" not in line.signals
+
+    def test_launcher_is_sanitised_through_record_turn(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(tmp_path))
+        raw = '{"prompt": "hello", "session_id": "s-launcher-sanitise"}'
+        env = {"PROMPTWITNESS_LAUNCHER": "  hes\ntia\x00  "}
+
+        line = claude_code.record_turn(raw, env)
+
+        assert line.signals["launcher"] == "hestia"
+
+    def test_launcher_longer_than_64_chars_is_capped(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(tmp_path))
+        raw = '{"prompt": "hello", "session_id": "s-launcher-cap"}'
+        long_value = "x" * 200
+        env = {"PROMPTWITNESS_LAUNCHER": long_value}
+
+        line = claude_code.record_turn(raw, env)
+
+        assert line.signals["launcher"] == long_value[:64]
+        assert len(line.signals["launcher"]) == 64
+
+
+class TestSanitiseLauncherHelper:
+    """Unit-level pin on `_sanitise_launcher`'s own order of operations
+    (strip C* chars, then whitespace, then cap at 64, then None-if-empty) --
+    the ordering itself is an acceptance criterion, not just the end result."""
+
+    def test_none_input_gives_none(self) -> None:
+        assert claude_code._sanitise_launcher(None) is None
+
+    def test_mixed_control_and_whitespace_sanitises_to_hestia(self) -> None:
+        assert claude_code._sanitise_launcher("  hes\ntia\x00  ") == "hestia"
+
+    def test_two_hundred_chars_caps_to_first_64(self) -> None:
+        long_value = "x" * 200
+        assert claude_code._sanitise_launcher(long_value) == long_value[:64]
+
+    def test_control_characters_only_gives_none(self) -> None:
+        assert claude_code._sanitise_launcher("\x00\x01\x02") is None
+
+
+# ---------------------------------------------------------------------------
 # AC — subagent / launch-argument via record_turn: non-human, no argv text
 # stored.
 # ---------------------------------------------------------------------------
