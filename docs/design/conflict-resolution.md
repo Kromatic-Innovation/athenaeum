@@ -673,6 +673,18 @@ are meant to implement that interface without this module changing.
   writer registry only labels. The limits above, including "the user typed
   these words is not the user authorized this" and the in-session forgery
   window, still stand. See [Writer identity](writer-identity.md).
+- **`_is_human_record` narrows WHICH record counts, not what a match means
+  (issue athenaeum#2146).** Before this fix, every `type: "user"` record —
+  including sub-agent/background-task results, peer messages, `isMeta`
+  records, and (on older harness versions) harness-wrapper text — counted as
+  a human utterance; a claim appearing only in a sub-agent's report could
+  classify as `user-stated`. The shared `_is_human_record(record)` helper
+  (used by `_user_authored_text`, `verify_user_stated`, and
+  `transcript_receipts._matching_human_utterance`) now requires
+  `origin.kind == "human"` when `origin` is present, or (on legacy
+  transcripts with no `origin` field) that the text not open with a known
+  harness-wrapper tag. This tightens WHICH record can win the substring
+  match above — it does not change what winning a substring match proves.
 
 ---
 

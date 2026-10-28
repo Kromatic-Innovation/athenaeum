@@ -122,7 +122,14 @@ def _record_text(record: object) -> str:
 
 
 def _is_user_record(record: object) -> bool:
-    """True when a transcript record is a user-authored message."""
+    """True when a transcript record is a ``type: "user"`` record.
+
+    Structural check ONLY — matches every record Claude Code writes with
+    ``type: "user"`` (or ``message.role == "user"``), which includes
+    sub-agent/background-task results, peer messages, ``isMeta`` records,
+    and harness-wrapper text, not just records a human actually typed. Use
+    :func:`_is_human_record` to tell those apart (issue athenaeum#2146).
+    """
     if not isinstance(record, dict):
         return False
     if record.get("type") == "user":
@@ -131,6 +138,92 @@ def _is_user_record(record: object) -> bool:
     if isinstance(message, dict) and message.get("role") == "user":
         return True
     return False
+
+
+#: Harness-wrapper tags that open a non-human ``type: "user"`` record on
+#: transcripts predating the ``origin`` field (2.1.280 through 2.1.309 still
+#: emit some records without it). Matched against the record's own text,
+#: after stripping leading whitespace — see :func:`_is_human_record`.
+_LEGACY_WRAPPER_PREFIXES = (
+    "<task-notification",
+    "<local-command-",
+    "<system-reminder",
+    "<command-name",
+    "<command-message",
+)
+
+
+def _non_tool_result_text(record: dict) -> str:
+    """A record's message text, with any ``tool_result`` blocks excluded.
+
+    Shared body for :func:`_user_authored_text` (its public contract) and
+    :func:`_is_human_record` (the legacy wrapper-prefix check) — exactly one
+    place knows this content shape, so the two never drift (issue
+    athenaeum#2146).
+    """
+    message = record.get("message")
+    content = message.get("content") if isinstance(message, dict) else record.get("content")
+    if isinstance(content, str):
+        return content
+    parts: list[str] = []
+    for block in _content_list(record):
+        if isinstance(block, dict):
+            if block.get("type") == "tool_result":
+                continue
+            txt = block.get("text")
+            if isinstance(txt, str):
+                parts.append(txt)
+        elif isinstance(block, str):
+            parts.append(block)
+    return "\n".join(parts)
+
+
+def _is_human_record(record: object) -> bool:
+    """True iff *record* is a message a human actually typed (issue athenaeum#2146).
+
+    ``_is_user_record`` over-counts: Claude Code also writes sub-agent and
+    background-task results (``origin.kind: "task-notification"``), peer
+    messages (``origin.kind: "peer"``), ``isMeta: true`` records, and (on
+    older harness versions with no ``origin`` field at all)
+    ``<system-reminder>``/``<local-command-stdout>``/slash-command-wrapper
+    text as ``type: "user"`` records. This is the ONE shared gate used by
+    :func:`_user_authored_text`, :func:`verify_user_stated`, and
+    :func:`athenaeum.transcript_receipts._matching_human_utterance` — a
+    record counts as human-authored only when ALL of these hold:
+
+    - :func:`_is_user_record` is true;
+    - the content is not a pure ``tool_result`` delivery (an artifact the
+      agent read, never a human utterance — the existing
+      :func:`_user_authored_text` exclusion);
+    - ``isMeta`` is not ``True``;
+    - when an ``origin`` dict is present, ``origin.kind == "human"`` — this
+      is what excludes ``task-notification`` and ``peer`` records.
+      ``promptSource`` (``typed``, ``queued``, or absent) is irrelevant once
+      ``origin.kind == "human"``; a ``<command-message>`` slash-command
+      invocation with ``origin.kind: "human"`` stays counted (operator
+      ruling 4, 2026-10-28, epic athenaeum#2144 — slash-command arguments
+      count as human-typed);
+    - when ``origin`` is absent entirely (older harness versions), the
+      content does not begin, after leading whitespace, with a known
+      harness-wrapper tag (:data:`_LEGACY_WRAPPER_PREFIXES`). A legacy
+      plain-text record with no ``origin`` and no wrapper prefix still
+      counts — unchanged behavior for transcripts that predate the
+      ``origin`` field.
+    """
+    if not _is_user_record(record):
+        return False
+    assert isinstance(record, dict)
+    if record.get("isMeta") is True:
+        return False
+    text = _non_tool_result_text(record)
+    if not text.strip():
+        # Purely a tool_result delivery (or genuinely empty) -- not a human
+        # utterance.
+        return False
+    origin = record.get("origin")
+    if isinstance(origin, dict):
+        return origin.get("kind") == "human"
+    return not text.lstrip().startswith(_LEGACY_WRAPPER_PREFIXES)
 
 
 def _iter_session_records(scope_dir: Path, session_id: str) -> list[object]:
@@ -219,8 +312,9 @@ def verify_user_stated(
         text = _record_text(record)
         if not text or needle not in _normalize(text):
             continue
-        if _is_user_record(record):
-            # The user said it → the user is the source.
+        if _is_human_record(record):
+            # A human actually typed it → the user is the source (issue
+            # athenaeum#2146: not every type: "user" record qualifies).
             ref = f"{session_id}#turn{turn}" if turn is not None else str(session_id)
             return "user-stated", ref
         # A non-user (agent / tool) message carrying the claim. If it quotes a
@@ -296,33 +390,19 @@ def _content_list(record: object) -> list:
 def _user_authored_text(record: object) -> str:
     """Extract ONLY genuine human-authored text from a user record.
 
-    A tool result is delivered as a ``type: "user"`` record whose content is a
-    list of ``tool_result`` blocks — that is an artifact the agent read, NOT a
-    human utterance, so those blocks are EXCLUDED here (they belong to
+    Gated on :func:`_is_human_record` (issue athenaeum#2146) — a
+    task-notification, peer, ``isMeta``, or legacy-wrapper record returns
+    ``""`` here even though it carries ``type: "user"``. A tool result is
+    delivered as a ``type: "user"`` record whose content is a list of
+    ``tool_result`` blocks — that is an artifact the agent read, NOT a human
+    utterance, so those blocks are EXCLUDED here too (they belong to
     :func:`_tool_result_text`). A bare-string content or ``{"type": "text"}``
     blocks are the real user message.
     """
-    if not _is_user_record(record):
+    if not _is_human_record(record):
         return ""
     assert isinstance(record, dict)
-    message = record.get("message")
-    if isinstance(message, dict):
-        content = message.get("content")
-    else:
-        content = record.get("content")
-    if isinstance(content, str):
-        return content
-    parts: list[str] = []
-    for block in _content_list(record):
-        if isinstance(block, dict):
-            if block.get("type") == "tool_result":
-                continue
-            txt = block.get("text")
-            if isinstance(txt, str):
-                parts.append(txt)
-        elif isinstance(block, str):
-            parts.append(block)
-    return "\n".join(parts)
+    return _non_tool_result_text(record)
 
 
 def _tool_result_text(record: object) -> str:
