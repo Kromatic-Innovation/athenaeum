@@ -161,6 +161,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (athenaeum#2157) and athenaeum wiring (athenaeum#2156, athenaeum#2040) are
   separate, later issues.
 
+- **`promptwitness` RFC 3161 anchoring: an optional, immediate second
+  attestation source alongside OpenTimestamps (issue athenaeum#2157).**
+  `Rfc3161Anchorer` (`promptwitness.anchor_rfc3161`) builds a timestamp
+  query with `openssl ts -query` and POSTs it to a configured TSA with
+  `urllib`; the reply is stored at `anchors/<subject-safe>.tsr` and recorded
+  as `rfc3161:<tsa-host>`. `verify()` runs `openssl ts -verify` against a
+  configured CA bundle, recorded as `rfc3161-ca:<bundle-name>`; with no CA
+  bundle configured, verification fails cleanly
+  (`rfc3161-ca:unconfigured`), never an exception. The subprocess and HTTP
+  calls are both injectable seams, so tests never shell out or touch the
+  network. Off by default, and no TSA URL is hard-coded: the adapter is
+  configured via `--rfc3161-url`/`PROMPTWITNESS_RFC3161_URL` and
+  `--rfc3161-ca-bundle`/`PROMPTWITNESS_RFC3161_CA_BUNDLE` on the existing
+  `promptwitness anchor` command, and is simply not offered — no `anchor`
+  line, no `failed` attestation — when no URL resolves. Implemented as a
+  sibling module (`anchor_rfc3161.py`), not the package submodule the issue
+  named, since `anchor.py` (athenaeum#2151) shipped as a single module, not
+  a package.
+
 ### Changed
 
 - **The public surface now says what the version number means (issue

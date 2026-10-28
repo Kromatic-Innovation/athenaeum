@@ -1,20 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 """``promptwitness`` console script (athenaeum#2147, athenaeum#2149,
-athenaeum#2150, athenaeum#2151, athenaeum#2152).
+athenaeum#2150, athenaeum#2151, athenaeum#2152, athenaeum#2157).
 
 Layering: L2 (CLI/presentation — depends on :mod:`promptwitness.ledger`,
-:mod:`promptwitness.canon`, :mod:`promptwitness.signing` and
-:mod:`promptwitness.anchor`). Standard library only at import time; no
-``athenaeum`` import, and no ``cryptography`` or ``opentimestamps`` import
-either — :mod:`promptwitness.signing` and :mod:`promptwitness.anchor` each
-import their optional dependency lazily, inside the functions that need it,
-so importing this module costs nothing on an install without the
-``witness-sign`` / ``witness-anchor`` extras.
+:mod:`promptwitness.canon`, :mod:`promptwitness.signing`,
+:mod:`promptwitness.anchor` and :mod:`promptwitness.anchor_rfc3161`).
+Standard library only at import time; no ``athenaeum`` import, and no
+``cryptography`` or ``opentimestamps`` import either — :mod:`promptwitness.signing`
+and :mod:`promptwitness.anchor` each import their optional dependency
+lazily, inside the functions that need it, so importing this module costs
+nothing on an install without the ``witness-sign`` / ``witness-anchor``
+extras. :mod:`promptwitness.anchor_rfc3161` shells out to ``openssl``
+rather than importing a third-party library, so it carries no such extra.
 
 ``status`` (athenaeum#2147), ``keygen`` (athenaeum#2150, extended with
 ``--provider os-keystore`` by athenaeum#2152), ``hook claude-code``
-(athenaeum#2149) and ``anchor`` (athenaeum#2151) are all implemented here.
-Each was added the same way: by registering another subparser in
+(athenaeum#2149) and ``anchor`` (athenaeum#2151, extended with the optional
+RFC 3161 second source by athenaeum#2157) are all implemented here. Each
+was added the same way: by registering another subparser in
 :func:`build_parser`, in this module.
 """
 
@@ -27,7 +30,7 @@ import re
 import sys
 from typing import Any
 
-from promptwitness import __version__, canon, ledger, signing
+from promptwitness import __version__, anchor_rfc3161, canon, ledger, signing
 from promptwitness import anchor as anchor_mod
 from promptwitness.harness import claude_code
 
@@ -162,6 +165,19 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=10.0,
         help="Per-adapter network timeout in seconds (default: 10.0).",
+    )
+    anchor_parser.add_argument(
+        "--rfc3161-url",
+        default=None,
+        help="RFC 3161 TSA URL for an optional, immediate second attestation "
+        "source (else PROMPTWITNESS_RFC3161_URL; no default -- an unconfigured "
+        "URL means this adapter is not offered at all).",
+    )
+    anchor_parser.add_argument(
+        "--rfc3161-ca-bundle",
+        default=None,
+        help="CA bundle path for --verify of the RFC 3161 attestation (else "
+        "PROMPTWITNESS_RFC3161_CA_BUNDLE; no default).",
     )
     anchor_parser.set_defaults(func=_cmd_anchor)
 
@@ -444,6 +460,13 @@ def _cmd_anchor(args: argparse.Namespace) -> int:
 
     ``--verify`` runs full Bitcoin verification afterward (a read-only
     report — it does not itself append a ledger line).
+
+    A third, OPTIONAL adapter — :class:`~promptwitness.anchor_rfc3161.Rfc3161Anchorer`
+    (athenaeum#2157) — runs only when a TSA URL resolves
+    (:func:`~promptwitness.anchor_rfc3161.resolve_rfc3161_url`: ``--rfc3161-url``
+    or ``PROMPTWITNESS_RFC3161_URL``). An unconfigured URL means the
+    adapter is never constructed and appends no ``anchor`` line and no
+    ``results`` entry at all — "not offered", not a ``failed`` attestation.
     """
     ledger_dir = ledger.resolve_ledger_dir(args.harness, override=args.dir)
 
@@ -507,6 +530,26 @@ def _cmd_anchor(args: argparse.Namespace) -> int:
     )
     results.append({"subject": subject, "op": ots_op, "attestation": ots_att.to_dict()})
 
+    rfc3161_url = anchor_rfc3161.resolve_rfc3161_url(args.rfc3161_url)
+    rfc3161: anchor_rfc3161.Rfc3161Anchorer | None = None
+    rfc3161_att: anchor_mod.Attestation | None = None
+    if rfc3161_url:
+        rfc3161 = anchor_rfc3161.Rfc3161Anchorer(
+            ledger_dir,
+            tsa_url=rfc3161_url,
+            ca_bundle=anchor_rfc3161.resolve_rfc3161_ca_bundle(args.rfc3161_ca_bundle),
+        )
+        rfc3161_att = rfc3161.anchor(digest_bytes, subject, timeout=args.timeout)
+        _append_anchor_line(
+            ledger_dir,
+            harness=args.harness,
+            subject=subject,
+            digest=digest,
+            attestation=rfc3161_att,
+            op="anchor",
+        )
+        results.append({"subject": subject, "op": "anchor", "attestation": rfc3161_att.to_dict()})
+
     if args.verify:
         verify_result = ots.verify(ots_att, digest_bytes)
         verify_payload = {
@@ -515,6 +558,15 @@ def _cmd_anchor(args: argparse.Namespace) -> int:
             "verify_result": verify_result.to_dict(),
         }
         results.append(verify_payload)
+        if rfc3161 is not None and rfc3161_att is not None:
+            rfc3161_verify_result = rfc3161.verify(rfc3161_att, digest_bytes)
+            results.append(
+                {
+                    "subject": subject,
+                    "op": "verify",
+                    "verify_result": rfc3161_verify_result.to_dict(),
+                }
+            )
 
     print(json.dumps({"results": results}, sort_keys=True))
     return 0

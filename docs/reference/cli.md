@@ -1778,6 +1778,8 @@ Anchor the ledger head (or --subject) with local-clock and OpenTimestamps.
 | `--block-source` | — | — | Esplora-compatible block explorer URL for --verify, or 'offline' for no network access at all (else PROMPTWITNESS_OTS_BLOCK_SOURCE / a public default). |
 | `--dir` | — | — | Override the ledger directory (else PROMPTWITNESS_DIR / the XDG default). |
 | `--harness` | `claude-code` | — | Harness name the ledger directory is namespaced under. |
+| `--rfc3161-ca-bundle` | — | — | CA bundle path for --verify of the RFC 3161 attestation (else PROMPTWITNESS_RFC3161_CA_BUNDLE; no default). |
+| `--rfc3161-url` | — | — | RFC 3161 TSA URL for an optional, immediate second attestation source (else PROMPTWITNESS_RFC3161_URL; no default -- an unconfigured URL means this adapter is not offered at all). |
 | `--subject` | — | — | Subject to anchor (default: witness:<ledger_id>:<seq> of the current chain head). |
 | `--timeout` | `10.0` | — | Per-adapter network timeout in seconds (default: 10.0). |
 | `--upgrade` | `False` | — | Ask the OpenTimestamps calendar whether a prior pending proof for this subject has since been confirmed in Bitcoin, instead of submitting a new stamp. |

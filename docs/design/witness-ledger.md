@@ -267,9 +267,14 @@ unverifiable.
 `Anchorer` (`anchor`, `upgrade`, `verify`); every `Attestation` records its
 `source`, and every verification records its `verify_source`. OpenTimestamps
 is primary (public calendars, no account) and full verification uses a public
-block explorer by default, configurable (ruling 3); RFC 3161 is optional;
-`local-clock` is mandatory on every pass and carries no independent weight.
-Network failure yields `failed` + `local-clock`, never an exception.
+block explorer by default, configurable (ruling 3); RFC 3161 is optional
+(issue athenaeum#2157) — `Rfc3161Anchorer` (`promptwitness.anchor_rfc3161`) stamps
+via `openssl ts -query`/POST, recorded as `rfc3161:<tsa-host>`, proof at
+`anchors/<subject-safe>.tsr`, and verifies via `openssl ts -verify` against a
+configured CA bundle, recorded as `rfc3161-ca:<bundle-name>`; off by default,
+not offered at all with no TSA URL configured; `local-clock` is mandatory on
+every pass and carries no independent weight. Network failure yields `failed`
++ `local-clock`, never an exception.
 
 | Subject | Digest | When |
 |---|---|---|
@@ -306,7 +311,9 @@ tiers, no rank shifts (ruling 9, athenaeum#2159).
 Hook-time env (honoring `config.env`): `ATHENAEUM_WITNESS_LEDGER_ENABLED`
 (off), `ATHENAEUM_WITNESS_ANCHOR_INTERVAL_MINUTES` (15), `PROMPTWITNESS_DIR`,
 `PROMPTWITNESS_KEY_PROVIDER` (`none`), `PROMPTWITNESS_KEY_PATH`,
-`PROMPTWITNESS_OTS_BLOCK_SOURCE`. Nightly yaml:
+`PROMPTWITNESS_OTS_BLOCK_SOURCE`, `PROMPTWITNESS_RFC3161_URL` (unset by
+default — unset means the RFC 3161 adapter is not offered),
+`PROMPTWITNESS_RFC3161_CA_BUNDLE`. Nightly yaml:
 `librarian.witness_ledger_enabled`, `librarian.witness.dir`,
 `librarian.witness.key_provider`, `librarian.witness_attestation_enabled`,
 `librarian.receipt_anchor.{adapters, ots_calendars, ots_block_source,
