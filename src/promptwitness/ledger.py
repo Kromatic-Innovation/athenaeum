@@ -82,6 +82,7 @@ __all__ = [
     "iter_lines",
     "verify_chain",
     "find_oversized_fields",
+    "signed_payload",
     "list_partitions",
 ]
 
@@ -653,6 +654,37 @@ def _scan_last_good(good: bytes) -> tuple[int, str] | tuple[None, None]:
 # ---------------------------------------------------------------------------
 
 
+#: Field names that are NEVER part of the signed payload. ``sig`` is the
+#: primary signature itself; a ``*_sig`` field is a COUNTERSIGNATURE written by
+#: an ``extra_signers`` entry (athenaeum#2150's ``prior_sig``), and a
+#: ``*_sig_error`` field records that one failed. All three are written AFTER
+#: the payload is serialized, so none can be inside it.
+#:
+#: Excluding countersignatures is the normal shape -- the primary key signs the
+#: CONTENT, and a countersignature is additional; covering each other is
+#: circular. What matters is that the sign side and the verify side agree, and
+#: they did not: the appender excluded ``prior_sig`` by construction (it did
+#: not exist yet) while ``verify_chain`` rebuilt the payload dropping only
+#: ``sig``, so a perfectly valid ``key-rotate`` line's own signature could
+#: never verify. Every side now goes through :func:`signed_payload`, so the rule
+#: lives in exactly one place and cannot drift again.
+_COUNTERSIG_SUFFIXES = ("_sig", "_sig_error")
+
+
+def _is_signature_field(name: str) -> bool:
+    return name == "sig" or name.endswith(_COUNTERSIG_SUFFIXES)
+
+
+def signed_payload(line: Mapping[str, Any]) -> bytes:
+    """The exact bytes a signature over *line* covers.
+
+    ``canonical_json(line_without_sig)``, where "without sig" means without
+    the primary signature and without any countersignature -- see
+    :data:`_COUNTERSIG_SUFFIXES`.
+    """
+    return canon.canonical_json({k: v for k, v in line.items() if not _is_signature_field(k)})
+
+
 def _run_sign_with_timeout(
     key_provider: KeyProviderLike, payload: bytes, timeout: float
 ) -> bytes:
@@ -694,7 +726,10 @@ def _run_sign_with_timeout(
 
 
 def _apply_key_and_sig(
-    line: dict[str, Any], key_provider: KeyProviderLike | None, timeout: float
+    line: dict[str, Any],
+    key_provider: KeyProviderLike | None,
+    timeout: float,
+    extra_signers: Mapping[str, KeyProviderLike] | None = None,
 ) -> None:
     """Mutate *line* in place: add ``key`` always, ``sig`` only when signed.
 
@@ -702,8 +737,7 @@ def _apply_key_and_sig(
     omits ``sig`` entirely (athenaeum#2147 AC). A key provider that raises,
     times out, or is otherwise unavailable degrades to the same unsigned
     shape plus ``key.error`` — the append never blocks or fails because
-    signing failed (athenaeum#2150's "the hook never blocks" rule, honored
-    here even though no real adapter calls this yet).
+    signing failed (athenaeum#2150's "the hook never blocks" rule).
 
     The signed payload is ``canonical_json(line_without_sig)``, so ``key`` is
     written into *line* BEFORE the payload is serialized. Signing the
@@ -714,6 +748,15 @@ def _apply_key_and_sig(
     contributes is knowable without signing (``key_id``/``algorithm``/
     ``strength``/``presence_required`` are plain queries). See
     ``TestSigningSeam::test_sig_covers_the_key_block``.
+
+    *extra_signers* (athenaeum#2150's key-rotate seam, additive — ``None``
+    for every caller except :func:`promptwitness.signing.
+    append_key_rotate_line`): each ``{field_name: provider}`` entry signs
+    the SAME payload the primary key signs (computed once, before ``sig``
+    is added) and writes ``line[field_name]``. A failing extra signer never
+    blocks the append either — it just omits that field and records
+    ``line[f"{field_name}_error"]``, leaving the primary ``key``/``sig``
+    untouched.
     """
     if key_provider is None:
         line["key"] = KeyInfo().to_dict()
@@ -726,7 +769,7 @@ def _apply_key_and_sig(
             presence=key_provider.presence_required(),
         )
         line["key"] = key_info.to_dict()
-        payload = canon.canonical_json(line)
+        payload = signed_payload(line)
         sig_bytes = _run_sign_with_timeout(key_provider, payload, timeout)
         import base64
 
@@ -734,6 +777,16 @@ def _apply_key_and_sig(
     except Exception as exc:  # noqa: BLE001 - signing must never block an append
         line["key"] = KeyInfo(strength="none", error=type(exc).__name__).to_dict()
         line.pop("sig", None)
+        return
+    for field_name, extra_provider in (extra_signers or {}).items():
+        import base64
+
+        try:
+            extra_sig_bytes = _run_sign_with_timeout(extra_provider, payload, timeout)
+            line[field_name] = base64.b64encode(extra_sig_bytes).decode("ascii")
+        except Exception as exc:  # noqa: BLE001 - an extra signer never blocks either
+            line.pop(field_name, None)
+            line[f"{field_name}_error"] = type(exc).__name__
 
 
 def _write_line_bytes(path: Path, line: Mapping[str, Any]) -> None:
@@ -835,6 +888,7 @@ def append_line(
     turns_witnessed: int | None = None,
     reason: str | None = None,
     extra: Mapping[str, Any] | None = None,
+    extra_signers: Mapping[str, KeyProviderLike] | None = None,
 ) -> WitnessLine:
     """Append one witness line to the ledger under *ledger_dir*.
 
@@ -849,6 +903,12 @@ def append_line(
     belongs to a different ``kind`` than the one given (turn-only fields on
     a non-turn line, etc.) — the schema's "fields are omitted on non-turn
     lines" rule is enforced, not merely documented.
+
+    *extra_signers* (athenaeum#2150): additional ``{field_name: provider}``
+    signatures over the same payload *key_provider* signs — see
+    :func:`promptwitness.signing.append_key_rotate_line`, the only caller
+    that passes this. ``None`` for every other caller, with zero behaviour
+    change.
     """
     if kind not in KINDS:
         raise ValueError(f"unknown ledger line kind {kind!r}; must be one of {sorted(KINDS)}")
@@ -949,7 +1009,7 @@ def append_line(
             partition_path.touch(exist_ok=True)
             line["ledger_meta"] = _apply_append_only_protection(partition_path)
 
-        _apply_key_and_sig(line, key_provider, sign_timeout)
+        _apply_key_and_sig(line, key_provider, sign_timeout, extra_signers)
         _write_line_bytes(partition_path, line)
 
     return WitnessLine.from_dict(line)
@@ -958,6 +1018,39 @@ def append_line(
 # ---------------------------------------------------------------------------
 # Chain verification
 # ---------------------------------------------------------------------------
+
+
+def _verify_ed25519(
+    payload: bytes, signature: bytes, public_key_raw: bytes, algorithm: str
+) -> bool:
+    """``True`` iff *signature* over *payload* verifies under
+    *public_key_raw* -- the one piece of :mod:`promptwitness.signing`'s
+    verification logic :func:`verify_chain` also needs.
+
+    Deliberately NOT a call into :mod:`promptwitness.signing`: that module
+    imports :mod:`promptwitness.ledger` (for :class:`KeyInfo` /
+    :class:`KeyUnavailable`), so the reverse import would be a cycle. A
+    dozen duplicated lines here are cheaper than restructuring either
+    module, and this function only ever runs when a caller opts in by
+    passing ``public_keys=`` — a ledger with no key provider never imports
+    ``cryptography`` at all, exactly as the module docstring promises.
+    Only ``"ed25519"`` is implemented, matching the only algorithm either
+    shipped adapter in ``signing.py`` produces.
+    """
+    if algorithm != "ed25519":
+        return False
+    try:
+        from cryptography.exceptions import InvalidSignature
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    except ImportError:
+        return False
+    try:
+        Ed25519PublicKey.from_public_bytes(public_key_raw).verify(signature, payload)
+    except InvalidSignature:
+        return False
+    except ValueError:
+        return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -971,16 +1064,62 @@ class ChainVerification:
     mutation); a deleted line surfaces at the ``seq`` of the line that
     physically follows the gap; a reordered pair surfaces at the ``seq`` of
     whichever of the two now appears earlier in the file.
+
+    **Signature-status fields (athenaeum#2150, additive — all default to a
+    value that preserves the pre-athenaeum#2150 behaviour exactly when the
+    new *public_keys* parameter is omitted).** ``ok``/``first_break_seq``/
+    ``lines_checked`` are UNCHANGED by signature status: a line with an
+    invalid signature still only breaks ``ok`` through the hash chain, never
+    through its signature, so every existing caller keeps working exactly
+    as before. ``signed_lines`` + ``unsigned_lines`` always sum to
+    ``lines_checked`` and need no *public_keys* to compute (a line either
+    carries a ``sig`` or it does not). ``unverified_signed_lines`` counts a
+    signed line whose ``key.id`` is not in *public_keys* (including every
+    signed line when *public_keys* is ``None``, the default — "no signature
+    checking", today's behaviour). ``invalid_signature_seqs`` lists the
+    ``seq`` of every signed line WHOSE key *was* supplied in *public_keys*
+    but whose signature does not verify against it.
     """
 
     ok: bool
     first_break_seq: int | None
     lines_checked: int
+    signed_lines: int = 0
+    unsigned_lines: int = 0
+    unverified_signed_lines: int = 0
+    invalid_signature_seqs: tuple[int, ...] = ()
 
 
-def verify_chain(ledger_dir: str | os.PathLike[str]) -> ChainVerification:
+def verify_chain(
+    ledger_dir: str | os.PathLike[str],
+    *,
+    public_keys: Mapping[str, bytes] | None = None,
+) -> ChainVerification:
+    """Verify the hash chain under *ledger_dir*, and report signature status.
+
+    **Reversible default (recorded for the lane report):** *public_keys*
+    defaults to ``None``, meaning "no signature checking" — exactly the
+    behaviour this function had before athenaeum#2150. Supplying a
+    ``{key_id: raw_public_key_bytes}`` mapping additionally verifies every
+    signed line whose ``key.id`` is a key in that mapping; a line whose
+    ``key.id`` is absent from it is counted as ``unverified_signed_lines``
+    rather than treated as a failure (an unknown key is not evidence of
+    tampering — just a line verification was not asked to check). This was
+    chosen over requiring a single ``KeyProvider`` (a ledger can rotate
+    keys, so more than one public key may be live at once) and over making
+    an unverifiable line fail ``ok`` (that would turn "I don't have this
+    key" into the same signal as "the chain is broken", which a caller like
+    ``promptwitness status`` must be able to tell apart). It is a reversible
+    default: additive fields, so a future caller can read
+    ``unverified_signed_lines`` and decide for itself whether that counts as
+    a problem.
+    """
     first_break: int | None = None
     checked = 0
+    signed = 0
+    unsigned = 0
+    unverified = 0
+    invalid: list[int] = []
     expected_prev: str | None = None
     for raw in _iter_raw(Path(ledger_dir)):
         checked += 1
@@ -991,8 +1130,52 @@ def verify_chain(ledger_dir: str | os.PathLike[str]) -> ChainVerification:
             seq = raw.get("seq")
             first_break = seq if isinstance(seq, int) else -1
         expected_prev = _recompute_line_hash(raw)
+
+        sig = raw.get("sig")
+        if sig is None:
+            unsigned += 1
+        else:
+            signed += 1
+            key_block = raw.get("key")
+            if not isinstance(key_block, dict):
+                # A signed line whose `key` is not an object at all: the
+                # ledger file is reachable by corruption and by tampering, so
+                # this is untrusted input. It cannot be verified (there is no
+                # key id to look up) and it must not raise -- an
+                # `AttributeError` here would crash every caller of
+                # `verify_chain` on a one-byte edit, which is the opposite of
+                # what a verifier is for. Same reasoning as `iter_lines`'
+                # tolerant skip; it is still counted, and still hashed above,
+                # so the chain break is reported either way.
+                unverified += 1
+                continue
+            key_id = key_block.get("id")
+            if not public_keys or not isinstance(key_id, str) or key_id not in public_keys:
+                unverified += 1
+            else:
+                payload = signed_payload(raw)
+                try:
+                    import base64
+
+                    sig_bytes = base64.b64decode(sig)
+                except (ValueError, TypeError):
+                    seq = raw.get("seq")
+                    invalid.append(seq if isinstance(seq, int) else -1)
+                    continue
+                if not _verify_ed25519(
+                    payload, sig_bytes, public_keys[key_id], str(key_block.get("alg") or "")
+                ):
+                    seq = raw.get("seq")
+                    invalid.append(seq if isinstance(seq, int) else -1)
+
     return ChainVerification(
-        ok=first_break is None, first_break_seq=first_break, lines_checked=checked
+        ok=first_break is None,
+        first_break_seq=first_break,
+        lines_checked=checked,
+        signed_lines=signed,
+        unsigned_lines=unsigned,
+        unverified_signed_lines=unverified,
+        invalid_signature_seqs=tuple(invalid),
     )
 
 

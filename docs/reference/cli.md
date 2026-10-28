@@ -1765,6 +1765,7 @@ The `promptwitness` console script (a standalone package — see `docs/design/wi
 
 - [`promptwitness hook`](#promptwitness-hook) (group) — Harness hook entry points.
 - [`promptwitness hook claude-code`](#promptwitness-hook-claude-code) (command) — Append a witness line for a Claude Code hook event.
+- [`promptwitness keygen`](#promptwitness-keygen) (command) — Generate a software-file Ed25519 signing key, mode 0600.
 - [`promptwitness status`](#promptwitness-status) (command) — Print the ledger head seq, chain_ok, partitions, and key strength.
 
 ## `promptwitness hook`
@@ -1782,6 +1783,16 @@ Append a witness line for a Claude Code hook event.
 | Flag | Default | Choices | Help |
 |---|---|---|---|
 | `--event` | — | session-end | Which Claude Code hook fired. Only 'session-end' is implemented here -- the per-turn 'UserPromptSubmit' path is wired directly through athenaeum.claude_code_adapter, in-process, not through this console script. |
+
+## `promptwitness keygen`
+
+Generate a software-file Ed25519 signing key, mode 0600.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--force` | `False` | — | Overwrite an existing key file instead of refusing. |
+| `--harness` | `claude-code` | — | Harness name the default key path is namespaced under. |
+| `--key-path` | — | — | Override the key file path (else PROMPTWITNESS_KEY_PATH, else <ledger_dir>/keys/ed25519.pem). |
 
 ## `promptwitness status`
 
