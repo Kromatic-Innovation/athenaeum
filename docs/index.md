@@ -165,6 +165,7 @@ Evidence, kept out of the reading path.
 - [C4 retirement coverage gate — live subject backfill](measurements/c4-retirement-coverage-gate-2026-10-05.md) — before/after coverage and Gate 1 (wiki + cluster domain) over the live apply, the shadow-parity re-run, and the GO/NO-GO verdict on precondition (c) of the 2026-09-15 adjudication.
 - [Raw auto-memory cluster member `subject` coverage](measurements/raw-member-subject-coverage-2026-10-07.md) — fixture before/after coverage and before/after relation split for the two release/hold clusters, from a direct script run against the real library code.
 - [Person-hint strict floor — 2026-10-09](measurements/person-hint-strict-floor-2026-10-09.md) — the recorded-response diagnosis for the `person_hint` strict floor's 2/5-or-1/5 reads, the merge-anchor and dangling-footnote fixes, and the two post-fix green runs.
+- [Claude Code witness hook latency — 2026-10-28](measurements/claude-code-witness-hook-latency-2026-10-28.md) — the witness path's own added p95 latency against the pre-existing fork/exec baseline, for `key_provider: none` and for a local Ed25519 stand-in standing in for the `software-file` adapter.
 
 ---
 

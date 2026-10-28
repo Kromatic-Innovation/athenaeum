@@ -2287,6 +2287,58 @@ class TestSessionEndCLIDerivedBudgets:
         assert captured["max_api_calls"] == lib.SESSION_END_MAX_API_CALLS
 
 
+class TestSessionEndDryRunDoesNotTouchTheWitnessLedger:
+    """`--dry-run` must not append a `session-close` line.
+
+    The witness ledger is the one store in this repo where a spurious write
+    cannot be undone: it is append-only and hash-chained, so deleting the
+    line breaks every `prev` after it and the chain reads as tampered with
+    from that point on. A dry run that permanently alters a tamper-evident
+    log is the sharpest version of the thing `--dry-run` promises not to do,
+    and the witness call sat above the dry-run check, unconditional.
+    """
+
+    def test_dry_run_writes_no_witness_line_while_a_real_run_does(
+        self,
+        tmp_path: Path,
+        mock_anthropic: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import sys
+
+        src = str(Path(__file__).resolve().parent.parent / "src")
+        sys.path.insert(0, src)
+        try:
+            from promptwitness import ledger as pw_ledger
+        finally:
+            sys.path.remove(src)
+
+        root = _seed_knowledge_root(tmp_path)
+        witness_dir = tmp_path / "witness"
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(witness_dir))
+        monkeypatch.setenv("ATHENAEUM_WITNESS_LEDGER_ENABLED", "true")
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "s-dry-run")
+
+        argv = [
+            "session-end",
+            "--path",
+            str(root),
+            "--cache-dir",
+            str(tmp_path / "cache"),
+            "--backend",
+            "fts5",
+        ]
+
+        assert main([*argv, "--dry-run"]) == 0
+        assert pw_ledger.list_partitions(witness_dir) == []
+
+        # Positive control: the same invocation WITHOUT --dry-run does write,
+        # so the assertion above is about the dry-run gate and not about the
+        # witness being disabled or misconfigured in this fixture.
+        assert main(argv) == 0
+        assert pw_ledger.list_partitions(witness_dir) != []
+
+
 # ---------------------------------------------------------------------------
 # Issue athenaeum#896 — derived inner deadline trips the graceful-stop path
 # ---------------------------------------------------------------------------

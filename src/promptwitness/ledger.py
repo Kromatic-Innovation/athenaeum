@@ -913,8 +913,17 @@ def append_line(
     if kind not in KINDS:
         raise ValueError(f"unknown ledger line kind {kind!r}; must be one of {sorted(KINDS)}")
 
+    # `session` is deliberately checked separately from the rest of
+    # `turn_kwargs` (athenaeum#2149 fix): `WitnessLine.to_dict()` already
+    # writes a `session` field for BOTH `kind="turn"` and
+    # `kind="session-close"` (a session-close line has to name which session
+    # it closes), but bucketing `session` inside `turn_kwargs` unconditionally
+    # rejected it on a session-close line before this fix -- the one call
+    # shape a `SessionEnd` hook adapter actually needs. `gap`/`anchor`/
+    # `key-rotate` still reject it, with the same "turn-only fields" message,
+    # so `TestAppendLineValidation::test_rejects_turn_fields_on_non_turn_kind`
+    # (a `gap` line) is unaffected.
     turn_kwargs = {
-        "session": session,
         "turn": turn,
         "prompt_id": prompt_id,
         "prompt_kind": prompt_kind,
@@ -930,6 +939,8 @@ def append_line(
     gap_kwargs = {"reason": reason}
 
     if kind != "turn" and any(v is not None for v in turn_kwargs.values()):
+        raise ValueError(f"turn-only fields were given for kind={kind!r}")
+    if kind not in ("turn", "session-close") and session is not None:
         raise ValueError(f"turn-only fields were given for kind={kind!r}")
     if kind != "session-close" and any(v is not None for v in close_kwargs.values()):
         raise ValueError(f"session-close-only fields were given for kind={kind!r}")

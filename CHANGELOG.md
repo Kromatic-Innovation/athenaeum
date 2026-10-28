@@ -127,6 +127,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     warning for the whole process, exactly like the `software-file` adapter,
     and never blocks the hook.
 
+- **The Claude Code harness adapter for the prompt witness ledger** (issue
+  athenaeum#2149): `promptwitness.harness.claude_code` classifies every
+  `UserPromptSubmit` prompt into a kind (`human`, `slash-command`,
+  `task-notification`, `local-command`, `system`, `unknown`, `subagent`,
+  `launch-argument`) and an entry channel (`interactive`, `headless`,
+  `bridge`, `unknown`), extracts typed/pasted/slash-args segments, detects
+  session resumption, and a new `promptwitness hook claude-code --event
+  session-end` subcommand closes each session with its turn/witnessed
+  counts. `athenaeum.claude_code_adapter` wires the per-turn call in,
+  gated off by default behind `ATHENAEUM_WITNESS_LEDGER_ENABLED`, with a
+  silent no-op guard (`<cache_dir>/witness_hook_errors.jsonl`) so a witness
+  failure can never surface as hook noise or change the hook's output.
+  Headless and bridge lines are never counted as human, per
+  `docs/design/witness-ledger.md`'s operator rulings. Out of scope here:
+  signing (athenaeum#2150) and intake lookup (athenaeum#2158).
 
 ### Changed
 

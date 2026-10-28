@@ -9,22 +9,24 @@ import either — :mod:`promptwitness.signing` itself only imports
 module (and therefore ``signing``) at module level costs nothing on an
 install without the ``witness-sign`` extra.
 
-``status`` (athenaeum#2147) and ``keygen`` (athenaeum#2150, extended with
-``--provider os-keystore`` by athenaeum#2152) are implemented in this
-slice. ``hook claude-code`` (athenaeum#2149) and ``anchor``
-(athenaeum#2151) are out of scope here — their subcommands are added by
-those issues, which extend :func:`build_parser` the same way ``status`` and
-``keygen`` were added: by registering another subparser in this module.
+``status`` (athenaeum#2147), ``keygen`` (athenaeum#2150, extended with
+``--provider os-keystore`` by athenaeum#2152) and ``hook claude-code``
+(athenaeum#2149) are implemented. ``anchor`` (athenaeum#2151) is out of
+scope here — its subcommand is added by that issue, which extends
+:func:`build_parser` the same way the three above were added: by
+registering another subparser in this module.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from typing import Any
 
 from promptwitness import ledger, signing
+from promptwitness.harness import claude_code
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -90,6 +92,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     keygen.set_defaults(func=_cmd_keygen)
 
+    hook = sub.add_parser(
+        "hook",
+        help="Harness hook entry points (athenaeum#2149).",
+    )
+    hook_sub = hook.add_subparsers(dest="harness_command")
+    hook_claude_code = hook_sub.add_parser(
+        "claude-code",
+        help="Append a witness line for a Claude Code hook event.",
+    )
+    hook_claude_code.add_argument(
+        "--event",
+        required=True,
+        choices=["session-end"],
+        help="Which Claude Code hook fired. Only 'session-end' is implemented "
+        "here -- the per-turn 'UserPromptSubmit' path is wired directly "
+        "through athenaeum.claude_code_adapter, in-process, not through "
+        "this console script.",
+    )
+    hook_claude_code.set_defaults(func=_cmd_hook_claude_code)
+
     return parser
 
 
@@ -149,6 +171,23 @@ def _cmd_keygen(args: argparse.Namespace) -> int:
     }
     print(json.dumps(payload, sort_keys=True))
     return 0
+
+def _cmd_hook_claude_code(args: argparse.Namespace) -> int:
+    """``promptwitness hook claude-code --event session-end``: append a
+    ``kind="session-close"`` witness line from the process environment (no
+    stdin payload is required -- :func:`promptwitness.harness.claude_code.session_close`
+    reads ``CLAUDE_CODE_SESSION_ID`` directly). A no-op (exit 0, no line
+    written) when that env var is absent.
+
+    Unlike the per-turn hook path wired through ``athenaeum.claude_code_adapter``,
+    this standalone console script carries no silent-no-op guard of its
+    own: a real failure here propagates as a normal CLI error (non-zero
+    exit, traceback on stderr), for an operator invoking it directly.
+    """
+    if args.event == "session-end":
+        claude_code.session_close(os.environ)
+        return 0
+    return 1
 
 
 def _keygen_os_keystore(args: argparse.Namespace) -> int:

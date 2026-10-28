@@ -86,6 +86,34 @@ Every ranking/dedup/budget decision already happened inside
 candidate — this module reads ``envelope["render"]["text"]``, a value the
 core already rendered, and does nothing to it beyond wrapping.
 
+**Witness ledger wiring (issue athenaeum#2149).** :func:`main` reads stdin
+exactly ONCE, before anything else, and passes the raw text to
+:func:`promptwitness.harness.claude_code.record_turn` inside its own
+``try``/``except`` — BEFORE both the ``AUTO_RECALL`` gate and the
+``len(prompt) < 8`` early return, so a witness line is appended even on a
+turn the recall path itself would skip. Gated on
+``ATHENAEUM_WITNESS_LEDGER_ENABLED`` (:func:`_witness_ledger_enabled`,
+default off), read after :func:`_load_config_env` — the same precedence as
+``AUTO_RECALL``. The call is a single delegation with no arithmetic of its
+own (AC2 forbids ``ast.BinOp`` in this module wholesale, and this call is no
+exception): any exception the witness path raises — including a
+``promptwitness`` that fails to import in a stale editable install — is
+caught here and appended as ``{ts, error: <ExceptionClassName>}`` to
+``<cache_dir>/witness_hook_errors.jsonl`` by :func:`_log_witness_error`,
+with no text and no stderr, so a witness failure can NEVER surface as
+session noise or change this adapter's stdout. :func:`witness_session_end`
+is the equivalent in-process call for the ``SessionEnd`` hook, invoked by
+:func:`athenaeum._cmd_index.cmd_session_end` rather than from this module's
+own ``main`` (``SessionEnd`` has a different entry point entirely —
+``athenaeum session-end``, not this console script).
+
+``promptwitness`` is imported lazily, function-local to the ``try`` block
+that calls it — never at this module's top level — so a bare
+``import athenaeum.claude_code_adapter`` (what
+``tests/test_import_budget.py``'s pinned set for this module measures)
+never pays for it, mirroring how :mod:`athenaeum.context` is already
+deferred into :func:`main` for the same reason.
+
 **Fail-safe axis (issue athenaeum#1621 AC3).** A recall failure must never
 block a user's turn: a ``UserPromptSubmit`` hook that exits non-zero, or
 writes to stderr, degrades the whole session (a failing hook surfaces to
@@ -130,6 +158,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -217,6 +246,33 @@ def _auto_recall_enabled() -> bool:
     return os.environ.get("AUTO_RECALL", "true") == "true"
 
 
+def _witness_ledger_enabled() -> bool:
+    """``ATHENAEUM_WITNESS_LEDGER_ENABLED`` gate (issue athenaeum#2149;
+    default OFF, the opposite default of :func:`_auto_recall_enabled`, but
+    read the same way: must run AFTER :func:`_load_config_env`, so a value
+    cached in ``config.env`` is honoured the same as one set directly in
+    the launcher's environment). Exact-string match: only ``"true"``
+    enables; unset or any other value stays disabled."""
+    return os.environ.get("ATHENAEUM_WITNESS_LEDGER_ENABLED", "false") == "true"
+
+
+def _log_witness_error(cache_dir: Path, exc: BaseException) -> None:
+    """Append one ``{ts, error: <ExceptionClassName>}`` line to
+    ``<cache_dir>/witness_hook_errors.jsonl`` (issue athenaeum#2149's silent
+    no-op guard). Never raises itself — logging a witness failure must
+    never become a second failure that reaches this adapter's own
+    ``except Exception`` and gets swallowed with no trace at all."""
+    try:
+        path = cache_dir.joinpath("witness_hook_errors.jsonl")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(timezone.utc).isoformat()
+        record = json.dumps({"ts": ts, "error": type(exc).__name__})
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(f"{record}\n")
+    except Exception:  # noqa: BLE001 - logging a failure must never itself raise
+        pass
+
+
 def _read_hook_input(raw: str) -> tuple[str, str]:
     """Parse the ``UserPromptSubmit`` stdin payload.
 
@@ -231,6 +287,52 @@ def _read_hook_input(raw: str) -> tuple[str, str]:
     prompt = str(payload.get("prompt") or "")
     session_id = str(payload.get("session_id") or "unknown")
     return prompt, session_id
+
+
+def _witness_turn(cache_dir: Path, raw: str) -> None:
+    """Gate, import, and delegate to
+    :func:`promptwitness.harness.claude_code.record_turn` for one
+    ``UserPromptSubmit`` turn — one delegation call, no arithmetic (issue
+    athenaeum#2149; the same ``TestAC2NoRetrievalLogic`` guard issue
+    athenaeum#1621 AC2 established). Any exception — including
+    ``promptwitness`` failing to import — is caught and logged via
+    :func:`_log_witness_error`; this function itself never raises.
+    """
+    if not _witness_ledger_enabled():
+        return
+    try:
+        from promptwitness.harness.claude_code import record_turn
+
+        record_turn(raw, os.environ)
+    except Exception as exc:  # noqa: BLE001 - a witness failure must never block a prompt
+        _log_witness_error(cache_dir, exc)
+
+
+def witness_session_end(cache_dir: Path) -> None:
+    """The ``SessionEnd`` counterpart to :func:`_witness_turn`, called
+    in-process from :func:`athenaeum._cmd_index.cmd_session_end` (issue
+    athenaeum#2149) — ``SessionEnd`` has its own entry point
+    (``athenaeum session-end``), not this console script's ``main``, but
+    the gating and silent-no-op-guard shape are identical.
+
+    The guard covers ``_load_config_env`` and the gate read too, not just
+    the witness call. Those two ran outside it, so a malformed
+    ``config.env`` -- one stray non-UTF-8 byte is enough for a
+    ``UnicodeDecodeError`` -- escaped into
+    :func:`athenaeum._cmd_index.cmd_session_end` and aborted the whole
+    command. A witness that can break the thing it observes is worse than
+    no witness: the entire point of this path is that it cannot affect the
+    caller's result or exit code. :func:`main` already wraps its own
+    ``_load_config_env`` call for the same reason."""
+    try:
+        _load_config_env(cache_dir)
+        if not _witness_ledger_enabled():
+            return
+        from promptwitness.harness.claude_code import session_close
+
+        session_close(os.environ)
+    except Exception as exc:  # noqa: BLE001 - a witness failure must never block SessionEnd
+        _log_witness_error(cache_dir, exc)
 
 
 def _hook_output(additional_context: str) -> str:
@@ -261,10 +363,17 @@ def main(argv: list[str] | None = None) -> int:
         cache_dir = resolve_cache_dir(None)
         _load_config_env(cache_dir)
 
+        # Read stdin exactly once, before anything else below — the witness
+        # call (issue athenaeum#2149) needs the raw text even on a turn the
+        # recall path itself is about to skip (AUTO_RECALL off, or a prompt
+        # shorter than 8 characters), so it runs BEFORE both of those gates.
+        raw = sys.stdin.read()
+        _witness_turn(cache_dir, raw)
+
         if not _auto_recall_enabled():
             return 0
 
-        prompt, session_id = _read_hook_input(sys.stdin.read())
+        prompt, session_id = _read_hook_input(raw)
         if len(prompt) < 8:
             return 0
 

@@ -327,7 +327,63 @@ strip or hash `query` first, per §1.1.
 
 ---
 
-## 4. Out of scope
+## 4. The witness-ledger step (athenaeum#2149)
+
+A SEPARATE step runs alongside the Tier-1 push described above, not instead
+of it: before this adapter ever calls `build_context_for_turn`, it reads the
+hook's raw stdin once and delegates to
+`promptwitness.harness.claude_code.record_turn` — one package boundary away
+from everything in §1–§3, which never sees the witness ledger at all. See
+`docs/design/witness-ledger.md` for the full design and security boundary;
+this section documents the step only as it touches THIS adapter's contract,
+and marks the verified/assumed split at the time this issue shipped.
+
+**Ordering and fail-safe shape.** The witness call runs BEFORE the
+`AUTO_RECALL` gate and the `len(prompt) < 8` early return — a witness line is
+written even for a turn the recall path itself skips. It is gated on
+`ATHENAEUM_WITNESS_LEDGER_ENABLED` (default off) and wrapped in its own
+`try`/`except`: any failure — including `promptwitness` failing to import —
+degrades to one `{ts, error}` line in
+`<cache_dir>/witness_hook_errors.jsonl`, never to stdout or stderr, and never
+changes this adapter's own exit code or output. The `SessionEnd` half
+(`promptwitness.harness.claude_code.session_close`) is called the same way,
+in-process, from `athenaeum._cmd_index.cmd_session_end` — a different entry
+point entirely (`athenaeum session-end`), not this module's own `main`.
+
+**Verified vs. assumed**, reproduced from the issue (each assumed row is
+turned into a deterministic assertion by the real-binary integration test,
+athenaeum#2161 — this document does not upgrade any row to verified on its
+own):
+
+| Claim | Status |
+|---|---|
+| stdin keys, including `prompt_id` (headless, 2.1.308) | **verified** (probe) |
+| stdin `prompt` == transcript record content (headless, plain text) | **verified** (probe) |
+| Hook env carries `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_SESSION_ATTENDED`, `CLAUDE_PID`, `CLAUDE_CODE_SESSION_ID` (headless) | **verified** (probe) |
+| A sub-agent of an interactive session shows `entrypoint=cli`, `attended=1`, `CHILD_SESSION=1`, and a `claude` on a tty, in its Bash env | **verified, but not a human-typed context.** The values a top-level interactive hook sees are unverified. |
+| The hook does not fire for sub-agent prompts | suggested by one record, not verified. The `subagent` kind row covers it either way. |
+| The first prompt of a `claude "<prompt>"` TTY launch is distinguishable | assumed. The `launch-argument` check covers it. |
+| Interactive hook stdin has the same keys | assumed |
+| Pasted content is expanded inline in stdin `prompt` | assumed (verified only in transcript records) |
+| Queued prompts fire the hook with their own `prompt_id` | assumed |
+| Slash-command stdin carries `<command-args>` inline | assumed |
+| claude.ai bridge sessions expose `CLAUDE_CODE_BRIDGE_SESSION_ID` in the hook env | assumed |
+| `CLAUDE_CODE_SESSION_ATTENDED` semantics are stable | assumed (undocumented) |
+
+**What the witness step does NOT touch.** Prompt-kind classification,
+segment extraction, and channel detection all live inside
+`promptwitness.harness.claude_code`, never in this adapter — the same
+dependency direction as the rest of `promptwitness` (§"Package boundary" in
+`docs/design/witness-ledger.md`). This adapter's own AC2 guard
+(`tests/test_claude_code_adapter.py::TestAC2NoRetrievalLogic`, originally
+athenaeum#1621's) forbids `ast.BinOp` wholesale in this module's source, so
+the witness call here is a single delegation with no arithmetic of its own —
+the same "no ranking/no budget logic lives here" shape §2.2 already
+requires for recall, extended to the witness path by construction.
+
+---
+
+## 5. Out of scope
 
 - **Writing any adapter.** This document specifies the contract; building a
   Claude Code adapter and a non-Claude proof adapter are separate issues
