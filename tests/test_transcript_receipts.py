@@ -430,6 +430,86 @@ class TestWriteReceiptForOrigin:
 
 
 # ---------------------------------------------------------------------------
+# issue athenaeum#2146: _is_human_record is the ONE shared gate for
+# "human-authored" -- verify_user_stated, _matching_human_utterance, and the
+# write_receipt_for_origin -> classify_backfill_claim path must all agree.
+# ---------------------------------------------------------------------------
+
+
+class TestSharedHumanRecordGateAgreement:
+    def test_task_notification_record_is_not_human_anywhere(self, tmp_path: Path) -> None:
+        from athenaeum.transcript_receipts import _matching_human_utterance
+        from athenaeum.transcript_verify import (
+            _iter_session_records,
+            classify_backfill_claim,
+            verify_user_stated,
+        )
+
+        pr = tmp_path / "projects"
+        scope, session, turn = "scopeA", "sharedfix1", 1
+        claim = "The deploy target is Fly.io"
+        records = [
+            {
+                "type": "user",
+                "origin": {"kind": "task-notification"},
+                "message": {
+                    "role": "user",
+                    "content": (
+                        "<task-notification>The deploy target is "
+                        "Fly.io.</task-notification>"
+                    ),
+                },
+            }
+        ]
+        _write_transcript(pr, scope, session, records)
+
+        # 1. verify_user_stated: never user-stated for a task-notification match.
+        stype, _ = verify_user_stated(
+            scope, session, turn=turn, claim=claim, projects_root=pr
+        )
+        assert stype != "user-stated"
+
+        # 2. classify_backfill_claim (the write_receipt_for_origin path):
+        #    no tool_result to fall back to, so it confirms inferred.
+        result = classify_backfill_claim(
+            scope, session, turn=turn, claim=claim, projects_root=pr
+        )
+        assert result.channel != "user-stated"
+
+        # 3. _matching_human_utterance: no human utterance found either.
+        parsed_records = _iter_session_records(pr / scope, session)
+        assert _matching_human_utterance(parsed_records, claim) is None
+
+    def test_genuine_human_record_is_human_everywhere(self, tmp_path: Path) -> None:
+        from athenaeum.transcript_receipts import _matching_human_utterance
+        from athenaeum.transcript_verify import (
+            _iter_session_records,
+            classify_backfill_claim,
+            verify_user_stated,
+        )
+
+        pr = tmp_path / "projects"
+        scope, session, turn = "scopeA", "sharedfix2", 2
+        claim = "Kromatic was founded in 2013"
+        records = [_user_record("Kromatic was founded in 2013.")]
+        _write_transcript(pr, scope, session, records)
+
+        stype, sref = verify_user_stated(
+            scope, session, turn=turn, claim=claim, projects_root=pr
+        )
+        assert stype == "user-stated"
+        assert sref == f"{session}#turn{turn}"
+
+        result = classify_backfill_claim(
+            scope, session, turn=turn, claim=claim, projects_root=pr
+        )
+        assert result.channel == "user-stated"
+
+        parsed_records = _iter_session_records(pr / scope, session)
+        assert _matching_human_utterance(parsed_records, claim) is not None
+
+
+# ---------------------------------------------------------------------------
 # lookup_receipt is session-filtered when the caller has a frontmatter session
 # ---------------------------------------------------------------------------
 
