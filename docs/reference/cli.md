@@ -1763,10 +1763,25 @@ The `promptwitness` console script (a standalone package — see `docs/design/wi
 
 ### promptwitness command index
 
+- [`promptwitness anchor`](#promptwitness-anchor) (command) — Anchor the ledger head (or --subject) with local-clock and OpenTimestamps.
 - [`promptwitness hook`](#promptwitness-hook) (group) — Harness hook entry points.
 - [`promptwitness hook claude-code`](#promptwitness-hook-claude-code) (command) — Append a witness line for a Claude Code hook event.
 - [`promptwitness keygen`](#promptwitness-keygen) (command) — Generate an Ed25519 signing key, in a file (mode 0600) or an OS keystore.
 - [`promptwitness status`](#promptwitness-status) (command) — Print the ledger head seq, chain_ok, partitions, and key strength.
+
+## `promptwitness anchor`
+
+Anchor the ledger head (or --subject) with local-clock and OpenTimestamps.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--block-source` | — | — | Esplora-compatible block explorer URL for --verify, or 'offline' for no network access at all (else PROMPTWITNESS_OTS_BLOCK_SOURCE / a public default). |
+| `--dir` | — | — | Override the ledger directory (else PROMPTWITNESS_DIR / the XDG default). |
+| `--harness` | `claude-code` | — | Harness name the ledger directory is namespaced under. |
+| `--subject` | — | — | Subject to anchor (default: witness:<ledger_id>:<seq> of the current chain head). |
+| `--timeout` | `10.0` | — | Per-adapter network timeout in seconds (default: 10.0). |
+| `--upgrade` | `False` | — | Ask the OpenTimestamps calendar whether a prior pending proof for this subject has since been confirmed in Bitcoin, instead of submitting a new stamp. |
+| `--verify` | `False` | — | Run full Bitcoin verification of the OpenTimestamps attestation after anchoring. |
 
 ## `promptwitness hook`
 

@@ -1,0 +1,8 @@
+{
+  "_comment": "Synthetic, deterministic Esplora-compatible block-explorer fixture for athenaeum#2151 -- NOT a real historical Bitcoin block (no network call ever produced this; it was constructed once, by hand, from a fixed commitment digest, and committed here so tests/test_promptwitness_anchor.py can feed it through the real OpenTimestampsAnchorer._http_get seam without any network access).",
+  "block_height": 123456,
+  "block_hash_response": "0000000000000000000abcdef0000000000000000000000000000000000000",
+  "header_hex_response": "01000000000000000000000000000000000000000000000000000000000000000000000087af216021e0967aba50c3d5a68288eed06b292468fb76845455533d1bc5927900f15365ffff001d00000000",
+  "merkle_root_hex": "87af216021e0967aba50c3d5a68288eed06b292468fb76845455533d1bc59279",
+  "block_time": 1700000000
+}
