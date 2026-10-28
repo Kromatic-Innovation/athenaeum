@@ -30,15 +30,19 @@ written by this module — every receipt-partition read is a plain
 
 **The 10 second budget.** :func:`run_session_end_anchor` takes a
 :func:`time.monotonic`-based deadline and never lets network-bound work
-start once it has passed: if the budget is already spent before the head
-subject is even attempted, the whole job is handed off to a detached
+start once it has passed: if there is no budget at all
+(``budget_seconds <= 0``), the whole job is handed off to a detached
 ``promptwitness anchor`` process instead (safe for the head subject only —
 see :func:`_spawn_detached_head_anchor`'s docstring for why receipts
 anchoring is simply skipped, never detached, in the same situation). A
-hung calendar cannot push SessionEnd past the budget either way: every
-per-adapter network call is given a *timeout* derived from the REMAINING
-budget at the moment it starts, and the loop re-checks the deadline before
-starting each subsequent subject.
+hung calendar cannot push SessionEnd past the budget either way: the
+remaining budget is re-read from the deadline before EACH network adapter
+call (not once per subject), a network adapter whose worst case no longer
+fits in what remains is skipped rather than started, and the loop re-checks
+the deadline before starting each subsequent subject. OpenTimestamps tries
+its calendars one after another with the same per-call *timeout*, so it is
+handed the remaining budget divided by its calendar count — its worst case
+(every calendar hanging) then still ends at the deadline.
 """
 
 from __future__ import annotations
@@ -132,12 +136,24 @@ def _append_anchor_line(
 
 
 def _anchor_subject_in_process(
-    ledger_dir: Path, *, subject: str, digest: str, timeout: float
+    ledger_dir: Path,
+    *,
+    subject: str,
+    digest: str,
+    deadline: float,
+    monotonic: Callable[[], float],
 ) -> None:
     """Anchor *subject* (a ``"sha256:<hex>"`` *digest* it commits to) with
     every adapter promptwitness itself knows how to offer: the mandatory
     ``LocalClockAnchorer`` (always, never fails), ``OpenTimestampsAnchorer``,
     and ``Rfc3161Anchorer`` when a TSA URL resolves.
+
+    Deadline-based, not timeout-based: each network adapter's *timeout* is
+    computed from ``deadline - monotonic()`` immediately before that
+    adapter starts (:func:`_adapter_timeout`), so time a slow OpenTimestamps
+    pass spent is no longer available to RFC 3161 after it. An adapter that
+    no longer fits is skipped and writes no line. The local-clock anchorer
+    does no I/O and always runs.
 
     Adapter selection and config come from promptwitness's OWN env-based
     resolvers (``anchor.resolve_block_source``,
@@ -153,27 +169,36 @@ def _anchor_subject_in_process(
     digest_bytes = anchor_mod.digest_bytes(digest)
 
     local = anchor_mod.LocalClockAnchorer()
-    local_att = local.anchor(digest_bytes, subject, timeout=timeout)
+    local_att = local.anchor(digest_bytes, subject, timeout=_MIN_ADAPTER_TIMEOUT_SECONDS)
     _append_anchor_line(
         ledger_dir, subject=subject, digest=digest, attestation=local_att, op="anchor"
     )
 
-    ots = anchor_mod.OpenTimestampsAnchorer(
-        ledger_dir, block_source=anchor_mod.resolve_block_source()
+    # OpenTimestampsAnchorer.anchor() tries each calendar in turn, each with
+    # the full per-call timeout, so its worst case is timeout x calendars.
+    ots_timeout = _adapter_timeout(
+        deadline, monotonic, sequential_calls=len(anchor_mod.DEFAULT_CALENDARS)
     )
-    ots_att = ots.anchor(digest_bytes, subject, timeout=timeout)
-    _append_anchor_line(
-        ledger_dir, subject=subject, digest=digest, attestation=ots_att, op="anchor"
-    )
+    if ots_timeout is not None:
+        ots = anchor_mod.OpenTimestampsAnchorer(
+            ledger_dir, block_source=anchor_mod.resolve_block_source()
+        )
+        ots_att = ots.anchor(digest_bytes, subject, timeout=ots_timeout)
+        _append_anchor_line(
+            ledger_dir, subject=subject, digest=digest, attestation=ots_att, op="anchor"
+        )
 
     rfc3161_url = anchor_rfc3161.resolve_rfc3161_url(None)
     if rfc3161_url:
+        rfc_timeout = _adapter_timeout(deadline, monotonic, sequential_calls=1)
+        if rfc_timeout is None:
+            return
         rfc = anchor_rfc3161.Rfc3161Anchorer(
             ledger_dir,
             tsa_url=rfc3161_url,
             ca_bundle=anchor_rfc3161.resolve_rfc3161_ca_bundle(None),
         )
-        rfc_att = rfc.anchor(digest_bytes, subject, timeout=timeout)
+        rfc_att = rfc.anchor(digest_bytes, subject, timeout=rfc_timeout)
         _append_anchor_line(
             ledger_dir, subject=subject, digest=digest, attestation=rfc_att, op="anchor"
         )
@@ -200,9 +225,22 @@ def _receipts_partition_unchanged(ledger_dir: Path, month: str, digest: str) -> 
     return last_digest == digest
 
 
-def _remaining_timeout(deadline: float, monotonic: Callable[[], float]) -> float:
-    remaining = deadline - monotonic()
-    return remaining if remaining > _MIN_ADAPTER_TIMEOUT_SECONDS else _MIN_ADAPTER_TIMEOUT_SECONDS
+def _adapter_timeout(
+    deadline: float, monotonic: Callable[[], float], *, sequential_calls: int
+) -> float | None:
+    """Per-call *timeout* for a network adapter about to start, read from
+    the clock NOW, or ``None`` when the adapter should not start at all.
+
+    *sequential_calls* is how many network calls the adapter may make one
+    after another with that same timeout; the remaining budget is split
+    across them so their sum still ends at *deadline*. ``None`` when the
+    split would fall below :data:`_MIN_ADAPTER_TIMEOUT_SECONDS` — starting
+    a call with a floored timeout is exactly how the budget gets overrun.
+    """
+    per_call = (deadline - monotonic()) / max(sequential_calls, 1)
+    if per_call < _MIN_ADAPTER_TIMEOUT_SECONDS:
+        return None
+    return per_call
 
 
 def run_session_end_anchor(
@@ -224,9 +262,8 @@ def run_session_end_anchor(
     deterministically — the acceptance criterion this exists for is "a
     hung calendar does not push session-end past its budget", which needs
     to be provable without an actual multi-second sleep in the test
-    suite). If that budget is already spent before the head subject even
-    starts (an unlikely but possible case — SessionEnd's own earlier steps
-    ran long), the whole job is handed off to a detached ``promptwitness
+    suite). If there is no budget at all (``budget_seconds <= 0``), the
+    whole job is handed off to a detached ``promptwitness
     anchor`` process instead (:func:`_spawn_detached_head_anchor`) — safe
     here because the chain-head subject's digest is a pure function of
     the subject string, recomputed identically by that CLI command.
@@ -236,10 +273,10 @@ def run_session_end_anchor(
     an anchor) leaves nothing recorded to compare against, so it is
     retried cleanly at the next SessionEnd.
     """
-    deadline = monotonic() + budget_seconds
-    if monotonic() >= deadline:
+    if budget_seconds <= 0:
         _spawn_detached_head_anchor(ledger_dir)
         return
+    deadline = monotonic() + budget_seconds
 
     head_subject, head_digest = _head_subject_and_digest(ledger_dir)
     if head_subject is not None and head_digest is not None:
@@ -247,13 +284,20 @@ def run_session_end_anchor(
             ledger_dir,
             subject=head_subject,
             digest=head_digest,
-            timeout=_remaining_timeout(deadline, monotonic),
+            deadline=deadline,
+            monotonic=monotonic,
         )
 
     from athenaeum import receipt_sealers
+    from promptwitness import anchor as anchor_mod
 
+    n_calendars = len(anchor_mod.DEFAULT_CALENDARS)
     for month in receipt_sealers.iter_months(wiki_root):
-        if monotonic() >= deadline:
+        # Stop once OpenTimestamps would no longer fit, not merely once the
+        # deadline has passed: a receipts subject that got only its
+        # local-clock line would read as "unchanged" next SessionEnd and
+        # never be offered to OpenTimestamps at all.
+        if _adapter_timeout(deadline, monotonic, sequential_calls=n_calendars) is None:
             break
         partition = receipt_sealers.partition_path(wiki_root, month)
         try:
@@ -270,5 +314,6 @@ def run_session_end_anchor(
             ledger_dir,
             subject=subject,
             digest=digest,
-            timeout=_remaining_timeout(deadline, monotonic),
+            deadline=deadline,
+            monotonic=monotonic,
         )

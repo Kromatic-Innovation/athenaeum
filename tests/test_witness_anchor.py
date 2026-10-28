@@ -272,7 +272,9 @@ class TestBudgetAndHungCalendar:
 
             def anchor(self, digest_bytes: bytes, subject: str, *, timeout: float) -> object:
                 _HangingOts.calls += 1
-                clock.value += timeout  # "used the entire budget it was given"
+                # Every calendar hangs for the whole per-call timeout, one
+                # after another -- the real anchorer's worst case.
+                clock.value += timeout * len(anchor_mod.DEFAULT_CALENDARS)
                 return anchor_mod.Attestation(
                     source="opentimestamps",
                     status="failed",
@@ -284,9 +286,11 @@ class TestBudgetAndHungCalendar:
         monkeypatch.setattr(anchor_mod, "OpenTimestampsAnchorer", _HangingOts)
 
         witness_anchor.run_session_end_anchor(
-            ledger_dir, wiki_root, budget_seconds=1.0, monotonic=clock
+            ledger_dir, wiki_root, budget_seconds=10.0, monotonic=clock
         )
 
+        # Every calendar hanging still ends exactly at the deadline.
+        assert clock.value <= 10.0
         # Exactly one hanging OTS call (the head subject's) -- the
         # receipts-partition loop must have seen the deadline already
         # passed and broken BEFORE calling it a second time.
@@ -304,3 +308,140 @@ class TestBudgetAndHungCalendar:
         ]
         assert len(head_ots) == 1
         assert head_ots[0].extra["attestation"]["status"] == "failed"
+
+
+class _FakeClock:
+    def __init__(self) -> None:
+        self.value = 0.0
+
+    def __call__(self) -> float:
+        return self.value
+
+
+def _install_fake_network_adapters(
+    monkeypatch: pytest.MonkeyPatch, anchor_mod, clock: _FakeClock, *, ots_cost: float
+) -> list[tuple[str, float, float]]:
+    """Replace OTS and RFC 3161 with fakes that record ``(source,
+    timeout, clock-at-start)`` per call. OTS advances the clock by
+    *ots_cost*; RFC 3161 consumes its whole timeout."""
+    from promptwitness import anchor_rfc3161
+
+    calls: list[tuple[str, float, float]] = []
+
+    def _att(source: str) -> object:
+        return anchor_mod.Attestation(
+            source=source, status="failed", claimed_time="t", proof_path=None, detail={}
+        )
+
+    class _Ots:
+        def __init__(self, ledger_dir: object, *, block_source: object = None) -> None:
+            pass
+
+        def anchor(self, digest_bytes: bytes, subject: str, *, timeout: float) -> object:
+            calls.append(("opentimestamps", timeout, clock.value))
+            clock.value += ots_cost
+            return _att("opentimestamps")
+
+    class _Rfc:
+        def __init__(self, ledger_dir: object, *, tsa_url: str, ca_bundle: object) -> None:
+            pass
+
+        def anchor(self, digest_bytes: bytes, subject: str, *, timeout: float) -> object:
+            calls.append(("rfc3161", timeout, clock.value))
+            clock.value += timeout
+            return _att("rfc3161:tsa.example")
+
+    monkeypatch.setattr(anchor_mod, "OpenTimestampsAnchorer", _Ots)
+    monkeypatch.setattr(anchor_rfc3161, "Rfc3161Anchorer", _Rfc)
+    monkeypatch.setenv("PROMPTWITNESS_RFC3161_URL", "https://tsa.example/tsr")
+    return calls
+
+
+class TestDeadlineReEvaluatedPerAdapter:
+    """PR athenaeum#2176 review finding: one timeout computed per subject
+    and reused across OTS then RFC 3161 let the adapters together overrun
+    the budget. Each adapter's timeout must come from the deadline at the
+    moment it starts."""
+
+    def test_rfc3161_gets_only_what_ots_left(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pw_modules
+    ) -> None:
+        witness_anchor, anchor_mod, pw_ledger = pw_modules
+        ledger_dir = tmp_path / "ledger"
+        _seed_turn_line(ledger_dir, pw_ledger)
+        clock = _FakeClock()
+        calls = _install_fake_network_adapters(monkeypatch, anchor_mod, clock, ots_cost=6.0)
+
+        witness_anchor.run_session_end_anchor(
+            ledger_dir, tmp_path / "wiki", budget_seconds=10.0, monotonic=clock
+        )
+
+        n_cal = len(anchor_mod.DEFAULT_CALENDARS)
+        assert [c[0] for c in calls] == ["opentimestamps", "rfc3161"]
+        assert calls[0][1] == pytest.approx(10.0 / n_cal)
+        assert calls[1][1] == pytest.approx(4.0)  # 10 - 6, not the original 10
+        assert clock.value <= 10.0
+
+    def test_every_call_fits_in_the_remaining_budget(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pw_modules
+    ) -> None:
+        witness_anchor, anchor_mod, pw_ledger = pw_modules
+        ledger_dir = tmp_path / "ledger"
+        wiki_root = tmp_path / "wiki"
+        _seed_turn_line(ledger_dir, pw_ledger)
+        _write_receipts_partition(wiki_root, "2026-09", ["a"])
+        _write_receipts_partition(wiki_root, "2026-10", ["b"])
+        clock = _FakeClock()
+        calls = _install_fake_network_adapters(monkeypatch, anchor_mod, clock, ots_cost=1.0)
+
+        witness_anchor.run_session_end_anchor(
+            ledger_dir, wiki_root, budget_seconds=10.0, monotonic=clock
+        )
+
+        n_cal = len(anchor_mod.DEFAULT_CALENDARS)
+        for source, timeout, started in calls:
+            worst = timeout * (n_cal if source == "opentimestamps" else 1)
+            assert started + worst <= 10.0 + 1e-9, (source, timeout, started)
+        assert clock.value <= 10.0
+
+    def test_receipts_subject_is_not_started_when_ots_would_not_fit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pw_modules
+    ) -> None:
+        """Deadline not yet passed, but too little left for OTS: the
+        receipts partition must get NO line at all (not even local-clock),
+        or the next SessionEnd would see its digest as already anchored."""
+        witness_anchor, anchor_mod, pw_ledger = pw_modules
+        ledger_dir = tmp_path / "ledger"
+        wiki_root = tmp_path / "wiki"
+        _seed_turn_line(ledger_dir, pw_ledger)
+        _write_receipts_partition(wiki_root, "2026-10", ["line one"])
+        clock = _FakeClock()
+        calls = _install_fake_network_adapters(monkeypatch, anchor_mod, clock, ots_cost=9.0)
+        monkeypatch.delenv("PROMPTWITNESS_RFC3161_URL")  # OTS only, so 1.0 s stays unspent
+
+        witness_anchor.run_session_end_anchor(
+            ledger_dir, wiki_root, budget_seconds=10.0, monotonic=clock
+        )
+
+        assert clock.value < 10.0  # deadline not reached
+        assert [c[0] for c in calls] == ["opentimestamps"]  # head only
+        subjects = {a.extra["subject"] for a in _anchor_lines(pw_ledger, ledger_dir)}
+        assert not any(s.startswith("receipts:") for s in subjects)
+
+    def test_adapter_that_no_longer_fits_is_skipped(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pw_modules
+    ) -> None:
+        witness_anchor, anchor_mod, pw_ledger = pw_modules
+        ledger_dir = tmp_path / "ledger"
+        _seed_turn_line(ledger_dir, pw_ledger)
+        clock = _FakeClock()
+        # OTS leaves less than the per-call floor for RFC 3161.
+        calls = _install_fake_network_adapters(monkeypatch, anchor_mod, clock, ots_cost=9.8)
+
+        witness_anchor.run_session_end_anchor(
+            ledger_dir, tmp_path / "wiki", budget_seconds=10.0, monotonic=clock
+        )
+
+        assert [c[0] for c in calls] == ["opentimestamps"]
+        sources = {a.extra["attestation"]["source"] for a in _anchor_lines(pw_ledger, ledger_dir)}
+        assert sources == {"local-clock", "opentimestamps"}
