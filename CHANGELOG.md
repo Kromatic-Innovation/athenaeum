@@ -95,6 +95,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ledger.append_line` additively accepts `extra_signers` so a `key-rotate`
   line can carry a second signature from the old key alongside the new one.
 
+- **`promptwitness` `os-keystore` key adapter: macOS Keychain, Linux Secret
+  Service, Windows DPAPI (issue athenaeum#2152, part of the
+  prompt-witness-ledger epic, athenaeum#2144).** The Ed25519 seed lives in the
+  OS keystore instead of a plaintext PEM, and signing still happens in-process
+  with no added per-turn friction. Select it with
+  `PROMPTWITNESS_KEY_PROVIDER=os-keystore` (backend by platform, overridable
+  with `PROMPTWITNESS_KEYSTORE_BACKEND`); create the key with
+  `promptwitness keygen --provider os-keystore`, which refuses to replace an
+  existing key without `--force`.
+  - **This tier protects the key at rest and nothing else**, and the docs say
+    so plainly: a stolen disk or backup yields no usable key, but the user's
+    own session can read the item back without a prompt, so
+    `presence_required()` is `False` and an `os-keystore` signature makes no
+    claim at all about a human being present.
+  - Key material travels on **stdin** (macOS `security -w` with no value,
+    `secret-tool store`) or not at all (DPAPI is an in-process `ctypes` call),
+    never on argv, which is world-readable on every platform; a test asserts
+    that over the real `subprocess` boundary. The Windows protected blob is
+    written atomically at mode 0600.
+  - An unavailable keystore — tool missing, keystore locked, DPAPI refusal, no
+    item stored, a malformed item — degrades to an unsigned line plus one
+    warning for the whole process, exactly like the `software-file` adapter,
+    and never blocks the hook.
+
 
 ### Changed
 
