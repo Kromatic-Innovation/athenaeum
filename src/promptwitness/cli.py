@@ -1,15 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
-"""``promptwitness`` console script (athenaeum#2147).
+"""``promptwitness`` console script (athenaeum#2147, athenaeum#2150).
 
-Layering: L2 (CLI/presentation — depends on :mod:`promptwitness.ledger` and
-:mod:`promptwitness.canon`). Standard library only at import time; no
-``athenaeum`` import.
+Layering: L2 (CLI/presentation — depends on :mod:`promptwitness.ledger`,
+:mod:`promptwitness.signing` and :mod:`promptwitness.canon`). Standard
+library only at import time; no ``athenaeum`` import, and no ``cryptography``
+import either — :mod:`promptwitness.signing` itself only imports
+``cryptography`` lazily inside the functions that need it, so importing this
+module (and therefore ``signing``) at module level costs nothing on an
+install without the ``witness-sign`` extra.
 
-Only ``status`` is implemented in this slice. ``hook claude-code``
-(athenaeum#2149), ``keygen`` (athenaeum#2150) and ``anchor``
+``status`` (athenaeum#2147) and ``keygen`` (athenaeum#2150) are implemented
+in this slice. ``hook claude-code`` (athenaeum#2149) and ``anchor``
 (athenaeum#2151) are out of scope here — their subcommands are added by
-those issues, which extend :func:`build_parser` the same way ``status`` was
-added: by registering another subparser in this module.
+those issues, which extend :func:`build_parser` the same way ``status`` and
+``keygen`` were added: by registering another subparser in this module.
 """
 
 from __future__ import annotations
@@ -19,7 +23,7 @@ import json
 import sys
 from typing import Any
 
-from promptwitness import ledger
+from promptwitness import ledger, signing
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -49,6 +53,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
     status.set_defaults(func=_cmd_status)
 
+    keygen = sub.add_parser(
+        "keygen",
+        help="Generate a software-file Ed25519 signing key, mode 0600.",
+    )
+    keygen.add_argument(
+        "--harness",
+        default="claude-code",
+        help="Harness name the default key path is namespaced under.",
+    )
+    keygen.add_argument(
+        "--key-path",
+        default=None,
+        help="Override the key file path (else PROMPTWITNESS_KEY_PATH, else "
+        "<ledger_dir>/keys/ed25519.pem).",
+    )
+    keygen.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite an existing key file instead of refusing.",
+    )
+    keygen.set_defaults(func=_cmd_keygen)
+
     return parser
 
 
@@ -72,6 +98,30 @@ def _cmd_status(args: argparse.Namespace) -> int:
         "first_break_seq": verification.first_break_seq,
         "partitions": partitions,
         "key_strength": key_strength,
+    }
+    print(json.dumps(payload, sort_keys=True))
+    return 0
+
+
+def _cmd_keygen(args: argparse.Namespace) -> int:
+    """Generate a new ``software-file`` Ed25519 key and print ``{key_path,
+    key_id, algorithm, strength}`` -- never the key material itself, on
+    stdout, stderr, or (this command logs nothing) a log record."""
+    key_path = signing.resolve_key_path(args.harness, override=args.key_path)
+    if key_path.exists():
+        if not args.force:
+            print(
+                json.dumps({"error": f"key already exists at {key_path}"}, sort_keys=True),
+                file=sys.stderr,
+            )
+            return 1
+        key_path.unlink()
+    provider = signing.generate_and_write_key(key_path)
+    payload: dict[str, Any] = {
+        "key_path": str(key_path),
+        "key_id": provider.key_id(),
+        "algorithm": provider.algorithm(),
+        "strength": provider.strength(),
     }
     print(json.dumps(payload, sort_keys=True))
     return 0
