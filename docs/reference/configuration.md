@@ -4837,5 +4837,6 @@ auto-applying tier from the one loop meant to catch it being wrong.
 | `ATHENAEUM_TOPIC_MODEL` | `src/athenaeum/config.py`, `src/athenaeum/query_topics.py` |
 | `ATHENAEUM_TOPIC_THINKING` | `src/athenaeum/query_topics.py` |
 | `ATHENAEUM_VERIFY_MODEL` | `src/athenaeum/_cmd_paste_cleanup.py` |
+| `ATHENAEUM_WITNESS_LEDGER_ENABLED` | `src/athenaeum/_cmd_index.py`, `src/athenaeum/claude_code_adapter.py` |
 | `ATHENAEUM_WRITE_MODEL` | `src/athenaeum/config.py`, `src/athenaeum/drain_advisor.py`, `src/athenaeum/librarian.py`, `src/athenaeum/tiers.py` |
 | `ATHENAEUM_ZERO_YIELD_ALERT_THRESHOLD` | `src/athenaeum/librarian.py`, `src/athenaeum/recovery_yield.py` |

@@ -1763,7 +1763,25 @@ The `promptwitness` console script (a standalone package — see `docs/design/wi
 
 ### promptwitness command index
 
+- [`promptwitness hook`](#promptwitness-hook) (group) — Harness hook entry points.
+- [`promptwitness hook claude-code`](#promptwitness-hook-claude-code) (command) — Append a witness line for a Claude Code hook event.
 - [`promptwitness status`](#promptwitness-status) (command) — Print the ledger head seq, chain_ok, partitions, and key strength.
+
+## `promptwitness hook`
+
+Harness hook entry points.
+
+Subcommands:
+
+- `promptwitness hook claude-code` — Append a witness line for a Claude Code hook event.
+
+## `promptwitness hook claude-code`
+
+Append a witness line for a Claude Code hook event.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--event` | — | session-end | Which Claude Code hook fired. Only 'session-end' is implemented here -- the per-turn 'UserPromptSubmit' path is wired directly through athenaeum.claude_code_adapter, in-process, not through this console script. |
 
 ## `promptwitness status`
 
