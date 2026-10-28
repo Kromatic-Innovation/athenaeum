@@ -606,6 +606,7 @@ def recall_search(
         config=config,
         with_pii=with_pii,
         usage_classes=usage_classes,
+        cache_dir=cache_dir,
     )
     if handle_resolution is not None:
         # Issue athenaeum#1002: `contact_values[].source` can carry a raw
