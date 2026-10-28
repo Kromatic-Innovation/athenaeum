@@ -1187,11 +1187,22 @@ def verify_chain(
 class LedgerIndex:
     """One-pass index over a ledger directory, by ``prompt_id`` and by
     ``(session, prompt_digest)``. Only ``kind == "turn"`` lines are indexed.
+
+    ``chain_verification`` (athenaeum#2155, additive) is the
+    :func:`verify_chain` result for the same ledger directory, computed once
+    by :meth:`build` and cached here so a caller like
+    ``promptwitness.verify.verify_transcript`` -- which receives only this
+    index, not the ledger directory itself -- can still tell a line at or
+    after a hash-chain break apart from a genuinely witnessed one. ``None``
+    only for an index built via the bare constructor rather than
+    :meth:`build` (no production caller does this; it exists for tests that
+    want an empty index with no disk access at all).
     """
 
     def __init__(self) -> None:
         self._by_prompt_id: dict[str, WitnessLine] = {}
         self._by_session_digest: dict[tuple[str, str], list[WitnessLine]] = {}
+        self.chain_verification: ChainVerification | None = None
 
     @classmethod
     def build(cls, ledger_dir: str | os.PathLike[str]) -> LedgerIndex:
@@ -1204,6 +1215,7 @@ class LedgerIndex:
             if line.session and line.prompt_digest:
                 key = (line.session, line.prompt_digest)
                 idx._by_session_digest.setdefault(key, []).append(line)
+        idx.chain_verification = verify_chain(ledger_dir)
         return idx
 
     def by_prompt_id(self, prompt_id: str) -> WitnessLine | None:

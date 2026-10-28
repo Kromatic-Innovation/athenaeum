@@ -626,3 +626,158 @@ class TestUpgradeFindingsRegression:
         assert ots_result["attestation"]["status"] == "complete"
         assert ots_result["attestation"]["proof_path"] == "anchors/beta.ots"
         assert ots_result["attestation"]["detail"] == complete_detail
+
+
+# ---------------------------------------------------------------------------
+# verify / demo (athenaeum#2155)
+# ---------------------------------------------------------------------------
+
+
+class TestVerifySubcommand:
+    def test_parser_requires_transcript_and_ledger(self) -> None:
+        with pytest.raises(SystemExit):
+            cli.build_parser().parse_args(["verify"])
+
+    def test_parses_json_flag(self, tmp_path: Path) -> None:
+        args = cli.build_parser().parse_args(
+            ["verify", "--transcript", "t.json", "--ledger", str(tmp_path), "--json"]
+        )
+        assert args.command == "verify"
+        assert args.json is True
+
+    def _write_transcript(self, path: Path, records: list[dict]) -> None:
+        path.write_text(json.dumps(records), encoding="utf-8")
+
+    def test_exit_0_when_every_human_turn_witnessed(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        ledger.append_line(
+            tmp_path,
+            kind="turn",
+            harness="claude-code",
+            harness_version="",
+            hook_version="promptwitness 0.1.0",
+            session="s1",
+            turn=1,
+            prompt_id="p1",
+            prompt_kind="human",
+            prompt_digest=canon.digest(canon.normalize("hello")),
+            raw_digest=canon.digest("hello"),
+            prompt_chars=5,
+            channel="interactive",
+        )
+        transcript = tmp_path / "t.json"
+        self._write_transcript(
+            transcript, [{"role": "human", "text": "hello", "session": "s1", "prompt_id": "p1"}]
+        )
+        rc = cli.main(["verify", "--transcript", str(transcript), "--ledger", str(tmp_path)])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "witnessed" in out
+
+    def test_exit_1_when_a_human_turn_is_not_witnessed(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        transcript = tmp_path / "t.json"
+        self._write_transcript(
+            transcript, [{"role": "human", "text": "ghost", "session": "s1", "prompt_id": "p1"}]
+        )
+        rc = cli.main(["verify", "--transcript", str(transcript), "--ledger", str(tmp_path)])
+        assert rc == 1
+
+    def test_json_output_shape(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        transcript = tmp_path / "t.json"
+        self._write_transcript(
+            transcript, [{"role": "machine", "text": "<task-notification>x</task-notification>"}]
+        )
+        rc = cli.main(
+            ["verify", "--transcript", str(transcript), "--ledger", str(tmp_path), "--json"]
+        )
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["ok"] is True
+        assert payload["verdicts"][0]["verdict"] == "machine-authored"
+
+
+class TestDemoSubcommand:
+    def test_parser_defaults(self, tmp_path: Path) -> None:
+        args = cli.build_parser().parse_args(["demo"])
+        assert args.command == "demo"
+        assert args.synthetic is False
+        assert args.transcript is None
+        assert args.out == "demo.html"
+
+    def test_synthetic_mode_writes_html_with_no_script_tag(self, tmp_path: Path) -> None:
+        out = tmp_path / "demo.html"
+        rc = cli.main(["demo", "--out", str(out)])
+        assert rc == 0
+        text = out.read_text(encoding="utf-8")
+        assert "<script" not in text.lower()
+        assert "Verified transcript" in text
+        assert "Tampered transcript" in text
+
+    def test_real_mode_requires_ledger(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        transcript = tmp_path / "t.json"
+        transcript.write_text(json.dumps([{"role": "human", "text": "hi"}]), encoding="utf-8")
+        rc = cli.main(["demo", "--transcript", str(transcript), "--out", str(tmp_path / "d.html")])
+        assert rc == 2
+
+    def test_synthetic_and_transcript_are_mutually_exclusive(self, tmp_path: Path) -> None:
+        transcript = tmp_path / "t.json"
+        transcript.write_text(json.dumps([{"role": "human", "text": "hi"}]), encoding="utf-8")
+        rc = cli.main(
+            [
+                "demo",
+                "--synthetic",
+                "--transcript",
+                str(transcript),
+                "--ledger",
+                str(tmp_path),
+                "--out",
+                str(tmp_path / "d.html"),
+            ]
+        )
+        assert rc == 2
+
+    def test_real_mode_writes_mode_0600_and_warns_on_stderr(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        ledger.append_line(
+            tmp_path,
+            kind="turn",
+            harness="claude-code",
+            harness_version="",
+            hook_version="promptwitness 0.1.0",
+            session="s1",
+            turn=1,
+            prompt_id="p1",
+            prompt_kind="human",
+            prompt_digest=canon.digest(canon.normalize("hi")),
+            raw_digest=canon.digest("hi"),
+            prompt_chars=2,
+            channel="interactive",
+        )
+        transcript = tmp_path / "t.json"
+        transcript.write_text(
+            json.dumps([{"role": "human", "text": "hi", "session": "s1", "prompt_id": "p1"}]),
+            encoding="utf-8",
+        )
+        out = tmp_path / "real-demo.html"
+        rc = cli.main(
+            [
+                "demo",
+                "--transcript",
+                str(transcript),
+                "--ledger",
+                str(tmp_path),
+                "--out",
+                str(out),
+            ]
+        )
+        assert rc == 0
+        assert stat.S_IMODE(out.stat().st_mode) == 0o600
+        err = capsys.readouterr().err
+        assert "do not publish" in err.lower()
+        assert "real" in err.lower()

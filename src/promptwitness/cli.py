@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """``promptwitness`` console script (athenaeum#2147, athenaeum#2149,
-athenaeum#2150, athenaeum#2151, athenaeum#2152, athenaeum#2157).
+athenaeum#2150, athenaeum#2151, athenaeum#2152, athenaeum#2157,
+athenaeum#2155).
 
 Layering: L2 (CLI/presentation — depends on :mod:`promptwitness.ledger`,
 :mod:`promptwitness.canon`, :mod:`promptwitness.signing`,
-:mod:`promptwitness.anchor` and :mod:`promptwitness.anchor_rfc3161`).
+:mod:`promptwitness.anchor`, :mod:`promptwitness.anchor_rfc3161`,
+:mod:`promptwitness.verify` and :mod:`promptwitness.demo`).
 Standard library only at import time; no ``athenaeum`` import, and no
 ``cryptography`` or ``opentimestamps`` import either — :mod:`promptwitness.signing`
 and :mod:`promptwitness.anchor` each import their optional dependency
@@ -15,10 +17,10 @@ rather than importing a third-party library, so it carries no such extra.
 
 ``status`` (athenaeum#2147), ``keygen`` (athenaeum#2150, extended with
 ``--provider os-keystore`` by athenaeum#2152), ``hook claude-code``
-(athenaeum#2149) and ``anchor`` (athenaeum#2151, extended with the optional
-RFC 3161 second source by athenaeum#2157) are all implemented here. Each
-was added the same way: by registering another subparser in
-:func:`build_parser`, in this module.
+(athenaeum#2149), ``anchor`` (athenaeum#2151, extended with the optional
+RFC 3161 second source by athenaeum#2157), ``verify`` and ``demo``
+(athenaeum#2155) are all implemented here. Each was added the same way: by
+registering another subparser in :func:`build_parser`, in this module.
 """
 
 from __future__ import annotations
@@ -28,11 +30,15 @@ import json
 import os
 import re
 import sys
+import tempfile
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from promptwitness import __version__, anchor_rfc3161, canon, ledger, signing
 from promptwitness import anchor as anchor_mod
+from promptwitness import demo as demo_mod
+from promptwitness import verify as verify_mod
 from promptwitness.harness import claude_code
 
 #: Matches a subject string that names an actual ledger line
@@ -181,6 +187,62 @@ def build_parser() -> argparse.ArgumentParser:
         "PROMPTWITNESS_RFC3161_CA_BUNDLE; no default).",
     )
     anchor_parser.set_defaults(func=_cmd_anchor)
+
+    verify_parser = sub.add_parser(
+        "verify",
+        help="Verify a transcript against a witness ledger; exit 0 iff every "
+        "human turn is witnessed, else 1.",
+    )
+    verify_parser.add_argument(
+        "--transcript",
+        required=True,
+        help="Path to a transcript JSON file: a top-level array of "
+        "{role, text, session, prompt_id} objects (role 'human' or "
+        "anything else for machine-authored; see promptwitness.verify).",
+    )
+    verify_parser.add_argument(
+        "--ledger",
+        required=True,
+        help="Ledger directory to verify the transcript against.",
+    )
+    verify_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print {ok, verdicts} as one JSON object instead of one line per turn.",
+    )
+    verify_parser.set_defaults(func=_cmd_verify)
+
+    demo_parser = sub.add_parser(
+        "demo",
+        help="Render a static HTML side-by-side demo: a verified transcript "
+        "next to a tampered one, turn by turn.",
+    )
+    demo_parser.add_argument(
+        "--synthetic",
+        action="store_true",
+        help="Generate a synthetic five-turn session and two transcripts "
+        "(default when --transcript is not given; contains no real prompt "
+        "text, safe to publish).",
+    )
+    demo_parser.add_argument(
+        "--transcript",
+        default=None,
+        help="Render a REAL transcript JSON file instead of synthetic data "
+        "(requires --ledger). The output file is written at mode 0600 and a "
+        "warning is printed -- never publish it.",
+    )
+    demo_parser.add_argument(
+        "--ledger",
+        default=None,
+        help="Ledger directory to verify --transcript against (ignored in "
+        "synthetic mode).",
+    )
+    demo_parser.add_argument(
+        "--out",
+        default="demo.html",
+        help="Output HTML file path (default: demo.html).",
+    )
+    demo_parser.set_defaults(func=_cmd_demo)
 
     return parser
 
@@ -629,6 +691,128 @@ def _cmd_anchor(args: argparse.Namespace) -> int:
             )
 
     print(json.dumps({"results": results}, sort_keys=True))
+    return 0
+
+
+def _last_turn_key_strength(ledger_dir: Any) -> str:
+    """The ``key.strength`` of the most recent ``kind="turn"`` line, or
+    ``"none"`` for an empty ledger -- the same value :func:`_cmd_status`
+    reports, reused here for the demo footer."""
+    strength = "none"
+    for line in ledger.iter_lines(ledger_dir):
+        if line.kind == "turn":
+            strength = line.key.strength
+    return strength
+
+
+def _collect_anchor_rows(ledger_dir: Any) -> list[tuple[str, str, str]]:
+    """``(source, status, claimed_time)`` for the most recent attestation
+    recorded per anchor ``source`` in *ledger_dir* -- the footer's "Anchors"
+    table. Last-write-wins per source, scanning every ``kind="anchor"``
+    line in the ledger (there is no separate anchor-status index)."""
+    rows: dict[str, tuple[str, str, str]] = {}
+    for line in ledger.iter_lines(ledger_dir):
+        if line.kind != "anchor":
+            continue
+        raw_att = line.extra.get("attestation")
+        if not isinstance(raw_att, dict):
+            continue
+        att = anchor_mod.Attestation.from_dict(raw_att)
+        rows[att.source] = (att.source, att.status, att.claimed_time)
+    return list(rows.values())
+
+
+def _cmd_verify(args: argparse.Namespace) -> int:
+    """``promptwitness verify --transcript ... --ledger ...``: verify a
+    transcript against a witness ledger and exit 0 iff every human turn is
+    witnessed (athenaeum#2155's own acceptance criterion), else 1."""
+    records = verify_mod.load_transcript_records(args.transcript)
+    ledger_index = ledger.LedgerIndex.build(args.ledger)
+    verdicts = verify_mod.verify_transcript(records, ledger_index)
+    ok = verify_mod.all_human_turns_witnessed(verdicts)
+    if args.json:
+        payload = {"ok": ok, "verdicts": [v.to_dict() for v in verdicts]}
+        print(json.dumps(payload, sort_keys=True))
+    else:
+        for turn_verdict in verdicts:
+            print(f"{turn_verdict.index}: {verify_mod.verdict_label(turn_verdict.verdict)}")
+        print("ok" if ok else "FAILED: not every human turn was witnessed")
+    return 0 if ok else 1
+
+
+def _cmd_demo(args: argparse.Namespace) -> int:
+    """``promptwitness demo``: render the static side-by-side HTML demo.
+
+    Synthetic mode (default, no ``--transcript``) builds a throwaway ledger
+    under a fresh temp directory and writes a shareable page with no real
+    prompt text. Real-transcript mode (``--transcript`` + ``--ledger``)
+    renders the operator's own data, writes the output at mode 0600, and
+    prints the required stderr warning -- never publish that file.
+    """
+    if args.transcript and args.synthetic:
+        print(
+            json.dumps({"error": "--synthetic and --transcript are mutually exclusive"}),
+            file=sys.stderr,
+        )
+        return 2
+
+    out_path = Path(args.out)
+
+    if args.transcript:
+        if not args.ledger:
+            print(
+                json.dumps({"error": "--ledger is required together with --transcript"}),
+                file=sys.stderr,
+            )
+            return 2
+        records = verify_mod.load_transcript_records(args.transcript)
+        ledger_index = ledger.LedgerIndex.build(args.ledger)
+        verdicts = verify_mod.verify_transcript(records, ledger_index)
+        section = demo_mod.DemoSection(
+            title="Real transcript", records=records, verdicts=verdicts
+        )
+        html_text = demo_mod.render_html(
+            [section],
+            mode="real",
+            key_strength=_last_turn_key_strength(args.ledger),
+            anchors=_collect_anchor_rows(args.ledger),
+        )
+        demo_mod.write_demo_html(out_path, html_text, restrict_mode=True)
+        print(
+            f"warning: {out_path} was rendered from a REAL transcript and ledger "
+            "and contains real prompt text. Do not publish or share this file.",
+            file=sys.stderr,
+        )
+        return 0
+
+    with tempfile.TemporaryDirectory(prefix="promptwitness-demo-") as tmp_dir:
+        synthetic = demo_mod.generate_synthetic(tmp_dir)
+        verdicts_a = verify_mod.verify_transcript(
+            synthetic.transcript_a, synthetic.ledger_index
+        )
+        verdicts_b = verify_mod.verify_transcript(
+            synthetic.transcript_b, synthetic.ledger_index
+        )
+        sections = [
+            demo_mod.DemoSection(
+                title="Verified transcript",
+                records=synthetic.transcript_a,
+                verdicts=verdicts_a,
+            ),
+            demo_mod.DemoSection(
+                title="Tampered transcript",
+                records=synthetic.transcript_b,
+                verdicts=verdicts_b,
+            ),
+        ]
+        att = synthetic.anchor_attestation
+        html_text = demo_mod.render_html(
+            sections,
+            mode="synthetic",
+            key_strength=synthetic.key_provider.strength(),
+            anchors=[(att.source, att.status, att.claimed_time)],
+        )
+        demo_mod.write_demo_html(out_path, html_text, restrict_mode=False)
     return 0
 
 
