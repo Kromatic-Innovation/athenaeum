@@ -528,6 +528,67 @@ def _orphan_uid(handle: str, *, with_pii: bool) -> HandleResolution:
     return _unresolved(handle, _Walk(kind="unresolvable", reason="orphan-uid"), with_pii=with_pii)
 
 
+#: A uid safe to splice into a filename glob: no path separator, no glob
+#: metacharacter. Anything else skips the filename fast path.
+_FILENAME_SAFE_UID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
+
+
+def _page_by_uid_filename(wiki_root: Path, uid: str) -> Path | None:
+    """The one page named ``<uid>-*.md`` / ``<uid>.md`` whose frontmatter carries *uid*.
+
+    Returns a path only when EXACTLY one such page exists and it indexes as an
+    entity page (readable, a ``name:``, and a frontmatter ``uid:`` equal to
+    *uid*: what :meth:`EntityIndex.has_entity_format` guarantees). Zero hits
+    (a page whose filename does not carry its uid) or several hits return
+    ``None`` so the caller falls back to a full index. Reads only the
+    candidate pages.
+    """
+    from athenaeum.models import EntityIndex as _EntityIndex
+
+    if not _FILENAME_SAFE_UID.fullmatch(uid):
+        return None
+    candidates = sorted(wiki_root.glob(f"{uid}-*.md"))
+    exact = wiki_root / f"{uid}.md"
+    if exact.is_file():
+        candidates.append(exact)
+    verified: list[Path] = []
+    for fpath in candidates:
+        parsed = _EntityIndex.read_page_record(fpath)
+        if parsed is not None and parsed[0].uid == uid:
+            verified.append(fpath)
+    return verified[0] if len(verified) == 1 else None
+
+
+def _locate_page(
+    wiki_root: Path,
+    uid: str,
+    *,
+    entity_index: EntityIndex | None,
+    cache_dir: Path | None,
+) -> Path | None:
+    """Resolve a known *uid* to its entity page, or ``None`` (orphan).
+
+    - *entity_index* given: that index decides, exactly as before.
+    - *cache_dir* given: the filename fast path, then the persisted index in
+      :mod:`athenaeum.entity_index_cache` when the fast path is not conclusive.
+    - neither: a fresh full :class:`EntityIndex`, the pre-cache behaviour.
+    """
+    from athenaeum.models import EntityIndex as _EntityIndex
+
+    if entity_index is None and cache_dir is not None:
+        fast = _page_by_uid_filename(wiki_root, uid)
+        if fast is not None:
+            return fast
+        from athenaeum.entity_index_cache import load_entity_index
+
+        entity_index = load_entity_index(wiki_root, cache_dir)
+    index = entity_index if entity_index is not None else _EntityIndex(wiki_root)
+    page_path = index.get_by_uid(uid)
+    if page_path is None or not page_path.exists() or not index.has_entity_format(page_path):
+        return None
+    return page_path
+
+
 def _finish(
     knowledge_root: Path,
     wiki_root: Path,
@@ -540,6 +601,7 @@ def _finish(
     usage_classes: Collection[str] | None,
     excluded_index: ExcludedRecordIndex | None = None,
     entity_index: EntityIndex | None = None,
+    cache_dir: Path | None = None,
 ) -> HandleResolution:
     """Turn a resolved/unresolved walk outcome into the full response (D5/D6).
 
@@ -557,7 +619,6 @@ def _finish(
     :func:`_assemble_contact_values` is ever reached — a prepared index
     changes what a lookup costs, never what it is permitted to see.
     """
-    from athenaeum.models import EntityIndex as _EntityIndex
     from athenaeum.models import is_page_authorized, parse_frontmatter
     from athenaeum.storage import is_recallable, storage_policy_configured
 
@@ -567,9 +628,8 @@ def _finish(
     uid = walk.uid
     assert uid is not None  # a "resolved" walk always carries a uid
 
-    index = entity_index if entity_index is not None else _EntityIndex(wiki_root)
-    page_path = index.get_by_uid(uid)
-    if page_path is None or not page_path.exists() or not index.has_entity_format(page_path):
+    page_path = _locate_page(wiki_root, uid, entity_index=entity_index, cache_dir=cache_dir)
+    if page_path is None:
         return _orphan_uid(handle, with_pii=with_pii)
 
     try:
@@ -627,6 +687,7 @@ def resolve_handle_query(
     usage_classes: Collection[str] | None = None,
     excluded_index: ExcludedRecordIndex | None = None,
     entity_index: EntityIndex | None = None,
+    cache_dir: Path | None = None,
 ) -> HandleResolution | None:
     """The one entry point both ``recall`` implementations call (D7).
 
@@ -679,6 +740,14 @@ def resolve_handle_query(
             long-lived process that also compiles new wiki pages between
             resolutions should rebuild it at that boundary for the same
             reason.
+        cache_dir: The athenaeum cache dir. Given (and *entity_index* not),
+            a resolved uid is located by its filename (``<uid>-*.md``) when
+            exactly one verified page matches, and otherwise through the
+            persisted, stat-validated index in
+            :mod:`athenaeum.entity_index_cache`, instead of a full
+            :class:`~athenaeum.models.EntityIndex` scan. ``None`` (the
+            default) keeps the full scan. The recall CLI and MCP tool pass
+            it; the librarian's compile-time caller does not.
 
     Gating is unaffected either way: :func:`_finish`'s audience and
     ``recallable`` checks run against frontmatter parsed fresh from disk on
@@ -691,6 +760,15 @@ def resolve_handle_query(
     if email_handle is not None:
         from athenaeum import pii
 
+        if excluded_index is None:
+            # One index for the whole call: the email walk and the contact
+            # value join read the same surface in the same read-only window,
+            # so a second scan would only repeat the first. The index loads
+            # lazily, and `_assemble_contact_values` still builds its own for
+            # a page class mapped to a different surface.
+            excluded_index = pii.ExcludedRecordIndex(
+                pii.contacts_surface_root(knowledge_root, config)
+            )
         normalized = pii.normalize_identifier(email_handle)
         walk = _walk_email_handle(
             knowledge_root, normalized, config=config, excluded_index=excluded_index
@@ -706,6 +784,7 @@ def resolve_handle_query(
             usage_classes=usage_classes,
             excluded_index=excluded_index,
             entity_index=entity_index,
+            cache_dir=cache_dir,
         )
 
     stripped = _strip_interrogative_framing(query)
@@ -731,6 +810,7 @@ def resolve_handle_query(
         usage_classes=usage_classes,
         excluded_index=excluded_index,
         entity_index=entity_index,
+        cache_dir=cache_dir,
     )
 
 
