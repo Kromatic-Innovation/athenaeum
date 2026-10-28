@@ -390,8 +390,15 @@ class OpenTimestampsAnchorer:
     def anchor(self, digest: bytes, subject: str, *, timeout: float = 10.0) -> Attestation:
         try:
             from opentimestamps.calendar import RemoteCalendar
-            from opentimestamps.core.notary import PendingAttestation
-            from opentimestamps.core.serialize import BytesSerializationContext
+            from opentimestamps.core.notary import (
+                BitcoinBlockHeaderAttestation,
+                PendingAttestation,
+            )
+            from opentimestamps.core.serialize import (
+                BytesDeserializationContext,
+                BytesSerializationContext,
+            )
+            from opentimestamps.core.timestamp import Timestamp
         except Exception as exc:  # noqa: BLE001 - any import failure degrades, never raises
             return Attestation(
                 source=self.source,
@@ -400,6 +407,38 @@ class OpenTimestampsAnchorer:
                 proof_path=None,
                 detail={"reason": "import-failed", "error": _short(exc)},
             )
+
+        proof_path = self._proof_path(subject)
+
+        # Defence in depth (review finding #2 on athenaeum#2151/PR #2168):
+        # never clobber an existing proof whose recorded attestation is
+        # already Bitcoin-confirmed -- it is the strongest evidence this
+        # design produces, and a confirmed proof cannot be regenerated.
+        # `promptwitness.cli._cmd_anchor` already avoids calling `anchor()`
+        # for a subject it knows is complete; this is the second,
+        # independent guard at the write site itself, since `anchor` is a
+        # public method any caller could reach directly.
+        if proof_path.is_file():
+            try:
+                existing_ts = Timestamp.deserialize(
+                    BytesDeserializationContext(proof_path.read_bytes()), digest
+                )
+                existing_commitment_hex, existing_status = _classify_timestamp(
+                    existing_ts, PendingAttestation, BitcoinBlockHeaderAttestation
+                )
+            except Exception:  # noqa: BLE001 - unreadable file: fall through, let submit overwrite it
+                existing_status, existing_commitment_hex = None, None
+            if existing_status == "complete":
+                return Attestation(
+                    source=self.source,
+                    status="complete",
+                    claimed_time=_now_iso_ms(),
+                    proof_path=str(proof_path.relative_to(self._ledger_dir)),
+                    detail={
+                        "reason": "existing-proof-already-complete",
+                        "commitment_hex": existing_commitment_hex,
+                    },
+                )
 
         tried: list[str] = []
         last_error: str | None = None
@@ -419,9 +458,22 @@ class OpenTimestampsAnchorer:
 
             ctx = BytesSerializationContext()
             ts.serialize(ctx)
-            proof_path = self._proof_path(subject)
-            proof_path.parent.mkdir(parents=True, exist_ok=True)
-            proof_path.write_bytes(ctx.getbytes())
+            try:
+                proof_path.parent.mkdir(parents=True, exist_ok=True)
+                proof_path.write_bytes(ctx.getbytes())
+            except OSError as exc:  # full disk / unwritable dir: never raise
+                return Attestation(
+                    source=self.source,
+                    status="failed",
+                    claimed_time=_now_iso_ms(),
+                    proof_path=None,
+                    detail={
+                        "reason": "proof-write-failed",
+                        "calendar": url,
+                        "calendars_tried": tried,
+                        "error": _short(exc),
+                    },
+                )
 
             return Attestation(
                 source=self.source,
@@ -517,7 +569,10 @@ class OpenTimestampsAnchorer:
 
         ctx = BytesSerializationContext()
         full_ts.serialize(ctx)
-        proof_path.write_bytes(ctx.getbytes())
+        try:
+            proof_path.write_bytes(ctx.getbytes())
+        except OSError:  # full disk / unwritable file: never raise, keep the old proof
+            return att
 
         return Attestation(
             source=self.source,
