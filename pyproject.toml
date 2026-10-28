@@ -88,6 +88,22 @@ maya-eval = [
 signing = [
     "cryptography>=42,<51",
 ]
+# Issue athenaeum#2147: promptwitness signing (athenaeum#2150) and anchoring
+# (athenaeum#2151) adapters. Both are lazy imports -- promptwitness is
+# stdlib-only at import time -- so a plain `pip install athenaeum` never
+# needs either. Deliberately separate from the `signing` extra above:
+# `signing` is athenaeum's OWN receipt sealer (a different key, a different
+# protocol, a different call site); promptwitness does not reuse it (the
+# epic's own "relationship to athenaeum's seam" note -- per-turn `op read`
+# latency and network dependency make the 1Password sealer unsuitable for a
+# per-prompt hook path). NOT in `DIRECT_EXTRAS` (tests/test_ci_lock_parity.py)
+# -- the deploy worktree installs `mcp,vector` only.
+witness-sign = [
+    "cryptography>=42,<51",
+]
+witness-anchor = [
+    "opentimestamps>=0.4",
+]
 dev = [
     "pytest>=8.0",
     # athenaeum#2136: BOTH of these are imported DIRECTLY by the test suite and
@@ -157,6 +173,12 @@ athenaeum = "athenaeum.cli:main"
 # importing every `_cmd_*` module up front — see
 # `src/athenaeum/claude_code_adapter.py`'s module docstring.
 athenaeum-claude-hook = "athenaeum.claude_code_adapter:main"
+# athenaeum#2147: the promptwitness ledger's own console script. A separate
+# top-level script (not an `athenaeum` subcommand) because promptwitness is
+# a standalone package with zero `athenaeum` imports (see
+# src/promptwitness/__init__.py's module docstring) and athenaeum#2162 may
+# extract it to its own repository later.
+promptwitness = "promptwitness.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/Kromatic-Innovation/athenaeum"
@@ -164,13 +186,18 @@ Repository = "https://github.com/Kromatic-Innovation/athenaeum"
 Issues = "https://github.com/Kromatic-Innovation/athenaeum/issues"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/athenaeum"]
+# athenaeum#2147: `src/promptwitness` is a second, independent top-level
+# package in the same wheel -- NOT force-included (unlike `skills`/
+# `examples` below), because it already lives under `src/`, which hatchling
+# packages the normal way when listed here, same as `src/athenaeum`.
+packages = ["src/athenaeum", "src/promptwitness"]
 # Non-Python artefacts we ship in the wheel. Current hatchling defaults
 # already pick these up, but declaring them explicitly protects against
 # future default-include shifts that would silently break `athenaeum init`
 # (schema templates) or type-checker discovery (PEP 561 marker).
 include = [
     "src/athenaeum/py.typed",
+    "src/promptwitness/py.typed",
     "src/athenaeum/schema/**/*.md",
     "src/athenaeum/templates/**/*.md",
     # Packaged shape-rule examples (issue athenaeum#901) -- copied into
@@ -265,7 +292,9 @@ select = ["E", "F", "I", "W", "RUF100", "BLE001"]
 # Strictness is intentionally still incremental here — tighten `[tool.mypy]`
 # (e.g. `disallow_untyped_defs`) in a follow-up, keeping the check green.
 python_version = "3.13"
-files = ["src/athenaeum"]
+# athenaeum#2147: promptwitness ships its own `py.typed` marker and is
+# type-checked by the same blocking `types` CI job as athenaeum.
+files = ["src/athenaeum", "src/promptwitness"]
 warn_unused_ignores = true
 # Third-party deps ship without stubs (anthropic, chromadb, fastmcp, …);
 # silence import-not-found so the sizing measures athenaeum's own

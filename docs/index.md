@@ -116,6 +116,9 @@ does not answer.
 - [PII classification policy](design/pii-classification-policy.md) — the five classes that
   separate a non-contact token from a genuine personal address, the page-purpose rule, and
   the over-restoring-is-worse-than-under-restoring principle.
+- [Prompt witness ledger](design/witness-ledger.md) — the hash-chained, no-plaintext witness
+  ledger, the security boundary it does and does not prove, and the `promptwitness` package
+  boundary.
 
 ## Measurements
 
