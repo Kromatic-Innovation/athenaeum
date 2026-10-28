@@ -1065,6 +1065,22 @@ class ChainVerification:
     physically follows the gap; a reordered pair surfaces at the ``seq`` of
     whichever of the two now appears earlier in the file.
 
+    ``first_break_prev_seq`` (athenaeum#2155 review finding #1, additive) is
+    the ``seq`` of whichever line physically precedes the break in on-disk
+    order -- the line a content mutation (anything other than ``prev``
+    itself) actually lands on, per the "break at N+1" note above. ``None``
+    when ``ok`` is ``True``, or when the break is at the very first line in
+    the file (a genesis-``prev`` mismatch has no preceding line to name; the
+    first line IS the suspect one there, already covered by
+    ``first_break_seq`` itself). Computed from on-disk iteration order, not
+    from ``seq`` arithmetic (``seq - 1``) -- a deleted line leaves a gap, so
+    the physically preceding line's own ``seq`` can differ from
+    ``first_break_seq - 1``. A caller that treats ONLY
+    ``seq >= first_break_seq`` as suspect -- as
+    ``promptwitness.verify.verify_transcript`` used to -- exempts exactly
+    the line that was actually tampered; see that module's own verdict
+    logic for the fix.
+
     **Signature-status fields (athenaeum#2150, additive — all default to a
     value that preserves the pre-athenaeum#2150 behaviour exactly when the
     new *public_keys* parameter is omitted).** ``ok``/``first_break_seq``/
@@ -1088,6 +1104,7 @@ class ChainVerification:
     unsigned_lines: int = 0
     unverified_signed_lines: int = 0
     invalid_signature_seqs: tuple[int, ...] = ()
+    first_break_prev_seq: int | None = None
 
 
 def verify_chain(
@@ -1115,21 +1132,32 @@ def verify_chain(
     a problem.
     """
     first_break: int | None = None
+    first_break_prev_seq: int | None = None
     checked = 0
     signed = 0
     unsigned = 0
     unverified = 0
     invalid: list[int] = []
     expected_prev: str | None = None
+    prev_seq: int | None = None
     for raw in _iter_raw(Path(ledger_dir)):
         checked += 1
         if expected_prev is None:
             expected_prev = _genesis_prev(str(raw.get("ledger_id", "")))
         actual_prev = raw.get("prev")
+        raw_seq = raw.get("seq")
         if actual_prev != expected_prev and first_break is None:
-            seq = raw.get("seq")
-            first_break = seq if isinstance(seq, int) else -1
+            first_break = raw_seq if isinstance(raw_seq, int) else -1
+            # The line physically preceding this one in on-disk order --
+            # NOT `first_break - 1`, which assumes contiguous `seq` and is
+            # wrong across a deleted-line gap. `None` here means this break
+            # line is the very first one in the file (no predecessor to
+            # name; that line is itself the suspect one, already covered by
+            # `first_break_seq`).
+            first_break_prev_seq = prev_seq
         expected_prev = _recompute_line_hash(raw)
+        if isinstance(raw_seq, int):
+            prev_seq = raw_seq
 
         sig = raw.get("sig")
         if sig is None:
@@ -1176,6 +1204,7 @@ def verify_chain(
         unsigned_lines=unsigned,
         unverified_signed_lines=unverified,
         invalid_signature_seqs=tuple(invalid),
+        first_break_prev_seq=first_break_prev_seq,
     )
 
 
@@ -1187,11 +1216,22 @@ def verify_chain(
 class LedgerIndex:
     """One-pass index over a ledger directory, by ``prompt_id`` and by
     ``(session, prompt_digest)``. Only ``kind == "turn"`` lines are indexed.
+
+    ``chain_verification`` (athenaeum#2155, additive) is the
+    :func:`verify_chain` result for the same ledger directory, computed once
+    by :meth:`build` and cached here so a caller like
+    ``promptwitness.verify.verify_transcript`` -- which receives only this
+    index, not the ledger directory itself -- can still tell a line at or
+    after a hash-chain break apart from a genuinely witnessed one. ``None``
+    only for an index built via the bare constructor rather than
+    :meth:`build` (no production caller does this; it exists for tests that
+    want an empty index with no disk access at all).
     """
 
     def __init__(self) -> None:
         self._by_prompt_id: dict[str, WitnessLine] = {}
         self._by_session_digest: dict[tuple[str, str], list[WitnessLine]] = {}
+        self.chain_verification: ChainVerification | None = None
 
     @classmethod
     def build(cls, ledger_dir: str | os.PathLike[str]) -> LedgerIndex:
@@ -1204,6 +1244,7 @@ class LedgerIndex:
             if line.session and line.prompt_digest:
                 key = (line.session, line.prompt_digest)
                 idx._by_session_digest.setdefault(key, []).append(line)
+        idx.chain_verification = verify_chain(ledger_dir)
         return idx
 
     def by_prompt_id(self, prompt_id: str) -> WitnessLine | None:
