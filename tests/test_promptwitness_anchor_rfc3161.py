@@ -48,13 +48,20 @@ def _fake_run_ok(
     args: list[str], data: bytes | None, timeout: float
 ) -> subprocess.CompletedProcess[bytes]:
     """Behaves like a real ``openssl ts -query`` (writes a request to
-    stdout, exits 0) and ``openssl ts -verify`` (prints ``Verification: OK``,
-    exits 0) -- the shape AC1 needs."""
+    stdout, exits 0), ``openssl ts -reply -in <path> -text`` (prints a
+    granted PKIStatus, exits 0 -- the reply-validation layer added for
+    athenaeum#2174 review finding #1), and ``openssl ts -verify`` (prints
+    ``Verification: OK``, exits 0) -- the shape AC1 needs."""
     del data, timeout
     if "-query" in args:
         assert "-digest" in args
         return subprocess.CompletedProcess(
             args, returncode=0, stdout=b"FAKE-TS-QUERY-BYTES", stderr=b""
+        )
+    if "-reply" in args:
+        assert "-in" in args
+        return subprocess.CompletedProcess(
+            args, returncode=0, stdout=b"Status: Granted.\n", stderr=b""
         )
     if "-verify" in args:
         assert "-CAfile" in args
@@ -215,6 +222,116 @@ class TestQueryAndPostAndWriteFailuresDegrade:
 
         assert result.status == "failed"
         assert result.detail["reason"] == "verify-failed"
+
+
+# ---------------------------------------------------------------------------
+# Reply validation (athenaeum#2174 review finding #1): a reply that isn't a
+# granted RFC 3161 TimeStampResp must never become a "complete" attestation,
+# and a bad reply must never clobber a GOOD proof already on disk.
+# ---------------------------------------------------------------------------
+
+
+class TestReplyValidationDegradesToFailed:
+    def test_empty_reply_is_empty_reply_and_leaves_no_tsr(self, tmp_path: Path) -> None:
+        def _empty_http_post(url: str, data: bytes, timeout: float) -> bytes:
+            return b""
+
+        rfc = anchor_rfc3161.Rfc3161Anchorer(
+            tmp_path, tsa_url=_TSA_URL, run=_fake_run_ok, http_post=_empty_http_post
+        )
+        att = rfc.anchor(b"\x00" * 32, "witness:pw-x:1")
+
+        assert att.status == "failed"
+        assert att.detail["reason"] == "empty-reply"
+        assert att.proof_path is None
+        proof_path = tmp_path / "anchors" / "witness_pw-x_1.tsr"
+        assert not proof_path.exists()
+        assert not proof_path.with_name(proof_path.name + ".tmp").exists()
+
+    def test_non_der_reply_is_reply_not_der_and_leaves_no_tsr(self, tmp_path: Path) -> None:
+        def _html_http_post(url: str, data: bytes, timeout: float) -> bytes:
+            return b"<html>503 Service Unavailable</html>"
+
+        rfc = anchor_rfc3161.Rfc3161Anchorer(
+            tmp_path, tsa_url=_TSA_URL, run=_fake_run_ok, http_post=_html_http_post
+        )
+        att = rfc.anchor(b"\x00" * 32, "witness:pw-x:1")
+
+        assert att.status == "failed"
+        assert att.detail["reason"] == "reply-not-der"
+        assert att.proof_path is None
+        proof_path = tmp_path / "anchors" / "witness_pw-x_1.tsr"
+        assert not proof_path.exists()
+        assert not proof_path.with_name(proof_path.name + ".tmp").exists()
+
+    def test_rejected_pkistatus_is_reply_not_granted_and_does_not_clobber_good_proof(
+        self, tmp_path: Path
+    ) -> None:
+        proof_path = tmp_path / "anchors" / "witness_pw-x_1.tsr"
+        proof_path.parent.mkdir(parents=True)
+        proof_path.write_bytes(b"GOOD-EXISTING-PROOF-BYTES")
+
+        def _fake_run_rejected(
+            args: list[str], data: bytes | None, timeout: float
+        ) -> subprocess.CompletedProcess[bytes]:
+            if "-query" in args:
+                return subprocess.CompletedProcess(
+                    args, returncode=0, stdout=b"FAKE-TS-QUERY-BYTES", stderr=b""
+                )
+            if "-reply" in args:
+                return subprocess.CompletedProcess(
+                    args, returncode=1, stdout=b"", stderr=b"Status: Rejection.\n"
+                )
+            raise AssertionError(f"unexpected openssl invocation: {args}")
+
+        def _bad_but_der_shaped_http_post(url: str, data: bytes, timeout: float) -> bytes:
+            return b"\x30BAD-BUT-DER-SHAPED-REPLY"
+
+        rfc = anchor_rfc3161.Rfc3161Anchorer(
+            tmp_path,
+            tsa_url=_TSA_URL,
+            run=_fake_run_rejected,
+            http_post=_bad_but_der_shaped_http_post,
+        )
+        att = rfc.anchor(b"\x00" * 32, "witness:pw-x:1")
+
+        assert att.status == "failed"
+        assert att.detail["reason"] == "reply-not-granted"
+        assert att.proof_path is None
+        # The clobber pin: a bad reply must never overwrite a GOOD proof
+        # already on disk at the same path.
+        assert proof_path.read_bytes() == b"GOOD-EXISTING-PROOF-BYTES"
+        assert not proof_path.with_name(proof_path.name + ".tmp").exists()
+
+    def test_openssl_missing_at_reply_stage_is_openssl_missing(self, tmp_path: Path) -> None:
+        def _fake_run_missing_at_reply_stage(
+            args: list[str], data: bytes | None, timeout: float
+        ) -> subprocess.CompletedProcess[bytes]:
+            if "-query" in args:
+                return subprocess.CompletedProcess(
+                    args, returncode=0, stdout=b"FAKE-TS-QUERY-BYTES", stderr=b""
+                )
+            if "-reply" in args:
+                raise FileNotFoundError("[Errno 2] No such file or directory: 'openssl'")
+            raise AssertionError(f"unexpected openssl invocation: {args}")
+
+        def _der_shaped_http_post(url: str, data: bytes, timeout: float) -> bytes:
+            return b"\x30GOOD-DER-SHAPED-REPLY"
+
+        rfc = anchor_rfc3161.Rfc3161Anchorer(
+            tmp_path,
+            tsa_url=_TSA_URL,
+            run=_fake_run_missing_at_reply_stage,
+            http_post=_der_shaped_http_post,
+        )
+        att = rfc.anchor(b"\x00" * 32, "witness:pw-x:1")
+
+        assert att.status == "failed"
+        assert att.detail["reason"] == "openssl-missing"
+        assert att.proof_path is None
+        proof_path = tmp_path / "anchors" / "witness_pw-x_1.tsr"
+        assert not proof_path.exists()
+        assert not proof_path.with_name(proof_path.name + ".tmp").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -384,3 +501,51 @@ class TestCliOfferedWithUrl:
         assert rfc_verify_results[0]["verify_result"]["verify_source"] == (
             f"rfc3161-ca:{ca_bundle.name}"
         )
+
+    def test_upgrade_does_not_reanchor_or_overwrite_the_tsr(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Finding #2 on PR athenaeum#2174: ``anchor --upgrade`` must find the
+        prior RFC 3161 attestation (matched by the ``rfc3161:`` source
+        PREFIX, since the source is per-TSA-host) and call ``upgrade()``
+        instead of submitting a fresh TSA request -- re-anchoring would
+        overwrite the ``.tsr`` file a prior ledger line's ``proof_path``
+        still names."""
+        monkeypatch.setenv("PROMPTWITNESS_RFC3161_URL", _TSA_URL)
+        monkeypatch.setattr(anchor_rfc3161, "_default_run", _fake_run_ok)
+        posted_calls: list[bytes] = []
+
+        def _spy_http_post(url: str, data: bytes, timeout: float) -> bytes:
+            posted_calls.append(data)
+            return _RECORDED_REPLY_BYTES
+
+        monkeypatch.setattr(anchor_rfc3161, "_default_http_post", _spy_http_post)
+
+        rc = cli.main(["anchor", "--dir", str(tmp_path), "--subject", "x"])
+        assert rc == 0
+        capsys.readouterr()  # discard the first pass's stdout
+        assert len(posted_calls) == 1
+
+        proof_path = tmp_path / "anchors" / "x.tsr"
+        original_bytes = proof_path.read_bytes()
+        assert original_bytes == _RECORDED_REPLY_BYTES
+
+        rc = cli.main(["anchor", "--dir", str(tmp_path), "--subject", "x", "--upgrade"])
+        assert rc == 0
+
+        # No second TSA POST -- upgrade() is a documented no-op.
+        assert len(posted_calls) == 1
+
+        payload = json.loads(capsys.readouterr().out)
+        rfc_results = [
+            r
+            for r in payload["results"]
+            if r.get("attestation", {}).get("source", "").startswith("rfc3161:")
+        ]
+        assert len(rfc_results) == 1
+        assert rfc_results[0]["op"] == "upgrade"
+        assert rfc_results[0]["attestation"]["status"] == "complete"
+        assert rfc_results[0]["attestation"]["proof_path"] == "anchors/x.tsr"
+
+        # The proof file on disk is byte-identical to the first anchor pass.
+        assert proof_path.read_bytes() == original_bytes

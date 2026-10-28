@@ -28,6 +28,7 @@ import json
 import os
 import re
 import sys
+from collections.abc import Callable
 from typing import Any
 
 from promptwitness import __version__, anchor_rfc3161, canon, ledger, signing
@@ -357,22 +358,54 @@ def _resolve_subject_and_digest(
     return f"witness:{head.ledger_id}:{head.seq}", head.line_hash()
 
 
-def _find_latest_ots_attestation(ledger_dir: Any, subject: str) -> anchor_mod.Attestation | None:
-    """The most recent OpenTimestamps :class:`~promptwitness.anchor.Attestation`
-    previously recorded for *subject*, reconstructed from the ledger's own
-    ``anchor`` lines — the ledger is the persisted attestation history, so
-    no separate side-state file is needed.
+def _find_latest_attestation_by_source(
+    ledger_dir: Any, subject: str, source_matches: Callable[[str], bool]
+) -> anchor_mod.Attestation | None:
+    """The most recent :class:`~promptwitness.anchor.Attestation` recorded
+    for *subject* whose ``source`` satisfies *source_matches*, reconstructed
+    from the ledger's own ``anchor`` lines — the ledger is the persisted
+    attestation history, so no separate side-state file is needed.
+
+    Shared by :func:`_find_latest_ots_attestation` (exact-match source) and
+    :func:`_find_latest_rfc3161_attestation` (prefix-match source) so
+    neither copies the scan loop.
     """
     latest: anchor_mod.Attestation | None = None
     for line in ledger.iter_lines(ledger_dir):
         if line.kind != "anchor" or line.extra.get("subject") != subject:
             continue
         raw_att = line.extra.get("attestation")
-        ots_source = anchor_mod.OpenTimestampsAnchorer.source
-        if not isinstance(raw_att, dict) or raw_att.get("source") != ots_source:
+        if not isinstance(raw_att, dict) or not source_matches(str(raw_att.get("source", ""))):
             continue
         latest = anchor_mod.Attestation.from_dict(raw_att)
     return latest
+
+
+def _find_latest_ots_attestation(ledger_dir: Any, subject: str) -> anchor_mod.Attestation | None:
+    """The most recent OpenTimestamps :class:`~promptwitness.anchor.Attestation`
+    previously recorded for *subject*. The OpenTimestamps source
+    (``"opentimestamps"``) never varies, so this matches it by equality.
+    """
+    ots_source = anchor_mod.OpenTimestampsAnchorer.source
+    return _find_latest_attestation_by_source(ledger_dir, subject, lambda s: s == ots_source)
+
+
+def _find_latest_rfc3161_attestation(
+    ledger_dir: Any, subject: str
+) -> anchor_mod.Attestation | None:
+    """The most recent RFC 3161 :class:`~promptwitness.anchor.Attestation`
+    previously recorded for *subject*. Unlike the OpenTimestamps source, the
+    RFC 3161 source is per-TSA-host (``f"rfc3161:{host}"`` —
+    :class:`~promptwitness.anchor_rfc3161.Rfc3161Anchorer`), so an operator
+    who changed ``--rfc3161-url`` between runs still has their prior
+    attestation located here. Matches by the ``"rfc3161:"`` source PREFIX,
+    never by equality against the *current* adapter's ``source``
+    (athenaeum#2174 review finding #2: ``anchor --upgrade`` must find the
+    proof it should preserve, not just the one pointing at today's TSA).
+    """
+    return _find_latest_attestation_by_source(
+        ledger_dir, subject, lambda s: s.startswith("rfc3161:")
+    )
 
 
 def _find_latest_pending_ots_attestation(
@@ -467,6 +500,19 @@ def _cmd_anchor(args: argparse.Namespace) -> int:
     or ``PROMPTWITNESS_RFC3161_URL``). An unconfigured URL means the
     adapter is never constructed and appends no ``anchor`` line and no
     ``results`` entry at all — "not offered", not a ``failed`` attestation.
+
+    ``--upgrade`` for the RFC 3161 adapter mirrors the OpenTimestamps
+    semantics above, but locates the prior attestation by source PREFIX
+    (:func:`_find_latest_rfc3161_attestation`) rather than equality, since
+    the RFC 3161 source is per-TSA-host: when a prior RFC 3161 attestation
+    for this subject exists, ``--upgrade`` calls
+    :meth:`~promptwitness.anchor_rfc3161.Rfc3161Anchorer.upgrade` (a
+    documented no-op — a TSA token is immediate) and records it with
+    ``op="upgrade"`` instead of submitting a fresh TSA request, which would
+    overwrite the ``.tsr`` file a prior ledger line's ``proof_path`` still
+    names (review finding #2 on PR athenaeum#2174). With no prior RFC 3161
+    attestation for this subject, ``--upgrade`` anchors as it does today —
+    there is nothing to preserve.
     """
     ledger_dir = ledger.resolve_ledger_dir(args.harness, override=args.dir)
 
@@ -539,16 +585,30 @@ def _cmd_anchor(args: argparse.Namespace) -> int:
             tsa_url=rfc3161_url,
             ca_bundle=anchor_rfc3161.resolve_rfc3161_ca_bundle(args.rfc3161_ca_bundle),
         )
-        rfc3161_att = rfc3161.anchor(digest_bytes, subject, timeout=args.timeout)
+        existing_rfc3161 = (
+            _find_latest_rfc3161_attestation(ledger_dir, subject) if args.upgrade else None
+        )
+        if existing_rfc3161 is not None:
+            # A TSA token is immediate -- there is nothing pending to
+            # re-submit, and re-anchoring would overwrite the .tsr file a
+            # prior ledger line's proof_path still names (review finding
+            # #2 on PR athenaeum#2174). upgrade() is a documented no-op.
+            rfc3161_att = rfc3161.upgrade(existing_rfc3161)
+            rfc3161_op = "upgrade"
+        else:
+            rfc3161_att = rfc3161.anchor(digest_bytes, subject, timeout=args.timeout)
+            rfc3161_op = "anchor"
         _append_anchor_line(
             ledger_dir,
             harness=args.harness,
             subject=subject,
             digest=digest,
             attestation=rfc3161_att,
-            op="anchor",
+            op=rfc3161_op,
         )
-        results.append({"subject": subject, "op": "anchor", "attestation": rfc3161_att.to_dict()})
+        results.append(
+            {"subject": subject, "op": rfc3161_op, "attestation": rfc3161_att.to_dict()}
+        )
 
     if args.verify:
         verify_result = ots.verify(ots_att, digest_bytes)

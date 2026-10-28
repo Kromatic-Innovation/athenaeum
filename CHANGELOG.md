@@ -178,7 +178,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   line, no `failed` attestation — when no URL resolves. Implemented as a
   sibling module (`anchor_rfc3161.py`), not the package submodule the issue
   named, since `anchor.py` (athenaeum#2151) shipped as a single module, not
-  a package.
+  a package. `anchor()` validates the TSA reply before trusting it —
+  empty, non-DER, or non-`granted` replies degrade to a `failed`
+  attestation instead of `complete`, and the write goes through a sibling
+  temp file so a bad reply never overwrites a prior good `.tsr` proof; and
+  `anchor --upgrade` now finds a subject's prior RFC 3161 attestation (by
+  `rfc3161:` source prefix) and calls the no-op `upgrade()` instead of
+  re-anchoring, so it never overwrites the `.tsr` file an earlier ledger
+  line's `proof_path` still names (PR athenaeum#2174 review findings).
 
 ### Changed
 

@@ -213,10 +213,39 @@ class Rfc3161Anchorer:
                 detail={"reason": "post-failed", "error": _short(exc)},
             )
 
+        if not reply_bytes:
+            return Attestation(
+                source=self.source,
+                status="failed",
+                claimed_time=_now_iso_ms(),
+                proof_path=None,
+                detail={"reason": "empty-reply"},
+            )
+        # Every `TimeStampResp` is DER-encoded and DER's SEQUENCE tag is
+        # always 0x30 -- a reply whose first byte is anything else cannot
+        # possibly be a `TimeStampResp` (an HTML error page, a proxy
+        # redirect body, or plain text all fail this). This is a cheap
+        # structural floor, NOT full ASN.1 validation: it catches garbage
+        # replies without parsing DER, which stays out of scope (no new
+        # dependency -- `scripts/check_declared_imports.py`).
+        if reply_bytes[0:1] != b"\x30":
+            return Attestation(
+                source=self.source,
+                status="failed",
+                claimed_time=_now_iso_ms(),
+                proof_path=None,
+                detail={"reason": "reply-not-der"},
+            )
+
         proof_path = self._proof_path(subject)
+        # Write to a sibling temp path first and only `os.replace` it into
+        # the live proof location once the PKIStatus check below passes --
+        # a rejected/garbage reply must never clobber a prior GOOD proof
+        # that an earlier ledger line's `proof_path` still names.
+        tmp_path = proof_path.with_name(proof_path.name + ".tmp")
         try:
             proof_path.parent.mkdir(parents=True, exist_ok=True)
-            proof_path.write_bytes(reply_bytes)
+            tmp_path.write_bytes(reply_bytes)
         except OSError as exc:  # full disk / unwritable dir: never raise
             return Attestation(
                 source=self.source,
@@ -226,6 +255,41 @@ class Rfc3161Anchorer:
                 detail={"reason": "proof-write-failed", "error": _short(exc)},
             )
 
+        status_args = [self._openssl, "ts", "-reply", "-in", str(tmp_path), "-text"]
+        try:
+            status_result = self._run(status_args, None, timeout)
+        except FileNotFoundError as exc:
+            tmp_path.unlink(missing_ok=True)
+            return Attestation(
+                source=self.source,
+                status="failed",
+                claimed_time=_now_iso_ms(),
+                proof_path=None,
+                detail={"reason": "openssl-missing", "error": _short(exc)},
+            )
+        except Exception as exc:  # noqa: BLE001 - subprocess timeout/OS error: never raise
+            tmp_path.unlink(missing_ok=True)
+            return Attestation(
+                source=self.source,
+                status="failed",
+                claimed_time=_now_iso_ms(),
+                proof_path=None,
+                detail={"reason": "reply-not-granted", "error": _short(exc)},
+            )
+
+        status_output = (status_result.stdout or b"") + (status_result.stderr or b"")
+        granted = status_result.returncode == 0 and b"granted" in status_output.lower()
+        if not granted:
+            tmp_path.unlink(missing_ok=True)
+            return Attestation(
+                source=self.source,
+                status="failed",
+                claimed_time=_now_iso_ms(),
+                proof_path=None,
+                detail={"reason": "reply-not-granted", "error": _short_bytes(status_output)},
+            )
+
+        os.replace(tmp_path, proof_path)
         return Attestation(
             source=self.source,
             status="complete",

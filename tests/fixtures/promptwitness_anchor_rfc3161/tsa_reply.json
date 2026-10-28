@@ -1,5 +1,5 @@
 {
-  "_comment": "Synthetic, deterministic RFC 3161 TSA reply fixture for athenaeum#2157 -- NOT a real TSA response (no network call ever produced this; constructed once, by hand, and committed here so tests/test_promptwitness_anchor_rfc3161.py can feed it through the real Rfc3161Anchorer http_post seam, and write it to a real .tsr proof file, without any network access).",
+  "_comment": "Synthetic, deterministic RFC 3161 TSA reply fixture for athenaeum#2157 -- NOT a real TSA response (no network call ever produced this; constructed once, by hand, and committed here so tests/test_promptwitness_anchor_rfc3161.py can feed it through the real Rfc3161Anchorer http_post seam, and write it to a real .tsr proof file, without any network access). The first byte is a literal 0x30 (DER SEQUENCE tag) so it passes anchor()'s structural reply-not-der floor (athenaeum#2174 review finding #1) -- the rest of the payload is still an arbitrary marker string, not real ASN.1.",
   "tsa_host": "tsa.example.test",
-  "reply_b64": "UkZDMzE2MS1UU0EtUkVQTFktRklYVFVSRS0wMDAxLXN5bnRoZXRpYy1kZXItYnl0ZXM="
+  "reply_b64": "MFJGQzMxNjEtVFNBLVJFUExZLUZJWFRVUkUtMDAwMi1zeW50aGV0aWMtZGVyLXNoYXBlZC1ieXRlcw=="
 }
