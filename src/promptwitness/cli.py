@@ -29,6 +29,8 @@ import argparse
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
 from collections.abc import Callable
@@ -735,9 +737,50 @@ def _cmd_verify(args: argparse.Namespace) -> int:
         print(json.dumps(payload, sort_keys=True))
     else:
         for turn_verdict in verdicts:
-            print(f"{turn_verdict.index}: {verify_mod.verdict_label(turn_verdict.verdict)}")
+            label = verify_mod.verdict_label(turn_verdict.verdict, turn_verdict.detail)
+            print(f"{turn_verdict.index}: {label}")
         print("ok" if ok else "FAILED: not every human turn was witnessed")
     return 0 if ok else 1
+
+
+def _clear_append_only_best_effort(root: Path) -> None:
+    """Clear whatever append-only protection
+    :func:`promptwitness.ledger.append_line` applied to a throwaway
+    ledger's partition files, so the caller can actually remove *root*
+    afterward (athenaeum#2175 review finding #3).
+
+    ``ledger._apply_append_only_protection`` runs ``chattr +a`` (Linux) or
+    ``chflags uappnd`` (macOS) on a ledger's first partition file as a
+    best-effort defence against accidental overwrites -- see its own
+    docstring. On a host where the process actually holds the needed
+    capability (``CAP_LINUX_IMMUTABLE`` on Linux; this container does not,
+    which is why the bug was invisible locally), that attribute also blocks
+    *deleting* the file, so a plain ``shutil.rmtree`` of a throwaway demo
+    ledger raises ``PermissionError``. A throwaway ledger -- generated and
+    discarded within one CLI invocation -- has no append-only threat model
+    to protect in the first place, so this is pure cleanup, not a security
+    control being relaxed.
+
+    Best-effort and silent by construction: a missing ``chattr``/``chflags``
+    binary, an unsupported platform, or a file that was never protected
+    must never raise -- the caller's own ``shutil.rmtree(..., ignore_errors=
+    True)`` is the actual safety net; this just makes the common case
+    (protection WAS applied) a clean deletion instead of a silently-lost
+    directory.
+    """
+    if sys.platform == "darwin":
+        clear_cmd = ["chflags", "nouappnd"]
+    elif sys.platform.startswith("linux"):
+        clear_cmd = ["chattr", "-a"]
+    else:
+        return
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        try:
+            subprocess.run([*clear_cmd, str(path)], capture_output=True, timeout=5, check=False)
+        except (OSError, subprocess.SubprocessError):
+            pass
 
 
 def _cmd_demo(args: argparse.Namespace) -> int:
@@ -785,7 +828,16 @@ def _cmd_demo(args: argparse.Namespace) -> int:
         )
         return 0
 
-    with tempfile.TemporaryDirectory(prefix="promptwitness-demo-") as tmp_dir:
+    # Not `tempfile.TemporaryDirectory(...)`'s own `with`/cleanup: its
+    # implicit `shutil.rmtree` is not tolerant of the append-only attribute
+    # `ledger.append_line` may have applied to a partition file (see
+    # `_clear_append_only_best_effort`'s docstring) and would raise
+    # `PermissionError` on a host where that protection actually took
+    # effect. Clearing the attribute first, then removing with
+    # `ignore_errors=True` as a final backstop, guarantees this cleanup
+    # never raises regardless of platform or capability.
+    tmp_dir = tempfile.mkdtemp(prefix="promptwitness-demo-")
+    try:
         synthetic = demo_mod.generate_synthetic(tmp_dir)
         verdicts_a = verify_mod.verify_transcript(
             synthetic.transcript_a, synthetic.ledger_index
@@ -813,6 +865,9 @@ def _cmd_demo(args: argparse.Namespace) -> int:
             anchors=[(att.source, att.status, att.claimed_time)],
         )
         demo_mod.write_demo_html(out_path, html_text, restrict_mode=False)
+    finally:
+        _clear_append_only_best_effort(Path(tmp_dir))
+        shutil.rmtree(tmp_dir, ignore_errors=True)
     return 0
 
 

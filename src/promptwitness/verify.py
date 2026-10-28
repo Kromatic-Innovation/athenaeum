@@ -38,11 +38,21 @@ display text for the HTML demo:
 ``"witnessed"``                         ``"witnessed"``
 ``"not-witnessed(inserted)"``           ``"not witnessed (inserted)"``
 ``"digest-mismatch(edited)"``           ``"digest mismatch (edited)"``
-``"machine-authored"``                  ``"machine-authored (task-notification)"``
+``"machine-authored"``                  ``"machine-authored (task-notification)"`` [#]_
 ``"headless"``                          ``"headless"``
 ``"bridge"``                            ``"bridge"``
 ``"chain-broken-at-seq-<N>"``           ``"chain broken at seq <N>"``
 ======================================= ===============================
+
+.. [#] The parenthetical names the matched witness line's actual
+   ``prompt_kind`` (``task-notification``, ``subagent``,
+   ``launch-argument``, ...) via :attr:`TurnVerdict.detail` --
+   :func:`verdict_label` takes an optional *detail* argument for this. A
+   transcript record whose own ``role`` is already non-human never reaches
+   the ledger at all (see :func:`verify_transcript` step 1) and always
+   renders the default ``"(task-notification)"`` (``detail=""``); a
+   ``role="human"`` record whose MATCHED LINE turns out not to be
+   witnessable-human (step 3 below) carries the line's real kind instead.
 """
 
 from __future__ import annotations
@@ -107,11 +117,20 @@ def is_chain_broken_verdict(verdict: str) -> bool:
     return verdict.startswith(_CHAIN_BROKEN_PREFIX)
 
 
-def verdict_label(verdict: str) -> str:
+def verdict_label(verdict: str, detail: str = "") -> str:
     """The issue's full display text for a terse ``TurnVerdict.verdict``
     string, for the HTML demo's badges. Returns *verdict* unchanged for any
     value this module did not itself produce (defensive; every value
-    :func:`verify_transcript` can emit is handled)."""
+    :func:`verify_transcript` can emit is handled).
+
+    *detail* (normally ``turn_verdict.detail``) overrides the parenthetical
+    for :data:`VERDICT_MACHINE_AUTHORED` with the matched line's actual
+    ``prompt_kind`` (``"subagent"``, ``"launch-argument"``, ...) when given;
+    the default ``""`` preserves the original ``"(task-notification)"``
+    text for every existing caller that does not pass it.
+    """
+    if verdict == VERDICT_MACHINE_AUTHORED and detail:
+        return f"machine-authored ({detail})"
     if verdict in _VERDICT_LABELS:
         return _VERDICT_LABELS[verdict]
     if verdict.startswith(_CHAIN_BROKEN_PREFIX):
@@ -129,9 +148,17 @@ class TurnVerdict:
     aligns with in the demo's side-by-side rendering. ``is_human`` is
     ``True`` iff the record's own ``role`` was ``"human"``; it is what
     :func:`all_human_turns_witnessed` filters on, not the verdict string
-    itself (a human turn can carry any verdict; a machine turn always
-    carries :data:`VERDICT_MACHINE_AUTHORED` and is never held to the
-    witnessed bar).
+    itself -- a ``role="human"`` record is held to the witnessed bar no
+    matter what verdict it carries (including :data:`VERDICT_MACHINE_AUTHORED`,
+    when the ledger's own evidence contradicts the transcript's claim), while
+    a genuinely non-human record (``is_human=False``) always carries
+    :data:`VERDICT_MACHINE_AUTHORED` and is exempt from the bar.
+
+    ``detail`` is ``""`` except for a :data:`VERDICT_MACHINE_AUTHORED`
+    verdict reached via a ledger-side ``prompt_kind`` mismatch (not via a
+    non-human ``role``), where it carries that line's actual ``prompt_kind``
+    (``"task-notification"``, ``"subagent"``, ``"launch-argument"``, ...)
+    for :func:`verdict_label` to render.
     """
 
     index: int
@@ -189,14 +216,38 @@ def verify_transcript(
     3. A matching line whose ``channel`` is ``"headless"`` or ``"bridge"``
        -> :data:`VERDICT_HEADLESS` / :data:`VERDICT_BRIDGE` (operator
        ruling: neither channel is ever human, independent of digest match).
-    4. The matching line's ``prompt_digest`` does not equal
+    4. A matching line that is not witnessable-human by
+       :meth:`~promptwitness.ledger.LedgerIndex.is_witnessable_human`
+       (``channel != "interactive"``, or ``prompt_kind`` not in ``("human",
+       "slash-command")`` -- a task-notification, subagent, or
+       launch-argument line, for instance) -> :data:`VERDICT_MACHINE_AUTHORED`
+       with ``detail`` set to the line's actual ``prompt_kind``, so a
+       transcript record that CLAIMS ``role="human"`` for a line the ledger
+       itself never recorded as human cannot verify as witnessed just
+       because some digest happens to match (review finding #2 on PR
+       athenaeum#2175: ``by_prompt_id``/``by_session_digest`` index every
+       ``kind == "turn"`` line regardless of kind, so this check cannot be
+       skipped). Counted as ``is_human=True`` -- fail safe: the transcript's
+       own claim governs whether this turn is held to the witnessed bar,
+       not the ledger's (possibly wrong, possibly tampered) say-so.
+    5. The matching line's ``prompt_digest`` does not equal
        ``canon.digest(canon.normalize(record["text"]))``
        -> :data:`VERDICT_DIGEST_MISMATCH_EDITED` -- the record was found,
        but its text was edited after the witness line was written.
-    5. The ledger's hash chain is broken at or before this line's ``seq``
-       (:attr:`~promptwitness.ledger.LedgerIndex.chain_verification`) ->
-       :func:`chain_broken_verdict`.
-    6. Otherwise -> :data:`VERDICT_WITNESSED`.
+    6. The ledger's hash chain is broken at this line's ``seq``, at any
+       later ``seq``, or at the ``seq`` immediately preceding the break in
+       on-disk order (:attr:`~promptwitness.ledger.LedgerIndex.
+       chain_verification`) -> :func:`chain_broken_verdict`. The
+       "immediately preceding" half matters: per
+       :class:`~promptwitness.ledger.ChainVerification`'s own docstring, a
+       content mutation of line N (anything other than N's own ``prev``)
+       surfaces as a break reported at N+1, so a verifier that only flagged
+       ``seq >= first_break_seq`` would exempt the one line that was
+       actually tampered -- the exact forgery this function exists to catch
+       (review finding #1 on PR athenaeum#2175). Fail safe: a false "chain
+       broken" costs a second look; a false "witnessed" is a forged
+       provenance claim.
+    7. Otherwise -> :data:`VERDICT_WITNESSED`.
     """
     verdicts: list[TurnVerdict] = []
     for index, record in enumerate(transcript_records):
@@ -227,6 +278,16 @@ def verify_transcript(
         if line.channel == "bridge":
             verdicts.append(TurnVerdict(index=index, is_human=True, verdict=VERDICT_BRIDGE))
             continue
+        if not ledger.LedgerIndex.is_witnessable_human(line):
+            verdicts.append(
+                TurnVerdict(
+                    index=index,
+                    is_human=True,
+                    verdict=VERDICT_MACHINE_AUTHORED,
+                    detail=str(line.prompt_kind or ""),
+                )
+            )
+            continue
 
         expected_digest = canon.digest(canon.normalize(text))
         if line.prompt_digest != expected_digest:
@@ -236,20 +297,20 @@ def verify_transcript(
             continue
 
         chain = ledger_index.chain_verification
-        if (
-            chain is not None
-            and not chain.ok
-            and chain.first_break_seq is not None
-            and line.seq >= chain.first_break_seq
-        ):
-            verdicts.append(
-                TurnVerdict(
-                    index=index,
-                    is_human=True,
-                    verdict=chain_broken_verdict(chain.first_break_seq),
-                )
+        if chain is not None and not chain.ok and chain.first_break_seq is not None:
+            is_suspect = line.seq >= chain.first_break_seq or (
+                chain.first_break_prev_seq is not None
+                and line.seq == chain.first_break_prev_seq
             )
-            continue
+            if is_suspect:
+                verdicts.append(
+                    TurnVerdict(
+                        index=index,
+                        is_human=True,
+                        verdict=chain_broken_verdict(chain.first_break_seq),
+                    )
+                )
+                continue
 
         verdicts.append(TurnVerdict(index=index, is_human=True, verdict=VERDICT_WITNESSED))
     return verdicts

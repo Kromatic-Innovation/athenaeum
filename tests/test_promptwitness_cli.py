@@ -781,3 +781,93 @@ class TestDemoSubcommand:
         err = capsys.readouterr().err
         assert "do not publish" in err.lower()
         assert "real" in err.lower()
+
+
+class TestClearAppendOnlyBestEffort:
+    """athenaeum#2175 review finding #3: a throwaway synthetic-demo ledger
+    may get `chattr +a`'d by `ledger.append_line` on a host that actually
+    has the capability to make it stick, which then makes a plain
+    `shutil.rmtree` of the temp dir raise `PermissionError`. This container
+    does not have that capability (chattr silently no-ops here), so these
+    tests exercise the mechanism directly via a stubbed `subprocess.run`
+    rather than relying on a real immutable file.
+    """
+
+    def test_invokes_chattr_minus_a_on_linux_for_every_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "2026-01.jsonl").write_text("{}\n", encoding="utf-8")
+        (tmp_path / "sub").mkdir()
+        (tmp_path / "sub" / "ledger.lock").write_text("", encoding="utf-8")
+
+        calls: list[list[str]] = []
+
+        def fake_run(cmd: list[str], **kwargs: object) -> None:
+            calls.append(cmd)
+
+        monkeypatch.setattr(cli.sys, "platform", "linux")
+        monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+        cli._clear_append_only_best_effort(tmp_path)
+
+        assert len(calls) == 2
+        for cmd in calls:
+            assert cmd[:2] == ["chattr", "-a"]
+
+    def test_invokes_chflags_nouappnd_on_macos(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "2026-01.jsonl").write_text("{}\n", encoding="utf-8")
+        calls: list[list[str]] = []
+        monkeypatch.setattr(cli.sys, "platform", "darwin")
+        monkeypatch.setattr(cli.subprocess, "run", lambda cmd, **kw: calls.append(cmd))
+
+        cli._clear_append_only_best_effort(tmp_path)
+
+        assert calls == [["chflags", "nouappnd", str(tmp_path / "2026-01.jsonl")]]
+
+    def test_is_a_noop_on_an_unsupported_platform(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "2026-01.jsonl").write_text("{}\n", encoding="utf-8")
+        calls: list[list[str]] = []
+        monkeypatch.setattr(cli.sys, "platform", "win32")
+        monkeypatch.setattr(cli.subprocess, "run", lambda cmd, **kw: calls.append(cmd))
+
+        cli._clear_append_only_best_effort(tmp_path)
+
+        assert calls == []
+
+    def test_tolerates_a_missing_chattr_binary(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "2026-01.jsonl").write_text("{}\n", encoding="utf-8")
+        monkeypatch.setattr(cli.sys, "platform", "linux")
+
+        def raising_run(cmd: list[str], **kwargs: object) -> None:
+            raise FileNotFoundError("chattr: command not found")
+
+        monkeypatch.setattr(cli.subprocess, "run", raising_run)
+
+        cli._clear_append_only_best_effort(tmp_path)  # must not raise
+
+    def test_demo_synthetic_mode_clears_attributes_before_cleanup(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End-to-end: `promptwitness demo` (synthetic) must call the
+        clearing helper before its temp ledger directory is removed, so the
+        fix is actually wired into the command, not just unit-tested in
+        isolation."""
+        calls: list[Path] = []
+        original = cli._clear_append_only_best_effort
+
+        def spy(root: Path) -> None:
+            calls.append(root)
+            original(root)
+
+        monkeypatch.setattr(cli, "_clear_append_only_best_effort", spy)
+        out = tmp_path / "demo.html"
+        rc = cli.main(["demo", "--out", str(out)])
+        assert rc == 0
+        assert len(calls) == 1
+        assert not calls[0].exists()  # cleaned up afterward

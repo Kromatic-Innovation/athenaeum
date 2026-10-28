@@ -336,7 +336,7 @@ def _render_row(record: Mapping[str, Any], turn_verdict: verify.TurnVerdict) -> 
     role = str(record.get("role") or "")
     text = str(record.get("text") or "")
     badge_class = _badge_class(turn_verdict.verdict)
-    label = _escape(verify.verdict_label(turn_verdict.verdict))
+    label = _escape(verify.verdict_label(turn_verdict.verdict, turn_verdict.detail))
     return (
         '<div class="row">'
         '<div><div class="pane-label">Transcript</div>'
