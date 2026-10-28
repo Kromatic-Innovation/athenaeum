@@ -16,11 +16,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from typing import Any
 
 from promptwitness import __version__, canon, ledger
 from promptwitness import anchor as anchor_mod
+
+#: Matches a subject string that names an actual ledger line
+#: (``witness:<ledger_id>:<seq>``), as opposed to an arbitrary caller-chosen
+#: label. Used by :func:`_digest_for_subject` to resolve the digest from
+#: that line's own hash rather than hashing the subject string itself.
+_WITNESS_SUBJECT_RE = re.compile(r"^witness:(?P<ledger_id>[^:]+):(?P<seq>\d+)$")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -122,20 +129,44 @@ def _cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _digest_for_subject(ledger_dir: Any, subject: str) -> str:
+    """The digest *subject* commits to.
+
+    **Invariant: a subject's digest is a function of the subject, never of
+    when it was resolved.** For a subject shaped like
+    ``witness:<ledger_id>:<seq>`` that names an actual ledger line, the
+    digest is that line's own ``line_hash()`` — the same value regardless
+    of whether this line is still the chain head (anchoring itself appends
+    lines, so by the time a second CLI pass asks, it usually is not).
+    Any other subject — including one shaped like a witness subject but
+    naming a line that does not exist in THIS ledger — hashes the subject
+    string itself via ``canon.digest``, same as always.
+    """
+    match = _WITNESS_SUBJECT_RE.match(subject)
+    if match:
+        target_ledger_id = match.group("ledger_id")
+        target_seq = int(match.group("seq"))
+        for line in ledger.iter_lines(ledger_dir):
+            if line.ledger_id == target_ledger_id and line.seq == target_seq:
+                return line.line_hash()
+    return canon.digest(subject)
+
+
 def _resolve_subject_and_digest(
     ledger_dir: Any, subject_arg: str | None
 ) -> tuple[str, str] | tuple[None, None]:
     """``(subject, digest)`` to anchor.
 
-    An explicit ``--subject`` is hashed on its own (``canon.digest``) — it
-    has no ledger line to point at. The default anchors the chain head:
+    An explicit ``--subject`` resolves its digest via
+    :func:`_digest_for_subject`. The default anchors the chain head:
     ``witness:<ledger_id>:<seq>`` committing to that line's own
-    ``line_hash()`` (the design doc's "Subject | Digest" table). Returns
-    ``(None, None)`` when no subject was given and the ledger is empty —
-    there is nothing to anchor yet.
+    ``line_hash()`` (the design doc's "Subject | Digest" table) — the same
+    value :func:`_digest_for_subject` would compute for that same subject
+    string later. Returns ``(None, None)`` when no subject was given and
+    the ledger is empty — there is nothing to anchor yet.
     """
     if subject_arg:
-        return subject_arg, canon.digest(subject_arg)
+        return subject_arg, _digest_for_subject(ledger_dir, subject_arg)
     head: ledger.WitnessLine | None = None
     for line in ledger.iter_lines(ledger_dir):
         head = line
@@ -160,6 +191,49 @@ def _find_latest_ots_attestation(ledger_dir: Any, subject: str) -> anchor_mod.At
             continue
         latest = anchor_mod.Attestation.from_dict(raw_att)
     return latest
+
+
+def _find_latest_pending_ots_attestation(
+    ledger_dir: Any,
+) -> tuple[str, str, anchor_mod.Attestation] | None:
+    """``(subject, digest, attestation)`` of whichever subject was most
+    recently touched by an OpenTimestamps anchor pass AND is still
+    ``pending``, scanning every subject in the ledger — not just the
+    current chain head.
+
+    Used by ``anchor --upgrade`` with no explicit ``--subject``: anchoring
+    itself appends lines, which moves the chain head, so re-deriving "the
+    subject to upgrade" from the (now different) head would target a
+    subject that was never anchored and could never upgrade (review
+    finding #1 on PR #2168). Each subject's status is last-write-wins (a
+    later ``complete``/``failed`` line for the same subject clears it from
+    consideration here); among subjects currently pending, the one with the
+    highest ``seq`` — the most recently touched — is returned.
+    """
+    latest_by_subject: dict[str, tuple[int, str, anchor_mod.Attestation]] = {}
+    ots_source = anchor_mod.OpenTimestampsAnchorer.source
+    for line in ledger.iter_lines(ledger_dir):
+        if line.kind != "anchor":
+            continue
+        subject = line.extra.get("subject")
+        digest = line.extra.get("digest")
+        raw_att = line.extra.get("attestation")
+        if not subject or not digest or not isinstance(raw_att, dict):
+            continue
+        if raw_att.get("source") != ots_source:
+            continue
+        latest_by_subject[subject] = (line.seq, digest, anchor_mod.Attestation.from_dict(raw_att))
+
+    pending = [
+        (seq, subject, digest, att)
+        for subject, (seq, digest, att) in latest_by_subject.items()
+        if att.status == "pending"
+    ]
+    if not pending:
+        return None
+    pending.sort(key=lambda item: item[0])
+    _, subject, digest, att = pending[-1]
+    return subject, digest, att
 
 
 def _append_anchor_line(
@@ -190,13 +264,35 @@ def _cmd_anchor(args: argparse.Namespace) -> int:
     """Anchor the chain head (or ``--subject``) with every configured
     adapter. :class:`~promptwitness.anchor.LocalClockAnchorer` always runs
     and always appends an ``anchor`` line, even when OpenTimestamps fails
-    entirely — the mandatory-fallback acceptance criterion. ``--upgrade``
-    asks the calendar about a prior pending proof instead of submitting a
-    new one; ``--verify`` runs full Bitcoin verification afterward (a
-    read-only report — it does not itself append a ledger line).
+    entirely — the mandatory-fallback acceptance criterion.
+
+    ``--upgrade`` with no ``--subject`` targets whichever subject is still
+    ``pending`` from a previous pass (:func:`_find_latest_pending_ots_attestation`)
+    — never the current chain head, which anchoring itself just moved
+    (review finding #1 on PR #2168). ``--upgrade`` against a subject whose
+    OpenTimestamps attestation is already ``complete`` is a no-op that
+    reports the existing attestation: re-anchoring would silently discard
+    the one Bitcoin-confirmed proof this design produces (review finding
+    #2; :meth:`~promptwitness.anchor.OpenTimestampsAnchorer.anchor` also
+    refuses this at the write site, independently).
+
+    ``--verify`` runs full Bitcoin verification afterward (a read-only
+    report — it does not itself append a ledger line).
     """
     ledger_dir = ledger.resolve_ledger_dir(args.harness, override=args.dir)
-    subject, digest = _resolve_subject_and_digest(ledger_dir, args.subject)
+
+    subject: str | None
+    digest: str | None
+    pending: anchor_mod.Attestation | None = None
+
+    found = None
+    if args.upgrade and not args.subject:
+        found = _find_latest_pending_ots_attestation(ledger_dir)
+    if found is not None:
+        subject, digest, pending = found
+    else:
+        subject, digest = _resolve_subject_and_digest(ledger_dir, args.subject)
+
     if subject is None or digest is None:
         print(
             json.dumps({"error": "ledger is empty; nothing to anchor (pass --subject)"}),
@@ -222,9 +318,14 @@ def _cmd_anchor(args: argparse.Namespace) -> int:
     ots = anchor_mod.OpenTimestampsAnchorer(
         ledger_dir, block_source=anchor_mod.resolve_block_source(args.block_source)
     )
-    existing = _find_latest_ots_attestation(ledger_dir, subject)
+    existing = pending if pending is not None else _find_latest_ots_attestation(ledger_dir, subject)
 
-    if args.upgrade and existing is not None and existing.status == "pending":
+    if args.upgrade and existing is not None and existing.status == "complete":
+        # Already the strongest evidence this design produces -- report it,
+        # touch nothing (never re-submit, never overwrite the proof file).
+        ots_att = existing
+        ots_op = "upgrade"
+    elif args.upgrade and existing is not None and existing.status == "pending":
         ots_att = ots.upgrade(existing)
         ots_op = "upgrade"
     else:
