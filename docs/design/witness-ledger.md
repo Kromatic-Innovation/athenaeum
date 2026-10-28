@@ -217,7 +217,7 @@ prompt and never a blocked hook.
 
 | Platform | Mechanism | Where the secret goes |
 |---|---|---|
-| macOS | `security add-generic-password` / `find-generic-password -w` | Keychain item; the secret is read from **stdin** (`-w` passed with no value), never argv |
+| macOS | `security -i` running `add-generic-password`, and `find-generic-password -w` to read | Keychain item; the **command text**, secret included, arrives on **stdin**, never argv |
 | Linux | `secret-tool store` / `lookup` | Secret Service item; the secret is read from **stdin**, attributes on argv are lookup coordinates only |
 | Windows | `CryptProtectData` / `CryptUnprotectData` via `ctypes` | the protected blob in `<ledger_dir>/keys/ed25519.dpapi`, mode 0600, written atomically; nothing is executed, so there is no argv at all |
 
@@ -225,6 +225,31 @@ argv is world-readable on every platform (`ps`, `/proc/<pid>/cmdline`), and
 a temp file would put the seed back on disk in the clear — the one thing
 this tier exists to stop. So key material travels only on a pipe, and the
 test suite asserts it over the real `subprocess` boundary.
+
+Why `security -i` rather than the obvious `add-generic-password -w <secret>`:
+that form is the recipe every macOS note writes down, and it puts the seed on
+argv. The next obvious form, a valueless `-w` with the secret piped in, trades
+that for a worse problem — a valueless `-w` makes `security` *prompt*, and a
+passphrase prompt reads `/dev/tty`, not stdin. Interactive mode reads
+*commands* from stdin until EOF, so the known-good `-w <value>` form is used
+with no prompt involved and the secret still never reaches argv. Every
+keystore child also runs in its own session with no controlling terminal, so
+no keystore tool can take the terminal from the session the hook is observing.
+
+Two consequences worth knowing as an operator:
+
+- **A store is verified by reading it back.** Interactive mode's per-command
+  exit status is not something to bet a signing key on, and "did the write
+  land?" is a fair question for every backend, so `keygen` compares the item
+  against what it just wrote and fails loudly rather than reporting a key that
+  cannot sign.
+- **"No key here" and "I cannot tell you what is here" are different.** Only a
+  genuinely absent item lets `keygen` write without `--force`; a locked
+  keychain, a timeout, a missing tool or a blob belonging to another user
+  profile all refuse. Reading a transient failure as emptiness is how a
+  default-path `keygen` would destroy a live key. On a ledger line the two
+  show up distinctly in `key.error`, as `KeystoreItemAbsent` ("you never
+  created a key") versus `KeyUnavailable` ("something is wrong").
 
 Selection: `PROMPTWITNESS_KEY_PROVIDER=os-keystore`, then
 `PROMPTWITNESS_KEYSTORE_BACKEND` (`macos-keychain` | `secret-service` |

@@ -176,9 +176,26 @@ def _keygen_os_keystore(args: argparse.Namespace) -> int:
     except ledger.KeyUnavailable as exc:
         print(json.dumps({"error": str(exc)}, sort_keys=True), file=sys.stderr)
         return 1
+    try:
+        key_id = provider.key_id()
+    except ledger.KeyUnavailable as exc:
+        # The key IS stored at this point (`generate_and_store_keystore_key`
+        # reads it back before returning), so say so rather than letting a
+        # traceback imply nothing happened.
+        print(
+            json.dumps(
+                {
+                    "error": f"the key was stored but could not be read back: {exc}",
+                    "keystore_backend": backend.name(),
+                },
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+        return 1
     payload: dict[str, Any] = {
         "keystore_backend": backend.name(),
-        "key_id": provider.key_id(),
+        "key_id": key_id,
         "algorithm": provider.algorithm(),
         "strength": provider.strength(),
     }

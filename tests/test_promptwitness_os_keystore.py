@@ -107,14 +107,24 @@ class FakeKeystoreTool:
         return argv[argv.index(flag) + 1]
 
     def _security(self, argv: list[str], kwargs: dict[str, Any]) -> Any:
-        key = (self._flag(argv, "-s"), self._flag(argv, "-a"))
-        if argv[1] == "add-generic-password":
-            stdin = kwargs.get("input") or b""
-            # The real tool reads one line from stdin for a valueless `-w`.
-            self.items[key] = stdin.split(b"\n", 1)[0]
+        if argv[1] == "-i":
+            # Interactive mode: `security` reads COMMANDS from stdin until
+            # EOF. Nothing is taken from argv, which is the point.
+            stdin = (kwargs.get("input") or b"").decode("utf-8")
+            for line in stdin.splitlines():
+                words = line.split()
+                if not words:
+                    continue
+                assert words[0] == "add-generic-password", (
+                    f"unexpected interactive verb {words[0]!r}"
+                )
+                key = (self._flag(words, "-s"), self._flag(words, "-a"))
+                self.items[key] = self._flag(words, "-w").encode("utf-8")
             return _completed(argv)
+        key = (self._flag(argv, "-s"), self._flag(argv, "-a"))
         if argv[1] == "find-generic-password":
             if key not in self.items:
+                # 44 is `errSecItemNotFound`.
                 return _completed(argv, returncode=44)
             return _completed(argv, stdout=self.items[key] + b"\n")
         raise AssertionError(f"unexpected security verb {argv[1]!r}")
@@ -379,11 +389,14 @@ class TestKeystoreArgvHygiene:
             "claude-code", backend=backend_name, env={}
         )
         signing.generate_and_store_keystore_key(backend)
-        store_calls = [c for c in keystore.calls if c.argv[1] in ("add-generic-password", "store")]
+        store_calls = [c for c in keystore.calls if c.argv[1] in ("-i", "store")]
         assert len(store_calls) == 1
         stdin = store_calls[0].stdin
         assert stdin is not None
-        assert len(base64.b64decode(stdin.strip())) == 32
+        # macOS carries the whole `-w <value>` command on stdin; Linux
+        # carries the bare secret. Either way the seed is in the pipe.
+        encoded = stdin.split()[-1] if b" " in stdin else stdin.strip()
+        assert len(base64.b64decode(encoded.strip())) == 32
 
     def test_a_read_passes_no_stdin_at_all(self, keystore: FakeSubprocess) -> None:
         backend = signing.resolve_keystore_backend(
@@ -393,6 +406,34 @@ class TestKeystoreArgvHygiene:
         keystore.calls.clear()
         provider.sign(b"payload")
         assert [c.stdin for c in keystore.calls] == [b""]
+
+    @pytest.mark.parametrize("backend_name", ["macos-keychain", "secret-service"])
+    def test_every_call_is_detached_from_the_controlling_terminal(
+        self, backend_name: str, keystore: FakeSubprocess
+    ) -> None:
+        """A keystore tool that wants a passphrase reaches for ``/dev/tty``,
+        not stdin, so a child that inherits the operator's terminal can sit
+        at a prompt until the timeout. And a per-prompt hook must never be
+        able to take the terminal from the session it is observing."""
+        backend = signing.resolve_keystore_backend(
+            "claude-code", backend=backend_name, env={}
+        )
+        signing.generate_and_store_keystore_key(backend).sign(b"payload")
+        assert keystore.calls
+        assert all(c.kwargs.get("start_new_session") is True for c in keystore.calls)
+
+    def test_the_macos_store_puts_nothing_on_argv_at_all(
+        self, keystore: FakeSubprocess
+    ) -> None:
+        """`security -i` takes its whole command from stdin, so the store
+        call's argv is two fixed tokens and cannot carry key material even
+        in principle."""
+        backend = signing.resolve_keystore_backend(
+            "claude-code", backend="macos-keychain", env={}
+        )
+        signing.generate_and_store_keystore_key(backend)
+        store_calls = [c for c in keystore.calls if c.argv[1] == "-i"]
+        assert [c.argv for c in store_calls] == [["security", "-i"]]
 
     def test_the_hygiene_assertion_is_not_vacuous(self, keystore: FakeSubprocess) -> None:
         """A sanity floor: the sweep above would actually catch a secret on
@@ -687,10 +728,35 @@ class TestUnavailableKeystoreDegrades:
         line = _append_turn(tmp_path / f"ledger-{label}", provider)
 
         assert line.key.strength == "none"
-        assert line.key.error == "KeyUnavailable"
+        # Every one of these is a `ledger.KeyUnavailable`; "no item stored"
+        # reports as the subclass so an operator can tell "you never created
+        # a key" from "something is wrong".
+        assert line.key.error in {"KeyUnavailable", "KeystoreItemAbsent"}
         assert line.sig is None
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
         assert len(warnings) == 1, f"{label}: expected one warning, got {len(warnings)}"
+
+    def test_a_missing_item_is_reported_as_the_absent_subclass(
+        self, keystore: FakeSubprocess, tmp_path: Path
+    ) -> None:
+        provider = signing.OsKeystoreKeyProvider(
+            signing.resolve_keystore_backend("claude-code", backend="secret-service", env={})
+        )
+        line = _append_turn(tmp_path / "ledger", provider)
+        assert line.key.error == "KeystoreItemAbsent"
+        assert issubclass(signing.KeystoreItemAbsent, ledger.KeyUnavailable)
+
+    def test_a_keystore_that_cannot_answer_is_not_reported_as_absent(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The distinction the overwrite guard depends on: a tool that is not
+        installed is NOT evidence that there is no key."""
+        monkeypatch.setattr(signing, "subprocess", FakeSubprocess(_missing_tool))
+        provider = signing.OsKeystoreKeyProvider(
+            signing.resolve_keystore_backend("claude-code", backend="secret-service", env={})
+        )
+        line = _append_turn(tmp_path / "ledger", provider)
+        assert line.key.error == "KeyUnavailable"
 
     def test_a_second_append_does_not_warn_again(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, tmp_path: Path
@@ -970,3 +1036,207 @@ class TestTheDocsStateTheAtRestOnlyLimit:
         doc = signing.OsKeystoreKeyProvider.__doc__ or ""
         assert "at rest" in doc
         assert "without a prompt" in doc
+
+
+# ---------------------------------------------------------------------------
+# A transient keystore failure must never be read as "there is no key"
+# ---------------------------------------------------------------------------
+
+
+class TestTheOverwriteGuardDistinguishesAbsentFromUnreadable:
+    """Collapsing "I cannot tell you what is here" into "it is empty" is how
+    a `keygen` without ``--force`` destroys a live signing key during a
+    transient keystore failure -- and every line that key ever signed becomes
+    permanently unverifiable, with no copy anywhere to restore from."""
+
+    def _tool_that_stores_then_breaks(
+        self, items: dict[tuple[str, str], bytes]
+    ) -> Callable[[FakeSubprocess, list[str], dict[str, Any]], Any]:
+        """A keystore holding a key, whose READS start failing."""
+        real = FakeKeystoreTool(items=items)
+
+        def handler(fake: FakeSubprocess, argv: list[str], kwargs: dict[str, Any]) -> Any:
+            if argv[1] == "lookup":
+                return _completed(argv, returncode=2)  # not an absent code
+            return real(fake, argv, kwargs)
+
+        return handler
+
+    def test_an_unreadable_keystore_refuses_rather_than_overwriting(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        items: dict[tuple[str, str], bytes] = {}
+        monkeypatch.setattr(signing, "subprocess", FakeSubprocess(FakeKeystoreTool(items=items)))
+        backend = signing.resolve_keystore_backend(
+            "claude-code", backend="secret-service", env={}
+        )
+        signing.generate_and_store_keystore_key(backend)
+        stored_before = dict(items)
+        assert stored_before
+
+        monkeypatch.setattr(
+            signing, "subprocess", FakeSubprocess(self._tool_that_stores_then_breaks(items))
+        )
+        with pytest.raises(ledger.KeyUnavailable):
+            signing.generate_and_store_keystore_key(backend)
+        assert items == stored_before, "the existing signing key was overwritten"
+
+    def test_a_tool_that_is_not_installed_also_refuses(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(signing, "subprocess", FakeSubprocess(_missing_tool))
+        backend = signing.resolve_keystore_backend(
+            "claude-code", backend="secret-service", env={}
+        )
+        with pytest.raises(ledger.KeyUnavailable):
+            signing.generate_and_store_keystore_key(backend)
+
+    def test_a_timeout_also_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(signing, "subprocess", FakeSubprocess(_hanging_tool))
+        backend = signing.resolve_keystore_backend(
+            "claude-code", backend="secret-service", env={}
+        )
+        with pytest.raises(ledger.KeyUnavailable):
+            signing.generate_and_store_keystore_key(backend)
+
+    def test_force_still_rotates_through_an_unreadable_keystore(
+        self, keystore: FakeSubprocess
+    ) -> None:
+        """``--force`` is the operator saying "I know, do it anyway", so the
+        probe is skipped entirely -- the guard protects the DEFAULT, it does
+        not override an explicit instruction."""
+        backend = signing.resolve_keystore_backend(
+            "claude-code", backend="secret-service", env={}
+        )
+        before = signing.generate_and_store_keystore_key(backend).key_id()
+        after = signing.generate_and_store_keystore_key(backend, replace=True).key_id()
+        assert before != after
+
+    def test_a_blob_this_user_cannot_decrypt_is_not_overwritten(
+        self, dpapi: FakeDpapi, tmp_path: Path
+    ) -> None:
+        """Most likely a real key belonging to another user profile."""
+        blob_path = tmp_path / "k.dpapi"
+        blob_path.write_bytes(b"someone-elses-dpapi-blob")
+        backend = signing.WindowsDpapiBackend(blob_path=blob_path)
+        with pytest.raises(ledger.KeyUnavailable):
+            signing.generate_and_store_keystore_key(backend)
+        assert blob_path.read_bytes() == b"someone-elses-dpapi-blob"
+
+    def test_an_absent_blob_file_is_safe_to_write(
+        self, dpapi: FakeDpapi, tmp_path: Path
+    ) -> None:
+        """The other half of the distinction: no file is unambiguous."""
+        provider = signing.generate_and_store_keystore_key(
+            signing.WindowsDpapiBackend(blob_path=tmp_path / "fresh.dpapi")
+        )
+        assert provider.key_id().startswith("ed25519:")
+
+
+class TestTheStoreIsVerifiedByReadingItBack:
+    def test_a_store_that_silently_drops_the_secret_is_caught(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`security -i`'s per-command exit status is not a contract this
+        module leans on, and the same question applies to every backend: a
+        store that reports success but lands nothing must not yield a
+        provider that cannot sign."""
+
+        def swallowing_tool(
+            _fake: FakeSubprocess, argv: list[str], _kwargs: dict[str, Any]
+        ) -> Any:
+            if argv[1] in ("-i", "store"):
+                return _completed(argv)  # claims success, stores nothing
+            return _completed(argv, returncode=1)  # absent
+
+        monkeypatch.setattr(signing, "subprocess", FakeSubprocess(swallowing_tool))
+        backend = signing.resolve_keystore_backend(
+            "claude-code", backend="secret-service", env={}
+        )
+        with pytest.raises(ledger.KeyUnavailable, match="did not read back as stored"):
+            signing.generate_and_store_keystore_key(backend)
+
+    def test_a_store_that_mangles_the_secret_is_caught(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        items: dict[tuple[str, str], bytes] = {}
+        real = FakeKeystoreTool(items=items)
+
+        def truncating_tool(
+            fake: FakeSubprocess, argv: list[str], kwargs: dict[str, Any]
+        ) -> Any:
+            result = real(fake, argv, kwargs)
+            if argv[1] == "store":
+                for k in list(items):
+                    items[k] = items[k][:-4]
+            return result
+
+        monkeypatch.setattr(signing, "subprocess", FakeSubprocess(truncating_tool))
+        backend = signing.resolve_keystore_backend(
+            "claude-code", backend="secret-service", env={}
+        )
+        with pytest.raises(ledger.KeyUnavailable, match="did not read back as stored"):
+            signing.generate_and_store_keystore_key(backend)
+
+
+class TestTheDpapiBlobIsWrittenInBinaryMode:
+    """On Windows a descriptor opened without ``O_BINARY`` is in TEXT mode and
+    the CRT rewrites every ``0x0A`` as ``0x0D 0x0A``, so the blob read back is
+    not the blob that was protected. Only ciphertext that happens to contain a
+    newline byte is affected, which is what makes it a latent bug rather than
+    an obvious one."""
+
+    def test_the_open_flags_request_binary_mode_where_it_exists(self) -> None:
+        o_binary = getattr(os, "O_BINARY", 0)
+        assert signing._DPAPI_BLOB_OPEN_FLAGS & o_binary == o_binary
+        # The flags this platform does need are present regardless.
+        for flag in (os.O_WRONLY, os.O_CREAT, os.O_EXCL):
+            assert signing._DPAPI_BLOB_OPEN_FLAGS & flag == flag
+
+    def test_ciphertext_containing_newline_bytes_round_trips_byte_exactly(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The property the flag protects, asserted directly."""
+
+        class NewlineHeavyDpapi(FakeDpapi):
+            MARKER = b"dpapi\n\r\nprotected:\n"
+
+        fake = NewlineHeavyDpapi()
+        monkeypatch.setattr(signing, "_dpapi_libraries", lambda: (fake, fake))
+        blob_path = tmp_path / "k.dpapi"
+        provider = signing.generate_and_store_keystore_key(
+            signing.WindowsDpapiBackend(blob_path=blob_path)
+        )
+        on_disk = blob_path.read_bytes()
+        assert b"\n" in on_disk
+        assert on_disk.startswith(NewlineHeavyDpapi.MARKER)
+        assert signing.verify_signature(
+            b"payload", provider.sign(b"payload"), provider.public_key(), "ed25519"
+        )
+
+
+class TestKeygenCliReportsAReadBackFailureHonestly:
+    def test_an_unreadable_key_after_a_successful_store_exits_1(
+        self, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+    ) -> None:
+        """The key IS stored by then, so the message must say so rather than
+        letting a traceback imply nothing happened."""
+        backend = signing.resolve_keystore_backend(
+            "claude-code", backend="secret-service", env={}
+        )
+        monkeypatch.setattr(
+            signing, "resolve_keystore_backend", lambda *a, **k: backend
+        )
+        monkeypatch.setattr(
+            signing,
+            "generate_and_store_keystore_key",
+            lambda b, replace=False: signing.OsKeystoreKeyProvider(b),
+        )
+        monkeypatch.setattr(signing, "subprocess", FakeSubprocess(_missing_tool))
+        rc = cli.main(["keygen", "--provider", "os-keystore"])
+        assert rc == 1
+        captured = capfd.readouterr()
+        assert captured.out == ""
+        payload = json.loads(captured.err)
+        assert "stored but could not be read back" in payload["error"]
+        assert payload["keystore_backend"] == "secret-service"

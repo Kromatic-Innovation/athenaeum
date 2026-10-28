@@ -77,6 +77,7 @@ __all__ = [
     "STRENGTHS",
     "KeyProvider",
     "KeystoreBackend",
+    "KeystoreItemAbsent",
     "MacOsKeychainBackend",
     "NoneKeyProvider",
     "OsKeystoreKeyProvider",
@@ -436,6 +437,24 @@ KEYSTORE_BACKENDS: tuple[str, ...] = (
 )
 
 
+class KeystoreItemAbsent(ledger.KeyUnavailable):
+    """The keystore answered, and it holds no signing key item.
+
+    A SUBCLASS of :class:`ledger.KeyUnavailable`, so every degrade path keeps
+    treating it as "cannot sign right now" with no special case. What it adds
+    is the distinction :func:`generate_and_store_keystore_key` needs: "there
+    is nothing here" is safe to write over, while "I could not tell you what
+    is here" (a locked keychain, a timeout, a tool that is not installed, a
+    blob this user cannot decrypt) is not. Collapsing the two is how a
+    `keygen` without ``--force`` would overwrite a live signing key during a
+    transient keystore failure -- and every line that key ever signed becomes
+    permanently unverifiable, with no copy anywhere to restore from. Reported
+    on the ledger line as ``key.error: "KeystoreItemAbsent"``, which also
+    tells an operator "you never created a key" rather than "something is
+    wrong".
+    """
+
+
 @runtime_checkable
 class KeystoreBackend(Protocol):
     """One OS keystore, reduced to "put a secret in" / "get it back out".
@@ -468,6 +487,7 @@ def _run_keystore_tool(
     timeout: float,
     backend: str,
     action: str,
+    absent_returncodes: tuple[int, ...] = (),
 ) -> bytes:
     """Run *argv*, feeding *input_bytes* on **stdin**, and return stdout.
 
@@ -485,8 +505,19 @@ def _run_keystore_tool(
     processes on its ends.
 
     Any failure -- tool missing, non-zero exit, timeout -- becomes
-    :class:`ledger.KeyUnavailable`. Nothing here logs: see
+    :class:`ledger.KeyUnavailable`, except an exit code in
+    *absent_returncodes*, which is the tool's way of saying "no such item"
+    and becomes :class:`KeystoreItemAbsent`. Nothing here logs: see
     :class:`KeystoreBackend`.
+
+    ``start_new_session=True`` puts the child in its own session with NO
+    controlling terminal. Two reasons, and the first is not cosmetic: a
+    keystore tool that wants a passphrase reaches for ``/dev/tty`` rather
+    than stdin, so a child that inherits the operator's terminal can sit at
+    a prompt until the timeout fires. Detached, it cannot -- it either reads
+    the pipe or fails cleanly. The second is that a per-prompt hook must
+    never be able to grab the terminal out from under the session it is
+    observing.
     """
     try:
         # Fixed argv, never a shell, and the secret rides on stdin only.
@@ -497,6 +528,7 @@ def _run_keystore_tool(
             stderr=subprocess.PIPE,
             timeout=timeout,
             check=False,
+            start_new_session=True,
         )
     except FileNotFoundError as exc:
         raise ledger.KeyUnavailable(
@@ -508,6 +540,8 @@ def _run_keystore_tool(
         raise ledger.KeyUnavailable(
             f"{backend}: {argv[0]} exceeded {timeout}s trying to {action} the signing key"
         ) from exc
+    if completed.returncode in absent_returncodes:
+        raise KeystoreItemAbsent(f"{backend}: no signing key item found")
     if completed.returncode != 0:
         # stderr is NOT included: a keystore tool echoes back the arguments
         # it was given, and while this module never puts the secret there,
@@ -522,10 +556,32 @@ def _run_keystore_tool(
 class MacOsKeychainBackend:
     """macOS Keychain, through ``security(1)``.
 
-    ``add-generic-password -w`` is passed **with no value**, so ``security``
-    reads the password from stdin instead of from argv; ``find-generic-password
-    -w`` prints just the password back. ``-U`` updates an existing item
-    rather than failing on a duplicate.
+    **The store goes through ``security -i``, and that is load-bearing.** The
+    obvious shape, ``add-generic-password ... -w <secret>``, is the recipe
+    every macOS note writes down and it puts the seed on argv, which this
+    tier exists to avoid. The next obvious shape, a valueless ``-w`` with the
+    secret on stdin, trades that for a worse problem: a valueless ``-w``
+    makes ``security`` PROMPT, and a passphrase prompt reads ``/dev/tty``,
+    not stdin -- so against a terminal it blocks until the timeout and
+    against a pipe its behaviour is not something this module should be
+    betting a signing key on.
+
+    ``security -i`` reads *commands* from stdin until EOF. So the command
+    text carries the known-good ``-w <value>`` form, no prompt is involved,
+    and the secret still never touches argv: it arrives over a pipe,
+    invisible to ``ps`` and ``/proc/<pid>/cmdline``. ``-U`` updates an
+    existing item rather than failing on a duplicate.
+
+    Because interactive mode's exit code is not a contract this module can
+    lean on, :func:`generate_and_store_keystore_key` reads the item back and
+    compares it after every store -- which is the right discipline for all
+    three backends anyway, and is what turns "did the write land?" from an
+    assumption into a checked fact.
+
+    The read stays a direct ``find-generic-password -w`` invocation (the
+    secret is only ever on the way OUT there, and exit 44 is
+    ``errSecItemNotFound`` -- a genuinely absent item, distinct from a
+    keystore that could not answer).
     """
 
     def __init__(
@@ -543,19 +599,21 @@ class MacOsKeychainBackend:
         return "macos-keychain"
 
     def store(self, secret: bytes) -> None:
+        # The command text (secret included) travels on stdin, never argv.
+        # Base64 needs no quoting -- `+`, `/` and `=` are not special to
+        # `security`'s own argument splitter, and there is no whitespace.
+        command = (
+            b"add-generic-password -a "
+            + self.account.encode("utf-8")
+            + b" -s "
+            + self.service.encode("utf-8")
+            + b" -U -w "
+            + secret
+            + b"\n"
+        )
         _run_keystore_tool(
-            [
-                "security",
-                "add-generic-password",
-                "-a",
-                self.account,
-                "-s",
-                self.service,
-                "-U",
-                "-w",
-            ],
-            # `security` reads one line from stdin for the `-w` value.
-            input_bytes=secret + b"\n",
+            ["security", "-i"],
+            input_bytes=command,
             timeout=self.timeout,
             backend=self.name(),
             action="store",
@@ -576,10 +634,12 @@ class MacOsKeychainBackend:
             timeout=self.timeout,
             backend=self.name(),
             action="read",
+            # 44 is `errSecItemNotFound`.
+            absent_returncodes=(44,),
         )
         secret = out.strip()
         if not secret:
-            raise ledger.KeyUnavailable(f"{self.name()}: no signing key item found")
+            raise KeystoreItemAbsent(f"{self.name()}: no signing key item found")
         return secret
 
 
@@ -638,12 +698,14 @@ class SecretServiceBackend:
             timeout=self.timeout,
             backend=self.name(),
             action="read",
+            # libsecret exits 1 from `lookup` when nothing matches.
+            absent_returncodes=(1,),
         )
         secret = out.strip()
         if not secret:
-            # `secret-tool lookup` exits 0 with empty output when nothing
-            # matches, so a zero exit is not evidence the item exists.
-            raise ledger.KeyUnavailable(f"{self.name()}: no signing key item found")
+            # Older `secret-tool lookup` exits 0 with empty output when
+            # nothing matches, so a zero exit is not evidence of an item.
+            raise KeystoreItemAbsent(f"{self.name()}: no signing key item found")
         return secret
 
 
@@ -706,6 +768,17 @@ def _dpapi_transform(data: bytes, *, encrypt: bool) -> bytes:
         kernel32.LocalFree(blob_out.pbData)
 
 
+#: ``O_BINARY`` is Windows-only and absent elsewhere, hence the ``getattr``.
+#: Without it the CRT opens the descriptor in TEXT mode and ``os.write``
+#: translates every ``0x0A`` in the DPAPI ciphertext into ``0x0D 0x0A``, so
+#: the blob that comes back off disk is not the blob that was protected and
+#: ``CryptUnprotectData`` fails -- on the one platform the backend exists
+#: for, and only for ciphertext that happens to contain a newline byte.
+_DPAPI_BLOB_OPEN_FLAGS = (
+    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+)
+
+
 class WindowsDpapiBackend:
     """Windows DPAPI: the seed is encrypted with ``CryptProtectData`` and the
     protected blob is kept in a file.
@@ -733,7 +806,7 @@ class WindowsDpapiBackend:
         # which for a signing key means every line it signed becomes
         # unverifiable, with no copy anywhere to restore from.
         tmp_path = path.with_name(f"{path.name}.new-{os.getpid()}")
-        fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        fd = os.open(str(tmp_path), _DPAPI_BLOB_OPEN_FLAGS, 0o600)
         try:
             try:
                 os.write(fd, protected)
@@ -751,14 +824,24 @@ class WindowsDpapiBackend:
     def load(self) -> bytes:
         try:
             protected = self.blob_path.read_bytes()
+        except FileNotFoundError as exc:
+            # No file is the one unambiguous "there is no key here".
+            raise KeystoreItemAbsent(
+                f"{self.name()}: no protected blob at {self.blob_path}"
+            ) from exc
         except OSError as exc:
+            # A permission error or an I/O fault is NOT evidence of absence;
+            # overwriting on the strength of it would destroy a live key.
             raise ledger.KeyUnavailable(
                 f"{self.name()}: protected blob unreadable at {self.blob_path}"
             ) from exc
         if not protected:
-            raise ledger.KeyUnavailable(
+            raise KeystoreItemAbsent(
                 f"{self.name()}: protected blob at {self.blob_path} is empty"
             )
+        # A blob that will not decrypt stays a plain KeyUnavailable: it is
+        # most likely a real key belonging to another user profile, which is
+        # exactly what must not be overwritten.
         return _dpapi_transform(protected, encrypt=False).strip()
 
 
@@ -968,10 +1051,23 @@ def generate_and_store_keystore_key(
     makes every line it ever signed permanently unverifiable, and there is
     no copy anywhere to restore from.
 
-    The probe for an existing item deliberately calls the backend directly
-    rather than through :meth:`OsKeystoreKeyProvider._seed` -- a miss here
-    is the EXPECTED outcome and must not emit the process-wide "key
-    unavailable" warning.
+    **Only :class:`KeystoreItemAbsent` counts as "nothing to lose".** Any
+    other :class:`ledger.KeyUnavailable` from the probe -- a locked keychain,
+    a timeout, a tool that is not installed, a blob this user cannot decrypt
+    -- means the keystore could not say what it holds, and is re-raised.
+    Treating "I cannot tell" as "it is empty" is how a transient failure
+    turns into an unrecoverable one.
+
+    **The store is verified by reading it back.** `security -i`'s per-command
+    exit status is not a contract this module leans on, and the same question
+    ("did the write actually land?") applies to every backend; comparing the
+    item against what was just written answers it rather than assuming it. A
+    mismatch raises :class:`ledger.KeyUnavailable` instead of returning a
+    provider that cannot sign.
+
+    The probe deliberately calls the backend directly rather than through
+    :meth:`OsKeystoreKeyProvider._seed` -- a miss here is the EXPECTED
+    outcome and must not emit the process-wide "key unavailable" warning.
     """
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
     from cryptography.hazmat.primitives.serialization import (
@@ -983,7 +1079,7 @@ def generate_and_store_keystore_key(
     if not replace:
         try:
             existing = backend.load()
-        except ledger.KeyUnavailable:
+        except KeystoreItemAbsent:
             existing = b""
         if existing:
             raise FileExistsError(
@@ -994,6 +1090,20 @@ def generate_and_store_keystore_key(
     encoded = base64.b64encode(seed)
     try:
         backend.store(encoded)
+        try:
+            read_back = backend.load()
+        except ledger.KeyUnavailable as exc:
+            # Including KeystoreItemAbsent: the item was just written, so
+            # "there is nothing here" means the write did not land, and
+            # attributing it to absence would send the operator looking in
+            # the wrong place.
+            raise ledger.KeyUnavailable(
+                f"{backend.name()}: the signing key did not read back as stored ({exc})"
+            ) from exc
+        if read_back != encoded:
+            raise ledger.KeyUnavailable(
+                f"{backend.name()}: the signing key did not read back as stored"
+            )
     finally:
         del seed, encoded, private_key
     return OsKeystoreKeyProvider(backend)
