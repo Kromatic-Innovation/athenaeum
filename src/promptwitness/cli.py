@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""``promptwitness`` console script (athenaeum#2147, athenaeum#2150,
-athenaeum#2151).
+"""``promptwitness`` console script (athenaeum#2147, athenaeum#2149,
+athenaeum#2150, athenaeum#2151, athenaeum#2152).
 
 Layering: L2 (CLI/presentation — depends on :mod:`promptwitness.ledger`,
 :mod:`promptwitness.canon`, :mod:`promptwitness.signing` and
@@ -11,23 +11,25 @@ import their optional dependency lazily, inside the functions that need it,
 so importing this module costs nothing on an install without the
 ``witness-sign`` / ``witness-anchor`` extras.
 
-``status`` (athenaeum#2147), ``keygen`` (athenaeum#2150) and ``anchor``
-(athenaeum#2151) are implemented. ``hook claude-code`` (athenaeum#2149) is
-out of scope here — its subcommand is added by that issue, which extends
-:func:`build_parser` the same way the three above were added: by
-registering another subparser in this module.
+``status`` (athenaeum#2147), ``keygen`` (athenaeum#2150, extended with
+``--provider os-keystore`` by athenaeum#2152), ``hook claude-code``
+(athenaeum#2149) and ``anchor`` (athenaeum#2151) are all implemented here.
+Each was added the same way: by registering another subparser in
+:func:`build_parser`, in this module.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from typing import Any
 
 from promptwitness import __version__, canon, ledger, signing
 from promptwitness import anchor as anchor_mod
+from promptwitness.harness import claude_code
 
 #: Matches a subject string that names an actual ledger line
 #: (``witness:<ledger_id>:<seq>``), as opposed to an arbitrary caller-chosen
@@ -65,12 +67,26 @@ def build_parser() -> argparse.ArgumentParser:
 
     keygen = sub.add_parser(
         "keygen",
-        help="Generate a software-file Ed25519 signing key, mode 0600.",
+        help="Generate an Ed25519 signing key, in a file (mode 0600) or an OS keystore.",
     )
     keygen.add_argument(
         "--harness",
         default="claude-code",
         help="Harness name the default key path is namespaced under.",
+    )
+    keygen.add_argument(
+        "--provider",
+        choices=["software-file", "os-keystore"],
+        default="software-file",
+        help="Where to keep the key: a PEM file on disk, or the OS keystore "
+        "(encrypted at rest; your own session can still read it).",
+    )
+    keygen.add_argument(
+        "--keystore-backend",
+        choices=list(signing.KEYSTORE_BACKENDS),
+        default=None,
+        help="Keystore to use with --provider os-keystore (else "
+        "PROMPTWITNESS_KEYSTORE_BACKEND, else this platform's).",
     )
     keygen.add_argument(
         "--key-path",
@@ -81,9 +97,29 @@ def build_parser() -> argparse.ArgumentParser:
     keygen.add_argument(
         "--force",
         action="store_true",
-        help="Overwrite an existing key file instead of refusing.",
+        help="Overwrite an existing key instead of refusing.",
     )
     keygen.set_defaults(func=_cmd_keygen)
+
+    hook = sub.add_parser(
+        "hook",
+        help="Harness hook entry points (athenaeum#2149).",
+    )
+    hook_sub = hook.add_subparsers(dest="harness_command")
+    hook_claude_code = hook_sub.add_parser(
+        "claude-code",
+        help="Append a witness line for a Claude Code hook event.",
+    )
+    hook_claude_code.add_argument(
+        "--event",
+        required=True,
+        choices=["session-end"],
+        help="Which Claude Code hook fired. Only 'session-end' is implemented "
+        "here -- the per-turn 'UserPromptSubmit' path is wired directly "
+        "through athenaeum.claude_code_adapter, in-process, not through "
+        "this console script.",
+    )
+    hook_claude_code.set_defaults(func=_cmd_hook_claude_code)
 
     anchor_parser = sub.add_parser(
         "anchor",
@@ -158,9 +194,15 @@ def _cmd_status(args: argparse.Namespace) -> int:
 
 
 def _cmd_keygen(args: argparse.Namespace) -> int:
-    """Generate a new ``software-file`` Ed25519 key and print ``{key_path,
-    key_id, algorithm, strength}`` -- never the key material itself, on
-    stdout, stderr, or (this command logs nothing) a log record."""
+    """Generate a new Ed25519 signing key and print where it went plus
+    ``{key_id, algorithm, strength}`` -- never the key material itself, on
+    stdout, stderr, or (this command logs nothing) a log record.
+
+    ``--provider os-keystore`` stores the seed in the OS keystore instead of
+    a PEM file; there is then no ``key_path`` to report, so the payload
+    carries ``keystore_backend`` in its place."""
+    if args.provider == "os-keystore":
+        return _keygen_os_keystore(args)
     key_path = signing.resolve_key_path(args.harness, override=args.key_path)
     if key_path.exists():
         if not args.force:
@@ -177,6 +219,75 @@ def _cmd_keygen(args: argparse.Namespace) -> int:
     payload: dict[str, Any] = {
         "key_path": str(key_path),
         "key_id": provider.key_id(),
+        "algorithm": provider.algorithm(),
+        "strength": provider.strength(),
+    }
+    print(json.dumps(payload, sort_keys=True))
+    return 0
+
+def _cmd_hook_claude_code(args: argparse.Namespace) -> int:
+    """``promptwitness hook claude-code --event session-end``: append a
+    ``kind="session-close"`` witness line from the process environment (no
+    stdin payload is required -- :func:`promptwitness.harness.claude_code.session_close`
+    reads ``CLAUDE_CODE_SESSION_ID`` directly). A no-op (exit 0, no line
+    written) when that env var is absent.
+
+    Unlike the per-turn hook path wired through ``athenaeum.claude_code_adapter``,
+    this standalone console script carries no silent-no-op guard of its
+    own: a real failure here propagates as a normal CLI error (non-zero
+    exit, traceback on stderr), for an operator invoking it directly.
+    """
+    if args.event == "session-end":
+        claude_code.session_close(os.environ)
+        return 0
+    return 1
+
+
+def _keygen_os_keystore(args: argparse.Namespace) -> int:
+    """The ``--provider os-keystore`` half of :func:`_cmd_keygen`.
+
+    Both failure modes report a one-line JSON error on stderr and exit 1
+    rather than raising: an existing item (replacing a signing key makes
+    every line it signed permanently unverifiable) and an unreachable
+    keystore (no ``security``/``secret-tool``, a locked keystore, a DPAPI
+    refusal)."""
+    try:
+        backend = signing.resolve_keystore_backend(
+            args.harness, backend=args.keystore_backend
+        )
+    except ValueError as exc:
+        print(json.dumps({"error": str(exc)}, sort_keys=True), file=sys.stderr)
+        return 1
+    try:
+        provider = signing.generate_and_store_keystore_key(
+            backend, replace=bool(args.force)
+        )
+    except FileExistsError as exc:
+        print(json.dumps({"error": str(exc)}, sort_keys=True), file=sys.stderr)
+        return 1
+    except ledger.KeyUnavailable as exc:
+        print(json.dumps({"error": str(exc)}, sort_keys=True), file=sys.stderr)
+        return 1
+    try:
+        key_id = provider.key_id()
+    except ledger.KeyUnavailable as exc:
+        # The key IS stored at this point (`generate_and_store_keystore_key`
+        # reads it back before returning), so say so rather than letting a
+        # traceback imply nothing happened.
+        print(
+            json.dumps(
+                {
+                    "error": f"the key was stored but could not be read back: {exc}",
+                    "keystore_backend": backend.name(),
+                },
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+        return 1
+    payload: dict[str, Any] = {
+        "keystore_backend": backend.name(),
+        "key_id": key_id,
         "algorithm": provider.algorithm(),
         "strength": provider.strength(),
     }

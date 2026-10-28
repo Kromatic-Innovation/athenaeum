@@ -95,6 +95,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ledger.append_line` additively accepts `extra_signers` so a `key-rotate`
   line can carry a second signature from the old key alongside the new one.
 
+- **`promptwitness` `os-keystore` key adapter: macOS Keychain, Linux Secret
+  Service, Windows DPAPI (issue athenaeum#2152, part of the
+  prompt-witness-ledger epic, athenaeum#2144).** The Ed25519 seed lives in the
+  OS keystore instead of a plaintext PEM, and signing still happens in-process
+  with no added per-turn friction. Select it with
+  `PROMPTWITNESS_KEY_PROVIDER=os-keystore` (backend by platform, overridable
+  with `PROMPTWITNESS_KEYSTORE_BACKEND`); create the key with
+  `promptwitness keygen --provider os-keystore`, which refuses to replace an
+  existing key without `--force`.
+  - **This tier protects the key at rest and nothing else**, and the docs say
+    so plainly: a stolen disk or backup yields no usable key, but the user's
+    own session can read the item back without a prompt, so
+    `presence_required()` is `False` and an `os-keystore` signature makes no
+    claim at all about a human being present.
+  - Key material travels on **stdin** (macOS `security -i`, which reads its
+    commands from stdin rather than argv; `secret-tool store`) or not at all
+    (DPAPI is an in-process `ctypes` call), never on argv, which is
+    world-readable on every platform; a test asserts that over the real
+    `subprocess` boundary. Keystore children run in their own session with no
+    controlling terminal, so no keystore tool can prompt on `/dev/tty` or take
+    the terminal from the session the hook is observing. The Windows protected
+    blob is written atomically at mode 0600, in binary mode.
+  - **A store is verified by reading it back**, and "no key here" is kept
+    distinct from "I cannot tell you what is here": only a genuinely absent
+    item lets `keygen` write without `--force`, so a locked keychain, a
+    timeout, a missing tool or a blob belonging to another user profile all
+    refuse rather than destroying a live key.
+  - An unavailable keystore — tool missing, keystore locked, DPAPI refusal, no
+    item stored, a malformed item — degrades to an unsigned line plus one
+    warning for the whole process, exactly like the `software-file` adapter,
+    and never blocks the hook.
+
+- **The Claude Code harness adapter for the prompt witness ledger** (issue
+  athenaeum#2149): `promptwitness.harness.claude_code` classifies every
+  `UserPromptSubmit` prompt into a kind (`human`, `slash-command`,
+  `task-notification`, `local-command`, `system`, `unknown`, `subagent`,
+  `launch-argument`) and an entry channel (`interactive`, `headless`,
+  `bridge`, `unknown`), extracts typed/pasted/slash-args segments, detects
+  session resumption, and a new `promptwitness hook claude-code --event
+  session-end` subcommand closes each session with its turn/witnessed
+  counts. `athenaeum.claude_code_adapter` wires the per-turn call in,
+  gated off by default behind `ATHENAEUM_WITNESS_LEDGER_ENABLED`, with a
+  silent no-op guard (`<cache_dir>/witness_hook_errors.jsonl`) so a witness
+  failure can never surface as hook noise or change the hook's output.
+  Headless and bridge lines are never counted as human, per
+  `docs/design/witness-ledger.md`'s operator rulings. Out of scope here:
+  signing (athenaeum#2150) and intake lookup (athenaeum#2158).
+
 - **`promptwitness` external anchoring: `Anchorer` protocol, the mandatory
   `LocalClockAnchorer`, and an `OpenTimestampsAnchorer` with configurable
   full Bitcoin verification (issue athenaeum#2151).** `LocalClockAnchorer`
@@ -112,7 +160,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   chained into the witness ledger as `kind: "anchor"` lines. RFC 3161
   (athenaeum#2157) and athenaeum wiring (athenaeum#2156, athenaeum#2040) are
   separate, later issues.
-
 
 ### Changed
 

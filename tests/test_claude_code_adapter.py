@@ -1051,3 +1051,150 @@ class TestAC6NoSecretLeakage:
         assert self._SECRET not in captured.err
         assert "another-secret-value" not in captured.out
         assert "another-secret-value" not in captured.err
+
+
+# ---------------------------------------------------------------------------
+# athenaeum#2149 AC — witness-ledger wiring: gated, ordered before AUTO_RECALL
+# and the length check, and silently no-op on failure.
+# ---------------------------------------------------------------------------
+
+
+class TestWitnessLedgerWiring:
+    """Counter-example this defeats: an adapter that either never calls the
+    witness path at all, or calls it only AFTER the ``AUTO_RECALL``/length
+    gates -- both would silently lose witness coverage for exactly the
+    turns those gates are designed to skip for recall purposes."""
+
+    def test_disabled_by_default_writes_no_line_and_no_error_log(
+        self, tmp_path: Path
+    ) -> None:
+        witness_dir = tmp_path / "witness"
+        stdin_payload = json.dumps(
+            {"prompt": "a sufficiently long test prompt", "session_id": "s"}
+        )
+        result = _run_adapter(
+            stdin_payload,
+            cache_dir=tmp_path,
+            extra_env={"PROMPTWITNESS_DIR": str(witness_dir), "AUTO_RECALL": "false"},
+        )
+        assert result.returncode == 0
+        assert result.stdout == ""
+        assert result.stderr == ""
+        assert not witness_dir.exists()
+        assert not (tmp_path / "witness_hook_errors.jsonl").exists()
+
+    def test_enabled_writes_a_line_even_when_auto_recall_is_false(
+        self, tmp_path: Path
+    ) -> None:
+        witness_dir = tmp_path / "witness"
+        stdin_payload = json.dumps({"prompt": "whatever happens here", "session_id": "s1"})
+        result = _run_adapter(
+            stdin_payload,
+            cache_dir=tmp_path,
+            extra_env={
+                "PROMPTWITNESS_DIR": str(witness_dir),
+                "ATHENAEUM_WITNESS_LEDGER_ENABLED": "true",
+                "AUTO_RECALL": "false",
+            },
+        )
+        assert result.returncode == 0
+        assert result.stdout == ""  # AUTO_RECALL=false still suppresses the recall push
+        assert result.stderr == ""
+
+        sys.path.insert(0, SRC)
+        try:
+            from promptwitness import ledger as pw_ledger
+        finally:
+            sys.path.remove(SRC)
+        assert pw_ledger.list_partitions(witness_dir) != []
+
+    def test_enabled_writes_a_line_for_a_three_char_prompt(self, tmp_path: Path) -> None:
+        witness_dir = tmp_path / "witness"
+        prompt = "hey"
+        assert len(prompt) == 3
+        stdin_payload = json.dumps({"prompt": prompt, "session_id": "s1"})
+        result = _run_adapter(
+            stdin_payload,
+            cache_dir=tmp_path,
+            extra_env={
+                "PROMPTWITNESS_DIR": str(witness_dir),
+                "ATHENAEUM_WITNESS_LEDGER_ENABLED": "true",
+            },
+        )
+        assert result.returncode == 0
+        assert result.stdout == ""  # too short for recall, but the witness still fires
+        assert result.stderr == ""
+
+        sys.path.insert(0, SRC)
+        try:
+            from promptwitness import ledger as pw_ledger
+        finally:
+            sys.path.remove(SRC)
+        assert pw_ledger.list_partitions(witness_dir) != []
+
+    def test_a_malformed_config_env_cannot_abort_session_end(self, tmp_path: Path) -> None:
+        """`witness_session_end` must swallow EVERYTHING, including the
+        `_load_config_env` call and the gate read.
+
+        Those two sat outside the try/except, so one stray non-UTF-8 byte in
+        `config.env` raised `UnicodeDecodeError` straight out of the witness
+        and aborted `athenaeum session-end` itself. A witness that can break
+        the thing it observes is strictly worse than no witness -- this path
+        exists on the promise that it cannot affect the caller's result or
+        exit code.
+        """
+        (tmp_path / "config.env").write_bytes(b"ATHENAEUM_WITNESS_LEDGER_ENABLED=true\n\xff\xfe\n")
+
+        sys.path.insert(0, SRC)
+        try:
+            from athenaeum.claude_code_adapter import witness_session_end
+        finally:
+            sys.path.remove(SRC)
+
+        # The assertion IS that this returns rather than raising.
+        witness_session_end(tmp_path)
+
+        errors = tmp_path / "witness_hook_errors.jsonl"
+        assert errors.exists()
+        records = [json.loads(line) for line in errors.read_text().splitlines() if line.strip()]
+        assert len(records) == 1
+        assert records[0]["error"] == "UnicodeDecodeError"
+        assert set(records[0]) == {"ts", "error"}  # never any text
+
+    def test_simulated_import_error_writes_exactly_one_error_line_stdout_unchanged(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        imported_adapter: tuple[object, object],
+    ) -> None:
+        """A ``promptwitness`` that fails to import (e.g. a stale editable
+        install) must never surface as hook noise -- it degrades to exactly
+        one line in the hook's own error log, with stdout byte-identical to
+        the no-witness-at-all path."""
+        adapter, _context_mod = imported_adapter
+        monkeypatch.setitem(sys.modules, "promptwitness.harness.claude_code", None)
+        monkeypatch.setenv("ATHENAEUM_WITNESS_LEDGER_ENABLED", "true")
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(tmp_path))
+        monkeypatch.setenv("AUTO_RECALL", "false")
+        monkeypatch.setattr(
+            sys,
+            "stdin",
+            io.StringIO(json.dumps({"prompt": "whatever happens here", "session_id": "s"})),
+        )
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = adapter.main()
+
+        assert rc == 0
+        assert buf.getvalue() == ""
+
+        error_log = tmp_path / "witness_hook_errors.jsonl"
+        lines = [ln for ln in error_log.read_text(encoding="utf-8").splitlines() if ln.strip()]
+        assert len(lines) == 1
+        record = json.loads(lines[0])
+        assert set(record.keys()) == {"ts", "error"}
+        # CPython raises the concrete `ModuleNotFoundError` subclass for a
+        # `None`-in-sys.modules import failure, not the bare `ImportError`
+        # base class -- `_log_witness_error` records the exact class name.
+        assert record["error"] == "ModuleNotFoundError"
