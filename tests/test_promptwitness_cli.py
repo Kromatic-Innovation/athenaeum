@@ -95,3 +95,61 @@ class TestStatusCommand:
             "partitions",
             "key_strength",
         }
+
+
+# ---------------------------------------------------------------------------
+# athenaeum#2149 AC — `promptwitness hook claude-code --event session-end`
+# ---------------------------------------------------------------------------
+
+
+class TestHookClaudeCodeSubcommand:
+    def test_registered_with_required_event_choice(self) -> None:
+        parser = cli.build_parser()
+        args = parser.parse_args(["hook", "claude-code", "--event", "session-end"])
+        assert args.command == "hook"
+        assert args.harness_command == "claude-code"
+        assert args.event == "session-end"
+
+    def test_unrecognized_event_is_rejected_by_argparse(self) -> None:
+        parser = cli.build_parser()
+        with pytest.raises(SystemExit):
+            parser.parse_args(["hook", "claude-code", "--event", "user-prompt-submit"])
+
+    def test_session_end_writes_a_session_close_line(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(tmp_path))
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "cli-sess")
+        ledger.append_line(
+            tmp_path,
+            kind="turn",
+            harness="claude-code",
+            harness_version="1",
+            hook_version="promptwitness 0.1.0",
+            session="cli-sess",
+            turn=1,
+            prompt_id="p1",
+            prompt_kind="human",
+            channel="interactive",
+        )
+
+        rc = cli.main(["hook", "claude-code", "--event", "session-end"])
+
+        assert rc == 0
+        lines = list(ledger.iter_lines(tmp_path))
+        close_lines = [ln for ln in lines if ln.kind == "session-close"]
+        assert len(close_lines) == 1
+        assert close_lines[0].session == "cli-sess"
+        assert close_lines[0].turns == 1
+        assert close_lines[0].turns_witnessed == 1
+
+    def test_session_end_with_no_session_id_env_is_a_noop(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(tmp_path))
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+
+        rc = cli.main(["hook", "claude-code", "--event", "session-end"])
+
+        assert rc == 0
+        assert ledger.list_partitions(tmp_path) == []
