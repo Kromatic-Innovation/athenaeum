@@ -85,7 +85,7 @@ import os
 import re
 from collections import deque
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -292,7 +292,8 @@ def _edge_timestamp(lines: Iterable[str]) -> datetime | None:
 
 @dataclass(frozen=True)
 class _ScopeIndex:
-    """One scope's transcripts, reduced to the two facts recovery needs.
+    """One scope's transcripts, reduced to the facts recovery (+ athenaeum#2148
+    model lookup) needs.
 
     Attributes:
         writes: ``{memory filename: (session id, write time)}`` — the LATEST
@@ -300,21 +301,46 @@ class _ScopeIndex:
             scope.
         windows: ``[(first, last, session id)]`` — each session's record-time
             span.
+        write_models: ``{memory filename: model id}`` — the ``message.model``
+            recorded on the SAME assistant record that cites ``writes[name]``
+            (issue athenaeum#2148 rung 1). Keyed/updated in lockstep with
+            ``writes`` — a filename with no model on its latest-write record
+            is simply absent here, never a stale earlier model.
+        session_models: ``{session id: model id}`` — the first assistant
+            turn's model seen anywhere in that session's transcript (rung 2
+            fallback, mirrors :func:`athenaeum.transcript_verify._assistant_model`
+            without re-reading the file: computed as a side effect of the
+            SAME single pass that builds ``writes``/``windows``).
     """
 
     writes: dict[str, tuple[str, datetime]]
     windows: list[tuple[datetime, datetime, str]]
+    write_models: dict[str, str] = field(default_factory=dict)
+    session_models: dict[str, str] = field(default_factory=dict)
+
+
+#: Cheap prefilter for the athenaeum#2148 rung-2 model scan: a JSON-serialized
+#: assistant record always contains this literal substring for its ``type``
+#: key. False positives (the substring appearing elsewhere) only cost one
+#: wasted ``json.loads`` of a line that would have been skipped anyway; a
+#: false negative is impossible since the real key always serializes this
+#: way. Scanning stops the moment one assistant model is found (mirrors
+#: ``transcript_verify._assistant_model``'s "first assistant turn" contract),
+#: so this never costs more than one extra parse per transcript.
+_ASSISTANT_TYPE_HINT = '"assistant"'
 
 
 def _scan_transcript(
     jsonl: Path, scope: str = ""
-) -> tuple[dict[str, datetime], datetime | None, datetime | None]:
-    """One linear pass over a transcript: memory writes + its time window.
+) -> tuple[dict[str, datetime], dict[str, str], str, datetime | None, datetime | None]:
+    """One linear pass over a transcript: memory writes, their models, this
+    session's first-assistant-turn model, and the transcript's time window.
 
-    Returns ``({memory filename: latest write time}, first, last)``. An
-    unreadable file yields empty results rather than raising — a transcript
-    that rolled off mid-scan must degrade to "cannot recover", not to a
-    crashed intake.
+    Returns ``({memory filename: latest write time}, {memory filename: model
+    on that write's record}, session's first assistant model or "", first,
+    last)``. An unreadable file yields empty results rather than raising — a
+    transcript that rolled off mid-scan must degrade to "cannot recover", not
+    to a crashed intake.
 
     ``scope`` narrows the accepted write targets to ``<scope>/memory/…`` —
     THIS scope's own memory directory. Without it, a session that edited some
@@ -324,9 +350,16 @@ def _scan_transcript(
     worst failure this module can have, so the match is anchored rather than
     merely ``"/memory/" in target``. An empty ``scope`` keeps the loose match
     (used only where no scope is known).
+
+    Issue athenaeum#2148: the model-lookup fields are a side effect of this
+    SAME read — adding them must never cost a second file open, which is the
+    whole point of folding them into this function rather than having a
+    caller re-read the transcript later.
     """
     needle = f"/{scope}/memory/" if scope else _MEMORY_HINT
     writes: dict[str, datetime] = {}
+    write_models: dict[str, str] = {}
+    session_model = ""
     head: list[str] = []
     tail: deque[str] = deque(maxlen=_EDGE_LINES)
     try:
@@ -338,20 +371,37 @@ def _scan_transcript(
                 tail.append(line)
                 if len(head) < _EDGE_LINES:
                     head.append(line)
+                record: object = None
+                if not session_model and _ASSISTANT_TYPE_HINT in line:
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        record = None
+                    if isinstance(record, dict) and record.get("type") == "assistant":
+                        message = record.get("message")
+                        model = message.get("model") if isinstance(message, dict) else None
+                        if isinstance(model, str) and model.strip():
+                            session_model = model.strip()
                 if _MEMORY_HINT not in line:
                     continue
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
+                if record is None:
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
                 paths = _tool_use_paths(record)
                 if not paths:
                     continue
                 stamp = None
+                record_model = ""
                 if isinstance(record, dict):
                     raw_ts = record.get("timestamp")
                     if isinstance(raw_ts, str):
                         stamp = _parse_timestamp(raw_ts)
+                    message = record.get("message")
+                    mval = message.get("model") if isinstance(message, dict) else None
+                    if isinstance(mval, str) and mval.strip():
+                        record_model = mval.strip()
                 for target in paths:
                     if needle not in target:
                         continue
@@ -361,15 +411,23 @@ def _scan_transcript(
                     prior = writes.get(name)
                     # A later write supersedes an earlier one; a write with no
                     # readable timestamp only fills an otherwise-empty slot.
+                    # The model recorded alongside the surviving write moves
+                    # in lockstep -- never stale next to a newer write time.
                     if prior is None:
                         writes[name] = stamp or _UNKNOWN_WRITE_TIME
+                        if record_model:
+                            write_models[name] = record_model
                     elif stamp is not None and stamp >= prior:
                         writes[name] = stamp
+                        if record_model:
+                            write_models[name] = record_model
+                        else:
+                            write_models.pop(name, None)
     except OSError:
-        return {}, None, None
+        return {}, {}, "", None, None
     first = _edge_timestamp(head)
     last = _edge_timestamp(reversed(tail))
-    return writes, first, last
+    return writes, write_models, session_model, first, last
 
 
 def _citation_explains(cited_at: datetime, written_at: datetime | None) -> bool:
@@ -419,6 +477,8 @@ class SessionRecoverer:
         if cached is not None:
             return cached
         writes: dict[str, tuple[str, datetime]] = {}
+        write_models: dict[str, str] = {}
+        session_models: dict[str, str] = {}
         windows: list[tuple[datetime, datetime, str]] = []
         scope_dir = self._root / scope
         if scope_dir.is_dir():
@@ -426,16 +486,60 @@ class SessionRecoverer:
                 session_id = jsonl.stem
                 if not session_id:
                     continue
-                found, first, last = _scan_transcript(jsonl, scope)
+                found, found_models, session_model, first, last = _scan_transcript(
+                    jsonl, scope
+                )
                 for name, stamp in found.items():
                     prior = writes.get(name)
                     if prior is None or stamp >= prior[1]:
                         writes[name] = (session_id, stamp)
+                        model = found_models.get(name, "")
+                        if model:
+                            write_models[name] = model
+                        else:
+                            write_models.pop(name, None)
+                if session_model:
+                    session_models[session_id] = session_model
                 if first is not None and last is not None and first <= last:
                     windows.append((first, last, session_id))
-        index = _ScopeIndex(writes=writes, windows=windows)
+        index = _ScopeIndex(
+            writes=writes,
+            windows=windows,
+            write_models=write_models,
+            session_models=session_models,
+        )
         self._cache[scope] = index
         return index
+
+    def model_for_write(self, memory_path: Path, scope: str) -> str:
+        """Issue athenaeum#2148 rung 1: the model on the LATEST write-citing
+        assistant record for ``memory_path`` in ``scope``, or ``""``.
+
+        Reuses the SAME per-scope index :meth:`recover` builds and caches —
+        safe to call for every AI-attributed file in a scope, including ones
+        whose ``origin_session_id`` came straight from frontmatter (never
+        routed through :meth:`recover`): `_index_for` memoizes per scope, so
+        the underlying transcripts are read at most once per scope per pass
+        either way (athenaeum#2048 budget).
+        """
+        if not scope:
+            return ""
+        return self._index_for(scope).write_models.get(memory_path.name, "")
+
+    def model_for_session(self, scope: str, session_id: str) -> str:
+        """Issue athenaeum#2148 rung 2: the first assistant-turn model
+        recorded anywhere in ``session_id``'s transcript, or ``""``.
+
+        Computed as a side effect of the SAME single-pass scan
+        :meth:`model_for_write` / :meth:`recover` already trigger for this
+        scope — never a second read of the transcript file. Mirrors
+        :func:`athenaeum.transcript_verify._assistant_model`'s "first
+        assistant turn" semantics without re-reading what this module
+        already read once (see :data:`_ScopeIndex.session_models`).
+        """
+        if not scope or not session_id:
+            return ""
+        return self._index_for(scope).session_models.get(session_id, "")
 
     @staticmethod
     def _write_time(memory_path: Path, written_at: datetime | None) -> datetime | None:

@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
@@ -175,7 +176,139 @@ def _forbidden_result() -> dict:
 # does not supply ``sources``. ``claude:inferred`` is intentionally
 # distinct from any session-id format so downstream provenance audits
 # can surface "agent never declared a source" as a first-class signal.
+#
+# KEEP THIS SCALAR BYTE-IDENTICAL: ``repair._DEFAULTED_INFERRED_SOURCE``
+# matches it exactly to select ``repair --backfill-sources`` candidates
+# (issue athenaeum#328). Issue athenaeum#2148 adds `model`/`originSessionId`
+# alongside this default (see ``_default_inferred_extras`` below) without
+# touching the scalar itself.
 _DEFAULT_INFERRED_SOURCE = "claude:inferred"
+
+#: Capped tail-read size (bytes) when resolving the model id from a session
+#: transcript for the ``claude:inferred`` default (issue athenaeum#2148). The
+#: newest assistant turn's ``message.model`` is almost always within the last
+#: few KB of a transcript; this bound keeps a long-lived session's lookup
+#: O(1) rather than O(transcript size).
+_INFERRED_MODEL_TAIL_READ_BYTES = 256 * 1024
+
+
+def _tail_read_text(path: Path, max_bytes: int) -> str:
+    """Read at most the LAST ``max_bytes`` of *path*, decoded permissively.
+
+    Used only by :func:`_newest_assistant_model` below -- a transcript line
+    split by the seek boundary is simply dropped by ``splitlines()``, which
+    is fine here: the goal is the newest COMPLETE record, not every byte.
+    Returns ``""`` on any read error (missing file, permission error) --
+    this is a best-effort lookup, never a hard dependency of ``remember()``.
+    """
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as handle:
+            if size > max_bytes:
+                handle.seek(size - max_bytes)
+            raw = handle.read()
+    except OSError:
+        return ""
+    return raw.decode("utf-8", errors="replace")
+
+
+def _newest_assistant_model(session_id: str) -> str:
+    """Best-effort model-id for the newest assistant turn of *session_id*.
+
+    Issue athenaeum#2148 rung 2 of the ``claude:inferred`` default's model
+    lookup (rung 1 is the ``ANTHROPIC_MODEL`` env var; rung 3 is the honest
+    ``"unknown"`` fallback -- see :func:`_resolve_inferred_model`). Reads
+    only the LAST :data:`_INFERRED_MODEL_TAIL_READ_BYTES` of
+    ``<projects_root>/*/<session_id>.jsonl`` -- a capped TAIL read, not a
+    full transcript scan, so a long-lived session costs this lookup a
+    bounded amount of I/O rather than O(transcript size). Returns ``""``
+    when there is no session id, no matching transcript, no assistant
+    record in the tail window, or a read error -- callers fall back to
+    ``"unknown"``.
+    """
+    if not session_id:
+        return ""
+    from athenaeum.transcript_verify import default_projects_root
+
+    root = default_projects_root()
+    try:
+        candidates = sorted(root.glob(f"*/{session_id}.jsonl"))
+    except OSError:
+        return ""
+    if not candidates:
+        return ""
+    text = _tail_read_text(candidates[0], _INFERRED_MODEL_TAIL_READ_BYTES)
+    newest = ""
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict) or record.get("type") != "assistant":
+            continue
+        message = record.get("message")
+        model = message.get("model") if isinstance(message, dict) else None
+        if isinstance(model, str) and model.strip():
+            # Lines are chronological within the file; keep overwriting so
+            # the LAST (newest) assistant record in the tail window wins.
+            newest = model.strip()
+    return newest
+
+
+def _resolve_inferred_model(session_id: str) -> str:
+    """Model-id to stamp on a ``claude:inferred`` default (issue athenaeum#2148).
+
+    Precedence: ``ANTHROPIC_MODEL`` env var, then the newest assistant
+    turn's model from *session_id*'s own transcript (capped tail read via
+    :func:`_newest_assistant_model`), then the honest ``"unknown"``.
+    """
+    env_model = os.environ.get("ANTHROPIC_MODEL")
+    if env_model and env_model.strip():
+        return env_model.strip()
+    return _newest_assistant_model(session_id) or "unknown"
+
+
+def _resolve_inferred_session_id() -> str:
+    """Session id to stamp on a ``claude:inferred`` default, or ``""``.
+
+    Reads ``CLAUDE_CODE_SESSION_ID`` directly (issue athenaeum#2148) --
+    verified present in the MCP server process env under the stdio
+    transport, where one server process serves one session. Deliberately
+    does NOT fall back to ``push_metrics.resolve_session_id()``'s wider
+    ``CLAUDE_SESSION_ID`` alias (issue athenaeum#734): under an HTTP or
+    shared server the environment is wrong for THIS purpose (attributing a
+    default to the session that triggered it), and stamping nothing is the
+    honest answer there, not a guess from a looser signal. Returns ``""`` —
+    never stamp a session -- when the variable is unset or empty.
+    """
+    value = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    return value.strip() if isinstance(value, str) and value.strip() else ""
+
+
+def _default_inferred_extras(content: str) -> dict:
+    """Extras to inject alongside the ``claude:inferred`` default (issue athenaeum#2148).
+
+    Stamps ``model`` and ``originSessionId`` — the two fields the
+    ``model-prior:<model-id>`` / ``agent-observed:<model>:<session-ref>``
+    tiers already carry, which a bare ``claude:inferred`` default
+    previously recorded neither of. Never overrides a value the caller
+    already declared in *content*'s own frontmatter: parsed BEFORE
+    ``_inject_provenance_frontmatter`` applies these as an end-of-block
+    merge, which would otherwise clobber a caller-supplied ``model:`` /
+    ``originSessionId:`` that arrived pre-stamped in the markdown body.
+    """
+    existing_meta, _ = parse_frontmatter(content)
+    extras: dict = {}
+    session_id = _resolve_inferred_session_id()
+    if session_id and not existing_meta.get("originSessionId"):
+        extras["originSessionId"] = session_id
+    if not existing_meta.get("model"):
+        extras["model"] = _resolve_inferred_model(session_id)
+    return extras
+
 
 # ---------------------------------------------------------------------------
 # Recall helpers
@@ -2240,7 +2373,12 @@ def remember_write(
         if sources is None:
             wiki_source: str | dict | None = _DEFAULT_INFERRED_SOURCE
             field_sources_map: dict | None = None
-            extras: dict = {}
+            # Issue athenaeum#2148: stamp `model` + `originSessionId` alongside
+            # the defaulted scalar so a `claude:inferred` write records WHICH
+            # model inferred it and in WHICH session, without touching the
+            # scalar itself (see the KEEP THIS SCALAR BYTE-IDENTICAL note on
+            # `_DEFAULT_INFERRED_SOURCE` above).
+            extras: dict = _default_inferred_extras(content)
             log.warning(
                 "remember(): no `sources` supplied; defaulting "
                 "wiki-level source to %r. Caller should declare a "
@@ -3022,6 +3160,11 @@ def create_server(
 
                 Omitting ``sources`` defaults to ``source: claude:inferred``
                 and logs a server-side warning. Always declare a source.
+                The default also stamps ``model:`` / ``originSessionId:``
+                (issue athenaeum#2148, ``docs/design/provenance-shape.md`` §10.6)
+                so a later audit can trace WHICH model guessed and in WHICH
+                session — never overriding either if already present in
+                ``content``'s own frontmatter.
 
                 BREAKING (issue athenaeum#96): bare dicts without the wrapper keys
                 are rejected — see ``remember_write`` for the rationale.
