@@ -80,7 +80,7 @@ from athenaeum.runlock import RunLock
 from athenaeum.store import append_line_durable
 from athenaeum.transcript_verify import (
     BackfillClassification,
-    _is_user_record,
+    _is_human_record,
     _normalize,
     _parse_session_text,
     _user_authored_text,
@@ -644,15 +644,19 @@ def _matching_human_utterance(records: list[object], claim: str) -> str | None:
     """The first human-authored record text whose normalized form contains
     *claim*'s normalized form, or ``None``.
 
-    Reuses :func:`athenaeum.transcript_verify._user_authored_text` and
-    :func:`athenaeum.transcript_verify._normalize` — imported, not
+    Reuses :func:`athenaeum.transcript_verify._is_human_record` (issue
+    athenaeum#2146 — excludes task-notification/peer/isMeta/legacy-wrapper
+    records, the same gate :func:`~athenaeum.transcript_verify._user_authored_text`
+    and :func:`~athenaeum.transcript_verify.verify_user_stated` use),
+    :func:`~athenaeum.transcript_verify._user_authored_text`, and
+    :func:`~athenaeum.transcript_verify._normalize` — imported, not
     reimplemented (issue athenaeum#753 candidate AC).
     """
     needle = _normalize(claim)
     if not needle:
         return None
     for record in records:
-        if not _is_user_record(record):
+        if not _is_human_record(record):
             continue
         text = _user_authored_text(record)
         if text and needle in _normalize(text):

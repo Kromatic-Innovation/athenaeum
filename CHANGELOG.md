@@ -166,6 +166,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was ever in the package root's `__all__`, so this was a changelog gap rather
   than an unannounced break.
 
+- **`transcript_verify` no longer counts every `type: "user"` record as a
+  human utterance (issue athenaeum#2146).** Sub-agent/background-task
+  results, peer messages, `isMeta` records, and (on older harness versions)
+  wrapper-prefixed legacy records were all classifying as `user-stated`. A
+  new shared `_is_human_record(record)` helper — used by
+  `_user_authored_text`, `verify_user_stated`, and
+  `transcript_receipts._matching_human_utterance` — restricts
+  "human-authored" to records a human actually typed; a dry-run
+  `repair --backfill-sources` against a fixture corpus flips 3 of 4
+  previously-misclassified `user-stated` results back to their correct
+  channel.
+
 
 ## [0.22.43] - 2026-10-25
 
