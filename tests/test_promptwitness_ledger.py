@@ -8,6 +8,8 @@ public-safe-lint gate rejects that shape even in test fixtures).
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import multiprocessing
 import os
@@ -459,6 +461,7 @@ class TestLedgerIndex:
 class _FakeKeyProvider:
     def __init__(self, raise_unavailable: bool = False) -> None:
         self._raise = raise_unavailable
+        self.signed_payloads: list[bytes] = []
 
     def key_id(self) -> str:
         return "ed25519:deadbeefdeadbeef"
@@ -475,7 +478,12 @@ class _FakeKeyProvider:
     def sign(self, payload: bytes) -> bytes:
         if self._raise:
             raise ledger.KeyUnavailable("no key configured")
-        return b"FAKESIG:" + payload[:8]
+        # Over the WHOLE payload, deliberately: a prefix-only fake (the first
+        # eight bytes are `{"channe` either way, since canonical_json sorts
+        # keys) cannot tell a payload that includes `key` from one that does
+        # not, and that is exactly the property these tests exist to pin.
+        self.signed_payloads.append(payload)
+        return b"FAKESIG:" + hashlib.sha256(payload).digest()
 
 
 class TestSigningSeam:
@@ -491,18 +499,57 @@ class TestSigningSeam:
         assert line.key.error == "KeyUnavailable"
         assert line.sig is None
 
-    def test_sig_covers_prev(self, tmp_path: Path) -> None:
-        """Changing ``prev`` would change what was signed -- proves the
-        signed payload actually includes ``prev``, not just the kind-
-        specific fields."""
+    def test_sig_covers_the_whole_line_without_sig(self, tmp_path: Path) -> None:
+        """The signed payload is byte-identical to
+        ``canonical_json(line_without_sig)`` -- every field, ``prev``
+        included, not just the kind-specific ones."""
         provider = _FakeKeyProvider()
         line = _append_turn(tmp_path, key_provider=provider)
         payload_without_sig = {k: v for k, v in line.to_dict().items() if k != "sig"}
         assert payload_without_sig["prev"] == line.prev
-        expected_sig_bytes = b"FAKESIG:" + canon.canonical_json(payload_without_sig)[:8]
-        import base64
-
+        expected = canon.canonical_json(payload_without_sig)
+        assert provider.signed_payloads == [expected]
+        expected_sig_bytes = b"FAKESIG:" + hashlib.sha256(expected).digest()
         assert line.sig == base64.b64encode(expected_sig_bytes).decode("ascii")
+
+    def test_sig_covers_the_key_block(self, tmp_path: Path) -> None:
+        """``key`` is inside the signed payload, so a custody claim cannot be
+        upgraded on an otherwise valid line.
+
+        ``key.strength`` is the field the later trust graph reads, and it is
+        the provider's own claim about itself -- if it sat outside the
+        signature, rewriting `software-file` to `hardware-presence` (or
+        swapping `key.id`) would leave the signature verifying.
+        """
+        provider = _FakeKeyProvider()
+        line = _append_turn(tmp_path, key_provider=provider)
+        signed = provider.signed_payloads[0]
+        assert b'"key":' in signed
+        assert b'"software-file"' in signed
+        assert b'"ed25519:deadbeefdeadbeef"' in signed
+
+        # A line whose key block is tampered with no longer matches the
+        # signature the real key produced.
+        tampered = {k: v for k, v in line.to_dict().items() if k != "sig"}
+        tampered["key"] = {**tampered["key"], "strength": "hardware-presence"}
+        tampered_sig = base64.b64encode(
+            b"FAKESIG:" + hashlib.sha256(canon.canonical_json(tampered)).digest()
+        ).decode("ascii")
+        assert tampered_sig != line.sig
+
+    def test_a_failed_sign_leaves_no_stale_sig_behind(self, tmp_path: Path) -> None:
+        """The unsigned degrade path must not leave a ``sig`` field.
+
+        ``key`` is now written before the payload is serialized, so the
+        failure branch runs with a partially-populated line; it must clear
+        any ``sig`` rather than let one survive beside
+        ``key.strength: "none"``.
+        """
+        line = _append_turn(tmp_path, key_provider=_FakeKeyProvider(raise_unavailable=True))
+        assert line.sig is None
+        assert "sig" not in line.to_dict()
+        assert line.key.strength == "none"
+        assert line.key.error == "KeyUnavailable"
 
 
 # ---------------------------------------------------------------------------

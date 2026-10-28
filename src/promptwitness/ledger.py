@@ -655,13 +655,21 @@ def _apply_key_and_sig(
     shape plus ``key.error`` — the append never blocks or fails because
     signing failed (athenaeum#2150's "the hook never blocks" rule, honored
     here even though no real adapter calls this yet).
+
+    The signed payload is ``canonical_json(line_without_sig)``, so ``key`` is
+    written into *line* BEFORE the payload is serialized. Signing the
+    pre-``key`` dict instead would leave ``key.strength`` outside the
+    signature, and a custody claim could then be upgraded (or a key id
+    swapped) on an otherwise valid line — the one field the later trust
+    graph reads. Nothing forces that ordering: every field the provider
+    contributes is knowable without signing (``key_id``/``algorithm``/
+    ``strength``/``presence_required`` are plain queries). See
+    ``TestSigningSeam::test_sig_covers_the_key_block``.
     """
     if key_provider is None:
         line["key"] = KeyInfo().to_dict()
         return
-    payload = canon.canonical_json(line)
     try:
-        sig_bytes = _run_sign_with_timeout(key_provider, payload, timeout)
         key_info = KeyInfo(
             id=key_provider.key_id(),
             alg=key_provider.algorithm(),
@@ -669,11 +677,14 @@ def _apply_key_and_sig(
             presence=key_provider.presence_required(),
         )
         line["key"] = key_info.to_dict()
+        payload = canon.canonical_json(line)
+        sig_bytes = _run_sign_with_timeout(key_provider, payload, timeout)
         import base64
 
         line["sig"] = base64.b64encode(sig_bytes).decode("ascii")
     except Exception as exc:  # noqa: BLE001 - signing must never block an append
         line["key"] = KeyInfo(strength="none", error=type(exc).__name__).to_dict()
+        line.pop("sig", None)
 
 
 def _write_line_bytes(path: Path, line: Mapping[str, Any]) -> None:
