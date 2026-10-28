@@ -300,10 +300,10 @@ h2 { font-size: 1.15rem; margin-top: 2.5rem; border-bottom: 2px solid #ddd;
 .section { margin-bottom: 2rem; }
 .row { display: grid; grid-template-columns: 1fr 1fr; gap: .75rem; border-bottom: 1px solid #eee;
        padding: .6rem 0; align-items: start; }
-.row.headrow { font-weight: 600; color: #555; font-size: .78rem; text-transform: uppercase;
+.row.headrow { font-weight: 600; color: #555555; font-size: .78rem; text-transform: uppercase;
                letter-spacing: .04em; border-bottom: 2px solid #ccc; }
-.pane-label { font-size: .72rem; color: #888; margin-bottom: .2rem; }
-.role { font-size: .75rem; color: #666; margin-bottom: .25rem; font-weight: 600; }
+.pane-label { font-size: .72rem; color: #888888; margin-bottom: .2rem; }
+.role { font-size: .75rem; color: #666666; margin-bottom: .25rem; font-weight: 600; }
 .text { white-space: pre-wrap;
         font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
         font-size: .85rem; background: #f7f7f7; border-radius: 6px; padding: .5rem .6rem; }
@@ -314,7 +314,7 @@ h2 { font-size: 1.15rem; margin-top: 2.5rem; border-bottom: 2px solid #ddd;
 .badge-warn { background: #fef9c3; color: #854d0e; }
 .badge-bad { background: #fee2e2; color: #991b1b; }
 footer { margin-top: 3rem; border-top: 2px solid #ddd; padding-top: 1rem;
-         font-size: .83rem; color: #444; }
+         font-size: .83rem; color: #444444; }
 table { border-collapse: collapse; width: 100%; margin: .75rem 0; }
 th, td { border: 1px solid #ddd; padding: .4rem .6rem; text-align: left; font-size: .8rem;
          vertical-align: top; }
