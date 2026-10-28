@@ -205,7 +205,7 @@ def _find_latest_pending_ots_attestation(
     itself appends lines, which moves the chain head, so re-deriving "the
     subject to upgrade" from the (now different) head would target a
     subject that was never anchored and could never upgrade (review
-    finding #1 on PR #2168). Each subject's status is last-write-wins (a
+    finding #1 on PR athenaeum#2168). Each subject's status is last-write-wins (a
     later ``complete``/``failed`` line for the same subject clears it from
     consideration here); among subjects currently pending, the one with the
     highest ``seq`` — the most recently touched — is returned.
@@ -269,7 +269,7 @@ def _cmd_anchor(args: argparse.Namespace) -> int:
     ``--upgrade`` with no ``--subject`` targets whichever subject is still
     ``pending`` from a previous pass (:func:`_find_latest_pending_ots_attestation`)
     — never the current chain head, which anchoring itself just moved
-    (review finding #1 on PR #2168). ``--upgrade`` against a subject whose
+    (review finding #1 on PR athenaeum#2168). ``--upgrade`` against a subject whose
     OpenTimestamps attestation is already ``complete`` is a no-op that
     reports the existing attestation: re-anchoring would silently discard
     the one Bitcoin-confirmed proof this design produces (review finding

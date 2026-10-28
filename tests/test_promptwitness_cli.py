@@ -2,7 +2,7 @@
 """Tests for the ``promptwitness`` console script (athenaeum#2147).
 
 The ``TestUpgradeFindingsRegression`` and ``TestDigestForSubjectInvariant``
-classes near the bottom are regression coverage for PR #2168 review
+classes near the bottom are regression coverage for PR athenaeum#2168 review
 findings #1 and #2 (athenaeum#2151) -- see each test's docstring.
 """
 
@@ -222,7 +222,7 @@ class TestAnchorCommand:
 
 
 class TestDigestForSubjectInvariant:
-    """Regression coverage for PR #2168 review finding #1 (athenaeum#2151):
+    """Regression coverage for PR athenaeum#2168 review finding #1 (athenaeum#2151):
     a subject's digest must be a pure function of the subject, never of
     when it was resolved.
     """
@@ -379,7 +379,7 @@ class TestFindLatestPendingOtsAttestation:
 
 
 class TestUpgradeFindingsRegression:
-    """CLI-level regression coverage for PR #2168 review findings #1 and #2."""
+    """CLI-level regression coverage for PR athenaeum#2168 review findings #1 and #2."""
 
     def test_upgrade_without_subject_targets_the_pending_subject_not_the_moved_head(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]

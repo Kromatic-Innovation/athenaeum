@@ -697,7 +697,7 @@ class TestVerifyWithRealSockets:
 
 
 # ---------------------------------------------------------------------------
-# Regression coverage: PR #2168 review findings #2 and #3 (athenaeum#2151).
+# Regression coverage: PR athenaeum#2168 review findings #2 and #3 (athenaeum#2151).
 # ---------------------------------------------------------------------------
 
 

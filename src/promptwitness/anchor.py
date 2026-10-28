@@ -410,7 +410,7 @@ class OpenTimestampsAnchorer:
 
         proof_path = self._proof_path(subject)
 
-        # Defence in depth (review finding #2 on athenaeum#2151/PR #2168):
+        # Defence in depth (review finding #2 on athenaeum#2151/PR athenaeum#2168):
         # never clobber an existing proof whose recorded attestation is
         # already Bitcoin-confirmed -- it is the strongest evidence this
         # design produces, and a confirmed proof cannot be regenerated.
