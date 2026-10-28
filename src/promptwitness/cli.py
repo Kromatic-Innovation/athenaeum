@@ -1,20 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 """``promptwitness`` console script (athenaeum#2147, athenaeum#2149,
-athenaeum#2150, athenaeum#2151, athenaeum#2152).
+athenaeum#2150, athenaeum#2151, athenaeum#2152, athenaeum#2157).
 
 Layering: L2 (CLI/presentation — depends on :mod:`promptwitness.ledger`,
-:mod:`promptwitness.canon`, :mod:`promptwitness.signing` and
-:mod:`promptwitness.anchor`). Standard library only at import time; no
-``athenaeum`` import, and no ``cryptography`` or ``opentimestamps`` import
-either — :mod:`promptwitness.signing` and :mod:`promptwitness.anchor` each
-import their optional dependency lazily, inside the functions that need it,
-so importing this module costs nothing on an install without the
-``witness-sign`` / ``witness-anchor`` extras.
+:mod:`promptwitness.canon`, :mod:`promptwitness.signing`,
+:mod:`promptwitness.anchor` and :mod:`promptwitness.anchor_rfc3161`).
+Standard library only at import time; no ``athenaeum`` import, and no
+``cryptography`` or ``opentimestamps`` import either — :mod:`promptwitness.signing`
+and :mod:`promptwitness.anchor` each import their optional dependency
+lazily, inside the functions that need it, so importing this module costs
+nothing on an install without the ``witness-sign`` / ``witness-anchor``
+extras. :mod:`promptwitness.anchor_rfc3161` shells out to ``openssl``
+rather than importing a third-party library, so it carries no such extra.
 
 ``status`` (athenaeum#2147), ``keygen`` (athenaeum#2150, extended with
 ``--provider os-keystore`` by athenaeum#2152), ``hook claude-code``
-(athenaeum#2149) and ``anchor`` (athenaeum#2151) are all implemented here.
-Each was added the same way: by registering another subparser in
+(athenaeum#2149) and ``anchor`` (athenaeum#2151, extended with the optional
+RFC 3161 second source by athenaeum#2157) are all implemented here. Each
+was added the same way: by registering another subparser in
 :func:`build_parser`, in this module.
 """
 
@@ -25,9 +28,10 @@ import json
 import os
 import re
 import sys
+from collections.abc import Callable
 from typing import Any
 
-from promptwitness import __version__, canon, ledger, signing
+from promptwitness import __version__, anchor_rfc3161, canon, ledger, signing
 from promptwitness import anchor as anchor_mod
 from promptwitness.harness import claude_code
 
@@ -162,6 +166,19 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=10.0,
         help="Per-adapter network timeout in seconds (default: 10.0).",
+    )
+    anchor_parser.add_argument(
+        "--rfc3161-url",
+        default=None,
+        help="RFC 3161 TSA URL for an optional, immediate second attestation "
+        "source (else PROMPTWITNESS_RFC3161_URL; no default -- an unconfigured "
+        "URL means this adapter is not offered at all).",
+    )
+    anchor_parser.add_argument(
+        "--rfc3161-ca-bundle",
+        default=None,
+        help="CA bundle path for --verify of the RFC 3161 attestation (else "
+        "PROMPTWITNESS_RFC3161_CA_BUNDLE; no default).",
     )
     anchor_parser.set_defaults(func=_cmd_anchor)
 
@@ -341,22 +358,54 @@ def _resolve_subject_and_digest(
     return f"witness:{head.ledger_id}:{head.seq}", head.line_hash()
 
 
-def _find_latest_ots_attestation(ledger_dir: Any, subject: str) -> anchor_mod.Attestation | None:
-    """The most recent OpenTimestamps :class:`~promptwitness.anchor.Attestation`
-    previously recorded for *subject*, reconstructed from the ledger's own
-    ``anchor`` lines — the ledger is the persisted attestation history, so
-    no separate side-state file is needed.
+def _find_latest_attestation_by_source(
+    ledger_dir: Any, subject: str, source_matches: Callable[[str], bool]
+) -> anchor_mod.Attestation | None:
+    """The most recent :class:`~promptwitness.anchor.Attestation` recorded
+    for *subject* whose ``source`` satisfies *source_matches*, reconstructed
+    from the ledger's own ``anchor`` lines — the ledger is the persisted
+    attestation history, so no separate side-state file is needed.
+
+    Shared by :func:`_find_latest_ots_attestation` (exact-match source) and
+    :func:`_find_latest_rfc3161_attestation` (prefix-match source) so
+    neither copies the scan loop.
     """
     latest: anchor_mod.Attestation | None = None
     for line in ledger.iter_lines(ledger_dir):
         if line.kind != "anchor" or line.extra.get("subject") != subject:
             continue
         raw_att = line.extra.get("attestation")
-        ots_source = anchor_mod.OpenTimestampsAnchorer.source
-        if not isinstance(raw_att, dict) or raw_att.get("source") != ots_source:
+        if not isinstance(raw_att, dict) or not source_matches(str(raw_att.get("source", ""))):
             continue
         latest = anchor_mod.Attestation.from_dict(raw_att)
     return latest
+
+
+def _find_latest_ots_attestation(ledger_dir: Any, subject: str) -> anchor_mod.Attestation | None:
+    """The most recent OpenTimestamps :class:`~promptwitness.anchor.Attestation`
+    previously recorded for *subject*. The OpenTimestamps source
+    (``"opentimestamps"``) never varies, so this matches it by equality.
+    """
+    ots_source = anchor_mod.OpenTimestampsAnchorer.source
+    return _find_latest_attestation_by_source(ledger_dir, subject, lambda s: s == ots_source)
+
+
+def _find_latest_rfc3161_attestation(
+    ledger_dir: Any, subject: str
+) -> anchor_mod.Attestation | None:
+    """The most recent RFC 3161 :class:`~promptwitness.anchor.Attestation`
+    previously recorded for *subject*. Unlike the OpenTimestamps source, the
+    RFC 3161 source is per-TSA-host (``f"rfc3161:{host}"`` —
+    :class:`~promptwitness.anchor_rfc3161.Rfc3161Anchorer`), so an operator
+    who changed ``--rfc3161-url`` between runs still has their prior
+    attestation located here. Matches by the ``"rfc3161:"`` source PREFIX,
+    never by equality against the *current* adapter's ``source``
+    (athenaeum#2174 review finding #2: ``anchor --upgrade`` must find the
+    proof it should preserve, not just the one pointing at today's TSA).
+    """
+    return _find_latest_attestation_by_source(
+        ledger_dir, subject, lambda s: s.startswith("rfc3161:")
+    )
 
 
 def _find_latest_pending_ots_attestation(
@@ -444,6 +493,26 @@ def _cmd_anchor(args: argparse.Namespace) -> int:
 
     ``--verify`` runs full Bitcoin verification afterward (a read-only
     report — it does not itself append a ledger line).
+
+    A third, OPTIONAL adapter — :class:`~promptwitness.anchor_rfc3161.Rfc3161Anchorer`
+    (athenaeum#2157) — runs only when a TSA URL resolves
+    (:func:`~promptwitness.anchor_rfc3161.resolve_rfc3161_url`: ``--rfc3161-url``
+    or ``PROMPTWITNESS_RFC3161_URL``). An unconfigured URL means the
+    adapter is never constructed and appends no ``anchor`` line and no
+    ``results`` entry at all — "not offered", not a ``failed`` attestation.
+
+    ``--upgrade`` for the RFC 3161 adapter mirrors the OpenTimestamps
+    semantics above, but locates the prior attestation by source PREFIX
+    (:func:`_find_latest_rfc3161_attestation`) rather than equality, since
+    the RFC 3161 source is per-TSA-host: when a prior RFC 3161 attestation
+    for this subject exists, ``--upgrade`` calls
+    :meth:`~promptwitness.anchor_rfc3161.Rfc3161Anchorer.upgrade` (a
+    documented no-op — a TSA token is immediate) and records it with
+    ``op="upgrade"`` instead of submitting a fresh TSA request, which would
+    overwrite the ``.tsr`` file a prior ledger line's ``proof_path`` still
+    names (review finding #2 on PR athenaeum#2174). With no prior RFC 3161
+    attestation for this subject, ``--upgrade`` anchors as it does today —
+    there is nothing to preserve.
     """
     ledger_dir = ledger.resolve_ledger_dir(args.harness, override=args.dir)
 
@@ -507,6 +576,40 @@ def _cmd_anchor(args: argparse.Namespace) -> int:
     )
     results.append({"subject": subject, "op": ots_op, "attestation": ots_att.to_dict()})
 
+    rfc3161_url = anchor_rfc3161.resolve_rfc3161_url(args.rfc3161_url)
+    rfc3161: anchor_rfc3161.Rfc3161Anchorer | None = None
+    rfc3161_att: anchor_mod.Attestation | None = None
+    if rfc3161_url:
+        rfc3161 = anchor_rfc3161.Rfc3161Anchorer(
+            ledger_dir,
+            tsa_url=rfc3161_url,
+            ca_bundle=anchor_rfc3161.resolve_rfc3161_ca_bundle(args.rfc3161_ca_bundle),
+        )
+        existing_rfc3161 = (
+            _find_latest_rfc3161_attestation(ledger_dir, subject) if args.upgrade else None
+        )
+        if existing_rfc3161 is not None:
+            # A TSA token is immediate -- there is nothing pending to
+            # re-submit, and re-anchoring would overwrite the .tsr file a
+            # prior ledger line's proof_path still names (review finding
+            # #2 on PR athenaeum#2174). upgrade() is a documented no-op.
+            rfc3161_att = rfc3161.upgrade(existing_rfc3161)
+            rfc3161_op = "upgrade"
+        else:
+            rfc3161_att = rfc3161.anchor(digest_bytes, subject, timeout=args.timeout)
+            rfc3161_op = "anchor"
+        _append_anchor_line(
+            ledger_dir,
+            harness=args.harness,
+            subject=subject,
+            digest=digest,
+            attestation=rfc3161_att,
+            op=rfc3161_op,
+        )
+        results.append(
+            {"subject": subject, "op": rfc3161_op, "attestation": rfc3161_att.to_dict()}
+        )
+
     if args.verify:
         verify_result = ots.verify(ots_att, digest_bytes)
         verify_payload = {
@@ -515,6 +618,15 @@ def _cmd_anchor(args: argparse.Namespace) -> int:
             "verify_result": verify_result.to_dict(),
         }
         results.append(verify_payload)
+        if rfc3161 is not None and rfc3161_att is not None:
+            rfc3161_verify_result = rfc3161.verify(rfc3161_att, digest_bytes)
+            results.append(
+                {
+                    "subject": subject,
+                    "op": "verify",
+                    "verify_result": rfc3161_verify_result.to_dict(),
+                }
+            )
 
     print(json.dumps({"results": results}, sort_keys=True))
     return 0

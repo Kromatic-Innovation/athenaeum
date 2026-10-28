@@ -206,8 +206,8 @@ class VerifyResult:
 class Anchorer(Protocol):
     """One anchoring backend. ``source`` identifies it on every
     :class:`Attestation` it produces (``"local-clock"``,
-    ``"opentimestamps"``, or a future ``"rfc3161:<tsa-host>"`` --
-    athenaeum#2157, out of scope here).
+    ``"opentimestamps"``, or ``"rfc3161:<tsa-host>"`` --
+    :class:`~promptwitness.anchor_rfc3161.Rfc3161Anchorer`, athenaeum#2157).
     """
 
     source: str

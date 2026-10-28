@@ -171,6 +171,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `prompt_kind`, or `LedgerIndex.is_witnessable_human`, and no ledger schema
   bump is needed. No launcher identifier is named in `src/promptwitness/`.
 
+- **`promptwitness` RFC 3161 anchoring: an optional, immediate second
+  attestation source alongside OpenTimestamps (issue athenaeum#2157).**
+  `Rfc3161Anchorer` (`promptwitness.anchor_rfc3161`) builds a timestamp
+  query with `openssl ts -query` and POSTs it to a configured TSA with
+  `urllib`; the reply is stored at `anchors/<subject-safe>.tsr` and recorded
+  as `rfc3161:<tsa-host>`. `verify()` runs `openssl ts -verify` against a
+  configured CA bundle, recorded as `rfc3161-ca:<bundle-name>`; with no CA
+  bundle configured, verification fails cleanly
+  (`rfc3161-ca:unconfigured`), never an exception. The subprocess and HTTP
+  calls are both injectable seams, so tests never shell out or touch the
+  network. Off by default, and no TSA URL is hard-coded: the adapter is
+  configured via `--rfc3161-url`/`PROMPTWITNESS_RFC3161_URL` and
+  `--rfc3161-ca-bundle`/`PROMPTWITNESS_RFC3161_CA_BUNDLE` on the existing
+  `promptwitness anchor` command, and is simply not offered — no `anchor`
+  line, no `failed` attestation — when no URL resolves. Implemented as a
+  sibling module (`anchor_rfc3161.py`), not the package submodule the issue
+  named, since `anchor.py` (athenaeum#2151) shipped as a single module, not
+  a package. `anchor()` validates the TSA reply before trusting it —
+  empty, non-DER, or non-`granted` replies degrade to a `failed`
+  attestation instead of `complete`, and the write goes through a sibling
+  temp file so a bad reply never overwrites a prior good `.tsr` proof; and
+  `anchor --upgrade` now finds a subject's prior RFC 3161 attestation (by
+  `rfc3161:` source prefix) and calls the no-op `upgrade()` instead of
+  re-anchoring, so it never overwrites the `.tsr` file an earlier ledger
+  line's `proof_path` still names (PR athenaeum#2174 review findings).
+
 ### Changed
 
 - **The public surface now says what the version number means (issue
