@@ -1,5 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the ``promptwitness`` console script (athenaeum#2147, athenaeum#2150)."""
+"""Tests for the ``promptwitness`` console script (athenaeum#2147,
+athenaeum#2150, athenaeum#2152).
+
+The ``keygen --provider os-keystore`` path is exercised end to end in
+``tests/test_promptwitness_os_keystore.py``, which already owns the fake
+keystore; what lives here is the parser shape.
+"""
 
 from __future__ import annotations
 
@@ -32,6 +38,36 @@ class TestBuildParser:
         assert args.harness == "claude-code"
         assert args.key_path is None
         assert args.force is False
+
+    def test_keygen_defaults_to_software_file(self) -> None:
+        """The default must stay ``software-file``: athenaeum#2152 adds a
+        tier, it does not change where an existing operator's key lives."""
+        args = cli.build_parser().parse_args(["keygen"])
+        assert args.provider == "software-file"
+        assert args.keystore_backend is None
+
+    def test_keygen_accepts_os_keystore_provider(self) -> None:
+        args = cli.build_parser().parse_args(["keygen", "--provider", "os-keystore"])
+        assert args.provider == "os-keystore"
+
+    @pytest.mark.parametrize(
+        "backend", ["macos-keychain", "secret-service", "windows-dpapi"]
+    )
+    def test_keygen_accepts_every_keystore_backend(self, backend: str) -> None:
+        args = cli.build_parser().parse_args(
+            ["keygen", "--provider", "os-keystore", "--keystore-backend", backend]
+        )
+        assert args.keystore_backend == backend
+
+    def test_keygen_rejects_an_unknown_provider(self) -> None:
+        with pytest.raises(SystemExit):
+            cli.build_parser().parse_args(["keygen", "--provider", "hardware-presence"])
+
+    def test_keygen_rejects_an_unknown_keystore_backend(self) -> None:
+        with pytest.raises(SystemExit):
+            cli.build_parser().parse_args(
+                ["keygen", "--provider", "os-keystore", "--keystore-backend", "keychain"]
+            )
 
     def test_keygen_accepts_key_path_and_force(self, tmp_path: Path) -> None:
         parser = cli.build_parser()
