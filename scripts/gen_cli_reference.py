@@ -111,10 +111,13 @@ class _Node:
         path: tuple[str, ...],
         parser: argparse.ArgumentParser,
         help_text: str,
+        *,
+        prog: str = "athenaeum",
     ) -> None:
         self.path = path
         self.parser = parser
         self.help_text = help_text
+        self.prog = prog
         self.children: dict[str, "_Node"] = {}
 
     @property
@@ -123,7 +126,7 @@ class _Node:
 
     @property
     def command_line(self) -> str:
-        return " ".join(("athenaeum",) + self.path)
+        return " ".join((self.prog,) + self.path)
 
 
 def _subparsers_action(parser: argparse.ArgumentParser) -> argparse._SubParsersAction | None:
@@ -133,8 +136,14 @@ def _subparsers_action(parser: argparse.ArgumentParser) -> argparse._SubParsersA
     return None
 
 
-def _build_tree(parser: argparse.ArgumentParser, path: tuple[str, ...], help_text: str) -> _Node:
-    node = _Node(path, parser, help_text)
+def _build_tree(
+    parser: argparse.ArgumentParser,
+    path: tuple[str, ...],
+    help_text: str,
+    *,
+    prog: str = "athenaeum",
+) -> _Node:
+    node = _Node(path, parser, help_text, prog=prog)
     sub_action = _subparsers_action(parser)
     if sub_action is not None:
         # `_choices_actions` carries the `help=` text passed to `add_parser`,
@@ -142,7 +151,7 @@ def _build_tree(parser: argparse.ArgumentParser, path: tuple[str, ...], help_tex
         help_by_name = {pseudo.dest: (pseudo.help or "") for pseudo in sub_action._choices_actions}
         for name, child_parser in sub_action.choices.items():
             node.children[name] = _build_tree(
-                child_parser, path + (name,), help_by_name.get(name, "")
+                child_parser, path + (name,), help_by_name.get(name, ""), prog=prog
             )
     return node
 
@@ -193,42 +202,16 @@ def _render_leaf_flags(parser: argparse.ArgumentParser) -> list[str]:
     return lines
 
 
-def generate() -> str:
-    import athenaeum.cli as cli_mod
-
-    root_parser = cli_mod.build_parser()
-    root = _build_tree(root_parser, (), "")
+def _flat_nodes(parser: argparse.ArgumentParser, *, prog: str) -> list[_Node]:
+    root = _build_tree(parser, (), "", prog=prog)
     nodes: list[_Node] = []
     _flatten(root, nodes)
     nodes.sort(key=lambda n: n.dotted)
+    return nodes
 
-    lines: list[str] = []
-    lines.append("# CLI Reference")
-    lines.append("")
-    lines.append(
-        "This page is GENERATED from `athenaeum.cli.build_parser()`'s real "
-        "`argparse` tree by `scripts/gen_cli_reference.py` — do not hand-edit "
-        "it. CI (`tests/test_generated_docs_parity.py`) regenerates it and "
-        "fails the build on any diff. To change an entry, change the "
-        "subcommand's own `add_argument(...)` call in its owning `_cmd_*.py` "
-        "module and regenerate:"
-    )
-    lines.append("")
-    lines.append("```")
-    lines.append("python scripts/gen_cli_reference.py")
-    lines.append("```")
-    lines.append("")
-    lines.append(
-        "Every subcommand is registered top-level on one `parser.add_subparsers()` "
-        "in `cli.py` — there is no `query` group. A handful of commands (`dedupe`, "
-        "`auto-memory`, `questions`, `merges`, `decisions`, `authority`, `axiom`, "
-        "`calibration`, `storage`, `push-metrics`, `measure`, `memory-class`, "
-        "`description`, `verdicts`, `dimensions`, `subject`) have their own nested "
-        "sub-subcommands, listed under their own section below."
-    )
-    lines.append("")
-    lines.append("## Command index")
-    lines.append("")
+
+def _render_command_index(nodes: list[_Node], *, heading: str) -> list[str]:
+    lines: list[str] = [heading, ""]
     for n in nodes:
         kind = "group" if n.children else "command"
         help_text = _sanitize(n.help_text)
@@ -236,7 +219,11 @@ def generate() -> str:
         suffix = f" — {help_text}" if help_text else ""
         lines.append(f"- [`{n.command_line}`](#{anchor}) ({kind}){suffix}")
     lines.append("")
+    return lines
 
+
+def _render_command_sections(nodes: list[_Node]) -> list[str]:
+    lines: list[str] = []
     for n in nodes:
         lines.append(f"## `{n.command_line}`")
         lines.append("")
@@ -256,6 +243,59 @@ def generate() -> str:
             lines.append("")
         else:
             lines.extend(_render_leaf_flags(n.parser))
+    return lines
+
+
+def generate() -> str:
+    import athenaeum.cli as cli_mod
+    import promptwitness.cli as promptwitness_cli_mod
+
+    athenaeum_nodes = _flat_nodes(cli_mod.build_parser(), prog="athenaeum")
+    promptwitness_nodes = _flat_nodes(promptwitness_cli_mod.build_parser(), prog="promptwitness")
+
+    lines: list[str] = []
+    lines.append("# CLI Reference")
+    lines.append("")
+    lines.append(
+        "This page is GENERATED from `athenaeum.cli.build_parser()`'s and "
+        "`promptwitness.cli.build_parser()`'s real `argparse` trees by "
+        "`scripts/gen_cli_reference.py` — do not hand-edit it. CI "
+        "(`tests/test_generated_docs_parity.py`) regenerates it and fails the "
+        "build on any diff. To change an entry, change the subcommand's own "
+        "`add_argument(...)` call in its owning module and regenerate:"
+    )
+    lines.append("")
+    lines.append("```")
+    lines.append("python scripts/gen_cli_reference.py")
+    lines.append("```")
+    lines.append("")
+    lines.append(
+        "`athenaeum` and `promptwitness` (issue athenaeum#2147) are two SEPARATE "
+        "console scripts with two separate `argparse` trees, documented together "
+        "on this one page. Every `athenaeum` subcommand is registered top-level "
+        "on one `parser.add_subparsers()` in `cli.py` — there is no `query` "
+        "group. A handful of commands (`dedupe`, `auto-memory`, `questions`, "
+        "`merges`, `decisions`, `authority`, `axiom`, `calibration`, `storage`, "
+        "`push-metrics`, `measure`, `memory-class`, `description`, `verdicts`, "
+        "`dimensions`, `subject`) have their own nested sub-subcommands, listed "
+        "under their own section below."
+    )
+    lines.append("")
+    lines.extend(_render_command_index(athenaeum_nodes, heading="## Command index"))
+    lines.extend(_render_command_sections(athenaeum_nodes))
+
+    lines.append("## promptwitness")
+    lines.append("")
+    lines.append(
+        "The `promptwitness` console script (a standalone package — see "
+        "`docs/design/witness-ledger.md`). Separate `argparse` tree from "
+        "`athenaeum` above, so its command index and sections are kept apart."
+    )
+    lines.append("")
+    lines.extend(
+        _render_command_index(promptwitness_nodes, heading="### promptwitness command index")
+    )
+    lines.extend(_render_command_sections(promptwitness_nodes))
 
     text = "\n".join(lines)
     text = re.sub(r"\n{3,}", "\n\n", text)

@@ -64,6 +64,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - An unknown `receipt_sealer` or `key_provider` value RAISES rather than
     silently falling back to not sealing.
 
+- **New top-level `promptwitness` package: canonical digest, hash-chained
+  ledger v1, chain verifier, `promptwitness status`, and an enforced
+  import boundary against `athenaeum` (issue athenaeum#2147, foundational
+  slice of the prompt-witness-ledger epic, athenaeum#2144).** Standard
+  library only at import time; zero `athenaeum` imports (AST-scanned).
+  `promptwitness.canon.normalize` is parity-tested against
+  `transcript_verify._normalize`. See `docs/design/witness-ledger.md` for
+  the full design and the security boundary it does and does not prove.
+  Signing (athenaeum#2150), anchoring (athenaeum#2151) and the Claude Code
+  harness adapter (athenaeum#2149) are separate, blocked-on-this issues.
+
 
 ### Changed
 

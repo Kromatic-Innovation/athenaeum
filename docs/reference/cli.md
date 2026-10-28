@@ -1,12 +1,12 @@
 # CLI Reference
 
-This page is GENERATED from `athenaeum.cli.build_parser()`'s real `argparse` tree by `scripts/gen_cli_reference.py` — do not hand-edit it. CI (`tests/test_generated_docs_parity.py`) regenerates it and fails the build on any diff. To change an entry, change the subcommand's own `add_argument(...)` call in its owning `_cmd_*.py` module and regenerate:
+This page is GENERATED from `athenaeum.cli.build_parser()`'s and `promptwitness.cli.build_parser()`'s real `argparse` trees by `scripts/gen_cli_reference.py` — do not hand-edit it. CI (`tests/test_generated_docs_parity.py`) regenerates it and fails the build on any diff. To change an entry, change the subcommand's own `add_argument(...)` call in its owning module and regenerate:
 
 ```
 python scripts/gen_cli_reference.py
 ```
 
-Every subcommand is registered top-level on one `parser.add_subparsers()` in `cli.py` — there is no `query` group. A handful of commands (`dedupe`, `auto-memory`, `questions`, `merges`, `decisions`, `authority`, `axiom`, `calibration`, `storage`, `push-metrics`, `measure`, `memory-class`, `description`, `verdicts`, `dimensions`, `subject`) have their own nested sub-subcommands, listed under their own section below.
+`athenaeum` and `promptwitness` (issue athenaeum#2147) are two SEPARATE console scripts with two separate `argparse` trees, documented together on this one page. Every `athenaeum` subcommand is registered top-level on one `parser.add_subparsers()` in `cli.py` — there is no `query` group. A handful of commands (`dedupe`, `auto-memory`, `questions`, `merges`, `decisions`, `authority`, `axiom`, `calibration`, `storage`, `push-metrics`, `measure`, `memory-class`, `description`, `verdicts`, `dimensions`, `subject`) have their own nested sub-subcommands, listed under their own section below.
 
 ## Command index
 
@@ -1756,3 +1756,20 @@ Serve a localhost-only, read-only page showing pushed-unbidden vs. pulled-delibe
 | `--poll-interval` | `3.0` | — | Seconds between the served page's automatic /data.json polls, so a live session updates without a manual reload (default: 3.0s). Each poll is a full ledger drain, so lower this with care. Pass 0 to disable polling (manual reload only, the pre- behaviour); an operator can also pause/resume live updates from the page itself. |
 | `--port` | `8756` | — | TCP port to bind on localhost (default: 8756). Pass 0 to let the OS assign a free port. |
 | `--session` | — | — | Scope the view to one consuming session id. Strongly recommended: without it, the view includes every session in the ledger, and if the viewer's own process ever triggers a recall call its own activity would appear mixed in. |
+
+## promptwitness
+
+The `promptwitness` console script (a standalone package — see `docs/design/witness-ledger.md`). Separate `argparse` tree from `athenaeum` above, so its command index and sections are kept apart.
+
+### promptwitness command index
+
+- [`promptwitness status`](#promptwitness-status) (command) — Print the ledger head seq, chain_ok, partitions, and key strength.
+
+## `promptwitness status`
+
+Print the ledger head seq, chain_ok, partitions, and key strength.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--dir` | — | — | Override the ledger directory (else PROMPTWITNESS_DIR / the XDG default). |
+| `--harness` | `claude-code` | — | Harness name the ledger directory is namespaced under. |
