@@ -57,8 +57,8 @@ import os
 import re
 import subprocess
 import sys
+import threading
 from collections.abc import Iterator, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -604,9 +604,26 @@ def _iter_raw(ledger_dir: Path) -> Iterator[dict[str, Any]]:
 
 def iter_lines(ledger_dir: str | os.PathLike[str]) -> Iterator[WitnessLine]:
     """Tolerant reader: every well-formed line across all partitions, in
-    chain order. Silently skips physically torn/unparseable lines."""
+    chain order.
+
+    Skips a physically torn or unparseable line (``_iter_raw_bytes_lines``
+    handles that) AND a line that parses as JSON but whose field TYPES are
+    not the v1 schema's — ``{"seq": "nope"}``, a string where ``key`` should
+    be an object, and so on. :meth:`WitnessLine.from_dict` coerces, so it
+    raises on those; a reader over a file that corruption and tampering can
+    both reach must degrade to "skip the line", never to a crashed caller
+    (:meth:`LedgerIndex.build` and ``promptwitness status`` are both callers).
+
+    This cannot be used to HIDE a line from verification: :func:`verify_chain`
+    reads the raw dicts, not ``WitnessLine`` objects, so a line skipped here
+    is still hashed there and still breaks the chain at its ``seq``.
+    """
     for raw in _iter_raw(Path(ledger_dir)):
-        yield WitnessLine.from_dict(raw)
+        try:
+            line = WitnessLine.from_dict(raw)
+        except (TypeError, ValueError, AttributeError, KeyError):
+            continue
+        yield line
 
 
 def _split_tail(raw: bytes) -> tuple[bytes, bytes]:
@@ -639,9 +656,41 @@ def _scan_last_good(good: bytes) -> tuple[int, str] | tuple[None, None]:
 def _run_sign_with_timeout(
     key_provider: KeyProviderLike, payload: bytes, timeout: float
 ) -> bytes:
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        future = pool.submit(key_provider.sign, payload)
-        return future.result(timeout=timeout)
+    """``key_provider.sign(payload)``, abandoned after *timeout* seconds.
+
+    Deliberately a bare DAEMON thread rather than a ``ThreadPoolExecutor``:
+    the executor's context manager calls ``shutdown(wait=True)`` on the way
+    out, so a timeout would raise and then BLOCK until the slow signer
+    returned anyway — with the ledger lock still held, which is the one
+    thing the timeout exists to prevent (a hook must never wait on a key).
+    ``shutdown(wait=False, cancel_futures=True)`` would fix the blocking but
+    not the exit: a pool's worker threads are non-daemon and the interpreter
+    joins them at shutdown, so a hung signer would hold up the hook process
+    on its way out instead. A daemon thread is abandoned on both paths.
+
+    Abandoning a thread mid-``sign`` is safe here because the signer is
+    handed an immutable ``bytes`` payload and its return value is dropped;
+    nothing it can still do is observable. Signing is not retried — the
+    caller degrades the line to unsigned.
+    """
+    result: list[bytes] = []
+    failure: list[BaseException] = []
+    done = threading.Event()
+
+    def _sign() -> None:
+        try:
+            result.append(key_provider.sign(payload))
+        except BaseException as exc:  # noqa: BLE001 - re-raised on the caller's thread
+            failure.append(exc)
+        finally:
+            done.set()
+
+    threading.Thread(target=_sign, name="promptwitness-sign", daemon=True).start()
+    if not done.wait(timeout):
+        raise TimeoutError(f"signing exceeded {timeout}s")
+    if failure:
+        raise failure[0]
+    return result[0]
 
 
 def _apply_key_and_sig(

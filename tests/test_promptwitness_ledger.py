@@ -14,6 +14,8 @@ import json
 import multiprocessing
 import os
 import sys
+import threading
+import time
 import types
 from pathlib import Path
 from unittest import mock
@@ -537,6 +539,59 @@ class TestSigningSeam:
         ).decode("ascii")
         assert tampered_sig != line.sig
 
+    def test_a_hanging_sign_does_not_hold_the_append_or_the_lock(
+        self, tmp_path: Path
+    ) -> None:
+        """A signer that never returns must cost the append its timeout and
+        nothing more -- not the signer's own runtime.
+
+        The timeout is the whole guarantee: a hook holds the ledger lock
+        across the append, so an append that waits on a hung key blocks every
+        other session's prompt too. Pinning the SECOND append proves the lock
+        was actually released, which a return-value-only assertion cannot.
+        """
+        release = threading.Event()
+        entered = threading.Event()
+
+        class _HangingProvider:
+            def key_id(self) -> str:
+                return "ed25519:deadbeefdeadbeef"
+
+            def algorithm(self) -> str:
+                return "ed25519"
+
+            def strength(self) -> str:
+                return "software-file"
+
+            def presence_required(self) -> bool:
+                return False
+
+            def sign(self, payload: bytes) -> bytes:
+                entered.set()
+                # Held well past the 0.2s timeout below; released in the
+                # `finally` so the thread never outlives the test.
+                release.wait(30)
+                return b"TOO-LATE"
+
+        try:
+            started = time.monotonic()
+            line = _append_turn(tmp_path, key_provider=_HangingProvider(), sign_timeout=0.2)
+            elapsed = time.monotonic() - started
+
+            assert entered.is_set(), "the signer should have been called at all"
+            assert elapsed < 10, f"append waited {elapsed:.1f}s on a hung signer"
+            assert line.sig is None
+            assert line.key.strength == "none"
+            assert line.key.error == "TimeoutError"
+
+            # The lock is free: a second append, with no signer, completes
+            # and chains onto the first.
+            second = _append_turn(tmp_path, prompt_id="p1", turn=1)
+            assert second.seq == line.seq + 1
+            assert ledger.verify_chain(tmp_path).ok
+        finally:
+            release.set()
+
     def test_a_failed_sign_leaves_no_stale_sig_behind(self, tmp_path: Path) -> None:
         """The unsigned degrade path must not leave a ``sig`` field.
 
@@ -594,3 +649,64 @@ class TestWitnessLineRoundTrip:
             canon.canonical_json(line.to_dict())
         ).hexdigest()
         assert line.line_hash() == expected
+
+
+class TestTolerantReaderSurvivesWrongFieldTypes:
+    """A line can be valid JSON and still not be a v1 witness line.
+
+    ``from_dict`` coerces (``int(d["seq"])``, ``KeyInfo.from_dict(d["key"])``,
+    ``dict(d["signals"])``), so a wrong TYPE raises where a wrong SYNTAX only
+    gets skipped. The ledger file is reachable by both corruption and
+    tampering, so every reader over it has to degrade rather than crash.
+    """
+
+    def _write_junk_line(self, ledger_dir: Path, obj: dict[str, object]) -> None:
+        partitions = ledger.list_partitions(ledger_dir)
+        assert partitions, "write a real line first so a partition exists"
+        path = ledger_dir / partitions[-1]
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(obj) + "\n")
+
+    @pytest.mark.parametrize(
+        "junk",
+        [
+            pytest.param({"v": {"nested": 1}, "seq": 2}, id="v-is-an-object"),
+            pytest.param({"v": 1, "seq": "not-a-number"}, id="seq-is-not-numeric"),
+            pytest.param({"v": 1, "seq": 2, "key": "not-an-object"}, id="key-is-a-string"),
+            pytest.param({"v": 1, "seq": 2, "segments": "not-a-list"}, id="segments-is-a-string"),
+            pytest.param({"v": 1, "seq": 2, "signals": "not-an-object"}, id="signals-is-a-string"),
+        ],
+    )
+    def test_iter_lines_skips_it_instead_of_raising(
+        self, tmp_path: Path, junk: dict[str, object]
+    ) -> None:
+        good = _append_turn(tmp_path)
+        self._write_junk_line(tmp_path, junk)
+
+        lines = list(ledger.iter_lines(tmp_path))
+
+        assert [ln.seq for ln in lines] == [good.seq]
+
+    def test_ledger_index_build_survives_it(self, tmp_path: Path) -> None:
+        _append_turn(tmp_path)
+        self._write_junk_line(tmp_path, {"v": 1, "seq": 2, "key": "not-an-object"})
+
+        index = ledger.LedgerIndex.build(tmp_path)
+
+        assert index.by_prompt_id("p0") is not None
+
+    def test_the_skip_does_not_hide_the_line_from_verify_chain(self, tmp_path: Path) -> None:
+        """Skipping is a reader convenience, never a way to launder a line.
+
+        ``verify_chain`` reads raw dicts, so the junk line is still hashed
+        and still breaks the chain -- otherwise appending unparseable bytes
+        would be a way to make a tampered ledger verify.
+        """
+        _append_turn(tmp_path)
+        self._write_junk_line(tmp_path, {"v": 1, "seq": 2, "key": "not-an-object"})
+
+        result = ledger.verify_chain(tmp_path)
+
+        assert not result.ok
+        assert result.first_break_seq == 2
+        assert result.lines_checked == 2
