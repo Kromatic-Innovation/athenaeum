@@ -1007,6 +1007,18 @@ def cmd_session_end(args: argparse.Namespace) -> int:
 
     configure_logging(verbose=getattr(args, "verbose", False))
 
+    # Witness-ledger SessionEnd close (issue athenaeum#2149). Unconditional
+    # and independent of everything below: the operator's existing
+    # SessionEnd hook calls `athenaeum session-end` for every session, in
+    # both modes, so this is the one in-process call-site the design needs
+    # (no settings.json change). Self-gated on
+    # ATHENAEUM_WITNESS_LEDGER_ENABLED (default off) and carries its own
+    # silent no-op guard, so a disabled or failing witness path can never
+    # affect this command's own compile/reindex result or exit code.
+    from athenaeum.claude_code_adapter import witness_session_end
+
+    witness_session_end(resolve_cache_dir(args.cache_dir))
+
     knowledge_root = (
         args.path.expanduser().resolve() if args.path else DEFAULT_KNOWLEDGE_ROOT
     )
