@@ -192,6 +192,76 @@ never blocks: a failed or slow (2s) `sign` writes the line with
 sealer stays as-is and is not reused here — per-turn `op read` latency and a
 network dependency are wrong for a per-prompt hook path.
 
+#### The `os-keystore` tier (athenaeum#2152)
+
+**What it protects, stated plainly: the key at rest, and nothing else.** The
+Ed25519 seed is held by the OS keystore, which encrypts it on disk — so a
+stolen laptop, a disk image or a backup yields no usable signing key, which
+is exactly what `software-file` (a plaintext PEM, mode 0600) does not give
+you.
+
+**The user's own session can still read the key.** Unlocking is what makes
+this tier free of per-turn friction, and it is also its limit: any process
+running as that user can ask the keystore for the seed and produce a
+signature indistinguishable from the hook's. `presence_required()` is
+`False`, and an `os-keystore` signature therefore proves nothing about a
+human being present — it says only that someone with this user's session
+signed. Changing that needs a hardware tier, not this one.
+
+The seed is read fresh from the keystore on every call that needs it and is
+never cached, so one appended line costs two local keystore reads
+(`key_id`, then `sign`). An unavailable keystore — tool missing, keystore
+locked, DPAPI refusal, no item stored, a malformed item — degrades to an
+unsigned line plus **one** warning for the whole process, never one per
+prompt and never a blocked hook.
+
+| Platform | Mechanism | Where the secret goes |
+|---|---|---|
+| macOS | `security -i` running `add-generic-password`, and `find-generic-password -w` to read | Keychain item; the **command text**, secret included, arrives on **stdin**, never argv |
+| Linux | `secret-tool store` / `lookup` | Secret Service item; the secret is read from **stdin**, attributes on argv are lookup coordinates only |
+| Windows | `CryptProtectData` / `CryptUnprotectData` via `ctypes` | the protected blob in `<ledger_dir>/keys/ed25519.dpapi`, mode 0600, written atomically; nothing is executed, so there is no argv at all |
+
+argv is world-readable on every platform (`ps`, `/proc/<pid>/cmdline`), and
+a temp file would put the seed back on disk in the clear — the one thing
+this tier exists to stop. So key material travels only on a pipe, and the
+test suite asserts it over the real `subprocess` boundary.
+
+Why `security -i` rather than the obvious `add-generic-password -w <secret>`:
+that form is the recipe every macOS note writes down, and it puts the seed on
+argv. The next obvious form, a valueless `-w` with the secret piped in, trades
+that for a worse problem — a valueless `-w` makes `security` *prompt*, and a
+passphrase prompt reads `/dev/tty`, not stdin. Interactive mode reads
+*commands* from stdin until EOF, so the known-good `-w <value>` form is used
+with no prompt involved and the secret still never reaches argv. Every
+keystore child also runs in its own session with no controlling terminal, so
+no keystore tool can take the terminal from the session the hook is observing.
+
+Two consequences worth knowing as an operator:
+
+- **A store is verified by reading it back.** Interactive mode's per-command
+  exit status is not something to bet a signing key on, and "did the write
+  land?" is a fair question for every backend, so `keygen` compares the item
+  against what it just wrote and fails loudly rather than reporting a key that
+  cannot sign.
+- **"No key here" and "I cannot tell you what is here" are different.** Only a
+  genuinely absent item lets `keygen` write without `--force`; a locked
+  keychain, a timeout, a missing tool or a blob belonging to another user
+  profile all refuse. Reading a transient failure as emptiness is how a
+  default-path `keygen` would destroy a live key. On a ledger line the two
+  show up distinctly in `key.error`, as `KeystoreItemAbsent` ("you never
+  created a key") versus `KeyUnavailable` ("something is wrong").
+
+Selection: `PROMPTWITNESS_KEY_PROVIDER=os-keystore`, then
+`PROMPTWITNESS_KEYSTORE_BACKEND` (`macos-keychain` | `secret-service` |
+`windows-dpapi`, default by platform),
+`PROMPTWITNESS_KEYSTORE_SERVICE`/`_ACCOUNT` (default
+`promptwitness-signing-key` / the harness name, so two harnesses on one
+machine hold two keys) and `PROMPTWITNESS_KEYSTORE_BLOB_PATH` (Windows
+only). Create the key with `promptwitness keygen --provider os-keystore`;
+like the file path, it refuses to replace an existing key without `--force`,
+because replacing a signing key makes every line it ever signed permanently
+unverifiable.
+
 ### Anchoring
 
 `Anchorer` (`anchor`, `upgrade`, `verify`); every `Attestation` records its
@@ -295,8 +365,10 @@ These replace the open questions the design pass raised.
   athenaeum#2147).
 - athenaeum#2150 — signing: `KeyProvider`, `software-file`/`none` adapters
   (blocked by athenaeum#2147).
-- athenaeum#2152 / athenaeum#2153 / athenaeum#2154 — os-keystore / Secure
-  Enclave / TPM key adapters (the latter two ~operator).
+- **athenaeum#2152 — os-keystore key adapter** (macOS Keychain, Linux Secret
+  Service, Windows DPAPI; blocked by athenaeum#2150).
+- athenaeum#2153 / athenaeum#2154 — Secure Enclave / TPM key adapters (both
+  ~operator).
 - athenaeum#2151 — anchoring: `Anchorer`, local-clock, OpenTimestamps,
   block-explorer verification (blocked by athenaeum#2147).
 - athenaeum#2156 — periodic in-session and SessionEnd anchoring, local ledger

@@ -9,8 +9,9 @@ import either — :mod:`promptwitness.signing` itself only imports
 module (and therefore ``signing``) at module level costs nothing on an
 install without the ``witness-sign`` extra.
 
-``status`` (athenaeum#2147) and ``keygen`` (athenaeum#2150) are implemented
-in this slice. ``hook claude-code`` (athenaeum#2149) and ``anchor``
+``status`` (athenaeum#2147) and ``keygen`` (athenaeum#2150, extended with
+``--provider os-keystore`` by athenaeum#2152) are implemented in this
+slice. ``hook claude-code`` (athenaeum#2149) and ``anchor``
 (athenaeum#2151) are out of scope here — their subcommands are added by
 those issues, which extend :func:`build_parser` the same way ``status`` and
 ``keygen`` were added: by registering another subparser in this module.
@@ -55,12 +56,26 @@ def build_parser() -> argparse.ArgumentParser:
 
     keygen = sub.add_parser(
         "keygen",
-        help="Generate a software-file Ed25519 signing key, mode 0600.",
+        help="Generate an Ed25519 signing key, in a file (mode 0600) or an OS keystore.",
     )
     keygen.add_argument(
         "--harness",
         default="claude-code",
         help="Harness name the default key path is namespaced under.",
+    )
+    keygen.add_argument(
+        "--provider",
+        choices=["software-file", "os-keystore"],
+        default="software-file",
+        help="Where to keep the key: a PEM file on disk, or the OS keystore "
+        "(encrypted at rest; your own session can still read it).",
+    )
+    keygen.add_argument(
+        "--keystore-backend",
+        choices=list(signing.KEYSTORE_BACKENDS),
+        default=None,
+        help="Keystore to use with --provider os-keystore (else "
+        "PROMPTWITNESS_KEYSTORE_BACKEND, else this platform's).",
     )
     keygen.add_argument(
         "--key-path",
@@ -71,7 +86,7 @@ def build_parser() -> argparse.ArgumentParser:
     keygen.add_argument(
         "--force",
         action="store_true",
-        help="Overwrite an existing key file instead of refusing.",
+        help="Overwrite an existing key instead of refusing.",
     )
     keygen.set_defaults(func=_cmd_keygen)
 
@@ -104,9 +119,15 @@ def _cmd_status(args: argparse.Namespace) -> int:
 
 
 def _cmd_keygen(args: argparse.Namespace) -> int:
-    """Generate a new ``software-file`` Ed25519 key and print ``{key_path,
-    key_id, algorithm, strength}`` -- never the key material itself, on
-    stdout, stderr, or (this command logs nothing) a log record."""
+    """Generate a new Ed25519 signing key and print where it went plus
+    ``{key_id, algorithm, strength}`` -- never the key material itself, on
+    stdout, stderr, or (this command logs nothing) a log record.
+
+    ``--provider os-keystore`` stores the seed in the OS keystore instead of
+    a PEM file; there is then no ``key_path`` to report, so the payload
+    carries ``keystore_backend`` in its place."""
+    if args.provider == "os-keystore":
+        return _keygen_os_keystore(args)
     key_path = signing.resolve_key_path(args.harness, override=args.key_path)
     if key_path.exists():
         if not args.force:
@@ -123,6 +144,58 @@ def _cmd_keygen(args: argparse.Namespace) -> int:
     payload: dict[str, Any] = {
         "key_path": str(key_path),
         "key_id": provider.key_id(),
+        "algorithm": provider.algorithm(),
+        "strength": provider.strength(),
+    }
+    print(json.dumps(payload, sort_keys=True))
+    return 0
+
+
+def _keygen_os_keystore(args: argparse.Namespace) -> int:
+    """The ``--provider os-keystore`` half of :func:`_cmd_keygen`.
+
+    Both failure modes report a one-line JSON error on stderr and exit 1
+    rather than raising: an existing item (replacing a signing key makes
+    every line it signed permanently unverifiable) and an unreachable
+    keystore (no ``security``/``secret-tool``, a locked keystore, a DPAPI
+    refusal)."""
+    try:
+        backend = signing.resolve_keystore_backend(
+            args.harness, backend=args.keystore_backend
+        )
+    except ValueError as exc:
+        print(json.dumps({"error": str(exc)}, sort_keys=True), file=sys.stderr)
+        return 1
+    try:
+        provider = signing.generate_and_store_keystore_key(
+            backend, replace=bool(args.force)
+        )
+    except FileExistsError as exc:
+        print(json.dumps({"error": str(exc)}, sort_keys=True), file=sys.stderr)
+        return 1
+    except ledger.KeyUnavailable as exc:
+        print(json.dumps({"error": str(exc)}, sort_keys=True), file=sys.stderr)
+        return 1
+    try:
+        key_id = provider.key_id()
+    except ledger.KeyUnavailable as exc:
+        # The key IS stored at this point (`generate_and_store_keystore_key`
+        # reads it back before returning), so say so rather than letting a
+        # traceback imply nothing happened.
+        print(
+            json.dumps(
+                {
+                    "error": f"the key was stored but could not be read back: {exc}",
+                    "keystore_backend": backend.name(),
+                },
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+        return 1
+    payload: dict[str, Any] = {
+        "keystore_backend": backend.name(),
+        "key_id": key_id,
         "algorithm": provider.algorithm(),
         "strength": provider.strength(),
     }
