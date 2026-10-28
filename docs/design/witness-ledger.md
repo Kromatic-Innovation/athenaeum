@@ -107,7 +107,7 @@ identifiers.
 | `promptwitness.ledger` | `WitnessLine` v1, `append_line`, `iter_lines`, `verify_chain`, `LedgerIndex` (by `prompt_id` and `(session, prompt_digest)`) | athenaeum#2147 |
 | `promptwitness.cli` | `promptwitness status` (and the later subcommands below) | athenaeum#2147 |
 | `promptwitness.harness.claude_code` | Hook stdin/env → `TurnEvent`; wrapper table; channel detection; transcript reader | athenaeum#2149 |
-| `promptwitness.keys` | `KeyProvider` protocol and adapters (`none`, `software-file`, …) | athenaeum#2150, athenaeum#2152, athenaeum#2153, athenaeum#2154 |
+| `promptwitness.signing` | `KeyProvider` protocol and adapters (`none`, `software-file`, …) | athenaeum#2150, athenaeum#2152, athenaeum#2153, athenaeum#2154 |
 | `promptwitness.anchor` | `Anchorer` protocol; `LocalClockAnchorer`, `OpenTimestampsAnchorer`, `Rfc3161Anchorer` | athenaeum#2151, athenaeum#2157 |
 | `promptwitness.verify` / `.demo` | Per-turn verdicts; static HTML demo | athenaeum#2155 |
 

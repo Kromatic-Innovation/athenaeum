@@ -1764,6 +1764,7 @@ The `promptwitness` console script (a standalone package — see `docs/design/wi
 ### promptwitness command index
 
 - [`promptwitness anchor`](#promptwitness-anchor) (command) — Anchor the ledger head (or --subject) with local-clock and OpenTimestamps.
+- [`promptwitness keygen`](#promptwitness-keygen) (command) — Generate a software-file Ed25519 signing key, mode 0600.
 - [`promptwitness status`](#promptwitness-status) (command) — Print the ledger head seq, chain_ok, partitions, and key strength.
 
 ## `promptwitness anchor`
@@ -1779,6 +1780,16 @@ Anchor the ledger head (or --subject) with local-clock and OpenTimestamps.
 | `--timeout` | `10.0` | — | Per-adapter network timeout in seconds (default: 10.0). |
 | `--upgrade` | `False` | — | Ask the OpenTimestamps calendar whether a prior pending proof for this subject has since been confirmed in Bitcoin, instead of submitting a new stamp. |
 | `--verify` | `False` | — | Run full Bitcoin verification of the OpenTimestamps attestation after anchoring. |
+
+## `promptwitness keygen`
+
+Generate a software-file Ed25519 signing key, mode 0600.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--force` | `False` | — | Overwrite an existing key file instead of refusing. |
+| `--harness` | `claude-code` | — | Harness name the default key path is namespaced under. |
+| `--key-path` | — | — | Override the key file path (else PROMPTWITNESS_KEY_PATH, else <ledger_dir>/keys/ed25519.pem). |
 
 ## `promptwitness status`
 

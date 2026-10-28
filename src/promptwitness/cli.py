@@ -1,15 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
-"""``promptwitness`` console script (athenaeum#2147).
+"""``promptwitness`` console script (athenaeum#2147, athenaeum#2150,
+athenaeum#2151).
 
 Layering: L2 (CLI/presentation — depends on :mod:`promptwitness.ledger`,
-:mod:`promptwitness.canon`, and :mod:`promptwitness.anchor`). Standard
-library only at import time; no ``athenaeum`` import.
+:mod:`promptwitness.canon`, :mod:`promptwitness.signing` and
+:mod:`promptwitness.anchor`). Standard library only at import time; no
+``athenaeum`` import, and no ``cryptography`` or ``opentimestamps`` import
+either — :mod:`promptwitness.signing` and :mod:`promptwitness.anchor` each
+import their optional dependency lazily, inside the functions that need it,
+so importing this module costs nothing on an install without the
+``witness-sign`` / ``witness-anchor`` extras.
 
-``status`` (athenaeum#2147) and ``anchor`` (athenaeum#2151) are implemented
-in this slice. ``hook claude-code`` (athenaeum#2149) and ``keygen``
-(athenaeum#2150) are out of scope here — their subcommands are added by
-those issues, which extend :func:`build_parser` the same way ``status`` and
-``anchor`` were added: by registering another subparser in this module.
+``status`` (athenaeum#2147), ``keygen`` (athenaeum#2150) and ``anchor``
+(athenaeum#2151) are implemented. ``hook claude-code`` (athenaeum#2149) is
+out of scope here — its subcommand is added by that issue, which extends
+:func:`build_parser` the same way the three above were added: by
+registering another subparser in this module.
 """
 
 from __future__ import annotations
@@ -20,7 +26,7 @@ import re
 import sys
 from typing import Any
 
-from promptwitness import __version__, canon, ledger
+from promptwitness import __version__, canon, ledger, signing
 from promptwitness import anchor as anchor_mod
 
 #: Matches a subject string that names an actual ledger line
@@ -56,6 +62,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override the ledger directory (else PROMPTWITNESS_DIR / the XDG default).",
     )
     status.set_defaults(func=_cmd_status)
+
+    keygen = sub.add_parser(
+        "keygen",
+        help="Generate a software-file Ed25519 signing key, mode 0600.",
+    )
+    keygen.add_argument(
+        "--harness",
+        default="claude-code",
+        help="Harness name the default key path is namespaced under.",
+    )
+    keygen.add_argument(
+        "--key-path",
+        default=None,
+        help="Override the key file path (else PROMPTWITNESS_KEY_PATH, else "
+        "<ledger_dir>/keys/ed25519.pem).",
+    )
+    keygen.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite an existing key file instead of refusing.",
+    )
+    keygen.set_defaults(func=_cmd_keygen)
 
     anchor_parser = sub.add_parser(
         "anchor",
@@ -124,6 +152,33 @@ def _cmd_status(args: argparse.Namespace) -> int:
         "first_break_seq": verification.first_break_seq,
         "partitions": partitions,
         "key_strength": key_strength,
+    }
+    print(json.dumps(payload, sort_keys=True))
+    return 0
+
+
+def _cmd_keygen(args: argparse.Namespace) -> int:
+    """Generate a new ``software-file`` Ed25519 key and print ``{key_path,
+    key_id, algorithm, strength}`` -- never the key material itself, on
+    stdout, stderr, or (this command logs nothing) a log record."""
+    key_path = signing.resolve_key_path(args.harness, override=args.key_path)
+    if key_path.exists():
+        if not args.force:
+            print(
+                json.dumps({"error": f"key already exists at {key_path}"}, sort_keys=True),
+                file=sys.stderr,
+            )
+            return 1
+    # `--force` does NOT unlink first: `generate_and_write_key(replace=True)`
+    # writes a sibling temp file and `os.replace`s it into position, so a
+    # failure mid-generation leaves the existing key intact. Losing a signing
+    # key makes every line it signed permanently unverifiable.
+    provider = signing.generate_and_write_key(key_path, replace=bool(args.force))
+    payload: dict[str, Any] = {
+        "key_path": str(key_path),
+        "key_id": provider.key_id(),
+        "algorithm": provider.algorithm(),
+        "strength": provider.strength(),
     }
     print(json.dumps(payload, sort_keys=True))
     return 0

@@ -81,6 +81,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Signing (athenaeum#2150), anchoring (athenaeum#2151) and the Claude Code
   harness adapter (athenaeum#2149) are separate, blocked-on-this issues.
 
+- **`promptwitness` signing: a `KeyProvider` protocol, the key-strength
+  vocabulary, and the `none` / `software-file` adapters (issue athenaeum#2150,
+  part of the prompt-witness-ledger epic, athenaeum#2144).**
+  `promptwitness.signing.KeyProvider` (`key_id`/`algorithm`/`strength`/
+  `presence_required`/`sign`/`public_key`) is structurally a
+  `ledger.KeyProviderLike`. The `software-file` adapter is an Ed25519 PEM
+  under `PROMPTWITNESS_DIR/keys/` (mode 0600, `cryptography` imported
+  lazily); `promptwitness keygen` generates one. A missing key or absent
+  `cryptography` degrades to an unsigned line plus one warning per process,
+  never a blocked hook. `ledger.verify_chain` additively reports signed vs.
+  unsigned line counts and, given public keys, per-line signature validity;
+  `ledger.append_line` additively accepts `extra_signers` so a `key-rotate`
+  line can carry a second signature from the old key alongside the new one.
+
 - **`promptwitness` external anchoring: `Anchorer` protocol, the mandatory
   `LocalClockAnchorer`, and an `OpenTimestampsAnchorer` with configurable
   full Bitcoin verification (issue athenaeum#2151).** `LocalClockAnchorer`

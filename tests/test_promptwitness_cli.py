@@ -1,14 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the ``promptwitness`` console script (athenaeum#2147).
+"""Tests for the ``promptwitness`` console script (athenaeum#2147,
+athenaeum#2150, athenaeum#2151).
 
 The ``TestUpgradeFindingsRegression`` and ``TestDigestForSubjectInvariant``
 classes near the bottom are regression coverage for PR athenaeum#2168 review
-findings #1 and #2 (athenaeum#2151) -- see each test's docstring.
+findings 1 and 2 (athenaeum#2151) -- see each test's docstring.
 """
 
 from __future__ import annotations
 
 import json
+import stat
 from pathlib import Path
 
 import pytest
@@ -31,10 +33,64 @@ class TestBuildParser:
         assert args.harness == "codex"
         assert args.dir == str(tmp_path)
 
+    def test_keygen_subcommand_registered(self) -> None:
+        parser = cli.build_parser()
+        args = parser.parse_args(["keygen"])
+        assert args.command == "keygen"
+        assert args.harness == "claude-code"
+        assert args.key_path is None
+        assert args.force is False
+
+    def test_keygen_accepts_key_path_and_force(self, tmp_path: Path) -> None:
+        parser = cli.build_parser()
+        args = parser.parse_args(["keygen", "--key-path", str(tmp_path / "k.pem"), "--force"])
+        assert args.key_path == str(tmp_path / "k.pem")
+        assert args.force is True
+
     def test_no_subcommand_has_no_func(self) -> None:
         parser = cli.build_parser()
         args = parser.parse_args([])
         assert getattr(args, "func", None) is None
+
+
+class TestKeygenCommand:
+    def test_generates_a_key_at_the_given_path(self, tmp_path: Path) -> None:
+        key_path = tmp_path / "k.pem"
+        rc = cli.main(["keygen", "--key-path", str(key_path)])
+        assert rc == 0
+        assert key_path.exists()
+        assert stat.S_IMODE(key_path.stat().st_mode) == 0o600
+
+    def test_prints_key_id_and_path_not_material(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        key_path = tmp_path / "k.pem"
+        rc = cli.main(["keygen", "--key-path", str(key_path)])
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["key_path"] == str(key_path)
+        assert payload["algorithm"] == "ed25519"
+        assert payload["strength"] == "software-file"
+        assert payload["key_id"].startswith("ed25519:")
+        assert "BEGIN" not in json.dumps(payload)
+
+    def test_refuses_to_overwrite_without_force(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        key_path = tmp_path / "k.pem"
+        assert cli.main(["keygen", "--key-path", str(key_path)]) == 0
+        capsys.readouterr()
+        rc = cli.main(["keygen", "--key-path", str(key_path)])
+        assert rc == 1
+        err_payload = json.loads(capsys.readouterr().err)
+        assert "error" in err_payload
+
+    def test_force_overwrites_an_existing_key(self, tmp_path: Path) -> None:
+        key_path = tmp_path / "k.pem"
+        assert cli.main(["keygen", "--key-path", str(key_path)]) == 0
+        first_bytes = key_path.read_bytes()
+        assert cli.main(["keygen", "--key-path", str(key_path), "--force"]) == 0
+        assert key_path.read_bytes() != first_bytes
 
 
 class TestStatusCommand:
