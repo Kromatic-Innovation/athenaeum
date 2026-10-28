@@ -285,6 +285,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`recall <email>` no longer rebuilds the whole entity index to find one
+  page.** When an address resolved to exactly one person, the handle path
+  built a full `EntityIndex` (parsing every wiki page's frontmatter) just to
+  map that uid to its file, and scanned the contact surface twice. On a
+  ~26k-page corpus that took about 8s per call. Now `recall` (CLI and MCP)
+  passes its cache dir to `resolve_handle_query`, which:
+  - locates the page by filename (`<uid>-*.md` / `<uid>.md`) when exactly
+    one page there carries the uid in its frontmatter, reading only that
+    page;
+  - otherwise uses a persisted, stat-validated `EntityIndex` cache under
+    `<cache_dir>/entity-index/` (new module `athenaeum.entity_index_cache`).
+    It re-parses only pages whose `(mtime_ns, ctime_ns, size, inode)`
+    changed, drops deleted pages, rebuilds on a missing or corrupt cache,
+    and writes atomically with mode `0600`. It stores only uid, name, type
+    and aliases;
+  - scans the contact surface once per call instead of twice.
+
+  Answers are unchanged. Callers that pass no `cache_dir`, including the
+  librarian's compile-time caller in `tiers.py`, keep the full scan. The
+  remaining frontmatter-parse cost of a full scan is tracked in
+  athenaeum#2178.
 - **A clean `pip install -e ".[dev]"` can collect and run the suite again
   (issue athenaeum#2136).** The Zenodotus release panel for 0.22.43 bootstrapped
   the project the way `CONTRIBUTING.md` says to and the documented command

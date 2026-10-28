@@ -96,6 +96,7 @@ MODULE_LAYER: dict[str, int] = {
     "config": 2,
     "corrections": 2,
     "declared_relationships": 2,  # "L1/L2 boundary primitive" -> upper bound
+    "entity_index_cache": 2,  # module docstring states "Layering: L2"
     "dimensions": 2,       # "L1/L2" -> upper bound
     "field_constraints": 2,
     "intake": 2,

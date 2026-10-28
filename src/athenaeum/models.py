@@ -3396,6 +3396,31 @@ class IndexEntry(NamedTuple):
 #: never affected by the demotion and are unaffected by its removal either.
 
 
+class PageIndexRecord(NamedTuple):
+    """What :class:`EntityIndex` keeps about one wiki page.
+
+    ``uid`` may be ``""`` (a named page with no ``uid:``); ``type`` is the
+    :func:`resolve_page_type` result (``""`` when the page has none);
+    ``aliases`` holds only the truthy entries, in frontmatter order. Small and
+    JSON-friendly on purpose: :mod:`athenaeum.entity_index_cache` persists
+    exactly these fields.
+    """
+
+    uid: str
+    name: str
+    type: str
+    aliases: tuple[str, ...]
+
+    def meta(self) -> dict[str, object]:
+        """The identity-only frontmatter view a cached index stores in ``_entities``."""
+        meta: dict[str, object] = {"uid": self.uid, "name": self.name}
+        if self.type:
+            meta["type"] = self.type
+        if self.aliases:
+            meta["aliases"] = list(self.aliases)
+        return meta
+
+
 class EntityIndex:
     """In-memory index of all wiki entities for name/alias lookup."""
 
@@ -3411,53 +3436,102 @@ class EntityIndex:
         for fpath in sorted(self.wiki_root.glob("*.md")):
             if fpath.name.startswith("_"):
                 continue
-            try:
-                text = fpath.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError):
+            parsed = self.read_page_record(fpath)
+            if parsed is None:
                 continue
-            meta, _ = parse_frontmatter(text)
-            if not meta:
-                continue
+            record, meta = parsed
+            self._apply_record(fpath, record, meta)
 
-            uid_raw = meta.get("uid", "")
-            name_raw = meta.get("name", "")
-            if not name_raw:
-                continue
-            # meta is dict[str, object] (arbitrary YAML-scalar values), but
-            # uid/name are coerced to str at the frontmatter boundary (see
-            # parse_frontmatter's identity-field coercion) — narrow here.
-            assert isinstance(uid_raw, str)
-            assert isinstance(name_raw, str)
-            uid = uid_raw
-            name = name_raw
+    @staticmethod
+    def read_page_record(fpath: Path) -> "tuple[PageIndexRecord, dict] | None":
+        """Read one wiki page into the facts this index keeps about it.
 
-            # Issue athenaeum#1169: carry the page's type through the index.
-            # resolve_page_type is the single canonical precedence resolver
-            # (top-level `type:` first, `metadata.type` fallback, else "") —
-            # reused here rather than reading meta["type"] directly so this
-            # index agrees with athenaeum.search / athenaeum.entity_schema on what a
-            # page's type IS. "" (no type: found) is normalized to the
-            # explicit IndexEntry.type=None sentinel below.
-            page_type = resolve_page_type(meta)
-            entry_type = page_type if page_type else None
+        Returns ``(record, meta)``, or ``None`` when the page contributes
+        nothing to the index (unreadable, no frontmatter, or no ``name:``).
+        This is the ONE place the per-page indexing rules live: the full
+        :meth:`_load` scan and the persisted cache in
+        :mod:`athenaeum.entity_index_cache` both call it, so a page is
+        indexed identically whichever path built the index.
+        """
+        try:
+            text = fpath.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return None
+        meta, _ = parse_frontmatter(text)
+        if not meta:
+            return None
 
-            key = name.lower()
-            self._by_name[key] = IndexEntry(uid or name, fpath, entry_type)
-            if uid:
-                self._entities[uid] = meta
-                self._by_uid[uid] = fpath
-                self._entity_format_paths.add(fpath)
+        uid_raw = meta.get("uid", "")
+        name_raw = meta.get("name", "")
+        if not name_raw:
+            return None
+        # meta is dict[str, object] (arbitrary YAML-scalar values), but
+        # uid/name are coerced to str at the frontmatter boundary (see
+        # parse_frontmatter's identity-field coercion) — narrow here.
+        assert isinstance(uid_raw, str)
+        assert isinstance(name_raw, str)
 
-            aliases_raw = meta.get("aliases", [])
-            # Iterable (not list) preserves the pre-existing runtime
-            # behavior of tolerating any iterable (e.g. a bare string would
-            # iterate per-character); .lower() below assumes str elements,
-            # same assumption the original code made.
-            assert isinstance(aliases_raw, Iterable)
-            for alias in aliases_raw:
-                if alias:
-                    assert isinstance(alias, str)
-                    self._by_name[alias.lower()] = IndexEntry(uid or name, fpath, entry_type)
+        # Issue athenaeum#1169: carry the page's type through the index.
+        # resolve_page_type is the single canonical precedence resolver
+        # (top-level `type:` first, `metadata.type` fallback, else "") —
+        # reused here rather than reading meta["type"] directly so this
+        # index agrees with athenaeum.search / athenaeum.entity_schema on what a
+        # page's type IS. "" (no type: found) is normalized to the
+        # explicit IndexEntry.type=None sentinel in _apply_record.
+        page_type = resolve_page_type(meta)
+
+        aliases_raw = meta.get("aliases", [])
+        # Iterable (not list) preserves the pre-existing runtime
+        # behavior of tolerating any iterable (e.g. a bare string would
+        # iterate per-character); .lower() assumes str elements,
+        # same assumption the original code made.
+        assert isinstance(aliases_raw, Iterable)
+        aliases: list[str] = []
+        for alias in aliases_raw:
+            if alias:
+                assert isinstance(alias, str)
+                aliases.append(alias)
+
+        record = PageIndexRecord(uid_raw, name_raw, page_type, tuple(aliases))
+        return record, meta
+
+    def _apply_record(self, fpath: Path, record: "PageIndexRecord", meta: dict) -> None:
+        """Index one page's :class:`PageIndexRecord` (last write wins per key)."""
+        uid = record.uid
+        name = record.name
+        entry_type = record.type if record.type else None
+
+        self._by_name[name.lower()] = IndexEntry(uid or name, fpath, entry_type)
+        if uid:
+            self._entities[uid] = meta
+            self._by_uid[uid] = fpath
+            self._entity_format_paths.add(fpath)
+
+        for alias in record.aliases:
+            self._by_name[alias.lower()] = IndexEntry(uid or name, fpath, entry_type)
+
+    @classmethod
+    def from_page_records(
+        cls, wiki_root: Path, records: "Iterable[tuple[Path, PageIndexRecord]]"
+    ) -> "EntityIndex":
+        """Build an index from already-extracted page records, without a scan.
+
+        *records* must be in the same order :meth:`_load` visits pages
+        (sorted path order): name/alias keys are last-write-wins, so order is
+        part of the result. ``_entities`` holds :meth:`PageIndexRecord.meta`
+        (identity fields only) rather than the page's full frontmatter —
+        enough for every reader of it (:meth:`pages_of_type`), and the same
+        reduced shape :meth:`register` already stores.
+        """
+        index = cls.__new__(cls)
+        index.wiki_root = wiki_root
+        index._by_name = {}
+        index._entities = {}
+        index._by_uid = {}
+        index._entity_format_paths = set()
+        for fpath, record in records:
+            index._apply_record(fpath, record, record.meta())
+        return index
 
     def lookup(self, name: str) -> IndexEntry | None:
         """Look up by name or alias (case-insensitive).

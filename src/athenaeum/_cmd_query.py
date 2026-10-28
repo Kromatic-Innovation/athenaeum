@@ -325,6 +325,7 @@ def cmd_recall(args: argparse.Namespace) -> int:
         config=cfg,
         with_pii=getattr(args, "with_pii", False),
         usage_classes=getattr(args, "usage_class", None) or None,
+        cache_dir=cache_dir,
     )
     if handle_resolution is not None:
         # Issue athenaeum#1110: `contact_values[].source` can carry a raw
