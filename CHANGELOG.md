@@ -197,6 +197,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   re-anchoring, so it never overwrites the `.tsr` file an earlier ledger
   line's `proof_path` still names (PR athenaeum#2174 review findings).
 
+- **The witness chain head is anchored periodically in-session and at
+  every SessionEnd (issue athenaeum#2156).** The `UserPromptSubmit` hook,
+  after appending its own ledger line, spawns a fully detached
+  `promptwitness anchor` process (closed stdio, `start_new_session=True`,
+  never waited on) whenever the newest anchor activity is older than
+  `ATHENAEUM_WITNESS_ANCHOR_INTERVAL_MINUTES` (default 15; `0` disables),
+  guarded by `promptwitness.anchor_schedule` so two concurrent sessions in
+  the same interval spawn at most one process. `session-end` (both modes)
+  runs a lock-free anchor step, bounded to a 10 second budget, that
+  anchors the chain head every time and each changed receipt partition
+  digest (read-only; nothing under `wiki/` is written). Six new
+  `librarian.receipt_anchor.*` config resolvers document the nightly
+  anchoring path's (athenaeum#2040) own adapter/calendar/timeout surface.
+
 ### Changed
 
 - **The public surface now says what the version number means (issue
