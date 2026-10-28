@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -1068,6 +1069,135 @@ class TestRememberSources:
         assert "uid: deadbeef" in text
         assert "name: Already Structured" in text
         assert "source: manual:vcard-import" in text
+
+
+# ---------------------------------------------------------------------------
+# Default-inferred model + session stamping (issue athenaeum#2148)
+# ---------------------------------------------------------------------------
+
+
+class TestDefaultInferredModelAndSession:
+    """``remember()`` with no ``sources`` now also stamps `model:` /
+    `originSessionId:` next to the defaulted `claude:inferred` scalar."""
+
+    def test_defaulted_scalar_matches_repair_sentinel_exactly(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC1: the scalar `repair._DEFAULTED_INFERRED_SOURCE` matches is
+        byte-identical after this change -- an exact-string regression test,
+        not a substring check, so a future edit to the literal is caught
+        here rather than only at `repair --backfill-sources` runtime."""
+        from athenaeum.repair import _DEFAULTED_INFERRED_SOURCE
+
+        monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+        raw = tmp_path / "raw"
+        raw.mkdir()
+        result = remember_write(raw, "Some claim")
+        assert "Saved to" in result
+        text = list((raw / "claude-session").glob("*.md"))[0].read_text()
+        assert f"source: {_DEFAULTED_INFERRED_SOURCE}" in text
+        assert _DEFAULTED_INFERRED_SOURCE == "claude:inferred"
+
+    def test_stamps_model_from_anthropic_model_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ANTHROPIC_MODEL", "claude-opus-4-7")
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-env-1")
+        raw = tmp_path / "raw"
+        raw.mkdir()
+        result = remember_write(raw, "Some claim")
+        assert "Saved to" in result
+        text = list((raw / "claude-session").glob("*.md"))[0].read_text()
+        assert "model: claude-opus-4-7" in text
+        assert "originSessionId: sess-env-1" in text
+
+    def test_no_session_env_stamps_no_session_but_still_succeeds(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC3: no `CLAUDE_CODE_SESSION_ID` -> no session stamped, write OK."""
+        monkeypatch.setenv("ANTHROPIC_MODEL", "claude-opus-4-7")
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+        raw = tmp_path / "raw"
+        raw.mkdir()
+        result = remember_write(raw, "Some claim")
+        assert "Saved to" in result
+        text = list((raw / "claude-session").glob("*.md"))[0].read_text()
+        assert "originSessionId" not in text
+        assert "model: claude-opus-4-7" in text
+
+    def test_never_overrides_caller_supplied_model_or_session(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC2: a caller-supplied `_model`/`originSessionId` (pre-stamped
+        directly into the markdown frontmatter) is never overwritten."""
+        monkeypatch.setenv("ANTHROPIC_MODEL", "claude-opus-4-7")
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-env-1")
+        raw = tmp_path / "raw"
+        raw.mkdir()
+        body = (
+            "---\n"
+            "name: pre-stamped\n"
+            "model: caller-declared-model\n"
+            "originSessionId: caller-declared-session\n"
+            "---\n"
+            "Body text.\n"
+        )
+        result = remember_write(raw, body)
+        assert "Saved to" in result
+        text = list((raw / "claude-session").glob("*.md"))[0].read_text()
+        assert "model: caller-declared-model" in text
+        assert "originSessionId: caller-declared-session" in text
+        assert "claude-opus-4-7" not in text
+        assert "sess-env-1" not in text
+
+    def test_model_falls_back_to_unknown_with_no_env_and_no_transcript(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-no-transcript")
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "empty-claude-home"))
+        raw = tmp_path / "raw"
+        raw.mkdir()
+        result = remember_write(raw, "Some claim")
+        assert "Saved to" in result
+        text = list((raw / "claude-session").glob("*.md"))[0].read_text()
+        assert "model: unknown" in text
+
+    def test_model_falls_back_to_newest_assistant_record_in_transcript(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Rung 2: a capped tail read of the session's own transcript picks
+        the NEWEST assistant record's `message.model`, not the first, when
+        the model changed mid-session."""
+        monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
+        session_id = "sess-tail-read"
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", session_id)
+        claude_home = tmp_path / "claude-home"
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_home))
+        scope_dir = claude_home / "projects" / "-some-scope"
+        scope_dir.mkdir(parents=True)
+        records = [
+            {"type": "user", "message": {"role": "user", "content": "hi"}},
+            {
+                "type": "assistant",
+                "message": {"role": "assistant", "model": "claude-opus-4-7", "content": []},
+            },
+            {
+                "type": "assistant",
+                "message": {"role": "assistant", "model": "claude-haiku-4-5", "content": []},
+            },
+        ]
+        (scope_dir / f"{session_id}.jsonl").write_text(
+            "\n".join(json.dumps(r) for r in records) + "\n",
+            encoding="utf-8",
+        )
+        raw = tmp_path / "raw"
+        raw.mkdir()
+        result = remember_write(raw, "Some claim")
+        assert "Saved to" in result
+        text = list((raw / "claude-session").glob("*.md"))[0].read_text()
+        assert "model: claude-haiku-4-5" in text
 
 
 # ---------------------------------------------------------------------------
