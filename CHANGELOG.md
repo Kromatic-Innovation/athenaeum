@@ -81,6 +81,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Signing (athenaeum#2150), anchoring (athenaeum#2151) and the Claude Code
   harness adapter (athenaeum#2149) are separate, blocked-on-this issues.
 
+- **`promptwitness` external anchoring: `Anchorer` protocol, the mandatory
+  `LocalClockAnchorer`, and an `OpenTimestampsAnchorer` with configurable
+  full Bitcoin verification (issue athenaeum#2151).** `LocalClockAnchorer`
+  always runs and always produces a `complete` (but "none independent")
+  attestation, even when every other adapter fails. `OpenTimestampsAnchorer`
+  lazily imports `opentimestamps` (the `witness-anchor` extra), stamps
+  against the default public calendars, stores proofs under
+  `anchors/<subject-safe>.ots`, and upgrades a pending proof only once the
+  new proof verifies. Full verification reads block headers from a
+  configurable Esplora-compatible source (`--block-source` /
+  `PROMPTWITNESS_OTS_BLOCK_SOURCE`, default a public explorer; `offline`
+  does no network access at all) and never raises on a network failure or a
+  missing optional dependency. New CLI subcommand: `promptwitness anchor
+  [--subject] [--upgrade] [--verify] [--block-source]`. Anchor results are
+  chained into the witness ledger as `kind: "anchor"` lines. RFC 3161
+  (athenaeum#2157) and athenaeum wiring (athenaeum#2156, athenaeum#2040) are
+  separate, later issues.
+
 
 ### Changed
 
