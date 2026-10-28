@@ -313,11 +313,21 @@ def witness_session_end(cache_dir: Path) -> None:
     in-process from :func:`athenaeum._cmd_index.cmd_session_end` (issue
     athenaeum#2149) — ``SessionEnd`` has its own entry point
     (``athenaeum session-end``), not this console script's ``main``, but
-    the gating and silent-no-op-guard shape are identical."""
-    _load_config_env(cache_dir)
-    if not _witness_ledger_enabled():
-        return
+    the gating and silent-no-op-guard shape are identical.
+
+    The guard covers ``_load_config_env`` and the gate read too, not just
+    the witness call. Those two ran outside it, so a malformed
+    ``config.env`` -- one stray non-UTF-8 byte is enough for a
+    ``UnicodeDecodeError`` -- escaped into
+    :func:`athenaeum._cmd_index.cmd_session_end` and aborted the whole
+    command. A witness that can break the thing it observes is worse than
+    no witness: the entire point of this path is that it cannot affect the
+    caller's result or exit code. :func:`main` already wraps its own
+    ``_load_config_env`` call for the same reason."""
     try:
+        _load_config_env(cache_dir)
+        if not _witness_ledger_enabled():
+            return
         from promptwitness.harness.claude_code import session_close
 
         session_close(os.environ)

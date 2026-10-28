@@ -1132,6 +1132,35 @@ class TestWitnessLedgerWiring:
             sys.path.remove(SRC)
         assert pw_ledger.list_partitions(witness_dir) != []
 
+    def test_a_malformed_config_env_cannot_abort_session_end(self, tmp_path: Path) -> None:
+        """`witness_session_end` must swallow EVERYTHING, including the
+        `_load_config_env` call and the gate read.
+
+        Those two sat outside the try/except, so one stray non-UTF-8 byte in
+        `config.env` raised `UnicodeDecodeError` straight out of the witness
+        and aborted `athenaeum session-end` itself. A witness that can break
+        the thing it observes is strictly worse than no witness -- this path
+        exists on the promise that it cannot affect the caller's result or
+        exit code.
+        """
+        (tmp_path / "config.env").write_bytes(b"ATHENAEUM_WITNESS_LEDGER_ENABLED=true\n\xff\xfe\n")
+
+        sys.path.insert(0, SRC)
+        try:
+            from athenaeum.claude_code_adapter import witness_session_end
+        finally:
+            sys.path.remove(SRC)
+
+        # The assertion IS that this returns rather than raising.
+        witness_session_end(tmp_path)
+
+        errors = tmp_path / "witness_hook_errors.jsonl"
+        assert errors.exists()
+        records = [json.loads(line) for line in errors.read_text().splitlines() if line.strip()]
+        assert len(records) == 1
+        assert records[0]["error"] == "UnicodeDecodeError"
+        assert set(records[0]) == {"ts", "error"}  # never any text
+
     def test_simulated_import_error_writes_exactly_one_error_line_stdout_unchanged(
         self,
         tmp_path: Path,
