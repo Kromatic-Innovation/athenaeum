@@ -74,6 +74,7 @@ from athenaeum.corrections import parse_batch_envelope
 from athenaeum.dimensions import stamp_recorded_time, validate_intake_temporal
 from athenaeum.ephemeral import classify_ephemeral
 from athenaeum.models import (
+    AI_ATTRIBUTED_SOURCE_TYPES,
     AutoMemoryFile,
     EntityIndex,
     RawFile,
@@ -577,6 +578,12 @@ def discover_auto_memory_files(
     recovered_write_cited = 0
     recovered_time_window = 0
 
+    # Issue athenaeum#2148: lazy import -- keeps `transcript_verify` off
+    # `intake`'s module-scope import graph (neither module is in
+    # `tests/test_import_budget.py::PINNED_IMPORTS` today, but a
+    # function-local import keeps it that way if one is ever added).
+    from athenaeum.transcript_verify import _best_effort_ref
+
     files: list[AutoMemoryFile] = []
     for root in roots:
         if not root.is_dir():
@@ -748,6 +755,33 @@ def discover_auto_memory_files(
                 )
                 # Issue athenaeum#191: non-destructive inactive markers.
                 meta_for_markers = meta if meta else None
+                # Issue athenaeum#2148: AI-attributed defaults (`agent-observed`/
+                # `inferred`/`model-prior`) that declare no `model:` get one
+                # filled HERE, in memory only -- raw stays write-once on this
+                # path, same as every other field this loop derives rather
+                # than writes back. Three-rung fallback, cheapest first:
+                #   1. the model on the assistant record that WROTE this file
+                #      (`recoverer.model_for_write`);
+                #   2. failing that, the origin session's own first assistant
+                #      turn (`recoverer.model_for_session`);
+                #   3. the honest "unknown".
+                # Both rungs reuse the SAME per-scope index `recoverer`
+                # already builds/caches for origin-session recovery above, so
+                # calling them here -- for every AI-attributed file, not just
+                # the uncited ones `.recover()` handles -- adds no transcript
+                # read beyond the one each transcript already gets per scope
+                # per pass (athenaeum#2048 budget; pinned in
+                # tests/test_inferred_provenance_stamping.py).
+                model = parse_model(meta_for_markers)
+                if not model and source_type in AI_ATTRIBUTED_SOURCE_TYPES:
+                    model = recoverer.model_for_write(fpath, scope)
+                    if not model and origin_session_id:
+                        model = recoverer.model_for_session(scope, origin_session_id)
+                    model = model or "unknown"
+                    # Fill an empty source_ref the same way -- a session-
+                    # anchored best-effort ref, never the raw filename.
+                    if not source_ref and origin_session_id:
+                        source_ref = _best_effort_ref(origin_session_id, origin_turn)
                 files.append(
                     AutoMemoryFile(
                         path=fpath,
@@ -766,7 +800,9 @@ def discover_auto_memory_files(
                         source_type=source_type,
                         source_ref=source_ref,
                         # Issue athenaeum#326: channel-split provenance annotations.
-                        model=parse_model(meta_for_markers),
+                        # Issue athenaeum#2148 fills `model` above when empty
+                        # and the channel is AI-attributed.
+                        model=model,
                         on_behalf_of=parse_on_behalf_of(meta_for_markers),
                         asserter=parse_asserter(meta_for_markers),
                         # Issue athenaeum#327: epistemic claim kind (fail-open when
