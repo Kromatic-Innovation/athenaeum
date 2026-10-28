@@ -2462,6 +2462,119 @@ triggered reasoning run AND no other trigger fired this evaluation (see
 primary path. ``bool`` and non-positive / non-int values fall through to
 the default.
 
+### `resolve_receipt_anchor_adapters`
+
+- **YAML path:** `librarian.receipt_anchor.adapters`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `['local-clock']`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve which anchoring adapters the nightly anchoring path
+ should submit to. DEFAULT
+``["local-clock"]``.
+
+``librarian.receipt_anchor.adapters`` must be a non-empty list drawn
+from `RECEIPT_ANCHOR_ADAPTERS`; any other value, or an unknown
+entry, raises `ReceiptAnchorConfigError` rather than silently
+dropping it (mirrors `resolve_receipt_sealer`'s "never falls back
+to off" discipline). ``"local-clock"`` — the mandatory fallback — is
+ALWAYS present in the returned list: appended if the operator's own
+list omitted it, kept in its given position otherwise. Duplicate
+entries collapse to one. yaml only, no env override.
+
+### `resolve_receipt_anchor_anchor_interval_minutes`
+
+- **YAML path:** `librarian.receipt_anchor.anchor_interval_minutes`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `15`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve the anchoring interval, in minutes, for the nightly
+anchoring path. DEFAULT ``15``; ``0`` disables
+periodic anchoring for whichever caller reads this knob.
+
+``librarian.receipt_anchor.anchor_interval_minutes``. yaml only, no env
+override — the ``UserPromptSubmit`` hook's own cadence is a SEPARATE,
+env-only knob read directly by
+``athenaeum.claude_code_adapter._witness_anchor_interval_minutes``
+(see that function's docstring for its env var name), because the
+hook never loads athenaeum.yaml at all; this yaml resolver is this
+knob's home for every OTHER caller (the nightly anchoring path).
+
+### `resolve_receipt_anchor_ots_block_source`
+
+- **YAML path:** `librarian.receipt_anchor.ots_block_source`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `'https://blockstream.info/api'`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve the Esplora-compatible block explorer the nightly anchoring
+path's full Bitcoin verification reads. DEFAULT
+the public block explorer
+(`DEFAULT_RECEIPT_ANCHOR_OTS_BLOCK_SOURCE`).
+
+``librarian.receipt_anchor.ots_block_source`` — ``"offline"`` is a
+valid value here too, the same sentinel
+``promptwitness.anchor.resolve_block_source`` recognizes (no network
+access at all). yaml only, no env override.
+
+### `resolve_receipt_anchor_ots_calendars`
+
+- **YAML path:** `librarian.receipt_anchor.ots_calendars`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `['https://a.pool.opentimestamps.org', 'https://b.pool.opentimestamps.org', 'https://a.pool.eternitywall.com']`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve the OpenTimestamps calendar URLs the nightly anchoring path
+ submits to. DEFAULT the three
+public pools (`DEFAULT_RECEIPT_ANCHOR_OTS_CALENDARS`).
+
+``librarian.receipt_anchor.ots_calendars`` must be a non-empty list of
+non-empty strings; any other shape raises
+`ReceiptAnchorConfigError`. yaml only, no env override — an
+operator who wants a per-invocation override uses ``promptwitness
+anchor``'s own CLI flags directly (see `promptwitness.anchor`).
+
+### `resolve_receipt_anchor_rfc3161_url`
+
+- **YAML path:** `librarian.receipt_anchor.rfc3161_url`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `None`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve the RFC 3161 TSA URL for the nightly anchoring path's
+optional second attestation source. DEFAULT
+``None`` — unset, the same no-free-default stance
+``promptwitness.anchor_rfc3161.resolve_rfc3161_url`` takes: no TSA is
+free to nominate on an operator's behalf, so an unconfigured URL means
+the adapter is simply not offered.
+
+``librarian.receipt_anchor.rfc3161_url``. yaml only, no env override.
+
+### `resolve_receipt_anchor_timeout_seconds`
+
+- **YAML path:** `librarian.receipt_anchor.timeout_seconds`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `10.0`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Resolve the per-adapter network timeout, in seconds, for the
+nightly anchoring path. DEFAULT ``10``.
+
+``librarian.receipt_anchor.timeout_seconds``. yaml only, no env
+override. Any positive int or float is accepted; anything else
+(including a non-positive value, or a bool — ``bool`` is an ``int``
+subclass in Python, so it is rejected explicitly rather than silently
+accepted as ``0``/``1`` seconds) falls back to the default rather than
+raising — a malformed timeout is a nuisance, not a security knob,
+unlike ``adapters`` above.
+
 ### `resolve_receipt_sealer`
 
 - **YAML path:** `librarian.receipt_sealer`
@@ -4867,6 +4980,7 @@ auto-applying tier from the one loop meant to catch it being wrong.
 | `ATHENAEUM_TOPIC_MODEL` | `src/athenaeum/config.py`, `src/athenaeum/query_topics.py` |
 | `ATHENAEUM_TOPIC_THINKING` | `src/athenaeum/query_topics.py` |
 | `ATHENAEUM_VERIFY_MODEL` | `src/athenaeum/_cmd_paste_cleanup.py` |
+| `ATHENAEUM_WITNESS_ANCHOR_INTERVAL_MINUTES` | `src/athenaeum/claude_code_adapter.py` |
 | `ATHENAEUM_WITNESS_LEDGER_ENABLED` | `src/athenaeum/_cmd_index.py`, `src/athenaeum/claude_code_adapter.py` |
 | `ATHENAEUM_WRITE_MODEL` | `src/athenaeum/config.py`, `src/athenaeum/drain_advisor.py`, `src/athenaeum/librarian.py`, `src/athenaeum/tiers.py` |
 | `ATHENAEUM_ZERO_YIELD_ALERT_THRESHOLD` | `src/athenaeum/librarian.py`, `src/athenaeum/recovery_yield.py` |

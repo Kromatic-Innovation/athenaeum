@@ -7857,3 +7857,241 @@ def resolve_witness_attestation_enabled(config: dict[str, Any] | None) -> bool:
             if isinstance(raw, bool):
                 return raw
     return False
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#2156: `librarian.receipt_anchor.*` -- config surface for
+# anchoring the witness-chain head and receipt-partition digests (see
+# docs/design/witness-ledger.md "Anchoring" and athenaeum#2144 operator
+# ruling 3). Six resolvers, kept together in one contiguous block appended
+# at the end of this file (athenaeum#2158 is adding its own resolvers to
+# this file concurrently; a shared end-of-file append point lets both
+# lanes' diffs merge without conflict).
+#
+# Every nested segment below is read INLINE, in the resolver's own body,
+# never through a shared helper -- so
+# `tests/test_config_resolver_parity_generic.py`'s source-literal scan can
+# see `librarian`/`receipt_anchor`/`<key>` (a factored-out lookup would
+# hide the key and the resolver would read as dead to that gate), mirroring
+# `resolve_receipt_signing_op_reference`'s identical note above. No seeds
+# in `_DEFAULTS` (issue athenaeum#231).
+#
+# These six keys are the NIGHTLY anchoring path's config surface
+# (athenaeum#2040, out of scope here). The two anchor paths athenaeum#2156
+# itself ships -- the `UserPromptSubmit` hook's periodic spawn and the
+# `session-end` anchor step, both in `athenaeum.claude_code_adapter` --
+# use promptwitness's own env-based resolvers directly
+# (`promptwitness.anchor.resolve_block_source`,
+# `promptwitness.anchor_rfc3161.resolve_rfc3161_url`): the hook never loads
+# athenaeum.yaml at all (it is a latency-sensitive per-prompt hook), and
+# session-end's own constraint is a wall-clock budget, not adapter
+# selection. These resolvers exist so the nightly lane, this parity gate,
+# and `docs/reference/configuration.md` have a documented, discoverable
+# home for the six knobs the design names, ahead of athenaeum#2040 wiring
+# them to a consumer.
+# ---------------------------------------------------------------------------
+
+
+class ReceiptAnchorConfigError(ValueError):
+    """An unknown ``librarian.receipt_anchor.adapters`` entry, or a
+    malformed ``ots_calendars``/``ots_block_source`` (issue athenaeum#2156).
+
+    Raised rather than silently dropping the value — mirrors
+    :class:`ReceiptSealerConfigError`'s reasoning exactly: a typo in a
+    security/evidence knob that silently disabled an anchor source would be
+    invisible after the fact.
+    """
+
+
+#: Accepted ``librarian.receipt_anchor.adapters`` entries (issue
+#: athenaeum#2156). ``local-clock`` is the mandatory fallback
+#: (``promptwitness.anchor.LocalClockAnchorer``) and is always present in
+#: :func:`resolve_receipt_anchor_adapters`'s return value even when absent
+#: from an explicit list; ``opentimestamps`` and ``rfc3161`` name the two
+#: optional network sources (``promptwitness.anchor.OpenTimestampsAnchorer``,
+#: ``promptwitness.anchor_rfc3161.Rfc3161Anchorer``).
+RECEIPT_ANCHOR_ADAPTERS = ("local-clock", "opentimestamps", "rfc3161")
+
+#: Default OpenTimestamps calendars (issue athenaeum#2156) — duplicated
+#: from ``promptwitness.anchor.DEFAULT_CALENDARS`` rather than imported:
+#: this module is the import root of nearly every CLI command, and
+#: ``src/promptwitness`` is a separate, independently-extractable package
+#: (athenaeum#2162) that must not be pulled in at this module's top level
+#: just to resolve one yaml default.
+DEFAULT_RECEIPT_ANCHOR_OTS_CALENDARS = (
+    "https://a.pool.opentimestamps.org",
+    "https://b.pool.opentimestamps.org",
+    "https://a.pool.eternitywall.com",
+)
+
+#: Default public block explorer for full OpenTimestamps verification
+#: (issue athenaeum#2156) — duplicated from
+#: ``promptwitness.anchor.DEFAULT_BLOCK_SOURCE`` for the same reason.
+DEFAULT_RECEIPT_ANCHOR_OTS_BLOCK_SOURCE = "https://blockstream.info/api"
+
+
+def resolve_receipt_anchor_adapters(config: dict[str, Any] | None) -> list[str]:
+    """Resolve which anchoring adapters the nightly anchoring path
+    (athenaeum#2040) should submit to (issue athenaeum#2156). DEFAULT
+    ``["local-clock"]``.
+
+    ``librarian.receipt_anchor.adapters`` must be a non-empty list drawn
+    from :data:`RECEIPT_ANCHOR_ADAPTERS`; any other value, or an unknown
+    entry, raises :class:`ReceiptAnchorConfigError` rather than silently
+    dropping it (mirrors :func:`resolve_receipt_sealer`'s "never falls back
+    to off" discipline). ``"local-clock"`` — the mandatory fallback — is
+    ALWAYS present in the returned list: appended if the operator's own
+    list omitted it, kept in its given position otherwise. Duplicate
+    entries collapse to one. yaml only, no env override.
+    """
+    raw: Any = None
+    if isinstance(config, dict):
+        _librarian = config.get("librarian")
+        if isinstance(_librarian, dict):
+            _receipt_anchor = _librarian.get("receipt_anchor")
+            if isinstance(_receipt_anchor, dict):
+                raw = _receipt_anchor.get("adapters")
+    if raw is None:
+        return ["local-clock"]
+    if not isinstance(raw, list) or not raw:
+        raise ReceiptAnchorConfigError(
+            f"librarian.receipt_anchor.adapters: expected a non-empty list "
+            f"drawn from {list(RECEIPT_ANCHOR_ADAPTERS)}, got {raw!r}"
+        )
+    adapters: list[str] = []
+    for entry in raw:
+        if not isinstance(entry, str) or entry not in RECEIPT_ANCHOR_ADAPTERS:
+            raise ReceiptAnchorConfigError(
+                f"librarian.receipt_anchor.adapters: unknown adapter {entry!r}; "
+                f"expected one of {list(RECEIPT_ANCHOR_ADAPTERS)}"
+            )
+        if entry not in adapters:
+            adapters.append(entry)
+    if "local-clock" not in adapters:
+        adapters.append("local-clock")
+    return adapters
+
+
+def resolve_receipt_anchor_ots_calendars(config: dict[str, Any] | None) -> list[str]:
+    """Resolve the OpenTimestamps calendar URLs the nightly anchoring path
+    (athenaeum#2040) submits to (issue athenaeum#2156). DEFAULT the three
+    public pools (:data:`DEFAULT_RECEIPT_ANCHOR_OTS_CALENDARS`).
+
+    ``librarian.receipt_anchor.ots_calendars`` must be a non-empty list of
+    non-empty strings; any other shape raises
+    :class:`ReceiptAnchorConfigError`. yaml only, no env override — an
+    operator who wants a per-invocation override uses ``promptwitness
+    anchor``'s own CLI flags directly (see :mod:`promptwitness.anchor`).
+    """
+    raw: Any = None
+    if isinstance(config, dict):
+        _librarian = config.get("librarian")
+        if isinstance(_librarian, dict):
+            _receipt_anchor = _librarian.get("receipt_anchor")
+            if isinstance(_receipt_anchor, dict):
+                raw = _receipt_anchor.get("ots_calendars")
+    if raw is None:
+        return list(DEFAULT_RECEIPT_ANCHOR_OTS_CALENDARS)
+    if not isinstance(raw, list) or not raw or not all(
+        isinstance(item, str) and item for item in raw
+    ):
+        raise ReceiptAnchorConfigError(
+            f"librarian.receipt_anchor.ots_calendars: expected a non-empty "
+            f"list of URL strings, got {raw!r}"
+        )
+    return list(raw)
+
+
+def resolve_receipt_anchor_ots_block_source(config: dict[str, Any] | None) -> str:
+    """Resolve the Esplora-compatible block explorer the nightly anchoring
+    path's full Bitcoin verification reads (issue athenaeum#2156). DEFAULT
+    the public block explorer
+    (:data:`DEFAULT_RECEIPT_ANCHOR_OTS_BLOCK_SOURCE`).
+
+    ``librarian.receipt_anchor.ots_block_source`` — ``"offline"`` is a
+    valid value here too, the same sentinel
+    ``promptwitness.anchor.resolve_block_source`` recognizes (no network
+    access at all). yaml only, no env override.
+    """
+    raw: Any = None
+    if isinstance(config, dict):
+        _librarian = config.get("librarian")
+        if isinstance(_librarian, dict):
+            _receipt_anchor = _librarian.get("receipt_anchor")
+            if isinstance(_receipt_anchor, dict):
+                raw = _receipt_anchor.get("ots_block_source")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    return DEFAULT_RECEIPT_ANCHOR_OTS_BLOCK_SOURCE
+
+
+def resolve_receipt_anchor_rfc3161_url(config: dict[str, Any] | None) -> str | None:
+    """Resolve the RFC 3161 TSA URL for the nightly anchoring path's
+    optional second attestation source (issue athenaeum#2156). DEFAULT
+    ``None`` — unset, the same no-free-default stance
+    ``promptwitness.anchor_rfc3161.resolve_rfc3161_url`` takes: no TSA is
+    free to nominate on an operator's behalf, so an unconfigured URL means
+    the adapter is simply not offered.
+
+    ``librarian.receipt_anchor.rfc3161_url``. yaml only, no env override.
+    """
+    raw: Any = None
+    if isinstance(config, dict):
+        _librarian = config.get("librarian")
+        if isinstance(_librarian, dict):
+            _receipt_anchor = _librarian.get("receipt_anchor")
+            if isinstance(_receipt_anchor, dict):
+                raw = _receipt_anchor.get("rfc3161_url")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    return None
+
+
+def resolve_receipt_anchor_timeout_seconds(config: dict[str, Any] | None) -> float:
+    """Resolve the per-adapter network timeout, in seconds, for the
+    nightly anchoring path (issue athenaeum#2156). DEFAULT ``10``.
+
+    ``librarian.receipt_anchor.timeout_seconds``. yaml only, no env
+    override. Any positive int or float is accepted; anything else
+    (including a non-positive value, or a bool — ``bool`` is an ``int``
+    subclass in Python, so it is rejected explicitly rather than silently
+    accepted as ``0``/``1`` seconds) falls back to the default rather than
+    raising — a malformed timeout is a nuisance, not a security knob,
+    unlike ``adapters`` above.
+    """
+    raw: Any = None
+    if isinstance(config, dict):
+        _librarian = config.get("librarian")
+        if isinstance(_librarian, dict):
+            _receipt_anchor = _librarian.get("receipt_anchor")
+            if isinstance(_receipt_anchor, dict):
+                raw = _receipt_anchor.get("timeout_seconds")
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool) and raw > 0:
+        return float(raw)
+    return 10.0
+
+
+def resolve_receipt_anchor_anchor_interval_minutes(config: dict[str, Any] | None) -> int:
+    """Resolve the anchoring interval, in minutes, for the nightly
+    anchoring path (issue athenaeum#2156). DEFAULT ``15``; ``0`` disables
+    periodic anchoring for whichever caller reads this knob.
+
+    ``librarian.receipt_anchor.anchor_interval_minutes``. yaml only, no env
+    override — the ``UserPromptSubmit`` hook's own cadence is a SEPARATE,
+    env-only knob read directly by
+    ``athenaeum.claude_code_adapter._witness_anchor_interval_minutes``
+    (see that function's docstring for its env var name), because the
+    hook never loads athenaeum.yaml at all; this yaml resolver is this
+    knob's home for every OTHER caller (the nightly anchoring path,
+    athenaeum#2040).
+    """
+    raw: Any = None
+    if isinstance(config, dict):
+        _librarian = config.get("librarian")
+        if isinstance(_librarian, dict):
+            _receipt_anchor = _librarian.get("receipt_anchor")
+            if isinstance(_receipt_anchor, dict):
+                raw = _receipt_anchor.get("anchor_interval_minutes")
+    if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
+        return raw
+    return 15

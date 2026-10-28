@@ -1007,32 +1007,46 @@ def cmd_session_end(args: argparse.Namespace) -> int:
 
     configure_logging(verbose=getattr(args, "verbose", False))
 
-    # Witness-ledger SessionEnd close (issue athenaeum#2149). Independent of
-    # everything below: the operator's existing
-    # SessionEnd hook calls `athenaeum session-end` for every session, in
-    # both modes, so this is the one in-process call-site the design needs
-    # (no settings.json change). Self-gated on
-    # ATHENAEUM_WITNESS_LEDGER_ENABLED (default off) and carries its own
-    # silent no-op guard, so a disabled or failing witness path can never
-    # affect this command's own compile/reindex result or exit code.
-    #
-    # NOT run under `--dry-run`. Writing a `session-close` line is a write,
-    # and the witness ledger is the one store in this repo where a spurious
-    # write cannot simply be deleted afterwards: it is append-only and
-    # hash-chained, so removing the line breaks every `prev` after it. A
-    # dry run that permanently alters a tamper-evident log is the sharpest
-    # version of the thing `--dry-run` exists to promise it will not do.
-    if not getattr(args, "dry_run", False):
-        from athenaeum.claude_code_adapter import witness_session_end
-
-        witness_session_end(resolve_cache_dir(args.cache_dir))
-
+    # `knowledge_root`/`wiki_root` are computed here, ahead of the witness
+    # block right below, purely so the anchor step (issue athenaeum#2156)
+    # has `wiki_root` available for its read-only receipt-partition scan —
+    # this is pure path resolution (no I/O), so moving it earlier changes
+    # nothing about the rest of this function's behavior.
     knowledge_root = (
         args.path.expanduser().resolve() if args.path else DEFAULT_KNOWLEDGE_ROOT
     )
     raw_root = knowledge_root / "raw"
     wiki_root = knowledge_root / "wiki"
     incremental = True if args.incremental is None else args.incremental
+
+    # Witness-ledger SessionEnd close + anchor step (issue athenaeum#2149,
+    # athenaeum#2156). Independent of everything below: the operator's
+    # existing SessionEnd hook calls `athenaeum session-end` for every
+    # session, in both modes, so this is the one in-process call-site the
+    # design needs (no settings.json change). Both calls are self-gated on
+    # ATHENAEUM_WITNESS_LEDGER_ENABLED (default off) and carry their own
+    # silent no-op guard, so a disabled or failing witness/anchor path can
+    # never affect this command's own compile/reindex result or exit code.
+    # The anchor step runs AFTER the session-close line, so the subject it
+    # anchors (`witness:<ledger_id>:<seq>`) is the head INCLUDING that
+    # line — and it takes no run lock either, per the design's lock rule.
+    #
+    # NOT run under `--dry-run`. Writing a `session-close`/`anchor` line is
+    # a write, and the witness ledger is the one store in this repo where
+    # a spurious write cannot simply be deleted afterwards: it is
+    # append-only and hash-chained, so removing the line breaks every
+    # `prev` after it. A dry run that permanently alters a tamper-evident
+    # log is the sharpest version of the thing `--dry-run` exists to
+    # promise it will not do.
+    if not getattr(args, "dry_run", False):
+        from athenaeum.claude_code_adapter import (
+            witness_session_end,
+            witness_session_end_anchor,
+        )
+
+        cache_dir_resolved = resolve_cache_dir(args.cache_dir)
+        witness_session_end(cache_dir_resolved)
+        witness_session_end_anchor(cache_dir_resolved, wiki_root)
 
     # Issue athenaeum#1566: --references-only short-circuits BEFORE the
     # compile kill switch and the run lock. Neither applies: this path runs
