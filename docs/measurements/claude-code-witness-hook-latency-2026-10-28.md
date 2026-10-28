@@ -16,7 +16,7 @@ python scripts/measure_claude_code_witness_hook_latency.py --n 500
 The hook process already starts a fresh Python interpreter and imports
 `athenaeum.config`/`athenaeum.models` for every turn **today**, for recall's
 own purposes, independent of this issue. That fork/exec + import cost is
-real (p95 ≈ 99–105 ms in this container — see both subprocess figures below)
+real (p95 ≈ 41–49 ms in this container — see both subprocess figures below)
 but is not what athenaeum#2149 adds: it is the pre-existing cost of invoking
 the hook at all. So this harness measures the witness path's **own added
 latency** as a delta: the same subprocess invocation with
@@ -35,54 +35,55 @@ is the real, shipped code path.
 
 | | baseline (gate off) | witness enabled | **added (witness path)** |
 |---|---|---|---|
-| mean | 82.182 ms | 96.818 ms | 14.636 ms |
-| p50 | 90.506 ms | 98.623 ms | 8.117 ms |
-| **p95** | 99.178 ms | 104.582 ms | **5.404 ms** |
-| max | 163.913 ms | 152.944 ms | — (subprocess-noise bound, not meaningful as a delta) |
+| mean | 37.210 ms | 45.348 ms | 8.138 ms |
+| p50 | 36.428 ms | 44.793 ms | 8.365 ms |
+| **p95** | 41.346 ms | 49.239 ms | **7.893 ms** |
+| max | 68.872 ms | 70.936 ms | — (subprocess-noise bound, not meaningful as a delta) |
 
-**p95 added latency: 5.404 ms — within the 25 ms budget.**
+**p95 added latency: 7.893 ms — within the 25 ms budget.**
 
-## `software-file` — measured against a local stand-in, not athenaeum#2150's adapter
+## `software-file` — measured against athenaeum#2150's shipped adapter
 
-**athenaeum#2150 (the `software-file` key adapter) is a sibling lane's
-deliverable and may not exist on this branch** — this issue is explicitly
-scoped to exclude signing. `record_turn` has no way to inject a
-`KeyProviderLike` today, so there is no production code path yet that signs
-a turn end-to-end.
-
-To still answer the AC honestly, this harness measures the **signing
+`record_turn` always calls
+`promptwitness.ledger.append_line(..., key_provider=None, ...)`: signing is
+wired in by athenaeum#2150 and selected by configuration, not by this issue,
+so there is no production code path that signs a turn end-to-end for a
+subprocess measurement to exercise. So this harness measures the **signing
 cost in isolation**: an in-process timer directly around
 `promptwitness.ledger.append_line`, once with `key_provider=None` and once
-with a **local Ed25519 stand-in** built from
-`cryptography.hazmat.primitives.asymmetric.ed25519.Ed25519PrivateKey` (already
-in the `dev` extra). The stand-in key is generated and used purely in
-process memory — never serialized to PEM or written to disk — so the
-cryptographic *work* (key generation once, one `sign()` call per append) is
-the same work `software-file` would do, which is what this measurement is
-about, without claiming to BE athenaeum#2150's shipped adapter.
+with athenaeum#2150's shipped `signing.SoftwareFileKeyProvider`, bound to a
+throwaway Ed25519 key that `signing.generate_and_write_key` writes into a
+`TemporaryDirectory` and that dies with it. No key material and no PEM
+banner is ever written into the repository or to stdout/stderr.
 
-| | unsigned | signed (local Ed25519 stand-in) | delta |
+That adapter is the stricter of the two things that could be measured here:
+it re-reads and re-parses the PEM from disk on **every** `sign` call rather
+than holding a key object in memory, so the figure below is an upper bound
+on what a cached-key implementation would cost.
+
+| | unsigned | signed (`SoftwareFileKeyProvider`) | delta |
 |---|---|---|---|
-| mean | 0.816 ms | 1.147 ms | 0.331 ms |
-| p50 | 0.565 ms | 0.744 ms | 0.179 ms |
-| **p95** | 1.533 ms | 2.042 ms | **0.509 ms** |
+| mean | 0.452 ms | 0.699 ms | 0.247 ms |
+| p50 | 0.457 ms | 0.695 ms | 0.238 ms |
+| **p95** | 0.536 ms | 0.872 ms | **0.336 ms** |
 
-**Estimated `software-file` added latency: 5.404 ms (measured `none` delta)
-+ 0.509 ms (measured signing delta) = 5.913 ms — within the 25 ms budget**,
-assuming athenaeum#2150's shipped adapter costs roughly the same as this
-stand-in's single local `sign()` call (no network, no OS keychain prompt —
-`software-file` reads an on-disk key, the same order of cost as the
-in-memory key used here).
+**`software-file` added latency: 7.893 ms (measured `none` delta) + 0.336 ms
+(measured signing delta) = 8.229 ms — within the 25 ms budget.**
 
 ## Caveats
 
-- **Container noise.** The absolute subprocess p95 (≈99–105 ms) reflects
-  this measurement container's fork/exec + Python-interpreter-startup cost,
-  which varies run to run (a repeat at `--n 200` showed a noisier, even
-  negative, signing delta purely from timing jitter on sub-millisecond
-  `append_line` calls). The delta figures above are from an `--n 500` run
-  and are the ones that matter for the AC; re-run the harness for a fresh
-  sample if reproducing.
+- **Container noise.** The absolute subprocess p95 (≈41–49 ms) reflects this
+  measurement container's fork/exec + Python-interpreter-startup cost, which
+  varies run to run. A `--n 300` repeat taken while two full `pytest` suites
+  were running concurrently in the same container put the deltas at
+  **15.125 ms (`none`) / 15.574 ms (`software-file`)** — roughly double, and
+  still inside the 25 ms budget, which is the useful thing that stress run
+  shows. The figures in the tables above are from an idle-container `--n 500`
+  run; re-run the harness for a fresh sample if reproducing.
+- **Sub-millisecond `append_line` timings are jitter-prone.** The signing
+  delta is a difference of two sub-millisecond p95s; a short run can show a
+  noisier or even negative delta purely from timing jitter. Use `--n 500` or
+  more.
 - **Not a Claude Code real-binary measurement.** This runs the adapter
   directly via `python -m`, with synthetic stdin — the real-binary,
   real-hook-wiring integration test is athenaeum#2161's explicit job, not
