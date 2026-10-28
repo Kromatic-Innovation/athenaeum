@@ -197,6 +197,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   re-anchoring, so it never overwrites the `.tsr` file an earlier ledger
   line's `proof_path` still names (PR athenaeum#2174 review findings).
 
+- **Intake attests `user-stated` utterances against the witness ledger,
+  with misses treated as incidents (issue athenaeum#2158).** New module
+  `athenaeum.witness_attestation` joins a `user-stated` transcript claim to
+  the `promptwitness` witness ledger by `promptId` (falling back to
+  `(session, digest)`) through an eleven-condition hit rule — prompt kind,
+  interactive channel, matching session, digest equality, an intact hash
+  chain, and three transcript cross-fields (`origin.kind`, `promptSource`,
+  `isSidechain`). A hit upgrades the receipt's channel to `witnessed`
+  (schema v2, purely additive — v1 receipts still parse and are never
+  rewritten); a miss stays `user-stated` with one of eleven `witness_miss`
+  reasons and is logged at WARNING (never the claim text or a digest), with
+  a provenance-incident variant for a miss that otherwise looks
+  human-and-interactive. Off by default
+  (`librarian.witness_attestation_enabled`); with it off, behavior and the
+  `correct_*` gate's decision are byte-identical to before this issue.
+  Nothing gates on attestation yet.
+
 ### Changed
 
 - **The public surface now says what the version number means (issue

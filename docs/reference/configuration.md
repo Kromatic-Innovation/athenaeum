@@ -3485,6 +3485,36 @@ malformed env value logs a WARNING and falls back to yaml. A ``bool`` or
 non-numeric yaml value falls back to the default; ``0`` or negative yaml
 disables the floor.
 
+### `resolve_witness_attestation_enabled`
+
+- **YAML path:** `librarian.witness_attestation_enabled`
+- **Environment variable:** `ATHENAEUM_WITNESS_ATTESTATION_ENABLED`
+- **CLI flag:** —
+- **Default:** `False`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the witness-ledger attestation opt-in. DEFAULT OFF.
+
+Gates `athenaeum.witness_attestation` entirely: with this off,
+`athenaeum.transcript_receipts.write_receipt_for_origin` never
+loads the ``promptwitness`` ledger and a ``user-stated`` classification
+is written exactly as it was before this issue existed — the
+``correct_*`` authorship gate's live-classification decision is
+byte-identical, pinned by
+``tests/test_transcript_receipts.py::TestGateFlagOffByteIdentical``.
+With it on, a ``user-stated`` claim is additionally checked against the
+hash-chained witness ledger (``docs/design/witness-ledger.md``); a hit
+upgrades the receipt's channel to ``witnessed``, and a miss is logged
+at WARNING with a ``witness_miss`` reason. Nothing gates on the result
+yet — this flag is intake-only. The gate, the readout, and the
+real-binary integration test are separate, later changes.
+
+Mirrors `resolve_transcript_receipts_enabled`'s shape exactly: env
+``ATHENAEUM_WITNESS_ATTESTATION_ENABLED`` (``1``/``true``/``yes``/``on``,
+case-insensitive) > yaml ``librarian.witness_attestation_enabled`` >
+default ``False``. No seed in ``_DEFAULTS``.
+Non-bool yaml values and unrecognized env strings fall through to off.
+
 ### `resolve_writer_identity_enforced`
 
 - **YAML path:** `librarian.writer_identity_enforced`

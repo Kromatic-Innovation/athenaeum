@@ -686,6 +686,92 @@ are meant to implement that interface without this module changing.
   harness-wrapper tag. This tightens WHICH record can win the substring
   match above — it does not change what winning a substring match proves.
 
+### Witnessed receipts (issue athenaeum#2158) — attesting `user-stated` against the witness ledger
+
+**Files:** `src/athenaeum/witness_attestation.py` (new, L2); `src/athenaeum/transcript_receipts.py`
+(`_matching_human_utterance` now returns the matched record, `write_receipt_for_origin`,
+`ReceiptRun`, `ReceiptEntry` schema v2, `classify_for_correct_gate`); `src/athenaeum/models.py`
+(`SOURCE_TYPES` gains `"witnessed"`).
+
+**The problem this closes.** A `"user-stated"` classification
+(`transcript_verify.classify_backfill_records`) has no witness outside the
+session transcript, which the model's own Bash tool can edit — `"the user
+typed these words"` has never meant `"the user authorized this"` (see
+"Known limits" above), and until this issue it had no corroborating signal
+at all. The epic (athenaeum#2144) states the normative security boundary this
+mechanism operates inside, reproduced here verbatim:
+
+> The witness ledger is written by the `UserPromptSubmit` hook, which runs
+> as the same OS user, with the same environment, as the model's Bash
+> tool. **With a separate OS user excluded, no file and no key on this
+> machine is outside the model's reach.** Any process running as the user
+> can run the same append code, recompute a valid chain hash, and ask any
+> key to sign. `chflags uappnd` / `chattr +a` can be cleared by the file's
+> owner; only `sappnd` cannot, and it needs root.
+
+`"witnessed"` therefore proves only what the hash chain, the hook's write
+timing, and the recorded channel/signature-strength signals can prove —
+never a verified human identity. See the epic's full mechanism table (also
+reproduced in `docs/design/witness-ledger.md`) for exactly what each layer
+does and does not establish.
+
+**Mechanism.** `witness_attestation.AttestationIndex.load(witness_dir)`
+builds a `promptwitness.ledger.LedgerIndex` once per run, verifies the
+chain once, and scans anchor coverage once — held on `ReceiptRun` exactly
+as the receipt ledger's own index already is, so the witness ledger is
+opened a FIXED number of times per partition per run, never once per
+memory. For a `"user-stated"` claim, `write_receipt_for_origin` looks the
+matched utterance up by the transcript record's `promptId` (falling back
+to `(session, utterance_digest)`) and runs an eleven-condition AND rule —
+`prompt_kind` human (or `slash-command` with a `slash-args` segment, the
+claim lying inside that span), `channel == "interactive"`, matching
+session, digest equality, an intact hash chain through that line, the
+transcript record's `origin.kind` (human when present), `promptSource`
+(`typed`/`queued`), and `isSidechain` not true. A hit upgrades the
+receipt's `channel` to `"witnessed"` and stamps `witness_tag`/`witness_ref`/
+`witness_strength`/`witness_anchored`; a miss leaves the channel
+`"user-stated"` and stamps one of eleven `witness_miss` reasons
+(`ledger-absent`, `no-entry`, `kind-not-human:<kind>`,
+`channel-not-interactive:<ch>`, `digest-mismatch`, `session-mismatch`,
+`chain-broken`, `transcript-origin-not-human`,
+`transcript-promptsource:<value>`, `sidechain`, `flag-off`).
+
+**Misses are incidents, not a tolerated rate (operator ruling 10).** Every
+miss other than `flag-off` is logged at WARNING naming the reason and the
+`witness_ref`/session only — never claim text, never a digest. A miss that
+otherwise looks human-and-interactive (`transcript_origin == "human"` and
+the witness line's own recorded entrypoint is `"cli"`) is logged as a
+PROVENANCE INCIDENT, still exactly one log record.
+
+**Receipt schema v2 — purely additive.** `SCHEMA_VERSION` is now `2`; a v1
+receipt on disk is NEVER rewritten, and `ReceiptEntry.from_dict` tolerates
+every v1 line missing every new field (each defaults to `None`). The
+append idempotency key (`(origin_scope, memory_digest, channel,
+origin_session_id, origin_turn, transcript_prefix_digest,
+transcript_line_count)`) gains nothing — `channel` already distinguishes
+`"user-stated"` from `"witnessed"`, so a claim upgraded to `"witnessed"`
+mints a successor through the existing "changed channel" path, which is
+intended.
+
+**The gate.** `classify_for_correct_gate`'s transcript-absent arm now
+authorizes on a `"user-stated"` OR `"witnessed"` receipt — refusing a
+`"witnessed"` receipt post-roll-off would be a regression relative to the
+plain `"user-stated"` case for the identical claim. The LIVE-classification
+arm (transcript present) is unchanged: nothing new gates on attestation.
+
+**Flag-off is byte-identical.** `librarian.witness_attestation_enabled`
+defaults off (env `ATHENAEUM_WITNESS_ATTESTATION_ENABLED`). With it off,
+`ReceiptRun` never resolves or reads the witness ledger directory at all —
+`witness_attestation.attest` is called with `index=None` and returns
+immediately with `witness_miss="flag-off"` and no I/O — and the
+`correct_*` gate's decision is byte-identical to the pre-athenaeum#2158
+behaviour (`tests/test_transcript_receipts.py::TestGateFlagOffByteIdentical`).
+
+**Out of scope for this issue.** Persisting the source rewrite / changing
+the precedence taxonomy (athenaeum#2159, which also keeps `"witnessed"` sharing
+tier 1 with `"user-stated"` — no rank change); the readout CLI (athenaeum#2160);
+and any new gating decision.
+
 ---
 
 ## Comparison matrix — who wins on each field type
