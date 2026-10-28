@@ -217,8 +217,16 @@ def first_party_names(root: Path, scan_dirs: Iterable[str] = SCAN_DIRS) -> set[s
     test-module imports from reading as undeclared third-party packages. Every
     directory that contributes a scanned file contributes its own module and
     package names.
+
+    `athenaeum` and `promptwitness` are seeded explicitly rather than relying
+    on the generic walk below: neither's own package name is ever added by
+    that walk, because it only adds a scanned FILE's sibling directory names
+    (`path.parent.iterdir()`), and no scanned file's parent is `src/` itself.
+    `promptwitness` (issue athenaeum#2147) is `src/`'s second top-level
+    first-party package, alongside `athenaeum` -- added here for the exact
+    reason `athenaeum` already was, not inferred.
     """
-    names: set[str] = {"athenaeum"}
+    names: set[str] = {"athenaeum", "promptwitness"}
     for directory in scan_dirs:
         base = root / directory
         if not base.is_dir():
