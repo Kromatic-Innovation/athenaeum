@@ -92,7 +92,7 @@ class TestClassifyPromptKind:
         kind, human = claude_code.classify_prompt_kind(
             "ordinary looking text",
             agent_id=None,
-            transcript_path="/home/user/.claude/projects/x/subagents/y.jsonl",
+            transcript_path="/var/tmp/claude-projects/x/subagents/y.jsonl",
             is_launch_argument=False,
         )
         assert (kind, human) == ("subagent", False)
