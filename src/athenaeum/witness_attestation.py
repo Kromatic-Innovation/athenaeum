@@ -38,7 +38,16 @@ human-and-interactive (``transcript_origin == "human"`` and
    re-derived (see "Known deviation" below) — and the claim lies inside
    that span (so a claim that only appears in expanded skill boilerplate
    outside ``<command-args>`` does not attest);
-6. the hash chain is intact through that line's ``seq``;
+6. the hash chain is intact through that line's ``seq``: no break was
+   found, or the line sits before the first break AND is not the line
+   physically preceding it (:attr:`promptwitness.ledger.ChainVerification.
+   first_break_prev_seq`). A content edit to line N surfaces as a break at
+   N+1, so N itself must count as broken; the predecessor is taken from
+   on-disk order rather than ``seq + 1`` so a deleted line's gap is handled
+   too. Same rule as :func:`promptwitness.verify.verify_transcript`. Known
+   limit: an edit to the ledger's very LAST line has no successor to
+   expose it, so the chain alone reports it intact; tail tamper-evidence
+   is what anchoring provides (``witness_anchored`` on the outcome);
 7. the transcript record's ``origin.kind`` is ``"human"`` when present;
 8. the transcript record's ``promptSource`` is ``"typed"`` or ``"queued"``
    (absent fails);
@@ -193,11 +202,13 @@ class AttestationIndex:
         chain_ok: bool,
         first_break_seq: int | None,
         anchored_through: Mapping[str, int],
+        first_break_prev_seq: int | None = None,
     ) -> None:
         self._ledger_index = ledger_index
         self.ledger_present = ledger_present
         self.chain_ok = chain_ok
         self.first_break_seq = first_break_seq
+        self.first_break_prev_seq = first_break_prev_seq
         self._anchored_through: dict[str, int] = dict(anchored_through)
 
     @classmethod
@@ -230,6 +241,7 @@ class AttestationIndex:
             chain_ok=verification.ok,
             first_break_seq=verification.first_break_seq,
             anchored_through=anchored_through,
+            first_break_prev_seq=verification.first_break_prev_seq,
         )
 
     def lookup(
@@ -244,7 +256,12 @@ class AttestationIndex:
         return matches[0] if matches else None
 
     def chain_intact_through(self, seq: int) -> bool:
-        return self.first_break_seq is None or seq < self.first_break_seq
+        """See hit-rule item 6 in the module docstring. A content edit to
+        line N breaks the chain at N+1, so the line physically preceding
+        the first break is itself suspect, not just the break and after."""
+        if self.first_break_seq is None:
+            return True
+        return seq < self.first_break_seq and seq != self.first_break_prev_seq
 
     def is_anchored(self, ledger_id: str, seq: int) -> bool:
         return seq <= self._anchored_through.get(ledger_id, -1)
