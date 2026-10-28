@@ -115,8 +115,11 @@ def _cmd_keygen(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
-        key_path.unlink()
-    provider = signing.generate_and_write_key(key_path)
+    # `--force` does NOT unlink first: `generate_and_write_key(replace=True)`
+    # writes a sibling temp file and `os.replace`s it into position, so a
+    # failure mid-generation leaves the existing key intact. Losing a signing
+    # key makes every line it signed permanently unverifiable.
+    provider = signing.generate_and_write_key(key_path, replace=bool(args.force))
     payload: dict[str, Any] = {
         "key_path": str(key_path),
         "key_id": provider.key_id(),

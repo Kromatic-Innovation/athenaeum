@@ -47,6 +47,7 @@ pattern ``promptwitness.canon.normalize`` uses against
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import logging
 import os
@@ -55,7 +56,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from promptwitness import canon, ledger
+from promptwitness import ledger
 
 __all__ = [
     "STRENGTHS",
@@ -309,7 +310,9 @@ class SoftwareFileKeyProvider:
         return self._public_bytes()
 
 
-def generate_and_write_key(key_path: str | os.PathLike[str]) -> SoftwareFileKeyProvider:
+def generate_and_write_key(
+    key_path: str | os.PathLike[str], *, replace: bool = False
+) -> SoftwareFileKeyProvider:
     """Generate a fresh Ed25519 keypair and write the PRIVATE key to
     *key_path*, mode 0600, PKCS8 PEM.
 
@@ -342,11 +345,35 @@ def generate_and_write_key(key_path: str | os.PathLike[str]) -> SoftwareFileKeyP
     pem_bytes = private_key.private_bytes(
         Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()
     )
-    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    # Written to a sibling temp file and then `os.replace`d into position,
+    # never generated on top of the target. `replace=True` (the `keygen
+    # --force` path) would otherwise have to unlink the old key FIRST, and a
+    # failure between the unlink and a successful write destroys it -- for a
+    # signing key that is unrecoverable: every line it ever signed becomes
+    # permanently unverifiable, and unlike most data loss there is no copy
+    # anywhere to restore from. `os.replace` is atomic on POSIX and on
+    # Windows, so there is no instant at which the key is absent. The temp
+    # file is a sibling so the rename stays within one filesystem.
+    tmp_path = path.with_name(f"{path.name}.new-{os.getpid()}")
+    fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
-        os.write(fd, pem_bytes)
-    finally:
-        os.close(fd)
+        try:
+            os.write(fd, pem_bytes)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.chmod(tmp_path, 0o600)
+        if replace:
+            os.replace(tmp_path, path)
+        else:
+            # Preserve the refuse-to-overwrite contract: `link` fails with
+            # `FileExistsError` if the target exists, and never clobbers.
+            os.link(tmp_path, path)
+            os.unlink(tmp_path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_path)
+        raise
     os.chmod(path, 0o600)
     del private_key, pem_bytes
     return SoftwareFileKeyProvider(path)
@@ -485,14 +512,18 @@ def verify_key_rotate_signatures(
 ) -> tuple[bool, bool]:
     """``(new_sig_ok, prior_sig_ok)`` for a ``kind="key-rotate"`` line.
 
-    Both signatures cover ``canonical_json(line)`` with ``sig`` AND
-    ``prior_sig`` excluded -- the exact bytes :func:`append_key_rotate_line`
-    had each provider sign. Returns ``(False, False)`` shapes gracefully
-    (never raises) when a field is missing or a signature does not decode.
+    Both signatures cover exactly what :func:`promptwitness.ledger.signed_payload`
+    defines -- the same function the appender and :func:`ledger.verify_chain`
+    use, deliberately rather than a local field list. This verifier had its
+    own copy of the rule, which omitted ``prior_sig_error``: when the prior
+    signer FAILED, that field is written after the payload is serialized, so
+    a local list would include it and the new key's signature would then fail
+    to verify on a line that is perfectly valid. One definition, three
+    callers. Returns ``(False, False)`` shapes gracefully (never raises) when
+    a field is missing or a signature does not decode.
     """
     d = line.to_dict()
-    payload_fields = {k: v for k, v in d.items() if k not in ("sig", "prior_sig")}
-    payload = canon.canonical_json(payload_fields)
+    payload = ledger.signed_payload(d)
 
     new_ok = False
     if line.sig is not None:

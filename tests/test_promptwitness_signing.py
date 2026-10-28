@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import base64
 import builtins
+import json
 import logging
+import os
 import stat
 from pathlib import Path
 
@@ -531,6 +533,92 @@ class TestKeyRotate:
         assert new_ok
         assert prior_ok
 
+    def test_key_rotate_line_signature_verifies_through_verify_chain(
+        self, tmp_path: Path
+    ) -> None:
+        """The sign side and the verify side must agree on which fields the
+        signature covers.
+
+        They did not. The appender serializes the payload BEFORE writing
+        `sig` and before the `extra_signers` loop writes `prior_sig`, so a
+        countersignature is outside the signed bytes by construction.
+        `verify_chain` rebuilt the payload dropping only `sig`, so it fed the
+        verifier a dict that still contained `prior_sig` -- and a perfectly
+        valid `key-rotate` line's own signature could never verify. The
+        sibling test below passes no `public_keys`, which is why it did not
+        catch this: with no keys supplied, nothing is verified at all.
+        """
+        old = signing.generate_and_write_key(tmp_path / "old.pem")
+        new = signing.generate_and_write_key(tmp_path / "new.pem")
+        line = signing.append_key_rotate_line(
+            tmp_path,
+            old_provider=old,
+            new_provider=new,
+            harness="claude-code",
+            harness_version="1",
+            hook_version="promptwitness 0.1.0",
+        )
+
+        v = ledger.verify_chain(tmp_path, public_keys={new.key_id(): new.public_key()})
+
+        assert v.invalid_signature_seqs == ()
+        assert v.unverified_signed_lines == 0
+        assert v.signed_lines == 1
+        assert line.kind == "key-rotate"
+
+    def test_a_failed_prior_signer_does_not_invalidate_the_new_key_signature(
+        self, tmp_path: Path
+    ) -> None:
+        """When the OLD key is unavailable, `prior_sig_error` is written --
+        also after the payload is serialized.
+
+        A verifier carrying its own field list would exclude `prior_sig` and
+        include `prior_sig_error`, so the new key's signature would fail on a
+        rotation that is otherwise fine. This is the second shape of the same
+        drift, which is why there is now one `ledger.signed_payload`.
+        """
+
+        class _UnavailableOldKey:
+            def key_id(self) -> str:
+                return "ed25519:0000000000000000"
+
+            def algorithm(self) -> str:
+                return "ed25519"
+
+            def strength(self) -> str:
+                return "software-file"
+
+            def presence_required(self) -> bool:
+                return False
+
+            def public_key(self) -> bytes:
+                return b"\x00" * 32
+
+            def sign(self, payload: bytes) -> bytes:
+                raise ledger.KeyUnavailable("old key is gone")
+
+        new = signing.generate_and_write_key(tmp_path / "new.pem")
+        line = signing.append_key_rotate_line(
+            tmp_path,
+            old_provider=_UnavailableOldKey(),
+            new_provider=new,
+            harness="claude-code",
+            harness_version="1",
+            hook_version="promptwitness 0.1.0",
+        )
+
+        assert line.to_dict().get("prior_sig") is None
+        assert line.to_dict().get("prior_sig_error") == "KeyUnavailable"
+
+        v = ledger.verify_chain(tmp_path, public_keys={new.key_id(): new.public_key()})
+        assert v.invalid_signature_seqs == ()
+
+        new_ok, prior_ok = signing.verify_key_rotate_signatures(
+            line, old_public_key=b"\x00" * 32, new_public_key=new.public_key()
+        )
+        assert new_ok
+        assert not prior_ok
+
     def test_key_rotate_line_is_accepted_by_the_chain_verifier(self, tmp_path: Path) -> None:
         old = signing.generate_and_write_key(tmp_path / "old.pem")
         new = signing.generate_and_write_key(tmp_path / "new.pem")
@@ -644,3 +732,97 @@ class TestKeyRotate:
         d = line.to_dict()
         assert "prior_sig" not in d
         assert d.get("prior_sig_error") == "KeyUnavailable"
+
+
+class TestVerifyChainOnUntrustedInput:
+    """`verify_chain` reads a file that corruption and tampering both reach.
+
+    It must report what it finds, never raise -- a verifier that crashes on a
+    one-byte edit tells an attacker's edit apart from a disk error by
+    crashing on both.
+    """
+
+    def _append_raw(self, ledger_dir: Path, obj: dict[str, object]) -> None:
+        partitions = ledger.list_partitions(ledger_dir)
+        assert partitions
+        with (ledger_dir / partitions[-1]).open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(obj) + "\n")
+
+    def test_a_signed_line_whose_key_is_not_an_object_does_not_raise(
+        self, tmp_path: Path
+    ) -> None:
+        provider = signing.generate_and_write_key(tmp_path / "k.pem")
+        ledger.append_line(
+            tmp_path,
+            kind="gap",
+            harness="claude-code",
+            harness_version="1",
+            hook_version="promptwitness 0.1.0",
+            reason="seed",
+            key_provider=provider,
+        )
+        # `raw.get("key") or {}` returns the STRING here, and `str.get` does
+        # not exist -- an AttributeError straight out of the verifier.
+        self._append_raw(tmp_path, {"v": 1, "seq": 2, "sig": "AAAA", "key": "not-an-object"})
+
+        v = ledger.verify_chain(tmp_path, public_keys={provider.key_id(): provider.public_key()})
+
+        assert v.lines_checked == 2
+        assert v.signed_lines == 2
+        assert v.unverified_signed_lines == 1
+        assert not v.ok  # the junk line still breaks the hash chain
+
+
+class TestKeygenNeverDestroysAnExistingKey:
+    """Losing a signing key is unrecoverable in a way most data loss is not.
+
+    Every line it ever signed becomes permanently unverifiable, and there is
+    no second copy anywhere to restore from -- so `--force` must never reach
+    a state where the old key is gone and the new one is not yet written.
+    """
+
+    def test_force_replaces_the_key_atomically(self, tmp_path: Path) -> None:
+        key_path = tmp_path / "k.pem"
+        # Both providers are bound to the same PATH and read it lazily, so
+        # compare the ids as captured at the time, not the live calls.
+        first_id = signing.generate_and_write_key(key_path).key_id()
+        first_bytes = key_path.read_bytes()
+
+        second_id = signing.generate_and_write_key(key_path, replace=True).key_id()
+
+        assert second_id != first_id
+        assert key_path.read_bytes() != first_bytes
+        assert stat.S_IMODE(key_path.stat().st_mode) == 0o600
+        assert [q.name for q in tmp_path.iterdir()] == ["k.pem"]
+
+    def test_a_failure_mid_generation_leaves_the_existing_key_intact(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        key_path = tmp_path / "k.pem"
+        original = signing.generate_and_write_key(key_path)
+        before = key_path.read_bytes()
+
+        real_replace = os.replace
+
+        def _boom(src: object, dst: object) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr(os, "replace", _boom)
+        # Matched on the INJECTED message on purpose: a bare `OSError` would
+        # also be satisfied by the `FileExistsError` an unlink-free
+        # `O_EXCL` open raises, so the test would pass against the very code
+        # it is meant to rule out.
+        with pytest.raises(OSError, match="disk full"):
+            signing.generate_and_write_key(key_path, replace=True)
+        monkeypatch.setattr(os, "replace", real_replace)
+
+        assert key_path.read_bytes() == before
+        assert signing.SoftwareFileKeyProvider(key_path).key_id() == original.key_id()
+        # And no temp file is left lying around with key material in it.
+        assert [p.name for p in tmp_path.iterdir()] == ["k.pem"]
+
+    def test_without_force_an_existing_key_is_still_refused(self, tmp_path: Path) -> None:
+        key_path = tmp_path / "k.pem"
+        signing.generate_and_write_key(key_path)
+        with pytest.raises(FileExistsError):
+            signing.generate_and_write_key(key_path)

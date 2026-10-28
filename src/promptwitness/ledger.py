@@ -82,6 +82,7 @@ __all__ = [
     "iter_lines",
     "verify_chain",
     "find_oversized_fields",
+    "signed_payload",
     "list_partitions",
 ]
 
@@ -653,6 +654,37 @@ def _scan_last_good(good: bytes) -> tuple[int, str] | tuple[None, None]:
 # ---------------------------------------------------------------------------
 
 
+#: Field names that are NEVER part of the signed payload. ``sig`` is the
+#: primary signature itself; a ``*_sig`` field is a COUNTERSIGNATURE written by
+#: an ``extra_signers`` entry (athenaeum#2150's ``prior_sig``), and a
+#: ``*_sig_error`` field records that one failed. All three are written AFTER
+#: the payload is serialized, so none can be inside it.
+#:
+#: Excluding countersignatures is the normal shape -- the primary key signs the
+#: CONTENT, and a countersignature is additional; covering each other is
+#: circular. What matters is that the sign side and the verify side agree, and
+#: they did not: the appender excluded ``prior_sig`` by construction (it did
+#: not exist yet) while ``verify_chain`` rebuilt the payload dropping only
+#: ``sig``, so a perfectly valid ``key-rotate`` line's own signature could
+#: never verify. Every side now goes through :func:`signed_payload`, so the rule
+#: lives in exactly one place and cannot drift again.
+_COUNTERSIG_SUFFIXES = ("_sig", "_sig_error")
+
+
+def _is_signature_field(name: str) -> bool:
+    return name == "sig" or name.endswith(_COUNTERSIG_SUFFIXES)
+
+
+def signed_payload(line: Mapping[str, Any]) -> bytes:
+    """The exact bytes a signature over *line* covers.
+
+    ``canonical_json(line_without_sig)``, where "without sig" means without
+    the primary signature and without any countersignature -- see
+    :data:`_COUNTERSIG_SUFFIXES`.
+    """
+    return canon.canonical_json({k: v for k, v in line.items() if not _is_signature_field(k)})
+
+
 def _run_sign_with_timeout(
     key_provider: KeyProviderLike, payload: bytes, timeout: float
 ) -> bytes:
@@ -737,7 +769,7 @@ def _apply_key_and_sig(
             presence=key_provider.presence_required(),
         )
         line["key"] = key_info.to_dict()
-        payload = canon.canonical_json(line)
+        payload = signed_payload(line)
         sig_bytes = _run_sign_with_timeout(key_provider, payload, timeout)
         import base64
 
@@ -1093,12 +1125,24 @@ def verify_chain(
             unsigned += 1
         else:
             signed += 1
-            key_block = raw.get("key") or {}
+            key_block = raw.get("key")
+            if not isinstance(key_block, dict):
+                # A signed line whose `key` is not an object at all: the
+                # ledger file is reachable by corruption and by tampering, so
+                # this is untrusted input. It cannot be verified (there is no
+                # key id to look up) and it must not raise -- an
+                # `AttributeError` here would crash every caller of
+                # `verify_chain` on a one-byte edit, which is the opposite of
+                # what a verifier is for. Same reasoning as `iter_lines`'
+                # tolerant skip; it is still counted, and still hashed above,
+                # so the chain break is reported either way.
+                unverified += 1
+                continue
             key_id = key_block.get("id")
             if not public_keys or not isinstance(key_id, str) or key_id not in public_keys:
                 unverified += 1
             else:
-                payload = canon.canonical_json({k: v for k, v in raw.items() if k != "sig"})
+                payload = signed_payload(raw)
                 try:
                     import base64
 
