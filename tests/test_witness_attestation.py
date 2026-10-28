@@ -21,7 +21,7 @@ import pytest
 
 from athenaeum.witness_attestation import MISS_REASONS, AttestationIndex, attest
 from promptwitness import canon, ledger
-from promptwitness.ledger import Segment
+from promptwitness.harness import claude_code
 
 # ---------------------------------------------------------------------------
 # Fixture builders
@@ -130,30 +130,41 @@ class TestHit:
 class TestSlashCommandHit:
     """AC2: a slash-command claim inside <command-args> attests with
     `witness_tag: "slash-args"`; a claim only in the expanded skill text
-    (outside the args span) does not."""
+    (outside the args span) does not.
+
+    The witness line is built through the REAL producer
+    (`claude_code.record_turn`, which calls `slash_args_segment`
+    internally) rather than a hand-built `Segment` -- `slash_args_segment`
+    hashes the RAW `<command-args>` span, not a normalized one (see
+    `witness_attestation`'s "Known deviation" docstring note), so a
+    hand-computed digest would make this test pass for a reason the real
+    producer cannot reach. Driving the actual hook-record path is what
+    makes this a genuine control: if the producer's digest formula ever
+    changes, this test breaks along with it."""
 
     _ARGS_TEXT = "fix the typo in README"
-    _RECORD_TEXT = (
+    _PROMPT = (
         "<command-message>review</command-message>"
         "<command-name>review</command-name>"
         f"<command-args>{_ARGS_TEXT}</command-args>\n"
         "Also remember the project's general typo-reporting policy."
     )
 
-    def _segment(self) -> Segment:
-        return Segment(
-            kind="slash-args",
-            start=0,
-            end=len(self._ARGS_TEXT),
-            digest=canon.digest(canon.normalize(self._ARGS_TEXT)),
-        )
+    def _record_via_real_producer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> ledger.WitnessLine:
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(tmp_path))
+        monkeypatch.setattr(claude_code, "_probe_has_tty", lambda pid: True)
+        raw = json.dumps({"prompt": self._PROMPT, "session_id": "s1", "prompt_id": "p1"})
+        env = {"CLAUDE_CODE_ENTRYPOINT": "cli", "CLAUDE_CODE_SESSION_ATTENDED": "1"}
+        return claude_code.record_turn(raw, env)
 
-    def test_claim_inside_command_args_attests_as_slash_args(self, tmp_path: Path) -> None:
-        line = _append_turn(
-            tmp_path,
-            prompt_kind="slash-command",
-            segments=[self._segment()],
-        )
+    def test_claim_inside_command_args_attests_as_slash_args(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        line = self._record_via_real_producer(tmp_path, monkeypatch)
+        assert line.prompt_kind == "slash-command"
+        assert any(s.kind == "slash-args" for s in line.segments)  # sanity: real producer wrote it
         index = AttestationIndex.load(tmp_path)
         outcome = attest(
             index,
@@ -161,7 +172,7 @@ class TestSlashCommandHit:
             origin_session_id="s1",
             claim="fix the typo in readme",  # case-insensitive substring of _ARGS_TEXT
             utterance_digest=_UTTERANCE_DIGEST,  # irrelevant on the slash-command path
-            matched_record_text=self._RECORD_TEXT,
+            matched_record_text=self._PROMPT,
             transcript_origin_kind="human",
             transcript_prompt_source="typed",
             transcript_is_sidechain=False,
@@ -170,12 +181,10 @@ class TestSlashCommandHit:
         assert outcome.witness_tag == "slash-args"
         assert outcome.witness_ref == f"{line.ledger_id}:{line.seq}"
 
-    def test_claim_only_in_expanded_skill_text_does_not_attest(self, tmp_path: Path) -> None:
-        _append_turn(
-            tmp_path,
-            prompt_kind="slash-command",
-            segments=[self._segment()],
-        )
+    def test_claim_only_in_expanded_skill_text_does_not_attest(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._record_via_real_producer(tmp_path, monkeypatch)
         index = AttestationIndex.load(tmp_path)
         outcome = attest(
             index,
@@ -183,7 +192,31 @@ class TestSlashCommandHit:
             origin_session_id="s1",
             claim="typo-reporting policy",  # only in the boilerplate, not in <command-args>
             utterance_digest=_UTTERANCE_DIGEST,
-            matched_record_text=self._RECORD_TEXT,
+            matched_record_text=self._PROMPT,
+            transcript_origin_kind="human",
+            transcript_prompt_source="typed",
+            transcript_is_sidechain=False,
+        )
+        assert not outcome.hit
+        assert outcome.miss_reason == "digest-mismatch"
+
+    def test_a_tampered_transcript_args_span_also_misses(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Negative control for the digest-equality check itself: the
+        witness line is genuine, but the TRANSCRIPT record's `<command-args>`
+        text has been altered since -- this must still miss on
+        `digest-mismatch`, proving the comparison is not vacuously true."""
+        self._record_via_real_producer(tmp_path, monkeypatch)
+        index = AttestationIndex.load(tmp_path)
+        tampered_prompt = self._PROMPT.replace(self._ARGS_TEXT, "a totally different instruction")
+        outcome = attest(
+            index,
+            prompt_id="p1",
+            origin_session_id="s1",
+            claim="a totally different instruction",
+            utterance_digest=_UTTERANCE_DIGEST,
+            matched_record_text=tampered_prompt,
             transcript_origin_kind="human",
             transcript_prompt_source="typed",
             transcript_is_sidechain=False,

@@ -30,11 +30,14 @@ human-and-interactive (``transcript_origin == "human"`` and
 3. ``channel == "interactive"``;
 4. the line's ``session`` matches the claim's origin session;
 5. digest equality — ``human``: ``prompt_digest == "sha256:" +
-   utterance_digest``; ``slash-command``: the ``slash-args`` segment's
-   digest equals ``sha256(normalize(<command-args> text))`` re-extracted
-   from the TRANSCRIPT record's own text, and the claim lies inside that
-   span (so a claim that only appears in expanded skill boilerplate outside
-   ``<command-args>`` does not attest);
+   utterance_digest`` (normalized, matching :func:`promptwitness.harness.
+   claude_code.record_turn`'s own ``prompt_digest`` formula); ``slash-command``:
+   the ``slash-args`` segment's digest equals the digest
+   :func:`promptwitness.harness.claude_code.slash_args_segment` computes
+   when re-run on the TRANSCRIPT record's own text — called directly, never
+   re-derived (see "Known deviation" below) — and the claim lies inside
+   that span (so a claim that only appears in expanded skill boilerplate
+   outside ``<command-args>`` does not attest);
 6. the hash chain is intact through that line's ``seq``;
 7. the transcript record's ``origin.kind`` is ``"human"`` when present;
 8. the transcript record's ``promptSource`` is ``"typed"`` or ``"queued"``
@@ -60,6 +63,30 @@ the readout". This module derives it from the WITNESS line's own
 a witness line was found, and ``None`` otherwise — never from the
 transcript record, which carries no such field. If a future issue defines
 a different source, this is the one place to change.
+
+**Known deviation from the issue's literal wording (digest contract defect
+— flagged to the epic owner, not a judgment call this module gets to make
+silently).** The issue specifies the slash-command digest check as
+``sha256(_normalize(<command-args> text))`` — NORMALIZED. The SHIPPED
+producer, ``promptwitness.harness.claude_code.slash_args_segment``
+(athenaeum#2149, pinned by
+``tests/test_promptwitness_harness_claude_code.py::
+TestSlashArgsSegment::test_command_args_present_yields_one_segment_with_its_own_digest``),
+computes ``canon.digest(content)`` over the RAW, un-normalized
+``<command-args>`` span — unlike ``record_turn``'s own ``prompt_digest``
+field, which IS normalized. Implementing the issue's literal formula would
+make the slash-args hit path unreachable for almost every real slash
+command (it would only fire when the args text happened to already be
+lowercase, single-spaced, with no leading/trailing whitespace). This
+module therefore compares against ``slash_args_segment``'s digest directly
+— calling the real producer function on the transcript record's text,
+never re-deriving its formula as a second copy — which is the strict
+direction (it can only REJECT a line the normalized form would have
+admitted, never admit one the normalized form would reject). Widening this
+to accept EITHER formula is explicitly not an option: this is a provenance
+check, and tolerating two formulas is the permissive direction. See
+``CHANGELOG.md``'s entry for this issue for the same note, and the lane
+report for the written-up defect this traces to.
 """
 
 from __future__ import annotations
@@ -344,13 +371,17 @@ def attest(
         return miss("session-mismatch", line, entrypoint)
 
     if slash_segment is not None:
+        # DEVIATION FROM THE ISSUE'S LITERAL WORDING, documented (see the
+        # module docstring's "Known deviation" note): compare against the
+        # shipped producer's RAW digest, via the producer function itself
+        # -- never a re-derived formula -- so this stays correct if the
+        # producer's own formula ever changes.
         record_segment = claude_code.slash_args_segment(matched_record_text)
         if record_segment is None:
             return miss("digest-mismatch", line, entrypoint)
-        args_text = matched_record_text[record_segment.start : record_segment.end]
-        expected_digest = canon.digest(canon.normalize(args_text))
-        if slash_segment.digest != expected_digest:
+        if slash_segment.digest != record_segment.digest:
             return miss("digest-mismatch", line, entrypoint)
+        args_text = matched_record_text[record_segment.start : record_segment.end]
         if canon.normalize(claim) not in canon.normalize(args_text):
             return miss("digest-mismatch", line, entrypoint)
         witness_tag = "slash-args"

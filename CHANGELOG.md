@@ -213,6 +213,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`librarian.witness_attestation_enabled`); with it off, behavior and the
   `correct_*` gate's decision are byte-identical to before this issue.
   Nothing gates on attestation yet.
+  - **Deviates from the issue's literal slash-command digest wording, by
+    necessity.** The issue specifies `sha256(normalize(<command-args>
+    text))`; the shipped producer (`promptwitness.harness.claude_code.
+    slash_args_segment`, athenaeum#2149) hashes the RAW, un-normalized span
+    instead, unlike `record_turn`'s own normalized `prompt_digest`. The
+    literal formula would make the slash-args hit path unreachable for
+    almost every real slash command. This module calls the producer
+    function directly and compares against its digest rather than
+    re-deriving a formula, so it tracks the producer if that formula ever
+    changes. Flagged to the epic owner as a digest-contract defect, not
+    resolved here — see `src/athenaeum/witness_attestation.py`'s "Known
+    deviation" docstring note.
 
 ### Changed
 
