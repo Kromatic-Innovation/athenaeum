@@ -418,6 +418,263 @@ class TestInferred:
         assert not sref.endswith(".md")
 
 
+class TestIsHumanRecord:
+    """issue athenaeum#2146: ``_is_human_record`` is the ONE shared gate that
+
+    restricts "human-authored" to records a human actually typed, used by
+    :func:`_user_authored_text`, :func:`verify_user_stated`, and
+    :func:`athenaeum.transcript_receipts._matching_human_utterance`.
+    """
+
+    def test_task_notification_origin_excluded(self) -> None:
+        from athenaeum.transcript_verify import _is_human_record
+
+        record = {
+            "type": "user",
+            "origin": {"kind": "task-notification"},
+            "message": {
+                "role": "user",
+                "content": "<task-notification>done</task-notification>",
+            },
+        }
+        assert _is_human_record(record) is False
+
+    def test_peer_origin_excluded(self) -> None:
+        from athenaeum.transcript_verify import _is_human_record
+
+        record = {
+            "type": "user",
+            "origin": {"kind": "peer"},
+            "message": {"role": "user", "content": "peer handoff text"},
+        }
+        assert _is_human_record(record) is False
+
+    def test_is_meta_excluded(self) -> None:
+        from athenaeum.transcript_verify import _is_human_record
+
+        record = {
+            "type": "user",
+            "isMeta": True,
+            "message": {"role": "user", "content": "meta bookkeeping text"},
+        }
+        assert _is_human_record(record) is False
+
+    def test_legacy_wrapper_prefixed_record_with_no_origin_excluded(self) -> None:
+        from athenaeum.transcript_verify import _is_human_record
+
+        for wrapper in (
+            "<task-notification>x</task-notification>",
+            "<local-command-stdout>x</local-command-stdout>",
+            "<system-reminder>x</system-reminder>",
+            "<command-name>review</command-name>",
+            "<command-message>/review</command-message>",
+        ):
+            record = {
+                "type": "user",
+                "message": {"role": "user", "content": wrapper},
+            }
+            assert _is_human_record(record) is False, wrapper
+
+    def test_legacy_wrapper_prefix_tolerates_leading_whitespace(self) -> None:
+        from athenaeum.transcript_verify import _is_human_record
+
+        record = {
+            "type": "user",
+            "message": {"role": "user", "content": "   <system-reminder>x</system-reminder>"},
+        }
+        assert _is_human_record(record) is False
+
+    def test_legacy_plain_text_record_with_no_origin_still_counts(self) -> None:
+        # AC: a legacy plain-text record with no origin field still
+        # classifies as user-stated — unchanged behavior for older
+        # transcripts that predate the origin field.
+        from athenaeum.transcript_verify import _is_human_record
+
+        record = {
+            "type": "user",
+            "message": {"role": "user", "content": "Kromatic was founded in 2013."},
+        }
+        assert _is_human_record(record) is True
+
+    def test_origin_human_counts_regardless_of_prompt_source(self) -> None:
+        # AC: origin.kind: "human" with promptSource typed/queued/absent
+        # still classifies as user-stated.
+        from athenaeum.transcript_verify import _is_human_record
+
+        for origin in (
+            {"kind": "human", "promptSource": "typed"},
+            {"kind": "human", "promptSource": "queued"},
+            {"kind": "human"},
+        ):
+            record = {
+                "type": "user",
+                "origin": origin,
+                "message": {"role": "user", "content": "Kromatic was founded in 2013."},
+            }
+            assert _is_human_record(record) is True, origin
+
+    def test_command_message_with_human_origin_still_counts(self) -> None:
+        # Operator ruling 4 (2026-10-28, epic athenaeum#2144): a
+        # <command-message> slash-command invocation with origin.kind ==
+        # "human" stays counted — the wrapper-prefix check only applies in
+        # the no-origin legacy branch.
+        from athenaeum.transcript_verify import _is_human_record
+
+        record = {
+            "type": "user",
+            "origin": {"kind": "human"},
+            "message": {
+                "role": "user",
+                "content": "<command-message>/review</command-message>",
+            },
+        }
+        assert _is_human_record(record) is True
+
+    def test_tool_result_only_record_excluded(self) -> None:
+        from athenaeum.transcript_verify import _is_human_record
+
+        record = {
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [{"type": "tool_result", "content": "stdout here"}],
+            },
+        }
+        assert _is_human_record(record) is False
+
+    def test_non_user_record_excluded(self) -> None:
+        from athenaeum.transcript_verify import _is_human_record
+
+        record = {
+            "type": "assistant",
+            "message": {"role": "assistant", "content": "Noted."},
+        }
+        assert _is_human_record(record) is False
+
+
+class TestTaskNotificationNeverUserStated:
+    """AC: a record with origin.kind: "task-notification" and matching text
+
+    classifies the claim as inferred (verify_user_stated has no
+    agent-observed channel) or agent-observed (classify_backfill_claim, when
+    a tool result ALSO matches) — never user-stated.
+    """
+
+    def test_verify_user_stated_resolves_inferred_not_user_stated(
+        self, projects_root: Path
+    ) -> None:
+        from athenaeum.transcript_verify import verify_user_stated
+
+        scope = "scopeA"
+        session = "tasknotif1"
+        _write_transcript(
+            projects_root,
+            scope,
+            session,
+            [
+                {
+                    "type": "user",
+                    "origin": {"kind": "task-notification"},
+                    "message": {
+                        "role": "user",
+                        "content": (
+                            "<task-notification>The deploy target is "
+                            "Fly.io.</task-notification>"
+                        ),
+                    },
+                },
+            ],
+        )
+        stype, sref = verify_user_stated(
+            scope,
+            session,
+            turn=1,
+            claim="The deploy target is Fly.io",
+            projects_root=projects_root,
+        )
+        assert stype == "inferred"
+        assert sref == f"{session}#turn1"
+
+    def test_classify_backfill_claim_prefers_agent_observed_over_task_notification(
+        self, projects_root: Path
+    ) -> None:
+        from athenaeum.transcript_verify import classify_backfill_claim
+
+        scope = "scopeA"
+        session = "tasknotif2"
+        _write_transcript(
+            projects_root,
+            scope,
+            session,
+            [
+                {
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "t1",
+                                "content": "VERSION = 3.14 in config.py",
+                            }
+                        ],
+                    },
+                },
+                {
+                    "type": "user",
+                    "origin": {"kind": "task-notification"},
+                    "message": {
+                        "role": "user",
+                        "content": (
+                            "<task-notification>VERSION = 3.14 in "
+                            "config.py</task-notification>"
+                        ),
+                    },
+                },
+            ],
+        )
+        result = classify_backfill_claim(
+            scope, session, turn=1, claim="VERSION = 3.14", projects_root=projects_root
+        )
+        assert result.channel == "agent-observed"
+
+    def test_classify_backfill_claim_task_notification_only_confirms_inferred(
+        self, projects_root: Path
+    ) -> None:
+        # No tool_result to fall back to -> confirm inferred, never
+        # user-stated.
+        from athenaeum.transcript_verify import classify_backfill_claim
+
+        scope = "scopeA"
+        session = "tasknotif3"
+        _write_transcript(
+            projects_root,
+            scope,
+            session,
+            [
+                {
+                    "type": "user",
+                    "origin": {"kind": "task-notification"},
+                    "message": {
+                        "role": "user",
+                        "content": (
+                            "<task-notification>The release cadence is "
+                            "weekly.</task-notification>"
+                        ),
+                    },
+                },
+            ],
+        )
+        result = classify_backfill_claim(
+            scope,
+            session,
+            turn=1,
+            claim="The release cadence is weekly",
+            projects_root=projects_root,
+        )
+        assert result.channel == "inferred"
+
+
 class TestDefaultProjectsRootHonorsClaudeConfigDir:
     """athenaeum#723: DEFAULT_PROJECTS_ROOT must honor CLAUDE_CONFIG_DIR (which
     relocates ~/.claude), resolved at call time so every caller benefits with no
