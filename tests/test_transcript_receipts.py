@@ -34,6 +34,7 @@ from athenaeum.transcript_receipts import (
     LockNotHeld,
     NoopSealer,
     ReceiptEntry,
+    ReceiptRun,
     ReceiptsRunStats,
     SealRecord,
     append_receipt,
@@ -42,11 +43,13 @@ from athenaeum.transcript_receipts import (
     iter_receipts,
     lookup_receipt,
     memory_digest,
+    partition_path,
     prefix_matches_receipt,
     verify_seals,
     write_receipt_for_origin,
     write_receipts_for_files,
 )
+from promptwitness import canon, ledger
 
 # ---------------------------------------------------------------------------
 # Fixture builders (mirrors tests/test_correct_authorship_gate.py's shapes)
@@ -430,6 +433,203 @@ class TestWriteReceiptForOrigin:
 
 
 # ---------------------------------------------------------------------------
+# Witness attestation integration (issue athenaeum#2158): write_receipt_for_
+# origin joins a "user-stated" claim against a fixture promptwitness ledger.
+# ---------------------------------------------------------------------------
+
+
+def _append_witness_turn(d: Path, **kwargs: object) -> ledger.WitnessLine:
+    text = str(kwargs.pop("_text", "the user literally said: the winning claim, right here"))
+    defaults: dict[str, object] = {
+        "kind": "turn",
+        "harness": "claude-code",
+        "harness_version": "2.1.308",
+        "hook_version": "promptwitness 0.1.0",
+        "session": "sess1",
+        "turn": 1,
+        "prompt_id": "p1",
+        "prompt_kind": "human",
+        "prompt_digest": canon.digest(canon.normalize(text)),
+        "raw_digest": canon.digest(text),
+        "prompt_chars": len(text),
+        "channel": "interactive",
+        "resumed": False,
+        "signals": {"entrypoint": "cli"},
+    }
+    defaults.update(kwargs)
+    return ledger.append_line(d, **defaults)  # type: ignore[arg-type]
+
+
+def _witnessable_human_record(
+    text: str,
+    *,
+    prompt_id: str = "p1",
+    origin_kind: str | None = "human",
+    prompt_source: str | None = "typed",
+    is_sidechain: bool = False,
+) -> dict[str, object]:
+    record: dict[str, object] = {
+        "type": "user",
+        "message": {"role": "user", "content": text},
+        "promptId": prompt_id,
+        "isSidechain": is_sidechain,
+    }
+    if origin_kind is not None:
+        record["origin"] = {"kind": origin_kind}
+    if prompt_source is not None:
+        record["promptSource"] = prompt_source
+    return record
+
+
+class TestWitnessAttestationIntegration:
+    def test_hit_upgrades_channel_to_witnessed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        witness_dir = tmp_path / "witness"
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(witness_dir))
+        text = "the user literally said: the winning claim, right here"
+        _append_witness_turn(witness_dir, _text=text)
+
+        pr = tmp_path / "projects"
+        _write_transcript(pr, "scopeA", "sess1", [_witnessable_human_record(text)])
+        wiki = tmp_path / "wiki"
+        lock = RunLock(tmp_path)
+        config = {"librarian": {"witness_attestation_enabled": True}}
+        run = ReceiptRun(wiki, config=config)
+        with lock:
+            entry = write_receipt_for_origin(
+                wiki,
+                origin_scope="scopeA",
+                origin_session_id="sess1",
+                origin_turn=1,
+                claim="the winning claim",
+                projects_root=pr,
+                lock=lock,
+                run=run,
+            )
+        assert entry is not None
+        assert entry.channel == "witnessed"
+        assert entry.witness_tag == "typed"
+        assert entry.witness_ref is not None and entry.witness_ref.endswith(":1")
+        assert entry.witness_miss is None
+        # No plaintext leaks through the new fields either.
+        serialized = json.dumps(entry.to_dict())
+        assert "the winning claim" not in serialized
+        assert text not in serialized
+
+    def test_miss_stays_user_stated_with_a_reason(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        witness_dir = tmp_path / "witness"
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(witness_dir))
+        text = "the user literally said: the winning claim, right here"
+        _append_witness_turn(witness_dir, _text=text, channel="headless")
+
+        pr = tmp_path / "projects"
+        _write_transcript(pr, "scopeA", "sess1", [_witnessable_human_record(text)])
+        wiki = tmp_path / "wiki"
+        lock = RunLock(tmp_path)
+        config = {"librarian": {"witness_attestation_enabled": True}}
+        run = ReceiptRun(wiki, config=config)
+        with lock:
+            entry = write_receipt_for_origin(
+                wiki,
+                origin_scope="scopeA",
+                origin_session_id="sess1",
+                origin_turn=1,
+                claim="the winning claim",
+                projects_root=pr,
+                lock=lock,
+                run=run,
+            )
+        assert entry is not None
+        assert entry.channel == "user-stated"
+        assert entry.witness_miss == "channel-not-interactive:headless"
+
+    def test_flag_off_never_upgrades_even_with_a_matching_ledger(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        witness_dir = tmp_path / "witness"
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(witness_dir))
+        text = "the user literally said: the winning claim, right here"
+        _append_witness_turn(witness_dir, _text=text)  # would hit if the flag were on
+
+        pr = tmp_path / "projects"
+        _write_transcript(pr, "scopeA", "sess1", [_witnessable_human_record(text)])
+        wiki = tmp_path / "wiki"
+        lock = RunLock(tmp_path)
+        with lock:
+            entry = write_receipt_for_origin(
+                wiki,
+                origin_scope="scopeA",
+                origin_session_id="sess1",
+                origin_turn=1,
+                claim="the winning claim",
+                projects_root=pr,
+                lock=lock,
+                # No `run=` -> defaults to `ReceiptRun(wiki_root)`, config=None.
+            )
+        assert entry is not None
+        assert entry.channel == "user-stated"
+        assert entry.witness_miss == "flag-off"
+        assert entry.schema_version == 2  # the schema bump applies regardless
+
+    def test_v1_receipt_still_parses_and_is_never_rewritten(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC: "Receipts written with schema v1 still parse, and are never
+        rewritten." A v1-shaped line (no witness_*/transcript_* keys, and no
+        schema_version key at all -- the EARLIEST possible v1 shape, before
+        even that field existed) is written directly, then a run that would
+        otherwise mint a successor for a DIFFERENT, unrelated claim must
+        leave the original line's bytes untouched."""
+        wiki = tmp_path / "wiki"
+        partition = partition_path(wiki, "2026-09")
+        partition.parent.mkdir(parents=True, exist_ok=True)
+        v1_line = json.dumps(
+            {
+                "origin_scope": "scopeA",
+                "memory_digest": memory_digest("an old pre-athenaeum#2158 claim"),
+                "channel": "user-stated",
+                "origin_session_id": "sess-old",
+                "origin_turn": 1,
+                "utterance_digest": "deadbeef",
+                "transcript_prefix_digest": "cafef00d",
+                "transcript_line_count": 1,
+                "recorded_at": "2026-09-01T00:00:00Z",
+                "schema_version": 1,
+            },
+            separators=(",", ":"),
+        )
+        original_bytes = (v1_line + "\n").encode("utf-8")
+        partition.write_bytes(original_bytes)
+
+        # Still parses, with every new field defaulting to None.
+        [parsed] = iter_receipts(wiki)
+        assert parsed.schema_version == 1
+        assert parsed.witness_tag is None
+        assert parsed.witness_miss is None
+        assert parsed.transcript_origin is None
+
+        # A run over a DIFFERENT, unrelated claim must not touch the v1 line.
+        pr = tmp_path / "projects"
+        _write_transcript(pr, "scopeB", "sess-new", [_user_record("a brand new claim")])
+        lock = RunLock(tmp_path)
+        with lock:
+            entry = write_receipt_for_origin(
+                wiki,
+                origin_scope="scopeB",
+                origin_session_id="sess-new",
+                origin_turn=1,
+                claim="a brand new claim",
+                projects_root=pr,
+                lock=lock,
+            )
+        assert entry is not None
+        assert partition.read_bytes()[: len(original_bytes)] == original_bytes
+
+
+# ---------------------------------------------------------------------------
 # issue athenaeum#2146: _is_human_record is the ONE shared gate for
 # "human-authored" -- verify_user_stated, _matching_human_utterance, and the
 # write_receipt_for_origin -> classify_backfill_claim path must all agree.
@@ -714,6 +914,45 @@ class TestClassifyForCorrectGate:
                     origin_session_id="sess1",
                     origin_turn=1,
                     recorded_at="2026-10-01T00:00:00Z",
+                ),
+                lock=lock,
+            )
+        pr = tmp_path / "projects"
+        pr.mkdir()  # rolled off — no transcript file.
+        authorized, ref = classify_for_correct_gate(
+            "scopeA",
+            "sess1",
+            1,
+            "the winning claim",
+            projects_root=pr,
+            wiki_root=wiki,
+            receipts_enabled=True,
+        )
+        assert authorized is True
+        assert ref.startswith("receipt")
+
+    def test_absent_transcript_witnessed_receipt_authorizes(self, tmp_path: Path) -> None:
+        """Issue athenaeum#2158 regression pin: a rolled-off transcript with a
+        `"witnessed"` receipt authorizes exactly like a plain `"user-stated"`
+        one would -- refusing it would be a REGRESSION relative to the
+        pre-athenaeum#2158 behaviour for the identical claim."""
+        wiki = tmp_path / "wiki"
+        lock = RunLock(tmp_path)
+        digest = memory_digest("the winning claim")
+        with lock:
+            append_receipt(
+                wiki,
+                ReceiptEntry(
+                    origin_scope="scopeA",
+                    memory_digest=digest,
+                    channel="witnessed",
+                    origin_session_id="sess1",
+                    origin_turn=1,
+                    recorded_at="2026-10-01T00:00:00Z",
+                    witness_tag="typed",
+                    witness_ref="pw-deadbeef:7",
+                    witness_strength="none",
+                    witness_anchored=False,
                 ),
                 lock=lock,
             )
@@ -1028,6 +1267,72 @@ class TestGateFlagOffByteIdentical:
         assert authorized is False
         assert channel_ref.startswith("unavailable")
 
+    def test_witness_attestation_flag_off_write_path_ignores_a_matching_ledger(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Issue athenaeum#2158: `librarian.witness_attestation_enabled` off
+        must leave `write_receipt_for_origin`'s output byte-identical to a
+        world with NO witness ledger configured at all, even when a witness
+        ledger sitting on disk WOULD have produced a "witnessed" hit."""
+        witness_dir = tmp_path / "witness"
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(witness_dir))
+        text = "the user literally said: the winning claim, right here"
+        ledger.append_line(
+            witness_dir,
+            kind="turn",
+            harness="claude-code",
+            harness_version="2.1.308",
+            hook_version="promptwitness 0.1.0",
+            session="sess1",
+            turn=1,
+            prompt_id="p1",
+            prompt_kind="human",
+            prompt_digest=canon.digest(canon.normalize(text)),
+            raw_digest=canon.digest(text),
+            prompt_chars=len(text),
+            channel="interactive",
+            resumed=False,
+            signals={"entrypoint": "cli"},
+        )
+        pr = tmp_path / "projects"
+        _write_transcript(pr, "scopeA", "sess1", [_witnessable_human_record(text)])
+
+        no_ledger_dir = tmp_path / "definitely-absent"
+        monkeypatch.delenv("PROMPTWITNESS_DIR", raising=False)
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(no_ledger_dir))
+        lock_a = RunLock(tmp_path / "a")
+        with lock_a:
+            without_ledger = write_receipt_for_origin(
+                tmp_path / "wiki-a",
+                origin_scope="scopeA",
+                origin_session_id="sess1",
+                origin_turn=1,
+                claim="the winning claim",
+                projects_root=pr,
+                lock=lock_a,
+                now="2026-10-28T00:00:00Z",
+            )
+
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(witness_dir))  # the matching ledger is back
+        lock_b = RunLock(tmp_path / "b")
+        with lock_b:
+            with_ledger_flag_off = write_receipt_for_origin(
+                tmp_path / "wiki-b",
+                origin_scope="scopeA",
+                origin_session_id="sess1",
+                origin_turn=1,
+                claim="the winning claim",
+                projects_root=pr,
+                lock=lock_b,
+                now="2026-10-28T00:00:00Z",
+                # No `run=` / no config -> ReceiptRun(wiki_root) resolves
+                # witness_attestation_enabled off from config=None.
+            )
+        assert without_ledger is not None
+        assert with_ledger_flag_off is not None
+        assert with_ledger_flag_off.channel == "user-stated"
+        assert with_ledger_flag_off.to_dict() == without_ledger.to_dict()
+
 
 class TestGateFrontmatterForgeryPinExtended:
     def test_forged_source_type_no_receipt_no_transcript_refuses(self, tmp_path: Path) -> None:
@@ -1262,6 +1567,7 @@ class TestReceiptsRunStats:
             "skipped_no_origin": 1,
             "skipped_transcript_missing": 0,
             "skipped_not_classified": 0,
+            "witnessed": 0,  # issue athenaeum#2158
         }
 
 
@@ -1465,6 +1771,84 @@ class TestRunReadBudget:
                 assert opens["ledger"] <= 1
                 assert opens["transcript"] == n
         assert len(iter_receipts(wiki)) == n
+
+    def test_witness_ledger_opened_at_most_once_per_partition_per_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Issue athenaeum#2158's own read-budget AC, extending this class:
+        the witness ledger is built ONCE per run (one partition here), never
+        once per memory -- a per-memory re-scan would make this count scale
+        with `n`, which is exactly the athenaeum#2048-shaped bug this class
+        exists to catch for the receipt ledger."""
+        n = 12
+        witness_dir = tmp_path / "witness"
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(witness_dir))
+        pr = tmp_path / "projects"
+        wiki = tmp_path / "wiki"
+        files = []
+        for i in range(n):
+            text = f"claim number {i}"
+            ledger.append_line(
+                witness_dir,
+                kind="turn",
+                harness="claude-code",
+                harness_version="2.1.308",
+                hook_version="promptwitness 0.1.0",
+                session=f"sess{i}",
+                turn=1,
+                prompt_id=f"p{i}",
+                prompt_kind="human",
+                prompt_digest=canon.digest(canon.normalize(text)),
+                raw_digest=canon.digest(text),
+                prompt_chars=len(text),
+                channel="interactive",
+                resumed=False,
+                signals={"entrypoint": "cli"},
+            )
+            _write_transcript(
+                pr, "scopeA", f"sess{i}", [_witnessable_human_record(text, prompt_id=f"p{i}")]
+            )
+            member = tmp_path / "mem" / f"m{i}.md"
+            member.parent.mkdir(exist_ok=True)
+            member.write_text(f"---\nname: m{i}\n---\n{text}\n", encoding="utf-8")
+            files.append(
+                AutoMemoryFile(
+                    path=member,
+                    origin_scope="scopeA",
+                    memory_type="feedback",
+                    origin_session_id=f"sess{i}",
+                    origin_turn=1,
+                )
+            )
+        assert len(ledger.list_partitions(witness_dir)) == 1
+
+        witness_opens = {"count": 0}
+        real_read_bytes = Path.read_bytes
+
+        def read_bytes(self: Path) -> bytes:
+            if self.is_relative_to(witness_dir):
+                witness_opens["count"] += 1
+            return real_read_bytes(self)
+
+        monkeypatch.setattr(Path, "read_bytes", read_bytes)
+        config = {
+            "librarian": {
+                "transcript_receipts_enabled": True,
+                "witness_attestation_enabled": True,
+            }
+        }
+        lock = RunLock(tmp_path)
+        with lock:
+            processed = write_receipts_for_files(
+                wiki, files, config=config, projects_root=pr, lock=lock
+            )
+        assert int(processed) == n
+        assert processed.witnessed == n
+        # `AttestationIndex.load` reads the one witness partition a FIXED
+        # number of times (indexing + chain-verify + anchor-scan) -- bounded
+        # by partition count (1), never by memory count (n=12). A bug that
+        # rebuilt the index per memory would show n (or 3*n) opens here.
+        assert 1 <= witness_opens["count"] <= 6
 
 
 # ---------------------------------------------------------------------------
