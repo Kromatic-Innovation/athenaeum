@@ -2339,6 +2339,127 @@ class TestSessionEndDryRunDoesNotTouchTheWitnessLedger:
         assert pw_ledger.list_partitions(witness_dir) != []
 
 
+class TestSessionEndAnchorsBothModes:
+    """Issue athenaeum#2156: both `session-end` modes (the compile path and
+    `--references-only`) must run the anchor step BEFORE either branch,
+    producing an `anchor` line covering the current witness chain head.
+    """
+
+    def test_compile_mode_anchors_the_head(
+        self,
+        tmp_path: Path,
+        mock_anthropic: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import sys
+
+        src = str(Path(__file__).resolve().parent.parent / "src")
+        sys.path.insert(0, src)
+        try:
+            from promptwitness import ledger as pw_ledger
+        finally:
+            sys.path.remove(src)
+
+        root = _seed_knowledge_root(tmp_path)
+        witness_dir = tmp_path / "witness"
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(witness_dir))
+        monkeypatch.setenv("ATHENAEUM_WITNESS_LEDGER_ENABLED", "true")
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "s-anchor-compile")
+
+        rc = main(
+            [
+                "session-end",
+                "--path",
+                str(root),
+                "--cache-dir",
+                str(tmp_path / "cache"),
+                "--backend",
+                "fts5",
+            ]
+        )
+
+        assert rc == 0
+        anchor_lines = [line for line in pw_ledger.iter_lines(witness_dir) if line.kind == "anchor"]
+        assert anchor_lines
+        assert any(line.extra.get("subject", "").startswith("witness:") for line in anchor_lines)
+
+    def test_references_only_mode_also_anchors_the_head(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import sys
+
+        src = str(Path(__file__).resolve().parent.parent / "src")
+        sys.path.insert(0, src)
+        try:
+            from promptwitness import ledger as pw_ledger
+        finally:
+            sys.path.remove(src)
+
+        root = _seed_knowledge_root(tmp_path)
+        witness_dir = tmp_path / "witness"
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(witness_dir))
+        monkeypatch.setenv("ATHENAEUM_WITNESS_LEDGER_ENABLED", "true")
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "s-anchor-refonly")
+
+        rc = main(
+            [
+                "session-end",
+                "--references-only",
+                "s-anchor-refonly",
+                "--path",
+                str(root),
+                "--cache-dir",
+                str(tmp_path / "cache"),
+            ]
+        )
+
+        assert rc == 0
+        anchor_lines = [line for line in pw_ledger.iter_lines(witness_dir) if line.kind == "anchor"]
+        assert anchor_lines
+        assert any(line.extra.get("subject", "").startswith("witness:") for line in anchor_lines)
+
+    def test_dry_run_still_does_not_anchor(
+        self,
+        tmp_path: Path,
+        mock_anthropic: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The anchor step rides the SAME `--dry-run` exemption as the
+        session-close line (both are ledger writes)."""
+        import sys
+
+        src = str(Path(__file__).resolve().parent.parent / "src")
+        sys.path.insert(0, src)
+        try:
+            from promptwitness import ledger as pw_ledger
+        finally:
+            sys.path.remove(src)
+
+        root = _seed_knowledge_root(tmp_path)
+        witness_dir = tmp_path / "witness"
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(witness_dir))
+        monkeypatch.setenv("ATHENAEUM_WITNESS_LEDGER_ENABLED", "true")
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "s-anchor-dry-run")
+
+        rc = main(
+            [
+                "session-end",
+                "--path",
+                str(root),
+                "--cache-dir",
+                str(tmp_path / "cache"),
+                "--backend",
+                "fts5",
+                "--dry-run",
+            ]
+        )
+
+        assert rc == 0
+        assert pw_ledger.list_partitions(witness_dir) == []
+
+
 # ---------------------------------------------------------------------------
 # Issue athenaeum#896 — derived inner deadline trips the graceful-stop path
 # ---------------------------------------------------------------------------

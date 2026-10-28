@@ -1198,3 +1198,238 @@ class TestWitnessLedgerWiring:
         # `None`-in-sys.modules import failure, not the bare `ImportError`
         # base class -- `_log_witness_error` records the exact class name.
         assert record["error"] == "ModuleNotFoundError"
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#2156 -- periodic in-session anchor: due-check, spawn
+# guard, and zero-added-latency.
+# ---------------------------------------------------------------------------
+
+
+class _FakeAnchorProcess:
+    """Stands in for the real `subprocess.Popen` return value. `wait()`/
+    `communicate()` raise if ever called -- the hook must never wait on
+    the detached child it spawns."""
+
+    def wait(self, *args: object, **kwargs: object) -> int:
+        raise AssertionError("the hook must never wait() on the spawned anchor process")
+
+    def communicate(self, *args: object, **kwargs: object) -> tuple[bytes, bytes]:
+        raise AssertionError("the hook must never communicate() with the spawned anchor process")
+
+
+def _fake_popen(calls: list[dict]):
+    """Intercept ONLY the ``promptwitness.cli anchor`` spawn shape and
+    record it; every other ``Popen`` call (e.g. ``record_turn``'s own
+    ``ps`` probes, via ``subprocess.run``) passes through to the REAL
+    ``subprocess.Popen`` untouched -- this helper patches the process-wide
+    ``subprocess.Popen``, so anything narrower would silently swallow
+    unrelated subprocess traffic the witness path itself needs."""
+    real_popen = subprocess.Popen
+
+    def _popen(argv: list[str], **kwargs: object):
+        if list(argv)[:3] == [sys.executable, "-m", "promptwitness.cli"]:
+            calls.append({"argv": list(argv), "kwargs": dict(kwargs)})
+            return _FakeAnchorProcess()
+        return real_popen(argv, **kwargs)
+
+    return _popen
+
+
+class TestPeriodicAnchorSpawn:
+    """Counter-example this defeats: a hook that either never checks for a
+    due periodic anchor, checks but blocks on the network itself, or lets
+    two concurrent sessions both spawn a process for the same interval."""
+
+    def test_due_spawns_exactly_one_detached_process(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        imported_adapter: tuple[object, object],
+    ) -> None:
+        adapter, _context_mod = imported_adapter
+        sys.path.insert(0, SRC)
+        try:
+            import promptwitness.anchor_schedule as sched_mod
+        finally:
+            sys.path.remove(SRC)
+
+        calls: list[dict] = []
+        monkeypatch.setattr(sched_mod, "claim_periodic_anchor_slot", lambda *a, **k: True)
+        monkeypatch.setattr(adapter.subprocess, "Popen", _fake_popen(calls))
+        monkeypatch.setenv("ATHENAEUM_WITNESS_LEDGER_ENABLED", "true")
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(tmp_path))
+        monkeypatch.setenv("AUTO_RECALL", "false")
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(tmp_path / "witness"))
+        monkeypatch.setattr(
+            sys,
+            "stdin",
+            io.StringIO(json.dumps({"prompt": "whatever happens here", "session_id": "s"})),
+        )
+
+        rc = adapter.main()
+
+        assert rc == 0
+        assert len(calls) == 1
+        argv = calls[0]["argv"]
+        assert argv[:4] == [sys.executable, "-m", "promptwitness.cli", "anchor"]
+        assert "--dir" in argv
+        kwargs = calls[0]["kwargs"]
+        assert kwargs["stdin"] is adapter.subprocess.DEVNULL
+        assert kwargs["stdout"] is adapter.subprocess.DEVNULL
+        assert kwargs["stderr"] is adapter.subprocess.DEVNULL
+        assert kwargs["start_new_session"] is True
+        # No error log -- the spawn itself did not fail.
+        assert not (tmp_path / "witness_hook_errors.jsonl").exists()
+
+    def test_not_due_spawns_nothing(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        imported_adapter: tuple[object, object],
+    ) -> None:
+        adapter, _context_mod = imported_adapter
+        sys.path.insert(0, SRC)
+        try:
+            import promptwitness.anchor_schedule as sched_mod
+        finally:
+            sys.path.remove(SRC)
+
+        calls: list[dict] = []
+        monkeypatch.setattr(sched_mod, "claim_periodic_anchor_slot", lambda *a, **k: False)
+        monkeypatch.setattr(adapter.subprocess, "Popen", _fake_popen(calls))
+        monkeypatch.setenv("ATHENAEUM_WITNESS_LEDGER_ENABLED", "true")
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(tmp_path))
+        monkeypatch.setenv("AUTO_RECALL", "false")
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(tmp_path / "witness"))
+        monkeypatch.setattr(
+            sys,
+            "stdin",
+            io.StringIO(json.dumps({"prompt": "whatever happens here", "session_id": "s"})),
+        )
+
+        rc = adapter.main()
+
+        assert rc == 0
+        assert calls == []
+
+    def test_interval_zero_never_spawns_even_on_a_fresh_ledger(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        imported_adapter: tuple[object, object],
+    ) -> None:
+        """Real (un-mocked) `claim_periodic_anchor_slot` -- a fresh ledger
+        would otherwise be 'due immediately'; `anchor_interval_minutes: 0`
+        (here, its hook-time env form) must still spawn nothing."""
+        adapter, _context_mod = imported_adapter
+        calls: list[dict] = []
+        monkeypatch.setattr(adapter.subprocess, "Popen", _fake_popen(calls))
+        monkeypatch.setenv("ATHENAEUM_WITNESS_LEDGER_ENABLED", "true")
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(tmp_path))
+        monkeypatch.setenv("AUTO_RECALL", "false")
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(tmp_path / "witness"))
+        monkeypatch.setenv("ATHENAEUM_WITNESS_ANCHOR_INTERVAL_MINUTES", "0")
+        monkeypatch.setattr(
+            sys,
+            "stdin",
+            io.StringIO(json.dumps({"prompt": "whatever happens here", "session_id": "s"})),
+        )
+
+        rc = adapter.main()
+
+        assert rc == 0
+        assert calls == []
+
+    def test_default_interval_spawns_on_a_real_fresh_ledger(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        imported_adapter: tuple[object, object],
+    ) -> None:
+        """Real (un-mocked) guard, default interval: the FIRST turn ever on
+        a fresh ledger has no prior anchor activity at all, so it is due
+        immediately."""
+        adapter, _context_mod = imported_adapter
+        calls: list[dict] = []
+        monkeypatch.setattr(adapter.subprocess, "Popen", _fake_popen(calls))
+        monkeypatch.setenv("ATHENAEUM_WITNESS_LEDGER_ENABLED", "true")
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(tmp_path))
+        monkeypatch.setenv("AUTO_RECALL", "false")
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(tmp_path / "witness"))
+        monkeypatch.setattr(
+            sys,
+            "stdin",
+            io.StringIO(json.dumps({"prompt": "whatever happens here", "session_id": "s"})),
+        )
+
+        rc = adapter.main()
+
+        assert rc == 0
+        assert len(calls) == 1
+
+    def test_two_turns_in_the_same_interval_spawn_at_most_one_process(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        imported_adapter: tuple[object, object],
+    ) -> None:
+        """The concurrency AC, exercised with the REAL guard file: two
+        `UserPromptSubmit` turns against the SAME witness ledger, close
+        enough in time that neither's detached child has appended an
+        `anchor` line yet, must spawn at most one process between them."""
+        adapter, _context_mod = imported_adapter
+        calls: list[dict] = []
+        monkeypatch.setattr(adapter.subprocess, "Popen", _fake_popen(calls))
+        monkeypatch.setenv("ATHENAEUM_WITNESS_LEDGER_ENABLED", "true")
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(tmp_path))
+        monkeypatch.setenv("AUTO_RECALL", "false")
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(tmp_path / "witness"))
+
+        for session_id in ("s1", "s2"):
+            monkeypatch.setattr(
+                sys,
+                "stdin",
+                io.StringIO(
+                    json.dumps({"prompt": "whatever happens here", "session_id": session_id})
+                ),
+            )
+            assert adapter.main() == 0
+
+        assert len(calls) == 1
+
+    def test_hook_never_waits_on_the_spawned_process(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        imported_adapter: tuple[object, object],
+    ) -> None:
+        """Structural proof of zero added latency: `_FakeAnchorProcess`
+        raises if `.wait()`/`.communicate()` is ever called on it. A clean
+        `main()` return proves neither was."""
+        adapter, _context_mod = imported_adapter
+        sys.path.insert(0, SRC)
+        try:
+            import promptwitness.anchor_schedule as sched_mod
+        finally:
+            sys.path.remove(SRC)
+
+        monkeypatch.setattr(sched_mod, "claim_periodic_anchor_slot", lambda *a, **k: True)
+        monkeypatch.setattr(adapter.subprocess, "Popen", _fake_popen([]))
+        monkeypatch.setenv("ATHENAEUM_WITNESS_LEDGER_ENABLED", "true")
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(tmp_path))
+        monkeypatch.setenv("AUTO_RECALL", "false")
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(tmp_path / "witness"))
+        monkeypatch.setattr(
+            sys,
+            "stdin",
+            io.StringIO(json.dumps({"prompt": "whatever happens here", "session_id": "s"})),
+        )
+
+        # The assertion IS that this returns cleanly -- a `.wait()` call
+        # inside the hook would raise AssertionError out of `main()`'s own
+        # broad `except Exception` and silently show up as an error-log
+        # line instead, so also check that no such line was written.
+        rc = adapter.main()
+        assert rc == 0
+        assert not (tmp_path / "witness_hook_errors.jsonl").exists()
