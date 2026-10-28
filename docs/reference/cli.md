@@ -1761,13 +1761,19 @@ Serve a localhost-only, read-only page showing pushed-unbidden vs. pulled-delibe
 
 The `promptwitness` console script (a standalone package — see `docs/design/witness-ledger.md`). Separate `argparse` tree from `athenaeum` above, so its command index and sections are kept apart.
 
+`promptwitness demo --synthetic` (issue athenaeum#2155) renders a static, shareable HTML page with no real prompt text -- a side-by-side verified transcript and tampered transcript, turn by turn. A render of that synthetic page:
+
+![promptwitness demo: verified vs tampered transcript, synthetic data](../assets/promptwitness-demo.png)
+
 ### promptwitness command index
 
 - [`promptwitness anchor`](#promptwitness-anchor) (command) — Anchor the ledger head (or --subject) with local-clock and OpenTimestamps.
+- [`promptwitness demo`](#promptwitness-demo) (command) — Render a static HTML side-by-side demo: a verified transcript next to a tampered one, turn by turn.
 - [`promptwitness hook`](#promptwitness-hook) (group) — Harness hook entry points.
 - [`promptwitness hook claude-code`](#promptwitness-hook-claude-code) (command) — Append a witness line for a Claude Code hook event.
 - [`promptwitness keygen`](#promptwitness-keygen) (command) — Generate an Ed25519 signing key, in a file (mode 0600) or an OS keystore.
 - [`promptwitness status`](#promptwitness-status) (command) — Print the ledger head seq, chain_ok, partitions, and key strength.
+- [`promptwitness verify`](#promptwitness-verify) (command) — Verify a transcript against a witness ledger; exit 0 iff every human turn is witnessed, else 1.
 
 ## `promptwitness anchor`
 
@@ -1784,6 +1790,17 @@ Anchor the ledger head (or --subject) with local-clock and OpenTimestamps.
 | `--timeout` | `10.0` | — | Per-adapter network timeout in seconds (default: 10.0). |
 | `--upgrade` | `False` | — | Ask the OpenTimestamps calendar whether a prior pending proof for this subject has since been confirmed in Bitcoin, instead of submitting a new stamp. |
 | `--verify` | `False` | — | Run full Bitcoin verification of the OpenTimestamps attestation after anchoring. |
+
+## `promptwitness demo`
+
+Render a static HTML side-by-side demo: a verified transcript next to a tampered one, turn by turn.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--ledger` | — | — | Ledger directory to verify --transcript against (ignored in synthetic mode). |
+| `--out` | `demo.html` | — | Output HTML file path (default: demo.html). |
+| `--synthetic` | `False` | — | Generate a synthetic five-turn session and two transcripts (default when --transcript is not given; contains no real prompt text, safe to publish). |
+| `--transcript` | — | — | Render a REAL transcript JSON file instead of synthetic data (requires --ledger). The output file is written at mode 0600 and a warning is printed -- never publish it. |
 
 ## `promptwitness hook`
 
@@ -1821,3 +1838,13 @@ Print the ledger head seq, chain_ok, partitions, and key strength.
 |---|---|---|---|
 | `--dir` | — | — | Override the ledger directory (else PROMPTWITNESS_DIR / the XDG default). |
 | `--harness` | `claude-code` | — | Harness name the ledger directory is namespaced under. |
+
+## `promptwitness verify`
+
+Verify a transcript against a witness ledger; exit 0 iff every human turn is witnessed, else 1.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--json` | `False` | — | Print {ok, verdicts} as one JSON object instead of one line per turn. |
+| `--ledger` | — | — | Ledger directory to verify the transcript against. |
+| `--transcript` | — | — | Path to a transcript JSON file: a top-level array of {role, text, session, prompt_id} objects (role 'human' or anything else for machine-authored; see promptwitness.verify). |

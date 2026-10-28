@@ -197,6 +197,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   re-anchoring, so it never overwrites the `.tsr` file an earlier ledger
   line's `proof_path` still names (PR athenaeum#2174 review findings).
 
+- **`promptwitness verify` and `promptwitness demo`: a harness-agnostic
+  verifier plus a static, shareable side-by-side demo (athenaeum#2155).**
+  `promptwitness.verify.verify_transcript(transcript_records, ledger_index)`
+  returns a per-turn verdict (`witnessed`, `not-witnessed(inserted)`,
+  `digest-mismatch(edited)`, `machine-authored`, `headless`, `bridge`, or a
+  hash-chain break at a named `seq`); `promptwitness verify --transcript
+  ... --ledger ... [--json]` exits 0 iff every human turn is witnessed, else
+  1. `promptwitness demo --synthetic --out demo.html` (the default) builds a
+  five-turn synthetic session and renders two transcripts side by side —
+  one untouched, one with a turn inserted after the fact and another
+  edited — as static HTML with inline CSS, no `<script>`, and no network
+  access; the footer carries the key strength, the anchor status, and the
+  security-boundary table from the epic (athenaeum#2144), so the page
+  cannot be read as an identity guarantee. Real-transcript mode
+  (`--transcript ... --ledger ...`) renders the operator's own prompt text
+  locally, writes the file at mode 0600, and warns on stderr — never
+  publish it.
 - **The witness chain head is anchored periodically in-session and at
   every SessionEnd (issue athenaeum#2156).** The `UserPromptSubmit` hook,
   after appending its own ledger line, spawns a fully detached

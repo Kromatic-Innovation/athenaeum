@@ -292,6 +292,15 @@ def generate() -> str:
         "`athenaeum` above, so its command index and sections are kept apart."
     )
     lines.append("")
+    lines.append(
+        "`promptwitness demo --synthetic` (issue athenaeum#2155) renders a "
+        "static, shareable HTML page with no real prompt text -- a side-by-side "
+        "verified transcript and tampered transcript, turn by turn. A render of "
+        "that synthetic page:"
+    )
+    lines.append("")
+    lines.append("![promptwitness demo: verified vs tampered transcript, synthetic data](../assets/promptwitness-demo.png)")
+    lines.append("")
     lines.extend(
         _render_command_index(promptwitness_nodes, heading="### promptwitness command index")
     )
