@@ -7,6 +7,7 @@ the one that spawns a detached ``promptwitness anchor`` process.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -91,25 +92,19 @@ class TestPeriodicAnchorDue:
         work (the detached child has not appended anything yet)."""
         _seed_turn_line(tmp_path)
         now = datetime.now(timezone.utc)
-        assert (
-            anchor_schedule.periodic_anchor_due(tmp_path, 15, now=now, last_claim=now)
-            is False
-        )
+        assert anchor_schedule.periodic_anchor_due(tmp_path, 15, now=now, last_claim=now) is False
 
     def test_old_last_claim_is_due(self, tmp_path: Path) -> None:
         _seed_turn_line(tmp_path)
         now = datetime.now(timezone.utc)
         old_claim = now - timedelta(minutes=20)
         assert (
-            anchor_schedule.periodic_anchor_due(tmp_path, 15, now=now, last_claim=old_claim)
-            is True
+            anchor_schedule.periodic_anchor_due(tmp_path, 15, now=now, last_claim=old_claim) is True
         )
 
 
 class TestClaimPeriodicAnchorSlot:
-    def test_disabled_interval_never_claims_and_touches_no_guard_file(
-        self, tmp_path: Path
-    ) -> None:
+    def test_disabled_interval_never_claims_and_touches_no_guard_file(self, tmp_path: Path) -> None:
         _seed_turn_line(tmp_path)
         assert anchor_schedule.claim_periodic_anchor_slot(tmp_path, 0) is False
         assert not (tmp_path / anchor_schedule._GUARD_NAME).exists()
@@ -157,3 +152,185 @@ class TestClaimPeriodicAnchorSlot:
         now = datetime.now(timezone.utc)
         _seed_anchor_line(tmp_path, ts=now.isoformat())
         assert anchor_schedule.claim_periodic_anchor_slot(tmp_path, 15, now=now) is False
+
+
+def _forbid_full_read(monkeypatch) -> None:
+    """Any whole-ledger reader reached from here fails the test."""
+
+    def _boom(*_a, **_k):
+        raise AssertionError("full ledger read on the hot path")
+
+    monkeypatch.setattr(ledger, "iter_lines", _boom)
+    monkeypatch.setattr(ledger, "_iter_raw", _boom)
+
+
+def _record_reads(monkeypatch) -> list[tuple[str, int, int]]:
+    """Wrap the incremental reader; records ``(partition, offset, n_bytes)``."""
+    reads: list[tuple[str, int, int]] = []
+    real = anchor_schedule._read_from
+
+    def _spy(path: Path, offset: int) -> bytes:
+        data = real(path, offset)
+        reads.append((path.name, offset, len(data)))
+        return data
+
+    monkeypatch.setattr(anchor_schedule, "_read_from", _spy)
+    return reads
+
+
+def _warm(ledger_dir: Path, now: datetime) -> None:
+    """One claim that has to consult the ledger, writing the pointer."""
+    assert anchor_schedule.claim_periodic_anchor_slot(ledger_dir, 15, now=now) is True
+    assert (ledger_dir / anchor_schedule._STATE_NAME).is_file()
+
+
+class TestHotPathDoesNotReadTheWholeLedger:
+    """PR athenaeum#2176 review: the due check parsed every partition on
+    every prompt. It must now read only what was appended since."""
+
+    def test_recent_claim_answers_without_touching_the_ledger(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        _seed_turn_line(tmp_path)
+        now = datetime.now(timezone.utc)
+        _warm(tmp_path, now)
+        _forbid_full_read(monkeypatch)
+        reads = _record_reads(monkeypatch)
+
+        later = now + timedelta(minutes=5)
+        assert anchor_schedule.claim_periodic_anchor_slot(tmp_path, 15, now=later) is False
+        assert reads == []
+
+    def test_due_check_reads_only_the_appended_bytes(self, tmp_path: Path, monkeypatch) -> None:
+        now = datetime.now(timezone.utc)
+        for _ in range(50):
+            _seed_turn_line(tmp_path)
+        _warm(tmp_path, now)
+        (partition,) = ledger.list_partitions(tmp_path)
+        size_at_warm = (tmp_path / partition).stat().st_size
+        _seed_turn_line(tmp_path)
+        appended = (tmp_path / partition).stat().st_size - size_at_warm
+
+        _forbid_full_read(monkeypatch)
+        reads = _record_reads(monkeypatch)
+        later = now + timedelta(minutes=20)
+        assert anchor_schedule.claim_periodic_anchor_slot(tmp_path, 15, now=later) is True
+        assert reads == [(partition, size_at_warm, appended)]
+
+    def test_anchor_appended_after_the_pointer_is_still_seen(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        _seed_turn_line(tmp_path)
+        now = datetime.now(timezone.utc)
+        _warm(tmp_path, now)
+        later = now + timedelta(minutes=20)
+        _seed_anchor_line(tmp_path, ts=later.isoformat())
+
+        _forbid_full_read(monkeypatch)
+        assert anchor_schedule.claim_periodic_anchor_slot(tmp_path, 15, now=later) is False
+
+    def test_anchor_in_a_new_month_partition_is_seen(self, tmp_path: Path, monkeypatch) -> None:
+        now = datetime(2026, 10, 31, 23, 50, tzinfo=timezone.utc)
+        _seed_anchor_line(tmp_path, ts="2026-10-31T23:00:00.000Z")
+        _warm(tmp_path, now)
+        rollover = datetime(2026, 11, 1, 0, 30, tzinfo=timezone.utc)
+        _seed_anchor_line(tmp_path, ts="2026-11-01T00:25:00.000Z")
+        assert ledger.list_partitions(tmp_path) == ["2026-10.jsonl", "2026-11.jsonl"]
+
+        _forbid_full_read(monkeypatch)
+        assert anchor_schedule.claim_periodic_anchor_slot(tmp_path, 15, now=rollover) is False
+        assert (
+            anchor_schedule.claim_periodic_anchor_slot(
+                tmp_path, 15, now=rollover + timedelta(minutes=20)
+            )
+            is True
+        )
+
+    def test_torn_tail_is_not_consumed(self, tmp_path: Path) -> None:
+        _seed_turn_line(tmp_path)
+        (partition,) = ledger.list_partitions(tmp_path)
+        size = (tmp_path / partition).stat().st_size
+        with open(tmp_path / partition, "ab") as fh:
+            fh.write(b'{"torn":')
+        _warm(tmp_path, datetime.now(timezone.utc))
+        state = json.loads((tmp_path / anchor_schedule._STATE_NAME).read_text())
+        assert state["partitions"][partition]["offset"] == size
+
+
+class TestPointerFallback:
+    """A missing, corrupt or stale pointer must degrade to the full read
+    and still give the right answer."""
+
+    def _ledger_with_recent_anchor(self, tmp_path: Path) -> datetime:
+        _seed_turn_line(tmp_path)
+        now = datetime.now(timezone.utc)
+        _seed_anchor_line(tmp_path, ts=now.isoformat())
+        return now
+
+    def _stale_state(self, tmp_path: Path, mutate) -> None:
+        """Write a pointer claiming the WHOLE ledger was scanned and held
+        no anchor, then break it with *mutate*. Trusted as-is, it would
+        hide the recent anchor and the claim would (wrongly) succeed."""
+        partitions = ledger.list_partitions(tmp_path)
+        anchor_schedule._save_state(
+            tmp_path, {name: (tmp_path / name).stat().st_size for name in partitions}, None
+        )
+        path = tmp_path / anchor_schedule._STATE_NAME
+        state = json.loads(path.read_text())
+        mutate(state)
+        path.write_text(json.dumps(state), encoding="utf-8")
+
+    def test_missing_pointer_reads_everything(self, tmp_path: Path) -> None:
+        now = self._ledger_with_recent_anchor(tmp_path)
+        assert not (tmp_path / anchor_schedule._STATE_NAME).exists()
+        assert anchor_schedule.claim_periodic_anchor_slot(tmp_path, 15, now=now) is False
+
+    def test_corrupt_pointer_reads_everything(self, tmp_path: Path) -> None:
+        now = self._ledger_with_recent_anchor(tmp_path)
+        (tmp_path / anchor_schedule._STATE_NAME).write_text("{not json", encoding="utf-8")
+        assert anchor_schedule.claim_periodic_anchor_slot(tmp_path, 15, now=now) is False
+
+    def test_untampered_pointer_is_trusted(self, tmp_path: Path) -> None:
+        """Positive control for the stale-pointer cases below."""
+        now = self._ledger_with_recent_anchor(tmp_path)
+        self._stale_state(tmp_path, lambda s: None)
+        assert anchor_schedule.claim_periodic_anchor_slot(tmp_path, 15, now=now) is True
+
+    def test_fingerprint_mismatch_reads_everything(self, tmp_path: Path) -> None:
+        now = self._ledger_with_recent_anchor(tmp_path)
+
+        def mutate(state):
+            for entry in state["partitions"].values():
+                entry["fingerprint"] = "0" * 64
+
+        self._stale_state(tmp_path, mutate)
+        assert anchor_schedule.claim_periodic_anchor_slot(tmp_path, 15, now=now) is False
+
+    def test_offset_past_end_reads_everything(self, tmp_path: Path) -> None:
+        now = self._ledger_with_recent_anchor(tmp_path)
+
+        def mutate(state):
+            for entry in state["partitions"].values():
+                entry["offset"] += 10_000
+
+        self._stale_state(tmp_path, mutate)
+        assert anchor_schedule.claim_periodic_anchor_slot(tmp_path, 15, now=now) is False
+
+    def test_vanished_partition_reads_everything(self, tmp_path: Path) -> None:
+        now = self._ledger_with_recent_anchor(tmp_path)
+
+        def mutate(state):
+            state["partitions"]["1999-01.jsonl"] = {"offset": 0, "fingerprint": "x"}
+
+        self._stale_state(tmp_path, mutate)
+        assert anchor_schedule.claim_periodic_anchor_slot(tmp_path, 15, now=now) is False
+
+    def test_wrong_version_reads_everything(self, tmp_path: Path) -> None:
+        now = self._ledger_with_recent_anchor(tmp_path)
+        self._stale_state(tmp_path, lambda s: s.update(v=999))
+        assert anchor_schedule.claim_periodic_anchor_slot(tmp_path, 15, now=now) is False
+
+    def test_standalone_due_check_never_writes_the_pointer(self, tmp_path: Path) -> None:
+        _seed_turn_line(tmp_path)
+        assert anchor_schedule.periodic_anchor_due(tmp_path, 15) is True
+        assert not (tmp_path / anchor_schedule._STATE_NAME).exists()

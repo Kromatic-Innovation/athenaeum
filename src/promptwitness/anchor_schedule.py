@@ -31,10 +31,29 @@ acquired non-blocking (``LOCK_NB``): a guard file already held by a truly
 simultaneous call is treated as "someone else is handling it", not an
 error worth waiting out, and :func:`claim_periodic_anchor_slot` returns
 ``False`` immediately in that case.
+
+**No full-ledger read per prompt (PR athenaeum#2176 review).** Two layers:
+
+1. A pending claim younger than the interval already answers "not due"
+   (due needs BOTH the newest anchor and the last claim to be old), so
+   :func:`claim_periodic_anchor_slot` returns before touching the ledger
+   at all -- nearly every prompt takes this path.
+2. When the ledger must be consulted, :func:`_newest_anchor_ts` resumes
+   from a small pointer file (:data:`_STATE_NAME`): per partition, the
+   byte offset up to the last complete line already scanned and a
+   fingerprint of the bytes just before it, plus the newest anchor ``ts``
+   seen so far. Only bytes appended since are read. The ledger is
+   append-only, so this is exact; a pointer that is missing, unparseable,
+   names a partition that is gone or shorter than its offset, or whose
+   fingerprint no longer matches, is discarded and the whole ledger is
+   read once, the way it always was. The pointer is written only under
+   the guard lock, by temp file plus ``os.replace``.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import sys
 from collections.abc import Iterator
@@ -47,6 +66,11 @@ from promptwitness import ledger
 __all__ = ["periodic_anchor_due", "claim_periodic_anchor_slot"]
 
 _GUARD_NAME = "anchor_spawn.guard"
+_STATE_NAME = "anchor_schedule.state.json"
+_STATE_VERSION = 1
+#: Bytes immediately before a partition's recorded offset that are hashed
+#: to detect a partition replaced (not appended to) since it was scanned.
+_FINGERPRINT_BYTES = 64
 
 
 def _lock_nonblocking(fd: int) -> bool:
@@ -96,15 +120,133 @@ def _parse_iso(raw: str) -> datetime | None:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
-def _newest_anchor_ts(ledger_dir: Path) -> datetime | None:
+def _newest(a: datetime | None, b: datetime | None) -> datetime | None:
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return max(a, b)
+
+
+def _newest_anchor_in(complete: bytes) -> datetime | None:
+    """Newest ``anchor`` line ``ts`` among the complete lines in
+    *complete*, with the same tolerance as :func:`ledger.iter_lines`:
+    unparseable or schema-invalid lines are skipped."""
     newest: datetime | None = None
-    for line in ledger.iter_lines(ledger_dir):
-        if line.kind != "anchor":
+    for chunk in complete.split(b"\n"):
+        if not chunk.strip():
             continue
-        ts = _parse_iso(line.ts)
-        if ts is not None and (newest is None or ts > newest):
-            newest = ts
+        try:
+            obj = json.loads(chunk.decode("utf-8"))
+            line = ledger.WitnessLine.from_dict(obj)
+        except (UnicodeDecodeError, ValueError, TypeError, AttributeError, KeyError):
+            continue
+        if line.kind == "anchor":
+            newest = _newest(newest, _parse_iso(line.ts))
     return newest
+
+
+def _read_from(path: Path, offset: int) -> bytes:
+    """Bytes of *path* from *offset* to EOF (the only ledger read on the
+    incremental path; a seam for tests)."""
+    with open(path, "rb") as fh:
+        fh.seek(offset)
+        return fh.read()
+
+
+def _fingerprint(path: Path, offset: int) -> str:
+    start = max(0, offset - _FINGERPRINT_BYTES)
+    with open(path, "rb") as fh:
+        fh.seek(start)
+        return hashlib.sha256(fh.read(offset - start)).hexdigest()
+
+
+def _load_state(
+    ledger_dir: Path, partitions: list[str]
+) -> tuple[dict[str, int], datetime | None] | None:
+    """``(offsets, newest)`` from the pointer file, or ``None`` when it is
+    missing or cannot be trusted -- the caller then reads everything."""
+    try:
+        state = json.loads((ledger_dir / _STATE_NAME).read_text(encoding="utf-8"))
+        if state.get("v") != _STATE_VERSION:
+            return None
+        recorded = state["partitions"]
+        offsets: dict[str, int] = {}
+        for name, entry in recorded.items():
+            offset, fp = entry["offset"], entry["fingerprint"]
+            if name not in partitions or not isinstance(offset, int) or offset < 0:
+                return None
+            path = ledger_dir / name
+            if path.stat().st_size < offset or _fingerprint(path, offset) != fp:
+                return None
+            offsets[name] = offset
+        raw_newest = state["newest"]
+        newest = _parse_iso(raw_newest) if raw_newest is not None else None
+        if raw_newest is not None and newest is None:
+            return None
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return None
+    return offsets, newest
+
+
+def _save_state(ledger_dir: Path, offsets: dict[str, int], newest: datetime | None) -> None:
+    """Best effort: a pointer that fails to save only costs one full read
+    on a later call."""
+    try:
+        payload = {
+            "v": _STATE_VERSION,
+            "newest": newest.isoformat() if newest is not None else None,
+            "partitions": {
+                name: {"offset": off, "fingerprint": _fingerprint(ledger_dir / name, off)}
+                for name, off in offsets.items()
+            },
+        }
+        tmp = ledger_dir / "{}.{}.tmp".format(_STATE_NAME, os.getpid())
+        tmp.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, ledger_dir / _STATE_NAME)
+    except OSError:
+        pass
+
+
+def _newest_anchor_ts(ledger_dir: Path, *, persist: bool = False) -> datetime | None:
+    """Newest ``anchor`` line ``ts`` across the whole ledger, reading only
+    what was appended since the pointer file was last written (see the
+    module docstring). *persist* writes the advanced pointer back; only
+    the guard-locked caller passes it."""
+    partitions = ledger.list_partitions(ledger_dir)
+    loaded = _load_state(ledger_dir, partitions)
+    offsets, newest = loaded if loaded is not None else ({}, None)
+    for name in partitions:
+        start = offsets.get(name, 0)
+        tail = _read_from(ledger_dir / name, start)
+        # Never consume a torn (unterminated) final fragment: it is either
+        # mid-append now or garbage, and is re-read next time either way.
+        complete = tail[: tail.rfind(b"\n") + 1]
+        newest = _newest(newest, _newest_anchor_in(complete))
+        offsets[name] = start + len(complete)
+    if persist and partitions:
+        _save_state(ledger_dir, offsets, newest)
+    return newest
+
+
+def _due(
+    ledger_dir: Path,
+    interval_minutes: int,
+    *,
+    now: datetime,
+    last_claim: datetime | None,
+    persist: bool,
+) -> bool:
+    if interval_minutes <= 0:
+        return False
+    interval = timedelta(minutes=interval_minutes)
+    # A recent claim alone settles it: due needs every activity to be old.
+    if last_claim is not None and now - last_claim < interval:
+        return False
+    newest = _newest(_newest_anchor_ts(ledger_dir, persist=persist), last_claim)
+    if newest is None:
+        return True
+    return now - newest >= interval
 
 
 def periodic_anchor_due(
@@ -124,14 +266,13 @@ def periodic_anchor_due(
     ``anchor`` line yet, and no *last_claim*) always returns ``True`` --
     due immediately.
     """
-    if interval_minutes <= 0:
-        return False
-    now = now or datetime.now(timezone.utc)
-    candidates = [t for t in (_newest_anchor_ts(Path(ledger_dir)), last_claim) if t is not None]
-    if not candidates:
-        return True
-    newest = max(candidates)
-    return now - newest >= timedelta(minutes=interval_minutes)
+    return _due(
+        Path(ledger_dir),
+        interval_minutes,
+        now=now or datetime.now(timezone.utc),
+        last_claim=last_claim,
+        persist=False,
+    )
 
 
 @contextmanager
@@ -177,7 +318,7 @@ def claim_periodic_anchor_slot(
         except OSError:
             raw = ""
         last_claim = _parse_iso(raw)
-        if not periodic_anchor_due(ledger_dir, interval_minutes, now=now, last_claim=last_claim):
+        if not _due(ledger_dir, interval_minutes, now=now, last_claim=last_claim, persist=True):
             return False
         try:
             os.lseek(fd, 0, os.SEEK_SET)
