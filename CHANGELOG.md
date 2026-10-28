@@ -64,6 +64,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - An unknown `receipt_sealer` or `key_provider` value RAISES rather than
     silently falling back to not sealing.
 
+- **A `claude:inferred` default now records which model inferred it and in
+  which session** (issue athenaeum#2148), without changing the `claude:inferred`
+  scalar itself: `mcp_server.remember` stamps `model`/`originSessionId`
+  extras, and `intake.py` fills `AutoMemoryFile.model`/`.source_ref` in
+  memory for AI-attributed auto-memory (raw stays write-once).
+
 - **New top-level `promptwitness` package: canonical digest, hash-chained
   ledger v1, chain verifier, `promptwitness status`, and an enforced
   import boundary against `athenaeum` (issue athenaeum#2147, foundational

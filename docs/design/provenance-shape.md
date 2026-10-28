@@ -1227,6 +1227,51 @@ the read-side parsers (`models.parse_asserter`,
   `email` is a snapshot for humans reading the frontmatter, not a
   lookup key.
 
+### 10.6 Model + session stamping on the `claude:inferred` default (issue athenaeum#2148)
+
+The `model-prior:<model-id>` and `agent-observed:<model>:<session-ref>`
+tiers (§10.1/§10.2) already carry which model asserted a claim and in
+which session. The bare `claude:inferred` default a caller falls into by
+supplying no `sources` at all carried neither. Two sites now fill both,
+WITHOUT changing the defaulted scalar itself (`mcp_server._DEFAULT_INFERRED_SOURCE`
+== `repair._DEFAULTED_INFERRED_SOURCE` == `"claude:inferred"`, byte-identical,
+pinned by an exact-string regression test):
+
+1. **`mcp_server.remember`'s `_DEFAULT_INFERRED_SOURCE` branch.** When
+   `sources` is `None`, `model:` and `originSessionId:` land in the SAME
+   `extras` dict `_inject_provenance_frontmatter` already merges §326's
+   channel-split keys through. `originSessionId` comes from
+   `CLAUDE_CODE_SESSION_ID` — present in the MCP server process env only
+   under the stdio transport (one process per session); absent (or an
+   HTTP/shared server, where the env is stale) means no session is
+   stamped, and the write still succeeds. `model` resolves `ANTHROPIC_MODEL`
+   first, then a capped (256 KB) TAIL read of `message.model` on the
+   newest assistant record in `<projects_root>/*/<session>.jsonl`, then
+   `"unknown"`. Neither field ever overwrites a value the caller already
+   declared in the markdown's own frontmatter.
+
+2. **`intake.py`'s `coerce_source_type` block building `AutoMemoryFile`.**
+   When the coerced `source_type` is in `models.AI_ATTRIBUTED_SOURCE_TYPES`
+   and `parse_model(meta)` is empty, `model` is filled IN MEMORY ONLY (raw
+   stays write-once on this path) — first from the `message.model` of the
+   assistant record whose `tool_use` input `file_path` names this memory
+   (`SessionRecoverer.model_for_write`), then from the origin session's own
+   first assistant turn (`SessionRecoverer.model_for_session`, mirroring
+   `transcript_verify._assistant_model`'s semantics), then `"unknown"`. An
+   empty `source_ref` is filled the same way, from
+   `transcript_verify._best_effort_ref(session, turn)`. Both rungs reuse
+   the SAME per-scope transcript scan `SessionRecoverer` already performs
+   for origin-session recovery (`§10.1a`'s companion, issue athenaeum#1452)
+   — the fill adds no transcript read beyond the one each transcript
+   already gets per scope per pass, respecting the athenaeum#2048 budget
+   (pinned by a counting test, not just a behavioral one).
+
+Neither site changes the `claude:` precedence tier itself (out of scope
+per athenaeum#2148) — only the *provenance of the default*, so a later
+audit or `repair --backfill-sources` run can trace WHICH model guessed
+and in WHICH session, without any confusion about whether the scalar
+changed underneath it.
+
 ## 11. Implementation issue mapping
 
 | Section | Issue | What the issue implements |
@@ -1238,6 +1283,7 @@ the read-side parsers (`models.parse_asserter`,
 | §8 claim-level temporal validity | athenaeum#308 | Slice 1: `valid_from` / `valid_until` parse + round-trip; shared `valid_until_expired` helper; currently-valid-by-default filter. **Slice 2 (shipped): resolver interval-close (§8.4) — `enact_resolution` stamps the loser's `valid_until` on `keep_a`/`keep_b` and sequential-snapshot `not_a_conflict`, only-close-never-widen.** **Slice 3 (shipped, athenaeum#354): read-time `--as-of` view (§8.5) — `recall --as-of` / `reindex --as-of` filter the compiled wiki by the upper bound + athenaeum#191 tombstones, no recompile.** **Slice 4 (shipped): per-claim compiled validity (§8.6).** **compile-as-of (shipped, athenaeum#359, §8.7): `compile --as-of --out` RE-RUNS the deterministic C3 blend into a scratch dir — resurrects members expired now but valid then; valid-time only.** athenaeum#329 generalizes the close to non-time scopes. |
 | §9 multi-dimensional scoped claims | athenaeum#329 | Buildable subset: `scope: {org, locale}` poset (trees) + time, versioned tree config (`scope.org`/`scope.locale`), three-way `scope_comparison` verdict (DISJOINT / OVERRIDE / OVERLAP) wired into `resolutions._scope_verdict_proposal`, and `scope_a`/`scope_b` resolver actions (time-dimension narrowing enactment). **Deferred (ADR):** time-nesting OVERRIDE, org/locale coordinate pinning enactment, recall `serve --scope` filter, team/multi-tenant scope-identity (athenaeum#314). |
 | §10 channel split + model + asserter | athenaeum#326 | Extend `SOURCE_TYPES` with `agent-observed` and `model-prior`; add `model:` / `on_behalf_of:` / `asserter:` claim-level frontmatter fields; extend `remember(sources=...)` with `_source_type` / `_source_ref` / `_model` / `_on_behalf_of` / `_asserter` wrapper keys; drop `model-prior:<model-id>` into the resolver's precedence taxonomy below `script:`. |
+| §10.6 model + session on the `claude:inferred` default | athenaeum#2148 | `mcp_server.remember`'s `_DEFAULT_INFERRED_SOURCE` branch stamps `model`/`originSessionId` extras; `intake.py`'s `coerce_source_type` block fills `AutoMemoryFile.model`/`.source_ref` in memory for AI-attributed defaults via `SessionRecoverer.model_for_write`/`.model_for_session`. Neither touches the `claude:inferred` scalar. |
 | §12 claim kind + opinion attribution | athenaeum#327 | Add `claim_kind:` (`fact`/`observation`/`opinion`/`decision`/`policy`/`definition`) classified once at intake (`claim_kind.classify_claim_kind`, tier2-style), round-tripped by tier0; add `compare_asserters` (`same`/`different`/`unknown`) over the §10.3 identity key; add the `attribute_both` resolver action + `_stance_attribution_verdict` short-circuit + detector `stance` conflict type. An opinion is NEVER resolved by precedence; unknown asserter → keep-both fallback. |
 | §13 adapter frontmatter provenance ledger | athenaeum#1462 | New `src/athenaeum/adapter_provenance.py`: bounded `SOURCE_OBJECT_ID_KEYS`/`ADAPTER_PROVENANCE_VALUE_KEYS`, `record_adapter_provenance_for_pages` wired into `librarian._apply_tier3_results`, `resolve_source_for_page` for the raw-file-independent join. Mechanism (b) chosen over (a); rejected-alternative reasoning in the module docstring. |
 

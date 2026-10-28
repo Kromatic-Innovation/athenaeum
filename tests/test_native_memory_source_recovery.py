@@ -565,7 +565,7 @@ class TestWindowBoundsComeFromRecords:
         _write_transcript(projects_root, WRITER_SESSION, [poisoned, _text_record("end", 9)])
         from athenaeum.session_recovery import _scan_transcript
 
-        _writes, first, last = _scan_transcript(
+        _writes, _write_models, _session_model, first, last = _scan_transcript(
             projects_root / SCOPE / f"{WRITER_SESSION}.jsonl", SCOPE
         )
         assert first == T0
@@ -585,7 +585,9 @@ class TestWindowBoundsComeFromRecords:
             json.dumps(_text_record("start", 0)) + "\n" + truncated + "\n",
             encoding="utf-8",
         )
-        _writes, first, last = _scan_transcript(scope_dir / f"{WRITER_SESSION}.jsonl", SCOPE)
+        _writes, _write_models, _session_model, first, last = _scan_transcript(
+            scope_dir / f"{WRITER_SESSION}.jsonl", SCOPE
+        )
         assert first == T0
         assert last == T0 + timedelta(minutes=9)
 
