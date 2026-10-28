@@ -697,6 +697,148 @@ class TestVerifyWithRealSockets:
 
 
 # ---------------------------------------------------------------------------
+# Regression coverage: PR #2168 review findings #2 and #3 (athenaeum#2151).
+# ---------------------------------------------------------------------------
+
+
+class TestAnchorNeverClobbersACompleteProof:
+    """Finding #2 (defence in depth): ``anchor()`` itself -- not just the
+    CLI caller -- must refuse to overwrite an existing proof file whose
+    recorded attestation is already Bitcoin-confirmed. It is the strongest
+    evidence this design produces, and a confirmed proof cannot be
+    regenerated.
+    """
+
+    def test_anchor_refuses_to_overwrite_an_existing_complete_proof(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ns = _install_fake_opentimestamps(monkeypatch)
+        digest = b"\x55" * 32
+        subject = "witness:pw-x:1"
+
+        # Pre-seed an existing COMPLETE proof, as if a prior pass already
+        # confirmed it in Bitcoin.
+        ts = ns.Timestamp(digest, attestations={ns.BitcoinBlockHeaderAttestation(height=999)})
+        from opentimestamps.core.serialize import (  # the fake, via sys.modules
+            BytesSerializationContext,
+        )
+
+        ctx = BytesSerializationContext()
+        ts.serialize(ctx)
+        proof_path = tmp_path / "anchors" / f"{anchor.subject_safe(subject)}.ots"
+        proof_path.parent.mkdir(parents=True)
+        proof_path.write_bytes(ctx.getbytes())
+        original_bytes = proof_path.read_bytes()
+
+        # No calendar is stubbed at all -- if the guard did not fire,
+        # `anchor()` would call `RemoteCalendar.submit`, which raises for
+        # an unregistered URL, and the result would degrade to
+        # `status: "failed"` instead of reporting the existing `"complete"`
+        # -- the discriminating signal.
+        ots = anchor.OpenTimestampsAnchorer(tmp_path, calendars=anchor.DEFAULT_CALENDARS[:1])
+        att = ots.anchor(digest, subject)
+
+        assert att.status == "complete"
+        assert att.detail["reason"] == "existing-proof-already-complete"
+        assert proof_path.read_bytes() == original_bytes  # byte-for-byte untouched
+
+    def test_anchor_still_submits_when_the_existing_proof_is_only_pending(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Negative-control-adjacent sanity check: the guard must be
+        specific to ``"complete"`` -- a merely-pending existing proof must
+        not block a fresh submission."""
+        ns = _install_fake_opentimestamps(monkeypatch)
+        digest = b"\x77" * 32
+        subject = "witness:pw-x:2"
+
+        ts = ns.Timestamp(digest, attestations={ns.PendingAttestation()})
+        from opentimestamps.core.serialize import (  # the fake, via sys.modules
+            BytesSerializationContext,
+        )
+
+        ctx = BytesSerializationContext()
+        ts.serialize(ctx)
+        proof_path = tmp_path / "anchors" / f"{anchor.subject_safe(subject)}.ots"
+        proof_path.parent.mkdir(parents=True)
+        proof_path.write_bytes(ctx.getbytes())
+
+        url = "https://a.pool.opentimestamps.org"
+        ns.submit_responses[url] = lambda d: ns.Timestamp(d, attestations={ns.PendingAttestation()})
+        ots = anchor.OpenTimestampsAnchorer(tmp_path, calendars=(url,))
+        att = ots.anchor(digest, subject)
+
+        assert att.status == "pending"
+        bad_reason = "existing-proof-already-complete"
+        assert "reason" not in att.detail or att.detail.get("reason") != bad_reason
+
+
+class TestAnchorDegradesOnFilesystemFailure:
+    """Finding #3: unguarded filesystem I/O around the proof write can
+    raise ``OSError`` (full disk, unwritable ``anchors/`` directory), which
+    violates the module's own "the pass never raises" contract -- the same
+    class of condition as a network failure.
+    """
+
+    def test_anchor_degrades_to_failed_when_the_proof_write_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ns = _install_fake_opentimestamps(monkeypatch)
+        url = "https://a.pool.opentimestamps.org"
+        ns.submit_responses[url] = lambda digest: ns.Timestamp(
+            digest, attestations={ns.PendingAttestation()}
+        )
+
+        def _raise_oserror(self: Path, data: bytes) -> int:
+            raise OSError("No space left on device (simulated)")
+
+        monkeypatch.setattr(Path, "write_bytes", _raise_oserror)
+
+        ots = anchor.OpenTimestampsAnchorer(tmp_path, calendars=(url,))
+        # Without the fix, this call raises OSError uncaught (not merely a
+        # wrong return value) -- the test itself would error, not fail an
+        # assertion, which is as discriminating as it gets.
+        att = ots.anchor(b"\x66" * 32, "witness:pw-x:1")
+
+        assert att.status == "failed"
+        assert att.detail["reason"] == "proof-write-failed"
+        assert "OSError" in att.detail["error"]
+
+    def test_upgrade_degrades_when_persisting_the_upgraded_proof_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ns = _install_fake_opentimestamps(monkeypatch)
+        url = "https://a.pool.opentimestamps.org"
+        ns.submit_responses[url] = lambda digest: ns.Timestamp(
+            digest, attestations={ns.PendingAttestation()}
+        )
+        fixture = _BLOCK_EXPLORER_FIXTURE
+        digest = bytes.fromhex(fixture["merkle_root_hex"])
+
+        ots = anchor.OpenTimestampsAnchorer(
+            tmp_path,
+            calendars=(url,),
+            block_source="https://explorer.example/api",
+            http_get=_fixture_http_get,
+        )
+        att = ots.anchor(digest, "witness:pw-x:1")
+        height = fixture["block_height"]
+        key = (url, att.detail["commitment_hex"])
+        ns.get_timestamp_responses[key] = lambda commitment: ns.Timestamp(
+            commitment, attestations={ns.BitcoinBlockHeaderAttestation(height=height)}
+        )
+
+        def _raise_oserror(self: Path, data: bytes) -> int:
+            raise OSError("disk full (simulated)")
+
+        monkeypatch.setattr(Path, "write_bytes", _raise_oserror)
+
+        # Without the fix, this call raises OSError uncaught.
+        upgraded = ots.upgrade(att)
+        assert upgraded == att  # degrades to a no-op -- never raises, never overwrites
+
+
+# ---------------------------------------------------------------------------
 # Real-library surface, if (and only if) opentimestamps happens to be
 # installed. Never runs in this CI -- see the module docstring.
 # ---------------------------------------------------------------------------
