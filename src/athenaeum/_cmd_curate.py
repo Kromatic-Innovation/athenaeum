@@ -308,12 +308,17 @@ def cmd_dedupe(args: argparse.Namespace) -> int:
         # the owner-address guard in the merge (issue athenaeum#1739). Without it
         # the guard exists but nothing reaches it from the CLI.
         owner = resolve_owner(cfg)
+        from athenaeum.contact_record_fold import resolve_contacts_root
+
         merge_report = merge_duplicate_persons(
             pairs,
             apply=True,
             wiki_root=wiki_root,
             google_contact_keys=gc_keys,
             owner=owner,
+            # Issue athenaeum#2184: fold each absorbed uid's contact record.
+            # None (no fold) when `pii` is not mapped to an excluded surface.
+            contacts_root=resolve_contacts_root(wiki_root.parent, cfg),
         )
     finally:
         lock.release()
@@ -323,6 +328,8 @@ def cmd_dedupe(args: argparse.Namespace) -> int:
         f"missing_canonical={merge_report.missing_canonical} "
         f"skipped_parse={merge_report.skipped_parse} "
         f"references_rewritten={merge_report.references_rewritten} "
+        f"contact_records_folded={merge_report.contact_records_folded} "
+        f"contact_values_added={merge_report.contact_values_added} "
         f"errors={len(merge_report.errors)}"
     )
     # Key and count only — the dropped value is the operator's own address.

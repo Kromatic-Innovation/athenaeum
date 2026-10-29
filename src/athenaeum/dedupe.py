@@ -161,6 +161,11 @@ class MergeReport:
     #: the COUNT only — never the address value, which is the operator's own
     #: mailbox and has no business in a log line or a CLI summary.
     owner_addresses_dropped: dict[str, int] = field(default_factory=dict)
+    #: Absorbed uids' contact records folded onto the canonical record, and
+    #: the values that added (issue athenaeum#2184). Zero unless the caller
+    #: passed ``contacts_root``.
+    contact_records_folded: int = 0
+    contact_values_added: int = 0
     errors: list[str] = field(default_factory=list)
     dry_run: bool = False
 
@@ -867,6 +872,7 @@ def merge_duplicate_persons(
     wiki_root: Path | None = None,
     google_contact_keys: Iterable[str] = (),
     owner: dict[str, Any] | None = None,
+    contacts_root: Path | None = None,
 ) -> MergeReport:
     """Merge a list of duplicate pairs.
 
@@ -889,9 +895,20 @@ def merge_duplicate_persons(
     owner's. Counts land on ``MergeReport.owner_addresses_dropped``, keyed by
     frontmatter key. ``None`` (the default) leaves merge behaviour exactly as
     it was.
+
+    ``contacts_root`` (issue athenaeum#2184; resolve it via
+    :func:`athenaeum.pii.contacts_surface_root`) folds each absorbed uid's
+    excluded contact record onto the canonical uid's record and retires it,
+    in the same run — see :mod:`athenaeum.contact_record_fold`. ``None`` (the
+    default) leaves the contacts surface untouched.
     """
     gc_keys = tuple(google_contact_keys)
     report = MergeReport(dry_run=not apply)
+    contact_index = None
+    if contacts_root is not None and Path(contacts_root).is_dir():
+        from athenaeum.pii import ExcludedRecordIndex
+
+        contact_index = ExcludedRecordIndex(Path(contacts_root))
     for pair in pairs:
         cpath = Path(pair.canonical_path)
         apath = Path(pair.absorbed_path)
@@ -922,6 +939,18 @@ def merge_duplicate_persons(
             report.skipped_parse += 1
         elif outcome.startswith("MERGED") or outcome.startswith("WOULD_MERGE"):
             report.merged += 1
+            if contact_index is not None and contacts_root is not None:
+                from athenaeum.contact_record_fold import fold_absorbed_contact_records
+
+                fold = fold_absorbed_contact_records(
+                    Path(contacts_root),
+                    [(pair.absorbed_uid, pair.canonical_uid)],
+                    index=contact_index,
+                    dry_run=not apply,
+                )
+                report.contact_records_folded += fold.records_folded
+                report.contact_values_added += fold.values_added_total
+                report.errors.extend(f"{pair.absorbed_uid}: {e}" for e in fold.errors)
             for key, count in pair_dropped.items():
                 report.owner_addresses_dropped[key] = (
                     report.owner_addresses_dropped.get(key, 0) + count

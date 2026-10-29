@@ -148,6 +148,9 @@ MODULE_LAYER: dict[str, int] = {
     "off_corpus": 3,
     "outbound_pii": 3,
     "pii": 3,
+    # Issue athenaeum#2184: the contact-record fold (L3, over pii) and the
+    # repair that needs pending_merges' target resolver (L4).
+    "contact_record_fold": 3,
     "prompt_registry": 3,
     "prompt_safety": 3,
     "provider": 3,
@@ -201,6 +204,7 @@ MODULE_LAYER: dict[str, int] = {
     # module's own docstring for the import-cycle this avoids.
     "decision_budget": 4,
     "decisions": 4,
+    "contact_record_repair": 4,
     "dedupe": 4,
     "drain": 4,
     "entity_resolution": 4,

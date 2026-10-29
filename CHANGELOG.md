@@ -56,6 +56,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `RunLock`, checked before any no-op condition, mirroring
     `persist_recovered_origin_session_id` (athenaeum#2038).
 
+- **A merge now folds the absorbed uid's contact record, and `athenaeum
+  repair --contact-records` cleans up the ones earlier merges left (issue
+  athenaeum#2184).** When `dedupe persons --apply` or a `fold-into-existing`
+  approve absorbed a person page, the absorbed uid's record on the excluded
+  contacts surface stayed behind. Every address on it then resolved to two
+  uids, and no sanctioned path could reach it. Both merge paths now fold that
+  record onto the canonical uid's record. Addresses the canonical record lacks
+  are added across `emails`, `alt_emails`, `former_emails` and `phones`, with
+  per-value `field_sources` provenance, and per-address bounce closes and
+  classifications move with them. Addresses it already lists are dropped. The
+  absorbed record is then retired: renamed to `<name>.md.retired`, stamped
+  `folded_into`, and logged to `_contact_record_retirements.jsonl`. It is never
+  deleted. The new repair mode finds records whose uid was absorbed by an
+  earlier merge (through a tombstone's `folded_into`, a canonical page's
+  `merged_from`, or `_merge_provenance.jsonl`) and folds them the same way. It
+  also retires a slug-only duplicate copy of a uid's record when every value
+  on that copy is already on the `<uid>`-named copy. Divergent copies,
+  ambiguous canonicals and page-less uids with no merge record are reported
+  and never touched. It is dry-run by default, prints counts only, and takes
+  the run lock on `--apply`. Nothing rebuilds the recall index, because the
+  excluded surface is not in it. A deployment that has not mapped `pii` to an
+  excluded surface is a no-op.
+
 - **`athenaeum receipts attest-readout`: witnessed hits, and every provenance
   miss as an INCIDENT (issue athenaeum#2160).** Reads the receipt ledger and
   the witness index — and nothing else, no transcript — and reports the
