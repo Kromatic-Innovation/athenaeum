@@ -731,6 +731,74 @@ def _matching_human_utterance(records: list[object], claim: str) -> object | Non
     return None
 
 
+def attest_user_stated_records(
+    records: list[object],
+    *,
+    origin_session_id: str,
+    claim: str,
+    index: witness_attestation.AttestationIndex | None,
+) -> tuple[witness_attestation.AttestationOutcome | None, str, str | None]:
+    """Attest a ``"user-stated"`` classification against the witness ledger.
+
+    Issue athenaeum#2158 ran this inline in :func:`write_receipt_for_origin`;
+    issue athenaeum#2159 needs the identical lookup from
+    :func:`athenaeum.repair.backfill_sources`, whose witnessed branch must
+    agree with intake's or the two writers would disagree about which claims
+    are witnessed. Extracted rather than copied for exactly that reason, and
+    it is a pure function over already-read *records* — the CALLER owns the
+    single transcript read (the athenaeum#2048 read budget).
+
+    Returns ``(outcome, utterance_digest, transcript_origin_kind)``:
+
+    * ``(None, "", None)`` when no human-authored record matches *claim* —
+      which is the pre-athenaeum#2158 state of the world, so a caller writes
+      its receipt (or its ``user:`` rewrite) exactly as it did before.
+    * otherwise the :class:`~athenaeum.witness_attestation.AttestationOutcome`
+      (``hit`` or a ``miss_reason``), the matched utterance's digest, and the
+      record's ``origin.kind`` when it carries one.
+
+    Every attestation input is read straight off the matched RECORD — never
+    from the claim or the utterance text — and *index* is ``None`` exactly
+    when ``librarian.witness_attestation_enabled`` resolves off, which is the
+    only way to reach the ``"flag-off"`` outcome and costs no I/O.
+    """
+    matched_record = _matching_human_utterance(records, claim)
+    if matched_record is None:
+        return None, "", None
+    matched_text = _normalize(_user_authored_text(matched_record))
+    utterance_digest = hashlib.sha256(matched_text.encode("utf-8")).hexdigest()
+
+    prompt_id: str | None = None
+    transcript_origin_kind: str | None = None
+    transcript_prompt_source: str | None = None
+    transcript_is_sidechain = False
+    if isinstance(matched_record, dict):
+        raw_prompt_id = matched_record.get("promptId")
+        prompt_id = str(raw_prompt_id) if raw_prompt_id else None
+        origin = matched_record.get("origin")
+        if isinstance(origin, dict):
+            raw_origin_kind = origin.get("kind")
+            if isinstance(raw_origin_kind, str):
+                transcript_origin_kind = raw_origin_kind
+        raw_prompt_source = matched_record.get("promptSource")
+        if isinstance(raw_prompt_source, str):
+            transcript_prompt_source = raw_prompt_source
+        transcript_is_sidechain = bool(matched_record.get("isSidechain"))
+
+    outcome = witness_attestation.attest(
+        index,
+        prompt_id=prompt_id,
+        origin_session_id=origin_session_id,
+        claim=claim,
+        utterance_digest=utterance_digest,
+        matched_record_text=_user_authored_text(matched_record),
+        transcript_origin_kind=transcript_origin_kind,
+        transcript_prompt_source=transcript_prompt_source,
+        transcript_is_sidechain=transcript_is_sidechain,
+    )
+    return outcome, utterance_digest, transcript_origin_kind
+
+
 def write_receipt_for_origin(
     wiki_root: Path,
     *,
@@ -822,45 +890,16 @@ def write_receipt_for_origin(
     transcript_origin_kind: str | None = None
     witness_outcome: witness_attestation.AttestationOutcome | None = None
     if classification.channel == "user-stated":
-        matched_record = _matching_human_utterance(snap.records, claim)
-        if matched_record is not None:
-            matched_text = _normalize(_user_authored_text(matched_record))
-            utterance_digest = hashlib.sha256(matched_text.encode("utf-8")).hexdigest()
-
-            # Issue athenaeum#2158: attest this utterance against the witness
-            # ledger. Every field below is read straight off the matched
-            # RECORD (never the claim/utterance text itself) — the same
-            # record `_matching_human_utterance` now returns instead of
-            # just its normalized text.
-            prompt_id: str | None = None
-            transcript_prompt_source: str | None = None
-            transcript_is_sidechain = False
-            if isinstance(matched_record, dict):
-                raw_prompt_id = matched_record.get("promptId")
-                prompt_id = str(raw_prompt_id) if raw_prompt_id else None
-                origin = matched_record.get("origin")
-                if isinstance(origin, dict):
-                    raw_origin_kind = origin.get("kind")
-                    if isinstance(raw_origin_kind, str):
-                        transcript_origin_kind = raw_origin_kind
-                raw_prompt_source = matched_record.get("promptSource")
-                if isinstance(raw_prompt_source, str):
-                    transcript_prompt_source = raw_prompt_source
-                transcript_is_sidechain = bool(matched_record.get("isSidechain"))
-
-            witness_outcome = witness_attestation.attest(
-                run.attestation_index,
-                prompt_id=prompt_id,
+        witness_outcome, utterance_digest, transcript_origin_kind = (
+            attest_user_stated_records(
+                snap.records,
                 origin_session_id=origin_session_id,
                 claim=claim,
-                utterance_digest=utterance_digest,
-                matched_record_text=_user_authored_text(matched_record),
-                transcript_origin_kind=transcript_origin_kind,
-                transcript_prompt_source=transcript_prompt_source,
-                transcript_is_sidechain=transcript_is_sidechain,
+                index=run.attestation_index,
             )
-            if witness_outcome.hit:
-                final_channel = "witnessed"
+        )
+        if witness_outcome is not None and witness_outcome.hit:
+            final_channel = "witnessed"
 
     if (
         existing is not None

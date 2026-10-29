@@ -9,6 +9,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`witnessed` joins source-precedence tier 1, and the rewrite is persisted
+  onto the memory (issue athenaeum#2159).** A `witnessed` receipt
+  (athenaeum#2158) changed nothing the resolver saw: precedence keys on the
+  memory's `source:` SCALAR, so a witness-corroborated claim still compared
+  as `claude:inferred`. Tier 1 now carries two tokens —
+  `user:<conversation-ref> / witnessed:<session-ref>` — in the same "two
+  tokens, one rank" form tier 2 (`linkedin:` / `twitter:`) already used, and
+  both intake and `repair --backfill-sources` write the ranked token back.
+  - **No rank moved.** Operator ruling 9 (2026-10-28, epic athenaeum#2144)
+    declined a tier ABOVE `user:`: a harness witness corroborates the user's
+    own word, it does not outrank it. Still 9 tiers,
+    `precedence.UNKNOWN_SOURCE_RANK` still 9, and every pre-existing token's
+    rank is pinned against a frozen snapshot rather than re-derived from the
+    live taxonomy (which would make the "nothing shifted" check vacuous).
+  - **A design-lock change, so every taxonomy site moved together:** the
+    canonical `resolutions._RESOLVE_SYSTEM` prose, `precedence.
+    SOURCE_PRECEDENCE_TIERS`, the regenerated golden + `docs/design/
+    prompts.md`, `conflict-resolution.md` §11, `provenance-shape.md` §10.1,
+    `contradiction-detection.md` §3 (which publishes its own copy), and
+    `field-corrections.md` §6.1's inline denominator, which had to go 10 → 11
+    tokens or its own positive control would stop firing.
+  - **One owner for the rewrite, so the two writers cannot drift.**
+    `repair`'s `_yaml_scalar_literal` / `_set_frontmatter_scalar` moved
+    verbatim down to a new L1 leaf, `athenaeum.frontmatter_edit` (`repair` is
+    L4, `intake` is L2), which also owns `witnessed_source_fields` — the only
+    place the four `witnessed` fields are composed and the only place the
+    `#turn<N>` ref is built. `transcript_receipts.attest_user_stated_records`
+    is likewise now shared, so intake and `repair` cannot disagree about
+    which claims are witnessed.
+  - **The subtle one: `#turn<N>` is the MEMORY's `originTurn`**, resolved
+    through `transcript_verify._best_effort_ref` — the same numbering
+    `repair`'s `user:<ref>` already used. The witness ledger's own
+    per-session `turn` counter is a DIFFERENT numbering and reaches the file
+    only as `witness_ref`'s `seq` segment. Pinned by a fixture where all
+    three numbers differ.
+  - **Eligibility is deliberately narrow.** Only a DEFAULTED
+    `claude:inferred` source or an existing `user:` source is rewritten; a
+    caller-declared, non-default, non-`user:` source is never
+    second-guessed, and an absent `source` key is not a claim this pass gets
+    to attribute. `repair`'s candidate selection is unchanged (still the
+    exactly-defaulted scalar only).
+  - Both writers are gated by `librarian.witness_attestation_enabled`
+    (default off), and the flag-off path is pinned byte- AND
+    mtime-identical. The intake write requires an already-acquired
+    `RunLock`, checked before any no-op condition, mirroring
+    `persist_recovered_origin_session_id` (athenaeum#2038).
+
 - **Nightly witness anchoring, the receipt `AnchoringSealer`, and an
   off-machine mirror of anchor records (issue athenaeum#2040).** The witness
   design's last unbuilt anchoring path: at the end of a librarian run, under

@@ -1109,6 +1109,20 @@ fallback first non-frontmatter line) as a normalized substring:
    `source_ref` are set. `on_behalf_of` is populated from the owner's
    configured `asserter` (§10.3) ONLY when it yields a durable identity
    key; transcripts carry no OIDC identity, so it is usually absent.
+1a. **...and the witness ledger agrees → `witnessed`** (issue
+   athenaeum#2159, gated by `librarian.witness_attestation_enabled`). When
+   the matched utterance ALSO attests against the hash-chained
+   `promptwitness` ledger, the quartet `witnessed:<session>#turn<N>` /
+   `source_type: witnessed` / `source_ref` / `witness_ref` replaces the
+   `user:` trio — still resolver tier 1, which `witnessed` SHARES with
+   `user:` rather than outranking. `on_behalf_of` is unaffected (it records
+   WHO asserted, orthogonal to the source token). The field mapping comes
+   from `frontmatter_edit.witnessed_source_fields`, the same function
+   `intake.persist_witnessed_source` calls, so the two writers produce an
+   identical rewrite by construction. Candidate SELECTION is unchanged —
+   still only the exactly-defaulted `claude:inferred` scalar. The pass
+   builds ONE `witness_attestation.AttestationIndex` for the whole run,
+   never one per memory.
 2. **Derived from a tool-result artifact → `agent-observed`.** The scalar
    is rewritten to `agent-observed:<model>:<session-ref>` (tier 5 above)
    and `source_type: agent-observed` / `source_ref` / `model` are set.

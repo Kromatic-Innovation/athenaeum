@@ -266,11 +266,13 @@ def _cmd_repair_backfill_sources(args: argparse.Namespace) -> int:
             apply=args.apply,
             asserter=asserter,
             limit=args.limit,
+            config=cfg,
         )
         mode = "APPLY" if args.apply else "DRY RUN"
         print(f"=== repair backfill-sources ({mode}) ===")
         print(f"  files_scanned:      {report.files_scanned}")
         print(f"  user-stated:        {report.user_stated}")
+        print(f"  witnessed:          {report.witnessed}")
         print(f"  agent-observed:     {report.agent_observed}")
         print(f"  confirmed-inferred: {report.confirmed_inferred}")
         print(f"  skipped:            {len(report.skips)}")
@@ -287,7 +289,10 @@ def _cmd_repair_backfill_sources(args: argparse.Namespace) -> int:
             print(f"  resume_after:       {report.resume_after}")
 
         total_changed = (
-            report.user_stated + report.agent_observed + report.confirmed_inferred
+            report.user_stated
+            + report.witnessed
+            + report.agent_observed
+            + report.confirmed_inferred
         )
         if report.errors:
             return 1

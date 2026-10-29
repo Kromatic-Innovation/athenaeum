@@ -44,7 +44,9 @@ import yaml
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.frontmatter_edit import (
     DEFAULTED_INFERRED_SOURCE,
+    apply_frontmatter_scalars,
     set_frontmatter_scalar,
+    witnessed_source_fields,
     yaml_scalar_literal,
 )
 
@@ -428,6 +430,13 @@ class BackfillReport:
         files_scanned: total ``*.md`` intake files inspected.
         user_stated: memories upgraded to ``user-stated`` (source scalar
             rewritten to ``user:<ref>``; resolver tier 1).
+        witnessed: memories upgraded to ``witnessed`` (issue athenaeum#2159)
+            — a ``user-stated`` match whose utterance ALSO attested against
+            the witness ledger. A subset of what ``user_stated`` would have
+            counted before this issue, not an addition to it: the two are
+            mutually exclusive per memory, and both land at resolver tier 1.
+            Always ``0`` when ``librarian.witness_attestation_enabled`` is
+            off.
         agent_observed: memories upgraded to ``agent-observed`` (source scalar
             rewritten to ``agent-observed:<model>:<ref>``).
         confirmed_inferred: memories confirmed ``inferred`` (idempotency
@@ -443,6 +452,7 @@ class BackfillReport:
 
     files_scanned: int = 0
     user_stated: int = 0
+    witnessed: int = 0
     agent_observed: int = 0
     confirmed_inferred: int = 0
     changes: list[tuple[Path, str]] = field(default_factory=list)
@@ -498,6 +508,7 @@ def backfill_sources(
     apply: bool = False,
     asserter: dict[str, object] | None = None,
     limit: int | None = None,
+    config: dict[str, object] | None = None,
 ) -> BackfillReport:
     """Re-classify DEFAULTED ``claude:inferred`` memories against transcripts.
 
@@ -512,6 +523,21 @@ def backfill_sources(
        ``source_type: user-stated`` / ``source_ref``. ``on_behalf_of`` is
        populated from *asserter* ONLY when it yields a durable identity key
        (transcripts carry no OIDC identity, so this is usually absent).
+    1a. **...and the witness ledger agrees → ``witnessed``** (issue
+       athenaeum#2159, gated by ``librarian.witness_attestation_enabled``
+       via *config*). When the matched utterance ALSO attests against the
+       hash-chained ``promptwitness`` ledger, the quartet
+       ``witnessed:<session>#turn<N>`` / ``source_type: witnessed`` /
+       ``source_ref`` / ``witness_ref`` replaces the ``user:`` trio. Still
+       resolver tier 1 — ``witnessed`` SHARES that tier with ``user:``, it
+       does not outrank it. The field mapping comes from
+       :func:`athenaeum.frontmatter_edit.witnessed_source_fields`, the same
+       function :func:`athenaeum.intake.persist_witnessed_source` calls, so
+       the two writers produce an IDENTICAL rewrite by construction rather
+       than by two transcriptions agreeing. ``on_behalf_of`` is still
+       populated the same way — it records WHO asserted, which is orthogonal
+       to the source token and would otherwise be silently lost for anyone
+       with a configured asserter.
     2. **Derived from a tool-result artifact → ``agent-observed``.** Rewrite the
        scalar to ``agent-observed:<model>:<session-ref>`` (``model`` omitted
        when the transcript carries none) and set
@@ -527,9 +553,18 @@ def backfill_sources(
     nothing. ``limit`` bounds the number of memories acted on per run for a
     resumable batch.
     """
+    from athenaeum.config import resolve_witness_attestation_enabled
     from athenaeum.models import asserter_identity_key
     from athenaeum.provenance import parse_source
-    from athenaeum.transcript_verify import classify_backfill_claim
+    from athenaeum.transcript_receipts import attest_user_stated_records
+    from athenaeum.transcript_verify import (
+        classify_backfill_records,
+        read_session_records,
+    )
+    from athenaeum.witness_attestation import (
+        AttestationIndex,
+        resolve_default_witness_dir,
+    )
 
     report = BackfillReport()
     if not auto_memory_root.is_dir():
@@ -543,6 +578,16 @@ def backfill_sources(
         name = asserter.get("name")
         if isinstance(name, str) and name.strip():
             on_behalf_of = name.strip()
+
+    # Issue athenaeum#2159: ONE witness-ledger index for the whole pass,
+    # built before the loop and never per file — the athenaeum#2158
+    # read-budget discipline, and the same "build once, hold for the run"
+    # shape `transcript_receipts.ReceiptRun` already uses. With the flag off
+    # the ledger directory is not even resolved, let alone read, so the
+    # flag-off path costs exactly what it did before this issue.
+    attestation_index: AttestationIndex | None = None
+    if resolve_witness_attestation_enabled(config):
+        attestation_index = AttestationIndex.load(resolve_default_witness_dir())
 
     acted = 0
     for path in _iter_auto_memory_files(auto_memory_root):
@@ -583,16 +628,48 @@ def backfill_sources(
         scope = path.parent.name
         claim = _extract_claim(meta, body)
 
-        result = classify_backfill_claim(
-            scope, session_id, turn=turn, claim=claim, projects_root=projects_root
-        )
+        # One transcript read, two consumers: the classification, and (when
+        # the witness flag is on and the claim classifies `user-stated`) the
+        # witness-ledger attestation. `classify_backfill_claim` is exactly
+        # this pair of calls, so the flag-off path is unchanged.
+        records = read_session_records(scope, session_id, projects_root=projects_root)
+        result = classify_backfill_records(records, session_id, turn, claim=claim)
         if result.channel == "unavailable":
             report.skips.append((path, "transcript-unavailable"))
             continue
 
+        # Attest only what could possibly be witnessed: a `user-stated`
+        # match, with the flag on. `attest_user_stated_records` is THE same
+        # function intake's receipt writer calls, so repair cannot disagree
+        # with intake about which claims are witnessed.
+        witness_fields: dict[str, str] | None = None
+        if result.channel == "user-stated" and attestation_index is not None:
+            outcome, _digest, _origin_kind = attest_user_stated_records(
+                records,
+                origin_session_id=session_id,
+                claim=claim,
+                index=attestation_index,
+            )
+            if outcome is not None and outcome.hit:
+                witness_fields = witnessed_source_fields(
+                    session_id=session_id,
+                    origin_turn=turn,
+                    witness_ref=outcome.witness_ref,
+                )
+
         # Build the surgical frontmatter edit for this channel.
         new_source: str | None
-        if result.channel == "user-stated":
+        if witness_fields is not None:
+            # Issue athenaeum#2159: byte-for-byte the mapping intake writes,
+            # from the one shared composer.
+            new_source = witness_fields["source"]
+            new_fm = apply_frontmatter_scalars(fm, witness_fields)
+            if on_behalf_of:
+                new_fm = _set_frontmatter_scalar(
+                    new_fm, "on_behalf_of", _yaml_scalar_literal(on_behalf_of)
+                )
+            summary = f"witnessed: source -> {new_source}"
+        elif result.channel == "user-stated":
             new_source = f"user:{result.ref}"
             new_fm = _set_frontmatter_scalar(
                 fm, "source", _yaml_scalar_literal(new_source)
@@ -640,7 +717,9 @@ def backfill_sources(
             report.errors.append((path, f"validation_failed: {str(exc)[:80]}"))
             continue
 
-        if result.channel == "user-stated":
+        if witness_fields is not None:
+            report.witnessed += 1
+        elif result.channel == "user-stated":
             report.user_stated += 1
         elif result.channel == "agent-observed":
             report.agent_observed += 1

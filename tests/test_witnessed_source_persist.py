@@ -392,3 +392,281 @@ class TestPersistWitnessedSource:
                 )
                 is False
             )
+
+
+# ---------------------------------------------------------------------------
+# repair --backfill-sources — the SAME rewrite, from the same composer
+# ---------------------------------------------------------------------------
+
+
+def _write_backfill_memory(
+    auto_memory_root: Path,
+    *,
+    filename: str = "feedback_a.md",
+    source: str = DEFAULTED_INFERRED_SOURCE,
+    turn: int | None = MEMORY_ORIGIN_TURN,
+    extra_fm: str = "",
+) -> Path:
+    scope_dir = auto_memory_root / "scopeA"
+    scope_dir.mkdir(parents=True, exist_ok=True)
+    lines = ["---", "type: feedback", "originSessionId: sess1"]
+    if turn is not None:
+        lines.append(f"originTurn: {turn}")
+    lines.append(f"source: {source}")
+    if extra_fm:
+        lines.append(extra_fm.rstrip("\n"))
+    lines += ["---", ""]
+    path = scope_dir / filename
+    path.write_text("\n".join(lines) + "\n" + CLAIM + "\n", encoding="utf-8")
+    return path
+
+
+def _backfill(
+    auto_memory_root: Path,
+    projects_root: Path,
+    *,
+    apply: bool = True,
+    witness_enabled: bool = True,
+    limit: int | None = None,
+):
+    from athenaeum.repair import backfill_sources
+
+    return backfill_sources(
+        auto_memory_root,
+        projects_root=projects_root,
+        apply=apply,
+        limit=limit,
+        config={"librarian": {"witness_attestation_enabled": witness_enabled}},
+    )
+
+
+class TestRepairBackfillWitnessedBranch:
+    def test_hit_writes_the_witnessed_quartet(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        witness_dir = tmp_path / "witness"
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(witness_dir))
+        line = _append_witness_turn(witness_dir)
+        auto_memory_root = tmp_path / "knowledge" / "raw" / "auto-memory"
+        member = _write_backfill_memory(auto_memory_root)
+        _write_transcript(tmp_path / "projects")
+
+        report = _backfill(auto_memory_root, tmp_path / "projects")
+        assert report.witnessed == 1
+        assert report.user_stated == 0
+        assert report.agent_observed == 0
+        assert report.errors == []
+        assert [s for _p, s in report.changes] == [
+            "witnessed: source -> witnessed:sess1#turn3"
+        ]
+
+        text = member.read_text(encoding="utf-8")
+        assert "source: 'witnessed:sess1#turn3'" in text
+        assert "source_type: witnessed" in text
+        assert "source_ref: 'sess1#turn3'" in text
+        assert f"witness_ref: '{line.ledger_id}:{line.seq}'" in text
+        # AC 6, on the repair path too: all three numbers differ.
+        assert f"#turn{LEDGER_TURN}" not in text
+        assert f"#turn{line.seq}" not in text
+
+    def test_rewrite_is_identical_to_intakes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC 5 — the two writers produce the SAME bytes.
+
+        Both paths run against identical member files and the same witness
+        line, then the two results are compared directly. This is the
+        assertion the shared `witnessed_source_fields` composer exists to
+        make true by construction; a future re-transcription on either side
+        fails here.
+        """
+        witness_dir = tmp_path / "witness"
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(witness_dir))
+        line = _append_witness_turn(witness_dir)
+        projects_root = tmp_path / "projects"
+        _write_transcript(projects_root)
+
+        # --- repair --backfill-sources --apply ---
+        repair_root = tmp_path / "repair-knowledge"
+        repair_member = _write_backfill_memory(repair_root / "raw" / "auto-memory")
+        report = _backfill(repair_root / "raw" / "auto-memory", projects_root)
+        assert report.witnessed == 1
+
+        # --- intake's persist, on a byte-identical member ---
+        intake_root = tmp_path / "intake-knowledge"
+        intake_root.mkdir(parents=True, exist_ok=True)
+        intake_member = _write_backfill_memory(intake_root / "raw" / "auto-memory")
+        with RunLock(intake_root) as lock:
+            assert (
+                persist_witnessed_source(
+                    intake_member,
+                    session_id="sess1",
+                    origin_turn=MEMORY_ORIGIN_TURN,
+                    witness_ref=f"{line.ledger_id}:{line.seq}",
+                    lock=lock,
+                )
+                is True
+            )
+
+        assert repair_member.read_text(encoding="utf-8") == intake_member.read_text(
+            encoding="utf-8"
+        )
+
+    def test_flag_off_still_writes_the_user_trio(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        witness_dir = tmp_path / "witness"
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(witness_dir))
+        _append_witness_turn(witness_dir)  # would hit if the flag were on
+        auto_memory_root = tmp_path / "knowledge" / "raw" / "auto-memory"
+        member = _write_backfill_memory(auto_memory_root)
+        _write_transcript(tmp_path / "projects")
+
+        report = _backfill(
+            auto_memory_root, tmp_path / "projects", witness_enabled=False
+        )
+        assert report.witnessed == 0
+        assert report.user_stated == 1
+        text = member.read_text(encoding="utf-8")
+        assert "source: 'user:sess1#turn3'" in text
+        assert "source_type: user-stated" in text
+        assert "witness_ref" not in text
+
+    def test_witness_miss_still_writes_the_user_trio(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        witness_dir = tmp_path / "witness"
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(witness_dir))
+        _append_witness_turn(witness_dir, channel="headless")  # a MISS
+        auto_memory_root = tmp_path / "knowledge" / "raw" / "auto-memory"
+        member = _write_backfill_memory(auto_memory_root)
+        _write_transcript(tmp_path / "projects")
+
+        report = _backfill(auto_memory_root, tmp_path / "projects")
+        assert report.witnessed == 0
+        assert report.user_stated == 1
+        assert "source: 'user:sess1#turn3'" in member.read_text(encoding="utf-8")
+
+    @pytest.mark.parametrize(
+        "source,extra_fm",
+        [
+            ("user:sess1#turn3", ""),  # not the DEFAULTED scalar
+            ("api:apollo", ""),
+            ("claude:inferred-but-not-exactly", ""),
+            (DEFAULTED_INFERRED_SOURCE, "inferred_verified: true"),
+        ],
+    )
+    def test_candidate_selection_is_unchanged(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        source: str,
+        extra_fm: str,
+    ) -> None:
+        """AC 5's second half: adding the witnessed branch must not widen
+        which memories the pass touches. Only the EXACTLY-defaulted
+        `claude:inferred` scalar is a candidate, and `inferred_verified`
+        still short-circuits — even with a witness line that would hit.
+        """
+        witness_dir = tmp_path / "witness"
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(witness_dir))
+        _append_witness_turn(witness_dir)
+        auto_memory_root = tmp_path / "knowledge" / "raw" / "auto-memory"
+        member = _write_backfill_memory(
+            auto_memory_root, source=source, extra_fm=extra_fm
+        )
+        _write_transcript(tmp_path / "projects")
+        before = member.read_bytes()
+
+        report = _backfill(auto_memory_root, tmp_path / "projects")
+        assert report.files_scanned == 1
+        assert report.witnessed == 0
+        assert report.user_stated == 0
+        assert report.changes == []
+        assert member.read_bytes() == before
+
+    def test_dry_run_reports_without_writing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        witness_dir = tmp_path / "witness"
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(witness_dir))
+        _append_witness_turn(witness_dir)
+        auto_memory_root = tmp_path / "knowledge" / "raw" / "auto-memory"
+        member = _write_backfill_memory(auto_memory_root)
+        _write_transcript(tmp_path / "projects")
+        before = member.read_bytes()
+
+        report = _backfill(auto_memory_root, tmp_path / "projects", apply=False)
+        assert report.witnessed == 1
+        assert member.read_bytes() == before
+
+    def test_second_apply_is_a_no_op(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        witness_dir = tmp_path / "witness"
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(witness_dir))
+        _append_witness_turn(witness_dir)
+        auto_memory_root = tmp_path / "knowledge" / "raw" / "auto-memory"
+        member = _write_backfill_memory(auto_memory_root)
+        _write_transcript(tmp_path / "projects")
+
+        _backfill(auto_memory_root, tmp_path / "projects")
+        after_first = member.read_bytes()
+        second = _backfill(auto_memory_root, tmp_path / "projects")
+        # The rewritten scalar is no longer the DEFAULTED one, so the memory
+        # is not even a candidate on the second pass.
+        assert second.witnessed == 0
+        assert member.read_bytes() == after_first
+
+    def test_attestation_index_is_built_once_per_pass(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The athenaeum#2158 read-budget discipline: one index for the whole
+        pass, never one per file.
+        """
+        from athenaeum import witness_attestation
+
+        witness_dir = tmp_path / "witness"
+        monkeypatch.setenv("PROMPTWITNESS_DIR", str(witness_dir))
+        _append_witness_turn(witness_dir)
+        auto_memory_root = tmp_path / "knowledge" / "raw" / "auto-memory"
+        for i in range(4):
+            _write_backfill_memory(auto_memory_root, filename=f"feedback_{i}.md")
+        _write_transcript(tmp_path / "projects")
+
+        calls: list[Path] = []
+        real_load = witness_attestation.AttestationIndex.load
+
+        def counting_load(witness_dir_arg: Path) -> object:
+            calls.append(witness_dir_arg)
+            return real_load(witness_dir_arg)
+
+        monkeypatch.setattr(
+            witness_attestation.AttestationIndex, "load", staticmethod(counting_load)
+        )
+        report = _backfill(auto_memory_root, tmp_path / "projects")
+        assert report.files_scanned == 4
+        assert report.witnessed == 4
+        assert len(calls) == 1, f"index rebuilt per file: {len(calls)} loads"
+
+    def test_flag_off_never_resolves_the_witness_dir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Zero added I/O on the flag-off path (the `ReceiptRun` contract)."""
+        from athenaeum import witness_attestation
+
+        auto_memory_root = tmp_path / "knowledge" / "raw" / "auto-memory"
+        _write_backfill_memory(auto_memory_root)
+        _write_transcript(tmp_path / "projects")
+
+        def boom(*_a: object, **_k: object) -> object:
+            raise AssertionError("the witness ledger must not be touched")
+
+        monkeypatch.setattr(
+            witness_attestation.AttestationIndex, "load", staticmethod(boom)
+        )
+        monkeypatch.setattr(witness_attestation, "resolve_default_witness_dir", boom)
+        report = _backfill(
+            auto_memory_root, tmp_path / "projects", witness_enabled=False
+        )
+        assert report.user_stated == 1
