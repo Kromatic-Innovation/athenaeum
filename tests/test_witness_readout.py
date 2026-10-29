@@ -20,6 +20,14 @@ What is under test, acceptance criterion by acceptance criterion:
   incident class, with its count, and never one per incident (AC5).
 * :class:`TestWitnessSide` — unsigned lines, anchor coverage, the
   ``session-close`` deficit, the tolerant hook-error read, and ``--since``.
+  Includes the two pins the review on PR athenaeum#2186 asked for: a
+  by-design non-human turn (``launch-argument``, ``subagent``, ``system``,
+  ``task-notification``, ``local-command``, any non-interactive channel)
+  creates NO deficit, and two cumulative ``session-close`` snapshots for one
+  session are not summed.
+* :class:`TestSupersededReceipts` — the append-only ledger holds history, so
+  a miss that was later resolved to a ``witnessed`` hit must not be reported
+  as a live incident (same review, finding 2), pinned in both directions.
 
 No network, no key provider, no transcript: the readout's whole contract is
 that it reads the receipt ledger and the witness index and nothing else, so
@@ -112,6 +120,7 @@ def _receipt(
     transcript_entrypoint: str | None = None,
     session: str = "11111111-2222-3333-4444-555555555555",
     month: str = MONTH,
+    day: int = 9,
 ) -> ReceiptEntry:
     entry = ReceiptEntry(
         origin_scope="raw/auto-memory",
@@ -122,7 +131,7 @@ def _receipt(
         utterance_digest=digest,
         transcript_prefix_digest=digest,
         transcript_line_count=3,
-        recorded_at=f"{month}-09T00:00:00Z",
+        recorded_at=f"{month}-{day:02d}T00:00:00Z",
         witness_tag=witness_tag,
         witness_ref=witness_ref,
         witness_miss=witness_miss,
@@ -138,7 +147,15 @@ def _digest(n: int) -> str:
     return f"{n:064x}"
 
 
-def _witness_turn(ledger_dir: Path, *, seq_hint: int, sig: bool = False) -> Any:
+def _witness_turn(
+    ledger_dir: Path,
+    *,
+    seq_hint: int,
+    sig: bool = False,
+    prompt_kind: str = "human",
+    channel: str = "interactive",
+    session: str = "11111111-2222-3333-4444-555555555555",
+) -> Any:
     """One real ``turn`` witness line, unsigned unless *sig* is set.
 
     Unsigned is the realistic default: the hook writes with
@@ -156,13 +173,13 @@ def _witness_turn(ledger_dir: Path, *, seq_hint: int, sig: bool = False) -> Any:
         hook_version="promptwitness test",
         ts=f"{MONTH}-09T00:00:0{seq_hint % 10}.000Z",
         key_provider=provider,
-        session="11111111-2222-3333-4444-555555555555",
+        session=session,
         turn=seq_hint,
-        prompt_id=f"p{seq_hint}",
-        prompt_kind="human",
+        prompt_id=f"p{seq_hint}-{prompt_kind}-{channel}",
+        prompt_kind=prompt_kind,
         prompt_digest="sha256:" + _digest(seq_hint),
         prompt_chars=12,
-        channel="interactive",
+        channel=channel,
         signals={"entrypoint": "cli"},
     )
 
@@ -205,6 +222,49 @@ def _witness_session_close(
         turns=turns,
         last_seq=turns,
         turns_witnessed=turns_witnessed,
+    )
+
+
+def _ended_session_with_deficit(
+    ledger_dir: Path, *, session: str, unwitnessed: int, witnessed: int = 1
+) -> None:
+    """An ENDED session carrying *unwitnessed* witness-ELIGIBLE turns that
+    are not witnessable-human.
+
+    "Eligible but not witnessable" has exactly one shape: an `interactive`
+    turn whose leading `<tag` the classifier did not recognise, so
+    `classify_prompt_kind` returned its default-deny `unknown`. That is the
+    only way a turn the design DOES attest can end up unattested, which is
+    what the deficit exists to surface.
+    """
+    seq = 0
+    for _ in range(witnessed):
+        seq += 1
+        _witness_turn(ledger_dir, seq_hint=seq, session=session)
+    for _ in range(unwitnessed):
+        seq += 1
+        _witness_turn(ledger_dir, seq_hint=seq, session=session, prompt_kind="unknown")
+    _witness_session_close(
+        ledger_dir, session=session, turns=witnessed + unwitnessed, turns_witnessed=witnessed
+    )
+
+
+def _witness_line_probe(prompt_kind: str, channel: str = "interactive") -> Any:
+    """An in-memory `WitnessLine` for predicate tests -- no ledger write."""
+    from promptwitness.ledger import WitnessLine
+
+    return WitnessLine(
+        v=1,
+        ledger_id="pw-0123456789abcdef",
+        seq=1,
+        kind="turn",
+        ts=f"{MONTH}-09T00:00:00.000Z",
+        harness="claude-code",
+        harness_version="",
+        hook_version="promptwitness test",
+        prev="",
+        prompt_kind=prompt_kind,
+        channel=channel,
     )
 
 
@@ -359,8 +419,8 @@ class TestExitCode:
             witness_ref="pw-0123456789abcdef:1",
         )
         _receipt(world["wiki"], digest=_digest(2), witness_miss="flag-off")
-        _witness_session_close(
-            world["witness"], session="s-clean", turns=4, turns_witnessed=4
+        _ended_session_with_deficit(
+            world["witness"], session="s-clean", unwitnessed=0, witnessed=4
         )
         assert self._run(world, capsys) == 0
 
@@ -387,9 +447,7 @@ class TestExitCode:
         from athenaeum._cmd_receipts import INCIDENT_EXIT
 
         _receipt(world["wiki"], digest=_digest(1), witness_miss="flag-off")
-        _witness_session_close(
-            world["witness"], session="s-short", turns=5, turns_witnessed=3
-        )
+        _ended_session_with_deficit(world["witness"], session="s-short", unwitnessed=2)
         assert self._run(world, capsys) == INCIDENT_EXIT
 
     def test_the_incident_code_is_distinct_from_the_other_receipts_codes(self) -> None:
@@ -422,9 +480,7 @@ class TestNoPlaintext:
         )
         _witness_turn(world["witness"], seq_hint=1)
         _witness_turn(world["witness"], seq_hint=2, sig=True)
-        _witness_session_close(
-            world["witness"], session="s-deficit", turns=9, turns_witnessed=2
-        )
+        _ended_session_with_deficit(world["witness"], session="s-deficit", unwitnessed=3)
         _hook_errors(world["cache"], "RuntimeError", "OSError")
 
         summary = build_readout(
@@ -543,9 +599,7 @@ class TestNightly:
         for n in range(5):
             _receipt(world["wiki"], digest=_digest(n), witness_miss="no-entry")
         _hook_errors(world["cache"], "OSError", "OSError", "RuntimeError")
-        _witness_session_close(
-            world["witness"], session="s-short", turns=6, turns_witnessed=2
-        )
+        _ended_session_with_deficit(world["witness"], session="s-short", unwitnessed=4)
 
         monkeypatch.setenv("ATHENAEUM_WITNESS_ATTESTATION_ENABLED", "1")
         ctx = _FakeCtx(world["wiki"])
@@ -679,20 +733,128 @@ class TestWitnessSide:
         assert "n/a (no witness lines)" in render_text(summary)
         assert summary.ok is True
 
-    def test_session_close_deficit_sums_per_session(self, world: dict[str, Path]) -> None:
-        _witness_session_close(world["witness"], session="s-a", turns=5, turns_witnessed=3)
-        _witness_session_close(world["witness"], session="s-a", turns=4, turns_witnessed=1)
-        _witness_session_close(world["witness"], session="s-b", turns=2, turns_witnessed=2)
+    def test_deficit_is_per_session_and_only_for_ended_sessions(
+        self, world: dict[str, Path]
+    ) -> None:
+        _ended_session_with_deficit(world["witness"], session="s-a", unwitnessed=3)
+        _ended_session_with_deficit(world["witness"], session="s-b", unwitnessed=0, witnessed=2)
+        # s-c has the same unwitnessed shape but NEVER closed -- still in
+        # flight, so it is not judged.
+        _witness_turn(world["witness"], seq_hint=50, session="s-c", prompt_kind="unknown")
+
         summary = build_readout(
             world["wiki"], witness_dir=world["witness"], cache_dir=world["cache"]
         )
-        assert summary.session_close_deficits == {"s-a": 5}
-        assert summary.session_close_deficit == 5
+        assert summary.session_close_deficits == {"s-a": 3}
+        assert summary.session_close_deficit == 3
         deficits = [
             i for i in summary.incidents if i.incident_class == INCIDENT_SESSION_CLOSE_DEFICIT
         ]
         assert len(deficits) == 1
-        assert (deficits[0].session, deficits[0].count) == ("s-a", 5)
+        assert (deficits[0].session, deficits[0].count) == ("s-a", 3)
+        assert deficits[0].reason == "eligible-turns-not-witnessed"
+
+    @pytest.mark.parametrize(
+        ("prompt_kind", "channel"),
+        [
+            ("launch-argument", "interactive"),
+            ("subagent", "interactive"),
+            ("system", "interactive"),
+            ("task-notification", "interactive"),
+            ("local-command", "interactive"),
+            ("human", "headless"),
+            ("human", "bridge"),
+            ("human", "unknown"),
+        ],
+    )
+    def test_by_design_non_human_turns_create_no_deficit(
+        self, world: dict[str, Path], prompt_kind: str, channel: str
+    ) -> None:
+        """Review of PR athenaeum#2186, finding 1b. `turns - turns_witnessed`
+        counts these, and every one of them occurs on a HEALTHY session --
+        a `<system-reminder>`, a finished subagent's `<task-notification>`,
+        a subagent prompt, a plain `claude "<prompt>"` TTY launch
+        (`launch-argument`), or any non-interactive channel. Firing an
+        incident on them would make the incident channel noise, which
+        defeats operator ruling 10 as surely as missing a real one.
+        """
+        _witness_turn(world["witness"], seq_hint=1, session="s-healthy")
+        _witness_turn(
+            world["witness"],
+            seq_hint=2,
+            session="s-healthy",
+            prompt_kind=prompt_kind,
+            channel=channel,
+        )
+        _witness_session_close(
+            world["witness"], session="s-healthy", turns=2, turns_witnessed=1
+        )
+        summary = build_readout(
+            world["wiki"], witness_dir=world["witness"], cache_dir=world["cache"]
+        )
+        # The close line's own literal pair DOES show a difference ...
+        assert summary.session_close_turns == 2
+        assert summary.session_close_turns_witnessed == 1
+        # ... and the readout still reports no incident.
+        assert summary.session_close_deficits == {}
+        assert summary.ok is True
+
+    def test_cumulative_close_snapshots_are_not_summed(
+        self, world: dict[str, Path]
+    ) -> None:
+        """Review of PR athenaeum#2186, finding 1a. `session_close`
+        recomputes `turns`/`turns_witnessed` by re-scanning the WHOLE ledger
+        for the session, so each close line is a cumulative snapshot, not an
+        increment -- a resumed session has several, and adding them
+        double-counts. Latest-wins by `seq`.
+        """
+        _witness_turn(world["witness"], seq_hint=1, session="s-resumed")
+        _witness_session_close(
+            world["witness"], session="s-resumed", turns=1, turns_witnessed=1
+        )
+        _witness_turn(world["witness"], seq_hint=2, session="s-resumed")
+        _witness_session_close(
+            world["witness"], session="s-resumed", turns=2, turns_witnessed=2
+        )
+        summary = build_readout(
+            world["wiki"], witness_dir=world["witness"], cache_dir=world["cache"]
+        )
+        # 2, the latest snapshot -- not 3, the sum of both.
+        assert summary.session_close_turns == 2
+        assert summary.session_close_turns_witnessed == 2
+        assert summary.session_close_deficits == {}
+        assert summary.ok is True
+
+    def test_session_close_recomputes_cumulatively(self) -> None:
+        """The premise of the test above, read off the producer rather than
+        assumed: `session_close` counts from a full ledger scan."""
+        import inspect
+
+        from promptwitness.harness.claude_code import session_close
+
+        source = inspect.getsource(session_close)
+        assert "for line in ledger.iter_lines(ledger_dir)" in source
+        assert "turns = 0" in source and "turns_witnessed = 0" in source
+
+    def test_eligibility_is_wider_than_witnessability_by_exactly_unknown(self) -> None:
+        """The eligible population is `is_witnessable_human` plus the one
+        failure shape: an interactive turn the classifier could not
+        classify."""
+        from athenaeum.witness_readout import NEVER_WITNESSED_KINDS, _is_witness_eligible
+        from promptwitness.ledger import LedgerIndex
+
+        assert "unknown" not in NEVER_WITNESSED_KINDS
+        kinds = sorted({"human", "slash-command", "unknown"} | set(NEVER_WITNESSED_KINDS))
+        eligible = set()
+        witnessable = set()
+        for kind in kinds:
+            line = _witness_line_probe(kind)
+            if _is_witness_eligible(line):
+                eligible.add(kind)
+            if LedgerIndex.is_witnessable_human(line):
+                witnessable.add(kind)
+        assert witnessable == {"human", "slash-command"}
+        assert eligible - witnessable == {"unknown"}
 
     def test_hook_errors_bucket_by_class_and_survive_a_torn_line(
         self, world: dict[str, Path]
@@ -727,7 +889,7 @@ class TestWitnessSide:
         _receipt(world["wiki"], digest=_digest(1), witness_miss="no-entry", month="2026-08")
         _receipt(world["wiki"], digest=_digest(2), witness_miss="no-entry", month=MONTH)
         _hook_errors(world["cache"], "OSError")
-        _witness_session_close(world["witness"], session="s-a", turns=3, turns_witnessed=1)
+        _ended_session_with_deficit(world["witness"], session="s-a", unwitnessed=2)
 
         every = build_readout(
             world["wiki"], witness_dir=world["witness"], cache_dir=world["cache"]
@@ -785,6 +947,164 @@ class TestWitnessSide:
         assert params == {"wiki_root", "witness_dir", "cache_dir", "since"}
         fields = set(witness_readout.ReadoutSummary.__dataclass_fields__)
         assert not {f for f in fields if "threshold" in f or "rate" in f or "window" in f}
+
+
+class TestSupersededReceipts:
+    """Review of PR athenaeum#2186, finding 2.
+
+    The receipt ledger is append-only, so it holds HISTORY:
+    ``write_receipt_for_origin`` appends a NEW line whenever a memory's
+    channel or utterance digest changes, and ``iter_receipts`` returns every
+    line. Counting all of them reports a miss that was LATER RESOLVED as a
+    live incident — which contradicts the AC it is meant to satisfy.
+    """
+
+    def test_a_resolved_miss_is_not_an_incident(
+        self, world: dict[str, Path], capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from athenaeum.cli import main
+
+        # One memory, two lines: the miss, then the witnessed hit.
+        _receipt(world["wiki"], digest=_digest(1), witness_miss="no-entry", day=9)
+        _receipt(
+            world["wiki"],
+            digest=_digest(1),
+            channel="witnessed",
+            witness_tag="typed",
+            witness_ref="pw-0123456789abcdef:3",
+            day=10,
+        )
+        summary = build_readout(
+            world["wiki"], witness_dir=world["witness"], cache_dir=world["cache"]
+        )
+        assert summary.superseded_receipt_lines == 1
+        assert summary.user_stated_total == 0
+        assert summary.witnessed_total == 1
+        assert summary.witnessed_by_tag == {"typed": 1}
+        assert summary.miss_counts == {}
+        assert summary.incidents == ()
+        assert summary.ok is True
+
+        rc = main(["receipts", "attest-readout", "--path", str(world["knowledge"])])
+        capsys.readouterr()
+        assert rc == 0
+
+    def test_a_still_unresolved_miss_is_an_incident(self, world: dict[str, Path]) -> None:
+        """The other direction, so the collapse cannot silently swallow a
+        live miss: a witnessed line SUPERSEDED by a later miss still fires."""
+        _receipt(
+            world["wiki"],
+            digest=_digest(2),
+            channel="witnessed",
+            witness_tag="typed",
+            witness_ref="pw-0123456789abcdef:3",
+            day=9,
+        )
+        _receipt(world["wiki"], digest=_digest(2), witness_miss="chain-broken", day=11)
+        summary = build_readout(
+            world["wiki"], witness_dir=world["witness"], cache_dir=world["cache"]
+        )
+        assert summary.superseded_receipt_lines == 1
+        assert summary.witnessed_total == 0
+        assert summary.user_stated_total == 1
+        assert summary.miss_counts == {"chain-broken": 1}
+        assert [i.reason for i in summary.incidents] == ["chain-broken"]
+
+    def test_the_collapse_agrees_with_lookup_receipt(self, world: dict[str, Path]) -> None:
+        """Latest-wins is not re-derived: it is the same selection
+        ``transcript_receipts.lookup_receipt`` makes."""
+        from athenaeum.transcript_receipts import lookup_receipt
+
+        _receipt(world["wiki"], digest=_digest(3), witness_miss="no-entry", day=9)
+        _receipt(
+            world["wiki"],
+            digest=_digest(3),
+            channel="witnessed",
+            witness_tag="slash-args",
+            witness_ref="pw-0123456789abcdef:8",
+            day=12,
+        )
+        current = lookup_receipt(world["wiki"], "raw/auto-memory", _digest(3))
+        assert current is not None and current.channel == "witnessed"
+
+        summary = build_readout(
+            world["wiki"], witness_dir=world["witness"], cache_dir=world["cache"]
+        )
+        assert summary.witnessed_by_tag == {current.witness_tag: 1}
+        assert summary.ok is True
+
+    def test_two_memories_in_one_session_are_not_collapsed_together(
+        self, world: dict[str, Path]
+    ) -> None:
+        """The collapse key is per MEMORY, not per session — two different
+        memories from one session each keep their own incident."""
+        _receipt(world["wiki"], digest=_digest(4), witness_miss="no-entry")
+        _receipt(world["wiki"], digest=_digest(5), witness_miss="sidechain")
+        summary = build_readout(
+            world["wiki"], witness_dir=world["witness"], cache_dir=world["cache"]
+        )
+        assert summary.superseded_receipt_lines == 0
+        assert summary.user_stated_total == 2
+        assert sorted(i.reason for i in summary.incidents) == ["no-entry", "sidechain"]
+
+    def test_the_same_digest_in_two_sessions_is_two_memories(
+        self, world: dict[str, Path]
+    ) -> None:
+        """``lookup_receipt`` warns that a receipt minted for one session must
+        never speak for another, so the collapse key carries the session —
+        strictly finer than ``(origin_scope, memory_digest)``, which can only
+        keep MORE incidents."""
+        _receipt(world["wiki"], digest=_digest(6), witness_miss="no-entry", session="s-one")
+        _receipt(world["wiki"], digest=_digest(6), witness_miss="no-entry", session="s-two")
+        summary = build_readout(
+            world["wiki"], witness_dir=world["witness"], cache_dir=world["cache"]
+        )
+        assert summary.superseded_receipt_lines == 0
+        assert summary.miss_counts == {"no-entry": 2}
+        assert sorted(i.session for i in summary.incidents) == ["s-one", "s-two"]
+
+    def test_the_window_is_applied_before_the_collapse(
+        self, world: dict[str, Path]
+    ) -> None:
+        """Otherwise the kept line could be one the window excluded."""
+        _receipt(
+            world["wiki"], digest=_digest(7), witness_miss="no-entry", month="2026-08", day=9
+        )
+        _receipt(
+            world["wiki"],
+            digest=_digest(7),
+            channel="witnessed",
+            witness_tag="typed",
+            witness_ref="pw-0123456789abcdef:9",
+            month="2026-10",
+            day=9,
+        )
+        # Whole corpus: the witnessed line wins, nothing to report.
+        whole = build_readout(
+            world["wiki"], witness_dir=world["witness"], cache_dir=world["cache"]
+        )
+        assert whole.ok is True
+        assert whole.witnessed_total == 1
+
+        # Windowed to August: only the miss is in scope, and it IS reported.
+        august = build_readout(
+            world["wiki"],
+            witness_dir=world["witness"],
+            cache_dir=world["cache"],
+            since="2026-08",
+        )
+        assert august.witnessed_total == 1  # both months are >= 2026-08
+
+        windowed = build_readout(
+            world["wiki"],
+            witness_dir=world["witness"],
+            cache_dir=world["cache"],
+            since="2026-10",
+        )
+        assert windowed.user_stated_total == 0
+        assert windowed.witnessed_total == 1
+        assert windowed.superseded_receipt_lines == 0
+        assert windowed.ok is True
 
 
 def _append_anchor(ledger_dir: Path, *, ledger_id: str, seq: int) -> None:

@@ -80,6 +80,8 @@ worth keeping: a reason that stopped occurring is a finding.
 | Anchored lines | `<n>` |
 | Anchor coverage | `<pct>` |
 | Anchored through (`<ledger_id>` -> `seq`) | `<pw-xxxxxxxxxxxxxxxx -> n>` |
+| `session-close` turns / witnessed (cumulative snapshot, latest per session) | `<n>` / `<n>` |
+| Superseded receipt lines (history, not counted) | `<n>` |
 
 ## Incidents
 
@@ -113,8 +115,17 @@ From `witness_hook_errors.jsonl`, one row per exception class.
 
 ### `session-close-deficit`
 
-`turns - turns_witnessed` from each `session-close` witness line, summed per
-session.
+Per ENDED session (one with a `session-close` witness line): the number of
+witness-ELIGIBLE turn lines minus the number that are witnessable-human.
+
+This is deliberately **not** the close line's own `turns - turns_witnessed`
+pair. `session_close` counts `turns` as every `kind="turn"` line for the
+session, which on a healthy session includes a `<system-reminder>`
+(`system`), a finished subagent's `<task-notification>`, a subagent prompt,
+and the first turn of a plain `claude "<prompt>"` TTY launch
+(`launch-argument`) — all by design, none a miss. The literal pair is still
+reported above for reference; only the eligible-population figure drives an
+incident.
 
 | Session | Deficit |
 |---|---|
@@ -126,8 +137,10 @@ session.
 say so plainly — ruling 10's target state is zero provenance misses, so a
 clean reading is the result, not an absence of one. If any count is non-zero,
 name the single most likely cause and the next action; a non-zero
-`session-close-deficit` usually means the hook did not run for some turns,
-and a non-zero `hook-error` names the exception class that explains it.>`
+`session-close-deficit` means an interactive turn the kind classifier could
+not recognise (`prompt_kind: unknown`), so check the prompt shapes
+`promptwitness.harness.claude_code.WRAPPERS` covers, and a non-zero
+`hook-error` names the exception class that explains it.>`
 
 ## Not measured here
 

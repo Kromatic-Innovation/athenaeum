@@ -46,11 +46,64 @@ run appears in either rendering.
    resolve_cache_dir` that module uses rather than by a second path
    literal, and it is read TOLERANTLY — a torn last line from a hook that
    died mid-append must not crash a readout;
-7. the ``session-close`` deficit: ``turns - turns_witnessed`` from each
-   ``kind="session-close"`` witness line (written by
-   :func:`promptwitness.harness.claude_code.session_close`), summed per
-   session. Readable from the ledger alone, which is why "hook-eligible
-   transcript records minus witnessed turns" needs no transcript read.
+7. the ``session-close`` deficit, per ENDED session (one that has a
+   ``kind="session-close"`` witness line, written by
+   :func:`promptwitness.harness.claude_code.session_close`): the number of
+   that session's witness-ELIGIBLE turn lines minus the number that are
+   witnessABLE-human. Readable from the ledger alone, which is why
+   "hook-eligible transcript records minus witnessed turns" needs no
+   transcript read.
+
+**Two corrections to the obvious readings of (1) and (7)**, both found by
+the review on PR athenaeum#2186 and both load-bearing for ruling 10 — a
+readout that fires on a healthy night makes the incident channel noise,
+which defeats "misses should be zero absent an incident" just as surely as
+a readout that misses a real one.
+
+*The receipt ledger is append-only, so it holds history, not state.*
+:func:`athenaeum.transcript_receipts.iter_receipts` returns every receipt
+LINE ever written, and
+:func:`~athenaeum.transcript_receipts.write_receipt_for_origin` appends a
+NEW line whenever a memory's channel or utterance digest changes — so a
+memory whose ``user-stated`` miss was later resolved to a ``witnessed`` hit
+has BOTH lines on disk. This module therefore collapses to the CURRENT
+receipt per memory before counting anything, latest-wins, matching
+:func:`athenaeum.transcript_receipts.lookup_receipt`'s own selection rule
+(sort by ``recorded_at``, take the last). The collapse key adds
+``origin_session_id`` to that function's ``(origin_scope, memory_digest)``
+pair — strictly finer, so it can only keep MORE incidents, which is the
+conservative direction for a provenance report and matches
+``lookup_receipt``'s own warning that a receipt minted for one session must
+never speak for another.
+
+*``turns - turns_witnessed`` is not the deficit.*
+:func:`~promptwitness.harness.claude_code.session_close` counts ``turns``
+as EVERY ``kind="turn"`` line for the session and ``turns_witnessed`` as
+the :meth:`~promptwitness.ledger.LedgerIndex.is_witnessable_human` subset
+of the same lines, so their difference is "turn lines that are not
+interactive-and-human" — which a healthy session routinely has:
+``record_turn`` writes a line for every ``UserPromptSubmit``, including a
+``<system-reminder>`` (``system``), a finished subagent's
+``<task-notification>``, a subagent prompt, and the first turn of a plain
+``claude "<prompt>"`` TTY launch (``launch-argument``). Each of those is
+by design, not a miss. This module instead counts the deficit over the
+witness-ELIGIBLE population — interactive turn lines whose kind is not in
+:data:`NEVER_WITNESSED_KINDS` — minus the witnessable ones, which is zero
+on a healthy session and non-zero exactly when a turn the design DOES
+attest was not attested. The close line's own ``turns``/``turns_witnessed``
+snapshot is still reported (``session_close_turns`` /
+``session_close_turns_witnessed``, taken latest-wins per session because
+each close line is a CUMULATIVE re-scan of the whole ledger, not an
+increment — summing them double-counts a resumed session) but it does not
+drive an incident. See this module's own ``REVERSIBLE DEFAULT`` note below.
+
+**REVERSIBLE DEFAULT (recorded for the lane report).** The issue's literal
+wording for (7) is "hook-eligible transcript records minus witnessed
+turns", and the lane brief spelled that as ``turns - turns_witnessed``. The
+evidence above shows that formula fires on healthy sessions, so what ships
+is the witness-eligible population instead. Both inputs stay in the output,
+so an operator can see the literal pair as well as the eligible-population
+deficit, and reverting is a one-line change in :func:`_witness_side`.
 
 **Three incident CLASSES**, and that granularity is load-bearing: the
 nightly librarian logs one WARNING per class with its count
@@ -69,7 +122,8 @@ partition). No second derivation is invented here.
 
 Layering: L3 service. Imports :mod:`athenaeum.transcript_receipts` (L2),
 :mod:`athenaeum.witness_attestation` (L2), :mod:`athenaeum.config` (L2) and
-:mod:`promptwitness.ledger`, and nothing above — which is what lets both
+:mod:`promptwitness.ledger` / :mod:`promptwitness.harness.claude_code`
+(for the ``WRAPPERS`` kind table), and nothing above — which is what lets both
 the L5 CLI (``athenaeum receipts attest-readout``) and the L4 nightly
 librarian call the SAME summary rather than each computing its own.
 """
@@ -84,9 +138,11 @@ from typing import Any
 from athenaeum import transcript_receipts, witness_attestation
 from athenaeum.config import resolve_cache_dir
 from promptwitness import ledger
+from promptwitness.harness import claude_code
 
 __all__ = [
     "HOOK_ERROR_FILENAME",
+    "NEVER_WITNESSED_KINDS",
     "INCIDENT_CLASSES",
     "INCIDENT_HOOK_ERROR",
     "INCIDENT_PROVENANCE_MISS",
@@ -108,8 +164,9 @@ INCIDENT_PROVENANCE_MISS = "provenance-miss"
 #: the same way a hundred times is one problem.
 INCIDENT_HOOK_ERROR = "hook-error"
 
-#: Incident class: one session whose ``session-close`` witness lines report
-#: more turns than witnessed turns.
+#: Incident class: one ENDED session with witness-eligible turn lines that
+#: are not witnessable-human. See the module docstring's second correction
+#: for why this is NOT ``turns - turns_witnessed``.
 INCIDENT_SESSION_CLOSE_DEFICIT = "session-close-deficit"
 
 #: Every incident class, in the order the readout renders them.
@@ -127,6 +184,22 @@ HOOK_ERROR_FILENAME = "witness_hook_errors.jsonl"
 #: The miss reason that is explicitly NOT an incident: attestation was
 #: turned off, so there was never a check to miss.
 _NOT_AN_INCIDENT = "flag-off"
+
+#: Prompt kinds the witness design deliberately NEVER attests, so a turn
+#: line carrying one is **not** witness-eligible and must not count toward
+#: the ``session-close`` deficit (review of PR athenaeum#2186, finding 1b).
+#:
+#: Derived from :data:`promptwitness.harness.claude_code.WRAPPERS`' own
+#: ``human=False`` rows rather than retyped, plus the two override kinds
+#: :func:`~promptwitness.harness.claude_code.classify_prompt_kind` applies
+#: ahead of that table (``launch-argument``, ``subagent``). ``unknown`` is
+#: deliberately ABSENT: an interactive prompt the classifier could not
+#: recognise is exactly a turn that should have been witnessed and was not,
+#: which is the failure shape the deficit exists to surface.
+NEVER_WITNESSED_KINDS: frozenset[str] = frozenset(
+    {rule.kind for rule in claude_code.WRAPPERS if not rule.human}
+    | {"launch-argument", "subagent"}
+)
 
 
 def _read_jsonl_tolerant(path: Path) -> list[dict[str, Any]]:
@@ -230,11 +303,16 @@ class ReadoutSummary:
     anchored_through: dict[str, int] = field(default_factory=dict)
     hook_error_counts: dict[str, int] = field(default_factory=dict)
     session_close_deficits: dict[str, int] = field(default_factory=dict)
+    session_close_turns: int = 0
+    session_close_turns_witnessed: int = 0
+    superseded_receipt_lines: int = 0
     incidents: tuple[Incident, ...] = ()
 
     @property
     def session_close_deficit(self) -> int:
-        """Total ``turns - turns_witnessed`` across every session."""
+        """Total witness-eligible-but-unwitnessed turns across every ended
+        session. NOT ``session_close_turns - session_close_turns_witnessed``
+        — see the module docstring's second correction."""
         return sum(self.session_close_deficits.values())
 
     @property
@@ -274,25 +352,78 @@ class ReadoutSummary:
             "hook_error_counts": dict(self.hook_error_counts),
             "session_close_deficit": self.session_close_deficit,
             "session_close_deficits": dict(self.session_close_deficits),
+            # The close lines' own cumulative snapshot, latest-wins per
+            # session. Reported, never an incident driver.
+            "session_close_turns": self.session_close_turns,
+            "session_close_turns_witnessed": self.session_close_turns_witnessed,
+            "superseded_receipt_lines": self.superseded_receipt_lines,
             "incidents": [i.to_dict() for i in self.incidents],
             "incident_class_counts": self.incident_class_counts(),
             "ok": self.ok,
         }
 
 
+def _receipt_key(entry: transcript_receipts.ReceiptEntry) -> tuple[str, str, str | None]:
+    """The identity of the memory a receipt line speaks for.
+
+    ``lookup_receipt``'s ``(origin_scope, memory_digest)`` plus
+    ``origin_session_id``: strictly finer, so collapsing on it can only keep
+    MORE incidents than that function would — the conservative direction
+    here, and it respects that function's own rule that a receipt minted for
+    one session must never speak for another.
+    """
+    return (entry.origin_scope, entry.memory_digest, entry.origin_session_id)
+
+
+def _current_receipts(
+    wiki_root: Path, since: str | None
+) -> tuple[list[transcript_receipts.ReceiptEntry], int]:
+    """``(current receipt per memory, superseded line count)``.
+
+    The ledger is append-only, so it carries HISTORY: a memory whose miss
+    was later resolved has both lines on disk. Latest-wins by
+    ``recorded_at``, with on-disk order as the tie-break (``iter_receipts``
+    returns partitions sorted and lines in append order, and this loop keeps
+    the later of two equal timestamps) — the same selection
+    :func:`athenaeum.transcript_receipts.lookup_receipt` makes.
+
+    The window is applied BEFORE the collapse, so the result is "the newest
+    receipt for this memory *within the window*" rather than a line that the
+    window excluded.
+    """
+    newest: dict[tuple[str, str, str | None], transcript_receipts.ReceiptEntry] = {}
+    superseded = 0
+    for entry in transcript_receipts.iter_receipts(wiki_root):
+        if not _in_window(entry.recorded_at[:7], since):
+            continue
+        key = _receipt_key(entry)
+        kept = newest.get(key)
+        if kept is None:
+            newest[key] = entry
+            continue
+        superseded += 1
+        if entry.recorded_at >= kept.recorded_at:
+            newest[key] = entry
+    return list(newest.values()), superseded
+
+
 def _receipt_side(
     wiki_root: Path, since: str | None
-) -> tuple[int, int, dict[str, int], dict[str, int], list[Incident]]:
-    """Receipt-ledger half: totals, tag split, miss breakdown, incidents."""
+) -> tuple[int, int, dict[str, int], dict[str, int], list[Incident], int]:
+    """Receipt-ledger half: totals, tag split, miss breakdown, incidents.
+
+    Counts the CURRENT receipt per memory, never every historical line —
+    otherwise a miss that has since been resolved to a ``witnessed`` hit
+    would still be reported as a live incident.
+    """
     user_stated = 0
     witnessed = 0
     by_tag: dict[str, int] = {}
     miss_counts: dict[str, int] = {}
     incidents: list[Incident] = []
 
-    for entry in transcript_receipts.iter_receipts(wiki_root):
-        if not _in_window(entry.recorded_at[:7], since):
-            continue
+    entries, superseded = _current_receipts(wiki_root, since)
+    for entry in entries:
         if entry.channel == "user-stated":
             user_stated += 1
         elif entry.channel == "witnessed":
@@ -317,19 +448,51 @@ def _receipt_side(
                 ),
             )
         )
-    return user_stated, witnessed, by_tag, miss_counts, incidents
+    return user_stated, witnessed, by_tag, miss_counts, incidents, superseded
+
+
+def _is_witness_eligible(line: ledger.WitnessLine) -> bool:
+    """Was the witness design in a position to attest this turn at all?
+
+    ``interactive`` channel (headless and bridge are never human — the
+    operator ruling :meth:`~promptwitness.ledger.LedgerIndex.
+    is_witnessable_human` cites) and a kind outside
+    :data:`NEVER_WITNESSED_KINDS`. Strictly WIDER than
+    ``is_witnessable_human``, by exactly one case: ``prompt_kind ==
+    "unknown"`` — an interactive prompt whose leading ``<tag`` the
+    classifier did not recognise, which is the one shape that means "a turn
+    the design attests went unattested".
+    """
+    return (
+        line.kind == "turn"
+        and line.channel == "interactive"
+        and line.prompt_kind not in NEVER_WITNESSED_KINDS
+    )
 
 
 def _witness_side(
     witness_dir: Path, since: str | None
-) -> tuple[int, int, int, dict[str, int], dict[str, int]]:
-    """Witness-index half: unsigned lines, anchor coverage, deficits."""
+) -> tuple[int, int, int, dict[str, int], dict[str, int], int, int]:
+    """Witness-index half: unsigned lines, anchor coverage, deficits.
+
+    One pass over the ledger. Deficits are reported only for ENDED sessions
+    — a session with no ``session-close`` line is still in flight — and are
+    computed over the witness-ELIGIBLE population rather than from the close
+    line's ``turns``/``turns_witnessed`` pair (module docstring, second
+    correction). That pair is still summed and returned, latest-wins per
+    session: each close line re-scans the whole ledger, so it is a
+    cumulative snapshot and adding two of them double-counts a resumed
+    session.
+    """
     index = witness_attestation.AttestationIndex.load(witness_dir)
     anchored_through = index.anchored_through()
     unsigned = 0
     total = 0
     anchored = 0
-    deficits: dict[str, int] = {}
+    eligible: dict[str, int] = {}
+    witnessable: dict[str, int] = {}
+    # session -> (seq of the close line this snapshot came from, turns, witnessed)
+    snapshots: dict[str, tuple[int, int, int]] = {}
 
     for line in ledger.iter_lines(witness_dir):
         if not _in_window(str(line.ts)[:7], since):
@@ -339,14 +502,35 @@ def _witness_side(
             unsigned += 1
         if index.is_anchored(line.ledger_id, line.seq):
             anchored += 1
-        if line.kind != "session-close":
+        session = line.session
+        if line.kind == "turn" and session:
+            if _is_witness_eligible(line):
+                eligible[session] = eligible.get(session, 0) + 1
+            if ledger.LedgerIndex.is_witnessable_human(line):
+                witnessable[session] = witnessable.get(session, 0) + 1
             continue
-        deficit = (line.turns or 0) - (line.turns_witnessed or 0)
-        if deficit <= 0:
+        if line.kind != "session-close" or not session:
             continue
-        session = line.session or "unknown"
-        deficits[session] = deficits.get(session, 0) + deficit
-    return unsigned, total, anchored, anchored_through, deficits
+        held = snapshots.get(session)
+        if held is None or line.seq >= held[0]:
+            snapshots[session] = (line.seq, line.turns or 0, line.turns_witnessed or 0)
+
+    deficits: dict[str, int] = {}
+    for session in snapshots:
+        deficit = eligible.get(session, 0) - witnessable.get(session, 0)
+        if deficit > 0:
+            deficits[session] = deficit
+    turns_total = sum(snap[1] for snap in snapshots.values())
+    witnessed_total = sum(snap[2] for snap in snapshots.values())
+    return (
+        unsigned,
+        total,
+        anchored,
+        anchored_through,
+        deficits,
+        turns_total,
+        witnessed_total,
+    )
 
 
 def _hook_error_counts(cache_dir: Path, since: str | None) -> dict[str, int]:
@@ -392,10 +576,18 @@ def build_readout(
     )
     resolved_cache = cache_dir if cache_dir is not None else resolve_cache_dir(None)
 
-    user_stated, witnessed, by_tag, miss_counts, incidents = _receipt_side(wiki_root, since)
-    unsigned, total, anchored, anchored_through, deficits = _witness_side(
-        resolved_witness, since
+    user_stated, witnessed, by_tag, miss_counts, incidents, superseded = _receipt_side(
+        wiki_root, since
     )
+    (
+        unsigned,
+        total,
+        anchored,
+        anchored_through,
+        deficits,
+        close_turns,
+        close_witnessed,
+    ) = _witness_side(resolved_witness, since)
     hook_errors = _hook_error_counts(resolved_cache, since)
 
     for error_class in sorted(hook_errors):
@@ -410,7 +602,7 @@ def build_readout(
         incidents.append(
             Incident(
                 incident_class=INCIDENT_SESSION_CLOSE_DEFICIT,
-                reason="turns-not-witnessed",
+                reason="eligible-turns-not-witnessed",
                 session=session,
                 count=deficits[session],
             )
@@ -428,6 +620,9 @@ def build_readout(
         anchored_through=anchored_through,
         hook_error_counts=hook_errors,
         session_close_deficits=deficits,
+        session_close_turns=close_turns,
+        session_close_turns_witnessed=close_witnessed,
+        superseded_receipt_lines=superseded,
         incidents=tuple(incidents),
     )
 
@@ -457,7 +652,18 @@ def render_text(summary: ReadoutSummary) -> str:
     lines.append(f"  hook errors:      {sum(summary.hook_error_counts.values())}")
     for error_class in sorted(summary.hook_error_counts):
         lines.append(f"    {error_class}: {summary.hook_error_counts[error_class]}")
+    lines.append(
+        f"  session-close:    {summary.session_close_turns} turn(s), "
+        f"{summary.session_close_turns_witnessed} witnessed (cumulative snapshot)"
+    )
     lines.append(f"  session-close deficit: {summary.session_close_deficit}")
+    for session in sorted(summary.session_close_deficits):
+        lines.append(f"    {session}: {summary.session_close_deficits[session]}")
+    if summary.superseded_receipt_lines:
+        lines.append(
+            f"  superseded receipt lines (not counted): "
+            f"{summary.superseded_receipt_lines}"
+        )
 
     class_counts = summary.incident_class_counts()
     if not summary.incidents:

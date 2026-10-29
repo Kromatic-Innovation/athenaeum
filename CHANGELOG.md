@@ -46,6 +46,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     template for a recorded reading. `AttestationIndex.anchored_through()` is
     a new narrow public accessor, added so the readout reports per-ledger
     anchor coverage without reaching into a private attribute.
+  - **Two things the obvious implementation gets wrong, both found in review
+    and both load-bearing for ruling 10** — a readout that fires on a healthy
+    night makes the incident channel noise, which defeats "misses should be
+    zero absent an incident" just as surely as missing a real one. First, the
+    receipt ledger is append-only, so it holds HISTORY: a memory whose miss
+    was later resolved to a `witnessed` hit has both lines on disk, and the
+    readout therefore collapses to the CURRENT receipt per memory
+    (latest-wins, matching `lookup_receipt`'s own selection) before counting
+    anything. Second, `turns - turns_witnessed` is NOT the `session-close`
+    deficit: `session_close` counts `turns` as every `kind="turn"` line, which
+    on a healthy session includes a `<system-reminder>`, a finished
+    subagent's `<task-notification>`, a subagent prompt, and the first turn
+    of a plain `claude "<prompt>"` TTY launch. The deficit is computed over
+    the witness-ELIGIBLE population instead, and the close lines' own
+    cumulative snapshot is reported latest-wins per session rather than
+    summed (each close line re-scans the whole ledger, so summing two
+    double-counts a resumed session).
 
 - **Nightly witness anchoring, the receipt `AnchoringSealer`, and an
   off-machine mirror of anchor records (issue athenaeum#2040).** The witness
