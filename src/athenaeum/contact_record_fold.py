@@ -85,6 +85,9 @@ FOLD_SOURCE = "script:contact-record-fold"
 #: ``reason`` strings written to the retirement ledger.
 REASON_MERGE_FOLD = "merge-fold"
 REASON_DUPLICATE = "duplicate-record"
+#: A divergent duplicate copy whose extra values were folded onto the
+#: ``<uid>``-named record before it was retired.
+REASON_DUPLICATE_FOLD = "duplicate-fold"
 
 
 # ---------------------------------------------------------------------------
@@ -218,6 +221,160 @@ def merge_contact_values(
             merged[fact_field] = [*_fact_entries(canonical, fact_field), *extra]
             facts += len(extra)
     return merged, added, facts
+
+
+# ---------------------------------------------------------------------------
+# Divergent duplicates: two records for ONE live uid
+# ---------------------------------------------------------------------------
+
+
+def _normalized_name(meta: Mapping[str, Any]) -> str:
+    return " ".join(re.sub(r"[^\w\s]", " ", str(meta.get("name") or "")).casefold().split())
+
+
+def _entries_by_identifier(meta: Mapping[str, Any], fact_field: str) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for entry in _fact_entries(meta, fact_field):
+        out.setdefault(_fact_identifier(entry), entry)
+    return out
+
+
+def _same_fact(a: Mapping[str, Any], b: Mapping[str, Any]) -> bool:
+    return {k: v for k, v in a.items() if k != "identifier"} == {
+        k: v for k, v in b.items() if k != "identifier"
+    }
+
+
+def duplicate_needs_review(copy: Mapping[str, Any], keep: Mapping[str, Any]) -> str | None:
+    """Why two records for ONE uid cannot be folded mechanically, or ``None``.
+
+    Two cases need a human:
+
+    - ``name-differs``: both records carry a ``name`` and they differ after
+      normalization. One uid should describe one entity, so differing names
+      may mean a record was attached to the wrong uid.
+    - ``validity-differs``: both records carry a validity entry (a bounce or
+      close) for the same address and the entries differ. Picking one would
+      decide whether an address is still deliverable, which is a fact
+      question, not a bookkeeping one.
+
+    A differing usage classification for the same address is NOT a review
+    case: :func:`merge_duplicate_record` settles it by the store's own
+    no-downgrade ladder.
+    """
+    copy_name, keep_name = _normalized_name(copy), _normalized_name(keep)
+    if copy_name and keep_name and copy_name != keep_name:
+        return "name-differs"
+    keep_validity = _entries_by_identifier(keep, pii.IDENTIFIER_VALIDITY_FIELD)
+    for key, entry in _entries_by_identifier(copy, pii.IDENTIFIER_VALIDITY_FIELD).items():
+        other = keep_validity.get(key)
+        if other is not None and not _same_fact(entry, other):
+            return "validity-differs"
+    return None
+
+
+def _stronger_classification(
+    keep_entry: Mapping[str, Any], copy_entry: Mapping[str, Any]
+) -> Mapping[str, Any]:
+    """The classification entry that survives a fold of two entries for one address.
+
+    The stronger usage class wins (``observed`` > ``provider`` >
+    ``unclassified``, the order of :data:`athenaeum.pii.USAGE_CLASSES`), so a
+    fold can never downgrade an address. With equal classes the entry with
+    the later ``observed_at`` wins, as a re-assertion of the same class
+    refreshes provenance in place. A full tie keeps the ``<uid>``-named
+    record's entry.
+    """
+    keep_rank = pii._classification_rank(str(keep_entry.get("usage_class") or ""))
+    copy_rank = pii._classification_rank(str(copy_entry.get("usage_class") or ""))
+    if copy_rank != keep_rank:
+        return copy_entry if copy_rank < keep_rank else keep_entry
+    keep_at = str(keep_entry.get("observed_at") or "")
+    copy_at = str(copy_entry.get("observed_at") or "")
+    return copy_entry if copy_at > keep_at else keep_entry
+
+
+def merge_duplicate_record(
+    keep: Mapping[str, Any], copy: Mapping[str, Any]
+) -> tuple[dict[str, Any], dict[str, int], int, int]:
+    """Fold a divergent duplicate *copy* onto *keep*, the ``<uid>``-named record.
+
+    Returns ``(merged_meta, values_added_per_field, facts_carried,
+    classifications_reconciled)``. Values and per-address facts on only one
+    copy are kept, through :func:`merge_contact_values`. A classification both
+    records hold for the same address is settled by
+    :func:`_stronger_classification`. Callers check
+    :func:`duplicate_needs_review` first; this function does not.
+    """
+    merged, added, facts = merge_contact_values(keep, copy)
+    copy_cls = _entries_by_identifier(copy, pii.CONTACT_CLASSIFICATION_FIELD)
+    reconciled = 0
+    entries = _fact_entries(merged, pii.CONTACT_CLASSIFICATION_FIELD)
+    for position, entry in enumerate(entries):
+        other = copy_cls.get(_fact_identifier(entry))
+        if other is None or _same_fact(entry, other):
+            continue
+        winner = _stronger_classification(entry, other)
+        if winner is other:
+            entries[position] = {**dict(other), "identifier": entry.get("identifier")}
+            reconciled += 1
+    if reconciled:
+        merged[pii.CONTACT_CLASSIFICATION_FIELD] = entries
+    return merged, added, facts, reconciled
+
+
+@dataclass
+class DuplicateFoldSummary:
+    """Counts from folding divergent duplicate copies. Never carries a value."""
+
+    copies_folded: int = 0
+    values_added: dict[str, int] = field(default_factory=dict)
+    facts_carried: int = 0
+    classifications_reconciled: int = 0
+    errors: list[str] = field(default_factory=list)
+
+
+def fold_duplicate_record(
+    contacts_root: Path,
+    uid: str,
+    copy_path: Path,
+    keep_path: Path,
+    *,
+    dry_run: bool = False,
+) -> DuplicateFoldSummary:
+    """Fold *copy_path* onto *keep_path* (both records for *uid*), then retire the copy.
+
+    The copy is retired with :data:`REASON_DUPLICATE_FOLD`, renamed out of the
+    ``*.md`` glob and logged, never deleted. Refuses (an error, nothing
+    written) when :func:`duplicate_needs_review` names a reason, so a caller
+    that skipped the check still cannot fold a pair that needs a human.
+    """
+    summary = DuplicateFoldSummary()
+    keep_meta, keep_body = parse_frontmatter(keep_path.read_text(encoding="utf-8"))
+    copy_meta, _ = parse_frontmatter(copy_path.read_text(encoding="utf-8"))
+    keep_meta = keep_meta if isinstance(keep_meta, dict) else {}
+    copy_meta = copy_meta if isinstance(copy_meta, dict) else {}
+    reason = duplicate_needs_review(copy_meta, keep_meta)
+    if reason is not None:
+        summary.errors.append(f"duplicate needs review ({reason})")
+        return summary
+    merged, added, facts, reconciled = merge_duplicate_record(keep_meta, copy_meta)
+    summary.copies_folded = 1
+    summary.values_added = added
+    summary.facts_carried = facts
+    summary.classifications_reconciled = reconciled
+    if dry_run:
+        return summary
+    if added or facts or reconciled:
+        atomic_write_text(keep_path, render_frontmatter(merged) + "\n" + keep_body)
+    pii.retire_contact_record(
+        Path(contacts_root),
+        copy_path,
+        folded_into=uid,
+        reason=REASON_DUPLICATE_FOLD,
+        canonical_record=keep_path,
+    )
+    return summary
 
 
 # ---------------------------------------------------------------------------
@@ -418,9 +575,7 @@ def fold_contact_records_after_merge(
             pairs = [
                 (absorbed, canonical)
                 for absorbed, canonical in pairs
-                if pii.surface_class_for_page_class(
-                    absorbed_page_types.get(absorbed, ""), config
-                )
+                if pii.surface_class_for_page_class(absorbed_page_types.get(absorbed, ""), config)
                 == pii.PII_ENTITY_CLASS
             ]
             if not pairs:
