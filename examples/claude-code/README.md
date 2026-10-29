@@ -329,7 +329,8 @@ sqlite3 ~/Library/Application\ Support/com.apple.TCC/TCC.db \
 log show --predicate 'subsystem == "com.apple.TCC"' --start "2026-10-29 05:40:00"
 ```
 
-A follow-up issue tracks running these and attributing the grant.
+Issue athenaeum#2195 tracks running these and attributing the grant; it is
+satisfied by producing the readings, including a null or unattributable one.
 
 ## Troubleshooting
 
