@@ -65,7 +65,7 @@ class TestExcludedRecordIndexSummary:
         message = warnings[0].getMessage()
         assert "2 uid(s) claimed by >1 record" in message
         assert "3 address(es) on >1 record" in message
-        assert "athenaeum#2184" in message
+        assert "athenaeum repair --contact-records" in message
         assert _records(caplog, logging.INFO) == []
         # One DEBUG line per collided key: 2 uids + 3 addresses.
         debug = _records(caplog, logging.DEBUG)

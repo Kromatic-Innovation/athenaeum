@@ -166,8 +166,10 @@ Five pieces, in the order the issue settles them:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import os
 import re
 from collections.abc import Collection, Iterable, Iterator, Mapping
 from dataclasses import dataclass, replace
@@ -2833,7 +2835,10 @@ def _log_collision_summary(
     if uid_collisions + (address_collisions or 0) <= 0:
         return
     level = logging.WARNING if uid_collisions > 0 else logging.INFO
-    hint = "run `contact-surface-lint` / see athenaeum#2184 (per-key detail at DEBUG)"
+    hint = (
+        "run `athenaeum repair --contact-records` (dry-run) / `contact-surface-lint` "
+        "(per-key detail at DEBUG)"
+    )
     if address_collisions is None:
         log.log(
             level,
@@ -3020,6 +3025,25 @@ class ExcludedRecordIndex:
             return []
         self._ensure_loaded()
         return list(self._by_identifier.get(key, ()))
+
+    def all_by_uid(self, uid: str) -> list[Path]:
+        """EVERY record carrying *uid*, in scan order (may be empty).
+
+        The all-matches sibling of :meth:`by_uid`, for the contact-record fold
+        (issue athenaeum#2184), which must reach every record an absorbed uid
+        left behind — not only the first. A path registered earlier and since
+        retired (renamed off the surface) is filtered out.
+        """
+        wanted = str(uid).strip()
+        if not wanted:
+            return []
+        self._ensure_loaded()
+        return [p for p in self._by_uid.get(wanted, ()) if p.exists()]
+
+    def uids(self) -> list[str]:
+        """Every uid on the surface, in first-seen scan order."""
+        self._ensure_loaded()
+        return list(self._by_uid)
 
     def uid_map(self) -> dict[str, Path]:
         """``uid -> first record`` — the shape :func:`build_contact_record_uid_index` returns."""
@@ -4299,6 +4323,125 @@ def fold_orphaned_bounce_marks(
 
 
 # ---------------------------------------------------------------------------
+# 5b. Contact-record retirement (issue athenaeum#2184)
+# ---------------------------------------------------------------------------
+#
+# A record retired by a merge fold or a duplicate repair is RENAMED out of the
+# ``*.md`` glob :func:`iter_contact_records` reads, never deleted. Stamping it
+# in place would not be enough: every resolver here (indexed and unindexed)
+# reads every ``*.md`` under the surface, so a stamped record would keep
+# claiming its uid and its addresses. Renaming takes it out of every read at
+# once, with no resolver change, and keeps the bytes on disk for a reversal.
+
+#: Appended to a retired record's filename. ``alex.md`` -> ``alex.md.retired``.
+RETIRED_RECORD_SUFFIX = ".retired"
+
+#: Frontmatter stamped on a retired record, next to :data:`FOLDED_INTO_FIELD`.
+RETIRED_AT_FIELD = "retired_at"
+RETIRED_REASON_FIELD = "retired_reason"
+
+#: Append-only ledger of retirements, under the contacts surface root.
+RECORD_RETIREMENT_LOG_FILENAME = "_contact_record_retirements.jsonl"
+RECORD_RETIREMENT_LOG_VERSION = 1
+
+
+def default_uid_record_path(contacts_root: Path, uid: str) -> Path:
+    """Where a uid-keyed record is minted when the uid has none: ``<root>/<uid>.md``.
+
+    The same placement ``corrections._read_surface_record`` mints at, named
+    here so a caller outside this module never builds the path itself.
+    """
+    return Path(contacts_root) / f"{str(uid).strip()}.md"
+
+
+def default_record_retirement_log_path(contacts_root: Path) -> Path:
+    """``<contacts_root>/_contact_record_retirements.jsonl``."""
+    return Path(contacts_root) / RECORD_RETIREMENT_LOG_FILENAME
+
+
+def _retired_path_for(record_path: Path) -> Path:
+    candidate = record_path.with_name(record_path.name + RETIRED_RECORD_SUFFIX)
+    n = 1
+    while candidate.exists():
+        candidate = record_path.with_name(f"{record_path.name}.{n}{RETIRED_RECORD_SUFFIX}")
+        n += 1
+    return candidate
+
+
+@dataclass(frozen=True)
+class RecordRetirement:
+    """One retired record: where it was, where it now is, and whose record absorbed it."""
+
+    record: Path
+    retired_as: Path
+    folded_into: str
+
+
+def retire_contact_record(
+    contacts_root: Path,
+    record_path: Path,
+    *,
+    folded_into: str,
+    reason: str,
+    canonical_record: Path | None = None,
+    at: str | None = None,
+) -> RecordRetirement:
+    """Retire one contact record: rename it out of every read, stamp it, log it.
+
+    The record is renamed to ``<name>.md`` + :data:`RETIRED_RECORD_SUFFIX` in
+    the same directory (``os.replace``, so its mode and bytes carry over), then
+    stamped with :data:`FOLDED_INTO_FIELD`, :data:`RETIRED_AT_FIELD` and
+    :data:`RETIRED_REASON_FIELD`, then logged to
+    :data:`RECORD_RETIREMENT_LOG_FILENAME` with both paths, the uid, the
+    canonical uid and a content hash. Nothing is deleted. Reversing it is a
+    rename back plus removing the three stamped keys; the ledger row says which
+    file to rename.
+
+    The ledger row carries paths relative to *contacts_root* and no value.
+    Raises on a failure — the caller decides whether that fails its operation.
+    """
+    root = Path(contacts_root)
+    src = Path(record_path)
+    meta, body = parse_frontmatter(src.read_text(encoding="utf-8"))
+    meta = meta if isinstance(meta, dict) else {}
+    when = at if at is not None else now_iso()
+    target = _retired_path_for(src)
+    os.replace(src, target)
+    stamped = dict(meta)
+    stamped[FOLDED_INTO_FIELD] = str(folded_into)
+    stamped[RETIRED_AT_FIELD] = when
+    stamped[RETIRED_REASON_FIELD] = reason
+    new_text = render_frontmatter(stamped) + "\n" + body
+    atomic_write_text(target, new_text)
+
+    def _rel(path: Path | None) -> str | None:
+        if path is None:
+            return None
+        try:
+            return str(Path(path).relative_to(root))
+        except ValueError:
+            return Path(path).name
+
+    row = {
+        "v": RECORD_RETIREMENT_LOG_VERSION,
+        "at": when,
+        "op": "retire",
+        "reason": reason,
+        "record": _rel(src),
+        "retired_as": _rel(target),
+        "uid": str(meta.get("uid", "") or "").strip(),
+        "folded_into": str(folded_into),
+        "canonical_record": _rel(canonical_record),
+        "sha256": hashlib.sha256(new_text.encode("utf-8")).hexdigest(),
+    }
+    _append_jsonl_line(
+        default_record_retirement_log_path(root),
+        json.dumps(row, separators=(",", ":")) + "\n",
+    )
+    return RecordRetirement(record=src, retired_as=target, folded_into=str(folded_into))
+
+
+# ---------------------------------------------------------------------------
 # 6. One-call entity read (issue athenaeum#883/#886)
 # ---------------------------------------------------------------------------
 #
@@ -4353,6 +4496,8 @@ EXCLUDED_RECORD_BOOKKEEPING_FIELDS: frozenset[str] = frozenset(
         IDENTIFIER_VALIDITY_FIELD,
         CONTACT_CLASSIFICATION_FIELD,
         FOLDED_INTO_FIELD,
+        RETIRED_AT_FIELD,
+        RETIRED_REASON_FIELD,
         "source",
         "observed_at",
         "valid_until",

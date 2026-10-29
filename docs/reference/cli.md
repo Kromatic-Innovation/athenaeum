@@ -1407,7 +1407,8 @@ Repair YAML-frontmatter corruption in wiki files. Default is dry-run; pass --app
 | `--apply` | `False` | — | Write fixes. Without this flag, the command is a dry-run. |
 | `--backfill-sources` | `False` | — | Re-classify memories whose source was DEFAULTED to `claude:inferred` against their origin transcript: user-stated / agent-observed upgrades, else confirm inferred. |
 | `--bounce-fold` | `False` | — | Fold slug-keyed bounce marks stranded by the pre- resolve path onto the person record that already lists the same address. Not included in --all — see module docstring. |
-| `--contacts-root` | — | — | --bounce-fold: override the contacts surface root (defaults to the configured `pii` entity-class surface under --knowledge-root). |
+| `--contact-records` | `False` | — | Fold contact records left behind by earlier merges onto the canonical uid's record, and retire slug-only duplicate copies of a uid's record whose values the uid-named copy already holds. Counts only. Divergent duplicates and page-less uids with no merge record are reported, never touched. Not included in --all. |
+| `--contacts-root` | — | — | --bounce-fold / --contact-records: override the contacts surface root (defaults to the configured `pii` entity-class surface under --knowledge-root). |
 | `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
 | `--knowledge-root` | — | — | Knowledge root for --backfill-sources / --bounce-fold (default: ~/knowledge); auto-memory is read from <root>/raw/auto-memory, and the contacts surface is resolved from it via the configured storage mapping unless --contacts-root overrides that. |
 | `--legacy-source-slugs` | `False` | — | Migrate legacy bare-slug `source:` values to typed `script:<slug>` form (/ design-lock §5). |

@@ -3,7 +3,8 @@
 
 A single subcommand with a mutually-exclusive repair-mode group
 (``--tag-indent`` / ``--value-quoting`` / ``--legacy-source-slugs`` /
-``--backfill-sources`` / ``--bounce-fold`` / ``--all``), kept in its own
+``--backfill-sources`` / ``--bounce-fold`` / ``--contact-records`` /
+``--all``), kept in its own
 module because it is sizable on its own (multiple report shapes, exit-code
 contract shared with ``auto-memory prune``).
 
@@ -84,6 +85,15 @@ def add_repair_subparser(subparsers: argparse._SubParsersAction) -> None:
         "— see module docstring.",
     )
     repair_mode.add_argument(
+        "--contact-records",
+        action="store_true",
+        help="Fold contact records left behind by earlier merges onto the "
+        "canonical uid's record, and retire slug-only duplicate copies of a "
+        "uid's record whose values the uid-named copy already holds (issue "
+        "athenaeum#2184). Counts only. Divergent duplicates and page-less uids "
+        "with no merge record are reported, never touched. Not included in --all.",
+    )
+    repair_mode.add_argument(
         "--all",
         action="store_true",
         help="Run all repair passes in sequence (tag-indent then value-quoting).",
@@ -119,7 +129,7 @@ def add_repair_subparser(subparsers: argparse._SubParsersAction) -> None:
         "--contacts-root",
         type=Path,
         default=None,
-        help="--bounce-fold: override the contacts surface root (defaults to "
+        help="--bounce-fold / --contact-records: override the contacts surface root (defaults to "
         "the configured `pii` entity-class surface under --knowledge-root).",
     )
     repair_parser.add_argument(
@@ -158,6 +168,11 @@ def cmd_repair(args: argparse.Namespace) -> int:
     # the wiki, so it branches BEFORE the wiki_root resolution below too.
     if getattr(args, "bounce_fold", False):
         return _cmd_repair_bounce_fold(args)
+
+    # Contact-record repair (issue athenaeum#2184) reads the contacts surface
+    # plus the wiki's uids and merge records.
+    if getattr(args, "contact_records", False):
+        return _cmd_repair_contact_records(args)
 
     wiki_root = (args.wiki_root or Path("~/knowledge/wiki")).expanduser().resolve()
     if not wiki_root.is_dir():
@@ -357,6 +372,83 @@ def _cmd_repair_bounce_fold(args: argparse.Namespace) -> int:
         if not args.apply and pairs_found > 0:
             return 2
         return 0
+    finally:
+        if lock is not None and not isinstance(lock, int):
+            lock.release()
+
+
+def _cmd_repair_contact_records(args: argparse.Namespace) -> int:
+    """Run the absorbed-uid / duplicate contact-record repair (issue athenaeum#2184).
+
+    Prints counts only — never a filename, uid or value, because contact
+    record filenames carry person slugs. Never rebuilds the recall index: the
+    excluded surface is not in it.
+
+    Exit codes (same contract as the other repair modes):
+        0 — nothing actionable, OR ``--apply`` succeeded with no errors.
+        1 — errors encountered.
+        2 — dry-run found records it WOULD fold or retire.
+    """
+    from athenaeum.config import load_config
+    from athenaeum.contact_record_fold import resolve_contacts_root
+    from athenaeum.contact_record_repair import (
+        apply_contact_record_repair,
+        plan_contact_record_repair,
+    )
+
+    knowledge_root = (args.knowledge_root or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()
+    cfg = load_config(knowledge_root)
+    contacts_root = (
+        args.contacts_root.expanduser().resolve()
+        if args.contacts_root
+        else resolve_contacts_root(knowledge_root, cfg)
+    )
+    if contacts_root is None:
+        print(
+            "The `pii` class is not mapped to an excluded surface "
+            "(storage.mapping.pii); there is no contacts surface to repair. "
+            "Pass --contacts-root to name one explicitly.",
+            file=sys.stderr,
+        )
+        return 1
+    if contacts_root.resolve() == (knowledge_root / "wiki").resolve():
+        print("Refusing: the contacts root is the wiki root.", file=sys.stderr)
+        return 1
+    if not contacts_root.is_dir():
+        print(f"Contacts root not found: {contacts_root}", file=sys.stderr)
+        return 1
+
+    # --apply renames and rewrites records on the contacts surface and can
+    # race a concurrent `run`, so it takes the run lock (issue athenaeum#309).
+    # A dry-run reads only — no lock.
+    lock: RunLock | int | None = None
+    if args.apply:
+        lock = _acquire_or_exit(knowledge_root, args, cfg)
+        if isinstance(lock, int):
+            return lock
+    try:
+        mode = "APPLY" if args.apply else "DRY RUN"
+        try:
+            plan = plan_contact_record_repair(knowledge_root, contacts_root)
+        except Exception as exc:  # noqa: BLE001 — surface a clean CLI error
+            print(f"ERR contact-records ({type(exc).__name__}): {exc}", file=sys.stderr)
+            return 1
+
+        print(f"=== repair contact-records ({mode}) ===")
+        for key, value in plan.counts().items():
+            print(f"  {key}: {value}")
+        if not args.apply:
+            return 2 if plan.actionable else 0
+
+        result = apply_contact_record_repair(plan, contacts_root)
+        print(f"  duplicates_retired: {result.duplicates_retired}")
+        print(f"  absorbed_records_folded: {result.fold.records_folded}")
+        print(f"  absorbed_values_added: {result.fold.values_added_total}")
+        print(f"  canonical_records_minted: {result.fold.canonical_records_minted}")
+        print(f"  errors: {len(result.errors)}")
+        for err in result.errors[:20]:
+            print(f"  ERR {err}", file=sys.stderr)
+        return 1 if result.errors else 0
     finally:
         if lock is not None and not isinstance(lock, int):
             lock.release()
