@@ -361,6 +361,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Contact-surface collision logging is one summary line per load (issue
+  athenaeum#2188).** `ExcludedRecordIndex` logged a WARNING for every uid
+  claimed by more than one contact record and every address listed on more
+  than one, on every load, and every CLI `recall` loads it, so a store with a
+  few hundred collided keys printed a few hundred lines before each result.
+  Each load now emits one summary: a WARNING when any uid collides (a store
+  defect), an INFO when only addresses collide (a shared address is
+  legitimate), nothing on a clean surface. The per-key lines move to DEBUG
+  with their content unchanged. `build_contact_record_uid_index` gets the same
+  treatment. Single-key lookups still log the one key they were asked about.
+
 - **The public surface now says what the version number means (issue
   athenaeum#2138).** The Zenodotus release panel for 0.22.43 had all three cold
   reviewers read the version as a release count — `pyproject.toml` said

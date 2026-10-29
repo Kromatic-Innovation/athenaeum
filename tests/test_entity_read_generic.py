@@ -415,7 +415,9 @@ class TestExcludedRecordIndex:
         _write_record(root, "a-first.md", uid="a", fields="emails:\n  - shared@example.org\n")
         _write_record(root, "z-second.md", uid="z", fields="emails:\n  - shared@example.org\n")
 
-        with caplog.at_level(logging.WARNING, logger=pii.log.name):
+        # Per-key detail is at DEBUG since athenaeum#2188 (one summary line per
+        # load above it), so capture at DEBUG to see it.
+        with caplog.at_level(logging.DEBUG, logger=pii.log.name):
             index = ExcludedRecordIndex(root)
             resolved = index.by_identifier("shared@example.org")
 
