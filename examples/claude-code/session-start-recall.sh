@@ -229,7 +229,19 @@ while [ "$_i" -lt "$_cred_count" ]; do
   if [ -f "$CONFIG_ENV" ]; then
     _line="$(grep "^${_name}=" "$CONFIG_ENV" 2>/dev/null | tail -n 1 || true)"
   fi
-  _cached_cred_lines[_i]="$_line"
+  # Seer finding on athenaeum#2193: discard a matched line whose VALUE is
+  # empty (e.g. a hand-edited `ANTHROPIC_API_KEY=` -- README option 2
+  # explicitly invites editing this file by hand). A non-empty line with
+  # an empty value reads as "already cached" to the end-of-script gate
+  # below, so a fetch never runs again -- permanently, with no
+  # ATHENAEUM_OP_REFRESH escape, since the gate tests this same captured
+  # line. Checked at capture time, not the gate, because this array has a
+  # second consumer: the restore loop that writes it back into a freshly
+  # truncated config.env, where an empty-valued line is equally useless.
+  case "$_line" in
+    "${_name}="?*) _cached_cred_lines[_i]="$_line" ;;
+    *) _cached_cred_lines[_i]="" ;;
+  esac
 
   # Same issue, plan step 2: if the caller's own process already exported
   # this credential, that value is scoped to this process, not to the

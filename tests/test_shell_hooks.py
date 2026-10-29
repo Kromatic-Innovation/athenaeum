@@ -1569,6 +1569,86 @@ class TestOpOptionalGate2193:
             "BIOMETRIC=UNSET",
         ]
 
+    def test_empty_cached_value_does_not_block_the_op_fetch(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """Seer finding on athenaeum#2193 (review of athenaeum#2194): a `config.env`
+        containing `ANTHROPIC_API_KEY=` (empty value -- e.g. hand-edited,
+        which the README's option 2 explicitly invites) is a NON-empty
+        line, so the pre-fix cache-presence gate
+        (`[ -z "${_cached_cred_lines[$_i]}" ]`) read it as "already
+        cached" and skipped the fetch forever, with no
+        ATHENAEUM_OP_REFRESH escape (the gate tests the same captured
+        line this fix changes). The fix discards a matched line whose
+        VALUE is empty at capture time, so an empty-valued line is
+        treated the same as no cached line at all -- here, with
+        ATHENAEUM_OP_REFRESH left UNSET, that means the fetch still
+        happens."""
+        _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        cache_dir = tmp_path / ".cache" / "athenaeum"
+        cache_dir.mkdir(parents=True)
+        (cache_dir / "config.env").write_text(
+            "AUTO_RECALL=true\n"
+            "SEARCH_BACKEND=fts5\n"
+            "ANTHROPIC_API_KEY=\n"
+        )
+
+        env = dict(hook_env)
+        env["OP_SERVICE_ACCOUNT_TOKEN"] = "synthetic-service-account-token"
+        fake_op_dir = _write_fake_op(tmp_path, "synthetic-fetched-despite-empty-cache")
+        env["PATH"] = f"{fake_op_dir}{os.pathsep}{env['PATH']}"
+        assert "ATHENAEUM_OP_REFRESH" not in env
+
+        result = subprocess.run(
+            ["bash", str(SESSION_START)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+
+        body = (cache_dir / "config.env").read_text()
+        key_lines = [line for line in body.splitlines() if line.startswith("ANTHROPIC_API_KEY=")]
+        assert key_lines == ["ANTHROPIC_API_KEY=synthetic-fetched-despite-empty-cache"]
+        assert "ANTHROPIC_API_KEY=" not in body.splitlines()
+
+    def test_empty_cached_value_is_not_mistaken_for_a_cached_key(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """Companion to the test above, cheaper: with an empty cached
+        `ANTHROPIC_API_KEY=` value and no `op` reachable at all to
+        refill it, the hook must still end with exactly one "no key
+        cached" warning rather than silently believing an empty value is
+        a real cached credential."""
+        _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        cache_dir = tmp_path / ".cache" / "athenaeum"
+        cache_dir.mkdir(parents=True)
+        (cache_dir / "config.env").write_text(
+            "AUTO_RECALL=true\n"
+            "SEARCH_BACKEND=fts5\n"
+            "ANTHROPIC_API_KEY=\n"
+        )
+
+        env = _path_with_no_op_at_all(dict(hook_env))
+        assert shutil.which("op", path=env["PATH"]) is None, (
+            "test setup bug: `op` still reachable on the filtered PATH"
+        )
+
+        result = subprocess.run(
+            ["bash", str(SESSION_START)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert result.stderr.count("No ANTHROPIC_API_KEY cached") == 1
+
 
 class TestUserPromptRecall:
     def _seed_index(self, hook_env: dict[str, str]) -> None:
