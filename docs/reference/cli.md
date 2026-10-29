@@ -101,8 +101,9 @@ python scripts/gen_cli_reference.py
 - [`athenaeum quiesce`](#athenaeum-quiesce) (command) — Pause `ingest --if-triggered` without touching the run lock: --for/--reason sets a sentinel, --release clears it, --status reads it. A cooperative alternative to `launchctl bootout` for corpus write lanes.
 - [`athenaeum rebuild-index`](#athenaeum-rebuild-index) (command)
 - [`athenaeum recall`](#athenaeum-recall) (command) — Search the wiki from the shell (one tab-separated hit per line)
-- [`athenaeum receipts`](#athenaeum-receipts) (group) — Seal, verify and anchor the transcript-receipt ledger. `seal` signs every unsealed line range and needs the configured signing key to be reachable; `verify` checks every seal against the live ledger and needs only the public key; `anchor` externally timestamps every changed partition and mirrors the anchor records off-machine, and needs the run lock. Output is partitions and line ranges only, never receipt content.
+- [`athenaeum receipts`](#athenaeum-receipts) (group) — Seal, verify and anchor the transcript-receipt ledger. `seal` signs every unsealed line range and needs the configured signing key to be reachable; `verify` checks every seal against the live ledger and needs only the public key; `anchor` externally timestamps every changed partition and mirrors the anchor records off-machine, and needs the run lock; `attest-readout` reports witnessed hits and every provenance miss as an incident, read-only. Output is partitions, line ranges, counts and enum labels only, never receipt content.
 - [`athenaeum receipts anchor`](#athenaeum-receipts-anchor) (command) — Anchor every receipt partition that changed since its own last anchor and the witness chain head, upgrade pending OpenTimestamps proofs, and mirror the anchor records into wiki/_witness_anchors/ so they leave the machine with the pushed knowledge repo. Takes the run lock; needs no signing key. The nightly run does this itself at the end of its run.
+- [`athenaeum receipts attest-readout`](#athenaeum-receipts-attest-readout) (command) — Report witnessed hits and every provenance miss as an incident, from the receipt ledger and the witness index only. Also reports the unsigned-line count, anchor coverage, the witness hook-error classes and the session-close deficit. Read-only: no key, no run lock. Exits 5 when any incident exists; there is no tolerated miss rate and no window beyond --since.
 - [`athenaeum receipts seal`](#athenaeum-receipts-seal) (command) — Sign every unsealed range in every receipt partition. Requires a reachable signing key, so this is a supervised or batched step rather than part of the nightly run.
 - [`athenaeum receipts verify`](#athenaeum-receipts-verify) (command) — Report unsealed ranges and seals that no longer verify, by partition and line range. Needs only the public key.
 - [`athenaeum reconcile`](#athenaeum-reconcile) (command) — Retire pending raw-intake files whose content is already materialized in the wiki (dual-write cleanup). Default is dry-run; pass --apply to remove.
@@ -1284,11 +1285,12 @@ Search the wiki from the shell (one tab-separated hit per line)
 
 ## `athenaeum receipts`
 
-Seal, verify and anchor the transcript-receipt ledger. `seal` signs every unsealed line range and needs the configured signing key to be reachable; `verify` checks every seal against the live ledger and needs only the public key; `anchor` externally timestamps every changed partition and mirrors the anchor records off-machine, and needs the run lock. Output is partitions and line ranges only, never receipt content.
+Seal, verify and anchor the transcript-receipt ledger. `seal` signs every unsealed line range and needs the configured signing key to be reachable; `verify` checks every seal against the live ledger and needs only the public key; `anchor` externally timestamps every changed partition and mirrors the anchor records off-machine, and needs the run lock; `attest-readout` reports witnessed hits and every provenance miss as an incident, read-only. Output is partitions, line ranges, counts and enum labels only, never receipt content.
 
 Subcommands:
 
 - `athenaeum receipts anchor` — Anchor every receipt partition that changed since its own last anchor and the witness chain head, upgrade pending OpenTimestamps proofs, and mirror the anchor records into wiki/_witness_anchors/ so they leave the machine with the pushed knowledge repo. Takes the run lock; needs no signing key. The nightly run does this itself at the end of its run.
+- `athenaeum receipts attest-readout` — Report witnessed hits and every provenance miss as an incident, from the receipt ledger and the witness index only. Also reports the unsigned-line count, anchor coverage, the witness hook-error classes and the session-close deficit. Read-only: no key, no run lock. Exits 5 when any incident exists; there is no tolerated miss rate and no window beyond --since.
 - `athenaeum receipts seal` — Sign every unsealed range in every receipt partition. Requires a reachable signing key, so this is a supervised or batched step rather than part of the nightly run.
 - `athenaeum receipts verify` — Report unsealed ranges and seals that no longer verify, by partition and line range. Needs only the public key.
 
@@ -1302,6 +1304,16 @@ Anchor every receipt partition that changed since its own last anchor and the wi
 | `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 | `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
+
+## `athenaeum receipts attest-readout`
+
+Report witnessed hits and every provenance miss as an incident, from the receipt ledger and the witness index only. Also reports the unsigned-line count, anchor coverage, the witness hook-error classes and the session-close deficit. Read-only: no key, no run lock. Exits 5 when any incident exists; there is no tolerated miss rate and no window beyond --since.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+| `--since` | — | — | Only count records from this YYYY-MM month onwards (receipt partition month / witness line month). Default: every month. |
 
 ## `athenaeum receipts seal`
 

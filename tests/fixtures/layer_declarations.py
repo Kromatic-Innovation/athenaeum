@@ -165,6 +165,11 @@ MODULE_LAYER: dict[str, int] = {
     "spend": 3,
     "usage_report": 3,
     "wiki_dedupe_attribution": 3,
+    # witness_readout.py: "Layering: L3 service" (athenaeum#2160) -- imports
+    # transcript_receipts/witness_attestation/config (all L2) and
+    # promptwitness.ledger, nothing above, so the L5 CLI and the L4 nightly
+    # librarian can both call the same summary.
+    "witness_readout": 3,
     # L4 -- domain/pipeline modules.
     "answers": 4,
     "audit": 4,
