@@ -62,6 +62,7 @@ from athenaeum.push_metrics import (
     record_push,
 )
 from tests.env_contract import require
+from tests.op_isolation import install_sentinel_op, sentinel_op_invocations
 
 HOOKS_DIR = Path(__file__).parent.parent / "examples" / "claude-code"
 SESSION_START = HOOKS_DIR / "session-start-recall.sh"
@@ -77,19 +78,42 @@ def _require(tool: str) -> None:
         pytest.skip(f"{tool} not available on this runner")
 
 
-def _env_without_op(base_env: dict[str, str]) -> dict[str, str]:
+def _path_with_no_op_at_all(base_env: dict[str, str]) -> dict[str, str]:
     """*base_env* with every PATH entry that provides an `op` binary removed.
 
-    athenaeum#1886's "fetch fails or is skipped" cases need `op` provably
-    absent — filtering PATH here (rather than trusting the runner's ambient
-    state) keeps those tests hermetic even on a machine that happens to have
-    the real 1Password CLI installed.
+    Renamed from the retired ``_env_without_op`` (athenaeum#2193): most
+    former callers no longer need `op` provably ABSENT, now that
+    ``hook_env`` installs a sentinel `op` by default (see that fixture) --
+    they need `op` provably a HARMLESS STUB, which the sentinel already is
+    without this filtering. This stripped-bare variant stays for the one
+    AC (athenaeum#2193 AC6) that specifically covers "no `op` on PATH at
+    all", e.g. a minimal container image with no 1Password CLI installed
+    -- including the sentinel itself, so the hook's `command -v op` check
+    fails exactly like it would there.
     """
     env = dict(base_env)
     dirs = [d for d in env.get("PATH", "").split(os.pathsep) if d]
     safe_dirs = [d for d in dirs if not os.path.isfile(os.path.join(d, "op"))]
     env["PATH"] = os.pathsep.join(safe_dirs)
     return env
+
+
+def _assert_op_is_sentinel(env: dict[str, str], tmp_path: Path) -> None:
+    """Assert PATH resolves `op` to the `hook_env` fixture's OWN sentinel.
+
+    Stronger than "op is absent": proves the real `op` the runner might
+    have installed never wins PATH precedence over the per-test sentinel
+    (athenaeum#2193) -- the gap the retired `_env_without_op`-based setup
+    assertions could not close, since they only ever proved absence on a
+    PATH they had just filtered themselves.
+    """
+    resolved = shutil.which("op", path=env["PATH"])
+    sentinel_op = tmp_path / "op-sentinel-bin" / "op"
+    assert resolved == str(sentinel_op), (
+        "test setup bug: `op` did not resolve to this test's own sentinel "
+        f"at {sentinel_op} (got {resolved!r}) -- test isolation leaked a "
+        "real `op` onto PATH"
+    )
 
 
 def _write_fake_op(tmp_path: Path, fetched_key: str) -> Path:
@@ -331,7 +355,17 @@ def hook_env(tmp_path: Path) -> dict[str, str]:
         # (e.g. a future edit that drops the HOME redirect but keeps this
         # dict). Setting it explicitly here closes that route too.
         "ATHENAEUM_CACHE_DIR": str(tmp_path / ".cache" / "athenaeum"),
-        "PATH": os.environ.get("PATH", ""),
+        # athenaeum#2193: a sentinel `op` goes FIRST on PATH by default, so
+        # a test that never thinks about `op` at all still can't shell out
+        # to whatever real 1Password CLI happens to be on the runner's own
+        # PATH -- it hits the sentinel, which fails loudly (exit 1, no
+        # stdout) and records the attempt. A test that prepends its own
+        # working fake `op` (see `_write_fake_op` / `_write_fake_op_table`)
+        # still wins: PATH precedence means whatever is prepended AFTER
+        # this fixture returns comes first.
+        "PATH": (
+            f"{install_sentinel_op(tmp_path)}{os.pathsep}{os.environ.get('PATH', '')}"
+        ),
         "KNOWLEDGE_ROOT": str(knowledge),
         "ATHENAEUM_SRC": str(athenaeum_src),
         "ATHENAEUM_PYTHON": sys.executable,
@@ -605,9 +639,14 @@ class TestSessionStartRecall:
         self, hook_env: dict[str, str], tmp_path: Path
     ) -> None:
         """athenaeum#1886 AC1: a cached ANTHROPIC_API_KEY line must survive
-        a run where the fetch fails (here, `op` is absent from PATH
-        entirely) — the config.env writers both truncate the file, and only
-        the restore this issue adds carries the line forward."""
+        a run where the fetch fails/is skipped (here, no OP_SERVICE_ACCOUNT_TOKEN
+        and no ATHENAEUM_OP_INTERACTIVE, so the athenaeum#2193 gate never even
+        reaches `op`) — the config.env writers both truncate the file, and only
+        the restore this issue adds carries the line forward. Also proves the
+        athenaeum#2193 gate itself: `op` here is the fixture's own sentinel
+        (hook_env's default), not a filtered-absent PATH, so a run that reached
+        `op` at all would be caught by the sentinel's recorded invocations in
+        the dedicated gate tests below."""
         _require("bash")
         _require_hook_python(hook_env, "athenaeum.search")
 
@@ -619,10 +658,8 @@ class TestSessionStartRecall:
             "ANTHROPIC_API_KEY=synthetic-cached-key-preserved\n"
         )
 
-        env = _env_without_op(hook_env)
-        assert shutil.which("op", path=env["PATH"]) is None, (
-            "test setup bug: `op` still reachable on the filtered PATH"
-        )
+        env = dict(hook_env)
+        _assert_op_is_sentinel(env, tmp_path)
 
         result = subprocess.run(
             ["bash", str(SESSION_START)],
@@ -638,11 +675,16 @@ class TestSessionStartRecall:
         assert key_lines == ["ANTHROPIC_API_KEY=synthetic-cached-key-preserved"]
         assert "No ANTHROPIC_API_KEY cached" not in result.stderr
 
-    def test_fresh_op_fetch_replaces_cached_key(
+    def test_fresh_op_fetch_with_refresh_replaces_cached_key(
         self, hook_env: dict[str, str], tmp_path: Path
     ) -> None:
-        """athenaeum#1886 AC2: a fresh successful `op read` must still
-        replace the cached value, not just preserve it."""
+        """athenaeum#1886 AC2, narrowed by athenaeum#2193: a fresh successful
+        `op read` still replaces a cached value -- but AC2's original
+        unconditional per-session re-read is now opt-in via
+        ATHENAEUM_OP_REFRESH=1 (an unconditional re-read on every SessionStart
+        is exactly what turns a one-time OS permission grant into a recurring
+        prompt). A cached line also needs OP_SERVICE_ACCOUNT_TOKEN set for the
+        fetch to be attempted at all under the new gate (athenaeum#2193 AC3/AC7)."""
         _require("bash")
         _require_hook_python(hook_env, "athenaeum.search")
 
@@ -654,7 +696,9 @@ class TestSessionStartRecall:
             "ANTHROPIC_API_KEY=synthetic-cached-key-stale\n"
         )
 
-        env = _env_without_op(hook_env)
+        env = dict(hook_env)
+        env["OP_SERVICE_ACCOUNT_TOKEN"] = "synthetic-service-account-token"
+        env["ATHENAEUM_OP_REFRESH"] = "1"
         fake_op_dir = _write_fake_op(tmp_path, "synthetic-fresh-key-from-op")
         env["PATH"] = f"{fake_op_dir}{os.pathsep}{env['PATH']}"
         assert shutil.which("op", path=env["PATH"]) == str(fake_op_dir / "op")
@@ -677,16 +721,17 @@ class TestSessionStartRecall:
         self, hook_env: dict[str, str], tmp_path: Path
     ) -> None:
         """athenaeum#1886 AC3: a run that ends with no key at all (nothing
-        cached, and the fetch fails because `op` is absent) must print
+        cached, and no fetch attempted under the athenaeum#2193 gate -- no
+        OP_SERVICE_ACCOUNT_TOKEN, no ATHENAEUM_OP_INTERACTIVE) must print
         exactly one clear warning to stderr, so the degrade is visible
-        instead of silent."""
+        instead of silent. `op` here is the fixture's own sentinel, not a
+        filtered-absent PATH -- proving the warning fires even when `op` is
+        technically reachable but the gate never calls it."""
         _require("bash")
         _require_hook_python(hook_env, "athenaeum.search")
 
-        env = _env_without_op(hook_env)
-        assert shutil.which("op", path=env["PATH"]) is None, (
-            "test setup bug: `op` still reachable on the filtered PATH"
-        )
+        env = dict(hook_env)
+        _assert_op_is_sentinel(env, tmp_path)
 
         result = subprocess.run(
             ["bash", str(SESSION_START)],
@@ -707,15 +752,17 @@ class TestSessionStartRecall:
     def test_op_present_fetches_both_anthropic_and_jev_keys(
         self, hook_env: dict[str, str], tmp_path: Path
     ) -> None:
-        """athenaeum#2056 AC1: with `op` signed in, config.env ends up with
-        both an ANTHROPIC_API_KEY line and a JEV_API_KEY line, each fetched
-        from its own default 1Password path. Pins
-        `ATHENAEUM_OP_JEV_KEY_PATH`'s default of `op://Agent Tools/Jev
+        """athenaeum#2056 AC1: with `op` signed in (and, per athenaeum#2193's
+        gate, OP_SERVICE_ACCOUNT_TOKEN set so the fetch is attempted at all),
+        config.env ends up with both an ANTHROPIC_API_KEY line and a
+        JEV_API_KEY line, each fetched from its own default 1Password path.
+        Pins `ATHENAEUM_OP_JEV_KEY_PATH`'s default of `op://Agent Tools/Jev
         Athenaeum Key/credential` via the stub's exact-path match."""
         _require("bash")
         _require_hook_python(hook_env, "athenaeum.search")
 
-        env = _env_without_op(hook_env)
+        env = dict(hook_env)
+        env["OP_SERVICE_ACCOUNT_TOKEN"] = "synthetic-service-account-token"
         fake_op_dir = _write_fake_op_table(tmp_path, jev_present=True)
         env["PATH"] = f"{fake_op_dir}{os.pathsep}{env['PATH']}"
         assert shutil.which("op", path=env["PATH"]) == str(fake_op_dir / "op")
@@ -740,9 +787,11 @@ class TestSessionStartRecall:
         self, hook_env: dict[str, str], tmp_path: Path
     ) -> None:
         """athenaeum#2056 AC2: a previously cached JEV_API_KEY line must
-        survive a run where `op` is entirely absent from PATH — same
-        preserve/restore contract as the athenaeum#1886
-        ANTHROPIC_API_KEY-only pins above, generalised to this credential."""
+        survive a run where the fetch is skipped (here, no
+        OP_SERVICE_ACCOUNT_TOKEN and no ATHENAEUM_OP_INTERACTIVE, so the
+        athenaeum#2193 gate never reaches `op`) — same preserve/restore
+        contract as the athenaeum#1886 ANTHROPIC_API_KEY-only pins above,
+        generalised to this credential."""
         _require("bash")
         _require_hook_python(hook_env, "athenaeum.search")
 
@@ -755,10 +804,8 @@ class TestSessionStartRecall:
             "JEV_API_KEY=synthetic-cached-jev-key\n"
         )
 
-        env = _env_without_op(hook_env)
-        assert shutil.which("op", path=env["PATH"]) is None, (
-            "test setup bug: `op` still reachable on the filtered PATH"
-        )
+        env = dict(hook_env)
+        _assert_op_is_sentinel(env, tmp_path)
 
         result = subprocess.run(
             ["bash", str(SESSION_START)],
@@ -782,17 +829,18 @@ class TestSessionStartRecall:
     def test_missing_jev_item_yields_no_line_and_no_warning(
         self, hook_env: dict[str, str], tmp_path: Path
     ) -> None:
-        """athenaeum#2056 AC3: when `op` is signed in but the Jev 1Password
-        item does not exist and nothing is cached, config.env must get no
-        JEV_API_KEY line at all, and stderr must carry no warning about it
-        -- Jev is optional. The ANTHROPIC_API_KEY fetch must still succeed
-        normally, and the existing no-key warning (which only ever checks
-        ANTHROPIC_API_KEY) must not fire for ANTHROPIC either, since that
-        fetch succeeds here."""
+        """athenaeum#2056 AC3: when `op` is signed in (OP_SERVICE_ACCOUNT_TOKEN
+        set, per the athenaeum#2193 gate) but the Jev 1Password item does not
+        exist and nothing is cached, config.env must get no JEV_API_KEY line
+        at all, and stderr must carry no warning about it -- Jev is optional.
+        The ANTHROPIC_API_KEY fetch must still succeed normally, and the
+        existing no-key warning (which only ever checks ANTHROPIC_API_KEY)
+        must not fire for ANTHROPIC either, since that fetch succeeds here."""
         _require("bash")
         _require_hook_python(hook_env, "athenaeum.search")
 
-        env = _env_without_op(hook_env)
+        env = dict(hook_env)
+        env["OP_SERVICE_ACCOUNT_TOKEN"] = "synthetic-service-account-token"
         fake_op_dir = _write_fake_op_table(tmp_path, jev_present=False)
         env["PATH"] = f"{fake_op_dir}{os.pathsep}{env['PATH']}"
         assert shutil.which("op", path=env["PATH"]) == str(fake_op_dir / "op")
