@@ -290,6 +290,43 @@ The hook path and SessionEnd hold no `RunLock`, so they record anchors only as
 mirrors them to `wiki/_witness_anchors/<YYYY-MM>.jsonl` (no prompt digests;
 pushed off-machine) and to the receipt `_seals/anchors/` store.
 
+**The nightly pass** (issue athenaeum#2040,
+`athenaeum.witness_anchor.run_nightly_anchor`) runs at the end of the
+librarian run under its own lock, and is also available on demand as
+`athenaeum receipts anchor`. It is gated by
+`librarian.witness_ledger_enabled` (default off) and does four things, in
+this order:
+
+1. Anchors every receipt partition whose `receipt_sealers.partition_digest`
+   differs from its own most recent anchor record, through
+   `receipt_sealers.AnchoringSealer` — a `transcript_receipts.Sealer`
+   implementation that landed with `transcript_receipts.py` unchanged.
+   Each attestation is recorded in BOTH stores: an `anchor` line in the
+   local witness ledger (so the mirror carries it) and an anchor record
+   under `_seals/anchors/<YYYY-MM>.jsonl` (so a re-run is a no-op). An
+   unchanged partition is left alone, and an attestation the lock-free
+   paths already obtained for the SAME digest is **imported, not
+   re-stamped** — a re-stamp would spend a calendar round trip to learn
+   something already known and would record a later `claimed_time` for
+   content demonstrably older than that.
+2. Anchors the witness chain head once per pass, with the configured
+   adapters (`receipt_sealers.select_anchorers`, a seam separate from
+   `select_sealer`: a sealer and an anchorer set are independent choices).
+3. Upgrades still-`pending` OpenTimestamps attestations. This is the only
+   place in athenaeum that turns a submitted stamp into a complete Bitcoin
+   attestation — a calendar's transaction confirms hours later, so
+   upgrading cannot be part of the pass that submitted it.
+4. Mirrors every new witness `anchor` line, last, so this pass's own lines
+   are included. A mirror record carries exactly `ledger_id`, `seq`,
+   `line_hash` and the attestations — nothing prompt-derived ever reaches
+   the pushed repo — with proof files copied by basename under
+   `_witness_anchors/proofs/`. The librarian then commits, before its
+   post-run push, so the records actually leave the machine; that is the
+   whole point, and it is the only defence against attack window (b).
+
+Every `wiki/` write on this path requires an already-acquired `RunLock` and
+raises `LockNotHeld` without one.
+
 ### Intake
 
 `src/athenaeum/witness_attestation.py` (athenaeum#2158) loads and verifies the
@@ -385,7 +422,8 @@ These replace the open questions the design pass raised.
   block-explorer verification (blocked by athenaeum#2147).
 - athenaeum#2156 — periodic in-session and SessionEnd anchoring, local ledger
   only.
-- athenaeum#2040 — nightly anchoring, wiki mirror, receipt `AnchoringSealer`.
+- **athenaeum#2040 — nightly anchoring, wiki mirror, receipt
+  `AnchoringSealer`** (built; see "Anchoring" above).
 - athenaeum#2157 — RFC 3161 anchoring adapter.
 - athenaeum#2158 — intake attestation, `witnessed` channel, misses as
   incidents.

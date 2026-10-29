@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""``athenaeum receipts {seal,verify}`` — transcript-receipt sealing CLI (issue athenaeum#2039).
+"""``athenaeum receipts {seal,verify,anchor}`` — transcript-receipt sealing and
+anchoring CLI (issues athenaeum#2039 and athenaeum#2040).
 
 - ``seal``    sign every unsealed range in every receipt partition
               (:func:`athenaeum.receipt_sealers.seal_all_unsealed`). Needs the
@@ -11,6 +12,15 @@
               report every range that has no seal
               (:func:`athenaeum.receipt_sealers.verify_all`). Needs only the
               PUBLIC key, so it runs anywhere that is configured.
+- ``anchor``  anchor every receipt partition that changed since its own last
+              anchor, plus the witness chain head, upgrade pending
+              OpenTimestamps proofs, and mirror the resulting witness
+              ``anchor`` lines into ``wiki/_witness_anchors/``
+              (:func:`athenaeum.witness_anchor.run_nightly_anchor`). This is
+              the same pass the nightly librarian run performs at the end of
+              its own run, offered here so an operator can run it on demand.
+              Unlike ``seal``/``verify`` it needs NO key — it needs the run
+              LOCK, because it writes into the knowledge repo.
 
 **No plaintext in either output.** Both verbs report a partition month and a
 line range and nothing else — receipt content never reaches this layer. The
@@ -29,7 +39,12 @@ import json
 import sys
 from pathlib import Path
 
-from athenaeum._cli_shared import _resolve_knowledge_root, _resolve_wiki_root
+from athenaeum._cli_shared import (
+    _acquire_or_exit,
+    _add_lock_args,
+    _resolve_knowledge_root,
+    _resolve_wiki_root,
+)
 from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT, load_config
 
 #: Exit code for `verify` when any seal failed or any range is unsealed. A
@@ -105,13 +120,63 @@ def _cmd_verify(args: argparse.Namespace) -> int:
     return 0 if report.ok else VERIFY_PROBLEM_EXIT
 
 
+def _cmd_anchor(args: argparse.Namespace) -> int:
+    """Run the anchoring pass under the run lock (issue athenaeum#2040).
+
+    Takes the SAME ``<knowledge_root>/.athenaeum.lock`` the nightly run
+    takes, because it writes into the knowledge repo — the anchor-record
+    store and the off-machine mirror. Needs no signing key at all: a
+    ``local-clock`` attestation is mandatory and cannot fail, so this
+    command always produces a record, with or without network.
+    """
+    from athenaeum.witness_anchor import run_nightly_anchor
+    from athenaeum.witness_attestation import resolve_default_witness_dir
+
+    knowledge_root = _resolve_knowledge_root(args)
+    config = load_config(knowledge_root)
+    acquired = _acquire_or_exit(knowledge_root, args, config)
+    if isinstance(acquired, int):
+        return acquired
+    try:
+        report = run_nightly_anchor(
+            resolve_default_witness_dir(),
+            _resolve_wiki_root(args),
+            config=config,
+            lock=acquired,
+        )
+    finally:
+        acquired.release()
+
+    if args.json:
+        sys.stdout.write(json.dumps(report.to_dict()) + "\n")
+        return 0
+    for month in report.anchored:
+        print(f"anchored:  {month}")
+    for month in report.imported:
+        print(f"imported:  {month} (attestation already held for this digest)")
+    for month in report.unchanged:
+        print(f"unchanged: {month}")
+    if report.head_subject:
+        print(f"head:      {report.head_subject}")
+    for subject in report.upgraded:
+        print(f"upgraded:  {subject}")
+    print(
+        f"receipts anchor: {len(report.anchored)} anchored, "
+        f"{len(report.imported)} imported, {len(report.unchanged)} unchanged, "
+        f"{len(report.upgraded)} upgraded, {report.mirrored} record(s) mirrored"
+    )
+    return 0
+
+
 def _cmd_receipts_dispatch(args: argparse.Namespace) -> int:
     target = getattr(args, "receipts_target", None)
     if target == "seal":
         return _cmd_seal(args)
     if target == "verify":
         return _cmd_verify(args)
-    print("usage: athenaeum receipts {seal,verify} [...]", file=sys.stderr)
+    if target == "anchor":
+        return _cmd_anchor(args)
+    print("usage: athenaeum receipts {seal,verify,anchor} [...]", file=sys.stderr)
     return 2
 
 
@@ -134,11 +199,13 @@ def add_receipts_subparser(subparsers: argparse._SubParsersAction) -> None:
     r_parser = subparsers.add_parser(
         "receipts",
         help=(
-            "Seal and verify the transcript-receipt ledger. `seal` signs "
-            "every unsealed line range and needs the configured signing key "
-            "to be reachable; `verify` checks every seal against the live "
-            "ledger and needs only the public key. Output is partitions and "
-            "line ranges only, never receipt content."
+            "Seal, verify and anchor the transcript-receipt ledger. `seal` "
+            "signs every unsealed line range and needs the configured "
+            "signing key to be reachable; `verify` checks every seal against "
+            "the live ledger and needs only the public key; `anchor` "
+            "externally timestamps every changed partition and mirrors the "
+            "anchor records off-machine, and needs the run lock. Output is "
+            "partitions and line ranges only, never receipt content."
         ),
     )
     r_parser.set_defaults(func=_cmd_receipts_dispatch)
@@ -164,6 +231,21 @@ def add_receipts_subparser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_common(verify_p)
     verify_p.set_defaults(func=_cmd_verify)
+
+    anchor_p = r_sub.add_parser(
+        "anchor",
+        help=(
+            "Anchor every receipt partition that changed since its own last "
+            "anchor and the witness chain head, upgrade pending "
+            "OpenTimestamps proofs, and mirror the anchor records into "
+            "wiki/_witness_anchors/ so they leave the machine with the "
+            "pushed knowledge repo. Takes the run lock; needs no signing "
+            "key. The nightly run does this itself at the end of its run."
+        ),
+    )
+    _add_common(anchor_p)
+    _add_lock_args(anchor_p)
+    anchor_p.set_defaults(func=_cmd_anchor)
 
 
 __all__ = ["add_receipts_subparser"]

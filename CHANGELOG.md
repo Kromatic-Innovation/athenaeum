@@ -9,6 +9,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Nightly witness anchoring, the receipt `AnchoringSealer`, and an
+  off-machine mirror of anchor records (issue athenaeum#2040).** The witness
+  design's last unbuilt anchoring path: at the end of a librarian run, under
+  its own run lock, athenaeum now anchors every receipt partition that changed
+  since its own last anchor, anchors the witness chain head, upgrades pending
+  OpenTimestamps proofs, and mirrors every new anchor record into
+  `wiki/_witness_anchors/<YYYY-MM>.jsonl` with its proof under `proofs/`.
+  Gated by `librarian.witness_ledger_enabled` (default off); the same pass is
+  available on demand as `athenaeum receipts anchor`.
+  - **Why the mirror matters more than the stamp.** Every other layer the
+    witness design builds — the hash chain, signatures, in-session anchors —
+    lives in files the same OS user can remove, so deleting the whole ledger
+    was undetectable (athenaeum#2144's attack window (b)). These records are
+    pushed with the knowledge repo, so a ledger that is gone can still be
+    shown to have existed, up to the last mirrored `seq`, with an attestation
+    for when. They carry exactly `ledger_id`, `seq`, `line_hash` and the
+    attestations — nothing prompt-derived ever reaches the pushed repo.
+  - **`receipt_sealers.AnchoringSealer`** is the second real
+    `transcript_receipts.Sealer`, and it landed with `transcript_receipts.py`
+    unchanged, exactly as that module's `Sealer` docstring promised. It is
+    never called from `append_receipt`: one network round trip per receipt is
+    not a cost intake can pay, and the whole-partition digest it commits to
+    would be invalidated by the very next appended line. `select_anchorers`
+    is its own selection seam alongside the unchanged `select_sealer` —
+    signing and anchoring answer different questions (*who sealed this* vs
+    *by when did this exist*) and are independent choices.
+  - **An attestation the lock-free paths already obtained is imported, not
+    re-stamped.** Keyed on the digest, not the subject. A re-stamp would
+    spend a calendar round trip to learn something already known and would
+    record a later `claimed_time` for content demonstrably older than that,
+    which is strictly worse evidence.
+  - Every `wiki/` write on this path requires an already-acquired `RunLock`
+    and raises `LockNotHeld` without one. Network failure is never an error:
+    `local-clock` is mandatory and cannot fail, and every other adapter
+    degrades to a `failed` attestation, so an offline nightly still records a
+    stamp and the next pass retries.
+
 - **A `clean-venv` CI job, so the documented install path is actually tested
   (issue athenaeum#2136).** Every other CI job constrains its install to
   `requirements-ci.lock`. That is right for reproducibility and wrong as the

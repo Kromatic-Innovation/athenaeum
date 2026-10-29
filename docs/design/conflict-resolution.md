@@ -598,9 +598,21 @@ confirmed (2026-10-09) the remote cannot refuse force-push, so that history
 is a log, not a cryptographic seal. `transcript_receipts.Sealer` is a small
 interface (`seal` a contiguous range of just-appended lines, `verify` a
 previously-sealed range) whose default, `NoopSealer`, records nothing beyond
-the ledger line itself. Two deferred sealers — an operator-held signing key
-(issue athenaeum#2039) and external timestamp anchoring (issue athenaeum#2040) —
-are meant to implement that interface without this module changing.
+the ledger line itself. Both real sealers now live behind it, in
+`receipt_sealers.py`, and `transcript_receipts.py` was not changed by
+either: `SigningSealer` (issue athenaeum#2039) signs a range with an
+operator-held key, answering *who sealed this*; `AnchoringSealer` (issue
+athenaeum#2040) anchors a whole partition's content digest with an external
+timestamp, answering *by when did this content exist*. They are
+independent — sign without anchoring, anchor without signing, or both —
+which is why anchorer selection is its own function (`select_anchorers`)
+rather than another branch inside `select_sealer`. Anchoring is never
+called from `append_receipt`: one network round trip per receipt is not a
+cost intake can pay, and the whole-partition digest it commits to would be
+invalidated by the very next appended line, so it runs at the end of the
+nightly run (and on demand, `athenaeum receipts anchor`) under the run
+lock. See `docs/design/witness-ledger.md` ("Anchoring") for the subjects,
+the adapters and the lock rule.
 
 ### Known limits — do not mistake this for a verified-identity guarantee
 
@@ -632,22 +644,33 @@ are meant to implement that interface without this module changing.
   distinguish a forged `type: "user"` record from a real one. The window
   between a session ending and the next nightly run is also unprotected
   (receipts are written under `RunLock` at nightly intake, not at
-  session_end). Only the two deferred sealers (athenaeum#2039, athenaeum#2040)
-  — and, upstream of this repo, harness-side signing of the transcript
-  itself — would close this. A forged human turn APPENDED after a
+  session_end). The two sealers narrow this but do not close it: a
+  signature (athenaeum#2039) makes a forged receipt line require the key,
+  and an anchor (athenaeum#2040) bounds a partition's content to a time it
+  demonstrably existed by — neither says anything about lines appended
+  after the last anchor, which is exactly the window named here. Only
+  harness-side signing of the transcript itself, upstream of this repo,
+  would close it. A forged human turn APPENDED after a
   legitimate receipt was already written is structurally indistinguishable
   from an ordinary resumed session — both are "more complete lines after
   the recorded prefix" — so the prefix-digest check cannot catch a forgery
   that only ever appends, by design (appending is exactly what a resumed
   session legitimately does).
 - **A forger with filesystem access can also append a fake receipt line
-  directly to the ledger.** Appending bypasses the classification step
-  entirely. With the default `NoopSealer`, nothing beyond "it shows up as an
-  addition in a git diff" catches this — git history is a log, not a seal
+  directly to the ledger, and can delete the ledger outright.** Appending
+  bypasses the classification step entirely. With the default `NoopSealer`,
+  nothing beyond "it shows up as an addition in a git diff" catches this — git history is a log, not a seal
   (the knowledge remote cannot refuse force-push). This is the same
   limitation the ledger's own design review flagged for a hand-rolled
   commit-provenance check, which is why that candidate criterion was
-  dropped rather than built.
+  dropped rather than built. Deleting the ledger wholesale is the
+  degenerate case, and it is detectable only off-machine: the anchor
+  records the nightly mirrors into `wiki/_witness_anchors/` are pushed
+  with the knowledge repo, so a ledger that is gone can still be shown to
+  have existed, up to the last mirrored `seq`, with an attestation for
+  when (issue athenaeum#2040). Those records are no-plaintext by
+  construction — `ledger_id`, `seq`, `line_hash` and the attestations,
+  never a prompt digest.
 - **Receipt digests are dictionary-recoverable.** Human utterances are
   short; a `memory_digest`/`utterance_digest` published anywhere outside the
   knowledge repo (a public mirror, a shared export) is attackable by

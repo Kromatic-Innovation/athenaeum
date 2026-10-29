@@ -10326,12 +10326,82 @@ def _format_budget_window_spend(ctx: "RunContext") -> str | None:
         return None
 
 
+def _maybe_run_nightly_anchor(ctx: "RunContext") -> None:
+    """End-of-run witness anchoring and off-machine mirror (issue athenaeum#2040).
+
+    The design's lock rule (``docs/design/witness-ledger.md``,
+    "Anchoring") makes the NIGHTLY run the only path allowed to write
+    anchor records into ``wiki/``: the hook and SessionEnd hold no run
+    lock, so they record anchors only in the local witness ledger. This is
+    that path. It runs here, at the end of finalize and immediately BEFORE
+    :func:`_maybe_push_after_run`, and commits its own writes, so the
+    mirrored records go out with THIS run's push rather than sitting
+    uncommitted until the next run's ``git add -A`` happens to sweep them
+    up — the whole point of the mirror is that the records leave the
+    machine (issue athenaeum#2144, attack window (b): deleting the entire
+    ledger is detectable only off-machine).
+
+    Four gates, every one of them a reason to do nothing at all:
+
+    - ``librarian.witness_ledger_enabled`` is off (the DEFAULT) — the
+      epic's rollback rule.
+    - ``--dry-run`` — a dry run writes nothing and must not spend a
+      calendar round trip either.
+    - no acquired run lock on ``ctx`` — a librarian invoked without one
+      (``merge_only`` helper paths, tests) must not write to ``wiki/``.
+      Checked here rather than left to
+      :func:`athenaeum.receipt_sealers.require_lock`, so the skip is a
+      logged non-event rather than a caught exception.
+    - any exception — best-effort, exactly like the athenaeum#310
+      page-size guardrail and the athenaeum#470 drain advisor below it: an
+      anchoring hiccup must never change a run's exit code.
+    """
+    from athenaeum.config import resolve_witness_ledger_enabled
+
+    if ctx.dry_run or not resolve_witness_ledger_enabled(ctx.config):
+        return
+    if not getattr(ctx.lock, "acquired", False):
+        log.debug(
+            "witness anchoring skipped: this run holds no run lock "
+            "(issue athenaeum#2040)"
+        )
+        return
+    try:
+        from athenaeum.store import FilesystemStore
+        from athenaeum.witness_anchor import run_nightly_anchor
+        from athenaeum.witness_attestation import resolve_default_witness_dir
+
+        report = run_nightly_anchor(
+            resolve_default_witness_dir(),
+            ctx.wiki_root,
+            config=ctx.config,
+            lock=ctx.lock,
+        )
+        log.info(
+            "witness anchoring: %d partition(s) anchored, %d imported, "
+            "%d unchanged, %d proof(s) upgraded, %d record(s) mirrored "
+            "off-machine (issue athenaeum#2040)",
+            len(report.anchored),
+            len(report.imported),
+            len(report.unchanged),
+            len(report.upgraded),
+            report.mirrored,
+        )
+        if report.mirrored or report.anchored or report.imported:
+            FilesystemStore(ctx.knowledge_root, {}).snapshot(
+                "athenaeum: witness anchor records (issue athenaeum#2040)"
+            )
+    except Exception as exc:  # noqa: BLE001 — anchoring must never break a run
+        log.warning("witness anchoring failed (non-fatal): %s", exc)
+
+
 def _run_finalize_phase(ctx: RunContext) -> int:
-    """Finalize: run-level spend summary + athenaeum#378 ledger write, post-run push,
-    the athenaeum#310 page-size guardrail, the athenaeum#481 pending-merge revalidation
+    """Finalize: run-level spend summary + athenaeum#378 ledger write, the
+    athenaeum#2040 witness-anchor step, post-run push, the athenaeum#310
+    page-size guardrail, the athenaeum#481 pending-merge revalidation
     advisor, the summary emit, the athenaeum#470 backlog-drain advisory, and the
     terminal return-code selection. Issue athenaeum#461/#378/#284/#310/#481/#464/
-    athenaeum#470/#396/#227 seam.
+    athenaeum#470/#396/#227/#2040 seam.
 
     This is the LAST phase; every remaining ``run()`` return code
     (EXIT_GRACEFUL_PARTIAL/75 for a deadline trip, 1 for failed files, 1 for
@@ -10493,6 +10563,10 @@ def _run_finalize_phase(ctx: RunContext) -> int:
                     ctx.zero_yield_consecutive,
                     _zy_alert_threshold,
                 )
+
+    # Issue athenaeum#2040: witness anchoring + off-machine mirror, BEFORE the
+    # push so this run's own records are what gets pushed.
+    _maybe_run_nightly_anchor(ctx)
 
     _maybe_push_after_run(
         ctx.knowledge_root,

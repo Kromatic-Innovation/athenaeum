@@ -8095,3 +8095,43 @@ def resolve_receipt_anchor_anchor_interval_minutes(config: dict[str, Any] | None
     if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
         return raw
     return 15
+
+
+def resolve_witness_ledger_enabled(config: dict[str, Any] | None) -> bool:
+    """Resolve the witness-ledger NIGHTLY opt-in (issue athenaeum#2040). DEFAULT OFF.
+
+    Gates :func:`athenaeum.witness_anchor.run_nightly_anchor` entirely at
+    its librarian call site: with this off, a nightly run writes nothing
+    under ``wiki/_witness_anchors/`` or
+    ``wiki/_transcript_receipts/_seals/anchors/``, makes no calendar call,
+    and is byte-identical to a run from before this issue existed. That is
+    the epic's migration rule (athenaeum#2144, "Migration and rollback"):
+    every behaviour except the in-session anchoring cadence is behind a
+    flag that defaults off, and rollback is turning the flag off.
+
+    **One knob, two readers.** ``ATHENAEUM_WITNESS_LEDGER_ENABLED`` is the
+    SAME env var the ``UserPromptSubmit`` hook reads
+    (``athenaeum.claude_code_adapter._witness_ledger_enabled``) — the
+    witness ledger being on is one fact, not two. The hook reads it with an
+    exact ``== "true"`` match because it never loads ``athenaeum.yaml`` at
+    all and must not grow a second failure mode per prompt; this resolver
+    accepts the usual vocabulary and adds the yaml home the nightly needs.
+    An operator who sets ``true`` (the documented value) gets both.
+
+    Precedence: ``ATHENAEUM_WITNESS_LEDGER_ENABLED`` env
+    (``1``/``true``/``yes``/``on``, case-insensitive) > yaml
+    ``librarian.witness_ledger_enabled`` > default ``False``. No seed in
+    ``_DEFAULTS`` (issue athenaeum#231). Non-bool yaml values and
+    unrecognized env strings fall through to off, exactly like
+    :func:`resolve_witness_attestation_enabled`.
+    """
+    env = os.environ.get("ATHENAEUM_WITNESS_LEDGER_ENABLED")
+    if env is not None:
+        return env.strip().lower() in ("1", "true", "yes", "on")
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("witness_ledger_enabled")
+            if isinstance(raw, bool):
+                return raw
+    return False
