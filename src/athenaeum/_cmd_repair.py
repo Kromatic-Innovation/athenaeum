@@ -390,10 +390,10 @@ def _cmd_repair_contact_records(args: argparse.Namespace) -> int:
         2 — dry-run found records it WOULD fold or retire.
     """
     from athenaeum.config import load_config
-    from athenaeum.contact_record_fold import (
+    from athenaeum.contact_record_fold import resolve_contacts_root
+    from athenaeum.contact_record_repair import (
         apply_contact_record_repair,
         plan_contact_record_repair,
-        resolve_contacts_root,
     )
 
     knowledge_root = (args.knowledge_root or DEFAULT_KNOWLEDGE_ROOT).expanduser().resolve()

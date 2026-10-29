@@ -8,7 +8,7 @@ person's addresses under the absorbed uid. Every such address then resolved to
 two uids, which kept raising ``email-handle-ambiguous`` questions, and no
 sanctioned write path could reach the record afterwards.
 
-This module is the fix, in two halves that share one fold primitive:
+This module holds the fold primitive and the merge hook; the repair reuses it:
 
 1. **The merge hook** — :func:`fold_absorbed_contact_records`. The merge paths
    call it after they absorb a page. Each of the absorbed uid's records is
@@ -20,8 +20,7 @@ This module is the fix, in two halves that share one fold primitive:
    :func:`athenaeum.pii.retire_contact_record` — renamed out of the
    ``*.md`` glob and logged in a ledger, never deleted.
 
-2. **The repair** — :func:`plan_contact_record_repair` /
-   :func:`apply_contact_record_repair`, reached through
+2. **The repair** — :mod:`athenaeum.contact_record_repair`, reached through
    ``athenaeum repair --contact-records``. It finds what earlier merges left
    behind:
 
@@ -46,9 +45,12 @@ instead, on a record it chose explicitly.
 
 Nothing here rebuilds the recall index: the excluded surface is not in it.
 
-Layering: L3 domain module over :mod:`athenaeum.pii` (surface layout and
-retirement), :mod:`athenaeum.models` (wiki page parsing) and
-:mod:`athenaeum.provenance` (the merge ledger).
+Layering: L3. Imports :mod:`athenaeum.pii` (L3; surface layout and
+retirement), :mod:`athenaeum.models` (L1) and :mod:`athenaeum.atomic_io`
+(L0). The merge paths that call it (:mod:`athenaeum.dedupe`,
+:mod:`athenaeum.pending_merges`) are L4; the repair, which needs
+:mod:`athenaeum.pending_merges`' target resolver, lives in
+:mod:`athenaeum.contact_record_repair` so this module never imports upward.
 """
 
 from __future__ import annotations
@@ -62,14 +64,7 @@ from typing import Any
 
 from athenaeum import pii
 from athenaeum.atomic_io import atomic_write_text
-from athenaeum.models import (
-    EntityIndex,
-    is_tombstone,
-    parse_frontmatter,
-    render_frontmatter,
-    slugify,
-    tombstone_target,
-)
+from athenaeum.models import parse_frontmatter, render_frontmatter
 
 log = logging.getLogger(__name__)
 
@@ -90,10 +85,6 @@ FOLD_SOURCE = "script:contact-record-fold"
 #: ``reason`` strings written to the retirement ledger.
 REASON_MERGE_FOLD = "merge-fold"
 REASON_DUPLICATE = "duplicate-record"
-
-#: How far :func:`_live_end` follows a chain of absorbed uids. Folds are
-#: acyclic by construction; this only bounds a hand-edited loop.
-_MAX_CHAIN = 16
 
 
 # ---------------------------------------------------------------------------
@@ -257,16 +248,16 @@ class ContactFoldSummary:
         return sum(self.values_added.values())
 
 
-def _uid_prefixed(path: Path, uid: str) -> bool:
+def uid_prefixed(path: Path, uid: str) -> bool:
     stem = path.stem
     return stem == uid or stem.startswith(f"{uid}-")
 
 
-def _preferred_record(paths: Iterable[Path], uid: str) -> Path | None:
+def preferred_record(paths: Iterable[Path], uid: str) -> Path | None:
     """The record a fold should land on: the ``<uid>``-named one first, else scan order."""
     existing = [p for p in paths if p.exists()]
     for path in existing:
-        if _uid_prefixed(path, uid):
+        if uid_prefixed(path, uid):
             return path
     return existing[0] if existing else None
 
@@ -294,7 +285,7 @@ def fold_contact_record(
     absorbed_meta, _ = parse_frontmatter(absorbed_text)
     absorbed_meta = absorbed_meta if isinstance(absorbed_meta, dict) else {}
 
-    canonical_path = _preferred_record(index.all_by_uid(canonical_uid), canonical_uid)
+    canonical_path = preferred_record(index.all_by_uid(canonical_uid), canonical_uid)
     minted = canonical_path is None
     if canonical_path is None:
         canonical_path = pii.default_uid_record_path(root, canonical_uid)
@@ -449,281 +440,3 @@ def fold_contact_records_after_merge(
             summary.records_folded,
         )
     return summary
-
-
-# ---------------------------------------------------------------------------
-# The repair
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class _WikiFacts:
-    live_uids: set[str] = field(default_factory=set)
-    tombstone_targets: dict[str, str] = field(default_factory=dict)  # uid -> slug
-    merged_into: dict[str, set[str]] = field(default_factory=dict)  # absorbed -> canonicals
-    slug_to_uid: dict[str, str] = field(default_factory=dict)
-    provenance_folds: list[tuple[str, str]] = field(default_factory=list)  # (stem, slug)
-    wiki_root: Path | None = None
-    _slug_cache: dict[str, str | None] = field(default_factory=dict)
-
-    def uid_for_slug(self, slug: str) -> str | None:
-        """The uid of the page a fold's target slug names, resolved as the fold did.
-
-        A fold records ``folded_into`` / ``canonical_slug`` as the BARE slug of
-        its ``merge_target_name``, while a real page lives at
-        ``<uid>-<slug>.md``. So this goes through
-        :func:`athenaeum.pending_merges.resolve_target_page` — the same
-        identity resolver the fold used to pick its target — rather than
-        matching filenames, falling back to an exact stem match.
-        """
-        if slug in self._slug_cache:
-            return self._slug_cache[slug]
-        uid: str | None = None
-        if self.wiki_root is not None and slug:
-            from athenaeum.pending_merges import resolve_target_page
-
-            page = resolve_target_page(slug, self.wiki_root)
-            if page is not None:
-                parsed = EntityIndex.read_page_record(page)
-                if parsed is not None and str(parsed[0].uid or "").strip():
-                    uid = str(parsed[0].uid).strip()
-        if uid is None:
-            uid = self.slug_to_uid.get(slug)
-        self._slug_cache[slug] = uid
-        return uid
-
-
-def _read_wiki_facts(wiki_root: Path) -> _WikiFacts:
-    """One pass over the wiki: which uids are live, and every recorded absorption.
-
-    Uids are read from page frontmatter through
-    :meth:`athenaeum.models.EntityIndex.read_page_record` — the same per-page
-    rule ``EntityIndex`` uses — never inferred from a filename. A tombstone
-    (``status: folded``) is NOT live, though ``EntityIndex`` indexes it.
-    """
-    facts = _WikiFacts(wiki_root=wiki_root)
-    if not wiki_root.is_dir():
-        return facts
-    for path in sorted(wiki_root.glob("*.md")):
-        if path.name.startswith("_"):
-            continue
-        parsed = EntityIndex.read_page_record(path)
-        if parsed is None:
-            continue
-        record, meta = parsed
-        uid = str(record.uid or "").strip()
-        if not uid:
-            continue
-        facts.slug_to_uid.setdefault(slugify(path.stem), uid)
-        if is_tombstone(meta):
-            target = tombstone_target(meta)
-            if target:
-                facts.tombstone_targets[uid] = slugify(target)
-            continue
-        facts.live_uids.add(uid)
-        merged_from = meta.get("merged_from")
-        if isinstance(merged_from, str):
-            merged_from = [merged_from]
-        if isinstance(merged_from, list):
-            for absorbed in merged_from:
-                absorbed_uid = str(absorbed or "").strip()
-                if absorbed_uid and absorbed_uid != uid:
-                    facts.merged_into.setdefault(absorbed_uid, set()).add(uid)
-
-    from athenaeum.provenance import read_merge_provenance
-
-    for rec in read_merge_provenance(wiki_root):
-        if rec.get("applied") is False:
-            continue
-        canonical_slug = slugify(str(rec.get("canonical_slug") or ""))
-        if not canonical_slug:
-            continue
-        sources = rec.get("folded_sources") or rec.get("source_paths") or []
-        if not isinstance(sources, list):
-            continue
-        for src in sources:
-            stem = Path(str(src)).stem
-            if stem and slugify(stem) != canonical_slug:
-                facts.provenance_folds.append((stem, canonical_slug))
-    return facts
-
-
-def _absorbers(uid: str, facts: _WikiFacts) -> set[str]:
-    """Every uid a recorded merge says absorbed *uid* (one hop)."""
-    out: set[str] = set(facts.merged_into.get(uid, ()))
-    for slug in _absorbing_slugs(uid, facts):
-        resolved = facts.uid_for_slug(slug)
-        if resolved:
-            out.add(resolved)
-    out.discard(uid)
-    return out
-
-
-def _absorbing_slugs(uid: str, facts: _WikiFacts) -> list[str]:
-    slugs: list[str] = []
-    slug = facts.tombstone_targets.get(uid)
-    if slug:
-        slugs.append(slug)
-    for stem, canonical_slug in facts.provenance_folds:
-        # A merge record names source PATHS, not uids; a source page whose
-        # filename carries the uid is the only link it offers.
-        if stem == uid or stem.startswith(f"{uid}-"):
-            slugs.append(canonical_slug)
-    return slugs
-
-
-def _has_absorption_record(uid: str, facts: _WikiFacts) -> bool:
-    """Whether ANY merge record names *uid* as absorbed, resolvable or not."""
-    return bool(facts.merged_into.get(uid)) or bool(_absorbing_slugs(uid, facts))
-
-
-def _live_ends(uid: str, facts: _WikiFacts) -> set[str]:
-    """Follow absorptions from *uid* to the live canonical uid(s) at the end."""
-    ends: set[str] = set()
-    frontier = _absorbers(uid, facts)
-    seen = {uid}
-    for _ in range(_MAX_CHAIN):
-        if not frontier:
-            break
-        nxt: set[str] = set()
-        for candidate in frontier - seen:
-            seen.add(candidate)
-            if candidate in facts.live_uids:
-                ends.add(candidate)
-            else:
-                nxt |= _absorbers(candidate, facts)
-        frontier = nxt
-    return ends
-
-
-@dataclass
-class ContactRepairPlan:
-    """What ``repair --contact-records`` found. Paths are kept for apply, never printed."""
-
-    records_scanned: int = 0
-    uids_scanned: int = 0
-    orphan_folds: list[tuple[str, str, list[Path]]] = field(default_factory=list)
-    orphan_ambiguous: int = 0
-    orphan_canonical_not_live: int = 0
-    pageless_unmapped: int = 0
-    duplicate_retire: list[tuple[str, Path, Path]] = field(default_factory=list)
-    duplicate_divergent: int = 0
-    duplicate_both_prefixed: int = 0
-    duplicate_other_shape: int = 0
-    orphan_values_to_add: int = 0
-
-    @property
-    def actionable(self) -> int:
-        return len(self.orphan_folds) + len(self.duplicate_retire)
-
-    def counts(self) -> dict[str, int]:
-        return {
-            "records_scanned": self.records_scanned,
-            "uids_scanned": self.uids_scanned,
-            "absorbed_uids_to_fold": len(self.orphan_folds),
-            "absorbed_records_to_fold": sum(len(p) for _, _, p in self.orphan_folds),
-            "absorbed_values_to_add": self.orphan_values_to_add,
-            "absorbed_ambiguous_canonical": self.orphan_ambiguous,
-            "absorbed_canonical_unresolved": self.orphan_canonical_not_live,
-            "pageless_no_merge_record": self.pageless_unmapped,
-            "duplicate_copies_to_retire": len(self.duplicate_retire),
-            "duplicate_divergent_reported": self.duplicate_divergent,
-            "duplicate_both_uid_prefixed": self.duplicate_both_prefixed,
-            "duplicate_other_shape": self.duplicate_other_shape,
-        }
-
-
-def plan_contact_record_repair(knowledge_root: Path, contacts_root: Path) -> ContactRepairPlan:
-    """Read-only: classify every uid on the contacts surface. Writes nothing."""
-    plan = ContactRepairPlan()
-    facts = _read_wiki_facts(Path(knowledge_root) / "wiki")
-    index = pii.ExcludedRecordIndex(Path(contacts_root))
-    plan.records_scanned = len(pii.iter_contact_records(Path(contacts_root)))
-    uids = index.uids()
-    plan.uids_scanned = len(uids)
-    for uid in uids:
-        paths = index.all_by_uid(uid)
-        if uid in facts.live_uids:
-            if len(paths) > 1:
-                _classify_duplicate(uid, paths, plan)
-            continue
-        if not _has_absorption_record(uid, facts):
-            plan.pageless_unmapped += 1
-            continue
-        ends = _live_ends(uid, facts)
-        if len(ends) == 1:
-            canonical = next(iter(ends))
-            plan.orphan_folds.append((uid, canonical, list(paths)))
-            plan.orphan_values_to_add += _values_to_add(paths, canonical, index)
-        elif not ends:
-            plan.orphan_canonical_not_live += 1
-        else:
-            plan.orphan_ambiguous += 1
-    return plan
-
-
-def _values_to_add(paths: list[Path], canonical_uid: str, index: pii.ExcludedRecordIndex) -> int:
-    target_path = _preferred_record(index.all_by_uid(canonical_uid), canonical_uid)
-    target = pii.read_bounce_record(target_path) if target_path else {}
-    total = 0
-    for path in paths:
-        missing = missing_values(pii.read_bounce_record(path), target)
-        total += sum(len(v) for v in missing.values())
-        # Later records see the earlier ones' values as already present.
-        target = merge_contact_values(target, pii.read_bounce_record(path))[0]
-    return total
-
-
-def _classify_duplicate(uid: str, paths: list[Path], plan: ContactRepairPlan) -> None:
-    if len(paths) != 2:
-        plan.duplicate_other_shape += 1
-        return
-    prefixed = [p for p in paths if _uid_prefixed(p, uid)]
-    if len(prefixed) == 2:
-        plan.duplicate_both_prefixed += 1
-        return
-    if len(prefixed) != 1:
-        plan.duplicate_other_shape += 1
-        return
-    keep = prefixed[0]
-    copy = next(p for p in paths if p != keep)
-    if keep.parent != copy.parent:
-        plan.duplicate_other_shape += 1
-        return
-    if holds_nothing_more(pii.read_bounce_record(copy), pii.read_bounce_record(keep)):
-        plan.duplicate_retire.append((uid, copy, keep))
-    else:
-        plan.duplicate_divergent += 1
-
-
-@dataclass
-class ContactRepairResult:
-    """Counts from :func:`apply_contact_record_repair`."""
-
-    fold: ContactFoldSummary = field(default_factory=ContactFoldSummary)
-    duplicates_retired: int = 0
-    errors: list[str] = field(default_factory=list)
-
-
-def apply_contact_record_repair(
-    plan: ContactRepairPlan, contacts_root: Path
-) -> ContactRepairResult:
-    """Act on *plan*: retire subset duplicates, then fold absorbed uids' records."""
-    result = ContactRepairResult()
-    root = Path(contacts_root)
-    for uid, copy, keep in plan.duplicate_retire:
-        try:
-            pii.retire_contact_record(
-                root, copy, folded_into=uid, reason=REASON_DUPLICATE, canonical_record=keep
-            )
-            result.duplicates_retired += 1
-        except (OSError, UnicodeDecodeError) as exc:
-            result.errors.append(f"{type(exc).__name__} retiring a duplicate record")
-    index = pii.ExcludedRecordIndex(root)
-    result.fold = fold_absorbed_contact_records(
-        root,
-        [(uid, canonical) for uid, canonical, _ in plan.orphan_folds],
-        index=index,
-    )
-    result.errors.extend(result.fold.errors)
-    return result

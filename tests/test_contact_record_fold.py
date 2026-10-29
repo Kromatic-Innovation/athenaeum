@@ -32,10 +32,9 @@ from pathlib import Path
 import pytest
 
 from athenaeum import pii
-from athenaeum.contact_record_fold import (
-    FOLD_SOURCE,
+from athenaeum.contact_record_fold import FOLD_SOURCE, fold_absorbed_contact_records
+from athenaeum.contact_record_repair import (
     apply_contact_record_repair,
-    fold_absorbed_contact_records,
     plan_contact_record_repair,
 )
 from athenaeum.dedupe import DuplicatePair, merge_duplicate_persons
