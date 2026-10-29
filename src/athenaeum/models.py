@@ -75,6 +75,14 @@ def generate_uid() -> str:
 #                         the resolver's source-precedence taxonomy.
 #   ``external``        — externally cited (URL, third-party record).
 #   ``document``        — permanent document (PDF, spec, contract).
+#   ``witnessed``       — issue athenaeum#2158: a ``user-stated`` utterance that
+#                         additionally matched a hash-chained line in the
+#                         ``promptwitness`` witness ledger (opt-in,
+#                         ``librarian.witness_attestation_enabled``). Shares
+#                         tier 1 with ``user-stated`` in the resolver's
+#                         source-precedence taxonomy (no rank change,
+#                         operator ruling 9, epic athenaeum#2144) — nothing
+#                         gates on this channel yet.
 SOURCE_TYPES: frozenset[str] = frozenset(
     {
         "user-stated",
@@ -83,6 +91,7 @@ SOURCE_TYPES: frozenset[str] = frozenset(
         "document",
         "inferred",
         "model-prior",
+        "witnessed",
     }
 )
 

@@ -7824,6 +7824,41 @@ def resolve_policy_pack_edit_proposals_enabled(config: dict[str, Any] | None) ->
     return False
 
 
+def resolve_witness_attestation_enabled(config: dict[str, Any] | None) -> bool:
+    """Resolve the witness-ledger attestation opt-in (issue athenaeum#2158). DEFAULT OFF.
+
+    Gates :mod:`athenaeum.witness_attestation` entirely: with this off,
+    :func:`athenaeum.transcript_receipts.write_receipt_for_origin` never
+    loads the ``promptwitness`` ledger and a ``user-stated`` classification
+    is written exactly as it was before this issue existed — the
+    ``correct_*`` authorship gate's live-classification decision is
+    byte-identical, pinned by
+    ``tests/test_transcript_receipts.py::TestGateFlagOffByteIdentical``.
+    With it on, a ``user-stated`` claim is additionally checked against the
+    hash-chained witness ledger (``docs/design/witness-ledger.md``); a hit
+    upgrades the receipt's channel to ``witnessed``, and a miss is logged
+    at WARNING with a ``witness_miss`` reason. Nothing gates on the result
+    yet — this flag is intake-only. The gate, the readout, and the
+    real-binary integration test are separate, later changes.
+
+    Mirrors :func:`resolve_transcript_receipts_enabled`'s shape exactly: env
+    ``ATHENAEUM_WITNESS_ATTESTATION_ENABLED`` (``1``/``true``/``yes``/``on``,
+    case-insensitive) > yaml ``librarian.witness_attestation_enabled`` >
+    default ``False``. No seed in ``_DEFAULTS`` (issue athenaeum#231).
+    Non-bool yaml values and unrecognized env strings fall through to off.
+    """
+    env = os.environ.get("ATHENAEUM_WITNESS_ATTESTATION_ENABLED")
+    if env is not None:
+        return env.strip().lower() in ("1", "true", "yes", "on")
+    if isinstance(config, dict):
+        cfg = config.get("librarian")
+        if isinstance(cfg, dict):
+            raw = cfg.get("witness_attestation_enabled")
+            if isinstance(raw, bool):
+                return raw
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Issue athenaeum#2156: `librarian.receipt_anchor.*` -- config surface for
 # anchoring the witness-chain head and receipt-partition digests (see

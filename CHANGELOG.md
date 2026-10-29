@@ -227,6 +227,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   digest (read-only; nothing under `wiki/` is written). Six new
   `librarian.receipt_anchor.*` config resolvers document the nightly
   anchoring path's (athenaeum#2040) own adapter/calendar/timeout surface.
+- **Intake attests `user-stated` utterances against the witness ledger,
+  with misses treated as incidents (issue athenaeum#2158).** New module
+  `athenaeum.witness_attestation` joins a `user-stated` transcript claim to
+  the `promptwitness` witness ledger by `promptId` (falling back to
+  `(session, digest)`) through an eleven-condition hit rule — prompt kind,
+  interactive channel, matching session, digest equality, an intact hash
+  chain, and three transcript cross-fields (`origin.kind`, `promptSource`,
+  `isSidechain`). A hit upgrades the receipt's channel to `witnessed`
+  (schema v2, purely additive — v1 receipts still parse and are never
+  rewritten); a miss stays `user-stated` with one of eleven `witness_miss`
+  reasons and is logged at WARNING (never the claim text or a digest), with
+  a provenance-incident variant for a miss that otherwise looks
+  human-and-interactive. Off by default
+  (`librarian.witness_attestation_enabled`); with it off, behavior and the
+  `correct_*` gate's decision are byte-identical to before this issue.
+  Nothing gates on attestation yet.
+  - **Deviates from the issue's literal slash-command digest wording, by
+    necessity.** The issue specifies `sha256(normalize(<command-args>
+    text))`; the shipped producer (`promptwitness.harness.claude_code.
+    slash_args_segment`, athenaeum#2149) hashes the RAW, un-normalized span
+    instead, unlike `record_turn`'s own normalized `prompt_digest`. The
+    literal formula would make the slash-args hit path unreachable for
+    almost every real slash command. This module calls the producer
+    function directly and compares against its digest rather than
+    re-deriving a formula, so it tracks the producer if that formula ever
+    changes. Flagged to the epic owner as a digest-contract defect, not
+    resolved here — see `src/athenaeum/witness_attestation.py`'s "Known
+    deviation" docstring note.
 
 ### Changed
 

@@ -74,7 +74,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol, cast, runtime_checkable
 
-from athenaeum.config import resolve_transcript_receipts_enabled
+from athenaeum import witness_attestation
+from athenaeum.config import (
+    resolve_transcript_receipts_enabled,
+    resolve_witness_attestation_enabled,
+)
 from athenaeum.models import AutoMemoryFile, parse_frontmatter
 from athenaeum.runlock import RunLock
 from athenaeum.store import append_line_durable
@@ -91,8 +95,15 @@ from athenaeum.transcript_verify import (
 
 log = logging.getLogger(__name__)
 
-#: Receipt schema version, stamped on every entry.
-SCHEMA_VERSION = 1
+#: Receipt schema version, stamped on every entry. Bumped 1 -> 2 for issue
+#: athenaeum#2158 (the ``witnessed`` channel + ``witness_*`` fields) — purely
+#: additive: a v1 line on disk is NEVER rewritten, and :meth:`ReceiptEntry.
+#: from_dict` tolerates every v1 line missing every new field (each defaults
+#: to ``None``/``False``). The bump applies to every NEWLY WRITTEN receipt
+#: from this point on, regardless of ``librarian.witness_attestation_enabled``
+#: — see that resolver and ``TestGateFlagOffByteIdentical`` for why this does
+#: not change the ``correct_*`` gate's decision when the flag is off.
+SCHEMA_VERSION = 2
 
 #: Directory (under ``wiki_root``) holding the monthly receipt partitions.
 RECEIPTS_DIRNAME = "_transcript_receipts"
@@ -260,6 +271,17 @@ class ReceiptEntry:
 
     NO PLAINTEXT: every field is either a digest, an origin coordinate, or a
     channel label. Never the claim text, never the utterance text.
+
+    **Schema v2 (issue athenaeum#2158, additive).** The seven ``witness_*``/
+    ``transcript_*`` fields below are new and all default to ``None`` — a
+    v1 line on disk (written before this issue) has none of them, and
+    :meth:`from_dict` reconstructs it with every one ``None``, which is
+    indistinguishable from a v2 line that simply never attempted
+    attestation (e.g. a non-``user-stated`` channel). ``witness_miss`` is
+    one of :data:`athenaeum.witness_attestation.MISS_REASONS` (with its
+    ``:``-suffixed variants) when the channel is ``"user-stated"`` and
+    attestation was attempted; ``None`` on a ``"witnessed"`` hit and on
+    every channel attestation never looks at.
     """
 
     origin_scope: str
@@ -272,6 +294,13 @@ class ReceiptEntry:
     transcript_line_count: int = 0
     recorded_at: str = ""
     schema_version: int = SCHEMA_VERSION
+    witness_tag: str | None = None
+    witness_ref: str | None = None
+    witness_strength: str | None = None
+    witness_anchored: bool | None = None
+    witness_miss: str | None = None
+    transcript_origin: str | None = None
+    transcript_entrypoint: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -285,6 +314,13 @@ class ReceiptEntry:
             "transcript_line_count": self.transcript_line_count,
             "recorded_at": self.recorded_at,
             "schema_version": self.schema_version,
+            "witness_tag": self.witness_tag,
+            "witness_ref": self.witness_ref,
+            "witness_strength": self.witness_strength,
+            "witness_anchored": self.witness_anchored,
+            "witness_miss": self.witness_miss,
+            "transcript_origin": self.transcript_origin,
+            "transcript_entrypoint": self.transcript_entrypoint,
         }
 
     @classmethod
@@ -298,6 +334,13 @@ class ReceiptEntry:
             utterance_digest=str(d.get("utterance_digest", "")),
             transcript_prefix_digest=str(d.get("transcript_prefix_digest", "")),
             transcript_line_count=int(d.get("transcript_line_count", 0) or 0),
+            witness_tag=d.get("witness_tag"),
+            witness_ref=d.get("witness_ref"),
+            witness_strength=d.get("witness_strength"),
+            witness_anchored=d.get("witness_anchored"),
+            witness_miss=d.get("witness_miss"),
+            transcript_origin=d.get("transcript_origin"),
+            transcript_entrypoint=d.get("transcript_entrypoint"),
             recorded_at=str(d.get("recorded_at", "")),
             schema_version=int(d.get("schema_version", SCHEMA_VERSION)),
         )
@@ -443,14 +486,29 @@ class ReceiptRun:
     Assumes this run is the only appender to every ledger partition: a future
     sealer that also appended mid-run would skew the cached line counts and
     therefore the seal ranges.
+
+    **Witness attestation (issue athenaeum#2158).** Mirrors this same
+    "build once, hold for the run" shape: ``witness_attestation_enabled``
+    is resolved once from *config*, and — only when it resolves ``True`` —
+    :attr:`attestation_index` is built once via :meth:`athenaeum.
+    witness_attestation.AttestationIndex.load`. With the flag off (or
+    *config* omitted, the historical default), :attr:`attestation_index`
+    stays ``None`` and the witness ledger directory is never even
+    resolved, let alone read — zero added I/O on the flag-off path.
     """
 
-    def __init__(self, wiki_root: Path) -> None:
+    def __init__(self, wiki_root: Path, *, config: dict[str, Any] | None = None) -> None:
         self.wiki_root = Path(wiki_root)
         self._by_digest: dict[tuple[str, str], list[ReceiptEntry]] = {}
         self._keys: set[tuple[Any, ...]] = set()
         self._line_counts: dict[Path, int] = {}
         self._transcripts: OrderedDict[Path, _TranscriptSnapshot | None] = OrderedDict()
+        self.witness_attestation_enabled = resolve_witness_attestation_enabled(config)
+        self.attestation_index: witness_attestation.AttestationIndex | None = None
+        if self.witness_attestation_enabled:
+            self.attestation_index = witness_attestation.AttestationIndex.load(
+                witness_attestation.resolve_default_witness_dir()
+            )
         d = ledger_dir(self.wiki_root)
         if not d.is_dir():
             return
@@ -640,8 +698,8 @@ def lookup_receipt(
 # ---------------------------------------------------------------------------
 
 
-def _matching_human_utterance(records: list[object], claim: str) -> str | None:
-    """The first human-authored record text whose normalized form contains
+def _matching_human_utterance(records: list[object], claim: str) -> object | None:
+    """The first human-authored RECORD whose text's normalized form contains
     *claim*'s normalized form, or ``None``.
 
     Reuses :func:`athenaeum.transcript_verify._is_human_record` (issue
@@ -651,6 +709,15 @@ def _matching_human_utterance(records: list[object], claim: str) -> str | None:
     :func:`~athenaeum.transcript_verify._user_authored_text`, and
     :func:`~athenaeum.transcript_verify._normalize` — imported, not
     reimplemented (issue athenaeum#753 candidate AC).
+
+    **Returns the matched RECORD, not only its normalized text** (issue
+    athenaeum#2158 — its single caller, :func:`write_receipt_for_origin`,
+    needs the record's own ``promptId``/``origin``/``promptSource``/
+    ``isSidechain`` fields for the witness-ledger attestation lookup, which
+    the normalized text alone cannot provide). The one existing caller
+    re-derives the SAME normalized text via
+    ``_normalize(_user_authored_text(matched))`` — byte-identical to this
+    function's old return value.
     """
     needle = _normalize(claim)
     if not needle:
@@ -660,7 +727,7 @@ def _matching_human_utterance(records: list[object], claim: str) -> str | None:
             continue
         text = _user_authored_text(record)
         if text and needle in _normalize(text):
-            return _normalize(text)
+            return record
     return None
 
 
@@ -709,7 +776,9 @@ def write_receipt_for_origin(
 
     Otherwise appends exactly one receipt (idempotent — see
     :func:`append_receipt`) carrying the classified ``channel`` (one of
-    ``"user-stated"``, ``"agent-observed"``, ``"inferred"``) and returns it.
+    ``"user-stated"``, ``"agent-observed"``, ``"inferred"``, or — issue
+    athenaeum#2158 — ``"witnessed"`` when a ``"user-stated"`` claim
+    additionally attested against the witness ledger) and returns it.
 
     *run* is the per-run :class:`ReceiptRun` (ledger index + transcript cache);
     ``None`` builds a throwaway one. The transcript is read once per call.
@@ -749,14 +818,53 @@ def write_receipt_for_origin(
         return existing
 
     utterance_digest = ""
+    final_channel = classification.channel
+    transcript_origin_kind: str | None = None
+    witness_outcome: witness_attestation.AttestationOutcome | None = None
     if classification.channel == "user-stated":
-        matched = _matching_human_utterance(snap.records, claim)
-        if matched:
-            utterance_digest = hashlib.sha256(matched.encode("utf-8")).hexdigest()
+        matched_record = _matching_human_utterance(snap.records, claim)
+        if matched_record is not None:
+            matched_text = _normalize(_user_authored_text(matched_record))
+            utterance_digest = hashlib.sha256(matched_text.encode("utf-8")).hexdigest()
+
+            # Issue athenaeum#2158: attest this utterance against the witness
+            # ledger. Every field below is read straight off the matched
+            # RECORD (never the claim/utterance text itself) — the same
+            # record `_matching_human_utterance` now returns instead of
+            # just its normalized text.
+            prompt_id: str | None = None
+            transcript_prompt_source: str | None = None
+            transcript_is_sidechain = False
+            if isinstance(matched_record, dict):
+                raw_prompt_id = matched_record.get("promptId")
+                prompt_id = str(raw_prompt_id) if raw_prompt_id else None
+                origin = matched_record.get("origin")
+                if isinstance(origin, dict):
+                    raw_origin_kind = origin.get("kind")
+                    if isinstance(raw_origin_kind, str):
+                        transcript_origin_kind = raw_origin_kind
+                raw_prompt_source = matched_record.get("promptSource")
+                if isinstance(raw_prompt_source, str):
+                    transcript_prompt_source = raw_prompt_source
+                transcript_is_sidechain = bool(matched_record.get("isSidechain"))
+
+            witness_outcome = witness_attestation.attest(
+                run.attestation_index,
+                prompt_id=prompt_id,
+                origin_session_id=origin_session_id,
+                claim=claim,
+                utterance_digest=utterance_digest,
+                matched_record_text=_user_authored_text(matched_record),
+                transcript_origin_kind=transcript_origin_kind,
+                transcript_prompt_source=transcript_prompt_source,
+                transcript_is_sidechain=transcript_is_sidechain,
+            )
+            if witness_outcome.hit:
+                final_channel = "witnessed"
 
     if (
         existing is not None
-        and existing.channel == classification.channel
+        and existing.channel == final_channel
         and existing.utterance_digest == utterance_digest
     ):
         return existing
@@ -764,13 +872,26 @@ def write_receipt_for_origin(
     entry = ReceiptEntry(
         origin_scope=origin_scope,
         memory_digest=digest,
-        channel=classification.channel,
+        channel=final_channel,
         origin_session_id=origin_session_id,
         origin_turn=origin_turn,
         utterance_digest=utterance_digest,
         transcript_prefix_digest=hashlib.sha256(b"\n".join(snap.lines)).hexdigest(),
         transcript_line_count=len(snap.lines),
         recorded_at=now if now is not None else _now_iso(),
+        witness_tag=witness_outcome.witness_tag if witness_outcome is not None else None,
+        witness_ref=witness_outcome.witness_ref if witness_outcome is not None else None,
+        witness_strength=(
+            witness_outcome.witness_strength if witness_outcome is not None else None
+        ),
+        witness_anchored=(
+            witness_outcome.witness_anchored if witness_outcome is not None else None
+        ),
+        witness_miss=witness_outcome.miss_reason if witness_outcome is not None else None,
+        transcript_origin=transcript_origin_kind,
+        transcript_entrypoint=(
+            witness_outcome.transcript_entrypoint if witness_outcome is not None else None
+        ),
     )
     append_receipt(wiki_root, entry, lock=lock, sealer=sealer, run=run)
     return entry
@@ -824,6 +945,14 @@ class ReceiptsRunStats:
     #: count would be a constant zero in every entry that IS written.
     skipped_flag_off: int = 0
     flag_off: bool = False
+    #: Issue athenaeum#2158: how many of ``receipts_processed`` upgraded to
+    #: the ``witnessed`` channel this run, and a per-``witness_miss``-reason
+    #: breakdown for the rest of the ``"user-stated"`` receipts processed
+    #: (``flag-off`` included — see :func:`athenaeum.witness_attestation.attest`).
+    #: Both stay all-zero/empty when ``librarian.witness_attestation_enabled``
+    #: is off, matching every OTHER count's "flag off -> nothing new" shape.
+    witnessed: int = 0
+    witness_miss_counts: dict[str, int] = field(default_factory=dict)
 
     def __int__(self) -> int:
         return self.receipts_processed
@@ -838,14 +967,19 @@ class ReceiptsRunStats:
         and the durable athenaeum#1102 ledger record pick it up with no
         further wiring.
         """
-        return {
+        fields: dict[str, int] = {
             "files_seen": self.files_seen,
             "files_with_origin": self.files_with_origin,
             "receipts_processed": self.receipts_processed,
             "skipped_no_origin": self.skipped_no_origin,
             "skipped_transcript_missing": self.skipped_transcript_missing,
             "skipped_not_classified": self.skipped_not_classified,
+            "witnessed": self.witnessed,
         }
+        for reason, count in sorted(self.witness_miss_counts.items()):
+            key = "witness_miss_" + reason.replace(":", "_").replace("-", "_")
+            fields[key] = count
+        return fields
 
 
 def transcript_path_for(
@@ -918,7 +1052,12 @@ def write_receipts_for_files(
     no_origin = 0
     transcript_missing = 0
     not_classified = 0
-    run = ReceiptRun(wiki_root)  # ONE ledger read for the whole run (athenaeum#2048)
+    witnessed = 0
+    witness_miss_counts: dict[str, int] = {}
+    # ONE receipt-ledger read AND (when the flag is on) ONE witness-ledger
+    # read for the WHOLE run (athenaeum#2048 / athenaeum#2158) — never
+    # rebuilt per file below.
+    run = ReceiptRun(wiki_root, config=config)
     for am in files:
         if not am.origin_session_id:
             no_origin += 1
@@ -947,6 +1086,12 @@ def write_receipts_for_files(
             # transcript with an existing receipt returns that receipt):
             # the receipt stands, so it is processed, not skipped.
             processed += 1
+            if entry.channel == "witnessed":
+                witnessed += 1
+            elif entry.witness_miss is not None:
+                witness_miss_counts[entry.witness_miss] = (
+                    witness_miss_counts.get(entry.witness_miss, 0) + 1
+                )
         elif not transcript_present:
             transcript_missing += 1
         else:
@@ -958,6 +1103,8 @@ def write_receipts_for_files(
         skipped_no_origin=no_origin,
         skipped_transcript_missing=transcript_missing,
         skipped_not_classified=not_classified,
+        witnessed=witnessed,
+        witness_miss_counts=witness_miss_counts,
     )
 
 
@@ -986,12 +1133,15 @@ def classify_for_correct_gate(
       ``"user-stated"``, exactly as athenaeum#752 always did.
     - transcript present, receipt's prefix digest MISMATCHES: **refuse**,
       ref ``"transcript-modified <session>"``.
-    - transcript absent, a ``"user-stated"`` receipt matches
-      ``(origin_scope, memory_digest(claim))``: **authorize**, ref
-      ``"receipt <ref>"``.
-    - transcript absent, no receipt, or receipt's channel is not
-      ``"user-stated"``: **refuse**, same ``"unavailable <ref>"`` athenaeum#752
-      always returned.
+    - transcript absent, a ``"user-stated"`` OR ``"witnessed"`` receipt
+      matches ``(origin_scope, memory_digest(claim))`` (issue athenaeum#2158:
+      a ``"witnessed"`` receipt is a ``"user-stated"`` claim that
+      additionally matched the witness ledger, so it authorizes here too —
+      refusing it would be a regression relative to the plain
+      ``"user-stated"`` case): **authorize**, ref ``"receipt <ref>"``.
+    - transcript absent, no receipt, or receipt's channel is neither
+      ``"user-stated"`` nor ``"witnessed"``: **refuse**, same
+      ``"unavailable <ref>"`` athenaeum#752 always returned.
     - ``origin_session_id`` absent from frontmatter: receipts are looked up
       by ``(origin_scope, memory_digest)`` regardless (addendum item 1), and
       the receipt's OWN recorded session/turn is used for the live-transcript
@@ -1054,8 +1204,13 @@ def classify_for_correct_gate(
         channel_ref = f"{classification.channel} {classification.ref}".strip()
         return classification.channel == "user-stated", channel_ref
 
-    # Transcript absent (rolled off / never captured).
-    if receipt is not None and receipt.channel == "user-stated":
+    # Transcript absent (rolled off / never captured). A `"witnessed"`
+    # receipt authorizes here too (issue athenaeum#2158 regression pin) — it
+    # is a `"user-stated"` claim that additionally matched the witness
+    # ledger, so refusing it post-roll-off would be a REGRESSION relative
+    # to the plain `"user-stated"` receipt this same claim would have
+    # gotten with `librarian.witness_attestation_enabled` off.
+    if receipt is not None and receipt.channel in ("user-stated", "witnessed"):
         ref = (
             f"{effective_session}#turn{effective_turn}"
             if effective_turn is not None

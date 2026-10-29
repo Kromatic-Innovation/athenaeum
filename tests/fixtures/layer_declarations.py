@@ -116,6 +116,7 @@ MODULE_LAYER: dict[str, int] = {
     "transcript_receipts": 2,
     "verdicts": 2,
     "wiki_write_guard": 2,
+    "witness_attestation": 2,  # witness_attestation.py: "Layering: L2" (athenaeum#2158)
     "zero_yield": 2,
     # L3 -- services.
     "adapter_provenance": 3,

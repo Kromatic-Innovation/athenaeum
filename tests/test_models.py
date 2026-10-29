@@ -1397,6 +1397,16 @@ class TestChannelSplitSourceTypes:
         assert coerce_source_type("agent-observed") == "agent-observed"
         assert coerce_source_type("model-prior") == "model-prior"
 
+    def test_witnessed_is_in_source_types_and_survives_coercion(self) -> None:
+        # Issue athenaeum#2158: without `SOURCE_TYPES` membership,
+        # `coerce_source_type` would silently downgrade "witnessed" to
+        # "inferred" — this is the AC pin for that failure mode.
+        assert "witnessed" in SOURCE_TYPES
+        assert coerce_source_type("witnessed") == "witnessed"
+        # `witnessed` means a human typed it (verified) -- the OPPOSITE of
+        # an AI-attributed channel, so it must not join that set.
+        assert "witnessed" not in AI_ATTRIBUTED_SOURCE_TYPES
+
     def test_ai_attributed_set_lists_the_three_ai_channels(self) -> None:
         # `AI_ATTRIBUTED_SOURCE_TYPES` is the set write-paths consult to
         # decide whether a `model:` annotation is expected.
