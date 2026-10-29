@@ -515,11 +515,22 @@ done
 # everywhere else until someone notices "generic-looking recall names".
 # Exactly one line, and only in the no-key case -- a run that ends with a
 # key (cached, restored, or freshly fetched) prints nothing new.
+#
+# athenaeum#2193 AC6: a caller that supplies ANTHROPIC_API_KEY LIVE (so
+# `_had_live_cred[0]` was true and the fetch branch above never ran at
+# all) never gets a line written into config.env -- checking the file
+# alone would warn even though a perfectly usable key is sitting in this
+# process's own `$ANTHROPIC_API_KEY` right now (restored earlier in this
+# script). Check that live variable too, so "a key is live-supplied, no
+# `op` is even on PATH" stays silent, matching every other "ends with a
+# key" case this comment already promises.
 _final_api_key_line="$(grep '^ANTHROPIC_API_KEY=' "$CONFIG_ENV" 2>/dev/null | tail -n 1 || true)"
 case "$_final_api_key_line" in
   ANTHROPIC_API_KEY=?*) ;;
   *)
-    echo "[Knowledge] No ANTHROPIC_API_KEY cached — LLM topic extraction will fall back to regex-only extraction until a fetch succeeds." >&2
+    if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+      echo "[Knowledge] No ANTHROPIC_API_KEY cached — LLM topic extraction will fall back to regex-only extraction until a fetch succeeds." >&2
+    fi
     ;;
 esac
 
