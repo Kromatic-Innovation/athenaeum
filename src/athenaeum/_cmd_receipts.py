@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""``athenaeum receipts {seal,verify,anchor}`` — transcript-receipt sealing and
-anchoring CLI (issues athenaeum#2039 and athenaeum#2040).
+"""``athenaeum receipts {seal,verify,anchor,attest-readout}`` — transcript-receipt
+sealing, anchoring and witness-readout CLI (issues athenaeum#2039,
+athenaeum#2040 and athenaeum#2160).
 
 - ``seal``    sign every unsealed range in every receipt partition
               (:func:`athenaeum.receipt_sealers.seal_all_unsealed`). Needs the
@@ -22,11 +23,23 @@ anchoring CLI (issues athenaeum#2039 and athenaeum#2040).
               Unlike ``seal``/``verify`` it needs NO key — it needs the run
               LOCK, because it writes into the knowledge repo.
 
-**No plaintext in either output.** Both verbs report a partition month and a
+- ``attest-readout``
+              report witnessed hits and every provenance miss as an
+              INCIDENT, from the receipt ledger and the witness index only
+              (:func:`athenaeum.witness_readout.build_readout`). Read-only:
+              it needs no key and takes NO run lock, which is why it is the
+              one verb here that cannot return ``EXIT_LOCK_HELD``. Exits
+              :data:`INCIDENT_EXIT` when any incident exists, so a nightly
+              or a wrapper can gate on it.
+
+**No plaintext in any output.** Both verbs report a partition month and a
 line range and nothing else — receipt content never reaches this layer. The
 receipt ledger carries only digests to begin with, but a human utterance is
 short enough that a published digest is dictionary-attack-recoverable, so the
-no-plaintext rule extends to anything derived from one.
+no-plaintext rule extends to anything derived from one. ``attest-readout``
+holds to the same rule: counts, enum labels, session ids and
+``witness_ref`` coordinates only (``tests/test_witness_readout.py::
+TestNoPlaintext``).
 
 Factoring rule (L5 presentation): a self-contained CLI subcommand lives in
 its own ``_cmd_<name>.py`` and registers via ``add_<name>_subparser``.
@@ -56,6 +69,15 @@ VERIFY_PROBLEM_EXIT = 3
 #: error in the usual sense — the operator ran it on a machine without the
 #: credential — so it is reported distinctly rather than as a crash.
 KEY_UNAVAILABLE_EXIT = 4
+
+#: Exit code for `attest-readout` when ANY incident exists — a non-`flag-off`
+#: provenance miss, a hook-error class, or a non-zero `session-close` deficit
+#: (issue athenaeum#2160, operator ruling 10: a miss is an incident, not a
+#: rate). Distinct from `2` (usage), `3` (a ledger seal problem) and `4` (no
+#: key), so a nightly wrapper can tell "provenance needs a human" from the
+#: three conditions that already had codes. There is deliberately no
+#: threshold: one incident is enough.
+INCIDENT_EXIT = 5
 
 
 def _sealer_for(args: argparse.Namespace) -> object:
@@ -168,6 +190,40 @@ def _cmd_anchor(args: argparse.Namespace) -> int:
     return 0
 
 
+def _month(value: str) -> str:
+    """Argparse type for ``--since YYYY-MM``.
+
+    Validated loudly rather than silently ignored: a mistyped window would
+    otherwise quietly widen the readout to every month, which is the one
+    failure mode an operator would not notice in the output.
+    """
+    text = value.strip()
+    if len(text) != 7 or text[4] != "-" or not text[:4].isdigit() or not text[5:].isdigit():
+        raise argparse.ArgumentTypeError(f"expected a YYYY-MM month, got {value!r}")
+    if not 1 <= int(text[5:]) <= 12:
+        raise argparse.ArgumentTypeError(f"month out of range in {value!r}")
+    return text
+
+
+def _cmd_attest_readout(args: argparse.Namespace) -> int:
+    """Report witnessed hits and every miss as an incident (athenaeum#2160).
+
+    Read-only, so it takes NO run lock (hence no ``_acquire_or_exit`` call
+    and no entry in ``docs/reference/exit-codes.md``'s ``EXIT_LOCK_HELD``
+    producer list) and needs no key. Both renderings come off ONE
+    :class:`athenaeum.witness_readout.ReadoutSummary`, so ``--json`` and the
+    text form cannot disagree about a number.
+    """
+    from athenaeum.witness_readout import build_readout, render_text
+
+    summary = build_readout(_resolve_wiki_root(args), since=getattr(args, "since", None))
+    if args.json:
+        sys.stdout.write(json.dumps(summary.to_dict()) + "\n")
+    else:
+        sys.stdout.write(render_text(summary))
+    return 0 if summary.ok else INCIDENT_EXIT
+
+
 def _cmd_receipts_dispatch(args: argparse.Namespace) -> int:
     target = getattr(args, "receipts_target", None)
     if target == "seal":
@@ -176,7 +232,12 @@ def _cmd_receipts_dispatch(args: argparse.Namespace) -> int:
         return _cmd_verify(args)
     if target == "anchor":
         return _cmd_anchor(args)
-    print("usage: athenaeum receipts {seal,verify,anchor} [...]", file=sys.stderr)
+    if target == "attest-readout":
+        return _cmd_attest_readout(args)
+    print(
+        "usage: athenaeum receipts {seal,verify,anchor,attest-readout} [...]",
+        file=sys.stderr,
+    )
     return 2
 
 
@@ -204,8 +265,10 @@ def add_receipts_subparser(subparsers: argparse._SubParsersAction) -> None:
             "signing key to be reachable; `verify` checks every seal against "
             "the live ledger and needs only the public key; `anchor` "
             "externally timestamps every changed partition and mirrors the "
-            "anchor records off-machine, and needs the run lock. Output is "
-            "partitions and line ranges only, never receipt content."
+            "anchor records off-machine, and needs the run lock; "
+            "`attest-readout` reports witnessed hits and every provenance "
+            "miss as an incident, read-only. Output is partitions, line "
+            "ranges, counts and enum labels only, never receipt content."
         ),
     )
     r_parser.set_defaults(func=_cmd_receipts_dispatch)
@@ -246,6 +309,30 @@ def add_receipts_subparser(subparsers: argparse._SubParsersAction) -> None:
     _add_common(anchor_p)
     _add_lock_args(anchor_p)
     anchor_p.set_defaults(func=_cmd_anchor)
+
+    readout_p = r_sub.add_parser(
+        "attest-readout",
+        help=(
+            "Report witnessed hits and every provenance miss as an "
+            "incident, from the receipt ledger and the witness index only. "
+            "Also reports the unsigned-line count, anchor coverage, the "
+            "witness hook-error classes and the session-close deficit. "
+            "Read-only: no key, no run lock. Exits 5 when any incident "
+            "exists; there is no tolerated miss rate and no window beyond "
+            "--since."
+        ),
+    )
+    _add_common(readout_p)
+    readout_p.add_argument(
+        "--since",
+        type=_month,
+        default=None,
+        help=(
+            "Only count records from this YYYY-MM month onwards (receipt "
+            "partition month / witness line month). Default: every month."
+        ),
+    )
+    readout_p.set_defaults(func=_cmd_attest_readout)
 
 
 __all__ = ["add_receipts_subparser"]

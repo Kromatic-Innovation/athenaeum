@@ -10394,6 +10394,69 @@ def _maybe_run_nightly_anchor(ctx: "RunContext") -> None:
         log.warning("witness anchoring failed (non-fatal): %s", exc)
 
 
+def _maybe_run_nightly_witness_readout(ctx: "RunContext") -> None:
+    """End-of-run witness-attestation readout (issue athenaeum#2160).
+
+    Calls the SAME summary ``athenaeum receipts attest-readout`` calls
+    (:func:`athenaeum.witness_readout.build_readout`) and logs **one WARNING
+    per incident CLASS with its count** — never one per incident. Operator
+    ruling 10 made every provenance miss an incident rather than a rate, so
+    a bad night can produce one incident per memory; a per-incident log
+    would bury the nightly's own output. The per-incident detail stays
+    available on demand through the CLI verb, which renders the same object.
+
+    Shape copied from :func:`_maybe_run_nightly_anchor` immediately above,
+    with one deliberate difference: this pass takes **no run lock** and
+    needs none, because it only READS the receipt ledger and the witness
+    index. So the lock gate that function applies is absent here, and the
+    readout still runs on a lock-free librarian invocation.
+
+    Three gates, each a reason to do nothing:
+
+    - ``--dry-run`` — a dry run reports nothing.
+    - ``librarian.witness_attestation_enabled`` is off (the DEFAULT). This is
+      the honest flag of the two candidates. With attestation off,
+      :func:`athenaeum.witness_attestation.attest` is never called and every
+      ``user-stated`` receipt carries ``witness_miss="flag-off"``, which
+      ruling 10 explicitly excludes from the incident set — so the readout's
+      central product is definitionally empty and a nightly line would be
+      pure noise. The other candidate,
+      ``librarian.witness_ledger_enabled``, gates whether the LEDGER exists;
+      gating on it would be wrong in a real configuration, because
+      attestation-on with the ledger off produces ``ledger-absent`` misses,
+      and that is exactly an incident an operator should be warned about
+      rather than silenced.
+    - any exception — best-effort, like the anchoring pass above: a readout
+      must never change a run's exit code.
+    """
+    from athenaeum.config import resolve_witness_attestation_enabled
+
+    if ctx.dry_run or not resolve_witness_attestation_enabled(ctx.config):
+        return
+    try:
+        from athenaeum.witness_readout import build_readout
+
+        summary = build_readout(ctx.wiki_root)
+        class_counts = summary.incident_class_counts()
+        for incident_class, count in class_counts.items():
+            log.warning(
+                "witness readout: %d %s incident(s) (issue athenaeum#2160)",
+                count,
+                incident_class,
+            )
+        log.info(
+            "witness readout: %d user-stated, %d witnessed, %d miss(es), "
+            "%d incident(s) in %d class(es) (issue athenaeum#2160)",
+            summary.user_stated_total,
+            summary.witnessed_total,
+            sum(summary.miss_counts.values()),
+            len(summary.incidents),
+            len(class_counts),
+        )
+    except Exception as exc:  # noqa: BLE001 — a readout must never break a run
+        log.warning("witness readout failed (non-fatal): %s", exc)
+
+
 def _run_finalize_phase(ctx: RunContext) -> int:
     """Finalize: run-level spend summary + athenaeum#378 ledger write, the
     athenaeum#2040 witness-anchor step, post-run push, the athenaeum#310
@@ -10574,6 +10637,17 @@ def _run_finalize_phase(ctx: RunContext) -> int:
         dry_run=ctx.dry_run,
         head_at_start=ctx.head_at_start,
     )
+
+    # Issue athenaeum#2160: the witness-attestation readout. AFTER the
+    # anchoring pass whose coverage it reports, so its numbers describe the
+    # state this run leaves behind -- and after the push rather than between
+    # the two, because athenaeum#2040's own guard
+    # (tests/test_receipt_anchoring.py::TestLibrarianCallSite::
+    # test_the_call_site_is_before_the_push) requires the anchor call and the
+    # push to stay ADJACENT. Nothing is lost by sitting here: this pass only
+    # READS, takes no lock, and the push does not change the local witness
+    # ledger or the receipt ledger it reads.
+    _maybe_run_nightly_witness_readout(ctx)
 
     # Issue athenaeum#310: warn-only page-size guardrail. Log a WARNING for each wiki
     # entity page over the flag threshold so a nightly run surfaces pages that

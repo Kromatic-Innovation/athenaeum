@@ -266,6 +266,17 @@ class AttestationIndex:
     def is_anchored(self, ledger_id: str, seq: int) -> bool:
         return seq <= self._anchored_through.get(ledger_id, -1)
 
+    def anchored_through(self) -> dict[str, int]:
+        """``{ledger_id: highest anchored seq}`` — a COPY (issue athenaeum#2160).
+
+        The narrow public read of the anchor-coverage map built by
+        :meth:`load`. :meth:`is_anchored` answers the per-line question;
+        the readout (:mod:`athenaeum.witness_readout`) needs the map itself
+        to report coverage per ledger, and a reader of that report must not
+        be able to mutate this index's state, hence the copy.
+        """
+        return dict(self._anchored_through)
+
 
 def _log_miss(
     reason: str,
