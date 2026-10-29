@@ -168,6 +168,28 @@ def _write_fake_op_table(
     return bin_dir
 
 
+def _write_sleeping_op(tmp_path: Path, *, marker: Path | None = None) -> Path:
+    """A stub `op` binary that sleeps well past any sane timeout budget
+    before echoing a value that must never be read.
+
+    Used to pin `_athenaeum_op_read`'s timeout-enforcement branches
+    (athenaeum#2193 AC4) without touching a real 1Password session. When
+    *marker* is given, the stub touches it AFTER the sleep returns, so a
+    test can assert the child was actually killed (the marker stays
+    absent) rather than merely orphaned and left to finish unobserved
+    (the marker would eventually appear).
+    """
+    bin_dir = tmp_path / "sleeping-op-bin"
+    bin_dir.mkdir(exist_ok=True)
+    op_stub = bin_dir / "op"
+    marker_line = f"touch {shlex.quote(str(marker))}\n" if marker is not None else ""
+    op_stub.write_text(
+        "#!/usr/bin/env bash\nsleep 30\necho should-never-be-read\n" + marker_line
+    )
+    op_stub.chmod(0o755)
+    return bin_dir
+
+
 def _write_shadow_athenaeum_package(tmp_path: Path) -> Path:
     """athenaeum#1826: a directory holding a SHADOW ``athenaeum`` package
     whose ``__init__.py`` unconditionally raises ``ImportError`` -- put
@@ -1062,11 +1084,7 @@ class TestOpOptionalGate2193:
         env["OP_SERVICE_ACCOUNT_TOKEN"] = "synthetic-service-account-token"
         env["ATHENAEUM_OP_REFRESH"] = "1"
 
-        bin_dir = tmp_path / "sleeping-op-bin"
-        bin_dir.mkdir()
-        op_stub = bin_dir / "op"
-        op_stub.write_text("#!/usr/bin/env bash\nsleep 30\necho should-never-be-read\n")
-        op_stub.chmod(0o755)
+        bin_dir = _write_sleeping_op(tmp_path)
         env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
 
         margin_seconds = 20
@@ -1092,6 +1110,116 @@ class TestOpOptionalGate2193:
         ) == 1
         assert "should-never-be-read" not in body
         assert "No ANTHROPIC_API_KEY cached" not in result.stderr
+
+    def test_ac4_portable_fallback_is_bounded_when_no_timeout_binary_exists(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """athenaeum#2193 AC4: pins the portable background+poll+kill
+        fallback specifically -- the branch `_athenaeum_op_read` takes
+        when NEITHER `timeout` nor `gtimeout` is on PATH, which is the
+        branch stock macOS actually takes (macOS ships no `timeout`;
+        `gtimeout` needs Homebrew coreutils). Linux CI and this lane both
+        have GNU `timeout` on PATH, so
+        `test_ac4_op_read_is_bounded_by_the_timeout` above only ever
+        exercises the `timeout`-present branch -- this test exercises the
+        operator's own platform instead, which is also the riskiest code
+        in the change: subprocess signalling plus a credential-bearing
+        temp file."""
+        _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        cache_dir = tmp_path / ".cache" / "athenaeum"
+        cache_dir.mkdir(parents=True)
+        (cache_dir / "config.env").write_text(
+            "AUTO_RECALL=true\n"
+            "SEARCH_BACKEND=fts5\n"
+            "ANTHROPIC_API_KEY=synthetic-cached-key-survives-portable-timeout\n"
+        )
+
+        env = dict(hook_env)
+        op_budget = 2
+        env["ATHENAEUM_OP_TIMEOUT_SECONDS"] = str(op_budget)
+        env["OP_SERVICE_ACCOUNT_TOKEN"] = "synthetic-service-account-token"
+        env["ATHENAEUM_OP_REFRESH"] = "1"
+
+        # Build a restricted PATH that has everything the hook needs EXCEPT
+        # `timeout`/`gtimeout` -- a symlink farm, not a directory-stripped
+        # PATH, since `timeout` lives in /usr/bin alongside bash, env,
+        # grep, mktemp and everything else the hook shells out to.
+        no_timeout_bin = tmp_path / "no-timeout-bin"
+        no_timeout_bin.mkdir()
+        for directory in (d for d in env["PATH"].split(os.pathsep) if d):
+            try:
+                names = os.listdir(directory)
+            except (OSError, PermissionError):
+                continue
+            for name in names:
+                if name in ("timeout", "gtimeout"):
+                    continue
+                link = no_timeout_bin / name
+                if link.exists() or link.is_symlink():
+                    continue  # first-on-PATH wins, same as real PATH lookup
+                try:
+                    link.symlink_to(os.path.join(directory, name))
+                except (OSError, PermissionError):
+                    continue
+
+        marker = tmp_path / "op-completed-marker"
+        sleeping_op_dir = _write_sleeping_op(tmp_path, marker=marker)
+        env["PATH"] = f"{sleeping_op_dir}{os.pathsep}{no_timeout_bin}"
+
+        # Precondition: this PATH can genuinely never reach `timeout` or
+        # `gtimeout`, still has `bash`, and resolves `op` to the sleeping
+        # stub above -- so this test can never silently degrade into a
+        # duplicate of test_ac4_op_read_is_bounded_by_the_timeout.
+        assert shutil.which("timeout", path=env["PATH"]) is None
+        assert shutil.which("gtimeout", path=env["PATH"]) is None
+        assert shutil.which("bash", path=env["PATH"]) is not None
+        resolved_op = shutil.which("op", path=env["PATH"])
+        assert resolved_op == str(sleeping_op_dir / "op"), (
+            "test setup bug: `op` did not resolve to this test's own "
+            f"sleeping stub at {sleeping_op_dir / 'op'} (got {resolved_op!r})"
+        )
+
+        # Two credentials (ANTHROPIC_API_KEY, JEV_API_KEY) and
+        # ATHENAEUM_OP_REFRESH=1 together mean BOTH attempt a fetch here,
+        # sequentially -- so the floor for this branch is ~2x the budget,
+        # not 1x as in the `timeout`-present test. Size the margin to the
+        # same generous 20s the existing AC4 test uses, but against 2x
+        # budget rather than 1x.
+        margin_seconds = 20
+        started = time.monotonic()
+        result = subprocess.run(
+            ["bash", str(SESSION_START)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=(2 * op_budget) + margin_seconds + 30,
+        )
+        elapsed = time.monotonic() - started
+
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert elapsed < (2 * op_budget) + margin_seconds, (
+            f"hook took {elapsed:.1f}s, expected well under "
+            f"{(2 * op_budget) + margin_seconds}s (2 credentials x "
+            f"{op_budget}s budget + margin)"
+        )
+
+        body = (cache_dir / "config.env").read_text()
+        assert body.splitlines().count(
+            "ANTHROPIC_API_KEY=synthetic-cached-key-survives-portable-timeout"
+        ) == 1
+        assert "should-never-be-read" not in body
+        assert "No ANTHROPIC_API_KEY cached" not in result.stderr
+
+        # The fallback mktemp's a credential temp file into $CACHE_DIR;
+        # it must never survive a killed fetch.
+        assert list(cache_dir.glob("op-read.*")) == []
+
+        # The sleeping `op` process must have been actually killed, not
+        # merely orphaned and ignored -- its own post-sleep side effect
+        # (the marker) must be absent.
+        assert not marker.exists()
 
     def test_ac6_env_supplied_key_needs_no_op_on_path_at_all(
         self, hook_env: dict[str, str], tmp_path: Path
