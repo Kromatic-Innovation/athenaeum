@@ -42,6 +42,11 @@ from pathlib import Path
 import yaml
 
 from athenaeum.atomic_io import atomic_write_text
+from athenaeum.frontmatter_edit import (
+    DEFAULTED_INFERRED_SOURCE,
+    set_frontmatter_scalar,
+    yaml_scalar_literal,
+)
 
 
 @dataclass
@@ -401,7 +406,13 @@ def migrate_legacy_source_slugs(
 # supplies no ``sources`` (mirrors ``mcp_server._DEFAULT_INFERRED_SOURCE``).
 # Only memories carrying EXACTLY this defaulted scalar are candidates — a
 # caller-declared source is never second-guessed.
-_DEFAULTED_INFERRED_SOURCE = "claude:inferred"
+#
+# Issue athenaeum#2159 moved the literal DOWN to
+# :data:`athenaeum.frontmatter_edit.DEFAULTED_INFERRED_SOURCE` so the L2
+# intake writer can select on the same scalar (this module is L4). The name
+# below is kept as the alias every existing call site — and
+# ``tests/test_mcp_server.py``'s byte-identity assertion — already imports.
+_DEFAULTED_INFERRED_SOURCE = DEFAULTED_INFERRED_SOURCE
 
 # Idempotency marker written on the confirm-inferred path (§3 of the athenaeum#328
 # lock). A boolean; presence means "already re-examined, no support found" so
@@ -453,41 +464,15 @@ def _iter_auto_memory_files(auto_memory_root: Path):
         yield path
 
 
-def _yaml_scalar_literal(value: str) -> str:
-    """Render *value* as a YAML scalar RHS, single-quoting when unsafe as plain.
-
-    Source scalars (``user:...``, ``agent-observed:...``) and refs
-    (``<session>#turn<N>``) carry ``:`` / ``#`` that YAML would otherwise
-    misparse, so they are single-quoted (with ``'`` doubled). Bare model ids
-    stay plain.
-    """
-    special = set(":#")
-    if (
-        value == ""
-        or value != value.strip()
-        or any(c in special for c in value)
-        or value[0] in "!&*[]{}>|@`\"'%,"
-    ):
-        return "'" + value.replace("'", "''") + "'"
-    return value
-
-
-def _set_frontmatter_scalar(fm: str, key: str, value_literal: str) -> str:
-    """Replace the top-level ``key:`` line's value, or append the key.
-
-    Only the single ``key:`` line is rewritten; every other line is preserved
-    byte-for-byte (the ``repair --legacy-source-slugs`` discipline). ``fm`` is
-    the frontmatter body WITHOUT the ``---`` fences and without a trailing
-    newline (as returned by :func:`_split_frontmatter`). The anchored
-    ``^key:`` match never touches an indented (nested) key of the same name.
-    """
-    pattern = re.compile(rf"^{re.escape(key)}:.*$", re.MULTILINE)
-    replacement = f"{key}: {value_literal}"
-    new_fm, n = pattern.subn(lambda _m: replacement, fm, count=1)
-    if n:
-        return new_fm
-    sep = "\n" if fm else ""
-    return fm + sep + replacement
+# ``_yaml_scalar_literal`` / ``_set_frontmatter_scalar`` moved to
+# :mod:`athenaeum.frontmatter_edit` (L1) in issue athenaeum#2159 — intake
+# (L2) needs the identical two primitives for the witnessed rewrite, and a
+# shared copy cannot live in an L4 module. Aliased back to their original
+# private names so every call site below is unchanged; see that module's
+# docstring for why the edit stays textual rather than a parse/render round
+# trip.
+_yaml_scalar_literal = yaml_scalar_literal
+_set_frontmatter_scalar = set_frontmatter_scalar
 
 
 def _extract_claim(meta: dict, body: str) -> str:
