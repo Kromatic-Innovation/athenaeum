@@ -1027,7 +1027,8 @@ no schema tightening.
 ### 10.1 Channel split — extend the `source_type` vocabulary
 
 The `source_type` vocabulary gains two values (see
-`models.SOURCE_TYPES`):
+`models.SOURCE_TYPES`; a third, `witnessed`, was added later by issue
+athenaeum#2158 and is listed below for completeness):
 
 | value | meaning |
 |---|---|
@@ -1036,6 +1037,7 @@ The `source_type` vocabulary gains two values (see
 | `inferred` | AI leap without artifact backing (unchanged; stays the coercion default) |
 | `model-prior` | **new** — asserted from training-data knowledge with no session evidence |
 | `external` / `document` | unchanged (external citation / permanent document) |
+| `witnessed` | **new (issue athenaeum#2158)** — a `user-stated` utterance that additionally matched a hash-chained line in the `promptwitness` witness ledger; opt-in via `librarian.witness_attestation_enabled` |
 
 `coerce_source_type` keeps its fail-open contract: a typo / unknown value
 downgrades to `inferred` with a debug breadcrumb; missing/None passes
@@ -1048,7 +1050,8 @@ at least names a repeatable in-tree process; a training prior names
 only the model that guessed, and dates from that model's cutoff.
 `unsourced` remains the last tier. The full ranking becomes:
 
-1. `user:<conversation-ref>` (highest)
+1. `user:<conversation-ref>` / **`witnessed:<session-ref>` (new — issue
+   athenaeum#2159)** (highest)
 2. `linkedin:<username>` / `twitter:<username>`
 3. `api:apollo` / `api:<vendor>`
 4. `wikipedia:<page>`
@@ -1057,6 +1060,19 @@ only the model that guessed, and dates from that model's cutoff.
 7. `script:<slug>`
 8. **`model-prior:<model-id>` (new — issue athenaeum#326)**
 9. `unsourced` / empty (lowest)
+
+`witnessed` (issue athenaeum#2159) SHARES tier 1 with `user:` rather than
+taking a tier of its own: operator ruling 9 (2026-10-28, epic
+athenaeum#2144) declined a tier above `user:` because a harness witness
+corroborates the user's own word, it does not outrank it. Adding it
+shifts no rank — there are still 9 tiers and
+`precedence.UNKNOWN_SOURCE_RANK` stays `9`. The scalar is
+`witnessed:<session>#turn<N>`, where `N` is the MEMORY's `originTurn`
+(the same numbering `repair`'s `user:<ref>` uses), NOT the witness
+ledger's own per-session `turn` counter — that one appears only inside
+`witness_ref` (as `seq`). It is written by intake and by
+`repair --backfill-sources` when a `user-stated` claim attests against
+the witness ledger, gated by `librarian.witness_attestation_enabled`.
 
 `agent-observed` (issue athenaeum#328) ranks BELOW `wikipedia:<page>` — it is not
 a curated public authority — but ABOVE `claude:tier3`/inferred: it is

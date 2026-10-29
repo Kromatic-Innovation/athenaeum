@@ -548,7 +548,8 @@ visible failure** — which is precisely why the drift-guard test below must com
 > The implementation MUST add a test binding the ranker to the prompt block. **Derive the
 > expected tiers by parsing the prompt block; do not transcribe them.** Transcription is
 > what produced the omitted `twitter` token in the first place. The test must also assert
-> its own denominator (it parsed 9 tiers and at least 10 tokens) and carry a positive
+> its own denominator (it parsed 9 tiers and at least 11 tokens — 10 until
+> athenaeum#2159 added `witnessed:` as tier 1's second token) and carry a positive
 > control that mutates the prompt text in-test and asserts the comparison fails — otherwise
 > a parser that silently extracts nothing compares empty to empty and passes forever.
 

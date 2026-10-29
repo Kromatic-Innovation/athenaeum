@@ -1237,6 +1237,12 @@ class TestIntervalCloseSlice2:
 # pipeline slug at least names a repeatable in-tree process. These tests pin
 # both the ordering AND the presence of the new tier in the prompt so a
 # regression here surfaces immediately.
+#
+# Issue athenaeum#2159 added a SECOND token to the EXISTING tier 1 --
+# `witnessed:<session-ref>` alongside `user:<conversation-ref>` -- without
+# shifting any rank (operator ruling 9: a harness witness corroborates the
+# user's own word, it does not outrank it). The tests below bind tier 1's
+# membership and re-assert that tiers 2-9 did not move.
 
 
 class TestSourcePrecedenceTaxonomyChannelSplit:
@@ -1307,6 +1313,59 @@ class TestSourcePrecedenceTaxonomyChannelSplit:
         assert "inferred" in SOURCE_TYPES
         assert "external" in SOURCE_TYPES
         assert "document" in SOURCE_TYPES
+
+    def test_witnessed_shares_tier_1_with_user(self) -> None:
+        # Issue athenaeum#2159 lock: tier 1 carries BOTH tokens, in the "two
+        # tokens, one rank" form tier 2 (`linkedin:` / `twitter:`) already
+        # used, and `witnessed:` does NOT get a tier of its own above
+        # `user:` (operator ruling 9, epic athenaeum#2144).
+        from athenaeum.resolutions import _RESOLVE_SYSTEM
+
+        prompt = _RESOLVE_SYSTEM
+        tier_1_pos = prompt.find(
+            "1. user:<conversation-ref> / witnessed:<session-ref>"
+        )
+        assert tier_1_pos != -1, (
+            "tier 1 must name BOTH `user:<conversation-ref>` and "
+            "`witnessed:<session-ref>` (issue athenaeum#2159)"
+        )
+        # No tier 0, and nothing numbered above 1: `witnessed` shares the
+        # existing top tier instead of displacing it.
+        assert "0. witnessed" not in prompt
+        assert prompt.find("2. linkedin:") > tier_1_pos
+
+    def test_witnessed_shifts_no_existing_rank(self) -> None:
+        # The companion to the test above: adding tier 1's second token must
+        # leave the deterministic LLM-free mirror's ranks exactly as they
+        # were (issue athenaeum#2159 AC 2). `tests/test_precedence.py` owns
+        # the exhaustive pin; this is the design-lock's belt-and-braces copy.
+        from athenaeum.precedence import (
+            SOURCE_PRECEDENCE_TIERS,
+            UNKNOWN_SOURCE_RANK,
+            source_rank,
+        )
+
+        assert len(SOURCE_PRECEDENCE_TIERS) == 9
+        assert UNKNOWN_SOURCE_RANK == 9
+        assert source_rank("witnessed:abc#turn3") == 1
+        assert source_rank("user:conv-2026") == 1
+        assert source_rank("linkedin:tkromer") == 2
+        assert source_rank("twitter:someone") == 2
+        assert source_rank("api:apollo") == 3
+        assert source_rank("wikipedia:Foo") == 4
+        assert source_rank("agent-observed:claude:s1") == 5
+        assert source_rank("claude:tier3-write") == 6
+        assert source_rank("script:enrich") == 7
+        assert source_rank("model-prior:claude-3-opus") == 8
+        assert source_rank("unsourced:x") == 9
+
+    def test_source_types_includes_witnessed(self) -> None:
+        # The coarse `source_type` vocabulary carries the channel the
+        # `witnessed:` scalar is persisted alongside (issue athenaeum#2158
+        # added the value; athenaeum#2159 is what writes it onto a memory).
+        from athenaeum.models import SOURCE_TYPES
+
+        assert "witnessed" in SOURCE_TYPES
 
     def test_model_prior_source_type_round_trips_tier0(self, tmp_path: Path) -> None:
         # Acceptance criterion 1 (issue athenaeum#326): a claim written with
