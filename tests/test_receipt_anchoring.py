@@ -931,3 +931,69 @@ class TestLibrarianCallSite:
         # call's own blank line.
         between = source[anchor_at + len("    _maybe_run_nightly_anchor(ctx)") : push_at]
         assert between.strip() == ""
+
+    def test_a_still_pending_upgrade_appends_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A calendar can stay pending for hours. A line per nightly per
+        unconfirmed stamp would grow the ledger — and the off-machine
+        mirror — while recording nothing new."""
+        from promptwitness import ledger as pw_ledger
+
+        knowledge_root, wiki, ledger = _ledger_with_receipts(tmp_path)
+        del knowledge_root
+        _append_witness_anchor(
+            ledger, subject="witness:pw-x:7", digest="sha256:" + "d" * 64,
+            source="opentimestamps", status="pending",
+        )
+
+        class _StillPending(_FakeAnchorer):
+            def upgrade(self, att: Any) -> Any:
+                self.upgrade_calls.append(att.status)
+                return att
+
+        anchorer = _StillPending()
+        monkeypatch.setattr(
+            receipt_sealers, "select_anchorers", lambda config, ledger_dir=None: [anchorer]
+        )
+        before = len(list(pw_ledger.iter_lines(ledger)))
+        report = witness_anchor.run_nightly_anchor(
+            ledger, wiki, config=None, lock=_HeldLock()
+        )
+        assert report.upgraded == []
+        assert anchorer.upgrade_calls == ["pending"]
+        # Only the head anchor and the receipts anchor were appended — no
+        # upgrade line.
+        appended = [
+            line
+            for line in list(pw_ledger.iter_lines(ledger))[before:]
+            if line.extra.get("op") == "upgrade"
+        ]
+        assert appended == []
+
+
+class TestWholePartitionOnly:
+    def test_a_sub_range_is_refused(self, tmp_path: Path) -> None:
+        """The subject is ``receipts:<YYYY-MM>:<line_count>``, defined over
+        the whole partition: a sub-range would record a line count that does
+        not describe the digest beside it."""
+        knowledge_root, wiki, _ledger = _ledger_with_receipts(tmp_path, count=3)
+        del knowledge_root
+        partition = partition_path(wiki, MONTH)
+        lines = partition.read_text(encoding="utf-8").splitlines()
+        sealer = _sealer(wiki, [_FakeAnchorer()])
+        with pytest.raises(ValueError, match="whole partitions only"):
+            sealer.seal(partition, 2, 3, lines[1:])
+        assert iter_stored_anchors(wiki, MONTH) == []
+
+    def test_select_sealer_can_never_name_this_sealer(self) -> None:
+        """Why raising above is safe: intake cannot reach this sealer.
+
+        ``librarian.receipt_sealer``'s vocabulary is ``noop``/``signing``;
+        anything else raises in the resolver, so no configuration makes
+        ``AnchoringSealer`` the sealer ``append_receipt`` is handed.
+        """
+        from athenaeum.config import ReceiptSealerConfigError
+
+        with pytest.raises(ReceiptSealerConfigError):
+            receipt_sealers.select_sealer({"librarian": {"receipt_sealer": "anchor"}})

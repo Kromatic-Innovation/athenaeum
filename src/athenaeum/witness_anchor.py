@@ -415,9 +415,10 @@ class NightlyAnchorReport:
         }
 
 
-def _ledger_attestations_for_digest(ledger_dir: Path, digest: str) -> list[dict[str, Any]]:
-    """Every attestation the LOCAL witness ledger already holds for
-    *digest*, newest-per-source (issue athenaeum#2040's import path).
+def _ledger_attestations_by_digest(ledger_dir: Path) -> dict[str, list[dict[str, Any]]]:
+    """Every attestation the LOCAL witness ledger holds, grouped by the
+    digest it commits to, newest-per-source (issue athenaeum#2040's import
+    path).
 
     The in-session and SessionEnd paths (issue athenaeum#2156) anchor a
     receipt partition's digest without any lock and record the result ONLY
@@ -430,22 +431,27 @@ def _ledger_attestations_for_digest(ledger_dir: Path, digest: str) -> list[dict[
     Keyed on the DIGEST, not the subject: that is what the attestation
     actually commits to, and it is identical across the two paths because
     both derive it through
-    :func:`athenaeum.receipt_sealers.partition_digest`.
+    :func:`athenaeum.receipt_sealers.partition_digest`. Built in ONE ledger
+    pass for the whole run rather than one pass per partition -- the
+    ledger is append-only and grows for the life of the machine, so a
+    per-partition scan would make the nightly's cost quadratic in a file
+    nobody ever truncates.
     """
     from promptwitness import ledger as pw_ledger
 
-    newest: dict[str, dict[str, Any]] = {}
+    newest: dict[str, dict[str, dict[str, Any]]] = {}
     for line in pw_ledger.iter_lines(ledger_dir):
-        if line.kind != "anchor" or line.extra.get("digest") != digest:
+        if line.kind != "anchor":
             continue
+        digest = line.extra.get("digest")
         raw_att = line.extra.get("attestation")
-        if not isinstance(raw_att, dict):
+        if not isinstance(digest, str) or not isinstance(raw_att, dict):
             continue
         source = str(raw_att.get("source", ""))
         if not source:
             continue
-        newest[source] = dict(raw_att)
-    return list(newest.values())
+        newest.setdefault(digest, {})[source] = dict(raw_att)
+    return {digest: list(by_source.values()) for digest, by_source in newest.items()}
 
 
 def _anchor_subject_with(
@@ -523,11 +529,16 @@ def _upgrade_pending(
         if anchorer is None:
             continue
         new_att = anchorer.upgrade(att)
+        if new_att.status == att.status:
+            # Still pending. Append NOTHING: a line per nightly per
+            # not-yet-confirmed stamp would grow the ledger (and the
+            # off-machine mirror) without recording anything new, and a
+            # calendar can legitimately stay pending for hours.
+            continue
         _append_anchor_line(
             ledger_dir, subject=subject, digest=digest, attestation=new_att, op="upgrade"
         )
-        if new_att.status != att.status:
-            upgraded.append(subject)
+        upgraded.append(subject)
     return upgraded
 
 
@@ -663,7 +674,7 @@ def run_nightly_anchor(
        no new stamp. When the local witness ledger already holds an
        attestation for that exact digest -- the in-session/SessionEnd path
        (issue athenaeum#2156) got there first -- it is IMPORTED rather
-       than re-stamped (:func:`_ledger_attestations_for_digest`).
+       than re-stamped (:func:`_ledger_attestations_by_digest`).
     2. **The witness chain head**, once per pass, with the configured
        adapters. (Anchoring appends ``anchor`` lines, which moves the
        head; the head read here is the one from BEFORE this pass wrote
@@ -693,7 +704,7 @@ def run_nightly_anchor(
         athenaeum#2156 paths write. Two consequences, both wanted: the
         off-machine mirror (step 4) carries receipt anchors as well as
         chain-head ones, and a later pass can FIND this attestation by its
-        digest (:func:`_ledger_attestations_for_digest`) instead of
+        digest (:func:`_ledger_attestations_by_digest`) instead of
         re-stamping it.
         """
         _append_anchor_line(
@@ -710,9 +721,12 @@ def run_nightly_anchor(
 
     report = NightlyAnchorReport()
 
-    # 1. Receipt partitions. The head subject is read BEFORE any anchoring
-    #    appends to the ledger, for the reason in the docstring.
+    # 1. Receipt partitions. Both of these read the ledger BEFORE any
+    #    anchoring appends to it: the head subject because anchoring moves
+    #    the head (see the docstring), and the attestation map because this
+    #    pass's own stamps are not imports.
     head_subject, head_digest = _head_subject_and_digest(ledger_dir)
+    attestations_by_digest = _ledger_attestations_by_digest(ledger_dir)
 
     for month in receipt_sealers.iter_months(wiki_root):
         partition = receipt_sealers.partition_path(wiki_root, month)
@@ -729,7 +743,7 @@ def run_nightly_anchor(
         ):
             report.unchanged.append(month)
             continue
-        imported = _ledger_attestations_for_digest(ledger_dir, digest)
+        imported = attestations_by_digest.get(digest)
         if imported:
             sealer.seal_with_op(
                 partition, 1, len(lines), lines, op="import", attestations=imported

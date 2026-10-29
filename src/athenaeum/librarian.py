@@ -10367,7 +10367,6 @@ def _maybe_run_nightly_anchor(ctx: "RunContext") -> None:
         )
         return
     try:
-        from athenaeum.store import FilesystemStore
         from athenaeum.witness_anchor import run_nightly_anchor
         from athenaeum.witness_attestation import resolve_default_witness_dir
 

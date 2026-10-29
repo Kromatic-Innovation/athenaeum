@@ -1230,6 +1230,20 @@ class AnchoringSealer:
         earlier, which is strictly worse evidence.
         """
         require_lock(self.lock)
+        if start_line != 1 or end_line != len(lines):
+            # The subject this sealer anchors --
+            # ``receipts:<YYYY-MM>:<line_count>`` -- is defined over the
+            # WHOLE partition, so a sub-range would record a line count that
+            # does not describe the digest beside it. Raising beats returning
+            # ``None``: ``None`` means "not sealed" to every caller, which
+            # would hide a wiring mistake as an unsealed range. Unreachable
+            # from intake by construction -- ``select_sealer``'s vocabulary
+            # (``noop``/``signing``) cannot name this sealer at all.
+            raise ValueError(
+                "AnchoringSealer anchors whole partitions only: got lines "
+                f"{start_line}-{end_line} of {len(lines)} given "
+                f"(partition {partition_path.name})"
+            )
         digest = partition_digest(lines)
         subject = receipts_subject(partition_path.stem, end_line)
         if attestations is None:
@@ -1273,6 +1287,14 @@ class AnchoringSealer:
         is upgraded by the next nightly pass. What fails is a changed
         range, a missing range, a record with no attestations at all, or
         an attestation that claimed ``complete`` and no longer verifies.
+
+        **The content check is the load-bearing one**, not the attestation
+        re-check. ``local-clock`` always verifies and carries no
+        independent weight (``promptwitness.anchor.LocalClockAnchorer``),
+        so on a local-clock-only record the thing that actually catches
+        tampering is the recomputed :func:`partition_digest` compared
+        against the recorded one — which runs first, before any anchorer
+        is consulted.
         """
         self.last_verify_results = []
         if seal is None:
