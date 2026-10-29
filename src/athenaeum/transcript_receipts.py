@@ -1001,6 +1001,42 @@ def transcript_path_for(
     return root / origin_scope / f"{origin_session_id}.jsonl"
 
 
+def _persist_witnessed_source(
+    am: AutoMemoryFile, entry: ReceiptEntry, *, lock: RunLock
+) -> bool:
+    """Write the ``witnessed`` source rewrite back onto *am*'s own file.
+
+    Issue athenaeum#2159. :func:`write_receipts_for_files` is the natural
+    seam: it already holds the acquired :class:`RunLock` for the whole run,
+    already loops per :class:`~athenaeum.models.AutoMemoryFile` (so it has
+    ``am.path`` and the ``origin_turn`` the ref needs), and already has to
+    look at ``entry.channel`` to count the ``witnessed`` upgrades. Nothing
+    else on this path knows all four of those things at once.
+
+    The import of :mod:`athenaeum.intake` is function-local. Both modules are
+    L2, so a top-level import would be legal LAYERING — but ``intake`` is the
+    discovery front door for the whole run loop, and this module is imported
+    by ``resolutions``; keeping the edge deferred leaves this module's
+    top-level import surface exactly as light as it was, the same reason the
+    rest of the codebase defers its L2-to-L2 edges. ``intake`` does not
+    import this module (checked: no cycle in either direction).
+
+    Returns whatever :func:`athenaeum.intake.persist_witnessed_source`
+    returns — ``True`` iff the file was rewritten. A
+    ``WitnessedSourceWriteNotLocked`` is deliberately NOT caught: an
+    unacquired lock is a caller bug, not a per-file condition to tolerate.
+    """
+    from athenaeum.intake import persist_witnessed_source
+
+    return persist_witnessed_source(
+        am.path,
+        session_id=am.origin_session_id or "",
+        origin_turn=am.origin_turn,
+        witness_ref=entry.witness_ref,
+        lock=lock,
+    )
+
+
 def write_receipts_for_files(
     wiki_root: Path,
     files: Sequence[AutoMemoryFile],
@@ -1088,6 +1124,17 @@ def write_receipts_for_files(
             processed += 1
             if entry.channel == "witnessed":
                 witnessed += 1
+                # Issue athenaeum#2159: a `witnessed` receipt only becomes
+                # visible to source precedence once the ranked token is on
+                # the MEMORY. The flag check is redundant by construction
+                # (a `witnessed` channel is unreachable with the flag off --
+                # `ReceiptRun` leaves `attestation_index` None, and
+                # `witness_attestation.attest` then returns the `flag-off`
+                # miss), but it is stated explicitly so the gate is
+                # TESTABLE at this seam rather than only inferable from two
+                # other modules' behaviour.
+                if run.witness_attestation_enabled:
+                    _persist_witnessed_source(am, entry, lock=lock)
             elif entry.witness_miss is not None:
                 witness_miss_counts[entry.witness_miss] = (
                     witness_miss_counts.get(entry.witness_miss, 0) + 1
