@@ -2814,6 +2814,44 @@ def iter_contact_records(contacts_root: Path) -> list[Path]:
     return sorted(p for p in root.rglob("*.md") if p.is_file())
 
 
+def _log_collision_summary(
+    uid_collisions: int, address_collisions: int | None
+) -> None:
+    """Log one line summarising collided keys on a contacts surface (athenaeum#2188).
+
+    The level follows what the counts mean. A uid claimed by more than one
+    record is a store defect (resolution silently picks the first), so any
+    uid collision makes the line a WARNING. A shared address is legitimate —
+    one household or role address can belong to several people, and the
+    observation log models that — so address-only collisions are INFO. A
+    clean surface logs nothing.
+
+    *address_collisions* is ``None`` for a scan that never indexed addresses
+    (:func:`build_contact_record_uid_index`); the address clause is then left
+    out rather than reported as a false zero.
+    """
+    if uid_collisions + (address_collisions or 0) <= 0:
+        return
+    level = logging.WARNING if uid_collisions > 0 else logging.INFO
+    hint = "run `contact-surface-lint` / see athenaeum#2184 (per-key detail at DEBUG)"
+    if address_collisions is None:
+        log.log(
+            level,
+            "contact surface: %d uid(s) claimed by >1 record — %s",
+            uid_collisions,
+            hint,
+        )
+        return
+    log.log(
+        level,
+        "contact surface: %d uid(s) claimed by >1 record, %d address(es) on >1 "
+        "record — %s",
+        uid_collisions,
+        address_collisions,
+        hint,
+    )
+
+
 class ExcludedRecordIndex:
     """Every record on one excluded surface, indexed by ``uid`` AND by address.
 
@@ -2831,7 +2869,8 @@ class ExcludedRecordIndex:
 
     - the FIRST match in :func:`iter_contact_records` order wins (that
       function sorts, so the same store always yields the same mapping);
-    - ``log.warning`` (never raise) when a key resolves to several records;
+    - log (never raise) when a key resolves to several records — one summary
+      line per load, per-key detail at DEBUG (athenaeum#2188);
     - keys are ``str(...).strip()``-coerced exactly as
       :func:`resolve_contact_record_for_uid` compares them, and addresses are
       :func:`normalize_identifier`-keyed exactly as
@@ -2911,10 +2950,18 @@ class ExcludedRecordIndex:
             paths.append(path)
 
     def _warn_collisions(self) -> None:
-        """One line per collided key — proportional to the problem, not the corpus."""
+        """ONE summary line per load; the per-key detail goes to DEBUG (athenaeum#2188).
+
+        Every CLI ``recall`` loads this index, so a per-key WARNING turned
+        each lookup into hundreds of lines of preamble on a store with a few
+        hundred collided keys. The per-key lines keep their content (key,
+        count, first-path name) for whoever turns DEBUG on to investigate.
+        """
+        uid_collisions = 0
         for uid, paths in self._by_uid.items():
             if len(paths) > 1:
-                log.warning(
+                uid_collisions += 1
+                log.debug(
                     "uid %r resolves to %d contact records; indexing the first "
                     "(%s). See resolve_contact_record's docstring for the same "
                     "shared-value posture.",
@@ -2922,15 +2969,18 @@ class ExcludedRecordIndex:
                     len(paths),
                     paths[0].name,
                 )
-        for identifier, paths in self._by_identifier.items():
+        address_collisions = 0
+        for paths in self._by_identifier.values():
             if len(paths) > 1:
-                log.warning(
+                address_collisions += 1
+                log.debug(
                     "identifier resolves to %d contact records; annotating the "
                     "first (%s). A shared address is legitimate — see the "
                     "observation log.",
                     len(paths),
                     paths[0].name,
                 )
+        _log_collision_summary(uid_collisions, address_collisions)
 
     def by_uid(self, uid: str) -> Path | None:
         """The record whose frontmatter ``uid`` equals *uid*, or ``None``.
@@ -4448,7 +4498,8 @@ def build_contact_record_uid_index(contacts_root: Path) -> dict[str, Path]:
 
     - the FIRST match in :func:`iter_contact_records` order wins (that
       function sorts, so the same store always yields the same mapping);
-    - ``log.warning`` (never raise) when more than one record carries a uid;
+    - log (never raise) when more than one record carries a uid — one
+      WARNING summary per scan, per-uid detail at DEBUG (athenaeum#2188);
     - the key is :func:`_normalize_frontmatter_uid` of the record's ``uid``
       frontmatter, the SAME normalizer the single-lookup function compares
       with. A record with no ``uid`` key, ``uid: ""``, or a VALUELESS
@@ -4475,8 +4526,10 @@ def build_contact_record_uid_index(contacts_root: Path) -> dict[str, Path]:
             duplicates[uid] = duplicates.get(uid, 1) + 1
             continue
         index[uid] = path
+    # Per-uid detail at DEBUG, one summary line at WARNING (athenaeum#2188):
+    # a corpus-wide scan must not print a line per collided key on every read.
     for uid, count in duplicates.items():
-        log.warning(
+        log.debug(
             "uid %r resolves to %d contact records; indexing the first "
             "(%s). See resolve_contact_record's docstring for the same "
             "shared-value posture.",
@@ -4484,6 +4537,7 @@ def build_contact_record_uid_index(contacts_root: Path) -> dict[str, Path]:
             count,
             index[uid].name,
         )
+    _log_collision_summary(len(duplicates), None)
     return index
 
 
