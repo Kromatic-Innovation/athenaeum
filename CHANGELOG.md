@@ -435,6 +435,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`athenaeum repair --contact-records` now folds a divergent duplicate
+  contact record instead of leaving it behind (issue athenaeum#2184
+  follow-up).** When a uid was claimed by a `<uid>`-named record and a
+  slug-named copy, the repair retired the copy only when it held nothing
+  more. A copy holding an extra address, phone, bounce close or usage
+  classification was reported and left in place, so the uid stayed claimed by
+  two records. The repair now folds such a copy onto the `<uid>`-named record
+  and retires it with reason `duplicate-fold`:
+  - values and per-address facts on only one copy are kept;
+  - a usage classification both copies hold for the same address is settled
+    by the existing no-downgrade ladder (`observed` > `provider` >
+    `unclassified`), with the newer `observed_at` winning between equal
+    classes.
+
+  Two cases still need a human and are reported, never touched: copies whose
+  `name` differs after normalization, and copies whose validity (bounce/close)
+  entries for the same address differ. New counts:
+  `duplicate_divergent_to_fold`, `duplicate_divergent_values_to_add`,
+  `duplicate_divergent_name_differs` and `duplicate_divergent_validity_differs`.
+  `duplicate_divergent_reported` now counts only the pairs that need review.
+
 - **`recall <email>` no longer rebuilds the whole entity index to find one
   page.** When an address resolved to exactly one person, the handle path
   built a full `EntityIndex` (parsing every wiki page's frontmatter) just to
