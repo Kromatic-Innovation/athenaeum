@@ -998,7 +998,8 @@ class TestReceiptsSealCliEndToEnd:
         from athenaeum.cli import main
 
         assert main(["receipts"]) == 2
-        assert "usage: athenaeum receipts {seal,verify}" in capsys.readouterr().err
+        # `anchor` joined the verb list in issue athenaeum#2040.
+        assert "usage: athenaeum receipts {seal,verify,anchor}" in capsys.readouterr().err
 
 
 class TestSeerReviewFindings:

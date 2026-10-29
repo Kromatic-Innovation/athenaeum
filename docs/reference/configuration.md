@@ -3628,6 +3628,41 @@ case-insensitive) > yaml ``librarian.witness_attestation_enabled`` >
 default ``False``. No seed in ``_DEFAULTS``.
 Non-bool yaml values and unrecognized env strings fall through to off.
 
+### `resolve_witness_ledger_enabled`
+
+- **YAML path:** `librarian.witness_ledger_enabled`
+- **Environment variable:** `ATHENAEUM_WITNESS_LEDGER_ENABLED`
+- **CLI flag:** —
+- **Default:** `False`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the witness-ledger NIGHTLY opt-in. DEFAULT OFF.
+
+Gates `athenaeum.witness_anchor.run_nightly_anchor` entirely at
+its librarian call site: with this off, a nightly run writes nothing
+under ``wiki/_witness_anchors/`` or
+``wiki/_transcript_receipts/_seals/anchors/``, makes no calendar call,
+and is byte-identical to a run from before this issue existed. That is
+the epic's migration rule ("Migration and rollback"):
+every behaviour except the in-session anchoring cadence is behind a
+flag that defaults off, and rollback is turning the flag off.
+
+**One knob, two readers.** ``ATHENAEUM_WITNESS_LEDGER_ENABLED`` is the
+SAME env var the ``UserPromptSubmit`` hook reads
+(``athenaeum.claude_code_adapter._witness_ledger_enabled``) — the
+witness ledger being on is one fact, not two. The hook reads it with an
+exact ``== "true"`` match because it never loads ``athenaeum.yaml`` at
+all and must not grow a second failure mode per prompt; this resolver
+accepts the usual vocabulary and adds the yaml home the nightly needs.
+An operator who sets ``true`` (the documented value) gets both.
+
+Precedence: ``ATHENAEUM_WITNESS_LEDGER_ENABLED`` env
+(``1``/``true``/``yes``/``on``, case-insensitive) > yaml
+``librarian.witness_ledger_enabled`` > default ``False``. No seed in
+``_DEFAULTS``. Non-bool yaml values and
+unrecognized env strings fall through to off, exactly like
+`resolve_witness_attestation_enabled`.
+
 ### `resolve_writer_identity_enforced`
 
 - **YAML path:** `librarian.writer_identity_enforced`
@@ -4981,6 +5016,5 @@ auto-applying tier from the one loop meant to catch it being wrong.
 | `ATHENAEUM_TOPIC_THINKING` | `src/athenaeum/query_topics.py` |
 | `ATHENAEUM_VERIFY_MODEL` | `src/athenaeum/_cmd_paste_cleanup.py` |
 | `ATHENAEUM_WITNESS_ANCHOR_INTERVAL_MINUTES` | `src/athenaeum/claude_code_adapter.py` |
-| `ATHENAEUM_WITNESS_LEDGER_ENABLED` | `src/athenaeum/_cmd_index.py`, `src/athenaeum/claude_code_adapter.py` |
 | `ATHENAEUM_WRITE_MODEL` | `src/athenaeum/config.py`, `src/athenaeum/drain_advisor.py`, `src/athenaeum/librarian.py`, `src/athenaeum/tiers.py` |
 | `ATHENAEUM_ZERO_YIELD_ALERT_THRESHOLD` | `src/athenaeum/librarian.py`, `src/athenaeum/recovery_yield.py` |

@@ -1,15 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 """Real :class:`athenaeum.transcript_receipts.Sealer` implementations and the
-selection seam around them (issue athenaeum#2039).
+selection seams around them (issues athenaeum#2039 and athenaeum#2040).
 
 :mod:`athenaeum.transcript_receipts` defines the ``Sealer`` Protocol and ships
 :class:`~athenaeum.transcript_receipts.NoopSealer` as its default, and says
 explicitly that SELECTION lives outside that module. This module is that
-outside: it adds the first real sealer and the one function
-(:func:`select_sealer`) that turns config into a sealer. Nothing here is
+outside: it holds the two real sealers and the two functions that turn config
+into one (:func:`select_sealer`, :func:`select_anchorers`). Nothing here is
 imported by ``transcript_receipts`` — the dependency runs one way only, which
-is what lets a later sealer (external timestamp anchoring, issue
-athenaeum#2040) land here without touching the ledger module at all.
+is what let the second sealer (external timestamp anchoring,
+:class:`AnchoringSealer`, issue athenaeum#2040) land here with
+``transcript_receipts.py`` unchanged, exactly as its ``Sealer`` docstring
+promised.
+
+**Two sealers, two questions.** :class:`SigningSealer` answers "who sealed
+this range" with a signature from a key the nightly cannot read;
+:class:`AnchoringSealer` answers "by when did this content exist" with an
+external timestamp attestation. They are independent — sign without
+anchoring, anchor without signing, or both — which is why anchorer selection
+is its OWN function rather than another branch inside ``select_sealer``.
+Unlike the signing sealer, the anchoring one is never called from
+``append_receipt``: one network round trip per receipt is not a cost intake
+can pay, and the whole-partition digest it commits to would be invalidated by
+the very next appended line (see :class:`AnchoringSealer`).
 
 **Why a signature at all.** With ``NoopSealer`` the git history of the
 knowledge repo is the only tamper evidence for a receipt, and the operator
@@ -79,6 +92,7 @@ from athenaeum.config import (
 from athenaeum.store import append_line_durable
 from athenaeum.transcript_receipts import (
     DEFAULT_SEALER,
+    LockNotHeld,
     Sealer,
     SealRecord,
     ledger_dir,
@@ -86,7 +100,7 @@ from athenaeum.transcript_receipts import (
 )
 
 if TYPE_CHECKING:  # pragma: no cover - annotation-only
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
 log = logging.getLogger(__name__)
 
@@ -923,29 +937,448 @@ def iter_months(wiki_root: Path) -> Iterator[str]:
     yield from _months(wiki_root)
 
 
+# ---------------------------------------------------------------------------
+# Anchoring (issue athenaeum#2040) — the second real Sealer, its selection
+# seam, and its own record store
+# ---------------------------------------------------------------------------
+
+#: :attr:`athenaeum.transcript_receipts.SealRecord.sealer` for every record
+#: :class:`AnchoringSealer` produces. Distinct from
+#: :data:`SIGNING_SEALER_NAME` because the two sealers answer different
+#: questions ("who sealed this" vs "by when did this exist") and a ledger
+#: can carry both.
+ANCHOR_SEALER_NAME = "anchor"
+
+#: Anchor records live in their OWN subdirectory of ``_seals/``, for the
+#: same glob-collision reason ``_seals/`` is itself a subdirectory of the
+#: ledger (see this module's docstring): ``iter_stored_seals`` globs
+#: ``_seals/*.jsonl``, so a sibling ``_seals/2026-10.anchors.jsonl`` would
+#: be parsed as a signing seal.
+ANCHORS_DIRNAME = "anchors"
+
+
+def anchors_dir(wiki_root: Path) -> Path:
+    return seals_dir(wiki_root) / ANCHORS_DIRNAME
+
+
+def anchors_partition_path(wiki_root: Path, month: str) -> Path:
+    return anchors_dir(wiki_root) / f"{month}.jsonl"
+
+
+def require_lock(lock: Any) -> None:
+    """Refuse a ``wiki/`` write without an ALREADY-ACQUIRED lock.
+
+    Mirrors :mod:`athenaeum.transcript_receipts`'s own ``_require_lock``
+    and reuses its :class:`~athenaeum.transcript_receipts.LockNotHeld` —
+    anchoring writes into the SAME knowledge repo the receipt ledger lives
+    in, so it reuses that lock rather than inventing a second one
+    (issue athenaeum#2040: "every ``wiki/`` write happens under an
+    acquired ``RunLock``").
+    """
+    if not getattr(lock, "acquired", False):
+        raise LockNotHeld(
+            "receipt_sealers: anchoring write attempted without an acquired "
+            "RunLock — the nightly anchoring path reuses "
+            "athenaeum.runlock.RunLock rather than inventing a second lock "
+            "(issue athenaeum#2040)."
+        )
+
+
+@dataclass(frozen=True)
+class StoredAnchor:
+    """One persisted anchor record: a partition month, the line range it
+    covers, the subject/digest that was anchored, and every
+    :class:`~promptwitness.anchor.Attestation` obtained for it.
+
+    ``attestations`` is a LIST because one anchoring pass runs several
+    adapters over the same digest (``local-clock`` always, plus whichever
+    network adapters are configured), and all of them attest to the same
+    subject. ``op`` records how the record was produced: ``"anchor"`` for a
+    stamp this pass obtained, ``"import"`` for one lifted from an
+    attestation the in-session/SessionEnd path (issue athenaeum#2156) had
+    already obtained for the SAME digest.
+    """
+
+    month: str
+    start_line: int
+    end_line: int
+    subject: str
+    digest: str
+    op: str
+    attestations: list[dict[str, Any]] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "month": self.month,
+            "start_line": self.start_line,
+            "end_line": self.end_line,
+            "subject": self.subject,
+            "digest": self.digest,
+            "op": self.op,
+            "attestations": [dict(att) for att in self.attestations],
+        }
+
+    @classmethod
+    def from_dict(cls, record: dict[str, Any]) -> StoredAnchor:
+        raw_atts = record.get("attestations")
+        return cls(
+            month=str(record.get("month", "")),
+            start_line=int(record.get("start_line", 0)),
+            end_line=int(record.get("end_line", 0)),
+            subject=str(record.get("subject", "")),
+            digest=str(record.get("digest", "")),
+            op=str(record.get("op", "")),
+            attestations=[dict(a) for a in raw_atts if isinstance(a, dict)]
+            if isinstance(raw_atts, list)
+            else [],
+        )
+
+    def as_seal_record(self) -> SealRecord:
+        return SealRecord(sealer=ANCHOR_SEALER_NAME, detail=self.to_dict())
+
+
+def iter_stored_anchors(wiki_root: Path, month: str | None = None) -> list[StoredAnchor]:
+    """Persisted anchor records, for one *month* or across every month."""
+    d = anchors_dir(wiki_root)
+    if not d.is_dir():
+        return []
+    paths = [anchors_partition_path(wiki_root, month)] if month else sorted(d.glob("*.jsonl"))
+    out: list[StoredAnchor] = []
+    for path in paths:
+        out.extend(StoredAnchor.from_dict(r) for r in _read_jsonl_tolerant(path))
+    return out
+
+
+def append_stored_anchor(wiki_root: Path, record: StoredAnchor, *, lock: Any) -> Path:
+    """Append *record* under ``_seals/anchors/``. Requires an acquired *lock*."""
+    require_lock(lock)
+    path = anchors_partition_path(wiki_root, record.month)
+    line = json.dumps(record.to_dict(), separators=(",", ":")) + "\n"
+    append_line_durable(path, line.encode("utf-8"))
+    return path
+
+
+def receipts_subject(month: str, line_count: int) -> str:
+    """``receipts:<YYYY-MM>:<line_count>`` — the anchor subject for one
+    receipt partition, byte-identical to the one
+    :func:`athenaeum.witness_anchor.run_session_end_anchor` builds, so an
+    attestation either path obtained is findable by the other.
+    """
+    return f"receipts:{month}:{line_count}"
+
+
+def partition_digest(lines: list[str]) -> str:
+    """``"sha256:<hex>"`` over *lines* — the digest an anchor commits to.
+
+    :func:`lines_digest` returns the bare hex; every anchoring caller needs
+    the ``sha256:``-prefixed form :func:`promptwitness.anchor.digest_bytes`
+    parses, so the prefix is applied in exactly one place rather than at
+    each call site (the same single-derivation rule
+    :func:`seal_payload` documents).
+    """
+    return f"sha256:{lines_digest(lines)}"
+
+
+def select_anchorers(config: dict[str, Any] | None, ledger_dir: Path | None = None) -> list[Any]:
+    """The :class:`~promptwitness.anchor.Anchorer` list this configuration
+    asks for, in the order they should be submitted to.
+
+    Selection is a SEPARATE function from :func:`select_sealer`, which is
+    unchanged: a sealer and an anchorer set are independent choices (an
+    operator can sign without anchoring, anchor without signing, or do
+    both), so folding anchoring into ``select_sealer``'s single return
+    value would make the two mutually exclusive.
+
+    ``librarian.receipt_anchor.adapters`` names them
+    (:func:`athenaeum.config.resolve_receipt_anchor_adapters`, which
+    already guarantees ``"local-clock"`` is present — the mandatory
+    fallback that always runs and never fails). ``rfc3161`` is dropped
+    silently when no TSA URL is configured, matching
+    ``promptwitness.anchor_rfc3161``'s own "no TSA is free to nominate on
+    an operator's behalf" stance; every other unknown value has already
+    raised in the resolver.
+
+    *ledger_dir* is where the network adapters persist their proof files
+    (``<ledger_dir>/anchors/<subject-safe>.ots``); it defaults to the
+    witness ledger directory, so ``select_anchorers(config)`` is the whole
+    call for the ordinary nightly path.
+    """
+    from athenaeum.config import (
+        resolve_receipt_anchor_adapters,
+        resolve_receipt_anchor_ots_block_source,
+        resolve_receipt_anchor_ots_calendars,
+        resolve_receipt_anchor_rfc3161_url,
+    )
+    from athenaeum.witness_attestation import resolve_default_witness_dir
+    from promptwitness import anchor as anchor_mod
+    from promptwitness import anchor_rfc3161
+
+    names = resolve_receipt_anchor_adapters(config)
+    proof_dir = ledger_dir if ledger_dir is not None else resolve_default_witness_dir()
+    rfc3161_url = resolve_receipt_anchor_rfc3161_url(config)
+
+    anchorers: list[Any] = []
+    for name in names:
+        if name == "local-clock":
+            anchorers.append(anchor_mod.LocalClockAnchorer())
+        elif name == "opentimestamps":
+            anchorers.append(
+                anchor_mod.OpenTimestampsAnchorer(
+                    proof_dir,
+                    calendars=resolve_receipt_anchor_ots_calendars(config),
+                    block_source=resolve_receipt_anchor_ots_block_source(config),
+                )
+            )
+        elif name == "rfc3161" and rfc3161_url:
+            anchorers.append(
+                anchor_rfc3161.Rfc3161Anchorer(
+                    proof_dir,
+                    tsa_url=rfc3161_url,
+                    ca_bundle=anchor_rfc3161.resolve_rfc3161_ca_bundle(None),
+                )
+            )
+    return anchorers
+
+
+@dataclass
+class AnchoringSealer:
+    """A :class:`~athenaeum.transcript_receipts.Sealer` that ANCHORS a
+    receipt partition's content digest instead of signing it.
+
+    ``seal(partition, 1, N, lines)`` anchors :func:`partition_digest` over
+    the whole partition with every configured anchorer and returns the
+    matching :class:`~athenaeum.transcript_receipts.SealRecord`
+    (``sealer="anchor"``, ``detail`` carrying every attestation);
+    ``verify`` re-reads the range from the LIVE partition, recomputes the
+    digest and re-runs each anchorer's own ``verify``, recording its
+    ``verify_source`` on :attr:`last_verify_results`.
+
+    **Never called from ``append_receipt``.** One network round trip per
+    receipt is not a cost intake can pay, and the subject this sealer
+    anchors (``receipts:<month>:<line_count>``) commits to the WHOLE
+    partition anyway, so a per-range call would stamp a digest that the
+    very next appended line invalidates. The callers are the nightly
+    anchoring path and ``athenaeum receipts anchor``
+    (:mod:`athenaeum.witness_anchor`), both of which hold the run lock.
+    ``athenaeum.transcript_receipts`` is therefore unchanged by this
+    issue, exactly as its ``Sealer`` docstring promised.
+
+    **The lock is a constructor field, not a ``seal`` argument.** The
+    ``Sealer`` Protocol's signature has no lock parameter — changing it
+    would mean editing ``transcript_receipts`` — so the lock this sealer's
+    ``wiki/`` writes require is held here and checked on every write
+    (:func:`require_lock`, raising
+    :class:`~athenaeum.transcript_receipts.LockNotHeld`).
+
+    **Network failure is not an error.** Every anchorer promptwitness
+    ships degrades to a ``status: "failed"`` attestation rather than
+    raising, and ``local-clock`` cannot fail at all, so ``seal`` always
+    returns a record: an offline nightly records the local-clock stamp and
+    the failed OpenTimestamps attempt, and the next pass retries because a
+    ``pending``/``failed`` record is not a complete one.
+    """
+
+    anchorers: list[Any]
+    lock: Any
+    wiki_root: Path
+    timeout: float = 10.0
+    #: Optional sink for each attestation :meth:`seal` obtains, called as
+    #: ``record_attestation(subject, digest, attestation)``. The nightly
+    #: path passes the witness-ledger appender here, so one anchoring pass
+    #: lands in BOTH stores: the ``anchor`` line in the local witness
+    #: ledger (which is what the off-machine mirror then carries) and the
+    #: anchor record under ``_seals/anchors/`` (which is what makes a
+    #: re-run a no-op). A callback rather than a ``ledger_dir`` field
+    #: because appending a witness line is L4 work
+    #: (:mod:`athenaeum.witness_anchor`) and this module is L2 — the
+    #: dependency may only run the other way.
+    record_attestation: Callable[[str, str, Any], None] | None = None
+    name: str = field(default=ANCHOR_SEALER_NAME, init=False)
+    #: Every :class:`~promptwitness.anchor.VerifyResult` the last
+    #: :meth:`verify` call produced, as dicts — each one carrying its own
+    #: ``verify_source``, which is the whole point of recording them: a
+    #: bare ``True``/``False`` would discard *how* the check was made.
+    last_verify_results: list[dict[str, Any]] = field(default_factory=list, init=False)
+
+    # -- Sealer -------------------------------------------------------------
+
+    def seal(
+        self, partition_path: Path, start_line: int, end_line: int, lines: list[str]
+    ) -> SealRecord | None:
+        return self.seal_with_op(partition_path, start_line, end_line, lines, op="anchor")
+
+    def seal_with_op(
+        self,
+        partition_path: Path,
+        start_line: int,
+        end_line: int,
+        lines: list[str],
+        *,
+        op: str,
+        attestations: list[dict[str, Any]] | None = None,
+    ) -> SealRecord | None:
+        """:meth:`seal`, plus the IMPORT path.
+
+        With *attestations* given, no anchorer is called at all AND
+        :attr:`record_attestation` is not invoked: the record is written
+        from attestations some other pass already obtained for this exact
+        digest, whose ``anchor`` lines therefore already exist (issue
+        athenaeum#2040 — "an athenaeum#2156 attestation for the same
+        digest is imported, not re-stamped"). A re-stamp would spend a
+        calendar round trip to learn something already known, and would
+        record a LATER claimed time for a digest that demonstrably existed
+        earlier, which is strictly worse evidence.
+        """
+        require_lock(self.lock)
+        if start_line != 1 or end_line != len(lines):
+            # The subject this sealer anchors --
+            # ``receipts:<YYYY-MM>:<line_count>`` -- is defined over the
+            # WHOLE partition, so a sub-range would record a line count that
+            # does not describe the digest beside it. Raising beats returning
+            # ``None``: ``None`` means "not sealed" to every caller, which
+            # would hide a wiring mistake as an unsealed range. Unreachable
+            # from intake by construction -- ``select_sealer``'s vocabulary
+            # (``noop``/``signing``) cannot name this sealer at all.
+            raise ValueError(
+                "AnchoringSealer anchors whole partitions only: got lines "
+                f"{start_line}-{end_line} of {len(lines)} given "
+                f"(partition {partition_path.name})"
+            )
+        digest = partition_digest(lines)
+        subject = receipts_subject(partition_path.stem, end_line)
+        if attestations is None:
+            from promptwitness import anchor as anchor_mod
+
+            digest_raw = anchor_mod.digest_bytes(digest)
+            obtained = []
+            for anchorer in self.anchorers:
+                att = anchorer.anchor(digest_raw, subject, timeout=self.timeout)
+                if self.record_attestation is not None:
+                    self.record_attestation(subject, digest, att)
+                obtained.append(att.to_dict())
+        else:
+            obtained = [dict(att) for att in attestations]
+        record = StoredAnchor(
+            month=partition_path.stem,
+            start_line=start_line,
+            end_line=end_line,
+            subject=subject,
+            digest=digest,
+            op=op,
+            attestations=obtained,
+        )
+        append_stored_anchor(self.wiki_root, record, lock=self.lock)
+        return record.as_seal_record()
+
+    def verify(
+        self, partition_path: Path, start_line: int, end_line: int, seal: SealRecord | None
+    ) -> bool:
+        """``True`` only when *seal* anchors the range's LIVE content.
+
+        An absent seal is ``False``, not vacuously true — the same stance
+        :meth:`SigningSealer.verify` takes. Every anchorer whose source
+        appears in the record re-runs its own ``verify``, and each
+        :class:`~promptwitness.anchor.VerifyResult` (``verify_source``
+        included) is recorded on :attr:`last_verify_results`.
+
+        A ``pending`` OpenTimestamps attestation does NOT fail
+        verification: pending is the normal state for the hours between a
+        calendar submission and its Bitcoin confirmation, and the record
+        is upgraded by the next nightly pass. What fails is a changed
+        range, a missing range, a record with no attestations at all, or
+        an attestation that claimed ``complete`` and no longer verifies.
+
+        **The content check is the load-bearing one**, not the attestation
+        re-check. ``local-clock`` always verifies and carries no
+        independent weight (``promptwitness.anchor.LocalClockAnchorer``),
+        so on a local-clock-only record the thing that actually catches
+        tampering is the recomputed :func:`partition_digest` compared
+        against the recorded one — which runs first, before any anchorer
+        is consulted.
+        """
+        self.last_verify_results = []
+        if seal is None:
+            return False
+        detail = seal.detail if isinstance(seal.detail, dict) else {}
+        raw_atts = detail.get("attestations")
+        if not isinstance(raw_atts, list) or not raw_atts:
+            return False
+        lines = read_range(partition_path, start_line, end_line)
+        if lines is None:
+            return False
+        if partition_digest(lines) != detail.get("digest"):
+            return False
+
+        from promptwitness import anchor as anchor_mod
+
+        digest_raw = anchor_mod.digest_bytes(partition_digest(lines))
+        by_source = {getattr(a, "source", ""): a for a in self.anchorers}
+        ok = False
+        for raw in raw_atts:
+            if not isinstance(raw, dict):
+                return False
+            att = anchor_mod.Attestation.from_dict(raw)
+            anchorer = by_source.get(att.source)
+            if anchorer is None:
+                # No configured adapter can speak for this source any more
+                # (the operator dropped it from `adapters`). Recorded as
+                # unverified rather than silently ignored or counted as a
+                # pass — "cannot verify" is never "verified".
+                self.last_verify_results.append(
+                    {
+                        "status": "failed",
+                        "verify_source": "unconfigured",
+                        "detail": {"source": att.source},
+                    }
+                )
+                continue
+            result = anchorer.verify(att, digest_raw)
+            self.last_verify_results.append(result.to_dict())
+            if att.status == "complete" and result.status not in (
+                "complete",
+                "complete-unverified-block",
+            ):
+                return False
+            if result.status in ("complete", "complete-unverified-block"):
+                ok = True
+        return ok
+
+
 __all__ = [
     "ALGORITHM",
+    "ANCHORS_DIRNAME",
+    "ANCHOR_SEALER_NAME",
     "OP_SERVICE_ACCOUNT_TOKEN_ENV",
     "SEALS_DIRNAME",
     "SIGNING_SEALER_NAME",
+    "AnchoringSealer",
     "KeyUnavailable",
     "OnePasswordServiceAccountKeyProvider",
     "RangeRef",
     "SealAllReport",
     "SigningKeyProvider",
     "SigningSealer",
+    "StoredAnchor",
     "StoredSeal",
     "VerifyReport",
+    "anchors_dir",
+    "anchors_partition_path",
+    "append_stored_anchor",
     "append_stored_seal",
     "derive_key_id",
     "iter_months",
+    "iter_stored_anchors",
     "iter_stored_seals",
     "lines_digest",
+    "partition_digest",
     "read_range",
+    "receipts_subject",
+    "require_lock",
     "seal_all_unsealed",
     "seal_payload",
     "seals_dir",
     "seals_partition_path",
+    "select_anchorers",
     "select_sealer",
     "unsealed_ranges",
     "verify_all",
