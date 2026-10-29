@@ -45,8 +45,11 @@
 #   ATHENAEUM_OP_REFRESH          1 = re-fetch from `op` even when a cached line for
 #                                 that credential already exists (default: unset,
 #                                 athenaeum#2193)
-#   ATHENAEUM_OP_TIMEOUT_SECONDS  Bound, in seconds, on a single `op read` (default:
-#                                 10, athenaeum#2193)
+#   ATHENAEUM_OP_TIMEOUT_SECONDS  Bound, in WHOLE seconds, on a single `op read`
+#                                 (default: 10, athenaeum#2193). Must be a
+#                                 positive integer -- a fractional, non-numeric,
+#                                 empty, or zero value silently falls back to
+#                                 the default rather than failing the fetch.
 
 set -euo pipefail
 
@@ -146,7 +149,24 @@ fi
 # ("missing Jev item produces no line and no warning").
 _athenaeum_op_read() {
   local _op_path="$1"
+  # Normalise the budget BEFORE either branch below spawns `op` (Seer
+  # finding on athenaeum#2193): a non-integer value (fractional,
+  # non-numeric, or empty-but-set) used to survive past this point because
+  # GNU `timeout` accepts a fractional argument on the branch below, then
+  # break the portable fallback's pure-integer arithmetic AFTER `op` was
+  # already running -- either the subshell aborts and orphans `op` (leaking
+  # its mode-600 temp file, since the `rm -f` never runs) or
+  # `_op_budget_ds` ends up empty and the bounded-wait loop's `-ge` test
+  # errors every iteration, is read as false, and never times out -- the
+  # exact unbounded hang this issue exists to prevent. A malformed knob
+  # must not be able to hang the hook or skip the credential, so anything
+  # that isn't a positive integer silently falls back to the documented
+  # default of 10 -- no stderr here, this hook's contract in this area is
+  # silence (athenaeum#2056).
   local _op_budget="${ATHENAEUM_OP_TIMEOUT_SECONDS:-10}"
+  case "$_op_budget" in
+    ''|*[!0-9]*|0) _op_budget=10 ;;
+  esac
   local _op_cmd
 
   if [ "${ATHENAEUM_OP_INTERACTIVE:-}" = "1" ]; then

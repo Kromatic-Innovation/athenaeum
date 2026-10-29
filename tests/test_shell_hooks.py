@@ -1221,6 +1221,122 @@ class TestOpOptionalGate2193:
         # (the marker) must be absent.
         assert not marker.exists()
 
+    def test_ac4_non_integer_timeout_falls_back_to_the_default_bound(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """Seer finding on athenaeum#2193 (review of athenaeum#2194): a non-integer
+        ATHENAEUM_OP_TIMEOUT_SECONDS (here `0.5`) must not reach either
+        branch's `op` spawn unnormalised. Pre-fix, the portable fallback's
+        pure-integer arithmetic (`_op_budget * 10`) broke AFTER `op` was
+        already backgrounded -- either the subshell aborted and orphaned
+        it (leaking its mode-600 temp file, since the `rm -f` never ran),
+        or `_op_budget_ds` ended up empty and the bounded-wait loop's
+        `-ge` test errored every iteration, read as false, and never
+        timed out. The fix normalises any non-positive-integer budget to
+        the documented default of 10 before `op` is spawned in either
+        branch.
+
+        Reuses the restricted-PATH setup from
+        test_ac4_portable_fallback_is_bounded_when_no_timeout_binary_exists
+        above (same four precondition assertions) so the FALLBACK branch
+        -- where this bug lives -- is the one under test, not the
+        `timeout`-present branch where GNU `timeout` happens to accept
+        `0.5` today."""
+        _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        cache_dir = tmp_path / ".cache" / "athenaeum"
+        cache_dir.mkdir(parents=True)
+        (cache_dir / "config.env").write_text(
+            "AUTO_RECALL=true\n"
+            "SEARCH_BACKEND=fts5\n"
+            "ANTHROPIC_API_KEY=synthetic-cached-key-survives-bad-timeout\n"
+        )
+
+        env = dict(hook_env)
+        env["ATHENAEUM_OP_TIMEOUT_SECONDS"] = "0.5"
+        env["OP_SERVICE_ACCOUNT_TOKEN"] = "synthetic-service-account-token"
+        env["ATHENAEUM_OP_REFRESH"] = "1"
+
+        # Same restricted-PATH construction as the sibling AC4 portable-
+        # fallback test: a symlink farm with everything the hook needs
+        # EXCEPT `timeout`/`gtimeout`.
+        no_timeout_bin = tmp_path / "no-timeout-bin"
+        no_timeout_bin.mkdir()
+        for directory in (d for d in env["PATH"].split(os.pathsep) if d):
+            try:
+                names = os.listdir(directory)
+            except (OSError, PermissionError):
+                continue
+            for name in names:
+                if name in ("timeout", "gtimeout"):
+                    continue
+                link = no_timeout_bin / name
+                if link.exists() or link.is_symlink():
+                    continue  # first-on-PATH wins, same as real PATH lookup
+                try:
+                    link.symlink_to(os.path.join(directory, name))
+                except (OSError, PermissionError):
+                    continue
+
+        marker = tmp_path / "op-completed-marker"
+        sleeping_op_dir = _write_sleeping_op(tmp_path, marker=marker)
+        env["PATH"] = f"{sleeping_op_dir}{os.pathsep}{no_timeout_bin}"
+
+        # Precondition: this PATH can genuinely never reach `timeout` or
+        # `gtimeout`, still has `bash`, and resolves `op` to the sleeping
+        # stub above.
+        assert shutil.which("timeout", path=env["PATH"]) is None
+        assert shutil.which("gtimeout", path=env["PATH"]) is None
+        assert shutil.which("bash", path=env["PATH"]) is not None
+        resolved_op = shutil.which("op", path=env["PATH"])
+        assert resolved_op == str(sleeping_op_dir / "op"), (
+            "test setup bug: `op` did not resolve to this test's own "
+            f"sleeping stub at {sleeping_op_dir / 'op'} (got {resolved_op!r})"
+        )
+
+        # A malformed budget falls back to the documented default of 10,
+        # not to the literal `0.5` -- so the floor here is 2 credentials
+        # (ANTHROPIC_API_KEY, JEV_API_KEY; ATHENAEUM_OP_REFRESH=1 means
+        # both attempt a fetch) x the DEFAULT budget, not x0.5s. Same
+        # generous 20s margin as the sibling AC4 tests, sized against 2x
+        # the default budget.
+        default_budget = 10
+        margin_seconds = 20
+        started = time.monotonic()
+        result = subprocess.run(
+            ["bash", str(SESSION_START)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=(2 * default_budget) + margin_seconds + 30,
+        )
+        elapsed = time.monotonic() - started
+
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert elapsed < (2 * default_budget) + margin_seconds, (
+            f"hook took {elapsed:.1f}s, expected well under "
+            f"{(2 * default_budget) + margin_seconds}s (2 credentials x "
+            f"{default_budget}s default budget + margin)"
+        )
+
+        body = (cache_dir / "config.env").read_text()
+        assert body.splitlines().count(
+            "ANTHROPIC_API_KEY=synthetic-cached-key-survives-bad-timeout"
+        ) == 1
+        assert "should-never-be-read" not in body
+
+        # The leak and marker assertions are the ones that actually
+        # discriminate this fix from the pre-fix behaviour -- do not drop
+        # them. The fallback mktemp's a credential temp file into
+        # $CACHE_DIR; it must never survive a killed fetch.
+        assert list(cache_dir.glob("op-read.*")) == []
+
+        # The sleeping `op` process must have been actually killed, not
+        # merely orphaned and left to finish unobserved -- its own
+        # post-sleep side effect (the marker) must be absent.
+        assert not marker.exists()
+
     def test_ac6_env_supplied_key_needs_no_op_on_path_at_all(
         self, hook_env: dict[str, str], tmp_path: Path
     ) -> None:

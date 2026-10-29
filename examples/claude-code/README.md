@@ -123,7 +123,7 @@ pages or the index hasn't been built — check `~/.cache/athenaeum/`.
 | `ATHENAEUM_OP_JEV_KEY_PATH` | `op://Agent Tools/Jev Athenaeum Key/credential` | 1Password secret reference for `JEV_API_KEY` |
 | `ATHENAEUM_OP_INTERACTIVE` | unset           | Set to `1` to opt into 1Password's interactive desktop-app integration: `op` may then run without `OP_SERVICE_ACCOUNT_TOKEN`, and the non-interactive suppression flags below are NOT set (athenaeum#2193) |
 | `ATHENAEUM_OP_REFRESH`   | unset                              | Set to `1` to re-fetch a credential from `op` even when a cached line already exists (athenaeum#2193) |
-| `ATHENAEUM_OP_TIMEOUT_SECONDS` | `10`                          | Bound, in seconds, on a single `op read` (athenaeum#2193) |
+| `ATHENAEUM_OP_TIMEOUT_SECONDS` | `10`                          | Bound, in whole seconds, on a single `op read`; a non-positive-integer value (fractional, non-numeric, empty, or zero) silently falls back to `10` (athenaeum#2193) |
 | `ATHENAEUM_FORCE_REBUILD` | `0`                              | Set to `1` to force a vector-index rebuild even if the existing one is fresher than the wiki |
 | `ATHENAEUM_INJECT_SKIP_WORDS` | `Code|Users|home|workspace|src|lib|app|var|tmp|usr` | Pipe-separated cwd path segments to ignore in `wiki-context-inject.sh` |
 | `ATHENAEUM_INJECT_MAX_RESULTS` | `3`                          | Max wiki pages to surface from `wiki-context-inject.sh`         |
@@ -179,7 +179,9 @@ ways to supply either key, and entirely optional. All three apply to both
      line.
 
    Every `op` call this hook makes is bounded by
-   `ATHENAEUM_OP_TIMEOUT_SECONDS` (default 10s) and runs with
+   `ATHENAEUM_OP_TIMEOUT_SECONDS` (default 10s, whole seconds only -- a
+   fractional, non-numeric, empty, or zero value silently falls back to the
+   default) and runs with
    `OP_LOAD_DESKTOP_APP_SETTINGS=false` / `OP_BIOMETRIC_UNLOCK_ENABLED=false`
    set on the `op` subprocess only — unless you opted into
    `ATHENAEUM_OP_INTERACTIVE=1`, in which case those flags are deliberately
