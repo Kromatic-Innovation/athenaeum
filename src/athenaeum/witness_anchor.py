@@ -676,9 +676,10 @@ def run_nightly_anchor(
        (issue athenaeum#2156) got there first -- it is IMPORTED rather
        than re-stamped (:func:`_ledger_attestations_by_digest`).
     2. **The witness chain head**, once per pass, with the configured
-       adapters. (Anchoring appends ``anchor`` lines, which moves the
-       head; the head read here is the one from BEFORE this pass wrote
-       anything, so the pass never chases its own tail.)
+       adapters. Read after step 1, so a turn the (lock-free) hook
+       appended while step 1 ran is covered; read ONCE, because anchoring
+       appends ``anchor`` lines and therefore moves the head, and a loop
+       that re-read it would chase its own tail forever.
     3. **Pending OpenTimestamps proofs** are upgraded
        (:func:`_upgrade_pending`) -- the one place in athenaeum that turns
        a submitted stamp into a complete Bitcoin attestation.
@@ -698,6 +699,7 @@ def run_nightly_anchor(
 
     timeout = resolve_receipt_anchor_timeout_seconds(config)
     anchorers = receipt_sealers.select_anchorers(config, ledger_dir)
+
     def _record(subject: str, digest: str, attestation: Any) -> None:
         """Every attestation the sealer obtains also becomes an ``anchor``
         line in the local witness ledger — the same shape the lock-free
@@ -721,11 +723,9 @@ def run_nightly_anchor(
 
     report = NightlyAnchorReport()
 
-    # 1. Receipt partitions. Both of these read the ledger BEFORE any
-    #    anchoring appends to it: the head subject because anchoring moves
-    #    the head (see the docstring), and the attestation map because this
-    #    pass's own stamps are not imports.
-    head_subject, head_digest = _head_subject_and_digest(ledger_dir)
+    # 1. Receipt partitions. The attestation map is read BEFORE any
+    #    anchoring appends to the ledger: this pass's own stamps are
+    #    stamps, not imports.
     attestations_by_digest = _ledger_attestations_by_digest(ledger_dir)
 
     for month in receipt_sealers.iter_months(wiki_root):
@@ -753,7 +753,13 @@ def run_nightly_anchor(
             sealer.seal(partition, 1, len(lines), lines)
             report.anchored.append(month)
 
-    # 2. The witness chain head.
+    # 2. The witness chain head, read HERE rather than at the top of the
+    #    pass: the hook appends turns lock-free, so a turn that arrived
+    #    while step 1 ran is covered by anchoring the head now and would
+    #    not be by anchoring a head read earlier. Read ONCE either way —
+    #    anchoring appends lines and so moves the head, and a loop that
+    #    re-read it would chase its own tail forever.
+    head_subject, head_digest = _head_subject_and_digest(ledger_dir)
     if head_subject is not None and head_digest is not None:
         _anchor_subject_with(
             ledger_dir,

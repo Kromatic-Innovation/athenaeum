@@ -442,12 +442,32 @@ class TestAnchorsOnceThenNotAgain:
         assert report.head_subject in [subject for _digest, subject in anchorer.anchor_calls]
 
     def test_an_empty_witness_ledger_anchors_no_head(self, tmp_path: Path) -> None:
+        """Nothing to anchor, nothing anchored. The ledger must be empty
+        after step 1 too, so this fixture has no receipt partitions
+        either — step 1's own ``anchor`` lines are what give a run with
+        receipts a head to anchor even when the hook never wrote a turn.
+        """
+        wiki = tmp_path / "knowledge" / "wiki"
+        report = witness_anchor.run_nightly_anchor(
+            tmp_path / "witness", wiki, config=None, lock=_HeldLock()
+        )
+        assert report.head_subject is None
+        assert report.anchored == []
+        assert report.mirrored == 0
+
+    def test_step_ones_own_anchor_lines_give_the_pass_a_head(
+        self, tmp_path: Path
+    ) -> None:
+        """With receipts but no turns, step 1's ``anchor`` lines ARE the
+        ledger, so the head read after step 1 is one of them."""
         knowledge_root, wiki, ledger = _ledger_with_receipts(tmp_path)
         del knowledge_root
         report = witness_anchor.run_nightly_anchor(
             ledger, wiki, config=None, lock=_HeldLock()
         )
-        assert report.head_subject is None
+        assert report.anchored == [MONTH]
+        assert report.head_subject is not None
+        assert report.head_subject.startswith("witness:")
 
 
 # ---------------------------------------------------------------------------
