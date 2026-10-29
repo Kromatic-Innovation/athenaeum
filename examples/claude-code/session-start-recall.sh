@@ -38,6 +38,15 @@
 #   ATHENAEUM_SRC        Path to athenaeum source checkout (optional)
 #   ATHENAEUM_OP_KEY_PATH  1Password path (default: op://Agent Tools/Anthropic API Key/credential)
 #   ATHENAEUM_OP_JEV_KEY_PATH  1Password path for JEV_API_KEY (default: op://Agent Tools/Jev Athenaeum Key/credential)
+#   ATHENAEUM_OP_INTERACTIVE      1 = opt into 1Password's interactive desktop-app
+#                                 integration: `op` may run without a service-account
+#                                 token, and the non-interactive suppression flags
+#                                 below are NOT set (default: unset, athenaeum#2193)
+#   ATHENAEUM_OP_REFRESH          1 = re-fetch from `op` even when a cached line for
+#                                 that credential already exists (default: unset,
+#                                 athenaeum#2193)
+#   ATHENAEUM_OP_TIMEOUT_SECONDS  Bound, in seconds, on a single `op read` (default:
+#                                 10, athenaeum#2193)
 
 set -euo pipefail
 
@@ -103,6 +112,90 @@ _CRED_OVERRIDE_VARS=(ATHENAEUM_OP_KEY_PATH ATHENAEUM_OP_JEV_KEY_PATH)
 # No warn-on-missing entry here: the no-key warning at the end of this
 # script stays hardcoded to ANTHROPIC_API_KEY only (Jev is optional,
 # athenaeum#2056 AC) -- see the comment on that block below.
+
+# ── Non-interactive, bounded `op read` (athenaeum#2193) ─────────────────────
+# `op` probes the 1Password desktop app's group container on every call
+# unless OP_LOAD_DESKTOP_APP_SETTINGS=false; on macOS that is the App Data
+# TCC service and the probe can block indefinitely, turning a background
+# SessionStart hook into a stuck OS permission prompt.
+# OP_BIOMETRIC_UNLOCK_ENABLED=false suppresses the matching biometric-unlock
+# prompt. Both flags are scoped to the single `op` subprocess via `env`,
+# NEVER `export`ed process-wide -- everything else this hook spawns (the
+# Python index build, etc.) must be unaffected. Skipped entirely when
+# ATHENAEUM_OP_INTERACTIVE=1: that is an explicit opt-in to 1Password's
+# interactive desktop-app integration, where these flags would be
+# counterproductive.
+#
+# Resolve a timeout runner once (not once per credential): prefer GNU/BSD
+# `timeout`, then macOS's `gtimeout` (coreutils via Homebrew), else a
+# portable background+poll+kill fallback that works on stock macOS bash
+# 3.2.57 (no `declare -A`, no `wait -n`).
+_athenaeum_op_timeout_bin=""
+if command -v timeout >/dev/null 2>&1; then
+  _athenaeum_op_timeout_bin="timeout"
+elif command -v gtimeout >/dev/null 2>&1; then
+  _athenaeum_op_timeout_bin="gtimeout"
+fi
+
+# _athenaeum_op_read <op-path>
+# Writes the fetched value to stdout, nothing else; returns non-zero on any
+# failure or timeout. No stderr output of its own -- the caller's existing
+# `if _fetched_key="$(...)" && [ -n "$_fetched_key" ]` guard already treats
+# a non-zero return (or empty stdout) as "leave the cached line alone", and
+# that silent-failure shape is itself part of the athenaeum#2056 contract
+# ("missing Jev item produces no line and no warning").
+_athenaeum_op_read() {
+  local _op_path="$1"
+  local _op_budget="${ATHENAEUM_OP_TIMEOUT_SECONDS:-10}"
+  local _op_cmd
+
+  if [ "${ATHENAEUM_OP_INTERACTIVE:-}" = "1" ]; then
+    _op_cmd=(op read "$_op_path")
+  else
+    _op_cmd=(env OP_LOAD_DESKTOP_APP_SETTINGS=false OP_BIOMETRIC_UNLOCK_ENABLED=false op read "$_op_path")
+  fi
+
+  if [ -n "$_athenaeum_op_timeout_bin" ]; then
+    "$_athenaeum_op_timeout_bin" "$_op_budget" "${_op_cmd[@]}" 2>/dev/null
+    return $?
+  fi
+
+  # Portable fallback (no `timeout`/`gtimeout` on PATH): background + poll
+  # + kill. The fetched value is a credential, so its temp file lives in
+  # $CACHE_DIR (already restricted to 700) at mode 600, mktemp'd like the
+  # config.env tmp handling above -- never a world-readable /tmp path. Poll
+  # in deciseconds: bash has no floating point, and 1-second polling would
+  # make a short-lived fetch wait up to a full second longer than needed.
+  local _op_tmp
+  _op_tmp=$(mktemp "${CACHE_DIR}/op-read.XXXXXX")
+  chmod 600 "$_op_tmp"
+  "${_op_cmd[@]}" > "$_op_tmp" 2>/dev/null &
+  local _op_pid=$!
+  local _op_budget_ds=$((_op_budget * 10))
+  local _op_waited_ds=0
+  while kill -0 "$_op_pid" 2>/dev/null; do
+    if [ "$_op_waited_ds" -ge "$_op_budget_ds" ]; then
+      kill "$_op_pid" 2>/dev/null || true
+      sleep 0.2
+      kill -9 "$_op_pid" 2>/dev/null || true
+      wait "$_op_pid" 2>/dev/null || true
+      rm -f "$_op_tmp"
+      return 1
+    fi
+    sleep 0.1
+    _op_waited_ds=$((_op_waited_ds + 1))
+  done
+
+  local _op_status=0
+  wait "$_op_pid" 2>/dev/null || _op_status=$?
+  if [ "$_op_status" -eq 0 ]; then
+    cat "$_op_tmp"
+    rm -f "$_op_tmp"
+    return 0
+  fi
+  rm -f "$_op_tmp"
+  return 1
+}
 
 _cached_cred_lines=()
 _had_live_cred=()
@@ -361,6 +454,27 @@ done
 # would make a run that ever cached a key skip every future fetch forever,
 # permanently defeating "a fresh `op read` still replaces the cached value"
 # (athenaeum#1886 AC2).
+#
+# athenaeum#2193 deliberately NARROWS that athenaeum#1886 AC2 guarantee:
+# instead of an unconditional per-session re-read, a fresh fetch now only
+# happens when nothing is cached yet (`_cached_cred_lines[$_i]` -- captured
+# BEFORE either writer above truncated config.env, not a re-read of the
+# file and not the live variable, same reasoning as the paragraph above) OR
+# the operator explicitly asks for one via ATHENAEUM_OP_REFRESH=1. An
+# unconditional per-session `op read` is exactly what turns a one-time OS
+# permission grant into a recurring prompt -- so the "always re-read"
+# behaviour AC2 established is now opt-in, not the default. Likewise, the
+# fetch as a whole is only attempted when a non-interactive credential is
+# available (OP_SERVICE_ACCOUNT_TOKEN) or the operator opted into
+# interactive 1Password via ATHENAEUM_OP_INTERACTIVE=1 -- a whole-loop
+# invariant (same for every credential), so hoisted out of the loop below
+# as `_op_allowed` rather than recomputed per entry.
+if [ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ] || [ "${ATHENAEUM_OP_INTERACTIVE:-}" = "1" ]; then
+  _op_allowed=true
+else
+  _op_allowed=false
+fi
+
 _i=0
 while [ "$_i" -lt "$_cred_count" ]; do
   _name="${_CRED_ENV_NAMES[$_i]}"
@@ -373,8 +487,10 @@ while [ "$_i" -lt "$_cred_count" ]; do
     _key_path="$_default_path"
   fi
 
-  if [ "${_had_live_cred[$_i]}" = false ] && command -v op >/dev/null 2>&1; then
-    if _fetched_key="$(op read "$_key_path" 2>/dev/null)" && [ -n "$_fetched_key" ]; then
+  if [ "${_had_live_cred[$_i]}" = false ] && command -v op >/dev/null 2>&1 \
+    && [ "$_op_allowed" = true ] \
+    && { [ -z "${_cached_cred_lines[$_i]}" ] || [ "${ATHENAEUM_OP_REFRESH:-}" = "1" ]; }; then
+    if _fetched_key="$(_athenaeum_op_read "$_key_path" 2>/dev/null)" && [ -n "$_fetched_key" ]; then
       # mktemp inside the (already-restricted) cache dir — gives us an
       # unpredictable path mode 600 atomically, closing the window where
       # `${CONFIG_ENV}.tmp` could have been pre-created as a symlink or
