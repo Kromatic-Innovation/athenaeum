@@ -2709,6 +2709,7 @@ def resolve_merge(
     fold_ledger_extra: dict[str, Any] = {}
     # Issue athenaeum#2184: (absorbed_uid, canonical_uid) pairs a fold absorbed.
     contact_fold_pairs: list[tuple[str, str]] = []
+    contact_fold_types: dict[str, str] = {}
 
     # Apply the side-effect tied to the decision BEFORE flushing the file.
     if decision == "approve":
@@ -2900,6 +2901,11 @@ def resolve_merge(
                         contact_fold_pairs.append(
                             (absorbed_uid, canonical_uid_for_contacts)
                         )
+                        from athenaeum.models import resolve_page_type
+
+                        contact_fold_types[absorbed_uid] = resolve_page_type(
+                            folded_meta or {}
+                        )
             fold_ledger_extra = {
                 "folded_sources": fold_result["folded_sources"],
                 "aliases_added": fold_result["aliases_added"],
@@ -2947,9 +2953,12 @@ def resolve_merge(
             from athenaeum.contact_record_fold import fold_contact_records_after_merge
 
             contact_fold = fold_contact_records_after_merge(
-                root.parent, contact_fold_pairs
+                root.parent,
+                contact_fold_pairs,
+                absorbed_page_types=contact_fold_types,
             )
-            extra_response["contact_records_folded"] = contact_fold.records_folded
+            if contact_fold.records_folded:
+                extra_response["contact_records_folded"] = contact_fold.records_folded
     elif decision == "reject" and len(target_pm.sources) >= 2:
         # Issue athenaeum#715 (restating athenaeum#658's D3): a rejection means "these
         # two are NOT the same claim" — a completely different assertion

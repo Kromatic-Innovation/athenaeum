@@ -296,7 +296,9 @@ class TestMergePathsCallTheHook:
 
         assert absorbed.exists()
 
-    def _approve_fold(self, tmp_path: Path) -> dict:
+    def _approve_fold(
+        self, tmp_path: Path, target_name: str = "casey-lee.md", src_name: str = "casey-lee-2.md"
+    ) -> dict:
         from athenaeum.pending_merges import (
             parse_pending_merges,
             resolve_merge,
@@ -305,8 +307,8 @@ class TestMergePathsCallTheHook:
         from tests.conftest import init_git_repo
 
         wiki = tmp_path / "wiki"
-        target = wiki / "casey-lee.md"
-        src = wiki / "casey-lee-2.md"
+        target = wiki / target_name
+        src = wiki / src_name
         init_git_repo(wiki)
         merges_path = wiki / "_pending_merges.md"
         write_pending_merge(
@@ -339,6 +341,57 @@ class TestMergePathsCallTheHook:
         assert _meta(canon)["emails"] == ["casey@example.org", "c2@example.org"]
         assert not absorbed.exists()
         assert _retired(absorbed).exists()
+
+    def test_fold_into_a_uid_prefixed_canonical_page(self, tmp_path: Path) -> None:
+        """The real corpus shape: the canonical lives at ``<uid>-<slug>.md``."""
+        (tmp_path / "athenaeum.yaml").write_text(
+            "storage:\n  mapping:\n    pii: excluded\n", encoding="utf-8"
+        )
+        wiki = tmp_path / "wiki"
+        root = pii.contacts_surface_root(tmp_path, {"storage": {"mapping": {"pii": "excluded"}}})
+        _page(wiki, f"{CANON}-casey-lee.md", CANON, "Casey Lee")
+        _page(wiki, f"{ABSORBED}-casey-lee-2.md", ABSORBED, "Casey Lee 2")
+        canon = _record(root, f"{CANON}-casey-lee.md", CANON, emails=["casey@example.org"])
+        absorbed = _record(root, f"{ABSORBED}-casey-lee.md", ABSORBED, emails=["c2@example.org"])
+
+        result = self._approve_fold(
+            tmp_path, f"{CANON}-casey-lee.md", f"{ABSORBED}-casey-lee-2.md"
+        )
+
+        assert result["ok"] is True, result
+        assert "c2@example.org" in _meta(canon)["emails"]
+        assert not absorbed.exists()
+        # And the repair would now map the tombstone the fold left (bare
+        # `folded_into` slug) to the uid-prefixed canonical: nothing left to do.
+        plan = plan_contact_record_repair(tmp_path, root)
+        assert plan.actionable == 0
+
+    def test_concept_fold_never_scans_the_contacts_surface(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "athenaeum.yaml").write_text(
+            "storage:\n  mapping:\n    pii: excluded\n", encoding="utf-8"
+        )
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        (wiki / "casey-lee.md").write_text(
+            f"---\nuid: {CANON}\nname: Casey Lee\ntype: concept\n---\nB.\n", encoding="utf-8"
+        )
+        (wiki / "casey-lee-2.md").write_text(
+            f"---\nuid: {ABSORBED}\nname: Casey Lee 2\ntype: concept\n---\nB.\n",
+            encoding="utf-8",
+        )
+        calls: list[Path] = []
+        monkeypatch.setattr(
+            pii.ExcludedRecordIndex,
+            "_ensure_loaded",
+            lambda self: calls.append(self.contacts_root),
+        )
+
+        result = self._approve_fold(tmp_path)
+
+        assert result["ok"] is True, result
+        assert calls == []
 
     def test_fold_approve_without_an_excluded_pii_mapping_touches_nothing(
         self, tmp_path: Path
@@ -442,6 +495,57 @@ class TestRepairAbsorbedOrphans:
         apply_contact_record_repair(plan, root)
 
         assert plan.counts()["absorbed_ambiguous_canonical"] == 1
+        assert absorbed.exists()
+
+    def test_bare_fold_slug_maps_to_a_uid_prefixed_canonical(self, tmp_path: Path) -> None:
+        """A fold records the BARE target slug; the live page is ``<uid>-<slug>.md``."""
+        from athenaeum.provenance import record_merge_provenance
+
+        wiki = tmp_path / "wiki"
+        root = tmp_path / "excluded"
+        _page(wiki, f"{CANON}-casey-lee.md", CANON, "Casey Lee")
+        _page(
+            wiki,
+            f"{ABSORBED}-casey-l.md",
+            ABSORBED,
+            "Casey L",
+            extra=["status: folded", "folded_into: casey-lee", "embedded: false"],
+        )
+        record_merge_provenance(
+            wiki,
+            merge_id="m2",
+            write_kind="fold-into-existing",
+            canonical_slug="casey-lee",
+            source_paths=[str(wiki / f"{OTHER}-gone.md")],
+        )
+        _record(root, f"{ABSORBED}.md", ABSORBED, emails=["a@example.org"])
+        _record(root, f"{OTHER}.md", OTHER, emails=["o@example.org"])
+
+        plan = plan_contact_record_repair(tmp_path, root)
+
+        assert sorted((u, c) for u, c, _ in plan.orphan_folds) == sorted(
+            [(ABSORBED, CANON), (OTHER, CANON)]
+        )
+
+    def test_merge_record_whose_canonical_cannot_be_resolved_is_its_own_count(
+        self, tmp_path: Path
+    ) -> None:
+        wiki = tmp_path / "wiki"
+        root = tmp_path / "excluded"
+        _page(
+            wiki,
+            f"{ABSORBED}-casey-l.md",
+            ABSORBED,
+            "Casey L",
+            extra=["status: folded", "folded_into: nobody-owns-this", "embedded: false"],
+        )
+        absorbed = _record(root, f"{ABSORBED}.md", ABSORBED, emails=["a@example.org"])
+
+        plan = plan_contact_record_repair(tmp_path, root)
+        apply_contact_record_repair(plan, root)
+
+        assert plan.counts()["absorbed_canonical_unresolved"] == 1
+        assert plan.counts()["pageless_no_merge_record"] == 0
         assert absorbed.exists()
 
     def test_chain_follows_to_the_live_end(self, tmp_path: Path) -> None:

@@ -399,8 +399,15 @@ def fold_contact_records_after_merge(
     absorbed_to_canonical: Iterable[tuple[str, str]],
     *,
     config: dict[str, Any] | None = None,
+    absorbed_page_types: Mapping[str, str] | None = None,
 ) -> ContactFoldSummary:
     """Best-effort wrapper the merge paths call: resolve the surface, fold, never raise.
+
+    *absorbed_page_types* maps an absorbed uid to its page's ``type:``. When
+    given, only uids whose page class joins the ``pii`` surface
+    (:func:`athenaeum.pii.surface_class_for_page_class`) are folded, and a
+    merge that absorbed none — a concept fold — returns before scanning the
+    contacts surface at all.
 
     Resolves the contacts surface through :func:`resolve_contacts_root`
     (loading the knowledge root's config when *config* is ``None``), so no
@@ -416,6 +423,17 @@ def fold_contact_records_after_merge(
             from athenaeum.config import load_config
 
             config = load_config(knowledge_root)
+        if absorbed_page_types is not None:
+            pairs = [
+                (absorbed, canonical)
+                for absorbed, canonical in pairs
+                if pii.surface_class_for_page_class(
+                    absorbed_page_types.get(absorbed, ""), config
+                )
+                == pii.PII_ENTITY_CLASS
+            ]
+            if not pairs:
+                return ContactFoldSummary()
         root = resolve_contacts_root(Path(knowledge_root), config)
         if root is None:
             return ContactFoldSummary()
@@ -445,6 +463,34 @@ class _WikiFacts:
     merged_into: dict[str, set[str]] = field(default_factory=dict)  # absorbed -> canonicals
     slug_to_uid: dict[str, str] = field(default_factory=dict)
     provenance_folds: list[tuple[str, str]] = field(default_factory=list)  # (stem, slug)
+    wiki_root: Path | None = None
+    _slug_cache: dict[str, str | None] = field(default_factory=dict)
+
+    def uid_for_slug(self, slug: str) -> str | None:
+        """The uid of the page a fold's target slug names, resolved as the fold did.
+
+        A fold records ``folded_into`` / ``canonical_slug`` as the BARE slug of
+        its ``merge_target_name``, while a real page lives at
+        ``<uid>-<slug>.md``. So this goes through
+        :func:`athenaeum.pending_merges.resolve_target_page` — the same
+        identity resolver the fold used to pick its target — rather than
+        matching filenames, falling back to an exact stem match.
+        """
+        if slug in self._slug_cache:
+            return self._slug_cache[slug]
+        uid: str | None = None
+        if self.wiki_root is not None and slug:
+            from athenaeum.pending_merges import resolve_target_page
+
+            page = resolve_target_page(slug, self.wiki_root)
+            if page is not None:
+                parsed = EntityIndex.read_page_record(page)
+                if parsed is not None and str(parsed[0].uid or "").strip():
+                    uid = str(parsed[0].uid).strip()
+        if uid is None:
+            uid = self.slug_to_uid.get(slug)
+        self._slug_cache[slug] = uid
+        return uid
 
 
 def _read_wiki_facts(wiki_root: Path) -> _WikiFacts:
@@ -455,7 +501,7 @@ def _read_wiki_facts(wiki_root: Path) -> _WikiFacts:
     rule ``EntityIndex`` uses — never inferred from a filename. A tombstone
     (``status: folded``) is NOT live, though ``EntityIndex`` indexes it.
     """
-    facts = _WikiFacts()
+    facts = _WikiFacts(wiki_root=wiki_root)
     if not wiki_root.is_dir():
         return facts
     for path in sorted(wiki_root.glob("*.md")):
@@ -505,16 +551,30 @@ def _read_wiki_facts(wiki_root: Path) -> _WikiFacts:
 def _absorbers(uid: str, facts: _WikiFacts) -> set[str]:
     """Every uid a recorded merge says absorbed *uid* (one hop)."""
     out: set[str] = set(facts.merged_into.get(uid, ()))
+    for slug in _absorbing_slugs(uid, facts):
+        resolved = facts.uid_for_slug(slug)
+        if resolved:
+            out.add(resolved)
+    out.discard(uid)
+    return out
+
+
+def _absorbing_slugs(uid: str, facts: _WikiFacts) -> list[str]:
+    slugs: list[str] = []
     slug = facts.tombstone_targets.get(uid)
-    if slug and slug in facts.slug_to_uid:
-        out.add(facts.slug_to_uid[slug])
+    if slug:
+        slugs.append(slug)
     for stem, canonical_slug in facts.provenance_folds:
         # A merge record names source PATHS, not uids; a source page whose
         # filename carries the uid is the only link it offers.
-        if (stem == uid or stem.startswith(f"{uid}-")) and canonical_slug in facts.slug_to_uid:
-            out.add(facts.slug_to_uid[canonical_slug])
-    out.discard(uid)
-    return out
+        if stem == uid or stem.startswith(f"{uid}-"):
+            slugs.append(canonical_slug)
+    return slugs
+
+
+def _has_absorption_record(uid: str, facts: _WikiFacts) -> bool:
+    """Whether ANY merge record names *uid* as absorbed, resolvable or not."""
+    return bool(facts.merged_into.get(uid)) or bool(_absorbing_slugs(uid, facts))
 
 
 def _live_ends(uid: str, facts: _WikiFacts) -> set[str]:
@@ -564,7 +624,7 @@ class ContactRepairPlan:
             "absorbed_records_to_fold": sum(len(p) for _, _, p in self.orphan_folds),
             "absorbed_values_to_add": self.orphan_values_to_add,
             "absorbed_ambiguous_canonical": self.orphan_ambiguous,
-            "absorbed_canonical_not_live": self.orphan_canonical_not_live,
+            "absorbed_canonical_unresolved": self.orphan_canonical_not_live,
             "pageless_no_merge_record": self.pageless_unmapped,
             "duplicate_copies_to_retire": len(self.duplicate_retire),
             "duplicate_divergent_reported": self.duplicate_divergent,
@@ -587,10 +647,11 @@ def plan_contact_record_repair(knowledge_root: Path, contacts_root: Path) -> Con
             if len(paths) > 1:
                 _classify_duplicate(uid, paths, plan)
             continue
-        ends = _live_ends(uid, facts)
-        if not _absorbers(uid, facts):
+        if not _has_absorption_record(uid, facts):
             plan.pageless_unmapped += 1
-        elif len(ends) == 1:
+            continue
+        ends = _live_ends(uid, facts)
+        if len(ends) == 1:
             canonical = next(iter(ends))
             plan.orphan_folds.append((uid, canonical, list(paths)))
             plan.orphan_values_to_add += _values_to_add(paths, canonical, index)
