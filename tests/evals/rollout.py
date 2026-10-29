@@ -155,6 +155,7 @@ from athenaeum.search import fts5_index_available, get_backend
 from tests.evals.containment import GridCell, SpendCeilingExceededError, build_grid
 from tests.evals.corpus import Corpus, Observation, Probe, build_corpus
 from tests.evals.harness import EvalSession, build_live_client
+from tests.op_isolation import install_sentinel_op
 
 # ---------------------------------------------------------------------------
 # Arms
@@ -930,7 +931,13 @@ def build_breadcrumb_hook_env(
     return {
         "HOME": str(hook_home),
         "ATHENAEUM_CACHE_DIR": str(hook_home / ".cache" / "athenaeum"),
-        "PATH": os.environ.get("PATH", ""),
+        # athenaeum#2193: same sentinel-`op`-first-on-PATH default as
+        # tests/test_shell_hooks.py::hook_env -- a rollout arm must never
+        # shell out to a real 1Password CLI the eval runner happens to
+        # have installed. install_sentinel_op creates hook_home itself if
+        # it doesn't exist yet (callers of this function own hook_home's
+        # lifecycle, not its existence at this point).
+        "PATH": f"{install_sentinel_op(hook_home)}{os.pathsep}{os.environ.get('PATH', '')}",
         "KNOWLEDGE_ROOT": str(knowledge_root),
         "ATHENAEUM_SRC": str(src),
         "ATHENAEUM_PYTHON": sys.executable,

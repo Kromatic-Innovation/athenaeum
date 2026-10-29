@@ -70,3 +70,31 @@ to lift on the next sync.
 - **Broken-symlink health check** in `knowledge-sidecar.sh`. Tied to Tristan's per-scope memory symlink topology under `~/.claude/projects/*/memory/`. Not a general-purpose check.
 
 Future syncs should re-run this audit against the cwc tree before assuming any newly-divergent hook is generic.
+
+## Credential-source decision (athenaeum#2193)
+
+`op` (1Password CLI) bootstrap was always meant to be one option among
+several, not the implicit default — this audit's own "What was
+deliberately NOT ported" section above already declined to port cwc's
+Keychain-specific bootstrap scheme for exactly that reason. athenaeum#2193
+makes that intent explicit and enforced rather than merely implied:
+
+- README.md's "Supplying an API key (three options)" section now presents
+  env export, a cached `config.env` line, and `op` as three co-equal
+  sources, `op` listed last and clearly optional — see that section for
+  the full detail, not duplicated here.
+- The hook's `op` fetch is now gated (not merely "best-effort silent"): it
+  only runs when a non-interactive credential or an explicit
+  `ATHENAEUM_OP_INTERACTIVE=1` opt-in is present, and only re-fetches over
+  an existing cached line when `ATHENAEUM_OP_REFRESH=1` is set. Every call
+  is time-bounded and runs with 1Password's desktop-app/biometric
+  integration suppressed unless interactive mode was explicitly chosen.
+- `receipt_sealers.OnePasswordServiceAccountKeyProvider` (used by the
+  SessionEnd librarian's receipt sealing, unrelated to this hook kit's own
+  `op` path) picked up the same non-interactive suppression flags,
+  unconditionally — it has no interactive mode.
+
+See README.md's "Supplying an API key" and "Repeated permission prompts"
+sections for the operator-facing detail; this entry exists only so a
+future audit of this file finds the decision recorded alongside the rest
+of the credential-handling history above.
