@@ -167,6 +167,7 @@ Evidence, kept out of the reading path.
 - [Person-hint strict floor — 2026-10-09](measurements/person-hint-strict-floor-2026-10-09.md) — the recorded-response diagnosis for the `person_hint` strict floor's 2/5-or-1/5 reads, the merge-anchor and dangling-footnote fixes, and the two post-fix green runs.
 - [Claude Code witness hook latency — 2026-10-28](measurements/claude-code-witness-hook-latency-2026-10-28.md) — the witness path's own added p95 latency against the pre-existing fork/exec baseline, for `key_provider: none` and for a local Ed25519 stand-in standing in for the `software-file` adapter.
 - [Claude Code periodic anchor spawn latency — 2026-10-28](measurements/claude-code-witness-anchor-spawn-latency-2026-10-28.md) — the due-vs-not-due subprocess delta for the periodic in-session anchor spawn, with a bare-`Popen` control isolating this container's own fork/exec cost from anything the design itself adds.
+- [Witness-attestation readout — template](measurements/witness-attestation-readout.md) — the fill-in shape for a witnessed-hits / per-miss-incident reading from `athenaeum receipts attest-readout`; a template, not a reading.
 
 ---
 

@@ -56,6 +56,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `RunLock`, checked before any no-op condition, mirroring
     `persist_recovered_origin_session_id` (athenaeum#2038).
 
+- **`athenaeum receipts attest-readout`: witnessed hits, and every provenance
+  miss as an INCIDENT (issue athenaeum#2160).** Reads the receipt ledger and
+  the witness index — and nothing else, no transcript — and reports the
+  `user-stated` total, the `witnessed` total split by `witness_tag`
+  (`typed` / `slash-args`), misses broken down by reason, the unsigned-line
+  count and anchor coverage, the `witness_hook_errors.jsonl` count by error
+  class, and the `session-close` deficit (`turns - turns_witnessed`). Exits
+  `5` when any incident exists, `0` when none does. `--since YYYY-MM` narrows
+  the window; `--json` emits the same object the text rendering is built
+  from, so the two cannot disagree about a number.
+  - **A miss is an incident, not a rate.** Operator ruling 10 (2026-10-28)
+    settled this: the miss counter stays, but every miss other than
+    `flag-off` is surfaced individually with its reason, session and
+    `witness_ref`, and there is deliberately NO tolerated miss rate and no
+    readout window beyond `--since`. A miss whose receipt carries
+    `transcript_origin: human` and `transcript_entrypoint: cli` is flagged a
+    likely false negative — it looked human-and-interactive and still did not
+    attest.
+  - **No plaintext, no digests.** The output is counts, enum labels, session
+    ids and `<ledger_id>:<seq>` coordinates;
+    `tests/test_witness_readout.py::TestNoPlaintext` asserts no 64-hex run
+    appears in either rendering, against a fixture whose receipts all carry
+    real 64-hex digests.
+  - **One summary, two callers.** The computation lives in
+    `athenaeum.witness_readout` (L3), not in the CLI, because the nightly
+    librarian calls the same `build_readout`: at the end of a run, right
+    after the anchoring pass, it logs one WARNING per incident CLASS with its
+    count — not one per incident, which on a bad night would be one line per
+    memory. Gated on `librarian.witness_attestation_enabled` (default off),
+    which is the honest flag: with attestation off every `user-stated`
+    receipt carries `witness_miss: flag-off`, which ruling 10 excludes from
+    the incident set, so there would be nothing to warn about. Non-fatal by
+    construction — a readout never changes a run's exit code.
+  - `docs/measurements/witness-attestation-readout.md` is the fill-in
+    template for a recorded reading. `AttestationIndex.anchored_through()` is
+    a new narrow public accessor, added so the readout reports per-ledger
+    anchor coverage without reaching into a private attribute.
+  - **Two things the obvious implementation gets wrong, both found in review
+    and both load-bearing for ruling 10** — a readout that fires on a healthy
+    night makes the incident channel noise, which defeats "misses should be
+    zero absent an incident" just as surely as missing a real one. First, the
+    receipt ledger is append-only, so it holds HISTORY: a memory whose miss
+    was later resolved to a `witnessed` hit has both lines on disk, and the
+    readout therefore collapses to the CURRENT receipt per memory
+    (latest-wins, matching `lookup_receipt`'s own selection) before counting
+    anything. Second, `turns - turns_witnessed` is NOT the `session-close`
+    deficit: `session_close` counts `turns` as every `kind="turn"` line, which
+    on a healthy session includes a `<system-reminder>`, a finished
+    subagent's `<task-notification>`, a subagent prompt, and the first turn
+    of a plain `claude "<prompt>"` TTY launch. The deficit is computed over
+    the witness-ELIGIBLE population instead, and the close lines' own
+    cumulative snapshot is reported latest-wins per session rather than
+    summed (each close line re-scans the whole ledger, so summing two
+    double-counts a resumed session).
+
 - **Nightly witness anchoring, the receipt `AnchoringSealer`, and an
   off-machine mirror of anchor records (issue athenaeum#2040).** The witness
   design's last unbuilt anchoring path: at the end of a librarian run, under
