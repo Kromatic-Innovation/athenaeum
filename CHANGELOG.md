@@ -44,7 +44,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     and raises `LockNotHeld` without one. Network failure is never an error:
     `local-clock` is mandatory and cannot fail, and every other adapter
     degrades to a `failed` attestation, so an offline nightly still records a
-    stamp and the next pass retries.
+    stamp and the next pass retries — "already anchored" means every
+    configured source holds a non-`failed` attestation for the current
+    digest, never digest equality alone, which would have made an offline
+    night's failure permanent.
+  - **A quiet night writes nothing.** The chain head is anchored only when
+    there is witness content past the highest head `seq` any anchor has
+    committed to. Anchoring is how a line is shown to have existed by some
+    time, so with nothing appended since the last head anchor there is
+    nothing to bound — and because anchoring itself appends lines, an
+    ungated pass would have produced an anchor line, a mirror record, a
+    commit and a push every single night regardless of whether a session
+    ever ran.
 
 - **A `clean-venv` CI job, so the documented install path is actually tested
   (issue athenaeum#2136).** Every other CI job constrains its install to

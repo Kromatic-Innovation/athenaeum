@@ -66,6 +66,7 @@ handed the remaining budget divided by its calendar count — its worst case
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -362,6 +363,13 @@ def run_session_end_anchor(
 #: stays detectable, so they must not live inside either of them.
 WITNESS_ANCHORS_DIRNAME = "_witness_anchors"
 
+#: ``witness:<ledger_id>:<seq>`` -- the chain-head anchor subject format.
+#: Duplicated rather than imported for the same reason
+#: ``athenaeum.witness_attestation`` duplicates it: the producer
+#: (``promptwitness.cli._WITNESS_SUBJECT_RE``) is private to a
+#: presentation-layer module this one must not reach into.
+_WITNESS_SUBJECT_RE = re.compile(r"^witness:(?P<ledger_id>[^:]+):(?P<seq>\d+)$")
+
 #: Proof files (``.ots`` / ``.tsr``) copied alongside the mirror, by their
 #: own basename, so an attestation's ``proof_path`` resolves here too.
 WITNESS_ANCHOR_PROOFS_DIRNAME = "proofs"
@@ -416,9 +424,9 @@ class NightlyAnchorReport:
 
 
 def _ledger_attestations_by_digest(ledger_dir: Path) -> dict[str, list[dict[str, Any]]]:
-    """Every attestation the LOCAL witness ledger holds, grouped by the
-    digest it commits to, newest-per-source (issue athenaeum#2040's import
-    path).
+    """Every NON-``failed`` attestation the LOCAL witness ledger holds,
+    grouped by the digest it commits to, newest-per-source (issue
+    athenaeum#2040's import path).
 
     The in-session and SessionEnd paths (issue athenaeum#2156) anchor a
     receipt partition's digest without any lock and record the result ONLY
@@ -448,7 +456,12 @@ def _ledger_attestations_by_digest(ledger_dir: Path) -> dict[str, list[dict[str,
         if not isinstance(digest, str) or not isinstance(raw_att, dict):
             continue
         source = str(raw_att.get("source", ""))
-        if not source:
+        if not source or str(raw_att.get("status", "")) == "failed":
+            # A FAILED attempt is not evidence of anything, so importing it
+            # would be importing nothing -- and would mark the digest as
+            # handled, which is how an offline night's failure becomes
+            # permanent (Seer review on PR athenaeum#2185, finding 2, one
+            # layer over from :func:`_anchored_sources`).
             continue
         newest.setdefault(digest, {})[source] = dict(raw_att)
     return {digest: list(by_source.values()) for digest, by_source in newest.items()}
@@ -652,6 +665,91 @@ def _copy_proof(ledger_dir: Path, wiki_root: Path, proof_path: Any) -> None:
         return
 
 
+def _anchored_sources(wiki_root: Path, month: str, digest: str) -> set[str]:
+    """Which anchor SOURCES already hold a non-``failed`` attestation for
+    *digest*, unioned across every record stored for it.
+
+    Digest equality alone is not "already anchored" (Seer review on PR
+    athenaeum#2185, finding 2). An offline pass records the mandatory
+    ``local-clock`` stamp AND a ``status: "failed"`` OpenTimestamps
+    attempt; keying the skip on the digest alone would then make the
+    failure permanent — the partition would read as anchored forever and
+    would never be offered to a calendar again, which is the opposite of
+    what this module's own "the next pass retries" contract says.
+
+    Unioned across records because evidence ACCUMULATES: a first pass may
+    hold the local-clock stamp and a failed calendar attempt, and a later
+    retry the calendar success. Either record alone is incomplete; together
+    they cover both sources.
+    """
+    from athenaeum import receipt_sealers
+
+    covered: set[str] = set()
+    for record in receipt_sealers.iter_stored_anchors(wiki_root, month):
+        if record.digest != digest:
+            continue
+        for att in record.attestations:
+            if str(att.get("status", "")) != "failed":
+                covered.add(str(att.get("source", "")))
+    return covered
+
+
+def _head_and_new_content(ledger_dir: Path) -> tuple[str | None, str | None, bool]:
+    """``(subject, digest, has_new_content)`` for the current chain head.
+
+    *has_new_content* is ``True`` when a NON-``anchor`` line exists whose
+    ``seq`` is past the highest head seq any ``anchor`` line has ever
+    committed to — i.e. there is witness content (a turn, a session close,
+    a key rotation, a gap) that no anchor yet bounds.
+
+    **Measured against the anchored HEAD SEQ, not against "the newest
+    anchor line".** Those differ, and the difference is the whole
+    criterion: anchoring a ``witness:<ledger_id>:<seq>`` subject bounds
+    every line up to that ``seq`` (that is what a hash chain buys), while
+    a ``receipts:<YYYY-MM>:<n>`` anchor line bounds a receipt partition
+    and says nothing about any witness line. Step 1 of the nightly writes
+    exactly those receipt anchor lines, so a "newer than the last anchor
+    line" test would read a genuine day of turns as already covered the
+    moment step 1 ran. Same derivation as
+    ``athenaeum.witness_attestation.AnchorIndex``'s ``anchored_through``.
+
+    Why the nightly gates head anchoring on it (Seer review on PR
+    athenaeum#2185, finding 1): anchoring is how a line is shown to have
+    existed by some time, so with nothing appended since the last anchor
+    there is nothing new to bound. Without the gate, a quiet day still
+    produced an ``anchor`` line, a mirror record, a commit and a push
+    carrying no information — and since anchoring itself appends lines, the
+    head always *looks* different from the one anchored last night even when
+    no session ever ran. Computed in the SAME pass as the head read rather
+    than a second scan, for the reason
+    :func:`_ledger_attestations_by_digest` gives.
+    """
+    from promptwitness import ledger as pw_ledger
+
+    head: Any = None
+    anchored_through: dict[str, int] = {}
+    last_content: dict[str, int] = {}
+    for line in pw_ledger.iter_lines(ledger_dir):
+        head = line
+        if line.kind == "anchor":
+            match = _WITNESS_SUBJECT_RE.match(str(line.extra.get("subject", "")))
+            if match is None:
+                continue
+            lid = match.group("ledger_id")
+            seq = int(match.group("seq"))
+            if seq > anchored_through.get(lid, -1):
+                anchored_through[lid] = seq
+        elif line.seq > last_content.get(line.ledger_id, -1):
+            last_content[line.ledger_id] = line.seq
+    if head is None:
+        return None, None, False
+    subject = "witness:{}:{}".format(head.ledger_id, head.seq)
+    new_content = last_content.get(head.ledger_id, -1) > anchored_through.get(
+        head.ledger_id, -1
+    )
+    return subject, head.line_hash(), new_content
+
+
 def run_nightly_anchor(
     ledger_dir: Path,
     wiki_root: Path,
@@ -664,22 +762,27 @@ def run_nightly_anchor(
 
     Under an ALREADY-ACQUIRED *lock*, in this order:
 
-    1. **Receipt partitions.** Every partition whose
-       :func:`~athenaeum.receipt_sealers.partition_digest` differs from
-       the digest of its own most recent anchor record is anchored once,
-       through :class:`~athenaeum.receipt_sealers.AnchoringSealer`, which
-       records each attestation in BOTH stores (the anchor record under
-       ``_seals/anchors/`` and an ``anchor`` line in the witness ledger);
-       a partition that has not changed is left alone, so a re-run makes
-       no new stamp. When the local witness ledger already holds an
-       attestation for that exact digest -- the in-session/SessionEnd path
-       (issue athenaeum#2156) got there first -- it is IMPORTED rather
-       than re-stamped (:func:`_ledger_attestations_by_digest`).
+    1. **Receipt partitions.** Every partition that does not already hold
+       a non-``failed`` attestation from every configured source for its
+       current :func:`~athenaeum.receipt_sealers.partition_digest` is
+       anchored once, through
+       :class:`~athenaeum.receipt_sealers.AnchoringSealer`, which records
+       each attestation in BOTH stores (the anchor record under
+       ``_seals/anchors/`` and an ``anchor`` line in the witness ledger).
+       A partition that has not changed and whose stamps all landed is
+       left alone, so a re-run makes no new stamp; one whose calendar
+       attempt FAILED is retried, because digest equality alone would make
+       an offline night's failure permanent (:func:`_anchored_sources`).
+       When the local witness ledger already holds an attestation for that
+       exact digest -- the in-session/SessionEnd path (issue
+       athenaeum#2156) got there first -- it is IMPORTED rather than
+       re-stamped (:func:`_ledger_attestations_by_digest`).
     2. **The witness chain head**, once per pass, with the configured
-       adapters. Read after step 1, so a turn the (lock-free) hook
-       appended while step 1 ran is covered; read ONCE, because anchoring
-       appends ``anchor`` lines and therefore moves the head, and a loop
-       that re-read it would chase its own tail forever.
+       adapters, and only when there is new witness content to bound
+       (:func:`_head_and_new_content`). Read after step 1, so a turn the
+       (lock-free) hook appended while step 1 ran is covered; read ONCE,
+       because anchoring appends ``anchor`` lines and therefore moves the
+       head, and a loop that re-read it would chase its own tail forever.
     3. **Pending OpenTimestamps proofs** are upgraded
        (:func:`_upgrade_pending`) -- the one place in athenaeum that turns
        a submitted stamp into a complete Bitcoin attestation.
@@ -722,6 +825,7 @@ def run_nightly_anchor(
     )
 
     report = NightlyAnchorReport()
+    configured_sources = {getattr(a, "source", "") for a in anchorers}
 
     # 1. Receipt partitions. The attestation map is read BEFORE any
     #    anchoring appends to the ledger: this pass's own stamps are
@@ -737,14 +841,17 @@ def run_nightly_anchor(
         if not lines:
             continue
         digest = receipt_sealers.partition_digest(lines)
-        if any(
-            record.digest == digest
-            for record in receipt_sealers.iter_stored_anchors(wiki_root, month)
-        ):
+        covered = _anchored_sources(wiki_root, month, digest)
+        if covered and configured_sources <= covered:
             report.unchanged.append(month)
             continue
-        imported = attestations_by_digest.get(digest)
-        if imported:
+        imported = attestations_by_digest.get(digest) or []
+        if configured_sources <= {str(att.get("source", "")) for att in imported}:
+            # Import only when the held attestations cover EVERY configured
+            # source. A partial import (say local-clock only, because the
+            # lock-free pass's calendar call failed) would record the
+            # digest as handled and the missing source would never be
+            # attempted again.
             sealer.seal_with_op(
                 partition, 1, len(lines), lines, op="import", attestations=imported
             )
@@ -758,9 +865,11 @@ def run_nightly_anchor(
     #    while step 1 ran is covered by anchoring the head now and would
     #    not be by anchoring a head read earlier. Read ONCE either way —
     #    anchoring appends lines and so moves the head, and a loop that
-    #    re-read it would chase its own tail forever.
-    head_subject, head_digest = _head_subject_and_digest(ledger_dir)
-    if head_subject is not None and head_digest is not None:
+    #    re-read it would chase its own tail forever. Skipped entirely when
+    #    no non-anchor line was appended since the last anchor: there is
+    #    then nothing new to bound.
+    head_subject, head_digest, new_content = _head_and_new_content(ledger_dir)
+    if head_subject is not None and head_digest is not None and new_content:
         _anchor_subject_with(
             ledger_dir,
             anchorers,

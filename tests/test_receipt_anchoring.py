@@ -455,19 +455,144 @@ class TestAnchorsOnceThenNotAgain:
         assert report.anchored == []
         assert report.mirrored == 0
 
-    def test_step_ones_own_anchor_lines_give_the_pass_a_head(
-        self, tmp_path: Path
-    ) -> None:
-        """With receipts but no turns, step 1's ``anchor`` lines ARE the
-        ledger, so the head read after step 1 is one of them."""
+    def test_receipts_but_no_turns_anchors_no_head(self, tmp_path: Path) -> None:
+        """Step 1's own ``anchor`` lines are not witness CONTENT.
+
+        With receipts but no turns there is nothing a chain-head anchor
+        would bound, so the head is skipped even though step 1 moved it.
+        """
         knowledge_root, wiki, ledger = _ledger_with_receipts(tmp_path)
         del knowledge_root
         report = witness_anchor.run_nightly_anchor(
             ledger, wiki, config=None, lock=_HeldLock()
         )
         assert report.anchored == [MONTH]
+        assert report.head_subject is None
+
+    def test_a_quiet_night_stamps_nothing_and_mirrors_nothing(
+        self, tmp_path: Path
+    ) -> None:
+        """The churn case (Seer review on PR athenaeum#2185, finding 1).
+
+        A second pass with no new receipts and no new turns must produce no
+        anchor line, no mirror record and therefore no commit — the
+        librarian only snapshots when something was anchored, imported or
+        mirrored.
+        """
+        knowledge_root, wiki, ledger = _ledger_with_receipts(tmp_path)
+        del knowledge_root
+        _append_witness_turn(ledger, prompt_digest="sha256:" + "e" * 64)
+        first = witness_anchor.run_nightly_anchor(
+            ledger, wiki, config=None, lock=_HeldLock()
+        )
+        assert first.head_subject is not None
+
+        second = witness_anchor.run_nightly_anchor(
+            ledger, wiki, config=None, lock=_HeldLock()
+        )
+        assert second.to_dict() == {
+            "anchored": [],
+            "imported": [],
+            "unchanged": [MONTH],
+            "head_subject": None,
+            "upgraded": [],
+            "mirrored": 0,
+        }
+
+    def test_a_turn_after_the_last_head_anchor_is_anchored_again(
+        self, tmp_path: Path
+    ) -> None:
+        """The gate is "content past the anchored head seq", not "newer than
+        the last anchor LINE": step 1 writes ``receipts:`` anchor lines,
+        which bound a receipt partition and say nothing about any witness
+        line, so a genuine day of turns must still get its head anchored.
+        """
+        knowledge_root, wiki, ledger = _ledger_with_receipts(tmp_path)
+        del knowledge_root
+        _append_witness_turn(ledger, prompt_digest="sha256:" + "e" * 64)
+        witness_anchor.run_nightly_anchor(ledger, wiki, config=None, lock=_HeldLock())
+        _append_witness_turn(ledger, prompt_digest="sha256:" + "f" * 64)
+
+        report = witness_anchor.run_nightly_anchor(
+            ledger, wiki, config=None, lock=_HeldLock()
+        )
         assert report.head_subject is not None
-        assert report.head_subject.startswith("witness:")
+
+    def test_a_failed_attestation_is_retried_next_pass(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Seer review on PR athenaeum#2185, finding 2.
+
+        Digest equality alone is not "already anchored". An offline pass
+        records a ``failed`` attempt; keying the skip on the digest would
+        make that failure permanent and the partition would never be
+        offered to a calendar again — contradicting this module's own "the
+        next pass retries" contract.
+        """
+        knowledge_root, wiki, ledger = _ledger_with_receipts(tmp_path)
+        del knowledge_root
+
+        class _Flaky(_FakeAnchorer):
+            def __init__(self) -> None:
+                super().__init__()
+                self.statuses = ["failed", "complete"]
+
+            def anchor(self, digest: bytes, subject: str, *, timeout: float = 10.0) -> Any:
+                self.status = self.statuses.pop(0) if self.statuses else "complete"
+                return super().anchor(digest, subject, timeout=timeout)
+
+        anchorer = _Flaky()
+        monkeypatch.setattr(
+            receipt_sealers, "select_anchorers", lambda config, ledger_dir=None: [anchorer]
+        )
+        first = witness_anchor.run_nightly_anchor(
+            ledger, wiki, config=None, lock=_HeldLock()
+        )
+        assert first.anchored == [MONTH]
+
+        second = witness_anchor.run_nightly_anchor(
+            ledger, wiki, config=None, lock=_HeldLock()
+        )
+        assert second.anchored == [MONTH], "a failed stamp must be retried"
+        assert second.imported == [], "a failed attestation is not importable either"
+
+        third = witness_anchor.run_nightly_anchor(
+            ledger, wiki, config=None, lock=_HeldLock()
+        )
+        assert third.anchored == []
+        assert third.unchanged == [MONTH], "once every source landed, leave it alone"
+
+    def test_a_partial_import_anchors_instead(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Held attestations must cover EVERY configured source to import.
+
+        A partial import (local-clock held, OpenTimestamps not) would
+        record the digest as handled and the missing source would never be
+        attempted.
+        """
+        knowledge_root, wiki, ledger = _ledger_with_receipts(tmp_path)
+        del knowledge_root
+        partition = partition_path(wiki, MONTH)
+        lines = partition.read_text(encoding="utf-8").splitlines()
+        _append_witness_anchor(
+            ledger,
+            subject=receipts_subject(MONTH, len(lines)),
+            digest=partition_digest(lines),
+            source="local-clock",
+            status="complete",
+        )
+
+        anchorer = _FakeAnchorer()  # source "opentimestamps"
+        monkeypatch.setattr(
+            receipt_sealers, "select_anchorers", lambda config, ledger_dir=None: [anchorer]
+        )
+        report = witness_anchor.run_nightly_anchor(
+            ledger, wiki, config=None, lock=_HeldLock()
+        )
+        assert report.imported == []
+        assert report.anchored == [MONTH]
+        assert [c[1] for c in anchorer.anchor_calls] == [receipts_subject(MONTH, len(lines))]
 
 
 # ---------------------------------------------------------------------------
@@ -1017,3 +1142,38 @@ class TestWholePartitionOnly:
 
         with pytest.raises(ReceiptSealerConfigError):
             receipt_sealers.select_sealer({"librarian": {"receipt_sealer": "anchor"}})
+
+
+class TestSessionEndIsUnchanged:
+    """The nightly's new-content gate must NOT leak into athenaeum#2156.
+
+    SessionEnd's contract is "anchor the chain head at EVERY SessionEnd",
+    lock-free and inside a 10 second budget — it is a session boundary, not
+    a periodic sweep, and it has no run lock with which to consult or write
+    anything else. The two functions live in one module and their head
+    reads look identical, which is exactly why this pin exists.
+    """
+
+    def test_session_end_anchors_the_head_with_no_new_content(
+        self, tmp_path: Path
+    ) -> None:
+        from promptwitness import ledger as pw_ledger
+
+        knowledge_root, wiki, ledger = _ledger_with_receipts(tmp_path)
+        del knowledge_root
+        _append_witness_anchor(
+            ledger, subject="witness:pw-x:1", digest="sha256:" + "a" * 64,
+            source="local-clock", status="complete",
+        )
+        before = len(list(pw_ledger.iter_lines(ledger)))
+
+        witness_anchor.run_session_end_anchor(ledger, wiki, budget_seconds=5.0)
+
+        after = list(pw_ledger.iter_lines(ledger))
+        head_anchors = [
+            line
+            for line in after[before:]
+            if line.kind == "anchor"
+            and str(line.extra.get("subject", "")).startswith("witness:")
+        ]
+        assert head_anchors, "SessionEnd anchors the head unconditionally"

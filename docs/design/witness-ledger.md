@@ -297,21 +297,36 @@ librarian run under its own lock, and is also available on demand as
 `librarian.witness_ledger_enabled` (default off) and does four things, in
 this order:
 
-1. Anchors every receipt partition whose `receipt_sealers.partition_digest`
-   differs from its own most recent anchor record, through
+1. Anchors every receipt partition that does not already hold a
+   non-`failed` attestation from every configured source for its current
+   `receipt_sealers.partition_digest`, through
    `receipt_sealers.AnchoringSealer` — a `transcript_receipts.Sealer`
    implementation that landed with `transcript_receipts.py` unchanged.
    Each attestation is recorded in BOTH stores: an `anchor` line in the
    local witness ledger (so the mirror carries it) and an anchor record
-   under `_seals/anchors/<YYYY-MM>.jsonl` (so a re-run is a no-op). An
-   unchanged partition is left alone, and an attestation the lock-free
+   under `_seals/anchors/<YYYY-MM>.jsonl` (so a re-run is a no-op). A
+   partition whose stamps all landed is left alone; one whose calendar
+   attempt **failed** is retried, because digest equality alone would make
+   an offline night's failure permanent. An attestation the lock-free
    paths already obtained for the SAME digest is **imported, not
    re-stamped** — a re-stamp would spend a calendar round trip to learn
    something already known and would record a later `claimed_time` for
-   content demonstrably older than that.
+   content demonstrably older than that — but only when the held
+   attestations cover every configured source, for the same reason: a
+   partial import would mark the digest handled and the missing source
+   would never be attempted.
 2. Anchors the witness chain head once per pass, with the configured
    adapters (`receipt_sealers.select_anchorers`, a seam separate from
-   `select_sealer`: a sealer and an anchorer set are independent choices).
+   `select_sealer`: a sealer and an anchorer set are independent choices),
+   and **only when there is witness content past the highest head `seq`
+   any anchor has committed to**. Anchoring is how a line is shown to have
+   existed by some time, so with nothing appended since the last head
+   anchor there is nothing new to bound, and a quiet day would otherwise
+   still cost an anchor line, a mirror record, a commit and a push
+   carrying no information. Measured against the anchored head `seq`, not
+   against the newest anchor LINE: step 1 writes `receipts:` anchor lines,
+   which bound a receipt partition and say nothing about any witness
+   line.
 3. Upgrades still-`pending` OpenTimestamps attestations. This is the only
    place in athenaeum that turns a submitted stamp into a complete Bitcoin
    attestation — a calendar's transaction confirms hours later, so
