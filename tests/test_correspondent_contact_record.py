@@ -25,6 +25,21 @@ Cases:
   resolves at tier 0 to the page this compile created.
 - ``TestAmbiguityIsPreserved`` — AC3: an address owned by another entity writes
   no second record and escalates.
+
+Extended by athenaeum#2209 (the correspondent shortcut records an introducer's
+address on the introducee; see ``docs/design/attribution-verification.md``
+§10.1 and §8.1):
+
+- ``TestMaskContactAddress`` — the ``pii.mask_contact_address`` helper itself.
+- ``TestResolvedCorrespondentRecordsNothing`` — AC1: the address already
+  resolves to an existing page, so no created page is the correspondent;
+  nothing is recorded and nothing escalates.
+- ``TestNameRequiredWhenPresent`` — AC2: a present ``correspondent_name``
+  must match a created page's name or alias, even with only one page.
+- ``TestNoNameLocalPartMatchEndToEnd`` / ``TestLocalPartMatchesNameTable`` —
+  AC3: no name, one created page — the address local part must name-match it.
+- ``TestMaskedEscalationsNeverLeakTheAddress`` — AC4: every escalation masks
+  the address, through the real ``_pending_questions.md`` renderer.
 """
 
 from __future__ import annotations
@@ -114,6 +129,42 @@ def _classification_for(record: Path, address: str) -> dict[str, object] | None:
         ):
             return entry
     return None
+
+
+# ---------------------------------------------------------------------------
+# pii.mask_contact_address (athenaeum#2209) — the masking helper in isolation
+# ---------------------------------------------------------------------------
+
+
+class TestMaskContactAddress:
+    """``<first char of local part>***@<domain>`` — never the bare
+    ``<first char>@<domain>`` form, which is itself a syntactically valid
+    address (see the function's docstring for why that distinction is
+    load-bearing for ``_pending_questions.md``)."""
+
+    def test_masks_to_first_char_plus_domain(self) -> None:
+        assert pii.mask_contact_address("alex@example.org") == "a***@example.org"
+
+    def test_the_mask_is_not_itself_an_inline_email_token(self) -> None:
+        """The whole point: a bare ``a@example.org`` mask would be
+        re-detected by the very scanner this issue protects the wiki from."""
+        masked = pii.mask_contact_address("alex@example.org")
+        assert pii.find_inline_emails(masked) == []
+
+    def test_single_character_local_part(self) -> None:
+        assert pii.mask_contact_address("a@example.org") == "a***@example.org"
+
+    @pytest.mark.parametrize("value", ["", "   "])
+    def test_empty_or_whitespace_is_empty(self, value: str) -> None:
+        assert pii.mask_contact_address(value) == ""
+
+    def test_no_at_sign_masks_to_first_char_only(self) -> None:
+        assert pii.mask_contact_address("not-an-address") == "n***"
+
+    def test_more_than_one_at_sign_splits_on_the_last(self) -> None:
+        assert (
+            pii.mask_contact_address("a@b@example.org") == "a***@example.org"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -434,15 +485,70 @@ class TestLaterCorrectionResolves:
         assert resolved == page_path
 
 
-class TestAmbiguityIsPreserved:
-    def test_address_owned_by_another_entity_writes_nothing_and_escalates(
+class TestResolvedCorrespondentRecordsNothing:
+    """AC1 (athenaeum#2209) — design §10.1 step 1.
+
+    This is the intro-email shape the issue exists for: the correspondent
+    (the ``From`` address) already has an existing page and a contact record
+    holding the address, so the ONE page this compile creates is someone
+    else's (the introducee) — not the correspondent's. Before athenaeum#2209 the
+    old shortcut handed the correspondent's address to that sole created page
+    unconditionally (``len(created_people) == 1`` short-circuit), which is
+    exactly the misattribution this issue closes. The fix: nothing is
+    recorded on the created page, and — per the design — nothing is
+    escalated either, because a resolved correspondent is not a question for
+    a human.
+    """
+
+    def test_writes_nothing_and_does_not_escalate(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """AC3 — no second record, and the case escalates as it does today."""
         knowledge = tmp_path / "knowledge"
         _write_page(knowledge / "wiki", "uid-incumbent", name="Robin Vance")
         other = _write_record(
             knowledge, "incumbent-contact.md", uid="uid-incumbent", emails=[_ADDRESS]
+        )
+        before = other.read_text(encoding="utf-8")
+
+        _, result = _compile(
+            tmp_path, monkeypatch, note=_prose_note(), classified=[_person(_DISPLAY)]
+        )
+        assert result.correspondent_contacts_recorded == 0  # type: ignore[attr-defined]
+
+        # Nothing new was recorded, and the incumbent's own record is
+        # byte-identical to before the compile ran.
+        contacts = pii.contacts_surface_root(knowledge, EXCLUDED_CONFIG)
+        assert pii.resolve_contact_records(contacts, _ADDRESS) == [other]
+        assert other.read_text(encoding="utf-8") == before
+
+        # And — unlike the OTHER_ENTITY/RECORD_WITHOUT_UID declines below —
+        # a resolved correspondent raises no escalation at all: there is no
+        # question for a human, per design §10.1 step 1.
+        assert result.escalated == []  # type: ignore[attr-defined]
+
+
+class TestAmbiguityIsPreserved:
+    def test_address_tied_to_an_orphan_uid_writes_nothing_and_escalates(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC3 — the OBSERVED_CONTACT_OTHER_ENTITY decline still escalates.
+
+        Unlike ``TestResolvedCorrespondentRecordsNothing`` above, the
+        contact record here names a uid with NO existing page
+        (``uid-ghost``) — an orphan uid, which
+        ``compile_routing.resolve_correspondent_page`` treats as a
+        non-unique, unresolvable outcome (``email-handle-orphan-uid``) and
+        returns ``None`` for, same as a genuinely unknown address. So the
+        step-1 guard stays inactive, this compile picks the one page it
+        created as the correspondent (its name matches), and
+        ``record_observed_contact_value`` is the one that declines — because
+        the address is already on the surface, tied to a DIFFERENT uid. That
+        decline still escalates (there IS a real question here: which uid is
+        right), and the escalation must mask the address.
+        """
+        knowledge = tmp_path / "knowledge"
+        other = _write_record(
+            knowledge, "orphan-contact.md", uid="uid-ghost", emails=[_ADDRESS]
         )
         before = other.read_text(encoding="utf-8")
 
@@ -457,8 +563,11 @@ class TestAmbiguityIsPreserved:
 
         escalated = result.escalated  # type: ignore[attr-defined]
         assert any(
-            "uid-incumbent" in item.description for item in escalated
-        ), f"expected an ambiguity escalation naming the incumbent, got {escalated}"
+            "uid-ghost" in item.description for item in escalated
+        ), f"expected an ambiguity escalation naming the orphan uid, got {escalated}"
+        for item in escalated:
+            assert _ADDRESS not in item.description
+            assert _ADDRESS not in item.entity_name
 
     def test_several_created_people_and_no_name_match_declines(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -540,3 +649,216 @@ class TestAmbiguityIsPreserved:
         assert len(result.created) == 1  # type: ignore[attr-defined]
         assert (knowledge / "wiki" / result.created[0].filename).is_file()  # type: ignore[attr-defined]
         assert result.correspondent_contacts_recorded == 0  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------------------
+# AC2 (athenaeum#2209) — a present `correspondent_name` must match a created
+# page's name or alias, even when only one page was created.
+# ---------------------------------------------------------------------------
+
+
+class TestNameRequiredWhenPresent:
+    """Before athenaeum#2209 the one-page shortcut returned the sole created page
+    unconditionally, so a name mismatch — or no name check at all — was never
+    possible on the single-page path. This is exactly the intro-email defect:
+    the correspondent's declared name need not belong to the page the compile
+    happened to create.
+    """
+
+    def test_one_created_page_that_matches_is_recorded(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        knowledge, result = _compile(
+            tmp_path, monkeypatch, note=_prose_note(), classified=[_person(_DISPLAY)]
+        )
+        assert len(result.created) == 1  # type: ignore[attr-defined]
+        assert result.correspondent_contacts_recorded == 1  # type: ignore[attr-defined]
+        contacts = pii.contacts_surface_root(knowledge, EXCLUDED_CONFIG)
+        records = pii.resolve_contact_records(contacts, _ADDRESS)
+        assert len(records) == 1
+        assert pii.uid_on_record(records[0]) == result.created[0].uid  # type: ignore[attr-defined]
+
+    def test_one_created_page_that_does_not_match_declines_and_escalates(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The note names ``Dana Quill``; the only created page is someone else."""
+        knowledge, result = _compile(
+            tmp_path,
+            monkeypatch,
+            note=_prose_note(),  # correspondent_name: "Dana Quill"
+            classified=[_person("Robin Vance")],
+        )
+        assert len(result.created) == 1  # type: ignore[attr-defined]
+        assert result.correspondent_contacts_recorded == 0  # type: ignore[attr-defined]
+        contacts = pii.contacts_surface_root(knowledge, EXCLUDED_CONFIG)
+        assert not contacts.exists() or list(contacts.rglob("*.md")) == []
+        escalated = result.escalated  # type: ignore[attr-defined]
+        assert any(
+            "no created person page's name or alias matches" in item.description
+            for item in escalated
+        ), f"expected a name-mismatch escalation, got {escalated}"
+
+
+# ---------------------------------------------------------------------------
+# AC3 (athenaeum#2209) — no name, exactly one created page: the address's
+# local part must name-match that page. A first name alone does not count.
+# ---------------------------------------------------------------------------
+
+
+class TestNoNameLocalPartMatchEndToEnd:
+    def test_matching_local_part_is_recorded(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No correspondent_name; the address's local part is ``dana.quill``
+        (``first.last``), which name-matches the one created page."""
+        knowledge, result = _compile(
+            tmp_path,
+            monkeypatch,
+            note=_prose_note(display_name=None),
+            classified=[_person(_DISPLAY)],
+        )
+        assert len(result.created) == 1  # type: ignore[attr-defined]
+        assert result.correspondent_contacts_recorded == 1  # type: ignore[attr-defined]
+
+    def test_non_matching_local_part_declines_and_escalates(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No correspondent_name; the one created page is someone else
+        entirely, so the local part cannot name-match it."""
+        knowledge, result = _compile(
+            tmp_path,
+            monkeypatch,
+            note=_prose_note(display_name=None),
+            classified=[_person("Robin Vance")],
+        )
+        assert len(result.created) == 1  # type: ignore[attr-defined]
+        assert result.correspondent_contacts_recorded == 0  # type: ignore[attr-defined]
+        contacts = pii.contacts_surface_root(knowledge, EXCLUDED_CONFIG)
+        assert not contacts.exists() or list(contacts.rglob("*.md")) == []
+        escalated = result.escalated  # type: ignore[attr-defined]
+        assert any(
+            "does not name-match" in item.description for item in escalated
+        ), f"expected a local-part-mismatch escalation, got {escalated}"
+
+
+class TestLocalPartMatchesNameTable:
+    """Table-driven coverage of ``_local_part_matches_name`` (AC3).
+
+    Covers full name, ``flast``, ``first.last``/``firstlast`` (one check,
+    since normalizing strips the only difference between them), a
+    three-token name's first+last ``flast`` form, an alias match, and the
+    first-name-alone / last-name-alone declines the issue calls out
+    explicitly.
+    """
+
+    @pytest.mark.parametrize(
+        ("local_part", "name", "aliases", "expected"),
+        [
+            # firstlast / first.last / firstname_lastname — one normalized
+            # check, so all three collapse to the same assertion.
+            ("janedoe", "Jane Doe", [], True),
+            ("jane.doe", "Jane Doe", [], True),
+            ("jane_doe", "Jane Doe", [], True),
+            ("Jane-Doe", "Jane Doe", [], True),
+            # flast
+            ("jdoe", "Jane Doe", [], True),
+            # a +tag suffix is stripped before matching.
+            ("jane.doe+work", "Jane Doe", [], True),
+            # three-or-more tokens: flast uses FIRST and LAST only.
+            ("jmdoe", "Jane Middle Doe", [], False),
+            ("jdoe", "Jane Middle Doe", [], True),
+            ("janemiddledoe", "Jane Middle Doe", [], True),
+            # alias match, same rules as the primary name.
+            ("ddoe", "Jane Doe", ["Dana Doe"], True),
+            # first name alone, or last name alone: neither is an accepted
+            # form, even though both are substrings of the accepted ones.
+            ("jane", "Jane Doe", [], False),
+            ("doe", "Jane Doe", [], False),
+            # an unrelated local part.
+            ("robin.vance", "Jane Doe", [], False),
+        ],
+    )
+    def test_accepted_and_declined_forms(
+        self, local_part: str, name: str, aliases: list[str], expected: bool
+    ) -> None:
+        from athenaeum.librarian import _local_part_matches_name
+
+        assert _local_part_matches_name(local_part, name, aliases) is expected
+
+
+# ---------------------------------------------------------------------------
+# AC4 (athenaeum#2209) — every escalation masks the address, through the REAL
+# `_pending_questions.md` renderer (`tiers.tier4_escalate`), not just on the
+# `EscalationItem` fields. `tiers.py` renders `entity_name` into both the
+# heading and the `**Also affects**:` line, so the no-display-name case —
+# where `entity_name` used to fall back to the raw address — is the one
+# that actually made the address the block's title.
+# ---------------------------------------------------------------------------
+
+
+class TestMaskedEscalationsNeverLeakTheAddress:
+    def _rendered(self, tmp_path: Path, escalated: list[object]) -> str:
+        from athenaeum.tiers import tier4_escalate
+
+        pending = tmp_path / "pending" / "_pending_questions.md"
+        tier4_escalate(escalated, pending)  # type: ignore[arg-type]
+        return pending.read_text(encoding="utf-8")
+
+    def test_no_display_name_decline_masks_the_title(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No display name: `entity_name` used to fall back to `ref.address`,
+        making the raw address the rendered block's own title."""
+        _, result = _compile(
+            tmp_path,
+            monkeypatch,
+            note=_prose_note(display_name=None),
+            classified=[_person("Robin Vance")],  # local part does not match
+        )
+        escalated = result.escalated  # type: ignore[attr-defined]
+        assert escalated
+        rendered = self._rendered(tmp_path, escalated)
+        assert _ADDRESS not in rendered
+        assert pii.mask_contact_address(_ADDRESS) in rendered
+
+    def test_name_mismatch_decline_masks_the_address(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _, result = _compile(
+            tmp_path,
+            monkeypatch,
+            note=_prose_note(),  # correspondent_name: "Dana Quill"
+            classified=[_person("Robin Vance")],
+        )
+        escalated = result.escalated  # type: ignore[attr-defined]
+        assert escalated
+        rendered = self._rendered(tmp_path, escalated)
+        assert _ADDRESS not in rendered
+
+    def test_other_entity_decline_masks_the_address(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        knowledge = tmp_path / "knowledge"
+        _write_record(knowledge, "orphan-contact.md", uid="uid-ghost", emails=[_ADDRESS])
+
+        _, result = _compile(
+            tmp_path, monkeypatch, note=_prose_note(), classified=[_person(_DISPLAY)]
+        )
+        escalated = result.escalated  # type: ignore[attr-defined]
+        assert escalated
+        rendered = self._rendered(tmp_path, escalated)
+        assert _ADDRESS not in rendered
+
+    def test_several_pages_no_match_decline_masks_the_address(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _, result = _compile(
+            tmp_path,
+            monkeypatch,
+            note=_prose_note(display_name=None),
+            classified=[_person(_DISPLAY), _person("Robin Vance")],
+        )
+        escalated = result.escalated  # type: ignore[attr-defined]
+        assert escalated
+        rendered = self._rendered(tmp_path, escalated)
+        assert _ADDRESS not in rendered
