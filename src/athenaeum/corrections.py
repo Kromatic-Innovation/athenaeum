@@ -1744,6 +1744,41 @@ def process_correction_record(
             fs.pop(write_field, None)
         merged_read["field_sources"] = fs
 
+        # Issue athenaeum#2196 (AC2): removing an address must not leave its
+        # per-address `contact_classification` / `identifier_validity`
+        # entries behind — the orphan these lines exist to prevent. Only for
+        # an address-identifier field (`pii.CONTACT_IDENTIFIER_FIELDS`:
+        # emails/former_emails/alt_emails), and only when no OTHER address
+        # field on this same record still lists the value — a shared
+        # address moved from `emails` to `alt_emails`, say, still deserves
+        # its classification. `merged_read` (not `read_meta`) is checked and
+        # mutated here because it is what actually gets written below, on
+        # both the surface-record path (`surface_class`) and the wiki path.
+        from athenaeum import pii
+
+        if write_field in pii.CONTACT_IDENTIFIER_FIELDS and not pii.record_lists_identifier(
+            merged_read, str(value)
+        ):
+            removed_key = pii.normalize_identifier(str(value))
+            for fact_field in (pii.CONTACT_CLASSIFICATION_FIELD, pii.IDENTIFIER_VALIDITY_FIELD):
+                fact_entries = merged_read.get(fact_field)
+                if not isinstance(fact_entries, list):
+                    continue
+                kept = [
+                    entry
+                    for entry in fact_entries
+                    if not (
+                        isinstance(entry, dict)
+                        and pii.normalize_identifier(str(entry.get("identifier", "") or ""))
+                        == removed_key
+                    )
+                ]
+                if len(kept) != len(fact_entries):
+                    if kept:
+                        merged_read[fact_field] = kept
+                    else:
+                        merged_read.pop(fact_field, None)
+
     if dry_run:
         disposition = "routed-elsewhere" if surface_class else "applied"
         return _result(disposition, reason, monotone_apply=monotone_apply)
