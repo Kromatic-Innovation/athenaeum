@@ -22,22 +22,23 @@ to `develop` for whether it touches the **LLM surface**, the list kept in
 
 - **`Evals: <run-url>`** — a link to an `evals.yml` `workflow_dispatch` run
   (e.g. `https://github.com/Kromatic-Innovation/athenaeum/actions/runs/123456789`)
-  whose `headSha` matches this PR's head commit, whose workflow is `Evals`
+  whose `headSha` carries the same LLM-surface content as this PR's head (see below), whose workflow is `Evals`
   (evals.yml's own `name:`), and whose `conclusion` is `success`. Get the
   URL from `gh run view <id> --json url -q .url` after dispatching, or copy
   it from the Actions tab — the **run** URL
   (`.../actions/runs/<id>`), not a **job** URL
   (`.../actions/runs/<id>/job/<job-id>`): the job-scoped form is rejected,
   since a job id isn't a run id `gh run view` can look up. A run from a
-  stale head SHA, from a different event (`push` instead of
+  head SHA whose surface files have since changed, from a different event (`push` instead of
   `workflow_dispatch`), from a different workflow (e.g. a `ci.yml`
   dispatch), from a different repo, or that didn't conclude `success`
   (failed or cancelled) does not satisfy the check — re-dispatch after the
-  last push. One exception: a run at the head's **parent** is accepted when
-  the head commit changes nothing but the `pyproject.toml` `version = "..."`
-  line (one parent, one file, one removed and one added version line). That
-  is the PATCH bump the merge wrapper pushes onto the head just before
-  merging, and it cannot move an eval result.
+  last surface change. The `headSha` match is on **content**: a run at an
+  earlier commit still satisfies the check when `git diff --name-only
+  <run sha> <head>` touches no path on the LLM surface, so the merge
+  wrapper's version bump, a merge from `develop` that leaves the surface
+  alone, or a rebase does not need a fresh (paid) dispatch. Re-dispatch only
+  when a surface file actually changed.
 - **`Evals: not needed — <reason>`** — for a PR that touches a surface
   file without moving anything an eval would catch (e.g. a comment-only
   edit, or this very check's own CI-only plumbing). The reason after the
@@ -47,9 +48,10 @@ to `develop` for whether it touches the **LLM surface**, the list kept in
 The check runs on `opened`/`synchronize`/`reopened`/**and `edited`** — the
 last one specifically so that adding the receipt line to an already-open
 PR (a body edit, not a new commit) re-triggers the check without needing a
-fresh push. It is **advisory**: it fails loudly and names the touched
-files, but is not in `ci.yml`'s required-checks aggregate (matching
-`embedding-pr.yml`'s convention). The decision logic lives in
+fresh push. It is not in `ci.yml`'s required-checks aggregate (matching
+`embedding-pr.yml`'s convention), but it is **blocking in practice**: the
+merge wrapper waits on every check on the head and will not merge past a red
+one. The decision logic lives in
 `scripts/check_llm_surface_receipt.py`, exercised offline by
 `tests/test_llm_surface_receipt.py`; `.github/llm-surface.txt`'s own rot
 check is `tests/test_llm_surface.py`.

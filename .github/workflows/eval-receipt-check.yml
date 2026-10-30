@@ -14,7 +14,7 @@ name: Eval Receipt Check
 #
 # Deliberately NOT path-filtered: an `on.pull_request.paths` block would be
 # a second copy of the surface list, and — worse — a path-filtered job that
-# does not run reports no status at all, which for an advisory check is
+# does not run reports no status at all, which for a gating check is
 # indistinguishable from "passed." Instead this job always runs and the
 # script decides: an empty intersection with the surface list is a
 # trivial pass (see AC3's docs-only-PR case).
@@ -27,9 +27,17 @@ name: Eval Receipt Check
 # Zero network beyond `gh` reads against the default `GITHUB_TOKEN` — no
 # Anthropic key, no push trigger, evals.yml's own triggers untouched.
 #
-# Status: ADVISORY, not a required status context — its own workflow file,
-# not folded into ci.yml's `ci-required` aggregate, matching
-# embedding-pr.yml's convention (athenaeum#1609).
+# Status: BLOCKING in practice. It is its own workflow file, not folded into
+# ci.yml's `ci-required` aggregate (embedding-pr.yml's convention,
+# athenaeum#1609), so the branch ruleset does not list it — but the merge
+# wrapper (code-workspace-config scripts/gh-orch-pr-merge.sh) waits on EVERY
+# check on the head and refuses to merge when any one fails, this one
+# included. Treat a red here as a merge blocker.
+#
+# A receipt is matched on content, not on the exact head commit: a run at an
+# earlier commit still counts when no LLM-surface file differs between it and
+# the head (see the script's docstring), so an update-branch, the wrapper's
+# version bump or a rebase does not demand a fresh paid eval dispatch.
 #
 # Third-party actions pinned to full commit SHAs for supply-chain hygiene,
 # matching ci.yml's convention.

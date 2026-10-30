@@ -460,15 +460,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **The eval-receipt check now accepts a receipt at the parent of a pure
-  version-bump head.** The merge wrapper pushes its own PATCH bump onto the
-  PR head just before merging, which moved the head off the receipted commit
-  and failed `LLM surface touched -> eval receipt required` on every
-  LLM-surface PR. `scripts/check_llm_surface_receipt.py` now also accepts a
-  successful `Evals` run at the head's parent when the head commit has one
-  parent and changes only the `pyproject.toml` `version = "..."` line. Any
-  other change in that commit, a merge commit, or a receipt two commits back
-  still fails.
+- **The eval-receipt check matches a receipt on content, not on the exact
+  head commit.** A successful `Evals` run at commit X now satisfies PR head H
+  when no file on `.github/llm-surface.txt` differs between X and H (a direct
+  tree diff, so a rebased or force-pushed head counts too). Before, every
+  update-branch, every merge-wrapper version bump and every rebase moved the
+  head off the receipted commit and demanded a fresh paid eval dispatch, even
+  when nothing an eval reads had changed. A surface file that changed since
+  the run, or a receipt commit that cannot be read, still fails as stale. The
+  workflow comment and `tests/evals/README.md` no longer call the check
+  advisory: the merge wrapper waits on it and will not merge past a red one.
 
 - **A field correction can now remove a list entry whose stored dates came
   from YAML.** List values were compared by `repr`, so an entry read from

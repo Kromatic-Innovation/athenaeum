@@ -193,6 +193,7 @@ def test_receipt_with_stale_sha_fails() -> None:
         head_sha=HEAD_SHA,
         this_repo=REPO,
         run_lookup=_stale_sha_lookup,
+        paths_changed_lookup=lambda receipt, head: ["src/athenaeum/tiers.py"],
     )
     assert not result.ok
     assert "stale" in result.message.lower()
@@ -334,107 +335,65 @@ def test_main_uses_three_dot_diff_and_reports_exit_code(
     assert exit_code == 0
 
 
-# --- receipt at the parent of a pure version-bump head ----------------------
+# --- content-based receipt validity -----------------------------------------
 #
-# The merge wrapper (code-workspace-config scripts/gh-orch-pr-merge.sh) pushes
-# its own PATCH bump onto the PR head right before merging. A receipt at the
-# head's parent is accepted only when the head commit changes nothing but the
-# pyproject.toml version line.
+# A receipt run at commit X satisfies head H when no LLM-surface path differs
+# between X and H (a direct tree diff), so a merge-wrapper bump, a develop
+# merge that leaves the surface alone, or a rebase does not demand a fresh
+# paid eval dispatch.
 
-PARENT_SHA = "b" * 40  # what _stale_sha_lookup reports as the run's headSha
-
-_BUMP_DIFF = (
-    "diff --git a/pyproject.toml b/pyproject.toml\n"
-    "--- a/pyproject.toml\n"
-    "+++ b/pyproject.toml\n"
-    "@@ -4 +4 @@\n"
-    '-version = "0.22.51"\n'
-    '+version = "0.22.52"\n'
-)
+RECEIPT_SHA = "b" * 40  # what _stale_sha_lookup reports as the run's headSha
 
 
-def test_is_version_only_change_accepts_a_pure_bump() -> None:
-    assert check_llm_surface_receipt.is_version_only_change(["pyproject.toml"], _BUMP_DIFF)
+def _changed(paths: list[str] | None):
+    def lookup(receipt_sha: str, head_sha: str) -> list[str] | None:
+        assert (receipt_sha, head_sha) == (RECEIPT_SHA, HEAD_SHA)
+        return paths
+
+    return lookup
 
 
-def test_is_version_only_change_rejects_a_second_file() -> None:
-    assert not check_llm_surface_receipt.is_version_only_change(
-        ["pyproject.toml", "src/athenaeum/tiers.py"], _BUMP_DIFF
-    )
-
-
-def test_is_version_only_change_rejects_another_pyproject_line() -> None:
-    diff = _BUMP_DIFF + '@@ -20 +20 @@\n-    "anthropic>=0.40",\n+    "anthropic>=0.50",\n'
-    assert not check_llm_surface_receipt.is_version_only_change(["pyproject.toml"], diff)
-
-
-def test_is_version_only_change_rejects_a_version_line_added_without_removal() -> None:
-    diff = "@@ -4,0 +5 @@\n" '+version = "9.9.9"\n'
-    assert not check_llm_surface_receipt.is_version_only_change(["pyproject.toml"], diff)
-
-
-def test_receipt_at_parent_of_pure_bump_head_passes() -> None:
-    result = evaluate(
-        changed_files=["src/athenaeum/tiers.py", "pyproject.toml"],
+def _evaluate_with(paths: list[str] | None, run_lookup=_stale_sha_lookup):
+    return evaluate(
+        changed_files=["src/athenaeum/tiers.py"],
         surface=SURFACE,
         pr_body=f"Evals: {RUN_URL}",
         head_sha=HEAD_SHA,
         this_repo=REPO,
-        run_lookup=_stale_sha_lookup,
-        bump_parent_lookup=lambda sha: PARENT_SHA if sha == HEAD_SHA else None,
+        run_lookup=run_lookup,
+        paths_changed_lookup=_changed(paths),
     )
+
+
+def test_receipt_covers_head_with_only_non_surface_changes() -> None:
+    result = _evaluate_with(["pyproject.toml", "CHANGELOG.md"])
     assert result.ok, result.message
-    assert "parent" in result.message
+    assert "no LLM-surface file differs" in result.message
 
 
-def test_receipt_at_parent_of_non_bump_head_still_fails() -> None:
-    result = evaluate(
-        changed_files=["src/athenaeum/tiers.py"],
-        surface=SURFACE,
-        pr_body=f"Evals: {RUN_URL}",
-        head_sha=HEAD_SHA,
-        this_repo=REPO,
-        run_lookup=_stale_sha_lookup,
-        bump_parent_lookup=lambda sha: None,
-    )
+def test_receipt_is_stale_when_a_surface_file_changed_since() -> None:
+    result = _evaluate_with(["CHANGELOG.md", "src/athenaeum/tiers.py"])
     assert not result.ok
     assert "stale" in result.message.lower()
+    assert "src/athenaeum/tiers.py" in result.message
 
 
-def test_receipt_at_grandparent_of_bump_head_fails() -> None:
-    # The head IS a pure bump, but its parent is "c"*40, not the receipted
-    # "b"*40: the receipt is one commit too old.
-    result = evaluate(
-        changed_files=["src/athenaeum/tiers.py"],
-        surface=SURFACE,
-        pr_body=f"Evals: {RUN_URL}",
-        head_sha=HEAD_SHA,
-        this_repo=REPO,
-        run_lookup=_stale_sha_lookup,
-        bump_parent_lookup=lambda sha: "c" * 40,
-    )
+def test_receipt_is_stale_when_the_receipt_commit_cannot_be_read() -> None:
+    result = _evaluate_with(None)
     assert not result.ok
-    assert "stale" in result.message.lower()
+    assert "could not be compared" in result.message
 
 
-def test_failed_run_at_parent_of_bump_head_still_fails() -> None:
-    def failed_at_parent(repo: str, run_id: str) -> dict[str, str]:
+def test_failed_run_with_identical_surface_still_fails() -> None:
+    def failed(repo: str, run_id: str) -> dict[str, str]:
         return {
-            "headSha": PARENT_SHA,
+            "headSha": RECEIPT_SHA,
             "event": "workflow_dispatch",
             "workflowName": "Evals",
             "conclusion": "failure",
         }
 
-    result = evaluate(
-        changed_files=["src/athenaeum/tiers.py"],
-        surface=SURFACE,
-        pr_body=f"Evals: {RUN_URL}",
-        head_sha=HEAD_SHA,
-        this_repo=REPO,
-        run_lookup=failed_at_parent,
-        bump_parent_lookup=lambda sha: PARENT_SHA,
-    )
+    result = _evaluate_with([], run_lookup=failed)
     assert not result.ok
     assert "failure" in result.message
 
@@ -445,90 +404,136 @@ def _rev_parse(cwd: Path, ref: str = "HEAD") -> str:
     ).stdout.strip()
 
 
-def _write_pyproject(cwd: Path, version: str, dep: str = "anthropic>=0.40") -> None:
-    (cwd / "pyproject.toml").write_text(
-        f'[project]\nname = "athenaeum"\nversion = "{version}"\n'
-        f'dependencies = ["{dep}"]\n'
+def _commit_file(cwd: Path, name: str, text: str, msg: str) -> str:
+    (cwd / name).write_text(text)
+    _run_git(cwd, "add", name)
+    _run_git(cwd, "commit", "-m", msg)
+    return _rev_parse(cwd)
+
+
+@pytest.fixture
+def content_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
+    """A develop line and a feature branch carrying a receipted surface change.
+
+    Returns named shas. `receipted` is the head the eval ran at; every other
+    head is a later state of the same PR.
+    """
+    _init_fixture_repo(tmp_path)
+    shas: dict[str, str] = {}
+    shas["base"] = _commit_file(tmp_path, "pyproject.toml", 'version = "0.22.51"\n', "base")
+    _commit_file(tmp_path, "tiers.py", "v0\n", "surface file on develop")
+    shas["fork"] = _rev_parse(tmp_path)
+
+    _run_git(tmp_path, "checkout", "-b", "feature")
+    shas["receipted"] = _commit_file(tmp_path, "tiers.py", "v1\n", "PR's surface change")
+
+    # (1) merge-wrapper bump on top of the receipted head.
+    shas["bump"] = _commit_file(
+        tmp_path, "pyproject.toml", 'version = "0.22.52"\n', "chore: bump version"
+    )
+
+    # (2) develop advances WITHOUT touching the surface; merged into the PR.
+    _run_git(tmp_path, "checkout", "develop")
+    _commit_file(tmp_path, "README.md", "docs\n", "docs on develop")
+    shas["develop_docs"] = _rev_parse(tmp_path)
+    _run_git(tmp_path, "checkout", "feature")
+    _run_git(tmp_path, "merge", "--no-ff", "-m", "merge develop (docs)", "develop")
+    shas["merge_docs"] = _rev_parse(tmp_path)
+
+    # (3) develop then changes a surface file; merged into the PR.
+    _run_git(tmp_path, "checkout", "develop")
+    _commit_file(tmp_path, "provider.py", "develop-side prompt change\n", "surface on develop")
+    _run_git(tmp_path, "checkout", "feature")
+    _run_git(tmp_path, "merge", "--no-ff", "-m", "merge develop (surface)", "develop")
+    shas["merge_surface"] = _rev_parse(tmp_path)
+
+    # (4) the PR rebased onto develop_docs: a NON-ancestor of `receipted`,
+    # with identical surface content.
+    _run_git(tmp_path, "checkout", "-b", "rebased", shas["develop_docs"])
+    _run_git(tmp_path, "cherry-pick", shas["receipted"])
+    shas["rebased"] = _rev_parse(tmp_path)
+
+    monkeypatch.chdir(tmp_path)
+    return shas
+
+
+CONTENT_SURFACE = ["tiers.py", "provider.py"]
+
+
+def _covers(shas: dict[str, str], head: str) -> tuple[bool, list[str]]:
+    return check_llm_surface_receipt.receipt_covers_head(
+        shas["receipted"],
+        shas[head],
+        CONTENT_SURFACE,
+        check_llm_surface_receipt.git_paths_changed_between,
     )
 
 
-def test_version_bump_parent_against_a_real_repo(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_bump_only_head_is_covered(content_repo: dict[str, str]) -> None:
+    assert _covers(content_repo, "bump") == (True, [])
+
+
+def test_develop_merge_without_surface_change_is_covered(content_repo: dict[str, str]) -> None:
+    assert _covers(content_repo, "merge_docs") == (True, [])
+
+
+def test_develop_merge_with_surface_change_is_stale(content_repo: dict[str, str]) -> None:
+    assert _covers(content_repo, "merge_surface") == (False, ["provider.py"])
+
+
+def test_non_ancestor_receipt_with_identical_surface_is_covered(
+    content_repo: dict[str, str],
 ) -> None:
-    """`version_bump_parent` (the default lookup) against real commits: a pure
-    version bump yields its parent; a bump that also edits another pyproject
-    line, a bump that also touches another file, and a merge commit do not."""
-    _init_fixture_repo(tmp_path)
-    (tmp_path / "README.md").write_text("base\n")
-    _run_git(tmp_path, "add", "README.md")
-    _run_git(tmp_path, "commit", "-m", "base")
-    base = _rev_parse(tmp_path)
-    _write_pyproject(tmp_path, "0.22.51")
-    (tmp_path / "tiers.py").write_text("v1\n")
-    _run_git(tmp_path, "add", ".")
-    _run_git(tmp_path, "commit", "-m", "receipted content")
-    receipted = _rev_parse(tmp_path)
+    rebased, receipted = content_repo["rebased"], content_repo["receipted"]
+    is_ancestor = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", receipted, rebased], check=False
+    ).returncode
+    assert is_ancestor != 0  # the premise: a rebase orphaned the receipted commit
+    assert _covers(content_repo, "rebased") == (True, [])
 
-    _write_pyproject(tmp_path, "0.22.52")
-    _run_git(tmp_path, "commit", "-am", "chore: bump version to 0.22.52 for this merge (cwc#3451)")
-    pure_bump = _rev_parse(tmp_path)
 
-    _write_pyproject(tmp_path, "0.22.53", dep="anthropic>=0.50")
-    _run_git(tmp_path, "commit", "-am", "bump plus a dependency change")
-    dep_bump = _rev_parse(tmp_path)
+def test_unknown_receipt_commit_is_not_covered(content_repo: dict[str, str]) -> None:
+    covered, hits = check_llm_surface_receipt.receipt_covers_head(
+        "0" * 40,
+        content_repo["bump"],
+        CONTENT_SURFACE,
+        check_llm_surface_receipt.git_paths_changed_between,
+    )
+    assert (covered, hits) == (False, [])
 
-    _write_pyproject(tmp_path, "0.22.54", dep="anthropic>=0.50")
-    (tmp_path / "tiers.py").write_text("v2\n")
-    _run_git(tmp_path, "commit", "-am", "bump plus a surface change")
-    file_bump = _rev_parse(tmp_path)
 
-    _run_git(tmp_path, "checkout", "-b", "side", receipted)
-    (tmp_path / "other.md").write_text("x\n")
-    _run_git(tmp_path, "add", "other.md")
-    _run_git(tmp_path, "commit", "-m", "side")
-    _run_git(tmp_path, "checkout", "develop")
-    _run_git(tmp_path, "merge", "--no-ff", "-m", "merge side", "side")
-    merge = _rev_parse(tmp_path)
-
-    monkeypatch.chdir(tmp_path)
-    lookup = check_llm_surface_receipt.version_bump_parent
-    assert lookup(pure_bump) == receipted
-    assert lookup(dep_bump) is None
-    assert lookup(file_bump) is None
-    assert lookup(merge) is None
-    assert lookup("0" * 40) is None  # unknown commit: git fails -> not a bump
-
-    # End to end through main(): the PR (base...head) touches the surface
-    # file, the receipt is at `receipted`, and the head is `pure_bump`.
-    surface_file = tmp_path / "llm-surface.txt"
-    surface_file.write_text("tiers.py\n")
-    pr_body_file = tmp_path / "pr-body.txt"
+def test_main_accepts_receipt_across_a_develop_merge(content_repo: dict[str, str]) -> None:
+    """End to end through main(): receipt at `receipted`, head `merge_docs`
+    passes; head `merge_surface` fails."""
+    cwd = Path.cwd()
+    surface_file = cwd / "llm-surface.txt"
+    surface_file.write_text("tiers.py\nprovider.py\n")
+    pr_body_file = cwd / "pr-body.txt"
     pr_body_file.write_text(f"Evals: {RUN_URL}\n")
     run = {
-        "headSha": receipted,
+        "headSha": content_repo["receipted"],
         "event": "workflow_dispatch",
         "workflowName": "Evals",
         "conclusion": "success",
     }
-    # main() calls the module-level evaluate() with its default lookups; route
-    # only the `gh run view` read to the stub, keep the real git bump lookup.
     real_evaluate = check_llm_surface_receipt.evaluate
-    monkeypatch.setattr(
-        check_llm_surface_receipt,
-        "evaluate",
-        lambda *a, **k: real_evaluate(*a, run_lookup=lambda repo, rid: run, **k),
-    )
 
     def run_main(head: str) -> int:
-        return check_llm_surface_receipt.main(
-            [
-                "--surface-file", str(surface_file),
-                "--base-sha", base,
-                "--head-sha", head,
-                "--pr-body-file", str(pr_body_file),
-                "--repo", REPO,
-            ]
-        )
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                check_llm_surface_receipt,
+                "evaluate",
+                lambda *a, **k: real_evaluate(*a, run_lookup=lambda repo, rid: run, **k),
+            )
+            return check_llm_surface_receipt.main(
+                [
+                    "--surface-file", str(surface_file),
+                    "--base-sha", content_repo["fork"],
+                    "--head-sha", content_repo[head],
+                    "--pr-body-file", str(pr_body_file),
+                    "--repo", REPO,
+                ]
+            )
 
-    assert run_main(pure_bump) == 0  # receipt at the bump's parent: accepted
-    assert run_main(dep_bump) == 1  # parent is pure_bump, not receipted: stale
+    assert run_main("merge_docs") == 0
+    assert run_main("merge_surface") == 1

@@ -20,22 +20,22 @@ Four independent checks gate a receipt URL, each with its own failure
 message (Quine's athenaeum#1745 review round): the run must be a
 ``workflow_dispatch`` of the ``Evals`` workflow (``workflowName`` —
 otherwise a dispatch of e.g. ``ci.yml`` at the right SHA would satisfy the
-gate), its ``headSha`` must match the PR head, and its ``conclusion`` must
+gate), its ``headSha`` must match the PR head's LLM-surface content (below),
+and its ``conclusion`` must
 be ``success`` (a failed or cancelled eval run is not a receipt that
 anything actually passed).
 
-One exception to the exact-head rule: the merge wrapper
-(code-workspace-config ``scripts/gh-orch-pr-merge.sh``) pushes its own PATCH
-bump commit onto the PR head right before merging, which moves the head off
-the receipted commit without changing anything an eval can see. A receipt
-at the head's PARENT is therefore accepted when the head commit is a pure
-version bump: exactly one parent, ``pyproject.toml`` the only file changed,
-and the only changed lines its ``version = "..."`` assignment (one removed,
-one added). The repo carries no lockfile with a version stamp of its own
-package (``requirements-ci.lock`` pins dependencies only), so nothing else
-is allowed. The check is on content, not on who authored the commit: a
-commit that passes it cannot have moved an eval result. See
-``version_bump_parent`` / ``is_version_only_change``.
+The ``headSha`` check is on content, not on the exact commit (cost: every
+update-branch, merge-wrapper bump or rebase used to demand a fresh paid eval
+dispatch even when nothing an eval reads had changed). A run at commit X
+satisfies PR head H when X == H, or when ``git diff --name-only X H`` — a
+direct tree-to-tree diff, so it holds for a non-ancestor X too (a rebase, a
+force-push) — contains no path on the LLM surface: then every surface file
+is byte-identical between what was evaluated and what would merge. That
+covers the merge wrapper's PATCH bump, merges from ``develop`` that leave
+the surface alone, and rebases. If X is not in the checkout (an old head a
+force-push orphaned), it is fetched by sha; if it still cannot be read, the
+receipt is treated as stale. See ``receipt_covers_head``.
 
 CLI entry point is only used by the workflow; the importable functions are
 the unit under test.
@@ -147,57 +147,48 @@ def gh_run_lookup(repo: str, run_id: str) -> dict[str, str]:
     }
 
 
-#: A changed line (from a ``-U0`` diff) that only assigns pyproject's version.
-_VERSION_LINE_RE = re.compile(r'^[+-]\s*version\s*=\s*"[^"\n]+"\s*$')
-
-
-def is_version_only_change(changed_files: list[str], diff_text: str) -> bool:
-    """True when a commit's change is ONLY the ``pyproject.toml`` version line.
-
-    `changed_files` is ``git diff --name-only parent head``; `diff_text` is
-    ``git diff -U0 parent head -- pyproject.toml``. Exactly one removed and
-    one added line, both a ``version = "..."`` assignment; any other file or
-    any other changed line means the commit is not a pure bump.
-    """
-    if changed_files != ["pyproject.toml"]:
-        return False
-    plus = minus = 0
-    for line in diff_text.splitlines():
-        if line.startswith(("+++", "---", "@@")) or not line.startswith(("+", "-")):
-            continue
-        if not _VERSION_LINE_RE.match(line):
-            return False
-        if line.startswith("+"):
-            plus += 1
-        else:
-            minus += 1
-    return plus == 1 and minus == 1
-
-
 def _git(*args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(["git", *args], capture_output=True, text=True, check=False)
 
 
-def version_bump_parent(head_sha: str) -> str | None:
-    """Default `bump_parent_lookup`: the head's parent sha when the head commit
-    is a pure version bump (see `is_version_only_change`), else ``None``.
+def git_paths_changed_between(receipt_sha: str, head_sha: str) -> list[str] | None:
+    """Default `paths_changed_lookup`: ``git diff --name-only receipt head``.
 
-    A merge commit (two parents) is never a bump. Any git failure reads as
-    ``None`` — "not a bump", which falls back to the exact-head rule.
+    Two-dot on purpose: this compares the two TREES directly (what was
+    evaluated vs. what would merge), so it is correct whether or not
+    `receipt_sha` is an ancestor of `head_sha`. A receipt commit missing from
+    the checkout (an old head orphaned by a force-push or rebase) is fetched
+    by sha first. Returns ``None`` when either commit cannot be read, which
+    the caller treats as stale.
     """
-    parents = _git("rev-list", "--parents", "-n", "1", head_sha)
-    if parents.returncode != 0:
+    if _git("cat-file", "-e", f"{receipt_sha}^{{commit}}").returncode != 0:
+        _git("fetch", "--no-tags", "--quiet", "origin", receipt_sha)
+    diff = _git("diff", "--name-only", receipt_sha, head_sha)
+    if diff.returncode != 0:
         return None
-    shas = parents.stdout.split()
-    if len(shas) != 2:
-        return None
-    parent = shas[1]
-    names = _git("diff", "--name-only", parent, head_sha)
-    diff = _git("diff", "-U0", parent, head_sha, "--", "pyproject.toml")
-    if names.returncode != 0 or diff.returncode != 0:
-        return None
-    changed = [line for line in names.stdout.splitlines() if line]
-    return parent if is_version_only_change(changed, diff.stdout) else None
+    return [line for line in diff.stdout.splitlines() if line]
+
+
+def receipt_covers_head(
+    receipt_sha: str,
+    head_sha: str,
+    surface: list[str],
+    paths_changed_lookup: Callable[[str, str], list[str] | None],
+) -> tuple[bool, list[str]]:
+    """Does a receipt at `receipt_sha` still describe `head_sha`?
+
+    True when they are the same commit, or when no path changed between them
+    is on the LLM surface. Returns ``(covered, surface_paths_changed)``; the
+    second element names what made it stale (empty when covered, or when the
+    diff could not be read at all).
+    """
+    if receipt_sha == head_sha:
+        return True, []
+    changed = paths_changed_lookup(receipt_sha, head_sha)
+    if changed is None:
+        return False, []
+    hits = intersect_surface(changed, surface)
+    return (not hits), hits
 
 
 def check_receipt(
@@ -205,12 +196,14 @@ def check_receipt(
     head_sha: str,
     this_repo: str,
     run_lookup: Callable[[str, str], dict[str, str]],
-    bump_parent_lookup: Callable[[str], str | None] = version_bump_parent,
+    surface: list[str] | None = None,
+    paths_changed_lookup: Callable[[str, str], list[str] | None] = git_paths_changed_between,
 ) -> ReceiptCheck:
     """Decide whether `pr_body` carries a valid eval receipt for `head_sha`.
 
-    The run must be at `head_sha`, or at its parent when
-    `bump_parent_lookup(head_sha)` says the head is a pure version bump.
+    The run must be at `head_sha`, or at a commit whose LLM-surface files are
+    identical to `head_sha`'s (see `receipt_covers_head`). With no `surface`
+    given, only the exact head is accepted.
     """
     not_needed = _NOT_NEEDED_RE.search(pr_body)
     if not_needed:
@@ -255,27 +248,37 @@ def check_receipt(
             f"run {run_id} was triggered by {run.get('event')!r}, not "
             "`workflow_dispatch` — dispatch a fresh run.",
         )
-    receipted_at = head_sha
-    if run.get("headSha") != head_sha:
-        bump_parent = bump_parent_lookup(head_sha)
-        if bump_parent is None or run.get("headSha") != bump_parent:
+    receipt_sha = run.get("headSha") or ""
+    if receipt_sha != head_sha:
+        if surface is None:
+            covered, stale_hits = False, []
+        else:
+            covered, stale_hits = receipt_covers_head(
+                receipt_sha, head_sha, surface, paths_changed_lookup
+            )
+        if not covered:
+            why = (
+                "LLM-surface files changed since that commit: " + ", ".join(stale_hits)
+                if stale_hits
+                else "the receipt commit could not be compared with the head"
+            )
             return ReceiptCheck(
                 False,
-                f"run {run_id}'s headSha ({run.get('headSha')!r}) does not match "
-                f"this PR's head ({head_sha!r}) — the dispatch is stale, re-run it.",
+                f"run {run_id}'s headSha ({receipt_sha!r}) does not match "
+                f"this PR's head ({head_sha!r}) and {why} — the dispatch is "
+                "stale, re-run it.",
             )
-        receipted_at = bump_parent
     if run.get("conclusion") != "success":
         return ReceiptCheck(
             False,
             f"run {run_id} concluded {run.get('conclusion')!r}, not `success` "
             "— a failed or cancelled eval run is not a receipt.",
         )
-    if receipted_at != head_sha:
+    if receipt_sha != head_sha:
         return ReceiptCheck(
             True,
-            f"valid eval receipt: run {run_id} at {receipted_at}, the parent of "
-            f"head {head_sha}, which only bumps the pyproject.toml version "
+            f"valid eval receipt: run {run_id} at {receipt_sha}; no LLM-surface "
+            f"file differs between it and head {head_sha} "
             f"(conclusion: {run.get('conclusion')})",
         )
     return ReceiptCheck(
@@ -292,14 +295,16 @@ def evaluate(
     head_sha: str,
     this_repo: str,
     run_lookup: Callable[[str, str], dict[str, str]] = gh_run_lookup,
-    bump_parent_lookup: Callable[[str], str | None] = version_bump_parent,
+    paths_changed_lookup: Callable[[str, str], list[str] | None] = git_paths_changed_between,
 ) -> ReceiptCheck:
     """Full decision: empty intersection passes trivially; otherwise require a receipt."""
     hits = intersect_surface(changed_files, surface)
     if not hits:
         return ReceiptCheck(True, "no LLM surface touched — no receipt needed.")
 
-    result = check_receipt(pr_body, head_sha, this_repo, run_lookup, bump_parent_lookup)
+    result = check_receipt(
+        pr_body, head_sha, this_repo, run_lookup, surface, paths_changed_lookup
+    )
     if result.ok:
         return result
     touched = "\n".join(f"  - {h}" for h in hits)
