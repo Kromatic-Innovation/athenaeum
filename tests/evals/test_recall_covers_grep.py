@@ -1095,6 +1095,10 @@ def test_person_repo_disambiguation_excludes_wrong_page_vector(
 # ---------------------------------------------------------------------------
 
 
+# Nightly tier: printed measurement tables (doc input), not gates. The one
+# real assertion the precision table carried, the hybrid-knob wiring check,
+# runs in the default selection as test_vector_hybrid_override_changes_ranking.
+@pytest.mark.nightly
 def test_print_per_probe_class_summary(scale_fixture: _ScaleFixture) -> None:
     """Not an assertion -- a printed summary table, one row per probe
     class, of expected pages reached by grep/recall/hook and irrelevant
@@ -1174,6 +1178,45 @@ def _build_probe_relevance(*, probe: Probe, retrieved: Sequence[str]) -> ProbeRe
     )
 
 
+@pytest.mark.skipif(not _VECTOR_AVAILABLE, reason=_VECTOR_SKIP_REASON or "chromadb not installed")
+def test_vector_hybrid_override_changes_ranking(
+    scale_fixture: _ScaleFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Wiring self-check, extracted from the nightly precision table below:
+    ``config={"recall": {"hybrid": False}}`` must actually reach the vector
+    backend, so hybrid-on and hybrid-off rank differently for at least one
+    probe. If they never differ, the override is silently not landing (for
+    example because ``ATHENAEUM_RECALL_HYBRID`` is set in the environment
+    and outranks it, hence the ``delenv``). Stops at the first probe that
+    differs, so it costs a few vector queries, not a sweep."""
+    monkeypatch.delenv("ATHENAEUM_RECALL_HYBRID", raising=False)
+    fx = scale_fixture
+    assert fx.vector_cache_dir is not None  # guaranteed by the skipif above
+    hybrid_off: dict[str, object] = {"recall": {"hybrid": False}}
+    probes = _non_abstention_probes()
+    assert probes  # positive control: an empty loop would pass vacuously
+    for probe in probes:
+        on = _recall_ranked_uids(
+            fx.wiki_root, probe.query, search_backend="vector", cache_dir=fx.vector_cache_dir
+        )
+        off = _recall_ranked_uids(
+            fx.wiki_root,
+            probe.query,
+            search_backend="vector",
+            cache_dir=fx.vector_cache_dir,
+            config=hybrid_off,
+        )
+        if on != off:
+            return
+    pytest.fail(
+        f"scale={fx.corpus.scale!r}: vector-hybrid-on and vector-hybrid-off produced "
+        "IDENTICAL rankings for every probe -- the config={'recall': {'hybrid': False}} "
+        "override is not landing (check ATHENAEUM_RECALL_HYBRID and resolve_recall_hybrid's "
+        "precedence)"
+    )
+
+
+@pytest.mark.nightly
 def test_print_precision_contamination_tables_and_cap_signal(
     scale_fixture: _ScaleFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -116,6 +116,13 @@ from tests.evals.rollout import (
     resolve_user_prompt_hook,
 )
 
+# Nightly tier: this module compares the adapter with a launcher that execs
+# the same adapter (see the module docstring). The notice arithmetic and
+# wording are pinned in process by tests/test_context_overflow_1905.py, and
+# the launcher-reaches-adapter property by the three-probe smoke in
+# test_hook_byte_equivalence_1912.py, both in the default selection.
+pytestmark = pytest.mark.nightly
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 #: How many ``core`` probes to compare. The full 48 is what athenaeum#1894's

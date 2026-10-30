@@ -93,7 +93,7 @@ _EVALS_DIR = REPO_ROOT / "tests" / "evals"
 # helper deliberately does not chase -- the module-level mark already governs
 # whether the file is reachable by default).
 _MODULE_MARKER_RE = re.compile(
-    r"^pytestmark\s*=\s*pytest\.mark\.(eval|embedding|rollout)\s*$", re.MULTILINE
+    r"^pytestmark\s*=\s*pytest\.mark\.(eval|embedding|rollout|nightly)\s*$", re.MULTILINE
 )
 
 # Textual proof a test file genuinely spends tokens or spawns the real
@@ -154,6 +154,9 @@ def test_token_free_report_modules_carry_no_deselecting_marker() -> None:
         "test_rollout.py",
         "test_north_star_cli.py",
         "test_rollout_payload.py",
+        # Its single-probe byte-equivalence test runs by default; only the
+        # multi-probe sweep carries a FUNCTION-level `nightly` marker, which
+        # this module-level check deliberately does not see.
         "test_rollout_push_breadcrumb_spike.py",
         "test_north_star_verdicts.py",
         "test_rollout_api_mode.py",
@@ -174,3 +177,49 @@ def test_token_free_report_modules_carry_no_deselecting_marker() -> None:
             f"{name} carries pytest.mark.{match.group(1) if match else '?'} -- "
             "expected no deselecting marker"
         )
+
+
+# ---------------------------------------------------------------------------
+# The `nightly` tier: token-free tests too slow or measurement-only for the
+# PR gate. They must stay deselected by default, run somewhere (nightly.yml),
+# and never be able to spend tokens there.
+# ---------------------------------------------------------------------------
+
+_NIGHTLY_YML = REPO_ROOT / ".github" / "workflows" / "nightly.yml"
+
+
+def test_nightly_marker_is_registered_and_deselected_by_default() -> None:
+    options = _pytest_ini_options()
+    assert any(str(m).startswith("nightly:") for m in options["markers"])  # type: ignore[union-attr]
+    assert "not nightly" in str(options["addopts"])
+
+
+def test_nightly_workflow_selects_exactly_the_nightly_marker() -> None:
+    text = _NIGHTLY_YML.read_text(encoding="utf-8")
+    run_lines = [line for line in text.splitlines() if "pytest " in line and "-m " in line]
+    assert run_lines, "nightly.yml must run pytest with an explicit -m selection"
+    for line in run_lines:
+        assert "-m nightly" in line, line
+        assert "rollout" not in line and "eval" not in line, line
+
+
+def test_nightly_workflow_has_no_model_credentials() -> None:
+    """A test that spends tokens belongs under `rollout`/`eval`, which only
+    run where a key is deliberately loaded. nightly.yml loads none, so a
+    mis-marked live test fails or skips there instead of spending."""
+    text = _NIGHTLY_YML.read_text(encoding="utf-8")
+    for forbidden in ("ANTHROPIC_API_KEY", "load-secrets-action", "OP_SERVICE_ACCOUNT_TOKEN"):
+        assert forbidden not in text, forbidden
+
+
+def test_no_test_is_both_nightly_and_rollout() -> None:
+    """`nightly` is the token-free tier; a test carrying both markers would
+    be ambiguous about whether it may spend."""
+    offenders = []
+    for path in sorted((REPO_ROOT / "tests").rglob("test_*.py")):
+        if path.resolve() == Path(__file__).resolve():
+            continue  # this guard names both markers in its own source
+        source = path.read_text(encoding="utf-8")
+        if "pytest.mark.nightly" in source and re.search(r"pytest\.mark\.rollout\b", source):
+            offenders.append(str(path.relative_to(REPO_ROOT)))
+    assert not offenders, offenders
