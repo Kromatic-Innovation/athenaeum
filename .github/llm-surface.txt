@@ -1,76 +1,351 @@
-# LLM surface list — athenaeum#1731
+# LLM surface list — athenaeum#1731, migrated to symbols by athenaeum#2224
 #
-# One path per line, relative to the repo root. Blank lines and lines
-# starting with `#` are ignored. An entry ending in `/` matches any path
-# under that directory (prefix match); anything else must match a changed
-# path exactly.
+# One ENTRY per line, relative to the repo root. Blank lines and lines
+# starting with `#` are ignored (a `#` must start the line — there are no
+# trailing comments). Three forms, all legal:
+#
+#   src/athenaeum/prompts/                     prefix: every path under it
+#   src/athenaeum/context.py                   one whole file
+#   src/athenaeum/tiers.py::tier3_merge        one symbol inside a file
+#
+# A symbol is a top-level `def`/`class`, a `Class.method`, or a module-level
+# assignment target (a constant). The ONE parser is
+# `check_llm_surface_receipt.parse_surface_entry`; the rot check imports it
+# rather than re-implementing it.
 #
 # This is the ONE file both `scripts/check_llm_surface_receipt.py` (the
 # `.github/workflows/eval-receipt-check.yml` gate) and
-# `tests/test_llm_surface.py` (the rot check) read — see that test's
-# docstring for what "rot" means here.
+# `tests/test_llm_surface.py` (the rot check) read.
 #
-# Two provenances, both legitimate:
+# WHAT THE GATE DOES WITH IT (athenaeum#2223): for each entry it compares a
+# docstring-stripped AST fingerprint at the merge base and at the head, over
+# the UNION of the designations at both ends. So a comment, a docstring or a
+# reformat inside a designated symbol costs nothing, an edit to an
+# UNDESIGNATED function in the same file costs nothing, and deleting an entry
+# cannot hide a change to the symbol it named. Design of record:
+# `docs/design/eval-trigger-surface.md`.
 #
-#   MACHINE-ENFORCED — `tests/test_llm_surface.py` fails CI if either of
-#   these sets gains a member not listed below:
-#     - every `src/athenaeum/*.py` file that imports `LLMBackend`
-#       (`grep -l LLMBackend src/athenaeum/*.py`, the athenaeum#1731 AC1
-#       oracle)
-#     - every module registered in `src/athenaeum/prompt_registry.py`'s
-#       `PROMPT_META` (i.e. every module that owns a prompt indexed in
-#       `PROMPTS`)
+# WHY IT IS SYMBOL-LEVEL (athenaeum#2224): `config.py` (8k lines),
+# `librarian.py` (12k) and `tiers.py` (9k) used to be listed whole, so 68 of
+# the 141 PRs merged in the 30 days to 2026-10-30 tripped the gate and 66 of
+# those passed on free-text "not needed". An exemption that is the default
+# answer is an exemption nobody reads.
 #
-#   HAND-CURATED — from the athenaeum#1731 architecture survey (2026-09-16),
-#   not derived by any test, but no less real a surface: the model-knob
-#   resolution seam and the sidecar delivery path. Nothing removes these
-#   automatically, so an intentional removal (e.g. `config.py` losing its
-#   model-knob functions) should drop the entry in the same PR.
+# TWO PROVENANCES, both legitimate:
 #
-# The rot check is a SUBSET check (machine-enforced sets subset-of this
-# file), not equality — hand-curated entries are always legal even though
-# no test requires them.
+#   MACHINE-DERIVED — `tests/test_llm_surface.py` fails CI if any member of a
+#   derived set is missing from this file (D1-D5 of the design's §5.2). The
+#   derived blocks below are written out rather than computed at read time,
+#   because the gate must work from `git show` with no install; re-derive them
+#   by running that test's `model_call_sites` / `prompt_constant_entries` /
+#   `routing_seam_entries` helpers.
+#
+#   HAND-CURATED — response parsers, request builders and gating thresholds
+#   that no pattern finds (R3/R4/R5 of the design's §3). No test requires
+#   these, and each carries its own one-line reason below. Designation is NOT
+#   transitive: an edit to an undesignated helper that a designated symbol
+#   calls does not fire. That is an accepted limit (§5.2) — the backstops are
+#   D1 (moving logic OUT of a call site changes the call site), review, and
+#   curating a helper once it has been missed.
+#
+# Every check is a SUBSET check, never equality and never a count, so a
+# hand-curated entry is always legal and removing one never fails CI.
 
-# --- machine-enforced: LLMBackend importers (src/athenaeum/*.py) ---
-src/athenaeum/answers.py
-src/athenaeum/batch.py
-src/athenaeum/claim_kind.py
-src/athenaeum/cluster_comparator.py
-src/athenaeum/comparator.py
-src/athenaeum/comparator_instruments.py
-src/athenaeum/contradictions.py
-src/athenaeum/decay_bucket.py
-src/athenaeum/decay_sweep.py
-src/athenaeum/librarian.py
-src/athenaeum/models.py
-src/athenaeum/provider.py
-src/athenaeum/reasoning_screens.py
-src/athenaeum/recompare.py
-src/athenaeum/resolutions.py
-src/athenaeum/shadow_parity.py
-src/athenaeum/subject_population.py
-src/athenaeum/tiers.py
-src/athenaeum/wiki_dedupe.py
+# --- machine-derived D1: every function or method that calls the Anthropic
+# SDK directly (`.messages.create` / `.messages.batches.create`) ---
+src/athenaeum/audit.py::audit_page
+src/athenaeum/batch.py::execute_batch
+src/athenaeum/claim_kind.py::classify_claim_kind
+src/athenaeum/comparator.py::content_relation
+src/athenaeum/contradictions.py::detect_contradictions
+src/athenaeum/decay_bucket.py::classify_decay_bucket
+src/athenaeum/memory_class_backfill.py::classify_residual
+src/athenaeum/page_description.py::describe_pages
+src/athenaeum/paste_cleanup.py::propose_page
+src/athenaeum/paste_cleanup.py::verify_page
+src/athenaeum/provider.py::_AnthropicMessagesBoundary.create
+src/athenaeum/query_topics.py::extract_topics
+src/athenaeum/reasoning_tiers.py::run_t1_tier
+src/athenaeum/reasoning_tiers.py::run_t2_tier
+src/athenaeum/resolutions.py::propose_freetext_source_edits
+src/athenaeum/resolutions.py::propose_resolution
+src/athenaeum/rule_proposals.py::_draft_rule_proposal
+src/athenaeum/tiers.py::_decide_create_name_fold_or_mint
+src/athenaeum/tiers.py::_tier2_confirm_same_subject
+src/athenaeum/tiers.py::tier2_classify
+src/athenaeum/tiers.py::tier2_reclassify_larger_budget
+src/athenaeum/tiers.py::tier3_create
+src/athenaeum/tiers.py::tier3_merge
+src/athenaeum/tiers.py::tier3_merge_full
 
-# --- machine-enforced: modules registered in prompt_registry.py's PROMPTS ---
-src/athenaeum/audit.py
-src/athenaeum/page_description.py
-src/athenaeum/query_topics.py
-src/athenaeum/reasoning_tiers.py
-src/athenaeum/rule_proposals.py
+# --- machine-derived D2: every prompt constant registered in
+# `prompt_registry.py`'s PROMPT_META ---
+src/athenaeum/audit.py::AUDIT_SYSTEM
+src/athenaeum/audit.py::AUDIT_USER_TEMPLATE
+src/athenaeum/claim_kind.py::CLAIM_KIND_SYSTEM
+src/athenaeum/contradictions.py::_DETECT_SYSTEM
+src/athenaeum/decay_bucket.py::DECAY_BUCKET_SYSTEM
+src/athenaeum/page_description.py::_DESCRIBE_SYSTEM
+src/athenaeum/page_description.py::_DESCRIBE_USER_TEMPLATE
+src/athenaeum/query_topics.py::_SYSTEM_PROMPT
+src/athenaeum/query_topics.py::_USER_TEMPLATE
+src/athenaeum/reasoning_tiers.py::T1_SYSTEM_PROMPT
+src/athenaeum/reasoning_tiers.py::T2_SYSTEM_PROMPT
+src/athenaeum/resolutions.py::_FREETEXT_EDIT_SYSTEM
+src/athenaeum/resolutions.py::_RESOLVE_SYSTEM
+src/athenaeum/rule_proposals.py::_RULE_PROPOSAL_SYSTEM_PROMPT
+src/athenaeum/tiers.py::CLASSIFY_SYSTEM
+src/athenaeum/tiers.py::CLASSIFY_USER_TEMPLATE
+src/athenaeum/tiers.py::CREATE_SYSTEM
+src/athenaeum/tiers.py::CREATE_TEMPLATE
+src/athenaeum/tiers.py::MERGE_SYSTEM
+src/athenaeum/tiers.py::MERGE_SYSTEM_FULL
+src/athenaeum/tiers.py::MERGE_TEMPLATE
+src/athenaeum/tiers.py::MERGE_TEMPLATE_FULL
+src/athenaeum/tiers.py::PERSON_HINT_CLASSIFY_PROMPT
+src/athenaeum/tiers.py::PERSON_HINT_VERIFY_NOTE
 
-# --- hand-curated: the seam + prompt index itself ---
-src/athenaeum/config.py
-src/athenaeum/prompt_registry.py
-docs/design/prompts.md
+# --- machine-derived D3: the model-routing seam — `resolve_model`, every
+# module-level DEFAULT_*_MODEL, every `_get_*model`, the max-tokens and
+# thinking resolvers, and the prompt registry's own knob table ---
+src/athenaeum/claim_kind.py::_get_classify_model
+src/athenaeum/config.py::DEFAULT_CLASSIFY_MODEL
+src/athenaeum/config.py::DEFAULT_VERIFY_MODEL
+src/athenaeum/config.py::resolve_model
+src/athenaeum/contradictions.py::DEFAULT_CONTRADICTION_MODEL
+src/athenaeum/contradictions.py::_get_model
+src/athenaeum/decay_bucket.py::_get_classify_model
+src/athenaeum/prompt_registry.py::_META_ROWS
+src/athenaeum/provider.py::resolve_max_tokens
+src/athenaeum/provider.py::resolve_thinking
+src/athenaeum/query_topics.py::DEFAULT_TOPIC_MODEL
+src/athenaeum/query_topics.py::_get_topic_model
+src/athenaeum/reasoning_tiers.py::DEFAULT_T1_MODEL
+src/athenaeum/reasoning_tiers.py::DEFAULT_T2_MODEL
+src/athenaeum/resolutions.py::DEFAULT_RESOLVE_MODEL
+src/athenaeum/resolutions.py::_get_model
+src/athenaeum/rule_proposals.py::DEFAULT_RULE_PROPOSALS_MODEL
+src/athenaeum/rule_proposals.py::_get_rule_proposals_model
+src/athenaeum/search.py::DEFAULT_EMBEDDING_MODEL
+src/athenaeum/tiers.py::DEFAULT_WRITE_MODEL
+src/athenaeum/tiers.py::_get_classify_model
+src/athenaeum/tiers.py::_get_write_model
 
-# --- machine-enforced: on-disk .md prompt files loaded as live system
-# prompts (tiers.py's name_resolution_confirm.md /
-# create_name_variant_decision.md, via importlib.resources.files) ---
+# --- hand-curated: R3/R4 — reasoning entry points that take an `LLMBackend` and call through the
+# protocol rather than the SDK, so D1's `.messages.create` scan cannot see
+# them. Re-derive the candidate list with: every top-level function or method
+# in src/athenaeum/**.py with a parameter annotated `LLMBackend`. ---
+# free-text answers are resolved by a model call made through the backend
+src/athenaeum/answers.py::ingest_answers
+# writes the model's answer back onto the source page
+src/athenaeum/answers.py::_writeback_source
+# acts on the classifier's verdict
+src/athenaeum/claim_kind.py::stamp_claim_kind
+# drives the detector layer's pairwise comparisons
+src/athenaeum/cluster_comparator.py::run_cluster_comparator
+# the T1 screen that decides a pair never reaches T2
+src/athenaeum/cluster_comparator.py::_t1_rejects_pair
+# the path-level form of the same screen
+src/athenaeum/cluster_comparator.py::t1_rejects_pair_paths
+# builds the comparison request and reads its verdict
+src/athenaeum/comparator.py::compare_pages
+# persists what the comparator decided
+src/athenaeum/comparator.py::record_comparison
+# decides which siblings are offered to a model
+src/athenaeum/comparator_instruments.py::run_sibling_widening
+# acts on the decay classifier's verdict
+src/athenaeum/decay_bucket.py::stamp_decay_bucket
+# the orchestration decision: which tier calls are made for a file, and when a model call is skipped entirely (the R5 class the Attachment and Person-hint eval layers exercise end to end)
+src/athenaeum/librarian.py::process_one
+# acts on tier-3 model output
+src/athenaeum/librarian.py::_apply_tier3_results
+# decides which open questions are re-asked
+src/athenaeum/librarian.py::_run_reresolve_pass
+# the pre-tier screen that skips a model call
+src/athenaeum/reasoning_screens.py::_t1_pretier_skip_reason
+# the T1 screen's reject decision
+src/athenaeum/reasoning_screens.py::t1_screen_rejects_merge_proposal
+# the T2 screen's request and verdict
+src/athenaeum/reasoning_screens.py::t2_screen_merge_proposal
+# re-asks the comparator about pending merges
+src/athenaeum/recompare.py::recompare_pending_merges
+# runs a second model path for comparison
+src/athenaeum/shadow_parity.py::run_shadow_parity
+# the spend ceiling that stops shadow calls
+src/athenaeum/shadow_parity.py::_wrap_with_ceiling_guard
+# builds the tier-2 subject-confirmation request
+src/athenaeum/subject_population.py::build_tier2_confirm
+# proposes merges from a model call
+src/athenaeum/wiki_dedupe.py::propose_wiki_page_merges
+
+# --- hand-curated: R4 — response parsers. The shape a model answer is read into decides what
+# the rest of the pipeline does with it; a parser change moves outcomes
+# without touching a prompt or a call site. ---
+# parses the tier-2 classification response
+src/athenaeum/tiers.py::parse_tier2_entities
+# parses the tier-3 merge response
+src/athenaeum/tiers.py::parse_tier3_merge
+# parses the append-mode merge response
+src/athenaeum/tiers.py::parse_tier3_merge_append
+# parses the merge-ops response
+src/athenaeum/tiers.py::parse_merge_ops_response
+
+# --- hand-curated: R3/R5 — tier gating and request building in `tiers.py`. These decide
+# whether a model is asked at all, and with which candidates. ---
+# the programmatic match that SKIPS the model entirely
+src/athenaeum/tiers.py::tier1_programmatic_match
+# turns a tier-3 answer into actions
+src/athenaeum/tiers.py::tier3_derive_actions
+# the write path a tier-3 answer takes
+src/athenaeum/tiers.py::tier3_write
+# gates which create-name classifications reach a model
+src/athenaeum/tiers.py::gate_create_name_classifications
+# partitions classifications before they are acted on
+src/athenaeum/tiers.py::partition_code_artifact_classifications
+# resolves address-named classifications from a verdict
+src/athenaeum/tiers.py::resolve_address_named_classifications
+# validates a model-proposed name
+src/athenaeum/tiers.py::validate_create_name
+# applies the similarity resolution a model returned
+src/athenaeum/tiers.py::_apply_similarity_resolution
+# decides which open questions are re-asked
+src/athenaeum/tiers.py::reresolve_open_questions
+# the body of that decision
+src/athenaeum/tiers.py::_reresolve_open_questions_impl
+
+# --- hand-curated: R2/R3 — the request/capability seam in `models.py` and `provider.py`.
+# Pricing tables are deliberately NOT here: a rate change cannot move a
+# reasoning outcome. ---
+# parses the model identifier a call is routed to
+src/athenaeum/models.py::parse_model
+# decides which sampling params a model is sent
+src/athenaeum/models.py::_sampling_params_rejected
+# decides whether a prompt prefix is cached
+src/athenaeum/models.py::min_cacheable_prefix_tokens
+# decides whether the thinking knob is sent
+src/athenaeum/models.py::adaptive_thinking_supported
+# the estimate every budget gate is applied to
+src/athenaeum/models.py::estimate_prompt_tokens
+# the protocol every model call is made through
+src/athenaeum/provider.py::LLMBackend
+
+# --- hand-curated: R5 — the recall path in `search.py`: ranking, floors and index width decide
+# what reaches a model, and what the sidecar delivers. ---
+# the relevance floor
+src/athenaeum/search.py::meets_relevance_floor
+# the candidate cap
+src/athenaeum/search.py::apply_relevance_cap
+# how hybrid results are ranked
+src/athenaeum/search.py::reciprocal_rank_fusion
+# the RRF constant that ranking depends on
+src/athenaeum/search.py::_DEFAULT_RRF_K
+# the hybrid keyword/vector weighting
+src/athenaeum/search.py::_DEFAULT_HYBRID_FTS5_WEIGHT
+# the hybrid guard rank
+src/athenaeum/search.py::_DEFAULT_HYBRID_GUARD_RANK
+# the hybrid candidate count
+src/athenaeum/search.py::_DEFAULT_HYBRID_K
+# the HNSW search width — exactly the knob athenaeum#2036 changed under a free-text exemption
+src/athenaeum/search.py::_get_ef
+# the embedding call itself
+src/athenaeum/search.py::embed_texts
+# keyword scoring
+src/athenaeum/search.py::score_keyword_page
+# how a query is tokenized before scoring
+src/athenaeum/search.py::tokenize_keyword_query
+# what goes into the vector index
+src/athenaeum/search.py::VectorBackend.build_index
+# what comes out of it
+src/athenaeum/search.py::VectorBackend.query
+# the neighbour query the detector layer uses
+src/athenaeum/search.py::VectorBackend.query_neighbors
+
+# --- hand-curated: R2/R5 — `config.py` resolvers that route a call or gate what reaches a
+# model. config.py has over a hundred `resolve_*` functions; the rest
+# (locks, retention, pushes, ledgers) cannot move a reasoning outcome and
+# are deliberately absent. ---
+# which embedding model the recall path uses
+src/athenaeum/config.py::resolve_embedding_model
+# which reasoning screens run
+src/athenaeum/config.py::resolve_screening
+# which index answers a recall
+src/athenaeum/config.py::resolve_search_backend
+# the recall relevance floor
+src/athenaeum/config.py::resolve_recall_relevance_floor
+# the recall cap ceiling
+src/athenaeum/config.py::resolve_recall_cap_ceiling
+# whether recall is hybrid at all
+src/athenaeum/config.py::resolve_recall_hybrid
+# the hybrid weighting
+src/athenaeum/config.py::resolve_recall_hybrid_fts5_weight
+# the hybrid guard rank
+src/athenaeum/config.py::resolve_recall_hybrid_guard_rank
+# the hybrid candidate count
+src/athenaeum/config.py::resolve_recall_hybrid_k
+# whether recall is scope-aware
+src/athenaeum/config.py::resolve_scope_aware_recall_enabled
+# the cohesion floor a cluster must clear to be compared
+src/athenaeum/config.py::resolve_min_cluster_cohesion
+# which scopes that floor applies to
+src/athenaeum/config.py::resolve_min_cluster_cohesion_scopes
+# the name-similarity threshold
+src/athenaeum/config.py::resolve_name_similarity_threshold
+# the sibling-widening similarity floor
+src/athenaeum/config.py::resolve_sibling_widening_min_similarity
+# how many siblings are widened into
+src/athenaeum/config.py::resolve_sibling_widening_budget
+# how many sources enter a merge prompt
+src/athenaeum/config.py::resolve_max_merge_sources
+# the confidence gate on a merge verdict
+src/athenaeum/config.py::resolve_min_merge_confidence
+# the mean-similarity gate on a merge
+src/athenaeum/config.py::resolve_min_merge_mean_similarity
+# how much body text goes into a merge prompt
+src/athenaeum/config.py::resolve_merge_body_preview_chars
+# the confidence gate on a dedupe verdict
+src/athenaeum/config.py::resolve_wiki_dedupe_min_confidence
+# the size floor for dedupe candidates
+src/athenaeum/config.py::resolve_wiki_dedupe_min_body_chars
+# whether any reasoning screen runs
+src/athenaeum/config.py::resolve_reasoning_tier_any_screen_enabled
+# whether a T2 verdict is applied automatically
+src/athenaeum/config.py::resolve_reasoning_tier_t2_auto_apply_enabled
+# whether a reversible verdict is applied automatically
+src/athenaeum/config.py::resolve_reversible_verdict_auto_apply_enabled
+# the unmarked-sentence ratio a model answer must clear
+src/athenaeum/config.py::resolve_unmarked_sentence_max_ratio
+# how a raw file is chunked for model calls
+src/athenaeum/config.py::resolve_raw_file_llm_calls_chunk_chars
+# how many calls each chunk gets
+src/athenaeum/config.py::resolve_raw_file_llm_calls_per_chunk
+# the per-file model-call ceiling
+src/athenaeum/config.py::resolve_raw_file_max_api_calls
+# the same ceiling, per source
+src/athenaeum/config.py::resolve_raw_file_max_api_calls_by_source
+# the page-size threshold that routes oversize content
+src/athenaeum/config.py::resolve_page_size_threshold_chars
+# the hard ceiling above which nothing is asked
+src/athenaeum/config.py::resolve_oversize_hard_ceiling_chars
+# the threshold that triggers a rule proposal
+src/athenaeum/config.py::resolve_rule_proposals_threshold
+# how many exemplars go into the proposal prompt
+src/athenaeum/config.py::resolve_rule_proposals_exemplar_count
+
+# --- Whole-file entries, deliberately. These are small enough, or uniform
+# enough, that symbol granularity would buy nothing. ---
+# every `.md` file here is loaded as a live system prompt by tiers.py (machine-enforced: a new file in this directory is exactly as much a prompt edit as a PROMPT_META row)
 src/athenaeum/prompts/
-
-# --- hand-curated: the sidecar delivery path ---
+# the sidecar delivery path: this shell hook is what a recall actually reaches the model through
 examples/claude-code/user-prompt-recall.sh
+# the sidecar context builder — the whole module is prompt assembly
 src/athenaeum/context.py
+# the sidecar block renderer — likewise
 src/athenaeum/sidecar_blocks.py
-src/athenaeum/search.py
+# an LLMBackend importer with no direct call site and no backend-taking entry point; listed whole until its reasoning symbols are curated (D4 floor)
+src/athenaeum/decay_sweep.py
+
+# `docs/design/prompts.md` was listed here until athenaeum#2224. It is
+# GENERATED from the registry and byte-pinned by
+# `tests/test_prompt_goldens.py`, so designating it made the gate fire on
+# a file no human edits and no eval reads. The prompts themselves are
+# designated by D2 above.
