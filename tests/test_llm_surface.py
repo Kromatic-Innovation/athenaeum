@@ -50,16 +50,31 @@ _check_script = importlib.util.module_from_spec(_spec)
 sys.modules[_spec.name] = _check_script
 _spec.loader.exec_module(_check_script)
 _matches = _check_script._matches
+parse_surface_entry = _check_script.parse_surface_entry
 
 
-def _load_surface() -> set[str]:
+def _load_surface(path: Path = SURFACE_FILE) -> set[str]:
+    """Surface entries, verbatim: `path`, `dir/` or `path::symbol`.
+
+    The `path::symbol` form arrived with athenaeum#2223. This reader accepts
+    it the same way the gate's `load_surface` does — by keeping the entry
+    whole and leaving interpretation to the ONE shared parser,
+    `check_llm_surface_receipt.parse_surface_entry` (imported above, never
+    re-implemented here: the surface file has two readers and exactly one
+    grammar).
+    """
     lines: set[str] = set()
-    for raw in SURFACE_FILE.read_text(encoding="utf-8").splitlines():
+    for raw in path.read_text(encoding="utf-8").splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
         lines.add(line)
     return lines
+
+
+def _surface_paths(surface: set[str]) -> set[str]:
+    """The FILE each entry designates, dropping any `::symbol` part."""
+    return {parse_surface_entry(entry).path for entry in surface}
 
 
 def _llm_backend_importers() -> set[str]:
@@ -85,7 +100,7 @@ def test_surface_file_exists_and_is_non_empty() -> None:
 def test_llm_backend_importers_are_on_the_surface() -> None:
     surface = _load_surface()
     importers = _llm_backend_importers()
-    missing = importers - surface
+    missing = importers - _surface_paths(surface)
     assert not missing, (
         "the following src/athenaeum/*.py files import LLMBackend but are "
         f"missing from {SURFACE_FILE}: {sorted(missing)} — add them to that "
@@ -96,7 +111,7 @@ def test_llm_backend_importers_are_on_the_surface() -> None:
 def test_prompt_registry_modules_are_on_the_surface() -> None:
     surface = _load_surface()
     modules = _prompt_registry_modules()
-    missing = modules - surface
+    missing = modules - _surface_paths(surface)
     assert not missing, (
         "the following modules are registered in prompt_registry.py's "
         f"PROMPT_META but missing from {SURFACE_FILE}: {sorted(missing)} — "
@@ -116,3 +131,45 @@ def test_prompt_md_files_are_covered_by_the_surface() -> None:
         f"covered by any entry in {SURFACE_FILE}: {uncovered} — add "
         "`src/athenaeum/prompts/` (or the specific file) to that file."
     )
+
+
+def test_both_readers_accept_the_symbol_grammar(tmp_path: Path) -> None:
+    """athenaeum#2223 AC1: the gate's reader and this one parse the same grammar.
+
+    Driven through a synthetic surface file rather than the real one, because
+    the real list is still whole-file at this point (its migration to symbols
+    is a separate change) — so only a synthetic file can show that both
+    readers handle the new form today.
+    """
+    surface_file = tmp_path / "llm-surface.txt"
+    surface_file.write_text(
+        "# a comment\n"
+        "\n"
+        "src/athenaeum/prompts/\n"
+        "src/athenaeum/tiers.py\n"
+        "src/athenaeum/tiers.py::parse_merge_ops_response\n"
+        "src/athenaeum/search.py::VectorBackend.build_index\n"
+        "src/athenaeum/prompt_registry.py::_META_ROWS\n",
+        encoding="utf-8",
+    )
+
+    from_rot_check = _load_surface(surface_file)
+    from_gate = set(_check_script.load_surface(surface_file))
+    assert from_rot_check == from_gate
+
+    parsed = {(e.path, e.symbol) for e in map(parse_surface_entry, from_gate)}
+    assert parsed == {
+        ("src/athenaeum/prompts/", None),
+        ("src/athenaeum/tiers.py", None),
+        ("src/athenaeum/tiers.py", "parse_merge_ops_response"),
+        ("src/athenaeum/search.py", "VectorBackend.build_index"),
+        ("src/athenaeum/prompt_registry.py", "_META_ROWS"),
+    }
+    # A whole-file and a symbol entry for the SAME path are both legal, and
+    # collapse to one path for the subset checks above.
+    assert _surface_paths(from_gate) == {
+        "src/athenaeum/prompts/",
+        "src/athenaeum/tiers.py",
+        "src/athenaeum/search.py",
+        "src/athenaeum/prompt_registry.py",
+    }
