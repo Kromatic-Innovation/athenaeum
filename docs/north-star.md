@@ -4,7 +4,9 @@
 
 **Status:** PURPOSE DOCUMENT. This is the canonical statement of athenaeum's
 intent and operating principles, ratified by the operator in the 2026-08-14
-intake-architecture review. Other documents implement pieces of it and
+intake-architecture review and amended by the operator on 2026-10-30 (§2.2's
+resolution rule, §2.7's extension to schema, and the new §2.12). Other
+documents implement pieces of it and
 reference this page rather than restating it. When a design dispute has no
 obvious winner, this page is the tie-breaker.
 
@@ -56,13 +58,30 @@ and enforceable in one place. Canonical:
 
 ### 2.2 One ladder — conformance sets depth, never admission
 
-All input flows one tiered escalation: deterministic handling first, then
-cheap reasoning, then expensive reasoning, then a human. A submission that
-already conforms to a shape the librarian understands enters low and costs
-nearly nothing; one that does not climbs until something can absorb it.
-There are no per-writer entry points and no typed interfaces at the gate —
-there is exactly one conformance format, and the librarian owns routing and
-schema. Canonical: [`docs/design/field-corrections.md`](design/field-corrections.md) §1.1.
+All input flows one tiered ladder: deterministic handling first, then
+reasoning, then a human. A submission that already conforms to a shape the
+librarian understands enters low and costs nearly nothing; one that does not
+goes on until something can absorb it. There are no per-writer entry points
+and no typed interfaces at the gate — there is exactly one conformance
+format, and the librarian owns routing and schema.
+
+**Which reasoning tier answers a question is measured, not climbed.** The
+ladder is not a price ladder that escalates automatically from a cheap model
+to an expensive one. For each class of question the librarian asks — is this
+address this person's, are these two pages one entity, does this note
+contradict that fact — the tier is chosen by its measured accuracy on evals
+for that class. If a model resolves the class at measured accuracy, that
+model is the default for it, whatever it costs relative to the others.
+
+Human attention is the scarcest resource in the system: no operator answers
+hundreds of questions a day. The human tier is therefore the last resort,
+for a question whose calibrated confidence remains below threshold after the
+best measured tier has answered it. Confidence thresholds are calibrated
+against evals and tracked over time, never guessed. Better calibration, and
+absorbing model improvements as they arrive, is how the volume of human
+questions falls. Canonical:
+[`docs/design/field-corrections.md`](design/field-corrections.md) §1.1 (the
+conformance half; this section owns the resolution rule).
 
 ### 2.3 Everything is dispositioned — and not everything is memory
 
@@ -134,6 +153,15 @@ caution: raw intake is untrusted, and an auto-adopted rule would be
 persistent, deterministic write influence granted by the very content it
 processes.
 
+The same holds for **schema**. A deployment's page types and page structure
+are configuration too, and the librarian works within them. When filed data
+does not fit — one person with several distinct deal or engagement records,
+say, where a flat per-page field set can hold only one — the librarian does
+not force the data into a shape that loses or conflates information. It files
+what fits, and proposes a schema amendment (here, a deal entity type) through
+the pending-decisions queue (§2.8). A schema proposal is adopted by a human,
+the same as a rule.
+
 ### 2.8 One queue of questions, answered through the one way in
 
 Everything that needs human or external input — contradictions, merge
@@ -173,6 +201,32 @@ and adds the two classes it is silent about: *operational* state (ledgers and
 queues, durable but not reconstructible) and *config* (§2.7's operator-authored
 rules and manifests).
 
+### 2.12 Filing is verification — the librarian owns what it files
+
+The librarian is the party responsible for the library being organised:
+nothing misfiled, nothing invented. Raw intake is untrusted as to its
+*truth*, not only its shape (§2.7). So every value or fact the librarian
+files is checked, before it is absorbed, for consistency with what the store
+already holds and with the source it cites. Inconsistencies look like:
+
+- a contact value already attributed to someone else;
+- an address whose local part names a different person;
+- a value absent from the source it cites;
+- a person-shaped value landing on an organisation's page.
+
+A failed check is not a rejection (§2.2: nothing is refused at the gate). The
+value is flagged and goes up the ladder to reasoning that can determine where
+it truly belongs, and it is filed there. An address that names someone else
+is attributed to its real owner, or, if the person genuinely uses it,
+recorded as a structured alias with provenance. Only a question that stays
+below calibrated confidence reaches a human. Quarantine (§2.3) is for what
+cannot be placed, not a substitute for placing it.
+
+This binds every writer, the librarian's own maintenance paths included:
+migrations, repairs, folds, compiles. A value moved by a repair is filed
+again, and is checked again. There is no back door around verification —
+it is part of what one way in (§2.1) means.
+
 ## 3. What we deliberately do not do
 
 Durable rejections — each was considered and declined for a reason that
@@ -193,6 +247,12 @@ outlives the session that considered it:
   direction.
 - **Action-policy predicates in the memory layer.** Consumers own their
   policies (§2.6).
+- **Escalating by price instead of by measured accuracy.** A question goes to
+  the tier evals show can answer its class, and to a human only below
+  calibrated confidence (§2.2).
+- **Unverified internal writes.** Migrations, repairs, folds and compiles
+  file values like any other writer, and are checked like any other
+  writer (§2.12).
 - **Excluding a semantically live source from intake.** If processing a
   source is too expensive, the answer is a cheaper tier for it — rules, a
   courtesy request to the producer, or both — never a locked door. Exclusion

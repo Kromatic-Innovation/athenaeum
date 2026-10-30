@@ -7,7 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **North star: filing is verification, tiers are measured, schema is data
+  (`docs/north-star.md`, amended 2026-10-30).** New §2.12 makes the librarian
+  responsible for what it files: every value is checked against the store and
+  its cited source before it is absorbed, a failed check is escalated to
+  reasoning that files the value where it truly belongs (never just refused),
+  and the rule binds internal writers such as migrations, repairs, folds and
+  compiles. §2.2 now chooses the reasoning tier for each question class by
+  measured eval accuracy rather than by escalating up a price ladder, with a
+  human asked only below a calibrated confidence threshold. §2.7 extends
+  "rules are data" to schema: data that does not fit the configured page
+  types produces a schema-amendment proposal for a human to adopt. Docs only;
+  no behaviour changes in this release.
+
 ### Added
+
+- **Design: attribution verification for contact values
+  (`docs/design/attribution-verification.md`, epic athenaeum#2192).** Specifies
+  one verification seam that every contact-value writer calls, the librarian's
+  own migrations, folds and compiles included; an ordered deterministic check
+  catalogue; escalation of suspects to the model tier evals measure for each
+  question class, with re-attribution to the real owner, structured aliases and
+  same-entity merge proposals; a human queue only below calibrated confidence;
+  observe mode before enforce; and the calibration eval that sets tiers and
+  thresholds. Docs only; no behaviour changes in this release.
 
 - **A merge now folds the absorbed uid's contact record, and `athenaeum
   repair --contact-records` cleans up the ones earlier merges left (issue
