@@ -7,107 +7,94 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-10-30
+
+First release since 0.22.43 (2026-10-25). The intermediate `0.22.44`–`0.22.58`
+versions were per-merge build numbers on `develop` that were never tagged or
+published; this section covers the whole span. This is a MINOR release
+because it adds public surface: a second top-level package with its own
+console script, a new `athenaeum receipts` command group, and three new
+optional extras. Nothing was removed. Detailed entries follow the summary,
+grouped by merge, so `### Added` / `### Changed` / `### Fixed` repeat; changes
+that only affect this project's own CI and contributor tooling are collected
+at the end under `### Internal`.
+
+**Upgrading from 0.22.43**
+
+Every new capability below is opt-in. A deployment that changes no
+configuration keeps its 0.22.43 behaviour, except for the points marked
+"behaviour change".
+
+- **New optional extras.** None is needed for a plain install.
+  - `signing`: Ed25519 sealing of athenaeum's own transcript receipts
+    (`pip install 'athenaeum[signing]'`).
+  - `witness-sign`: Ed25519 signing for the promptwitness ledger.
+  - `witness-anchor`: OpenTimestamps anchoring for the promptwitness ledger.
+- **New commands.**
+  - `athenaeum receipts seal | verify | anchor | attest-readout`.
+  - A new `promptwitness` console script (`status`, `keygen`, `hook`,
+    `anchor`, `verify`, `demo`).
+  - `athenaeum repair --contact-records`, dry-run by default.
+- **New top-level import name.** The wheel now installs a `promptwitness`
+  package next to `athenaeum`. It is standard-library-only at import time and
+  never imports `athenaeum`. If your environment already has an unrelated
+  module named `promptwitness`, the two will collide.
+- **New configuration keys, all off by default:**
+  `librarian.receipt_sealer` (and `librarian.receipt_signing.*`),
+  `librarian.witness_ledger_enabled`, `librarian.witness_attestation_enabled`,
+  and, for the Claude Code hook, `ATHENAEUM_WITNESS_LEDGER_ENABLED` and
+  `ATHENAEUM_WITNESS_ANCHOR_INTERVAL_MINUTES`. An unrecognised
+  `receipt_sealer` or `key_provider` value now raises instead of silently
+  not sealing.
+- **Behaviour change: merges fold contact records.** `dedupe persons --apply`
+  and an approved `fold-into-existing` now also fold the absorbed person's
+  contact record into the surviving one and retire the absorbed copy (it is
+  renamed and logged, never deleted). If you merged person pages before
+  upgrading, run `athenaeum repair --contact-records` to see what earlier
+  merges left behind, then re-run it with `--apply` to fold those records.
+  Divergent or ambiguous records are reported and left for you.
+- **Behaviour change: quieter contact-surface logging.** Each load now logs
+  one summary line instead of one WARNING per collided uid or address; the
+  per-key lines moved to DEBUG.
+- **Behaviour change: new frontmatter keys on `remember`.** A memory saved
+  through the MCP `remember` tool with the default `claude:inferred` source
+  now also records `model` and `originSessionId`. The `source` value itself
+  is unchanged.
+- **Deprecation timeline.** `athenaeum merges` and `athenaeum questions`
+  still work, and their warnings now name `0.24.0` as the removal release.
+  Move to `athenaeum decisions` before then.
+
+**Highlights**
+
+- **promptwitness (new package).** A harness-agnostic, hash-chained ledger
+  that records that a human typed each prompt, without storing any prompt
+  text. It ships a chain verifier, optional Ed25519 signing (file or OS
+  keystore keys), optional external anchoring (OpenTimestamps, and RFC 3161
+  when you configure a timestamp authority), a Claude Code hook adapter, and
+  `promptwitness verify` / `promptwitness demo` for checking a transcript
+  against the ledger turn by turn.
+- **Receipt sealing and witness attestation.** Transcript receipts can be
+  signed with a key held outside the nightly process, verified with only the
+  public key, and anchored nightly, with anchor records mirrored into the
+  knowledge repo so that a deleted ledger is still detectable. Intake can
+  attest `user-stated` memories against the witness ledger, and
+  witness-corroborated claims rank in source-precedence tier 1 alongside
+  `user:` (no existing rank moved). `athenaeum receipts attest-readout`
+  reports witnessed hits and every provenance miss.
+- **Contact-record fold and repair.** Merges no longer leave an absorbed
+  person's contact record behind, and `athenaeum repair --contact-records`
+  cleans up records that earlier merges, or duplicate copies of the same
+  record, left claiming one uid. `recall <email>` is much faster on large
+  stores, because it no longer rebuilds the whole entity index for a
+  single-address lookup.
+- **CI and evaluation gate rework (contributors only).** The eval-receipt
+  gate now judges a pull request by the base branch's copy of its own rules,
+  identifies the LLM surface by symbol rather than by file, and accepts a
+  receipt across rebases when nothing an eval reads has changed. A new
+  `clean-venv` CI job installs the documented `pip install -e ".[dev]"` path
+  without the lock file. None of this changes the installed package.
+
 ### Changed
-
-- **The eval-receipt gate is judged by the BASE commit's copy of itself
-  (issue athenaeum#2227).** `.github/workflows/eval-receipt-check.yml` ran
-  `python scripts/check_llm_surface_receipt.py` out of the `pull_request`
-  checkout, so a PR's own copy of the script decided that PR — and since the
-  merge wrapper treats any failed check as blocking, a one-line edit to the
-  script in the same PR would have bypassed it. The script, and every
-  repo-local file it imports, is now materialised from
-  `pull_request.base.sha` with `git show` into `$RUNNER_TEMP` and run from
-  there; the merge base's copy of the surface list is passed alongside the
-  head's, so the union rule still applies. A base commit that predates the
-  script falls back to the head copy with a `::warning::`.
-  `tests/test_eval_receipt_gate_from_base.py` extracts the workflow's own
-  shell bodies and runs them against throwaway repos — including the case
-  that matters, a PR that weakens the gate and is failed by the base version
-  anyway — so the recipe is tested rather than described. `ci.yml` is
-  untouched and nothing new is installed.
-
-- **The eval gate's `not needed` escape is structured and checked (issue
-  athenaeum#2226).** The free-text form no longer passes when the reasoning
-  surface changed; the replacement is
-  `Evals: not needed — <category>: <symbol>[, <symbol>...]` with a category
-  from a closed vocabulary (`rename-only`, `log-or-error-text`, `dead-code`,
-  `refactor-equivalent`, `gate-plumbing`). The named symbol set must EQUAL the
-  set the gate found changed — the failure prints both sets and the
-  difference. That is all the gate checks (operator ruling 2026-10-30:
-  symbol-match only). All five categories are reviewer-checked: the gate
-  publishes each changed symbol's docstring-stripped `ast.unparse` before and
-  after to `$GITHUB_STEP_SUMMARY`, so a reviewer reads function bodies rather
-  than files. Machine re-hash checks for `rename-only` and
-  `log-or-error-text` are deferred until misuse is observed. When nothing designated changed, no line is required at all.
-  Vocabulary documented in `tests/evals/README.md`.
-
-- **An eval receipt now survives a `develop` merge or a rebase (issue
-  athenaeum#2225).** `receipt_covers_head` keeps its name, its call site and
-  its `(covered, stale)` shape, and gains the symbol-fingerprint COVERS rule:
-  a passing run at commit X satisfies head H when, for every designated
-  symbol, either X and H agree structurally, or the PR changed that symbol at
-  neither point — in which case the difference arrived from `develop`, where
-  it was evaluated under its own PR. athenaeum#2206 compared the two trees on
-  surface paths, so a rebase that brought in another PR's `tiers.py` change
-  invalidated a perfectly good receipt and cost a re-dispatch. Fails closed:
-  an unreadable receipt commit (fetched by sha first) or an unresolvable merge
-  base is not covered, and the failure text now names the symbols that made
-  the receipt stale rather than the files. `pyproject.toml` is still not
-  designated, so the merge wrapper's version bump is still covered.
-
-- **The LLM surface is designated by SYMBOL, and the designation is derived
-  rather than transcribed (issue athenaeum#2224).** `.github/llm-surface.txt`
-  moves from whole-file entries to `path::symbol` ones: `config.py` (8k
-  lines), `librarian.py` (12k), `tiers.py` (9k), `models.py` and `search.py`
-  are no longer listed whole, so an edit to an undesignated function in one of
-  them no longer demands a paid eval dispatch. `tests/test_llm_surface.py`
-  gains five derivations, each a membership check with a counter-example test:
-  **D1** every function or method that calls the Anthropic SDK directly,
-  **D2** every `PROMPT_META` row as `path::CONSTANT`, **D3** the model-routing
-  seam by AST name pattern, **D4** every `LLMBackend` importer (loosened to
-  "at least one entry of any form"), and **D5** no entry naming a symbol that
-  no longer resolves. D1 closes the gap the old substring oracle had:
-  `paste_cleanup.py` and `memory_class_backfill.py` call
-  `client.messages.create` without naming `LLMBackend`, so neither was on the
-  surface at all. `docs/design/prompts.md` is dropped (generated, and
-  byte-pinned by `tests/test_prompt_goldens.py`). Measured by replaying the
-  predicate over every PR merged to `develop` in the 30 days to 2026-10-30
-  (`scripts/replay_fire_over_merged_prs.py`,
-  `docs/measurements/eval-fire-replay-2026-10-30.md`): of the 68 PRs that
-  tripped the old gate, 34 would not trip the new one at all.
-
-- **"Dispatch once, at the final reviewed head" is now written down, and the
-  eval gate says it (issue athenaeum#2228).** `tests/evals/README.md` gains
-  the canonical statement of the rule — dispatch only when review is
-  complete, the gate reports a changed reasoning surface, and no passing run
-  already covers the head; never for a `develop` merge, a rebase, or a head
-  that already has a run. There is no automatic retry: a red run is a finding
-  to investigate (operator ruling 2026-10-30; small-sample flakiness is fixed
-  at source by athenaeum#2231). The gate's own
-  failure text carries a one-sentence version, because that is what a
-  dispatching agent reads at decision time: it no longer says "the dispatch
-  is stale, re-run it", which was the most likely driver of the measured
-  churn (19 of 23 paid runs in 30 days went to three PR branches, five of
-  them following a `Merge develop` with no surface delta at all). The
-  README's receipt section keeps athenaeum#2206's content-based coverage and
-  reconciles its "re-dispatch after the last surface change" wording with the
-  new rule.
-
-- **The eval-receipt gate decides on structure, not on touched paths (issue
-  athenaeum#2223).** `.github/llm-surface.txt` gains a `path::symbol` form —
-  a top-level `def`/`class`, a `Class.method`, or a module-level constant —
-  and `scripts/check_llm_surface_receipt.py` now asks whether a designated
-  symbol's docstring-stripped AST differs between the merge base and the
-  head (`fire`), instead of whether its file appears in the changed-path
-  list. A comment, a docstring or a reformat inside a designated function no
-  longer demands a paid eval dispatch; a one-literal change inside one still
-  does, and an edit to an undesignated function in the same file does not.
-  The decision uses the UNION of the designations at both ends, so a PR
-  cannot delete its own entry to hide a change, and missing, renamed or
-  unparseable symbols count as changed (fail closed). The whole-file and
-  `dir/` prefix forms keep their exact meaning, so the list itself is
-  unchanged by this release and a rollback to whole-file entries needs no
-  code change. Stdlib only — no install is added to the gate's workflow.
 
 - **North star: filing is verification, tiers are measured, schema is data
   (`docs/north-star.md`, amended 2026-10-30).** New §2.12 makes the librarian
@@ -731,6 +718,108 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `repair --backfill-sources` against a fixture corpus flips 3 of 4
   previously-misclassified `user-stated` results back to their correct
   channel.
+
+### Internal
+
+- **The eval-receipt gate is judged by the BASE commit's copy of itself
+  (issue athenaeum#2227).** `.github/workflows/eval-receipt-check.yml` ran
+  `python scripts/check_llm_surface_receipt.py` out of the `pull_request`
+  checkout, so a PR's own copy of the script decided that PR — and since the
+  merge wrapper treats any failed check as blocking, a one-line edit to the
+  script in the same PR would have bypassed it. The script, and every
+  repo-local file it imports, is now materialised from
+  `pull_request.base.sha` with `git show` into `$RUNNER_TEMP` and run from
+  there; the merge base's copy of the surface list is passed alongside the
+  head's, so the union rule still applies. A base commit that predates the
+  script falls back to the head copy with a `::warning::`.
+  `tests/test_eval_receipt_gate_from_base.py` extracts the workflow's own
+  shell bodies and runs them against throwaway repos — including the case
+  that matters, a PR that weakens the gate and is failed by the base version
+  anyway — so the recipe is tested rather than described. `ci.yml` is
+  untouched and nothing new is installed.
+
+- **The eval gate's `not needed` escape is structured and checked (issue
+  athenaeum#2226).** The free-text form no longer passes when the reasoning
+  surface changed; the replacement is
+  `Evals: not needed — <category>: <symbol>[, <symbol>...]` with a category
+  from a closed vocabulary (`rename-only`, `log-or-error-text`, `dead-code`,
+  `refactor-equivalent`, `gate-plumbing`). The named symbol set must EQUAL the
+  set the gate found changed — the failure prints both sets and the
+  difference. That is all the gate checks (operator ruling 2026-10-30:
+  symbol-match only). All five categories are reviewer-checked: the gate
+  publishes each changed symbol's docstring-stripped `ast.unparse` before and
+  after to `$GITHUB_STEP_SUMMARY`, so a reviewer reads function bodies rather
+  than files. Machine re-hash checks for `rename-only` and
+  `log-or-error-text` are deferred until misuse is observed. When nothing designated changed, no line is required at all.
+  Vocabulary documented in `tests/evals/README.md`.
+
+- **An eval receipt now survives a `develop` merge or a rebase (issue
+  athenaeum#2225).** `receipt_covers_head` keeps its name, its call site and
+  its `(covered, stale)` shape, and gains the symbol-fingerprint COVERS rule:
+  a passing run at commit X satisfies head H when, for every designated
+  symbol, either X and H agree structurally, or the PR changed that symbol at
+  neither point — in which case the difference arrived from `develop`, where
+  it was evaluated under its own PR. athenaeum#2206 compared the two trees on
+  surface paths, so a rebase that brought in another PR's `tiers.py` change
+  invalidated a perfectly good receipt and cost a re-dispatch. Fails closed:
+  an unreadable receipt commit (fetched by sha first) or an unresolvable merge
+  base is not covered, and the failure text now names the symbols that made
+  the receipt stale rather than the files. `pyproject.toml` is still not
+  designated, so the merge wrapper's version bump is still covered.
+
+- **The LLM surface is designated by SYMBOL, and the designation is derived
+  rather than transcribed (issue athenaeum#2224).** `.github/llm-surface.txt`
+  moves from whole-file entries to `path::symbol` ones: `config.py` (8k
+  lines), `librarian.py` (12k), `tiers.py` (9k), `models.py` and `search.py`
+  are no longer listed whole, so an edit to an undesignated function in one of
+  them no longer demands a paid eval dispatch. `tests/test_llm_surface.py`
+  gains five derivations, each a membership check with a counter-example test:
+  **D1** every function or method that calls the Anthropic SDK directly,
+  **D2** every `PROMPT_META` row as `path::CONSTANT`, **D3** the model-routing
+  seam by AST name pattern, **D4** every `LLMBackend` importer (loosened to
+  "at least one entry of any form"), and **D5** no entry naming a symbol that
+  no longer resolves. D1 closes the gap the old substring oracle had:
+  `paste_cleanup.py` and `memory_class_backfill.py` call
+  `client.messages.create` without naming `LLMBackend`, so neither was on the
+  surface at all. `docs/design/prompts.md` is dropped (generated, and
+  byte-pinned by `tests/test_prompt_goldens.py`). Measured by replaying the
+  predicate over every PR merged to `develop` in the 30 days to 2026-10-30
+  (`scripts/replay_fire_over_merged_prs.py`,
+  `docs/measurements/eval-fire-replay-2026-10-30.md`): of the 68 PRs that
+  tripped the old gate, 34 would not trip the new one at all.
+
+- **"Dispatch once, at the final reviewed head" is now written down, and the
+  eval gate says it (issue athenaeum#2228).** `tests/evals/README.md` gains
+  the canonical statement of the rule — dispatch only when review is
+  complete, the gate reports a changed reasoning surface, and no passing run
+  already covers the head; never for a `develop` merge, a rebase, or a head
+  that already has a run. There is no automatic retry: a red run is a finding
+  to investigate (operator ruling 2026-10-30; small-sample flakiness is fixed
+  at source by athenaeum#2231). The gate's own
+  failure text carries a one-sentence version, because that is what a
+  dispatching agent reads at decision time: it no longer says "the dispatch
+  is stale, re-run it", which was the most likely driver of the measured
+  churn (19 of 23 paid runs in 30 days went to three PR branches, five of
+  them following a `Merge develop` with no surface delta at all). The
+  README's receipt section keeps athenaeum#2206's content-based coverage and
+  reconciles its "re-dispatch after the last surface change" wording with the
+  new rule.
+
+- **The eval-receipt gate decides on structure, not on touched paths (issue
+  athenaeum#2223).** `.github/llm-surface.txt` gains a `path::symbol` form —
+  a top-level `def`/`class`, a `Class.method`, or a module-level constant —
+  and `scripts/check_llm_surface_receipt.py` now asks whether a designated
+  symbol's docstring-stripped AST differs between the merge base and the
+  head (`fire`), instead of whether its file appears in the changed-path
+  list. A comment, a docstring or a reformat inside a designated function no
+  longer demands a paid eval dispatch; a one-literal change inside one still
+  does, and an edit to an undesignated function in the same file does not.
+  The decision uses the UNION of the designations at both ends, so a PR
+  cannot delete its own entry to hide a change, and missing, renamed or
+  unparseable symbols count as changed (fail closed). The whole-file and
+  `dir/` prefix forms keep their exact meaning, so the list itself is
+  unchanged by this release and a rollback to whole-file entries needs no
+  code change. Stdlib only — no install is added to the gate's workflow.
 
 
 ## [0.22.43] - 2026-10-25
