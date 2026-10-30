@@ -637,7 +637,7 @@ stable names for this document. Issue numbers are on the epic.
 | C | Context checks C1 to C3, with their per-run indexes | B |
 | D | Calibration eval: dataset generator, `judge_contact_attribution` with prompt file and registry entry, metrics, threshold derivation, shipped calibration record (§12) | B |
 | E | Escalation and placement in observe (shadow) mode: memo, question classes, the placement executor for every outcome in §7, `identifier_relation`, masked human-queue items, `attribution show` and `place` CLIs | C, D |
-| F | Enforce: the `librarian.attribution.mode` knob with `observe`, `enforce` and `auto`, per-writer enforce branches, the staleness preflight, `auto` as the shipped default | E |
+| F | Enforce: the `librarian.attribution.mode` knob with `observe`, `enforce` and `auto`, per-writer enforce branches (including the scrub's), the staleness preflight, `auto` as the shipped default | E, G |
 | G | Prose-compile scrub at `tier3_create` and `tier3_merge` (§10.2) | B |
 | H | Orphan contact records on page removal, and repair's report-and-retire mode (§10.3) | athenaeum#2196 |
 | I | `contact-surface-lint`, including `--attribution` report mode (§10.4) | C, H |
