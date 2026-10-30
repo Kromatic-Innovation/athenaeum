@@ -145,6 +145,12 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
+          # Reuse downloaded wheels across runs; keyed on both dependency
+          # manifests so a lock or range change starts a fresh cache.
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements-ci.lock
 
       - name: Install dependencies (with vector extras)
         run: |
@@ -158,8 +164,28 @@ jobs:
       - name: Lint with ruff
         run: ruff check src/ tests/
 
+      # Parallel across the runner's cores via pytest-xdist. `loadfile`, not
+      # `load`/`worksteal`: several modules build an expensive MODULE-scoped
+      # fixture (tests/evals/test_recall_covers_grep.py's index build,
+      # test_hook_byte_equivalence_1912.py's 48-probe comparison), and
+      # spreading one module's tests across workers would rebuild it on each.
+      # pytest-cov combines the per-worker coverage data itself, so the 75%
+      # floor still gates the whole suite. `--durations=30` keeps the slowest
+      # tests visible in every log for the next round of tuning.
+      # tests/conftest.py's `pytest_xdist_make_scheduler` additionally splits
+      # test_recall_covers_grep.py by its `scale` param, its slowest module.
+      #
+      # The one test deselected here runs serially in the next step instead:
+      # it races a 20ms heartbeat thread and fails under 4-way CPU
+      # contention (athenaeum#2229, a product-side read-during-rewrite race),
+      # while never failing serially.
       - name: Run tests
-        run: pytest tests/ -v --tb=short --cov=athenaeum --cov-report=term-missing --cov-fail-under=75
+        run: pytest tests/ -n auto --dist loadfile -v --tb=short --durations=30 --cov=athenaeum --cov-report= --deselect tests/test_runlock.py::TestLockHeldMessageDetail::test_message_reports_last_heartbeat_age_after_a_bump
+
+      # Appends to the parallel step's coverage data, so the 75% floor is
+      # enforced on the combined total of BOTH steps.
+      - name: Run contention-sensitive tests serially
+        run: pytest tests/test_runlock.py::TestLockHeldMessageDetail::test_message_reports_last_heartbeat_age_after_a_bump -v --tb=short --cov=athenaeum --cov-append --cov-report=term-missing --cov-fail-under=75
 
   # hestia#596 — BLOCKING type check. The package ships `py.typed` (a PEP 561
   # assertion of type correctness to downstream consumers); mypy now enforces
@@ -204,7 +230,7 @@ jobs:
   # reviewer bootstrapping the project from CONTRIBUTING.md.
   #
   # Deliberately NOT a second full matrix leg: `test` already covers "does the
-  # suite pass", at ~25 minutes. This job answers the narrower question "can the
+  # suite pass", at ~10 minutes. This job answers the narrower question "can the
   # documented install still RUN the suite at all", in about two — collection of
   # everything, plus a smoke subset of the modules that touch the third-party
   # dependency surface directly, plus the declared-imports check that names an

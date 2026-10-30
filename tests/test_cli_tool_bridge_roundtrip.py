@@ -165,7 +165,12 @@ def _drive_bridge_child(
                 "athenaeum",
             ],
         )
-        async with stdio_client(params) as (read, write):
+        # `errlog` passed explicitly: `stdio_client`'s default is bound to
+        # whatever `sys.stderr` was when `mcp.client.stdio` was first
+        # imported. Under pytest-xdist that first import can happen inside an
+        # unrelated test's capsys capture, leaving a stale stream with no
+        # `fileno()` (io.UnsupportedOperation in Popen) for this test.
+        async with stdio_client(params, errlog=sys.stderr) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 result = await session.call_tool(call_name, arguments)
