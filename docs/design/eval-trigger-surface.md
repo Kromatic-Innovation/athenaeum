@@ -391,5 +391,18 @@ changed", strictly coarser than today's path match minus comment-only edits.
 ## 12. Children
 
 Filed as hestia-buildable issues, each `moscow:should` (the monthly cost does
-not justify `must`), with native `blocked_by` links. The issue numbers are
-recorded on this page's PR.
+not justify `must`), with native `blocked_by` links where the blocker is an
+issue. athenaeum#2206 is a pull request, which native `blocked_by` cannot
+target, so the issues that depend on it are held at `~planning` with a comment
+until it merges.
+
+| Issue | Scope | Blocked by |
+| --- | --- | --- |
+| athenaeum#2223 | `path::symbol` grammar, static fingerprint, FIRE predicate (§5.1, §5.3, §5.4) | athenaeum#2206 (PR, held) |
+| athenaeum#2224 | rot-check derivation D1–D5, list migration, 30-day replay measurement (§5.2) | athenaeum#2223 |
+| athenaeum#2225 | COVERS predicate with develop-merge clause (§5.4) | athenaeum#2206 (PR, held), athenaeum#2223 |
+| athenaeum#2226 | structured exemption line, set check, step-summary diffs (§5.5) | athenaeum#2223 |
+| athenaeum#2227 | run the gate script from the base commit (§5.6) | — |
+| athenaeum#2228 | dispatch rule in `tests/evals/README.md` and the gate message (§7) | athenaeum#2206 (PR, held) |
+| code-workspace-config#3552 | pointers in promotion-runner, pr-shepherd, dijkstra (§7) | athenaeum#2228 |
+| hestia#2834 | pointer in hestia-ops (§7) | athenaeum#2228 |
