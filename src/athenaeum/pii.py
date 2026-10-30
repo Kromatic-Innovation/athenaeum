@@ -4450,7 +4450,7 @@ def retire_contact_record(
     contacts_root: Path,
     record_path: Path,
     *,
-    folded_into: str | None = None,
+    folded_into: str | None,
     reason: str,
     canonical_record: Path | None = None,
     at: str | None = None,
@@ -4466,9 +4466,13 @@ def retire_contact_record(
     rename back plus removing the stamped keys; the ledger row says which
     file to rename.
 
-    *folded_into* is optional: ``None`` means this record was retired on its
+    *folded_into* accepts ``None``: that means this record was retired on its
     own, not folded into a successor's (issue athenaeum#2217 — a page-removal
-    with no merge target). In that case :data:`FOLDED_INTO_FIELD` is NOT
+    with no merge target). It stays a REQUIRED keyword with no default even
+    so — every caller must state which of the two it means, because silently
+    defaulting to ``None`` would let a future fold caller that forgot the
+    argument retire a record as unabsorbed and lose the successor link.
+    In the ``None`` case :data:`FOLDED_INTO_FIELD` is NOT
     stamped on the record at all, and the ledger row's ``"folded_into"`` is
     JSON ``null`` — never a sentinel string, which would read back as a real
     uid. Reversing a ``None``-folded retirement is the same rename-back; there
