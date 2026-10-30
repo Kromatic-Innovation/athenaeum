@@ -435,6 +435,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The eval-receipt check now accepts a receipt at the parent of a pure
+  version-bump head.** The merge wrapper pushes its own PATCH bump onto the
+  PR head just before merging, which moved the head off the receipted commit
+  and failed `LLM surface touched -> eval receipt required` on every
+  LLM-surface PR. `scripts/check_llm_surface_receipt.py` now also accepts a
+  successful `Evals` run at the head's parent when the head commit has one
+  parent and changes only the `pyproject.toml` `version = "..."` line. Any
+  other change in that commit, a merge commit, or a receipt two commits back
+  still fails.
+
 - **A field correction can now remove a list entry whose stored dates came
   from YAML.** List values were compared by `repr`, so an entry read from
   frontmatter with an unquoted date (`start_date: 2023-10-01`, which YAML

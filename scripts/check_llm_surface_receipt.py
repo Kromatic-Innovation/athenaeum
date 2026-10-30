@@ -24,6 +24,19 @@ gate), its ``headSha`` must match the PR head, and its ``conclusion`` must
 be ``success`` (a failed or cancelled eval run is not a receipt that
 anything actually passed).
 
+One exception to the exact-head rule: the merge wrapper
+(code-workspace-config ``scripts/gh-orch-pr-merge.sh``) pushes its own PATCH
+bump commit onto the PR head right before merging, which moves the head off
+the receipted commit without changing anything an eval can see. A receipt
+at the head's PARENT is therefore accepted when the head commit is a pure
+version bump: exactly one parent, ``pyproject.toml`` the only file changed,
+and the only changed lines its ``version = "..."`` assignment (one removed,
+one added). The repo carries no lockfile with a version stamp of its own
+package (``requirements-ci.lock`` pins dependencies only), so nothing else
+is allowed. The check is on content, not on who authored the commit: a
+commit that passes it cannot have moved an eval result. See
+``version_bump_parent`` / ``is_version_only_change``.
+
 CLI entry point is only used by the workflow; the importable functions are
 the unit under test.
 """
@@ -134,13 +147,71 @@ def gh_run_lookup(repo: str, run_id: str) -> dict[str, str]:
     }
 
 
+#: A changed line (from a ``-U0`` diff) that only assigns pyproject's version.
+_VERSION_LINE_RE = re.compile(r'^[+-]\s*version\s*=\s*"[^"\n]+"\s*$')
+
+
+def is_version_only_change(changed_files: list[str], diff_text: str) -> bool:
+    """True when a commit's change is ONLY the ``pyproject.toml`` version line.
+
+    `changed_files` is ``git diff --name-only parent head``; `diff_text` is
+    ``git diff -U0 parent head -- pyproject.toml``. Exactly one removed and
+    one added line, both a ``version = "..."`` assignment; any other file or
+    any other changed line means the commit is not a pure bump.
+    """
+    if changed_files != ["pyproject.toml"]:
+        return False
+    plus = minus = 0
+    for line in diff_text.splitlines():
+        if line.startswith(("+++", "---", "@@")) or not line.startswith(("+", "-")):
+            continue
+        if not _VERSION_LINE_RE.match(line):
+            return False
+        if line.startswith("+"):
+            plus += 1
+        else:
+            minus += 1
+    return plus == 1 and minus == 1
+
+
+def _git(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["git", *args], capture_output=True, text=True, check=False)
+
+
+def version_bump_parent(head_sha: str) -> str | None:
+    """Default `bump_parent_lookup`: the head's parent sha when the head commit
+    is a pure version bump (see `is_version_only_change`), else ``None``.
+
+    A merge commit (two parents) is never a bump. Any git failure reads as
+    ``None`` — "not a bump", which falls back to the exact-head rule.
+    """
+    parents = _git("rev-list", "--parents", "-n", "1", head_sha)
+    if parents.returncode != 0:
+        return None
+    shas = parents.stdout.split()
+    if len(shas) != 2:
+        return None
+    parent = shas[1]
+    names = _git("diff", "--name-only", parent, head_sha)
+    diff = _git("diff", "-U0", parent, head_sha, "--", "pyproject.toml")
+    if names.returncode != 0 or diff.returncode != 0:
+        return None
+    changed = [line for line in names.stdout.splitlines() if line]
+    return parent if is_version_only_change(changed, diff.stdout) else None
+
+
 def check_receipt(
     pr_body: str,
     head_sha: str,
     this_repo: str,
     run_lookup: Callable[[str, str], dict[str, str]],
+    bump_parent_lookup: Callable[[str], str | None] = version_bump_parent,
 ) -> ReceiptCheck:
-    """Decide whether `pr_body` carries a valid eval receipt for `head_sha`."""
+    """Decide whether `pr_body` carries a valid eval receipt for `head_sha`.
+
+    The run must be at `head_sha`, or at its parent when
+    `bump_parent_lookup(head_sha)` says the head is a pure version bump.
+    """
     not_needed = _NOT_NEEDED_RE.search(pr_body)
     if not_needed:
         return ReceiptCheck(True, f"Evals not needed: {not_needed.group(1).strip()}")
@@ -184,17 +255,28 @@ def check_receipt(
             f"run {run_id} was triggered by {run.get('event')!r}, not "
             "`workflow_dispatch` — dispatch a fresh run.",
         )
+    receipted_at = head_sha
     if run.get("headSha") != head_sha:
-        return ReceiptCheck(
-            False,
-            f"run {run_id}'s headSha ({run.get('headSha')!r}) does not match "
-            f"this PR's head ({head_sha!r}) — the dispatch is stale, re-run it.",
-        )
+        bump_parent = bump_parent_lookup(head_sha)
+        if bump_parent is None or run.get("headSha") != bump_parent:
+            return ReceiptCheck(
+                False,
+                f"run {run_id}'s headSha ({run.get('headSha')!r}) does not match "
+                f"this PR's head ({head_sha!r}) — the dispatch is stale, re-run it.",
+            )
+        receipted_at = bump_parent
     if run.get("conclusion") != "success":
         return ReceiptCheck(
             False,
             f"run {run_id} concluded {run.get('conclusion')!r}, not `success` "
             "— a failed or cancelled eval run is not a receipt.",
+        )
+    if receipted_at != head_sha:
+        return ReceiptCheck(
+            True,
+            f"valid eval receipt: run {run_id} at {receipted_at}, the parent of "
+            f"head {head_sha}, which only bumps the pyproject.toml version "
+            f"(conclusion: {run.get('conclusion')})",
         )
     return ReceiptCheck(
         True,
@@ -210,13 +292,14 @@ def evaluate(
     head_sha: str,
     this_repo: str,
     run_lookup: Callable[[str, str], dict[str, str]] = gh_run_lookup,
+    bump_parent_lookup: Callable[[str], str | None] = version_bump_parent,
 ) -> ReceiptCheck:
     """Full decision: empty intersection passes trivially; otherwise require a receipt."""
     hits = intersect_surface(changed_files, surface)
     if not hits:
         return ReceiptCheck(True, "no LLM surface touched — no receipt needed.")
 
-    result = check_receipt(pr_body, head_sha, this_repo, run_lookup)
+    result = check_receipt(pr_body, head_sha, this_repo, run_lookup, bump_parent_lookup)
     if result.ok:
         return result
     touched = "\n".join(f"  - {h}" for h in hits)

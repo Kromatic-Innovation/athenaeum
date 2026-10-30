@@ -33,7 +33,11 @@ to `develop` for whether it touches the **LLM surface**, the list kept in
   `workflow_dispatch`), from a different workflow (e.g. a `ci.yml`
   dispatch), from a different repo, or that didn't conclude `success`
   (failed or cancelled) does not satisfy the check — re-dispatch after the
-  last push.
+  last push. One exception: a run at the head's **parent** is accepted when
+  the head commit changes nothing but the `pyproject.toml` `version = "..."`
+  line (one parent, one file, one removed and one added version line). That
+  is the PATCH bump the merge wrapper pushes onto the head just before
+  merging, and it cannot move an eval result.
 - **`Evals: not needed — <reason>`** — for a PR that touches a surface
   file without moving anything an eval would catch (e.g. a comment-only
   edit, or this very check's own CI-only plumbing). The reason after the
