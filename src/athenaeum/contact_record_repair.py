@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from athenaeum import pii
+from athenaeum.atomic_io import atomic_write_text
 from athenaeum.contact_record_fold import (
     REASON_DUPLICATE,
     ContactFoldSummary,
@@ -47,10 +48,19 @@ from athenaeum.contact_record_fold import (
     merge_contact_values,
     merge_duplicate_record,
     missing_values,
+    orphaned_fact_entries,
     preferred_record,
+    prune_orphan_fact_entries,
     uid_prefixed,
 )
-from athenaeum.models import EntityIndex, is_tombstone, slugify, tombstone_target
+from athenaeum.models import (
+    EntityIndex,
+    is_tombstone,
+    parse_frontmatter,
+    render_frontmatter,
+    slugify,
+    tombstone_target,
+)
 from athenaeum.pending_merges import resolve_target_page
 from athenaeum.provenance import read_merge_provenance
 
@@ -215,10 +225,24 @@ class ContactRepairPlan:
     duplicate_both_prefixed: int = 0
     duplicate_other_shape: int = 0
     orphan_values_to_add: int = 0
+    #: Issue athenaeum#2196 — per-address fact entries describing an address
+    #: the record carrying them does not itself list, found on ANY scanned
+    #: record (independent of its uid's live/absorbed/duplicate state).
+    #: Total entry count, across every record.
+    orphan_fact_entries: int = 0
+    #: Paths of the records above, so ``apply`` knows which to prune without
+    #: a second scan. Kept for apply, never printed — same discipline every
+    #: other path list on this dataclass already follows.
+    orphan_fact_entry_paths: list[Path] = field(default_factory=list)
 
     @property
     def actionable(self) -> int:
-        return len(self.orphan_folds) + len(self.duplicate_retire) + len(self.duplicate_fold)
+        return (
+            len(self.orphan_folds)
+            + len(self.duplicate_retire)
+            + len(self.duplicate_fold)
+            + len(self.orphan_fact_entry_paths)
+        )
 
     def counts(self) -> dict[str, int]:
         return {
@@ -242,6 +266,7 @@ class ContactRepairPlan:
             ),
             "duplicate_both_uid_prefixed": self.duplicate_both_prefixed,
             "duplicate_other_shape": self.duplicate_other_shape,
+            "orphan_fact_entries": self.orphan_fact_entries,
         }
 
 
@@ -250,7 +275,19 @@ def plan_contact_record_repair(knowledge_root: Path, contacts_root: Path) -> Con
     plan = ContactRepairPlan()
     facts = _read_wiki_facts(Path(knowledge_root) / "wiki")
     index = pii.ExcludedRecordIndex(Path(contacts_root))
-    plan.records_scanned = len(pii.iter_contact_records(Path(contacts_root)))
+    records = pii.iter_contact_records(Path(contacts_root))
+    plan.records_scanned = len(records)
+    # Issue athenaeum#2196: orphan fact entries are a per-RECORD property,
+    # independent of the uid-level live/absorbed/duplicate classification
+    # below — a record with no duplicate and nothing absorbing it can still
+    # carry one (the corrections applier's `remove` branch is the live
+    # source), so every scanned record is checked here rather than folded
+    # into one of the branches below.
+    for record_path in records:
+        orphans = orphaned_fact_entries(pii.read_bounce_record(record_path))
+        if orphans:
+            plan.orphan_fact_entries += sum(len(v) for v in orphans.values())
+            plan.orphan_fact_entry_paths.append(record_path)
     uids = index.uids()
     plan.uids_scanned = len(uids)
     for uid in uids:
@@ -323,6 +360,10 @@ class ContactRepairResult:
     fold: ContactFoldSummary = field(default_factory=ContactFoldSummary)
     duplicates_retired: int = 0
     duplicates_folded: DuplicateFoldSummary = field(default_factory=DuplicateFoldSummary)
+    #: Issue athenaeum#2196 — orphan fact entries dropped from still-live
+    #: records (never counts an entry on a record that was itself retired
+    #: by one of the actions above — nothing to prune there).
+    orphan_fact_entries_pruned: int = 0
     errors: list[str] = field(default_factory=list)
 
 
@@ -361,4 +402,33 @@ def apply_contact_record_repair(
         index=index,
     )
     result.errors.extend(result.fold.errors)
+
+    # Issue athenaeum#2196 (AC4): prune orphan fact entries LAST, re-checking
+    # each path fresh rather than trusting the plan's pre-action snapshot —
+    # the actions above can rename a path away (retired, no longer exists:
+    # skip, nothing to prune) or rewrite one's content (a duplicate-fold
+    # target, an absorbed-fold canonical: re-reading picks up the final
+    # state rather than a stale one). None of the fold/merge primitives
+    # above ever ADD a new orphan (that is what decisions 1-3 of this issue
+    # guard against), so this worklist — built once, before any action ran
+    # — still covers every record that could have one once they are done.
+    for record_path in plan.orphan_fact_entry_paths:
+        if not record_path.exists():
+            continue
+        try:
+            text = record_path.read_text(encoding="utf-8")
+            meta, body = parse_frontmatter(text)
+            meta = meta if isinstance(meta, dict) else {}
+            pruned, dropped = prune_orphan_fact_entries(meta)
+        except (OSError, UnicodeDecodeError) as exc:
+            result.errors.append(f"{type(exc).__name__} reading a record to prune orphan facts")
+            continue
+        if not dropped:
+            continue
+        try:
+            atomic_write_text(record_path, render_frontmatter(pruned) + "\n" + body)
+        except OSError as exc:
+            result.errors.append(f"{type(exc).__name__} pruning orphan fact entries")
+            continue
+        result.orphan_fact_entries_pruned += dropped
     return result
