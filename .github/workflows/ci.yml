@@ -130,21 +130,35 @@ jobs:
             --output "$verdict"
           cat "$verdict" >> "$GITHUB_OUTPUT"
 
+  # The suite runs as a matrix of runner shards, each running its slice under
+  # pytest-xdist, so the job's wall clock is set by the slowest shard rather
+  # than one 4-vCPU runner (athenaeum#2230 measured ~2x effective parallelism
+  # per runner). tests/ci_sharding.py assigns every collected test to exactly
+  # one shard, deterministically, keeping each xdist work unit whole. The
+  # `coverage` job below checks that the shards' selected counts sum to the
+  # collected total, then combines their coverage data and enforces the 75%
+  # floor. To change the shard count, edit `shard:` only; every leg reads the
+  # total from `strategy.job-total`.
   test:
+    name: test (shard ${{ matrix.shard }})
     needs: [check_duplicate]
     if: needs.check_duplicate.outputs.skip != 'true'
     runs-on: ubuntu-latest
     strategy:
+      # A failing shard must not cancel its siblings: their own failures
+      # would then be hidden behind `cancelled`. `needs.test.result` is
+      # `failure` either way, so the gate is unaffected.
+      fail-fast: false
       matrix:
-        python-version: ["3.13"]
+        shard: [1, 2, 3]
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
-      - name: Set up Python ${{ matrix.python-version }}
+      - name: Set up Python 3.13
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.13"
           # Reuse downloaded wheels across runs; keyed on both dependency
           # manifests so a lock or range change starts a fresh cache.
           cache: pip
@@ -169,23 +183,95 @@ jobs:
       # fixture (tests/evals/test_recall_covers_grep.py's index build,
       # test_hook_byte_equivalence_1912.py's 48-probe comparison), and
       # spreading one module's tests across workers would rebuild it on each.
-      # pytest-cov combines the per-worker coverage data itself, so the 75%
-      # floor still gates the whole suite. `--durations=30` keeps the slowest
-      # tests visible in every log for the next round of tuning.
       # tests/conftest.py's `pytest_xdist_make_scheduler` additionally splits
       # test_recall_covers_grep.py by its `scale` param, its slowest module.
+      # `--ci-shard` keeps only this leg's slice; `--ci-shard-report` records
+      # the collected/selected counts the `coverage` job cross-checks.
       #
-      # The one test deselected here runs serially in the next step instead:
-      # it races a 20ms heartbeat thread and fails under 4-way CPU
+      # The one test deselected here runs serially in shard 1's next step
+      # instead: it races a 20ms heartbeat thread and fails under 4-way CPU
       # contention (athenaeum#2229, a product-side read-during-rewrite race),
       # while never failing serially.
       - name: Run tests
-        run: pytest tests/ -n auto --dist loadfile -v --tb=short --durations=30 --cov=athenaeum --cov-report= --deselect tests/test_runlock.py::TestLockHeldMessageDetail::test_message_reports_last_heartbeat_age_after_a_bump
+        run: pytest tests/ -n auto --dist loadfile -v --tb=short --durations=30 --cov=athenaeum --cov-report= --ci-shard ${{ matrix.shard }}/${{ strategy.job-total }} --ci-shard-report ci-shard-report.json --deselect tests/test_runlock.py::TestLockHeldMessageDetail::test_message_reports_last_heartbeat_age_after_a_bump
 
-      # Appends to the parallel step's coverage data, so the 75% floor is
-      # enforced on the combined total of BOTH steps.
+      # Appends to this shard's coverage data before it is uploaded.
       - name: Run contention-sensitive tests serially
-        run: pytest tests/test_runlock.py::TestLockHeldMessageDetail::test_message_reports_last_heartbeat_age_after_a_bump -v --tb=short --cov=athenaeum --cov-append --cov-report=term-missing --cov-fail-under=75
+        if: matrix.shard == 1
+        run: pytest tests/test_runlock.py::TestLockHeldMessageDetail::test_message_reports_last_heartbeat_age_after_a_bump -v --tb=short --cov=athenaeum --cov-append --cov-report=
+
+      # `.coverage` is a dotfile, which upload-artifact skips by default, so
+      # it is renamed to a per-shard name that also cannot collide when the
+      # `coverage` job downloads every shard into one directory.
+      - name: Stage shard coverage data
+        run: |
+          mkdir -p shard-out
+          mv .coverage "shard-out/coverage.shard-${{ matrix.shard }}"
+          mv ci-shard-report.json "shard-out/report.shard-${{ matrix.shard }}.json"
+
+      - name: Upload shard coverage data
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ci-shard-${{ matrix.shard }}
+          path: shard-out/
+          if-no-files-found: error
+          retention-days: 3
+
+  # Combines the shards: proves every collected test ran in exactly one shard,
+  # then merges their coverage data and enforces the 75% floor that the
+  # single-runner job used to enforce itself. Runs only when every shard
+  # passed (explicit `needs.test.result == 'success'`, because `success()` is
+  # also true for a skipped need). `CI Required` treats this job's skip as
+  # green only when `test` itself was skipped by the dedup.
+  coverage:
+    name: Coverage (combined shards)
+    needs: [check_duplicate, test]
+    if: needs.check_duplicate.outputs.skip != 'true' && needs.test.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Install coverage (locked version)
+        run: |
+          python -m pip install --upgrade pip
+          pip install coverage -c requirements-ci.lock
+
+      - name: Download shard coverage data
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          pattern: ci-shard-*
+          path: shard-data
+          merge-multiple: true
+
+      - name: Every collected test ran in exactly one shard
+        run: |
+          python - <<'EOF'
+          import json, pathlib
+          reports = [json.loads(p.read_text()) for p in sorted(pathlib.Path("shard-data").glob("report.shard-*.json"))]
+          for r in reports:
+              print(r)
+          shards = {r["shard"] for r in reports}
+          totals = {r["total_shards"] for r in reports}
+          collected = {r["collected"] for r in reports}
+          assert len(totals) == 1, f"shards disagree on the shard count: {totals}"
+          (n,) = totals
+          assert shards == set(range(1, n + 1)) and len(reports) == n, f"expected reports for shards 1..{n}, got {sorted(shards)}"
+          assert len(collected) == 1, f"shards collected different suites: {collected}"
+          (total,) = collected
+          selected = sum(r["selected"] for r in reports)
+          assert selected == total, f"shards selected {selected} tests but {total} were collected"
+          print(f"OK: {n} shards selected {selected} of {total} collected tests, each exactly once")
+          EOF
+
+      - name: Combine coverage and enforce the 75% floor
+        run: |
+          coverage combine shard-data/coverage.shard-*
+          coverage report --show-missing --fail-under=75
 
   # hestia#596 — BLOCKING type check. The package ships `py.typed` (a PEP 561
   # assertion of type correctness to downstream consumers); mypy now enforces
@@ -230,7 +316,7 @@ jobs:
   # reviewer bootstrapping the project from CONTRIBUTING.md.
   #
   # Deliberately NOT a second full matrix leg: `test` already covers "does the
-  # suite pass", at ~10 minutes. This job answers the narrower question "can the
+  # suite pass", sharded across runners. This job answers the narrower question "can the
   # documented install still RUN the suite at all", in about two — collection of
   # everything, plus a smoke subset of the modules that touch the third-party
   # dependency surface directly, plus the declared-imports check that names an
@@ -327,10 +413,11 @@ jobs:
   # failure here must cost a future CI saving, never a merge.
   publish_attestation:
     name: Publish CI attestation
-    needs: [check_duplicate, test, types, public-safe-lint, clean-venv]
+    needs: [check_duplicate, test, coverage, types, public-safe-lint, clean-venv]
     if: >-
       needs.check_duplicate.result == 'success' &&
       needs.test.result == 'success' &&
+      needs.coverage.result == 'success' &&
       needs.types.result == 'success' &&
       needs.public-safe-lint.result == 'success' &&
       needs.clean-venv.result == 'success'
@@ -377,7 +464,7 @@ jobs:
   # not-yet-tested PR head).
   ci-required:
     name: CI Required
-    needs: [check_duplicate, test, types, public-safe-lint, clean-venv]
+    needs: [check_duplicate, test, coverage, types, public-safe-lint, clean-venv]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -385,22 +472,31 @@ jobs:
         env:
           DUP_RESULT: ${{ needs.check_duplicate.result }}
           TEST_RESULT: ${{ needs.test.result }}
+          COVERAGE_RESULT: ${{ needs.coverage.result }}
           TYPES_RESULT: ${{ needs.types.result }}
           PUBLIC_SAFE_LINT_RESULT: ${{ needs.public-safe-lint.result }}
           CLEAN_VENV_RESULT: ${{ needs.clean-venv.result }}
         run: |
-          echo "check_duplicate=$DUP_RESULT test=$TEST_RESULT types=$TYPES_RESULT public-safe-lint=$PUBLIC_SAFE_LINT_RESULT clean-venv=$CLEAN_VENV_RESULT"
+          echo "check_duplicate=$DUP_RESULT test=$TEST_RESULT coverage=$COVERAGE_RESULT types=$TYPES_RESULT public-safe-lint=$PUBLIC_SAFE_LINT_RESULT clean-venv=$CLEAN_VENV_RESULT"
           # The duplicate detector must itself have succeeded; otherwise we
           # cannot trust its skip decision and must fail closed.
           if [ "$DUP_RESULT" != "success" ]; then
             echo "::error::check_duplicate did not succeed (result='$DUP_RESULT') — failing the aggregate gate."
             exit 1
           fi
+          # The shard-combining `coverage` job is where the 75% floor and the
+          # every-test-ran-once check live. It may be skipped only when the
+          # whole `test` matrix was skipped by the dedup above; once tests ran
+          # (or failed, or were cancelled), anything but `success` fails.
+          if [ "$TEST_RESULT" != "skipped" ] && [ "$COVERAGE_RESULT" != "success" ]; then
+            echo "::error::coverage result '$COVERAGE_RESULT' with test result '$TEST_RESULT' — failing the aggregate gate."
+            exit 1
+          fi
           # `success`  → the job ran and passed.
           # `skipped`  → check_duplicate verified this push's tree was already
           #              tested green on the PR head; nothing new to prove.
           # anything else (failure/cancelled) → fail the gate.
-          for pair in "test:$TEST_RESULT" "types:$TYPES_RESULT" "public-safe-lint:$PUBLIC_SAFE_LINT_RESULT" "clean-venv:$CLEAN_VENV_RESULT"; do
+          for pair in "test:$TEST_RESULT" "coverage:$COVERAGE_RESULT" "types:$TYPES_RESULT" "public-safe-lint:$PUBLIC_SAFE_LINT_RESULT" "clean-venv:$CLEAN_VENV_RESULT"; do
             name="${pair%%:*}"
             result="${pair#*:}"
             case "$result" in
