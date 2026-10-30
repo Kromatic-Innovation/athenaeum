@@ -23,6 +23,18 @@ person/company/project/concept/source into `<path>/templates/`) and
 installing them changes nothing until you promote one to `mode: live`).
 `--force` overwrites existing template/rule files at the destination.
 
+## I want to supply an API key (without 1Password)
+
+`athenaeum run` needs `ANTHROPIC_API_KEY` in its own environment, unless you
+pass `--dry-run` or set `llm.provider: claude-cli` to run on your Claude Code
+login. 1Password is optional; any secret manager works. Where the key goes,
+which commands read `~/.cache/athenaeum/config.env`, and how to fetch it from
+the macOS Keychain, Secret Service, `pass`, Bitwarden, or 1Password are covered
+in [Supplying an API key](../../examples/claude-code/README.md#supplying-an-api-key).
+If a macOS dialog keeps asking that "“op” would like to access data from other
+apps", see
+[Repeated permission prompts](../../examples/claude-code/README.md#repeated-permission-prompts).
+
 ## I want to try it before spending any API budget
 
 `athenaeum run` needs `ANTHROPIC_API_KEY` unless you pass `--dry-run`:
@@ -69,6 +81,13 @@ fully passive recall experience (no explicit tool calls needed on every
 turn), see [Passive recall via hooks](sidecar.md); for bridging Claude
 Code's own auto-memory files into Athenaeum's intake, see
 [Claude Code auto-memory integration](claude-code.md).
+
+## I use a client other than Claude Code, or Linux or Windows
+
+Claude Desktop, Cursor, and other local (stdio) MCP clients can use the MCP
+tools, without auto-recall; ChatGPT and Grok are not supported; Linux is
+supported and Windows is not. See
+[Other clients and platforms](clients.md).
 
 ## I want my agent's memories to carry provenance and skip a classifier call
 
@@ -162,4 +181,4 @@ git checkout "$(git describe --tags --abbrev=0)"
 - Modules — [librarian](../modules/librarian.md) · [mcp](../modules/mcp.md)
 - Design — [security posture](../design/security-posture.md) (§2.1, audience scoping)
 - Reference — [configuration](../reference/configuration.md) · [exit codes](../reference/exit-codes.md)
-- Guides — [Claude Code integration](claude-code.md) · [Passive recall via hooks](sidecar.md) · [Vector search](vector-search.md)
+- Guides — [Claude Code integration](claude-code.md) · [Other clients and platforms](clients.md) · [Passive recall via hooks](sidecar.md) · [Vector search](vector-search.md) · [Troubleshooting](troubleshooting.md)

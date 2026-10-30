@@ -36,6 +36,7 @@ Task-shaped. *"I want to ___."* Each guide names the module page that backs it.
   constraint in `wiki/_schema/` and what happens when a write violates it.
 - [Codex context file](guides/codex.md) — Tier-2 snapshot adapter for OpenAI Codex.
 - [Claude Code integration](guides/claude-code.md) — wiring the MCP server and the example hooks.
+- [Other clients and platforms](guides/clients.md) — Claude Desktop, Cursor, ChatGPT/Grok, Codex; macOS, Linux, Windows.
 - [Vector search](guides/vector-search.md) — optional embedding backends and query-topic extraction.
 - [Upgrading](guides/upgrading.md) — data lifecycle and what a version bump does to an existing wiki.
 - [Troubleshooting](guides/troubleshooting.md) — symptom → cause.
@@ -113,6 +114,9 @@ does not answer.
 - [Security posture](design/security-posture.md)
 - [Bounce surface convergence](design/bounce-surface-convergence.md)
 - [Deprecated email tracking](design/deprecated-email-tracking.md)
+- [Attribution verification](design/attribution-verification.md) — checking whose contact
+  value it is before filing it: the verification seam every writer calls, the deterministic
+  checks, measured-tier escalation and re-attribution, and the calibration eval.
 - [PII classification policy](design/pii-classification-policy.md) — the five classes that
   separate a non-contact token from a genuine personal address, the page-purpose rule, and
   the over-restoring-is-worse-than-under-restoring principle.
