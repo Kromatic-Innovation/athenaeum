@@ -4,8 +4,8 @@
 north-star §2.12 ("Filing is verification") and the amended §2.2 resolution
 rule (measured tiers, calibrated thresholds, human last) for one value class:
 contact values (email addresses and phone numbers) on person records. Both
-sections were ratified on 2026-10-30 and land in `docs/north-star.md` through
-athenaeum#2208. The child issues are listed in §11.
+sections were ratified on 2026-10-30 and are in `docs/north-star.md`
+(athenaeum#2208). The child issues are listed in §11.
 
 ## 1. The problem in one paragraph
 
