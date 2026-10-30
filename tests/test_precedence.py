@@ -96,13 +96,17 @@ def test_parser_denominator_sanity() -> None:
 
     Guards against the exact failure the module docstring warns about — a
     parser that silently extracts nothing (or too little) and thereby
-    compares empty-to-empty forever. 9 tiers, at least 10 raw type tokens
-    (tier 3 alone contributes two — ``api:apollo`` / ``api:<vendor>``).
+    compares empty-to-empty forever. 9 tiers, at least 11 raw type tokens
+    (10 until issue athenaeum#2159 added ``witnessed:`` as tier 1's second
+    token; note ``api:apollo`` / ``api:<vendor>`` DE-DUPLICATE to the single
+    ``api`` token). Kept in sync with the same denominator stated inline in
+    ``docs/design/field-corrections.md`` §6.1, which
+    ``test_field_corrections_doc_denominator_matches_taxonomy`` below reads.
     """
     tiers = _parse_taxonomy(_RESOLVE_SYSTEM)
     assert len(tiers) == 9
     total_tokens = sum(len(tier) for tier in tiers)
-    assert total_tokens >= 10, (
+    assert total_tokens >= 11, (
         f"parsed only {total_tokens} tokens across {len(tiers)} tiers — "
         "parser regression (would silently pass an empty-vs-empty compare)"
     )
@@ -359,10 +363,88 @@ def test_field_corrections_doc_denominator_positive_control() -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# Issue athenaeum#2159: ``witnessed`` joins tier 1 alongside ``user``.
+#
+# Every token's rank BEFORE that change, transcribed on purpose: this one
+# mapping is the "no rank shifted" oracle (AC 2). It is the only place in
+# this file where transcription is correct rather than a smell — the whole
+# point is to compare the live ranker against a frozen historical snapshot,
+# so deriving it from the live taxonomy would make it vacuous.
+# ---------------------------------------------------------------------------
+
+_RANKS_BEFORE_WITNESSED: dict[str, int] = {
+    "user": 1,
+    "linkedin": 2,
+    "twitter": 2,
+    "api": 3,
+    "wikipedia": 4,
+    "agent-observed": 5,
+    "claude": 6,
+    "script": 7,
+    "model-prior": 8,
+    "unsourced": 9,
+}
+
+
+def test_every_pre_existing_token_rank_unchanged() -> None:
+    """Adding ``witnessed`` to tier 1 must shift NOTHING (issue athenaeum#2159
+    AC 2): every token that had a rank before still has the same rank, and
+    ``UNKNOWN_SOURCE_RANK`` is still 9.
+    """
+    for token, rank in sorted(_RANKS_BEFORE_WITNESSED.items()):
+        assert source_rank(f"{token}:some-ref") == rank, (
+            f"rank drift: {token!r} ranked {rank} before issue athenaeum#2159 "
+            f"but ranks {source_rank(f'{token}:some-ref')} now"
+        )
+    assert UNKNOWN_SOURCE_RANK == 9
+    assert len(SOURCE_PRECEDENCE_TIERS) == 9
+
+
+def test_taxonomy_token_set_is_exactly_the_old_set_plus_witnessed() -> None:
+    """The canonical block gained ``witnessed`` and nothing else — the
+    additive half of AC 2, parsed (not transcribed) from the prompt so a
+    token QUIETLY dropped elsewhere in the same edit also fails here.
+    """
+    assert _canonical_token_set(_RESOLVE_SYSTEM) == frozenset(
+        _RANKS_BEFORE_WITNESSED
+    ) | {"witnessed"}
+
+
+def test_witnessed_shares_tier_1_with_user_in_the_canonical_block() -> None:
+    """Tier 1 carries BOTH tokens in the prompt itself (issue athenaeum#2159) —
+    the "two tokens, one rank" form tier 2 already used."""
+    parsed = _parse_taxonomy(_RESOLVE_SYSTEM)
+    assert frozenset(parsed[0]) == {"user", "witnessed"}
+    assert frozenset(SOURCE_PRECEDENCE_TIERS[0]) == {"user", "witnessed"}
+
+
+def test_positive_control_mutated_tier_1_fails_comparison() -> None:
+    """The tier-2 positive control's twin for tier 1: drop ``witnessed:``
+    from the taxonomy text in-test and assert the membership comparison
+    against ``SOURCE_PRECEDENCE_TIERS`` then FAILS. Without this, tier 1's
+    new second token would be bound by nothing a parser regression could
+    not silently satisfy — the exact hole the tier-2 control exists to
+    close, reproduced for the token this issue adds.
+    """
+    mutated = _RESOLVE_SYSTEM.replace(
+        "1. user:<conversation-ref> / witnessed:<session-ref> — user said it",
+        "1. user:<conversation-ref> — user said it",
+    )
+    # Confirm the mutation actually took (guards the guard).
+    assert mutated != _RESOLVE_SYSTEM
+    parsed = _parse_taxonomy(mutated)
+    assert frozenset(parsed[0]) != frozenset(SOURCE_PRECEDENCE_TIERS[0]), (
+        "positive control did not perturb tier 1 — the parser is not "
+        "actually reading the mutated text"
+    )
+
+
 @pytest.mark.parametrize(
     "source,expected_rank",
     [
         ("user:conv-2026", 1),
+        ("witnessed:abc#turn3", 1),  # issue athenaeum#2159: tier 1, no rank shift
         ("linkedin:tkromer", 2),
         ("twitter:someone", 2),  # the exact regression this design guards
         ("api:apollo", 3),

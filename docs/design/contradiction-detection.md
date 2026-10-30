@@ -296,7 +296,11 @@ When the detector flags a contradiction, the Opus resolver
 `source:` frontmatter values against this taxonomy:
 
 ```
-1. user:<conversation-ref>      — user said it directly. Highest authority.
+1. user:<conversation-ref> / witnessed:<session-ref> — user said it
+   directly; witnessed additionally carries a harness witness (a
+   hash-chained witness-ledger line agreeing with the transcript record).
+   A harness witness does not outrank the user's own word — the two share
+   tier 1 (issue athenaeum#2159). Highest authority.
 2. linkedin:<...> / twitter:<...> — user-curated public profile.
 3. api:apollo / api:<vendor>    — third-party authoritative source.
 4. wikipedia:<page>             — consensus public source.

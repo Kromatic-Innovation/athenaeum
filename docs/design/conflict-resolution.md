@@ -332,8 +332,8 @@ overlaps with the dedupe path's per-field merge but the surfaces are disjoint.
 - **Resolution rule (unchanged for existing tiers):** the taxonomy is
   ordered highest-to-lowest; ties break by newer source date. The tiers
   are the SourceRef `<type>:<ref>` shorthand's type component (`user:`,
-  `linkedin:`, `twitter:`, `api:`, `wikipedia:`, `agent-observed:`,
-  `claude:`, `script:`, `model-prior:`, `unsourced`).
+  `witnessed:`, `linkedin:`, `twitter:`, `api:`, `wikipedia:`,
+  `agent-observed:`, `claude:`, `script:`, `model-prior:`, `unsourced`).
 - **Change (athenaeum#326):** issue athenaeum#326 introduced a NEW tier `model-prior:<model-id>`
   ranked BELOW `script:<slug>`. Rationale is locked in
   `docs/design/provenance-shape.md` §10.1 — a training prior is unverifiable and
@@ -355,6 +355,30 @@ overlaps with the dedupe path's per-field merge but the surfaces are disjoint.
   `tests/test_prompt_goldens.py::test_prompt_matches_golden`), and the
   Section 11 test class in `tests/test_conflict_resolution.py` are updated
   together.
+- **Change (this issue — athenaeum#2159):** issue athenaeum#2159 adds a SECOND
+  token `witnessed:<session-ref>` to the EXISTING tier 1, alongside
+  `user:<conversation-ref>` — the same "two tokens, one rank" form tier 2
+  (`linkedin:` / `twitter:`) already uses. **No rank shifts**: there are
+  still 9 tiers, every other tier keeps its rank, and
+  `precedence.UNKNOWN_SOURCE_RANK` stays `9`. Operator ruling 9
+  (2026-10-28, epic athenaeum#2144) declined a separate tier ABOVE `user:`:
+  a harness witness corroborates the user's own word, it does not outrank
+  it. `witnessed:` is written by intake (and by
+  `repair --backfill-sources`) when a `user-stated` claim additionally
+  attests against the hash-chained `promptwitness` witness ledger
+  (`src/athenaeum/witness_attestation.py`, issue athenaeum#2158), gated by
+  `librarian.witness_attestation_enabled`. In the scalar
+  `witnessed:<session>#turn<N>`, `N` is the MEMORY's `originTurn` — the
+  same numbering `transcript_verify._best_effort_ref` and `repair`'s
+  `user:<ref>` use. The witness ledger's own per-session `turn` counter is
+  a DIFFERENT numbering and appears only inside `witness_ref` (as `seq`),
+  never in a `#turn` ref. This is a §10.1 LOCK-DISCIPLINE change — the
+  taxonomy in `resolutions.py` (`_RESOLVE_SYSTEM`),
+  `precedence.SOURCE_PRECEDENCE_TIERS`, the golden
+  `tests/data/prompts/resolutions.resolve_system.txt`, this list,
+  `docs/design/provenance-shape.md` §10.1,
+  `docs/design/contradiction-detection.md` §3, and the Section 11 test
+  class in `tests/test_conflict_resolution.py` are updated together.
 - **Cross-reference:** the channel-split source_type vocabulary (with
   the parallel `agent-observed` and `model-prior` claim-level values)
   is locked in `docs/design/provenance-shape.md` §10; the two docs cross-link

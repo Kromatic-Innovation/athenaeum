@@ -5,25 +5,20 @@
       "type": "thinking"
     },
     {
-      "text": "{\"recommended_winner\": \"neither\", \"action\": \"scope_a\", \"rationale\": \"DECISION/FACT pair of sequential hosting states \u2014 both were true in separate time windows, so narrow side a (Hostmoor) to 2026-02-10 through the 2026-05-20 cutover rather than retiring or correcting either claim.\", \"confidence\": 0.88, \"source_precedence_used\": [\"a:unsourced > b:unsourced (tie; resolved by scope, not precedence)\"]}",
+      "text": "{\"recommended_winner\": \"neither\", \"action\": \"scope_a\", \"rationale\": \"DECISION/FACT pair about an evolving hosting target: both were true in distinct time windows, so narrow member a's open-ended 'runs on Hostmoor' claim to 2026-02-10 through the 2026-05-20 Fly.io cutover rather than retiring either side.\", \"confidence\": 0.88, \"source_precedence_used\": [\"a:unsourced = b:unsourced (same tier; resolved by time-scoping, b newer 2026-05-20 > a 2026-02-10)\"]}",
       "type": "text"
     }
   ],
   "layer": "resolver",
   "model": "claude-opus-5",
-  "prompt_hash": "sha256:619cd9c20cd59b9570a0e3a92c5565186ae2670e0dda42ff7116aafe8e2d4c9c",
-  "recorded_at": "2026-08-02T18:05:43.441882+00:00",
-  "rederived": {
-    "at": "2026-09-09T23:08:01.220420+00:00",
-    "from_prompt_hash": "sha256:5d9190190cb4c6ae25032b0d037495d70ce2c5ec815adac024421694e9f772c2",
-    "rename_map_digest": "sha256:7166cc089b9aebe108b7b1f3eeeec39e91829925562f0defc92e4172dbc84625",
-    "tool": "scripts/rederive_recorded_fixture.py"
-  },
-  "response_text": "{\"recommended_winner\": \"neither\", \"action\": \"scope_a\", \"rationale\": \"DECISION/FACT pair of sequential hosting states \u2014 both were true in separate time windows, so narrow side a (Hostmoor) to 2026-02-10 through the 2026-05-20 cutover rather than retiring or correcting either claim.\", \"confidence\": 0.88, \"source_precedence_used\": [\"a:unsourced > b:unsourced (tie; resolved by scope, not precedence)\"]}",
+  "prompt_hash": "sha256:b88c42ea02fb18c4aff5420b72ab41dd50a3f881f42aa9fc84179e7daf596e1d",
+  "recorded_at": "2026-10-29T11:11:15.304483+00:00",
+  "rederived": null,
+  "response_text": "{\"recommended_winner\": \"neither\", \"action\": \"scope_a\", \"rationale\": \"DECISION/FACT pair about an evolving hosting target: both were true in distinct time windows, so narrow member a's open-ended 'runs on Hostmoor' claim to 2026-02-10 through the 2026-05-20 Fly.io cutover rather than retiring either side.\", \"confidence\": 0.88, \"source_precedence_used\": [\"a:unsourced = b:unsourced (same tier; resolved by time-scoping, b newer 2026-05-20 > a 2026-02-10)\"]}",
   "usage": {
     "cache_creation_input_tokens": 0,
-    "cache_read_input_tokens": 4390,
-    "input_tokens": 359,
-    "output_tokens": 339
+    "cache_read_input_tokens": 4475,
+    "input_tokens": 377,
+    "output_tokens": 349
   }
 }

@@ -87,6 +87,9 @@ MODULE_LAYER: dict[str, int] = {
     "storage": 1,
     "store": 1,            # "L0/L1 (design note Sec6.4)" -> upper bound
     "footnote_markers": 1,  # pure text arithmetic over a markdown body, no I/O
+    # athenaeum#2159: pure single-key frontmatter-line surgery plus the one
+    # witnessed-source field mapping; imports only transcript_verify (L1).
+    "frontmatter_edit": 1,
     "text_overlap": 1,     # pure text arithmetic, no I/O
     "session_recovery": 1,  # "L0/L1-boundary primitive" -> upper bound
     "transcript_verify": 1,  # "L0/L1-boundary primitive" -> upper bound
