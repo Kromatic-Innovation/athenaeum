@@ -456,6 +456,7 @@ def _cmd_repair_contact_records(args: argparse.Namespace) -> int:
         print(f"  absorbed_records_folded: {result.fold.records_folded}")
         print(f"  absorbed_values_added: {result.fold.values_added_total}")
         print(f"  canonical_records_minted: {result.fold.canonical_records_minted}")
+        print(f"  orphan_fact_entries_pruned: {result.orphan_fact_entries_pruned}")
         print(f"  errors: {len(result.errors)}")
         for err in result.errors[:20]:
             print(f"  ERR {err}", file=sys.stderr)

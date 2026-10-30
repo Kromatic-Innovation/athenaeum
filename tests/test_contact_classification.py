@@ -39,6 +39,7 @@ import pytest
 
 from athenaeum.pii import (
     CONTACT_CLASSIFICATION_FIELD,
+    IDENTIFIER_VALIDITY_FIELD,
     OUTREACH_ELIGIBLE_CLASSES,
     USAGE_CLASS_OBSERVED,
     USAGE_CLASS_PROVIDER,
@@ -48,6 +49,8 @@ from athenaeum.pii import (
     classify_contact_value,
     contact_classification_entries,
     contacts_surface_root,
+    identifier_validity_entries,
+    is_bounced_identifier,
     is_outreach_eligible,
     read_bounce_record,
     read_entity,
@@ -776,3 +779,138 @@ class TestMcpAndCliSurfaces:
         assert code == 0
         payload = json.loads(capsys.readouterr().out)
         assert payload["contact"]["emails"] == [OBSERVED_ADDRESS, PROVIDER_ADDRESS]
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#2196 (AC3): defence in depth — a fact entry whose identifier
+# is not among the addresses the record itself lists is invisible to the
+# classification readers, even though nothing here deletes it. Bounce-state
+# readers deliberately stay unfiltered (see the per-test note below).
+# ---------------------------------------------------------------------------
+
+
+class TestOrphanedClassificationEntriesAreInvisible:
+    ORPHAN_ADDRESS = "orphan@example.org"
+    LISTED_ADDRESS = "listed@example.org"
+
+    def _meta_with_orphan_entry(self) -> dict:
+        return {
+            "uid": "alex",
+            "emails": [self.LISTED_ADDRESS],
+            CONTACT_CLASSIFICATION_FIELD: [
+                {
+                    "identifier": self.ORPHAN_ADDRESS,
+                    "usage_class": USAGE_CLASS_OBSERVED,
+                    "source": "script:synthetic-importer",
+                    "observed_at": "2026-10-01T00:00:00Z",
+                },
+                {
+                    "identifier": self.LISTED_ADDRESS,
+                    "usage_class": USAGE_CLASS_PROVIDER,
+                    "source": "api:apollo",
+                    "observed_at": "2026-10-02T00:00:00Z",
+                },
+            ],
+        }
+
+    def test_contact_classification_entries_drops_the_orphan(self) -> None:
+        entries = contact_classification_entries(self._meta_with_orphan_entry())
+
+        assert [e["identifier"] for e in entries] == [self.LISTED_ADDRESS]
+
+    def test_classification_for_value_reads_the_orphan_as_unclassified(self) -> None:
+        meta = self._meta_with_orphan_entry()
+
+        classification = classification_for_value(meta, self.ORPHAN_ADDRESS)
+
+        assert classification.usage_class == USAGE_CLASS_UNCLASSIFIED
+        assert classification.outreach_eligible is False
+        # The listed address's own entry is unaffected by the other one
+        # being orphaned.
+        assert (
+            classification_for_value(meta, self.LISTED_ADDRESS).usage_class
+            == USAGE_CLASS_PROVIDER
+        )
+
+    def test_read_entity_never_surfaces_the_orphan(self, tmp_path: Path) -> None:
+        """End-to-end repro of the issue's live incident: a stale `observed`
+        entry for an address no record lists must not read back through the
+        one-call entity read either."""
+        knowledge = tmp_path / "knowledge"
+        _write_wiki_person(knowledge / "wiki", "alex")
+        contacts_root = contacts_surface_root(knowledge, EXCLUDED_CONFIG)
+        _write_contact_record(
+            contacts_root,
+            "alex-contact.md",
+            uid="alex",
+            fields=(
+                f"emails:\n  - {self.LISTED_ADDRESS}\n"
+                f"{CONTACT_CLASSIFICATION_FIELD}:\n"
+                f"  - identifier: {self.ORPHAN_ADDRESS}\n"
+                f"    usage_class: {USAGE_CLASS_OBSERVED}\n"
+                "    source: script:synthetic-importer\n"
+            ),
+        )
+
+        result = read_entity(
+            knowledge, EXCLUDED_CONFIG, "alex", surface_class="pii", include_excluded=True
+        )
+
+        assert result is not None
+        assert result.contact["emails"] == [self.LISTED_ADDRESS]
+        # Only the listed address is classified; the orphan never appears,
+        # under any field, anywhere in the read.
+        assert len(result.classifications["emails"]) == 1
+        assert result.classifications["emails"][0].identifier == self.LISTED_ADDRESS
+        for values in result.classifications.values():
+            assert self.ORPHAN_ADDRESS not in [item.identifier for item in values]
+
+    def test_bounce_state_readers_stay_unfiltered(self) -> None:
+        """Contrast case, stated explicitly so a later "complete the
+        symmetry" edit does not widen this filter onto bounce state too: a
+        validity entry for an unlisted address is NOT dropped here, because
+        suppressing a bounce mark errs toward a false SEND (unrecoverable),
+        while suppressing a classification errs toward `unclassified`
+        (recoverable)."""
+        meta = {
+            "uid": "alex",
+            "emails": [self.LISTED_ADDRESS],
+            IDENTIFIER_VALIDITY_FIELD: [
+                {"identifier": self.ORPHAN_ADDRESS, "valid_until": "2026-01-02"}
+            ],
+        }
+
+        entries = identifier_validity_entries(meta)
+        assert [e["identifier"] for e in entries] == [self.ORPHAN_ADDRESS]
+        # `as_of` BEFORE the close: not yet bounced -- unfiltered, reading
+        # straight off the entry.
+        from datetime import date
+
+        assert is_bounced_identifier(meta, self.ORPHAN_ADDRESS, as_of=date(2025, 6, 1)) is False
+        # `as_of` AFTER the close: bounced -- still unfiltered either way.
+        assert is_bounced_identifier(meta, self.ORPHAN_ADDRESS, as_of=date(2026, 6, 1)) is True
+
+    def test_slug_keyed_records_own_identifier_entry_is_kept(self) -> None:
+        """Decision 6: a slug-keyed bounce record carries its address in the
+        top-level `identifier:` key rather than in a list
+        (`pii.identifiers_on_record`'s documented shape). Its OWN
+        classification entry for that address must not read as an orphan."""
+        meta = {
+            "uid": "alex",
+            "identifier": self.ORPHAN_ADDRESS,
+            CONTACT_CLASSIFICATION_FIELD: [
+                {
+                    "identifier": self.ORPHAN_ADDRESS,
+                    "usage_class": USAGE_CLASS_OBSERVED,
+                    "source": "script:synthetic-importer",
+                }
+            ],
+        }
+
+        entries = contact_classification_entries(meta)
+
+        assert [e["identifier"] for e in entries] == [self.ORPHAN_ADDRESS]
+        assert (
+            classification_for_value(meta, self.ORPHAN_ADDRESS).usage_class
+            == USAGE_CLASS_OBSERVED
+        )

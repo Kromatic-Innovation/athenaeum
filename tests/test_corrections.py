@@ -3373,6 +3373,118 @@ class TestListValueIdentityAcrossYamlAndJson:
         assert result.disposition == "noop"
 
 
+# ---------------------------------------------------------------------------
+# Issue athenaeum#2196 AC2: an `op: remove` on a contact-identifier field must
+# not leave the removed address's `contact_classification` /
+# `identifier_validity` entries behind on the surface record.
+# ---------------------------------------------------------------------------
+
+
+class TestRemoveDropsOrphanedContactFacts:
+    def _config(self) -> dict:
+        return {
+            "librarian": {
+                "corrections": {
+                    "fields": {
+                        "emails": {"shape": "list", "writers": ["delivery-monitor"]}
+                    },
+                    "sensitive_fields": {"emails": "pii"},
+                }
+            },
+            "storage": {"mapping": {"pii": "excluded"}},
+        }
+
+    def _write_surface(self, excluded_root: Path, lines: list[str]) -> Path:
+        excluded_root.mkdir(parents=True, exist_ok=True)
+        record = excluded_root / "person-alex.md"
+        record.write_text("\n".join(["---", *lines, "---", "", "Synthetic.", ""]), encoding="utf-8")
+        return record
+
+    def _remove(self, tmp_path: Path, value: str) -> CorrectionRecordResult:
+        wiki = tmp_path / "wiki"
+        _write_page(wiki, "p.md", {"uid": "person-alex", "type": "person", "name": "Alex Doe"})
+        record = {
+            "record": "correction",
+            "target": {"uid": "person-alex"},
+            "op": "remove",
+            "field": "emails",
+            "value": value,
+            "source": "api:delivery-monitor:2026-10-29",
+            "observed_at": "2026-10-29T00:00:00Z",
+        }
+        return process_correction_record(
+            record,
+            _envelope(submitter="delivery-monitor"),
+            index=EntityIndex(wiki),
+            knowledge_root=tmp_path,
+            registry_entities={},
+            config=self._config(),
+        )
+
+    def test_removed_address_drops_its_classification_and_validity(
+        self, tmp_path: Path
+    ) -> None:
+        excluded_root = tmp_path / "excluded"
+        self._write_surface(
+            excluded_root,
+            [
+                "uid: person-alex",
+                "pii: true",
+                "emails:",
+                "  - x@example.org",
+                "contact_classification:",
+                "  - identifier: x@example.org",
+                "    usage_class: observed",
+                "    source: 'script:synthetic-importer'",
+                "    observed_at: '2026-10-01'",
+                "identifier_validity:",
+                "  - identifier: x@example.org",
+                "    valid_until: '2026-01-02'",
+            ],
+        )
+
+        result = self._remove(tmp_path, "x@example.org")
+
+        assert result.disposition == "routed-elsewhere", result.reason
+        meta = pii.read_bounce_record(excluded_root / "person-alex.md")
+        assert "x@example.org" not in (meta.get("emails") or [])
+        assert meta.get(pii.CONTACT_CLASSIFICATION_FIELD) is None
+        assert meta.get(pii.IDENTIFIER_VALIDITY_FIELD) is None
+
+    def test_still_listed_on_another_field_keeps_the_entries(self, tmp_path: Path) -> None:
+        excluded_root = tmp_path / "excluded"
+        self._write_surface(
+            excluded_root,
+            [
+                "uid: person-alex",
+                "pii: true",
+                "emails:",
+                "  - x@example.org",
+                "alt_emails:",
+                "  - x@example.org",
+                "contact_classification:",
+                "  - identifier: x@example.org",
+                "    usage_class: observed",
+                "    source: 'script:synthetic-importer'",
+                "    observed_at: '2026-10-01'",
+                "identifier_validity:",
+                "  - identifier: x@example.org",
+                "    valid_until: '2026-01-02'",
+            ],
+        )
+
+        result = self._remove(tmp_path, "x@example.org")
+
+        assert result.disposition == "routed-elsewhere", result.reason
+        meta = pii.read_bounce_record(excluded_root / "person-alex.md")
+        assert "x@example.org" not in (meta.get("emails") or [])
+        assert "x@example.org" in (meta.get("alt_emails") or [])
+        entries = pii.contact_classification_entries(meta)
+        assert [e["identifier"] for e in entries] == ["x@example.org"]
+        validity = pii.identifier_validity_entries(meta)
+        assert [e["identifier"] for e in validity] == ["x@example.org"]
+
+
 def test_value_key_treats_dates_and_iso_strings_alike() -> None:
     from datetime import datetime
 

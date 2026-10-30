@@ -166,15 +166,98 @@ def _facts_not_on(
     return out
 
 
+def _identifier_keys(*metas: Mapping[str, Any]) -> set[str]:
+    """``pii.normalize_identifier`` of every value across ``FOLD_FIELDS`` on *metas*.
+
+    The orphan test's identifier universe (issue athenaeum#2196, AC1): a
+    per-address fact entry (:data:`_PER_IDENTIFIER_FACT_FIELDS`) whose
+    :func:`_fact_identifier` is not in this set, computed on the record(s) in
+    question, describes an address neither record lists. Deliberately the
+    WIDE set — :data:`FOLD_FIELDS` (= :data:`pii.CONTACT_DATA_FIELDS`,
+    includes ``phones``) rather than the narrower
+    :data:`pii.CONTACT_IDENTIFIER_FIELDS` :func:`missing_values` iterates for
+    VALUE comparison — per the issue's explicit AC1 wording; the wider set
+    errs toward KEEPING an entry, never toward dropping one it need not.
+    """
+    keys: set[str] = set()
+    for meta in metas:
+        for field_name in FOLD_FIELDS:
+            for value in _field_values(meta, field_name):
+                key = pii.normalize_identifier(value)
+                if key:
+                    keys.add(key)
+    return keys
+
+
+def orphaned_fact_entries(meta: Mapping[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    """Per-field fact entries on *meta* describing an address *meta* itself does not list.
+
+    The single-record form of the same orphan test :func:`merge_contact_values`
+    and :func:`holds_nothing_more` apply during a fold (issue athenaeum#2196,
+    AC1/AC4) — here "the record in question" is *meta* itself, which is what
+    ``repair --contact-records`` needs to report and prune an orphan that
+    predates this fix and that no fold or merge touches (a record with no
+    duplicate and no absorption to trigger one). Keyed by fact field
+    (:data:`_PER_IDENTIFIER_FACT_FIELDS`); a field with no orphan entry is
+    absent from the result, never present with an empty list.
+    """
+    keys = _identifier_keys(meta)
+    out: dict[str, list[dict[str, Any]]] = {}
+    for fact_field in _PER_IDENTIFIER_FACT_FIELDS:
+        orphans = [e for e in _fact_entries(meta, fact_field) if _fact_identifier(e) not in keys]
+        if orphans:
+            out[fact_field] = orphans
+    return out
+
+
+def prune_orphan_fact_entries(meta: Mapping[str, Any]) -> tuple[dict[str, Any], int]:
+    """A copy of *meta* with every :func:`orphaned_fact_entries` entry dropped.
+
+    Returns ``(pruned_meta, entries_dropped)``. ``entries_dropped == 0``
+    returns a plain ``dict(meta)`` unchanged, so a caller can skip a write
+    when there was nothing to prune — the same "write only on a real change"
+    discipline the rest of this module follows.
+    """
+    orphans = orphaned_fact_entries(meta)
+    if not orphans:
+        return dict(meta), 0
+    pruned = dict(meta)
+    dropped = 0
+    for fact_field, bad in orphans.items():
+        bad_keys = {_fact_identifier(e) for e in bad}
+        kept = [e for e in _fact_entries(meta, fact_field) if _fact_identifier(e) not in bad_keys]
+        dropped += len(bad)
+        if kept:
+            pruned[fact_field] = kept
+        else:
+            pruned.pop(fact_field, None)
+    return pruned, dropped
+
+
 def holds_nothing_more(copy: Mapping[str, Any], keep: Mapping[str, Any]) -> bool:
     """True when every value and per-address fact on *copy* is already on *keep*.
 
     The retire-safe test for a duplicate record: retiring *copy* then loses
     nothing any reader could have seen.
+
+    A fact entry on *copy* that :func:`merge_contact_values` would drop as an
+    orphan (its identifier is in neither record's address fields — issue
+    athenaeum#2196, AC1/AC4) does not count as "more": the fold would never
+    carry it across in the first place, so retiring *copy* loses nothing a
+    fold could have preserved.
     """
     if missing_values(copy, keep):
         return False
-    return not any(_facts_not_on(copy, keep, f) for f in _PER_IDENTIFIER_FACT_FIELDS)
+    identifier_keys = _identifier_keys(copy, keep)
+    for fact_field in _PER_IDENTIFIER_FACT_FIELDS:
+        extra = [
+            e
+            for e in _facts_not_on(copy, keep, fact_field)
+            if _fact_identifier(e) in identifier_keys
+        ]
+        if extra:
+            return False
+    return True
 
 
 def merge_contact_values(
@@ -190,6 +273,14 @@ def merge_contact_values(
     absorbed record's own ``field_sources`` provenance when it had one, else
     gets *source*; either way the entry is written in the corrections
     applier's list shape, ``{"value": ..., "source": ...}``.
+
+    **Orphan guard (issue athenaeum#2196, AC1).** A per-address fact entry on
+    *absorbed* is carried onto the merged record only when its identifier is
+    in the MERGED record's address set (:func:`_identifier_keys` over
+    :data:`FOLD_FIELDS`) — computed AFTER the value-fold above, so an
+    address this SAME call is adding (because *absorbed* lists it and
+    *canonical* did not) still counts, and its fact entry travels with it.
+    An entry describing an address neither record lists is never written.
     """
     merged = dict(canonical)
     added: dict[str, int] = {}
@@ -215,8 +306,13 @@ def merge_contact_values(
     if added:
         merged["field_sources"] = fs
     facts = 0
+    identifier_keys = _identifier_keys(merged)
     for fact_field in _PER_IDENTIFIER_FACT_FIELDS:
-        extra = _missing_facts(absorbed, canonical, fact_field)
+        extra = [
+            e
+            for e in _missing_facts(absorbed, canonical, fact_field)
+            if _fact_identifier(e) in identifier_keys
+        ]
         if extra:
             merged[fact_field] = [*_fact_entries(canonical, fact_field), *extra]
             facts += len(extra)
@@ -305,12 +401,25 @@ def merge_duplicate_record(
     records hold for the same address is settled by
     :func:`_stronger_classification`. Callers check
     :func:`duplicate_needs_review` first; this function does not.
+
+    **Orphan guard (issue athenaeum#2196, decision 3).** The reconciliation
+    loop below only ever swaps an EXISTING entry's value for an identifier
+    :func:`merge_contact_values` has already allowed onto *merged* — it
+    cannot itself introduce a new one. The entries list is re-filtered
+    against the same merged-record identifier set anyway, defensively, so a
+    later change to this loop cannot quietly reintroduce an orphan.
     """
     merged, added, facts = merge_contact_values(keep, copy)
     copy_cls = _entries_by_identifier(copy, pii.CONTACT_CLASSIFICATION_FIELD)
+    identifier_keys = _identifier_keys(merged)
     reconciled = 0
     entries = _fact_entries(merged, pii.CONTACT_CLASSIFICATION_FIELD)
     for position, entry in enumerate(entries):
+        if _fact_identifier(entry) not in identifier_keys:
+            # Orphaned on the merged record already (pre-existing on *keep*,
+            # or describing an address neither copy lists) — never a
+            # reconciliation candidate; pruned below regardless of outcome.
+            continue
         other = copy_cls.get(_fact_identifier(entry))
         if other is None or _same_fact(entry, other):
             continue
@@ -318,8 +427,12 @@ def merge_duplicate_record(
         if winner is other:
             entries[position] = {**dict(other), "identifier": entry.get("identifier")}
             reconciled += 1
-    if reconciled:
-        merged[pii.CONTACT_CLASSIFICATION_FIELD] = entries
+    pruned = [e for e in entries if _fact_identifier(e) in identifier_keys]
+    if reconciled or len(pruned) != len(entries):
+        if pruned:
+            merged[pii.CONTACT_CLASSIFICATION_FIELD] = pruned
+        else:
+            merged.pop(pii.CONTACT_CLASSIFICATION_FIELD, None)
     return merged, added, facts, reconciled
 
 

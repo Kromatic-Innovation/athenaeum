@@ -3338,6 +3338,53 @@ class ContactClassification:
         }
 
 
+def _contact_fact_identifier_keys(meta: dict[str, Any] | None) -> frozenset[str]:
+    """Normalized identifiers *meta* lists — the set a fact entry may describe.
+
+    Union of every value across :data:`CONTACT_DATA_FIELDS` plus the record's
+    own top-level ``identifier:`` when non-empty (issue athenaeum#2196). The
+    ``identifier:`` key is included here, on the READ side only, because a
+    slug-keyed bounce record carries its address there rather than in a list
+    (see :func:`identifiers_on_record`'s docstring) — without it, a bare
+    read of such a record would treat its own classification entry as
+    describing an address the record "doesn't list" and drop it.
+
+    Deliberately NOT exported, and deliberately not reused by
+    :mod:`athenaeum.contact_record_fold`, which computes its own
+    merged-record identifier set over :data:`CONTACT_DATA_FIELDS` alone (no
+    ``identifier:`` read there — the fold's own module documents why). This
+    is the defence-in-depth filter the per-value readers apply
+    (:func:`contact_classification_entries`, :func:`classification_for_value`,
+    and transitively :func:`read_entity`) — NOT the orphan definition the
+    fold and the corrections applier use to decide what to drop or carry.
+
+    Bounce-state readers (:func:`identifier_validity_entries`,
+    :func:`is_bounced_identifier`) deliberately do NOT call this: suppressing
+    a bounce mark errs toward a false SEND to a dead address, while
+    suppressing a classification errs toward ``unclassified`` (not
+    outreach-eligible) — the recoverable direction. Only the classification
+    readers filter.
+    """
+    if not isinstance(meta, dict):
+        return frozenset()
+    keys: set[str] = set()
+    for field_name in CONTACT_DATA_FIELDS:
+        raw = meta.get(field_name)
+        if isinstance(raw, str):
+            raw = [raw]
+        if not isinstance(raw, list):
+            continue
+        for item in raw:
+            if isinstance(item, str | int) and str(item).strip():
+                key = normalize_identifier(str(item))
+                if key:
+                    keys.add(key)
+    own = normalize_identifier(str(meta.get("identifier", "") or ""))
+    if own:
+        keys.add(own)
+    return frozenset(keys)
+
+
 def contact_classification_entries(meta: dict[str, Any] | None) -> list[dict[str, Any]]:
     """The per-value classification entries on *meta*, or ``[]``.
 
@@ -3347,13 +3394,28 @@ def contact_classification_entries(meta: dict[str, Any] | None) -> list[dict[str
     hand-edited record must degrade to "no classification recorded" — which
     reads as ``unclassified``, and therefore NOT outreach-eligible — never to
     a crash in a consumer.
+
+    **Orphan filter (issue athenaeum#2196, defence in depth).** An entry whose
+    ``identifier`` is not among :func:`_contact_fact_identifier_keys` of
+    *meta* — i.e. an address *meta* does not itself list, across
+    :data:`CONTACT_DATA_FIELDS` or its own ``identifier:`` — is dropped. The
+    fold and the corrections applier are the places that actually stop such
+    an entry from existing; this is the backstop for one that exists anyway
+    (a hand edit, a pre-fix write, an unrelated bug): a record must never
+    read back a usage claim for an address it does not list.
     """
     if not isinstance(meta, dict):
         return []
     entries = meta.get(CONTACT_CLASSIFICATION_FIELD)
     if not isinstance(entries, list):
         return []
-    return [entry for entry in entries if isinstance(entry, dict)]
+    listed = _contact_fact_identifier_keys(meta)
+    return [
+        entry
+        for entry in entries
+        if isinstance(entry, dict)
+        and normalize_identifier(str(entry.get("identifier", "") or "")) in listed
+    ]
 
 
 def classification_for_value(
@@ -3374,6 +3436,12 @@ def classification_for_value(
     missed ``Alex@example.org`` because it was stored as ``alex@example.org``
     would silently read as unclassified, losing a permission that was in fact
     recorded.
+
+    Inherits :func:`contact_classification_entries`'s orphan filter (issue
+    athenaeum#2196): an entry for an identifier *meta* does not itself list is
+    invisible here too, so asking this function for THAT identifier reads
+    back ``unclassified`` rather than a stale classification with no address
+    to attach to.
     """
     wanted = normalize_identifier(identifier)
     if wanted:
@@ -5113,6 +5181,12 @@ def read_entity(
     :data:`CONTACT_DATA_FIELDS` allowlist. The four inclusion/record cells, the
     :class:`RedactionMarker` per withheld non-empty field, and the co-indexed
     ``classifications`` map are all identical — see :class:`EntityRead`.
+
+    The co-indexed ``classifications`` map inherits
+    :func:`classification_for_value`'s orphan filter (issue athenaeum#2196):
+    a stale ``contact_classification`` entry for an identifier this entity's
+    record does not itself list never surfaces here, even if a later write
+    adds a DIFFERENT value this entity does list.
 
     Args:
         knowledge_root: Root of the knowledge base (parent of ``wiki/``).
