@@ -43,6 +43,32 @@ os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")
 # rather than reimplemented, so there is exactly one implementation.
 from tests.evals.harness import RecordingClient  # noqa: F401
 
+# CI runs the suite under pytest-xdist with `--dist loadfile`, which keeps a
+# module on one worker so its module-scoped fixtures are built once. These
+# modules are the exception: each parametrizes an expensive module-scoped
+# fixture by its FIRST param id (e.g. `[core-...]` / `[medium-...]`), and one
+# module alone outlasted every other worker. Splitting the module's work unit
+# by that leading param id lets each instance build on its own worker, still
+# exactly once.
+_XDIST_SPLIT_BY_LEADING_PARAM = frozenset({"tests/evals/test_recall_covers_grep.py"})
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_xdist_make_scheduler(config: Any, log: Any) -> Any:
+    if config.getoption("dist") != "loadfile":
+        return None
+    from xdist.scheduler import LoadFileScheduling
+
+    class _SplitHeavyModules(LoadFileScheduling):
+        def _split_scope(self, nodeid: str) -> str:
+            scope = super()._split_scope(nodeid)
+            if scope in _XDIST_SPLIT_BY_LEADING_PARAM and "[" in nodeid:
+                leading = nodeid.split("[", 1)[1].split("-", 1)[0].rstrip("]")
+                return f"{scope}[{leading}]"
+            return scope
+
+    return _SplitHeavyModules(config, log)
+
 
 def init_git_repo(root: Path, *, branch: str = "develop") -> None:
     """Initialize *root* as a git repo with an initial commit (issue athenaeum#947).
