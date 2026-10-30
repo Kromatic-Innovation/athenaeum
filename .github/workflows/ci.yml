@@ -158,8 +158,16 @@ jobs:
       - name: Lint with ruff
         run: ruff check src/ tests/
 
+      # Parallel across the runner's cores via pytest-xdist. `loadfile`, not
+      # `load`/`worksteal`: several modules build an expensive MODULE-scoped
+      # fixture (tests/evals/test_recall_covers_grep.py's index build,
+      # test_hook_byte_equivalence_1912.py's 48-probe comparison), and
+      # spreading one module's tests across workers would rebuild it on each.
+      # pytest-cov combines the per-worker coverage data itself, so the 75%
+      # floor still gates the whole suite. `--durations=30` keeps the slowest
+      # tests visible in every log for the next round of tuning.
       - name: Run tests
-        run: pytest tests/ -v --tb=short --cov=athenaeum --cov-report=term-missing --cov-fail-under=75
+        run: pytest tests/ -n auto --dist loadfile --tb=short --durations=30 --cov=athenaeum --cov-report=term-missing --cov-fail-under=75
 
   # hestia#596 — BLOCKING type check. The package ships `py.typed` (a PEP 561
   # assertion of type correctness to downstream consumers); mypy now enforces
