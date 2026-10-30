@@ -457,6 +457,25 @@ def fingerprint_entry(
     )
 
 
+#: Where the surface list lives, for reading it at a commit other than the
+#: checkout's own (the receipt commit, for COVERS's union rule).
+SURFACE_FILE_PATH = ".github/llm-surface.txt"
+
+
+def git_surface_at(sha: str, path: str = SURFACE_FILE_PATH) -> list[str] | None:
+    """The designations in effect at `sha`, or `None` when the file is unreadable.
+
+    `None` is NOT an error: a commit old enough to predate
+    `.github/llm-surface.txt` genuinely designated nothing, and the caller
+    reads that as an empty set, which leaves the union equal to the head's
+    designations. See `check_receipt`.
+    """
+    blob = git_read_blob(sha, path)
+    if blob is None:
+        return None
+    return parse_surface_text(blob.decode("utf-8", errors="replace"))
+
+
 def git_ensure_commit(sha: str) -> bool:
     """Make `sha` readable, fetching it by sha if the checkout lacks it.
 
@@ -552,6 +571,12 @@ def receipt_covers_head(
     message prints. Fails closed: an unreadable receipt commit, or a merge
     base that cannot be resolved, is NOT covered.
 
+    `receipt_surface` is `D(X)`: the designations as they stood at the receipt
+    commit. `None` means the receipt commit designated nothing readable (a
+    commit predating the list), which leaves the union equal to `D(H)` — NOT
+    "assume it matched the head", which would quietly drop exactly the entries
+    a PR deleted.
+
     WITHOUT `base_sha` the predicate degrades to athenaeum#2206's path diff
     over `paths_changed_lookup`. That is strictly MORE conservative than
     COVERS (it has no way to tell this PR's change from `develop`'s, so it
@@ -576,7 +601,10 @@ def receipt_covers_head(
         return False, []
 
     stale: list[str] = []
-    for entry in sorted(set(surface) | set(receipt_surface or surface)):
+    designations = set(surface)
+    if receipt_surface is not None:
+        designations |= set(receipt_surface)
+    for entry in sorted(designations):
         at_receipt = fingerprint(entry, receipt_sha)
         at_head = fingerprint(entry, head_sha)
         if at_receipt == at_head:
@@ -599,6 +627,7 @@ def check_receipt(
     *,
     base_sha: str | None = None,
     fingerprint: Callable[[str, str], str] = fingerprint_entry,
+    surface_at_lookup: Callable[[str], list[str] | None] = git_surface_at,
 ) -> ReceiptCheck:
     """Decide whether `pr_body` carries a valid eval receipt for `head_sha`.
 
@@ -610,6 +639,14 @@ def check_receipt(
     `base_sha` is the PR's base ref. COVERS needs it to tell a change THIS PR
     made from one it merely inherited from `develop`, which is a question a
     receipt-to-head diff cannot answer at all.
+
+    `surface_at_lookup` reads the designations at the RECEIPT commit, so
+    COVERS gets the real `D(X) ∪ D(H)` rather than `D(H)` twice. Without it a
+    PR could drop a designation at head and have an old receipt accepted for
+    the very symbol it dropped — the hole the union rule exists to close
+    (Seer review on PR athenaeum#2246). A receipt commit with no surface file
+    designated nothing, so `None` reads as the empty set and the union is
+    just the head's.
     """
     not_needed = _NOT_NEEDED_RE.search(pr_body)
     if not_needed:
@@ -665,6 +702,7 @@ def check_receipt(
                 surface,
                 paths_changed_lookup,
                 base_sha=base_sha,
+                receipt_surface=surface_at_lookup(receipt_sha),
                 fingerprint=fingerprint,
             )
         if not covered:
@@ -713,6 +751,7 @@ def evaluate(
     merge_base_sha: str | None = None,
     base_surface: list[str] | None = None,
     fingerprint: Callable[[str, str], str] = fingerprint_entry,
+    surface_at_lookup: Callable[[str], list[str] | None] = git_surface_at,
 ) -> ReceiptCheck:
     """Full decision: no reasoning-surface change passes trivially; otherwise require a receipt.
 
@@ -752,6 +791,7 @@ def evaluate(
         paths_changed_lookup,
         base_sha=base_sha,
         fingerprint=fingerprint,
+        surface_at_lookup=surface_at_lookup,
     )
     if result.ok:
         return result
@@ -835,6 +875,10 @@ def main(argv: list[str] | None = None) -> int:
         base_sha=args.base_sha,
         merge_base_sha=merge_base_sha,
         base_surface=base_surface,
+        # Read D(X) from the same path the caller named, not the default: the
+        # surface file is passed in explicitly, so hardcoding the default
+        # would read the wrong list — or none at all.
+        surface_at_lookup=lambda sha: git_surface_at(sha, str(args.surface_file)),
     )
     print(result.message)
     return 0 if result.ok else 1

@@ -1114,3 +1114,82 @@ def test_the_dispatch_rule_appears_exactly_once_in_a_failure_message() -> None:
         ).message,
     ):
         assert message.lower().count(_RULE_KEY_PHRASE) == 1, message
+
+
+def test_covers_reads_the_receipt_commits_own_designations(tmp_path: Path) -> None:
+    """Seer review on PR athenaeum#2246: `D(X)` has to come from the receipt commit.
+
+    The union rule is what stops a PR from dropping a designation to escape an
+    eval. `receipt_covers_head` took `receipt_surface`, but nothing in
+    production ever supplied it, so the "union" was `D(H)` twice — and a PR
+    that both changed a designated symbol AND deleted its entry would have had
+    an old receipt accepted for exactly that symbol.
+
+    Driven end to end through `check_receipt`, because the defect was in the
+    CALL, not in the predicate: a test of `receipt_covers_head` alone passes
+    either way.
+    """
+    _init_fixture_repo(tmp_path)
+    surface_both = "# both symbols\nmod.py::designated\nmod.py::other\n"
+    (tmp_path / ".github").mkdir()
+    (tmp_path / ".github" / "llm-surface.txt").write_text(surface_both)
+    (tmp_path / "mod.py").write_text(
+        "def designated(value):\n    return value + 1\n\n\ndef other(value):\n    return value\n"
+    )
+    _run_git(tmp_path, "add", "-A")
+    _run_git(tmp_path, "commit", "-m", "base")
+    base = _rev_parse(tmp_path)
+
+    _run_git(tmp_path, "checkout", "-q", "-b", "feature")
+    receipted = _commit_file(
+        tmp_path,
+        "mod.py",
+        "def designated(value):\n    return value + 2\n\n\ndef other(value):\n    return value\n",
+        "the PR changes designated()",
+    )
+    # The head changes it AGAIN and deletes its designation.
+    (tmp_path / "mod.py").write_text(
+        "def designated(value):\n    return value + 3\n\n\ndef other(value):\n    return value\n"
+    )
+    (tmp_path / ".github" / "llm-surface.txt").write_text("# only the other one\nmod.py::other\n")
+    _run_git(tmp_path, "add", "-A")
+    _run_git(tmp_path, "commit", "-m", "change it again and drop its designation")
+    head = _rev_parse(tmp_path)
+
+    run = {
+        "headSha": receipted,
+        "event": "workflow_dispatch",
+        "workflowName": "Evals",
+        "conclusion": "success",
+    }
+    with pytest.MonkeyPatch.context() as mp:
+        mp.chdir(tmp_path)
+        head_surface = check_llm_surface_receipt.load_surface(
+            tmp_path / ".github" / "llm-surface.txt"
+        )
+        assert head_surface == ["mod.py::other"]  # the premise: the entry is gone
+
+        # Positive control: with D(X) unavailable, the union is D(H) alone and
+        # the dropped symbol is never looked at — the pre-fix behaviour.
+        blind = check_llm_surface_receipt.check_receipt(
+            pr_body=f"Evals: {RUN_URL}",
+            head_sha=head,
+            this_repo=REPO,
+            run_lookup=lambda repo, run_id: run,
+            surface=head_surface,
+            base_sha=base,
+            surface_at_lookup=lambda sha: None,
+        )
+        assert blind.ok, blind.message
+
+        # With the real lookup, D(X) still carries the entry, so it is checked.
+        result = check_llm_surface_receipt.check_receipt(
+            pr_body=f"Evals: {RUN_URL}",
+            head_sha=head,
+            this_repo=REPO,
+            run_lookup=lambda repo, run_id: run,
+            surface=head_surface,
+            base_sha=base,
+        )
+        assert not result.ok
+        assert "mod.py::designated" in result.message
