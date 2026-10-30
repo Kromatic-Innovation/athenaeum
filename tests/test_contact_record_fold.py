@@ -32,7 +32,13 @@ from pathlib import Path
 import pytest
 
 from athenaeum import pii
-from athenaeum.contact_record_fold import FOLD_SOURCE, fold_absorbed_contact_records
+from athenaeum.contact_record_fold import (
+    FOLD_SOURCE,
+    fold_absorbed_contact_records,
+    holds_nothing_more,
+    merge_contact_values,
+    merge_duplicate_record,
+)
 from athenaeum.contact_record_repair import (
     apply_contact_record_repair,
     plan_contact_record_repair,
@@ -244,6 +250,142 @@ class TestMergeHook:
     def test_missing_surface_is_a_no_op(self, tmp_path: Path) -> None:
         summary = fold_absorbed_contact_records(tmp_path / "nope", [(ABSORBED, CANON)])
         assert summary.records_folded == 0
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#2196: orphaned per-address fact entries (identifier in
+# NEITHER record's address fields) must never be carried by a fold, and must
+# not count toward `holds_nothing_more`'s retire-safe test. Hermetic,
+# dict-level — these primitives take plain mappings, no files needed.
+# ---------------------------------------------------------------------------
+
+
+class TestOrphanFactEntries:
+    def test_merge_contact_values_never_carries_an_orphan_entry(self) -> None:
+        """Repro shape from the issue: A's `remove` left an orphaned
+        `observed` classification with no address on A; B (the fold target)
+        never gets it."""
+        canonical = {"uid": "U", "emails": ["y@example.org"]}
+        absorbed = {
+            "uid": "U",
+            "emails": [],
+            "contact_classification": [
+                {"identifier": "x@example.org", "usage_class": "observed", "source": "note"}
+            ],
+        }
+
+        merged, added, facts = merge_contact_values(canonical, absorbed)
+
+        assert added == {}
+        assert facts == 0
+        assert pii.CONTACT_CLASSIFICATION_FIELD not in merged
+        assert merged["emails"] == ["y@example.org"]
+
+    def test_merge_contact_values_still_carries_a_fact_with_its_own_address(self) -> None:
+        """A fact entry whose address THIS SAME fold is adding still
+        travels with it (decision 2: the identifier set is computed on the
+        MERGED, post-fold record)."""
+        canonical = {"uid": "U", "emails": ["y@example.org"]}
+        absorbed = {
+            "uid": "U",
+            "emails": ["x@example.org"],
+            "contact_classification": [
+                {
+                    "identifier": "x@example.org",
+                    "usage_class": "observed",
+                    "source": "script:synthetic",
+                }
+            ],
+        }
+
+        merged, added, facts = merge_contact_values(canonical, absorbed)
+
+        assert added == {"emails": 1}
+        assert facts == 1
+        assert merged["emails"] == ["y@example.org", "x@example.org"]
+        assert [e["identifier"] for e in merged[pii.CONTACT_CLASSIFICATION_FIELD]] == [
+            "x@example.org"
+        ]
+
+    def test_merge_contact_values_uses_the_wide_contact_data_fields_set(self) -> None:
+        """AC1: the identifier universe is `pii.CONTACT_DATA_FIELDS` (includes
+        `phones`), not the narrower `CONTACT_IDENTIFIER_FIELDS` -- a fact
+        entry whose identifier matches a PHONE value on the merged record is
+        not treated as an orphan."""
+        canonical = {"uid": "U", "phones": ["5550100"]}
+        absorbed = {
+            "uid": "U",
+            "contact_classification": [
+                {"identifier": "5550100", "usage_class": "observed", "source": "note"}
+            ],
+        }
+
+        merged, _added, facts = merge_contact_values(canonical, absorbed)
+
+        assert facts == 1
+        assert merged[pii.CONTACT_CLASSIFICATION_FIELD][0]["identifier"] == "5550100"
+
+    def test_holds_nothing_more_ignores_an_orphan_only_copy(self) -> None:
+        """AC4: a copy whose only extra content is an orphaned fact entry
+        (describes an address neither record lists) is retire-safe."""
+        copy = {
+            "uid": "U",
+            "contact_classification": [
+                {"identifier": "x@example.org", "usage_class": "observed", "source": "note"}
+            ],
+        }
+        keep = {"uid": "U", "emails": ["y@example.org"]}
+
+        assert holds_nothing_more(copy, keep) is True
+
+    def test_holds_nothing_more_still_sees_a_real_extra_fact(self) -> None:
+        """Contrast: when the fact's address IS listed (on either record),
+        it is real extra content and blocks a bare retire."""
+        copy = {
+            "uid": "U",
+            "emails": ["x@example.org"],
+            "contact_classification": [
+                {"identifier": "x@example.org", "usage_class": "observed", "source": "note"}
+            ],
+        }
+        keep = {"uid": "U", "emails": ["x@example.org"]}
+
+        assert holds_nothing_more(copy, keep) is False
+
+    def test_merge_duplicate_record_never_reintroduces_an_orphan(self) -> None:
+        """Decision 3: the classification-reconciliation loop in
+        `merge_duplicate_record` must not land an orphan entry on the
+        merged record either, even when BOTH copies carry one for the same
+        unlisted address."""
+        keep = {
+            "uid": "U",
+            "emails": ["y@example.org"],
+            "contact_classification": [
+                {
+                    "identifier": "z@example.org",
+                    "usage_class": "provider",
+                    "source": "note",
+                    "observed_at": "2026-01-01",
+                }
+            ],
+        }
+        copy = {
+            "uid": "U",
+            "emails": ["y@example.org"],
+            "contact_classification": [
+                {
+                    "identifier": "z@example.org",
+                    "usage_class": "observed",
+                    "source": "note",
+                    "observed_at": "2026-05-01",
+                }
+            ],
+        }
+
+        merged, _added, _facts, reconciled = merge_duplicate_record(keep, copy)
+
+        assert reconciled == 0
+        assert pii.CONTACT_CLASSIFICATION_FIELD not in merged
 
 
 # ---------------------------------------------------------------------------
@@ -881,6 +1023,109 @@ class TestRepairDuplicates:
 
         assert plan.counts()["duplicate_both_uid_prefixed"] == 1
         assert a.exists() and b.exists()
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#2196: `orphan_fact_entries` reporting and pruning.
+# ---------------------------------------------------------------------------
+
+
+class TestRepairOrphanFactEntries:
+    def _live(self, tmp_path: Path) -> Path:
+        _page(tmp_path / "wiki", f"{CANON}-casey-lee.md", CANON, "Casey Lee")
+        return tmp_path / "excluded"
+
+    def test_dry_run_reports_an_orphan_on_a_lone_record(self, tmp_path: Path) -> None:
+        """AC1/AC2's repro shape, step 4's dry-run half: a lone (no
+        duplicate, nothing absorbing it) live record carrying a classification
+        for an address it does not itself list is counted."""
+        root = self._live(tmp_path)
+        _record(
+            root,
+            f"{CANON}-casey-lee.md",
+            CANON,
+            emails=["y@example.org"],
+            extra=[
+                "contact_classification:",
+                "- identifier: x@example.org",
+                "  usage_class: observed",
+                "  source: script:example",
+            ],
+        )
+
+        plan = plan_contact_record_repair(tmp_path, root)
+
+        assert plan.counts()["orphan_fact_entries"] == 1
+        assert plan.actionable == 1
+
+    def test_apply_prunes_the_orphan_and_leaves_the_real_entry(self, tmp_path: Path) -> None:
+        root = self._live(tmp_path)
+        record = _record(
+            root,
+            f"{CANON}-casey-lee.md",
+            CANON,
+            emails=["y@example.org"],
+            extra=[
+                "contact_classification:",
+                "- identifier: x@example.org",
+                "  usage_class: observed",
+                "  source: script:example",
+                "- identifier: y@example.org",
+                "  usage_class: provider",
+                "  source: script:example",
+                "identifier_validity:",
+                "- identifier: x@example.org",
+                "  valid_until: '2026-01-02'",
+            ],
+        )
+
+        plan = plan_contact_record_repair(tmp_path, root)
+        assert plan.counts()["orphan_fact_entries"] == 2
+        result = apply_contact_record_repair(plan, root)
+
+        assert result.orphan_fact_entries_pruned == 2
+        meta = _meta(record)
+        entries = pii.contact_classification_entries(meta)
+        assert [e["identifier"] for e in entries] == ["y@example.org"]
+        assert meta.get(pii.IDENTIFIER_VALIDITY_FIELD) is None
+
+        # A rerun is clean.
+        rerun = plan_contact_record_repair(tmp_path, root)
+        assert rerun.counts()["orphan_fact_entries"] == 0
+
+    def test_a_copy_holding_only_orphaned_facts_is_retired_not_folded(
+        self, tmp_path: Path
+    ) -> None:
+        """AC4: once the orphan no longer counts as "more" (via
+        `holds_nothing_more`), a duplicate pair whose copy holds nothing but
+        an orphaned fact entry is retired outright instead of going through
+        `duplicate_fold`."""
+        root = self._live(tmp_path)
+        keep = _record(root, f"{CANON}-casey-lee.md", CANON, emails=["y@example.org"])
+        copy = _record(
+            root,
+            "casey-lee.md",
+            CANON,
+            emails=["y@example.org"],
+            extra=[
+                "contact_classification:",
+                "- identifier: x@example.org",
+                "  usage_class: observed",
+                "  source: script:example",
+            ],
+        )
+
+        plan = plan_contact_record_repair(tmp_path, root)
+        assert plan.counts()["duplicate_copies_to_retire"] == 1
+        assert plan.counts()["duplicate_divergent_to_fold"] == 0
+
+        result = apply_contact_record_repair(plan, root)
+
+        assert result.duplicates_retired == 1
+        assert result.duplicates_folded.copies_folded == 0
+        assert not copy.exists()
+        assert keep.exists()
+        assert pii.contact_classification_entries(_meta(keep)) == []
 
 
 # ---------------------------------------------------------------------------
