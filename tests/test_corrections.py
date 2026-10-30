@@ -3255,3 +3255,132 @@ class TestParkedEmailNoMatchCorrections:
             now=date(2026, 9, 6),
         )
         assert len(list(raw.glob("*.md"))) == 1
+
+
+# ---------------------------------------------------------------------------
+# List value identity: YAML-parsed dates and dict key order
+# ---------------------------------------------------------------------------
+
+
+class TestListValueIdentityAcrossYamlAndJson:
+    """A list entry read from YAML frontmatter and the same entry submitted in
+    a JSON batch must compare equal. YAML parses an unquoted ``2023-10-01`` to
+    a ``datetime.date``; JSON can only carry the string. Before the fix, an
+    ``op: remove`` of such an entry resolved to a silent ``noop``."""
+
+    HISTORY_PAGE = (
+        "---\n"
+        "uid: person-h\n"
+        "type: person\n"
+        "name: Dana Example\n"
+        "employment_history:\n"
+        "- title: Director\n"
+        "  organization_name: Example Corp\n"
+        "  start_date: 2023-10-01\n"
+        "  current: true\n"
+        "- title: Lead\n"
+        "  organization_name: Sample Ltd\n"
+        "  start_date: 2020-02-01\n"
+        "  end_date: 2022-02-01\n"
+        "  current: false\n"
+        "---\n\n# Dana Example\n\nBody.\n"
+    )
+
+    def _config(self) -> dict:
+        return _fields_config(
+            employment_history={"shape": "list", "writers": ["enrichment-service"]}
+        )
+
+    def _run(self, tmp_path: Path, op: str, value: dict) -> tuple[CorrectionRecordResult, Path]:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir(parents=True, exist_ok=True)
+        page = wiki / "person-h.md"
+        if not page.exists():
+            page.write_text(self.HISTORY_PAGE, encoding="utf-8")
+        result = process_correction_record(
+            {
+                "record": "correction",
+                "target": {"uid": "person-h"},
+                "op": op,
+                "field": "employment_history",
+                "value": value,
+                "source": "api:enrichment-vendor",
+                "observed_at": "2026-10-30T04:06:00Z",
+            },
+            _envelope(submitter="enrichment-service"),
+            index=EntityIndex(wiki),
+            knowledge_root=tmp_path,
+            registry_entities={},
+            config=self._config(),
+        )
+        return result, page
+
+    def test_remove_matches_an_entry_whose_date_yaml_parsed(self, tmp_path: Path) -> None:
+        # The JSON form of the stored entry: the date is a string.
+        value = {
+            "title": "Director",
+            "organization_name": "Example Corp",
+            "start_date": "2023-10-01",
+            "current": True,
+        }
+        result, page = self._run(tmp_path, "remove", value)
+
+        assert result.disposition == "applied", result.reason
+        meta, _ = parse_frontmatter(page.read_text(encoding="utf-8"))
+        assert [h["organization_name"] for h in meta["employment_history"]] == ["Sample Ltd"]
+        # The surviving entry keeps its own stored dates.
+        assert str(meta["employment_history"][0]["start_date"]) == "2020-02-01"
+
+    def test_remove_ignores_dict_key_order(self, tmp_path: Path) -> None:
+        value = {
+            "current": True,
+            "start_date": "2023-10-01",
+            "organization_name": "Example Corp",
+            "title": "Director",
+        }
+        result, _ = self._run(tmp_path, "remove", value)
+
+        assert result.disposition == "applied", result.reason
+
+    def test_add_of_an_already_present_entry_is_a_noop(self, tmp_path: Path) -> None:
+        value = {
+            "title": "Lead",
+            "organization_name": "Sample Ltd",
+            "start_date": "2020-02-01",
+            "end_date": "2022-02-01",
+            "current": False,
+        }
+        wiki = tmp_path / "wiki"
+        wiki.mkdir(parents=True, exist_ok=True)
+        page = wiki / "person-h.md"
+        page.write_text(self.HISTORY_PAGE, encoding="utf-8")
+        before = page.read_text(encoding="utf-8")
+
+        result, _ = self._run(tmp_path, "add", value)
+
+        assert result.disposition == "noop", result.reason
+        assert page.read_text(encoding="utf-8") == before
+
+    def test_a_different_date_still_does_not_match(self, tmp_path: Path) -> None:
+        value = {
+            "title": "Director",
+            "organization_name": "Example Corp",
+            "start_date": "2023-10-02",
+            "current": True,
+        }
+        result, _ = self._run(tmp_path, "remove", value)
+
+        assert result.disposition == "noop"
+
+
+def test_value_key_treats_dates_and_iso_strings_alike() -> None:
+    from datetime import datetime
+
+    from athenaeum.corrections import _value_key
+
+    assert _value_key(date(2023, 10, 1)) == _value_key("2023-10-01")
+    assert _value_key({"d": date(2023, 10, 1), "a": 1}) == _value_key({"a": 1, "d": "2023-10-01"})
+    assert _value_key([date(2023, 10, 1)]) == _value_key(["2023-10-01"])
+    assert _value_key(datetime(2023, 10, 1, 12, 0)) == _value_key("2023-10-01T12:00:00")
+    assert _value_key("x") == "x"
+    assert _value_key({"a": 1}) != _value_key({"a": 2})
