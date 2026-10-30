@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The LLM surface is designated by SYMBOL, and the designation is derived
+  rather than transcribed (issue athenaeum#2224).** `.github/llm-surface.txt`
+  moves from whole-file entries to `path::symbol` ones: `config.py` (8k
+  lines), `librarian.py` (12k), `tiers.py` (9k), `models.py` and `search.py`
+  are no longer listed whole, so an edit to an undesignated function in one of
+  them no longer demands a paid eval dispatch. `tests/test_llm_surface.py`
+  gains five derivations, each a membership check with a counter-example test:
+  **D1** every function or method that calls the Anthropic SDK directly,
+  **D2** every `PROMPT_META` row as `path::CONSTANT`, **D3** the model-routing
+  seam by AST name pattern, **D4** every `LLMBackend` importer (loosened to
+  "at least one entry of any form"), and **D5** no entry naming a symbol that
+  no longer resolves. D1 closes the gap the old substring oracle had:
+  `paste_cleanup.py` and `memory_class_backfill.py` call
+  `client.messages.create` without naming `LLMBackend`, so neither was on the
+  surface at all. `docs/design/prompts.md` is dropped (generated, and
+  byte-pinned by `tests/test_prompt_goldens.py`). Measured by replaying the
+  predicate over every PR merged to `develop` in the 30 days to 2026-10-30
+  (`scripts/replay_fire_over_merged_prs.py`,
+  `docs/measurements/eval-fire-replay-2026-10-30.md`): of the 68 PRs that
+  tripped the old gate, 34 would not trip the new one at all.
+
 - **"Dispatch once, at the final reviewed head" is now written down, and the
   eval gate says it (issue athenaeum#2228).** `tests/evals/README.md` gains
   the canonical statement of the rule — dispatch only when review is
