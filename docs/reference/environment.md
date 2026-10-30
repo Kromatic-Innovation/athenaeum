@@ -14,7 +14,7 @@ yaml key, and CLI flag with its code default and precedence chain — lives in
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `ANTHROPIC_API_KEY` | Yes (unless `--dry-run`) | API key for Tier 2/3 LLM calls |
+| `ANTHROPIC_API_KEY` | For `run` under the default `api` provider (not with `--dry-run` or `llm.provider: claude-cli`) | API key for Tier 2/3 LLM calls and the per-turn topic extractor. `run`/`ingest`/`session-end`/`drain` read it from their own process environment only — see "Credentials" below |
 | `ATHENAEUM_CLASSIFY_MODEL` | No | Override Tier 2 model. Precedence: env > `models.classify` in `athenaeum.yaml` > default `claude-haiku-4-5-20251001` |
 | `ATHENAEUM_WRITE_MODEL` | No | Override Tier 3 model. Precedence: env > `models.write` in `athenaeum.yaml` > default `claude-sonnet-4-6` |
 | `ATHENAEUM_LLM_PROVIDER` | No | LLM backend for the compile path: `api` (default, metered Anthropic API) or `claude-cli` (run the librarian on a Claude Code **subscription** via the `claude` binary, no API key). Precedence: env > `llm.provider` in `athenaeum.yaml` > `api`. Batch mode is API-only. See [`configuration.md`](configuration.md) → "LLM provider selection" |
@@ -33,9 +33,7 @@ yaml key, and CLI flag with its code default and precedence chain — lives in
 | `ATHENAEUM_TIER4_DEDUP` | No | Dedupe pending-question escalations by source-memory pair (default: `true`; set `false`/`0`/`no`/`off` for legacy always-append) |
 | `ATHENAEUM_CACHE_DIR` | No | Cache root for the librarian's embedding/cluster pass (default: `~/.cache/athenaeum`) |
 | `ATHENAEUM_TOPIC_MODEL` | No | Override query-topic model. Precedence: env > `models.topic` in `athenaeum.yaml` > default `claude-haiku-4-5-20251001` |
-| `ATHENAEUM_OP_KEY_PATH` | No | 1Password path for the session-start `ANTHROPIC_API_KEY` bootstrap (default: `op://Agent Tools/Anthropic API Key/credential`) |
-| `JEV_API_KEY` | No | API key for the Jev decision provider (athenaeum#1997). Cached in `~/.cache/athenaeum/config.env` by the session-start hook, same preserve/refetch handling as `ANTHROPIC_API_KEY`; optional — a missing 1Password item produces no warning |
-| `ATHENAEUM_OP_JEV_KEY_PATH` | No | 1Password path for the session-start `JEV_API_KEY` bootstrap (default: `op://Agent Tools/Jev Athenaeum Key/credential`) |
+| `JEV_API_KEY` | No | API key for the optional Jev decision provider. Supplied the same ways as `ANTHROPIC_API_KEY` (see "Credentials" below) |
 | `ATHENAEUM_PQ_SNOOZE_HOURS` | No | Snooze TTL in hours for pending-questions surfacing (default: `24`; consumed by the `resolve-questions` skill) |
 | `ATHENAEUM_PYTHON` | No | Python interpreter used by the example hooks (default: `python3`) |
 | `AUTO_RECALL` | No | Per-turn recall on/off (hook shell env; overrides `athenaeum.yaml`'s `auto_recall`). Default: `true` |
@@ -58,9 +56,37 @@ the error instead of the silence, run the same per-turn sequence directly:
 **Claude Code auth caveat.** Claude Code's own `CLAUDE_CODE_OAUTH_TOKEN` is
 scoped to its inference endpoint, and the Anthropic Messages API rejects it
 with `401 OAuth authentication is currently not supported`. The pipeline and
-example hooks need a separate console API key — see
-[`../design/recall-architecture.md`](../design/recall-architecture.md#anthropic_api_key-bootstrap-sessionstart)
-for the 1Password bootstrap pattern.
+example hooks need a separate console API key (or `llm.provider: claude-cli`).
+
+## Credentials
+
+How to supply `ANTHROPIC_API_KEY` / `JEV_API_KEY` is documented in one
+place: the "Supplying an API key" section of
+[`examples/claude-code/README.md`](../../examples/claude-code/README.md#supplying-an-api-key),
+which covers:
+
+- the environment versus `~/.cache/athenaeum/config.env`;
+- which commands read `config.env` and which don't;
+- using your own secret manager.
+
+1Password is optional and off by default. The hook variables below matter
+only if you opt into it.
+
+`docs/reference/configuration.md` is generated from `config.py`'s resolvers
+and covers resolver-backed knobs only. The variables below are read by the
+shell hook (and, for the two `OP_*` flags, by `op` itself), so they are
+listed here instead.
+
+| Variable | Read by | Description |
+|----------|---------|-------------|
+| `ATHENAEUM_OP_KEY_PATH` | `session-start-recall.sh` | 1Password item path for `ANTHROPIC_API_KEY` when the `op` fetch is opted into. The shipped default (`op://Agent Tools/Anthropic API Key/credential`) is used only then |
+| `ATHENAEUM_OP_JEV_KEY_PATH` | `session-start-recall.sh` | Same, for `JEV_API_KEY` (default `op://Agent Tools/Jev Athenaeum Key/credential`, used only when `op` is opted into) |
+| `OP_SERVICE_ACCOUNT_TOKEN` | `session-start-recall.sh`, `op`, the receipt-sealing key provider | 1Password service-account token. Setting it is one of the two ways to open the hook's `op` gate |
+| `ATHENAEUM_OP_INTERACTIVE` | `session-start-recall.sh` | `1` opens the `op` gate without a service-account token and uses 1Password's interactive desktop-app integration; the two `OP_*` suppression flags are then NOT set. Default unset |
+| `ATHENAEUM_OP_REFRESH` | `session-start-recall.sh` | `1` re-fetches from `op` even when `config.env` already caches the credential. Default unset |
+| `ATHENAEUM_OP_TIMEOUT_SECONDS` | `session-start-recall.sh` | Bound on a single `op read`, whole seconds. Default `10`; a non-positive-integer value falls back to `10` |
+| `OP_LOAD_DESKTOP_APP_SETTINGS` | `op` | Set to `false` wherever `op` runs to stop its macOS App Data probe ("would like to access data from other apps"). The hook sets it on its own `op` calls unless `ATHENAEUM_OP_INTERACTIVE=1` |
+| `OP_BIOMETRIC_UNLOCK_ENABLED` | `op` | Set to `false` alongside the flag above to stop the matching biometric-unlock prompt |
 
 ## Precedence and yaml shape
 

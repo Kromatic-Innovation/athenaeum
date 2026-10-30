@@ -76,7 +76,8 @@ free) would exceed it -- partial results are still scored and reported.
 
 Usage::
 
-    export JEV_API_KEY="$(op read 'op://Agent Tools/Jev Athenaeum Key/credential')"
+    export JEV_API_KEY="$(OP_LOAD_DESKTOP_APP_SETTINGS=false OP_BIOMETRIC_UNLOCK_ENABLED=false \\
+        op read 'op://Agent Tools/Jev Athenaeum Key/credential')"
     python scripts/eval_jev_comparator.py \\
         --wiki-root ~/knowledge \\
         --output docs/measurements/jev-comparator-eval-2026-10.md \\

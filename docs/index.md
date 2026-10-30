@@ -36,6 +36,7 @@ Task-shaped. *"I want to ___."* Each guide names the module page that backs it.
   constraint in `wiki/_schema/` and what happens when a write violates it.
 - [Codex context file](guides/codex.md) — Tier-2 snapshot adapter for OpenAI Codex.
 - [Claude Code integration](guides/claude-code.md) — wiring the MCP server and the example hooks.
+- [Other clients and platforms](guides/clients.md) — Claude Desktop, Cursor, ChatGPT/Grok, Codex; macOS, Linux, Windows.
 - [Vector search](guides/vector-search.md) — optional embedding backends and query-topic extraction.
 - [Upgrading](guides/upgrading.md) — data lifecycle and what a version bump does to an existing wiki.
 - [Troubleshooting](guides/troubleshooting.md) — symptom → cause.

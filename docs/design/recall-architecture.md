@@ -258,16 +258,13 @@ Claude Code authenticates with `CLAUDE_CODE_OAUTH_TOKEN` (starts `sk-ant-o`), sc
 401 OAuth authentication is currently not supported
 ```
 
-So the LLM preprocessor needs a real console API key, which it reads from `ANTHROPIC_API_KEY`. The reference `session-start-recall.sh` fetches it from 1Password when:
+So the LLM preprocessor needs a real console API key, which it reads from `ANTHROPIC_API_KEY` (or no key at all under `llm.provider: claude-cli`). The reference `session-start-recall.sh` uses, in order: a key already exported in its environment; a cached line in `~/.cache/athenaeum/config.env`; and only then, as an opt-in, a 1Password fetch. It runs `op` for a credential only when all of these hold (athenaeum#2193):
 
-- `ANTHROPIC_API_KEY` isn't already exported, AND
-- the `op` CLI is signed in
+- the key is not already exported, AND nothing is cached in `config.env` for it (or `ATHENAEUM_OP_REFRESH=1` forces a re-fetch over a cached line), AND
+- `op` is on `PATH`, AND
+- `OP_SERVICE_ACCOUNT_TOKEN` is set, OR the operator opted in with `ATHENAEUM_OP_INTERACTIVE=1`
 
-```bash
-op read "op://Agent Tools/Anthropic API Key/credential"
-```
-
-Override path via `ATHENAEUM_OP_KEY_PATH`. The fetched key is cached in `~/.cache/athenaeum/config.env` with `0600` perms. Every failure mode is silent — the recall hook then degrades to the regex fallback.
+Each `op read` is bounded by `ATHENAEUM_OP_TIMEOUT_SECONDS` (default 10) and, unless `ATHENAEUM_OP_INTERACTIVE=1`, runs with `OP_LOAD_DESKTOP_APP_SETTINGS=false` and `OP_BIOMETRIC_UNLOCK_ENABLED=false`. The item path defaults are overridable via `ATHENAEUM_OP_KEY_PATH` / `ATHENAEUM_OP_JEV_KEY_PATH`; athenaeum#2205 plans to replace them with a generic credential command. A fetched key is cached in `config.env` with `0600` perms. Every failure mode is silent — the recall hook then degrades to the regex fallback. User-facing setup, including using any secret manager instead of `op`, lives in the "Supplying an API key" section of [`examples/claude-code/README.md`](../../examples/claude-code/README.md#supplying-an-api-key).
 
 **On-disk exposure (athenaeum#1179).** The key is cached in *plaintext*, not
 encrypted — `0600` restricts it to the owning OS user, it does not protect it
