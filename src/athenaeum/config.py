@@ -336,6 +336,125 @@ def resolve_owner_asserter(config: dict[str, Any] | None) -> dict[str, Any] | No
     return None
 
 
+def owner_addresses(owner: dict[str, Any] | None) -> set[str]:
+    """Return the owner's own mailbox addresses, lowercased (issue athenaeum#1739).
+
+    Drawn from two places, both already operator-supplied config, exactly as
+    :func:`athenaeum.dedupe._owner_addresses` computed them before issue
+    athenaeum#2210 lifted this helper down here — ``pii`` (L3) must not import
+    the L4 ``dedupe`` module, so this is the one definition both
+    :mod:`athenaeum.dedupe` (the merge address guard) and
+    :mod:`athenaeum.pii_attribution` (the D1-narrow operator-address check)
+    now share:
+
+    - ``owner["emails"]`` — the explicit owner-address list (see
+      :func:`resolve_owner`).
+    - Any configured alias that looks like an address (contains ``@``). The
+      alias list already mixes display names with handles and git-author
+      emails, so an owner who listed their address there gets the guard
+      without having to restate it.
+
+    *owner* is the already-RESOLVED owner dict (:func:`resolve_owner`'s
+    return value), not the raw config. Empty when *owner* is falsy, which
+    makes every caller inert when no owner is configured.
+    """
+    if not owner:
+        return set()
+    out: set[str] = set()
+    for raw in owner.get("emails") or []:
+        s = str(raw).strip().lower()
+        if s:
+            out.add(s)
+    for alias in owner.get("aliases") or []:
+        s = str(alias).strip().lower()
+        if s and "@" in s:
+            out.add(s)
+    return out
+
+
+def resolve_relay_local_prefixes(config: dict[str, Any] | None) -> frozenset[str]:
+    """Operator-extended local-part relay/notification prefixes (issue athenaeum#2210).
+
+    Read from ``librarian.attribution.relay_local_prefixes``. Layered onto
+    :data:`athenaeum.pii_attribution.BUILTIN_RELAY_LOCAL_PREFIXES` by
+    :func:`athenaeum.pii_attribution.build_attribution_context` — this
+    resolver returns only the operator's additions, matching every other
+    ``resolve_*`` knob's DEFAULT-EMPTY convention (issue athenaeum#231); the
+    built-in set is this module's business to merge, not config's.
+
+    Deliberately NOT delegated through a shared per-key helper (unlike most
+    of this module's other list-valued resolvers): this function, and its
+    two siblings below, each inline the full ``librarian`` ->
+    ``attribution`` -> ``<key>`` chain so
+    ``tests/test_config_resolver_parity_generic.py`` — which discovers a
+    resolver's yaml nesting by scanning ITS OWN source for string literals
+    in outer-to-inner order — finds all three literals in the right order.
+    A shared helper taking the leaf key as a parameter would discover that
+    leaf-key literal at the CALL SITE, ahead of "librarian"/"attribution"
+    found inside the helper, which is backwards for this nesting.
+    """
+    if isinstance(config, dict):
+        librarian_cfg = config.get("librarian")
+        if isinstance(librarian_cfg, dict):
+            attribution_cfg = librarian_cfg.get("attribution")
+            if isinstance(attribution_cfg, dict):
+                raw = attribution_cfg.get("relay_local_prefixes")
+                if isinstance(raw, list):
+                    return frozenset(
+                        s.strip().lower() for s in raw if isinstance(s, str) and s.strip()
+                    )
+    return frozenset()
+
+
+def resolve_operator_mailer_domains(config: dict[str, Any] | None) -> frozenset[str]:
+    """The operator's mailer domains for D1-narrow (issue athenaeum#2210).
+
+    Read from ``librarian.attribution.operator_mailer_domains``. An address
+    at one of these domains, on a page that is not the configured owner's
+    own, is a non-personal identifier enforced from day one (design
+    ``docs/design/attribution-verification.md`` §5.1, D1-narrow). DEFAULT-
+    EMPTY: unconfigured, this check never fires. See
+    :func:`resolve_relay_local_prefixes` for why this inlines its own
+    ``librarian.attribution.*`` chain rather than sharing a helper.
+    """
+    if isinstance(config, dict):
+        librarian_cfg = config.get("librarian")
+        if isinstance(librarian_cfg, dict):
+            attribution_cfg = librarian_cfg.get("attribution")
+            if isinstance(attribution_cfg, dict):
+                raw = attribution_cfg.get("operator_mailer_domains")
+                if isinstance(raw, list):
+                    return frozenset(
+                        s.strip().lower() for s in raw if isinstance(s, str) and s.strip()
+                    )
+    return frozenset()
+
+
+def resolve_relay_domains(config: dict[str, Any] | None) -> frozenset[str]:
+    """Whole-domain relay entries for D1-domain (issue athenaeum#2210).
+
+    Read from ``librarian.attribution.relay_domains``. Logged as
+    ``non-personal`` but OBSERVE-ONLY (design §5.1, D1-domain) — a
+    whole-domain entry over-denies that domain's real employees
+    (athenaeum-adapters#269), so unlike :func:`resolve_relay_local_prefixes`
+    and :func:`resolve_operator_mailer_domains` this set is never enforced in
+    this issue. DEFAULT-EMPTY: unconfigured, this check never fires. See
+    :func:`resolve_relay_local_prefixes` for why this inlines its own
+    ``librarian.attribution.*`` chain rather than sharing a helper.
+    """
+    if isinstance(config, dict):
+        librarian_cfg = config.get("librarian")
+        if isinstance(librarian_cfg, dict):
+            attribution_cfg = librarian_cfg.get("attribution")
+            if isinstance(attribution_cfg, dict):
+                raw = attribution_cfg.get("relay_domains")
+                if isinstance(raw, list):
+                    return frozenset(
+                        s.strip().lower() for s in raw if isinstance(s, str) and s.strip()
+                    )
+    return frozenset()
+
+
 def _normalize_audience_roles(values: Any) -> set[str]:
     """Case-fold, trim, and drop empties from an iterable of role ids (athenaeum#312)."""
     if not isinstance(values, (list, tuple, set)):

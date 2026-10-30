@@ -9,6 +9,7 @@ import pytest
 
 from athenaeum.config import (
     load_config,
+    owner_addresses,
     resolve_audience,
     resolve_audit_on_touch_freshness_hours,
     resolve_extra_intake_roots,
@@ -16,6 +17,7 @@ from athenaeum.config import (
     resolve_min_cluster_cohesion,
     resolve_min_cluster_cohesion_scopes,
     resolve_min_merge_confidence,
+    resolve_operator_mailer_domains,
     resolve_owner,
     resolve_page_flag_bytes,
     resolve_page_warn_bytes,
@@ -27,6 +29,8 @@ from athenaeum.config import (
     resolve_reasoning_tier_auditing_enabled,
     resolve_reasoning_tier_t2_auto_apply_enabled,
     resolve_reindex_full_rehash_max_age_days,
+    resolve_relay_domains,
+    resolve_relay_local_prefixes,
     resolve_retire,
     resolve_reversible_verdict_auto_apply_enabled,
     resolve_wiki_dedupe_min_body_chars,
@@ -830,6 +834,62 @@ class TestResolveOwner:
         assert "owner" not in _DEFAULTS
         # Unset owner stays inert through the full load path.
         assert resolve_owner(load_config(Path("/nonexistent-knowledge-root"))) is None
+
+
+class TestOwnerAddresses:
+    """Issue athenaeum#2210: lifted from ``dedupe._owner_addresses`` so the L3
+    attribution seam can share one definition with the L4 merge guard
+    without ``pii_attribution`` importing ``dedupe``."""
+
+    def test_none_owner_is_empty(self) -> None:
+        assert owner_addresses(None) == set()
+        assert owner_addresses({}) == set()
+
+    def test_emails_are_lowercased(self) -> None:
+        owner = resolve_owner({"owner": {"emails": ["  Owner@Example.COM "]}})
+        assert owner_addresses(owner) == {"owner@example.com"}
+
+    def test_address_shaped_alias_is_included(self) -> None:
+        owner = resolve_owner(
+            {"owner": {"aliases": ["Tristan Kromer", "tristan@example.com"]}}
+        )
+        assert owner_addresses(owner) == {"tristan@example.com"}
+
+    def test_non_address_alias_is_excluded(self) -> None:
+        owner = resolve_owner({"owner": {"aliases": ["user_tristan"]}})
+        assert owner_addresses(owner) == set()
+
+
+class TestResolveAttributionStringSets:
+    """Issue athenaeum#2210: the three ``librarian.attribution.*`` knobs the
+    attribution seam layers onto its own built-in sets."""
+
+    def test_default_empty(self) -> None:
+        assert resolve_relay_local_prefixes(None) == frozenset()
+        assert resolve_operator_mailer_domains(None) == frozenset()
+        assert resolve_relay_domains({}) == frozenset()
+
+    def test_relay_local_prefixes_lowercased_and_stripped(self) -> None:
+        config = {
+            "librarian": {"attribution": {"relay_local_prefixes": ["  Campaign-  ", ""]}}
+        }
+        assert resolve_relay_local_prefixes(config) == {"campaign-"}
+
+    def test_operator_mailer_domains(self) -> None:
+        config = {
+            "librarian": {
+                "attribution": {"operator_mailer_domains": ["Mailer.Example.ORG"]}
+            }
+        }
+        assert resolve_operator_mailer_domains(config) == {"mailer.example.org"}
+
+    def test_relay_domains(self) -> None:
+        config = {"librarian": {"attribution": {"relay_domains": ["relay.example.com"]}}}
+        assert resolve_relay_domains(config) == {"relay.example.com"}
+
+    def test_non_list_value_is_ignored(self) -> None:
+        config = {"librarian": {"attribution": {"relay_domains": "not-a-list"}}}
+        assert resolve_relay_domains(config) == frozenset()
 
 
 class TestLoadConfig:

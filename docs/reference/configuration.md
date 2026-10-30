@@ -314,6 +314,71 @@ at pack-build time, with the pack name in the message.
 
 ## `librarian`
 
+### `resolve_operator_mailer_domains`
+
+- **YAML path:** `librarian.attribution.operator_mailer_domains`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `frozenset()`
+- **Precedence:** `athenaeum.yaml` > code default
+
+The operator's mailer domains for D1-narrow.
+
+Read from ``librarian.attribution.operator_mailer_domains``. An address
+at one of these domains, on a page that is not the configured owner's
+own, is a non-personal identifier enforced from day one (design
+``docs/design/attribution-verification.md`` §5.1, D1-narrow). DEFAULT-
+EMPTY: unconfigured, this check never fires. See
+`resolve_relay_local_prefixes` for why this inlines its own
+``librarian.attribution.*`` chain rather than sharing a helper.
+
+### `resolve_relay_domains`
+
+- **YAML path:** `librarian.attribution.relay_domains`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `frozenset()`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Whole-domain relay entries for D1-domain.
+
+Read from ``librarian.attribution.relay_domains``. Logged as
+``non-personal`` but OBSERVE-ONLY (design §5.1, D1-domain) — a
+whole-domain entry over-denies that domain's real employees
+(athenaeum-adapters#269), so unlike `resolve_relay_local_prefixes`
+and `resolve_operator_mailer_domains` this set is never enforced in
+this issue. DEFAULT-EMPTY: unconfigured, this check never fires. See
+`resolve_relay_local_prefixes` for why this inlines its own
+``librarian.attribution.*`` chain rather than sharing a helper.
+
+### `resolve_relay_local_prefixes`
+
+- **YAML path:** `librarian.attribution.relay_local_prefixes`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `frozenset()`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Operator-extended local-part relay/notification prefixes.
+
+Read from ``librarian.attribution.relay_local_prefixes``. Layered onto
+`athenaeum.pii_attribution.BUILTIN_RELAY_LOCAL_PREFIXES` by
+`athenaeum.pii_attribution.build_attribution_context` — this
+resolver returns only the operator's additions, matching every other
+``resolve_*`` knob's DEFAULT-EMPTY convention; the
+built-in set is this module's business to merge, not config's.
+
+Deliberately NOT delegated through a shared per-key helper (unlike most
+of this module's other list-valued resolvers): this function, and its
+two siblings below, each inline the full ``librarian`` ->
+``attribution`` -> ``<key>`` chain so
+``tests/test_config_resolver_parity_generic.py`` — which discovers a
+resolver's yaml nesting by scanning ITS OWN source for string literals
+in outer-to-inner order — finds all three literals in the right order.
+A shared helper taking the leaf key as a parameter would discover that
+leaf-key literal at the CALL SITE, ahead of "librarian"/"attribution"
+found inside the helper, which is backwards for this nesting.
+
 ### `resolve_audit_on_touch_freshness_hours`
 
 - **YAML path:** `librarian.audit_on_touch_freshness_hours`
