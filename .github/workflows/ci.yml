@@ -150,7 +150,12 @@ jobs:
       # `failure` either way, so the gate is unaffected.
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        # 2, measured against 3 and 4 on real runs: all three finished in
+        # ~8m25s, because each shard pays ~2.5 min of install + collection
+        # and the test_recall_covers_grep.py `core` unit (~4.5-5.5 min) sets
+        # the floor wherever it lands. More shards only add runners until
+        # that unit gets cheaper.
+        shard: [1, 2]
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
