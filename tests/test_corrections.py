@@ -14,7 +14,7 @@ import pytest
 from pydantic import BaseModel
 from pydantic import ValidationError as PydanticValidationError
 
-from athenaeum import pii
+from athenaeum import pii, pii_attribution
 from athenaeum.corrections import (
     BatchOutcome,
     CorrectionRecordResult,
@@ -3483,6 +3483,95 @@ class TestRemoveDropsOrphanedContactFacts:
         assert [e["identifier"] for e in entries] == ["x@example.org"]
         validity = pii.identifier_validity_entries(meta)
         assert [e["identifier"] for e in validity] == ["x@example.org"]
+
+
+class TestAttributionSeamWiring:
+    """Issue athenaeum#2210: the ``op == "add"`` branch calls the seam after
+    the delta gate decides a value is genuinely new, for a contact-
+    identifier field routed to an excluded surface. Observe mode is
+    byte-identical except D1-narrow, which is enforced: ``noop`` with reason
+    ``attribution-non-personal``, and the value is never filed."""
+
+    def _config(self) -> dict:
+        return {
+            "librarian": {
+                "corrections": {
+                    "fields": {
+                        "emails": {"shape": "list", "writers": ["delivery-monitor"]}
+                    },
+                    "sensitive_fields": {"emails": "pii"},
+                }
+            },
+            "storage": {"mapping": {"pii": "excluded"}},
+        }
+
+    def _add(
+        self, tmp_path: Path, value: str, *, attribution_context: object = None
+    ) -> "CorrectionRecordResult":
+        wiki = tmp_path / "wiki"
+        _write_page(wiki, "p.md", {"uid": "person-alex", "type": "person", "name": "Alex Doe"})
+        record = {
+            "record": "correction",
+            "target": {"uid": "person-alex"},
+            "op": "add",
+            "field": "emails",
+            "value": value,
+            "source": "api:delivery-monitor:2026-10-29",
+            "observed_at": "2026-10-29T00:00:00Z",
+        }
+        return process_correction_record(
+            record,
+            _envelope(submitter="delivery-monitor"),
+            index=EntityIndex(wiki),
+            knowledge_root=tmp_path,
+            registry_entities={},
+            config=self._config(),
+            attribution_context=attribution_context,
+        )
+
+    def test_observe_mode_is_byte_identical_and_logs(self, tmp_path: Path) -> None:
+        without_context = self._add(tmp_path, "quinn@example.org")
+        assert without_context.disposition == "routed-elsewhere", without_context.reason
+        excluded_root = tmp_path / "excluded"
+        before = (excluded_root / "person-alex.md").read_text(encoding="utf-8")
+
+        tmp_path_2 = tmp_path.parent / (tmp_path.name + "-with-context")
+        context = pii_attribution.build_attribution_context(tmp_path_2, self._config())
+        with_context = self._add(
+            tmp_path_2, "quinn@example.org", attribution_context=context
+        )
+        assert with_context.disposition == "routed-elsewhere", with_context.reason
+        after = (tmp_path_2 / "excluded" / "person-alex.md").read_text(encoding="utf-8")
+        assert before == after
+
+        log_path = pii_attribution.default_attribution_log_path(context.contacts_root)
+        rows = [
+            json.loads(line)
+            for line in log_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        assert any(
+            r["target_uid"] == "person-alex" and r["writer"] == "correction-add"
+            for r in rows
+        )
+
+    def test_d1_narrow_is_enforced_as_noop(self, tmp_path: Path) -> None:
+        context = pii_attribution.build_attribution_context(tmp_path, self._config())
+        result = self._add(
+            tmp_path, "noreply@example.org", attribution_context=context
+        )
+        assert result.disposition == "noop"
+        assert result.reason == "attribution-non-personal"
+        excluded_record = tmp_path / "excluded" / "person-alex.md"
+        if excluded_record.exists():
+            meta = pii.read_bounce_record(excluded_record)
+            assert "noreply@example.org" not in (meta.get("emails") or [])
+
+        suspects = list((context.contacts_root / "_attribution" / "suspects").glob("*.md"))
+        assert len(suspects) == 1
+        meta, _ = parse_frontmatter(suspects[0].read_text(encoding="utf-8"))
+        assert meta["shadow"] is False
+        assert meta["disposition"] == "non-personal"
 
 
 def test_value_key_treats_dates_and_iso_strings_alike() -> None:

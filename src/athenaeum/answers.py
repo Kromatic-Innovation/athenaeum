@@ -1242,6 +1242,14 @@ def _apply_field_correction(
         "submitter": None,
         "defaults": {},
     }
+    # Issue athenaeum#2210: the attribution seam, built fresh for this one
+    # ratified correction — reusing the `index` just built above, so this
+    # costs no second entity scan.
+    from athenaeum import pii_attribution
+
+    attribution_context = pii_attribution.build_attribution_context(
+        knowledge_root, config, entity_index=index
+    )
     result = corrections.process_correction_record(
         raw_record,
         envelope,
@@ -1250,6 +1258,7 @@ def _apply_field_correction(
         registry_entities=registry_entities,
         config=config,
         ratified_source=ratified_source,
+        attribution_context=attribution_context,
     )
     if result.disposition in ("applied", "routed-elsewhere", "recorded-as-prose", "noop"):
         page_name = result.entity_path.name if result.entity_path is not None else "?"
