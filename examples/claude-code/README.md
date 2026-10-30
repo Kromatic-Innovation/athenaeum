@@ -122,8 +122,8 @@ pages or the index hasn't been built — check `~/.cache/athenaeum/`.
 | `ATHENAEUM_CLI`          | `athenaeum`                       | CLI binary (override for editable installs)                    |
 | `ATHENAEUM_PYTHON`       | `python3`                         | Python interpreter with athenaeum deps                         |
 | `ATHENAEUM_SRC`          | —                                 | Source checkout path (skips `pip install`, runs from source)   |
-| `ATHENAEUM_OP_KEY_PATH`  | `op://Agent Tools/Anthropic API Key/credential` | 1Password secret reference for `ANTHROPIC_API_KEY` |
-| `ATHENAEUM_OP_JEV_KEY_PATH` | `op://Agent Tools/Jev Athenaeum Key/credential` | 1Password secret reference for `JEV_API_KEY` |
+| `ATHENAEUM_OP_KEY_PATH`  | `op://Agent Tools/Anthropic API Key/credential` | 1Password item for `ANTHROPIC_API_KEY`, used only if you opt into the `op` fetch (see "Supplying an API key") |
+| `ATHENAEUM_OP_JEV_KEY_PATH` | `op://Agent Tools/Jev Athenaeum Key/credential` | 1Password item for `JEV_API_KEY`, used only if you opt into the `op` fetch |
 | `ATHENAEUM_OP_INTERACTIVE` | unset           | Set to `1` to opt into 1Password's interactive desktop-app integration: `op` may then run without `OP_SERVICE_ACCOUNT_TOKEN`, and the non-interactive suppression flags below are NOT set (athenaeum#2193) |
 | `ATHENAEUM_OP_REFRESH`   | unset                              | Set to `1` to re-fetch a credential from `op` even when a cached line already exists (athenaeum#2193) |
 | `ATHENAEUM_OP_TIMEOUT_SECONDS` | `10`                          | Bound, in whole seconds, on a single `op read`; a non-positive-integer value (fractional, non-numeric, empty, or zero) silently falls back to `10` (athenaeum#2193) |
