@@ -35,7 +35,7 @@ Three properties, each load-bearing:
 
 **Tiering.** Since athenaeum#1363 the shell hook is a thin launcher that
 ``exec``s the same packaged adapter, so the two sides differ only by one
-process spawn, and the #1912 term rule itself is pinned in process by
+process spawn, and the athenaeum#1912 term rule itself is pinned in process by
 ``tests/evals/test_hook_term_parity_1912.py``. The DEFAULT pytest selection
 therefore runs a three-probe smoke (``SMOKE_PROBES``) proving the launcher
 still reaches the adapter with the same env, argv and stdin. The full
