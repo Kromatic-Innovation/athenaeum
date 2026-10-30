@@ -6,6 +6,8 @@
 [`native-memory-baseline.md` §9](native-memory-baseline.md#9-cadence) — the
 cadence rule ("dispatch only when a change could move the result") is unchanged;
 this page makes "could move the result" mechanical instead of self-attested.
+It does narrow §9's list: "the compile pipeline" now means its reasoning
+surface (§3), not every edit to a compile-pipeline file.
 Builds on athenaeum#2206 (content-based receipt matching, in progress at the
 time of writing) and does not duplicate it.
 
@@ -315,12 +317,12 @@ Classifying the 23 runs from §2 against what each mechanism would have removed:
 | Mechanism | Runs removed | Which |
 | --- | --- | --- |
 | athenaeum#2206 (content-based receipt) | about 8 | athenaeum#2187: 5 develop merges + 1 tests-only push; athenaeum#2043 branch: 2 heads with zero surface delta from a passing head |
-| §7 dispatch rule | about 4 | athenaeum#2043 branch: 3 same-head duplicates; athenaeum#2078 branch: pre-review dispatch |
+| §7 dispatch rule | about 3 | athenaeum#2043 branch: the third red run on one head (one retry is allowed) and the second green run on another; athenaeum#2078 branch: pre-review dispatch |
 | COVERS clause 2 | 1 | athenaeum#2043 branch: rebase onto another PR's surface change |
 | Symbol-level FIRE | about 0 removed, 2–5 added | every paid PR genuinely changed prompts or call sites; some free-text exemptions would now fire (audited in the designation child's ACs) |
 
-**Net: about 23 down to roughly 12 a month (≈ 50%), most of it from athenaeum#2206 and the
-dispatch rule.** The symbol-level surface buys a different thing: about 60 of
+**Net: about 23 down to roughly 13–16 a month (≈ 30–45%): 12 removed, 2–5
+added, most of the removal from athenaeum#2206 and the dispatch rule.** The symbol-level surface buys a different thing: about 60 of
 66 monthly free-text claims become mechanical non-fires needing no line at all,
 and the handful that remain are structured and checked. Two baseline
 dispatches on `develop` are left as they are.
@@ -402,7 +404,7 @@ until it merges.
 | athenaeum#2224 | rot-check derivation D1–D5, list migration, 30-day replay measurement (§5.2) | athenaeum#2223 |
 | athenaeum#2225 | COVERS predicate with develop-merge clause (§5.4) | athenaeum#2206 (PR, held), athenaeum#2223 |
 | athenaeum#2226 | structured exemption line, set check, step-summary diffs (§5.5) | athenaeum#2223 |
-| athenaeum#2227 | run the gate script from the base commit (§5.6) | — |
+| athenaeum#2227 | run the gate script from the base commit (§5.6) | athenaeum#2223 |
 | athenaeum#2228 | dispatch rule in `tests/evals/README.md` and the gate message (§7) | athenaeum#2206 (PR, held) |
 | code-workspace-config#3552 | pointers in promotion-runner, pr-shepherd, dijkstra (§7) | athenaeum#2228 |
 | hestia#2834 | pointer in hestia-ops (§7) | athenaeum#2228 |
