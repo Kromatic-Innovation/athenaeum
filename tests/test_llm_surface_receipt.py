@@ -1091,3 +1091,26 @@ def test_the_stale_message_names_the_symbols(covers_repo: dict[str, str]) -> Non
     assert not result.ok
     assert "mod.py::designated" in result.message
     assert "mod.py::other" not in result.message
+
+
+def test_the_dispatch_rule_appears_exactly_once_in_a_failure_message() -> None:
+    """Seer review on PR athenaeum#2244: it was attached twice for a stale receipt.
+
+    athenaeum#2228 put `DISPATCH_RULE` in `check_receipt`'s stale branch AND in
+    `evaluate`'s trailing instruction, so the stale path printed the rule
+    twice. `evaluate` is the one place that attaches it now; the stale branch
+    states only the diagnosis.
+    """
+    for message in (
+        _evaluate_with(["CHANGELOG.md", "src/athenaeum/tiers.py"]).message,
+        _evaluate_with(None).message,
+        evaluate(
+            changed_files=["src/athenaeum/tiers.py"],
+            surface=SURFACE,
+            pr_body="no receipt",
+            head_sha=HEAD_SHA,
+            this_repo=REPO,
+            run_lookup=_unreached_lookup,
+        ).message,
+    ):
+        assert message.lower().count(_RULE_KEY_PHRASE) == 1, message
