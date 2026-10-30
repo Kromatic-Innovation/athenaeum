@@ -7,11 +7,12 @@ Two layers of test that share one recording pipeline.
 Deselected by default (see `pyproject.toml` `addopts = "... -m 'not eval'"`),
 so regular contributor test runs and the `develop` CI job never touch the
 network. The suite runs only from the `evals.yml` workflow, and only on
-**manual `workflow_dispatch`** — never on push. Dispatch it when a change
-to a prompt, a model tier, the compile pipeline, the recall path, or the
-sidecar could move a result; a docs or tooling change does not warrant a
-run. (The same workflow's token-free `embedding-suite` job still runs on
-push to `main`; see the workflow header.)
+**manual `workflow_dispatch`** — never on push. WHEN to dispatch is not a
+judgement call: the gate below decides whether a change could move a result,
+and [Dispatch once, at the final reviewed head](#dispatch-once-at-the-final-reviewed-head)
+is the rule for how often. (The same workflow's token-free
+`embedding-suite` job still runs on push to `main`; see the workflow
+header.)
 
 ### The `Evals:` receipt line (issue athenaeum#1731)
 
@@ -32,18 +33,57 @@ to `develop` for whether it touches the **LLM surface**, the list kept in
   head SHA whose surface files have since changed, from a different event (`push` instead of
   `workflow_dispatch`), from a different workflow (e.g. a `ci.yml`
   dispatch), from a different repo, or that didn't conclude `success`
-  (failed or cancelled) does not satisfy the check — re-dispatch after the
-  last surface change. The `headSha` match is on **content**: a run at an
-  earlier commit still satisfies the check when `git diff --name-only
-  <run sha> <head>` touches no path on the LLM surface, so the merge
-  wrapper's version bump, a merge from `develop` that leaves the surface
-  alone, or a rebase does not need a fresh (paid) dispatch. Re-dispatch only
-  when a surface file actually changed.
+  (failed or cancelled) does not satisfy the check. The `headSha` match is on
+  **content**, not on the exact commit (athenaeum#2206): a run at an earlier
+  commit still satisfies the check when no path on the LLM surface differs
+  between that commit and the head, so the merge wrapper's version bump, a
+  merge from `develop` that leaves the surface alone, or a rebase does **not**
+  need a fresh (paid) dispatch. When a receipt genuinely does not cover the
+  head, re-dispatch per the rule below — once, at the final reviewed head —
+  not once per push.
 - **`Evals: not needed — <reason>`** — for a PR that touches a surface
   file without moving anything an eval would catch (e.g. a comment-only
   edit, or this very check's own CI-only plumbing). The reason after the
   dash (`-`, `–`, or `—`) must be non-empty; a bare `Evals: not needed`
   does not pass.
+
+### Dispatch once, at the final reviewed head
+
+**This is the canonical statement of the rule** (design of record:
+`docs/design/eval-trigger-surface.md` §7). The gate's own failure message
+carries a one-sentence version, because that is what a dispatching agent reads
+at decision time; everything else points here.
+
+Dispatch `evals.yml` only when all three hold:
+
+1. **Review is complete**, and no further change to a designated symbol is
+   planned.
+2. **The gate says an eval is required** — it reports a changed reasoning
+   surface, with no covering receipt. Do not dispatch pre-emptively because a
+   PR "looks LLM-ish": the gate decides.
+3. **No passing run already covers the head.** Coverage is content-based (the
+   bullet above), so a run at an earlier commit frequently already covers it.
+
+Never re-dispatch:
+
+- **because of a `develop` merge or a rebase.** Receipt coverage handles both;
+  a merge that brings in somebody else's surface change was evaluated under
+  that PR.
+- **for a head that already has a run in flight or finished.** At most **one
+  retry** of a red run — then treat red as a finding and read it, rather than
+  re-rolling the dice.
+- **per push while iterating on a red eval**, unless the push changes a
+  designated symbol.
+
+Iterating on a genuinely red eval is legitimate, at one run per
+reasoning-changing push.
+
+Why the rule is written down: in the 30 days to 2026-10-30 there were 23 paid
+dispatches, and 19 of them went to three PR branches. On one, five dispatches
+each followed a `Merge develop` with zero surface delta and one followed a
+tests-only push; on another, one head was dispatched three times and a second
+head twice. Each run is about USD 0.61 and — the cost that actually bites — six
+to seven minutes of serial wait inside a lane.
 
 The check runs on `opened`/`synchronize`/`reopened`/**and `edited`** — the
 last one specifically so that adding the receipt line to an already-open

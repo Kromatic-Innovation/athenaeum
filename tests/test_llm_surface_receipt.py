@@ -537,3 +537,307 @@ def test_main_accepts_receipt_across_a_develop_merge(content_repo: dict[str, str
 
     assert run_main("merge_docs") == 0
     assert run_main("merge_surface") == 1
+
+
+# --- symbol-level surface grammar and the structural fingerprint ------------
+#
+# athenaeum#2223 / design `docs/design/eval-trigger-surface.md` §5.1, §5.3,
+# §5.4. Real throwaway git repos, per the ephemeral-git-fixture convention
+# the content-based cases above already follow: the fingerprint reads through
+# `git show`, so stubbing git would leave the thing under test untested.
+
+parse_surface_entry = check_llm_surface_receipt.parse_surface_entry
+fingerprint_entry = check_llm_surface_receipt.fingerprint_entry
+fire = check_llm_surface_receipt.fire
+MISSING = check_llm_surface_receipt.MISSING
+UNPARSEABLE = check_llm_surface_receipt.UNPARSEABLE
+
+#: The module every symbol case below designates one function inside of.
+_MOD_V0 = '''"""Module docstring."""
+
+CONSTANT = 7
+
+
+def designated(value):
+    """What this does."""
+    # an explanatory comment
+    return value + 1
+
+
+def undesignated(value):
+    return value - 1
+
+
+class Holder:
+    """A class with a designated method."""
+
+    def method(self):
+        return "held"
+'''
+
+SYMBOL_SURFACE = [
+    "mod.py::designated",
+    "mod.py::CONSTANT",
+    "mod.py::Holder.method",
+    "whole.py",
+    "notes.txt",
+    "prompts/",
+]
+
+
+def _parse_forms(entry: str) -> tuple[str, str | None]:
+    parsed = parse_surface_entry(entry)
+    return parsed.path, parsed.symbol
+
+
+def test_surface_grammar_splits_the_three_symbol_forms() -> None:
+    assert _parse_forms("src/athenaeum/tiers.py::parse_merge_ops_response") == (
+        "src/athenaeum/tiers.py",
+        "parse_merge_ops_response",
+    )
+    assert _parse_forms("src/athenaeum/search.py::VectorBackend.build_index") == (
+        "src/athenaeum/search.py",
+        "VectorBackend.build_index",
+    )
+    assert _parse_forms("src/athenaeum/prompt_registry.py::_META_ROWS") == (
+        "src/athenaeum/prompt_registry.py",
+        "_META_ROWS",
+    )
+
+
+def test_surface_grammar_keeps_the_pre_existing_forms() -> None:
+    """Back-compatibility: whole-file and `dir/` entries parse as they always did."""
+    assert _parse_forms("src/athenaeum/tiers.py") == ("src/athenaeum/tiers.py", None)
+    assert _parse_forms("src/athenaeum/prompts/") == ("src/athenaeum/prompts/", None)
+    assert parse_surface_entry("src/athenaeum/prompts/").is_prefix
+    assert not parse_surface_entry("src/athenaeum/tiers.py").is_prefix
+
+
+def test_a_symbol_entry_still_matches_its_file_for_the_touched_list() -> None:
+    """`_matches` is path-level on purpose — `fire` makes the symbol decision."""
+    assert check_llm_surface_receipt._matches("mod.py", "mod.py::designated")
+    assert not check_llm_surface_receipt._matches("other.py", "mod.py::designated")
+
+
+@pytest.fixture
+def symbol_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A `develop` carrying `mod.py`, a whole-file module, a text file and a prompt dir."""
+    _init_fixture_repo(tmp_path)
+    (tmp_path / "prompts").mkdir()
+    (tmp_path / "mod.py").write_text(_MOD_V0)
+    (tmp_path / "whole.py").write_text("WHOLE = 1  # a comment\n")
+    (tmp_path / "notes.txt").write_text("plain text\n")
+    (tmp_path / "prompts" / "one.md").write_text("prompt one\n")
+    _run_git(tmp_path, "add", "-A")
+    _run_git(tmp_path, "commit", "-m", "develop base")
+    monkeypatch.chdir(tmp_path)
+    return tmp_path
+
+
+def _branch_with(
+    repo: Path, name: str, files: dict[str, str], *, surface: list[str] | None = None
+) -> tuple[bool, list[str]]:
+    """Branch off `develop`, apply `files`, and return FIRE(merge_base, head).
+
+    `surface` defaults to `SYMBOL_SURFACE` at both ends; passing a different
+    list models a PR that also edits `.github/llm-surface.txt` (the head
+    designations), which is what the union rule is about.
+    """
+    _run_git(repo, "checkout", "-q", "develop")
+    merge_base = _rev_parse(repo, "develop")
+    _run_git(repo, "checkout", "-q", "-b", name)
+    for path, text in files.items():
+        target = repo / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text)
+    _run_git(repo, "add", "-A")
+    _run_git(repo, "commit", "-m", f"case: {name}")
+    head = _rev_parse(repo)
+    return fire(
+        merge_base,
+        head,
+        SYMBOL_SURFACE,
+        SYMBOL_SURFACE if surface is None else surface,
+    )
+
+
+def test_comment_only_edit_in_a_designated_function_does_not_fire(symbol_repo: Path) -> None:
+    """(a) Comments never reach the AST, so they cannot cost a paid eval run."""
+    edited = _MOD_V0.replace("# an explanatory comment", "# a differently worded comment")
+    assert edited != _MOD_V0
+    assert _branch_with(symbol_repo, "case-a", {"mod.py": edited}) == (False, [])
+
+
+def test_docstring_only_edit_does_not_fire(symbol_repo: Path) -> None:
+    """(b) Docstrings DO reach the AST — `_strip_docstrings` is what removes them."""
+    edited = _MOD_V0.replace('"""What this does."""', '"""What this does, explained better."""')
+    assert edited != _MOD_V0
+    assert _branch_with(symbol_repo, "case-b", {"mod.py": edited}) == (False, [])
+
+
+def test_changing_one_literal_in_a_designated_function_fires(symbol_repo: Path) -> None:
+    """(c) The case the whole gate exists for."""
+    edited = _MOD_V0.replace("return value + 1", "return value + 2")
+    required, changed = _branch_with(symbol_repo, "case-c", {"mod.py": edited})
+    assert required
+    assert changed == ["mod.py::designated"]
+
+
+def test_editing_an_undesignated_function_in_the_same_file_does_not_fire(
+    symbol_repo: Path,
+) -> None:
+    """(d) The precision the file-level surface could not express."""
+    edited = _MOD_V0.replace("return value - 1", "return value - 99")
+    assert _branch_with(symbol_repo, "case-d", {"mod.py": edited}) == (False, [])
+
+
+def test_renaming_a_designated_function_fires_as_missing(symbol_repo: Path) -> None:
+    """(e) A rename leaves the entry unresolved at head: MISSING != the base hash."""
+    edited = _MOD_V0.replace("def designated(", "def renamed(")
+    required, changed = _branch_with(symbol_repo, "case-e", {"mod.py": edited})
+    assert required
+    assert changed == ["mod.py::designated"]
+
+
+def test_removing_the_entry_while_editing_the_symbol_still_fires(symbol_repo: Path) -> None:
+    """(f) The union rule: a PR cannot un-designate its way out of an eval."""
+    edited = _MOD_V0.replace("return value + 1", "return value + 3")
+    head_surface = [e for e in SYMBOL_SURFACE if e != "mod.py::designated"]
+    required, changed = _branch_with(
+        symbol_repo, "case-f", {"mod.py": edited}, surface=head_surface
+    )
+    assert required
+    assert changed == ["mod.py::designated"]
+
+
+def test_whole_file_entry_fires_on_a_non_comment_change(symbol_repo: Path) -> None:
+    """(g) Whole-file entries behave as before."""
+    required, changed = _branch_with(symbol_repo, "case-g", {"whole.py": "WHOLE = 2\n"})
+    assert required
+    assert changed == ["whole.py"]
+
+
+def test_whole_file_entry_ignores_a_comment_only_change(symbol_repo: Path) -> None:
+    """The one way a whole-file entry is NOT as before: strictly coarser, minus prose.
+
+    Design §11's rollback property — restoring a whole-file list degrades
+    FIRE to "the module's AST changed", which is still never WEAKER than the
+    old path match except for comments and docstrings.
+    """
+    assert _branch_with(
+        symbol_repo, "case-g2", {"whole.py": "WHOLE = 1  # reworded comment\n"}
+    ) == (False, [])
+
+
+def test_a_module_level_constant_is_a_designatable_symbol(symbol_repo: Path) -> None:
+    edited = _MOD_V0.replace("CONSTANT = 7", "CONSTANT = 8")
+    required, changed = _branch_with(symbol_repo, "case-const", {"mod.py": edited})
+    assert (required, changed) == (True, ["mod.py::CONSTANT"])
+
+
+def test_a_class_method_is_a_designatable_symbol(symbol_repo: Path) -> None:
+    edited = _MOD_V0.replace('return "held"', 'return "released"')
+    required, changed = _branch_with(symbol_repo, "case-method", {"mod.py": edited})
+    assert (required, changed) == (True, ["mod.py::Holder.method"])
+
+
+def test_a_non_py_entry_is_byte_hashed(symbol_repo: Path) -> None:
+    required, changed = _branch_with(symbol_repo, "case-txt", {"notes.txt": "plain text!\n"})
+    assert (required, changed) == (True, ["notes.txt"])
+
+
+def test_a_prefix_entry_fires_on_an_added_file(symbol_repo: Path) -> None:
+    """A prefix is hashed path-by-path, so an ADDED prompt fires, not just an edited one."""
+    required, changed = _branch_with(symbol_repo, "case-prefix", {"prompts/two.md": "prompt two\n"})
+    assert (required, changed) == (True, ["prompts/"])
+
+
+def test_an_unparseable_head_always_counts_as_changed(symbol_repo: Path) -> None:
+    """Fail closed: a head with no parseable structure has nothing to compare."""
+    required, changed = _branch_with(symbol_repo, "case-syntax", {"whole.py": "def oops(:\n"})
+    assert required
+    assert "whole.py" in changed
+    head = _rev_parse(symbol_repo)
+    assert fingerprint_entry("whole.py", head) == UNPARSEABLE
+
+
+def test_fingerprint_is_missing_for_an_absent_path_and_an_absent_symbol(
+    symbol_repo: Path,
+) -> None:
+    head = _rev_parse(symbol_repo, "develop")
+    assert fingerprint_entry("nosuchfile.py", head) == MISSING
+    assert fingerprint_entry("mod.py::nosuchsymbol", head) == MISSING
+    assert fingerprint_entry("nosuchdir/", head) == MISSING
+    # A dotted path deeper than `Class.member` is not part of the grammar.
+    assert fingerprint_entry("mod.py::Holder.method.inner", head) == MISSING
+
+
+def test_fingerprint_of_a_designated_symbol_ignores_the_rest_of_the_file(
+    symbol_repo: Path,
+) -> None:
+    """The property every case above rests on, asserted directly."""
+    base = _rev_parse(symbol_repo, "develop")
+    before = fingerprint_entry("mod.py::designated", base)
+    (symbol_repo / "mod.py").write_text(_MOD_V0.replace("return value - 1", "return value - 5"))
+    _run_git(symbol_repo, "add", "mod.py")
+    _run_git(symbol_repo, "commit", "-m", "edit the undesignated sibling")
+    after = fingerprint_entry("mod.py::designated", _rev_parse(symbol_repo))
+    assert before == after
+    assert before not in {MISSING, UNPARSEABLE}
+
+
+# --- the dispatch rule in the failure text (athenaeum#2228) -----------------
+#
+# Design §7: the gate's failure message is what a dispatching agent reads at
+# decision time, so the rule has to be IN it. The old text ("the dispatch is
+# stale, re-run it") is the most likely driver of the measured per-push
+# re-dispatch churn, so its absence is pinned too.
+
+DISPATCH_RULE = check_llm_surface_receipt.DISPATCH_RULE
+_RULE_KEY_PHRASE = "dispatch once, after review is complete, at the final head"
+
+
+def test_the_dispatch_rule_says_once_at_the_final_reviewed_head() -> None:
+    assert _RULE_KEY_PHRASE in DISPATCH_RULE.lower()
+    assert "tests/evals/README.md" in DISPATCH_RULE
+
+
+def test_stale_receipt_message_carries_the_dispatch_rule_and_not_re_run_it() -> None:
+    result = _evaluate_with(["CHANGELOG.md", "src/athenaeum/tiers.py"])
+    assert not result.ok
+    assert "stale" in result.message.lower()
+    assert _RULE_KEY_PHRASE in result.message.lower()
+    assert "re-run it" not in result.message.lower()
+
+
+def test_missing_receipt_message_carries_the_dispatch_rule() -> None:
+    result = evaluate(
+        changed_files=["src/athenaeum/tiers.py"],
+        surface=SURFACE,
+        pr_body="a PR description with no receipt line",
+        head_sha=HEAD_SHA,
+        this_repo=REPO,
+        run_lookup=_unreached_lookup,
+    )
+    assert not result.ok
+    assert _RULE_KEY_PHRASE in result.message.lower()
+    assert "re-run it" not in result.message.lower()
+
+
+def test_no_failure_message_tells_the_reader_to_re_dispatch_per_push() -> None:
+    """Every path that asks for a dispatch asks for exactly ONE, at the final head."""
+    messages = [
+        _evaluate_with(["CHANGELOG.md", "src/athenaeum/tiers.py"]).message,
+        _evaluate_with(None).message,
+        evaluate(
+            changed_files=["src/athenaeum/tiers.py"],
+            surface=SURFACE,
+            pr_body="no receipt",
+            head_sha=HEAD_SHA,
+            this_repo=REPO,
+            run_lookup=_unreached_lookup,
+        ).message,
+    ]
+    for message in messages:
+        assert "re-run" not in message.lower(), message
+        assert _RULE_KEY_PHRASE in message.lower(), message
