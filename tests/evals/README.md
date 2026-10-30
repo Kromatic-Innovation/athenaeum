@@ -41,11 +41,51 @@ to `develop` for whether it touches the **LLM surface**, the list kept in
   need a fresh (paid) dispatch. When a receipt genuinely does not cover the
   head, re-dispatch per the rule below — once, at the final reviewed head —
   not once per push.
-- **`Evals: not needed — <reason>`** — for a PR that touches a surface
-  file without moving anything an eval would catch (e.g. a comment-only
-  edit, or this very check's own CI-only plumbing). The reason after the
-  dash (`-`, `–`, or `—`) must be non-empty; a bare `Evals: not needed`
-  does not pass.
+- **`Evals: not needed — <category>: <symbol>[, <symbol>...]`** — a
+  STRUCTURED exemption, checked by the gate. See
+  [The exemption vocabulary](#the-exemption-vocabulary) below. The older
+  free-text form (`Evals: not needed — <any prose>`) no longer passes when the
+  gate reports a changed reasoning surface: 66 of the 68 surface-touching PRs
+  in the 30 days to 2026-10-30 used it, which is exactly when an exemption
+  stops being read. When nothing designated changed, **no line is required at
+  all** — that is the common case now, and it needs no prose either.
+
+### The exemption vocabulary
+
+When the gate reports a changed reasoning surface and no run covers the head,
+the only line other than a receipt URL that passes is
+
+```text
+Evals: not needed — <category>: <symbol>[, <symbol>...]
+```
+
+Three things are checked, in order (`scripts/check_llm_surface_receipt.py`,
+`check_exemption`):
+
+1. **The category is one of exactly five.** Anything else fails, and the
+   failure lists these:
+
+   | Category | Means | Checked by |
+   | --- | --- | --- |
+   | `rename-only` | local or private identifiers renamed, no structural change | **machine** — the symbol is re-hashed with every locally-bound name alpha-renamed, and must then match |
+   | `log-or-error-text` | only logging, warning or exception message strings changed | **machine** — re-hashed with the string arguments of logging/warning calls and of `raise` blanked, and must then match |
+   | `dead-code` | designated code removed that nothing reachable called | reviewer |
+   | `refactor-equivalent` | restructured with identical inputs and outputs to the model | reviewer |
+   | `gate-plumbing` | the change is to the gate, the surface list or the rot check itself | reviewer |
+
+2. **The named set must EQUAL the changed set** — no missing names, no extras.
+   The failure prints both sets and the difference, so there is nothing to
+   guess.
+3. **The two machine categories must survive their re-hash.** A real logic
+   change labelled `rename-only` or `log-or-error-text` fails: the structure
+   is still there to differ. A changed exception *type*, or a changed
+   interpolated expression inside a log message, is structure — not text.
+
+For the three reviewer-checked categories, the gate publishes each changed
+symbol's docstring-stripped `ast.unparse` **before and after** to the job
+summary, so the reviewer reads N function bodies rather than N files. The
+merger is not the author (`gh-orch-pr-merge.sh` enforces that), which is what
+makes a reviewer-checked category meaningful at all.
 
 ### Dispatch once, at the final reviewed head
 
