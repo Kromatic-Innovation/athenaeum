@@ -185,7 +185,7 @@ the escalation sees all the evidence. A value with no fired check passes.
 
 | Id | Check | Disposition | Cost | Child |
 |---|---|---|---|---|
-| D1 | **Non-personal identifier.** Reply-relay and notification senders at platform domains, `noreply`-family local parts, the operator's own addresses on a non-owner page, and service identifiers (`pii.is_service_address`). Role local parts (`info`, `hello`, `hi`, `team`, `contact`) pass when the domain matches the target's own or employer domain, and are `suspect` otherwise. On a non-person target, role addresses pass. | `non-personal` or `suspect` | O(1), set lookups | B |
+| D1 | **Non-personal identifier.** Two tiers (§17, decision 3). *D1-narrow*: relay and notification local-part prefixes (the `noreply` family plus `librarian.attribution.relay_local_prefixes`), the operator's own addresses and mailer domains (`librarian.attribution.operator_mailer_domains`) on a non-owner page, and service identifiers (`pii.is_service_address`). D1-narrow is enforced in every mode. *D1-domain*: whole-domain relay entries (`librarian.attribution.relay_domains`), logged as `non-personal` but observe-only until a narrowed list exists, because a whole-domain entry over-denies that domain's real employees. Role local parts (`info`, `hello`, `hi`, `team`, `contact`) pass when the domain matches the target's own or employer domain, and are `suspect` otherwise. On a non-person target, role addresses pass. | `non-personal` or `suspect` | O(1), set lookups | B |
 | D2 | **Held elsewhere on the surface.** Another uid's contact record lists the value (`pii.resolve_contact_records` deduped by uid, the walk `record_observed_contact_value` already does). Records whose uid has no page do not count (§10.3). | `suspect` | O(1), index lookup | B |
 | D3 | **Target is not a person.** The target page's `type` is not `person`, or its name matches a company or organisation page's name or alias in `EntityIndex`. | `suspect` | O(1) | B |
 | D4 | **Fan-out.** The value is already on two or more uids, whoever holds it. | `suspect` | O(1), from D2's walk | B |
@@ -475,19 +475,21 @@ calibrated probability, not a raw score.
   is logged, but nothing is filed. The one exception is the prose-compile
   scrub (§10.2), which removes non-subject addresses from compiled bodies in
   every mode. Bodies should never hold addresses, and the scrubbed tokens are
-  parked, not dropped.
+  parked, not dropped. D1-narrow values (§5.1) are also never filed on their
+  target, in every mode, from child B onward (§17, decision 3).
 - **`enforce`.** A `suspect` value is parked and not written to its target. A
   `non-personal` value is not written to its target. Escalation places what it
   can, and the rest goes to the human queue.
 - **`auto`** (the shipped default once child F lands). Enforce for a question
-  class only when a valid calibration record exists for the model and prompt
-  that class resolves to (§9.3). Otherwise observe for that class. A fresh
-  install with no calibration therefore observes. The repository's own
-  measured record (§12.4) makes the stock Anthropic configuration enforce once
-  it passes.
+  class only when BOTH hold (§17, decision 1): a valid calibration record
+  exists for the model and prompt that class resolves to, and the operator has
+  acknowledged a clean observe report for this deployment covering that class
+  (§9.3). Otherwise observe for that class. A fresh install therefore observes,
+  and so does the stock Anthropic configuration until its operator has
+  reviewed and acknowledged an observe report on their own store.
 
-Until child F lands, the code has only observe behaviour and the knob does not
-exist.
+Until child F lands, the knob does not exist and the code observes, apart from
+D1-narrow, which child B enforces in every mode (§17, decision 3).
 
 ### 9.2 What observe mode produces
 
@@ -510,8 +512,16 @@ A calibration record is valid for a class when all of these hold:
 - its `prompt_sha256` equals the live prompt's;
 - it passes the bar in §12.3.
 
-`auto` checks this at run start through a preflight, and logs the per-class
-mode chosen. A stale record reverts that class to observe and logs a warning.
+An observe report is the record `contact-surface-lint --attribution`
+(§10.4) persists on the excluded surface: per-class shadow counts and the
+model and prompt sha it ran under, never a value. The operator acknowledges a
+report as clean with `athenaeum attribution ack-observe-report <report-id>`.
+An acknowledgement is valid for a class when the report covers that class
+under the same model and prompt sha the class resolves to now.
+
+`auto` checks both at run start through a preflight, and logs the per-class
+mode chosen. A stale record or a stale acknowledgement reverts that class to observe and
+logs a warning.
 It never silently keeps enforcing on a model that was never measured.
 
 ### 9.4 Rollback
@@ -633,11 +643,11 @@ stable names for this document. Issue numbers are on the epic.
 | Child | Scope | Blocked by |
 |---|---|---|
 | A | Correspondent-shortcut fix and masked escalation text (§10.1) | none |
-| B | The seam, `AttributionVerdict` and `AttributionContext`, checks D1 to D4, the suspect store and attribution log (§4.3), wired in observe mode into the four store writers (§4.2: correspondent recording, corrections list-add, PII migration bulk and `--page`, fold) | athenaeum#2196 |
+| B | The seam, `AttributionVerdict` and `AttributionContext`, checks D1 to D4 (D1-narrow enforced from day one), the suspect store and attribution log (§4.3), wired in observe mode into the four store writers (§4.2: correspondent recording, corrections list-add, PII migration bulk and `--page`, fold) | athenaeum#2196 |
 | C | Context checks C1 to C3, with their per-run indexes | B |
 | D | Calibration eval: dataset generator, `judge_contact_attribution` with prompt file and registry entry, metrics, threshold derivation, shipped calibration record (§12) | B |
 | E | Escalation and placement in observe (shadow) mode: memo, question classes, the placement executor for every outcome in §7, `identifier_relation`, masked human-queue items, `attribution show` and `place` CLIs | C, D |
-| F | Enforce: the `librarian.attribution.mode` knob with `observe`, `enforce` and `auto`, per-writer enforce branches (including the scrub's), the staleness preflight, `auto` as the shipped default | E, G |
+| F | Enforce: the `librarian.attribution.mode` knob with `observe`, `enforce` and `auto`, per-writer enforce branches (including the scrub's), the calibration and observe-report preflight, `auto` as the shipped default | E, G, I |
 | G | Prose-compile scrub at `tier3_create` and `tier3_merge` (§10.2) | B |
 | H | Orphan contact records on page removal, and repair's report-and-retire mode (§10.3) | athenaeum#2196 |
 | I | `contact-surface-lint`, including `--attribution` report mode (§10.4) | C, H |
@@ -718,7 +728,9 @@ held-out split:
 
 1. The Wilson 95% lower bound of accuracy among cases at or above threshold is
    at least the target (`librarian.attribution.accuracy_floor`, default
-   **0.95**).
+   **0.95**). This is one floor for every outcome: confirming a value as the
+   target's own and re-attributing it are held to the same bar (§17,
+   decision 2).
 2. ECE is at most 0.05 for signals 1 and 2. Signal 3 has no ECE.
 3. The abstain share is at most 0.30. A class that would send more than this
    to humans is reported as failing, so a human decides whether to accept the
@@ -811,9 +823,10 @@ the pass bar.
   `identifier_relation` is additive and optional. `PiiMigrationPlan.parked_tokens`
   is additive.
 - Observe mode changes no write. The only behaviour changes before child F
-  are child A's shortcut fix, child G's scrub (which parks what it removes),
-  and child H's retire-on-removal (rename, never delete). All three are
-  reversible from their logs.
+  are child A's shortcut fix, child B's D1-narrow enforcement (logged, and
+  reversible with `attribution place`), child G's scrub (which parks what it
+  removes), and child H's retire-on-removal (rename, never delete). All four
+  are reversible from their logs.
 - Rollback from enforce is a config change (§9.4).
 
 ## 16. Rejected alternatives
@@ -857,14 +870,15 @@ the pass bar.
 4. **Masking in the queue makes some questions harder to answer.**
    Mitigation: `attribution show` reads the value through the one way out.
 
-**Open questions for the operator**
+**Operator decisions (2026-10-30)**
 
-1. Is the default auto-filing floor of 0.95 (Wilson lower bound) right, or
-   should re-attribution require a stricter floor than confirming a value as
-   the person's own?
-2. Should `auto` enforce on the repository's synthetic calibration alone, or
-   should a deployment also need an operator-run observe report before it
-   enforces?
-3. Should deterministic `non-personal` dispositions (relay and operator
-   addresses) be enforced as soon as child B lands, before calibration exists?
-   The default here is no: B is observe-only.
+1. **`auto` needs both measurements.** A class enforces only when it passes the
+   synthetic calibration eval AND the deployment has an operator-acknowledged
+   clean observe report on its real store (§9.1, §9.3).
+2. **One accuracy floor.** 0.95, Wilson lower bound, for every outcome. There is
+   no stricter floor for re-attribution than for confirming a value (§12.3).
+3. **Narrow non-personal shapes enforce from child B.** Relay local-part
+   prefixes and the operator's own addresses and mailer domains are never
+   filed on a non-owner target, in every mode. Whole-domain relay entries stay
+   observe-only until a narrowed list exists, because they over-deny real
+   employees of the relay's domain (§5.1, D1).
