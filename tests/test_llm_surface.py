@@ -119,14 +119,27 @@ def _surface_paths(surface: set[str]) -> set[str]:
 def _covers(surface: set[str], entry: str) -> bool:
     """Is `entry` (a `path::symbol`) designated, by itself or by its file?
 
-    A whole-file or `dir/` entry covers every symbol in that file — which is
-    what makes D4 a floor rather than a target, and what keeps a rollback to
-    a whole-file list legal.
+    A WHOLE-FILE or `dir/` entry covers every symbol in that file — which is
+    what makes D4 a floor rather than a target, and what keeps a rollback to a
+    whole-file list legal.
+
+    A SIBLING SYMBOL entry in the same file covers nothing. `_matches` is
+    path-level (it drops any `::symbol`), so matching every candidate with it
+    would let `tiers.py::tier3_merge` vouch for a brand-new call site
+    elsewhere in `tiers.py` — and since the migrated list gives almost every
+    `src/athenaeum` module at least one symbol entry, D1/D2/D3 would have
+    become vacuous for the whole tree. Caught by Seer review on PR
+    athenaeum#2245; pinned by
+    `test_a_sibling_symbol_entry_does_not_cover_a_new_symbol`.
     """
     if entry in surface:
         return True
     path = parse_surface_entry(entry).path
-    return any(_matches(path, candidate) for candidate in surface)
+    return any(
+        _matches(path, candidate)
+        for candidate in surface
+        if parse_surface_entry(candidate).symbol is None
+    )
 
 
 def _missing(surface: set[str], required: Iterable[str]) -> list[str]:
@@ -443,6 +456,28 @@ def test_d1_counter_example_an_undesignated_call_site_fails(tmp_path: Path) -> N
     # ...and designating it, or its file, clears the check.
     assert _missing({"src/athenaeum/sneaky.py::asks_a_model"}, required) == []
     assert _missing({"src/athenaeum/sneaky.py"}, required) == []
+
+
+def test_a_sibling_symbol_entry_does_not_cover_a_new_symbol() -> None:
+    """The rot check must not be vouched for by a DIFFERENT symbol in the same file.
+
+    Seer review on PR athenaeum#2245. `_matches` is path-level, so before the
+    fix `tiers.py::tier3_merge` made any new `tiers.py` symbol read as
+    designated — which would have made D1, D2 and D3 vacuous across almost the
+    whole migrated list, since nearly every module now carries at least one
+    symbol entry. This is the single assertion that distinguishes a live
+    subset check from a decorative one.
+    """
+    sibling_only = {"src/athenaeum/tiers.py::tier3_merge"}
+    assert not _covers(sibling_only, "src/athenaeum/tiers.py::brand_new_call_site")
+    assert _missing(sibling_only, ["src/athenaeum/tiers.py::brand_new_call_site"]) == [
+        "src/athenaeum/tiers.py::brand_new_call_site"
+    ]
+    # Its own entry covers it, and so does a WHOLE-FILE entry — both still true.
+    assert _covers(sibling_only, "src/athenaeum/tiers.py::tier3_merge")
+    assert _covers({"src/athenaeum/tiers.py"}, "src/athenaeum/tiers.py::brand_new_call_site")
+    # ...and a `dir/` prefix entry still covers everything under it.
+    assert _covers({"src/athenaeum/prompts/"}, "src/athenaeum/prompts/one.md")
 
 
 def test_d1_finds_a_batches_call_and_a_method(tmp_path: Path) -> None:
