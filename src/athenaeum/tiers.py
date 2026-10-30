@@ -6645,15 +6645,39 @@ def _perform_oversize_log_demote(
         source="oversize-wiki-pages",
         rule_tag="oversize-page-gate",
     )
-    if dest is None or not uid or not name:
-        if dest is not None:
-            log.warning(
-                "oversize-page-gate: demoted %s to %s with no uid/name "
-                "frontmatter -- no retired-name record written (issue "
-                "athenaeum#1406); the name is NOT guarded against re-mint",
-                existing_path.name,
-                dest,
-            )
+    if dest is None:
+        return dest
+
+    # Issue athenaeum#2217: settle this uid's contact record now that its page
+    # has actually moved out of the wiki. Strictly post-success -- `dest is
+    # None` returned just above, so "the move failed" and "nothing was
+    # settled" are the exact same branch, mirroring the retired-name record's
+    # own ordering contract below.
+    #
+    # Deliberately placed BEFORE the no-uid/no-name early return rather than
+    # after the retired-name write: a page carrying a uid but no `name` still
+    # MOVED, so its contact record is just as orphaned, even though there is
+    # no name to guard against re-mint and the retired-name record is
+    # correctly skipped for it. `uid` was already read from the page's own
+    # frontmatter above -- reused here, not re-read. A log-demote records no
+    # merge target, so there is never a successor.
+    if uid:
+        settle_removed_uid_records_after_removal(
+            knowledge_root,
+            uid,
+            successor_uid=None,
+            reason=REASON_PAGE_REMOVED,
+            config=config,
+        )
+
+    if not uid or not name:
+        log.warning(
+            "oversize-page-gate: demoted %s to %s with no uid/name "
+            "frontmatter -- no retired-name record written (issue "
+            "athenaeum#1406); the name is NOT guarded against re-mint",
+            existing_path.name,
+            dest,
+        )
         return dest
 
     records = _retired_records_by_uid(wiki_root)
@@ -6675,20 +6699,6 @@ def _perform_oversize_log_demote(
             dest,
         )
 
-    # Issue athenaeum#2217: settle this uid's contact record now that its
-    # page has actually moved out of the wiki -- same post-success branch as
-    # the retired-name record above (`dest is None` already returned), so
-    # "the move failed" and "nothing was settled" remain the exact same
-    # branch. A log-demote records no merge target, so there is never a
-    # successor. `uid` was already read from the page's own frontmatter
-    # above -- reused here, not re-read.
-    settle_removed_uid_records_after_removal(
-        knowledge_root,
-        uid,
-        successor_uid=None,
-        reason=REASON_PAGE_REMOVED,
-        config=config,
-    )
     return dest
 
 
