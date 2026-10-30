@@ -166,7 +166,7 @@ transports, identical prompts either way. → [modules/provider](docs/modules/pr
 | | |
 |---|---|
 | **Why this exists** | [Why Athenaeum](docs/why-athenaeum.md) · [North star](docs/north-star.md) |
-| **Get it running** | [Install](docs/guides/install.md) · [Daily operation](docs/guides/daily-operation.md) · [Troubleshooting](docs/guides/troubleshooting.md) |
+| **Get it running** | [Install](docs/guides/install.md) · [Other clients and platforms](docs/guides/clients.md) · [Daily operation](docs/guides/daily-operation.md) · [Troubleshooting](docs/guides/troubleshooting.md) |
 | **How it works** | [Module reference](docs/index.md#modules) — what each part does, reads, writes, and refuses |
 | **Every knob** | [Configuration](docs/reference/configuration.md) · [Environment](docs/reference/environment.md) · [Data formats](docs/reference/data-formats.md) |
 | **Extend it** | [Adapter contracts](docs/extending/) · [Storage surfaces](docs/extending/storage-adapter-contract.md) |

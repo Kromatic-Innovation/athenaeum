@@ -48,7 +48,8 @@ has fewer available cases than its proportional share.
 
 Usage::
 
-    JEV_API_KEY="$(op read 'op://Agent Tools/Jev Athenaeum Key/credential')" \\
+    JEV_API_KEY="$(OP_LOAD_DESKTOP_APP_SETTINGS=false OP_BIOMETRIC_UNLOCK_ENABLED=false \\
+        op read 'op://Agent Tools/Jev Athenaeum Key/credential')" \\
         python scripts/eval_jev_claim_kind.py \\
         --sample-dir ~/knowledge/raw/auto-memory \\
         --network-note "measured from a US home connection, 2026-10-11" \\
