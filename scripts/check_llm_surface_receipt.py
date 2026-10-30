@@ -30,6 +30,11 @@ and its ``conclusion`` must
 be ``success`` (a failed or cancelled eval run is not a receipt that
 anything actually passed).
 
+COVERS (athenaeum#2225) is the receipt half of the same idea: a receipt
+survives a `develop` merge or a rebase that brings in ANOTHER PR's change
+to a designated symbol, as long as this PR's own reasoning delta is
+unchanged. See ``receipt_covers_head``.
+
 The ``headSha`` check is on content, not on the exact commit (cost: every
 update-branch, merge-wrapper bump or rebase used to demand a fresh paid eval
 dispatch even when nothing an eval reads had changed). A run at commit X
@@ -452,6 +457,20 @@ def fingerprint_entry(
     )
 
 
+def git_ensure_commit(sha: str) -> bool:
+    """Make `sha` readable, fetching it by sha if the checkout lacks it.
+
+    A receipt commit orphaned by a force-push or a rebase is not in the PR
+    checkout. Fetching it by sha is what lets COVERS compare fingerprints at
+    a commit no branch points at any more; when it still cannot be read,
+    COVERS fails closed (design §9).
+    """
+    if _git("cat-file", "-e", f"{sha}^{{commit}}").returncode == 0:
+        return True
+    _git("fetch", "--no-tags", "--quiet", "origin", sha)
+    return _git("cat-file", "-e", f"{sha}^{{commit}}").returncode == 0
+
+
 def git_merge_base(base_sha: str, head_sha: str) -> str | None:
     """`git merge-base base head` — where this branch left the base ref, or `None`.
 
@@ -500,21 +519,74 @@ def receipt_covers_head(
     head_sha: str,
     surface: list[str],
     paths_changed_lookup: Callable[[str, str], list[str] | None],
+    *,
+    base_sha: str | None = None,
+    receipt_surface: list[str] | None = None,
+    merge_base_lookup: Callable[[str, str], str | None] = git_merge_base,
+    fingerprint: Callable[[str, str], str] = fingerprint_entry,
+    ensure_commit: Callable[[str], bool] = git_ensure_commit,
 ) -> tuple[bool, list[str]]:
-    """Does a receipt at `receipt_sha` still describe `head_sha`?
+    """COVERS (design §5.4): does a passing run at `receipt_sha` satisfy `head_sha`?
 
-    True when they are the same commit, or when no path changed between them
-    is on the LLM surface. Returns ``(covered, surface_paths_changed)``; the
-    second element names what made it stale (empty when covered, or when the
-    diff could not be read at all).
+    Covered iff, for every entry `s` in ``D(receipt) | D(head)``, either
+
+    1. ``fp(s, X) == fp(s, H)`` — the symbol-level form of athenaeum#2206's
+       "no surface path differs between the evaluated commit and the head" —
+       **or**
+    2. this PR changed `s` at NEITHER point:
+       ``fp(s, X) == fp(s, mb(X))`` and ``fp(s, H) == fp(s, mb(H))``. The
+       difference came from `develop`, where it was evaluated or exempted
+       under its own PR.
+
+    Clause 2 is the develop-merge refinement, and it is the whole point: a
+    rebase or a merge that brings in ANOTHER PR's change to a designated
+    symbol no longer invalidates this PR's receipt. athenaeum#2206's tree
+    diff still treated that as stale, which cost a re-dispatch on the
+    athenaeum#2043 branch. **Accepted risk** (§5.4): an interaction between
+    this PR's change to one symbol and `develop`'s concurrent change to
+    another is not re-evaluated — every merge to `develop` already carries
+    that risk.
+
+    Returns ``(covered, stale_entries)``; the second element names the
+    designated symbols that made the receipt stale, which is what the failure
+    message prints. Fails closed: an unreadable receipt commit, or a merge
+    base that cannot be resolved, is NOT covered.
+
+    WITHOUT `base_sha` the predicate degrades to athenaeum#2206's path diff
+    over `paths_changed_lookup`. That is strictly MORE conservative than
+    COVERS (it has no way to tell this PR's change from `develop`'s, so it
+    calls both stale), so the fallback asks for more dispatches, never fewer.
+    It is the path the offline stubbed tests drive, and the behaviour when the
+    caller has no base ref to reason from.
     """
     if receipt_sha == head_sha:
         return True, []
-    changed = paths_changed_lookup(receipt_sha, head_sha)
-    if changed is None:
+    if base_sha is None:
+        changed = paths_changed_lookup(receipt_sha, head_sha)
+        if changed is None:
+            return False, []
+        hits = intersect_surface(changed, surface)
+        return (not hits), hits
+
+    if not ensure_commit(receipt_sha):
         return False, []
-    hits = intersect_surface(changed, surface)
-    return (not hits), hits
+    merge_base_receipt = merge_base_lookup(base_sha, receipt_sha)
+    merge_base_head = merge_base_lookup(base_sha, head_sha)
+    if merge_base_receipt is None or merge_base_head is None:
+        return False, []
+
+    stale: list[str] = []
+    for entry in sorted(set(surface) | set(receipt_surface or surface)):
+        at_receipt = fingerprint(entry, receipt_sha)
+        at_head = fingerprint(entry, head_sha)
+        if at_receipt == at_head:
+            continue
+        came_from_base = at_receipt == fingerprint(
+            entry, merge_base_receipt
+        ) and at_head == fingerprint(entry, merge_base_head)
+        if not came_from_base:
+            stale.append(entry)
+    return (not stale), stale
 
 
 def check_receipt(
@@ -524,12 +596,20 @@ def check_receipt(
     run_lookup: Callable[[str, str], dict[str, str]],
     surface: list[str] | None = None,
     paths_changed_lookup: Callable[[str, str], list[str] | None] = git_paths_changed_between,
+    *,
+    base_sha: str | None = None,
+    fingerprint: Callable[[str, str], str] = fingerprint_entry,
 ) -> ReceiptCheck:
     """Decide whether `pr_body` carries a valid eval receipt for `head_sha`.
 
-    The run must be at `head_sha`, or at a commit whose LLM-surface files are
-    identical to `head_sha`'s (see `receipt_covers_head`). With no `surface`
-    given, only the exact head is accepted.
+    The run must be at `head_sha`, or at a commit COVERS accepts for it (see
+    `receipt_covers_head`). With no `surface` given, only the exact head is
+    accepted; with no `base_sha`, COVERS degrades to athenaeum#2206's path
+    diff, which is the more conservative of the two.
+
+    `base_sha` is the PR's base ref. COVERS needs it to tell a change THIS PR
+    made from one it merely inherited from `develop`, which is a question a
+    receipt-to-head diff cannot answer at all.
     """
     not_needed = _NOT_NEEDED_RE.search(pr_body)
     if not_needed:
@@ -580,11 +660,17 @@ def check_receipt(
             covered, stale_hits = False, []
         else:
             covered, stale_hits = receipt_covers_head(
-                receipt_sha, head_sha, surface, paths_changed_lookup
+                receipt_sha,
+                head_sha,
+                surface,
+                paths_changed_lookup,
+                base_sha=base_sha,
+                fingerprint=fingerprint,
             )
         if not covered:
             why = (
-                "LLM-surface files changed since that commit: " + ", ".join(stale_hits)
+                "the reasoning surface changed since that commit: "
+                + ", ".join(stale_hits)
                 if stale_hits
                 else "the receipt commit could not be compared with the head"
             )
@@ -623,6 +709,7 @@ def evaluate(
     run_lookup: Callable[[str, str], dict[str, str]] = gh_run_lookup,
     paths_changed_lookup: Callable[[str, str], list[str] | None] = git_paths_changed_between,
     *,
+    base_sha: str | None = None,
     merge_base_sha: str | None = None,
     base_surface: list[str] | None = None,
     fingerprint: Callable[[str, str], str] = fingerprint_entry,
@@ -657,7 +744,14 @@ def evaluate(
         return ReceiptCheck(True, "no LLM reasoning surface changed — no receipt needed.")
 
     result = check_receipt(
-        pr_body, head_sha, this_repo, run_lookup, surface, paths_changed_lookup
+        pr_body,
+        head_sha,
+        this_repo,
+        run_lookup,
+        surface,
+        paths_changed_lookup,
+        base_sha=base_sha,
+        fingerprint=fingerprint,
     )
     if result.ok:
         return result
@@ -735,6 +829,7 @@ def main(argv: list[str] | None = None) -> int:
         pr_body,
         args.head_sha,
         args.repo,
+        base_sha=args.base_sha,
         merge_base_sha=merge_base_sha,
         base_surface=base_surface,
     )

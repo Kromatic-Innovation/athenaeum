@@ -841,3 +841,253 @@ def test_no_failure_message_tells_the_reader_to_re_dispatch_per_push() -> None:
     for message in messages:
         assert "re-run" not in message.lower(), message
         assert _RULE_KEY_PHRASE in message.lower(), message
+
+
+# --- COVERS: a receipt that survives a develop merge (athenaeum#2225) -------
+#
+# Design §5.4. A passing run at X satisfies head H iff, for every designated
+# symbol, either X and H agree, or the PR changed it at NEITHER point (so the
+# difference arrived from `develop`, where it was evaluated under its own PR).
+# Real throwaway git repos: the predicate reads three commits per symbol, so
+# there is nothing meaningful left to test once git is stubbed out.
+
+receipt_covers_head = check_llm_surface_receipt.receipt_covers_head
+
+_COVERS_SURFACE = ["mod.py::designated", "mod.py::other"]
+
+
+def _mod(*, designated_body: str, other_body: str, comment: str = "# comment") -> str:
+    return (
+        '"""Module."""\n'
+        "\n"
+        "\n"
+        "def designated(value):\n"
+        '    """Doc."""\n'
+        f"    {comment}\n"
+        f"    {designated_body}\n"
+        "\n"
+        "\n"
+        "def other(value):\n"
+        f"    {other_body}\n"
+    )
+
+
+_V0 = _mod(designated_body="return value + 1", other_body="return value * 2")
+_PR_CHANGE = _mod(designated_body="return value + 7", other_body="return value * 2")
+_DEVELOP_CHANGED_OTHER = _mod(designated_body="return value + 1", other_body="return value * 9")
+_DEVELOP_CHANGED_DESIGNATED = _mod(
+    designated_body="return value + 1 + 100", other_body="return value * 2"
+)
+#: What a clean rebase of the PR onto `_DEVELOP_CHANGED_DESIGNATED` produces:
+#: both edits live in the same function.
+_REBASED_ONTO_BOTH = _mod(designated_body="return value + 7 + 100", other_body="return value * 2")
+
+
+@pytest.fixture
+def covers_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
+    """A develop line, a receipted PR head, and the four later states of it."""
+    _init_fixture_repo(tmp_path)
+    shas: dict[str, str] = {}
+    (tmp_path / "pyproject.toml").write_text('version = "0.22.51"\n')
+    (tmp_path / "mod.py").write_text(_V0)
+    _run_git(tmp_path, "add", "-A")
+    _run_git(tmp_path, "commit", "-m", "develop base")
+    shas["d1"] = _rev_parse(tmp_path)
+
+    # The PR, and the commit the eval ran at.
+    _run_git(tmp_path, "checkout", "-q", "-b", "feature")
+    shas["receipted"] = _commit_file(tmp_path, "mod.py", _PR_CHANGE, "PR changes designated()")
+
+    # (e) a comment-only follow-up commit inside the designated function.
+    shas["comment_only"] = _commit_file(
+        tmp_path,
+        "mod.py",
+        _mod(
+            designated_body="return value + 7",
+            other_body="return value * 2",
+            comment="# reworded comment",
+        ),
+        "comment-only follow-up",
+    )
+
+    # the merge wrapper's version bump, on top of the receipted head.
+    _run_git(tmp_path, "checkout", "-q", "-B", "bump", shas["receipted"])
+    shas["version_bump"] = _commit_file(
+        tmp_path, "pyproject.toml", 'version = "0.22.52"\n', "chore: bump version"
+    )
+
+    # (d) a new commit that changes a designated symbol again.
+    _run_git(tmp_path, "checkout", "-q", "-B", "more", shas["receipted"])
+    shas["changed_again"] = _commit_file(
+        tmp_path,
+        "mod.py",
+        _mod(designated_body="return value + 8", other_body="return value * 2"),
+        "change designated() again",
+    )
+
+    # (a) develop advances without touching the surface; merged into the PR.
+    _run_git(tmp_path, "checkout", "-q", "develop")
+    _commit_file(tmp_path, "README.md", "docs\n", "docs on develop")
+    shas["d2_docs"] = _rev_parse(tmp_path)
+    _run_git(tmp_path, "checkout", "-q", "-B", "merged_docs", shas["receipted"])
+    _run_git(tmp_path, "merge", "--no-ff", "-m", "merge develop (docs)", shas["d2_docs"])
+    shas["merged_docs"] = _rev_parse(tmp_path)
+
+    # (b) develop changes a designated symbol this PR never touched; the PR
+    #     rebases onto it.
+    _run_git(tmp_path, "checkout", "-q", "develop")
+    shas["d3_other"] = _commit_file(
+        tmp_path, "mod.py", _DEVELOP_CHANGED_OTHER, "develop changes other()"
+    )
+    _run_git(tmp_path, "checkout", "-q", "-B", "rebased_other", shas["d3_other"])
+    shas["rebased_other"] = _commit_file(
+        tmp_path,
+        "mod.py",
+        _mod(designated_body="return value + 7", other_body="return value * 9"),
+        "PR change, rebased onto develop's other() change",
+    )
+
+    # (c) develop changes the SAME symbol the PR changed; the PR rebases onto
+    #     it, so the head carries both edits.
+    _run_git(tmp_path, "checkout", "-q", "develop")
+    shas["d4_designated"] = _commit_file(
+        tmp_path, "mod.py", _DEVELOP_CHANGED_DESIGNATED, "develop changes designated()"
+    )
+    _run_git(tmp_path, "checkout", "-q", "-B", "rebased_same", shas["d4_designated"])
+    shas["rebased_same"] = _commit_file(
+        tmp_path, "mod.py", _REBASED_ONTO_BOTH, "PR change, rebased onto develop's designated()"
+    )
+
+    monkeypatch.chdir(tmp_path)
+    return shas
+
+
+def _covers_at(shas: dict[str, str], head: str, base: str) -> tuple[bool, list[str]]:
+    return receipt_covers_head(
+        shas["receipted"],
+        shas[head],
+        _COVERS_SURFACE,
+        check_llm_surface_receipt.git_paths_changed_between,
+        base_sha=shas[base],
+    )
+
+
+def test_covers_a_develop_merge_with_no_surface_change(covers_repo: dict[str, str]) -> None:
+    """(a) The case athenaeum#2206 already handled, at symbol granularity."""
+    assert _covers_at(covers_repo, "merged_docs", "d2_docs") == (True, [])
+
+
+def test_covers_a_rebase_onto_a_symbol_this_pr_never_touched(
+    covers_repo: dict[str, str],
+) -> None:
+    """(b) The refinement athenaeum#2225 exists for — athenaeum#2206 called this stale."""
+    assert _covers_at(covers_repo, "rebased_other", "d3_other") == (True, [])
+    # Positive control: without `base_sha` the predicate degrades to
+    # athenaeum#2206's path diff, which CANNOT tell this PR's change from
+    # develop's and so calls the same head stale. If that came back covered
+    # too, the assertion above would be proving nothing.
+    assert receipt_covers_head(
+        covers_repo["receipted"],
+        covers_repo["rebased_other"],
+        _COVERS_SURFACE,
+        check_llm_surface_receipt.git_paths_changed_between,
+    ) == (False, ["mod.py"])  # the fallback names paths, not symbols
+
+
+def test_does_not_cover_a_rebase_where_develop_changed_the_same_symbol(
+    covers_repo: dict[str, str],
+) -> None:
+    """(c) Clause 2 requires the PR to have changed `s` at NEITHER point."""
+    covered, stale = _covers_at(covers_repo, "rebased_same", "d4_designated")
+    assert not covered
+    assert stale == ["mod.py::designated"]
+
+
+def test_does_not_cover_a_new_commit_changing_a_designated_symbol(
+    covers_repo: dict[str, str],
+) -> None:
+    """(d) The receipt is genuinely stale; this is the case that must still fail."""
+    covered, stale = _covers_at(covers_repo, "changed_again", "d1")
+    assert not covered
+    assert stale == ["mod.py::designated"]
+
+
+def test_covers_a_comment_only_follow_up_commit(covers_repo: dict[str, str]) -> None:
+    """(e) Comments never reach the AST, so they cannot cost a re-dispatch."""
+    assert _covers_at(covers_repo, "comment_only", "d1") == (True, [])
+
+
+def test_does_not_cover_an_unreadable_receipt_commit(covers_repo: dict[str, str]) -> None:
+    """(f) Fail closed: an unknown receipt commit proves nothing."""
+    covered, stale = receipt_covers_head(
+        "0" * 40,
+        covers_repo["merged_docs"],
+        _COVERS_SURFACE,
+        check_llm_surface_receipt.git_paths_changed_between,
+        base_sha=covers_repo["d2_docs"],
+    )
+    assert (covered, stale) == (False, [])
+    # ...and with the fetch stubbed out as failing, likewise — the real
+    # `git_ensure_commit` call above has no reachable `origin` in the fixture,
+    # so this pins the refusal on the injected lookup rather than on luck.
+    assert receipt_covers_head(
+        covers_repo["receipted"],
+        covers_repo["merged_docs"],
+        _COVERS_SURFACE,
+        check_llm_surface_receipt.git_paths_changed_between,
+        base_sha=covers_repo["d2_docs"],
+        ensure_commit=lambda sha: False,
+    ) == (False, [])
+
+
+def test_covers_a_version_bump_only_head(covers_repo: dict[str, str]) -> None:
+    """athenaeum#2206's behaviour, preserved: `pyproject.toml` is not designated."""
+    assert _covers_at(covers_repo, "version_bump", "d1") == (True, [])
+
+
+def test_covers_fails_closed_when_a_merge_base_cannot_be_resolved(
+    covers_repo: dict[str, str],
+) -> None:
+    assert receipt_covers_head(
+        covers_repo["receipted"],
+        covers_repo["merged_docs"],
+        _COVERS_SURFACE,
+        check_llm_surface_receipt.git_paths_changed_between,
+        base_sha=covers_repo["d2_docs"],
+        merge_base_lookup=lambda base, sha: None,
+    ) == (False, [])
+
+
+def test_covers_uses_the_union_of_both_ends_designations(covers_repo: dict[str, str]) -> None:
+    """A PR that drops a designation cannot thereby cover a change to it."""
+    covered, stale = receipt_covers_head(
+        covers_repo["receipted"],
+        covers_repo["changed_again"],
+        ["mod.py::other"],  # D(head): the PR deleted its own designation
+        check_llm_surface_receipt.git_paths_changed_between,
+        base_sha=covers_repo["d1"],
+        receipt_surface=_COVERS_SURFACE,  # D(receipt) still has it
+    )
+    assert not covered
+    assert stale == ["mod.py::designated"]
+
+
+def test_the_stale_message_names_the_symbols(covers_repo: dict[str, str]) -> None:
+    """athenaeum#2225: the failure text names WHAT made the receipt stale."""
+    run = {
+        "headSha": covers_repo["receipted"],
+        "event": "workflow_dispatch",
+        "workflowName": "Evals",
+        "conclusion": "success",
+    }
+    result = check_llm_surface_receipt.check_receipt(
+        pr_body=f"Evals: {RUN_URL}",
+        head_sha=covers_repo["changed_again"],
+        this_repo=REPO,
+        run_lookup=lambda repo, run_id: run,
+        surface=_COVERS_SURFACE,
+        base_sha=covers_repo["d1"],
+    )
+    assert not result.ok
+    assert "mod.py::designated" in result.message
+    assert "mod.py::other" not in result.message
