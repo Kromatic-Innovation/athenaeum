@@ -33,18 +33,21 @@ from collections.abc import Iterable
 SPLIT_BY_LEADING_PARAM = frozenset({"tests/evals/test_recall_covers_grep.py"})
 
 #: Measured worker-seconds under 4-way xdist contention on a GitHub-hosted
-#: 4-vCPU runner (athenaeum#2230's per-worker timelines). Units missing here
-#: weigh DEFAULT_SECONDS_PER_TEST per test.
+#: 4-vCPU runner (per-worker timelines of athenaeum#2242's PR runs, after the
+#: nightly tier took the print tables and hook sweeps out of the default
+#: selection). Units missing here weigh DEFAULT_SECONDS_PER_TEST per test.
 UNIT_WEIGHT_SECONDS: dict[str, float] = {
-    "tests/evals/test_recall_covers_grep.py[core]": 450.0,
-    "tests/evals/test_recall_covers_grep.py[medium]": 110.0,
-    "tests/evals/test_hook_byte_equivalence_1912.py": 250.0,
-    "tests/evals/test_north_star_preflight.py": 250.0,
-    "tests/test_eval_corpus_generator.py": 180.0,
-    "tests/test_shell_hooks.py": 120.0,
-    "tests/evals/test_rollout_push_breadcrumb_spike.py": 80.0,
-    "tests/evals/test_adapter_overflow_breadcrumb_1905.py": 70.0,
-    "tests/test_declared_imports.py": 70.0,
+    "tests/evals/test_recall_covers_grep.py[core]": 200.0,
+    "tests/evals/test_north_star_preflight.py": 190.0,
+    "tests/test_shell_hooks.py": 130.0,
+    "tests/test_eval_corpus_generator.py": 115.0,
+    "tests/evals/test_recall_covers_grep.py[medium]": 90.0,
+    "tests/test_json_utils.py": 50.0,
+    "tests/test_declared_imports.py": 47.0,
+    "tests/test_eval_corpus_leakage.py": 40.0,
+    "tests/evals/test_hook_byte_equivalence_1912.py": 40.0,
+    "tests/evals/test_rollout_mode_labelling.py": 37.0,
+    "tests/evals/test_rollout_push_breadcrumb_spike.py": 31.0,
 }
 
 DEFAULT_SECONDS_PER_TEST = 0.1
