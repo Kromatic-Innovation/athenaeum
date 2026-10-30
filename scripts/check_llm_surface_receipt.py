@@ -1042,7 +1042,7 @@ def check_receipt(
                 False,
                 f"run {run_id}'s headSha ({receipt_sha!r}) does not match "
                 f"this PR's head ({head_sha!r}) and {why} — the receipt is "
-                f"stale for this head. {DISPATCH_RULE}",
+                "stale for this head.",
             )
     if run.get("conclusion") != "success":
         return ReceiptCheck(
@@ -1133,6 +1133,9 @@ def evaluate(
         "PR changes the LLM reasoning surface but carries no valid eval "
         f"receipt.\n\n{detail}"
         f"{result.message}\n\n"
+        # The ONE place the rule is attached (athenaeum#2228 put it here and
+        # in `check_receipt`'s stale branch, which printed it twice for a
+        # stale receipt — Seer review on PR athenaeum#2244).
         f"{DISPATCH_RULE}\n\n"
         "Then add `Evals: <run-url>` to the PR body — or, if none of the "
         "changed symbols above can move a result, add\n\n"
