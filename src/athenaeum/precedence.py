@@ -37,7 +37,7 @@ from athenaeum.provenance import parse_source
 #: One entry per precedence tier, highest first; index + 1 is the rank.
 #: A tier may carry several source-type tokens that rank equally.
 SOURCE_PRECEDENCE_TIERS: tuple[tuple[str, ...], ...] = (
-    ("user",),  # 1  user said it directly
+    ("user", "witnessed"),  # 1  user said it directly (+ harness witness)
     ("linkedin", "twitter"),  # 2  user-curated public profile
     ("api",),  # 3  third-party authoritative source
     ("wikipedia",),  # 4  consensus public source

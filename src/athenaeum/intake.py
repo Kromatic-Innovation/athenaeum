@@ -22,7 +22,9 @@ any SCC member back — :mod:`athenaeum.models`, :mod:`athenaeum.config`,
 peer L2 primitive, (issue athenaeum#1452) :mod:`athenaeum.session_recovery`,
 a stdlib-only L0/L1 primitive, and (issue athenaeum#2038)
 :mod:`athenaeum.runlock`, which imports only :mod:`athenaeum.store` (L0/L1)
-and never any SCC member. It must NEVER import ``librarian``, ``merge``,
+and never any SCC member, and (issue athenaeum#2159)
+:mod:`athenaeum.frontmatter_edit`, an L1 leaf whose only athenaeum import is
+:mod:`athenaeum.transcript_verify` (also L1). It must NEVER import ``librarian``, ``merge``,
 ``tiers``, ``pending_merges``, ``batch``, ``status``, ``retire``, or
 ``wiki_dedupe`` (that would re-introduce the cycle this module exists to
 break). ``librarian`` re-exports these three names for backward compatibility,
@@ -73,6 +75,11 @@ from athenaeum.config import (
 from athenaeum.corrections import parse_batch_envelope
 from athenaeum.dimensions import stamp_recorded_time, validate_intake_temporal
 from athenaeum.ephemeral import classify_ephemeral
+from athenaeum.frontmatter_edit import (
+    DEFAULTED_INFERRED_SOURCE,
+    apply_frontmatter_scalars,
+    witnessed_source_fields,
+)
 from athenaeum.models import (
     AI_ATTRIBUTED_SOURCE_TYPES,
     AutoMemoryFile,
@@ -223,6 +230,128 @@ def persist_recovered_origin_session_id(
         updated = (
             f"{text[:block_end]}{newline}originSessionId: {session_id}{text[block_end:]}"
         )
+    if updated == text:
+        return False
+    atomic_write_text(path, updated)
+    return True
+
+
+class WitnessedSourceWriteNotLocked(RuntimeError):
+    """Raised by :func:`persist_witnessed_source` when called without an
+    acquired :class:`athenaeum.runlock.RunLock` (issue athenaeum#2159).
+
+    The sibling of :class:`OriginSessionWriteNotLocked`, and raised for the
+    same reason: this module reuses :mod:`athenaeum.runlock` rather than
+    inventing a second lock, and enforces the single-appender requirement at
+    the API boundary instead of leaving it an unstated convention.
+    """
+
+
+def _witnessed_rewrite_eligible(existing: object) -> bool:
+    """Whether a member's current ``source`` may be rewritten to ``witnessed:``.
+
+    Exactly two shapes qualify (issue athenaeum#2159):
+
+    * the DEFAULTED ``claude:inferred`` scalar
+      (:data:`athenaeum.frontmatter_edit.DEFAULTED_INFERRED_SOURCE`) — the
+      same "the agent never declared a source" selector
+      ``repair --backfill-sources`` has used since issue athenaeum#328, matched
+      EXACTLY and not by prefix;
+    * a ``user:`` source — already tier 1, so adding the harness witness
+      records strictly more provenance at the SAME rank, never a promotion.
+
+    Everything else is a caller-DECLARED, non-default, non-``user:`` source
+    and is never rewritten, including an absent ``source`` key (there is no
+    claim to corroborate) and a non-string value.
+    """
+    if not isinstance(existing, str):
+        return False
+    if existing == DEFAULTED_INFERRED_SOURCE:
+        return True
+    return existing.startswith("user:")
+
+
+def persist_witnessed_source(
+    path: Path,
+    *,
+    session_id: str,
+    origin_turn: int | None,
+    witness_ref: str | None,
+    lock: RunLock,
+) -> bool:
+    """Persist the ``witnessed`` source rewrite onto *path*'s frontmatter.
+
+    Issue athenaeum#2159: a ``witnessed`` RECEIPT (issue athenaeum#2158)
+    changes nothing the resolver sees, because source precedence keys on the
+    memory's ``source:`` SCALAR, not on the receipt ledger. This writes the
+    ranked token back onto the memory so a tier-1 ``witnessed:`` claim
+    actually wins a comparison the way the taxonomy says it should.
+
+    Writes the four fields :func:`athenaeum.frontmatter_edit.
+    witnessed_source_fields` composes — ``source`` / ``source_type`` /
+    ``source_ref`` / ``witness_ref`` — the SAME mapping
+    ``repair --backfill-sources`` writes, from the same function, so the two
+    cannot drift (AC 5). ``source``'s ``#turn<N>`` is the MEMORY's
+    *origin_turn*, never the witness ledger's own per-session counter, which
+    reaches the file only as *witness_ref*'s ``seq`` segment (AC 6).
+
+    Mirrors :func:`persist_recovered_origin_session_id` throughout —
+    keyword-only *lock*, textual surgery over the existing block rather than
+    a ``parse_frontmatter`` -> ``render_frontmatter`` round trip (so every
+    byte this edit does not name survives verbatim), ``atomic_write_text``,
+    and ``True`` iff the file was rewritten. ``False`` for every no-op:
+
+    * an empty *session_id* (nothing to cite — a skip, never a blank ref).
+    * *path* has no YAML frontmatter block at all (never synthesize one).
+    * the existing ``source`` is not rewrite-eligible (see
+      :func:`_witnessed_rewrite_eligible`) — a caller-declared,
+      non-default, non-``user:`` source is NEVER second-guessed (AC 4).
+    * the rewrite is a no-op (idempotent: a memory already carrying these
+      exact values is byte- and mtime-identical on a second call).
+    * the read fails (``OSError``/``UnicodeDecodeError``) — best-effort, the
+      same tolerance every other per-file read in this module applies.
+
+    Requires an ALREADY-ACQUIRED *lock* — raises
+    :class:`WitnessedSourceWriteNotLocked` otherwise, checked FIRST, before
+    any of the no-op conditions above, so a caller that passes an unacquired
+    lock learns it is misusing the API even on an input that would have been
+    a no-op anyway (AC 4). This function does not itself call
+    :meth:`RunLock.acquire`: a second, independent acquire from within an
+    already-locked run would deadlock on the same-process ``flock``.
+    """
+    if not getattr(lock, "acquired", False):
+        raise WitnessedSourceWriteNotLocked(
+            "intake: persisting a witnessed source rewrite requires an "
+            "acquired RunLock (issue athenaeum#2159); the caller must hold "
+            "the same lock the mutating command acquired, not a fresh, "
+            "unacquired RunLock instance."
+        )
+    if not session_id:
+        return False
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    match = _ORIGIN_SESSION_FRONTMATTER_RE.match(text)
+    if match is None:
+        return False
+    meta, _body = parse_frontmatter(text)
+    meta = meta if isinstance(meta, dict) else {}
+    if not _witnessed_rewrite_eligible(meta.get("source")):
+        return False
+    block_start, block_end = match.start(1), match.end(1)
+    block = text[block_start:block_end]
+    new_block = apply_frontmatter_scalars(
+        block,
+        witnessed_source_fields(
+            session_id=session_id,
+            origin_turn=origin_turn,
+            witness_ref=witness_ref,
+        ),
+    )
+    if new_block == block:
+        return False
+    updated = text[:block_start] + new_block + text[block_end:]
     if updated == text:
         return False
     atomic_write_text(path, updated)
