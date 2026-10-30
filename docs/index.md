@@ -123,6 +123,9 @@ does not answer.
 - [Prompt witness ledger](design/witness-ledger.md) — the hash-chained, no-plaintext witness
   ledger, the security boundary it does and does not prove, and the `promptwitness` package
   boundary.
+- [Eval trigger surface](design/eval-trigger-surface.md) — when a change must carry a paid
+  eval receipt: the symbol-level reasoning surface, the structural fingerprint, and the
+  structured exemption line.
 
 ## Measurements
 
