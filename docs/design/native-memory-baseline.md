@@ -886,6 +886,10 @@ compile pipeline, the recall path, or the sidecar could move the result.
 Nothing in this record runs on push. Token-free checks over the runner, the
 corpus and the report generator run in ordinary CI.
 
+Which changes count as able to "move the result", and when a PR must carry a
+paid eval receipt, is specified in
+[`eval-trigger-surface.md`](eval-trigger-surface.md) (2026-10-30 amendment).
+
 ## 10. Related
 
 - [`../use-cases.md`](../use-cases.md) — the questions being graded.
