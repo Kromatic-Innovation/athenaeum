@@ -48,7 +48,8 @@ latency samples reflect one call at a time, not queueing behind siblings.
 
 Usage::
 
-    JEV_API_KEY="$(op read 'op://Agent Tools/Jev Athenaeum Key/credential')" \\
+    JEV_API_KEY="$(OP_LOAD_DESKTOP_APP_SETTINGS=false OP_BIOMETRIC_UNLOCK_ENABLED=false \\
+        op read 'op://Agent Tools/Jev Athenaeum Key/credential')" \\
         python scripts/eval_jev_pii_hazard.py \\
         --fixtures /path/to/host-side/positives.jsonl \\
         --allowlist ~/knowledge/wiki/_pii-allowlist.yml \\
