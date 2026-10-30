@@ -63,10 +63,12 @@ instead, on a record it chose explicitly.
 Nothing here rebuilds the recall index: the excluded surface is not in it.
 
 Layering: L3. Imports :mod:`athenaeum.pii` (L3; surface layout and
-retirement), :mod:`athenaeum.models` (L1) and :mod:`athenaeum.atomic_io`
-(L0). The merge paths that call it (:mod:`athenaeum.dedupe`,
-:mod:`athenaeum.pending_merges`) are L4; the repair, which needs
-:mod:`athenaeum.pending_merges`' target resolver, lives in
+retirement), :mod:`athenaeum.pii_attribution` (L3 sibling; the issue athenaeum#2210
+attribution seam — a same-layer edge exactly like the ``pii`` one above, and
+one :mod:`athenaeum.pii_attribution` never reciprocates), :mod:`athenaeum.models`
+(L1) and :mod:`athenaeum.atomic_io` (L0). The merge paths that call it
+(:mod:`athenaeum.dedupe`, :mod:`athenaeum.pending_merges`) are L4; the
+repair, which needs :mod:`athenaeum.pending_merges`' target resolver, lives in
 :mod:`athenaeum.contact_record_repair` so this module never imports upward.
 """
 
@@ -79,7 +81,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from athenaeum import pii
+from athenaeum import pii, pii_attribution
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.models import parse_frontmatter, render_frontmatter
 
@@ -287,14 +289,27 @@ def merge_contact_values(
     absorbed: Mapping[str, Any],
     *,
     source: Any = FOLD_SOURCE,
-) -> tuple[dict[str, Any], dict[str, int], int]:
+    attribution_context: "pii_attribution.AttributionContext | None" = None,
+    target_uid: str = "",
+    target_name: str | None = None,
+    target_type: str | None = None,
+) -> tuple[
+    dict[str, Any],
+    dict[str, int],
+    int,
+    tuple[tuple[str, "pii_attribution.AttributionVerdict"], ...],
+]:
     """Fold *absorbed*'s values onto a copy of *canonical*.
 
-    Returns ``(merged_meta, values_added_per_field, facts_carried)``. A value
-    the canonical record already lists is dropped. An added value keeps the
-    absorbed record's own ``field_sources`` provenance when it had one, else
-    gets *source*; either way the entry is written in the corrections
-    applier's list shape, ``{"value": ..., "source": ...}``.
+    Returns ``(merged_meta, values_added_per_field, facts_carried,
+    attribution_verdicts)`` — the last a ``(value, verdict)`` pair per
+    checked value, since a bare verdict carries no value
+    (:class:`athenaeum.pii_attribution.AttributionVerdict` deliberately
+    never does) and the caller needs the value to park a suspect entry. A
+    value the canonical record already lists is dropped. An added value
+    keeps the absorbed record's own ``field_sources`` provenance when it had
+    one, else gets *source*; either way the entry is written in the
+    corrections applier's list shape, ``{"value": ..., "source": ...}``.
 
     **Orphan guard (issue athenaeum#2196, AC1).** A per-address fact entry on
     *absorbed* is carried onto the merged record only when its identifier is
@@ -303,10 +318,48 @@ def merge_contact_values(
     address this SAME call is adding (because *absorbed* lists it and
     *canonical* did not) still counts, and its fact entry travels with it.
     An entry describing an address neither record lists is never written.
+
+    **Attribution (issue athenaeum#2210).** When *attribution_context* is
+    given, the seam runs once per value :func:`missing_values` would carry
+    onto the canonical record — i.e. exactly the values this call would
+    otherwise add. This function stays pure (no logging, no parking — see
+    :func:`athenaeum.pii_attribution.check_contact_attribution`'s own
+    "pure apart from the log" for what IS a side effect here regardless):
+    the verdicts are returned for :func:`fold_contact_record` to park. A
+    D1-narrow verdict (:func:`athenaeum.pii_attribution.is_d1_narrow`)
+    excludes that one value from the merge entirely — it is never carried
+    onto the canonical record — while every other value is added exactly as
+    it is with *attribution_context* omitted (design
+    ``docs/design/attribution-verification.md`` §9.1). Omitting
+    *attribution_context* (the default) skips the seam and returns an empty
+    verdicts tuple, so every existing caller is byte-identical.
     """
     merged = dict(canonical)
     added: dict[str, int] = {}
     missing = missing_values(absorbed, canonical)
+    verdicts: list[tuple[str, "pii_attribution.AttributionVerdict"]] = []
+    if attribution_context is not None:
+        parked_values: set[str] = set()
+        for field_name, values in missing.items():
+            for value in values:
+                verdict = pii_attribution.check_contact_attribution(
+                    value,
+                    target_uid=target_uid,
+                    target_name=target_name,
+                    target_type=target_type,
+                    source_ref=source,
+                    writer=pii_attribution.WRITER_CONTACT_FOLD,
+                    context=attribution_context,
+                )
+                verdicts.append((value, verdict))
+                if pii_attribution.is_d1_narrow(verdict):
+                    parked_values.add(_value_key(field_name, value))
+        if parked_values:
+            missing = {
+                field_name: [v for v in values if _value_key(field_name, v) not in parked_values]
+                for field_name, values in missing.items()
+            }
+            missing = {field_name: values for field_name, values in missing.items() if values}
     absorbed_fs = absorbed.get("field_sources")
     absorbed_fs = absorbed_fs if isinstance(absorbed_fs, dict) else {}
     canonical_fs = canonical.get("field_sources")
@@ -338,7 +391,7 @@ def merge_contact_values(
         if extra:
             merged[fact_field] = [*_fact_entries(canonical, fact_field), *extra]
             facts += len(extra)
-    return merged, added, facts
+    return merged, added, facts, tuple(verdicts)
 
 
 # ---------------------------------------------------------------------------
@@ -431,7 +484,10 @@ def merge_duplicate_record(
     against the same merged-record identifier set anyway, defensively, so a
     later change to this loop cannot quietly reintroduce an orphan.
     """
-    merged, added, facts = merge_contact_values(keep, copy)
+    # Issue athenaeum#2210: this call site (two records for ONE live uid) is
+    # not one of this issue's four wired writers — no attribution_context is
+    # passed, so the seam is skipped and the verdicts tuple is always empty.
+    merged, added, facts, _verdicts = merge_contact_values(keep, copy)
     copy_cls = _entries_by_identifier(copy, pii.CONTACT_CLASSIFICATION_FIELD)
     identifier_keys = _identifier_keys(merged)
     reconciled = 0
@@ -562,6 +618,7 @@ def fold_contact_record(
     index: pii.ExcludedRecordIndex,
     reason: str = REASON_MERGE_FOLD,
     dry_run: bool = False,
+    attribution_context: "pii_attribution.AttributionContext | None" = None,
 ) -> ContactFoldSummary:
     """Fold one absorbed record onto *canonical_uid*'s record, then retire it.
 
@@ -570,6 +627,15 @@ def fold_contact_record(
     record at all and the absorbed one carries something to move, a record is
     minted at :func:`athenaeum.pii.default_uid_record_path`. Under *dry_run*
     nothing is written and the summary describes what would be.
+
+    *attribution_context* (issue athenaeum#2210): threaded into
+    :func:`merge_contact_values`, target is *canonical_uid* — the fold files
+    every carried value onto the CANONICAL record, so that is the
+    attribution target, not the absorbed one. The returned verdicts are
+    parked here (this function, unlike ``merge_contact_values``, does write
+    to disk) for every non-``pass`` verdict, and only once the real write
+    below actually happens — never under *dry_run*, matching every other
+    write this function makes.
     """
     root = Path(contacts_root)
     summary = ContactFoldSummary()
@@ -591,7 +657,19 @@ def fold_contact_record(
         meta, canonical_body = parse_frontmatter(canonical_path.read_text(encoding="utf-8"))
         canonical_meta = meta if isinstance(meta, dict) else {}
 
-    merged, added, facts = merge_contact_values(canonical_meta, absorbed_meta)
+    canonical_name = canonical_meta.get("name")
+    # Issue athenaeum#2210 (Seer review): calling the seam at all appends a
+    # log row as its own side effect, so it must never run under dry_run —
+    # not even to compute a verdict this function then discards. Pass
+    # `None` through for a dry-run call regardless of what the caller gave,
+    # the same discipline every other write below already follows.
+    merged, added, facts, verdicts = merge_contact_values(
+        canonical_meta,
+        absorbed_meta,
+        attribution_context=attribution_context if not dry_run else None,
+        target_uid=canonical_uid,
+        target_name=canonical_name if isinstance(canonical_name, str) else None,
+    )
     if minted:
         merged["uid"] = canonical_uid
         merged[pii.PII_FLAG] = True
@@ -608,6 +686,20 @@ def fold_contact_record(
         canonical_path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_text(canonical_path, render_frontmatter(merged) + "\n" + canonical_body)
         index.register(canonical_path)
+    if attribution_context is not None:
+        for value, verdict in verdicts:
+            if verdict.disposition == pii_attribution.DISPOSITION_PASS:
+                continue
+            pii_attribution.park_suspect(
+                attribution_context,
+                value,
+                verdict,
+                target_uid=canonical_uid,
+                target_name=canonical_name if isinstance(canonical_name, str) else None,
+                writer=pii_attribution.WRITER_CONTACT_FOLD,
+                source_ref=str(absorbed_path),
+                shadow=not pii_attribution.is_d1_narrow(verdict),
+            )
     pii.retire_contact_record(
         root,
         absorbed_path,
@@ -624,6 +716,7 @@ def fold_absorbed_contact_records(
     *,
     index: pii.ExcludedRecordIndex | None = None,
     dry_run: bool = False,
+    attribution_context: "pii_attribution.AttributionContext | None" = None,
 ) -> ContactFoldSummary:
     """The merge hook: fold every record of each absorbed uid onto its canonical.
 
@@ -632,6 +725,10 @@ def fold_absorbed_contact_records(
     already folded has none left to find. A missing contacts surface is a
     no-op. One failing record is reported in ``errors`` and does not stop the
     rest — the merge that called this has already happened.
+
+    *attribution_context* (issue athenaeum#2210): threaded to every
+    :func:`fold_contact_record` call. ``None`` (the default) skips the seam
+    entirely, so every existing caller is byte-identical.
     """
     summary = ContactFoldSummary()
     root = Path(contacts_root)
@@ -652,6 +749,7 @@ def fold_absorbed_contact_records(
                         canonical_uid=canonical,
                         index=idx,
                         dry_run=dry_run,
+                        attribution_context=attribution_context,
                     )
                 )
             except (OSError, UnicodeDecodeError, ValueError) as exc:
@@ -718,7 +816,17 @@ def fold_contact_records_after_merge(
         root = resolve_contacts_root(Path(knowledge_root), config)
         if root is None:
             return ContactFoldSummary()
-        summary = fold_absorbed_contact_records(root, pairs)
+        # Issue athenaeum#2210: this IS the real production entry point every
+        # merge path (dedupe.py, pending_merges.py) calls, so the
+        # attribution context is built HERE rather than threaded as a new
+        # parameter through every merge caller — those callers already
+        # have no attribution concept and should not need one.
+        attribution_context = pii_attribution.build_attribution_context(
+            Path(knowledge_root), config
+        )
+        summary = fold_absorbed_contact_records(
+            root, pairs, attribution_context=attribution_context
+        )
     except Exception as exc:  # noqa: BLE001 — must never fail the merge
         log.warning("contact-record fold after merge skipped (%s): %s", type(exc).__name__, exc)
         summary = ContactFoldSummary(errors=[f"{type(exc).__name__}: contact-record fold skipped"])

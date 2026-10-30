@@ -94,7 +94,14 @@ from dataclasses import dataclass
 from dataclasses import field as dc_field
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    # Issue athenaeum#2210: type-only, same discipline this module already
+    # applies to every other `athenaeum.pii` use (see the module docstring's
+    # "Layering" note) — this module is L2 and must not import the L3
+    # attribution seam at module scope.
+    from athenaeum.pii_attribution import AttributionContext
 
 from pydantic import ValidationError as PydanticValidationError
 
@@ -1149,12 +1156,26 @@ def process_correction_record(
     dry_run: bool = False,
     dry_run_pages: DryRunPageOverlay | None = None,
     ratified_source: Any | None = None,
+    attribution_context: "AttributionContext | None" = None,
 ) -> CorrectionRecordResult:
     """Process one correction record against a target entity — the tier-0
     applier. Never raises for a non-conformant record; every failure mode
     returns ``disposition="raised-tier"`` (§8) with a human-readable
     ``reason``, so the caller can hand it to the fallthrough path (§8.1)
     instead of dropping it.
+
+    ``attribution_context`` (issue athenaeum#2210, keyword-only, ``None`` by
+    default so every existing caller is byte-identical): when given, the
+    contact-value attribution seam runs on the ``op == "add"`` branch, after
+    the delta gate decides the value is genuinely new, for a field routed to
+    an excluded surface (see that branch's own comment). A D1-narrow verdict
+    makes the result ``noop`` with reason ``"attribution-non-personal"``
+    instead of filing the value — enforced in every mode. Every other
+    verdict only logs and parks a shadow suspect; this function's output is
+    otherwise unchanged (design ``docs/design/attribution-verification.md``
+    §9.1). :func:`process_correction_batch` and :func:`retry_parked_corrections`
+    build one context per batch and thread it through; a caller processing a
+    single ratified correction (:mod:`athenaeum.answers`) builds its own.
 
     ``dry_run_pages`` (issue athenaeum#873) is the per-run dry-run page overlay
     — see :data:`DryRunPageOverlay`. Optional and defaulting to ``None`` so
@@ -1640,6 +1661,52 @@ def process_correction_record(
             if already_present
             else ("apply", "new value, not a conflict (§4)")
         )
+
+        # Issue athenaeum#2210: the attribution seam, after the delta gate
+        # above decided this is genuinely a NEW value (not already present)
+        # for a contact-identifier field routed to an excluded surface —
+        # only that combination is a contact-value write this seam cares
+        # about. `uid` is in scope here because it is only ever unset when
+        # `surface_class` is falsy, which the guard below also requires.
+        from athenaeum import pii as _pii
+        from athenaeum import pii_attribution
+
+        if (
+            attribution_context is not None
+            and not dry_run
+            and verdict == "apply"
+            and surface_class
+            and write_field in _pii.CONTACT_IDENTIFIER_FIELDS
+        ):
+            av_verdict = pii_attribution.check_contact_attribution(
+                str(value),
+                target_uid=uid,
+                target_name=entity_name,
+                target_type=existing_meta.get("type"),
+                source_ref=source,
+                writer=pii_attribution.WRITER_CORRECTION_ADD,
+                context=attribution_context,
+            )
+            if av_verdict.disposition != pii_attribution.DISPOSITION_PASS:
+                pii_attribution.park_suspect(
+                    attribution_context,
+                    str(value),
+                    av_verdict,
+                    target_uid=uid,
+                    target_name=entity_name,
+                    writer=pii_attribution.WRITER_CORRECTION_ADD,
+                    source_ref=source,
+                    shadow=not pii_attribution.is_d1_narrow(av_verdict),
+                )
+            if pii_attribution.is_d1_narrow(av_verdict):
+                # D1-narrow is enforced in every mode (design §9.1): the
+                # value is never filed on this target. A DISTINCT verdict
+                # token (not "noop") so the `just_created` shortcut just
+                # below — which only special-cases an ordinary "noop" as
+                # "the create write already covered this field" — cannot
+                # mistake an enforced non-personal value for that case and
+                # report "applied".
+                verdict, reason = "attribution-non-personal", "attribution-non-personal"
     else:  # op == "remove"
         existing_list = read_meta.get(write_field)
         present = isinstance(existing_list, list) and any(
@@ -1663,6 +1730,14 @@ def process_correction_record(
                     "defer",
                     f"incoming rank {incoming_rank} outranked by existing rank {existing_rank}",
                 )
+
+    if verdict == "attribution-non-personal":
+        # Issue athenaeum#2210: a D1-narrow value never gets filed, whether
+        # or not this correction also just created the entity — reported
+        # before the `just_created` shortcut below so an enforced
+        # non-personal value is never mistaken for "the create write
+        # already covered this field".
+        return _result("noop", reason)
 
     if just_created and verdict == "noop":
         # The record's own field/value happens to equal what the create
@@ -1934,6 +2009,7 @@ def process_batch_file(
     dry_run: bool = False,
     registry_entities: dict[str, Any] | None = None,
     dry_run_pages: DryRunPageOverlay | None = None,
+    attribution_context: "AttributionContext | None" = None,
 ) -> BatchOutcome:
     """Process every correction record in one batch file.
 
@@ -1950,11 +2026,35 @@ def process_batch_file(
     files in one run (`run_correction_phase`) passes ONE overlay shared
     across all of them; a caller processing a single file on its own (most
     tests) gets a fresh, file-scoped one built here.
+
+    ``attribution_context`` (issue athenaeum#2210): threaded to every
+    :func:`process_correction_record` call in this file. Built once HERE
+    when omitted, reusing the already-loaded ``index`` so it costs no second
+    entity scan — a caller processing several batch files in one run may
+    build and share ONE context across all of them instead (same convention
+    as ``registry_entities``/``dry_run_pages`` above), which additionally
+    avoids re-reading the per-deployment HMAC key file once per batch file.
+    Never built under ``dry_run`` (even when the caller passed ``None``):
+    building it mints the per-deployment HMAC key file on first use, and
+    calling the seam at all appends a log row as its own side effect
+    (:func:`athenaeum.pii_attribution.check_contact_attribution`'s own "pure
+    apart from the log") — both are disk writes a dry run must not make.
+    ``process_correction_record``'s own ``attribution_context is not None``
+    guard then skips the seam entirely for this run, the same tradeoff
+    ``storage_migrate.plan_pii_migration``'s dry-run path already makes: a
+    dry-run preview shows the ordinary (non-attribution) result, never a
+    predicted enforcement it cannot act on without writing.
     """
     if registry_entities is None:
         registry_entities = load_registry(knowledge_root)
     if dry_run_pages is None:
         dry_run_pages = {}
+    if attribution_context is None and not dry_run:
+        from athenaeum import pii_attribution
+
+        attribution_context = pii_attribution.build_attribution_context(
+            knowledge_root, config, entity_index=index
+        )
 
     with path.open("r", encoding="utf-8") as fh:
         lines = fh.readlines()
@@ -1994,6 +2094,11 @@ def process_batch_file(
                 config=config,
                 dry_run=dry_run,
                 dry_run_pages=dry_run_pages,
+                # Never under dry_run, even when a caller shared a
+                # pre-built context across several batch files (Seer
+                # finding, athenaeum#2210 PR review): calling the seam at
+                # all appends a log row, and dry_run must write nothing.
+                attribution_context=attribution_context if not dry_run else None,
             )
         )
 
@@ -2426,6 +2531,14 @@ def retry_parked_corrections(
     if not store:
         return counts, 0
 
+    # Issue athenaeum#2210: one attribution context for the whole retry pass,
+    # built only once there is actually something parked to retry.
+    from athenaeum import pii_attribution
+
+    attribution_context = pii_attribution.build_attribution_context(
+        knowledge_root, config, entity_index=index
+    )
+
     changed = False
     applied_delta = 0
     for correction_id, row in list(store.items()):
@@ -2445,6 +2558,7 @@ def retry_parked_corrections(
             config=config,
             dry_run=False,
             dry_run_pages=dry_run_pages,
+            attribution_context=attribution_context,
         )
 
         if result.disposition == "parked":

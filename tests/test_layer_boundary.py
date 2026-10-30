@@ -88,6 +88,12 @@ ALLOWED_UPWARD_EDGES: frozenset[tuple[str, str]] = frozenset(
         # site (see corrections.py's own docstring: "_resolve_email_handle
         # and the Sec7.1 sensitivity-routing helpers").
         ("corrections", "pii"),
+        # corrections.py (L2) imports pii_attribution.py (L3), the issue
+        # athenaeum#2210 attribution seam, function-local at the op=="add"
+        # branch's call site and in the batch-driver functions that build a
+        # context to thread through it -- same shape as the ("corrections",
+        # "pii") edge directly above.
+        ("corrections", "pii_attribution"),
         # init.py (L1) imports config.py (L2)'s write_default_config,
         # function-local/deferred -- the module's own docstring states this
         # is deliberate: "to avoid a module-level L1->L2 cycle at import

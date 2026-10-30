@@ -10,10 +10,12 @@ Covers the pure transform (:mod:`athenaeum.storage_migrate`) and the CLI
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
+from athenaeum import pii_attribution
 from athenaeum.cli import main
 from athenaeum.config import load_config
 from athenaeum.librarian import reindex
@@ -485,6 +487,77 @@ class TestStorageMigratePiiCLI:
         # lint-pii is now advertised in the usage line too (issue athenaeum#495).
         rc = main(["storage"])
         assert "lint-pii" in capsys.readouterr().err
+
+
+class TestAttributionSeamWiring:
+    """Issue athenaeum#2210: ``--apply`` builds an attribution context and
+    threads it through ``plan_pii_migration``/``_apply_plan``; dry-run never
+    does (no log/park write for a preview that is never written to disk)."""
+
+    def test_dry_run_builds_no_context_and_writes_no_log(self, tmp_path: Path) -> None:
+        root = _seed_knowledge_root(tmp_path)
+        page = root / "wiki" / "jane.md"
+
+        rc = main(["storage", "migrate-pii", "--path", str(root), "--page", str(page)])
+
+        assert rc == 0
+        log_path = pii_attribution.default_attribution_log_path(
+            surface_root_for_class("pii", EXCLUDED_CONFIG, root)
+        )
+        assert not log_path.exists()
+
+    def test_apply_logs_a_pass_verdict_for_the_pages_own_address(
+        self, tmp_path: Path
+    ) -> None:
+        root = _seed_knowledge_root(tmp_path)
+        page = root / "wiki" / "jane.md"
+
+        rc = main(
+            ["storage", "migrate-pii", "--path", str(root), "--page", str(page), "--apply"]
+        )
+
+        assert rc == 0
+        log_path = pii_attribution.default_attribution_log_path(
+            surface_root_for_class("pii", EXCLUDED_CONFIG, root)
+        )
+        rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+        assert any(
+            r["target_uid"] == "12345" and r["writer"] == "pii-migration" for r in rows
+        )
+        assert all("jane@example.com" not in json.dumps(r) for r in rows)
+
+    def test_apply_enforces_d1_narrow_without_adding_it_to_the_record(
+        self, tmp_path: Path
+    ) -> None:
+        root = _seed_knowledge_root(tmp_path)
+        page = root / "wiki" / "jane.md"
+        page.write_text(
+            page.read_text(encoding="utf-8").replace(
+                "Jane leads widgets.",
+                "Jane leads widgets. CC noreply@example.com for automated updates.",
+            ),
+            encoding="utf-8",
+        )
+
+        rc = main(
+            ["storage", "migrate-pii", "--path", str(root), "--page", str(page), "--apply"]
+        )
+
+        assert rc == 0
+        origin = page.read_text(encoding="utf-8")
+        assert "noreply@example.com" not in origin  # still redacted from the wiki
+
+        excluded_page = surface_root_for_class("pii", EXCLUDED_CONFIG, root) / "jane.md"
+        meta, _ = parse_frontmatter(excluded_page.read_text(encoding="utf-8"))
+        assert "noreply@example.com" not in (meta.get("emails") or [])
+        assert "jane@example.com" in (meta.get("emails") or [])  # unrelated value unaffected
+
+        contacts_root = surface_root_for_class("pii", EXCLUDED_CONFIG, root)
+        suspects = list((contacts_root / "_attribution" / "suspects").glob("*.md"))
+        assert len(suspects) == 1
+        suspect_meta, _ = parse_frontmatter(suspects[0].read_text(encoding="utf-8"))
+        assert suspect_meta["shadow"] is False
+        assert suspect_meta["value"] == "noreply@example.com"
 
 
 # ---------------------------------------------------------------------------

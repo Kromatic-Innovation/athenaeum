@@ -78,9 +78,11 @@ from __future__ import annotations
 
 from collections.abc import Collection, Iterable, Iterator, Mapping
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from pathlib import Path
 from typing import Any
 
+from athenaeum import pii_attribution
 from athenaeum.models import parse_frontmatter, render_frontmatter
 from athenaeum.pii import (
     DURABLE_IDENTIFIER_FIELDS,
@@ -203,6 +205,30 @@ class PiiMigrationPlan:
     #: skip is never silent (the same principle as athenaeum#1273's exclusion
     #: reporting) — the CLI prints these in both dry-run and ``--apply``.
     skipped_allowlisted: tuple[PiiAllowlistEntry, ...] = ()
+    #: Per-value attribution verdicts (issue athenaeum#2210), one per distinct
+    #: token in :attr:`emails` + :attr:`phones`, keyed by the raw value.
+    #: Empty when the caller passed no ``context`` to :func:`plan_pii_migration`
+    #: (back-compat: attribution is entirely opt-in). This function is pure —
+    #: it never logs or parks anything — so a caller that wants the log row
+    #: and the suspect file written reads this mapping itself; see
+    #: :func:`athenaeum._cmd_storage._apply_plan`.
+    attribution_verdicts: "dict[str, pii_attribution.AttributionVerdict]" = dataclass_field(
+        default_factory=dict
+    )
+    #: Tokens whose verdict fired D1-narrow (issue athenaeum#2210,
+    #: :func:`athenaeum.pii_attribution.is_d1_narrow`) — enforced in every
+    #: mode. These are still redacted from the rewritten origin page (the
+    #: token itself never belongs in the wiki regardless of attribution) but
+    #: are NOT added to :attr:`excluded_page_text`'s ``emails``/``phones``.
+    parked_tokens: tuple[str, ...] = ()
+    #: The origin page's own uid/name (issue athenaeum#2210) — every
+    #: migration files tokens onto the page's OWN record, so these are the
+    #: attribution target identity the caller needs to log/park verdicts
+    #: without re-parsing :attr:`excluded_page_text`. Set whenever the page
+    #: carries a ``uid:``, independent of whether *attribution_context* was
+    #: given.
+    target_uid: str = ""
+    target_name: str | None = None
 
     @property
     def changed(self) -> bool:
@@ -567,6 +593,8 @@ def plan_pii_migration(
     config: dict[str, Any] | None,
     knowledge_root: Path,
     allowlist: Mapping[str, str] | Iterable[PiiAllowlistEntry] | None = None,
+    *,
+    attribution_context: "pii_attribution.AttributionContext | None" = None,
 ) -> PiiMigrationPlan:
     """Compute the migration for one entity page — pure, writes nothing.
 
@@ -592,6 +620,21 @@ def plan_pii_migration(
     the CLI's job, via :func:`athenaeum.pii.load_pii_allowlist` — the same
     reader ``lint-pii`` uses); omitting *allowlist* preserves this function's
     pre-athenaeum#1275 behaviour exactly.
+
+    *attribution_context* (issue athenaeum#2210, keyword-only, ``None`` by
+    default so every existing caller is byte-identical): when given, the
+    attribution seam runs once per distinct extracted token (the deduped
+    ``emails``/``phones`` this run found), against the page's OWN uid/name/
+    type as the target. This function stays pure — it never logs or parks
+    anything, per the design's "``plan_pii_migration`` is pure and writes
+    nothing" (``docs/design/attribution-verification.md`` §4.2) — the
+    verdicts are returned on :attr:`PiiMigrationPlan.attribution_verdicts`
+    for the caller (:mod:`athenaeum._cmd_storage`) to log and park on apply.
+    A D1-narrow token (:attr:`PiiMigrationPlan.parked_tokens`) is still
+    redacted from the rewritten origin page — the token never belongs in the
+    wiki regardless of attribution — but is excluded from the excluded-
+    surface record's own ``emails``/``phones``, i.e. never added to the
+    page's uid's contact record.
     """
     entries = coerce_pii_allowlist(allowlist)
     text = page_path.read_text(encoding="utf-8")
@@ -622,6 +665,9 @@ def plan_pii_migration(
 
     excluded_root = surface_root_for_class(PII_ENTITY_CLASS, config, knowledge_root)
     excluded_page_path = excluded_root / page_path.name
+    target_uid = str(meta.get("uid") or "")
+    raw_target_name = meta.get("name")
+    target_name = raw_target_name if isinstance(raw_target_name, str) else None
 
     if not (emails or phones):
         # No migratable contact data. A page whose only PII is in its name is
@@ -636,7 +682,31 @@ def plan_pii_migration(
             excluded_page_text=None,
             name_field_pii=name_field_pii,
             skipped_allowlisted=skipped_allowlisted,
+            target_uid=target_uid,
+            target_name=target_name,
         )
+
+    # Issue athenaeum#2210: one verdict per distinct extracted token, target
+    # is this page's own uid — a migration files every token onto the page's
+    # own record, so the page is its own target.
+    attribution_verdicts: dict[str, pii_attribution.AttributionVerdict] = {}
+    parked_tokens: list[str] = []
+    if attribution_context is not None:
+        raw_target_type = meta.get("type")
+        target_type = raw_target_type if isinstance(raw_target_type, str) else None
+        for token in _dedupe_preserving_order([*emails, *phones]):
+            verdict = pii_attribution.check_contact_attribution(
+                token,
+                target_uid=target_uid,
+                target_name=target_name,
+                target_type=target_type,
+                source_ref=str(page_path),
+                writer=pii_attribution.WRITER_PII_MIGRATION,
+                context=attribution_context,
+            )
+            attribution_verdicts[token] = verdict
+            if pii_attribution.is_d1_narrow(verdict):
+                parked_tokens.append(token)
 
     # Rewrite origin: frontmatter with contact data stripped/redacted (durable
     # identifiers untouched, real aliases preserved), then the body inline
@@ -657,7 +727,12 @@ def plan_pii_migration(
     # migration had archived. Pre-existing keys survive; emails/phones union;
     # a differing scalar identity field is surfaced as a conflict, never
     # silently picked (see _merge_excluded_record).
-    new_record = _build_excluded_record(meta, emails, phones)
+    # D1-narrow tokens are never added to the owner's record (design §9.1) —
+    # filtered here, AFTER the rewritten origin page above already redacted
+    # them like any other migrated token.
+    record_emails = [e for e in emails if e not in parked_tokens]
+    record_phones = [p for p in phones if p not in parked_tokens]
+    new_record = _build_excluded_record(meta, record_emails, record_phones)
     # Only attempt a merge when 'pii' is actually mapped to a distinct
     # excluded surface. When it is NOT (is_pii_class_excluded is False),
     # surface_root_for_class falls back to the default wiki surface — so
@@ -691,6 +766,10 @@ def plan_pii_migration(
         excluded_record_existed=excluded_record_existed,
         excluded_record_conflicts=excluded_record_conflicts,
         skipped_allowlisted=skipped_allowlisted,
+        attribution_verdicts=attribution_verdicts,
+        parked_tokens=tuple(parked_tokens),
+        target_uid=target_uid,
+        target_name=target_name,
     )
 
 

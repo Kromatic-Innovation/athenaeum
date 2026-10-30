@@ -61,6 +61,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from athenaeum.runlock import RunLock
 
+from athenaeum import pii_attribution
 from athenaeum._cli_shared import _acquire_or_exit, _add_lock_args, _resolve_knowledge_root
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.config import (
@@ -447,7 +448,11 @@ def _cmd_storage_audit_h1_redaction(args: argparse.Namespace) -> int:
     return 0
 
 
-def _apply_plan(plan: PiiMigrationPlan) -> None:
+def _apply_plan(
+    plan: PiiMigrationPlan,
+    *,
+    attribution_context: "pii_attribution.AttributionContext | None" = None,
+) -> None:
     """Write one migration plan: excluded record first, then scrub the origin.
 
     Excluded record is written BEFORE the origin is scrubbed so a crash between
@@ -460,10 +465,37 @@ def _apply_plan(plan: PiiMigrationPlan) -> None:
     Both writes are atomic (temp-file + rename). Callers must not invoke this
     when ``plan.excluded_record_conflicts`` is non-empty — that is refused
     upstream in ``_cmd_storage_migrate_pii_single``/``_bulk`` before this runs.
+
+    *attribution_context* (issue athenaeum#2210): when given, parks a
+    suspect entry for every non-``pass`` verdict on
+    ``plan.attribution_verdicts`` — shadow for everything except a
+    D1-narrow verdict (:attr:`PiiMigrationPlan.parked_tokens`), which parks
+    non-shadow. The log row itself was already written when
+    :func:`athenaeum.storage_migrate.plan_pii_migration` called the seam
+    (the seam logs as its own side effect) — this function only parks. The
+    log/park entries land ONLY on apply because BOTH CLI entry points below
+    pass ``attribution_context=None`` into ``plan_pii_migration`` itself for
+    a dry-run preview, so the seam is never even called for one; this
+    function is never reached for a dry run either, by construction (both
+    call sites below only call it under ``if args.apply``).
     """
     plan.excluded_page_path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(plan.excluded_page_path, plan.excluded_page_text or "")
     atomic_write_text(plan.page_path, plan.rewritten_page_text or "")
+    if attribution_context is not None:
+        for token, verdict in plan.attribution_verdicts.items():
+            if verdict.disposition == pii_attribution.DISPOSITION_PASS:
+                continue
+            pii_attribution.park_suspect(
+                attribution_context,
+                token,
+                verdict,
+                target_uid=plan.target_uid,
+                target_name=plan.target_name,
+                writer=pii_attribution.WRITER_PII_MIGRATION,
+                source_ref=str(plan.page_path),
+                shadow=not pii_attribution.is_d1_narrow(verdict),
+            )
 
 
 def _print_excluded_record_conflicts(plan: PiiMigrationPlan, *, refusing: bool) -> None:
@@ -785,7 +817,22 @@ def _cmd_storage_migrate_pii_single(args: argparse.Namespace) -> int:
             renamed_this_run = True
             page_path = wiki_root / f"{rename_report.renames[-1][1]}.md"
 
-    plan = plan_pii_migration(page_path, config, knowledge_root, allowlist=allowlist)
+    # Issue athenaeum#2210: the attribution seam runs only when this will
+    # actually apply — a dry-run preview passes no context, so
+    # `plan_pii_migration` never calls the seam at all and writes nothing
+    # (not even a log row) for a preview that is never written to disk.
+    attribution_context = (
+        pii_attribution.build_attribution_context(knowledge_root, config)
+        if args.apply
+        else None
+    )
+    plan = plan_pii_migration(
+        page_path,
+        config,
+        knowledge_root,
+        allowlist=allowlist,
+        attribution_context=attribution_context,
+    )
 
     if plan.skipped_allowlisted:
         _print_skipped_allowlisted(plan.skipped_allowlisted)
@@ -826,7 +873,7 @@ def _cmd_storage_migrate_pii_single(args: argparse.Namespace) -> int:
         _print_excluded_record_conflicts(plan, refusing=True)
         return 1
 
-    _apply_plan(plan)
+    _apply_plan(plan, attribution_context=attribution_context)
     print(f"migrated PII off {page_path}\n{summary}")
     _scrub_merge_sidecar(knowledge_root, plan.emails + plan.phones, apply=True)
     _post_apply_index_step(args, knowledge_root, config)
@@ -899,6 +946,17 @@ def _cmd_storage_migrate_pii_bulk(args: argparse.Namespace) -> int:
         file=sys.stderr,
     )
 
+    # Issue athenaeum#2210: ONE attribution context for the whole bulk run
+    # (built only under --apply, same reasoning as the single-page path) —
+    # built once rather than per page, which would otherwise re-read the
+    # per-deployment HMAC key file and re-scan the entity index per page
+    # over an 11.5k-page sweep.
+    attribution_context = (
+        pii_attribution.build_attribution_context(knowledge_root, config)
+        if args.apply
+        else None
+    )
+
     affected = 0
     records = 0
     total_emails = 0
@@ -914,7 +972,11 @@ def _cmd_storage_migrate_pii_bulk(args: argparse.Namespace) -> int:
     for i, page_path in enumerate(pages, start=1):
         try:
             plan = plan_pii_migration(
-                page_path, config, knowledge_root, allowlist=allowlist
+                page_path,
+                config,
+                knowledge_root,
+                allowlist=allowlist,
+                attribution_context=attribution_context,
             )
         except (OSError, UnicodeDecodeError) as exc:
             print(f"[migrate-pii] skip {page_path}: {exc}", file=sys.stderr)
@@ -941,7 +1003,7 @@ def _cmd_storage_migrate_pii_bulk(args: argparse.Namespace) -> int:
                 migrated_values.extend(plan.emails)
                 migrated_values.extend(plan.phones)
                 if args.apply:
-                    _apply_plan(plan)
+                    _apply_plan(plan, attribution_context=attribution_context)
         if i % _PROGRESS_EVERY == 0 or i == total:
             verb = "migrated" if args.apply else "would migrate"
             print(

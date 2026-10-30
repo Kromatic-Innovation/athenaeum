@@ -31,7 +31,7 @@ from pathlib import Path
 
 import pytest
 
-from athenaeum import pii
+from athenaeum import pii, pii_attribution
 from athenaeum.contact_record_fold import (
     FOLD_SOURCE,
     REASON_PAGE_REMOVED,
@@ -256,6 +256,114 @@ class TestMergeHook:
 
 
 # ---------------------------------------------------------------------------
+# Issue athenaeum#2210: the attribution seam at the fold's two layers —
+# ``merge_contact_values`` (pure, returns verdicts) and ``fold_contact_record``
+# (parks them, since it is the one that actually writes).
+# ---------------------------------------------------------------------------
+
+
+class TestAttributionSeamWiring:
+    def _context(self, tmp_path: Path, root: Path) -> "pii_attribution.AttributionContext":
+        return pii_attribution.build_attribution_context(
+            tmp_path,
+            {"storage": {"mapping": {"pii": "excluded"}}},
+            excluded_index=pii.ExcludedRecordIndex(root),
+        )
+
+    def test_merge_contact_values_without_context_is_byte_identical(self) -> None:
+        canonical = {"uid": CANON, "emails": ["c@example.org"]}
+        absorbed = {"uid": ABSORBED, "emails": ["a@example.org"]}
+        merged, added, facts, verdicts = merge_contact_values(canonical, absorbed)
+        assert merged["emails"] == ["c@example.org", "a@example.org"]
+        assert added == {"emails": 1}
+        assert facts == 0
+        assert verdicts == ()
+
+    def test_merge_contact_values_logs_a_pass_for_an_ordinary_value(
+        self, tmp_path: Path
+    ) -> None:
+        root = tmp_path / "excluded"
+        root.mkdir(parents=True)
+        context = self._context(tmp_path, root)
+        canonical = {"uid": CANON, "name": "Casey", "emails": ["c@example.org"]}
+        absorbed = {"uid": ABSORBED, "emails": ["a@example.org"]}
+        merged, added, facts, verdicts = merge_contact_values(
+            canonical,
+            absorbed,
+            attribution_context=context,
+            target_uid=CANON,
+            target_name="Casey",
+        )
+        assert merged["emails"] == ["c@example.org", "a@example.org"]
+        assert [v.disposition for _value, v in verdicts] == [pii_attribution.DISPOSITION_PASS]
+
+    def test_merge_contact_values_excludes_a_d1_narrow_value_from_the_merge(
+        self, tmp_path: Path
+    ) -> None:
+        root = tmp_path / "excluded"
+        root.mkdir(parents=True)
+        context = self._context(tmp_path, root)
+        canonical = {"uid": CANON, "name": "Casey", "emails": ["c@example.org"]}
+        absorbed = {"uid": ABSORBED, "emails": ["noreply@example.org"]}
+        merged, added, facts, verdicts = merge_contact_values(
+            canonical,
+            absorbed,
+            attribution_context=context,
+            target_uid=CANON,
+            target_name="Casey",
+        )
+        # The D1-narrow value is never carried onto the canonical record.
+        assert merged["emails"] == ["c@example.org"]
+        assert added == {}
+        values_and_dispositions = [(value, v.disposition) for value, v in verdicts]
+        assert values_and_dispositions == [
+            ("noreply@example.org", pii_attribution.DISPOSITION_NON_PERSONAL)
+        ]
+        assert pii_attribution.is_d1_narrow(verdicts[0][1])
+
+    def test_fold_contact_record_parks_a_d1_narrow_value_non_shadow(
+        self, tmp_path: Path
+    ) -> None:
+        root = tmp_path / "excluded"
+        canon = _record(root, f"{CANON}.md", CANON, emails=["c@example.org"])
+        absorbed = _record(root, f"{ABSORBED}.md", ABSORBED, emails=["noreply@example.org"])
+        context = self._context(tmp_path, root)
+
+        summary = fold_absorbed_contact_records(
+            root, [(ABSORBED, CANON)], attribution_context=context
+        )
+
+        meta = _meta(canon)
+        assert "noreply@example.org" not in (meta.get("emails") or [])
+        assert summary.records_folded == 1
+        assert not absorbed.exists()  # still retired, like any other fold
+
+        suspects = list((root / "_attribution" / "suspects").glob("*.md"))
+        assert len(suspects) == 1
+        suspect_meta, _ = parse_frontmatter(suspects[0].read_text(encoding="utf-8"))
+        assert suspect_meta["shadow"] is False
+        assert suspect_meta["value"] == "noreply@example.org"
+
+    def test_fold_contact_record_observe_mode_is_byte_identical(self, tmp_path: Path) -> None:
+        root = tmp_path / "excluded"
+        canon = _record(root, f"{CANON}.md", CANON, emails=["c@example.org"])
+        _record(root, f"{ABSORBED}.md", ABSORBED, emails=["a@example.org"])
+        without_context = fold_absorbed_contact_records(root, [(ABSORBED, CANON)])
+        after_no_context = canon.read_bytes()
+
+        root2 = tmp_path / "excluded2"
+        canon2 = _record(root2, f"{CANON}.md", CANON, emails=["c@example.org"])
+        _record(root2, f"{ABSORBED}.md", ABSORBED, emails=["a@example.org"])
+        context = self._context(tmp_path, root2)
+        with_context = fold_absorbed_contact_records(
+            root2, [(ABSORBED, CANON)], attribution_context=context
+        )
+
+        assert without_context.values_added == with_context.values_added
+        assert canon2.read_bytes() == after_no_context
+
+
+# ---------------------------------------------------------------------------
 # Issue athenaeum#2196: orphaned per-address fact entries (identifier in
 # NEITHER record's address fields) must never be carried by a fold, and must
 # not count toward `holds_nothing_more`'s retire-safe test. Hermetic,
@@ -277,7 +385,7 @@ class TestOrphanFactEntries:
             ],
         }
 
-        merged, added, facts = merge_contact_values(canonical, absorbed)
+        merged, added, facts, _verdicts = merge_contact_values(canonical, absorbed)
 
         assert added == {}
         assert facts == 0
@@ -301,7 +409,7 @@ class TestOrphanFactEntries:
             ],
         }
 
-        merged, added, facts = merge_contact_values(canonical, absorbed)
+        merged, added, facts, _verdicts = merge_contact_values(canonical, absorbed)
 
         assert added == {"emails": 1}
         assert facts == 1
@@ -323,7 +431,7 @@ class TestOrphanFactEntries:
             ],
         }
 
-        merged, _added, facts = merge_contact_values(canonical, absorbed)
+        merged, _added, facts, _verdicts = merge_contact_values(canonical, absorbed)
 
         assert facts == 1
         assert merged[pii.CONTACT_CLASSIFICATION_FIELD][0]["identifier"] == "5550100"
@@ -419,6 +527,65 @@ class TestMergePathsCallTheHook:
         assert report.contact_values_added == 1
         assert _meta(canon)["emails"] == ["casey@example.org", "cl@example.org"]
         assert not absorbed.exists()
+
+    def test_dedupe_persons_apply_enforces_d1_narrow(self, tmp_path: Path) -> None:
+        """Seer PR review finding (athenaeum#2210): ``dedupe persons --apply``
+        calls ``fold_absorbed_contact_records`` directly, bypassing
+        ``fold_contact_records_after_merge`` — the ONE place this issue
+        originally built an attribution context. Fixed by building one
+        inline in ``merge_duplicate_persons`` itself, reusing the
+        ``contact_index`` it already constructs and its own pre-resolved
+        ``owner``, so this real merge path is no longer uncovered."""
+        wiki = tmp_path / "wiki"
+        root = tmp_path / "excluded"
+        canon_page = _page(wiki, f"{CANON}-casey-lee.md", CANON, "Casey Lee")
+        absorbed_page = _page(wiki, f"{ABSORBED}-casey-lee.md", ABSORBED, "Casey Lee")
+        canon = _record(root, f"{CANON}-casey-lee.md", CANON, emails=["casey@example.org"])
+        _record(
+            root, f"{ABSORBED}-casey-lee.md", ABSORBED, emails=["noreply@example.org"]
+        )
+        pair = DuplicatePair(
+            canonical_uid=CANON,
+            canonical_path=str(canon_page),
+            absorbed_uid=ABSORBED,
+            absorbed_path=str(absorbed_page),
+            match_signal="name_exact",
+        )
+
+        report = merge_duplicate_persons([pair], apply=True, wiki_root=wiki, contacts_root=root)
+
+        assert report.merged == 1
+        # The D1-narrow value is never carried onto the canonical record.
+        assert _meta(canon)["emails"] == ["casey@example.org"]
+        suspects = list((root / "_attribution" / "suspects").glob("*.md"))
+        assert len(suspects) == 1
+        suspect_meta, _ = parse_frontmatter(suspects[0].read_text(encoding="utf-8"))
+        assert suspect_meta["shadow"] is False
+        assert suspect_meta["value"] == "noreply@example.org"
+
+    def test_dedupe_persons_dry_run_writes_no_attribution_artifacts(
+        self, tmp_path: Path
+    ) -> None:
+        wiki = tmp_path / "wiki"
+        root = tmp_path / "excluded"
+        canon_page = _page(wiki, f"{CANON}-x.md", CANON, "X Person")
+        absorbed_page = _page(wiki, f"{ABSORBED}-x.md", ABSORBED, "X Person")
+        _record(root, f"{CANON}-x.md", CANON, emails=["x@example.org"])
+        _record(root, f"{ABSORBED}-x.md", ABSORBED, emails=["noreply@example.org"])
+        pair = DuplicatePair(
+            canonical_uid=CANON,
+            canonical_path=str(canon_page),
+            absorbed_uid=ABSORBED,
+            absorbed_path=str(absorbed_page),
+            match_signal="name_exact",
+        )
+
+        merge_duplicate_persons([pair], apply=False, wiki_root=wiki, contacts_root=root)
+
+        log_path = pii_attribution.default_attribution_log_path(root)
+        assert not log_path.exists()
+        suspects_dir = root / "_attribution" / "suspects"
+        assert not suspects_dir.exists() or list(suspects_dir.glob("*.md")) == []
 
     def test_dedupe_without_contacts_root_is_unchanged(self, tmp_path: Path) -> None:
         wiki = tmp_path / "wiki"

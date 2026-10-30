@@ -232,30 +232,13 @@ def _owner_alias_sets(owner: dict[str, Any]) -> tuple[set[str], set[str]]:
     return norm, raw
 
 
-def _owner_addresses(owner: dict[str, Any] | None) -> set[str]:
-    """Return the owner's own mailbox addresses, lowercased (issue athenaeum#1739).
-
-    Drawn from two places, both already operator-supplied config:
-
-    - ``owner["emails"]`` — the explicit owner-address list
-      (:func:`athenaeum.config.resolve_owner`).
-    - Any configured alias that looks like an address (contains ``@``). The
-      alias list already mixes display names with handles and git-author
-      emails, so an owner who listed their address there gets the guard
-      without having to restate it.
-
-    Empty when no owner is configured, which makes every caller inert.
-    """
-    if not owner:
-        return set()
-    out: set[str] = set()
-    for raw in owner.get("emails") or []:
-        s = str(raw).strip().lower()
-        if s:
-            out.add(s)
-    _, alias_raw = _owner_alias_sets(owner)
-    out.update(a for a in alias_raw if "@" in a)
-    return out
+# The owner-mailbox-address helper used to live here, re-scanning
+# ``owner["emails"]`` plus any ``@``-bearing alias. Issue athenaeum#2210 lifted
+# it to :func:`athenaeum.config.owner_addresses` so the L3 attribution seam
+# (:mod:`athenaeum.pii_attribution`) can share the SAME definition without
+# this L4 module's merge-guard caller importing anything new — ``config`` is
+# L2, strictly below this module already. Behavior is unchanged; only the
+# address lives one layer down now.
 
 
 def owner_signal(meta: dict[str, Any], owner: dict[str, Any] | None) -> str | None:
@@ -674,7 +657,9 @@ def _merge_meta(
     # "is this the owner" has exactly one definition in this module.
     owner_addresses: set[str] = set()
     if owner and owner_signal(canonical, owner) is None:
-        owner_addresses = _owner_addresses(owner)
+        from athenaeum.config import owner_addresses as _resolve_owner_addresses
+
+        owner_addresses = _resolve_owner_addresses(owner)
 
     # List unions
     for k in _LIST_UNION_KEYS:
@@ -909,6 +894,33 @@ def merge_duplicate_persons(
         from athenaeum.pii import ExcludedRecordIndex
 
         contact_index = ExcludedRecordIndex(Path(contacts_root))
+
+    # Issue athenaeum#2210 (Seer PR review): this is the real entry point
+    # `dedupe persons --apply` uses to fold contact records, and it was
+    # calling `fold_absorbed_contact_records` directly rather than through
+    # `contact_record_fold.fold_contact_records_after_merge`, so the
+    # attribution seam never ran here at all. Built once, reusing the
+    # `contact_index` already constructed above and this function's own
+    # pre-resolved `owner` — neither of which `build_attribution_context`'s
+    # usual `config`-driven path would know to reuse (this function carries
+    # no `config` dict to re-derive them from). Never built when NOT
+    # applying: calling the seam at all appends a log row as its own side
+    # effect, and a dry run must write nothing.
+    attribution_context = None
+    if apply and contact_index is not None and contacts_root is not None:
+        from athenaeum import pii_attribution
+        from athenaeum.models import EntityIndex as _EntityIndex
+
+        entity_index = _EntityIndex(wiki_root) if wiki_root is not None else None
+        attribution_context = pii_attribution.build_attribution_context(
+            wiki_root.parent if wiki_root is not None else Path(contacts_root).parent,
+            None,
+            excluded_index=contact_index,
+            entity_index=entity_index,
+            contacts_root=Path(contacts_root),
+            owner=owner,
+        )
+
     for pair in pairs:
         cpath = Path(pair.canonical_path)
         apath = Path(pair.absorbed_path)
@@ -947,6 +959,7 @@ def merge_duplicate_persons(
                     [(pair.absorbed_uid, pair.canonical_uid)],
                     index=contact_index,
                     dry_run=not apply,
+                    attribution_context=attribution_context,
                 )
                 report.contact_records_folded += fold.records_folded
                 report.contact_values_added += fold.values_added_total

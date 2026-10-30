@@ -91,7 +91,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from athenaeum import batch_state, push_state, spend, zero_yield
+from athenaeum import batch_state, pii_attribution, push_state, spend, zero_yield
 from athenaeum import stuck_ledger as stuck_ledger_mod
 from athenaeum._retry import TransientAPIError
 from athenaeum.adapter_provenance import record_adapter_provenance_for_pages
@@ -1912,6 +1912,54 @@ def _record_correspondent_contact(
 
     contacts_root = contacts_surface_root(wiki_root.parent, config)
     try:
+        # Issue athenaeum#2210: the attribution seam runs HERE, in the
+        # caller, before `record_observed_contact_value` is invoked at all —
+        # not inside that function. `pii` must not import the L3 sibling
+        # `pii_attribution` in any form (that module already imports `pii`
+        # at module scope; a reverse edge, even function-local/deferred,
+        # would close a 2-node import cycle — see pii.py's own note on
+        # `record_observed_contact_value`). Built from the indexes this pass
+        # already has in hand (no second O(corpus) scan) — the target of
+        # this write is always a freshly created PERSON page
+        # (`created_people`/`_pick_correspondent_entity` only ever select
+        # from person pages this compile just made), so `target_type` is
+        # hardcoded rather than threaded through from a page read.
+        attribution_context = pii_attribution.build_attribution_context(
+            wiki_root.parent,
+            config,
+            excluded_index=excluded_index,
+            entity_index=index,
+        )
+        av_verdict = pii_attribution.check_contact_attribution(
+            ref.address,
+            target_uid=entity.uid,
+            target_name=entity.name,
+            target_type="person",
+            source_ref=raw.ref,
+            writer=pii_attribution.WRITER_OBSERVED_CONTACT,
+            context=attribution_context,
+        )
+        if av_verdict.disposition != pii_attribution.DISPOSITION_PASS:
+            pii_attribution.park_suspect(
+                attribution_context,
+                ref.address,
+                av_verdict,
+                target_uid=entity.uid,
+                target_name=entity.name,
+                writer=pii_attribution.WRITER_OBSERVED_CONTACT,
+                source_ref=raw.ref,
+                shadow=not pii_attribution.is_d1_narrow(av_verdict),
+            )
+        if pii_attribution.is_d1_narrow(av_verdict):
+            # Enforced in every mode (design §9.1): never mint, never
+            # classify — this writer's write primitive is not even called.
+            log.info(
+                "  Correspondent address for %s (uid %s) is a D1-narrow "
+                "non-personal identifier; not recorded (issue athenaeum#2210)",
+                entity.name,
+                entity.uid,
+            )
+            return
         written = record_observed_contact_value(
             contacts_root,
             ref.address,
