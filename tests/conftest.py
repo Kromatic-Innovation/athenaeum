@@ -41,18 +41,59 @@ os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")
 # record/replay flow; it is NOT a canned-response fake, so it is a distinct
 # tool from FakeLLMClient (which never touches the network). Imported here,
 # rather than reimplemented, so there is exactly one implementation.
+# (`ci_sharding` is the CI shard partition used by the hooks below.)
+from tests import ci_sharding
 from tests.evals.harness import RecordingClient  # noqa: F401
 
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    # CI-only: ci.yml's `test` matrix passes `--ci-shard INDEX/TOTAL` so each
+    # runner keeps only its slice (tests/ci_sharding.py). Unset = no-op.
+    parser.addoption("--ci-shard", default=None, help="Run only shard INDEX/TOTAL (CI).")
+    parser.addoption(
+        "--ci-shard-report",
+        default=None,
+        help="Write this shard's collected/selected counts as JSON to this path (CI).",
+    )
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    # trylast: runs after `-m` / `--deselect` have already narrowed `items`,
+    # so the report counts exactly what this run would otherwise execute.
+    spec = config.getoption("--ci-shard")
+    if not spec:
+        return
+    index, total = ci_sharding.parse_shard(spec)
+    owner = ci_sharding.assign_units((item.nodeid for item in items), total)
+    selected = [item for item in items if owner[ci_sharding.unit_key(item.nodeid)] == index]
+    deselected = [item for item in items if owner[ci_sharding.unit_key(item.nodeid)] != index]
+    report_path = config.getoption("--ci-shard-report")
+    # One writer per shard: the xdist worker gw0, or the process itself when
+    # running without xdist. Every worker computes the same counts.
+    if report_path and os.environ.get("PYTEST_XDIST_WORKER", "gw0") == "gw0":
+        import json
+
+        report = {
+            "shard": index,
+            "total_shards": total,
+            "collected": len(items),
+            "selected": len(selected),
+        }
+        Path(report_path).write_text(json.dumps(report), encoding="utf-8")
+    if deselected:
+        config.hook.pytest_deselected(items=deselected)
+    items[:] = selected
+
+
 # CI runs the suite under pytest-xdist with `--dist loadfile`, which keeps a
-# module on one worker so its module-scoped fixtures are built once. These
-# modules are the exception: each parametrizes an expensive module-scoped
-# fixture by its FIRST param id (e.g. `[core-...]` / `[medium-...]`), and one
-# module alone outlasted every other worker. Splitting the module's work unit
-# by that leading param id lets each instance build on its own worker, still
-# exactly once.
-_XDIST_SPLIT_BY_LEADING_PARAM = frozenset({"tests/evals/test_recall_covers_grep.py"})
-
-
+# module on one worker so its module-scoped fixtures are built once. The
+# modules in `ci_sharding.SPLIT_BY_LEADING_PARAM` are the exception: each one
+# parametrizes an expensive module-scoped fixture by its FIRST param id, and
+# one of them alone outlasted every other worker. `ci_sharding.unit_key`
+# splits such a module's work unit by that leading param id, so each instance
+# builds on its own worker, still exactly once. The shard filter above uses
+# the same key.
 @pytest.hookimpl(optionalhook=True)
 def pytest_xdist_make_scheduler(config: Any, log: Any) -> Any:
     if config.getoption("dist") != "loadfile":
@@ -61,11 +102,7 @@ def pytest_xdist_make_scheduler(config: Any, log: Any) -> Any:
 
     class _SplitHeavyModules(LoadFileScheduling):
         def _split_scope(self, nodeid: str) -> str:
-            scope = super()._split_scope(nodeid)
-            if scope in _XDIST_SPLIT_BY_LEADING_PARAM and "[" in nodeid:
-                leading = nodeid.split("[", 1)[1].split("-", 1)[0].rstrip("]")
-                return f"{scope}[{leading}]"
-            return scope
+            return ci_sharding.unit_key(nodeid)
 
     return _SplitHeavyModules(config, log)
 
