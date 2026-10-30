@@ -772,10 +772,40 @@ def _existing_scalar_source(meta: dict[str, Any], field_name: str) -> Any:
     return meta.get("source")
 
 
+def _normalize_for_key(value: Any) -> Any:
+    """Recursively replace ``date``/``datetime`` values with ISO-8601 strings.
+
+    A value read from a page's YAML frontmatter and the same value arriving in
+    a JSON correction batch must compare equal. YAML parses an unquoted
+    ``2023-10-01`` to a :class:`datetime.date`, while JSON can only carry the
+    string ``"2023-10-01"``. Without this, an ``op: remove`` of a list entry
+    such as an employment-history dict never matches the stored entry, and
+    the correction resolves to a silent ``noop``.
+    """
+    if isinstance(value, datetime | date):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(k): _normalize_for_key(v) for k, v in value.items()}
+    if isinstance(value, list | tuple):
+        return [_normalize_for_key(v) for v in value]
+    return value
+
+
 def _value_key(value: Any) -> Any:
-    """Value-identity key (§4): ``repr(value)`` for dicts, the value itself
-    for scalars — matches ``dedupe._perform_merge``'s existing convention."""
-    return repr(value) if isinstance(value, dict) else value
+    """Value-identity key (§4).
+
+    Scalars compare as themselves, except that a ``date``/``datetime`` compares
+    as its ISO string. Dicts compare as canonical JSON (sorted keys, dates as
+    ISO strings), so neither key order nor YAML's date parsing breaks equality
+    between a stored entry and the same entry submitted in a batch. Used only
+    for comparison, never persisted.
+    """
+    normalized = _normalize_for_key(value)
+    if isinstance(normalized, dict):
+        return json.dumps(normalized, sort_keys=True, separators=(",", ":"), default=str)
+    if isinstance(normalized, list):
+        return json.dumps(normalized, separators=(",", ":"), default=str)
+    return normalized
 
 
 def _list_field_sources(meta: dict[str, Any], field_name: str) -> list[dict[str, Any]]:

@@ -435,6 +435,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A field correction can now remove a list entry whose stored dates came
+  from YAML.** List values were compared by `repr`, so an entry read from
+  frontmatter with an unquoted date (`start_date: 2023-10-01`, which YAML
+  parses to a `date`) never equalled the same entry submitted in a JSON batch,
+  where the date is a string. An `op: remove` of, for example, an
+  employment-history entry resolved to a silent `noop` ("value already
+  absent"), and an `op: add` of an entry already present appended a duplicate.
+  Value identity now normalizes `date`/`datetime` to ISO strings and compares
+  dicts as canonical JSON with sorted keys, so neither YAML date parsing nor
+  key order breaks equality. The key is used only for comparison and is never
+  written.
+
 - **`athenaeum repair --contact-records` now folds a divergent duplicate
   contact record instead of leaving it behind (issue athenaeum#2184
   follow-up).** When a uid was claimed by a `<uid>`-named record and a
