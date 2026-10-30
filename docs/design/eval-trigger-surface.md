@@ -105,7 +105,7 @@ docstrings.
 | Main risk | under-designation (a helper nobody listed) | same as (a): it hashes *something*, so it inherits whatever designation it is given | exemption fatigue; already the observed state |
 | Gaming resistance | moderate (drop a designation) | high if the designation is a union of base and head | low unless verified |
 | Cost to build | rot-check derivation + grammar | small hashing module | vocabulary + review step |
-| Fits #2206 | needs its predicate to understand symbols | drop-in replacement for #2206's path-intersection predicate | orthogonal |
+| Fits athenaeum#2206 | needs its predicate to understand symbols | drop-in replacement for its path-intersection predicate | orthogonal |
 
 Sub-variants considered and rejected inside (a) and (b) are in §10.
 
@@ -319,7 +319,7 @@ Classifying the 23 runs from §2 against what each mechanism would have removed:
 | COVERS clause 2 | 1 | athenaeum#2043 branch: rebase onto another PR's surface change |
 | Symbol-level FIRE | about 0 removed, 2–5 added | every paid PR genuinely changed prompts or call sites; some free-text exemptions would now fire (audited in the designation child's ACs) |
 
-**Net: about 23 down to roughly 12 a month (≈ 50%), most of it from #2206 and the
+**Net: about 23 down to roughly 12 a month (≈ 50%), most of it from athenaeum#2206 and the
 dispatch rule.** The symbol-level surface buys a different thing: about 60 of
 66 monthly free-text claims become mechanical non-fires needing no line at all,
 and the handful that remain are structured and checked. Two baseline
