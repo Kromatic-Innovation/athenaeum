@@ -148,7 +148,13 @@ def test_tiers_py_with_valid_receipt_passes() -> None:
     assert result.ok, result.message
 
 
-def test_not_needed_line_passes() -> None:
+def test_legacy_free_text_not_needed_line_no_longer_passes() -> None:
+    """athenaeum#2226 AC: the unchecked free-text escape stops working.
+
+    It passed until then, and 66 of the 68 surface-touching PRs in the 30
+    days to 2026-10-30 used it — which is exactly when an exemption stops
+    being read. The failure text names the structured form that replaces it.
+    """
     result = evaluate(
         changed_files=["src/athenaeum/tiers.py"],
         surface=SURFACE,
@@ -157,7 +163,9 @@ def test_not_needed_line_passes() -> None:
         this_repo=REPO,
         run_lookup=_unreached_lookup,
     )
-    assert result.ok, result.message
+    assert not result.ok
+    assert "no longer passes" in result.message
+    assert "rename-only" in result.message
 
 
 def test_bare_not_needed_without_reason_fails() -> None:
@@ -1193,3 +1201,319 @@ def test_covers_reads_the_receipt_commits_own_designations(tmp_path: Path) -> No
         )
         assert not result.ok
         assert "mod.py::designated" in result.message
+
+
+# --- structured, checkable exemptions (athenaeum#2226) ----------------------
+#
+# Design §5.5/§5.6. `Evals: not needed — <category>: <symbols>`: a closed
+# vocabulary, a symbol set that must EQUAL what FIRE found changed, and a
+# machine re-hash for the two categories a machine can settle.
+
+parse_exemption = check_llm_surface_receipt.parse_exemption
+check_exemption = check_llm_surface_receipt.check_exemption
+verify_exemption_category = check_llm_surface_receipt.verify_exemption_category
+EXEMPTION_CATEGORIES = check_llm_surface_receipt.EXEMPTION_CATEGORIES
+
+
+def test_exemption_line_parses_category_and_symbols() -> None:
+    parsed = parse_exemption(
+        "Some description.\n\n"
+        "Evals: not needed — rename-only: `mod.py::designated`, mod.py::other\n"
+    )
+    assert parsed is not None
+    assert parsed.category == "rename-only"
+    assert parsed.symbols == ("mod.py::designated", "mod.py::other")
+
+
+def test_exemption_line_is_not_matched_mid_sentence() -> None:
+    assert parse_exemption("we decided that Evals: not needed — dead-code: x inline") is None
+
+
+def test_an_unknown_category_fails_and_lists_the_valid_ones() -> None:
+    result = check_exemption(
+        check_llm_surface_receipt.Exemption("cosmetic", ("mod.py::designated",)),
+        ["mod.py::designated"],
+        "h" * 40,
+        "b" * 40,
+    )
+    assert not result.ok
+    for category in EXEMPTION_CATEGORIES:
+        assert category in result.message
+
+
+def test_a_missing_symbol_fails_and_prints_both_sets() -> None:
+    result = check_exemption(
+        check_llm_surface_receipt.Exemption("dead-code", ("mod.py::a",)),
+        ["mod.py::a", "mod.py::b"],
+        "h" * 40,
+        "b" * 40,
+    )
+    assert not result.ok
+    assert "changed but not named: mod.py::b" in result.message
+    assert "changed: mod.py::a, mod.py::b" in result.message
+    assert "named:   mod.py::a" in result.message
+
+
+def test_an_extra_symbol_fails_too() -> None:
+    result = check_exemption(
+        check_llm_surface_receipt.Exemption("dead-code", ("mod.py::a", "mod.py::z")),
+        ["mod.py::a"],
+        "h" * 40,
+        "b" * 40,
+    )
+    assert not result.ok
+    assert "named but not changed: mod.py::z" in result.message
+
+
+def test_a_reviewer_checked_category_with_the_exact_set_passes() -> None:
+    result = check_exemption(
+        check_llm_surface_receipt.Exemption("gate-plumbing", ("mod.py::a",)),
+        ["mod.py::a"],
+        "h" * 40,
+        "b" * 40,
+        verifier=lambda category, entry, base, head: True,
+    )
+    assert result.ok, result.message
+    assert "job summary" in result.message
+
+
+def test_an_exemption_cannot_be_checked_without_a_changed_set() -> None:
+    """Fail closed: with no FIRE set there is nothing to compare the claim to."""
+    result = check_exemption(
+        check_llm_surface_receipt.Exemption("dead-code", ("mod.py::a",)),
+        None,
+        "h" * 40,
+        "b" * 40,
+    )
+    assert not result.ok
+    assert "changed-symbol set" in result.message
+
+
+# --- the two machine-checked categories, against real git -------------------
+
+
+def _exemption_repo(tmp_path: Path, before: str, after: str) -> tuple[str, str]:
+    """A base commit and a head commit of `mod.py`, returning (base, head)."""
+    _init_fixture_repo(tmp_path)
+    base = _commit_file(tmp_path, "mod.py", before, "base")
+    head = _commit_file(tmp_path, "mod.py", after, "head")
+    return base, head
+
+
+_RENAME_BEFORE = (
+    "def designated(value):\n"
+    "    total = value + 1\n"
+    "    return total\n"
+)
+_RENAME_AFTER = (
+    "def designated(amount):\n"
+    "    running = amount + 1\n"
+    "    return running\n"
+)
+_LOGIC_AFTER = (
+    "def designated(amount):\n"
+    "    running = amount + 2\n"
+    "    return running\n"
+)
+
+
+def test_rename_only_holds_when_only_locals_were_renamed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base, head = _exemption_repo(tmp_path, _RENAME_BEFORE, _RENAME_AFTER)
+    monkeypatch.chdir(tmp_path)
+    # The premise: the plain fingerprint DOES differ, so FIRE fired.
+    assert check_llm_surface_receipt.fingerprint_entry(
+        "mod.py::designated", base
+    ) != check_llm_surface_receipt.fingerprint_entry("mod.py::designated", head)
+    assert verify_exemption_category("rename-only", "mod.py::designated", base, head)
+
+
+def test_rename_only_counter_example_a_real_logic_change_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A changed literal, dressed up as a rename, does not survive the re-hash."""
+    base, head = _exemption_repo(tmp_path, _RENAME_BEFORE, _LOGIC_AFTER)
+    monkeypatch.chdir(tmp_path)
+    assert not verify_exemption_category("rename-only", "mod.py::designated", base, head)
+
+
+def test_rename_only_does_not_normalise_a_reference_to_something_outside(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only BOUND names are renamed — swapping which global is called is a change."""
+    base, head = _exemption_repo(
+        tmp_path,
+        "def designated(value):\n    return helper_a(value)\n",
+        "def designated(amount):\n    return helper_b(amount)\n",
+    )
+    monkeypatch.chdir(tmp_path)
+    assert not verify_exemption_category("rename-only", "mod.py::designated", base, head)
+
+
+_LOG_BEFORE = (
+    "import logging\n"
+    "\n"
+    "logger = logging.getLogger(__name__)\n"
+    "\n"
+    "\n"
+    "def designated(value):\n"
+    '    logger.warning("value was odd")\n'
+    "    if value < 0:\n"
+    '        raise ValueError("value must not be negative")\n'
+    "    return value + 1\n"
+)
+_LOG_AFTER_TEXT_ONLY = _LOG_BEFORE.replace(
+    '"value was odd"', '"the value came in odd; continuing"'
+).replace('"value must not be negative"', '"value has to be zero or more"')
+_LOG_AFTER_WITH_LOGIC = _LOG_AFTER_TEXT_ONLY.replace("return value + 1", "return value + 2")
+_LOG_AFTER_DIFFERENT_EXCEPTION = _LOG_AFTER_TEXT_ONLY.replace("ValueError", "TypeError")
+
+
+def test_log_or_error_text_holds_when_only_the_wording_changed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base, head = _exemption_repo(tmp_path, _LOG_BEFORE, _LOG_AFTER_TEXT_ONLY)
+    monkeypatch.chdir(tmp_path)
+    assert check_llm_surface_receipt.fingerprint_entry(
+        "mod.py::designated", base
+    ) != check_llm_surface_receipt.fingerprint_entry("mod.py::designated", head)
+    assert verify_exemption_category("log-or-error-text", "mod.py::designated", base, head)
+
+
+def test_log_or_error_text_counter_example_a_real_logic_change_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base, head = _exemption_repo(tmp_path, _LOG_BEFORE, _LOG_AFTER_WITH_LOGIC)
+    monkeypatch.chdir(tmp_path)
+    assert not verify_exemption_category("log-or-error-text", "mod.py::designated", base, head)
+
+
+def test_log_or_error_text_does_not_cover_a_changed_exception_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the message STRINGS are blanked — the raised type is structure."""
+    base, head = _exemption_repo(tmp_path, _LOG_BEFORE, _LOG_AFTER_DIFFERENT_EXCEPTION)
+    monkeypatch.chdir(tmp_path)
+    assert not verify_exemption_category("log-or-error-text", "mod.py::designated", base, head)
+
+
+def test_a_normalizer_never_affects_the_plain_fingerprint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FIRE and COVERS must keep seeing the un-normalised structure."""
+    base, head = _exemption_repo(tmp_path, _RENAME_BEFORE, _RENAME_AFTER)
+    monkeypatch.chdir(tmp_path)
+    required, changed = check_llm_surface_receipt.fire(
+        base, head, ["mod.py::designated"], ["mod.py::designated"]
+    )
+    assert (required, changed) == (True, ["mod.py::designated"])
+
+
+def test_end_to_end_a_structured_exemption_passes_the_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Through `evaluate`, with real git: FIRE fires, the line clears it."""
+    base, head = _exemption_repo(tmp_path, _RENAME_BEFORE, _RENAME_AFTER)
+    monkeypatch.chdir(tmp_path)
+    result = evaluate(
+        changed_files=["mod.py"],
+        surface=["mod.py::designated"],
+        pr_body="Evals: not needed — rename-only: mod.py::designated\n",
+        head_sha=head,
+        this_repo=REPO,
+        run_lookup=_unreached_lookup,
+        merge_base_sha=base,
+    )
+    assert result.ok, result.message
+    assert "machine-checked" in result.message
+
+
+def test_end_to_end_a_wrong_category_is_rejected_by_the_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base, head = _exemption_repo(tmp_path, _RENAME_BEFORE, _LOGIC_AFTER)
+    monkeypatch.chdir(tmp_path)
+    result = evaluate(
+        changed_files=["mod.py"],
+        surface=["mod.py::designated"],
+        pr_body="Evals: not needed — rename-only: mod.py::designated\n",
+        head_sha=head,
+        this_repo=REPO,
+        run_lookup=_unreached_lookup,
+        merge_base_sha=base,
+    )
+    assert not result.ok
+    assert "does not hold for: mod.py::designated" in result.message
+
+
+def test_no_line_is_required_when_fire_is_false(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """athenaeum#2226 AC: with no reasoning change, no line at all is needed."""
+    base, head = _exemption_repo(
+        tmp_path,
+        _RENAME_BEFORE,
+        _RENAME_BEFORE.replace("    total = value + 1", "    # a comment\n    total = value + 1"),
+    )
+    monkeypatch.chdir(tmp_path)
+    result = evaluate(
+        changed_files=["mod.py"],
+        surface=["mod.py::designated"],
+        pr_body="no receipt line at all",
+        head_sha=head,
+        this_repo=REPO,
+        run_lookup=_unreached_lookup,
+        merge_base_sha=base,
+    )
+    assert result.ok, result.message
+
+
+# --- the job summary (athenaeum#2226 AC: before/after per changed symbol) ---
+
+
+def test_the_step_summary_carries_each_changed_symbols_before_and_after(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base, head = _exemption_repo(tmp_path, _RENAME_BEFORE, _LOGIC_AFTER)
+    monkeypatch.chdir(tmp_path)
+    summary = check_llm_surface_receipt.render_step_summary(
+        ["mod.py::designated"], base, head
+    )
+    assert "### `mod.py::designated`" in summary
+    assert "before (merge base)" in summary and "after (head)" in summary
+    assert "value + 1" in summary and "amount + 2" in summary
+    # The docstring-stripped `ast.unparse` — what the gate hashed, not a raw diff.
+    assert "def designated(value):" in summary
+
+
+def test_the_step_summary_is_written_when_github_sets_the_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base, head = _exemption_repo(tmp_path, _RENAME_BEFORE, _LOGIC_AFTER)
+    monkeypatch.chdir(tmp_path)
+    destination = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(destination))
+    check_llm_surface_receipt._publish_step_summary(["mod.py::designated"], base, head)
+    assert "mod.py::designated" in destination.read_text(encoding="utf-8")
+
+
+def test_the_step_summary_is_skipped_without_the_env_var(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Best effort: a job summary is an aid, never part of the verdict."""
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    check_llm_surface_receipt._publish_step_summary(["mod.py::designated"], "a" * 40, "b" * 40)
+
+
+def test_unparse_entry_reports_the_sentinels_rather_than_raising(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base, _ = _exemption_repo(tmp_path, _RENAME_BEFORE, _RENAME_AFTER)
+    monkeypatch.chdir(tmp_path)
+    assert check_llm_surface_receipt.MISSING in check_llm_surface_receipt.unparse_entry(
+        "nosuch.py::thing", base
+    )
+    assert check_llm_surface_receipt.MISSING in check_llm_surface_receipt.unparse_entry(
+        "mod.py::nosuchsymbol", base
+    )

@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The eval gate's `not needed` escape is structured and checked (issue
+  athenaeum#2226).** The free-text form no longer passes when the reasoning
+  surface changed; the replacement is
+  `Evals: not needed — <category>: <symbol>[, <symbol>...]` with a category
+  from a closed vocabulary (`rename-only`, `log-or-error-text`, `dead-code`,
+  `refactor-equivalent`, `gate-plumbing`). The named symbol set must EQUAL the
+  set the gate found changed — the failure prints both sets and the difference
+  — and the two machine-checkable categories are verified by re-hashing the
+  symbol with local identifiers alpha-renamed, or with logging/warning/`raise`
+  message strings blanked: a real logic change labelled either way still
+  fails. For the three reviewer-checked categories the gate publishes each
+  changed symbol's docstring-stripped `ast.unparse` before and after to
+  `$GITHUB_STEP_SUMMARY`, so a reviewer reads function bodies rather than
+  files. When nothing designated changed, no line is required at all.
+  Vocabulary documented in `tests/evals/README.md`.
+
 - **An eval receipt now survives a `develop` merge or a rebase (issue
   athenaeum#2225).** `receipt_covers_head` keeps its name, its call site and
   its `(covered, stale)` shape, and gains the symbol-fingerprint COVERS rule:
