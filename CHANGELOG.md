@@ -32,14 +32,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Evals: not needed — <category>: <symbol>[, <symbol>...]` with a category
   from a closed vocabulary (`rename-only`, `log-or-error-text`, `dead-code`,
   `refactor-equivalent`, `gate-plumbing`). The named symbol set must EQUAL the
-  set the gate found changed — the failure prints both sets and the difference
-  — and the two machine-checkable categories are verified by re-hashing the
-  symbol with local identifiers alpha-renamed, or with logging/warning/`raise`
-  message strings blanked: a real logic change labelled either way still
-  fails. For the three reviewer-checked categories the gate publishes each
-  changed symbol's docstring-stripped `ast.unparse` before and after to
-  `$GITHUB_STEP_SUMMARY`, so a reviewer reads function bodies rather than
-  files. When nothing designated changed, no line is required at all.
+  set the gate found changed — the failure prints both sets and the
+  difference. That is all the gate checks (operator ruling 2026-10-30:
+  symbol-match only). All five categories are reviewer-checked: the gate
+  publishes each changed symbol's docstring-stripped `ast.unparse` before and
+  after to `$GITHUB_STEP_SUMMARY`, so a reviewer reads function bodies rather
+  than files. Machine re-hash checks for `rename-only` and
+  `log-or-error-text` are deferred until misuse is observed. When nothing designated changed, no line is required at all.
   Vocabulary documented in `tests/evals/README.md`.
 
 - **An eval receipt now survives a `develop` merge or a rebase (issue
@@ -82,7 +81,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the canonical statement of the rule — dispatch only when review is
   complete, the gate reports a changed reasoning surface, and no passing run
   already covers the head; never for a `develop` merge, a rebase, or a head
-  that already has a run (at most one retry of a red one). The gate's own
+  that already has a run. There is no automatic retry: a red run is a finding
+  to investigate (operator ruling 2026-10-30; small-sample flakiness is fixed
+  at source by athenaeum#2231). The gate's own
   failure text carries a one-sentence version, because that is what a
   dispatching agent reads at decision time: it no longer says "the dispatch
   is stale, re-run it", which was the most likely driver of the measured
