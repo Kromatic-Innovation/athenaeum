@@ -63,6 +63,15 @@ configuration keeps its 0.22.43 behaviour, except for the points marked
 - **Deprecation timeline.** `athenaeum merges` and `athenaeum questions`
   still work, and their warnings now name `0.24.0` as the removal release.
   Move to `athenaeum decisions` before then.
+- **Behaviour change: some contact values are no longer recorded.** Every
+  contact-record writer now runs an attribution check first. Most verdicts
+  are only logged (observe mode), but three narrow non-personal shapes are
+  enforced: addresses with a relay or no-reply local-part prefix, your own
+  addresses on someone else's page, and addresses at domains listed in
+  `librarian.attribution.operator_mailer_domains`. These are no longer added
+  to a person's contact record. Tune the relay lists with
+  `librarian.attribution.relay_local_prefixes` and
+  `librarian.attribution.relay_domains`.
 
 **Highlights**
 
@@ -86,7 +95,9 @@ configuration keeps its 0.22.43 behaviour, except for the points marked
   cleans up records that earlier merges, or duplicate copies of the same
   record, left claiming one uid. `recall <email>` is much faster on large
   stores, because it no longer rebuilds the whole entity index for a
-  single-address lookup.
+  single-address lookup. Every contact-record writer now runs an
+  attribution check before writing, logging its verdict and refusing only
+  clearly non-personal values.
 - **CI and evaluation gate rework (contributors only).** The eval-receipt
   gate now judges a pull request by the base branch's copy of its own rules,
   identifies the LLM surface by symbol rather than by file, and accepts a
@@ -110,6 +121,23 @@ configuration keeps its 0.22.43 behaviour, except for the points marked
   no behaviour changes in this release.
 
 ### Added
+
+- **Contact-value attribution check, in observe mode, at every contact-record
+  writer (issue athenaeum#2210).** A new seam,
+  `pii.check_contact_attribution` (implemented in `athenaeum.pii_attribution`),
+  runs four deterministic checks before a value is written: D1 non-personal,
+  D2 held elsewhere, D3 not a person and D4 fan-out. The observed-contact,
+  correction-add, PII-migration and contact-fold writers all call it,
+  including the fold that `dedupe persons --apply` runs. Each verdict is
+  logged to an attribution log on the excluded contacts surface (the log row
+  never carries the value itself), and suspects are parked in an idempotent
+  suspect store. The writers otherwise behave as before, with one exception:
+  the narrow non-personal shapes (relay local-part prefixes, the owner's own
+  addresses on another page, configured mailer domains) are enforced and not
+  written. Nothing is checked under `--dry-run`, and no model is called. New
+  configuration: `librarian.attribution.relay_local_prefixes`,
+  `librarian.attribution.relay_domains` and
+  `librarian.attribution.operator_mailer_domains`.
 
 - **`witnessed` joins source-precedence tier 1, and the rewrite is persisted
   onto the memory (issue athenaeum#2159).** A `witnessed` receipt
@@ -166,7 +194,8 @@ configuration keeps its 0.22.43 behaviour, except for the points marked
   question class, with re-attribution to the real owner, structured aliases and
   same-entity merge proposals; a human queue only below calibrated confidence;
   observe mode before enforce; and the calibration eval that sets tiers and
-  thresholds. Docs only; no behaviour changes in this release.
+  thresholds. The design document itself changes no behaviour; its first
+  slice, the observe-mode attribution check, is listed above (athenaeum#2210).
 
 - **A merge now folds the absorbed uid's contact record, and `athenaeum
   repair --contact-records` cleans up the ones earlier merges left (issue
