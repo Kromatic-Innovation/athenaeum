@@ -44,12 +44,13 @@ address on the introducee; see ``docs/design/attribution-verification.md``
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
-from athenaeum import pii
+from athenaeum import pii, pii_attribution
 from athenaeum.corrections import resolve_target
 from athenaeum.librarian import CORRESPONDENT_EMAIL_KEY, process_one
 from athenaeum.models import ClassifiedEntity, EntityIndex, RawFile, TokenUsage
@@ -371,6 +372,61 @@ def _person(name: str) -> ClassifiedEntity:
         existing_uid=None,
         observations="They asked about tiered pricing.",
     )
+
+
+class TestAttributionSeamWiring:
+    """Issue athenaeum#2210: ``_record_correspondent_contact`` calls the seam
+    before calling ``record_observed_contact_value`` at all (not inside that
+    function — see its own docstring on why), in observe mode — unchanged
+    output plus a logged verdict for every disposition, except D1-narrow,
+    which is enforced (the write primitive is never even called) in every
+    mode."""
+
+    def test_observe_mode_is_unchanged_and_logs_a_pass(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        knowledge, result = _compile(
+            tmp_path, monkeypatch, note=_prose_note(), classified=[_person(_DISPLAY)]
+        )
+        assert result.correspondent_contacts_recorded == 1  # type: ignore[attr-defined]
+        created = result.created[0]  # type: ignore[attr-defined]
+
+        contacts = pii.contacts_surface_root(knowledge, EXCLUDED_CONFIG)
+        records = pii.resolve_contact_records(contacts, _ADDRESS)
+        assert len(records) == 1  # exactly the same shape TestProseCompileRecordsTheAddress asserts
+        assert pii.uid_on_record(records[0]) == created.uid
+
+        log_path = pii_attribution.default_attribution_log_path(contacts)
+        rows = [
+            json.loads(line)
+            for line in log_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        assert any(
+            r["target_uid"] == created.uid and r["disposition"] == "pass" for r in rows
+        )
+        assert all(_ADDRESS not in json.dumps(r) for r in rows)  # no value in the log
+
+    def test_d1_narrow_is_enforced_and_parked_non_shadow(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        knowledge, result = _compile(
+            tmp_path,
+            monkeypatch,
+            note=_prose_note(address="noreply@example.org"),
+            classified=[_person(_DISPLAY)],
+        )
+        # The write primitive was never even called: no mint, no classify.
+        assert result.correspondent_contacts_recorded == 0  # type: ignore[attr-defined]
+        contacts = pii.contacts_surface_root(knowledge, EXCLUDED_CONFIG)
+        assert pii.resolve_contact_records(contacts, "noreply@example.org") == []
+
+        suspects = list((contacts / "_attribution" / "suspects").glob("*.md"))
+        assert len(suspects) == 1
+        meta, _ = pii.parse_frontmatter(suspects[0].read_text(encoding="utf-8"))
+        assert meta["shadow"] is False
+        assert meta["value"] == "noreply@example.org"
+        assert meta["disposition"] == "non-personal"
 
 
 class TestProseCompileRecordsTheAddress:

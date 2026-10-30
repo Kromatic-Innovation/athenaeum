@@ -4089,6 +4089,17 @@ def record_observed_contact_value(
             :meth:`~ExcludedRecordIndex.register`-ed back before returning, so
             a second create in the same run resolves to the record the first
             one just minted instead of minting a duplicate.
+
+    Issue athenaeum#2210: the attribution seam runs in the CALLER, before this
+    function is invoked at all — see
+    :func:`athenaeum.librarian._record_correspondent_contact`. A D1-narrow
+    verdict there skips calling this function entirely (so "no mint, no
+    classify" holds trivially), which keeps this module's own import graph
+    unchanged: ``pii`` must not import the L3 sibling ``pii_attribution`` in
+    any form, not even function-local, because ``pii_attribution`` already
+    imports ``pii`` at module scope and a reverse edge — even deferred —
+    would close a 2-node import cycle (``tests/test_import_graph_acyclic.py``
+    counts function-local imports as graph edges too).
     """
     if not normalize_identifier(identifier) or not str(uid).strip():
         return ObservedContactWrite(outcome=OBSERVED_CONTACT_SKIPPED)
