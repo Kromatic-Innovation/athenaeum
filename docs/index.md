@@ -132,6 +132,9 @@ does not answer.
 Evidence, kept out of the reading path.
 
 - [Evals inventory](measurements/evals-inventory.md)
+- [Eval-gate FIRE replay over merged PRs](measurements/eval-fire-replay-2026-10-30.md) — replays the symbol-level eval trigger over every PR merged to `develop` in the 30
+  days to 2026-10-30: of the 68 that tripped the old whole-file gate, 34 would not
+  trip the symbol-level one at all.
 - [Maya and Jev PII-hazard eval](measurements/maya-pii-hazard-eval-2026-10.md) — a local
   yes/no cross-encoder (Maya) and a hosted classifier (Jev) measured against the
   regex PII-hazard gate on the same fixture set.
