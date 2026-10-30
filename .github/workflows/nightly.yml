@@ -1,0 +1,55 @@
+name: Nightly tests
+
+# The `nightly` pytest tier (pyproject.toml `markers`): token-FREE tests that
+# are too slow or measurement-only for the PR gate. Examples are full-corpus
+# sweeps whose property a small default-suite test already pins, and printed
+# measurement tables that feed docs. `addopts` deselects them from every
+# default run, ci.yml's included, and this workflow selects ONLY them.
+#
+# No model credential is loaded here, deliberately: anything that spends
+# tokens is `rollout`/`eval` and runs only from evals.yml. A mis-marked live
+# test therefore skips or fails here instead of spending, and
+# tests/evals/test_containment_ci_wiring.py pins both properties.
+#
+# Not a required check. A red nightly run is a signal to look, not a merge
+# gate; the default suite still gates every PR.
+#
+# Third-party actions are SHA-pinned to the same releases as ci.yml.
+
+on:
+  schedule:
+    - cron: "41 6 * * *"   # daily, 06:41 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  nightly:
+    name: Nightly tier (token-free)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements-ci.lock
+
+      - name: Install dependencies (with vector extras)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,vector]" -c requirements-ci.lock
+
+      # `-m nightly` on the command line REPLACES addopts' `-m` expression,
+      # so this selects exactly the nightly tier and nothing else.
+      - name: Run the nightly tier
+        run: pytest tests/ -m nightly -n auto --dist loadfile -v --tb=short --durations=30
