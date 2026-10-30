@@ -49,6 +49,7 @@ import subprocess
 import sys
 import tempfile
 import uuid
+from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -271,8 +272,10 @@ def run(
     backend: str = "vector",
     scale: str = "core",
     workdir: Path | None = None,
+    probe_ids: Collection[str] | None = None,
 ) -> list[ProbeResult]:
-    """Classify every probe at *scale*.
+    """Classify every probe at *scale*, or only those named in *probe_ids*
+    (an unknown id raises, so a typo cannot shrink the sweep silently).
 
     ``adapter-vs-shell`` shares ONE hook index between the two sides (the
     measurement the issue's first acceptance criterion asks for).
@@ -306,8 +309,14 @@ def run(
         else:  # pragma: no cover — argparse constrains the CLI
             raise ValueError(f"unknown mode: {mode!r}")
 
+        probes = list(corpus.probes)
+        if probe_ids is not None:
+            unknown = set(probe_ids) - {p.id for p in probes}
+            if unknown:
+                raise ValueError(f"unknown probe ids at scale {scale!r}: {sorted(unknown)}")
+            probes = [p for p in probes if p.id in set(probe_ids)]
         results: list[ProbeResult] = []
-        for probe in corpus.probes:
+        for probe in probes:
             left = _query(left_argv, knowledge_root, left_home, probe.query, backend=backend)
             right = _query(right_argv, knowledge_root, right_home, probe.query, backend=backend)
             results.append(ProbeResult(probe.id, classify(left, right), left, right))

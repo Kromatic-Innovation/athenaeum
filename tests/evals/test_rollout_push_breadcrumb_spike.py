@@ -216,6 +216,12 @@ def test_push_breadcrumb_arm_is_byte_equivalent_to_the_real_hook(
     assert actual == expected
 
 
+# Nightly tier: the single-probe test above stays in the default selection
+# and proves the same byte-equivalence. Since athenaeum#1363 both sides reach
+# the same adapter, so repeating it over more probes is a sweep, not a gate.
+# Function-level marker only: the module itself must carry no deselecting
+# marker (tests/evals/test_containment_ci_wiring.py pins that by name).
+@pytest.mark.nightly
 def test_push_breadcrumb_arm_matches_the_real_hook_across_multiple_probes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

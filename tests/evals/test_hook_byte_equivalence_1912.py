@@ -33,12 +33,19 @@ Three properties, each load-bearing:
   else is normalized away, so this really is a byte comparison of everything
   that reaches the model.
 
+**Tiering.** Since athenaeum#1363 the shell hook is a thin launcher that
+``exec``s the same packaged adapter, so the two sides differ only by one
+process spawn, and the #1912 term rule itself is pinned in process by
+``tests/evals/test_hook_term_parity_1912.py``. The DEFAULT pytest selection
+therefore runs a three-probe smoke (``SMOKE_PROBES``) proving the launcher
+still reaches the adapter with the same env, argv and stdin. The full
+48-probe sweep is marked ``nightly`` and runs in
+``.github/workflows/nightly.yml``.
+
 **Cost and skipping.** No model call, no ``claude`` binary, no API key — the
 harness env pins BOTH hooks to their offline regex term extractor. It spawns
-two subprocesses per probe against one prebuilt index; the full 48-probe
-sweep runs in under a minute. It carries no ``eval``/``embedding``/``rollout``
-marker, so it is part of the DEFAULT pytest selection, and it SKIPS (never
-passes) when ``bash``, ``jq``, an FTS5-capable ``sqlite3``, the packaged
+two subprocesses per probe against one prebuilt index. Both tiers SKIP (never
+pass) when ``bash``, ``jq``, an FTS5-capable ``sqlite3``, the packaged
 console script, ``chromadb`` or a built vector index is unavailable — a
 silent pass on a runner that could not run either hook would be worse than no
 test at all.
@@ -69,8 +76,13 @@ from tests.evals.rollout import resolve_user_prompt_hook
 KNOWN_DIVERGENCES: dict[str, str] = {}
 
 
-@pytest.fixture(scope="module")
-def comparison() -> list[ProbeResult]:
+#: The default-suite smoke: three core probes from different probe classes,
+#: each of which renders a bullet list AND an overflow notice on the shared
+#: core index, so the smoke exercises both halves of the byte comparison.
+SMOKE_PROBES: tuple[str, ...] = ("pto_allowance", "person_not_repo", "invoiceref_rename")
+
+
+def _compare(probe_ids: tuple[str, ...] | None) -> list[ProbeResult]:
     missing = missing_prerequisites(backend="vector")
     if missing:
         pytest.skip("hook byte-equivalence needs: " + ", ".join(missing))
@@ -80,11 +92,42 @@ def comparison() -> list[ProbeResult]:
             "module would compare the shell hook with itself and prove nothing"
         )
     try:
-        return run(mode="adapter-vs-shell", backend="vector", scale="core")
+        return run(mode="adapter-vs-shell", backend="vector", scale="core", probe_ids=probe_ids)
     except ClassifierUnavailable as exc:  # pragma: no cover — runner-dependent
         pytest.skip(str(exc))
 
 
+@pytest.fixture(scope="module")
+def comparison() -> list[ProbeResult]:
+    """The full 48-probe sweep. Requested only by ``nightly`` tests, so the
+    default selection never builds it."""
+    return _compare(None)
+
+
+@pytest.fixture(scope="module")
+def smoke_comparison() -> list[ProbeResult]:
+    return _compare(SMOKE_PROBES)
+
+
+def test_smoke_covers_exactly_the_named_probes(smoke_comparison: list[ProbeResult]) -> None:
+    assert [r.probe_id for r in smoke_comparison] == list(SMOKE_PROBES)
+
+
+def test_smoke_hooks_render_identical_bytes_with_a_notice(
+    smoke_comparison: list[ProbeResult],
+) -> None:
+    """Default-suite pin: the shipped launcher and the adapter render the
+    same bytes, bullet list and overflow notice included, and neither side
+    rendered nothing (two empty strings would be byte-equal and prove
+    nothing)."""
+    for result in smoke_comparison:
+        left, right = normalize(result.left), normalize(result.right)
+        assert left.strip() and right.strip(), f"{result.probe_id}: a hook rendered nothing"
+        assert split_render(left)[1], f"{result.probe_id}: no overflow notice to compare"
+        assert left == right, (result.probe_id, _first_difference(left, right))
+
+
+@pytest.mark.nightly
 def test_the_sweep_covers_every_core_probe(comparison: list[ProbeResult]) -> None:
     """Vacuity guard: a comparison that silently swept a prefix (or nothing)
     would let every assertion below pass on an empty set."""
@@ -94,6 +137,7 @@ def test_the_sweep_covers_every_core_probe(comparison: list[ProbeResult]) -> Non
     assert len(comparison) == 48
 
 
+@pytest.mark.nightly
 def test_both_hooks_rendered_something(comparison: list[ProbeResult]) -> None:
     """Both sides must have produced real context on most probes — two hooks
     that both returned the empty string would be byte-equal and meaningless."""
@@ -104,6 +148,7 @@ def test_both_hooks_rendered_something(comparison: list[ProbeResult]) -> None:
     )
 
 
+@pytest.mark.nightly
 def test_at_least_one_probe_carries_an_overflow_notice(comparison: list[ProbeResult]) -> None:
     """Vacuity guard for the notice half of the byte comparison — which is the
     half ``test_adapter_overflow_breadcrumb_1905.py`` deliberately left
@@ -115,6 +160,7 @@ def test_at_least_one_probe_carries_an_overflow_notice(comparison: list[ProbeRes
     )
 
 
+@pytest.mark.nightly
 def test_no_unexplained_divergence(comparison: list[ProbeResult]) -> None:
     """The issue's byte-equivalence criterion, with no blanket tolerance.
 
@@ -135,6 +181,7 @@ def test_no_unexplained_divergence(comparison: list[ProbeResult]) -> None:
     )
 
 
+@pytest.mark.nightly
 def test_every_enumerated_divergence_still_diverges(comparison: list[ProbeResult]) -> None:
     """A stale exemption is a silent hole. Any probe listed in
     :data:`KNOWN_DIVERGENCES` that now matches must be deleted from it."""

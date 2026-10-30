@@ -15,6 +15,7 @@ import os
 import subprocess
 import sys
 from collections import Counter
+from collections.abc import Iterable
 from pathlib import Path
 from unittest import mock
 
@@ -762,22 +763,11 @@ def _follow_through_fixture_matrix() -> list[tuple[dict[str, bool], list[Page], 
     return cases
 
 
-def test_validate_core_problem_list_is_identical_after_the_extraction() -> None:
-    """AC (issue athenaeum#1844): ``validate_core``'s follow_through block
-    now CALLS :func:`deep_hop_uids` instead of keeping a second copy of the
-    predicate, and the problem list it produces is unchanged by that.
-
-    Pinned by driving ``validate_core``'s decision off the verbatim
-    pre-extraction copy above (patched in place of the extracted function)
-    and asserting the two problem lists are equal element-for-element --
-    over the shipped corpus at every scale AND over all 64 synthetic
-    fixtures, which between them make the predicate answer both True and
-    False.
-    """
+def _assert_validate_core_unchanged_by_the_extraction(scales: Iterable[str]) -> None:
     populations: list[tuple[str, list[Page], list[Probe]]] = [
         ("core-hand-authored", load_core_pages(), load_probes()),
     ]
-    for scale in SCALES:
+    for scale in scales:
         corpus = build_corpus(scale=scale)
         populations.append((f"built-{scale}", list(corpus.pages), list(corpus.probes)))
     for params, pages, probe in _follow_through_fixture_matrix():
@@ -805,6 +795,29 @@ def test_validate_core_problem_list_is_identical_after_the_extraction() -> None:
         with mock.patch.object(corpus_module, "deep_hop_uids", _legacy):
             before = validate_core(pages, probes)
         assert before == after, label
+
+
+def test_validate_core_problem_list_is_identical_after_the_extraction() -> None:
+    """AC (issue athenaeum#1844): ``validate_core``'s follow_through block
+    now CALLS :func:`deep_hop_uids` instead of keeping a second copy of the
+    predicate, and the problem list it produces is unchanged by that.
+
+    Pinned by driving ``validate_core``'s decision off the verbatim
+    pre-extraction copy above (patched in place of the extracted function)
+    and asserting the two problem lists are equal element-for-element --
+    over the hand-authored and built ``core`` corpus AND all 64 synthetic
+    fixtures, which between them make the predicate answer both True and
+    False. The larger built scales repeat the same check over generated
+    filler pages and run in the nightly tier (the test below).
+    """
+    _assert_validate_core_unchanged_by_the_extraction(["core"])
+
+
+@pytest.mark.nightly
+def test_validate_core_problem_list_is_identical_after_the_extraction_at_every_scale() -> None:
+    """The same pin over every built scale (large/xlarge builds dominate the
+    cost, ~70s on CI), kept as a nightly sweep."""
+    _assert_validate_core_unchanged_by_the_extraction(SCALES)
 
 
 def test_deep_hop_uids_matches_the_extracted_predicate_page_for_page() -> None:

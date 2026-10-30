@@ -357,11 +357,19 @@ testpaths = ["tests"]
 # none of which carry the marker).
 # tests/evals/test_containment_ci_wiring.py::test_rollout_deselected_tests_are_actually_live
 # enforces the split mechanically so it cannot drift back together.
-addopts = "--ignore=tests/benchmarks -m 'not eval and not embedding and not rollout'"
+#
+# `nightly` is the token-FREE counterpart: tests that need no key and spend
+# nothing, but are measurement tables or full-corpus sweeps too slow for the
+# PR gate, where a small default-suite test pins the same property. They
+# run in .github/workflows/nightly.yml (schedule + workflow_dispatch) via
+# `pytest -m nightly`. Never mark a token-spending test `nightly`: that is
+# what `rollout` is for, and nightly.yml has no key.
+addopts = "--ignore=tests/benchmarks -m 'not eval and not embedding and not rollout and not nightly'"
 markers = [
     "regression: contract regression tests pinning resolver outputs against canonical fixtures",
     "live: opt-in live-LLM tests; require ATHENAEUM_LIVE_TESTS=1 and ANTHROPIC_API_KEY",
     "eval: live-API eval suite under tests/evals/; deselected by default (see evals.yml)",
     "embedding: asserts on real MiniLM cosine values; deselected by default, runs in evals.yml's embedding-suite job (athenaeum#1091)",
     "rollout: costs tokens — constructs a live LLM client, spawns the real claude binary, or is gated on ANTHROPIC_API_KEY/ATHENAEUM_LIVE_TESTS; deselected by default (athenaeum#1521, split from token-free siblings in athenaeum#1742)",
+    "nightly: token-free but slow or measurement-only (full-corpus sweeps, printed tables); deselected by default, runs in nightly.yml via -m nightly. A small default-suite test must still pin the property it covers",
 ]
