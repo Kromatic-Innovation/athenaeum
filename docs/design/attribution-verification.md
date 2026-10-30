@@ -206,8 +206,11 @@ Built once per run, or once per CLI invocation, and passed to every call:
 - the operator's addresses. The logic is lifted from `dedupe._owner_addresses`
   into `pii` or `config`, because `pii` is L3 and must not import the L4
   `dedupe`;
-- the non-personal pattern set: built-ins plus
-  `librarian.attribution.non_personal_patterns`;
+- the non-personal pattern set: built-ins plus the three D1 config keys
+  (§5.1): `librarian.attribution.relay_local_prefixes` (D1-narrow local-part
+  prefixes), `librarian.attribution.operator_mailer_domains` (D1-narrow
+  operator mailer domains) and `librarian.attribution.relay_domains`
+  (D1-domain, observe-only whole-domain relay entries);
 - the attribution-label list: built-ins plus
   `librarian.attribution.context_labels`;
 - (child C) the inline-value inverted index and the person-name index.
@@ -533,6 +536,14 @@ reversible from the attribution log and the suspect files:
   attribution place <suspect-id> --as own`;
 - a placed value carries provenance naming its original target and source.
 
+D1-narrow's day-one enforcement (§5.1, §9.1) is the one exception that runs
+ahead of the mode flip above, and it is held to the same guarantee by the
+same mechanism: a value D1-narrow blocks is never filed on the target, but it
+is parked as a non-shadow suspect entry with disposition `non-personal`
+(operator ruling 2026-10-30; §15). The entry is never lost, and it is
+reversible exactly like any other parked value — `athenaeum attribution place
+<suspect-id> --as own` files it on the target it was withheld from.
+
 No value is ever deleted by this design.
 
 ## 10. Writer-side defects
@@ -558,8 +569,12 @@ seam:
 3. Otherwise (no name, one created page), require the local part to
    name-match the created page under C2's full-name or `flast` rule.
    Otherwise decline and escalate.
-4. The two escalation descriptions in `_record_correspondent_contact` mask
-   the address (§8.1) instead of embedding `ref.address!r`.
+4. Every escalation `_record_correspondent_contact` raises masks the address
+   (§8.1) in both its description and its `entity_name`, instead of
+   embedding `ref.address!r`. One escalation description — shared by the
+   three decline paths above — sets `entity_name=ref.display_name or
+   masked`, so `entity_name` falls back to the masked address, never the raw
+   one, when the raw note gives no display name.
 
 This is the one live defect that produces outreach-eligible misattribution,
 so it ships first and does not wait for athenaeum#2196.
@@ -568,10 +583,16 @@ so it ships first and does not wait for athenaeum#2196.
 
 The tier-3 create and merge prompts can write addresses mentioned in a note
 into the body of whichever page they compile. The next PII migration pass
-then files those addresses as the page owner's. Compiled output has two call
-sites, `batch.py` and the synchronous path in `tiers.py`, which both call
-`tiers.tier3_create` and `tiers.tier3_merge`. The scrub therefore sits inside
-those two functions, on their parsed return value, so both callers get it.
+then files those addresses as the page owner's. `batch.py`'s batched
+result-handling path does not call `tiers.tier3_create` or
+`tiers.tier3_merge`; its unbatched fallback loops at finalize do call both,
+alongside the synchronous path in `tiers.py`. All three converge on the same
+three shared helpers: `tier3_create` returns through
+`tiers.tier3_entity_from_response`, and `tier3_merge` returns through
+`tiers.parse_merge_ops_response` and `tiers.tier3_merge_full`, and so does
+the batched path's own result parsing. The scrub therefore sits on the
+output of those three helpers (or immediately after each call in both
+callers), so every caller gets it regardless of transport.
 
 `scrub_compiled_contact_tokens(body, *, subject_uid, source_ref, context)`:
 
@@ -646,11 +667,11 @@ stable names for this document. Issue numbers are on the epic.
 | B | The seam, `AttributionVerdict` and `AttributionContext`, checks D1 to D4 (D1-narrow enforced from day one), the suspect store and attribution log (§4.3), wired in observe mode into the four store writers (§4.2: correspondent recording, corrections list-add, PII migration bulk and `--page`, fold) | athenaeum#2196 |
 | C | Context checks C1 to C3, with their per-run indexes | B |
 | D | Calibration eval: dataset generator, `judge_contact_attribution` with prompt file and registry entry, metrics, threshold derivation, shipped calibration record (§12) | B |
-| E | Escalation and placement in observe (shadow) mode: memo, question classes, the placement executor for every outcome in §7, `identifier_relation`, masked human-queue items, `attribution show` and `place` CLIs | C, D |
+| E | Escalation and placement in observe (shadow) mode: memo, question classes, the placement executor for every outcome in §7, `identifier_relation`, masked human-queue items, `attribution show` and `place` CLIs | A, C, D |
 | F | Enforce: the `librarian.attribution.mode` knob with `observe`, `enforce` and `auto`, per-writer enforce branches (including the scrub's), the calibration and observe-report preflight, `auto` as the shipped default | E, G, I |
-| G | Prose-compile scrub at `tier3_create` and `tier3_merge` (§10.2) | B |
+| G | Prose-compile scrub at `tier3_entity_from_response`, `parse_merge_ops_response` and `tier3_merge_full` (§10.2) | B |
 | H | Orphan contact records on page removal, and repair's report-and-retire mode (§10.3) | athenaeum#2196 |
-| I | `contact-surface-lint`, including `--attribution` report mode (§10.4) | C, H |
+| I | `contact-surface-lint`, including `--attribution` report mode (§10.4) | C, E, H |
 | J | Calibration over time: the `attribution` audit tier in the calibration ledger, and threshold proposals on the `auto_apply_proposals` rail (§8.3) | E |
 
 athenaeum#2197 is blocked by child B only, for the reason given in §2.2.
@@ -823,10 +844,14 @@ the pass bar.
   `identifier_relation` is additive and optional. `PiiMigrationPlan.parked_tokens`
   is additive.
 - Observe mode changes no write. The only behaviour changes before child F
-  are child A's shortcut fix, child B's D1-narrow enforcement (logged, and
-  reversible with `attribution place`), child G's scrub (which parks what it
-  removes), and child H's retire-on-removal (rename, never delete). All four
-  are reversible from their logs.
+  are child A's shortcut fix, child B's D1-narrow enforcement, child G's
+  scrub (which parks what it removes), and child H's retire-on-removal
+  (rename, never delete). All four are reversible from their logs. Child B's
+  D1-narrow enforcement does not file a blocked value on the target, but
+  parks it as a non-shadow suspect entry with disposition `non-personal`
+  (operator ruling 2026-10-30; §9.1, §9.4) — the named mechanism that keeps
+  it from being lost and keeps `athenaeum attribution place <suspect-id>
+  --as own` able to file it later.
 - Rollback from enforce is a config change (§9.4).
 
 ## 16. Rejected alternatives
