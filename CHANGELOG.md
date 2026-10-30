@@ -24,6 +24,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Design: attribution verification for contact values
+  (`docs/design/attribution-verification.md`, epic athenaeum#2192).** Specifies
+  one verification seam that every contact-value writer calls, the librarian's
+  own migrations, folds and compiles included; an ordered deterministic check
+  catalogue; escalation of suspects to the model tier evals measure for each
+  question class, with re-attribution to the real owner, structured aliases and
+  same-entity merge proposals; a human queue only below calibrated confidence;
+  observe mode before enforce; and the calibration eval that sets tiers and
+  thresholds. Docs only; no behaviour changes in this release.
+
 - **A merge now folds the absorbed uid's contact record, and `athenaeum
   repair --contact-records` cleans up the ones earlier merges left (issue
   athenaeum#2184).** When `dedupe persons --apply` or a `fold-into-existing`
