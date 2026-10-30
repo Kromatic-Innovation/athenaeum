@@ -1233,6 +1233,18 @@ def _publish_step_summary(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--surface-file", type=Path, default=Path(".github/llm-surface.txt"))
+    parser.add_argument(
+        "--base-surface-file",
+        type=Path,
+        default=None,
+        help=(
+            "the surface file as it stands at the MERGE BASE. FIRE and COVERS "
+            "use the union of both ends' designations (design §5.4), so the "
+            "base copy is as load-bearing as the head's. Without it the merge "
+            "base's copy is read out of git instead, which needs the commit to "
+            "be in the checkout."
+        ),
+    )
     parser.add_argument("--base-sha", required=True, help="PR base commit SHA")
     parser.add_argument("--head-sha", required=True, help="PR head commit SHA")
     parser.add_argument("--pr-body-file", type=Path, required=True)
@@ -1252,7 +1264,9 @@ def main(argv: list[str] | None = None) -> int:
     # coarser, never weaker (see `evaluate`).
     merge_base_sha = git_merge_base(args.base_sha, args.head_sha)
     base_surface: list[str] | None = None
-    if merge_base_sha is not None:
+    if args.base_surface_file is not None:
+        base_surface = load_surface(args.base_surface_file)
+    elif merge_base_sha is not None:
         base_blob = git_read_blob(merge_base_sha, str(args.surface_file))
         if base_blob is not None:
             base_surface = parse_surface_text(base_blob.decode("utf-8", errors="replace"))

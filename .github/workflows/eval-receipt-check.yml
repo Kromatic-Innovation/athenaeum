@@ -39,6 +39,23 @@ name: Eval Receipt Check
 # the head (see the script's docstring), so an update-branch, the wrapper's
 # version bump or a rebase does not demand a fresh paid eval dispatch.
 #
+# THE GATE RUNS FROM THE BASE COMMIT (athenaeum#2227, design §5.6). This job
+# used to run `python scripts/check_llm_surface_receipt.py` straight out of the
+# `pull_request` checkout, which means a PR's OWN copy of the script decided
+# that PR. Since the merge wrapper treats any failed check as blocking, the
+# gate matters — and a one-line edit to the script in the same PR would have
+# bypassed it. So the script (and every repo-local file it imports) is
+# materialised from `github.event.pull_request.base.sha` with `git show` and
+# run from `$RUNNER_TEMP`, so a PR's gate changes only take effect after they
+# merge. The PR's own surface list is still what the gate reads for the HEAD
+# designations; the merge base's copy is passed alongside it, because FIRE and
+# COVERS use the union of both ends (design §5.4).
+#
+# Bootstrap: a base commit that predates the script falls back to the head
+# copy with a `::warning::`. `tests/test_eval_receipt_gate_from_base.py` runs
+# this step's own shell body against throwaway repos, so the recipe is tested
+# rather than described.
+#
 # Third-party actions pinned to full commit SHAs for supply-chain hygiene,
 # matching ci.yml's convention.
 
@@ -87,6 +104,44 @@ jobs:
             --repo "${{ github.repository }}" \
             --json body -q .body > pr-body.txt
 
+      - name: Materialise the gate from the PR's base commit
+        id: gate
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # EVERY repo-local file the gate needs, not just the entry script —
+          # a helper module taken from the PR's checkout would reopen exactly
+          # the hole this step closes. The list is pinned against the script's
+          # own imports by tests/test_eval_receipt_gate_from_base.py, so adding
+          # a helper module without adding it here fails CI.
+          GATE_FILES="scripts/check_llm_surface_receipt.py"
+          GATE_DIR="$RUNNER_TEMP/gate"
+          mkdir -p "$GATE_DIR"
+          missing=0
+          for f in $GATE_FILES; do
+            mkdir -p "$GATE_DIR/$(dirname "$f")"
+            if ! git show "$BASE_SHA:$f" > "$GATE_DIR/$f" 2>/dev/null; then
+              missing=1
+            fi
+          done
+          if [ "$missing" = 1 ]; then
+            echo "::warning::the base commit $BASE_SHA does not carry the eval-receipt gate; falling back to this PR's own copy (bootstrap only)"
+            for f in $GATE_FILES; do
+              mkdir -p "$GATE_DIR/$(dirname "$f")"
+              cp "$f" "$GATE_DIR/$f"
+            done
+          fi
+          # The merge base's surface list, for the union rule. `|| true`: a
+          # shallow or missing merge base is not fatal — the gate falls back to
+          # the head designations, which is coarser, never weaker.
+          MERGE_BASE="$(git merge-base "$BASE_SHA" "$HEAD_SHA" 2>/dev/null || true)"
+          if [ -n "$MERGE_BASE" ] && git show "$MERGE_BASE:.github/llm-surface.txt" > "$GATE_DIR/base-llm-surface.txt" 2>/dev/null; then
+            echo "base_surface=$GATE_DIR/base-llm-surface.txt" >> "$GITHUB_OUTPUT"
+          fi
+          echo "script=$GATE_DIR/scripts/check_llm_surface_receipt.py" >> "$GITHUB_OUTPUT"
+
       - name: Check LLM surface + eval receipt
         env:
           # `scripts/check_llm_surface_receipt.py` shells out to `gh run
@@ -94,10 +149,24 @@ jobs:
           # run's headSha/event — same default-token read as the PR-body
           # fetch above.
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GATE_SCRIPT: ${{ steps.gate.outputs.script }}
+          BASE_SURFACE: ${{ steps.gate.outputs.base_surface }}
         run: |
-          python scripts/check_llm_surface_receipt.py \
-            --surface-file .github/llm-surface.txt \
-            --base-sha "${{ github.event.pull_request.base.sha }}" \
-            --head-sha "${{ github.event.pull_request.head.sha }}" \
-            --pr-body-file pr-body.txt \
+          set -euo pipefail
+          # The BASE copy of the script, from $RUNNER_TEMP — never
+          # `scripts/check_llm_surface_receipt.py` out of this checkout.
+          args=(
+            --surface-file .github/llm-surface.txt
+            --base-sha "${{ github.event.pull_request.base.sha }}"
+            --head-sha "${{ github.event.pull_request.head.sha }}"
+            --pr-body-file pr-body.txt
             --repo "${{ github.repository }}"
+          )
+          # Only pass the base surface list if the BASE copy of the script
+          # understands the flag — during the rollout the base commit may
+          # predate it, and an unknown flag would fail the gate rather than
+          # check it.
+          if [ -n "$BASE_SURFACE" ] && grep -q -- "--base-surface-file" "$GATE_SCRIPT"; then
+            args+=(--base-surface-file "$BASE_SURFACE")
+          fi
+          python "$GATE_SCRIPT" "${args[@]}"

@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The eval-receipt gate is judged by the BASE commit's copy of itself
+  (issue athenaeum#2227).** `.github/workflows/eval-receipt-check.yml` ran
+  `python scripts/check_llm_surface_receipt.py` out of the `pull_request`
+  checkout, so a PR's own copy of the script decided that PR — and since the
+  merge wrapper treats any failed check as blocking, a one-line edit to the
+  script in the same PR would have bypassed it. The script, and every
+  repo-local file it imports, is now materialised from
+  `pull_request.base.sha` with `git show` into `$RUNNER_TEMP` and run from
+  there; the merge base's copy of the surface list is passed alongside the
+  head's, so the union rule still applies. A base commit that predates the
+  script falls back to the head copy with a `::warning::`.
+  `tests/test_eval_receipt_gate_from_base.py` extracts the workflow's own
+  shell bodies and runs them against throwaway repos — including the case
+  that matters, a PR that weakens the gate and is failed by the base version
+  anyway — so the recipe is tested rather than described. `ci.yml` is
+  untouched and nothing new is installed.
+
 - **The eval gate's `not needed` escape is structured and checked (issue
   athenaeum#2226).** The free-text form no longer passes when the reasoning
   surface changed; the replacement is
