@@ -525,6 +525,68 @@ class TestSessionStartRecall:
         body = config_env.read_text()
         assert "SEARCH_BACKEND=vector" in body
 
+    @pytest.mark.parametrize("flavor", ["gnu", "bsd"])
+    def test_vector_freshness_check_works_with_either_stat_flavor(
+        self, hook_env: dict[str, str], tmp_path: Path, flavor: str
+    ) -> None:
+        """The vector-index freshness check must read mtimes on GNU and BSD.
+
+        It used to call BSD-only ``stat -f %m``. GNU coreutils reads
+        ``-f`` as ``--file-system`` and ``%m`` as a filename, so on Linux
+        the check never saw a number, always reported the index stale,
+        and rebuilt the vector index on every session (~45s on a
+        ~3k-page wiki). A stub ``stat`` first on PATH stands in for each
+        flavor: ``gnu`` accepts only ``-c %Y`` and fails on ``-f``;
+        ``bsd`` accepts only ``-f %m`` and fails on ``-c``. Either way
+        an index newer than every wiki page must be reported fresh.
+        """
+        knowledge_yaml = Path(hook_env["KNOWLEDGE_ROOT"]) / "athenaeum.yaml"
+        knowledge_yaml.write_text("auto_recall: true\nsearch_backend: vector\n")
+
+        # Wiki pages an hour old; an index file written just now.
+        old = time.time() - 3600
+        for page in (Path(hook_env["KNOWLEDGE_ROOT"]) / "wiki").glob("*.md"):
+            os.utime(page, (old, old))
+        vector_dir = tmp_path / ".cache" / "athenaeum" / "wiki-vectors"
+        vector_dir.mkdir(parents=True)
+        (vector_dir / "index.bin").write_bytes(b"x")
+
+        accepted, rejected = ("-c", "-f") if flavor == "gnu" else ("-f", "-c")
+        stub_dir = tmp_path / f"stat-{flavor}-bin"
+        stub_dir.mkdir()
+        stub = stub_dir / "stat"
+        stub.write_text(
+            "#!/usr/bin/env bash\n"
+            f'if [ "$1" = {rejected} ]; then\n'
+            f'  echo "stat: {flavor} stub rejects {rejected}" >&2; exit 1\n'
+            "fi\n"
+            f'[ "$1" = {accepted} ] || {{ echo "stat: bad usage" >&2; exit 1; }}\n'
+            "shift 2\n"
+            f"exec {shlex.quote(sys.executable)} -c "
+            "'import os, sys\n"
+            "for p in sys.argv[1:]: print(int(os.stat(p).st_mtime))' \"$@\"\n",
+            encoding="utf-8",
+        )
+        stub.chmod(0o755)
+        env = dict(hook_env)
+        env["PATH"] = f"{stub_dir}{os.pathsep}{env['PATH']}"
+
+        _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
+        result = subprocess.run(
+            ["bash", str(SESSION_START)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert "Vector index fresh" in result.stderr, (
+            f"{flavor}-style stat: fresh index was reported stale "
+            f"(stderr: {result.stderr!r})"
+        )
+        assert sentinel_op_invocations(tmp_path) == []
+
     def test_fts5_build_failure_is_nonzero_exit_with_stderr_not_stdout(
         self, hook_env: dict[str, str], tmp_path: Path
     ) -> None:

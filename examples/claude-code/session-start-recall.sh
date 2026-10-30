@@ -630,11 +630,19 @@ if [ "${SEARCH_BACKEND:-vector}" = "vector" ]; then
   VECTOR_DIR="${CACHE_DIR}/wiki-vectors"
   _vector_fresh=false
   if [ -d "$VECTOR_DIR" ] && [ "${ATHENAEUM_FORCE_REBUILD:-0}" != "1" ]; then
+    # Portable mtime: GNU coreutils takes `stat -c %Y`, BSD/macOS takes
+    # `stat -f %m`. GNU reads `-f` as --file-system, so the BSD form alone
+    # never yields a number on Linux and the index always looks stale.
+    if stat -c %Y / >/dev/null 2>&1; then
+      _stat_mtime=(stat -c %Y)
+    else
+      _stat_mtime=(stat -f %m)
+    fi
     _idx_mtime=$(find "$VECTOR_DIR" -type f -print0 2>/dev/null \
-      | xargs -0 stat -f %m 2>/dev/null \
+      | xargs -0 "${_stat_mtime[@]}" 2>/dev/null \
       | sort -n | tail -1 || echo 0)
     _wiki_mtime=$(find "$WIKI_ROOT" -type f -name '*.md' -print0 2>/dev/null \
-      | xargs -0 stat -f %m 2>/dev/null \
+      | xargs -0 "${_stat_mtime[@]}" 2>/dev/null \
       | sort -n | tail -1 || echo 0)
     _idx_mtime="${_idx_mtime:-0}"
     _wiki_mtime="${_wiki_mtime:-0}"
