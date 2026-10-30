@@ -3506,7 +3506,12 @@ class TestAttributionSeamWiring:
         }
 
     def _add(
-        self, tmp_path: Path, value: str, *, attribution_context: object = None
+        self,
+        tmp_path: Path,
+        value: str,
+        *,
+        attribution_context: object = None,
+        dry_run: bool = False,
     ) -> "CorrectionRecordResult":
         wiki = tmp_path / "wiki"
         _write_page(wiki, "p.md", {"uid": "person-alex", "type": "person", "name": "Alex Doe"})
@@ -3527,6 +3532,7 @@ class TestAttributionSeamWiring:
             registry_entities={},
             config=self._config(),
             attribution_context=attribution_context,
+            dry_run=dry_run,
         )
 
     def test_observe_mode_is_byte_identical_and_logs(self, tmp_path: Path) -> None:
@@ -3572,6 +3578,23 @@ class TestAttributionSeamWiring:
         meta, _ = parse_frontmatter(suspects[0].read_text(encoding="utf-8"))
         assert meta["shadow"] is False
         assert meta["disposition"] == "non-personal"
+
+    def test_dry_run_never_writes_a_log_row_or_suspect_file(self, tmp_path: Path) -> None:
+        """Seer PR review finding (athenaeum#2210): calling the seam at all
+        appends a log row as its own side effect, so a dry-run correction
+        must never call it — even to preview a D1-narrow enforcement."""
+        context = pii_attribution.build_attribution_context(tmp_path, self._config())
+        result = self._add(
+            tmp_path, "noreply@example.org", attribution_context=context, dry_run=True
+        )
+        # Dry-run falls back to ordinary (non-attribution) behavior: it
+        # previews the sensitivity-routed "apply" shape, not the
+        # enforcement a real run would make.
+        assert result.disposition == "routed-elsewhere", result.reason
+        log_path = pii_attribution.default_attribution_log_path(context.contacts_root)
+        assert not log_path.exists()
+        suspects_dir = context.contacts_root / "_attribution" / "suspects"
+        assert not suspects_dir.exists() or list(suspects_dir.glob("*.md")) == []
 
 
 def test_value_key_treats_dates_and_iso_strings_alike() -> None:

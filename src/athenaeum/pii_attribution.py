@@ -234,6 +234,17 @@ class AttributionContext:
     excluded_index: "pii.ExcludedRecordIndex"
     entity_index: EntityIndex | None
     owner_uid: str
+    #: Lowercased, trimmed owner aliases/name (issue athenaeum#2210 PR review,
+    #: Seer finding): an owner configured WITHOUT a ``uid`` — emails/aliases
+    #: only — would otherwise never match :attr:`owner_uid` on any target, so
+    #: ``_check_d1``'s "is this the owner's own page" test would be False
+    #: for every target including the owner's real one, and the owner's own
+    #: address would be flagged D1-narrow non-personal even there. This set
+    #: lets that test also match by name, the same ``owner_name``/
+    #: ``owner_alias`` signal :func:`athenaeum.dedupe.owner_signal` already
+    #: uses (simplified to an exact, case-folded match — this seam has only
+    #: ``target_name``, not the full page metadata ``owner_signal`` reads).
+    owner_name_aliases: frozenset[str]
     owner_addresses: frozenset[str]
     relay_local_prefixes: frozenset[str]
     operator_mailer_domains: frozenset[str]
@@ -297,6 +308,8 @@ def build_attribution_context(
     *,
     excluded_index: "pii.ExcludedRecordIndex | None" = None,
     entity_index: EntityIndex | None = None,
+    contacts_root: Path | None = None,
+    owner: dict[str, Any] | None = None,
 ) -> AttributionContext:
     """Build an :class:`AttributionContext`, once per run (design §5.2).
 
@@ -307,29 +320,54 @@ def build_attribution_context(
     either way. A CLI migration with neither builds both itself, matching the
     single-constructor call shape design §5.2 shows:
     ``pii.build_attribution_context(knowledge_root, config)``.
+
+    *contacts_root* / *owner* (issue athenaeum#2210 PR review, Seer finding)
+    let a caller that has ALREADY resolved these — :func:`athenaeum.dedupe.
+    merge_duplicate_persons` takes a pre-resolved ``owner`` dict and a
+    pre-resolved ``contacts_root`` and carries no ``config`` dict to
+    re-derive either from — pass them straight through, bypassing
+    :func:`athenaeum.config.resolve_owner` / :func:`athenaeum.pii.
+    contacts_surface_root`. *config* still supplies the three
+    ``librarian.attribution.*`` extras (``None`` there yields the built-ins
+    only, same as every other caller).
     """
     root = Path(knowledge_root)
-    contacts_root = pii.contacts_surface_root(root, config)
-    idx = excluded_index if excluded_index is not None else pii.ExcludedRecordIndex(contacts_root)
+    resolved_contacts_root = (
+        Path(contacts_root)
+        if contacts_root is not None
+        else pii.contacts_surface_root(root, config)
+    )
+    idx = (
+        excluded_index
+        if excluded_index is not None
+        else pii.ExcludedRecordIndex(resolved_contacts_root)
+    )
     ent_idx = entity_index
     if ent_idx is None:
         wiki_root = root / "wiki"
         if wiki_root.is_dir():
             ent_idx = EntityIndex(wiki_root)
-    owner = config_module.resolve_owner(config)
-    owner_uid = str((owner or {}).get("uid") or "")
-    owner_addrs = frozenset(config_module.owner_addresses(owner))
+    resolved_owner = owner if owner is not None else config_module.resolve_owner(config)
+    owner_uid = str((resolved_owner or {}).get("uid") or "")
+    owner_addrs = frozenset(config_module.owner_addresses(resolved_owner))
+    owner_name_aliases: set[str] = set()
+    if resolved_owner:
+        for alias in resolved_owner.get("aliases") or []:
+            cleaned = str(alias).strip().lower()
+            if cleaned:
+                owner_name_aliases.add(cleaned)
     return AttributionContext(
-        contacts_root=contacts_root,
+        contacts_root=resolved_contacts_root,
         excluded_index=idx,
         entity_index=ent_idx,
         owner_uid=owner_uid,
+        owner_name_aliases=frozenset(owner_name_aliases),
         owner_addresses=owner_addrs,
         relay_local_prefixes=BUILTIN_RELAY_LOCAL_PREFIXES
         | config_module.resolve_relay_local_prefixes(config),
         operator_mailer_domains=config_module.resolve_operator_mailer_domains(config),
         relay_domains=config_module.resolve_relay_domains(config),
-        value_key_secret=_load_or_mint_value_key_secret(contacts_root),
+        value_key_secret=_load_or_mint_value_key_secret(resolved_contacts_root),
     )
 
 
@@ -392,13 +430,17 @@ def _check_d1(
     value: str,
     *,
     target_uid: str,
+    target_name: str | None,
     target_type: str | None,
     context: AttributionContext,
 ) -> CheckEvidence | None:
     """D1: non-personal identifier, two tiers plus the role-local-part branch."""
     local, domain = _local_and_domain(value)
     normalized = pii.normalize_identifier(value)
-    is_owner_page = bool(context.owner_uid) and target_uid == context.owner_uid
+    is_owner_page = (bool(context.owner_uid) and target_uid == context.owner_uid) or (
+        target_name is not None
+        and target_name.strip().lower() in context.owner_name_aliases
+    )
 
     if pii.is_service_address(normalized):
         return CheckEvidence(check_id=CHECK_D1_NARROW, label="service-address")
@@ -450,7 +492,13 @@ def check_contact_attribution(
     checks: list[CheckEvidence] = []
     candidates: list[str] = []
 
-    d1 = _check_d1(value, target_uid=target_uid, target_type=target_type, context=context)
+    d1 = _check_d1(
+        value,
+        target_uid=target_uid,
+        target_name=target_name,
+        target_type=target_type,
+        context=context,
+    )
     disposition = DISPOSITION_PASS
     if d1 is not None:
         checks.append(d1)

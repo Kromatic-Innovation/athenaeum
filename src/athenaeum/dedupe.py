@@ -894,6 +894,33 @@ def merge_duplicate_persons(
         from athenaeum.pii import ExcludedRecordIndex
 
         contact_index = ExcludedRecordIndex(Path(contacts_root))
+
+    # Issue athenaeum#2210 (Seer PR review): this is the real entry point
+    # `dedupe persons --apply` uses to fold contact records, and it was
+    # calling `fold_absorbed_contact_records` directly rather than through
+    # `contact_record_fold.fold_contact_records_after_merge`, so the
+    # attribution seam never ran here at all. Built once, reusing the
+    # `contact_index` already constructed above and this function's own
+    # pre-resolved `owner` — neither of which `build_attribution_context`'s
+    # usual `config`-driven path would know to reuse (this function carries
+    # no `config` dict to re-derive them from). Never built when NOT
+    # applying: calling the seam at all appends a log row as its own side
+    # effect, and a dry run must write nothing.
+    attribution_context = None
+    if apply and contact_index is not None and contacts_root is not None:
+        from athenaeum import pii_attribution
+        from athenaeum.models import EntityIndex as _EntityIndex
+
+        entity_index = _EntityIndex(wiki_root) if wiki_root is not None else None
+        attribution_context = pii_attribution.build_attribution_context(
+            wiki_root.parent if wiki_root is not None else Path(contacts_root).parent,
+            None,
+            excluded_index=contact_index,
+            entity_index=entity_index,
+            contacts_root=Path(contacts_root),
+            owner=owner,
+        )
+
     for pair in pairs:
         cpath = Path(pair.canonical_path)
         apath = Path(pair.absorbed_path)
@@ -932,6 +959,7 @@ def merge_duplicate_persons(
                     [(pair.absorbed_uid, pair.canonical_uid)],
                     index=contact_index,
                     dry_run=not apply,
+                    attribution_context=attribution_context,
                 )
                 report.contact_records_folded += fold.records_folded
                 report.contact_values_added += fold.values_added_total

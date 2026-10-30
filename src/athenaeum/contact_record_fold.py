@@ -658,10 +658,15 @@ def fold_contact_record(
         canonical_meta = meta if isinstance(meta, dict) else {}
 
     canonical_name = canonical_meta.get("name")
+    # Issue athenaeum#2210 (Seer review): calling the seam at all appends a
+    # log row as its own side effect, so it must never run under dry_run —
+    # not even to compute a verdict this function then discards. Pass
+    # `None` through for a dry-run call regardless of what the caller gave,
+    # the same discipline every other write below already follows.
     merged, added, facts, verdicts = merge_contact_values(
         canonical_meta,
         absorbed_meta,
-        attribution_context=attribution_context,
+        attribution_context=attribution_context if not dry_run else None,
         target_uid=canonical_uid,
         target_name=canonical_name if isinstance(canonical_name, str) else None,
     )

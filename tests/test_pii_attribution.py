@@ -216,6 +216,46 @@ class TestD1Narrow:
         )
         assert pii_attribution.is_d1_narrow(verdict)
 
+    def test_owner_configured_by_name_alone_still_matches_their_own_page(
+        self, tmp_path: Path
+    ) -> None:
+        """Seer PR review finding (athenaeum#2210): an owner configured with
+        no ``uid`` (emails/aliases only) must still be recognized as the
+        owner on THEIR OWN page — identified here by name, since
+        ``owner_uid`` is empty and can never equal any ``target_uid``.
+        Before the fix, this fired D1-narrow on the owner's own address on
+        their own page, exactly like any stranger's page."""
+        config = {
+            **EXCLUDED_CONFIG,
+            "owner": {
+                "aliases": ["Tristan Kromer"],
+                "emails": ["owner@example.org"],
+            },
+        }
+        context = _context(tmp_path, config=config)
+        verdict = pii_attribution.check_contact_attribution(
+            "owner@example.org",
+            target_uid="uid-tristan",
+            target_name="Tristan Kromer",
+            target_type="person",
+            source_ref=None,
+            writer=pii_attribution.WRITER_OBSERVED_CONTACT,
+            context=context,
+        )
+        assert verdict.disposition == pii_attribution.DISPOSITION_PASS
+
+        # The guard still fires for the SAME address on a DIFFERENT page.
+        verdict_elsewhere = pii_attribution.check_contact_attribution(
+            "owner@example.org",
+            target_uid="uid-someone-else",
+            target_name="Someone Else",
+            target_type="person",
+            source_ref=None,
+            writer=pii_attribution.WRITER_OBSERVED_CONTACT,
+            context=context,
+        )
+        assert pii_attribution.is_d1_narrow(verdict_elsewhere)
+
 
 class TestD1Domain:
     def test_relay_domain_is_non_personal_but_not_narrow(self, tmp_path: Path) -> None:

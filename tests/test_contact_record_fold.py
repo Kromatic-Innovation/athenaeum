@@ -528,6 +528,65 @@ class TestMergePathsCallTheHook:
         assert _meta(canon)["emails"] == ["casey@example.org", "cl@example.org"]
         assert not absorbed.exists()
 
+    def test_dedupe_persons_apply_enforces_d1_narrow(self, tmp_path: Path) -> None:
+        """Seer PR review finding (athenaeum#2210): ``dedupe persons --apply``
+        calls ``fold_absorbed_contact_records`` directly, bypassing
+        ``fold_contact_records_after_merge`` — the ONE place this issue
+        originally built an attribution context. Fixed by building one
+        inline in ``merge_duplicate_persons`` itself, reusing the
+        ``contact_index`` it already constructs and its own pre-resolved
+        ``owner``, so this real merge path is no longer uncovered."""
+        wiki = tmp_path / "wiki"
+        root = tmp_path / "excluded"
+        canon_page = _page(wiki, f"{CANON}-casey-lee.md", CANON, "Casey Lee")
+        absorbed_page = _page(wiki, f"{ABSORBED}-casey-lee.md", ABSORBED, "Casey Lee")
+        canon = _record(root, f"{CANON}-casey-lee.md", CANON, emails=["casey@example.org"])
+        _record(
+            root, f"{ABSORBED}-casey-lee.md", ABSORBED, emails=["noreply@example.org"]
+        )
+        pair = DuplicatePair(
+            canonical_uid=CANON,
+            canonical_path=str(canon_page),
+            absorbed_uid=ABSORBED,
+            absorbed_path=str(absorbed_page),
+            match_signal="name_exact",
+        )
+
+        report = merge_duplicate_persons([pair], apply=True, wiki_root=wiki, contacts_root=root)
+
+        assert report.merged == 1
+        # The D1-narrow value is never carried onto the canonical record.
+        assert _meta(canon)["emails"] == ["casey@example.org"]
+        suspects = list((root / "_attribution" / "suspects").glob("*.md"))
+        assert len(suspects) == 1
+        suspect_meta, _ = parse_frontmatter(suspects[0].read_text(encoding="utf-8"))
+        assert suspect_meta["shadow"] is False
+        assert suspect_meta["value"] == "noreply@example.org"
+
+    def test_dedupe_persons_dry_run_writes_no_attribution_artifacts(
+        self, tmp_path: Path
+    ) -> None:
+        wiki = tmp_path / "wiki"
+        root = tmp_path / "excluded"
+        canon_page = _page(wiki, f"{CANON}-x.md", CANON, "X Person")
+        absorbed_page = _page(wiki, f"{ABSORBED}-x.md", ABSORBED, "X Person")
+        _record(root, f"{CANON}-x.md", CANON, emails=["x@example.org"])
+        _record(root, f"{ABSORBED}-x.md", ABSORBED, emails=["noreply@example.org"])
+        pair = DuplicatePair(
+            canonical_uid=CANON,
+            canonical_path=str(canon_page),
+            absorbed_uid=ABSORBED,
+            absorbed_path=str(absorbed_page),
+            match_signal="name_exact",
+        )
+
+        merge_duplicate_persons([pair], apply=False, wiki_root=wiki, contacts_root=root)
+
+        log_path = pii_attribution.default_attribution_log_path(root)
+        assert not log_path.exists()
+        suspects_dir = root / "_attribution" / "suspects"
+        assert not suspects_dir.exists() or list(suspects_dir.glob("*.md")) == []
+
     def test_dedupe_without_contacts_root_is_unchanged(self, tmp_path: Path) -> None:
         wiki = tmp_path / "wiki"
         root = tmp_path / "excluded"

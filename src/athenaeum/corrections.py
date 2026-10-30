@@ -1673,6 +1673,7 @@ def process_correction_record(
 
         if (
             attribution_context is not None
+            and not dry_run
             and verdict == "apply"
             and surface_class
             and write_field in _pii.CONTACT_IDENTIFIER_FIELDS
@@ -2033,12 +2034,22 @@ def process_batch_file(
     build and share ONE context across all of them instead (same convention
     as ``registry_entities``/``dry_run_pages`` above), which additionally
     avoids re-reading the per-deployment HMAC key file once per batch file.
+    Never built under ``dry_run`` (even when the caller passed ``None``):
+    building it mints the per-deployment HMAC key file on first use, and
+    calling the seam at all appends a log row as its own side effect
+    (:func:`athenaeum.pii_attribution.check_contact_attribution`'s own "pure
+    apart from the log") — both are disk writes a dry run must not make.
+    ``process_correction_record``'s own ``attribution_context is not None``
+    guard then skips the seam entirely for this run, the same tradeoff
+    ``storage_migrate.plan_pii_migration``'s dry-run path already makes: a
+    dry-run preview shows the ordinary (non-attribution) result, never a
+    predicted enforcement it cannot act on without writing.
     """
     if registry_entities is None:
         registry_entities = load_registry(knowledge_root)
     if dry_run_pages is None:
         dry_run_pages = {}
-    if attribution_context is None:
+    if attribution_context is None and not dry_run:
         from athenaeum import pii_attribution
 
         attribution_context = pii_attribution.build_attribution_context(
@@ -2083,7 +2094,11 @@ def process_batch_file(
                 config=config,
                 dry_run=dry_run,
                 dry_run_pages=dry_run_pages,
-                attribution_context=attribution_context,
+                # Never under dry_run, even when a caller shared a
+                # pre-built context across several batch files (Seer
+                # finding, athenaeum#2210 PR review): calling the seam at
+                # all appends a log row, and dry_run must write nothing.
+                attribution_context=attribution_context if not dry_run else None,
             )
         )
 
