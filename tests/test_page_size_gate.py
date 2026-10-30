@@ -41,6 +41,7 @@ from unittest.mock import MagicMock
 import pytest
 import yaml
 
+from athenaeum import pii
 from athenaeum import rules as rules_module
 from athenaeum import tiers as tiers_module
 from athenaeum.answers import ingest_answers
@@ -1138,6 +1139,86 @@ class TestLogDemoteRetiredNameGuard:
         assert results[0].demoted is True
         payload = yaml.safe_load((wiki / "_retired_names.yaml").read_text())
         assert payload["retired"][0]["name"] == name
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#2217: log_demote settles the moved page's contact record,
+# only after the move itself succeeded.
+# ---------------------------------------------------------------------------
+
+
+class TestOversizeLogDemoteContactRecordSettle:
+    """``_perform_oversize_log_demote`` calls the page-removal settle helper
+    with no successor, strictly in the post-success branch -- the exact
+    branch :class:`TestLogDemoteRetiredNameGuard` above already pins for the
+    retired-name record, reused here (issue athenaeum#2217 AC4: a case for
+    the move succeeding, a case for it failing)."""
+
+    def _config(self) -> dict:
+        return {
+            "librarian": {"preserved_log_dir": "logs"},
+            "storage": {"mapping": {"pii": "excluded"}},
+        }
+
+    def _contact_record(self, knowledge_root: Path, uid: str) -> Path:
+        root = pii.contacts_surface_root(knowledge_root, self._config())
+        root.mkdir(parents=True, exist_ok=True)
+        record = root / f"{uid}.md"
+        record.write_text(
+            f"---\nuid: {uid}\npii: true\nemails:\n  - 'a@example.org'\n---\nSynthetic.\n",
+            encoding="utf-8",
+        )
+        return record
+
+    def test_move_success_settles_the_contact_record(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        target, _meta, _body = _make_flat_fixture_page(wiki)
+        record = self._contact_record(tmp_path, "cccc3333")
+
+        results = demote_oversize_pages([target], wiki, self._config())
+
+        assert results[0].demoted is True
+        assert not record.exists()
+        assert pii.resolve_contact_record_for_uid(record.parent, "cccc3333") is None
+
+    def test_uid_without_a_name_still_settles_the_contact_record(
+        self, tmp_path: Path
+    ) -> None:
+        """A page carrying a uid but NO ``name`` still MOVED, so its contact
+        record is just as orphaned — even though the retired-name record is
+        correctly skipped for it (there is no name to guard against re-mint).
+        The settle must not ride on that early return."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        body = "Detailed log content, one long undifferentiated stream. " * 300
+        target = wiki / "cccc3333-huge-log.md"
+        target.write_text("---\nuid: cccc3333\ntype: session\n---\n\n" + body)
+        record = self._contact_record(tmp_path, "cccc3333")
+
+        results = demote_oversize_pages([target], wiki, self._config())
+
+        assert results[0].demoted is True
+        assert not record.exists()
+        assert pii.resolve_contact_record_for_uid(record.parent, "cccc3333") is None
+
+    def test_move_failure_leaves_the_contact_record_untouched(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        target, _meta, _body = _make_flat_fixture_page(wiki)
+        record = self._contact_record(tmp_path, "cccc3333")
+
+        def _flaky_move(*_a: object, **_kw: object) -> None:
+            raise OSError("simulated move failure")
+
+        monkeypatch.setattr(rules_module.shutil, "move", _flaky_move)
+
+        results = demote_oversize_pages([target], wiki, self._config())
+
+        assert results[0].demoted is False
+        assert record.exists()
 
 
 # ---------------------------------------------------------------------------

@@ -89,10 +89,12 @@ def add_repair_subparser(subparsers: argparse._SubParsersAction) -> None:
         help="Fold contact records left behind by earlier merges onto the "
         "canonical uid's record, and retire slug-only duplicate copies of a "
         "uid's record (issue athenaeum#2184). A copy holding values or facts "
-        "the uid-named copy lacks is folded onto it first. Counts only. "
-        "Duplicates whose names or per-address validity differ, and page-less "
-        "uids with no merge record, are reported, never touched. Not included "
-        "in --all.",
+        "the uid-named copy lacks is folded onto it first. Counts (and, for "
+        "page-less uids, bare uids) only. Duplicates whose names or "
+        "per-address validity differ are reported, never touched. Page-less "
+        "uids with no merge record are reported, and retired only with "
+        "--retire-pageless --apply (issue athenaeum#2217). Not included in "
+        "--all.",
     )
     repair_mode.add_argument(
         "--all",
@@ -103,6 +105,15 @@ def add_repair_subparser(subparsers: argparse._SubParsersAction) -> None:
         "--apply",
         action="store_true",
         help="Write fixes. Without this flag, the command is a dry-run.",
+    )
+    repair_parser.add_argument(
+        "--retire-pageless",
+        action="store_true",
+        help="--contact-records --apply only: retire every page-less uid "
+        "(a live contact record whose uid has no live page and no merge "
+        "record) through the same fold-or-retire helper a page removal "
+        "uses, with no successor (issue athenaeum#2217). Ignored without "
+        "--contact-records --apply; dry-run still only reports them.",
     )
     repair_parser.add_argument(
         "--wiki-root",
@@ -384,9 +395,12 @@ def _cmd_repair_bounce_fold(args: argparse.Namespace) -> int:
 def _cmd_repair_contact_records(args: argparse.Namespace) -> int:
     """Run the absorbed-uid / duplicate contact-record repair (issue athenaeum#2184).
 
-    Prints counts only — never a filename, uid or value, because contact
-    record filenames carry person slugs. Never rebuilds the recall index: the
-    excluded surface is not in it.
+    Prints counts only — never a filename or a value, because contact
+    record filenames carry person slugs. The one exception (issue
+    athenaeum#2217): page-less uids are ALSO listed by bare uid, since an
+    operator deciding whether to pass ``--retire-pageless`` needs to know
+    which uids that would touch, and a bare uid carries no person slug.
+    Never rebuilds the recall index: the excluded surface is not in it.
 
     Exit codes (same contract as the other repair modes):
         0 — nothing actionable, OR ``--apply`` succeeded with no errors.
@@ -441,10 +455,18 @@ def _cmd_repair_contact_records(args: argparse.Namespace) -> int:
         print(f"=== repair contact-records ({mode}) ===")
         for key, value in plan.counts().items():
             print(f"  {key}: {value}")
+        if plan.pageless_records:
+            print("  PAGELESS UIDS (no live page, no merge record):")
+            for uid, _paths in plan.pageless_records[:20]:
+                print(f"    {uid}")
+            if len(plan.pageless_records) > 20:
+                print(f"    ... and {len(plan.pageless_records) - 20} more")
         if not args.apply:
             return 2 if plan.actionable else 0
 
-        result = apply_contact_record_repair(plan, contacts_root)
+        result = apply_contact_record_repair(
+            plan, contacts_root, retire_pageless=getattr(args, "retire_pageless", False)
+        )
         print(f"  duplicates_retired: {result.duplicates_retired}")
         print(f"  divergent_duplicates_folded: {result.duplicates_folded.copies_folded}")
         print(f"  divergent_values_added: {sum(result.duplicates_folded.values_added.values())}")
@@ -457,6 +479,7 @@ def _cmd_repair_contact_records(args: argparse.Namespace) -> int:
         print(f"  absorbed_values_added: {result.fold.values_added_total}")
         print(f"  canonical_records_minted: {result.fold.canonical_records_minted}")
         print(f"  orphan_fact_entries_pruned: {result.orphan_fact_entries_pruned}")
+        print(f"  pageless_retired: {result.pageless_retired.records_retired}")
         print(f"  errors: {len(result.errors)}")
         for err in result.errors[:20]:
             print(f"  ERR {err}", file=sys.stderr)

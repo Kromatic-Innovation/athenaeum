@@ -4482,18 +4482,19 @@ def _retired_path_for(record_path: Path) -> Path:
 
 @dataclass(frozen=True)
 class RecordRetirement:
-    """One retired record: where it was, where it now is, and whose record absorbed it."""
+    """One retired record: where it was, where it now is, and whose record
+    absorbed it — ``None`` when it was not folded into anything."""
 
     record: Path
     retired_as: Path
-    folded_into: str
+    folded_into: str | None
 
 
 def retire_contact_record(
     contacts_root: Path,
     record_path: Path,
     *,
-    folded_into: str,
+    folded_into: str | None,
     reason: str,
     canonical_record: Path | None = None,
     at: str | None = None,
@@ -4502,12 +4503,24 @@ def retire_contact_record(
 
     The record is renamed to ``<name>.md`` + :data:`RETIRED_RECORD_SUFFIX` in
     the same directory (``os.replace``, so its mode and bytes carry over), then
-    stamped with :data:`FOLDED_INTO_FIELD`, :data:`RETIRED_AT_FIELD` and
-    :data:`RETIRED_REASON_FIELD`, then logged to
+    stamped with :data:`RETIRED_AT_FIELD` and :data:`RETIRED_REASON_FIELD`
+    (plus :data:`FOLDED_INTO_FIELD` — see below), then logged to
     :data:`RECORD_RETIREMENT_LOG_FILENAME` with both paths, the uid, the
     canonical uid and a content hash. Nothing is deleted. Reversing it is a
-    rename back plus removing the three stamped keys; the ledger row says which
+    rename back plus removing the stamped keys; the ledger row says which
     file to rename.
+
+    *folded_into* accepts ``None``: that means this record was retired on its
+    own, not folded into a successor's (issue athenaeum#2217 — a page-removal
+    with no merge target). It stays a REQUIRED keyword with no default even
+    so — every caller must state which of the two it means, because silently
+    defaulting to ``None`` would let a future fold caller that forgot the
+    argument retire a record as unabsorbed and lose the successor link.
+    In the ``None`` case :data:`FOLDED_INTO_FIELD` is NOT
+    stamped on the record at all, and the ledger row's ``"folded_into"`` is
+    JSON ``null`` — never a sentinel string, which would read back as a real
+    uid. Reversing a ``None``-folded retirement is the same rename-back; there
+    is simply no ``folded_into`` key to remove.
 
     The ledger row carries paths relative to *contacts_root* and no value.
     Raises on a failure — the caller decides whether that fails its operation.
@@ -4520,7 +4533,8 @@ def retire_contact_record(
     target = _retired_path_for(src)
     os.replace(src, target)
     stamped = dict(meta)
-    stamped[FOLDED_INTO_FIELD] = str(folded_into)
+    if folded_into is not None:
+        stamped[FOLDED_INTO_FIELD] = str(folded_into)
     stamped[RETIRED_AT_FIELD] = when
     stamped[RETIRED_REASON_FIELD] = reason
     new_text = render_frontmatter(stamped) + "\n" + body
@@ -4542,7 +4556,7 @@ def retire_contact_record(
         "record": _rel(src),
         "retired_as": _rel(target),
         "uid": str(meta.get("uid", "") or "").strip(),
-        "folded_into": str(folded_into),
+        "folded_into": str(folded_into) if folded_into is not None else None,
         "canonical_record": _rel(canonical_record),
         "sha256": hashlib.sha256(new_text.encode("utf-8")).hexdigest(),
     }
@@ -4550,7 +4564,11 @@ def retire_contact_record(
         default_record_retirement_log_path(root),
         json.dumps(row, separators=(",", ":")) + "\n",
     )
-    return RecordRetirement(record=src, retired_as=target, folded_into=str(folded_into))
+    return RecordRetirement(
+        record=src,
+        retired_as=target,
+        folded_into=str(folded_into) if folded_into is not None else None,
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -438,3 +438,75 @@ class TestIndexRebuildFailureAborts:
         # No archive commit landed, so the page is still reachable from HEAD.
         recovered = _git(wiki_repo, "show", "HEAD:wiki/aaaa1111-alpha.md")
         assert "Alpha content, a dud template restatement." in recovered.stdout
+
+
+class TestContactRecordSettle:
+    """Issue athenaeum#2217 (AC2): ``apply_retirement`` settles every
+    retired uid's contact records — folded when the retirement records a
+    successor, retired outright otherwise."""
+
+    def _write_storage_config(self, knowledge_root: Path) -> None:
+        (knowledge_root / "athenaeum.yaml").write_text(
+            "storage:\n  mapping:\n    pii: excluded\n", encoding="utf-8"
+        )
+
+    def _contacts_root(self, knowledge_root: Path) -> Path:
+        from athenaeum import pii
+
+        return pii.contacts_surface_root(
+            knowledge_root, {"storage": {"mapping": {"pii": "excluded"}}}
+        )
+
+    def _contact_record(self, root: Path, filename: str, uid: str, email: str) -> Path:
+        root.mkdir(parents=True, exist_ok=True)
+        path = root / filename
+        path.write_text(
+            f"---\nuid: {uid}\npii: true\nemails:\n  - '{email}'\n---\nSynthetic.\n",
+            encoding="utf-8",
+        )
+        return path
+
+    def test_retired_page_leaves_no_live_contact_record(self, wiki_repo: Path) -> None:
+        from athenaeum import pii
+
+        self._write_storage_config(wiki_repo)
+        root = self._contacts_root(wiki_repo)
+        record = self._contact_record(root, "aaaa1111.md", "aaaa1111", "a@example.org")
+
+        candidates, errors = resolve_uids(wiki_repo / "wiki", ["aaaa1111"])
+        assert errors == []
+
+        report = apply_retirement(wiki_repo, candidates, reason="dud template page")
+
+        assert report.committed is True
+        assert not report.errors
+        assert not record.exists()
+        assert pii.resolve_contact_record_for_uid(root, "aaaa1111") is None
+
+    def test_successor_uid_folds_instead_of_retiring_outright(self, wiki_repo: Path) -> None:
+        from athenaeum.models import parse_frontmatter
+        from athenaeum.retire_pages import RetireCandidate
+
+        self._write_storage_config(wiki_repo)
+        root = self._contacts_root(wiki_repo)
+        absorbed = self._contact_record(root, "aaaa1111.md", "aaaa1111", "a@example.org")
+        canon = self._contact_record(root, "bbbb2222.md", "bbbb2222", "b@example.org")
+
+        # Not something `resolve_uids` can build today (it has no merge-target
+        # knowledge — see `RetireCandidate.successor_uid`'s docstring) — a
+        # caller that DOES know one constructs it directly.
+        candidates = [
+            RetireCandidate(
+                uid="aaaa1111",
+                path=wiki_repo / "wiki" / "aaaa1111-alpha.md",
+                successor_uid="bbbb2222",
+            )
+        ]
+
+        report = apply_retirement(wiki_repo, candidates, reason="merged into beta")
+
+        assert report.committed is True
+        assert not report.errors
+        assert not absorbed.exists()
+        meta, _ = parse_frontmatter(canon.read_text(encoding="utf-8"))
+        assert meta["emails"] == ["b@example.org", "a@example.org"]

@@ -45,7 +45,12 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
+from athenaeum.contact_record_fold import (
+    REASON_PAGE_REMOVED,
+    settle_removed_uid_records_after_removal,
+)
 from athenaeum.decay_sweep import _git, archive_via_two_commit_git_rm
 from athenaeum.librarian import rebuild_index
 from athenaeum.models import parse_frontmatter
@@ -59,10 +64,21 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class RetireCandidate:
-    """One uid resolved to exactly one wiki page."""
+    """One uid resolved to exactly one wiki page.
+
+    ``successor_uid`` (issue athenaeum#2217): the uid a merge target this
+    retirement recorded, when it recorded one. No current constructor of
+    this class actually populates it — ``resolve_uids`` below builds
+    candidates from a bare uid list with no merge-target knowledge — so the
+    no-successor branch of the contact-record settle is what runs today.
+    The field exists so a caller that DOES know a merge target (a future
+    retirement flow backed by a recorded merge) can thread one through
+    without a second code path.
+    """
 
     uid: str
     path: Path
+    successor_uid: str | None = None
 
 
 @dataclass
@@ -173,6 +189,7 @@ def apply_retirement(
     candidates: list[RetireCandidate],
     *,
     reason: str,
+    config: dict[str, Any] | None = None,
 ) -> RetireReport:
     """Retire *candidates* via the shared two-commit git-archive mechanics.
 
@@ -275,4 +292,20 @@ def apply_retirement(
             "retire-pages: retired %d page(s); committed",
             len(rel_paths),
         )
+        # Issue athenaeum#2217: a retired page's contact record used to stay
+        # live on the excluded surface with nobody pointing at it. Settle
+        # every retired candidate's uid now that its page is actually gone —
+        # only `pairs` (the candidates included in the commit above), never
+        # the full `candidates` list, which may hold ones filtered out
+        # earlier (outside knowledge_root). The successor is whatever this
+        # retirement recorded (see `RetireCandidate.successor_uid`'s
+        # docstring for today's honest limit), `None` otherwise.
+        for cand, _rel in pairs:
+            settle_removed_uid_records_after_removal(
+                knowledge_root,
+                cand.uid,
+                successor_uid=cand.successor_uid,
+                reason=REASON_PAGE_REMOVED,
+                config=config,
+            )
     return report

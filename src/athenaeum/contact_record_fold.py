@@ -36,6 +36,23 @@ This module holds the fold primitive and the merge hook; the repair reuses it:
    Records whose uid has no page and no merge record are reported, never
    touched. Everything is counts only.
 
+3. **The page-removal settle** — :func:`settle_removed_uid_records` and its
+   best-effort wrapper :func:`settle_removed_uid_records_after_removal`
+   (issue athenaeum#2217). Removing a wiki page used to leave its contact
+   record live on the excluded surface with nobody pointing at it: the
+   merge paths above fold an ABSORBED uid's record, but a page can also go
+   away with no absorption at all — a retirement
+   (:mod:`athenaeum.retire_pages`), a decay sweep
+   (:mod:`athenaeum.decay_sweep`), or an oversize page moved into the
+   preserved-log area (:mod:`athenaeum.tiers`). Such a record keeps
+   inflating the shared-address count and makes the ownership guard decline
+   correct writes. The three removal paths call the wrapper as a one-liner
+   right after their own removal succeeds: with a successor uid (a
+   retirement that recorded a merge target) each record is folded exactly
+   as in (1); with none, each record is retired outright through
+   :func:`athenaeum.pii.retire_contact_record` with no ``folded_into`` —
+   genuinely not folded into anything, never a sentinel string.
+
 Why not the corrections applier itself: ``process_correction_record`` is gated
 by the deployment's ``librarian.corrections.fields`` allowlist, which is empty
 by default, and it resolves a uid's record first-match-wins — so on a store
@@ -88,6 +105,11 @@ REASON_DUPLICATE = "duplicate-record"
 #: A divergent duplicate copy whose extra values were folded onto the
 #: ``<uid>``-named record before it was retired.
 REASON_DUPLICATE_FOLD = "duplicate-fold"
+#: A record settled (folded or retired) because its own wiki page was
+#: removed — a retirement, a decay sweep, or an oversize log-demote (issue
+#: athenaeum#2217). Used uniformly by :func:`settle_removed_uid_records`
+#: regardless of which branch it takes.
+REASON_PAGE_REMOVED = "page-removed"
 
 
 # ---------------------------------------------------------------------------
@@ -706,5 +728,161 @@ def fold_contact_records_after_merge(
             summary.records_folded,
             summary.values_added_total,
             summary.records_folded,
+        )
+    return summary
+
+
+# ---------------------------------------------------------------------------
+# Page removal: fold or retire a removed uid's records (issue athenaeum#2217)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SettleSummary:
+    """Counts from settling one removed uid's records. Never carries a value.
+
+    ``records_folded``/``values_added``/``facts_carried``/
+    ``canonical_records_minted`` mirror :class:`ContactFoldSummary` exactly
+    (the successor branch delegates to :func:`fold_contact_record`);
+    ``records_retired`` counts the no-successor branch, which retires
+    outright rather than folding.
+    """
+
+    records_folded: int = 0
+    records_retired: int = 0
+    values_added: dict[str, int] = field(default_factory=dict)
+    facts_carried: int = 0
+    canonical_records_minted: int = 0
+    errors: list[str] = field(default_factory=list)
+
+    def add(self, other: SettleSummary) -> None:
+        self.records_folded += other.records_folded
+        self.records_retired += other.records_retired
+        for key, count in other.values_added.items():
+            self.values_added[key] = self.values_added.get(key, 0) + count
+        self.facts_carried += other.facts_carried
+        self.canonical_records_minted += other.canonical_records_minted
+        self.errors.extend(other.errors)
+
+
+def settle_removed_uid_records(
+    contacts_root: Path,
+    uid: str,
+    *,
+    successor_uid: str | None,
+    reason: str,
+    index: pii.ExcludedRecordIndex,
+    dry_run: bool = False,
+) -> SettleSummary:
+    """Fold or retire every record *uid* left behind once its page is gone.
+
+    *uid*'s page has already been removed (a retirement, a decay sweep, an
+    oversize log-demote) — this never touches wiki pages, only the excluded
+    contacts surface. A uid with no records on *index* is a no-op, returning
+    a zero summary.
+
+    With *successor_uid* given, each of *uid*'s records is folded onto the
+    successor's record through :func:`fold_contact_record` (the same
+    primitive the merge hook uses) — the retirement recorded a merge target,
+    so the departing uid's values genuinely belong to a live entity. With
+    *successor_uid* ``None``, each record is retired outright through
+    :func:`athenaeum.pii.retire_contact_record` with no ``folded_into``: the
+    uid was not absorbed by anything, it simply has no page anymore.
+
+    One record's failure is reported in ``errors`` and does not stop the
+    rest, mirroring :func:`fold_absorbed_contact_records`.
+    """
+    summary = SettleSummary()
+    root = Path(contacts_root)
+    wanted = str(uid or "").strip()
+    if not wanted:
+        return summary
+    paths = [p for p in index.all_by_uid(wanted) if p.exists()]
+    if not paths:
+        return summary
+    successor = str(successor_uid or "").strip() or None
+    for path in paths:
+        try:
+            if successor is not None:
+                fold_summary = fold_contact_record(
+                    root,
+                    path,
+                    canonical_uid=successor,
+                    index=index,
+                    reason=reason,
+                    dry_run=dry_run,
+                )
+                summary.records_folded += fold_summary.records_folded
+                for key, count in fold_summary.values_added.items():
+                    summary.values_added[key] = summary.values_added.get(key, 0) + count
+                summary.facts_carried += fold_summary.facts_carried
+                summary.canonical_records_minted += fold_summary.canonical_records_minted
+                summary.errors.extend(fold_summary.errors)
+            else:
+                summary.records_retired += 1
+                if not dry_run:
+                    pii.retire_contact_record(root, path, folded_into=None, reason=reason)
+        except (OSError, UnicodeDecodeError, ValueError) as exc:
+            summary.errors.append(f"{type(exc).__name__} settling a removed uid's record")
+            log.warning(
+                "contact-record settle failed for one record of a removed uid (%s): %s",
+                type(exc).__name__,
+                exc,
+            )
+    return summary
+
+
+def settle_removed_uid_records_after_removal(
+    knowledge_root: Path,
+    uid: str,
+    *,
+    successor_uid: str | None,
+    reason: str,
+    config: dict[str, Any] | None = None,
+    dry_run: bool = False,
+) -> SettleSummary:
+    """Best-effort wrapper the page-removal paths call: resolve the surface,
+    settle, never raise.
+
+    Mirrors :func:`fold_contact_records_after_merge`'s shape exactly: resolves
+    the contacts surface through :func:`resolve_contacts_root` (loading the
+    knowledge root's config when *config* is ``None``), so none of
+    :mod:`athenaeum.retire_pages`, :mod:`athenaeum.decay_sweep`, or
+    :mod:`athenaeum.tiers` hand-crafts a surface path, and a deployment that
+    has not mapped ``pii`` to an excluded surface is a no-op. A failure is
+    logged and returned in ``errors``; it never fails the removal this was
+    called after, which has already happened.
+    """
+    wanted = str(uid or "").strip()
+    if not wanted:
+        return SettleSummary()
+    try:
+        if config is None:
+            from athenaeum.config import load_config
+
+            config = load_config(knowledge_root)
+        root = resolve_contacts_root(Path(knowledge_root), config)
+        if root is None:
+            return SettleSummary()
+        summary = settle_removed_uid_records(
+            root,
+            wanted,
+            successor_uid=successor_uid,
+            reason=reason,
+            index=pii.ExcludedRecordIndex(root),
+            dry_run=dry_run,
+        )
+    except Exception as exc:  # noqa: BLE001 — must never fail the removal
+        log.warning(
+            "contact-record settle after page removal skipped (%s): %s",
+            type(exc).__name__,
+            exc,
+        )
+        summary = SettleSummary(errors=[f"{type(exc).__name__}: contact-record settle skipped"])
+    if summary.records_folded or summary.records_retired:
+        log.info(
+            "contact-record settle: %d record(s) folded, %d retired after page removal",
+            summary.records_folded,
+            summary.records_retired,
         )
     return summary

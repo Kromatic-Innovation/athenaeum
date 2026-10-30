@@ -89,7 +89,11 @@ from pathlib import Path
 from typing import Any
 
 from athenaeum.config import resolve_cache_dir
-from athenaeum.models import parse_bucket, parse_frontmatter, valid_until_expired
+from athenaeum.contact_record_fold import (
+    REASON_PAGE_REMOVED,
+    settle_removed_uid_records_after_removal,
+)
+from athenaeum.models import EntityIndex, parse_bucket, parse_frontmatter, valid_until_expired
 from athenaeum.store import append_line_durable, now_iso
 
 log = logging.getLogger(__name__)
@@ -730,6 +734,12 @@ def apply_sweep(
 
     kr = knowledge_root.resolve()
     pairs: list[tuple[SweepCandidate, str]] = []
+    # Issue athenaeum#2217: a swept page's uid must be read from its OWN
+    # frontmatter BEFORE it is removed — it is gone afterwards, and
+    # `SweepCandidate` carries no uid of its own (only `path`). The same
+    # per-page rule `EntityIndex` itself uses, never inferred from a
+    # filename.
+    uid_by_path: dict[Path, str] = {}
     for cand in report.kill:
         try:
             rel = str(cand.path.resolve().relative_to(kr))
@@ -739,6 +749,11 @@ def apply_sweep(
             )
             continue
         pairs.append((cand, rel))
+        parsed = EntityIndex.read_page_record(cand.path)
+        if parsed is not None:
+            uid = str(parsed[0].uid or "").strip()
+            if uid:
+                uid_by_path[cand.path] = uid
     if not pairs:
         return report
     rel_paths = [rel for _, rel in pairs]
@@ -792,4 +807,18 @@ def apply_sweep(
             "decay-sweep: git-archived %d expired daily-bucket page(s); committed",
             len(rel_paths),
         )
+        # Issue athenaeum#2217: settle each swept page's contact record now
+        # that it is actually gone, using the uid captured before removal
+        # above. A decay-sweep removal records no merge target, so there is
+        # never a successor.
+        for cand, _rel in pairs:
+            swept_uid = uid_by_path.get(cand.path)
+            if swept_uid:
+                settle_removed_uid_records_after_removal(
+                    knowledge_root,
+                    swept_uid,
+                    successor_uid=None,
+                    reason=REASON_PAGE_REMOVED,
+                    config=config,
+                )
     return report

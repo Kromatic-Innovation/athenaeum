@@ -39,8 +39,10 @@ from athenaeum import pii
 from athenaeum.atomic_io import atomic_write_text
 from athenaeum.contact_record_fold import (
     REASON_DUPLICATE,
+    REASON_PAGE_REMOVED,
     ContactFoldSummary,
     DuplicateFoldSummary,
+    SettleSummary,
     duplicate_needs_review,
     fold_absorbed_contact_records,
     fold_duplicate_record,
@@ -51,6 +53,7 @@ from athenaeum.contact_record_fold import (
     orphaned_fact_entries,
     preferred_record,
     prune_orphan_fact_entries,
+    settle_removed_uid_records,
     uid_prefixed,
 )
 from athenaeum.models import (
@@ -215,6 +218,12 @@ class ContactRepairPlan:
     orphan_ambiguous: int = 0
     orphan_canonical_not_live: int = 0
     pageless_unmapped: int = 0
+    #: Issue athenaeum#2217 — the same population as ``pageless_unmapped``,
+    #: but with the uid and every record path kept so ``--retire-pageless``
+    #: can act on it without a second scan. Kept for apply, never printed in
+    #: full — same discipline every other path list on this dataclass
+    #: already follows (only the bare uids are surfaced, in the CLI).
+    pageless_records: list[tuple[str, list[Path]]] = field(default_factory=list)
     duplicate_retire: list[tuple[str, Path, Path]] = field(default_factory=list)
     #: Divergent pairs folded onto the ``<uid>``-named copy, then retired.
     duplicate_fold: list[tuple[str, Path, Path]] = field(default_factory=list)
@@ -254,6 +263,10 @@ class ContactRepairPlan:
             "absorbed_ambiguous_canonical": self.orphan_ambiguous,
             "absorbed_canonical_unresolved": self.orphan_canonical_not_live,
             "pageless_no_merge_record": self.pageless_unmapped,
+            # Issue athenaeum#2217: new name for the same count. The old key
+            # stays, as an alias, so an existing reader is never silently
+            # broken by the rename.
+            "pageless_records": self.pageless_unmapped,
             "duplicate_copies_to_retire": len(self.duplicate_retire),
             "duplicate_divergent_to_fold": len(self.duplicate_fold),
             "duplicate_divergent_values_to_add": self.duplicate_fold_values_to_add,
@@ -298,6 +311,7 @@ def plan_contact_record_repair(knowledge_root: Path, contacts_root: Path) -> Con
             continue
         if not _has_absorption_record(uid, facts):
             plan.pageless_unmapped += 1
+            plan.pageless_records.append((uid, list(paths)))
             continue
         ends = _live_ends(uid, facts)
         if len(ends) == 1:
@@ -364,13 +378,30 @@ class ContactRepairResult:
     #: records (never counts an entry on a record that was itself retired
     #: by one of the actions above — nothing to prune there).
     orphan_fact_entries_pruned: int = 0
+    #: Issue athenaeum#2217 — page-less records retired through
+    #: :func:`athenaeum.contact_record_fold.settle_removed_uid_records`,
+    #: only when ``--retire-pageless`` asked for it. Zero summary when it
+    #: did not.
+    pageless_retired: SettleSummary = field(default_factory=SettleSummary)
     errors: list[str] = field(default_factory=list)
 
 
 def apply_contact_record_repair(
-    plan: ContactRepairPlan, contacts_root: Path
+    plan: ContactRepairPlan,
+    contacts_root: Path,
+    *,
+    retire_pageless: bool = False,
 ) -> ContactRepairResult:
-    """Act on *plan*: retire subset duplicates, fold divergent ones, then fold absorbed uids."""
+    """Act on *plan*: retire subset duplicates, fold divergent ones, then fold absorbed uids.
+
+    *retire_pageless* (issue athenaeum#2217): when true, every uid in
+    ``plan.pageless_records`` — a live page nowhere, and no merge record
+    either — is retired through
+    :func:`athenaeum.contact_record_fold.settle_removed_uid_records` with no
+    successor (there is no merge target to fold onto; a page-less uid was
+    never absorbed). Defaults to ``False`` so dry-run-equivalent callers that
+    only want the fold/duplicate passes keep their existing behavior.
+    """
     result = ContactRepairResult()
     root = Path(contacts_root)
     for uid, copy, keep in plan.duplicate_retire:
@@ -402,6 +433,19 @@ def apply_contact_record_repair(
         index=index,
     )
     result.errors.extend(result.fold.errors)
+
+    if retire_pageless:
+        for uid, _paths in plan.pageless_records:
+            result.pageless_retired.add(
+                settle_removed_uid_records(
+                    root,
+                    uid,
+                    successor_uid=None,
+                    reason=REASON_PAGE_REMOVED,
+                    index=index,
+                )
+            )
+        result.errors.extend(result.pageless_retired.errors)
 
     # Issue athenaeum#2196 (AC4): prune orphan fact entries LAST, re-checking
     # each path fresh rather than trusting the plan's pre-action snapshot —
