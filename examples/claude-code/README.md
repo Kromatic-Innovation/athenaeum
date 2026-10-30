@@ -66,7 +66,10 @@ timer, or at session end. See "Compile raw → wiki" below.
    ```json
    {
      "mcpServers": {
-       "athenaeum": { "command": "athenaeum", "args": ["serve"] }
+       "athenaeum": {
+         "command": "/path/to/venv/bin/athenaeum",
+         "args": ["serve", "--path", "/absolute/path/to/knowledge"]
+       }
      }
    }
    ```
@@ -119,8 +122,8 @@ pages or the index hasn't been built — check `~/.cache/athenaeum/`.
 | `ATHENAEUM_CLI`          | `athenaeum`                       | CLI binary (override for editable installs)                    |
 | `ATHENAEUM_PYTHON`       | `python3`                         | Python interpreter with athenaeum deps                         |
 | `ATHENAEUM_SRC`          | —                                 | Source checkout path (skips `pip install`, runs from source)   |
-| `ATHENAEUM_OP_KEY_PATH`  | `op://Agent Tools/Anthropic API Key/credential` | 1Password secret reference for `ANTHROPIC_API_KEY` |
-| `ATHENAEUM_OP_JEV_KEY_PATH` | `op://Agent Tools/Jev Athenaeum Key/credential` | 1Password secret reference for `JEV_API_KEY` |
+| `ATHENAEUM_OP_KEY_PATH`  | `op://Agent Tools/Anthropic API Key/credential` | 1Password item for `ANTHROPIC_API_KEY`, used only if you opt into the `op` fetch (see "Supplying an API key") |
+| `ATHENAEUM_OP_JEV_KEY_PATH` | `op://Agent Tools/Jev Athenaeum Key/credential` | 1Password item for `JEV_API_KEY`, used only if you opt into the `op` fetch |
 | `ATHENAEUM_OP_INTERACTIVE` | unset           | Set to `1` to opt into 1Password's interactive desktop-app integration: `op` may then run without `OP_SERVICE_ACCOUNT_TOKEN`, and the non-interactive suppression flags below are NOT set (athenaeum#2193) |
 | `ATHENAEUM_OP_REFRESH`   | unset                              | Set to `1` to re-fetch a credential from `op` even when a cached line already exists (athenaeum#2193) |
 | `ATHENAEUM_OP_TIMEOUT_SECONDS` | `10`                          | Bound, in whole seconds, on a single `op read`; a non-positive-integer value (fractional, non-numeric, empty, or zero) silently falls back to `10` (athenaeum#2193) |
@@ -144,59 +147,188 @@ Removing either backend collapses recall for its rescue class. See
 `docs/design/recall-architecture.md` for the full walkthrough and the four
 invariants a future "simplification" must not remove.
 
-## Supplying an API key (three options)
+## Supplying an API key
 
-The LLM topic extractor (`athenaeum query-topics`) needs a real
-`ANTHROPIC_API_KEY` for the Messages API when using the default Anthropic
-provider — Claude Code's own `CLAUDE_CODE_OAUTH_TOKEN` is rejected with
-`401 OAuth authentication is currently not supported`, so that token can't
-be reused for the general API. The Jev decision provider
-(athenaeum#1997, athenaeum#2054) needs its own key the same way, via
-`JEV_API_KEY`. **Athenaeum works fully with no `op` (1Password CLI)
-installed or signed in at all** — `op` is the LAST of three co-equal
-ways to supply either key, and entirely optional. All three apply to both
-`ANTHROPIC_API_KEY` and `JEV_API_KEY` identically.
+### Which parts of athenaeum need a key
 
-1. **Export it in your environment.** Add `export ANTHROPIC_API_KEY=sk-…`
-   (and/or `export JEV_API_KEY=…`) to your shell rc. `session-start-recall.sh`
-   sees a live, already-exported value and never touches `op` or the cache
-   for that credential at all — see `_had_live_cred` in the script if you
-   want the exact mechanics.
-2. **Write it into `~/.cache/athenaeum/config.env`.** One line,
-   `ANTHROPIC_API_KEY=sk-…` (or `JEV_API_KEY=…`), file mode `600`. The hook
-   preserves a cached line across every run unless a fresh fetch supersedes
-   it (see option 3's `ATHENAEUM_OP_REFRESH`) — no `op`, no network, ever,
-   for a credential supplied this way.
-3. **Let the hook fetch it with `op`.** Opt-in and gated — as of
-   athenaeum#2193, `session-start-recall.sh` calls `op` for a given
-   credential only when ALL of:
-   - `op` is on `PATH`;
-   - `OP_SERVICE_ACCOUNT_TOKEN` is set, **or** you set
-     `ATHENAEUM_OP_INTERACTIVE=1` to opt into 1Password's interactive
-     desktop-app integration instead;
-   - nothing is cached for that credential yet, **or** you set
-     `ATHENAEUM_OP_REFRESH=1` to force a re-fetch over an existing cached
-     line.
+Two optional credentials, handled the same way:
 
-   Every `op` call this hook makes is bounded by
-   `ATHENAEUM_OP_TIMEOUT_SECONDS` (default 10s, whole seconds only -- a
-   fractional, non-numeric, empty, or zero value silently falls back to the
-   default) and runs with
-   `OP_LOAD_DESKTOP_APP_SETTINGS=false` / `OP_BIOMETRIC_UNLOCK_ENABLED=false`
-   set on the `op` subprocess only — unless you opted into
-   `ATHENAEUM_OP_INTERACTIVE=1`, in which case those flags are deliberately
-   NOT set. See "Repeated permission prompts" below for why those flags
-   matter. The fetched value is cached at `~/.cache/athenaeum/config.env`
-   (mode 600, owner-only). Silent on any failure — a missing item, an
-   expired `op` session, or a timeout all just leave whatever was already
-   cached (or live) in place.
+- `ANTHROPIC_API_KEY`, for the default Anthropic provider. Two things use it.
+  The per-turn LLM topic extractor (`query-topics`) uses it, and so does the
+  compile step (`athenaeum run`, `ingest`, `session-end`, `drain`). Claude
+  Code's own `CLAUDE_CODE_OAUTH_TOKEN` cannot stand in for it, because the
+  Messages API rejects it with
+  `401 OAuth authentication is currently not supported`.
+- `JEV_API_KEY`, for the optional Jev decision provider.
 
-Under `llm.provider: claude-cli`, no `ANTHROPIC_API_KEY` is needed at
-all — `query-topics` authenticates via the ambient Claude Code login
-instead, and none of the three options above come into play for that key.
+If you set `llm.provider: claude-cli` in `athenaeum.yaml`, neither the topic
+extractor nor the compile step needs `ANTHROPIC_API_KEY`. Both then use your
+Claude Code login.
 
-Without a key (and outside `llm.provider: claude-cli`), the hook falls
-back to a regex+stopword extractor — still good, just less topic-aware.
+**1Password is not required.** athenaeum works fully with no `op` (the
+1Password CLI) installed. It only ever looks for the key in two places: the
+environment, and the cache file described below. Put it there with whatever
+secret manager you already use (see "Using your own secret manager" below).
+
+### Where the key goes
+
+1. **The environment Claude Code launches with.** Hooks inherit Claude
+   Code's environment. If you start `claude` from a terminal, an
+   `export ANTHROPIC_API_KEY=sk-…` in your shell startup file reaches the
+   hooks. **A GUI-launched app does not read shell startup files**
+   (`~/.zshrc`, `~/.bashrc` and so on), whether you open it from the Dock,
+   Spotlight or an IDE. The export is then invisible to it, so use option 2.
+2. **`~/.cache/athenaeum/config.env`.** Add one line,
+   `ANTHROPIC_API_KEY=sk-…` (or `JEV_API_KEY=…`), and set the file to mode
+   `600`. The SessionStart hook rewrites this file every session. It keeps
+   the last `ANTHROPIC_API_KEY=` and `JEV_API_KEY=` lines and regenerates
+   everything else, so don't keep other settings there. The file is
+   plaintext: mode `600` keeps other users out, but not other processes
+   running as you.
+
+**Order the hooks use.** There is no ranking beyond this:
+
+- a key already exported in the hook's environment wins;
+- otherwise the cached `config.env` line is used;
+- otherwise, and only if you opted into `op` (see below), the hook fetches
+  the key with `op` and caches it.
+
+Neither of the first two ever runs `op`. An exported key is never written
+into `config.env`.
+
+**Who reads `config.env`, and who doesn't.** `config.env` is read by:
+
+- the hooks in this directory;
+- the packaged `athenaeum-claude-hook` adapter;
+- `athenaeum audit`.
+
+In each case a variable that is already set in the process environment wins
+over the file. **`athenaeum run`, `ingest`, `session-end`, `drain` and `serve`
+never read `config.env`.** A compile started from cron, launchd or a terminal
+needs `ANTHROPIC_API_KEY` in its own environment, for example:
+
+- `EnvironmentVariables` in the launchd plist;
+- a line in the crontab;
+- a wrapper script that reads your secret manager.
+
+Alternatively, set `llm.provider: claude-cli`.
+
+### Using your own secret manager
+
+athenaeum doesn't integrate with any secret manager, and doesn't need to.
+Fetch the key once with the tool you already use and write it to
+`config.env`:
+
+```bash
+mkdir -p ~/.cache/athenaeum && chmod 700 ~/.cache/athenaeum
+key="$(security find-generic-password -s anthropic-api-key -a "$USER" -w)"   # replace with your command
+( umask 077; printf 'ANTHROPIC_API_KEY=%s\n' "$key" >> ~/.cache/athenaeum/config.env )
+chmod 600 ~/.cache/athenaeum/config.env
+unset key
+```
+
+The command that fetches the key, by tool. The service, item and account
+names are placeholders; use your own.
+
+| Secret store | Read command |
+|---|---|
+| macOS Keychain | `security find-generic-password -s anthropic-api-key -a "$USER" -w` (store it first with `security add-generic-password -s anthropic-api-key -a "$USER" -w`, which prompts for the value) |
+| Linux Secret Service (GNOME Keyring, KWallet) | `secret-tool lookup service anthropic-api-key` |
+| `pass` | `pass show anthropic/api-key` |
+| Bitwarden | `bw get password "Anthropic API Key"` (needs an unlocked `BW_SESSION`) |
+| 1Password | `OP_LOAD_DESKTOP_APP_SETTINGS=false OP_BIOMETRIC_UNLOCK_ENABLED=false op read "op://<vault>/<item>/credential"` |
+
+Notes:
+
+- **Apple's Passwords app has no command-line interface.** It is a front end
+  to the Keychain, but items saved through it are not reliably readable with
+  `security`. Store the API key yourself with `security add-generic-password`
+  as shown above, and read it back with `security find-generic-password`.
+- **A Keychain read can raise its own access prompt** ("security wants to use
+  your confidential information stored in … in your keychain"). That is why
+  the recipe above fetches **once** and caches the key. Don't fetch from the
+  Keychain inside a per-session hook.
+- **When the key changes**, run the recipe again. The last
+  `ANTHROPIC_API_KEY=` line in the file wins.
+
+### Optional: let the hook fetch the key with `op`
+
+`session-start-recall.sh` can fetch a missing credential with `op` itself.
+It does this only when all of the following hold:
+
+- `op` is on `PATH`;
+- `OP_SERVICE_ACCOUNT_TOKEN` is set, **or** you set `ATHENAEUM_OP_INTERACTIVE=1`
+  to use 1Password's interactive desktop-app integration instead;
+- the key is not already exported, and nothing is cached in `config.env` for
+  it. `ATHENAEUM_OP_REFRESH=1` forces a re-fetch over a cached line.
+
+Each `op read` is bounded by `ATHENAEUM_OP_TIMEOUT_SECONDS` (default 10,
+whole seconds only). Unless you set `ATHENAEUM_OP_INTERACTIVE=1`, it runs
+with `OP_LOAD_DESKTOP_APP_SETTINGS=false` and
+`OP_BIOMETRIC_UNLOCK_ENABLED=false`, set on that one subprocess. See
+"Repeated permission prompts" below for why. The fetched value is cached in
+`config.env` (mode 600). Any failure is silent and leaves the existing
+state in place.
+
+The script ships default item paths (`op://Agent Tools/Anthropic API Key/credential`
+and `op://Agent Tools/Jev Athenaeum Key/credential`). They are used only if
+you opt into `op` as described above. Point them at your own items with
+`ATHENAEUM_OP_KEY_PATH` and `ATHENAEUM_OP_JEV_KEY_PATH`. athenaeum#2205
+plans to drop these baked-in paths in favour of a generic credential
+command.
+
+### What happens with no key
+
+With no key, the default provider and no `claude-cli`:
+
+- **Per-turn recall still works, with less topic awareness.** The topic
+  extractor quietly falls back to a regex and stopword extractor. That
+  per-turn fallback logs nothing.
+- **The only warning is printed at session start, and you won't see it.**
+  `session-start-recall.sh` prints
+  `[Knowledge] No ANTHROPIC_API_KEY cached — LLM topic extraction will fall back to regex-only extraction …`
+  to stderr. The shipped `settings-snippet.json` ends every hook command
+  with `2>/dev/null || true`, which throws that line away. Under
+  `llm.provider: claude-cli` the line still prints and can be ignored.
+- **`athenaeum run` refuses to start.** It exits `1` with
+  `ANTHROPIC_API_KEY not set`, unless you pass `--dry-run` or use
+  `llm.provider: claude-cli`.
+
+To check which state you are in:
+
+- run the hook by hand, `bash ~/.claude/hooks/athenaeum/session-start-recall.sh`,
+  and look for the `No ANTHROPIC_API_KEY cached` line;
+- run `grep -c '^ANTHROPIC_API_KEY=.' ~/.cache/athenaeum/config.env`. `0`
+  means nothing is cached.
+
+athenaeum#2204 tracks making this degraded state visible without running
+anything by hand.
+
+### Hook timeouts
+
+The shipped `settings-snippet.json` gives the SessionStart hook a 15-second
+timeout. The header of `session-start-recall.sh` suggests 60 seconds. The
+two disagree. If the hook outlives the timeout, Claude Code stops it.
+
+Worst-case foreground work in that hook:
+
+| Step | When it runs | Cost |
+|---|---|---|
+| Up to two `op read` calls | Only when the `op` gate above opens | Up to 10 s each |
+| FTS5 index build | Every session | About 1 s per ~3,000 pages |
+| Vector index rebuild | When the vector backend is on and the index is older than the newest wiki page | About 45 s on ~3,000 pages |
+
+So a vector rebuild alone can exceed 15 seconds. If the hook is stopped
+before the index is built, the next session pays the same cost again.
+
+What you can do today:
+
+- raise the SessionStart `timeout` in your own settings;
+- wire `rebuild-index.sh` as a `SessionEnd` hook, so the rebuild happens
+  after the session instead of at its start.
+
+athenaeum#2204 tracks budgeting the hook so it finishes inside the host's
+timeout.
 
 ## Auto-memory integration
 
@@ -246,8 +378,9 @@ athenaeum questions list --with-proposal --limit 5  # all unresolved (capped)
 
 ## Repeated permission prompts
 
-A macOS "App Data" (or similar) permission dialog that keeps reappearing
-for `op`, `bash`, `node`, or `python` is almost always `op` itself, not
+A macOS "App Data" permission dialog that keeps reappearing, worded
+**"“op” would like to access data from other apps"** (or the same wording
+naming `bash`, `node`, or `python`), is almost always `op` itself, not
 anything Athenaeum's hooks do directly — this section explains why, how to
 stop it for good, and exactly which recurring paths in this repo were
 checked to confirm that (athenaeum#2193).
@@ -317,22 +450,9 @@ per session once a key is cached or supplied via env/`config.env`; at
 most one prompt per install, and none at all when `op` is unused or the
 suppression flags are in effect.
 
-**Unresolved lead.** A 2026-10-29 05:48 App Data grant recorded for a
-versioned Homebrew `bash` could **not** be attributed from this
-repository — no athenaeum hook invokes `op` outside the gate documented
-above, and attributing a specific historical grant needs the operator's
-local TCC database and the unified log, neither of which this audit (a
-static read of the shipped source) can read. An operator who wants to
-settle it would run:
-
-```bash
-sqlite3 ~/Library/Application\ Support/com.apple.TCC/TCC.db \
-  'select client, auth_value, last_modified from access where service="kTCCServiceSystemPolicyAppData"'
-log show --predicate 'subsystem == "com.apple.TCC"' --start "2026-10-29 05:40:00"
-```
-
-Issue athenaeum#2195 tracks running these and attributing the grant; it is
-satisfied by producing the readings, including a null or unattributable one.
+An App Data grant that could not be attributed to any athenaeum path from
+the shipped source is tracked in athenaeum#2195. It doesn't change any of
+the setup guidance above.
 
 ## Troubleshooting
 

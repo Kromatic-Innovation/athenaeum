@@ -20,7 +20,16 @@ A symptom-first index. Find what you're seeing, then follow the link.
 
 | Symptom | Check |
 |---|---|
-| `401 OAuth authentication is currently not supported` from the Anthropic API | Claude Code's own `CLAUDE_CODE_OAUTH_TOKEN` is scoped to its inference endpoint and is rejected by the Messages API. The pipeline and example hooks need a separate console API key — see the 1Password bootstrap pattern in [Recall architecture](../design/recall-architecture.md#anthropic_api_key-bootstrap-sessionstart). |
+| `401 OAuth authentication is currently not supported` from the Anthropic API | Claude Code's own `CLAUDE_CODE_OAUTH_TOKEN` is scoped to its inference endpoint and is rejected by the Messages API. The pipeline and example hooks need a separate console API key (or `llm.provider: claude-cli`) — see [Supplying an API key](../../examples/claude-code/README.md#supplying-an-api-key). |
+| `athenaeum run` from cron/launchd fails with `ANTHROPIC_API_KEY not set` although the hooks work | `~/.cache/athenaeum/config.env` feeds only the hooks (and `athenaeum audit`); `run` needs the key in its own environment, or `llm.provider: claude-cli`. See [Supplying an API key](../../examples/claude-code/README.md#supplying-an-api-key). |
+| Recall names look generic / topic extraction seems off | With no key, topic extraction silently falls back to a regex extractor, and the one session-start warning is discarded by the snippet's `2>/dev/null`. Run `session-start-recall.sh` by hand and look for `No ANTHROPIC_API_KEY cached`. See [What happens with no key](../../examples/claude-code/README.md#what-happens-with-no-key). |
+
+## Permission prompts (macOS)
+
+| Symptom | Check |
+|---|---|
+| A dialog keeps reappearing: "“op” would like to access data from other apps" (App Data), sometimes naming `bash`, `node`, or `python` | Don't keep approving it — the grant often doesn't stick for CLI binaries. Set `OP_LOAD_DESKTOP_APP_SETTINGS=false` and `OP_BIOMETRIC_UNLOCK_ENABLED=false` wherever `op` runs, or stop using `op` for athenaeum; reset with `tccutil reset SystemPolicyAppData`. Full explanation: [Repeated permission prompts](../../examples/claude-code/README.md#repeated-permission-prompts). |
+| SessionStart hook seems to time out | The snippet's SessionStart timeout is 15 s; a vector-index rebuild alone can take ~45 s. See [Hook timeouts](../../examples/claude-code/README.md#hook-timeouts). |
 
 ## Runs, budgets, and exit codes
 
