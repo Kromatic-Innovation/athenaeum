@@ -176,7 +176,7 @@ def cmd_retire_pages(args: argparse.Namespace) -> int:
     if isinstance(lock, int):
         return lock
     try:
-        report = apply_retirement(knowledge_root, candidates, reason=args.reason)
+        report = apply_retirement(knowledge_root, candidates, reason=args.reason, config=cfg)
         for apply_err in report.errors:
             print(f"  ERR {apply_err}", file=sys.stderr)
         if report.errors:

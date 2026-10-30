@@ -92,6 +92,10 @@ from athenaeum.config import (
     resolve_page_size_threshold_chars,
     resolve_preserved_log_dir,
 )
+from athenaeum.contact_record_fold import (
+    REASON_PAGE_REMOVED,
+    settle_removed_uid_records_after_removal,
+)
 from athenaeum.decision_provider import DecisionBackend
 from athenaeum.entity_resolution import (
     Ambiguous,
@@ -6670,6 +6674,21 @@ def _perform_oversize_log_demote(
             existing_path.name,
             dest,
         )
+
+    # Issue athenaeum#2217: settle this uid's contact record now that its
+    # page has actually moved out of the wiki -- same post-success branch as
+    # the retired-name record above (`dest is None` already returned), so
+    # "the move failed" and "nothing was settled" remain the exact same
+    # branch. A log-demote records no merge target, so there is never a
+    # successor. `uid` was already read from the page's own frontmatter
+    # above -- reused here, not re-read.
+    settle_removed_uid_records_after_removal(
+        knowledge_root,
+        uid,
+        successor_uid=None,
+        reason=REASON_PAGE_REMOVED,
+        config=config,
+    )
     return dest
 
 

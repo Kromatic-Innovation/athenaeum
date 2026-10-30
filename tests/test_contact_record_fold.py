@@ -34,10 +34,13 @@ import pytest
 from athenaeum import pii
 from athenaeum.contact_record_fold import (
     FOLD_SOURCE,
+    REASON_PAGE_REMOVED,
+    SettleSummary,
     fold_absorbed_contact_records,
     holds_nothing_more,
     merge_contact_values,
     merge_duplicate_record,
+    settle_removed_uid_records,
 )
 from athenaeum.contact_record_repair import (
     apply_contact_record_repair,
@@ -1173,6 +1176,126 @@ class TestRetirement:
         assert pii.resolve_contact_record_for_uid(root, ABSORBED) is None
         assert pii.resolve_contact_record(root, "c@example.org") is None
 
+    def test_folded_into_none_stamps_nothing_and_ledger_is_null(self, tmp_path: Path) -> None:
+        """Issue athenaeum#2217: a page-removal retirement with no successor
+        never stamps ``FOLDED_INTO_FIELD`` and never invents a sentinel —
+        the ledger row's ``folded_into`` is JSON ``null``."""
+        root = tmp_path / "excluded"
+        record = _record(root, "lonely.md", OTHER, emails=["l@example.org"])
+        original = _meta(record)
+
+        retirement = pii.retire_contact_record(
+            root, record, folded_into=None, reason=REASON_PAGE_REMOVED
+        )
+
+        assert retirement.folded_into is None
+        retired = retirement.retired_as
+        assert retired == _retired(record)
+        meta = _meta(retired)
+        assert FOLDED_INTO_FIELD not in meta
+        assert meta["emails"] == ["l@example.org"]
+        row = _ledger(root)[0]
+        assert row["folded_into"] is None
+        assert row["reason"] == REASON_PAGE_REMOVED
+        # Reversal: rename back, drop the two stamped keys (no
+        # FOLDED_INTO_FIELD was ever written, so there is nothing extra to
+        # remove on this shape).
+        retired.rename(record)
+        restored = {
+            k: v
+            for k, v in _meta(record).items()
+            if k not in (pii.RETIRED_AT_FIELD, pii.RETIRED_REASON_FIELD)
+        }
+        assert restored == original
+
+
+# ---------------------------------------------------------------------------
+# Page removal: settle_removed_uid_records (issue athenaeum#2217, AC1)
+# ---------------------------------------------------------------------------
+
+
+class TestSettleRemovedUidRecords:
+    def test_with_successor_folds_each_record(self, tmp_path: Path) -> None:
+        root = tmp_path / "excluded"
+        absorbed = _record(root, f"{ABSORBED}.md", ABSORBED, emails=["a@example.org"])
+        canon = _record(root, f"{CANON}.md", CANON, emails=["c@example.org"])
+        index = pii.ExcludedRecordIndex(root)
+
+        summary = settle_removed_uid_records(
+            root,
+            ABSORBED,
+            successor_uid=CANON,
+            reason=REASON_PAGE_REMOVED,
+            index=index,
+        )
+
+        assert summary.records_folded == 1
+        assert summary.records_retired == 0
+        assert summary.values_added == {"emails": 1}
+        assert _meta(canon)["emails"] == ["c@example.org", "a@example.org"]
+        assert not absorbed.exists()
+        retired = _retired(absorbed)
+        assert retired.exists()
+        assert _meta(retired)[FOLDED_INTO_FIELD] == CANON
+        assert _meta(retired)["retired_reason"] == REASON_PAGE_REMOVED
+
+    def test_without_successor_retires_each_record_with_no_folded_into(
+        self, tmp_path: Path
+    ) -> None:
+        root = tmp_path / "excluded"
+        record = _record(root, f"{OTHER}.md", OTHER, emails=["l@example.org"])
+        index = pii.ExcludedRecordIndex(root)
+
+        summary = settle_removed_uid_records(
+            root,
+            OTHER,
+            successor_uid=None,
+            reason=REASON_PAGE_REMOVED,
+            index=index,
+        )
+
+        assert summary.records_retired == 1
+        assert summary.records_folded == 0
+        assert not record.exists()
+        retired = _retired(record)
+        assert retired.exists()
+        assert FOLDED_INTO_FIELD not in _meta(retired)
+        row = _ledger(root)[0]
+        assert row["folded_into"] is None
+        assert row["reason"] == REASON_PAGE_REMOVED
+
+    def test_uid_with_no_records_is_a_noop(self, tmp_path: Path) -> None:
+        root = tmp_path / "excluded"
+        root.mkdir(parents=True)
+        index = pii.ExcludedRecordIndex(root)
+
+        summary = settle_removed_uid_records(
+            root,
+            "nosuchuid",
+            successor_uid=None,
+            reason=REASON_PAGE_REMOVED,
+            index=index,
+        )
+
+        assert summary == SettleSummary()
+
+    def test_dry_run_counts_without_writing(self, tmp_path: Path) -> None:
+        root = tmp_path / "excluded"
+        record = _record(root, f"{OTHER}.md", OTHER, emails=["l@example.org"])
+        index = pii.ExcludedRecordIndex(root)
+
+        summary = settle_removed_uid_records(
+            root,
+            OTHER,
+            successor_uid=None,
+            reason=REASON_PAGE_REMOVED,
+            index=index,
+            dry_run=True,
+        )
+
+        assert summary.records_retired == 1
+        assert record.exists()
+
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -1260,3 +1383,70 @@ class TestRepairCli:
 
         assert code == EXIT_LOCK_HELD
         assert copy.exists()
+
+    def test_pageless_uid_is_listed_by_bare_uid_in_dry_run(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Issue athenaeum#2217 (AC5): the page-less population is reported
+        by bare uid — the one exception to "counts only" (see
+        ``_cmd_repair_contact_records``'s docstring) — never a value."""
+        root, _copy, lonely = self._store(tmp_path)
+
+        code = self._run(
+            "repair",
+            "--contact-records",
+            "--knowledge-root",
+            str(tmp_path),
+            "--contacts-root",
+            str(root),
+        )
+
+        out = capsys.readouterr().out
+        assert code == 2
+        assert "pageless_records: 1" in out
+        assert OTHER in out
+        assert "example.org" not in out
+        assert lonely.exists()
+
+    def test_retire_pageless_only_acts_with_apply_and_flag(self, tmp_path: Path) -> None:
+        root, _copy, lonely = self._store(tmp_path)
+        base = [
+            "repair",
+            "--contact-records",
+            "--knowledge-root",
+            str(tmp_path),
+            "--contacts-root",
+            str(root),
+        ]
+
+        # --retire-pageless without --apply: still just a dry run.
+        assert self._run(*base, "--retire-pageless") == 2
+        assert lonely.exists()
+
+        # --apply without --retire-pageless: the page-less record is
+        # reported, never touched — dry run stays the default.
+        assert self._run(*base, "--apply") == 0
+        assert lonely.exists()
+
+    def test_retire_pageless_apply_retires_the_record(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        root, _copy, lonely = self._store(tmp_path)
+        base = [
+            "repair",
+            "--contact-records",
+            "--knowledge-root",
+            str(tmp_path),
+            "--contacts-root",
+            str(root),
+        ]
+
+        code = self._run(*base, "--apply", "--retire-pageless")
+
+        out = capsys.readouterr().out
+        assert code == 0
+        assert "pageless_retired: 1" in out
+        assert not lonely.exists()
+        retired = _retired(lonely)
+        assert retired.exists()
+        assert FOLDED_INTO_FIELD not in _meta(retired)

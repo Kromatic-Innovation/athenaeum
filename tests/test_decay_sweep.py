@@ -295,6 +295,67 @@ class TestApplySweep:
         assert "EDITED after the initial commit" in show.stdout
 
 
+class TestContactRecordSettle:
+    """Issue athenaeum#2217 (AC3): a swept page's contact record is retired
+    (no successor — a decay sweep never records a merge target), with the
+    uid read from the page's OWN frontmatter before it is removed."""
+
+    def _config(self) -> dict:
+        return {"storage": {"mapping": {"pii": "excluded"}}}
+
+    def test_swept_page_leaves_no_live_contact_record(self, tmp_path: Path) -> None:
+        from athenaeum import pii
+
+        knowledge_root = tmp_path / "knowledge"
+        wiki = knowledge_root / "wiki"
+        wiki.mkdir(parents=True)
+        (wiki / "aaaa1111-status.md").write_text(
+            "---\nuid: aaaa1111\nname: Status\ntype: feedback\nbucket: daily\n"
+            "valid_until: '2020-01-01'\n---\n\nExpired status, long gone.\n",
+            encoding="utf-8",
+        )
+        (knowledge_root / "athenaeum.yaml").write_text(
+            "storage:\n  mapping:\n    pii: excluded\n", encoding="utf-8"
+        )
+        _git_init(knowledge_root)
+        contacts_root = pii.contacts_surface_root(knowledge_root, self._config())
+        contacts_root.mkdir(parents=True, exist_ok=True)
+        record = contacts_root / "aaaa1111.md"
+        record.write_text(
+            "---\nuid: aaaa1111\npii: true\nemails:\n  - 'a@example.org'\n---\nSynthetic.\n",
+            encoding="utf-8",
+        )
+
+        report = build_sweep_report(wiki)
+        report = apply_sweep(knowledge_root, report, config=self._config())
+
+        assert report.committed is True
+        assert not record.exists()
+        assert pii.resolve_contact_record_for_uid(contacts_root, "aaaa1111") is None
+        ledger_rows = [
+            line
+            for line in pii.default_record_retirement_log_path(
+                contacts_root
+            ).read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        assert len(ledger_rows) == 1
+        assert '"folded_into":null' in ledger_rows[0]
+
+    def test_unmapped_pii_surface_is_a_noop(self, wiki_with_bucket_pages: Path) -> None:
+        # No `storage.mapping.pii` configured — mirrors every other
+        # existing test in this module: the settle wrapper no-ops, so
+        # nothing about the archive itself changes.
+        knowledge_root = wiki_with_bucket_pages
+        wiki = knowledge_root / "wiki"
+
+        report = build_sweep_report(wiki)
+        report = apply_sweep(knowledge_root, report)
+
+        assert report.committed is True
+        assert not (wiki / "status-monday.md").exists()
+
+
 class TestSweepLedger:
     """Issue athenaeum#969 AC1: one durable ledger record per archived page,
     written BEFORE the archival `git rm`, refusing to archive on write
