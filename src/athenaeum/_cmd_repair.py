@@ -60,8 +60,7 @@ def add_repair_subparser(subparsers: argparse._SubParsersAction) -> None:
     repair_mode.add_argument(
         "--value-quoting",
         action="store_true",
-        help="Quote unquoted YAML values that break safe_load "
-        "(values starting with '-' or '[').",
+        help="Quote unquoted YAML values that break safe_load (values starting with '-' or '[').",
     )
     repair_mode.add_argument(
         "--legacy-source-slugs",
@@ -89,9 +88,11 @@ def add_repair_subparser(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         help="Fold contact records left behind by earlier merges onto the "
         "canonical uid's record, and retire slug-only duplicate copies of a "
-        "uid's record whose values the uid-named copy already holds (issue "
-        "athenaeum#2184). Counts only. Divergent duplicates and page-less uids "
-        "with no merge record are reported, never touched. Not included in --all.",
+        "uid's record (issue athenaeum#2184). A copy holding values or facts "
+        "the uid-named copy lacks is folded onto it first. Counts only. "
+        "Duplicates whose names or per-address validity differ, and page-less "
+        "uids with no merge record, are reported, never touched. Not included "
+        "in --all.",
     )
     repair_mode.add_argument(
         "--all",
@@ -123,7 +124,7 @@ def add_repair_subparser(subparsers: argparse._SubParsersAction) -> None:
         "--projects-root",
         type=Path,
         default=None,
-        help="Transcript root for --backfill-sources " "(default: ~/.claude/projects).",
+        help="Transcript root for --backfill-sources (default: ~/.claude/projects).",
     )
     repair_parser.add_argument(
         "--contacts-root",
@@ -261,9 +262,7 @@ def _cmd_repair_backfill_sources(args: argparse.Namespace) -> int:
         print(f"Auto-memory root not found: {auto_memory_root}", file=sys.stderr)
         return 1
 
-    projects_root = (
-        args.projects_root.expanduser().resolve() if args.projects_root else None
-    )
+    projects_root = args.projects_root.expanduser().resolve() if args.projects_root else None
     cfg = load_config(knowledge_root)
     asserter = resolve_owner_asserter(cfg)
 
@@ -447,6 +446,13 @@ def _cmd_repair_contact_records(args: argparse.Namespace) -> int:
 
         result = apply_contact_record_repair(plan, contacts_root)
         print(f"  duplicates_retired: {result.duplicates_retired}")
+        print(f"  divergent_duplicates_folded: {result.duplicates_folded.copies_folded}")
+        print(f"  divergent_values_added: {sum(result.duplicates_folded.values_added.values())}")
+        print(f"  divergent_facts_carried: {result.duplicates_folded.facts_carried}")
+        print(
+            "  divergent_classifications_reconciled: "
+            f"{result.duplicates_folded.classifications_reconciled}"
+        )
         print(f"  absorbed_records_folded: {result.fold.records_folded}")
         print(f"  absorbed_values_added: {result.fold.values_added_total}")
         print(f"  canonical_records_minted: {result.fold.canonical_records_minted}")

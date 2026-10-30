@@ -53,6 +53,7 @@ from cryptography.hazmat.primitives.serialization import (
 from athenaeum.config import ReceiptSealerConfigError
 from athenaeum.models import AutoMemoryFile
 from athenaeum.receipt_sealers import (
+    OP_NON_INTERACTIVE_ENV,
     OP_SERVICE_ACCOUNT_TOKEN_ENV,
     KeyUnavailable,
     OnePasswordServiceAccountKeyProvider,
@@ -278,6 +279,48 @@ class TestOnePasswordProvider:
         # nowhere the provider could have put it.
         assert _files_containing(home, private.strip()) == []
         assert _files_containing(home, bytes(key.private_bytes_raw())) == []
+
+    def test_op_subprocess_gets_non_interactive_suppression_flags(
+        self, tmp_path: Path
+    ) -> None:
+        """athenaeum#2193 AC10: every ``op`` subprocess this provider spawns
+        runs with ``OP_LOAD_DESKTOP_APP_SETTINGS=false`` and
+        ``OP_BIOMETRIC_UNLOCK_ENABLED=false`` -- overlaid onto the
+        subprocess's own env only, never onto this test process's.
+        """
+        key = Ed25519PrivateKey.generate()
+        bin_dir = tmp_path / "fixture-bin"
+        home = tmp_path / "home"
+        capture = tmp_path / "env-capture.txt"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        (bin_dir / "private.key").write_bytes(_openssh_private(key))
+        script = bin_dir / "op"
+        script.write_text(
+            "#!/bin/sh\n"
+            'printf \'%s\\n\' "$OP_LOAD_DESKTOP_APP_SETTINGS" '
+            f'"$OP_BIOMETRIC_UNLOCK_ENABLED" > "{capture}"\n'
+            'if [ "$1" != "read" ]; then echo "unexpected verb: $1" >&2; exit 2; fi\n'
+            'cat "$(dirname "$0")/private.key"\n',
+            encoding="utf-8",
+        )
+        script.chmod(script.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+        provider = OnePasswordServiceAccountKeyProvider(
+            PRIVATE_REF,
+            public_key_openssh=_openssh_public(key).decode("ascii"),
+            env=_provider_env(bin_dir, home),
+        )
+
+        provider.sign(b"payload-bytes")
+
+        lines = capture.read_text(encoding="utf-8").splitlines()
+        assert lines == [
+            OP_NON_INTERACTIVE_ENV["OP_LOAD_DESKTOP_APP_SETTINGS"],
+            OP_NON_INTERACTIVE_ENV["OP_BIOMETRIC_UNLOCK_ENABLED"],
+        ]
+        # Overlay target was the subprocess env dict, never this process's
+        # own `os.environ` -- the test harness's environment is untouched.
+        assert "OP_LOAD_DESKTOP_APP_SETTINGS" not in os.environ
+        assert "OP_BIOMETRIC_UNLOCK_ENABLED" not in os.environ
 
     def test_inline_public_key_needs_no_op_at_all(self, tmp_path: Path) -> None:
         """Verification runs with no credential and no ``op`` binary."""

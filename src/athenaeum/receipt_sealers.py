@@ -123,6 +123,16 @@ OP_SERVICE_ACCOUNT_TOKEN_ENV = "OP_SERVICE_ACCOUNT_TOKEN"
 #: an unattended nightly never reaches it (no token -> no subprocess).
 OP_READ_TIMEOUT_SECONDS = 30
 
+#: 1Password desktop-app integration / biometric unlock, both forced off for
+#: every ``op`` subprocess athenaeum spawns (athenaeum#2193). Without the
+#: first, ``op`` probes the 1Password desktop app's group container on every
+#: call even when a service-account token is present, which raises a macOS
+#: App Data permission prompt and can block indefinitely.
+OP_NON_INTERACTIVE_ENV: dict[str, str] = {
+    "OP_LOAD_DESKTOP_APP_SETTINGS": "false",
+    "OP_BIOMETRIC_UNLOCK_ENABLED": "false",
+}
+
 
 class KeyUnavailable(RuntimeError):
     """The signing key cannot be reached from this process.
@@ -392,7 +402,11 @@ class OnePasswordServiceAccountKeyProvider:
                 [binary, "read", reference],
                 capture_output=True,
                 check=False,
-                env=env,
+                # Overlay onto the subprocess env only (never os.environ) --
+                # this provider has no interactive mode, the token is
+                # mandatory above, so the suppression flags are
+                # unconditional (athenaeum#2193).
+                env={**env, **OP_NON_INTERACTIVE_ENV},
                 timeout=OP_READ_TIMEOUT_SECONDS,
             )
         except (OSError, subprocess.SubprocessError) as exc:
@@ -1348,6 +1362,7 @@ __all__ = [
     "ALGORITHM",
     "ANCHORS_DIRNAME",
     "ANCHOR_SEALER_NAME",
+    "OP_NON_INTERACTIVE_ENV",
     "OP_SERVICE_ACCOUNT_TOKEN_ENV",
     "SEALS_DIRNAME",
     "SIGNING_SEALER_NAME",

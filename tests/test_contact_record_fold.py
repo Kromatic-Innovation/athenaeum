@@ -175,9 +175,7 @@ class TestMergeHook:
         assert summary.values_added["emails"] == 1
         assert summary.values_added["former_emails"] == 1
 
-    def test_per_address_facts_travel_and_original_provenance_is_kept(
-        self, tmp_path: Path
-    ) -> None:
+    def test_per_address_facts_travel_and_original_provenance_is_kept(self, tmp_path: Path) -> None:
         root = tmp_path / "excluded"
         canon = _record(root, f"{CANON}.md", CANON, emails=["c@example.org"])
         _record(
@@ -353,9 +351,7 @@ class TestMergePathsCallTheHook:
         canon = _record(root, f"{CANON}-casey-lee.md", CANON, emails=["casey@example.org"])
         absorbed = _record(root, f"{ABSORBED}-casey-lee.md", ABSORBED, emails=["c2@example.org"])
 
-        result = self._approve_fold(
-            tmp_path, f"{CANON}-casey-lee.md", f"{ABSORBED}-casey-lee-2.md"
-        )
+        result = self._approve_fold(tmp_path, f"{CANON}-casey-lee.md", f"{ABSORBED}-casey-lee-2.md")
 
         assert result["ok"] is True, result
         assert "c2@example.org" in _meta(canon)["emails"]
@@ -625,24 +621,55 @@ class TestRepairDuplicates:
 
         assert not copy.exists()
 
-    def test_divergent_pair_is_reported_never_retired(self, tmp_path: Path) -> None:
+    def test_divergent_value_on_the_copy_is_folded_then_retired(self, tmp_path: Path) -> None:
         root = self._live(tmp_path)
         keep = _record(root, f"{CANON}-casey-lee.md", CANON, emails=["c@example.org"])
         copy = _record(
             root, "casey-lee.md", CANON, emails=["c@example.org"], former_emails=["old@example.org"]
         )
-        before = (keep.read_bytes(), copy.read_bytes())
 
         plan = plan_contact_record_repair(tmp_path, root)
-        apply_contact_record_repair(plan, root)
-
-        assert plan.counts()["duplicate_divergent_reported"] == 1
+        assert plan.counts()["duplicate_divergent_to_fold"] == 1
+        assert plan.counts()["duplicate_divergent_values_to_add"] == 1
+        assert plan.counts()["duplicate_divergent_reported"] == 0
         assert plan.counts()["duplicate_copies_to_retire"] == 0
-        assert (keep.read_bytes(), copy.read_bytes()) == before
+        result = apply_contact_record_repair(plan, root)
 
-    def test_a_per_address_fact_only_on_the_copy_is_divergent(self, tmp_path: Path) -> None:
+        assert result.duplicates_folded.copies_folded == 1
+        assert result.duplicates_folded.values_added == {"former_emails": 1}
+        assert not result.errors
+        meta = _meta(keep)
+        assert meta["emails"] == ["c@example.org"]
+        assert meta["former_emails"] == ["old@example.org"]
+        assert meta["field_sources"]["former_emails"] == [
+            {"value": "old@example.org", "source": FOLD_SOURCE}
+        ]
+        assert not copy.exists()
+        assert _retired(copy).exists()
+        row = _ledger(root)[0]
+        assert row["reason"] == "duplicate-fold"
+        assert pii.ExcludedRecordIndex(root).all_by_uid(CANON) == [keep]
+
+    def test_values_split_both_ways_keep_everything(self, tmp_path: Path) -> None:
         root = self._live(tmp_path)
-        _record(root, f"{CANON}-casey-lee.md", CANON, emails=["c@example.org"])
+        keep = _record(
+            root,
+            f"{CANON}-casey-lee.md",
+            CANON,
+            emails=["a@example.org", "b@example.org"],
+            phones=["555 0100"],
+        )
+        _record(root, "casey-lee.md", CANON, emails=["a@example.org", "c@example.org"])
+
+        apply_contact_record_repair(plan_contact_record_repair(tmp_path, root), root)
+
+        meta = _meta(keep)
+        assert meta["emails"] == ["a@example.org", "b@example.org", "c@example.org"]
+        assert meta["phones"] == ["555 0100"]
+
+    def test_a_per_address_fact_only_on_the_copy_is_carried(self, tmp_path: Path) -> None:
+        root = self._live(tmp_path)
+        keep = _record(root, f"{CANON}-casey-lee.md", CANON, emails=["c@example.org"])
         copy = _record(
             root,
             "casey-lee.md",
@@ -655,11 +682,194 @@ class TestRepairDuplicates:
             ],
         )
 
+        result = apply_contact_record_repair(plan_contact_record_repair(tmp_path, root), root)
+
+        assert result.duplicates_folded.facts_carried == 1
+        assert not copy.exists()
+        assert pii.is_bounced_identifier(_meta(keep), "c@example.org")
+
+    def test_classification_only_on_the_copy_is_carried(self, tmp_path: Path) -> None:
+        root = self._live(tmp_path)
+        keep = _record(root, f"{CANON}-casey-lee.md", CANON, emails=["c@example.org"])
+        _record(
+            root,
+            "casey-lee.md",
+            CANON,
+            emails=["c@example.org"],
+            extra=[
+                "contact_classification:",
+                "- identifier: c@example.org",
+                "  usage_class: observed",
+                "  source: script:example",
+                "  observed_at: '2026-03-01'",
+            ],
+        )
+
+        apply_contact_record_repair(plan_contact_record_repair(tmp_path, root), root)
+
+        entries = pii.contact_classification_entries(_meta(keep))
+        assert [(e["identifier"], e["usage_class"]) for e in entries] == [
+            ("c@example.org", "observed")
+        ]
+
+    @pytest.mark.parametrize(
+        ("keep_cls", "keep_at", "copy_cls", "copy_at", "expected"),
+        [
+            ("provider", "2026-05-01", "observed", "2026-01-01", ("observed", "2026-01-01")),
+            ("observed", "2026-01-01", "provider", "2026-05-01", ("observed", "2026-01-01")),
+            ("observed", "2026-01-01", "observed", "2026-05-01", ("observed", "2026-05-01")),
+            ("observed", "2026-05-01", "observed", "2026-01-01", ("observed", "2026-05-01")),
+        ],
+        ids=["copy-stronger", "keep-stronger", "equal-copy-newer", "equal-keep-newer"],
+    )
+    def test_same_address_classification_takes_the_stronger_then_newer(
+        self,
+        tmp_path: Path,
+        keep_cls: str,
+        keep_at: str,
+        copy_cls: str,
+        copy_at: str,
+        expected: tuple[str, str],
+    ) -> None:
+        def cls(usage: str, at: str) -> list[str]:
+            return [
+                "contact_classification:",
+                "- identifier: c@example.org",
+                f"  usage_class: {usage}",
+                "  source: script:example",
+                f"  observed_at: '{at}'",
+            ]
+
+        root = self._live(tmp_path)
+        keep = _record(
+            root,
+            f"{CANON}-casey-lee.md",
+            CANON,
+            emails=["c@example.org"],
+            extra=cls(keep_cls, keep_at),
+        )
+        copy = _record(
+            root, "casey-lee.md", CANON, emails=["C@example.org"], extra=cls(copy_cls, copy_at)
+        )
+
+        result = apply_contact_record_repair(plan_contact_record_repair(tmp_path, root), root)
+
+        assert not copy.exists()
+        entries = pii.contact_classification_entries(_meta(keep))
+        assert len(entries) == 1
+        assert entries[0]["identifier"] == "c@example.org"
+        assert (entries[0]["usage_class"], str(entries[0]["observed_at"])) == expected
+        winner_is_copy = expected == (copy_cls, copy_at) and expected != (keep_cls, keep_at)
+        assert result.duplicates_folded.classifications_reconciled == int(winner_is_copy)
+
+    def test_differing_names_need_review_and_are_never_touched(self, tmp_path: Path) -> None:
+        root = self._live(tmp_path)
+        keep = _record(
+            root,
+            f"{CANON}-casey-lee.md",
+            CANON,
+            emails=["c@example.org"],
+            extra=["name: Casey Lee"],
+        )
+        copy = _record(
+            root,
+            "casey-lee.md",
+            CANON,
+            emails=["d@example.org"],
+            extra=["name: Dana Moss"],
+        )
+        before = (keep.read_bytes(), copy.read_bytes())
+
+        plan = plan_contact_record_repair(tmp_path, root)
+        result = apply_contact_record_repair(plan, root)
+
+        assert plan.counts()["duplicate_divergent_reported"] == 1
+        assert plan.counts()["duplicate_divergent_name_differs"] == 1
+        assert plan.counts()["duplicate_divergent_to_fold"] == 0
+        assert result.duplicates_folded.copies_folded == 0
+        assert (keep.read_bytes(), copy.read_bytes()) == before
+
+    def test_name_formatting_alone_is_not_a_difference(self, tmp_path: Path) -> None:
+        root = self._live(tmp_path)
+        _record(
+            root,
+            f"{CANON}-casey-lee.md",
+            CANON,
+            emails=["c@example.org"],
+            extra=["name: Casey Lee"],
+        )
+        copy = _record(
+            root,
+            "casey-lee.md",
+            CANON,
+            emails=["c2@example.org"],
+            extra=["name: 'casey  lee.'"],
+        )
+
+        apply_contact_record_repair(plan_contact_record_repair(tmp_path, root), root)
+
+        assert not copy.exists()
+
+    def test_differing_validity_for_one_address_needs_review(self, tmp_path: Path) -> None:
+        def closed(on: str) -> list[str]:
+            return ["identifier_validity:", "- identifier: c@example.org", f"  valid_until: '{on}'"]
+
+        root = self._live(tmp_path)
+        keep = _record(
+            root,
+            f"{CANON}-casey-lee.md",
+            CANON,
+            emails=["c@example.org"],
+            extra=closed("2026-01-02"),
+        )
+        copy = _record(
+            root, "casey-lee.md", CANON, emails=["c@example.org"], extra=closed("2026-04-09")
+        )
+        before = (keep.read_bytes(), copy.read_bytes())
+
         plan = plan_contact_record_repair(tmp_path, root)
         apply_contact_record_repair(plan, root)
 
-        assert plan.counts()["duplicate_divergent_reported"] == 1
+        assert plan.counts()["duplicate_divergent_validity_differs"] == 1
+        assert (keep.read_bytes(), copy.read_bytes()) == before
+
+    def test_divergent_fold_refuses_a_review_pair_even_if_called_directly(
+        self, tmp_path: Path
+    ) -> None:
+        from athenaeum.contact_record_fold import fold_duplicate_record
+
+        root = self._live(tmp_path)
+        keep = _record(
+            root,
+            f"{CANON}-casey-lee.md",
+            CANON,
+            emails=["c@example.org"],
+            extra=["name: Casey Lee"],
+        )
+        copy = _record(
+            root, "casey-lee.md", CANON, emails=["d@example.org"], extra=["name: Dana Moss"]
+        )
+
+        summary = fold_duplicate_record(root, CANON, copy, keep)
+
+        assert summary.errors == ["duplicate needs review (name-differs)"]
         assert copy.exists()
+
+    def test_divergent_fold_dry_run_writes_nothing_and_rerun_is_clean(self, tmp_path: Path) -> None:
+        root = self._live(tmp_path)
+        keep = _record(root, f"{CANON}-casey-lee.md", CANON, emails=["c@example.org"])
+        copy = _record(root, "casey-lee.md", CANON, emails=["d@example.org"])
+        before = (keep.read_bytes(), copy.read_bytes())
+
+        plan = plan_contact_record_repair(tmp_path, root)
+        assert (keep.read_bytes(), copy.read_bytes()) == before
+        assert plan.actionable == 1
+
+        apply_contact_record_repair(plan, root)
+        again = plan_contact_record_repair(tmp_path, root)
+
+        assert again.actionable == 0
+        assert again.counts()["duplicate_divergent_to_fold"] == 0
 
     def test_both_uid_prefixed_is_reported_never_retired(self, tmp_path: Path) -> None:
         root = self._live(tmp_path)
@@ -685,9 +895,7 @@ class TestRetirement:
         os.chmod(record, 0o600)
         original = _meta(record)
 
-        retirement = pii.retire_contact_record(
-            root, record, folded_into=CANON, reason="merge-fold"
-        )
+        retirement = pii.retire_contact_record(root, record, folded_into=CANON, reason="merge-fold")
 
         assert not record.exists()
         retired = retirement.retired_as
@@ -750,8 +958,12 @@ class TestRepairCli:
         root, copy, _ = self._store(tmp_path)
 
         code = self._run(
-            "repair", "--contact-records", "--knowledge-root", str(tmp_path),
-            "--contacts-root", str(root),
+            "repair",
+            "--contact-records",
+            "--knowledge-root",
+            str(tmp_path),
+            "--contacts-root",
+            str(root),
         )
 
         out = capsys.readouterr().out
@@ -765,8 +977,14 @@ class TestRepairCli:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         root, copy, lonely = self._store(tmp_path)
-        base = ["repair", "--contact-records", "--knowledge-root", str(tmp_path),
-                "--contacts-root", str(root)]
+        base = [
+            "repair",
+            "--contact-records",
+            "--knowledge-root",
+            str(tmp_path),
+            "--contacts-root",
+            str(root),
+        ]
 
         assert self._run(*base, "--apply") == 0
         assert not copy.exists()
@@ -784,8 +1002,13 @@ class TestRepairCli:
         held.acquire()
         try:
             code = self._run(
-                "repair", "--contact-records", "--knowledge-root", str(tmp_path),
-                "--contacts-root", str(root), "--apply",
+                "repair",
+                "--contact-records",
+                "--knowledge-root",
+                str(tmp_path),
+                "--contacts-root",
+                str(root),
+                "--apply",
             )
         finally:
             held.release()

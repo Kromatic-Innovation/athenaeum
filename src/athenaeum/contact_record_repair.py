@@ -9,13 +9,20 @@ Two populations on the excluded contacts surface, both counts-only:
   canonical with :func:`athenaeum.contact_record_fold.fold_absorbed_contact_records`,
   the same fold the merge paths now run;
 - uids claimed by two records: a slug-only filename next to a
-  ``<uid>-``-prefixed one. The slug copy is retired only when
+  ``<uid>-``-prefixed one. The slug copy is retired outright when
   :func:`athenaeum.contact_record_fold.holds_nothing_more` says every value
-  and per-address fact on it is already on the prefixed copy.
+  and per-address fact on it is already on the prefixed copy. A DIVERGENT
+  copy (it holds something the prefixed copy lacks) is folded onto the
+  prefixed copy first with
+  :func:`athenaeum.contact_record_fold.fold_duplicate_record` — values and
+  facts on only one copy are kept, a same-address classification is settled
+  by the no-downgrade ladder — and then retired.
 
 Records whose uid has no page and no merge record, an ambiguous or
-unresolvable canonical, a divergent duplicate, and any other duplicate shape
-are reported and never touched.
+unresolvable canonical, a divergent duplicate that
+:func:`athenaeum.contact_record_fold.duplicate_needs_review` flags (differing
+names, or differing validity entries for one address), and any other
+duplicate shape are reported and never touched.
 
 Layering: L4. Imports :mod:`athenaeum.contact_record_fold` (L3),
 :mod:`athenaeum.pii` (L3), :mod:`athenaeum.pending_merges` (L4, for the
@@ -32,9 +39,13 @@ from athenaeum import pii
 from athenaeum.contact_record_fold import (
     REASON_DUPLICATE,
     ContactFoldSummary,
+    DuplicateFoldSummary,
+    duplicate_needs_review,
     fold_absorbed_contact_records,
+    fold_duplicate_record,
     holds_nothing_more,
     merge_contact_values,
+    merge_duplicate_record,
     missing_values,
     preferred_record,
     uid_prefixed,
@@ -195,14 +206,19 @@ class ContactRepairPlan:
     orphan_canonical_not_live: int = 0
     pageless_unmapped: int = 0
     duplicate_retire: list[tuple[str, Path, Path]] = field(default_factory=list)
+    #: Divergent pairs folded onto the ``<uid>``-named copy, then retired.
+    duplicate_fold: list[tuple[str, Path, Path]] = field(default_factory=list)
+    duplicate_fold_values_to_add: int = 0
+    #: Divergent pairs that need a human (see ``duplicate_needs_review``).
     duplicate_divergent: int = 0
+    duplicate_review_reasons: dict[str, int] = field(default_factory=dict)
     duplicate_both_prefixed: int = 0
     duplicate_other_shape: int = 0
     orphan_values_to_add: int = 0
 
     @property
     def actionable(self) -> int:
-        return len(self.orphan_folds) + len(self.duplicate_retire)
+        return len(self.orphan_folds) + len(self.duplicate_retire) + len(self.duplicate_fold)
 
     def counts(self) -> dict[str, int]:
         return {
@@ -215,7 +231,15 @@ class ContactRepairPlan:
             "absorbed_canonical_unresolved": self.orphan_canonical_not_live,
             "pageless_no_merge_record": self.pageless_unmapped,
             "duplicate_copies_to_retire": len(self.duplicate_retire),
+            "duplicate_divergent_to_fold": len(self.duplicate_fold),
+            "duplicate_divergent_values_to_add": self.duplicate_fold_values_to_add,
             "duplicate_divergent_reported": self.duplicate_divergent,
+            "duplicate_divergent_name_differs": self.duplicate_review_reasons.get(
+                "name-differs", 0
+            ),
+            "duplicate_divergent_validity_differs": self.duplicate_review_reasons.get(
+                "validity-differs", 0
+            ),
             "duplicate_both_uid_prefixed": self.duplicate_both_prefixed,
             "duplicate_other_shape": self.duplicate_other_shape,
         }
@@ -278,10 +302,18 @@ def _classify_duplicate(uid: str, paths: list[Path], plan: ContactRepairPlan) ->
     if keep.parent != copy.parent:
         plan.duplicate_other_shape += 1
         return
-    if holds_nothing_more(pii.read_bounce_record(copy), pii.read_bounce_record(keep)):
+    copy_meta, keep_meta = pii.read_bounce_record(copy), pii.read_bounce_record(keep)
+    if holds_nothing_more(copy_meta, keep_meta):
         plan.duplicate_retire.append((uid, copy, keep))
-    else:
+        return
+    reason = duplicate_needs_review(copy_meta, keep_meta)
+    if reason is not None:
         plan.duplicate_divergent += 1
+        plan.duplicate_review_reasons[reason] = plan.duplicate_review_reasons.get(reason, 0) + 1
+        return
+    plan.duplicate_fold.append((uid, copy, keep))
+    _, added, _, _ = merge_duplicate_record(keep_meta, copy_meta)
+    plan.duplicate_fold_values_to_add += sum(added.values())
 
 
 @dataclass
@@ -290,13 +322,14 @@ class ContactRepairResult:
 
     fold: ContactFoldSummary = field(default_factory=ContactFoldSummary)
     duplicates_retired: int = 0
+    duplicates_folded: DuplicateFoldSummary = field(default_factory=DuplicateFoldSummary)
     errors: list[str] = field(default_factory=list)
 
 
 def apply_contact_record_repair(
     plan: ContactRepairPlan, contacts_root: Path
 ) -> ContactRepairResult:
-    """Act on *plan*: retire subset duplicates, then fold absorbed uids' records."""
+    """Act on *plan*: retire subset duplicates, fold divergent ones, then fold absorbed uids."""
     result = ContactRepairResult()
     root = Path(contacts_root)
     for uid, copy, keep in plan.duplicate_retire:
@@ -307,6 +340,20 @@ def apply_contact_record_repair(
             result.duplicates_retired += 1
         except (OSError, UnicodeDecodeError) as exc:
             result.errors.append(f"{type(exc).__name__} retiring a duplicate record")
+    folded = result.duplicates_folded
+    for uid, copy, keep in plan.duplicate_fold:
+        try:
+            one = fold_duplicate_record(root, uid, copy, keep)
+        except (OSError, UnicodeDecodeError) as exc:
+            result.errors.append(f"{type(exc).__name__} folding a divergent duplicate record")
+            continue
+        folded.copies_folded += one.copies_folded
+        for key, count in one.values_added.items():
+            folded.values_added[key] = folded.values_added.get(key, 0) + count
+        folded.facts_carried += one.facts_carried
+        folded.classifications_reconciled += one.classifications_reconciled
+        folded.errors.extend(one.errors)
+    result.errors.extend(folded.errors)
     index = pii.ExcludedRecordIndex(root)
     result.fold = fold_absorbed_contact_records(
         root,

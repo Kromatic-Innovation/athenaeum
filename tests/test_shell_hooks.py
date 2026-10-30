@@ -62,6 +62,7 @@ from athenaeum.push_metrics import (
     record_push,
 )
 from tests.env_contract import require
+from tests.op_isolation import install_sentinel_op, sentinel_op_invocations
 
 HOOKS_DIR = Path(__file__).parent.parent / "examples" / "claude-code"
 SESSION_START = HOOKS_DIR / "session-start-recall.sh"
@@ -77,19 +78,42 @@ def _require(tool: str) -> None:
         pytest.skip(f"{tool} not available on this runner")
 
 
-def _env_without_op(base_env: dict[str, str]) -> dict[str, str]:
+def _path_with_no_op_at_all(base_env: dict[str, str]) -> dict[str, str]:
     """*base_env* with every PATH entry that provides an `op` binary removed.
 
-    athenaeum#1886's "fetch fails or is skipped" cases need `op` provably
-    absent — filtering PATH here (rather than trusting the runner's ambient
-    state) keeps those tests hermetic even on a machine that happens to have
-    the real 1Password CLI installed.
+    Renamed from the retired ``_env_without_op`` (athenaeum#2193): most
+    former callers no longer need `op` provably ABSENT, now that
+    ``hook_env`` installs a sentinel `op` by default (see that fixture) --
+    they need `op` provably a HARMLESS STUB, which the sentinel already is
+    without this filtering. This stripped-bare variant stays for the one
+    AC (athenaeum#2193 AC6) that specifically covers "no `op` on PATH at
+    all", e.g. a minimal container image with no 1Password CLI installed
+    -- including the sentinel itself, so the hook's `command -v op` check
+    fails exactly like it would there.
     """
     env = dict(base_env)
     dirs = [d for d in env.get("PATH", "").split(os.pathsep) if d]
     safe_dirs = [d for d in dirs if not os.path.isfile(os.path.join(d, "op"))]
     env["PATH"] = os.pathsep.join(safe_dirs)
     return env
+
+
+def _assert_op_is_sentinel(env: dict[str, str], tmp_path: Path) -> None:
+    """Assert PATH resolves `op` to the `hook_env` fixture's OWN sentinel.
+
+    Stronger than "op is absent": proves the real `op` the runner might
+    have installed never wins PATH precedence over the per-test sentinel
+    (athenaeum#2193) -- the gap the retired `_env_without_op`-based setup
+    assertions could not close, since they only ever proved absence on a
+    PATH they had just filtered themselves.
+    """
+    resolved = shutil.which("op", path=env["PATH"])
+    sentinel_op = tmp_path / "op-sentinel-bin" / "op"
+    assert resolved == str(sentinel_op), (
+        "test setup bug: `op` did not resolve to this test's own sentinel "
+        f"at {sentinel_op} (got {resolved!r}) -- test isolation leaked a "
+        "real `op` onto PATH"
+    )
 
 
 def _write_fake_op(tmp_path: Path, fetched_key: str) -> Path:
@@ -139,6 +163,28 @@ def _write_fake_op_table(
         "  *)\n"
         '    echo "unknown item" >&2; exit 1 ;;\n'
         "esac\n"
+    )
+    op_stub.chmod(0o755)
+    return bin_dir
+
+
+def _write_sleeping_op(tmp_path: Path, *, marker: Path | None = None) -> Path:
+    """A stub `op` binary that sleeps well past any sane timeout budget
+    before echoing a value that must never be read.
+
+    Used to pin `_athenaeum_op_read`'s timeout-enforcement branches
+    (athenaeum#2193 AC4) without touching a real 1Password session. When
+    *marker* is given, the stub touches it AFTER the sleep returns, so a
+    test can assert the child was actually killed (the marker stays
+    absent) rather than merely orphaned and left to finish unobserved
+    (the marker would eventually appear).
+    """
+    bin_dir = tmp_path / "sleeping-op-bin"
+    bin_dir.mkdir(exist_ok=True)
+    op_stub = bin_dir / "op"
+    marker_line = f"touch {shlex.quote(str(marker))}\n" if marker is not None else ""
+    op_stub.write_text(
+        "#!/usr/bin/env bash\nsleep 30\necho should-never-be-read\n" + marker_line
     )
     op_stub.chmod(0o755)
     return bin_dir
@@ -331,7 +377,17 @@ def hook_env(tmp_path: Path) -> dict[str, str]:
         # (e.g. a future edit that drops the HOME redirect but keeps this
         # dict). Setting it explicitly here closes that route too.
         "ATHENAEUM_CACHE_DIR": str(tmp_path / ".cache" / "athenaeum"),
-        "PATH": os.environ.get("PATH", ""),
+        # athenaeum#2193: a sentinel `op` goes FIRST on PATH by default, so
+        # a test that never thinks about `op` at all still can't shell out
+        # to whatever real 1Password CLI happens to be on the runner's own
+        # PATH -- it hits the sentinel, which fails loudly (exit 1, no
+        # stdout) and records the attempt. A test that prepends its own
+        # working fake `op` (see `_write_fake_op` / `_write_fake_op_table`)
+        # still wins: PATH precedence means whatever is prepended AFTER
+        # this fixture returns comes first.
+        "PATH": (
+            f"{install_sentinel_op(tmp_path)}{os.pathsep}{os.environ.get('PATH', '')}"
+        ),
         "KNOWLEDGE_ROOT": str(knowledge),
         "ATHENAEUM_SRC": str(athenaeum_src),
         "ATHENAEUM_PYTHON": sys.executable,
@@ -605,9 +661,14 @@ class TestSessionStartRecall:
         self, hook_env: dict[str, str], tmp_path: Path
     ) -> None:
         """athenaeum#1886 AC1: a cached ANTHROPIC_API_KEY line must survive
-        a run where the fetch fails (here, `op` is absent from PATH
-        entirely) — the config.env writers both truncate the file, and only
-        the restore this issue adds carries the line forward."""
+        a run where the fetch fails/is skipped (here, no OP_SERVICE_ACCOUNT_TOKEN
+        and no ATHENAEUM_OP_INTERACTIVE, so the athenaeum#2193 gate never even
+        reaches `op`) — the config.env writers both truncate the file, and only
+        the restore this issue adds carries the line forward. Also proves the
+        athenaeum#2193 gate itself: `op` here is the fixture's own sentinel
+        (hook_env's default), not a filtered-absent PATH, so a run that reached
+        `op` at all would be caught by the sentinel's recorded invocations in
+        the dedicated gate tests below."""
         _require("bash")
         _require_hook_python(hook_env, "athenaeum.search")
 
@@ -619,10 +680,8 @@ class TestSessionStartRecall:
             "ANTHROPIC_API_KEY=synthetic-cached-key-preserved\n"
         )
 
-        env = _env_without_op(hook_env)
-        assert shutil.which("op", path=env["PATH"]) is None, (
-            "test setup bug: `op` still reachable on the filtered PATH"
-        )
+        env = dict(hook_env)
+        _assert_op_is_sentinel(env, tmp_path)
 
         result = subprocess.run(
             ["bash", str(SESSION_START)],
@@ -638,11 +697,16 @@ class TestSessionStartRecall:
         assert key_lines == ["ANTHROPIC_API_KEY=synthetic-cached-key-preserved"]
         assert "No ANTHROPIC_API_KEY cached" not in result.stderr
 
-    def test_fresh_op_fetch_replaces_cached_key(
+    def test_fresh_op_fetch_with_refresh_replaces_cached_key(
         self, hook_env: dict[str, str], tmp_path: Path
     ) -> None:
-        """athenaeum#1886 AC2: a fresh successful `op read` must still
-        replace the cached value, not just preserve it."""
+        """athenaeum#1886 AC2, narrowed by athenaeum#2193: a fresh successful
+        `op read` still replaces a cached value -- but AC2's original
+        unconditional per-session re-read is now opt-in via
+        ATHENAEUM_OP_REFRESH=1 (an unconditional re-read on every SessionStart
+        is exactly what turns a one-time OS permission grant into a recurring
+        prompt). A cached line also needs OP_SERVICE_ACCOUNT_TOKEN set for the
+        fetch to be attempted at all under the new gate (athenaeum#2193 AC3/AC7)."""
         _require("bash")
         _require_hook_python(hook_env, "athenaeum.search")
 
@@ -654,7 +718,9 @@ class TestSessionStartRecall:
             "ANTHROPIC_API_KEY=synthetic-cached-key-stale\n"
         )
 
-        env = _env_without_op(hook_env)
+        env = dict(hook_env)
+        env["OP_SERVICE_ACCOUNT_TOKEN"] = "synthetic-service-account-token"
+        env["ATHENAEUM_OP_REFRESH"] = "1"
         fake_op_dir = _write_fake_op(tmp_path, "synthetic-fresh-key-from-op")
         env["PATH"] = f"{fake_op_dir}{os.pathsep}{env['PATH']}"
         assert shutil.which("op", path=env["PATH"]) == str(fake_op_dir / "op")
@@ -677,16 +743,17 @@ class TestSessionStartRecall:
         self, hook_env: dict[str, str], tmp_path: Path
     ) -> None:
         """athenaeum#1886 AC3: a run that ends with no key at all (nothing
-        cached, and the fetch fails because `op` is absent) must print
+        cached, and no fetch attempted under the athenaeum#2193 gate -- no
+        OP_SERVICE_ACCOUNT_TOKEN, no ATHENAEUM_OP_INTERACTIVE) must print
         exactly one clear warning to stderr, so the degrade is visible
-        instead of silent."""
+        instead of silent. `op` here is the fixture's own sentinel, not a
+        filtered-absent PATH -- proving the warning fires even when `op` is
+        technically reachable but the gate never calls it."""
         _require("bash")
         _require_hook_python(hook_env, "athenaeum.search")
 
-        env = _env_without_op(hook_env)
-        assert shutil.which("op", path=env["PATH"]) is None, (
-            "test setup bug: `op` still reachable on the filtered PATH"
-        )
+        env = dict(hook_env)
+        _assert_op_is_sentinel(env, tmp_path)
 
         result = subprocess.run(
             ["bash", str(SESSION_START)],
@@ -707,15 +774,17 @@ class TestSessionStartRecall:
     def test_op_present_fetches_both_anthropic_and_jev_keys(
         self, hook_env: dict[str, str], tmp_path: Path
     ) -> None:
-        """athenaeum#2056 AC1: with `op` signed in, config.env ends up with
-        both an ANTHROPIC_API_KEY line and a JEV_API_KEY line, each fetched
-        from its own default 1Password path. Pins
-        `ATHENAEUM_OP_JEV_KEY_PATH`'s default of `op://Agent Tools/Jev
+        """athenaeum#2056 AC1: with `op` signed in (and, per athenaeum#2193's
+        gate, OP_SERVICE_ACCOUNT_TOKEN set so the fetch is attempted at all),
+        config.env ends up with both an ANTHROPIC_API_KEY line and a
+        JEV_API_KEY line, each fetched from its own default 1Password path.
+        Pins `ATHENAEUM_OP_JEV_KEY_PATH`'s default of `op://Agent Tools/Jev
         Athenaeum Key/credential` via the stub's exact-path match."""
         _require("bash")
         _require_hook_python(hook_env, "athenaeum.search")
 
-        env = _env_without_op(hook_env)
+        env = dict(hook_env)
+        env["OP_SERVICE_ACCOUNT_TOKEN"] = "synthetic-service-account-token"
         fake_op_dir = _write_fake_op_table(tmp_path, jev_present=True)
         env["PATH"] = f"{fake_op_dir}{os.pathsep}{env['PATH']}"
         assert shutil.which("op", path=env["PATH"]) == str(fake_op_dir / "op")
@@ -740,9 +809,11 @@ class TestSessionStartRecall:
         self, hook_env: dict[str, str], tmp_path: Path
     ) -> None:
         """athenaeum#2056 AC2: a previously cached JEV_API_KEY line must
-        survive a run where `op` is entirely absent from PATH — same
-        preserve/restore contract as the athenaeum#1886
-        ANTHROPIC_API_KEY-only pins above, generalised to this credential."""
+        survive a run where the fetch is skipped (here, no
+        OP_SERVICE_ACCOUNT_TOKEN and no ATHENAEUM_OP_INTERACTIVE, so the
+        athenaeum#2193 gate never reaches `op`) — same preserve/restore
+        contract as the athenaeum#1886 ANTHROPIC_API_KEY-only pins above,
+        generalised to this credential."""
         _require("bash")
         _require_hook_python(hook_env, "athenaeum.search")
 
@@ -755,10 +826,8 @@ class TestSessionStartRecall:
             "JEV_API_KEY=synthetic-cached-jev-key\n"
         )
 
-        env = _env_without_op(hook_env)
-        assert shutil.which("op", path=env["PATH"]) is None, (
-            "test setup bug: `op` still reachable on the filtered PATH"
-        )
+        env = dict(hook_env)
+        _assert_op_is_sentinel(env, tmp_path)
 
         result = subprocess.run(
             ["bash", str(SESSION_START)],
@@ -782,17 +851,18 @@ class TestSessionStartRecall:
     def test_missing_jev_item_yields_no_line_and_no_warning(
         self, hook_env: dict[str, str], tmp_path: Path
     ) -> None:
-        """athenaeum#2056 AC3: when `op` is signed in but the Jev 1Password
-        item does not exist and nothing is cached, config.env must get no
-        JEV_API_KEY line at all, and stderr must carry no warning about it
-        -- Jev is optional. The ANTHROPIC_API_KEY fetch must still succeed
-        normally, and the existing no-key warning (which only ever checks
-        ANTHROPIC_API_KEY) must not fire for ANTHROPIC either, since that
-        fetch succeeds here."""
+        """athenaeum#2056 AC3: when `op` is signed in (OP_SERVICE_ACCOUNT_TOKEN
+        set, per the athenaeum#2193 gate) but the Jev 1Password item does not
+        exist and nothing is cached, config.env must get no JEV_API_KEY line
+        at all, and stderr must carry no warning about it -- Jev is optional.
+        The ANTHROPIC_API_KEY fetch must still succeed normally, and the
+        existing no-key warning (which only ever checks ANTHROPIC_API_KEY)
+        must not fire for ANTHROPIC either, since that fetch succeeds here."""
         _require("bash")
         _require_hook_python(hook_env, "athenaeum.search")
 
-        env = _env_without_op(hook_env)
+        env = dict(hook_env)
+        env["OP_SERVICE_ACCOUNT_TOKEN"] = "synthetic-service-account-token"
         fake_op_dir = _write_fake_op_table(tmp_path, jev_present=False)
         env["PATH"] = f"{fake_op_dir}{os.pathsep}{env['PATH']}"
         assert shutil.which("op", path=env["PATH"]) == str(fake_op_dir / "op")
@@ -812,6 +882,772 @@ class TestSessionStartRecall:
         assert "ANTHROPIC_API_KEY=synthetic-anthropic-key-from-op" in body.splitlines()
         assert "JEV" not in result.stderr
         assert "No ANTHROPIC_API_KEY cached" not in result.stderr
+
+
+class TestOpOptionalGate2193:
+    """One test per athenaeum#2193 acceptance criterion.
+
+    AC5, AC8, AC9 are docs-only (examples/claude-code/README.md) and have
+    no test here. AC10's hook half lives here too; its receipt_sealers
+    half is ``tests/test_receipt_sealers.py::TestOnePasswordProvider::
+    test_op_subprocess_gets_non_interactive_suppression_flags``.
+    """
+
+    @staticmethod
+    def _minimal_knowledge_root(tmp_path: Path, name: str = "knowledge") -> Path:
+        """A knowledge root with just enough wiki content for the hook to
+        pass its `[ -d "$WIKI_ROOT" ]` guard and do real work, for tests
+        that build their env via ``build_breadcrumb_hook_env`` rather than
+        the ``hook_env`` fixture (which already does this itself)."""
+        knowledge = tmp_path / name
+        wiki = knowledge / "wiki"
+        wiki.mkdir(parents=True)
+        (wiki / "lean-startup.md").write_text(
+            "---\n"
+            "name: Lean Startup\n"
+            "tags: [methodology]\n"
+            "description: Build-measure-learn methodology\n"
+            "memory_tier: hot\n"
+            "---\n\nBody text.\n"
+        )
+        (knowledge / "athenaeum.yaml").write_text(
+            "auto_recall: true\nsearch_backend: fts5\n"
+        )
+        return knowledge
+
+    def test_ac1_sentinel_sees_zero_invocations_under_hook_env(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """athenaeum#2193 AC1(a): a plain `hook_env` run (no token, no
+        interactive opt-in, nothing cached) never reaches `op` at all --
+        not even the sentinel the fixture installs by default."""
+        _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        result = subprocess.run(
+            ["bash", str(SESSION_START)],
+            env=dict(hook_env),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert sentinel_op_invocations(tmp_path) == []
+
+    def test_ac1_sentinel_sees_zero_invocations_under_rollout_hook_env(
+        self, tmp_path: Path
+    ) -> None:
+        """athenaeum#2193 AC1(b): same guarantee under
+        ``tests.evals.rollout.build_breadcrumb_hook_env`` -- the OTHER
+        shared env-builder hooks run under (eval rollouts), not just
+        ``test_shell_hooks.py``'s own ``hook_env`` fixture. Importing
+        ``tests.evals.rollout`` here is a plain, fast import (no live
+        model/network access at import time) -- confirmed before adding
+        this test."""
+        _require("bash")
+        from tests.evals.rollout import build_breadcrumb_hook_env
+
+        knowledge_root = self._minimal_knowledge_root(tmp_path)
+        hook_home = tmp_path / "hook_home"
+        env = build_breadcrumb_hook_env(knowledge_root, hook_home)
+        _require_hook_python(
+            {"ATHENAEUM_SRC": env["ATHENAEUM_SRC"], "ATHENAEUM_PYTHON": env["ATHENAEUM_PYTHON"]},
+            "athenaeum.search",
+        )
+
+        result = subprocess.run(
+            ["bash", str(SESSION_START)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert sentinel_op_invocations(hook_home) == []
+
+    def test_ac2_fake_op_never_called_without_token_or_interactive_opt_in(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """athenaeum#2193 AC2: with OP_SERVICE_ACCOUNT_TOKEN unset and
+        ATHENAEUM_OP_INTERACTIVE unset, a WORKING fake `op` prepended on
+        PATH (which would happily serve a value if ever invoked) is never
+        called -- the gate closes before `command -v op` even matters.
+        Cached lines survive unchanged and the fake's distinct sentinel
+        value never appears anywhere in config.env."""
+        _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        cache_dir = tmp_path / ".cache" / "athenaeum"
+        cache_dir.mkdir(parents=True)
+        (cache_dir / "config.env").write_text(
+            "AUTO_RECALL=true\n"
+            "SEARCH_BACKEND=fts5\n"
+            "ANTHROPIC_API_KEY=synthetic-cached-key-untouched\n"
+        )
+
+        env = dict(hook_env)
+        fake_op_dir = _write_fake_op(tmp_path, "synthetic-must-not-be-fetched")
+        env["PATH"] = f"{fake_op_dir}{os.pathsep}{env['PATH']}"
+        assert shutil.which("op", path=env["PATH"]) == str(fake_op_dir / "op")
+
+        result = subprocess.run(
+            ["bash", str(SESSION_START)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+
+        body = (cache_dir / "config.env").read_text()
+        assert body.splitlines().count(
+            "ANTHROPIC_API_KEY=synthetic-cached-key-untouched"
+        ) == 1
+        assert "synthetic-must-not-be-fetched" not in body
+
+    def test_ac3_token_present_allows_the_fetch_with_no_cache(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """athenaeum#2193 AC3(i): OP_SERVICE_ACCOUNT_TOKEN set, nothing
+        cached yet -> the fetch is attempted and the working fake `op`'s
+        value is cached, exactly as today."""
+        _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        env = dict(hook_env)
+        env["OP_SERVICE_ACCOUNT_TOKEN"] = "synthetic-service-account-token"
+        fake_op_dir = _write_fake_op(tmp_path, "synthetic-fetched-via-token")
+        env["PATH"] = f"{fake_op_dir}{os.pathsep}{env['PATH']}"
+
+        result = subprocess.run(
+            ["bash", str(SESSION_START)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+
+        cache_dir = tmp_path / ".cache" / "athenaeum"
+        body = (cache_dir / "config.env").read_text()
+        assert "ANTHROPIC_API_KEY=synthetic-fetched-via-token" in body.splitlines()
+
+    def test_ac3_interactive_opt_in_allows_the_fetch_with_no_token(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """athenaeum#2193 AC3(ii): ATHENAEUM_OP_INTERACTIVE=1 and NO token
+        -> the fetch is still attempted and cached, same as AC3(i)."""
+        _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        env = dict(hook_env)
+        env["ATHENAEUM_OP_INTERACTIVE"] = "1"
+        fake_op_dir = _write_fake_op(tmp_path, "synthetic-fetched-via-interactive")
+        env["PATH"] = f"{fake_op_dir}{os.pathsep}{env['PATH']}"
+
+        result = subprocess.run(
+            ["bash", str(SESSION_START)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+
+        cache_dir = tmp_path / ".cache" / "athenaeum"
+        body = (cache_dir / "config.env").read_text()
+        assert "ANTHROPIC_API_KEY=synthetic-fetched-via-interactive" in body.splitlines()
+
+    def test_ac4_op_read_is_bounded_by_the_timeout(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """athenaeum#2193 AC4: a fake `op` that sleeps well past the
+        configured budget must not stall the hook. The run must finish
+        well inside budget + 20s (a generous margin over the rest of the
+        hook's own work, chiefly the index build -- NOT a tight bound on
+        `_athenaeum_op_read` alone), the cached line must survive
+        untouched, and no new stderr warning must appear."""
+        _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        cache_dir = tmp_path / ".cache" / "athenaeum"
+        cache_dir.mkdir(parents=True)
+        (cache_dir / "config.env").write_text(
+            "AUTO_RECALL=true\n"
+            "SEARCH_BACKEND=fts5\n"
+            "ANTHROPIC_API_KEY=synthetic-cached-key-survives-timeout\n"
+        )
+
+        env = dict(hook_env)
+        op_budget = 2
+        env["ATHENAEUM_OP_TIMEOUT_SECONDS"] = str(op_budget)
+        env["OP_SERVICE_ACCOUNT_TOKEN"] = "synthetic-service-account-token"
+        env["ATHENAEUM_OP_REFRESH"] = "1"
+
+        bin_dir = _write_sleeping_op(tmp_path)
+        env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+
+        margin_seconds = 20
+        started = time.monotonic()
+        result = subprocess.run(
+            ["bash", str(SESSION_START)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=op_budget + margin_seconds + 30,
+        )
+        elapsed = time.monotonic() - started
+
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert elapsed < op_budget + margin_seconds, (
+            f"hook took {elapsed:.1f}s, expected well under "
+            f"{op_budget + margin_seconds}s (budget {op_budget}s + margin)"
+        )
+
+        body = (cache_dir / "config.env").read_text()
+        assert body.splitlines().count(
+            "ANTHROPIC_API_KEY=synthetic-cached-key-survives-timeout"
+        ) == 1
+        assert "should-never-be-read" not in body
+        assert "No ANTHROPIC_API_KEY cached" not in result.stderr
+
+    def test_ac4_portable_fallback_is_bounded_when_no_timeout_binary_exists(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """athenaeum#2193 AC4: pins the portable background+poll+kill
+        fallback specifically -- the branch `_athenaeum_op_read` takes
+        when NEITHER `timeout` nor `gtimeout` is on PATH, which is the
+        branch stock macOS actually takes (macOS ships no `timeout`;
+        `gtimeout` needs Homebrew coreutils). Linux CI and this lane both
+        have GNU `timeout` on PATH, so
+        `test_ac4_op_read_is_bounded_by_the_timeout` above only ever
+        exercises the `timeout`-present branch -- this test exercises the
+        operator's own platform instead, which is also the riskiest code
+        in the change: subprocess signalling plus a credential-bearing
+        temp file."""
+        _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        cache_dir = tmp_path / ".cache" / "athenaeum"
+        cache_dir.mkdir(parents=True)
+        (cache_dir / "config.env").write_text(
+            "AUTO_RECALL=true\n"
+            "SEARCH_BACKEND=fts5\n"
+            "ANTHROPIC_API_KEY=synthetic-cached-key-survives-portable-timeout\n"
+        )
+
+        env = dict(hook_env)
+        op_budget = 2
+        env["ATHENAEUM_OP_TIMEOUT_SECONDS"] = str(op_budget)
+        env["OP_SERVICE_ACCOUNT_TOKEN"] = "synthetic-service-account-token"
+        env["ATHENAEUM_OP_REFRESH"] = "1"
+
+        # Build a restricted PATH that has everything the hook needs EXCEPT
+        # `timeout`/`gtimeout` -- a symlink farm, not a directory-stripped
+        # PATH, since `timeout` lives in /usr/bin alongside bash, env,
+        # grep, mktemp and everything else the hook shells out to.
+        no_timeout_bin = tmp_path / "no-timeout-bin"
+        no_timeout_bin.mkdir()
+        for directory in (d for d in env["PATH"].split(os.pathsep) if d):
+            try:
+                names = os.listdir(directory)
+            except (OSError, PermissionError):
+                continue
+            for name in names:
+                if name in ("timeout", "gtimeout"):
+                    continue
+                link = no_timeout_bin / name
+                if link.exists() or link.is_symlink():
+                    continue  # first-on-PATH wins, same as real PATH lookup
+                try:
+                    link.symlink_to(os.path.join(directory, name))
+                except (OSError, PermissionError):
+                    continue
+
+        marker = tmp_path / "op-completed-marker"
+        sleeping_op_dir = _write_sleeping_op(tmp_path, marker=marker)
+        env["PATH"] = f"{sleeping_op_dir}{os.pathsep}{no_timeout_bin}"
+
+        # Precondition: this PATH can genuinely never reach `timeout` or
+        # `gtimeout`, still has `bash`, and resolves `op` to the sleeping
+        # stub above -- so this test can never silently degrade into a
+        # duplicate of test_ac4_op_read_is_bounded_by_the_timeout.
+        assert shutil.which("timeout", path=env["PATH"]) is None
+        assert shutil.which("gtimeout", path=env["PATH"]) is None
+        assert shutil.which("bash", path=env["PATH"]) is not None
+        resolved_op = shutil.which("op", path=env["PATH"])
+        assert resolved_op == str(sleeping_op_dir / "op"), (
+            "test setup bug: `op` did not resolve to this test's own "
+            f"sleeping stub at {sleeping_op_dir / 'op'} (got {resolved_op!r})"
+        )
+
+        # Two credentials (ANTHROPIC_API_KEY, JEV_API_KEY) and
+        # ATHENAEUM_OP_REFRESH=1 together mean BOTH attempt a fetch here,
+        # sequentially -- so the floor for this branch is ~2x the budget,
+        # not 1x as in the `timeout`-present test. Size the margin to the
+        # same generous 20s the existing AC4 test uses, but against 2x
+        # budget rather than 1x.
+        margin_seconds = 20
+        started = time.monotonic()
+        result = subprocess.run(
+            ["bash", str(SESSION_START)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=(2 * op_budget) + margin_seconds + 30,
+        )
+        elapsed = time.monotonic() - started
+
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert elapsed < (2 * op_budget) + margin_seconds, (
+            f"hook took {elapsed:.1f}s, expected well under "
+            f"{(2 * op_budget) + margin_seconds}s (2 credentials x "
+            f"{op_budget}s budget + margin)"
+        )
+
+        body = (cache_dir / "config.env").read_text()
+        assert body.splitlines().count(
+            "ANTHROPIC_API_KEY=synthetic-cached-key-survives-portable-timeout"
+        ) == 1
+        assert "should-never-be-read" not in body
+        assert "No ANTHROPIC_API_KEY cached" not in result.stderr
+
+        # The fallback mktemp's a credential temp file into $CACHE_DIR;
+        # it must never survive a killed fetch.
+        assert list(cache_dir.glob("op-read.*")) == []
+
+        # The sleeping `op` process must have been actually killed, not
+        # merely orphaned and ignored -- its own post-sleep side effect
+        # (the marker) must be absent.
+        assert not marker.exists()
+
+    def test_ac4_non_integer_timeout_falls_back_to_the_default_bound(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """Seer finding on athenaeum#2193 (review of athenaeum#2194): a non-integer
+        ATHENAEUM_OP_TIMEOUT_SECONDS (here `0.5`) must not reach either
+        branch's `op` spawn unnormalised. Pre-fix, the portable fallback's
+        pure-integer arithmetic (`_op_budget * 10`) broke AFTER `op` was
+        already backgrounded -- either the subshell aborted and orphaned
+        it (leaking its mode-600 temp file, since the `rm -f` never ran),
+        or `_op_budget_ds` ended up empty and the bounded-wait loop's
+        `-ge` test errored every iteration, read as false, and never
+        timed out. The fix normalises any non-positive-integer budget to
+        the documented default of 10 before `op` is spawned in either
+        branch.
+
+        Reuses the restricted-PATH setup from
+        test_ac4_portable_fallback_is_bounded_when_no_timeout_binary_exists
+        above (same four precondition assertions) so the FALLBACK branch
+        -- where this bug lives -- is the one under test, not the
+        `timeout`-present branch where GNU `timeout` happens to accept
+        `0.5` today."""
+        _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        cache_dir = tmp_path / ".cache" / "athenaeum"
+        cache_dir.mkdir(parents=True)
+        (cache_dir / "config.env").write_text(
+            "AUTO_RECALL=true\n"
+            "SEARCH_BACKEND=fts5\n"
+            "ANTHROPIC_API_KEY=synthetic-cached-key-survives-bad-timeout\n"
+        )
+
+        env = dict(hook_env)
+        env["ATHENAEUM_OP_TIMEOUT_SECONDS"] = "0.5"
+        env["OP_SERVICE_ACCOUNT_TOKEN"] = "synthetic-service-account-token"
+        env["ATHENAEUM_OP_REFRESH"] = "1"
+
+        # Same restricted-PATH construction as the sibling AC4 portable-
+        # fallback test: a symlink farm with everything the hook needs
+        # EXCEPT `timeout`/`gtimeout`.
+        no_timeout_bin = tmp_path / "no-timeout-bin"
+        no_timeout_bin.mkdir()
+        for directory in (d for d in env["PATH"].split(os.pathsep) if d):
+            try:
+                names = os.listdir(directory)
+            except (OSError, PermissionError):
+                continue
+            for name in names:
+                if name in ("timeout", "gtimeout"):
+                    continue
+                link = no_timeout_bin / name
+                if link.exists() or link.is_symlink():
+                    continue  # first-on-PATH wins, same as real PATH lookup
+                try:
+                    link.symlink_to(os.path.join(directory, name))
+                except (OSError, PermissionError):
+                    continue
+
+        marker = tmp_path / "op-completed-marker"
+        sleeping_op_dir = _write_sleeping_op(tmp_path, marker=marker)
+        env["PATH"] = f"{sleeping_op_dir}{os.pathsep}{no_timeout_bin}"
+
+        # Precondition: this PATH can genuinely never reach `timeout` or
+        # `gtimeout`, still has `bash`, and resolves `op` to the sleeping
+        # stub above.
+        assert shutil.which("timeout", path=env["PATH"]) is None
+        assert shutil.which("gtimeout", path=env["PATH"]) is None
+        assert shutil.which("bash", path=env["PATH"]) is not None
+        resolved_op = shutil.which("op", path=env["PATH"])
+        assert resolved_op == str(sleeping_op_dir / "op"), (
+            "test setup bug: `op` did not resolve to this test's own "
+            f"sleeping stub at {sleeping_op_dir / 'op'} (got {resolved_op!r})"
+        )
+
+        # A malformed budget falls back to the documented default of 10,
+        # not to the literal `0.5` -- so the floor here is 2 credentials
+        # (ANTHROPIC_API_KEY, JEV_API_KEY; ATHENAEUM_OP_REFRESH=1 means
+        # both attempt a fetch) x the DEFAULT budget, not x0.5s. Same
+        # generous 20s margin as the sibling AC4 tests, sized against 2x
+        # the default budget.
+        default_budget = 10
+        margin_seconds = 20
+        started = time.monotonic()
+        result = subprocess.run(
+            ["bash", str(SESSION_START)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=(2 * default_budget) + margin_seconds + 30,
+        )
+        elapsed = time.monotonic() - started
+
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert elapsed < (2 * default_budget) + margin_seconds, (
+            f"hook took {elapsed:.1f}s, expected well under "
+            f"{(2 * default_budget) + margin_seconds}s (2 credentials x "
+            f"{default_budget}s default budget + margin)"
+        )
+
+        body = (cache_dir / "config.env").read_text()
+        assert body.splitlines().count(
+            "ANTHROPIC_API_KEY=synthetic-cached-key-survives-bad-timeout"
+        ) == 1
+        assert "should-never-be-read" not in body
+
+        # The leak and marker assertions are the ones that actually
+        # discriminate this fix from the pre-fix behaviour -- do not drop
+        # them. The fallback mktemp's a credential temp file into
+        # $CACHE_DIR; it must never survive a killed fetch.
+        assert list(cache_dir.glob("op-read.*")) == []
+
+        # The sleeping `op` process must have been actually killed, not
+        # merely orphaned and left to finish unobserved -- its own
+        # post-sleep side effect (the marker) must be absent.
+        assert not marker.exists()
+
+    def test_ac6_env_supplied_key_needs_no_op_on_path_at_all(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """athenaeum#2193 AC6(i): with NO `op` reachable on PATH at all
+        (not even the sentinel) and ANTHROPIC_API_KEY supplied live by the
+        caller, the hook succeeds silently -- no "no key cached" warning
+        and nothing mentioning `op`/1Password, because the live value
+        takes precedence over the cache entirely (see the hook's own
+        ``_had_live_cred`` restore logic)."""
+        _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        env = _path_with_no_op_at_all(dict(hook_env))
+        assert shutil.which("op", path=env["PATH"]) is None, (
+            "test setup bug: `op` still reachable on the filtered PATH"
+        )
+        env["ANTHROPIC_API_KEY"] = "synthetic-env-supplied-key"
+
+        result = subprocess.run(
+            ["bash", str(SESSION_START)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert "No ANTHROPIC_API_KEY cached" not in result.stderr
+        assert "op" not in result.stderr.lower()
+        assert "1password" not in result.stderr.lower()
+
+    def test_ac6_cached_key_needs_no_op_on_path_at_all(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """athenaeum#2193 AC6(ii): same as AC6(i), but the key is supplied
+        via a pre-seeded `config.env` line rather than a live env var. The
+        cached line must survive and stderr must stay clean of both the
+        no-key warning and any `op`/1Password mention."""
+        _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        cache_dir = tmp_path / ".cache" / "athenaeum"
+        cache_dir.mkdir(parents=True)
+        (cache_dir / "config.env").write_text(
+            "AUTO_RECALL=true\n"
+            "SEARCH_BACKEND=fts5\n"
+            "ANTHROPIC_API_KEY=synthetic-cached-key-no-op-on-path\n"
+        )
+
+        env = _path_with_no_op_at_all(dict(hook_env))
+        assert shutil.which("op", path=env["PATH"]) is None, (
+            "test setup bug: `op` still reachable on the filtered PATH"
+        )
+
+        result = subprocess.run(
+            ["bash", str(SESSION_START)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert "No ANTHROPIC_API_KEY cached" not in result.stderr
+        assert "op" not in result.stderr.lower()
+        assert "1password" not in result.stderr.lower()
+
+        body = (cache_dir / "config.env").read_text()
+        assert "ANTHROPIC_API_KEY=synthetic-cached-key-no-op-on-path" in body.splitlines()
+
+    def test_ac7_cached_key_survives_when_refresh_not_requested(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """athenaeum#2193 AC7: a working fake `op`, OP_SERVICE_ACCOUNT_TOKEN
+        set, a cached ANTHROPIC_API_KEY line present, and
+        ATHENAEUM_OP_REFRESH unset -> the fetch is NOT attempted even
+        though the token-present gate is open, because nothing is missing
+        from the cache. The fake's value never lands in config.env and the
+        cached line is byte-identical afterwards.
+
+        JEV_API_KEY is cached too, deliberately -- the "nothing missing"
+        condition is evaluated PER CREDENTIAL, so a cached-ANTHROPIC-only
+        config.env would still have the JEV slot open and the fake op
+        WOULD be called for that one, defeating the point of this test.
+        """
+        _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        cache_dir = tmp_path / ".cache" / "athenaeum"
+        cache_dir.mkdir(parents=True)
+        cached_body = (
+            "AUTO_RECALL=true\n"
+            "SEARCH_BACKEND=fts5\n"
+            "ANTHROPIC_API_KEY=synthetic-cached-key-no-refresh\n"
+            "JEV_API_KEY=synthetic-cached-jev-key-no-refresh\n"
+        )
+        (cache_dir / "config.env").write_text(cached_body)
+
+        env = dict(hook_env)
+        env["OP_SERVICE_ACCOUNT_TOKEN"] = "synthetic-service-account-token"
+        fake_op_dir = _write_fake_op(tmp_path, "synthetic-must-not-overwrite-cache")
+        env["PATH"] = f"{fake_op_dir}{os.pathsep}{env['PATH']}"
+
+        result = subprocess.run(
+            ["bash", str(SESSION_START)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+
+        body = (cache_dir / "config.env").read_text()
+        assert "synthetic-must-not-overwrite-cache" not in body
+        key_lines = [line for line in body.splitlines() if line.startswith("ANTHROPIC_API_KEY=")]
+        assert key_lines == ["ANTHROPIC_API_KEY=synthetic-cached-key-no-refresh"]
+
+    def test_ac7_sentinel_sees_zero_invocations_with_token_and_cache(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """athenaeum#2193 AC7 (sentinel half): same setup as the test
+        above but WITHOUT a fake `op` prepended, so the fixture's own
+        sentinel is what `op` resolves to -- it must record zero
+        invocations, proving the "nothing missing from cache" branch of
+        the gate short-circuits before `_athenaeum_op_read` is ever
+        called, not merely before a *successful* fetch. Both credentials
+        are cached, same reason as the test above."""
+        _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        cache_dir = tmp_path / ".cache" / "athenaeum"
+        cache_dir.mkdir(parents=True)
+        (cache_dir / "config.env").write_text(
+            "AUTO_RECALL=true\n"
+            "SEARCH_BACKEND=fts5\n"
+            "ANTHROPIC_API_KEY=synthetic-cached-key-no-refresh\n"
+            "JEV_API_KEY=synthetic-cached-jev-key-no-refresh\n"
+        )
+
+        env = dict(hook_env)
+        env["OP_SERVICE_ACCOUNT_TOKEN"] = "synthetic-service-account-token"
+        _assert_op_is_sentinel(env, tmp_path)
+
+        result = subprocess.run(
+            ["bash", str(SESSION_START)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert sentinel_op_invocations(tmp_path) == []
+
+    def test_ac10_hook_op_subprocess_gets_non_interactive_suppression_flags(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """athenaeum#2193 AC10 (hook half): when a fetch is attempted with
+        a token present (no interactive opt-in), the `op` subprocess runs
+        with OP_LOAD_DESKTOP_APP_SETTINGS=false and
+        OP_BIOMETRIC_UNLOCK_ENABLED=false set in ITS environment."""
+        _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        capture = tmp_path / "op-env-capture.txt"
+        bin_dir = tmp_path / "flag-capturing-op-bin"
+        bin_dir.mkdir()
+        op_stub = bin_dir / "op"
+        op_stub.write_text(
+            "#!/usr/bin/env bash\n"
+            'printf \'LOAD=%s\\nBIOMETRIC=%s\\n\' '
+            f'"${{OP_LOAD_DESKTOP_APP_SETTINGS:-UNSET}}" "${{OP_BIOMETRIC_UNLOCK_ENABLED:-UNSET}}" '
+            f'> {shlex.quote(str(capture))}\n'
+            "echo synthetic-flag-check-key\n"
+        )
+        op_stub.chmod(0o755)
+
+        env = dict(hook_env)
+        env["OP_SERVICE_ACCOUNT_TOKEN"] = "synthetic-service-account-token"
+        env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+
+        result = subprocess.run(
+            ["bash", str(SESSION_START)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert capture.read_text(encoding="utf-8").splitlines() == [
+            "LOAD=false",
+            "BIOMETRIC=false",
+        ]
+
+    def test_ac10_hook_interactive_opt_in_does_not_set_suppression_flags(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """athenaeum#2193 AC10 (hook half, interactive branch): with
+        ATHENAEUM_OP_INTERACTIVE=1 and no token, the gate still opens (per
+        AC3(ii)) but the suppression flags must be ABSENT/empty in the
+        `op` subprocess's own environment -- interactive mode means the
+        operator wants 1Password's normal desktop-app behaviour."""
+        _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        capture = tmp_path / "op-env-capture-interactive.txt"
+        bin_dir = tmp_path / "flag-capturing-op-bin-interactive"
+        bin_dir.mkdir()
+        op_stub = bin_dir / "op"
+        op_stub.write_text(
+            "#!/usr/bin/env bash\n"
+            'printf \'LOAD=%s\\nBIOMETRIC=%s\\n\' '
+            f'"${{OP_LOAD_DESKTOP_APP_SETTINGS:-UNSET}}" "${{OP_BIOMETRIC_UNLOCK_ENABLED:-UNSET}}" '
+            f'> {shlex.quote(str(capture))}\n'
+            "echo synthetic-flag-check-key-interactive\n"
+        )
+        op_stub.chmod(0o755)
+
+        env = dict(hook_env)
+        env["ATHENAEUM_OP_INTERACTIVE"] = "1"
+        env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+
+        result = subprocess.run(
+            ["bash", str(SESSION_START)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert capture.read_text(encoding="utf-8").splitlines() == [
+            "LOAD=UNSET",
+            "BIOMETRIC=UNSET",
+        ]
+
+    def test_empty_cached_value_does_not_block_the_op_fetch(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """Seer finding on athenaeum#2193 (review of athenaeum#2194): a `config.env`
+        containing `ANTHROPIC_API_KEY=` (empty value -- e.g. hand-edited,
+        which the README's option 2 explicitly invites) is a NON-empty
+        line, so the pre-fix cache-presence gate
+        (`[ -z "${_cached_cred_lines[$_i]}" ]`) read it as "already
+        cached" and skipped the fetch forever, with no
+        ATHENAEUM_OP_REFRESH escape (the gate tests the same captured
+        line this fix changes). The fix discards a matched line whose
+        VALUE is empty at capture time, so an empty-valued line is
+        treated the same as no cached line at all -- here, with
+        ATHENAEUM_OP_REFRESH left UNSET, that means the fetch still
+        happens."""
+        _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        cache_dir = tmp_path / ".cache" / "athenaeum"
+        cache_dir.mkdir(parents=True)
+        (cache_dir / "config.env").write_text(
+            "AUTO_RECALL=true\n"
+            "SEARCH_BACKEND=fts5\n"
+            "ANTHROPIC_API_KEY=\n"
+        )
+
+        env = dict(hook_env)
+        env["OP_SERVICE_ACCOUNT_TOKEN"] = "synthetic-service-account-token"
+        fake_op_dir = _write_fake_op(tmp_path, "synthetic-fetched-despite-empty-cache")
+        env["PATH"] = f"{fake_op_dir}{os.pathsep}{env['PATH']}"
+        assert "ATHENAEUM_OP_REFRESH" not in env
+
+        result = subprocess.run(
+            ["bash", str(SESSION_START)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+
+        body = (cache_dir / "config.env").read_text()
+        key_lines = [line for line in body.splitlines() if line.startswith("ANTHROPIC_API_KEY=")]
+        assert key_lines == ["ANTHROPIC_API_KEY=synthetic-fetched-despite-empty-cache"]
+        assert "ANTHROPIC_API_KEY=" not in body.splitlines()
+
+    def test_empty_cached_value_is_not_mistaken_for_a_cached_key(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """Companion to the test above, cheaper: with an empty cached
+        `ANTHROPIC_API_KEY=` value and no `op` reachable at all to
+        refill it, the hook must still end with exactly one "no key
+        cached" warning rather than silently believing an empty value is
+        a real cached credential."""
+        _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        cache_dir = tmp_path / ".cache" / "athenaeum"
+        cache_dir.mkdir(parents=True)
+        (cache_dir / "config.env").write_text(
+            "AUTO_RECALL=true\n"
+            "SEARCH_BACKEND=fts5\n"
+            "ANTHROPIC_API_KEY=\n"
+        )
+
+        env = _path_with_no_op_at_all(dict(hook_env))
+        assert shutil.which("op", path=env["PATH"]) is None, (
+            "test setup bug: `op` still reachable on the filtered PATH"
+        )
+
+        result = subprocess.run(
+            ["bash", str(SESSION_START)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert result.stderr.count("No ANTHROPIC_API_KEY cached") == 1
 
 
 class TestUserPromptRecall:

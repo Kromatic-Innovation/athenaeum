@@ -38,6 +38,18 @@
 #   ATHENAEUM_SRC        Path to athenaeum source checkout (optional)
 #   ATHENAEUM_OP_KEY_PATH  1Password path (default: op://Agent Tools/Anthropic API Key/credential)
 #   ATHENAEUM_OP_JEV_KEY_PATH  1Password path for JEV_API_KEY (default: op://Agent Tools/Jev Athenaeum Key/credential)
+#   ATHENAEUM_OP_INTERACTIVE      1 = opt into 1Password's interactive desktop-app
+#                                 integration: `op` may run without a service-account
+#                                 token, and the non-interactive suppression flags
+#                                 below are NOT set (default: unset, athenaeum#2193)
+#   ATHENAEUM_OP_REFRESH          1 = re-fetch from `op` even when a cached line for
+#                                 that credential already exists (default: unset,
+#                                 athenaeum#2193)
+#   ATHENAEUM_OP_TIMEOUT_SECONDS  Bound, in WHOLE seconds, on a single `op read`
+#                                 (default: 10, athenaeum#2193). Must be a
+#                                 positive integer -- a fractional, non-numeric,
+#                                 empty, or zero value silently falls back to
+#                                 the default rather than failing the fetch.
 
 set -euo pipefail
 
@@ -104,6 +116,107 @@ _CRED_OVERRIDE_VARS=(ATHENAEUM_OP_KEY_PATH ATHENAEUM_OP_JEV_KEY_PATH)
 # script stays hardcoded to ANTHROPIC_API_KEY only (Jev is optional,
 # athenaeum#2056 AC) -- see the comment on that block below.
 
+# ── Non-interactive, bounded `op read` (athenaeum#2193) ─────────────────────
+# `op` probes the 1Password desktop app's group container on every call
+# unless OP_LOAD_DESKTOP_APP_SETTINGS=false; on macOS that is the App Data
+# TCC service and the probe can block indefinitely, turning a background
+# SessionStart hook into a stuck OS permission prompt.
+# OP_BIOMETRIC_UNLOCK_ENABLED=false suppresses the matching biometric-unlock
+# prompt. Both flags are scoped to the single `op` subprocess via `env`,
+# NEVER `export`ed process-wide -- everything else this hook spawns (the
+# Python index build, etc.) must be unaffected. Skipped entirely when
+# ATHENAEUM_OP_INTERACTIVE=1: that is an explicit opt-in to 1Password's
+# interactive desktop-app integration, where these flags would be
+# counterproductive.
+#
+# Resolve a timeout runner once (not once per credential): prefer GNU/BSD
+# `timeout`, then macOS's `gtimeout` (coreutils via Homebrew), else a
+# portable background+poll+kill fallback that works on stock macOS bash
+# 3.2.57 (no `declare -A`, no `wait -n`).
+_athenaeum_op_timeout_bin=""
+if command -v timeout >/dev/null 2>&1; then
+  _athenaeum_op_timeout_bin="timeout"
+elif command -v gtimeout >/dev/null 2>&1; then
+  _athenaeum_op_timeout_bin="gtimeout"
+fi
+
+# _athenaeum_op_read <op-path>
+# Writes the fetched value to stdout, nothing else; returns non-zero on any
+# failure or timeout. No stderr output of its own -- the caller's existing
+# `if _fetched_key="$(...)" && [ -n "$_fetched_key" ]` guard already treats
+# a non-zero return (or empty stdout) as "leave the cached line alone", and
+# that silent-failure shape is itself part of the athenaeum#2056 contract
+# ("missing Jev item produces no line and no warning").
+_athenaeum_op_read() {
+  local _op_path="$1"
+  # Normalise the budget BEFORE either branch below spawns `op` (Seer
+  # finding on athenaeum#2193): a non-integer value (fractional,
+  # non-numeric, or empty-but-set) used to survive past this point because
+  # GNU `timeout` accepts a fractional argument on the branch below, then
+  # break the portable fallback's pure-integer arithmetic AFTER `op` was
+  # already running -- either the subshell aborts and orphans `op` (leaking
+  # its mode-600 temp file, since the `rm -f` never runs) or
+  # `_op_budget_ds` ends up empty and the bounded-wait loop's `-ge` test
+  # errors every iteration, is read as false, and never times out -- the
+  # exact unbounded hang this issue exists to prevent. A malformed knob
+  # must not be able to hang the hook or skip the credential, so anything
+  # that isn't a positive integer silently falls back to the documented
+  # default of 10 -- no stderr here, this hook's contract in this area is
+  # silence (athenaeum#2056).
+  local _op_budget="${ATHENAEUM_OP_TIMEOUT_SECONDS:-10}"
+  case "$_op_budget" in
+    ''|*[!0-9]*|0) _op_budget=10 ;;
+  esac
+  local _op_cmd
+
+  if [ "${ATHENAEUM_OP_INTERACTIVE:-}" = "1" ]; then
+    _op_cmd=(op read "$_op_path")
+  else
+    _op_cmd=(env OP_LOAD_DESKTOP_APP_SETTINGS=false OP_BIOMETRIC_UNLOCK_ENABLED=false op read "$_op_path")
+  fi
+
+  if [ -n "$_athenaeum_op_timeout_bin" ]; then
+    "$_athenaeum_op_timeout_bin" "$_op_budget" "${_op_cmd[@]}" 2>/dev/null
+    return $?
+  fi
+
+  # Portable fallback (no `timeout`/`gtimeout` on PATH): background + poll
+  # + kill. The fetched value is a credential, so its temp file lives in
+  # $CACHE_DIR (already restricted to 700) at mode 600, mktemp'd like the
+  # config.env tmp handling above -- never a world-readable /tmp path. Poll
+  # in deciseconds: bash has no floating point, and 1-second polling would
+  # make a short-lived fetch wait up to a full second longer than needed.
+  local _op_tmp
+  _op_tmp=$(mktemp "${CACHE_DIR}/op-read.XXXXXX")
+  chmod 600 "$_op_tmp"
+  "${_op_cmd[@]}" > "$_op_tmp" 2>/dev/null &
+  local _op_pid=$!
+  local _op_budget_ds=$((_op_budget * 10))
+  local _op_waited_ds=0
+  while kill -0 "$_op_pid" 2>/dev/null; do
+    if [ "$_op_waited_ds" -ge "$_op_budget_ds" ]; then
+      kill "$_op_pid" 2>/dev/null || true
+      sleep 0.2
+      kill -9 "$_op_pid" 2>/dev/null || true
+      wait "$_op_pid" 2>/dev/null || true
+      rm -f "$_op_tmp"
+      return 1
+    fi
+    sleep 0.1
+    _op_waited_ds=$((_op_waited_ds + 1))
+  done
+
+  local _op_status=0
+  wait "$_op_pid" 2>/dev/null || _op_status=$?
+  if [ "$_op_status" -eq 0 ]; then
+    cat "$_op_tmp"
+    rm -f "$_op_tmp"
+    return 0
+  fi
+  rm -f "$_op_tmp"
+  return 1
+}
+
 _cached_cred_lines=()
 _had_live_cred=()
 _live_cred_values=()
@@ -116,7 +229,19 @@ while [ "$_i" -lt "$_cred_count" ]; do
   if [ -f "$CONFIG_ENV" ]; then
     _line="$(grep "^${_name}=" "$CONFIG_ENV" 2>/dev/null | tail -n 1 || true)"
   fi
-  _cached_cred_lines[_i]="$_line"
+  # Seer finding on athenaeum#2193: discard a matched line whose VALUE is
+  # empty (e.g. a hand-edited `ANTHROPIC_API_KEY=` -- README option 2
+  # explicitly invites editing this file by hand). A non-empty line with
+  # an empty value reads as "already cached" to the end-of-script gate
+  # below, so a fetch never runs again -- permanently, with no
+  # ATHENAEUM_OP_REFRESH escape, since the gate tests this same captured
+  # line. Checked at capture time, not the gate, because this array has a
+  # second consumer: the restore loop that writes it back into a freshly
+  # truncated config.env, where an empty-valued line is equally useless.
+  case "$_line" in
+    "${_name}="?*) _cached_cred_lines[_i]="$_line" ;;
+    *) _cached_cred_lines[_i]="" ;;
+  esac
 
   # Same issue, plan step 2: if the caller's own process already exported
   # this credential, that value is scoped to this process, not to the
@@ -361,6 +486,27 @@ done
 # would make a run that ever cached a key skip every future fetch forever,
 # permanently defeating "a fresh `op read` still replaces the cached value"
 # (athenaeum#1886 AC2).
+#
+# athenaeum#2193 deliberately NARROWS that athenaeum#1886 AC2 guarantee:
+# instead of an unconditional per-session re-read, a fresh fetch now only
+# happens when nothing is cached yet (`_cached_cred_lines[$_i]` -- captured
+# BEFORE either writer above truncated config.env, not a re-read of the
+# file and not the live variable, same reasoning as the paragraph above) OR
+# the operator explicitly asks for one via ATHENAEUM_OP_REFRESH=1. An
+# unconditional per-session `op read` is exactly what turns a one-time OS
+# permission grant into a recurring prompt -- so the "always re-read"
+# behaviour AC2 established is now opt-in, not the default. Likewise, the
+# fetch as a whole is only attempted when a non-interactive credential is
+# available (OP_SERVICE_ACCOUNT_TOKEN) or the operator opted into
+# interactive 1Password via ATHENAEUM_OP_INTERACTIVE=1 -- a whole-loop
+# invariant (same for every credential), so hoisted out of the loop below
+# as `_op_allowed` rather than recomputed per entry.
+if [ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ] || [ "${ATHENAEUM_OP_INTERACTIVE:-}" = "1" ]; then
+  _op_allowed=true
+else
+  _op_allowed=false
+fi
+
 _i=0
 while [ "$_i" -lt "$_cred_count" ]; do
   _name="${_CRED_ENV_NAMES[$_i]}"
@@ -373,8 +519,10 @@ while [ "$_i" -lt "$_cred_count" ]; do
     _key_path="$_default_path"
   fi
 
-  if [ "${_had_live_cred[$_i]}" = false ] && command -v op >/dev/null 2>&1; then
-    if _fetched_key="$(op read "$_key_path" 2>/dev/null)" && [ -n "$_fetched_key" ]; then
+  if [ "${_had_live_cred[$_i]}" = false ] && command -v op >/dev/null 2>&1 \
+    && [ "$_op_allowed" = true ] \
+    && { [ -z "${_cached_cred_lines[$_i]}" ] || [ "${ATHENAEUM_OP_REFRESH:-}" = "1" ]; }; then
+    if _fetched_key="$(_athenaeum_op_read "$_key_path" 2>/dev/null)" && [ -n "$_fetched_key" ]; then
       # mktemp inside the (already-restricted) cache dir — gives us an
       # unpredictable path mode 600 atomically, closing the window where
       # `${CONFIG_ENV}.tmp` could have been pre-created as a symlink or
@@ -399,11 +547,22 @@ done
 # everywhere else until someone notices "generic-looking recall names".
 # Exactly one line, and only in the no-key case -- a run that ends with a
 # key (cached, restored, or freshly fetched) prints nothing new.
+#
+# athenaeum#2193 AC6: a caller that supplies ANTHROPIC_API_KEY LIVE (so
+# `_had_live_cred[0]` was true and the fetch branch above never ran at
+# all) never gets a line written into config.env -- checking the file
+# alone would warn even though a perfectly usable key is sitting in this
+# process's own `$ANTHROPIC_API_KEY` right now (restored earlier in this
+# script). Check that live variable too, so "a key is live-supplied, no
+# `op` is even on PATH" stays silent, matching every other "ends with a
+# key" case this comment already promises.
 _final_api_key_line="$(grep '^ANTHROPIC_API_KEY=' "$CONFIG_ENV" 2>/dev/null | tail -n 1 || true)"
 case "$_final_api_key_line" in
   ANTHROPIC_API_KEY=?*) ;;
   *)
-    echo "[Knowledge] No ANTHROPIC_API_KEY cached — LLM topic extraction will fall back to regex-only extraction until a fetch succeeds." >&2
+    if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+      echo "[Knowledge] No ANTHROPIC_API_KEY cached — LLM topic extraction will fall back to regex-only extraction until a fetch succeeds." >&2
+    fi
     ;;
 esac
 
