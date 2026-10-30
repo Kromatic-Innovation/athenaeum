@@ -583,14 +583,16 @@ so it ships first and does not wait for athenaeum#2196.
 
 The tier-3 create and merge prompts can write addresses mentioned in a note
 into the body of whichever page they compile. The next PII migration pass
-then files those addresses as the page owner's. The synchronous path in
-`tiers.py` and the batched path in `batch.py` do not converge on
-`tiers.tier3_create` / `tiers.tier3_merge` directly — `batch.py` never calls
-either. Both transports instead return through three shared helpers:
-`tiers.tier3_entity_from_response` (create), `tiers.parse_merge_ops_response`
-(merge) and `tiers.tier3_merge_full` (merge fallback). The scrub therefore
-sits on the output of those three helpers (or immediately after each call in
-both callers), so every caller gets it regardless of transport.
+then files those addresses as the page owner's. `batch.py`'s batched
+result-handling path does not call `tiers.tier3_create` or
+`tiers.tier3_merge`; its unbatched fallback loops at finalize do call both,
+alongside the synchronous path in `tiers.py`. All three converge on the same
+three shared helpers: `tier3_create` returns through
+`tiers.tier3_entity_from_response`, and `tier3_merge` returns through
+`tiers.parse_merge_ops_response` and `tiers.tier3_merge_full`, and so does
+the batched path's own result parsing. The scrub therefore sits on the
+output of those three helpers (or immediately after each call in both
+callers), so every caller gets it regardless of transport.
 
 `scrub_compiled_contact_tokens(body, *, subject_uid, source_ref, context)`:
 
