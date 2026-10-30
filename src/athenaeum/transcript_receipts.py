@@ -731,6 +731,74 @@ def _matching_human_utterance(records: list[object], claim: str) -> object | Non
     return None
 
 
+def attest_user_stated_records(
+    records: list[object],
+    *,
+    origin_session_id: str,
+    claim: str,
+    index: witness_attestation.AttestationIndex | None,
+) -> tuple[witness_attestation.AttestationOutcome | None, str, str | None]:
+    """Attest a ``"user-stated"`` classification against the witness ledger.
+
+    Issue athenaeum#2158 ran this inline in :func:`write_receipt_for_origin`;
+    issue athenaeum#2159 needs the identical lookup from
+    :func:`athenaeum.repair.backfill_sources`, whose witnessed branch must
+    agree with intake's or the two writers would disagree about which claims
+    are witnessed. Extracted rather than copied for exactly that reason, and
+    it is a pure function over already-read *records* — the CALLER owns the
+    single transcript read (the athenaeum#2048 read budget).
+
+    Returns ``(outcome, utterance_digest, transcript_origin_kind)``:
+
+    * ``(None, "", None)`` when no human-authored record matches *claim* —
+      which is the pre-athenaeum#2158 state of the world, so a caller writes
+      its receipt (or its ``user:`` rewrite) exactly as it did before.
+    * otherwise the :class:`~athenaeum.witness_attestation.AttestationOutcome`
+      (``hit`` or a ``miss_reason``), the matched utterance's digest, and the
+      record's ``origin.kind`` when it carries one.
+
+    Every attestation input is read straight off the matched RECORD — never
+    from the claim or the utterance text — and *index* is ``None`` exactly
+    when ``librarian.witness_attestation_enabled`` resolves off, which is the
+    only way to reach the ``"flag-off"`` outcome and costs no I/O.
+    """
+    matched_record = _matching_human_utterance(records, claim)
+    if matched_record is None:
+        return None, "", None
+    matched_text = _normalize(_user_authored_text(matched_record))
+    utterance_digest = hashlib.sha256(matched_text.encode("utf-8")).hexdigest()
+
+    prompt_id: str | None = None
+    transcript_origin_kind: str | None = None
+    transcript_prompt_source: str | None = None
+    transcript_is_sidechain = False
+    if isinstance(matched_record, dict):
+        raw_prompt_id = matched_record.get("promptId")
+        prompt_id = str(raw_prompt_id) if raw_prompt_id else None
+        origin = matched_record.get("origin")
+        if isinstance(origin, dict):
+            raw_origin_kind = origin.get("kind")
+            if isinstance(raw_origin_kind, str):
+                transcript_origin_kind = raw_origin_kind
+        raw_prompt_source = matched_record.get("promptSource")
+        if isinstance(raw_prompt_source, str):
+            transcript_prompt_source = raw_prompt_source
+        transcript_is_sidechain = bool(matched_record.get("isSidechain"))
+
+    outcome = witness_attestation.attest(
+        index,
+        prompt_id=prompt_id,
+        origin_session_id=origin_session_id,
+        claim=claim,
+        utterance_digest=utterance_digest,
+        matched_record_text=_user_authored_text(matched_record),
+        transcript_origin_kind=transcript_origin_kind,
+        transcript_prompt_source=transcript_prompt_source,
+        transcript_is_sidechain=transcript_is_sidechain,
+    )
+    return outcome, utterance_digest, transcript_origin_kind
+
+
 def write_receipt_for_origin(
     wiki_root: Path,
     *,
@@ -822,45 +890,16 @@ def write_receipt_for_origin(
     transcript_origin_kind: str | None = None
     witness_outcome: witness_attestation.AttestationOutcome | None = None
     if classification.channel == "user-stated":
-        matched_record = _matching_human_utterance(snap.records, claim)
-        if matched_record is not None:
-            matched_text = _normalize(_user_authored_text(matched_record))
-            utterance_digest = hashlib.sha256(matched_text.encode("utf-8")).hexdigest()
-
-            # Issue athenaeum#2158: attest this utterance against the witness
-            # ledger. Every field below is read straight off the matched
-            # RECORD (never the claim/utterance text itself) — the same
-            # record `_matching_human_utterance` now returns instead of
-            # just its normalized text.
-            prompt_id: str | None = None
-            transcript_prompt_source: str | None = None
-            transcript_is_sidechain = False
-            if isinstance(matched_record, dict):
-                raw_prompt_id = matched_record.get("promptId")
-                prompt_id = str(raw_prompt_id) if raw_prompt_id else None
-                origin = matched_record.get("origin")
-                if isinstance(origin, dict):
-                    raw_origin_kind = origin.get("kind")
-                    if isinstance(raw_origin_kind, str):
-                        transcript_origin_kind = raw_origin_kind
-                raw_prompt_source = matched_record.get("promptSource")
-                if isinstance(raw_prompt_source, str):
-                    transcript_prompt_source = raw_prompt_source
-                transcript_is_sidechain = bool(matched_record.get("isSidechain"))
-
-            witness_outcome = witness_attestation.attest(
-                run.attestation_index,
-                prompt_id=prompt_id,
+        witness_outcome, utterance_digest, transcript_origin_kind = (
+            attest_user_stated_records(
+                snap.records,
                 origin_session_id=origin_session_id,
                 claim=claim,
-                utterance_digest=utterance_digest,
-                matched_record_text=_user_authored_text(matched_record),
-                transcript_origin_kind=transcript_origin_kind,
-                transcript_prompt_source=transcript_prompt_source,
-                transcript_is_sidechain=transcript_is_sidechain,
+                index=run.attestation_index,
             )
-            if witness_outcome.hit:
-                final_channel = "witnessed"
+        )
+        if witness_outcome is not None and witness_outcome.hit:
+            final_channel = "witnessed"
 
     if (
         existing is not None
@@ -1001,6 +1040,42 @@ def transcript_path_for(
     return root / origin_scope / f"{origin_session_id}.jsonl"
 
 
+def _persist_witnessed_source(
+    am: AutoMemoryFile, entry: ReceiptEntry, *, lock: RunLock
+) -> bool:
+    """Write the ``witnessed`` source rewrite back onto *am*'s own file.
+
+    Issue athenaeum#2159. :func:`write_receipts_for_files` is the natural
+    seam: it already holds the acquired :class:`RunLock` for the whole run,
+    already loops per :class:`~athenaeum.models.AutoMemoryFile` (so it has
+    ``am.path`` and the ``origin_turn`` the ref needs), and already has to
+    look at ``entry.channel`` to count the ``witnessed`` upgrades. Nothing
+    else on this path knows all four of those things at once.
+
+    The import of :mod:`athenaeum.intake` is function-local. Both modules are
+    L2, so a top-level import would be legal LAYERING — but ``intake`` is the
+    discovery front door for the whole run loop, and this module is imported
+    by ``resolutions``; keeping the edge deferred leaves this module's
+    top-level import surface exactly as light as it was, the same reason the
+    rest of the codebase defers its L2-to-L2 edges. ``intake`` does not
+    import this module (checked: no cycle in either direction).
+
+    Returns whatever :func:`athenaeum.intake.persist_witnessed_source`
+    returns — ``True`` iff the file was rewritten. A
+    ``WitnessedSourceWriteNotLocked`` is deliberately NOT caught: an
+    unacquired lock is a caller bug, not a per-file condition to tolerate.
+    """
+    from athenaeum.intake import persist_witnessed_source
+
+    return persist_witnessed_source(
+        am.path,
+        session_id=am.origin_session_id or "",
+        origin_turn=am.origin_turn,
+        witness_ref=entry.witness_ref,
+        lock=lock,
+    )
+
+
 def write_receipts_for_files(
     wiki_root: Path,
     files: Sequence[AutoMemoryFile],
@@ -1088,6 +1163,17 @@ def write_receipts_for_files(
             processed += 1
             if entry.channel == "witnessed":
                 witnessed += 1
+                # Issue athenaeum#2159: a `witnessed` receipt only becomes
+                # visible to source precedence once the ranked token is on
+                # the MEMORY. The flag check is redundant by construction
+                # (a `witnessed` channel is unreachable with the flag off --
+                # `ReceiptRun` leaves `attestation_index` None, and
+                # `witness_attestation.attest` then returns the `flag-off`
+                # miss), but it is stated explicitly so the gate is
+                # TESTABLE at this seam rather than only inferable from two
+                # other modules' behaviour.
+                if run.witness_attestation_enabled:
+                    _persist_witnessed_source(am, entry, lock=lock)
             elif entry.witness_miss is not None:
                 witness_miss_counts[entry.witness_miss] = (
                     witness_miss_counts.get(entry.witness_miss, 0) + 1

@@ -490,7 +490,7 @@ was found (or be empty).
 - **Constant:** `athenaeum.resolutions._RESOLVE_SYSTEM`
 - **Source:** `src/athenaeum/resolutions.py`
 - **Model knob:** `resolve` &middot; **max_tokens:** `8192`
-- **sha256:** `c1c165404b6ceef7715dc34b329fc621e864e03a954a0ed8b0fab031c0cbee45`
+- **sha256:** `1bf4df28ce00b67ebe80c4840c91225366c02ff901949dba65f4d761868a3dc4`
 
 ```text
 You are a resolver for an AI agent's long-term memory system.
@@ -654,7 +654,11 @@ STEP 2 — APPLY THE CLASSIFICATION:
 
 SOURCE-PRECEDENCE TAXONOMY (highest to lowest):
 
-1. user:<conversation-ref> — user said it directly. Highest authority.
+1. user:<conversation-ref> / witnessed:<session-ref> — user said it
+   directly; witnessed additionally carries a harness witness (a
+   hash-chained witness-ledger line agreeing with the transcript
+   record). A harness witness does NOT outrank the user's own word —
+   the two share tier 1. Highest authority.
 2. linkedin:<username> / twitter:<username> — user-curated public profile.
 3. api:apollo / api:<vendor> — third-party authoritative source.
 4. wikipedia:<page> — consensus public source.

@@ -479,9 +479,28 @@ def classify_backfill_claim(
         claim: the fact text to match (title/name, or first body line).
         projects_root: transcript root; defaults to ``~/.claude/projects``.
     """
-    root = projects_root if projects_root is not None else default_projects_root()
-    records = _iter_session_records(root / scope, session_id)
+    records = read_session_records(scope, session_id, projects_root=projects_root)
     return classify_backfill_records(records, session_id, turn, claim=claim)
+
+
+def read_session_records(
+    scope: str, session_id: str, *, projects_root: Path | None = None
+) -> list[object]:
+    """The ORIGINATING session's parsed transcript records — ONE read.
+
+    The public face of :func:`_iter_session_records`, added in issue
+    athenaeum#2159 so a caller that needs the records for TWO purposes (
+    ``repair --backfill-sources`` classifies AND then attests against the
+    witness ledger) can own the single read instead of each helper doing its
+    own. :func:`classify_backfill_claim` routes through it too, so there is
+    exactly one path to the transcript.
+
+    Scope discipline is unchanged (issue athenaeum#260 Quine S1): exactly the
+    one ``{session_id}.jsonl`` named by the caller, never a scope-wide glob.
+    Returns ``[]`` when the transcript is absent or unreadable.
+    """
+    root = projects_root if projects_root is not None else default_projects_root()
+    return _iter_session_records(root / scope, session_id)
 
 
 def classify_backfill_records(
