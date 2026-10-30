@@ -27,6 +27,7 @@ NODEIDS = [
     "tests/evals/test_recall_covers_grep.py::test_print[core]",
     "tests/evals/test_recall_covers_grep.py::test_unparametrized",
     "tests/evals/test_hook_byte_equivalence_1912.py::test_sweep",
+    "tests/evals/test_north_star_preflight.py::test_case_a",
     "tests/test_c.py::test_four",
 ]
 
@@ -61,7 +62,8 @@ def test_assignment_is_independent_of_input_order() -> None:
 def test_heavy_units_are_spread_across_shards() -> None:
     owner = ci_sharding.assign_units(NODEIDS, 2)
     core = owner["tests/evals/test_recall_covers_grep.py[core]"]
-    assert owner["tests/evals/test_hook_byte_equivalence_1912.py"] != core
+    # The two heaviest units must never share a shard.
+    assert owner["tests/evals/test_north_star_preflight.py"] != core
 
 
 @pytest.mark.parametrize("spec", ["", "3", "0/3", "4/3", "1/0", "a/b", "1/3/5", "-1/3"])

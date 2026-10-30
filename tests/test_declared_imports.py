@@ -34,14 +34,11 @@ _spec.loader.exec_module(check_declared_imports)
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
-def test_gate_passes_on_the_current_tree() -> None:
+def test_gate_passes_on_the_current_tree(capsys: pytest.CaptureFixture[str]) -> None:
     # The gate. A new undeclared third-party import must make this red.
+    # One full-tree scan serves both checks (each scan costs ~20s on CI).
     assert check_declared_imports.main(["--root", str(REPO_ROOT)]) == 0
-
-
-def test_gate_reports_a_denominator_on_success(capsys: pytest.CaptureFixture[str]) -> None:
-    # Evidence a sweep actually ran, rather than a silent zero-work pass.
-    check_declared_imports.main(["--root", str(REPO_ROOT)])
+    # ...and evidence a sweep actually ran, rather than a silent zero-work pass.
     out = capsys.readouterr().out
     assert "OK" in out
     assert "distinct top-level imports" in out
