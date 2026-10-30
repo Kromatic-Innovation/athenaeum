@@ -16,6 +16,11 @@ see that module for the injected-stub pattern. The default lookup
 local read against the default ``GITHUB_TOKEN`` — no Anthropic key, no push
 trigger, matching the athenaeum#1731 AC2 constraint.
 
+When a receipt is needed, the failure message carries the DISPATCH RULE
+(`DISPATCH_RULE`, design §7): dispatch once, after review is complete, at
+the final head. A `develop` merge, a rebase, or a head that already has a
+run is never a reason to dispatch again.
+
 Four independent checks gate a receipt URL, each with its own failure
 message (Quine's athenaeum#1745 review round): the run must be a
 ``workflow_dispatch`` of the ``Evals`` workflow (``workflowName`` —
@@ -74,6 +79,23 @@ from pathlib import Path
 
 #: The workflow this gate's receipt must point at (evals.yml's `name:`).
 EVALS_WORKFLOW_NAME = "Evals"
+
+#: The dispatch rule (design `docs/design/eval-trigger-surface.md` §7), in one
+#: sentence, because THIS is the text a dispatching agent reads at decision
+#: time. The full rule — and the reasoning — lives in `tests/evals/README.md`;
+#: this string is a pointer to it, not a second specification.
+#:
+#: It replaces the old "the dispatch is stale, re-run it", which was the most
+#: likely driver of the measured re-dispatch churn: 19 of 23 paid runs in the
+#: 30 days to 2026-10-30 went to three PR branches, five of them following a
+#: `Merge develop` with no surface delta at all (athenaeum#2228).
+DISPATCH_RULE = (
+    "Dispatch once, after review is complete, at the final head. Do not "
+    "re-dispatch for a `develop` merge or a rebase (a receipt covers those), "
+    "nor for a head that already has a run in flight or finished — at most "
+    "one retry of a red run, then treat red as a finding. See "
+    "tests/evals/README.md."
+)
 
 
 def _dispatch_hint(repo: str) -> str:
@@ -569,8 +591,8 @@ def check_receipt(
             return ReceiptCheck(
                 False,
                 f"run {run_id}'s headSha ({receipt_sha!r}) does not match "
-                f"this PR's head ({head_sha!r}) and {why} — the dispatch is "
-                "stale, re-run it.",
+                f"this PR's head ({head_sha!r}) and {why} — the receipt is "
+                f"stale for this head. {DISPATCH_RULE}",
             )
     if run.get("conclusion") != "success":
         return ReceiptCheck(
@@ -651,9 +673,10 @@ def evaluate(
         "PR changes the LLM reasoning surface but carries no valid eval "
         f"receipt.\n\n{detail}"
         f"{result.message}\n\n"
-        "Dispatch the eval suite, then add `Evals: <run-url>` to the PR "
-        "body, or add `Evals: not needed — <reason>` if this change cannot "
-        f"move a result:\n\n  {_dispatch_hint(this_repo)}",
+        f"{DISPATCH_RULE}\n\n"
+        "Then add `Evals: <run-url>` to the PR body — or add "
+        "`Evals: not needed — <reason>` if this change cannot move a "
+        f"result:\n\n  {_dispatch_hint(this_repo)}",
     )
 
 

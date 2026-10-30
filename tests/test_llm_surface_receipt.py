@@ -784,3 +784,60 @@ def test_fingerprint_of_a_designated_symbol_ignores_the_rest_of_the_file(
     after = fingerprint_entry("mod.py::designated", _rev_parse(symbol_repo))
     assert before == after
     assert before not in {MISSING, UNPARSEABLE}
+
+
+# --- the dispatch rule in the failure text (athenaeum#2228) -----------------
+#
+# Design §7: the gate's failure message is what a dispatching agent reads at
+# decision time, so the rule has to be IN it. The old text ("the dispatch is
+# stale, re-run it") is the most likely driver of the measured per-push
+# re-dispatch churn, so its absence is pinned too.
+
+DISPATCH_RULE = check_llm_surface_receipt.DISPATCH_RULE
+_RULE_KEY_PHRASE = "dispatch once, after review is complete, at the final head"
+
+
+def test_the_dispatch_rule_says_once_at_the_final_reviewed_head() -> None:
+    assert _RULE_KEY_PHRASE in DISPATCH_RULE.lower()
+    assert "tests/evals/README.md" in DISPATCH_RULE
+
+
+def test_stale_receipt_message_carries_the_dispatch_rule_and_not_re_run_it() -> None:
+    result = _evaluate_with(["CHANGELOG.md", "src/athenaeum/tiers.py"])
+    assert not result.ok
+    assert "stale" in result.message.lower()
+    assert _RULE_KEY_PHRASE in result.message.lower()
+    assert "re-run it" not in result.message.lower()
+
+
+def test_missing_receipt_message_carries_the_dispatch_rule() -> None:
+    result = evaluate(
+        changed_files=["src/athenaeum/tiers.py"],
+        surface=SURFACE,
+        pr_body="a PR description with no receipt line",
+        head_sha=HEAD_SHA,
+        this_repo=REPO,
+        run_lookup=_unreached_lookup,
+    )
+    assert not result.ok
+    assert _RULE_KEY_PHRASE in result.message.lower()
+    assert "re-run it" not in result.message.lower()
+
+
+def test_no_failure_message_tells_the_reader_to_re_dispatch_per_push() -> None:
+    """Every path that asks for a dispatch asks for exactly ONE, at the final head."""
+    messages = [
+        _evaluate_with(["CHANGELOG.md", "src/athenaeum/tiers.py"]).message,
+        _evaluate_with(None).message,
+        evaluate(
+            changed_files=["src/athenaeum/tiers.py"],
+            surface=SURFACE,
+            pr_body="no receipt",
+            head_sha=HEAD_SHA,
+            this_repo=REPO,
+            run_lookup=_unreached_lookup,
+        ).message,
+    ]
+    for message in messages:
+        assert "re-run" not in message.lower(), message
+        assert _RULE_KEY_PHRASE in message.lower(), message

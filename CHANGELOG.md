@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **"Dispatch once, at the final reviewed head" is now written down, and the
+  eval gate says it (issue athenaeum#2228).** `tests/evals/README.md` gains
+  the canonical statement of the rule — dispatch only when review is
+  complete, the gate reports a changed reasoning surface, and no passing run
+  already covers the head; never for a `develop` merge, a rebase, or a head
+  that already has a run (at most one retry of a red one). The gate's own
+  failure text carries a one-sentence version, because that is what a
+  dispatching agent reads at decision time: it no longer says "the dispatch
+  is stale, re-run it", which was the most likely driver of the measured
+  churn (19 of 23 paid runs in 30 days went to three PR branches, five of
+  them following a `Merge develop` with no surface delta at all). The
+  README's receipt section keeps athenaeum#2206's content-based coverage and
+  reconciles its "re-dispatch after the last surface change" wording with the
+  new rule.
+
 - **The eval-receipt gate decides on structure, not on touched paths (issue
   athenaeum#2223).** `.github/llm-surface.txt` gains a `path::symbol` form —
   a top-level `def`/`class`, a `Class.method`, or a module-level constant —
