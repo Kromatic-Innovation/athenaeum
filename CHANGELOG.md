@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **An eval receipt now survives a `develop` merge or a rebase (issue
+  athenaeum#2225).** `receipt_covers_head` keeps its name, its call site and
+  its `(covered, stale)` shape, and gains the symbol-fingerprint COVERS rule:
+  a passing run at commit X satisfies head H when, for every designated
+  symbol, either X and H agree structurally, or the PR changed that symbol at
+  neither point — in which case the difference arrived from `develop`, where
+  it was evaluated under its own PR. athenaeum#2206 compared the two trees on
+  surface paths, so a rebase that brought in another PR's `tiers.py` change
+  invalidated a perfectly good receipt and cost a re-dispatch. Fails closed:
+  an unreadable receipt commit (fetched by sha first) or an unresolvable merge
+  base is not covered, and the failure text now names the symbols that made
+  the receipt stale rather than the files. `pyproject.toml` is still not
+  designated, so the merge wrapper's version bump is still covered.
+
 - **The LLM surface is designated by SYMBOL, and the designation is derived
   rather than transcribed (issue athenaeum#2224).** `.github/llm-surface.txt`
   moves from whole-file entries to `path::symbol` ones: `config.py` (8k

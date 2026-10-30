@@ -30,6 +30,11 @@ and its ``conclusion`` must
 be ``success`` (a failed or cancelled eval run is not a receipt that
 anything actually passed).
 
+COVERS (athenaeum#2225) is the receipt half of the same idea: a receipt
+survives a `develop` merge or a rebase that brings in ANOTHER PR's change
+to a designated symbol, as long as this PR's own reasoning delta is
+unchanged. See ``receipt_covers_head``.
+
 The ``headSha`` check is on content, not on the exact commit (cost: every
 update-branch, merge-wrapper bump or rebase used to demand a fresh paid eval
 dispatch even when nothing an eval reads had changed). A run at commit X
@@ -452,6 +457,39 @@ def fingerprint_entry(
     )
 
 
+#: Where the surface list lives, for reading it at a commit other than the
+#: checkout's own (the receipt commit, for COVERS's union rule).
+SURFACE_FILE_PATH = ".github/llm-surface.txt"
+
+
+def git_surface_at(sha: str, path: str = SURFACE_FILE_PATH) -> list[str] | None:
+    """The designations in effect at `sha`, or `None` when the file is unreadable.
+
+    `None` is NOT an error: a commit old enough to predate
+    `.github/llm-surface.txt` genuinely designated nothing, and the caller
+    reads that as an empty set, which leaves the union equal to the head's
+    designations. See `check_receipt`.
+    """
+    blob = git_read_blob(sha, path)
+    if blob is None:
+        return None
+    return parse_surface_text(blob.decode("utf-8", errors="replace"))
+
+
+def git_ensure_commit(sha: str) -> bool:
+    """Make `sha` readable, fetching it by sha if the checkout lacks it.
+
+    A receipt commit orphaned by a force-push or a rebase is not in the PR
+    checkout. Fetching it by sha is what lets COVERS compare fingerprints at
+    a commit no branch points at any more; when it still cannot be read,
+    COVERS fails closed (design §9).
+    """
+    if _git("cat-file", "-e", f"{sha}^{{commit}}").returncode == 0:
+        return True
+    _git("fetch", "--no-tags", "--quiet", "origin", sha)
+    return _git("cat-file", "-e", f"{sha}^{{commit}}").returncode == 0
+
+
 def git_merge_base(base_sha: str, head_sha: str) -> str | None:
     """`git merge-base base head` — where this branch left the base ref, or `None`.
 
@@ -500,21 +538,83 @@ def receipt_covers_head(
     head_sha: str,
     surface: list[str],
     paths_changed_lookup: Callable[[str, str], list[str] | None],
+    *,
+    base_sha: str | None = None,
+    receipt_surface: list[str] | None = None,
+    merge_base_lookup: Callable[[str, str], str | None] = git_merge_base,
+    fingerprint: Callable[[str, str], str] = fingerprint_entry,
+    ensure_commit: Callable[[str], bool] = git_ensure_commit,
 ) -> tuple[bool, list[str]]:
-    """Does a receipt at `receipt_sha` still describe `head_sha`?
+    """COVERS (design §5.4): does a passing run at `receipt_sha` satisfy `head_sha`?
 
-    True when they are the same commit, or when no path changed between them
-    is on the LLM surface. Returns ``(covered, surface_paths_changed)``; the
-    second element names what made it stale (empty when covered, or when the
-    diff could not be read at all).
+    Covered iff, for every entry `s` in ``D(receipt) | D(head)``, either
+
+    1. ``fp(s, X) == fp(s, H)`` — the symbol-level form of athenaeum#2206's
+       "no surface path differs between the evaluated commit and the head" —
+       **or**
+    2. this PR changed `s` at NEITHER point:
+       ``fp(s, X) == fp(s, mb(X))`` and ``fp(s, H) == fp(s, mb(H))``. The
+       difference came from `develop`, where it was evaluated or exempted
+       under its own PR.
+
+    Clause 2 is the develop-merge refinement, and it is the whole point: a
+    rebase or a merge that brings in ANOTHER PR's change to a designated
+    symbol no longer invalidates this PR's receipt. athenaeum#2206's tree
+    diff still treated that as stale, which cost a re-dispatch on the
+    athenaeum#2043 branch. **Accepted risk** (§5.4): an interaction between
+    this PR's change to one symbol and `develop`'s concurrent change to
+    another is not re-evaluated — every merge to `develop` already carries
+    that risk.
+
+    Returns ``(covered, stale_entries)``; the second element names the
+    designated symbols that made the receipt stale, which is what the failure
+    message prints. Fails closed: an unreadable receipt commit, or a merge
+    base that cannot be resolved, is NOT covered.
+
+    `receipt_surface` is `D(X)`: the designations as they stood at the receipt
+    commit. `None` means the receipt commit designated nothing readable (a
+    commit predating the list), which leaves the union equal to `D(H)` — NOT
+    "assume it matched the head", which would quietly drop exactly the entries
+    a PR deleted.
+
+    WITHOUT `base_sha` the predicate degrades to athenaeum#2206's path diff
+    over `paths_changed_lookup`. That is strictly MORE conservative than
+    COVERS (it has no way to tell this PR's change from `develop`'s, so it
+    calls both stale), so the fallback asks for more dispatches, never fewer.
+    It is the path the offline stubbed tests drive, and the behaviour when the
+    caller has no base ref to reason from.
     """
     if receipt_sha == head_sha:
         return True, []
-    changed = paths_changed_lookup(receipt_sha, head_sha)
-    if changed is None:
+    if base_sha is None:
+        changed = paths_changed_lookup(receipt_sha, head_sha)
+        if changed is None:
+            return False, []
+        hits = intersect_surface(changed, surface)
+        return (not hits), hits
+
+    if not ensure_commit(receipt_sha):
         return False, []
-    hits = intersect_surface(changed, surface)
-    return (not hits), hits
+    merge_base_receipt = merge_base_lookup(base_sha, receipt_sha)
+    merge_base_head = merge_base_lookup(base_sha, head_sha)
+    if merge_base_receipt is None or merge_base_head is None:
+        return False, []
+
+    stale: list[str] = []
+    designations = set(surface)
+    if receipt_surface is not None:
+        designations |= set(receipt_surface)
+    for entry in sorted(designations):
+        at_receipt = fingerprint(entry, receipt_sha)
+        at_head = fingerprint(entry, head_sha)
+        if at_receipt == at_head:
+            continue
+        came_from_base = at_receipt == fingerprint(
+            entry, merge_base_receipt
+        ) and at_head == fingerprint(entry, merge_base_head)
+        if not came_from_base:
+            stale.append(entry)
+    return (not stale), stale
 
 
 def check_receipt(
@@ -524,12 +624,29 @@ def check_receipt(
     run_lookup: Callable[[str, str], dict[str, str]],
     surface: list[str] | None = None,
     paths_changed_lookup: Callable[[str, str], list[str] | None] = git_paths_changed_between,
+    *,
+    base_sha: str | None = None,
+    fingerprint: Callable[[str, str], str] = fingerprint_entry,
+    surface_at_lookup: Callable[[str], list[str] | None] = git_surface_at,
 ) -> ReceiptCheck:
     """Decide whether `pr_body` carries a valid eval receipt for `head_sha`.
 
-    The run must be at `head_sha`, or at a commit whose LLM-surface files are
-    identical to `head_sha`'s (see `receipt_covers_head`). With no `surface`
-    given, only the exact head is accepted.
+    The run must be at `head_sha`, or at a commit COVERS accepts for it (see
+    `receipt_covers_head`). With no `surface` given, only the exact head is
+    accepted; with no `base_sha`, COVERS degrades to athenaeum#2206's path
+    diff, which is the more conservative of the two.
+
+    `base_sha` is the PR's base ref. COVERS needs it to tell a change THIS PR
+    made from one it merely inherited from `develop`, which is a question a
+    receipt-to-head diff cannot answer at all.
+
+    `surface_at_lookup` reads the designations at the RECEIPT commit, so
+    COVERS gets the real `D(X) ∪ D(H)` rather than `D(H)` twice. Without it a
+    PR could drop a designation at head and have an old receipt accepted for
+    the very symbol it dropped — the hole the union rule exists to close
+    (Seer review on PR athenaeum#2246). A receipt commit with no surface file
+    designated nothing, so `None` reads as the empty set and the union is
+    just the head's.
     """
     not_needed = _NOT_NEEDED_RE.search(pr_body)
     if not_needed:
@@ -580,11 +697,18 @@ def check_receipt(
             covered, stale_hits = False, []
         else:
             covered, stale_hits = receipt_covers_head(
-                receipt_sha, head_sha, surface, paths_changed_lookup
+                receipt_sha,
+                head_sha,
+                surface,
+                paths_changed_lookup,
+                base_sha=base_sha,
+                receipt_surface=surface_at_lookup(receipt_sha),
+                fingerprint=fingerprint,
             )
         if not covered:
             why = (
-                "LLM-surface files changed since that commit: " + ", ".join(stale_hits)
+                "the reasoning surface changed since that commit: "
+                + ", ".join(stale_hits)
                 if stale_hits
                 else "the receipt commit could not be compared with the head"
             )
@@ -592,7 +716,7 @@ def check_receipt(
                 False,
                 f"run {run_id}'s headSha ({receipt_sha!r}) does not match "
                 f"this PR's head ({head_sha!r}) and {why} — the receipt is "
-                f"stale for this head. {DISPATCH_RULE}",
+                "stale for this head.",
             )
     if run.get("conclusion") != "success":
         return ReceiptCheck(
@@ -623,9 +747,11 @@ def evaluate(
     run_lookup: Callable[[str, str], dict[str, str]] = gh_run_lookup,
     paths_changed_lookup: Callable[[str, str], list[str] | None] = git_paths_changed_between,
     *,
+    base_sha: str | None = None,
     merge_base_sha: str | None = None,
     base_surface: list[str] | None = None,
     fingerprint: Callable[[str, str], str] = fingerprint_entry,
+    surface_at_lookup: Callable[[str], list[str] | None] = git_surface_at,
 ) -> ReceiptCheck:
     """Full decision: no reasoning-surface change passes trivially; otherwise require a receipt.
 
@@ -657,7 +783,15 @@ def evaluate(
         return ReceiptCheck(True, "no LLM reasoning surface changed — no receipt needed.")
 
     result = check_receipt(
-        pr_body, head_sha, this_repo, run_lookup, surface, paths_changed_lookup
+        pr_body,
+        head_sha,
+        this_repo,
+        run_lookup,
+        surface,
+        paths_changed_lookup,
+        base_sha=base_sha,
+        fingerprint=fingerprint,
+        surface_at_lookup=surface_at_lookup,
     )
     if result.ok:
         return result
@@ -673,6 +807,9 @@ def evaluate(
         "PR changes the LLM reasoning surface but carries no valid eval "
         f"receipt.\n\n{detail}"
         f"{result.message}\n\n"
+        # The ONE place the rule is attached (athenaeum#2228 put it here and
+        # in `check_receipt`'s stale branch, which printed it twice for a
+        # stale receipt — Seer review on PR athenaeum#2244).
         f"{DISPATCH_RULE}\n\n"
         "Then add `Evals: <run-url>` to the PR body — or add "
         "`Evals: not needed — <reason>` if this change cannot move a "
@@ -735,8 +872,13 @@ def main(argv: list[str] | None = None) -> int:
         pr_body,
         args.head_sha,
         args.repo,
+        base_sha=args.base_sha,
         merge_base_sha=merge_base_sha,
         base_surface=base_surface,
+        # Read D(X) from the same path the caller named, not the default: the
+        # surface file is passed in explicitly, so hardcoding the default
+        # would read the wrong list — or none at all.
+        surface_at_lookup=lambda sha: git_surface_at(sha, str(args.surface_file)),
     )
     print(result.message)
     return 0 if result.ok else 1
