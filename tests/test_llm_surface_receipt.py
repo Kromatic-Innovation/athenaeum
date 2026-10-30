@@ -810,6 +810,20 @@ def test_the_dispatch_rule_says_once_at_the_final_reviewed_head() -> None:
     assert "tests/evals/README.md" in DISPATCH_RULE
 
 
+def test_the_dispatch_rule_allows_no_retry_of_a_red_run() -> None:
+    """Operator ruling 2026-10-30 (athenaeum#2228): no automatic retry.
+
+    A red run is a finding to investigate; small-sample flakiness is fixed at
+    source (athenaeum#2231), not by re-rolling. So the rule must say there is
+    no retry, and must not carry any retry allowance ("at most one retry").
+    """
+    rule = DISPATCH_RULE.lower()
+    assert "no automatic retry" in rule
+    assert "red run is a finding" in rule
+    assert "at most" not in rule
+    assert "one retry" not in rule
+
+
 def test_stale_receipt_message_carries_the_dispatch_rule_and_not_re_run_it() -> None:
     result = _evaluate_with(["CHANGELOG.md", "src/athenaeum/tiers.py"])
     assert not result.ok
@@ -1206,12 +1220,13 @@ def test_covers_reads_the_receipt_commits_own_designations(tmp_path: Path) -> No
 # --- structured, checkable exemptions (athenaeum#2226) ----------------------
 #
 # Design §5.5/§5.6. `Evals: not needed — <category>: <symbols>`: a closed
-# vocabulary, a symbol set that must EQUAL what FIRE found changed, and a
-# machine re-hash for the two categories a machine can settle.
+# vocabulary and a symbol set that must EQUAL what FIRE found changed. Nothing
+# more — operator ruling 2026-10-30: symbol-match only, all five categories
+# reviewer-checked from the job summary; machine re-hash checks are deferred
+# until misuse is observed.
 
 parse_exemption = check_llm_surface_receipt.parse_exemption
 check_exemption = check_llm_surface_receipt.check_exemption
-verify_exemption_category = check_llm_surface_receipt.verify_exemption_category
 EXEMPTION_CATEGORIES = check_llm_surface_receipt.EXEMPTION_CATEGORIES
 
 
@@ -1233,8 +1248,6 @@ def test_an_unknown_category_fails_and_lists_the_valid_ones() -> None:
     result = check_exemption(
         check_llm_surface_receipt.Exemption("cosmetic", ("mod.py::designated",)),
         ["mod.py::designated"],
-        "h" * 40,
-        "b" * 40,
     )
     assert not result.ok
     for category in EXEMPTION_CATEGORIES:
@@ -1245,8 +1258,6 @@ def test_a_missing_symbol_fails_and_prints_both_sets() -> None:
     result = check_exemption(
         check_llm_surface_receipt.Exemption("dead-code", ("mod.py::a",)),
         ["mod.py::a", "mod.py::b"],
-        "h" * 40,
-        "b" * 40,
     )
     assert not result.ok
     assert "changed but not named: mod.py::b" in result.message
@@ -1258,23 +1269,22 @@ def test_an_extra_symbol_fails_too() -> None:
     result = check_exemption(
         check_llm_surface_receipt.Exemption("dead-code", ("mod.py::a", "mod.py::z")),
         ["mod.py::a"],
-        "h" * 40,
-        "b" * 40,
     )
     assert not result.ok
     assert "named but not changed: mod.py::z" in result.message
 
 
-def test_a_reviewer_checked_category_with_the_exact_set_passes() -> None:
+@pytest.mark.parametrize("category", EXEMPTION_CATEGORIES)
+def test_every_category_with_the_exact_set_passes_as_reviewer_checked(category: str) -> None:
+    """All five categories are reviewer-checked; none is claimed as machine-verified."""
     result = check_exemption(
-        check_llm_surface_receipt.Exemption("gate-plumbing", ("mod.py::a",)),
+        check_llm_surface_receipt.Exemption(category, ("mod.py::a",)),
         ["mod.py::a"],
-        "h" * 40,
-        "b" * 40,
-        verifier=lambda category, entry, base, head: True,
     )
     assert result.ok, result.message
+    assert "reviewer-checked" in result.message
     assert "job summary" in result.message
+    assert "machine" not in result.message.lower()
 
 
 def test_an_exemption_cannot_be_checked_without_a_changed_set() -> None:
@@ -1282,14 +1292,25 @@ def test_an_exemption_cannot_be_checked_without_a_changed_set() -> None:
     result = check_exemption(
         check_llm_surface_receipt.Exemption("dead-code", ("mod.py::a",)),
         None,
-        "h" * 40,
-        "b" * 40,
     )
     assert not result.ok
     assert "changed-symbol set" in result.message
 
 
-# --- the two machine-checked categories, against real git -------------------
+def test_the_gate_carries_no_exemption_re_hash_machinery() -> None:
+    """The deferred re-hash checks stay deferred until misuse is observed."""
+    for name in (
+        "verify_exemption_category",
+        "alpha_normalize_locals",
+        "blank_message_strings",
+        "_AlphaRenamer",
+        "_MessageStringBlanker",
+        "_EXEMPTION_NORMALIZERS",
+    ):
+        assert not hasattr(check_llm_surface_receipt, name), name
+
+
+# --- exemptions through the gate, against real git --------------------------
 
 
 def _exemption_repo(tmp_path: Path, before: str, after: str) -> tuple[str, str]:
@@ -1317,99 +1338,6 @@ _LOGIC_AFTER = (
 )
 
 
-def test_rename_only_holds_when_only_locals_were_renamed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    base, head = _exemption_repo(tmp_path, _RENAME_BEFORE, _RENAME_AFTER)
-    monkeypatch.chdir(tmp_path)
-    # The premise: the plain fingerprint DOES differ, so FIRE fired.
-    assert check_llm_surface_receipt.fingerprint_entry(
-        "mod.py::designated", base
-    ) != check_llm_surface_receipt.fingerprint_entry("mod.py::designated", head)
-    assert verify_exemption_category("rename-only", "mod.py::designated", base, head)
-
-
-def test_rename_only_counter_example_a_real_logic_change_fails(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A changed literal, dressed up as a rename, does not survive the re-hash."""
-    base, head = _exemption_repo(tmp_path, _RENAME_BEFORE, _LOGIC_AFTER)
-    monkeypatch.chdir(tmp_path)
-    assert not verify_exemption_category("rename-only", "mod.py::designated", base, head)
-
-
-def test_rename_only_does_not_normalise_a_reference_to_something_outside(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Only BOUND names are renamed — swapping which global is called is a change."""
-    base, head = _exemption_repo(
-        tmp_path,
-        "def designated(value):\n    return helper_a(value)\n",
-        "def designated(amount):\n    return helper_b(amount)\n",
-    )
-    monkeypatch.chdir(tmp_path)
-    assert not verify_exemption_category("rename-only", "mod.py::designated", base, head)
-
-
-_LOG_BEFORE = (
-    "import logging\n"
-    "\n"
-    "logger = logging.getLogger(__name__)\n"
-    "\n"
-    "\n"
-    "def designated(value):\n"
-    '    logger.warning("value was odd")\n'
-    "    if value < 0:\n"
-    '        raise ValueError("value must not be negative")\n'
-    "    return value + 1\n"
-)
-_LOG_AFTER_TEXT_ONLY = _LOG_BEFORE.replace(
-    '"value was odd"', '"the value came in odd; continuing"'
-).replace('"value must not be negative"', '"value has to be zero or more"')
-_LOG_AFTER_WITH_LOGIC = _LOG_AFTER_TEXT_ONLY.replace("return value + 1", "return value + 2")
-_LOG_AFTER_DIFFERENT_EXCEPTION = _LOG_AFTER_TEXT_ONLY.replace("ValueError", "TypeError")
-
-
-def test_log_or_error_text_holds_when_only_the_wording_changed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    base, head = _exemption_repo(tmp_path, _LOG_BEFORE, _LOG_AFTER_TEXT_ONLY)
-    monkeypatch.chdir(tmp_path)
-    assert check_llm_surface_receipt.fingerprint_entry(
-        "mod.py::designated", base
-    ) != check_llm_surface_receipt.fingerprint_entry("mod.py::designated", head)
-    assert verify_exemption_category("log-or-error-text", "mod.py::designated", base, head)
-
-
-def test_log_or_error_text_counter_example_a_real_logic_change_fails(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    base, head = _exemption_repo(tmp_path, _LOG_BEFORE, _LOG_AFTER_WITH_LOGIC)
-    monkeypatch.chdir(tmp_path)
-    assert not verify_exemption_category("log-or-error-text", "mod.py::designated", base, head)
-
-
-def test_log_or_error_text_does_not_cover_a_changed_exception_type(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Only the message STRINGS are blanked — the raised type is structure."""
-    base, head = _exemption_repo(tmp_path, _LOG_BEFORE, _LOG_AFTER_DIFFERENT_EXCEPTION)
-    monkeypatch.chdir(tmp_path)
-    assert not verify_exemption_category("log-or-error-text", "mod.py::designated", base, head)
-
-
-def test_a_normalizer_never_affects_the_plain_fingerprint(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """FIRE and COVERS must keep seeing the un-normalised structure."""
-    base, head = _exemption_repo(tmp_path, _RENAME_BEFORE, _RENAME_AFTER)
-    monkeypatch.chdir(tmp_path)
-    required, changed = check_llm_surface_receipt.fire(
-        base, head, ["mod.py::designated"], ["mod.py::designated"]
-    )
-    assert (required, changed) == (True, ["mod.py::designated"])
-
-
 def test_end_to_end_a_structured_exemption_passes_the_gate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1426,12 +1354,18 @@ def test_end_to_end_a_structured_exemption_passes_the_gate(
         merge_base_sha=base,
     )
     assert result.ok, result.message
-    assert "machine-checked" in result.message
+    assert "reviewer-checked" in result.message
 
 
-def test_end_to_end_a_wrong_category_is_rejected_by_the_gate(
+def test_end_to_end_the_gate_does_not_re_hash_the_category_claim(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Symbol-match only: a logic change labelled `rename-only` is the reviewer's catch.
+
+    The gate checks the vocabulary and the exact symbol set and nothing else
+    (operator ruling 2026-10-30, athenaeum#2226). Pinned so a re-hash check is
+    not quietly reintroduced before misuse is observed.
+    """
     base, head = _exemption_repo(tmp_path, _RENAME_BEFORE, _LOGIC_AFTER)
     monkeypatch.chdir(tmp_path)
     result = evaluate(
@@ -1443,8 +1377,25 @@ def test_end_to_end_a_wrong_category_is_rejected_by_the_gate(
         run_lookup=_unreached_lookup,
         merge_base_sha=base,
     )
+    assert result.ok, result.message
+
+
+def test_end_to_end_a_wrong_symbol_set_is_rejected_by_the_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base, head = _exemption_repo(tmp_path, _RENAME_BEFORE, _LOGIC_AFTER)
+    monkeypatch.chdir(tmp_path)
+    result = evaluate(
+        changed_files=["mod.py"],
+        surface=["mod.py::designated"],
+        pr_body="Evals: not needed — rename-only: mod.py::other\n",
+        head_sha=head,
+        this_repo=REPO,
+        run_lookup=_unreached_lookup,
+        merge_base_sha=base,
+    )
     assert not result.ok
-    assert "does not hold for: mod.py::designated" in result.message
+    assert "changed but not named: mod.py::designated" in result.message
 
 
 def test_no_line_is_required_when_fire_is_false(

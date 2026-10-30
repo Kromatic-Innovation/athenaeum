@@ -59,16 +59,16 @@ the only line other than a receipt URL that passes is
 Evals: not needed — <category>: <symbol>[, <symbol>...]
 ```
 
-Three things are checked, in order (`scripts/check_llm_surface_receipt.py`,
-`check_exemption`):
+Two things are checked, in order (`scripts/check_llm_surface_receipt.py`,
+`check_exemption`), and nothing else:
 
 1. **The category is one of exactly five.** Anything else fails, and the
    failure lists these:
 
    | Category | Means | Checked by |
    | --- | --- | --- |
-   | `rename-only` | local or private identifiers renamed, no structural change | **machine** — the symbol is re-hashed with every locally-bound name alpha-renamed, and must then match |
-   | `log-or-error-text` | only logging, warning or exception message strings changed | **machine** — re-hashed with the string arguments of logging/warning calls and of `raise` blanked, and must then match |
+   | `rename-only` | local or private identifiers renamed, no structural change | reviewer |
+   | `log-or-error-text` | only logging, warning or exception message strings changed | reviewer |
    | `dead-code` | designated code removed that nothing reachable called | reviewer |
    | `refactor-equivalent` | restructured with identical inputs and outputs to the model | reviewer |
    | `gate-plumbing` | the change is to the gate, the surface list or the rot check itself | reviewer |
@@ -76,12 +76,13 @@ Three things are checked, in order (`scripts/check_llm_surface_receipt.py`,
 2. **The named set must EQUAL the changed set** — no missing names, no extras.
    The failure prints both sets and the difference, so there is nothing to
    guess.
-3. **The two machine categories must survive their re-hash.** A real logic
-   change labelled `rename-only` or `log-or-error-text` fails: the structure
-   is still there to differ. A changed exception *type*, or a changed
-   interpolated expression inside a log message, is structure — not text.
 
-For the three reviewer-checked categories, the gate publishes each changed
+The gate does **not** check that the change is what the category claims —
+for any of the five. Whether a `rename-only` change really only renamed, or a
+`log-or-error-text` change really only reworded a message, is the reviewer's
+call (operator ruling 2026-10-30, athenaeum#2226: symbol-match only; machine
+re-hash checks for those two categories are deferred until misuse is
+observed). To make that call cheap, the gate publishes each changed
 symbol's docstring-stripped `ast.unparse` **before and after** to the job
 summary, so the reviewer reads N function bodies rather than N files. The
 merger is not the author (`gh-orch-pr-merge.sh` enforces that), which is what
@@ -109,9 +110,10 @@ Never re-dispatch:
 - **because of a `develop` merge or a rebase.** Receipt coverage handles both;
   a merge that brings in somebody else's surface change was evaluated under
   that PR.
-- **for a head that already has a run in flight or finished.** At most **one
-  retry** of a red run — then treat red as a finding and read it, rather than
-  re-rolling the dice.
+- **for a head that already has a run in flight or finished.** There is **no
+  automatic retry**: a red run is a real failure to investigate, not a flake
+  to re-roll (operator ruling 2026-10-30). Small-sample flakiness is fixed at
+  source (athenaeum#2231), not by retrying.
 - **per push while iterating on a red eval**, unless the push changes a
   designated symbol.
 

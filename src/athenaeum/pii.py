@@ -1168,6 +1168,50 @@ def find_inline_phones(text: str) -> list[str]:
     return seen
 
 
+def mask_contact_address(value: str) -> str:
+    """Mask a contact address for any context outside the excluded surface.
+
+    Renders ``<first char of local part>***@<domain>`` — ``alex@example.org``
+    -> ``a***@example.org`` — never more than the local part's first
+    character. Used by escalations that must name an address a human can
+    recognize without the full value ever landing in ``_pending_questions.md``
+    (issue athenaeum#2209), which lives in the wiki (design
+    ``docs/design/attribution-verification.md`` §8.1).
+
+    **Why ``***`` and not the bare ``<first char>@<domain>`` form §8.1's
+    wording ("local part reduced to its first character plus the domain")
+    could also be read as:** that bare form is ITSELF a syntactically valid
+    email address. Verified in this repo: ``find_inline_emails("a@example.org")``
+    returns ``["a@example.org"]`` while ``find_inline_emails("a***@example.org")``
+    returns ``[]`` — the ``*`` is outside :data:`_EMAIL_RE`'s local-part
+    character class, so it breaks the match. Writing the bare form into the
+    wiki would make the "masked" value re-detectable as a fresh inline
+    contact token by the very PII scanner this issue protects the wiki from.
+    The ``***`` form closes that hole while still satisfying the design's
+    intent (enough of the value for a human to recognize it, never the whole
+    thing).
+
+    Edge cases:
+
+    - no ``@`` at all: masks to ``<first char>***`` (there is no domain to
+      keep);
+    - empty or whitespace-only *value*: returns ``""`` (nothing to mask);
+    - more than one ``@``: splits on the LAST one, so everything before it
+      (including any earlier ``@``) is treated as the local part;
+    - a single-character local part: still ``<char>***@<domain>`` — the
+      mask never reveals more than that first character regardless of how
+      short the local part already is.
+    """
+    cleaned = (value or "").strip()
+    if not cleaned:
+        return ""
+    if "@" not in cleaned:
+        return f"{cleaned[0]}***"
+    local, _, domain = cleaned.rpartition("@")
+    first = local[0] if local else ""
+    return f"{first}***@{domain}"
+
+
 #: Domains whose addresses are ALWAYS service identifiers, regardless of
 #: localpart (issue athenaeum#507). A ``…@group.calendar.google.com`` address is a Google
 #: Calendar group id, not a person's contact address — migrating it off the page
@@ -5588,6 +5632,7 @@ __all__ = [
     "is_pii_flagged",
     "find_inline_emails",
     "find_inline_phones",
+    "mask_contact_address",
     "SERVICE_ADDRESS_DOMAINS",
     "SERVICE_ADDRESSES",
     "is_service_address",

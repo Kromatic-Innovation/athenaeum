@@ -98,9 +98,9 @@ EVALS_WORKFLOW_NAME = "Evals"
 DISPATCH_RULE = (
     "Dispatch once, after review is complete, at the final head. Do not "
     "re-dispatch for a `develop` merge or a rebase (a receipt covers those), "
-    "nor for a head that already has a run in flight or finished — at most "
-    "one retry of a red run, then treat red as a finding. See "
-    "tests/evals/README.md."
+    "nor for a head that already has a run in flight or finished. There is "
+    "no automatic retry: a red run is a finding to investigate, not a flake "
+    "to re-roll. See tests/evals/README.md."
 )
 
 
@@ -405,8 +405,6 @@ def fingerprint_entry(
     sha: str,
     blob_lookup: Callable[[str, str], bytes | None] = git_read_blob,
     tree_lookup: Callable[[str, str], list[str] | None] = git_list_tree,
-    *,
-    normalizer: Callable[[ast.AST], ast.AST] | None = None,
 ) -> str:
     """Structural fingerprint of one surface entry at one commit.
 
@@ -419,12 +417,6 @@ def fingerprint_entry(
     * a whole non-`.py` file — the byte hash.
     * a `dir/` prefix — the byte hash of every file under it, keyed by path,
       so an added, removed or edited file all show up.
-
-    `normalizer`, when given, is applied to each node AFTER docstrings are
-    stripped. It is how athenaeum#2226 machine-checks an exemption claim: re-hash
-    both sides with local identifiers alpha-renamed and a `rename-only` claim
-    either holds or it does not. It never affects the plain fingerprint FIRE
-    and COVERS compare.
 
     Returns `MISSING` or `UNPARSEABLE` (above) rather than raising. Hashes
     are only ever compared with other hashes computed in the SAME process:
@@ -452,18 +444,18 @@ def fingerprint_entry(
         module = ast.parse(data)
     except (SyntaxError, ValueError):
         return UNPARSEABLE
-    def dump(node: ast.AST) -> bytes:
-        prepared = _strip_docstrings(node)
-        if normalizer is not None:
-            prepared = normalizer(prepared)
-        return ast.dump(prepared, include_attributes=False).encode("utf-8")
-
     if parsed.symbol is None:
-        return _sha256_hex(dump(module))
+        dumped = ast.dump(_strip_docstrings(module), include_attributes=False)
+        return _sha256_hex(dumped.encode("utf-8"))
     nodes = _resolve_symbol(module, parsed.symbol)
     if nodes is None:
         return MISSING
-    return _sha256_hex(*(dump(node) for node in nodes))
+    return _sha256_hex(
+        *(
+            ast.dump(_strip_docstrings(node), include_attributes=False).encode("utf-8")
+            for node in nodes
+        )
+    )
 
 
 #: The CLOSED vocabulary for an exemption line (design §5.5). Free text is
@@ -488,13 +480,6 @@ _NOT_NEEDED_STRUCTURED_RE = re.compile(
     re.MULTILINE | re.IGNORECASE,
 )
 
-#: Logging method names, for `log-or-error-text`. The design says
-#: "`logging.*`"; real code writes `logger.info(...)`, so the final attribute
-#: is matched as well as the `logging`/`warnings` module root.
-_LOG_METHOD_NAMES = frozenset(
-    {"debug", "info", "warning", "warn", "error", "exception", "critical", "log"}
-)
-
 
 @dataclass(frozen=True)
 class Exemption:
@@ -517,162 +502,19 @@ def parse_exemption(pr_body: str) -> Exemption | None:
     return Exemption(category=match.group("category").strip().lower(), symbols=symbols)
 
 
-def _bound_names(node: ast.AST) -> list[str]:
-    """Names BOUND inside `node`, in a deterministic order.
-
-    Only bindings — a `Load`-only name is a reference to something outside the
-    symbol, and renaming it would make an unrelated change look like a rename.
-    """
-    order: list[str] = []
-
-    def note(name: str | None) -> None:
-        if name and name not in order:
-            order.append(name)
-
-    for sub in ast.walk(node):
-        if isinstance(sub, ast.arg):
-            note(sub.arg)
-        elif isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Store | ast.Del):
-            note(sub.id)
-        elif isinstance(sub, ast.ExceptHandler):
-            note(sub.name)
-        elif isinstance(sub, ast.alias):
-            note(sub.asname)
-    return order
-
-
-class _AlphaRenamer(ast.NodeTransformer):
-    def __init__(self, mapping: dict[str, str]) -> None:
-        self.mapping = mapping
-
-    def visit_Name(self, node: ast.Name) -> ast.AST:
-        node.id = self.mapping.get(node.id, node.id)
-        return node
-
-    def visit_arg(self, node: ast.arg) -> ast.AST:
-        node.arg = self.mapping.get(node.arg, node.arg)
-        self.generic_visit(node)
-        return node
-
-    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> ast.AST:
-        if node.name:
-            node.name = self.mapping.get(node.name, node.name)
-        self.generic_visit(node)
-        return node
-
-    def visit_alias(self, node: ast.alias) -> ast.AST:
-        if node.asname:
-            node.asname = self.mapping.get(node.asname, node.asname)
-        return node
-
-
-def alpha_normalize_locals(node: ast.AST) -> ast.AST:
-    """Rename every locally-bound identifier to a positional placeholder.
-
-    Two versions of a symbol that differ ONLY by what its locals are called
-    hash identically after this, which is what makes a `rename-only` claim
-    machine-checkable. A version that also changed a literal, a call or the
-    control flow does not — the structure is still there to differ.
-    """
-    mapping = {name: f"_n{index}" for index, name in enumerate(_bound_names(node))}
-    return _AlphaRenamer(mapping).visit(node)
-
-
-def _is_message_call(call: ast.Call) -> bool:
-    func = call.func
-    if isinstance(func, ast.Attribute):
-        if func.attr in _LOG_METHOD_NAMES:
-            return True
-        root = func
-        while isinstance(root.value, ast.Attribute):
-            root = root.value
-        if isinstance(root.value, ast.Name) and root.value.id in {"logging", "warnings"}:
-            return True
-    return False
-
-
-class _MessageStringBlanker(ast.NodeTransformer):
-    """Blank string literals that are only ever read by a human."""
-
-    def __init__(self) -> None:
-        self.depth = 0
-
-    def _blank_within(self, node: ast.AST) -> ast.AST:
-        self.depth += 1
-        try:
-            return self.generic_visit(node)
-        finally:
-            self.depth -= 1
-
-    def visit_Call(self, node: ast.Call) -> ast.AST:
-        if _is_message_call(node):
-            return self._blank_within(node)
-        return self.generic_visit(node)
-
-    def visit_Raise(self, node: ast.Raise) -> ast.AST:
-        return self._blank_within(node)
-
-    def visit_Constant(self, node: ast.Constant) -> ast.AST:
-        if self.depth and isinstance(node.value, str):
-            return ast.Constant(value="")
-        return node
-
-
-def blank_message_strings(node: ast.AST) -> ast.AST:
-    """Blank the string arguments of logging/warning calls and of `raise`.
-
-    Two versions that differ only in the WORDING of a log line or an
-    exception message hash identically after this, which is what makes a
-    `log-or-error-text` claim machine-checkable. A changed condition, a
-    changed exception TYPE or a changed interpolated expression still differs.
-    """
-    return _MessageStringBlanker().visit(node)
-
-
-#: The two categories a machine can settle (design §5.5). The other three are
-#: reviewer-checked, which is why the gate also publishes each changed
-#: symbol's before/after to the job summary.
-_EXEMPTION_NORMALIZERS: dict[str, Callable[[ast.AST], ast.AST]] = {
-    "rename-only": alpha_normalize_locals,
-    "log-or-error-text": blank_message_strings,
-}
-
-
-def verify_exemption_category(
-    category: str,
-    entry: str,
-    base_sha: str,
-    head_sha: str,
-) -> bool:
-    """Does `category`'s own claim hold for `entry` between the two commits?
-
-    `rename-only` and `log-or-error-text` are re-hashed under the matching
-    normalizer and must then MATCH — a real logic change labelled with either
-    does not survive that. The other three categories are reviewer-checked,
-    so this returns True for them and the review step is the job summary the
-    gate publishes.
-    """
-    normalizer = _EXEMPTION_NORMALIZERS.get(category)
-    if normalizer is None:
-        return True
-    at_base = fingerprint_entry(entry, base_sha, normalizer=normalizer)
-    at_head = fingerprint_entry(entry, head_sha, normalizer=normalizer)
-    return at_base == at_head and at_head != UNPARSEABLE
-
-
 def check_exemption(
     exemption: Exemption,
     fire_changed: list[str] | None,
-    head_sha: str,
-    merge_base_sha: str | None,
-    verifier: Callable[[str, str, str, str], bool] = verify_exemption_category,
 ) -> ReceiptCheck:
     """Is a structured `not needed` line a valid substitute for a receipt?
 
-    Three gates, in order: the category is in the closed vocabulary; the
-    named symbol set EQUALS the set FIRE found changed (no missing names, no
-    extras — the message prints both); and, for the two machine-checkable
-    categories, the claim survives a re-hash under the matching normalizer.
+    Symbol-match only (operator ruling 2026-10-30, athenaeum#2226). Two gates,
+    in order: the category is in the closed vocabulary, and the named symbol
+    set EQUALS the set FIRE found changed (no missing names, no extras — the
+    message prints both). Whether the change really is what the category
+    claims is a REVIEWER's call for all five categories, made from the
+    before/after the gate publishes to the job summary; the gate does not
+    re-hash to verify any category.
     """
     if exemption.category not in EXEMPTION_CATEGORIES:
         return ReceiptCheck(
@@ -704,34 +546,11 @@ def check_exemption(
             f"  named:   {', '.join(sorted(claimed)) or '(none)'}\n"
             "  " + "; ".join(detail),
         )
-    if merge_base_sha is None:
-        return ReceiptCheck(
-            False,
-            "cannot check an `Evals: not needed` line without a merge base to "
-            "compare the head against.",
-        )
-    unverified = [
-        entry
-        for entry in sorted(changed)
-        if not verifier(exemption.category, entry, merge_base_sha, head_sha)
-    ]
-    if unverified:
-        return ReceiptCheck(
-            False,
-            f"`Evals: not needed — {exemption.category}` does not hold for: "
-            f"{', '.join(unverified)}. Re-hashing those symbols with the "
-            f"{exemption.category} normalizer still shows a structural "
-            "difference, so the change is not what the category claims.",
-        )
-    checked = (
-        "machine-checked"
-        if exemption.category in _EXEMPTION_NORMALIZERS
-        else "reviewer-checked; see the job summary for each symbol's before/after"
-    )
     return ReceiptCheck(
         True,
         f"Evals not needed — {exemption.category}: "
-        f"{', '.join(sorted(changed))} ({checked})",
+        f"{', '.join(sorted(changed))} (reviewer-checked; see the job summary "
+        "for each symbol's before/after)",
     )
 
 
@@ -772,8 +591,9 @@ def render_step_summary(
 ) -> str:
     """The `$GITHUB_STEP_SUMMARY` block: each changed symbol, before and after.
 
-    This is what makes the three reviewer-checked categories cheap to verify
-    (design §5.6): the merger reads N function bodies, not N files.
+    This is what makes the exemption categories — all five reviewer-checked —
+    cheap to verify (design §5.6): the merger reads N function bodies, not N
+    files.
     """
     out = [
         "## Changed reasoning surface",
@@ -976,10 +796,8 @@ def check_receipt(
     paths_changed_lookup: Callable[[str, str], list[str] | None] = git_paths_changed_between,
     *,
     base_sha: str | None = None,
-    merge_base_sha: str | None = None,
     fire_changed: list[str] | None = None,
     fingerprint: Callable[[str, str], str] = fingerprint_entry,
-    exemption_verifier: Callable[[str, str, str, str], bool] = verify_exemption_category,
     surface_at_lookup: Callable[[str], list[str] | None] = git_surface_at,
 ) -> ReceiptCheck:
     """Decide whether `pr_body` carries a valid eval receipt for `head_sha`.
@@ -1003,9 +821,7 @@ def check_receipt(
     """
     exemption = parse_exemption(pr_body)
     if exemption is not None:
-        return check_exemption(
-            exemption, fire_changed, head_sha, merge_base_sha, exemption_verifier
-        )
+        return check_exemption(exemption, fire_changed)
     if _NOT_NEEDED_RE.search(pr_body):
         return ReceiptCheck(
             False,
@@ -1154,7 +970,6 @@ def evaluate(
         surface,
         paths_changed_lookup,
         base_sha=base_sha,
-        merge_base_sha=merge_base_sha,
         fire_changed=changed_entries if merge_base_sha is not None else None,
         fingerprint=fingerprint,
         surface_at_lookup=surface_at_lookup,

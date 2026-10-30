@@ -80,6 +80,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -124,9 +125,11 @@ from athenaeum.compile_routing import (
 from athenaeum.compile_routing import (
     PERSON_ENTITY_TYPE,
     CompileRouteRecord,
+    CorrespondentRef,
     classify_route,
     correspondent_from_raw,
     record_compile_route,
+    resolve_correspondent_page,
     resolved_correspondent_uid,
 )
 from athenaeum.config import (
@@ -233,6 +236,7 @@ from athenaeum.pii import (
     contacts_surface_root,
     detect_do_not_email_fact,
     mark_bounced,
+    mask_contact_address,
     record_observed_contact_value,
 )
 from athenaeum.progress import PhaseHeartbeat
@@ -1605,31 +1609,156 @@ def tier0_do_not_email_mark(
     return entity, True
 
 
+#: :func:`_pick_correspondent_entity` decline reasons (issue athenaeum#2209).
+#: Carried on :class:`_CorrespondentPick` rather than pre-rendered into text
+#: so the caller — the only place that knows the masked address — builds the
+#: final escalation description.
+_DECLINE_SEVERAL_NO_MATCH = "several_no_match"
+_DECLINE_NAME_MISMATCH = "name_mismatch"
+_DECLINE_LOCAL_PART_MISMATCH = "local_part_mismatch"
+
+#: Characters a human name or an email local part may use as word
+#: separators. Stripped entirely when normalizing for a match (so
+#: ``jane.doe``, ``jane_doe`` and ``janedoe`` all collapse to ``janedoe``),
+#: and split on when tokenizing a page's name into words.
+_NAME_MATCH_SEPARATORS_RE = re.compile(r"[.\-_\s]+")
+
+
+@dataclass(frozen=True)
+class _CorrespondentPick:
+    """Result of :func:`_pick_correspondent_entity`.
+
+    ``entity`` is the matched page, or ``None`` when nothing may be
+    recorded. ``decline_kind``/``decline_names`` are set only when ``entity``
+    is ``None`` and the caller must escalate — they carry enough structured
+    context for the caller to render a tailored description without this
+    function needing to know about masking or :class:`EscalationItem` at all.
+    """
+
+    entity: WikiEntity | None
+    decline_kind: str = ""
+    decline_names: tuple[str, ...] = ()
+
+
+def _normalize_for_local_part_match(text: str) -> str:
+    """Casefold *text* with every name/local-part separator stripped out.
+
+    Shared normalization for both sides of the C2 (design §10.1 step 3)
+    comparison: ``Jane-Doe``, ``jane.doe``, ``jane_doe`` and ``janedoe`` all
+    collapse to ``janedoe``.
+    """
+    return _NAME_MATCH_SEPARATORS_RE.sub("", text).casefold()
+
+
+def _accepted_local_part_forms(name: str) -> set[str]:
+    """The local-part strings that count as naming *name*, per issue athenaeum#2209.
+
+    Two forms, built from *name*'s whitespace/separator-delimited tokens:
+
+    - the full token join, normalized (covers "full name", ``first.last``
+      and ``firstlast`` as ONE check, since normalizing strips the
+      separator that is the only difference between them);
+    - ``flast`` — the first token's initial plus the LAST token, normalized.
+      For three-or-more tokens this uses the FIRST and LAST tokens only, per
+      the issue's rule; the middle token(s) still count toward the full join.
+
+    A single token alone (just a first name, or just a last name) is
+    deliberately never one of these forms — :func:`_pick_correspondent_entity`
+    relies on that to decline a first-name-only local part.
+    """
+    tokens = [t for t in _NAME_MATCH_SEPARATORS_RE.split(name.strip()) if t]
+    if not tokens:
+        return set()
+    forms = {_normalize_for_local_part_match("".join(tokens))}
+    if len(tokens) >= 2:
+        flast = tokens[0][0] + tokens[-1]
+        forms.add(_normalize_for_local_part_match(flast))
+    return forms
+
+
+def _local_part_matches_name(
+    local_part: str, name: str, aliases: list[str] | None = None
+) -> bool:
+    """True when *local_part* name-matches *name* or one of *aliases*.
+
+    Strips a ``+tag`` suffix before comparing (``jane.doe+work`` matches
+    exactly as ``jane.doe`` would) and never matches an empty local part.
+    """
+    bare_local = local_part.split("+", 1)[0]
+    normalized_local = _normalize_for_local_part_match(bare_local)
+    if not normalized_local:
+        return False
+    forms = set(_accepted_local_part_forms(name))
+    for alias in aliases or ():
+        forms |= _accepted_local_part_forms(alias)
+    return normalized_local in forms
+
+
 def _pick_correspondent_entity(
     created_people: list[WikiEntity],
-    display_name: str,
-) -> WikiEntity | None:
-    """Which newly-created person page is the correspondent, or ``None``.
+    ref: CorrespondentRef,
+) -> _CorrespondentPick:
+    """Which newly-created person page is the correspondent, or a decline.
 
-    One created person page is the overwhelming case for a one-correspondent
-    summary, and it is unambiguous. When a file created SEVERAL person pages
-    (the summary named other people too) the correspondent's address must not
-    be attached by position or by luck: fall back to an exact,
-    case-insensitive match on the producer's own ``correspondent_name``, and
-    if that still does not single one out, return ``None`` so the caller
-    escalates instead of guessing. Attaching an address to the wrong person
-    is precisely the failure mode athenaeum#1948 exists to stop, so the
-    ambiguous case declines the write.
+    Implements design ``docs/design/attribution-verification.md`` §10.1
+    steps 2-3 (step 1 — the resolved-correspondent check — runs in the
+    caller, :func:`_record_correspondent_contact`, before this is ever
+    called, because it needs an :class:`~athenaeum.models.EntityIndex` this
+    function does not take):
+
+    - a non-empty ``correspondent_name`` must exact-match (case-insensitive)
+      a created page's ``name`` or one of its ``aliases`` — EVEN WHEN only
+      one page was created. This is the fix: the old shortcut returned the
+      sole created page unconditionally, which is exactly wrong for an intro
+      email (the correspondent is the introducer, who already has a page;
+      the one page created is the introducee's). No match declines, for one
+      page or several.
+    - with no name and exactly one created page, the address's local part
+      must name-match that page (:func:`_local_part_matches_name`) — a first
+      name alone does not count.
+    - with no name and SEVERAL created pages, there is nothing to
+      disambiguate with: decline. Unchanged from before this issue
+      (athenaeum#1948's own behavior).
+
+    Attaching an address to the wrong person is precisely the failure mode
+    athenaeum#1948 exists to stop, so every ambiguous case declines the write.
     """
     if not created_people:
-        return None
+        return _CorrespondentPick(entity=None)
+
+    display_name = ref.display_name.strip()
+    if display_name:
+        wanted = display_name.casefold()
+        matches = [
+            e
+            for e in created_people
+            if e.name.strip().casefold() == wanted
+            or wanted in {a.strip().casefold() for a in e.aliases}
+        ]
+        if len(matches) == 1:
+            return _CorrespondentPick(entity=matches[0])
+        return _CorrespondentPick(
+            entity=None,
+            decline_kind=_DECLINE_NAME_MISMATCH,
+            decline_names=tuple(sorted(e.name for e in created_people)),
+        )
+
     if len(created_people) == 1:
-        return created_people[0]
-    wanted = display_name.casefold()
-    if not wanted:
-        return None
-    matches = [e for e in created_people if e.name.strip().casefold() == wanted]
-    return matches[0] if len(matches) == 1 else None
+        candidate = created_people[0]
+        local_part = ref.address.split("@", 1)[0]
+        if _local_part_matches_name(local_part, candidate.name, candidate.aliases):
+            return _CorrespondentPick(entity=candidate)
+        return _CorrespondentPick(
+            entity=None,
+            decline_kind=_DECLINE_LOCAL_PART_MISMATCH,
+            decline_names=(candidate.name,),
+        )
+
+    return _CorrespondentPick(
+        entity=None,
+        decline_kind=_DECLINE_SEVERAL_NO_MATCH,
+        decline_names=tuple(sorted(e.name for e in created_people)),
+    )
 
 
 def _record_correspondent_contact(
@@ -1639,6 +1768,7 @@ def _record_correspondent_contact(
     created_people: list[WikiEntity],
     escalations: list[EscalationItem],
     wiki_root: Path,
+    index: EntityIndex,
     config: dict[str, object] | None,
     excluded_index: ExcludedRecordIndex | None,
 ) -> None:
@@ -1681,9 +1811,28 @@ def _record_correspondent_contact(
       a person) is untouched, because the create decision is upstream and the
       significance gate stays voltaire's.
 
+    **athenaeum#2209 — the correspondent shortcut.** Before anything else, this
+    checks whether the address already resolves to an EXISTING page via
+    :func:`~athenaeum.compile_routing.resolve_correspondent_page` (design
+    ``docs/design/attribution-verification.md`` §10.1 step 1). When it does,
+    no created page is the correspondent — the address already has an
+    owner — and this records and escalates NOTHING. That is the fix for an
+    intro email: the correspondent (the ``From`` address) is the introducer,
+    who usually already has a page, so the one page a compile creates is the
+    introducee's. The old shortcut handed the introducer's address to
+    whichever single page got created, regardless of whose it actually was.
+    Every escalation raised below shows the address masked
+    (:func:`~athenaeum.pii.mask_contact_address`, design §8.1) in both its
+    description and its ``entity_name`` — never the raw value, because
+    ``_pending_questions.md`` lives in the wiki.
+
     Fail-open, like every other observability/annotation write on this path: a
     surface write that raises is logged and swallowed, never allowed to fail a
-    compile whose wiki writes have already landed.
+    compile whose wiki writes have already landed. The step-1 resolve call
+    below is wrapped the same way even though
+    :func:`~athenaeum.compile_routing.resolve_correspondent_page` already
+    catches internally — belt and suspenders, since this function must never
+    propagate.
     """
     if raw is None:
         return
@@ -1691,23 +1840,74 @@ def _record_correspondent_contact(
     if not ref.address:
         return
 
-    entity = _pick_correspondent_entity(created_people, ref.display_name)
+    masked = mask_contact_address(ref.address)
+
+    resolved_page: Path | None = None
+    try:
+        resolved_page = resolve_correspondent_page(
+            ref,
+            index=index,
+            knowledge_root=wiki_root.parent,
+            config=config,
+            excluded_index=excluded_index,
+        )
+    except Exception:
+        log.warning(
+            "  Could not resolve correspondent address for %s; routing guard "
+            "disabled for this file (issue athenaeum#2209)",
+            raw.ref,
+            exc_info=True,
+        )
+        resolved_page = None
+
+    if resolved_page is not None:
+        # Design §10.1 step 1: the address already has an owner. Record
+        # nothing, and — unlike every decline below — raise no escalation;
+        # there is no question for a human here.
+        log.info(
+            "  Correspondent address for %s already resolves to %s; "
+            "recording nothing (issue athenaeum#2209)",
+            raw.ref,
+            resolved_page,
+        )
+        return
+
+    pick = _pick_correspondent_entity(created_people, ref)
+    entity = pick.entity
     if entity is None:
-        if created_people:
-            escalations.append(
-                EscalationItem(
-                    raw_ref=raw.ref,
-                    entity_name=ref.display_name or ref.address,
-                    conflict_type="ambiguous",
-                    description=(
-                        f"Raw file names correspondent {ref.address!r} but created "
-                        f"{len(created_people)} person pages "
-                        f"({', '.join(sorted(e.name for e in created_people))}); "
-                        "cannot tell which one the address belongs to, so it was "
-                        "not recorded on any of them (issue athenaeum#1948)."
-                    ),
-                )
+        if pick.decline_kind == _DECLINE_SEVERAL_NO_MATCH:
+            description = (
+                f"Raw file names correspondent {masked} but created "
+                f"{len(pick.decline_names)} person pages "
+                f"({', '.join(pick.decline_names)}); cannot tell which one "
+                "the address belongs to, so it was not recorded on any of "
+                "them (issue athenaeum#1948)."
             )
+        elif pick.decline_kind == _DECLINE_NAME_MISMATCH:
+            description = (
+                f"Raw file names correspondent {masked} as "
+                f"{ref.display_name!r}, but no created person page's name "
+                f"or alias matches it (created: "
+                f"{', '.join(pick.decline_names)}); the address was not "
+                "recorded on any of them (issue athenaeum#2209)."
+            )
+        elif pick.decline_kind == _DECLINE_LOCAL_PART_MISMATCH:
+            description = (
+                f"Raw file names correspondent {masked}; the address's "
+                "local part does not name-match the one person page this "
+                f"file created ({pick.decline_names[0]!r}), so it was not "
+                "recorded (issue athenaeum#2209)."
+            )
+        else:
+            return
+        escalations.append(
+            EscalationItem(
+                raw_ref=raw.ref,
+                entity_name=ref.display_name or masked,
+                conflict_type="ambiguous",
+                description=description,
+            )
+        )
         return
 
     contacts_root = contacts_surface_root(wiki_root.parent, config)
@@ -1738,10 +1938,11 @@ def _record_correspondent_contact(
                 entity_name=entity.name,
                 conflict_type="ambiguous",
                 description=(
-                    f"Correspondent address on {raw.ref} already belongs to "
-                    f"{'/'.join(written.uids)} on the contacts surface, but this "
-                    f"file created person page {entity.uid}. No contact record "
-                    "was written (issue athenaeum#1948)."
+                    f"Correspondent address {masked} on {raw.ref} already "
+                    f"belongs to {'/'.join(written.uids)} on the contacts "
+                    f"surface, but this file created person page "
+                    f"{entity.uid}. No contact record was written (issue "
+                    "athenaeum#1948)."
                 ),
             )
         )
@@ -1753,10 +1954,10 @@ def _record_correspondent_contact(
                 entity_name=entity.name,
                 conflict_type="ambiguous",
                 description=(
-                    f"Correspondent address on {raw.ref} is already on the "
-                    "contacts surface but no record says whose it is, so it was "
-                    f"not claimed for the person page {entity.uid} this file "
-                    "created (issue athenaeum#1948)."
+                    f"Correspondent address {masked} on {raw.ref} is already "
+                    "on the contacts surface but no record says whose it "
+                    f"is, so it was not claimed for the person page "
+                    f"{entity.uid} this file created (issue athenaeum#1948)."
                 ),
             )
         )
@@ -2047,6 +2248,7 @@ def _apply_tier3_results(
         created_people=_created_people,
         escalations=escalations,
         wiki_root=wiki_root,
+        index=index,
         config=config,
         excluded_index=excluded_index,
     )
