@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The eval-receipt gate decides on structure, not on touched paths (issue
+  athenaeum#2223).** `.github/llm-surface.txt` gains a `path::symbol` form —
+  a top-level `def`/`class`, a `Class.method`, or a module-level constant —
+  and `scripts/check_llm_surface_receipt.py` now asks whether a designated
+  symbol's docstring-stripped AST differs between the merge base and the
+  head (`fire`), instead of whether its file appears in the changed-path
+  list. A comment, a docstring or a reformat inside a designated function no
+  longer demands a paid eval dispatch; a one-literal change inside one still
+  does, and an edit to an undesignated function in the same file does not.
+  The decision uses the UNION of the designations at both ends, so a PR
+  cannot delete its own entry to hide a change, and missing, renamed or
+  unparseable symbols count as changed (fail closed). The whole-file and
+  `dir/` prefix forms keep their exact meaning, so the list itself is
+  unchanged by this release and a rollback to whole-file entries needs no
+  code change. Stdlib only — no install is added to the gate's workflow.
+
 - **North star: filing is verification, tiers are measured, schema is data
   (`docs/north-star.md`, amended 2026-10-30).** New §2.12 makes the librarian
   responsible for what it files: every value is checked against the store and
