@@ -279,7 +279,26 @@ def wilson_interval(successes: int, n: int, *, confidence: float = 0.95) -> tupl
     margin = z * ((phat * (1 - phat) + z * z / (4 * n)) / n) ** 0.5
     lower = (center - margin) / denom
     upper = (center + margin) / denom
-    return max(0.0, lower), min(1.0, upper)
+    # athenaeum#2211: at phat == 0 (or 1), `margin` and `center`'s second term
+    # are EQUAL in real-number math (`phat * (1 - phat)` vanishes exactly),
+    # so `lower`/`upper` should cancel to exactly 0.0/1.0 -- but `margin` is
+    # reached through a sqrt that `center` never takes, so the two sides of
+    # the cancellation are two independently-rounded floating-point paths,
+    # not literally the same bit pattern. The residual left over (order
+    # 1e-17, either sign) is a genuine rounding artifact of the CPU/libm
+    # computing that sqrt, not a property of the statistics -- it was
+    # observed to differ between aarch64 (exactly 0.0) and x86-64 CI
+    # (~2e-17), which is what makes a bare `== 0.0` test architecture-
+    # dependent without this clamp. A Wilson interval can never legitimately
+    # sit outside `[0, 1]` NOR outside `[0, phat]` / `[phat, 1]` for its
+    # lower/upper half respectively (the interval must contain its own point
+    # estimate) -- clamping to `phat` on top of the `[0, 1]` floor/ceiling
+    # removes the artifact at the one exact value (the point estimate) where
+    # both the unclamped result AND the architecture-dependent noise live,
+    # regardless of which direction the rounding happened to go.
+    lower = min(max(0.0, lower), phat)
+    upper = max(min(1.0, upper), phat)
+    return lower, upper
 
 
 def wilson_lower_bound(successes: int, n: int, *, confidence: float = 0.95) -> float:
