@@ -150,6 +150,8 @@ Evidence, kept out of the reading path.
   Choice-question classifier measured against the five-verdict comparator's recorded
   verdicts for the same source pairs.
 - [Transcript-receipts writer: ledger scans and transcript reads](measurements/transcript-receipts-writer-2026-10.md) — synthetic before/after for the nightly receipts phase.
+- [Frontmatter parse cost](measurements/frontmatter-parse-cost-2026-10-31.md) — full vs.
+  field-selective frontmatter parsing over a generated 26k-page corpus.
 - [Memory-model measurements](measurements/memory-model-measurements.md)
 - [Reasoning-tier measurements](measurements/reasoning-tier-measurements.md)
 - [Retrieval entry-point measurements](measurements/retrieval-entry-point-measurements.md)
