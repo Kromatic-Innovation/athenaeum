@@ -455,9 +455,24 @@ def witness_session_end_anchor(cache_dir: Path, wiki_root: Path) -> None:
         _log_witness_error(cache_dir, exc)
 
 
-class _HookTimeoutExceeded(Exception):
+class _HookTimeoutExceeded(BaseException):
     """Raised by :func:`_run_within_timeout`'s alarm handler. Private --
-    callers see it only inside their own ``try``/``except``."""
+    callers see it only inside their own ``try``/``except``.
+
+    Deliberately ``BaseException``, not ``Exception`` (Seer finding on
+    this issue's own PR): the SIGALRM handler can fire while execution is
+    anywhere inside :func:`~athenaeum.context.build_context_for_turn`,
+    including beneath one of its own broad, best-effort
+    ``except Exception`` blocks (the vector leg, the LLM topic-extraction
+    leg). A plain ``Exception`` subclass would be swallowed right there --
+    no `step_timeout` recorded, and worse, the alarm is one-shot, so
+    whatever ran AFTER the swallowed exception would then execute with no
+    time bound left at all. Subclassing ``BaseException`` instead is the
+    same reason ``KeyboardInterrupt``/``SystemExit`` do: a bare
+    ``except Exception`` cannot catch it, so it always reaches this
+    module's own ``except _HookTimeoutExceeded`` in :func:`main`,
+    regardless of which inner frame it was raised from.
+    """
 
 
 def _run_within_timeout(timeout_seconds: int, fn: Any, *args: Any, **kwargs: Any) -> Any:
