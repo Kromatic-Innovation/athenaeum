@@ -1094,6 +1094,31 @@ class TestHeartbeatRewriteNeverExposesAPartialPayload:
         assert new_holder["pid"] == str(os.getpid())
         assert len(observed["post_bytes"]) > len(observed["old_bytes"])
 
+    def test_a_short_write_raises_instead_of_persisting_a_mixed_payload(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A SHORT `os.write` (ENOSPC is the realistic cause) would leave on
+        disk exactly the `new_prefix + old_tail` state the single-write design
+        exists to make impossible. It must be loud, not silently persisted."""
+        from athenaeum import store
+
+        lockfile = tmp_path / "lock-2229-short"
+        fd = store.lease_open_fd(lockfile)
+        try:
+            acquired_at = store.lease_write_metadata(fd)
+            real_write = os.write
+
+            def short_write(write_fd: int, data: bytes) -> int:
+                if write_fd == fd:
+                    return real_write(write_fd, data[: len(data) // 2])
+                return real_write(write_fd, data)
+
+            monkeypatch.setattr(os, "write", short_write)
+            with pytest.raises(OSError, match="partial heartbeat write"):
+                store.lease_refresh_heartbeat(fd, acquired_at)
+        finally:
+            os.close(fd)
+
 
 class TestLivenessStrHelper:
     """Unit coverage for `runlock._liveness_str`, the belt-and-braces

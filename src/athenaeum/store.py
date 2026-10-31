@@ -532,7 +532,16 @@ def lease_refresh_heartbeat(fd: int, acquired_at: str) -> None:
     current_size = os.fstat(fd).st_size
     if len(data) < current_size:
         data += b"\n" * (current_size - len(data))
-    os.write(fd, data)
+    written = os.write(fd, data)
+    if written != len(data):
+        # A SHORT write (ENOSPC is the realistic cause) would leave exactly the
+        # `new_prefix + old_tail` state the single-write design exists to make
+        # impossible, so it must be loud rather than silently persisted. Not
+        # retried: a second write would itself be a second window.
+        raise OSError(
+            f"partial heartbeat write: {written} of {len(data)} bytes "
+            "reached the lockfile"
+        )
     os.fsync(fd)
 
 
