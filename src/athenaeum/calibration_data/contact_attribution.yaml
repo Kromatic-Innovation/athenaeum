@@ -19,7 +19,7 @@
 # this file is regenerated.
 - question_class: held-elsewhere
   model: claude-haiku-4-5-20251001
-  prompt_sha256: fee32ce4edf4a4086ecd08ad819410db61721a7c3027436a099df37567a48b6a
+  prompt_sha256: 334d2d8dce0ef8c4c341213f4d080b1531db5aa023c40d675231bc30dfa4a668
   signal: class-level
   bins: []
   threshold: 0.0
@@ -35,7 +35,7 @@
   passes: false
 - question_class: names-other
   model: claude-haiku-4-5-20251001
-  prompt_sha256: fee32ce4edf4a4086ecd08ad819410db61721a7c3027436a099df37567a48b6a
+  prompt_sha256: 334d2d8dce0ef8c4c341213f4d080b1531db5aa023c40d675231bc30dfa4a668
   signal: class-level
   bins: []
   threshold: 0.0
@@ -51,7 +51,7 @@
   passes: false
 - question_class: source-context
   model: claude-haiku-4-5-20251001
-  prompt_sha256: fee32ce4edf4a4086ecd08ad819410db61721a7c3027436a099df37567a48b6a
+  prompt_sha256: 334d2d8dce0ef8c4c341213f4d080b1531db5aa023c40d675231bc30dfa4a668
   signal: class-level
   bins: []
   threshold: 0.0
@@ -67,7 +67,7 @@
   passes: false
 - question_class: non-person-target
   model: claude-haiku-4-5-20251001
-  prompt_sha256: fee32ce4edf4a4086ecd08ad819410db61721a7c3027436a099df37567a48b6a
+  prompt_sha256: 334d2d8dce0ef8c4c341213f4d080b1531db5aa023c40d675231bc30dfa4a668
   signal: class-level
   bins: []
   threshold: 0.0
@@ -83,7 +83,7 @@
   passes: false
 - question_class: role-unmatched
   model: claude-haiku-4-5-20251001
-  prompt_sha256: fee32ce4edf4a4086ecd08ad819410db61721a7c3027436a099df37567a48b6a
+  prompt_sha256: 334d2d8dce0ef8c4c341213f4d080b1531db5aa023c40d675231bc30dfa4a668
   signal: class-level
   bins: []
   threshold: 0.0

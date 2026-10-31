@@ -1717,6 +1717,14 @@ _CONTACT_ATTRIBUTION_JUDGE_MAX_TOKENS = 512
 #: hundred tokens").
 _SOURCE_EXCERPT_MAX_CHARS = 1200
 
+#: Budget for the assembled <evidence> fence (athenaeum#2211, Seer finding
+#: on PR athenaeum#2259): the value, every entity brief (target/holders/
+#: candidates) and the fired-check labels, all together. Generous relative
+#: to typical case sizes (a handful of short briefs plus a few check
+#: lines) -- this is a safety cap against a pathological number of
+#: holders/candidates, not a tuning knob.
+_EVIDENCE_MAX_CHARS = 4000
+
 
 def _format_entity_brief(brief: EntityBrief, *, label: str) -> str:
     lines = [f"{label}: {brief.name} (uid={brief.uid})"]
@@ -1748,30 +1756,50 @@ def _format_checks(checks: tuple[CheckEvidence, ...]) -> str:
 def _build_question_user_message(question: AttributionQuestion) -> str:
     """Render *question* into the judge call's user message.
 
-    The source excerpt is untrusted content from the raw corpus (the same
-    egress the compile already performs on it, design §6.2) — fenced with
-    :func:`athenaeum.prompt_safety.fence_untrusted` rather than embedded
-    bare.
+    Every piece of attacker-influenced content is fenced with
+    :func:`athenaeum.prompt_safety.fence_untrusted` — never interpolated
+    bare (athenaeum#2211, Seer finding on PR athenaeum#2259). Two fenced
+    regions, not one per field: a single ``<evidence>`` fence wraps the
+    value, every :class:`EntityBrief` (``name``/``aliases``/
+    ``employer_domain_hints`` all originate from ingested external
+    content -- an email display name among them -- so they are
+    attacker-influenced by construction, exactly like the value itself),
+    and the fired checks' labels (:func:`_format_checks` -- a check label
+    such as ``role-local-part:<local>`` embeds a substring of the value,
+    so it carries the same risk). Wrapping each short field in its own
+    fence would litter the prompt with delimiters and make a name harder
+    to read as a name; one fence over the whole assembled region avoids
+    that while still drawing the trust boundary around everything that
+    did not originate from this module's own deterministic checks. A
+    second, separate fence (unchanged from before this finding) wraps the
+    source excerpt, which is a different piece of untrusted content (a
+    free-text quote, not structured evidence) with its own existing tag.
     """
-    sections = [
+    evidence_lines = [
         f"Contact value under question: {question.value}",
         "",
         _format_entity_brief(question.target, label="Target"),
     ]
     if question.holders:
-        sections.append("")
-        sections.append("Other uids that already hold or name this value:")
+        evidence_lines.append("")
+        evidence_lines.append("Other uids that already hold or name this value:")
         for holder in question.holders:
-            sections.append(_format_entity_brief(holder, label="Holder"))
+            evidence_lines.append(_format_entity_brief(holder, label="Holder"))
     if question.candidates:
-        sections.append("")
-        sections.append("Candidate owners the evidence points at:")
+        evidence_lines.append("")
+        evidence_lines.append("Candidate owners the evidence points at:")
         for candidate in question.candidates:
-            sections.append(_format_entity_brief(candidate, label="Candidate"))
-    sections.append("")
-    sections.append("Checks that fired:")
-    sections.append(_format_checks(question.checks))
-    sections.append("")
+            evidence_lines.append(_format_entity_brief(candidate, label="Candidate"))
+    evidence_lines.append("")
+    evidence_lines.append("Checks that fired:")
+    evidence_lines.append(_format_checks(question.checks))
+
+    sections = [
+        fence_untrusted(
+            "\n".join(evidence_lines), tag="evidence", max_chars=_EVIDENCE_MAX_CHARS
+        ),
+        "",
+    ]
     if question.source_excerpt:
         sections.append(
             fence_untrusted(
