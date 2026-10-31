@@ -86,6 +86,10 @@ def _run(args: list[str], env_extra: dict[str, str]) -> subprocess.CompletedProc
     env = dict(os.environ)
     env.pop("ATHENAEUM_DEPLOY_DIR", None)
     env.pop("LOCAL_DEPLOYS_DIR", None)
+    # A caller shell that exports ATHENAEUM_GUARD_PYTHON (a real operator
+    # override) must not leak into tests that never asked for one -- scrub it
+    # here so each test's own env_extra is the only source (athenaeum#2256).
+    env.pop("ATHENAEUM_GUARD_PYTHON", None)
     env["ATHENAEUM_GUARD_FETCH"] = "0"  # never hit the network
     env.update(env_extra)
     return subprocess.run(
@@ -377,6 +381,10 @@ def _source_and_eval(func_call: str, env_extra: dict[str, str]) -> str:
     """Source the guard (entrypoint is source-guarded) and echo one helper's output."""
     env = dict(os.environ)
     env.pop("ATHENAEUM_DEPLOY_EXTRAS", None)
+    # Same caller-leak scrub as _source_and_eval_rc/_run below (athenaeum#2256):
+    # a real ATHENAEUM_GUARD_PYTHON in the invoking shell must not silently
+    # override the shimmed PATH a test builds for default-resolution cases.
+    env.pop("ATHENAEUM_GUARD_PYTHON", None)
     env.update(env_extra)
     r = subprocess.run(
         [_BASH, "-c", f'. "{GUARD}"; {func_call}'],
