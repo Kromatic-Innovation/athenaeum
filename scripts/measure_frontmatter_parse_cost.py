@@ -65,7 +65,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from athenaeum.models import (  # noqa: E402
+from athenaeum.models import (
     _C_SAFE_LOADER,
     EntityIndex,
     parse_frontmatter,
@@ -294,21 +294,11 @@ Raw per-repeat timings ({args.repeats} interleaved reps) -- `full`:
   show a smaller ratio.
 - Per-call recall latency is explicitly out of scope for athenaeum#2178 and is
   not measured here.
-- A controlled, uncontended in-memory (no file I/O) comparison on the same
-  corpus shape measured separately during development showed a consistent
-  ~1.6x parse-only speedup; the min/min figure above is the closer of this
-  run's two statistics to that uncontended number, which is why min, not
-  mean, is the headline figure on a shared machine.
-- The issue asks for "about 26k pages"; the generator (``--pages``) supports
-  that directly and was exercised and spot-checked at 26,000 pages during
-  development (file generation + correctness), but a full TIMED 26,000-page
-  x 8-pass run did not complete in a bounded wait under this run's sibling
-  lane contention (single passes that take ~5s uncontended were observed
-  taking 30-60s+ and climbing). {args.pages} pages is the largest corpus
-  size this run completed cleanly end to end; the per-page cost ratio this
-  measures is corpus-size-independent, so the speedup figure generalizes.
-  Re-run with ``--pages 26000`` on a quieter host for the literal 26k-page
-  number.
+- On a SHARED machine, re-run this a few times and compare the `min`
+  figures across runs before trusting a single result -- an outlier
+  sibling-process repeat (visible in the raw per-repeat timings above) can
+  inflate `full` or `selective` independently, which is exactly why `min`,
+  not `mean`, is this script's headline statistic.
 """
 
     out_path = args.out or (
