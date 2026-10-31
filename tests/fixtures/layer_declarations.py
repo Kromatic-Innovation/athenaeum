@@ -209,6 +209,10 @@ MODULE_LAYER: dict[str, int] = {
     "decision_budget": 4,
     "decisions": 4,
     "contact_record_repair": 4,
+    # Issue athenaeum#2218: read-only contact-surface lint + attribution
+    # backfill report. Imports contact_record_repair (L4 sibling, page-less
+    # detection reuse), pii_attribution / pii / contact_record_fold (L3).
+    "contact_surface_lint": 4,
     "dedupe": 4,
     "drain": 4,
     "entity_resolution": 4,
@@ -299,6 +303,7 @@ MODULE_LAYER: dict[str, int] = {
     "_cli_shared": 5,
     "_cmd_attribution": 5,  # issue athenaeum#2212
     "_cmd_audit": 5,
+    "_cmd_contact_surface_lint": 5,  # issue athenaeum#2218
     "_cmd_decompose_page": 5,
     "_cmd_correct_notes": 5,
     "_cmd_paste_cleanup": 5,
