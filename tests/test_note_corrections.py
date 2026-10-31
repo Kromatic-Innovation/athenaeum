@@ -39,10 +39,12 @@ from athenaeum.note_corrections import (
     BatchEnvelope,
     CorrectionRecord,
     NoteCorrectionError,
+    _parse_sections,
     apply_batch,
     dry_run_report,
     load_batch,
     previously_applied,
+    section_id,
 )
 
 SOURCE_UID = "src00001"
@@ -104,6 +106,48 @@ def workspace(tmp_path: Path) -> Path:
         name="Jordan",
         body="## Notes\n\n- Jordan likes coffee.[^1]\n\n[^1]: **Source:** `drive/d099-jordan.md`\n",
     )
+    return root
+
+
+_SECTION_BODY = """## Notes
+
+- Jamie switched teams at Acme in March.[^1]
+
+## Enrichment (wrong person)
+
+This paragraph is entirely about a different Jamie and does not belong on
+this page.[^2]
+It also cites a source shared with another section on this page.[^3]
+
+### Sub detail
+
+Nested detail that must be removed together with its parent section.[^2]
+
+## Keep
+
+This section stays, and its own citation of the shared source is what
+proves the drop above did not orphan it.[^3]
+
+[^1]: **Source:** `drive/d001-jamie-switch.md`
+[^2]: **Source:** `drive/d002-wrong-jamie.md`
+[^3]: **Source:** `drive/d003-shared.md`
+"""
+
+#: The stable id the "Enrichment (wrong person)" ## heading computes
+#: (first and only occurrence of its exact text) — issue athenaeum#2236.
+SECTION_ENRICHMENT_ID = section_id("Enrichment (wrong person)", 1)
+
+
+@pytest.fixture
+def section_workspace(tmp_path: Path) -> Path:
+    """A private knowledge root with a section-bearing source page (issue
+    athenaeum#2236) — kept separate from ``workspace`` above so section
+    tests never perturb the bullet-only fixture's byte-identical digests.
+    """
+    root = tmp_path / "knowledge"
+    wiki = root / "wiki"
+    wiki.mkdir(parents=True)
+    _write_page(wiki / f"{SOURCE_UID}-jamie.md", uid=SOURCE_UID, name="Jamie", body=_SECTION_BODY)
     return root
 
 
@@ -681,3 +725,229 @@ class TestBatchEnvelopeIsFrozen:
         )
         with pytest.raises(Exception):
             envelope.batch_id = "other"  # type: ignore[misc]
+
+
+# --- section drop (issue athenaeum#2236) ------------------------------------
+
+
+class TestSectionId:
+    """AC1's id derivation, :func:`section_id`, in isolation."""
+
+    def test_same_text_increments_the_ordinal(self) -> None:
+        assert section_id("Notes", 1) == "notes-1"
+        assert section_id("Notes", 2) == "notes-2"
+
+    def test_slugifies_punctuation_and_case(self) -> None:
+        assert section_id("Notes (Draft)!!", 1) == "notes-draft-1"
+
+    def test_a_heading_with_no_alnum_text_falls_back_to_a_placeholder_slug(self) -> None:
+        assert section_id("---", 1) == "section-1"
+
+
+class TestParseSections:
+    """AC2: :func:`_parse_sections`' own unit coverage of the boundary rule
+    and the ambiguity case :func:`section_id`'s docstring describes."""
+
+    def test_two_headings_that_slugify_identically_are_both_excluded(self) -> None:
+        body = "## Notes (Draft)\n\nFirst.\n\n## Notes [Draft]\n\nSecond.\n"
+        assert _parse_sections(body) == {}
+
+    def test_an_unrelated_heading_does_not_perturb_a_later_ones_id(self) -> None:
+        body = "## Alpha\n\nx\n\n## Notes\n\ny\n"
+        spans = _parse_sections(body)
+        assert "notes-1" in spans
+
+    def test_a_nested_subsection_stays_inside_the_parents_span(self) -> None:
+        spans = _parse_sections(_SECTION_BODY)
+        span = spans[SECTION_ENRICHMENT_ID]
+        lines = _SECTION_BODY.split("\n")
+        assert lines[span.start_line] == "## Enrichment (wrong person)"
+        # The span ends exactly at the next ##, so "### Sub detail" (level 3)
+        # is included and "## Keep" (level 2) is not.
+        assert lines[span.end_line] == "## Keep"
+        assert any("### Sub detail" in lines[i] for i in range(span.start_line, span.end_line))
+
+
+class TestLoadBatchSections:
+    def test_round_trips_a_section_drop_record(self, tmp_path: Path) -> None:
+        path = _write_batch(
+            tmp_path, "b1", [{"section_id": SECTION_ENRICHMENT_ID, "action": "drop"}]
+        )
+        envelope = load_batch(path)
+        assert envelope.records == (
+            CorrectionRecord(section_id=SECTION_ENRICHMENT_ID, action="drop"),
+        )
+
+    def test_rejects_a_record_with_both_bullet_id_and_section_id(self, tmp_path: Path) -> None:
+        path = _write_batch(
+            tmp_path,
+            "b1",
+            [{"bullet_id": BID_1, "section_id": SECTION_ENRICHMENT_ID, "action": "drop"}],
+        )
+        with pytest.raises(NoteCorrectionError, match="exactly one"):
+            load_batch(path)
+
+    def test_rejects_a_record_with_neither_bullet_id_nor_section_id(self, tmp_path: Path) -> None:
+        path = _write_batch(tmp_path, "b1", [{"action": "drop"}])
+        with pytest.raises(NoteCorrectionError, match="must carry"):
+            load_batch(path)
+
+    def test_rejects_a_section_move(self, tmp_path: Path) -> None:
+        path = _write_batch(
+            tmp_path,
+            "b1",
+            [{"section_id": SECTION_ENRICHMENT_ID, "action": "move", "target_uid": TARGET_UID}],
+        )
+        with pytest.raises(NoteCorrectionError, match="section move is not supported"):
+            load_batch(path)
+
+    def test_rejects_a_section_drop_that_carries_a_target_uid(self, tmp_path: Path) -> None:
+        path = _write_batch(
+            tmp_path,
+            "b1",
+            [{"section_id": SECTION_ENRICHMENT_ID, "action": "drop", "target_uid": TARGET_UID}],
+        )
+        with pytest.raises(NoteCorrectionError, match="must not carry"):
+            load_batch(path)
+
+    def test_rejects_a_duplicate_section_id_in_one_batch(self, tmp_path: Path) -> None:
+        path = _write_batch(
+            tmp_path,
+            "b1",
+            [
+                {"section_id": SECTION_ENRICHMENT_ID, "action": "drop"},
+                {"section_id": SECTION_ENRICHMENT_ID, "action": "drop"},
+            ],
+        )
+        with pytest.raises(NoteCorrectionError, match="duplicate"):
+            load_batch(path)
+
+
+class TestDropSection:
+    """AC1/AC3: drop a whole prose ``##`` section, its nested subsection,
+    and get bullet-drop's identical footnote reference handling."""
+
+    def test_drops_the_section_and_its_nested_subsection(self, section_workspace: Path) -> None:
+        wiki = section_workspace / "wiki"
+        batch_path = _write_batch(
+            section_workspace,
+            "b-section-drop",
+            [{"section_id": SECTION_ENRICHMENT_ID, "action": "drop"}],
+        )
+        outcome = apply_batch(wiki, load_batch(batch_path))
+        assert [r.disposition for r in outcome.results] == ["dropped"]
+
+        text = (wiki / f"{SOURCE_UID}-jamie.md").read_text(encoding="utf-8")
+        assert "Enrichment" not in text
+        assert "Sub detail" not in text
+        assert "Nested detail" not in text
+        # Untouched sections survive, in order.
+        assert "Jamie switched teams" in text
+        assert "## Keep" in text
+
+    def test_an_unshared_footnote_is_removed_and_a_shared_one_survives(
+        self, section_workspace: Path
+    ) -> None:
+        wiki = section_workspace / "wiki"
+        batch_path = _write_batch(
+            section_workspace,
+            "b-section-footnotes",
+            [{"section_id": SECTION_ENRICHMENT_ID, "action": "drop"}],
+        )
+        apply_batch(wiki, load_batch(batch_path))
+        text = (wiki / f"{SOURCE_UID}-jamie.md").read_text(encoding="utf-8")
+        assert "[^2]: **Source:** `drive/d002-wrong-jamie.md`" not in text
+        assert "[^3]: **Source:** `drive/d003-shared.md`" in text
+        assert "[^1]: **Source:** `drive/d001-jamie-switch.md`" in text
+
+
+class TestSectionRefusal:
+    """AC2: an unknown or ambiguous section_id refuses the WHOLE batch,
+    through the same bucket an unknown bullet_id already hits."""
+
+    def test_an_unknown_section_id_refuses_the_whole_batch(self, section_workspace: Path) -> None:
+        wiki = section_workspace / "wiki"
+        before = _digests(wiki)
+        batch_path = _write_batch(
+            section_workspace,
+            "b-section-bad-id",
+            [{"section_id": "nonexistent-1", "action": "drop"}],
+        )
+        with pytest.raises(NoteCorrectionError, match="unknown section id"):
+            apply_batch(wiki, load_batch(batch_path))
+        assert _digests(wiki) == before
+        assert not previously_applied(wiki, "b-section-bad-id")
+
+    def test_an_ambiguous_section_id_refuses_the_whole_batch(self, tmp_path: Path) -> None:
+        root = tmp_path / "knowledge"
+        wiki = root / "wiki"
+        wiki.mkdir(parents=True)
+        body = "## Notes (Draft)\n\nFirst section.\n\n## Notes [Draft]\n\nSecond section.\n"
+        _write_page(wiki / f"{SOURCE_UID}-jamie.md", uid=SOURCE_UID, name="Jamie", body=body)
+        before = _digests(wiki)
+        batch_path = _write_batch(
+            root, "b-section-ambiguous", [{"section_id": "notes-draft-1", "action": "drop"}]
+        )
+        with pytest.raises(NoteCorrectionError, match="unknown section id"):
+            apply_batch(wiki, load_batch(batch_path))
+        assert _digests(wiki) == before
+
+
+class TestSectionDryRun:
+    def test_dry_run_reports_a_section_drop_without_writing(self, section_workspace: Path) -> None:
+        wiki = section_workspace / "wiki"
+        before = _digests(wiki)
+        batch_path = _write_batch(
+            section_workspace,
+            "b-section-dry",
+            [{"section_id": SECTION_ENRICHMENT_ID, "action": "drop"}],
+        )
+        report = dry_run_report(wiki, load_batch(batch_path))
+        assert report.dropped == 1
+        assert report.moved == 0
+        assert report.body_chars_after < report.body_chars_before
+        assert _digests(wiki) == before
+        assert not (wiki / "_note_corrections_applied.jsonl").exists()
+
+
+class TestSectionLedger:
+    def test_apply_writes_one_ledger_row_for_a_section_drop(self, section_workspace: Path) -> None:
+        wiki = section_workspace / "wiki"
+        batch_path = _write_batch(
+            section_workspace,
+            "b-section-ledger",
+            [{"section_id": SECTION_ENRICHMENT_ID, "action": "drop"}],
+        )
+        apply_batch(wiki, load_batch(batch_path))
+        lines = (wiki / "_note_corrections_applied.jsonl").read_text().splitlines()
+        assert len(lines) == 1
+        record = json.loads(lines[0])
+        assert record["batch_id"] == "b-section-ledger"
+        assert record["dispositions"] == {"dropped": 1}
+
+
+class TestSectionCliOutputNeverLeaksText:
+    """AC4: neither mode ever prints the dropped section's heading/prose."""
+
+    def test_dry_run_and_apply_never_print_the_heading_text(
+        self, section_workspace: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        dry_batch = _write_batch(
+            section_workspace,
+            "b-section-cli-dry",
+            [{"section_id": SECTION_ENRICHMENT_ID, "action": "drop"}],
+        )
+        assert main(_cli_argv(section_workspace, dry_batch, "--dry-run")) == 0
+        dry_out = capsys.readouterr().out
+        assert "Enrichment" not in dry_out
+        assert "wrong person" not in dry_out
+
+        apply_batch_path = _write_batch(
+            section_workspace,
+            "b-section-cli-apply",
+            [{"section_id": SECTION_ENRICHMENT_ID, "action": "drop"}],
+        )
+        assert main(_cli_argv(section_workspace, apply_batch_path)) == 0
+        apply_out = capsys.readouterr().out
+        assert "Enrichment" not in apply_out
+        assert "wrong person" not in apply_out
