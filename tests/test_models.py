@@ -1779,6 +1779,27 @@ class TestParseFrontmatterSelective:
         sel, _ = parse_frontmatter_selective(self._RICH_BLOCK, keys)
         assert sel == self._subset(full, keys)
 
+    def test_unhashable_top_level_key_matches_the_full_parse(self) -> None:
+        """A list/mapping used as a YAML key must fail open exactly as the full parse does.
+
+        `? [a, b]` / `? {x: 1}` is legal YAML whose key is unhashable.
+        `SafeConstructor.construct_mapping` raises `ConstructorError` on it and
+        `parse_frontmatter` fails open to `({}, text)`. The selective path does
+        its own `key in wanted` membership test BEFORE constructing the mapping,
+        so without the guard the unhashable key escapes as a bare `TypeError`
+        and one malformed page crashes a whole index build (Seer review on
+        PR athenaeum#2271). Asserted against live `parse_frontmatter` output, not a
+        literal, so the two can never drift apart.
+        """
+        for block in (
+            "uid: u1\nname: N\n? [a, b]\n: value",
+            "uid: u2\nname: M\n? {x: 1}\n: v",
+        ):
+            text = f"---\n{block}\n---\n\nbody\n"
+            assert parse_frontmatter_selective(text, {"uid", "name"}) == parse_frontmatter(
+                text
+            )
+
     def test_merge_key_expands_the_same_as_the_full_parse(self) -> None:
         text = "---\n<<: {a: 1, uid: '99'}\nname: Merged\n---\nbody\n"
         keys = {"uid", "name", "a"}

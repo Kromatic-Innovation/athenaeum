@@ -572,7 +572,23 @@ def _construct_selective_mapping(block: str, wanted: frozenset[str]) -> dict[str
         result: dict[str, object] = {}
         for key_node, value_node in node.value:
             key = loader.construct_object(key_node, deep=True)
-            if key in wanted:
+            try:
+                selected = key in wanted
+            except TypeError as exc:
+                # An unhashable top-level key (a list or mapping used as a
+                # key, YAML's `? [a, b]` form). SafeConstructor.construct_mapping
+                # raises ConstructorError("found unhashable key") here, which
+                # parse_frontmatter catches and fails open to {} -- but this
+                # function does its own membership test BEFORE constructing the
+                # mapping, so the unhashable value reaches `in wanted` first and
+                # would escape as a bare TypeError. Re-raise as the YAMLError
+                # the caller's fallback already handles, so a malformed page is
+                # skipped exactly as the full parse skips it rather than
+                # crashing a whole index build (Seer review on PR athenaeum#2271).
+                raise yaml.constructor.ConstructorError(
+                    None, None, f"found unhashable key: {exc}", key_node.start_mark
+                ) from exc
+            if selected:
                 result[key] = loader.construct_object(value_node, deep=True)
         return result
     finally:
