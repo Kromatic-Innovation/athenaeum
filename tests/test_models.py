@@ -28,6 +28,7 @@ from athenaeum.models import (
     parse_asserter,
     parse_deprecated,
     parse_frontmatter,
+    parse_frontmatter_selective,
     parse_model,
     parse_on_behalf_of,
     parse_superseded_by,
@@ -1653,3 +1654,227 @@ class TestCompareAsserters:
             "provider_ids": {"entra_tid": "tid-9", "entra_oid": "oid-9"},
         }
         assert compare_asserters(entra, entra_other_app) == "same"
+
+
+# ---------------------------------------------------------------------------
+# Selective (field-scoped) frontmatter parsing (issue athenaeum#2178)
+# ---------------------------------------------------------------------------
+
+
+class TestParseFrontmatterSelective:
+    """``parse_frontmatter_selective`` must agree with ``parse_frontmatter``
+    on exactly the keys it was asked to return -- never more, never less,
+    and never a different value for a shared key. Covers AC2's named
+    categories: dates, timestamps, nested mappings, and lists.
+    """
+
+    _RICH_BLOCK = textwrap.dedent(
+        """\
+        ---
+        uid: "1001"
+        name: Alice Example
+        type: person
+        aliases: [Al, Ally, "A. Example"]
+        metadata:
+          type: person
+          region: us
+        created: 2026-01-05
+        updated_at: 2026-01-05T12:30:00Z
+        valid_until: 2027-06-01
+        sources:
+          - type: email
+            id: abc-123
+            seen_at: 2026-02-01T00:00:00Z
+        claims:
+          - text: likes coffee
+            kind: fact
+            asserted_on: 2026-01-02
+        tags: [vip, internal]
+        ---
+        Body text.
+        """
+    )
+
+    @staticmethod
+    def _subset(meta: dict, keys: set[str]) -> dict:
+        return {k: v for k, v in meta.items() if k in keys}
+
+    def test_selective_subset_matches_full_parse_on_requested_keys(self) -> None:
+        keys = {"uid", "name", "type", "metadata", "aliases"}
+        full, full_body = parse_frontmatter(self._RICH_BLOCK)
+        sel, sel_body = parse_frontmatter_selective(self._RICH_BLOCK, keys)
+        assert sel_body == full_body
+        assert sel == self._subset(full, keys)
+
+    def test_dates_and_timestamps_round_trip_identically_when_selected(self) -> None:
+        keys = {"created", "updated_at", "valid_until"}
+        full, _ = parse_frontmatter(self._RICH_BLOCK)
+        sel, _ = parse_frontmatter_selective(self._RICH_BLOCK, keys)
+        assert sel == self._subset(full, keys)
+        # Pin the actual Python types a selective caller would get back --
+        # a selective parse that silently returned strings instead of
+        # date/datetime objects would be a correctness regression no
+        # dict-equality-only check would catch (str("2026-01-05") ==
+        # date(2026, 1, 5) is False, so equality already guards this, but
+        # spell out the type too for a clearer failure message).
+        import datetime as _dt
+
+        assert isinstance(sel["created"], _dt.date)
+        assert isinstance(sel["updated_at"], _dt.datetime)
+
+    def test_nested_mappings_and_lists_round_trip_identically_when_selected(
+        self,
+    ) -> None:
+        keys = {"sources", "claims", "tags", "metadata"}
+        full, _ = parse_frontmatter(self._RICH_BLOCK)
+        sel, _ = parse_frontmatter_selective(self._RICH_BLOCK, keys)
+        assert sel == self._subset(full, keys)
+        assert sel["sources"][0]["seen_at"] == full["sources"][0]["seen_at"]
+        assert isinstance(sel["metadata"], dict)
+
+    def test_unselected_keys_are_absent_even_though_present_on_the_page(self) -> None:
+        sel, _ = parse_frontmatter_selective(self._RICH_BLOCK, {"uid"})
+        assert set(sel) == {"uid"}
+
+    def test_identity_field_int_coercion_matches_full_parse(self) -> None:
+        text = "---\nuid: 19052\nname: 42\ntype: 7\n---\nbody\n"
+        keys = {"uid", "name", "type"}
+        full, _ = parse_frontmatter(text)
+        sel, _ = parse_frontmatter_selective(text, keys)
+        assert sel == full == {"uid": "19052", "name": "42", "type": "7"}
+
+    def test_no_frontmatter_block_returns_empty_dict_and_full_text(self) -> None:
+        text = "no frontmatter here\n"
+        sel, body = parse_frontmatter_selective(text, {"uid"})
+        assert sel == {}
+        assert body == text
+
+    def test_requested_key_absent_from_page_is_simply_missing(self) -> None:
+        text = "---\nname: Solo\n---\nbody\n"
+        sel, _ = parse_frontmatter_selective(text, {"uid", "name", "aliases"})
+        assert sel == {"name": "Solo"}
+
+    def test_falls_back_when_the_c_loader_rejects_a_block(self) -> None:
+        # Same discriminator as TestFrontmatterLoaderPreference's equivalent
+        # test: a lone-surrogate escape the C scanner rejects and the
+        # pure-Python one accepts must not make the page vanish.
+        text = '---\nuid: u1\nname: "\\ud83d\\ude00"\n---\n\nBody.\n'
+        sel, body = parse_frontmatter_selective(text, {"uid", "name"})
+        # YAML's own \u escape decoding does NOT pair-combine surrogates (that
+        # is the whole discriminator this test exercises) -- build the
+        # expected value with chr() rather than a Python string literal,
+        # since the Python source decoder WOULD combine an adjacent
+        # 😀 pair into a single astral character.
+        assert sel == {"uid": "u1", "name": chr(0xD83D) + chr(0xDE00)}
+        assert body == "Body.\n"
+
+    def test_works_identically_with_no_c_loader(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import athenaeum.models as models
+
+        monkeypatch.setattr(models, "_C_SAFE_LOADER", None)
+        keys = {"uid", "name", "type", "metadata", "aliases"}
+        full, _ = parse_frontmatter(self._RICH_BLOCK)
+        sel, _ = parse_frontmatter_selective(self._RICH_BLOCK, keys)
+        assert sel == self._subset(full, keys)
+
+    def test_merge_key_expands_the_same_as_the_full_parse(self) -> None:
+        text = "---\n<<: {a: 1, uid: '99'}\nname: Merged\n---\nbody\n"
+        keys = {"uid", "name", "a"}
+        full, _ = parse_frontmatter(text)
+        sel, _ = parse_frontmatter_selective(text, keys)
+        assert sel == self._subset(full, keys) == {"uid": "99", "name": "Merged", "a": 1}
+
+    def test_non_mapping_frontmatter_returns_empty_dict(self) -> None:
+        # A page whose frontmatter block is a bare list/scalar has no
+        # top-level KEYS to select at all -- documented degenerate case,
+        # distinct from (and safer than) the full parser, which returns the
+        # raw non-dict value and would make a dict-shaped caller crash on
+        # ``.get()`` either way.
+        text = "---\n- a\n- b\n---\nbody\n"
+        sel, body = parse_frontmatter_selective(text, {"uid"})
+        assert sel == {}
+        assert body == "body\n"
+
+
+class TestEntityIndexSelectiveParseEquivalence:
+    """``EntityIndex.read_page_record`` opted into the selective parser
+    (issue athenaeum#2178). Pin that a page's index contribution -- the
+    ONLY thing any caller of :class:`EntityIndex` ever observes -- is
+    unchanged by that switch, across the same date/timestamp/nested-mapping/
+    list shapes AC2 requires.
+    """
+
+    def _write(self, tmp_path: Path, name: str, body: str) -> Path:
+        p = tmp_path / name
+        p.write_text(body, encoding="utf-8")
+        return p
+
+    def test_read_page_record_matches_full_parse_derived_record(
+        self, tmp_path: Path
+    ) -> None:
+        text = textwrap.dedent(
+            """\
+            ---
+            uid: "42"
+            name: Bob Example
+            metadata:
+              type: person
+            aliases: [Bobby, "B. Example"]
+            created: 2026-03-01
+            updated_at: 2026-03-01T00:00:00Z
+            sources:
+              - type: email
+                id: xyz
+            claims:
+              - text: irrelevant to the index
+            ---
+            Body.
+            """
+        )
+        fpath = self._write(tmp_path, "bob.md", text)
+
+        # Reference: what the OLD (full-parse) behavior would have computed,
+        # reimplemented inline from the full frontmatter dict so this test
+        # does not depend on calling the full parser through the same code
+        # path being changed.
+        full, _ = parse_frontmatter(text)
+        assert full["aliases"] == ["Bobby", "B. Example"]
+        assert resolve_page_type(full) == "person"
+
+        parsed = EntityIndex.read_page_record(fpath)
+        assert parsed is not None
+        record, meta = parsed
+        assert record.uid == "42"
+        assert record.name == "Bob Example"
+        assert record.type == "person"  # via metadata.type fallback
+        assert record.aliases == ("Bobby", "B. Example")
+        # The long tail (sources/claims/created/updated_at) must be absent
+        # from the selectively-parsed meta the index keeps -- proving the
+        # long tail was never constructed, not merely unused.
+        assert set(meta) <= {"uid", "name", "type", "metadata", "aliases"}
+
+    def test_full_index_build_unaffected_by_long_tail_fields(
+        self, tmp_path: Path
+    ) -> None:
+        pages = {
+            "a.md": (
+                "---\nuid: \"1\"\nname: A\ntype: person\n"
+                "notes: [huge, list, of, stuff]\n---\nBody A\n"
+            ),
+            "b.md": (
+                "---\nuid: \"2\"\nname: B\nmetadata:\n  type: project\n"
+                "created: 2026-01-01\n---\nBody B\n"
+            ),
+            "_skip.md": "---\nuid: \"3\"\nname: Skip\n---\nBody\n",
+        }
+        for fname, body in pages.items():
+            self._write(tmp_path, fname, body)
+
+        index = EntityIndex(tmp_path)
+        assert index.lookup("a") is not None
+        assert index.lookup("a").uid == "1"
+        assert index.lookup("b").type == "project"
+        assert index.lookup("skip") is None
+        assert list(index.pages_of_type("project"))[0][1] == "B"
