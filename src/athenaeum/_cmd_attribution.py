@@ -83,6 +83,8 @@ from athenaeum._cli_shared import _acquire_or_exit, _add_lock_args
 from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from athenaeum.runlock import RunLock
 
 #: ``--as`` prefixes that take an argument, and the verdict each selects.
@@ -342,7 +344,7 @@ def _cmd_place(args: argparse.Namespace) -> int:
     # record, the real check is INJECTED instead: §7.2's "stops a placement
     # that would itself create a fresh conflict" is precisely about that
     # case. The module docstring carries the full reasoning.
-    injected_recheck: Any | None = None
+    injected_recheck: "Callable[..., Any] | None" = None
     if verdict in _RECHECK_BYPASS_VERDICTS:
         recheck = pii_attribution.check_contact_attribution(
             suspect.value,
@@ -451,11 +453,14 @@ def _cmd_place(args: argparse.Namespace) -> int:
             f"itself create a fresh conflict there: the deterministic checks say "
             f"{placement.recheck_disposition!r} for it on that record ({fired}). "
             f"Design §7.2 sends such a placement to the human queue rather than "
-            f"writing it, and re-running this command will refuse again. Either "
-            f"file it on the original target instead "
-            f"(`athenaeum attribution place {suspect.suspect_id} --as own`, which "
-            f"design §9.4 makes the always-available rollback), or settle the "
-            f"competing holder first -- `athenaeum attribution show "
+            f"writing it, so re-running this command will refuse again.",
+            file=sys.stderr,
+        )
+        print(
+            f"  Either file it on the original target instead -- "
+            f"`athenaeum attribution place {suspect.suspect_id} --as own`, which "
+            f"design §9.4 makes the always-available rollback -- or settle the "
+            f"competing holder first: `athenaeum attribution show "
             f"{suspect.suspect_id}` names the candidates.",
             file=sys.stderr,
         )
