@@ -41,6 +41,20 @@ cache at the next load of this cache.
 Opt-in: nothing builds an ``EntityIndex`` through here unless the caller
 passes a cache dir. ``EntityIndex(wiki_root)`` is unchanged.
 
+**The single-uid fast path** (issue athenaeum#2179, broadened to a shared helper
+by athenaeum#2181): :func:`page_by_uid_filename`, :func:`locate_entity_page` and
+:func:`entity_index_for_uid` are the ONE implementation of "a page named
+``<uid>-*.md``/``<uid>.md`` whose frontmatter confirms *uid*, used only when
+exactly one such page qualifies, else fall back to the persisted cache above."
+Originally private to :mod:`athenaeum.identity_resolution`
+(``_page_by_uid_filename``/``_locate_page``), moved here rather than copied
+into each of the three single-uid readers that now share it
+(:func:`athenaeum.mcp_server.entity_read`, :func:`athenaeum.pii.read_entity`,
+:func:`athenaeum.pii.read_identifier_facts`) — this module already owns the
+cache-fallback tier these functions complete, is L2 (below both ``pii`` and
+``identity_resolution``), and needs no import neither of those two modules
+would otherwise require.
+
 Layering: L2. Imports only :mod:`athenaeum.models` (L1) and
 :mod:`athenaeum.atomic_io` (L0); the caller resolves the cache dir.
 """
@@ -51,6 +65,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import stat
 from dataclasses import dataclass
 from pathlib import Path
@@ -213,3 +228,97 @@ def load_with_stats(wiki_root: Path, cache_dir: Path) -> tuple[EntityIndex, Load
 def load_entity_index(wiki_root: Path, cache_dir: Path) -> EntityIndex:
     """:func:`load_with_stats` without the stats."""
     return load_with_stats(wiki_root, cache_dir)[0]
+
+
+#: A uid safe to splice into a filename glob: no path separator, no glob
+#: metacharacter. Anything else skips the filename fast path.
+_FILENAME_SAFE_UID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
+
+
+def page_by_uid_filename(wiki_root: Path, uid: str) -> Path | None:
+    """The one page named ``<uid>-*.md`` / ``<uid>.md`` whose frontmatter carries *uid*.
+
+    Returns a path only when EXACTLY one such page exists and it indexes as an
+    entity page (readable, a ``name:``, and a frontmatter ``uid:`` equal to
+    *uid*: what :meth:`EntityIndex.has_entity_format` guarantees). Zero hits
+    (a page whose filename does not carry its uid) or several hits return
+    ``None`` so the caller falls back to a full index. Reads only the
+    candidate pages.
+    """
+    wiki_root = Path(wiki_root)
+    if not _FILENAME_SAFE_UID.fullmatch(uid):
+        return None
+    candidates = sorted(wiki_root.glob(f"{uid}-*.md"))
+    exact = wiki_root / f"{uid}.md"
+    if exact.is_file():
+        candidates.append(exact)
+    verified: list[Path] = []
+    for fpath in candidates:
+        parsed = EntityIndex.read_page_record(fpath)
+        if parsed is not None and parsed[0].uid == uid:
+            verified.append(fpath)
+    return verified[0] if len(verified) == 1 else None
+
+
+def locate_entity_page(
+    wiki_root: Path,
+    uid: str,
+    *,
+    entity_index: EntityIndex | None = None,
+    cache_dir: Path | None = None,
+) -> Path | None:
+    """Resolve a known *uid* to its entity page, or ``None`` (orphan).
+
+    - *entity_index* given: that index decides, exactly as before.
+    - *cache_dir* given (and *entity_index* not): the filename fast path
+      (:func:`page_by_uid_filename`), then the persisted index above when the
+      fast path is not conclusive.
+    - neither: a fresh full :class:`EntityIndex`, the pre-cache behaviour.
+    """
+    wiki_root = Path(wiki_root)
+    if entity_index is None and cache_dir is not None:
+        fast = page_by_uid_filename(wiki_root, uid)
+        if fast is not None:
+            return fast
+        entity_index = load_entity_index(wiki_root, cache_dir)
+    index = entity_index if entity_index is not None else EntityIndex(wiki_root)
+    page_path = index.get_by_uid(uid)
+    if page_path is None or not page_path.exists() or not index.has_entity_format(page_path):
+        return None
+    return page_path
+
+
+def entity_index_for_uid(
+    wiki_root: Path,
+    uid: str,
+    *,
+    cache_dir: Path | None = None,
+) -> EntityIndex:
+    """An :class:`EntityIndex` whose ``get_by_uid(uid)`` answers correctly,
+    built as cheaply as the fast-path/cache mechanism allows (issue athenaeum#2181).
+
+    For a caller that needs an actual index object rather than a bare path —
+    :func:`athenaeum.mcp_server.entity_read` and :func:`athenaeum.pii.read_entity`
+    both pass the result onward to code that calls ``.get_by_uid`` again, and
+    the former also registers a non-wiki-root fallback hit (issue athenaeum#1394)
+    directly into the returned index's ``_by_uid`` map.
+
+    - *cache_dir* given and exactly one filename-fast-path match verifies for
+      *uid*: returns a single-entry index built with
+      :meth:`EntityIndex.from_page_records` (no directory scan beyond the one
+      glob, no frontmatter parse beyond that one page) — this is the case
+      AC2 pins as "no full ``EntityIndex`` build on a fast-path hit".
+    - *cache_dir* given and the fast path is not conclusive: the persisted,
+      stat-validated cache (:func:`load_entity_index`).
+    - *cache_dir* ``None``: a fresh full :class:`EntityIndex`, the pre-cache
+      behaviour, byte-identical to callers that have not opted in.
+    """
+    wiki_root = Path(wiki_root)
+    if cache_dir is not None:
+        fast = page_by_uid_filename(wiki_root, uid)
+        if fast is not None:
+            parsed = EntityIndex.read_page_record(fast)
+            if parsed is not None:
+                return EntityIndex.from_page_records(wiki_root, [(fast, parsed[0])])
+        return load_entity_index(wiki_root, cache_dir)
+    return EntityIndex(wiki_root)
