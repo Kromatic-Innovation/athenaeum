@@ -1243,8 +1243,10 @@ def _apply_field_correction(
         "defaults": {},
     }
     # Issue athenaeum#2210: the attribution seam, built fresh for this one
-    # ratified correction — reusing the `index` just built above, so this
-    # costs no second entity scan.
+    # ratified correction — reusing the `index` just built above. The
+    # child-C indexes (athenaeum#2215) are memoized against that SAME
+    # `index` object's identity (`pii_attribution._cached_child_c_indexes`),
+    # so this still costs no second entity scan per correction.
     from athenaeum import pii_attribution
 
     attribution_context = pii_attribution.build_attribution_context(
