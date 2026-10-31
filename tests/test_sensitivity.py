@@ -469,6 +469,16 @@ class TestPiiModuleUntouched:
 # ---------------------------------------------------------------------------
 
 
+#: The exact path macOS's stdlib `platform`/`sysconfig` version probe opens
+#: as a side effect of interpreter startup (not athenaeum code) -- CPython's
+#: own machinery reads this file by this precise path on every macOS import,
+#: never a prefix/substring (athenaeum#2255 cause 5). Tolerating only this
+#: EXACT literal, rather than a blanket macOS-path allowance, keeps the
+#: open-tracker able to catch a genuinely unexpected open of a NEARBY macOS
+#: system file -- see the positive control below.
+_MACOS_VERSION_PROBE_PATH = "/System/Library/CoreServices/SystemVersion.plist"
+
+
 def test_import_has_no_file_io_beyond_module_source_loading() -> None:
     """Importing athenaeum.sensitivity reads/writes no data file (AC8).
 
@@ -476,12 +486,14 @@ def test_import_has_no_file_io_beyond_module_source_loading() -> None:
     the test session's own collection masks a real side effect. Every
     ``open()`` call made while importing the module is recorded; the only
     tolerated opens are Python's own module-source loading (``.py``/``.pyc``,
-    ``__pycache__``) — anything else (a wiki page, a config file, a knowledge
-    corpus path) would mean the module does I/O merely by being imported,
-    which the design note's layering note says it must not.
+    ``__pycache__``) and, by EXACT path, macOS's stdlib version probe (see
+    ``_MACOS_VERSION_PROBE_PATH`` above) — anything else (a wiki page, a
+    config file, a knowledge corpus path) would mean the module does I/O
+    merely by being imported, which the design note's layering note says it
+    must not.
     """
     src_root = Path(__file__).resolve().parent.parent / "src"
-    script = """
+    script = f"""
 import builtins
 opened = []
 _real_open = builtins.open
@@ -495,10 +507,12 @@ builtins.open = _tracking_open
 import athenaeum.sensitivity  # noqa: F401
 
 def _is_source_load(p):
-    return p.endswith(".py") or p.endswith(".pyc") or "__pycache__" in p
+    if p.endswith(".py") or p.endswith(".pyc") or "__pycache__" in p:
+        return True
+    return p == {_MACOS_VERSION_PROBE_PATH!r}
 
 non_source = [p for p in opened if not _is_source_load(p)]
-assert non_source == [], f"unexpected file I/O during import: {non_source!r}"
+assert non_source == [], f"unexpected file I/O during import: {{non_source!r}}"
 print("OK")
 """
     result = subprocess.run(
@@ -510,6 +524,56 @@ print("OK")
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "OK" in result.stdout
+
+
+def test_import_io_tracker_still_catches_an_unexpected_non_source_open() -> None:
+    """Positive control for the test above (athenaeum#2255 cause 5 AC):
+    proves the tracker genuinely CATCHES a non-tolerated open, so the
+    macOS-probe exact-path tolerance above cannot silently widen into a
+    blanket allowance without this test going red. Injects an open of a
+    throwaway file created inside the very same subprocess -- no real
+    filesystem assumption beyond ``tempfile`` itself."""
+    src_root = Path(__file__).resolve().parent.parent / "src"
+    script = f"""
+import builtins
+import tempfile
+
+opened = []
+_real_open = builtins.open
+
+def _tracking_open(file, *a, **kw):
+    opened.append(str(file))
+    return _real_open(file, *a, **kw)
+
+builtins.open = _tracking_open
+
+import athenaeum.sensitivity  # noqa: F401
+
+# Simulate a regression: some import-time code path opens an unexpected,
+# non-source file.
+fd, injected_path = tempfile.mkstemp()
+import os as _os
+_os.close(fd)
+_tracking_open(injected_path).close()
+
+def _is_source_load(p):
+    if p.endswith(".py") or p.endswith(".pyc") or "__pycache__" in p:
+        return True
+    return p == {_MACOS_VERSION_PROBE_PATH!r}
+
+non_source = [p for p in opened if not _is_source_load(p)]
+assert non_source == [injected_path], f"tracker missed the injected open: {{non_source!r}}"
+print("CAUGHT")
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={"PYTHONPATH": str(src_root), "PATH": "/usr/bin:/bin"},
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "CAUGHT" in result.stdout
 
 
 # ===========================================================================

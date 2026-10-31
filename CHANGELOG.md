@@ -783,6 +783,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and under `env -i` after it. Isolation lives entirely in test fixtures; no
   CI configuration changed.
 
+- **16 tests no longer fail on a stock macOS checkout (issue athenaeum#2255).**
+  All five causes were test-side assumptions that happened to hold on the
+  Linux CI runner: tests rewriting a `promptwitness` ledger partition without
+  first clearing the append-only flag `ledger._apply_append_only_protection`
+  applies (now cleared via `cli._clear_append_only_best_effort`, with a
+  counter-example test gated on a new `append_only_protection_enforced`
+  environment-contract property); a decay-bucket test fixture deriving its
+  scope name directly from `tmp_path`, which collided with the default
+  ephemeral-scope globs on macOS's `/private/var/folders/...` layout (now
+  hashed); an `AF_UNIX` socket placed under `tmp_path`, which macOS's default
+  `TMPDIR` can push past the 104-byte `sun_path` limit (now a short
+  `/tmp`-rooted scratch dir); a timezone test that assumed the host runs UTC
+  (now compares against the host's real `/etc/localtime` resolution); and a
+  macOS-only stdlib version-probe open that an import-I/O tracker test did
+  not tolerate (now tolerated by exact path, with a positive control proving
+  the tracker still catches an unrelated unexpected open). No product
+  behavior changed; `_system_local_timezone`'s docstring now also records,
+  rather than changes, its existing `$TZ` precedence.
+
 
 ## [0.22.43] - 2026-10-25
 
