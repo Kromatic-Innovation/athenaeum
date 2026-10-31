@@ -4373,7 +4373,9 @@ PLACEMENT_PARKED = "parked"
 PLACEMENT_MERGE_PROPOSED = "merge-proposed"
 #: ``logged`` — ``non-personal``: recorded in the attribution log, not filed.
 PLACEMENT_LOGGED = "logged"
-#: ``queued`` — the design §7.2 re-check returned ``suspect``. Nothing is
+#: ``queued`` — the design §7.2 re-check did not say ``pass``: either it
+#: returned ``suspect``, or it returned a disposition outside the vocabulary
+#: (:data:`_DISPOSITION_PASS`), which fails CLOSED the same way. Nothing is
 #: written and the CALLER raises the human-queue item (design §8.1); this
 #: function never loops back to a model, and has no model access to loop with.
 PLACEMENT_QUEUED = "queued"
@@ -4413,10 +4415,18 @@ PLACEMENT_VERDICTS: tuple[str, ...] = (
     _VERDICT_UNCLEAR,
 )
 
-#: The two ``pii_attribution.DISPOSITION_*`` tokens the re-check result is
-#: tested against, as plain strings — read off the injected callable's result
+#: The ``pii_attribution.DISPOSITION_*`` tokens the re-check result is tested
+#: against, as plain strings — read off the injected callable's result
 #: STRUCTURALLY (``getattr``), so this module needs no import of the verdict
-#: type. Same layering reason as :data:`IDENTIFIER_RELATIONS`.
+#: type. Same layering reason as :data:`IDENTIFIER_RELATIONS`; a test pins
+#: all three equal to their ``pii_attribution`` originals.
+#:
+#: :data:`_DISPOSITION_PASS` is the ONLY value that lets a write proceed.
+#: Design §6.3 makes the attribution seam fail CLOSED, so an absent token or
+#: one outside this vocabulary refuses the write and goes to the human queue
+#: rather than falling through to it: a re-check whose answer cannot be read
+#: has not said the placement is safe.
+_DISPOSITION_PASS = "pass"
 _DISPOSITION_SUSPECT = "suspect"
 _DISPOSITION_NON_PERSONAL = "non-personal"
 
@@ -4710,12 +4720,16 @@ def place_contact_value(
             ``context``; it is called as ``recheck(value,
             target_uid=<the uid about to be written to>, target_name=...,
             target_type=..., source_ref=original_source, writer=writer)`` and
-            its ``.disposition`` / ``.checks`` are read structurally. A
-            ``suspect`` disposition writes nothing and returns
-            :data:`PLACEMENT_QUEUED`; a ``non-personal`` one writes nothing
-            and returns :data:`PLACEMENT_LOGGED`, because design §9.1 holds
-            that a D1-narrow value "is never filed on its target, in every
-            mode". ``target_type`` is passed as ``None``: a placement has no
+            its ``.disposition`` / ``.checks`` are read structurally.
+            **Only ``pass`` writes.** A ``suspect`` disposition writes nothing
+            and returns :data:`PLACEMENT_QUEUED`; a ``non-personal`` one
+            writes nothing and returns :data:`PLACEMENT_LOGGED`, because
+            design §9.1 holds that a D1-narrow value "is never filed on its
+            target, in every mode"; and ANY other value — a token outside
+            :data:`_DISPOSITION_PASS`'s vocabulary, or no readable
+            disposition at all — also writes nothing and returns
+            :data:`PLACEMENT_QUEUED`, because design §6.3 makes this seam fail
+            closed. ``target_type`` is passed as ``None``: a placement has no
             page metadata to type the target from, and ``None`` makes the
             seam's D3 check inert rather than asserting a type this function
             cannot know — D2/D4, the checks that answer "would this placement
@@ -4908,6 +4922,28 @@ def place_contact_value(
                     "re-check returned non-personal; not filed on any record "
                     "(design §9.1: a D1-narrow value is never filed on its target, "
                     "in every mode)"
+                ),
+            )
+        if disposition != _DISPOSITION_PASS:
+            # Fail CLOSED on a token outside the vocabulary, or on no token at
+            # all (design §6.3). The alternative — falling through to the
+            # write — is fail-OPEN: a re-check that returns a typo, a renamed
+            # disposition, or a result this function cannot read structurally
+            # would silently authorise exactly the write it exists to gate.
+            return ContactPlacement(
+                outcome=PLACEMENT_QUEUED,
+                verdict=verdict,
+                placed_uid=placed_uid,
+                field=field,
+                usage_class=usage_class,
+                recheck_disposition=disposition,
+                recheck_checks=checks,
+                detail=(
+                    f"re-check returned an unrecognised disposition "
+                    f"{disposition!r} (expected one of "
+                    f"{[_DISPOSITION_PASS, _DISPOSITION_NON_PERSONAL, _DISPOSITION_SUSPECT]}); "
+                    "nothing written and the item goes to the human queue "
+                    "(design §6.3: the seam fails closed)"
                 ),
             )
 

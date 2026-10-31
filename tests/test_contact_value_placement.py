@@ -713,6 +713,49 @@ class TestReCheck:
         assert _snapshot(contacts) == {}
 
     @pytest.mark.parametrize(
+        "disposition", ["probably-fine", "", "PASS", "pass ", "suspect-ish"]
+    )
+    def test_an_unrecognised_disposition_refuses_the_write(
+        self, tmp_path: Path, disposition: str
+    ) -> None:
+        """Design §6.3: the seam fails CLOSED, so only ``pass`` writes.
+
+        A token outside the vocabulary — a typo, a renamed disposition, a
+        result this function cannot read structurally — must refuse the write
+        and go to the human queue. Falling through to the write would be
+        fail-OPEN on exactly the gate the re-check exists to be.
+        """
+        contacts = _contacts(tmp_path)
+        stub = _RecheckStub(disposition)
+        placement = _place(contacts, verdict="own", recheck=stub)
+        assert placement.outcome == pii.PLACEMENT_QUEUED
+        assert placement.recheck_disposition == (disposition or None)
+        assert "unrecognised disposition" in placement.detail
+        assert placement.path is None
+        assert placement.write_outcome is None
+        assert len(stub.calls) == 1
+        assert _snapshot(contacts) == {}
+
+    def test_a_result_with_no_disposition_attribute_refuses_the_write(
+        self, tmp_path: Path
+    ) -> None:
+        """The structural read's own failure mode: ``getattr`` yields nothing.
+
+        A re-check whose result this module cannot read has not said the
+        placement is safe, so it is queued rather than written.
+        """
+
+        class _Shapeless:
+            def __call__(self, _value: str, **_kwargs: Any) -> object:
+                return object()
+
+        contacts = _contacts(tmp_path)
+        placement = _place(contacts, verdict="own", recheck=_Shapeless())
+        assert placement.outcome == pii.PLACEMENT_QUEUED
+        assert placement.recheck_disposition is None
+        assert _snapshot(contacts) == {}
+
+    @pytest.mark.parametrize(
         "verdict", ["other-unknown", "non-personal", "unclear", "same-entity"]
     )
     def test_a_verdict_that_writes_nothing_never_re_checks(
@@ -1018,5 +1061,6 @@ class TestVocabulariesArePinned:
         assert default in pii_attribution.WRITER_IDS
 
     def test_the_dispositions_the_executor_tests_against_are_the_real_ones(self) -> None:
+        assert pii._DISPOSITION_PASS == pii_attribution.DISPOSITION_PASS
         assert pii._DISPOSITION_SUSPECT == pii_attribution.DISPOSITION_SUSPECT
         assert pii._DISPOSITION_NON_PERSONAL == pii_attribution.DISPOSITION_NON_PERSONAL
