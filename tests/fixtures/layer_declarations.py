@@ -297,6 +297,7 @@ MODULE_LAYER: dict[str, int] = {
     "witness_anchor": 4,
     # L5 -- presentation (CLI).
     "_cli_shared": 5,
+    "_cmd_attribution": 5,  # issue athenaeum#2212
     "_cmd_audit": 5,
     "_cmd_decompose_page": 5,
     "_cmd_correct_notes": 5,

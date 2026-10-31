@@ -10,6 +10,9 @@ python scripts/gen_cli_reference.py
 
 ## Command index
 
+- [`athenaeum attribution`](#athenaeum-attribution) (group) — Read and answer parked contact-value attribution suspects. `show` prints one suspect through the excluded-surface read gate (the only place a raw contact value is shown); `place` files a human answer through the placement executor.
+- [`athenaeum attribution place`](#athenaeum-attribution-place) (command) — File a human answer for one parked suspect through the placement executor, with decided_by: human and no calibrated probability.
+- [`athenaeum attribution show`](#athenaeum-attribution-show) (command) — Print one parked suspect, including its raw contact value. This is the sanctioned read for that value.
 - [`athenaeum audit`](#athenaeum-audit) (command) — Read-and-reason audit pass over wiki pages: stamps last_audited/audit_version, fills determinable valid_from/valid_until/claimed_scope. Dry-run by default; --apply writes.
 - [`athenaeum authority`](#athenaeum-authority) (group) — Authority manifest: detect + convert memories that duplicate a live source (skill file, code path, config) into pointer stubs.
 - [`athenaeum authority convert`](#athenaeum-authority-convert) (command) — Convert ONE page into a one-line pointer stub for a given manifest source. Default is dry-run; --apply writes the file. Scoped to a single --page; never walks the corpus.
@@ -142,6 +145,46 @@ python scripts/gen_cli_reference.py
 - [`athenaeum verdicts show-one-pair`](#athenaeum-verdicts-show-one-pair) (command) — Show the current live verdict for one pair.
 - [`athenaeum verdicts show-stale`](#athenaeum-verdicts-show-stale) (command) — List every live verdict currently flagged stale.
 - [`athenaeum viewer`](#athenaeum-viewer) (command) — Serve a localhost-only, read-only page showing pushed-unbidden vs. pulled-deliberately vs. overlap recall for one session.
+
+## `athenaeum attribution`
+
+Read and answer parked contact-value attribution suspects. `show` prints one suspect through the excluded-surface read gate (the only place a raw contact value is shown); `place` files a human answer through the placement executor.
+
+Subcommands:
+
+- `athenaeum attribution place` — File a human answer for one parked suspect through the placement executor, with decided_by: human and no calibrated probability.
+- `athenaeum attribution show` — Print one parked suspect, including its raw contact value. This is the sanctioned read for that value.
+
+## `athenaeum attribution place`
+
+File a human answer for one parked suspect through the placement executor, with decided_by: human and no calibrated probability.
+
+**Positional arguments:**
+
+- `suspect_id` — Suspect id: <value_key>-<target_uid>.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--as` | — | — | The answer to file: own \| other:<uid> \| alias:<relation> \| merge:<uid>. `own` confirms the value is the target's; `other:<uid>` re-attributes it to that uid; `alias:<relation>` files it as an alias with one of the four identifier relations; `merge:<uid>` proposes a same-entity merge and writes no contact value. |
+| `--contacts-root` | — | — | Excluded 'pii' surface root, resolved from config by default. |
+| `--force` | `False` | — | Break the run lock even if a process is still holding it (the current holder is logged first) and proceed. Use ONLY when you are certain the holder is hung or dead; never run two --force invocations concurrently. |
+| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge). |
+| `--wait` | — | — | Block up to SECONDS for the run lock instead of failing fast. Default: ATHENAEUM_LOCK_TIMEOUT env, then athenaeum.yaml librarian.lock_timeout, then 0 (fail fast). |
+
+## `athenaeum attribution show`
+
+Print one parked suspect, including its raw contact value. This is the sanctioned read for that value.
+
+**Positional arguments:**
+
+- `suspect_id` — Suspect id: <value_key>-<target_uid>.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--contacts-root` | — | — | Excluded 'pii' surface root, resolved from config by default. |
+| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge). |
 
 ## `athenaeum audit`
 
