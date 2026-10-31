@@ -571,7 +571,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   EITHER direction (widen below the class's target error rate, narrow
   above it, per `librarian.attribution.accuracy_floor`), and an approval
   writes a ledger override `pii_attribution.threshold_for_class` reads
-  BELOW explicit config. No model call; synthetic fixtures only.
+  BELOW explicit config. Wired into the SAME nightly
+  `librarian._run_auto_apply_proposals_phase` as the existing merge-dedupe
+  widen rail — same `librarian.signal_mining.enabled` gate, same dry-run
+  precedence, same call position, no new knob — drafting over
+  `pii_attribution.QUESTION_CLASSES` (the seam's own vocabulary) rather
+  than a hand-written list. No model call; synthetic fixtures only.
 
 ### Changed
 

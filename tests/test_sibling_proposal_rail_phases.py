@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the self-tuning loop's two sibling nightly phases (issue
+"""Tests for the self-tuning loop's sibling nightly phases (issue
 athenaeum#719 AC11/AC15): ``librarian._run_tier_movement_proposals_phase``
 (issue athenaeum#2019) and ``librarian._run_auto_apply_proposals_phase``
-(issue athenaeum#2018), both gated by the SAME master key
+(issue athenaeum#2018, now also hosting athenaeum#2219's
+attribution-threshold drafter -- see ``TestAttributionThresholdPhase*``
+below), both gated by the SAME master key
 (``librarian.signal_mining.enabled``) ``_run_signal_mining_phase`` already
 uses for ``dimension_proposals.py``.
 
@@ -29,6 +31,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+
+import pytest
 
 from athenaeum.auto_apply_proposals import (
     AutoApplyProposalRunSummary,
@@ -364,3 +368,191 @@ class TestAutoApplyPhaseActionListDerivation:
         _run_auto_apply_proposals_phase(ctx)
 
         assert captured["actions"] == sorted(DEFAULT_AUTO_APPLY_THRESHOLD_PER_ACTION)
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#2219, design §8.3 — the attribution-threshold drafter,
+# wired into the SAME `_run_auto_apply_proposals_phase` (no second phase,
+# no new config knob, no new gate). The round trip below is the production
+# path: real sampler -> real phase entry point -> real decisions queue ->
+# real approval -> real `threshold_for_class` read-back.
+# ---------------------------------------------------------------------------
+
+
+def _sample_and_review_attribution(
+    wiki_root: Path,
+    *,
+    proposal_id: str,
+    question_class: str,
+    human_verdict: str,
+    verdict: str = "own",
+) -> None:
+    """Same shape as ``_sample_and_review`` above, for the attribution
+    tier -- copied, not imported, per this file's own docstring."""
+    from athenaeum.calibration import ATTRIBUTION_TIER_NAME
+
+    sample_tier_decision(
+        wiki_root,
+        tier=ATTRIBUTION_TIER_NAME,
+        verdict=verdict,
+        proposal_id=proposal_id,
+        reason="test",
+        config={"librarian": {"audit_sample_rate_attribution": 1.0}},
+        question_class=question_class,
+        applied=True,
+    )
+    audit_id = next(
+        r["id"]
+        for r in read_calibration_ledger(wiki_root)
+        if r.get("kind") == "audit" and r.get("proposal_id") == proposal_id
+    )
+    record_audit_review(wiki_root, audit_id=audit_id, human_verdict=human_verdict)
+
+
+def _seed_attribution_disagreement(
+    wiki_root: Path, *, question_class: str, overturned: int, confirmed: int
+) -> None:
+    """Sample + review N attribution ``own`` audits for *question_class*:
+    *overturned* reviewed as ``alias`` (differs -> overturned), *confirmed*
+    reviewed as ``own`` (matches -> confirmed)."""
+    idx = 0
+    for _ in range(overturned):
+        idx += 1
+        _sample_and_review_attribution(
+            wiki_root,
+            proposal_id=f"attr-{question_class}-{idx}",
+            question_class=question_class,
+            human_verdict="alias",
+        )
+    for _ in range(confirmed):
+        idx += 1
+        _sample_and_review_attribution(
+            wiki_root,
+            proposal_id=f"attr-{question_class}-{idx}",
+            question_class=question_class,
+            human_verdict="own",
+        )
+
+
+def _attribution_threshold_config(question_class: str, threshold: float) -> dict:
+    return {
+        "librarian": {
+            "signal_mining": {"enabled": True, "dry_run": False},
+            "attribution": {
+                "accuracy_floor": 0.95,
+                "thresholds": {question_class: threshold},
+            },
+        }
+    }
+
+
+class TestAttributionThresholdPhaseMasterGate:
+    def test_disabled_by_default_leaves_both_summaries_none(self, tmp_path: Path) -> None:
+        ctx = _make_ctx(tmp_path, config={})
+        _run_auto_apply_proposals_phase(ctx)
+        assert ctx.auto_apply_proposals_summary is None
+        assert ctx.attribution_threshold_proposals_summary is None
+
+    def test_deadline_tripped_skips_and_records_reason(self, tmp_path: Path) -> None:
+        ctx = _make_ctx(tmp_path, config=_master_config(enabled=True))
+        ctx.deadline_tripped = True
+        _run_auto_apply_proposals_phase(ctx)
+        assert ctx.attribution_threshold_proposals_summary == {
+            "skipped_deadline_tripped": True
+        }
+
+
+class TestAttributionThresholdPhaseQuestionClassDerivation:
+    def test_question_classes_passed_are_derived_from_the_seam(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """A hand-written class list must never drift back in -- spy on the
+        drafter entry point and assert the *question_classes* positional
+        arg is exactly ``sorted(pii_attribution.QUESTION_CLASSES)``."""
+        import athenaeum.auto_apply_proposals as auto_apply_mod
+        from athenaeum.pii_attribution import QUESTION_CLASSES
+
+        captured: dict[str, list[str]] = {}
+
+        def _spy(question_classes, **kwargs):
+            captured["question_classes"] = list(question_classes)
+            return AutoApplyProposalRunSummary(actions_seen=len(question_classes))
+
+        monkeypatch.setattr(
+            auto_apply_mod, "run_attribution_threshold_proposal_detection", _spy
+        )
+
+        ctx = _make_ctx(tmp_path, config=_master_config(enabled=True))
+        _run_auto_apply_proposals_phase(ctx)
+
+        assert captured["question_classes"] == sorted(QUESTION_CLASSES)
+
+
+class TestAttributionThresholdPhaseRoundTrip:
+    """The production round trip the coordinator asked for: real sampler,
+    real phase entry point (never the drafter directly), real decisions
+    queue, real approval path, real ``threshold_for_class`` read-back."""
+
+    def test_full_round_trip_through_the_production_phase_and_decisions_queue(
+        self, tmp_path: Path
+    ) -> None:
+        from athenaeum.auto_apply_proposals import approve_auto_apply_threshold_proposal
+        from athenaeum.calibration import attribution_threshold_action_id
+        from athenaeum.decisions import list_pending_decisions
+        from athenaeum.pii_attribution import threshold_for_class
+
+        wiki_root = tmp_path / "knowledge" / "wiki"
+        question_class = "held-elsewhere"
+        config = _attribution_threshold_config(question_class, 0.9)
+
+        # 0/10 overturned -> 0.0, strictly below the 0.05 target (1 -
+        # accuracy_floor) -> the real sampler + the real phase should widen.
+        _seed_attribution_disagreement(
+            wiki_root, question_class=question_class, overturned=0, confirmed=10
+        )
+
+        ctx = _make_ctx(tmp_path, wiki_root=wiki_root, config=config)
+        _run_auto_apply_proposals_phase(ctx)
+
+        summary = ctx.attribution_threshold_proposals_summary
+        assert summary is not None
+        assert summary["dry_run"] is False
+        assert summary["proposed"] == 1
+        assert len(summary["drafted_ids"]) == 1
+        proposal_id = summary["drafted_ids"][0]
+
+        # The draft is visible in the REAL decisions queue, as the SAME
+        # `type: "auto-apply-threshold"` item the merge-dedupe rail uses.
+        decisions = list_pending_decisions(wiki_root)
+        drafted = next(d for d in decisions if d["id"] == proposal_id)
+        assert drafted["type"] == "auto-apply-threshold"
+        assert drafted["payload"]["direction"] == "widen"
+        assert drafted["payload"]["question_class"] == question_class
+        action = attribution_threshold_action_id(question_class)
+        assert drafted["payload"]["action"] == action
+
+        # Nothing changed yet -- AC5's "no threshold changes without
+        # approval" -- the explicit config threshold still reads back.
+        assert threshold_for_class(
+            question_class, config, wiki_root=wiki_root
+        ) == pytest.approx(0.9)
+
+        # Approve through the REAL approval path.
+        approve_auto_apply_threshold_proposal(wiki_root, proposal_id=proposal_id)
+
+        # The ledger override is honoured BELOW explicit config -- so with
+        # the SAME explicit override still set, the explicit layer still
+        # wins (it must, unconditionally, per threshold_for_class's own
+        # precedence).
+        assert threshold_for_class(
+            question_class, config, wiki_root=wiki_root
+        ) == pytest.approx(0.9)
+
+        # Drop the explicit override and re-read: NOW the approved ledger
+        # override is what the real reader honours.
+        config_without_override = {"librarian": {"signal_mining": {"enabled": True}}}
+        overridden = threshold_for_class(
+            question_class, config_without_override, wiki_root=wiki_root
+        )
+        assert overridden == pytest.approx(0.85)  # 0.9 - the default widen step (0.05)
+        assert overridden < 0.9
