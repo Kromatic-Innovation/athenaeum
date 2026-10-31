@@ -3750,6 +3750,144 @@ class TestTier3MergePatchOps:
         assert "dana.quill@example.org" not in body
         assert esc is None
 
+    def _suspect_checks(
+        self, context: pii_attribution.AttributionContext, value: str, target_uid: str
+    ) -> list[str]:
+        from athenaeum.models import parse_frontmatter
+
+        key = pii_attribution.value_key_for(context, value)
+        path = (
+            context.contacts_root
+            / pii_attribution.ATTRIBUTION_SUSPECTS_DIRNAME
+            / f"{key}-{target_uid}.md"
+        )
+        meta, _ = parse_frontmatter(path.read_text(encoding="utf-8"))
+        checks = meta.get("checks") or []
+        return [str(c) for c in checks]
+
+    def test_merge_scrub_with_the_real_type_does_not_trip_d3(
+        self, tmp_path: Path
+    ) -> None:
+        """Seer finding (2026-10-31), fixed in athenaeum#2216: ``action.entity_type``
+        is ALWAYS ``""`` on every merge action in production (every
+        ``kind="update"`` construction site in ``librarian.py`` sets it that
+        way) — passing it straight through as ``target_type`` wrongly fired
+        D3 ("target is not a person") on every merge-path token, corrupting
+        the attribution-log/shadow-park bookkeeping athenaeum#2219's
+        calibration ledger and athenaeum#2220's enforcement gate both read.
+
+        This pins the fix: the CALLER now resolves the real type from the
+        target page's own frontmatter and passes it as ``target_type``
+        (``"person"`` here, simulating a real resolution) — the parked
+        suspect's ``checks`` must NOT contain ``D3``.
+        """
+        context = _attribution_context(tmp_path)
+        action = self._action()
+        body, esc, needs_fallback = parse_merge_ops_response(
+            json.dumps(
+                {
+                    "ops": [
+                        {
+                            "op": "append_section",
+                            "text": "Reach Dana at dana.quill@example.org.[^2]",
+                        }
+                    ]
+                }
+            ),
+            action,
+            "ref",
+            "# Acme\n\nOld.",
+            attribution_context=context,
+            target_type="person",
+        )
+        assert needs_fallback is False
+        assert esc is None
+        assert body is not None
+        assert "dana.quill@example.org" not in body
+
+        checks = self._suspect_checks(
+            context, "dana.quill@example.org", action.existing_uid or ""
+        )
+        assert "D3" not in checks
+
+    def test_merge_scrub_with_empty_action_entity_type_default_would_trip_d3(
+        self, tmp_path: Path
+    ) -> None:
+        """The regression this fix closes, pinned directly: the OLD
+        behaviour (``target_type=action.entity_type``, which is ``""`` on
+        every real merge action) wrongly fires D3. Calling with
+        ``target_type=""`` explicitly reproduces exactly that — proving the
+        bug is in the empty string, not in D3 itself (which this issue does
+        not touch), and that the fix is choosing ``None``, never ``""``, as
+        the "unknown" sentinel.
+        """
+        context = _attribution_context(tmp_path)
+        action = self._action()
+        body, esc, needs_fallback = parse_merge_ops_response(
+            json.dumps(
+                {
+                    "ops": [
+                        {
+                            "op": "append_section",
+                            "text": "Reach Pat at pat.cruz@example.org.[^2]",
+                        }
+                    ]
+                }
+            ),
+            action,
+            "ref2",
+            "# Acme\n\nOld.",
+            attribution_context=context,
+            target_type="",
+        )
+        assert needs_fallback is False
+        assert body is not None
+        assert "pat.cruz@example.org" not in body
+
+        checks = self._suspect_checks(
+            context, "pat.cruz@example.org", action.existing_uid or ""
+        )
+        assert "D3" in checks
+
+    def test_merge_scrub_role_local_part_evaluated_on_a_real_person_target(
+        self, tmp_path: Path
+    ) -> None:
+        """Seer's D1-role mirror-image case, recorded alongside D3: with the
+        real type threaded through, a role-local-part address on a genuinely
+        ``person`` merge target is evaluated (D1-role fires, suspect) rather
+        than silently short-circuited to "pass" the way ``target_type=""``
+        used to short-circuit it (the ``is not None`` check in
+        ``_check_d1``'s role branch treats "" the same wrong way D3 does —
+        tracked as the same latent-trap finding, not fixed here).
+        """
+        context = _attribution_context(tmp_path)
+        action = self._action()
+        body, esc, needs_fallback = parse_merge_ops_response(
+            json.dumps(
+                {
+                    "ops": [
+                        {
+                            "op": "append_section",
+                            "text": "General inbox: info@thirdparty.example.com.[^2]",
+                        }
+                    ]
+                }
+            ),
+            action,
+            "ref3",
+            "# Acme\n\nOld.",
+            attribution_context=context,
+            target_type="person",
+        )
+        assert needs_fallback is False
+        assert body is not None
+        assert "info@thirdparty.example.com" not in body
+
+        checks = self._suspect_checks(
+            context, "info@thirdparty.example.com", action.existing_uid or ""
+        )
+        assert pii_attribution.CHECK_D1_ROLE in checks
+
     def test_parse_signals_fallback_on_op_missing_the_op_key(self) -> None:
         # M17 phase 2a (athenaeum#1035): a JSON-valid ops list whose single op is
         # missing "op" entirely — the measured window's one missing-required

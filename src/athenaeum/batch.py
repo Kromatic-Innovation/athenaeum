@@ -2079,6 +2079,12 @@ def process_batch_run(
                 # try/except with the shared helper so the rule lives in
                 # exactly one place.
                 merge_text = text_or_truncated(msg, merge_stop_reason)
+                # Issue athenaeum#2216: the scrub's real target type, resolved
+                # from the TARGET page's own frontmatter (already in `meta`)
+                # — never `action.entity_type`, which is always "" for a
+                # merge action. `or None` turns resolve_page_type's own ""
+                # (genuinely no `type:` set) into the "unknown" sentinel too.
+                merge_target_type = resolve_page_type(meta) or None
                 updated_body, esc, needs_fallback = parse_merge_ops_response(
                     merge_text,
                     action,
@@ -2092,6 +2098,7 @@ def process_batch_run(
                     # transports (see TokenUsage's own docstring).
                     usage=usage,
                     attribution_context=attribution_context,
+                    target_type=merge_target_type,
                 )
                 if needs_fallback:
                     updated_body, esc = tier3_merge_full(
@@ -2102,6 +2109,7 @@ def process_batch_run(
                         usage=usage,
                         config=config,
                         attribution_context=attribution_context,
+                        target_type=merge_target_type,
                     )
                 if esc:
                     escalations.append(esc)
@@ -2212,6 +2220,10 @@ def process_batch_run(
                         SURFACE_SAME_PAGE_MULTI_MERGE if batch_write else None
                     ),
                     attribution_context=attribution_context,
+                    # Issue athenaeum#2216: resolved from `meta` (already
+                    # read above), never `action.entity_type` — see the
+                    # batched-merge loop's own comment above for why.
+                    target_type=resolve_page_type(meta) or None,
                 )
                 if esc:
                     escalations.append(esc)
