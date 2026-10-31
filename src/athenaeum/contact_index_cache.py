@@ -231,7 +231,18 @@ def _write_cache(
         },
     }
     try:
+        # `mkdir(mode=...)` only applies when it actually CREATES the
+        # directory -- `exist_ok=True` leaves an already-existing (and
+        # possibly since-widened) directory's mode untouched. So the
+        # rewrite path re-narrows it explicitly every call, not just on
+        # first creation: "never wider, including on rewrite" applies to
+        # the directory exactly as much as to the file.
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        try:
+            if stat.S_IMODE(path.parent.stat().st_mode) != 0o700:
+                os.chmod(path.parent, 0o700)
+        except FileNotFoundError:
+            pass
         # atomic_write_text keeps an existing file's mode; narrow a widened
         # one first so the rewrite lands 0600 (a new file is created 0600).
         try:

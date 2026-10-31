@@ -305,6 +305,30 @@ class TestModes:
         )
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
+    def test_directory_mode_never_widens_on_rewrite(
+        self, contacts_root: Path, cache_dir: Path
+    ) -> None:
+        # `mkdir(exist_ok=True)` does not touch an existing directory's mode,
+        # so widening it out-of-band must be re-narrowed on the NEXT write,
+        # not only when the directory is first created.
+        cic.load_contact_index(contacts_root, cache_dir)
+        path = cic.cache_path(contacts_root, cache_dir)
+        os.chmod(path.parent, 0o755)
+        _record(contacts_root, "ffff6666-fay.md", "ffff6666", ["fay@example.org"])
+        cic.load_contact_index(contacts_root, cache_dir)
+        assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+
+    def test_directory_mode_never_widens_on_erasure_rewrite(
+        self, contacts_root: Path, cache_dir: Path
+    ) -> None:
+        cic.load_contact_index(contacts_root, cache_dir)
+        path = cic.cache_path(contacts_root, cache_dir)
+        os.chmod(path.parent, 0o755)
+        cic.erase_contact_record(
+            contacts_root, contacts_root / "aaaa1111-ada.md", cache_dir=cache_dir
+        )
+        assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+
 
 class TestCacheInvalidation:
     def test_added_record_is_indexed(self, contacts_root: Path, cache_dir: Path) -> None:
