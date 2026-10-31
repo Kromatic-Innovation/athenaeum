@@ -70,6 +70,7 @@ from athenaeum.config import (
     resolve_unmarked_sentence_max_ratio,
 )
 from athenaeum.footnote_markers import unmarked_sentence_ratio
+from athenaeum.hook_status import read_latest_degradation
 from athenaeum.intake import discover_raw_files
 from athenaeum.models import parse_frontmatter
 from athenaeum.run_summary_log import read_latest_embedder_counts, read_refusal_streak
@@ -228,6 +229,13 @@ class StatusInfo(TypedDict):
     # best-effort read failure (status must never break on this). See
     # that function's docstring for the shape.
     decision_budget: dict[str, object] | None
+    # Issue athenaeum#2204: the most recently recorded shipped-hook
+    # degradation event (no cached ANTHROPIC_API_KEY, the configured
+    # backend's index has never been built, or a foreground step ran out of
+    # its budget and was skipped) -- see :mod:`athenaeum.hook_status` for the
+    # full shape (``{"ts", "hook", "event", "detail"}``). ``None`` when no
+    # shipped hook has ever recorded one.
+    hook_degradation: dict[str, object] | None
 
 
 def scan_page_sizes(
@@ -658,6 +666,18 @@ def status(knowledge_root: Path) -> StatusInfo:
             exc,
         )
 
+    # Issue athenaeum#2204 AC8: the latest shipped-hook degradation event, if
+    # any has ever been recorded. Best-effort, same discipline as every
+    # other advisory read above -- a corrupt/missing status file must never
+    # break status.
+    hook_degradation: dict[str, object] | None = None
+    try:
+        hook_degradation = read_latest_degradation(resolve_cache_dir())
+    except Exception as exc:  # noqa: BLE001 — must never break status
+        log.debug(
+            "status: hook-degradation read skipped (%s): %s", type(exc).__name__, exc
+        )
+
     return {
         "raw_pending": raw_pending,
         "entity_count": entity_count,
@@ -681,6 +701,7 @@ def status(knowledge_root: Path) -> StatusInfo:
         "stuck_backlog_warning": stuck_backlog_warning,
         "repair_debt": repair_debt,
         "decision_budget": decision_budget,
+        "hook_degradation": hook_degradation,
     }
 
 
@@ -856,6 +877,20 @@ def format_status(info: StatusInfo) -> str:
 
         lines.append("")
         lines.append(format_budget_report(decision_budget))
+
+    # Issue athenaeum#2204 AC8: the latest shipped-hook degradation. ``.get``
+    # keeps a pre-athenaeum#2204 status dict (missing this key) formatting
+    # cleanly; shown only when set, mirroring the drain-advisory "only when
+    # actionable" convention above.
+    hook_degradation = info.get("hook_degradation")
+    if hook_degradation:
+        lines.append(
+            "Hook degradation (latest): "
+            f"{hook_degradation.get('event', 'unknown')} "
+            f"[{hook_degradation.get('hook', 'unknown')}] "
+            f"at {hook_degradation.get('ts', 'unknown')} — "
+            f"{hook_degradation.get('detail', '')}"
+        )
 
     if info["last_commit_date"]:
         lines.append(f"Last commit:          {info['last_commit_date']}")
