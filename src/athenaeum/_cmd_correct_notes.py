@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """``athenaeum correct-notes`` — move or drop individual Notes lines on a
-person/company page (issue athenaeum#1976).
+person/company page (issue athenaeum#1976), or drop a whole ``##`` section
+by its ``section_id`` (issue athenaeum#2236).
 
 Apply-by-default, UNLIKE ``decompose-page``/``paste-cleanup``/
 ``retire-pages``: the bare command resolves every record in ``--batch``
@@ -43,11 +44,12 @@ def add_correct_notes_subparser(subparsers: argparse._SubParsersAction) -> None:
         "correct-notes",
         help="Move or drop individual Notes lines on a person/company page "
         "(issue athenaeum#1976), e.g. lines misfiled onto a first-name "
-        "match-magnet page. Default is APPLY: every bullet id and move "
-        "target in --batch is resolved against one snapshot of the page, "
-        "and the whole batch is written only when every record resolves. "
-        "--dry-run reports counts only and changes nothing. Makes no LLM "
-        "call.",
+        "match-magnet page, or drop a whole ## section by its section_id "
+        "(issue athenaeum#2236). Default is APPLY: every bullet/section id "
+        "and move target in --batch is resolved against one snapshot of the "
+        "page, and the whole batch is written only when every record "
+        "resolves. --dry-run reports counts only and changes nothing. Makes "
+        "no LLM call.",
     )
     parser.add_argument(
         "uid",
@@ -60,10 +62,14 @@ def add_correct_notes_subparser(subparsers: argparse._SubParsersAction) -> None:
         required=True,
         metavar="PATH",
         help="Host-path JSON batch file: {source_uid, batch_id, created_at, "
-        "records: [{bullet_id, action: 'move'|'drop', target_uid?, "
-        "note?}]}. Never read from raw/ -- see the module docstring for "
-        "why that boundary matters here. A batch_id already present in "
-        "the ledger makes the whole batch a no-op.",
+        "records: [{bullet_id, action: 'move'|'drop', target_uid?, note?} "
+        "| {section_id, action: 'drop', note?}]}. A record carries exactly "
+        "one of bullet_id (move/drop a Notes line) or section_id (drop a "
+        "whole ## heading's span, issue athenaeum#2236 -- action must be "
+        "'drop', there is no section move). Never read from raw/ -- see "
+        "the module docstring for why that boundary matters here. A "
+        "batch_id already present in the ledger makes the whole batch a "
+        "no-op.",
     )
     parser.add_argument(
         "--dry-run",
@@ -88,8 +94,9 @@ def cmd_correct_notes(args: argparse.Namespace) -> int:
     Exit codes:
         0  - clean run (--dry-run report written, or the batch applied —
              including a no-op replay of an already-applied batch_id).
-        1  - refused: bad uid/batch shape, an unknown bullet id or move
-             target, or an I/O failure. Nothing was written.
+        1  - refused: bad uid/batch shape, an unknown or ambiguous bullet/
+             section id, an unknown move target, or an I/O failure. Nothing
+             was written.
         75 - the run lock is held (``EXIT_LOCK_HELD``). Apply only; a dry
              run never takes the lock because it never writes.
     """
