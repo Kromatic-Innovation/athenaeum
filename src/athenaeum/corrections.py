@@ -2029,11 +2029,14 @@ def process_batch_file(
 
     ``attribution_context`` (issue athenaeum#2210): threaded to every
     :func:`process_correction_record` call in this file. Built once HERE
-    when omitted, reusing the already-loaded ``index`` so it costs no second
-    entity scan — a caller processing several batch files in one run may
-    build and share ONE context across all of them instead (same convention
-    as ``registry_entities``/``dry_run_pages`` above), which additionally
-    avoids re-reading the per-deployment HMAC key file once per batch file.
+    when omitted, reusing the already-loaded ``index``; the child-C indexes
+    (athenaeum#2215) are memoized against that SAME ``index`` object's
+    identity (``pii_attribution._cached_child_c_indexes``), so passing it
+    here still costs no second entity scan — a caller processing several
+    batch files in one run may build and share ONE context across all of
+    them instead (same convention as ``registry_entities``/
+    ``dry_run_pages`` above), which additionally avoids re-reading the
+    per-deployment HMAC key file once per batch file.
     Never built under ``dry_run`` (even when the caller passed ``None``):
     building it mints the per-deployment HMAC key file on first use, and
     calling the seam at all appends a log row as its own side effect
