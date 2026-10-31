@@ -14,8 +14,11 @@ the local machine, no network, no model call, no token spent.
 from __future__ import annotations
 
 import json
+import shutil
 import stat
 import sys
+import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -24,6 +27,26 @@ from athenaeum.cli_tool_bridge import ToolBridgeHost
 from athenaeum.provider import ClaudeCliClient
 
 FIXTURE = Path(__file__).parent / "fixtures" / "cli_tool_bridge" / "fake_claude.py"
+
+
+@pytest.fixture
+def short_socket_dir() -> Iterator[Path]:
+    """A SHORT-path scratch directory for an AF_UNIX socket under test.
+
+    ``tmp_path``'s base directory depends on ``TMPDIR``, and macOS's default
+    (``/var/folders/.../T/...``) plus pytest's own nesting routinely pushes a
+    socket path there past the 104-byte ``sun_path`` limit: ``OSError: AF_UNIX
+    path too long`` (athenaeum#2255 cause 3). ``/tmp`` itself stays short
+    regardless of ``TMPDIR``, so the socket lives there via
+    ``tempfile.mkdtemp``, with its own explicit cleanup -- this is a literal
+    ``/tmp``, not a ``/home``/``/Users`` stand-in the public-safe-lint gate
+    would reject.
+    """
+    d = Path(tempfile.mkdtemp(dir="/tmp"))
+    try:
+        yield d
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 @pytest.fixture
@@ -131,7 +154,7 @@ def test_executor_exception_surfaces_as_api_mode_error_string(fake_claude_binary
 
 
 def _drive_bridge_child(
-    tmp_path: Path, specs: list[dict], call_name: str, arguments: dict
+    socket_dir: Path, specs: list[dict], call_name: str, arguments: dict
 ) -> tuple[bool | None, list[str]]:
     """Run the bridge child and make ONE ``tools/call`` against it with a real
     stdio ``mcp.client`` / ``ClientSession``, returning ``(is_error, texts)``.
@@ -141,14 +164,18 @@ def _drive_bridge_child(
     validation behaviour below is -- is not observable through it. This also
     calls the tool by the name ``tools/list`` actually SERVES, which is what a
     real ``claude -p`` does.
+
+    *socket_dir* must be the SAME short directory (see the ``short_socket_dir``
+    fixture) the ``ToolBridgeHost`` under test was constructed with -- the
+    client and the host must agree on the socket path.
     """
     import asyncio
 
     from mcp import ClientSession
     from mcp.client.stdio import StdioServerParameters, stdio_client
 
-    socket_path = tmp_path / "bridge.sock"
-    tools_path = tmp_path / "tools.json"
+    socket_path = socket_dir / "bridge.sock"
+    tools_path = socket_dir / "tools.json"
     tools_path.write_text(json.dumps(specs), encoding="utf-8")
 
     async def _run() -> tuple[bool | None, list[str]]:
@@ -203,7 +230,7 @@ _RECALL_SPEC = [
 
 
 def test_schema_violating_arguments_are_rejected_without_reaching_the_executor(
-    tmp_path: Path,
+    short_socket_dir: Path,
 ) -> None:
     """athenaeum#1954: the bridge validates ``tools/call`` arguments against
     the schema it served, and a violation never reaches the Host.
@@ -224,9 +251,9 @@ def test_schema_violating_arguments_are_rejected_without_reaching_the_executor(
         calls.append((name, tool_input))
         return "executor should not have been reached"
 
-    with ToolBridgeHost(str(tmp_path / "bridge.sock"), _recording_executor):
+    with ToolBridgeHost(str(short_socket_dir / "bridge.sock"), _recording_executor):
         is_error, texts = _drive_bridge_child(
-            tmp_path, _RECALL_SPEC, "recall", {"unexpected": 1}
+            short_socket_dir, _RECALL_SPEC, "recall", {"unexpected": 1}
         )
 
     # Same message shape AND same is_error the pre-2.0 SDK produced, so a
@@ -238,7 +265,7 @@ def test_schema_violating_arguments_are_rejected_without_reaching_the_executor(
 
 
 def test_conforming_arguments_reach_the_executor_under_the_spec_name(
-    tmp_path: Path,
+    short_socket_dir: Path,
 ) -> None:
     """Positive control for the validation above: it must reject only what the
     schema actually rejects. Also pins the served-name -> spec-name mapping,
@@ -250,9 +277,9 @@ def test_conforming_arguments_reach_the_executor_under_the_spec_name(
         calls.append((name, tool_input))
         return f"recalled: {tool_input['query']}"
 
-    with ToolBridgeHost(str(tmp_path / "bridge.sock"), _recording_executor):
+    with ToolBridgeHost(str(short_socket_dir / "bridge.sock"), _recording_executor):
         is_error, texts = _drive_bridge_child(
-            tmp_path, _RECALL_SPEC, "recall", {"query": "pto policy"}
+            short_socket_dir, _RECALL_SPEC, "recall", {"query": "pto policy"}
         )
 
     assert is_error is False
