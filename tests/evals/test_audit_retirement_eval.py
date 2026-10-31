@@ -125,9 +125,10 @@ pytestmark = pytest.mark.eval
 # collapse detector for a multi-case regression and a weak one for a
 # single-case regression — it cannot, at n=6, distinguish a healthy model
 # from one that has silently broken exactly one of the four easy cases.
-# See test_audit_retirement_degraded_model_reds_floor (offline, unmarked)
-# for a synthetic case proving the floor actually catches a 2+ case
-# collapse.
+# See test_two_case_collapse_reds_the_new_floor and
+# test_single_case_regression_can_slip_through_when_stochastic_case_passes
+# in test_audit_retirement_eval_stub.py (offline, unmarked) for synthetic
+# proof of both the catch and the honest miss.
 AUDIT_RETIREMENT_FLOOR = 4  # >= 4/6
 
 
