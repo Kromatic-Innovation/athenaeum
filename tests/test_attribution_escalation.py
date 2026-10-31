@@ -52,17 +52,26 @@ from typing import Any
 import pytest
 
 from athenaeum import pii, pii_attribution
+from athenaeum.calibration import ATTRIBUTION_TIER_NAME, read_calibration_ledger
 from athenaeum.config import (
     DEFAULT_ATTRIBUTION_MAX_ESCALATIONS_PER_RUN,
     resolve_attribution_context_window_chars,
     resolve_attribution_escalate,
     resolve_attribution_max_escalations_per_run,
 )
+from athenaeum.decisions import list_pending_decisions
 from athenaeum.models import TokenUsage, parse_frontmatter, render_frontmatter
 from athenaeum.tiers import tier4_escalate
 from tests.conftest import FakeLLMClient
 
 EXCLUDED_CONFIG: dict[str, Any] = {"storage": {"mapping": {"pii": "excluded"}}}
+
+#: Issue athenaeum#2219: a config that both clears EXCLUDED_CONFIG's storage
+#: mapping AND samples every above-threshold attribution placement.
+_FULL_SAMPLE_ATTRIBUTION_CONFIG: dict[str, Any] = {
+    **EXCLUDED_CONFIG,
+    "librarian": {"audit_sample_rate_attribution": 1.0},
+}
 
 _VALUE = "introducer@example.org"
 _TARGET_UID = "uid-target"
@@ -2530,3 +2539,245 @@ class TestLibrarianShadowPhase:
         ctx.config = {"librarian": {"attribution": {"escalate": True}}}
         librarian._run_attribution_shadow_phase(ctx)
         assert ctx.attribution_shadow_summary == {"skipped_failed": True}
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#2219, design §8.3 — calibration audit-sampling of
+# above-threshold ATTRIBUTION placements, and the human audit review that
+# re-files an overturn through the SAME placement executor.
+# ---------------------------------------------------------------------------
+
+
+class TestAttributionCalibrationAuditSampling:
+    def test_apply_mode_above_threshold_own_is_sampled(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _patch_record(monkeypatch, _entry(threshold=0.5))
+        context = _context(tmp_path)
+        outcome = _escalate(
+            context,
+            _suspect_verdict(context),
+            client=_judge_client(verdict="own", score=0.95),
+            apply=True,
+            config=_FULL_SAMPLE_ATTRIBUTION_CONFIG,
+        )
+        assert outcome.placement is not None
+        assert outcome.placement.outcome == pii.PLACEMENT_FILED
+
+        ledger = read_calibration_ledger(context.wiki_root)
+        audits = [r for r in ledger if r.get("kind") == "audit"]
+        assert len(audits) == 1
+        rec = audits[0]
+        assert rec["tier"] == ATTRIBUTION_TIER_NAME
+        assert rec["verdict"] == "own"
+        assert rec["proposal_id"] == outcome.suspect_id
+        assert rec["applied"] is True
+        assert rec["question_class"] == pii_attribution.QUESTION_CLASS_HELD_ELSEWHERE
+
+    def test_observe_mode_above_threshold_is_never_sampled(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Issue athenaeum#2212's shadow/observe mode files nothing; the
+        issue's own motivation ("the live decisions the system actually
+        makes") means nothing is sampled either until athenaeum#2220 flips
+        callers to ``apply=True``. This also pins
+        ``TestShadowSweepObserveMode``'s pre-existing "no new record
+        appeared" invariant."""
+        _patch_record(monkeypatch, _entry(threshold=0.5))
+        context = _context(tmp_path)
+        outcome = _escalate(
+            context,
+            _suspect_verdict(context),
+            client=_judge_client(verdict="own", score=0.95),
+            apply=False,
+            config=_FULL_SAMPLE_ATTRIBUTION_CONFIG,
+        )
+        assert outcome.placement is not None
+        assert outcome.placement.outcome == pii.PLACEMENT_PROPOSED
+        assert read_calibration_ledger(context.wiki_root) == []
+
+    def test_unwatched_verdict_same_entity_is_never_sampled(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _patch_record(monkeypatch, _entry(threshold=0.5))
+        context = _context(tmp_path)
+        _escalate(
+            context,
+            _suspect_verdict(context),
+            client=_judge_client(verdict="same-entity", owner_uid=_HOLDER_UID, score=0.95),
+            apply=True,
+            config=_FULL_SAMPLE_ATTRIBUTION_CONFIG,
+            propose_merge=lambda **_kw: None,
+        )
+        assert read_calibration_ledger(context.wiki_root) == []
+
+    def test_sampled_item_surfaces_in_decisions_with_masked_values_only(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _patch_record(monkeypatch, _entry(threshold=0.5))
+        context = _context(tmp_path)
+        _escalate(
+            context,
+            _suspect_verdict(context),
+            client=_judge_client(verdict="own", score=0.95),
+            apply=True,
+            config=_FULL_SAMPLE_ATTRIBUTION_CONFIG,
+        )
+
+        # The raw value never lands in the calibration ledger -- the wiki
+        # file design §8.1 bars it from.
+        ledger_text = (context.wiki_root / "_calibration.jsonl").read_text(
+            encoding="utf-8"
+        )
+        assert _VALUE not in ledger_text
+        assert pii.mask_contact_address(_VALUE) in ledger_text
+
+        decisions = list_pending_decisions(context.wiki_root)
+        audits = [d for d in decisions if d["type"] == "audit"]
+        assert len(audits) == 1
+        audit = audits[0]
+        assert audit["payload"]["tier"] == ATTRIBUTION_TIER_NAME
+        assert audit["payload"]["question_class"] == (
+            pii_attribution.QUESTION_CLASS_HELD_ELSEWHERE
+        )
+        assert _VALUE not in json.dumps(audit)
+        assert pii.mask_contact_address(_VALUE) in json.dumps(audit)
+
+
+class TestAttributionAuditReview:
+    def _sample_a_filed_own(
+        self, context: pii_attribution.AttributionContext, monkeypatch: pytest.MonkeyPatch
+    ) -> pii_attribution.EscalationOutcome:
+        _patch_record(monkeypatch, _entry(threshold=0.5))
+        verdict = _suspect_verdict(context)
+        # Design §6.1/§4.3: a real (non-shadow) escalation always has an
+        # upstream `park_suspect` write before the model is ever called --
+        # see `test_other_unknown_stays_parked` for the same prerequisite.
+        # Needed here so the overturn re-file below can read the value back
+        # through the one documented way out (`read_suspect`).
+        pii_attribution.park_suspect(
+            context,
+            _VALUE,
+            verdict,
+            target_uid=_TARGET_UID,
+            target_name=_TARGET_NAME,
+            writer=pii_attribution.WRITER_OBSERVED_CONTACT,
+            source_ref="raw/intake/note.md",
+            shadow=False,
+        )
+        return _escalate(
+            context,
+            verdict,
+            client=_judge_client(verdict="own", score=0.95),
+            apply=True,
+            config=_FULL_SAMPLE_ATTRIBUTION_CONFIG,
+        )
+
+    def _audit_id_for(self, context: pii_attribution.AttributionContext, suspect_id: str) -> str:
+        rec = next(
+            r
+            for r in read_calibration_ledger(context.wiki_root)
+            if r.get("kind") == "audit" and r.get("proposal_id") == suspect_id
+        )
+        return rec["id"]
+
+    def test_confirm_changes_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        context = _context(tmp_path)
+        outcome = self._sample_a_filed_own(context, monkeypatch)
+        assert outcome.placement is not None and outcome.placement.path is not None
+        before = outcome.placement.path.read_bytes()
+        audit_id = self._audit_id_for(context, outcome.suspect_id)
+
+        review_outcome = pii_attribution.record_attribution_audit_review(
+            context, audit_id=audit_id, human_verdict="own"
+        )
+        assert review_outcome.overturned is False
+        assert review_outcome.placement is None
+        assert outcome.placement.path.read_bytes() == before
+
+    def test_overturn_records_the_signal_and_refiles_through_the_executor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        context = _context(tmp_path)
+        outcome = self._sample_a_filed_own(context, monkeypatch)
+        audit_id = self._audit_id_for(context, outcome.suspect_id)
+
+        # Overturn to "alias" (same target, different field) rather than
+        # re-pointing to a different uid: the value is ALREADY filed on
+        # `_TARGET_UID` by the original model answer, so re-filing it onto
+        # a DIFFERENT entity here would be exactly the fresh conflict
+        # design §7.2's re-check (and the write primitive beneath it)
+        # exist to refuse -- that is a real, separate overturn scenario,
+        # not this test's.
+        review_outcome = pii_attribution.record_attribution_audit_review(
+            context,
+            audit_id=audit_id,
+            human_verdict="alias",
+            alias_relation="role-inbox",
+        )
+        assert review_outcome.overturned is True
+        assert review_outcome.review["tier"] == ATTRIBUTION_TIER_NAME
+        assert review_outcome.placement is not None
+        assert review_outcome.placement.outcome == pii.PLACEMENT_FILED
+        assert review_outcome.placement.placed_uid == _TARGET_UID
+        assert review_outcome.placement.field == "alt_emails"
+
+        meta, _ = parse_frontmatter(
+            review_outcome.placement.path.read_text(encoding="utf-8")
+        )
+        source = meta["field_sources"]["alt_emails"][0]["source"]
+        assert source["decided_by"] == "human"
+        assert "calibrated_p" not in source
+        assert "model" not in source
+        assert source["original_target"] == _TARGET_UID
+
+    def test_overturn_summary_counts_toward_the_question_class(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from athenaeum.calibration import calibration_summary
+
+        context = _context(tmp_path)
+        outcome = self._sample_a_filed_own(context, monkeypatch)
+        audit_id = self._audit_id_for(context, outcome.suspect_id)
+        pii_attribution.record_attribution_audit_review(
+            context,
+            audit_id=audit_id,
+            human_verdict="alias",
+            alias_relation="role-inbox",
+        )
+        summary = calibration_summary(context.wiki_root)
+        bucket = summary[ATTRIBUTION_TIER_NAME]["by_class"][
+            pii_attribution.QUESTION_CLASS_HELD_ELSEWHERE
+        ]
+        assert bucket["reviewed"] == 1
+        assert bucket["overturned"] == 1
+        assert bucket["overturned_applied"] == 1
+
+    def test_unknown_audit_id_raises(self, tmp_path: Path) -> None:
+        context = _context(tmp_path)
+        with pytest.raises(pii_attribution.AttributionAuditReviewError):
+            pii_attribution.record_attribution_audit_review(
+                context, audit_id="not-a-real-id", human_verdict="own"
+            )
+
+    def test_a_t1_audit_id_is_rejected_as_not_attribution(
+        self, tmp_path: Path
+    ) -> None:
+        from athenaeum.calibration import sample_tier_decision
+
+        context = _context(tmp_path)
+        rec = sample_tier_decision(
+            context.wiki_root,
+            tier="T1",
+            verdict="reject",
+            proposal_id="p1",
+            reason="r",
+            config={"librarian": {"audit_sample_rate_t1_rejects": 1.0}},
+        )
+        assert rec is not None
+        with pytest.raises(pii_attribution.AttributionAuditReviewError):
+            pii_attribution.record_attribution_audit_review(
+                context, audit_id=rec["id"], human_verdict="own"
+            )

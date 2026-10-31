@@ -14,6 +14,18 @@ calibration review:
 - a config-resolvable share of **T2 approvals**
   (:func:`athenaeum.config.resolve_audit_sample_rate_t2_approvals`).
 
+A third watched population joined this module on the SAME ledger/primitives
+(issue athenaeum#2219, design ``docs/design/attribution-verification.md``
+§8.3): **above-threshold attribution placements** -- the ``own`` /
+``other-known`` / ``alias`` verdicts :mod:`athenaeum.pii_attribution`'s
+escalation seam hands to :func:`athenaeum.pii.place_contact_value`. Unlike
+T1/T2 (one watched verdict each), :data:`ATTRIBUTION_TIER_NAME` watches all
+three of those verdicts at once -- see :data:`_WATCHED_VERDICT`'s shape
+below. Its share is config-resolvable via
+:func:`athenaeum.config.resolve_audit_sample_rate_attribution`, and its
+audit records additionally carry a ``question_class`` (design §6.6), which
+:func:`calibration_summary` breaks out per class.
+
 Sampled decisions become **audit items** in the human decisions queue,
 distinguishable from ordinary escalations by ``type: "audit"`` (see
 :func:`athenaeum.decisions.list_pending_decisions`). Reviewing an audit item
@@ -65,11 +77,50 @@ CALIBRATION_LEDGER_FILENAME = "_calibration.jsonl"
 AUDIT_KIND = "audit"
 REVIEW_KIND = "review"
 
-#: The one watched verdict per tier — the direction that never escalates and
+#: The watched verdict(s) per tier — the direction(s) that never escalate and
 #: so would otherwise go unaudited. A T1 *reject* is the false-reject risk; a
-#: T2 *approve* is the false-approve risk. A decision whose ``(tier, verdict)``
-#: is not in this map is never an audit candidate.
-_WATCHED_VERDICT: dict[str, str] = {"T1": "reject", "T2": "approve"}
+#: T2 *approve* is the false-approve risk; an *attribution* placement watches
+#: all three verdicts :func:`athenaeum.pii.place_contact_value` can FILE (or,
+#: in observe mode, propose) — ``own``, ``other-known``, ``alias`` — because
+#: any of the three can be the model's wrong answer (issue athenaeum#2219,
+#: design §8.3). A decision whose ``verdict`` is not in its tier's set here
+#: is never an audit candidate.
+_WATCHED_VERDICT: dict[str, frozenset[str]] = {
+    "T1": frozenset({"reject"}),
+    "T2": frozenset({"approve"}),
+}
+
+#: The audit-sampled tier for above-threshold ATTRIBUTION placements (issue
+#: athenaeum#2219, design §8.3) — see the module docstring. Distinct from
+#: :data:`TRIAGE_TIER_NAME` / :data:`DEFAULT_ACCEPTANCE_TIER`: this one DOES
+#: use the watched-verdict gate (:data:`_WATCHED_VERDICT`), with three
+#: watched verdicts instead of one.
+ATTRIBUTION_TIER_NAME = "attribution"
+
+_WATCHED_VERDICT[ATTRIBUTION_TIER_NAME] = frozenset({"own", "other-known", "alias"})
+
+#: Action-id prefix for an attribution-threshold proposal on the SHARED
+#: auto-apply-proposals rail (:mod:`athenaeum.auto_apply_proposals`, issue
+#: athenaeum#2219, design §8.3: "its own action ids, one per question
+#: class"). Lives here, not in ``auto_apply_proposals.py`` (L4), because
+#: :mod:`athenaeum.pii_attribution` (L3) needs to name the SAME action id
+#: when reading a ledger override back through
+#: :func:`athenaeum.config.auto_apply_threshold_ledger_override_for`, and an
+#: L3 module importing an L4 one inverts the documented layer direction
+#: (``tests/test_layer_boundary.py``). ``calibration.py`` is the L3 module
+#: both already import.
+ATTRIBUTION_THRESHOLD_ACTION_PREFIX = "attribution-threshold:"
+
+
+def attribution_threshold_action_id(question_class: str) -> str:
+    """The ``auto_apply_proposals`` ``action`` id for one attribution question class.
+
+    Distinct from every pre-existing :func:`athenaeum.resolutions.
+    resolve_auto_apply_threshold_for` resolver-action string the SAME ledger
+    (``_auto_apply_proposals.jsonl``) already carries, so the two proposal
+    populations never collide on the same ``action`` id.
+    """
+    return f"{ATTRIBUTION_THRESHOLD_ACTION_PREFIX}{question_class}"
 
 #: Issue athenaeum#1996 guard 2: the audit-record ``tier`` value for a
 #: second-reviewed human DEFAULT-ACCEPTANCE -- a human accepting a queue
@@ -211,38 +262,58 @@ def sample_tier_decision(
     config: dict[str, Any] | None = None,
     ledger_path: Path | None = None,
     applied: bool = False,
+    question_class: str | None = None,
 ) -> dict[str, Any] | None:
     """Sample one finalized tier decision for human audit, if selected.
 
-    Called right after a T1 reject or T2 approve is finalized. Returns the
-    audit record when the decision is sampled (and appends it to the ledger),
-    or ``None`` when the decision is not a watched ``(tier, verdict)`` pair or
-    simply isn't selected by the deterministic sampler at the configured rate.
-    Idempotent — re-sampling an already-recorded decision returns ``None``
-    rather than duplicating it.
+    Called right after a T1 reject, a T2 approve, or an above-threshold
+    ATTRIBUTION placement (issue athenaeum#2219, design §8.3) is finalized.
+    Returns the audit record when the decision is sampled (and appends it to
+    the ledger), or ``None`` when the decision is not a watched ``(tier,
+    verdict)`` pair or simply isn't selected by the deterministic sampler at
+    the configured rate. Idempotent — re-sampling an already-recorded
+    decision returns ``None`` rather than duplicating it.
 
-    ``applied`` (issue athenaeum#602): ``True`` iff the sampled decision was a T2
-    ``approve`` that was ALREADY auto-finalized (the merge is live in the
-    wiki by the time this is called — see
-    :func:`athenaeum.reasoning_screens.t2_screen_merge_proposal`), as opposed to a T1
-    reject (never "applied" — a reject never writes anything) or a
-    hypothetical future watched verdict that only proposes. Carried through
-    unchanged onto a later :func:`record_audit_review` so an overturn of
-    this item can be recorded as an overturn of an ALREADY-APPLIED merge,
-    not merely of a proposal — see that function's ``overturned_applied``
-    field and :func:`calibration_summary`'s ``overturned_applied`` count.
+    *reason* must already be safe for the wiki (never the raw contact
+    value) — the ATTRIBUTION caller masks it
+    (:func:`athenaeum.pii.mask_contact_address`) before calling this, the
+    same discipline design §8.1 applies to an escalation's own description.
+
+    ``applied`` (issue athenaeum#602, extended by athenaeum#2219): ``True``
+    iff the sampled decision was ALREADY live — a T2 ``approve`` that was
+    auto-finalized (see
+    :func:`athenaeum.reasoning_screens.t2_screen_merge_proposal`), or an
+    attribution placement actually FILED (:data:`athenaeum.pii.
+    PLACEMENT_FILED`, i.e. ``apply=True`) rather than merely proposed
+    (:data:`athenaeum.pii.PLACEMENT_PROPOSED`, observe mode) — as opposed to
+    a T1 reject (never "applied" — a reject never writes anything). Carried
+    through unchanged onto a later :func:`record_audit_review` so an
+    overturn of this item can be recorded as an overturn of an
+    ALREADY-APPLIED write, not merely of a proposal — see that function's
+    ``overturned_applied`` field and :func:`calibration_summary`'s
+    ``overturned_applied`` count.
+
+    ``question_class`` (issue athenaeum#2219): the attribution question
+    class (design §6.6) the placement escalated under. Omitted from the
+    stored record when ``None`` (every T1/T2 call site). Carried through
+    onto the later review record by :func:`record_audit_review` so
+    :func:`calibration_summary` can break the attribution tier out per
+    class.
     """
     from athenaeum.config import (
+        resolve_audit_sample_rate_attribution,
         resolve_audit_sample_rate_t1_rejects,
         resolve_audit_sample_rate_t2_approvals,
     )
 
-    if _WATCHED_VERDICT.get(tier) != verdict:
+    if verdict not in _WATCHED_VERDICT.get(tier, frozenset()):
         return None
     if tier == "T1":
         rate = resolve_audit_sample_rate_t1_rejects(config)
-    else:  # tier == "T2"
+    elif tier == "T2":
         rate = resolve_audit_sample_rate_t2_approvals(config)
+    else:  # tier == ATTRIBUTION_TIER_NAME, the only other _WATCHED_VERDICT key
+        rate = resolve_audit_sample_rate_attribution(config)
     if not should_sample(tier, proposal_id, rate=rate):
         return None
 
@@ -267,6 +338,8 @@ def sample_tier_decision(
         "sample_rate": rate,
         "applied": applied,
     }
+    if question_class is not None:
+        record["question_class"] = question_class
     target = (
         ledger_path if ledger_path is not None else default_calibration_ledger_path(wiki_root)
     )
@@ -488,6 +561,11 @@ def record_audit_review(
         "overturned_applied": overturned and applied,
         "note": note,
     }
+    if audit.get("question_class") is not None:
+        # Issue athenaeum#2219: carried through from the sampled audit record
+        # so calibration_summary's per-class attribution breakdown can bucket
+        # this review without a second ledger lookup.
+        record["question_class"] = audit.get("question_class")
     target = (
         ledger_path if ledger_path is not None else default_calibration_ledger_path(wiki_root)
     )
@@ -544,6 +622,8 @@ def record_audit_not_applicable(
         "overturned_applied": False,
         "note": note.strip(),
     }
+    if audit.get("question_class") is not None:
+        record["question_class"] = audit.get("question_class")
     target = (
         ledger_path if ledger_path is not None else default_calibration_ledger_path(wiki_root)
     )
@@ -553,7 +633,7 @@ def record_audit_not_applicable(
 
 def calibration_summary(
     wiki_root: Path, *, ledger_path: Path | None = None
-) -> dict[str, dict[str, int]]:
+) -> dict[str, dict[str, Any]]:
     """Per-tier calibration counts:
     ``{tier: {sampled, reviewed, overturned, applied, overturned_applied}}``.
 
@@ -572,35 +652,71 @@ def calibration_summary(
     Surfaced as its own top-level count (not folded into ``overturned``) so
     it cannot be silently averaged away in a summary that also has ordinary
     proposal overturns.
+
+    **Per-question-class breakdown for the attribution tier** (issue
+    athenaeum#2219): :data:`ATTRIBUTION_TIER_NAME`'s bucket carries one
+    EXTRA key, ``by_class`` — ``{question_class: {sampled, reviewed,
+    overturned, applied, overturned_applied}}``, the SAME five-count shape
+    as the tier bucket itself, one per :data:`athenaeum.pii_attribution`
+    question class seen in the ledger (a record with no ``question_class``
+    buckets under ``"unclassified"``). T1/T2 (and every other tier) keep
+    their original five-key shape unchanged — ``by_class`` is added ONLY to
+    the attribution bucket, never to theirs, so existing exact-dict-equality
+    assertions on a T1/T2 bucket stay valid byte-for-byte.
     """
-    from athenaeum.reasoning_tiers import T1_TIER_NAME, T2_TIER_NAME
+    # Issue athenaeum#2219: inlined rather than imported from
+    # `athenaeum.reasoning_tiers` (`T1_TIER_NAME = "T1"`, `T2_TIER_NAME =
+    # "T2"`, unchanged since issue athenaeum#438) -- this module already
+    # hardcodes both literals elsewhere (`_WATCHED_VERDICT`), and
+    # `pii_attribution.py` now imports THIS module at module scope
+    # (the audit sampler / threshold ledger-override action-id helper).
+    # `reasoning_tiers -> pending_merges -> answers -> pii_attribution`
+    # already existed, so keeping this deferred import would close a NEW
+    # cycle back into `calibration` (`tests/test_import_graph_acyclic.py`
+    # counts deferred imports as edges too) for two string literals that
+    # never change.
+    t1_tier_name, t2_tier_name = "T1", "T2"
 
     records = read_calibration_ledger(wiki_root, ledger_path=ledger_path)
-    summary: dict[str, dict[str, int]] = {
-        T1_TIER_NAME: _empty_tier_bucket(),
-        T2_TIER_NAME: _empty_tier_bucket(),
+    summary: dict[str, dict[str, Any]] = {
+        t1_tier_name: _empty_tier_bucket(),
+        t2_tier_name: _empty_tier_bucket(),
     }
     for r in records:
         tier = str(r.get("tier", ""))
         if not tier:
             continue
-        bucket = summary.setdefault(tier, _empty_tier_bucket())
+        is_attribution = tier == ATTRIBUTION_TIER_NAME
+        bucket = summary.setdefault(
+            tier, _empty_attribution_bucket() if is_attribution else _empty_tier_bucket()
+        )
+        class_bucket: dict[str, int] | None = None
+        if is_attribution:
+            qclass = str(r.get("question_class") or "unclassified")
+            class_bucket = bucket["by_class"].setdefault(qclass, _empty_tier_bucket())
+        applied_flag = bool(r.get("applied"))
         if r.get("kind") == AUDIT_KIND:
-            bucket["sampled"] += 1
-            if r.get("applied"):
-                bucket["applied"] += 1
+            _bump_audit(bucket, applied=applied_flag)
+            if class_bucket is not None:
+                _bump_audit(class_bucket, applied=applied_flag)
         elif r.get("kind") == REVIEW_KIND and r.get("not_applicable"):
             # Issue athenaeum#2079 AC3: closed as not applicable -- the sample
             # never counts toward ``sampled`` or any rate.
-            bucket["sampled"] = max(0, bucket["sampled"] - 1)
-            if r.get("applied"):
-                bucket["applied"] = max(0, bucket["applied"] - 1)
+            _bump_not_applicable(bucket, applied=applied_flag)
+            if class_bucket is not None:
+                _bump_not_applicable(class_bucket, applied=applied_flag)
         elif r.get("kind") == REVIEW_KIND:
-            bucket["reviewed"] += 1
-            if r.get("overturned"):
-                bucket["overturned"] += 1
-                if r.get("overturned_applied"):
-                    bucket["overturned_applied"] += 1
+            overturned_flag = bool(r.get("overturned"))
+            overturned_applied_flag = bool(r.get("overturned_applied"))
+            _bump_review(
+                bucket, overturned=overturned_flag, overturned_applied=overturned_applied_flag
+            )
+            if class_bucket is not None:
+                _bump_review(
+                    class_bucket,
+                    overturned=overturned_flag,
+                    overturned_applied=overturned_applied_flag,
+                )
     return summary
 
 
@@ -612,6 +728,35 @@ def _empty_tier_bucket() -> dict[str, int]:
         "applied": 0,
         "overturned_applied": 0,
     }
+
+
+def _empty_attribution_bucket() -> dict[str, Any]:
+    """:func:`_empty_tier_bucket`'s five counts, PLUS the attribution-only
+    ``by_class`` breakdown (issue athenaeum#2219). Never reused for T1/T2 —
+    see :func:`calibration_summary`'s docstring."""
+    bucket: dict[str, Any] = _empty_tier_bucket()
+    bucket["by_class"] = {}
+    return bucket
+
+
+def _bump_audit(bucket: dict[str, Any], *, applied: bool) -> None:
+    bucket["sampled"] += 1
+    if applied:
+        bucket["applied"] += 1
+
+
+def _bump_not_applicable(bucket: dict[str, Any], *, applied: bool) -> None:
+    bucket["sampled"] = max(0, bucket["sampled"] - 1)
+    if applied:
+        bucket["applied"] = max(0, bucket["applied"] - 1)
+
+
+def _bump_review(bucket: dict[str, Any], *, overturned: bool, overturned_applied: bool) -> None:
+    bucket["reviewed"] += 1
+    if overturned:
+        bucket["overturned"] += 1
+        if overturned_applied:
+            bucket["overturned_applied"] += 1
 
 
 # ---------------------------------------------------------------------------
@@ -786,6 +931,9 @@ __all__ = [
     "CALIBRATION_LEDGER_FILENAME",
     "AUDIT_KIND",
     "REVIEW_KIND",
+    "ATTRIBUTION_TIER_NAME",
+    "ATTRIBUTION_THRESHOLD_ACTION_PREFIX",
+    "attribution_threshold_action_id",
     "TRIAGE_TIER_NAME",
     "CONFIRMED_WRONG_QUARTER_THRESHOLD",
     "default_calibration_ledger_path",

@@ -22,7 +22,9 @@ from pathlib import Path
 import pytest
 
 from athenaeum.calibration import (
+    ATTRIBUTION_TIER_NAME,
     DEFAULT_ACCEPTANCE_TIER,
+    attribution_threshold_action_id,
     audit_item_id,
     calibration_summary,
     default_acceptance_rubber_stamp_rate,
@@ -35,6 +37,7 @@ from athenaeum.calibration import (
     should_sample,
 )
 from athenaeum.config import (
+    resolve_audit_sample_rate_attribution,
     resolve_audit_sample_rate_t1_rejects,
     resolve_audit_sample_rate_t2_approvals,
 )
@@ -439,3 +442,243 @@ class TestDefaultAcceptanceRubberStampRate:
             "sampled": 0, "reviewed": 0, "overturned": 0,
             "applied": 0, "overturned_applied": 0,
         }
+
+
+# ---------------------------------------------------------------------------
+# Issue athenaeum#2219, design §8.3 — the ATTRIBUTION tier: three watched
+# verdicts (own/other-known/alias), a dedicated rate knob, and a
+# per-question-class calibration_summary breakdown.
+# ---------------------------------------------------------------------------
+
+
+def _sample_all_attribution_config() -> dict:
+    return {"librarian": {"audit_sample_rate_attribution": 1.0}}
+
+
+class TestAttributionTierSampling:
+    def test_watched_verdicts_are_sampled(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        config = _sample_all_attribution_config()
+        for verdict in ("own", "other-known", "alias"):
+            rec = sample_tier_decision(
+                wiki,
+                tier=ATTRIBUTION_TIER_NAME,
+                verdict=verdict,
+                proposal_id=f"suspect-{verdict}",
+                reason="masked placement",
+                config=config,
+                question_class="held-elsewhere",
+            )
+            assert rec is not None, verdict
+            assert rec["tier"] == ATTRIBUTION_TIER_NAME
+            assert rec["question_class"] == "held-elsewhere"
+
+    def test_unwatched_verdicts_are_never_sampled(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        config = _sample_all_attribution_config()
+        for verdict in ("other-unknown", "same-entity", "non-personal", "unclear"):
+            rec = sample_tier_decision(
+                wiki,
+                tier=ATTRIBUTION_TIER_NAME,
+                verdict=verdict,
+                proposal_id=f"suspect-{verdict}",
+                reason="masked placement",
+                config=config,
+            )
+            assert rec is None, verdict
+        assert read_calibration_ledger(wiki) == []
+
+    def test_sampling_is_idempotent(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        config = _sample_all_attribution_config()
+        kw = dict(
+            tier=ATTRIBUTION_TIER_NAME,
+            verdict="own",
+            proposal_id="suspect-1",
+            reason="masked placement",
+            config=config,
+            question_class="role-unmatched",
+        )
+        first = sample_tier_decision(wiki, **kw)
+        second = sample_tier_decision(wiki, **kw)
+        assert first is not None
+        assert second is None
+        assert len([r for r in read_calibration_ledger(wiki) if r["kind"] == "audit"]) == 1
+
+    def test_sampler_selects_exactly_the_expected_items(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        rate = 0.5
+        config = {"librarian": {"audit_sample_rate_attribution": rate}}
+        expected_sampled = set()
+        for i in range(40):
+            pid = f"suspect-{i}"
+            rec = sample_tier_decision(
+                wiki,
+                tier=ATTRIBUTION_TIER_NAME,
+                verdict="own",
+                proposal_id=pid,
+                reason="masked placement",
+                config=config,
+            )
+            if should_sample(ATTRIBUTION_TIER_NAME, pid, rate=rate):
+                assert rec is not None, pid
+                expected_sampled.add(pid)
+            else:
+                assert rec is None, pid
+        ledger_ids = {
+            r["proposal_id"] for r in read_calibration_ledger(wiki) if r["kind"] == "audit"
+        }
+        assert ledger_ids == expected_sampled
+        assert 0 < len(expected_sampled) < 40
+
+    def test_reason_never_carries_a_question_class_default_when_omitted(
+        self, tmp_path: Path
+    ) -> None:
+        """No ``question_class`` key at all when the caller omits it (T1/T2
+        never pass one) -- the stored shape stays unchanged for them."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        rec = sample_tier_decision(
+            wiki,
+            tier="T1",
+            verdict="reject",
+            proposal_id="p1",
+            reason="r",
+            config={"librarian": {"audit_sample_rate_t1_rejects": 1.0}},
+        )
+        assert rec is not None
+        assert "question_class" not in rec
+
+    def test_existing_t1_t2_tests_are_unaffected_by_the_new_tier(
+        self, tmp_path: Path
+    ) -> None:
+        """A sanity check that T1/T2 sampling (AC1: 'unchanged') still reads
+        _WATCHED_VERDICT's new frozenset shape correctly."""
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        config = _sample_all_config()
+        assert sample_tier_decision(
+            wiki, tier="T1", verdict="reject", proposal_id="a", reason="r", config=config
+        ) is not None
+        assert sample_tier_decision(
+            wiki, tier="T1", verdict="pass_up", proposal_id="b", reason="r", config=config
+        ) is None
+        assert sample_tier_decision(
+            wiki, tier="T2", verdict="approve", proposal_id="c", reason="r", config=config
+        ) is not None
+
+
+class TestAttributionAuditSampleRateConfig:
+    def test_default(self) -> None:
+        assert resolve_audit_sample_rate_attribution(None) == 0.1
+
+    def test_yaml_overrides_default(self) -> None:
+        cfg = {"librarian": {"audit_sample_rate_attribution": 0.25}}
+        assert resolve_audit_sample_rate_attribution(cfg) == 0.25
+
+    def test_env_overrides_yaml(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ATHENAEUM_AUDIT_SAMPLE_RATE_ATTRIBUTION", "0.3")
+        cfg = {"librarian": {"audit_sample_rate_attribution": 0.1}}
+        assert resolve_audit_sample_rate_attribution(cfg) == 0.3
+
+    def test_out_of_range_is_clamped(self) -> None:
+        assert resolve_audit_sample_rate_attribution(
+            {"librarian": {"audit_sample_rate_attribution": 5.0}}
+        ) == 1.0
+
+
+class TestAttributionCalibrationSummaryByClass:
+    def _seed(
+        self,
+        wiki: Path,
+        *,
+        question_class: str,
+        verdict: str,
+        proposal_id: str,
+        human_verdict: str,
+        applied: bool = True,
+    ) -> str:
+        rec = sample_tier_decision(
+            wiki,
+            tier=ATTRIBUTION_TIER_NAME,
+            verdict=verdict,
+            proposal_id=proposal_id,
+            reason="masked placement",
+            config=_sample_all_attribution_config(),
+            question_class=question_class,
+            applied=applied,
+        )
+        assert rec is not None
+        audit_id = rec["id"]
+        return record_audit_review(
+            wiki, audit_id=audit_id, human_verdict=human_verdict
+        )["id"]
+
+    def test_breakdown_is_per_question_class(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        # held-elsewhere: one confirmed own.
+        self._seed(
+            wiki, question_class="held-elsewhere", verdict="own",
+            proposal_id="s1", human_verdict="own",
+        )
+        # role-unmatched: one overturned alias (human says own instead).
+        self._seed(
+            wiki, question_class="role-unmatched", verdict="alias",
+            proposal_id="s2", human_verdict="own",
+        )
+        summary = calibration_summary(wiki)
+        attribution = summary[ATTRIBUTION_TIER_NAME]
+        assert attribution["sampled"] == 2
+        assert attribution["reviewed"] == 2
+        assert attribution["overturned"] == 1
+        by_class = attribution["by_class"]
+        assert by_class["held-elsewhere"] == {
+            "sampled": 1, "reviewed": 1, "overturned": 0,
+            "applied": 1, "overturned_applied": 0,
+        }
+        assert by_class["role-unmatched"] == {
+            "sampled": 1, "reviewed": 1, "overturned": 1,
+            "applied": 1, "overturned_applied": 1,
+        }
+
+    def test_t1_t2_buckets_never_gain_a_by_class_key(self, tmp_path: Path) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        sample_tier_decision(
+            wiki, tier="T1", verdict="reject", proposal_id="p1", reason="r",
+            config=_sample_all_config(),
+        )
+        summary = calibration_summary(wiki)
+        assert "by_class" not in summary["T1"]
+        assert "by_class" not in summary["T2"]
+
+    def test_record_with_no_question_class_buckets_as_unclassified(
+        self, tmp_path: Path
+    ) -> None:
+        wiki = tmp_path / "wiki"
+        wiki.mkdir()
+        rec = sample_tier_decision(
+            wiki,
+            tier=ATTRIBUTION_TIER_NAME,
+            verdict="own",
+            proposal_id="s1",
+            reason="masked placement",
+            config=_sample_all_attribution_config(),
+        )
+        assert rec is not None
+        summary = calibration_summary(wiki)
+        assert summary[ATTRIBUTION_TIER_NAME]["by_class"]["unclassified"]["sampled"] == 1
+
+
+class TestAttributionThresholdActionId:
+    def test_action_id_is_namespaced_per_class(self) -> None:
+        held = attribution_threshold_action_id("held-elsewhere")
+        role = attribution_threshold_action_id("role-unmatched")
+        assert held != role
+        assert held.startswith("attribution-threshold:")
+        assert attribution_threshold_action_id("held-elsewhere") == held  # deterministic

@@ -61,16 +61,36 @@ hashes all three — not the action alone — so rejecting one proposed widen
 step does not permanently suppress every future proposal for that action;
 a later pass computing a DIFFERENT proposed value gets a fresh id.
 
+**A second drafter, same rail, both directions** (issue athenaeum#2219,
+design §8.3 §12.3-adjacent): :func:`draft_attribution_threshold_proposal`
+targets the ATTRIBUTION calibration tier's per-question-class thresholds
+(:func:`athenaeum.pii_attribution.threshold_for_class`) rather than a
+merge-dedupe resolver action, with its own ``action`` ids
+(:func:`athenaeum.calibration.attribution_threshold_action_id`, one per
+question class) on the SAME ledger. Unlike the merge-dedupe drafter above,
+it drafts in EITHER direction: WIDEN (lower the bar) when audited overturns
+stay below the class's target error rate
+(``1 - librarian.attribution.accuracy_floor``), NARROW (raise the bar) when
+they exceed it. Approving either kind of proposal is handled by the SAME
+:func:`approve_auto_apply_threshold_proposal` (it only ever reads the
+proposal's own ``action``/``proposed_threshold`` back, generic over which
+drafter wrote them); :func:`athenaeum.pii_attribution.threshold_for_class`
+reads the approved override back through
+:func:`athenaeum.config.auto_apply_threshold_ledger_override_for`, BELOW
+its own explicit-config layer.
+
 Layering: L4 domain/pipeline module, a peer of
 :mod:`athenaeum.dimension_proposals` and :mod:`athenaeum.rule_proposals`.
 Imports :mod:`athenaeum.calibration` (L3, for
-:func:`~athenaeum.calibration.calibration_summary`), :mod:`athenaeum.
-resolutions` (for :func:`~athenaeum.resolutions.
-resolve_auto_apply_threshold_for` / :data:`~athenaeum.resolutions.
-DEFAULT_AUTO_APPLY_THRESHOLD_PER_ACTION`), :mod:`athenaeum.config` (L2),
-and :mod:`athenaeum.store` (L3). :mod:`athenaeum.decisions` imports this
-module for its mapper; this module never imports ``decisions`` back, so
-no cycle.
+:func:`~athenaeum.calibration.calibration_summary` and the attribution
+tier/action-id constants), :mod:`athenaeum.pii_attribution` (L3, for
+:func:`~athenaeum.pii_attribution.threshold_for_class` — a downward L4->L3
+edge, not an inversion), :mod:`athenaeum.resolutions` (for
+:func:`~athenaeum.resolutions.resolve_auto_apply_threshold_for` /
+:data:`~athenaeum.resolutions.DEFAULT_AUTO_APPLY_THRESHOLD_PER_ACTION`),
+:mod:`athenaeum.config` (L2), and :mod:`athenaeum.store` (L3).
+:mod:`athenaeum.decisions` imports this module for its mapper; this module
+never imports ``decisions`` back, so no cycle.
 """
 
 from __future__ import annotations
@@ -83,11 +103,17 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from athenaeum.calibration import calibration_summary
+from athenaeum.calibration import (
+    ATTRIBUTION_TIER_NAME,
+    attribution_threshold_action_id,
+    calibration_summary,
+)
 from athenaeum.config import (
+    resolve_attribution_accuracy_floor,
     resolve_auto_apply_proposals_disagreement_trigger,
     resolve_auto_apply_proposals_widen_step,
 )
+from athenaeum.pii_attribution import threshold_for_class
 from athenaeum.resolutions import resolve_auto_apply_threshold_for
 from athenaeum.store import append_line_durable, now_iso
 
@@ -310,7 +336,14 @@ class AutoApplyProposalRunSummary:
     proposed: int = 0
     skipped_pending: int = 0
     skipped_suppressed: int = 0
-    drafts: list[AutoApplyThresholdProposalDraft] = field(default_factory=list)
+    #: Issue athenaeum#2219: shared with
+    #: :func:`run_attribution_threshold_proposal_detection`, whose drafts are
+    #: :class:`AttributionThresholdProposalDraft` rather than
+    #: :class:`AutoApplyThresholdProposalDraft` -- both carry a ``to_ledger_record``
+    #: and an ``id``, which is all this dataclass's own callers need.
+    drafts: list[AutoApplyThresholdProposalDraft | AttributionThresholdProposalDraft] = field(
+        default_factory=list
+    )
 
 
 def run_auto_apply_proposal_detection(
@@ -357,6 +390,217 @@ def run_auto_apply_proposal_detection(
     for action in actions:
         draft = draft_auto_apply_threshold_proposal(
             action, wiki_root=wiki_root, config=config, tier=tier
+        )
+        if draft is None:
+            summary.not_warranted += 1
+            continue
+
+        if draft.id in rejected_ids:
+            summary.skipped_suppressed += 1
+            continue
+        if draft.id in pending_ids:
+            summary.skipped_pending += 1
+            continue
+
+        summary.drafts.append(draft)
+        if dry_run:
+            continue
+
+        _append_jsonl_line(
+            target, json.dumps(draft.to_ledger_record(now=now), sort_keys=True) + "\n"
+        )
+        pending_ids.add(draft.id)
+        summary.proposed += 1
+
+    return summary
+
+
+# ---------------------------------------------------------------------------
+# Attribution-threshold drafting, EITHER direction (issue athenaeum#2219,
+# design §8.3)
+# ---------------------------------------------------------------------------
+#
+# A second drafter on the SAME ledger/action-triple/approve-reject rail as
+# the merge-dedupe one above, targeting
+# :func:`athenaeum.pii_attribution.threshold_for_class`'s per-question-class
+# threshold instead of :func:`athenaeum.resolutions.
+# resolve_auto_apply_threshold_for`'s per-resolver-action one. Unlike that
+# drafter, this one proposes in BOTH directions -- see
+# :func:`draft_attribution_threshold_proposal`.
+
+
+def attribution_overturn_rate(wiki_root: Path, question_class: str) -> float | None:
+    """The reviewed-but-overturned rate for one attribution *question_class*.
+
+    Reads :func:`athenaeum.calibration.calibration_summary`'s
+    ``by_class`` breakdown for :data:`athenaeum.calibration.
+    ATTRIBUTION_TIER_NAME`. ``None`` when nothing has been reviewed yet for
+    this class — mirrors :func:`disagreement_rate`'s own
+    None-until-reviewed contract (an unreviewed sample asserts nothing
+    about accuracy).
+    """
+    bucket = (
+        calibration_summary(Path(wiki_root))
+        .get(ATTRIBUTION_TIER_NAME, {})
+        .get("by_class", {})
+        .get(question_class)
+    )
+    if not bucket or bucket.get("reviewed", 0) <= 0:
+        return None
+    return bucket["overturned"] / bucket["reviewed"]
+
+
+@dataclass(frozen=True)
+class AttributionThresholdProposalDraft:
+    """One drafted proposal: widen OR narrow one question class's
+    attribution threshold (issue athenaeum#2219)."""
+
+    id: str
+    action: str
+    question_class: str
+    direction: str  # "widen" | "narrow"
+    current_threshold: float
+    proposed_threshold: float
+    step: float
+    overturn_rate_value: float
+    target_error_rate: float
+    sampled: int
+    reviewed: int
+    overturned: int
+
+    def to_ledger_record(self, *, now: datetime | None = None) -> dict[str, Any]:
+        return {
+            "v": AUTO_APPLY_PROPOSALS_LEDGER_VERSION,
+            "kind": PROPOSAL_KIND,
+            "id": self.id,
+            "created_at": _now_iso(now),
+            "action": self.action,
+            "tier": ATTRIBUTION_TIER_NAME,
+            "question_class": self.question_class,
+            "direction": self.direction,
+            "current_threshold": self.current_threshold,
+            "proposed_threshold": self.proposed_threshold,
+            "step": self.step,
+            "overturn_rate": self.overturn_rate_value,
+            "target_error_rate": self.target_error_rate,
+            "sampled": self.sampled,
+            "reviewed": self.reviewed,
+            "overturned": self.overturned,
+        }
+
+
+def draft_attribution_threshold_proposal(
+    question_class: str,
+    *,
+    wiki_root: Path,
+    config: dict[str, Any] | None = None,
+) -> AttributionThresholdProposalDraft | None:
+    """Draft one widen-or-narrow proposal for *question_class*, or ``None``.
+
+    ``None`` when: the class's overturn rate is unavailable (nothing
+    reviewed yet); the class has no current threshold at all
+    (:func:`athenaeum.pii_attribution.threshold_for_class` returns
+    ``None`` — no valid calibration, so there is no floor to move); the
+    overturn rate sits exactly AT the target error rate (no change
+    warranted either direction); or the computed step would not actually
+    move the floor (clamped to ``[0.0, 1.0]`` and already there).
+
+    Direction (design §8.3): WIDEN (lower the bar, ``current - step``) when
+    the overturn rate stays BELOW the class's target error rate (``1 -``
+    :func:`athenaeum.config.resolve_attribution_accuracy_floor`\\ ``(config)``);
+    NARROW (raise the bar, ``current + step``) when it EXCEEDS that rate.
+    Reuses :func:`athenaeum.config.resolve_auto_apply_proposals_widen_step`
+    for the step size in both directions — issue athenaeum#2219 adds no
+    second step knob; design §8.3 names only the rate/direction logic, not
+    a distinct magnitude.
+    """
+    rate = attribution_overturn_rate(wiki_root, question_class)
+    if rate is None:
+        return None
+    current = threshold_for_class(question_class, config, wiki_root=Path(wiki_root))
+    if current is None:
+        return None
+
+    target_error_rate = round(1.0 - resolve_attribution_accuracy_floor(config), 6)
+    step = resolve_auto_apply_proposals_widen_step(config)
+    if rate < target_error_rate:
+        direction = "widen"
+        proposed = max(0.0, round(current - step, 6))
+        if proposed >= current:
+            return None
+    elif rate > target_error_rate:
+        direction = "narrow"
+        proposed = min(1.0, round(current + step, 6))
+        if proposed <= current:
+            return None
+    else:
+        return None  # exactly at the target: no change warranted
+
+    bucket = (
+        calibration_summary(Path(wiki_root))
+        .get(ATTRIBUTION_TIER_NAME, {})
+        .get("by_class", {})
+        .get(question_class, {})
+    )
+    action = attribution_threshold_action_id(question_class)
+    item_id = proposal_item_id(action, current, proposed)
+    return AttributionThresholdProposalDraft(
+        id=item_id,
+        action=action,
+        question_class=question_class,
+        direction=direction,
+        current_threshold=current,
+        proposed_threshold=proposed,
+        step=step,
+        overturn_rate_value=rate,
+        target_error_rate=target_error_rate,
+        sampled=bucket.get("sampled", 0),
+        reviewed=bucket.get("reviewed", 0),
+        overturned=bucket.get("overturned", 0),
+    )
+
+
+def run_attribution_threshold_proposal_detection(
+    question_classes: list[str],
+    *,
+    wiki_root: Path,
+    config: dict[str, Any] | None = None,
+    ledger_path: Path | None = None,
+    dry_run: bool = False,
+    now: datetime | None = None,
+) -> AutoApplyProposalRunSummary:
+    """Detect + draft: for each question class in *question_classes*, draft
+    a widen-or-narrow attribution-threshold proposal if warranted.
+
+    Shares :class:`AutoApplyProposalRunSummary` and the SAME
+    idempotent-per-id / pending-skip / suppressed-skip logic as
+    :func:`run_auto_apply_proposal_detection` — see that function's
+    docstring; the only difference is which drafter is called per item.
+    """
+    summary = AutoApplyProposalRunSummary()
+    wiki_root = Path(wiki_root)
+    summary.actions_seen = len(question_classes)
+    if not question_classes:
+        return summary
+
+    records = read_auto_apply_proposals_ledger(wiki_root, ledger_path=ledger_path)
+    resolved_ids = _resolved_ids(records)
+    rejected_ids = _kind_ids(records, REJECT_KIND)
+    pending_ids = {
+        str(r.get("id"))
+        for r in records
+        if r.get("kind") == PROPOSAL_KIND and str(r.get("id")) not in resolved_ids
+    }
+
+    target = (
+        ledger_path
+        if ledger_path is not None
+        else default_auto_apply_proposals_ledger_path(wiki_root)
+    )
+
+    for question_class in question_classes:
+        draft = draft_attribution_threshold_proposal(
+            question_class, wiki_root=wiki_root, config=config
         )
         if draft is None:
             summary.not_warranted += 1
@@ -503,6 +747,10 @@ __all__ = [
     "draft_auto_apply_threshold_proposal",
     "AutoApplyProposalRunSummary",
     "run_auto_apply_proposal_detection",
+    "attribution_overturn_rate",
+    "AttributionThresholdProposalDraft",
+    "draft_attribution_threshold_proposal",
+    "run_attribution_threshold_proposal_detection",
     "approve_auto_apply_threshold_proposal",
     "reject_auto_apply_threshold_proposal",
 ]
