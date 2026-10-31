@@ -745,9 +745,16 @@ def resolve_handle_query(
             exactly one verified page matches, and otherwise through the
             persisted, stat-validated index in
             :mod:`athenaeum.entity_index_cache`, instead of a full
-            :class:`~athenaeum.models.EntityIndex` scan. ``None`` (the
-            default) keeps the full scan. The recall CLI and MCP tool pass
-            it; the librarian's compile-time caller does not.
+            :class:`~athenaeum.models.EntityIndex` scan. Also (and
+            *excluded_index* not, issue athenaeum#2182): the email-handle walk
+            answers from the persisted, HMAC-keyed cache in
+            :mod:`athenaeum.contact_index_cache` instead of a fresh
+            ``iter_contact_records`` scan + frontmatter parse of every
+            contact record. ``None`` (the default) keeps both full scans. The
+            recall CLI and MCP tool pass it; the librarian's compile-time
+            caller does not — that caller's own ``ExcludedRecordIndex`` stays
+            exactly as built at `librarian.py`'s entity phase, unaffected by
+            this parameter.
 
     Gating is unaffected either way: :func:`_finish`'s audience and
     ``recallable`` checks run against frontmatter parsed fresh from disk on
@@ -766,9 +773,22 @@ def resolve_handle_query(
             # so a second scan would only repeat the first. The index loads
             # lazily, and `_assemble_contact_values` still builds its own for
             # a page class mapped to a different surface.
-            excluded_index = pii.ExcludedRecordIndex(
-                pii.contacts_surface_root(knowledge_root, config)
-            )
+            #
+            # cache_dir given (issue athenaeum#2182): answer from the
+            # persisted, HMAC-keyed cache in `athenaeum.contact_index_cache`
+            # instead of a fresh `iter_contact_records` scan + frontmatter
+            # parse of every record. `None` (the default) keeps the fresh,
+            # lazy, uncached build exactly as before.
+            if cache_dir is not None:
+                from athenaeum.contact_index_cache import load_contact_index
+
+                excluded_index = load_contact_index(
+                    pii.contacts_surface_root(knowledge_root, config), cache_dir
+                )
+            else:
+                excluded_index = pii.ExcludedRecordIndex(
+                    pii.contacts_surface_root(knowledge_root, config)
+                )
         normalized = pii.normalize_identifier(email_handle)
         walk = _walk_email_handle(
             knowledge_root, normalized, config=config, excluded_index=excluded_index

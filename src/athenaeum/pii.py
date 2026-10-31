@@ -3143,6 +3143,28 @@ class ExcludedRecordIndex:
         self._ensure_loaded()
         self._index_record(Path(path))
 
+    def unregister(self, path: Path) -> None:
+        """Remove *path* from both maps — the erasure-cascade counterpart to :meth:`register`.
+
+        Added for issue athenaeum#2182: a caller that deletes a contact
+        record (an erasure) must also drop it from any already-loaded index
+        so a lookup made immediately afterward, in the SAME process, does
+        not resolve through a now-stale in-memory entry — "no later load
+        needed to heal it". Idempotent: removing a path that was never
+        indexed, or removing it twice, is a no-op. Purely in-memory, exactly
+        like :meth:`register` — this never touches disk.
+        """
+        self._ensure_loaded()
+        target = Path(path)
+        for mapping in (self._by_uid, self._by_identifier):
+            for key in list(mapping):
+                if target in mapping[key]:
+                    kept = [p for p in mapping[key] if p != target]
+                    if kept:
+                        mapping[key] = kept
+                    else:
+                        del mapping[key]
+
 
 def resolve_contact_record(
     contacts_root: Path,

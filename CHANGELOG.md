@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Persisted, HMAC-keyed `ExcludedRecordIndex` cache, in the erasure
+  cascade's delete set (issue athenaeum#2182).** athenaeum#2179 deliberately
+  left `pii.ExcludedRecordIndex` in-memory-only: "a cache of it would be a
+  copy of excluded PII that the erasure cascade does not reach." The new
+  `athenaeum.contact_index_cache` module persists it anyway, by changing
+  what hits disk — only the HMAC-SHA256 digest of each address (keyed under
+  the same per-corpus `_erasure_hmac_key` `athenaeum.erasure` already
+  mints/purges) plus each record's opaque uid, never a raw address.
+  Invalidation copies `athenaeum.entity_index_cache`'s discipline exactly:
+  every record `stat`-ed on every load, only changed records re-parsed,
+  atomic 0600-inside-0700 writes, a corrupt/wrong-version/wrong-root/
+  wrong-key-fingerprint cache rebuilt wholesale. `erase_contact_record`
+  deletes a record file and drops its cache entry in one call, and — handed
+  the caller's live index — unregisters it from memory too, so an erased
+  address is unresolvable immediately, with no reload (the new
+  `ExcludedRecordIndex.unregister`, the counterpart to `register`).
+  `identity_resolution.resolve_handle_query`'s email-handle branch uses the
+  cache when `cache_dir` is given, exactly as it already does for
+  `entity_index_cache`; the librarian's compile-time caller is untouched.
+  See `docs/design/contact-index-writer-coherence.md` for why
+  `pii.mark_bounced`'s existing one-shot-load-plus-`register` discipline
+  stays correct underneath a persisted initial load, and
+  `scripts/bench_contact_index_cache.py` for the before/after timing
+  methodology against a synthetic ~13k-record fixture corpus.
+
 ### Changed
 
 - **The eval-receipt gate is judged by the BASE commit's copy of itself
