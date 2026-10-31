@@ -261,6 +261,43 @@
         source_ref: "session-2026-05-12"
         updated: "2026-05-12"
 
+# Added in issue athenaeum#2231 to give RESOLVER_FLOOR one case of real margin
+# (see test_resolver_eval.py's floor-derivation comment) — a second
+# keep_pick_winner-via-source-precedence pair, same proven-reliable shape as
+# precedence_user_over_unsourced_contact above: one inferred claim, one
+# user-stated claim with a dated ``source:``/``source_ref:``, no
+# valid_from/valid_until and no supersedes/refines frontmatter (so the LLM
+# call fires per this file's authoring rules above) — on a different fact
+# (a project deadline, not a contact) so it does not duplicate content.
+- id: precedence_user_over_unsourced_deadline
+  outcome_class: contradict
+  expected:
+    action_class: keep_pick_winner
+  detector:
+    conflict_type: factual
+    rationale: "Two claims about the Atlas Retooling engagement deadline; one inferred, one user-stated."
+    passages:
+      - "The Atlas Retooling engagement deadline is 2026-09-30."
+      - "The Atlas Retooling engagement deadline is 2026-11-15."
+  members:
+    - filename: reference_deadline_inferred.md
+      body: "The Atlas Retooling engagement deadline is 2026-09-30."
+      frontmatter:
+        name: atlas-deadline-inferred
+        type: reference
+        source_type: inferred
+    - filename: reference_deadline_user.md
+      body: >-
+        The Atlas Retooling engagement deadline is 2026-11-15 — Amir confirmed
+        this directly in the 2026-08 planning review.
+      frontmatter:
+        name: atlas-deadline-user
+        type: reference
+        source_type: user-stated
+        source: "user:session-2026-08-20"
+        source_ref: "session-2026-08-20"
+        updated: "2026-08-20"
+
 # propose_merge via a second general+exception PREFERENCE pair (distinct domain
 # from the docs-tool case so the set covers the shape without duplicating it).
 - id: propose_merge_ticketing_general_and_exception

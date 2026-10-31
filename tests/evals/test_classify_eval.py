@@ -42,14 +42,57 @@ from tests.evals.harness import (
 
 pytestmark = pytest.mark.eval
 
-# Floor derivation: N=6 cases spanning extract_single / extract_multiple /
-# skip_matched / skip_placeholder / empty_procedural outcome classes. A
-# generous 2-case slack over an all-pass expectation, matching the detector
-# set's ~80% floor ratio — single-case Haiku noise on entity-count/name
-# boundaries should not sink the layer, but a systemic drift (e.g. the
-# classifier starts extracting placeholder mentions, or stops extracting
-# real entities) must fail loudly.
-CLASSIFY_FLOOR = 4  # >= 4/6
+# Floor derivation (issue athenaeum#2231 — see tests/evals/README.md's "How a
+# floor is derived" section): floor = the number of cases that pass
+# DETERMINISTICALLY, never n-1. This is the pattern the repo already got
+# right here — unlike the pre-fix AUDIT_RETIREMENT_FLOOR, which had set its
+# floor to n-1 with a permanent miss already consuming the slack (see
+# test_audit_retirement_eval.py).
+#
+# Per-case live history across the 23 October 2026 workflow_dispatch runs:
+#   single_person_entity                      — 23/23 (100%)
+#   multiple_entities_project_and_person       — 23/23 (100%)
+#   skip_already_matched_entity                — 23/23 (100%)
+#   purely_procedural_no_entities               — 23/23 (100%)
+#   passing_mention_not_substantive (skip)     —  0/23 (0%)  — permanent miss
+#   reference_entity_office_policy             —  4/23 (17.4%) — the weak case
+# (96/138 = 69.6% pooled; matches the athenaeum#2231 research-findings comment's
+# inventory table.)
+#
+# Floor=4 is already the deterministic-pass count over the original 6
+# cases, which is WHY this suite has never gone red in 23 runs — but it ran
+# at EXACTLY 4/6 on 2026-10-29 (the permanent miss and the weak case both
+# missing that run), meaning any ONE of the four always-passing cases
+# failing once would have reddened it: zero real margin.
+#
+# ``single_project_entity`` (added by athenaeum#2231) gives that real margin:
+# n grows to 7, floor stays at 4, so one always-passing case can now miss
+# once without a near-certain simultaneous permanent-miss + weak-case double
+# failure also reddening the run.
+#
+# False-red rate. Pessimistic iid exact-binomial bound at the pooled
+# historical accuracy (69.6%, which is dragged down hard by the permanent
+# miss and the weak case and so understates the always-passing cases' real
+# reliability): P(X < 4) for X ~ Binomial(7, 0.696) ≈ 13.2%, down from
+# ≈26.4% at the pre-athenaeum#2231 n=6 floor under the same pooled model. The
+# true rate is far lower in practice, because the five always-passing cases
+# (four original + the new one) have shown 0 misses in 92 observed trials.
+#
+# False-green / what this floor cannot catch (verified by exhaustive case
+# enumeration, not just the pooled model above): a regression confined to
+# ONE always-passing case is NEVER caught by floor=4 — passed stays >= 4
+# whether or not the weak case also misses that run. A regression spanning
+# TWO always-passing cases is caught only on the ~82.6% of runs where the
+# weak case also misses (its historical norm); the ~17.4% of runs the weak
+# case happens to pass, a two-case regression still clears the floor. A
+# regression spanning THREE OR MORE always-passing cases is always caught,
+# independent of the weak case. This floor is a collapse detector at n=7,
+# not a fine-grained regression detector, and is honestly weaker here than
+# AUDIT_RETIREMENT_FLOOR's (which has ~22% power against even a single-case
+# regression) because classify's floor sits two notches below its n, not
+# one. See test_classify_eval_stub.py (offline, unmarked) for a synthetic
+# proof of both the catch and the miss.
+CLASSIFY_FLOOR = 4  # >= 4/7
 
 
 def _load_cases() -> list[dict[str, Any]]:

@@ -131,7 +131,7 @@ def _probe_meta(case: ParityCase) -> tuple[dict[str, Any], dict[str, Any], str, 
 
 
 def compute_probe_table(corpora: tuple[Path, ...] = CORPORA) -> list[ProbeRow]:
-    """Load the 18 committed cases, apply the probe rule to a throwaway copy
+    """Load the committed cases (19 as of athenaeum#2231), apply the probe rule to a throwaway copy
     of each pair's frontmatter, and tabulate `gate1_separator_relations`
     (`src/athenaeum/comparator.py`) -- zero LLM calls, zero writes back to
     the committed fixtures."""

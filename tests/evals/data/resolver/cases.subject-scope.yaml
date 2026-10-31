@@ -228,6 +228,38 @@
       updated: '2026-05-12'
       subject: northwind-contact
       claimed_scope: northwind-contact
+- id: precedence_user_over_unsourced_deadline
+  outcome_class: contradict
+  expected:
+    action_class: keep_pick_winner
+  detector:
+    conflict_type: factual
+    rationale: Two claims about the Atlas Retooling engagement deadline; one inferred,
+      one user-stated.
+    passages:
+    - The Atlas Retooling engagement deadline is 2026-09-30.
+    - The Atlas Retooling engagement deadline is 2026-11-15.
+  members:
+  - filename: reference_deadline_inferred.md
+    body: The Atlas Retooling engagement deadline is 2026-09-30.
+    frontmatter:
+      name: atlas-deadline-inferred
+      type: reference
+      source_type: inferred
+      subject: atlas-deadline
+      claimed_scope: atlas-deadline
+  - filename: reference_deadline_user.md
+    body: The Atlas Retooling engagement deadline is 2026-11-15 — Amir confirmed this
+      directly in the 2026-08 planning review.
+    frontmatter:
+      name: atlas-deadline-user
+      type: reference
+      source_type: user-stated
+      source: user:session-2026-08-20
+      source_ref: session-2026-08-20
+      updated: '2026-08-20'
+      subject: atlas-deadline
+      claimed_scope: atlas-deadline
 - id: propose_merge_ticketing_general_and_exception
   outcome_class: merge
   expected:

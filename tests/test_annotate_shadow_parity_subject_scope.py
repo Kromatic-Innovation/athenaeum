@@ -241,7 +241,7 @@ class TestGate1ReachabilityOnTheAnnotatedFixture:
                         results[case.case_id] = (unknown, disjoint)
         return results
 
-    def test_seventeen_of_eighteen_clusters_have_no_unknown_separator_dims(self) -> None:
+    def test_eighteen_of_nineteen_clusters_have_no_unknown_separator_dims(self) -> None:
         # Before this issue: EVERY pair had unknown_dims == ["subject"]
         # (subject was UNKNOWN on all 18/18 -- the issue's own premise,
         # verified independently against comparator.py/dimensions.py before
@@ -250,10 +250,15 @@ class TestGate1ReachabilityOnTheAnnotatedFixture:
         # keeps an unknown dim; the other 17 -- including
         # deploy_target_sequential_snapshot, which exits at Gate 1 on a
         # DISJOINT valid-time before subject/scope even matter -- clear it.
+        #
+        # athenaeum#2231 added a 19th cluster (the resolver-suite
+        # precedence_user_over_unsourced_deadline case, for RESOLVER_FLOOR
+        # margin). Its members share the clean "atlas-deadline" stem, so it
+        # clears too: 18 of 19 cleared, same one holdout as before.
         results = self._unknown_and_disjoint_dims()
-        assert len(results) == 18
+        assert len(results) == 19
         cleared = [cid for cid, (unknown, _) in results.items() if unknown == []]
-        assert len(cleared) == 17
+        assert len(cleared) == 18
 
     def test_the_one_unrelated_cluster_still_reads_unknown_on_subject(self) -> None:
         # meeting_cadence_different_scenarios: "client-weekly-sync" and
