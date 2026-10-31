@@ -155,6 +155,10 @@ MODULE_LAYER: dict[str, int] = {
     # Issue athenaeum#2184: the contact-record fold (L3, over pii) and the
     # repair that needs pending_merges' target resolver (L4).
     "contact_record_fold": 3,
+    # Issue athenaeum#2182: the persisted contact-index cache (L3, peer to
+    # pii/erasure -- its module docstring states "Layering: L3, peer to
+    # athenaeum.pii and athenaeum.erasure").
+    "contact_index_cache": 3,
     "prompt_registry": 3,
     "prompt_safety": 3,
     "provider": 3,
