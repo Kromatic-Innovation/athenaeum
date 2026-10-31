@@ -113,6 +113,9 @@ does not answer.
 - [Sensitivity value routing](design/sensitivity-value-routing.md)
 - [Security posture](design/security-posture.md)
 - [Bounce surface convergence](design/bounce-surface-convergence.md)
+- [Contact-index writer coherence](design/contact-index-writer-coherence.md) — how a
+  persisted contact-record index stays correct across compile-loop writes, and why an
+  erasure must reach it.
 - [Deprecated email tracking](design/deprecated-email-tracking.md)
 - [Attribution verification](design/attribution-verification.md) — checking whose contact
   value it is before filing it: the verification seam every writer calls, the deterministic
