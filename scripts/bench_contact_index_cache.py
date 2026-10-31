@@ -36,8 +36,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from athenaeum import contact_index_cache as cic  # noqa: E402
-from athenaeum import pii  # noqa: E402
+from athenaeum import contact_index_cache as cic
+from athenaeum import pii
 
 SINGLE_ADDRESS = "user00000@example.org"
 AMBIGUOUS_ADDRESS = "shared@example.org"
@@ -84,7 +84,9 @@ def run(n_records: int, repeat: int) -> dict[str, object]:
     try:
         contacts_root = scratch / "contacts"
         cache_dir = scratch / "cache"
+        gen_start = time.perf_counter()
         build_fixture_corpus(contacts_root, n_records)
+        fixture_generation_s = time.perf_counter() - gen_start
 
         addresses = {
             "single_page": SINGLE_ADDRESS,
@@ -112,6 +114,7 @@ def run(n_records: int, repeat: int) -> dict[str, object]:
         return {
             "n_records": n_records,
             "repeat": repeat,
+            "fixture_generation_s": fixture_generation_s,
             "cold_cache_build_s": cold_build_s,
             "before_s": {k: _avg(v) for k, v in before.items()},
             "after_warm_s": {k: _avg(v) for k, v in after.items()},
