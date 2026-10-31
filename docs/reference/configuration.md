@@ -382,6 +382,61 @@ Malformed (non-int, bool, or ``<= 0``) yaml values fall through to the
 default rather than silently disabling or widening the window
 unexpectedly.
 
+### `resolve_attribution_escalate`
+
+- **YAML path:** `librarian.attribution.escalate`
+- **Environment variable:** `ATHENAEUM_ATTRIBUTION_ESCALATE`
+- **CLI flag:** —
+- **Default:** `False`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+``librarian.attribution.escalate`` (default False). DEFAULT OFF.
+
+: gates the librarian's shadow-escalation phase
+(``librarian._run_attribution_shadow_phase``), which escalates already-
+parked SHADOW attribution suspects to the measured tier and logs the
+placement it would have made. With this off (the default), that phase
+returns immediately — no client constructed, no suspect directory read,
+no model call, and no change to any writer's output.
+
+DEFAULT OFF is deliberate, for the same reason
+`resolve_rule_proposals_enabled` is: this wiring adds a NEW
+unattended model call to the nightly run. It is also the design's own
+staging (§9.1): until the mode knob lands, "the code observes", and an
+operator opts into even the observe-mode model spend.
+
+Mirrors `resolve_rule_proposals_enabled`'s shape: env
+``ATHENAEUM_ATTRIBUTION_ESCALATE`` (``1``/``true``/``yes``/``on``,
+case-insensitive) > yaml ``librarian.attribution.escalate`` > default
+``False``. Non-bool yaml values and unrecognized env strings fall
+through to off.
+
+### `resolve_attribution_max_escalations_per_run`
+
+- **YAML path:** `librarian.attribution.max_escalations_per_run`
+- **Environment variable:** `ATHENAEUM_ATTRIBUTION_MAX_ESCALATIONS_PER_RUN`
+- **CLI flag:** —
+- **Default:** `25`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+``librarian.attribution.max_escalations_per_run`` (default 25).
+
+: caps how many parked SHADOW suspects the
+librarian's shadow-escalation phase escalates in one run, so a store
+with a large parked backlog pays a bounded increment per run instead of
+one model call per suspect. ``<= 0`` disables the phase entirely (the
+same "a non-positive value means off" escape hatch
+`athenaeum.librarian.librarian_max_runtime` uses for its own
+deadline).
+
+Env ``ATHENAEUM_ATTRIBUTION_MAX_ESCALATIONS_PER_RUN`` > yaml
+``librarian.attribution.max_escalations_per_run`` >
+`DEFAULT_ATTRIBUTION_MAX_ESCALATIONS_PER_RUN`. A malformed env
+value logs a WARNING (via `_env_number`) and falls back to yaml; a
+``bool`` or non-integer yaml value falls through to the default. See
+`resolve_relay_local_prefixes` for why this inlines its own
+``librarian.attribution.*`` chain rather than sharing a helper.
+
 ### `resolve_operator_mailer_domains`
 
 - **YAML path:** `librarian.attribution.operator_mailer_domains`
@@ -446,6 +501,45 @@ in outer-to-inner order — finds all three literals in the right order.
 A shared helper taking the leaf key as a parameter would discover that
 leaf-key literal at the CALL SITE, ahead of "librarian"/"attribution"
 found inside the helper, which is backwards for this nesting.
+
+### `resolve_attribution_thresholds`
+
+- **YAML path:** `librarian.attribution.thresholds`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `{}`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Per-question-class calibrated-probability thresholds.
+
+Read from ``librarian.attribution.thresholds``, a mapping of question
+class to the CALIBRATED probability an escalation must reach before its
+placement is filed (design ``docs/design/attribution-verification.md``
+§8.2: "A deployment can override them in
+``librarian.attribution.thresholds.<class>``. A threshold is a calibrated
+probability, not a raw score"). DEFAULT-EMPTY: unconfigured, every class
+falls back to the shipped calibration record's own threshold
+(`athenaeum.pii_attribution.threshold_for_class`).
+
+SINGLE-ARGUMENT by design: this returns the WHOLE mapping and the caller
+selects its class, rather than taking a class parameter. A two-argument
+``resolve_*`` cannot be exercised by
+``tests/test_config_resolver_parity_generic.py``'s prober (which only
+ever calls ``fn(config)``) and would have to be excluded from it.
+
+Keys are NOT filtered against the question-class vocabulary: an unknown
+key is simply never looked up by the one caller, so dropping it here
+would buy nothing and would hide a typo behind a silent empty result
+instead of leaving it visible in the returned mapping. VALUES are
+validated: a non-numeric value, a ``bool`` (``int`` subclass guard), or
+one outside ``[0, 1]`` is logged at WARNING and omitted rather than
+raising — a malformed threshold must not take a run down, and omitting it
+falls back to the calibration record, which is the safe direction (design
+§8.1 sends an item with no valid threshold to a human).
+
+See `resolve_relay_local_prefixes` for why this inlines its own
+``librarian`` -> ``attribution`` -> ``thresholds`` chain rather than
+sharing a helper.
 
 ### `resolve_audit_on_touch_freshness_hours`
 
