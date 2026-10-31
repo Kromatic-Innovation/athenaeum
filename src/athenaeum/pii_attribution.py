@@ -89,6 +89,7 @@ import json
 import logging
 import os
 import re
+import weakref
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -440,7 +441,7 @@ def build_attribution_context(
             if cleaned:
                 owner_name_aliases.add(cleaned)
     value_key_secret = _load_or_mint_value_key_secret(resolved_contacts_root)
-    inline_elsewhere_index, person_name_index = _build_child_c_indexes(ent_idx, value_key_secret)
+    inline_elsewhere_index, person_name_index = _cached_child_c_indexes(ent_idx, value_key_secret)
     return AttributionContext(
         contacts_root=resolved_contacts_root,
         excluded_index=idx,
@@ -667,6 +668,57 @@ def _build_child_c_indexes(
     frozen_inline = {key: tuple(uids) for key, uids in inline_index.items()}
     frozen_names = {form: frozenset(uids) for form, uids in name_index.items()}
     return frozen_inline, frozen_names
+
+
+#: Memoizes :func:`_build_child_c_indexes`'s result against the IDENTITY of
+#: the :class:`EntityIndex` object a caller handed to
+#: :func:`build_attribution_context` (PR review finding, issue
+#: athenaeum#2258). Keyed on identity, never on the knowledge-root path or
+#: wall-clock time: a caller handing in the SAME ``EntityIndex`` object is
+#: vouching that the corpus it describes has not moved since that index was
+#: built, so reusing the cached scan is safe; a caller that builds a FRESH
+#: ``EntityIndex`` gets a fresh scan, because the corpus genuinely may have
+#: changed, and a stale C1 index would produce a silently missed or
+#: spurious suspect -- far worse than the scan it would have saved. Every
+#: caller in this codebase resolves ``value_key_secret`` from the SAME
+#: ``contacts_root`` as the ``entity_index`` it hands in (both ultimately
+#: come from one ``knowledge_root``), so identity on the index implies the
+#: same secret too; this cache does not separately key on the secret.
+#: A :class:`weakref.WeakKeyDictionary`, not a plain module-level dict, so
+#: this never pins (leaks) an ``EntityIndex`` the rest of the process has
+#: already let go of across a long-running process.
+_ChildCIndexes = tuple[dict[str, tuple[str, ...]], dict[str, frozenset[str]]]
+_CHILD_C_INDEX_CACHE: "weakref.WeakKeyDictionary[EntityIndex, _ChildCIndexes]" = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _cached_child_c_indexes(
+    entity_index: EntityIndex | None,
+    value_key_secret: bytes,
+) -> tuple[dict[str, tuple[str, ...]], dict[str, frozenset[str]]]:
+    """:func:`_build_child_c_indexes`, memoized per *entity_index* identity.
+
+    The ONLY seam :func:`build_attribution_context` calls — several of this
+    seam's own callers construct a context once per record/batch-file
+    rather than once per run, passing in an *already-built* ``entity_index``
+    specifically so that reuse is cheap (see e.g. ``answers.py``'s
+    ``_apply_field_correction`` and ``corrections.py``'s
+    ``process_batch_file``); without this memo, every one of those calls
+    would re-scan the whole corpus's page bodies, turning a per-record loop
+    into an O(corpus)-per-record one (issue athenaeum#2258 PR review). With
+    no *entity_index* at all, there is nothing to key a cache on and this
+    is simply :func:`_build_child_c_indexes`'s own already-cheap empty-dict
+    path -- no cache lookup is attempted.
+    """
+    if entity_index is None:
+        return _build_child_c_indexes(entity_index, value_key_secret)
+    cached = _CHILD_C_INDEX_CACHE.get(entity_index)
+    if cached is not None:
+        return cached
+    built = _build_child_c_indexes(entity_index, value_key_secret)
+    _CHILD_C_INDEX_CACHE[entity_index] = built
+    return built
 
 
 def _check_c1(

@@ -159,6 +159,56 @@ class TestC1InlineElsewhere:
             )
         assert len(calls) == 1
 
+    def test_memoized_across_contexts_sharing_the_same_entity_index_object(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """PR review finding (issue athenaeum#2258): several callers build a
+        NEW ``AttributionContext`` per record/batch-file but pass in an
+        ALREADY-BUILT ``EntityIndex`` specifically so that reuse is cheap
+        (e.g. ``answers.py``'s ``_apply_field_correction``,
+        ``corrections.py``'s ``process_batch_file``). Design §5.1 requires
+        the child-C indexes be built "once per run", not once per context —
+        with those call sites, once-per-context is NOT once-per-run. This
+        proves the memo: the SAME ``EntityIndex`` object across two
+        ``build_attribution_context`` calls costs exactly one real build: a
+        DIFFERENT ``EntityIndex`` object costs a second one. Both halves
+        matter -- without the second, this would pass even if the rebuild
+        were simply disabled globally rather than cached on identity."""
+        from athenaeum.models import EntityIndex
+
+        knowledge = tmp_path / "knowledge"
+        wiki_root = knowledge / "wiki"
+        _write_page(wiki_root, uid="uid-holder", name="Other Holder", body="x3@example.org\n")
+
+        calls: list[int] = []
+        real_builder = pii_attribution._build_child_c_indexes
+
+        def counting_builder(entity_index: object, secret: bytes) -> object:
+            calls.append(1)
+            return real_builder(entity_index, secret)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(pii_attribution, "_build_child_c_indexes", counting_builder)
+
+        shared_index = EntityIndex(wiki_root)
+        pii_attribution.build_attribution_context(
+            knowledge, EXCLUDED_CONFIG, entity_index=shared_index
+        )
+        assert len(calls) == 1
+
+        # Same EntityIndex OBJECT again -> cache hit, no second real build.
+        pii_attribution.build_attribution_context(
+            knowledge, EXCLUDED_CONFIG, entity_index=shared_index
+        )
+        assert len(calls) == 1
+
+        # A DIFFERENT EntityIndex object (even describing the same corpus)
+        # -> cache miss, a second real build.
+        fresh_index = EntityIndex(wiki_root)
+        pii_attribution.build_attribution_context(
+            knowledge, EXCLUDED_CONFIG, entity_index=fresh_index
+        )
+        assert len(calls) == 2
+
 
 class TestC2LocalPartNamesSomeoneElse:
     @pytest.mark.parametrize(
