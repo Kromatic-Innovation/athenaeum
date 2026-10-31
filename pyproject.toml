@@ -377,4 +377,5 @@ markers = [
     "embedding: asserts on real MiniLM cosine values; deselected by default, runs in evals.yml's embedding-suite job (athenaeum#1091)",
     "rollout: costs tokens — constructs a live LLM client, spawns the real claude binary, or is gated on ANTHROPIC_API_KEY/ATHENAEUM_LIVE_TESTS; deselected by default (athenaeum#1521, split from token-free siblings in athenaeum#1742)",
     "nightly: token-free but slow or measurement-only (full-corpus sweeps, printed tables); deselected by default, runs in nightly.yml via -m nightly. A small default-suite test must still pin the property it covers",
+    "reads_live_knowledge_tree: declared opt-in for a test whose documented purpose is reading the real default knowledge root or cache dir (tests/fixtures/default_root_guard.py, athenaeum#2183) -- every other test is forbidden from touching either",
 ]
