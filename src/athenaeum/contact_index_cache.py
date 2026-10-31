@@ -210,7 +210,11 @@ def _read_cache(
                 _CachedRecord(uid=uid_raw, identifier_hmacs=tuple(hmacs_raw)),
             )
         return records
-    except (KeyError, TypeError, ValueError) as exc:
+    # AttributeError too: a cache file whose `records` is null, a list or a
+    # string reaches `.items()` and raises it, which would crash a read where
+    # the issue requires "a corrupt or missing index is rebuilt" (Seer review
+    # on PR athenaeum#2274).
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
         log.warning("contact index cache %s malformed (%s); rebuilding", path, exc)
         return None
 
@@ -380,7 +384,11 @@ def load_with_stats(
     contacts_root = Path(contacts_root)
     try:
         key = load_or_create_erasure_key(cache_dir)
-    except (OSError, ErasureKeyError) as exc:
+    # ValueError covers UnicodeDecodeError, which `load_or_create_erasure_key`
+    # lets escape on a key file holding non-UTF-8 bytes; without it the
+    # documented fall-back-to-uncached never happens (Seer review on PR
+    # athenaeum#2274).
+    except (OSError, ErasureKeyError, ValueError) as exc:
         log.warning(
             "contact index cache: erasure key unavailable (%s); answering uncached", exc
         )
@@ -457,7 +465,11 @@ def invalidate_cached_record(contacts_root: Path, cache_dir: Path, record_path: 
     """
     try:
         key = load_or_create_erasure_key(cache_dir)
-    except (OSError, ErasureKeyError):
+    # ValueError (hence UnicodeDecodeError) as above. Here it matters for
+    # erasure integrity, not just robustness: this runs AFTER the record file
+    # is unlinked, so an escaping exception would leave the in-memory index
+    # still holding the erased identifiers.
+    except (OSError, ErasureKeyError, ValueError):
         return False
     path = cache_path(contacts_root, cache_dir)
     cached = _read_cache(path, contacts_root, _key_fingerprint(key))

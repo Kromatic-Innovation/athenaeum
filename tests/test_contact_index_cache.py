@@ -29,6 +29,7 @@ import pytest
 
 from athenaeum import contact_index_cache as cic
 from athenaeum import identity_resolution, pii
+from athenaeum import erasure as erasure_mod
 from athenaeum.erasure import load_or_create_erasure_key, purge_erasure_key
 
 EXCLUDED_CONFIG: dict[str, object] = {"storage": {"mapping": {"pii": "excluded"}}}
@@ -450,3 +451,50 @@ class TestWriterCoherence:
         assert index.by_identifier("ada@example.org") is None
         index.register(existing)
         assert index.by_identifier("ada@example.org") == existing
+
+
+class TestCorruptInputsRebuildRatherThanRaise:
+    """The issue requires "a corrupt or missing index is rebuilt" — never a raise.
+
+    Both shapes here escaped as uncaught exceptions before (Seer review on
+    PR athenaeum#2274). The second matters for erasure integrity rather than
+    mere robustness: it fires after the record file is already unlinked.
+    """
+
+    @pytest.mark.parametrize("records", [None, [], "x", 3])
+    def test_malformed_records_mapping_is_a_cache_miss(
+        self, tmp_path: Path, records: object
+    ) -> None:
+        contacts_root = tmp_path / "contacts"
+        contacts_root.mkdir()
+        cache = tmp_path / "cache.json"
+        cache.write_text(
+            json.dumps(
+                {
+                    "format": cic.CACHE_FORMAT,
+                    "contacts_root": str(contacts_root.resolve()),
+                    "key_fingerprint": "deadbeef",
+                    "records": records,
+                }
+            ),
+            encoding="utf-8",
+        )
+        assert cic._read_cache(cache, contacts_root, "deadbeef") is None
+
+    def test_non_utf8_erasure_key_falls_back_instead_of_raising(
+        self, tmp_path: Path
+    ) -> None:
+        """A key file of non-UTF-8 bytes must not escape as UnicodeDecodeError."""
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        (cache_dir / erasure_mod.ERASURE_KEY_FILENAME).write_bytes(b"\xff\xfe\x00not-utf8")
+        contacts_root = tmp_path / "contacts"
+        contacts_root.mkdir()
+        (contacts_root / "aaaa1111-someone.md").write_text(
+            "---\nuid: aaaa1111\nemails:\n  - someone@example.com\n---\n\nbody\n",
+            encoding="utf-8",
+        )
+        index, stats = cic.load_with_stats(contacts_root, cache_dir)
+        # Resolution still works, just uncached.
+        assert index.by_uid("aaaa1111") is not None or index.uids() is not None
+        assert stats is not None
