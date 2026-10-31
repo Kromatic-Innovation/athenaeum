@@ -28,8 +28,8 @@ from pathlib import Path
 import pytest
 
 from athenaeum import contact_index_cache as cic
-from athenaeum import identity_resolution, pii
 from athenaeum import erasure as erasure_mod
+from athenaeum import identity_resolution, pii
 from athenaeum.erasure import load_or_create_erasure_key, purge_erasure_key
 
 EXCLUDED_CONFIG: dict[str, object] = {"storage": {"mapping": {"pii": "excluded"}}}
