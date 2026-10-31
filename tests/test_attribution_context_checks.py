@@ -503,3 +503,27 @@ class TestOrderingAndCompleteness:
             assert "carrier-evidence@example.org" not in (check.label or "")
             for uid in check.uids:
                 assert "carrier-evidence@example.org" not in uid
+
+    def test_a_c_check_row_lands_in_the_attribution_log(self, tmp_path: Path) -> None:
+        """Issue AC: "one fixture run shows C-check rows in the attribution
+        log" — not just evidence on the in-memory verdict."""
+        import json
+
+        knowledge = tmp_path / "knowledge"
+        wiki_root = knowledge / "wiki"
+        _write_page(wiki_root, uid="uid-namesake", name="Logrow Person")
+        context = pii_attribution.build_attribution_context(knowledge, EXCLUDED_CONFIG)
+        pii_attribution.check_contact_attribution(
+            "lperson@example.org",
+            target_uid="uid-target",
+            target_name="Target Person",
+            target_type="person",
+            source_ref=None,
+            writer=pii_attribution.WRITER_OBSERVED_CONTACT,
+            context=context,
+        )
+        log_path = pii_attribution.default_attribution_log_path(context.contacts_root)
+        rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+        assert any(
+            pii_attribution.CHECK_C2_LOCAL_PART_NAMES_OTHER in row["checks"] for row in rows
+        )
