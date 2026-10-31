@@ -1015,6 +1015,98 @@ class TestQueueItemContents:
         assert f"writer: {pii_attribution.WRITER_OBSERVED_CONTACT}" in description
 
 
+class TestSourceExcerpt:
+    """Design §6.2: "a window ... around each occurrence of the value"."""
+
+    def _question(
+        self, tmp_path: Path, source_ref: Any
+    ) -> pii_attribution.AttributionQuestion:
+        context = _context(tmp_path)
+        return pii_attribution.build_attribution_question(
+            context,
+            _VALUE,
+            _suspect_verdict(context),
+            target_uid=_TARGET_UID,
+            target_name=_TARGET_NAME,
+            target_type="person",
+            source_ref=source_ref,
+        )
+
+    def test_a_window_around_the_occurrence(self, tmp_path: Path) -> None:
+        source = tmp_path / "note.md"
+        source.write_text(
+            "A" * 500 + f"\nReferred by {_VALUE} at the conference.\n" + "B" * 500,
+            encoding="utf-8",
+        )
+        question = self._question(tmp_path, str(source))
+        assert question.source_excerpt is not None
+        assert _VALUE in question.source_excerpt
+        assert "Referred by" in question.source_excerpt
+        # Bounded: the window is 200 chars each side by default, not the file.
+        assert len(question.source_excerpt) < 700
+
+    def test_overlapping_windows_are_merged_once(self, tmp_path: Path) -> None:
+        source = tmp_path / "note.md"
+        source.write_text(f"cc: {_VALUE} and again {_VALUE}\n", encoding="utf-8")
+        question = self._question(tmp_path, str(source))
+        assert question.source_excerpt is not None
+        assert question.source_excerpt.count("\n...\n") == 0
+
+    def test_distant_occurrences_are_separate_windows(self, tmp_path: Path) -> None:
+        source = tmp_path / "note.md"
+        source.write_text(
+            f"first {_VALUE}\n" + "X" * 2000 + f"\nsecond {_VALUE}\n", encoding="utf-8"
+        )
+        question = self._question(tmp_path, str(source))
+        assert question.source_excerpt is not None
+        assert "\n...\n" in question.source_excerpt
+
+    @pytest.mark.parametrize("source_ref", [None, "raw/does/not/exist.md", {}])
+    def test_no_resolvable_source_yields_no_excerpt(
+        self, tmp_path: Path, source_ref: Any
+    ) -> None:
+        assert self._question(tmp_path, source_ref).source_excerpt is None
+
+    def test_a_source_the_value_is_absent_from_yields_no_excerpt(
+        self, tmp_path: Path
+    ) -> None:
+        """C3's own "the value is absent from it" branch: there is no window
+        around an occurrence that does not exist, and inventing one would
+        hand the judge text with no established relation to the value."""
+        source = tmp_path / "note.md"
+        source.write_text("No addresses in this note at all.\n", encoding="utf-8")
+        assert self._question(tmp_path, str(source)).source_excerpt is None
+
+    def test_the_excerpt_is_fenced_in_the_prompt_not_here(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fencing happens ONCE, at the prompt-assembly site that already
+        owns it -- double-fencing would nest delimiters inside a fence."""
+        _patch_record(monkeypatch, _entry())
+        source = tmp_path / "note.md"
+        source.write_text(f"Referred by {_VALUE}.\n", encoding="utf-8")
+        context = _context(tmp_path)
+        client = _judge_client(verdict="own", score=0.5)
+        _escalate(
+            context,
+            _suspect_verdict(context),
+            client=client,
+            source_ref=str(source),
+        )
+        sent = client.calls[0]["messages"][0]["content"]
+        assert sent.count("<source_excerpt") == 1
+        assert "Referred by" in sent
+
+    def test_a_dict_source_ref_resolves_through_its_path_key(
+        self, tmp_path: Path
+    ) -> None:
+        source = tmp_path / "note.md"
+        source.write_text(f"cc: {_VALUE}\n", encoding="utf-8")
+        question = self._question(tmp_path, {"path": str(source), "ref": "note"})
+        assert question.source_excerpt is not None
+        assert _VALUE in question.source_excerpt
+
+
 class TestRawValueNeverReachesPendingQuestions:
     """The explicit AC, through a REAL ``tier4_escalate`` write.
 
