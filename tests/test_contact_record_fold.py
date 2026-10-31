@@ -436,6 +436,65 @@ class TestOrphanFactEntries:
         assert facts == 1
         assert merged[pii.CONTACT_CLASSIFICATION_FIELD][0]["identifier"] == "5550100"
 
+    def test_identifier_relation_entry_travels_with_its_address(self) -> None:
+        """athenaeum#2212: `identifier_relation` joined
+        `_PER_IDENTIFIER_FACT_FIELDS`, so an alias relation the placement
+        executor stamped on an absorbed record lands on the canonical one --
+        through the SAME generic per-identifier machinery, with no field-
+        specific code (design §7.1)."""
+        canonical = {"uid": "U", "emails": ["y@example.org"]}
+        absorbed = {
+            "uid": "U",
+            "alt_emails": ["team@example.org"],
+            pii.IDENTIFIER_RELATION_FIELD: [
+                {
+                    "identifier": "team@example.org",
+                    "relation": "role-inbox",
+                    "source": "raw/x.md",
+                    "decided_by": "model",
+                }
+            ],
+        }
+
+        merged, added, facts, _verdicts = merge_contact_values(canonical, absorbed)
+
+        assert added == {"alt_emails": 1}
+        assert facts == 1
+        assert merged[pii.IDENTIFIER_RELATION_FIELD] == [
+            {
+                "identifier": "team@example.org",
+                "relation": "role-inbox",
+                "source": "raw/x.md",
+                "decided_by": "model",
+            }
+        ]
+
+    def test_identifier_relation_orphan_is_pruned(self) -> None:
+        """athenaeum#2212 + athenaeum#2196: an `identifier_relation` entry for
+        an address NEITHER record lists is dropped by the existing orphan
+        rule, unchanged -- `_identifier_keys` is computed over the merged
+        record's own values and the entry carries the `identifier` key the
+        generic rule reads."""
+        canonical = {"uid": "U", "emails": ["y@example.org"]}
+        absorbed = {
+            "uid": "U",
+            "alt_emails": [],
+            pii.IDENTIFIER_RELATION_FIELD: [
+                {
+                    "identifier": "gone@example.org",
+                    "relation": "shared",
+                    "source": "raw/x.md",
+                    "decided_by": "model",
+                }
+            ],
+        }
+
+        merged, added, facts, _verdicts = merge_contact_values(canonical, absorbed)
+
+        assert added == {}
+        assert facts == 0
+        assert pii.IDENTIFIER_RELATION_FIELD not in merged
+
     def test_holds_nothing_more_ignores_an_orphan_only_copy(self) -> None:
         """AC4: a copy whose only extra content is an orphaned fact entry
         (describes an address neither record lists) is retire-safe."""

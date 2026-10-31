@@ -30,7 +30,8 @@ push-metrics liveness, issue athenaeum#1422),
 ``_cmd_memory_class`` (memory-class backfill, issue athenaeum#996),
 ``_cmd_verdicts`` (verdict ledger inspection, issue athenaeum#712),
 ``_cmd_explain_routing`` (explain-routing, issue athenaeum#1176),
-``_cmd_recovery_yield`` (recovery-yield, issue athenaeum#1453).
+``_cmd_recovery_yield`` (recovery-yield, issue athenaeum#1453),
+``_cmd_attribution`` (attribution show|place, issue athenaeum#2212).
 
 FACTORING RULE: **every subcommand lives in its own ``_cmd_<name>.py`` module
 (or a small same-domain group module) with an ``add_<name>_subparser(subparsers)``
@@ -184,6 +185,7 @@ _SUBCOMMAND_LOADERS: dict[str, tuple[str, str]] = {
     "ingest": ("athenaeum._cmd_index", "add_index_subparsers"),
     "session-end": ("athenaeum._cmd_index", "add_index_subparsers"),
     "audit": ("athenaeum._cmd_audit", "add_audit_subparser"),
+    "attribution": ("athenaeum._cmd_attribution", "add_attribution_subparser"),
     "paste-cleanup": ("athenaeum._cmd_paste_cleanup", "add_paste_cleanup_subparser"),
     "schema": ("athenaeum._cmd_schema", "add_schema_subparser"),
     "quiesce": ("athenaeum._cmd_quiesce", "add_quiesce_subparser"),
@@ -203,6 +205,7 @@ def build_parser() -> argparse.ArgumentParser:
     ``func`` default) without going through argv parsing + dispatch. ``main``
     is the only intended caller in production code.
     """
+    from athenaeum._cmd_attribution import add_attribution_subparser
     from athenaeum._cmd_audit import add_audit_subparser
     from athenaeum._cmd_authority import add_authority_subparser
     from athenaeum._cmd_axiom import add_axiom_subparser
@@ -329,6 +332,8 @@ def build_parser() -> argparse.ArgumentParser:
     )  # reindex/rebuild-index, compile, registry, ingest, session-end
     add_quiesce_subparser(subparsers)  # quiesce (issue athenaeum#1898)
     add_triage_subparser(subparsers)  # triage run|report (issue athenaeum#1995)
+    # attribution show|place (issue athenaeum#2212)
+    add_attribution_subparser(subparsers)
 
     return parser
 

@@ -140,6 +140,8 @@ from athenaeum.config import (
     effective_raw_file_runtime_limit,
     load_config,
     preflight_model_rates,
+    resolve_attribution_escalate,
+    resolve_attribution_max_escalations_per_run,
     resolve_audit_on_touch_freshness_hours,
     resolve_authority_manifest_path,
     resolve_corrections_max_escalations_per_run,
@@ -5426,6 +5428,12 @@ class RunContext:
     # gate -- is off, same "disabled phase never touches this field"
     # contract as its siblings above).
     auto_apply_proposals_summary: dict[str, Any] | None = None
+    # Issue athenaeum#2212: run-summary counts from
+    # ``_run_attribution_shadow_phase`` (``None`` until that phase runs,
+    # including when its gate -- ``athenaeum.config.
+    # resolve_attribution_escalate``, DEFAULT OFF -- is off, same "disabled
+    # phase never touches this field" contract as its siblings above).
+    attribution_shadow_summary: dict[str, Any] | None = None
     # Issue athenaeum#1679 (§3.10): comparator-domain (five-verdict
     # comparator, reached only via ``athenaeum.wiki_dedupe`` -- see that
     # module's own docstring) counts from ``_run_wiki_dedup_phase`` (``None``
@@ -6424,6 +6432,14 @@ def _run_preconditions(ctx: RunContext) -> int | None:
         # construction, no I/O) — and a bad value should fail at startup,
         # not the first night an operator flips the phase on.
         resolve_provider(ctx.config, knob="rule_proposals", default=ctx.provider)
+        # Issue athenaeum#2212: ``attribution`` is independently routed for
+        # the same reason, and from this issue onward this module builds its
+        # client too (``_run_attribution_shadow_phase``). Validated here on
+        # exactly the same terms as ``rule_proposals`` directly above: cheap,
+        # unconditional even while the phase defaults off, and a bad
+        # ``llm.providers.attribution`` value should fail at startup rather
+        # than the first night an operator flips the phase on.
+        resolve_provider(ctx.config, knob="attribution", default=ctx.provider)
     except ProviderConfigError as exc:
         log.error("%s", exc)
         return 1
@@ -7515,6 +7531,116 @@ def _run_auto_apply_proposals_phase(ctx: RunContext) -> None:
             summary.not_warranted,
             summary.skipped_pending,
             summary.skipped_suppressed,
+        )
+
+
+def _run_attribution_shadow_phase(ctx: RunContext) -> None:
+    """Shadow attribution escalation (issue athenaeum#2212, design §9.1/§9.2).
+
+    Escalates the parked SHADOW attribution suspects to the measured tier for
+    their question class and logs the placement it WOULD have made, with that
+    placement's calibrated probability. **It files nothing**: every call goes
+    through :func:`athenaeum.pii_attribution.escalate_shadow_suspects`, which
+    passes ``apply=False`` to the placement executor. Enforcement is
+    athenaeum#2220.
+
+    **Why this site.** It is the one place in the pipeline where all four
+    conditions hold:
+
+    - It runs AFTER every writer. The design (§9.1) requires each writer's
+      output to be unchanged in observe mode, and the only way to be
+      structurally sure of that is to run after they have all finished. The
+      two other candidate sites are both inside per-raw-file loops —
+      ``process_one``'s own ``build_attribution_context`` call (athenaeum#2216)
+      and ``batch._finalize``'s — so neither can see a suspect a LATER file's
+      writer parks, and neither can bound the work per RUN.
+    - It is once per run, so :func:`~athenaeum.config.
+      resolve_attribution_max_escalations_per_run` is a real per-run cap
+      rather than a per-file one multiplied by the file count.
+    - A suspect parked by THIS run's own writers is already on disk by the
+      time it reads the directory — the same "make this run's own writes
+      visible to a later phase in this same run" ordering rationale
+      :func:`_run_rule_proposal_phase` gives for its own placement.
+    - ``ctx`` already holds the config, the ``TokenUsage``, the API key and
+      the wiki/knowledge roots, so the phase needs no new plumbing.
+
+    **Two guards, both needed.** The config gate
+    (:func:`~athenaeum.config.resolve_attribution_escalate`) is DEFAULT OFF,
+    for the reason :func:`_run_rule_proposal_phase`'s is: this adds a new
+    unattended model call to the nightly run. And even enabled,
+    ``escalate_shadow_suspects`` is a no-op without a client — a clientless
+    escalation yields ``unclear`` for every suspect (design §6.3) and would
+    flood the human queue on every run, which is the one way a default-on
+    observe hook could do damage.
+
+    **The queue items are counted, not filed.** ``escalate_shadow_suspects``
+    returns the ``EscalationItem``s a human would see, and this phase logs
+    the count. It deliberately does NOT hand them to :func:`tier4_escalate`:
+    design §8.1 sends an item with no valid calibration to a human only when
+    "the mode is ``enforce``", and this issue is observe-only. Filing them
+    now would put one block in ``_pending_questions.md`` per parked suspect
+    on a store whose shipped calibration record passes no class at all.
+
+    Skipped whenever ``ctx.deadline_tripped`` or the deadline has expired,
+    mirroring its opt-in siblings above: a run that already blew its
+    wall-clock budget must not open a brand-new LLM knob afterward.
+    """
+    if not resolve_attribution_escalate(ctx.config):
+        return
+    if ctx.deadline_tripped or ctx.deadline_exceeded():
+        ctx.attribution_shadow_summary = {"skipped_deadline_tripped": True}
+        return
+
+    _provider = resolve_provider(ctx.config, knob="attribution", default=ctx.provider)
+    ctx.knob_providers["attribution"] = _provider
+    ctx.knob_models["attribution"] = pii_attribution._get_attribution_model_for_preflight(
+        ctx.config
+    )
+    client = build_llm_client(
+        ctx.config, knob="attribution", api_key=ctx.api_key, max_retries=3
+    )
+
+    try:
+        context = pii_attribution.build_attribution_context(ctx.knowledge_root, ctx.config)
+        summary = pii_attribution.escalate_shadow_suspects(
+            context,
+            client=client,
+            config=ctx.config,
+            usage=ctx.usage,
+            limit=resolve_attribution_max_escalations_per_run(ctx.config),
+        )
+    except Exception:
+        log.exception("attribution shadow-escalation phase failed; continuing run")
+        ctx.attribution_shadow_summary = {"skipped_failed": True}
+        return
+
+    ctx.attribution_shadow_summary = {
+        "considered": summary.considered,
+        "escalated": summary.escalated,
+        "proposed": summary.proposed,
+        "would_queue": summary.queued,
+        "memo_hits": summary.memo_hits,
+        # Issue athenaeum#2212: these three plus `escalated` partition
+        # `considered` exactly, so the row reconciles instead of leaving an
+        # operator to infer a remainder. `skipped_over_cap` is now the
+        # still-needs-escalating tail, which must drain across runs.
+        "skipped_not_suspect": summary.skipped_not_suspect,
+        "skipped_already_answered": summary.skipped_already_answered,
+        "skipped_over_cap": summary.skipped_over_cap,
+    }
+    if summary.escalated or summary.skipped_already_answered:
+        log.info(
+            "attribution shadow-escalation: %d/%d suspect(s) escalated, "
+            "%d proposed placement(s) logged and NOTHING filed, %d would reach "
+            "a human, %d already answered (no call), %d not a suspect, "
+            "%d still to do and left for the next run (over cap)",
+            summary.escalated,
+            summary.considered,
+            summary.proposed,
+            summary.queued,
+            summary.skipped_already_answered,
+            summary.skipped_not_suspect,
+            summary.skipped_over_cap,
         )
 
 
@@ -11511,6 +11637,15 @@ def run(
     # opt-in, zero-cost-until-enabled, LAST in the run).
     _run_tier_movement_proposals_phase(ctx)
     _run_auto_apply_proposals_phase(ctx)
+
+    # Phase: shadow attribution escalation (issue athenaeum#2212) — DEFAULT
+    # OFF (`librarian.attribution.escalate`), same opt-in contract as the
+    # three phases directly above, and LAST for the same reason plus one of
+    # its own: it must run after EVERY writer, because design
+    # `attribution-verification.md` §9.1 requires observe mode to leave each
+    # writer's output unchanged, and it reads the suspects THIS run's writers
+    # just parked. See `_run_attribution_shadow_phase`'s own docstring.
+    _run_attribution_shadow_phase(ctx)
 
     # Phase: finalize (spend summary + ledger, post-run push, page-size
     # guardrail, pending-merge revalidation advisor, summary emit, drain

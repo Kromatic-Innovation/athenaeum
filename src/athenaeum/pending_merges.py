@@ -877,6 +877,13 @@ def write_pending_merge(
     approve time, delete every source page (the destructive misclassification
     that motivated this issue). ``None`` (the default) simply uses the derived
     value. Passing an unrecognized ``write_kind`` string also fails closed.
+
+    Issue athenaeum#2212: an empty (or whitespace-only) ``draft_merged_body``
+    on a proposal whose DERIVED ``write_kind`` is ``fold-into-existing``
+    also fails closed with a :class:`ValueError`, for the mirror reason —
+    :func:`_apply_fold_into_existing` step 1 writes the draft over the
+    pre-existing canonical page, so an empty draft blanks it at approve
+    time. ``create-merged`` is unaffected (nothing exists to overwrite).
     """
     derived_write_kind = classify_write_kind(merge_target_name, merges_path.parent)
     if write_kind is None:
@@ -894,6 +901,23 @@ def write_pending_merge(
             "Refusing to store a misclassified proposal — a wrong "
             "'fold-into-existing' deletes the source pages at approve time. "
             "Pass write_kind=None to derive it, or correct merge_target_name."
+        )
+    if write_kind == "fold-into-existing" and not draft_merged_body.strip():
+        raise ValueError(
+            "draft_merged_body is empty (athenaeum#2212): target slug "
+            f"{slugify(merge_target_name)!r} classifies as "
+            f"{derived_write_kind!r} under {merges_path.parent}, so the target "
+            "IS an existing canonical page and approving this proposal writes "
+            "draft_merged_body straight over it "
+            "(:func:`_apply_fold_into_existing` step 1). Refusing to store a "
+            "proposal whose approval would blank that page — the same "
+            "fail-closed reasoning as the write_kind mismatch above "
+            "(athenaeum#748), for the mirror destructive case: there the "
+            "misclassification loses the SOURCE pages, here the empty draft "
+            "loses the TARGET. Pass the canonical page's current text "
+            "verbatim (a fold's value is alias bookkeeping + source "
+            "tombstoning, not a body rewrite — see "
+            "``merges propose-fold``'s default) or a real merged body."
         )
     if audit_counters is not None:
         _audit_pending_merge_sources(

@@ -565,6 +565,156 @@ def resolve_attribution_context_window_chars(config: dict[str, Any] | None) -> i
     return 200
 
 
+def resolve_attribution_thresholds(config: dict[str, Any] | None) -> dict[str, float]:
+    """Per-question-class calibrated-probability thresholds (issue athenaeum#2212).
+
+    Read from ``librarian.attribution.thresholds``, a mapping of question
+    class to the CALIBRATED probability an escalation must reach before its
+    placement is filed (design ``docs/design/attribution-verification.md``
+    §8.2: "A deployment can override them in
+    ``librarian.attribution.thresholds.<class>``. A threshold is a calibrated
+    probability, not a raw score"). DEFAULT-EMPTY: unconfigured, every class
+    falls back to the shipped calibration record's own threshold
+    (:func:`athenaeum.pii_attribution.threshold_for_class`).
+
+    SINGLE-ARGUMENT by design: this returns the WHOLE mapping and the caller
+    selects its class, rather than taking a class parameter. A two-argument
+    ``resolve_*`` cannot be exercised by
+    ``tests/test_config_resolver_parity_generic.py``'s prober (which only
+    ever calls ``fn(config)``) and would have to be excluded from it.
+
+    Keys are NOT filtered against the question-class vocabulary: an unknown
+    key is simply never looked up by the one caller, so dropping it here
+    would buy nothing and would hide a typo behind a silent empty result
+    instead of leaving it visible in the returned mapping. VALUES are
+    validated: a non-numeric value, a ``bool`` (``int`` subclass guard), or
+    one outside ``[0, 1]`` is logged at WARNING and omitted rather than
+    raising — a malformed threshold must not take a run down, and omitting it
+    falls back to the calibration record, which is the safe direction (design
+    §8.1 sends an item with no valid threshold to a human).
+
+    See :func:`resolve_relay_local_prefixes` for why this inlines its own
+    ``librarian`` -> ``attribution`` -> ``thresholds`` chain rather than
+    sharing a helper.
+    """
+    resolved: dict[str, float] = {}
+    if isinstance(config, dict):
+        librarian_cfg = config.get("librarian")
+        if isinstance(librarian_cfg, dict):
+            attribution_cfg = librarian_cfg.get("attribution")
+            if isinstance(attribution_cfg, dict):
+                raw = attribution_cfg.get("thresholds")
+                if isinstance(raw, dict):
+                    for key, value in raw.items():
+                        name = str(key).strip()
+                        if not name:
+                            continue
+                        if isinstance(value, bool) or not isinstance(value, (int, float)):
+                            logger.warning(
+                                "Ignoring non-numeric attribution threshold for "
+                                "question class %r: %r",
+                                name,
+                                value,
+                            )
+                            continue
+                        parsed = float(value)
+                        if not 0.0 <= parsed <= 1.0:
+                            logger.warning(
+                                "Ignoring out-of-range attribution threshold for "
+                                "question class %r: %r (expected a calibrated "
+                                "probability in [0, 1])",
+                                name,
+                                parsed,
+                            )
+                            continue
+                        resolved[name] = parsed
+    return resolved
+
+
+def resolve_attribution_escalate(config: dict[str, Any] | None) -> bool:
+    """``librarian.attribution.escalate`` (default False). DEFAULT OFF.
+
+    Issue athenaeum#2212: gates the librarian's shadow-escalation phase
+    (``librarian._run_attribution_shadow_phase``), which escalates already-
+    parked SHADOW attribution suspects to the measured tier and logs the
+    placement it would have made. With this off (the default), that phase
+    returns immediately — no client constructed, no suspect directory read,
+    no model call, and no change to any writer's output.
+
+    DEFAULT OFF is deliberate, for the same reason
+    :func:`resolve_rule_proposals_enabled` is: this wiring adds a NEW
+    unattended model call to the nightly run. It is also the design's own
+    staging (§9.1): until the mode knob lands, "the code observes", and an
+    operator opts into even the observe-mode model spend.
+
+    Mirrors :func:`resolve_rule_proposals_enabled`'s shape: env
+    ``ATHENAEUM_ATTRIBUTION_ESCALATE`` (``1``/``true``/``yes``/``on``,
+    case-insensitive) > yaml ``librarian.attribution.escalate`` > default
+    ``False``. Non-bool yaml values and unrecognized env strings fall
+    through to off.
+    """
+    env = os.environ.get("ATHENAEUM_ATTRIBUTION_ESCALATE")
+    if env is not None:
+        return env.strip().lower() in ("1", "true", "yes", "on")
+    if isinstance(config, dict):
+        librarian_cfg = config.get("librarian")
+        if isinstance(librarian_cfg, dict):
+            attribution_cfg = librarian_cfg.get("attribution")
+            if isinstance(attribution_cfg, dict):
+                raw = attribution_cfg.get("escalate")
+                if isinstance(raw, bool):
+                    return raw
+    return False
+
+
+#: Default for :func:`resolve_attribution_max_escalations_per_run` (issue
+#: athenaeum#2212): how many parked shadow suspects one run may escalate.
+#: There is no pre-existing per-run cap this phase could reuse — the
+#: librarian's ``max_api_calls`` is a run-wide ceiling the entity tier has
+#: usually already spent by the time this phase runs, so it bounds nothing
+#: here. 25 is chosen as the design's own cost unit: §13 prices one
+#: escalation at roughly 250 output tokens, so a capped run adds a small,
+#: predictable, bounded increment rather than a cost proportional to however
+#: many suspects a backlog happens to hold.
+DEFAULT_ATTRIBUTION_MAX_ESCALATIONS_PER_RUN = 25
+
+
+def resolve_attribution_max_escalations_per_run(config: dict[str, Any] | None) -> int:
+    """``librarian.attribution.max_escalations_per_run`` (default 25).
+
+    Issue athenaeum#2212: caps how many parked SHADOW suspects the
+    librarian's shadow-escalation phase escalates in one run, so a store
+    with a large parked backlog pays a bounded increment per run instead of
+    one model call per suspect. ``<= 0`` disables the phase entirely (the
+    same "a non-positive value means off" escape hatch
+    :func:`athenaeum.librarian.librarian_max_runtime` uses for its own
+    deadline).
+
+    Env ``ATHENAEUM_ATTRIBUTION_MAX_ESCALATIONS_PER_RUN`` > yaml
+    ``librarian.attribution.max_escalations_per_run`` >
+    :data:`DEFAULT_ATTRIBUTION_MAX_ESCALATIONS_PER_RUN`. A malformed env
+    value logs a WARNING (via :func:`_env_number`) and falls back to yaml; a
+    ``bool`` or non-integer yaml value falls through to the default. See
+    :func:`resolve_relay_local_prefixes` for why this inlines its own
+    ``librarian.attribution.*`` chain rather than sharing a helper.
+    """
+    value = _env_number("ATHENAEUM_ATTRIBUTION_MAX_ESCALATIONS_PER_RUN", int)
+    if value is not None:
+        return value
+    if isinstance(config, dict):
+        librarian_cfg = config.get("librarian")
+        if isinstance(librarian_cfg, dict):
+            attribution_cfg = librarian_cfg.get("attribution")
+            if isinstance(attribution_cfg, dict):
+                raw = attribution_cfg.get("max_escalations_per_run")
+                if raw is not None and not isinstance(raw, bool):
+                    try:
+                        return int(raw)
+                    except (TypeError, ValueError):
+                        return DEFAULT_ATTRIBUTION_MAX_ESCALATIONS_PER_RUN
+    return DEFAULT_ATTRIBUTION_MAX_ESCALATIONS_PER_RUN
+
+
 def _normalize_audience_roles(values: Any) -> set[str]:
     """Case-fold, trim, and drop empties from an iterable of role ids (athenaeum#312)."""
     if not isinstance(values, (list, tuple, set)):

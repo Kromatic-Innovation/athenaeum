@@ -91,6 +91,7 @@ import logging
 import os
 import re
 import weakref
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -104,6 +105,7 @@ from athenaeum.atomic_io import atomic_write_text
 from athenaeum.json_utils import extract_json_object
 from athenaeum.models import (
     EntityIndex,
+    EscalationItem,
     TokenUsage,
     cache_usage_counts,
     parse_frontmatter,
@@ -139,15 +141,25 @@ WRITER_CONTACT_FOLD = "contact-fold"
 #: convergence helpers' writer id — see "Prose-compile scrub" below.
 WRITER_PROSE_COMPILE = "prose-compile"
 
+#: issue athenaeum#2212 (model escalation / re-attribution): the placement
+#: executor's own writer id. Design §7.2 — "every filing goes back through
+#: :func:`check_contact_attribution` with ``writer="re-attribution"`` before
+#: it writes" — so the re-check a placement performs is attributable to the
+#: placement itself rather than to whichever writer originally proposed the
+#: value.
+WRITER_RE_ATTRIBUTION = "re-attribution"
+
 #: The four writers issue athenaeum#2210 wires, plus athenaeum#2216's
-#: prose-compile scrub. Membership, not count, is what the writer-inventory
-#: guard test asserts (future children extend this set further).
+#: prose-compile scrub and athenaeum#2212's re-attribution placement.
+#: Membership, not count, is what the writer-inventory guard test asserts
+#: (future children extend this set further).
 WRITER_IDS: tuple[str, ...] = (
     WRITER_OBSERVED_CONTACT,
     WRITER_CORRECTION_ADD,
     WRITER_PII_MIGRATION,
     WRITER_CONTACT_FOLD,
     WRITER_PROSE_COMPILE,
+    WRITER_RE_ATTRIBUTION,
 )
 
 # ---------------------------------------------------------------------------
@@ -1330,6 +1342,16 @@ def park_suspect(
         "shadow": merged_shadow,
         "updated_at": now_iso(),
     }
+    # Issue athenaeum#2212: keys a LATER actor stamped on this file and this
+    # function does not author. Carried forward verbatim, appended after
+    # everything above so the pre-athenaeum#2212 key order is untouched.
+    # Without this, a routine observe-mode re-park would rebuild `meta` from
+    # its own inputs and silently drop the recorded judgement
+    # (:func:`record_suspect_judgement`). The idempotency property below is
+    # unaffected: an unchanged re-park still produces identical merged bytes.
+    for carried in _SUSPECT_CARRIED_FORWARD_KEYS:
+        if carried in existing_meta:
+            meta[carried] = existing_meta[carried]
     body = (
         "Attribution suspect entry (issue athenaeum#2210). This record is outside "
         "the corpus: not embedded, recalled, or merge-eligible. Reversible with "
@@ -1358,6 +1380,7 @@ __all__ = [
     "WRITER_PII_MIGRATION",
     "WRITER_CONTACT_FOLD",
     "WRITER_PROSE_COMPILE",
+    "WRITER_RE_ATTRIBUTION",
     "WRITER_IDS",
     "DISPOSITION_PASS",
     "DISPOSITION_NON_PERSONAL",
@@ -1815,6 +1838,34 @@ def _load_contact_attribution_judge_prompt() -> str:
 #: loaded once at import time, never inlined as a literal here.
 CONTACT_ATTRIBUTION_JUDGE_SYSTEM: str = _load_contact_attribution_judge_prompt()
 
+
+def attribution_call_identity(
+    question_class: str, config: dict[str, Any] | None = None
+) -> tuple[str, str]:
+    """The ``(model, prompt_sha256)`` pair a judge call for *question_class* uses.
+
+    Both halves of the memo key (issue athenaeum#2212, design §4.3) that are
+    resolvable BEFORE any call: the model
+    (:func:`_get_attribution_model`, seeded with
+    :func:`recommended_model_for_class`'s recommendation for this class) and
+    the sha256 of the live judge prompt. Factored out of
+    :func:`judge_contact_attribution` — which now calls it — rather than
+    copied, so a memo LOOKUP (made before the call, which is the whole point
+    of a memo) and the judgement a real call stamps cannot disagree about
+    which model/prompt pair they are keyed on. Two copies of the same
+    expression would silently miss on every lookup the moment one of them
+    changed.
+    """
+    calibration_model = recommended_model_for_class(question_class)
+    model = _get_attribution_model(
+        question_class, config, calibration_model=calibration_model
+    )
+    prompt_sha256 = hashlib.sha256(
+        CONTACT_ATTRIBUTION_JUDGE_SYSTEM.encode("utf-8")
+    ).hexdigest()
+    return model, prompt_sha256
+
+
 #: Output budget: design §13 measures "about 250 output tokens" for one
 #: escalation call. 512 gives 2x headroom over that measurement for the
 #: quote + reasoning fields, resolved through the same
@@ -1945,13 +1996,11 @@ def judge_contact_attribution(
     value as settled. Never raises.
     """
     question_class = question_class_for(question.checks)
-    calibration_model = recommended_model_for_class(question_class)
-    model = _get_attribution_model(
-        question_class, config, calibration_model=calibration_model
-    )
-    prompt_sha256 = hashlib.sha256(
-        CONTACT_ATTRIBUTION_JUDGE_SYSTEM.encode("utf-8")
-    ).hexdigest()
+    # Issue athenaeum#2212: resolved through the SHARED
+    # :func:`attribution_call_identity`, so the memo's pre-call lookup key
+    # and this judgement's stamped (model, prompt_sha256) agree by
+    # construction rather than by two copies of the same expression.
+    model, prompt_sha256 = attribution_call_identity(question_class, config)
 
     def _unclear() -> AttributionJudgement:
         return AttributionJudgement(
@@ -2097,4 +2146,1665 @@ __all__ += [
     "recommended_model_for_class",
     "CONTACT_ATTRIBUTION_JUDGE_SYSTEM",
     "judge_contact_attribution",
+]
+
+
+# ---------------------------------------------------------------------------
+# Escalation: calibrated thresholds, the verdict memo, and the placement
+# entry point (athenaeum#2212)
+# ---------------------------------------------------------------------------
+#
+# Child E of epic athenaeum#2192, designed in
+# ``docs/design/attribution-verification.md`` §6 ("Escalation contract"),
+# §7 ("Filing the result"), §8 ("The human queue and the threshold") and
+# §9 ("Observe, then enforce"). Appended after athenaeum#2211's section for
+# the same anchor-discipline reason that section gives: sibling lanes edit
+# the regions above, and this one touches none of them. Its public names are
+# exported via a THIRD ``__all__ +=`` below.
+#
+# **This issue is observe (shadow) mode only.** Nothing here files anything
+# on its own initiative: :func:`escalate_contact_attribution_suspect` passes
+# the caller's ``apply`` straight through to
+# :func:`athenaeum.pii.place_contact_value`, and every pipeline caller in
+# this issue passes ``apply=False``. Enforcement is athenaeum#2220.
+#
+# **Layering.** This module is L3 and must not reach L4
+# (``tiers``/``pending_merges``/``librarian``/``batch``/``decisions``), in
+# any form -- ``tests/test_import_graph_acyclic.py`` counts a
+# function-local import as an edge. So:
+#
+# - the human-queue item is RETURNED as an :class:`athenaeum.models.
+#   EscalationItem` (L1) for an L4 caller to hand to ``tiers.tier4_escalate``;
+# - the same-entity merge proposal is RETURNED as an
+#   :class:`AttributionMergeProposal` for an L4 caller to adapt onto
+#   ``pending_merges.write_pending_merge``, and the proposer itself is
+#   INJECTED by that caller;
+# - the design §7.2 re-check is a callable this module binds to its own
+#   :func:`check_contact_attribution`, which is how ``pii`` (an L3 sibling
+#   this module imports) performs it without an import back.
+
+
+# ---------------------------------------------------------------------------
+# The calibrated mapping (design §6.5, §12.4)
+# ---------------------------------------------------------------------------
+
+
+def calibrated_probability(entry: CalibrationEntry, score: float) -> float:
+    """Map a raw *score* through *entry*'s bins to a calibrated probability.
+
+    Design §6.5: ``score`` is any scalar, and the calibration record maps it
+    to an empirical probability of being correct. §12.4's ``bins`` are
+    ``(lo, hi, observed_accuracy)`` triples in record order.
+
+    **Edge semantics, stated rather than inferred** (the design gives the
+    shape but not the boundary rule):
+
+    - A bin matches when ``lo <= score < hi`` -- lower bound INCLUSIVE,
+      upper bound EXCLUSIVE. §12.4's example bins share endpoints
+      (``[0.0, 0.42, ...], [0.42, 0.70, ...]``), so this is the only reading
+      under which they partition rather than overlap.
+    - The LAST bin is closed at both ends (``lo <= score <= hi``). Without
+      that, a score exactly at the top of the measured range -- ``1.0`` for
+      a self-reported confidence -- would fall off the end of a record that
+      demonstrably covers it.
+    - A score BELOW the first bin's ``lo``, ABOVE the last bin's ``hi``, or
+      in a GAP between two bins is **unmappable** and yields ``0.0``.
+    - An EMPTY ``bins`` tuple means no mapping was ever measured, and also
+      yields ``0.0``. This is today's shipped state for every class.
+
+    **Fail safe.** Every unmappable case returns ``0.0`` -- a probability
+    that cannot clear any threshold in ``[0, 1]`` except ``0.0`` itself, and
+    :func:`threshold_for_class` returns ``None`` (not ``0.0``) for exactly
+    the entries that have no measured bins, so such an item goes to a human
+    (design §8.1). It never returns a default-HIGH probability: a wrongly
+    placed address is not recoverable the way a false referral to a human is.
+
+    :data:`SIGNAL_CLASS_LEVEL` is handled explicitly, BEFORE any bin
+    arithmetic. Design §6.5 signal 3: the score is a constant, so "the
+    threshold degenerates to 'this class auto-files or it does not'". A
+    passing class-level entry therefore returns ``1.0`` (the class
+    auto-files; its own measured per-class accuracy is what cleared the bar,
+    and *score* carries no information to weigh against it) and a
+    non-passing one returns ``0.0``. Running such an entry through the bins
+    would read its empty ``bins`` as an unmappable score and lose that
+    distinction.
+    """
+    if entry.signal == SIGNAL_CLASS_LEVEL:
+        return 1.0 if entry.passes else 0.0
+    if not entry.bins:
+        return 0.0
+    try:
+        value = float(score)
+    except (TypeError, ValueError):
+        return 0.0
+    last_index = len(entry.bins) - 1
+    for position, (lo, hi, probability) in enumerate(entry.bins):
+        if lo <= value < hi or (position == last_index and lo <= value <= hi):
+            return float(probability)
+    return 0.0
+
+
+def _valid_calibration_entry(question_class: str) -> CalibrationEntry | None:
+    """The shipped calibration entry for *question_class*, or ``None``.
+
+    ``None`` for a record that cannot be loaded, carries no entry for this
+    class, or carries one that does not :attr:`~CalibrationEntry.passes` --
+    the same three conditions :func:`recommended_model_for_class` already
+    treats as "no recommendation" (design §12.4: "If no tier passes, the
+    class has no recommended tier"). Never raises.
+    """
+    try:
+        record = load_calibration_record()
+    except (CalibrationRecordError, OSError):
+        return None
+    entry = record.get(question_class)
+    if entry is None or not entry.passes:
+        return None
+    return entry
+
+
+def calibrated_probability_for_class(question_class: str, score: float) -> float:
+    """:func:`calibrated_probability` against the SHIPPED record's entry.
+
+    ``0.0`` when *question_class* has no valid calibration entry
+    (:func:`_valid_calibration_entry`) -- the same fail-safe direction as an
+    unmappable score.
+    """
+    entry = _valid_calibration_entry(question_class)
+    if entry is None:
+        return 0.0
+    return calibrated_probability(entry, score)
+
+
+def threshold_for_class(
+    question_class: str, config: dict[str, Any] | None = None
+) -> float | None:
+    """The calibrated-probability threshold for *question_class* (design §8.2).
+
+    Precedence: the operator's ``librarian.attribution.thresholds.<class>``
+    override (:func:`athenaeum.config.resolve_attribution_thresholds`) >
+    the shipped calibration entry's own
+    :attr:`~CalibrationEntry.threshold` > ``None``.
+
+    The override wins UNCONDITIONALLY, including over a missing or
+    non-passing calibration entry: design §8.2 gives a deployment the
+    override precisely so one that has run its own eval is not held to the
+    shipped record, and setting it is an explicit operator act.
+
+    An override does NOT substitute for a calibration record. The threshold
+    is compared against :func:`calibrated_probability_for_class`, which
+    needs a valid entry to map a score at all, so a deployment that
+    overrides the threshold without having run its own eval gets ``0.0``
+    for every probability and a positive override that nothing can clear --
+    every item goes to a human. That is the correct fail-safe direction:
+    design §8.2's "a threshold is a calibrated probability, not a raw
+    score".
+
+    ``None`` means **"no valid calibration for this class"**, which per
+    design §8.1 sends the item to a human. A calibration entry whose
+    ``passes`` is ``false`` yields ``None`` rather than its stored
+    ``threshold``: that threshold was never measured (today's shipped record
+    carries ``threshold: 0.0`` with ``passes: false`` for every class, and a
+    ``0.0`` threshold would auto-file EVERYTHING), so a non-passing entry
+    must not yield an auto-filing threshold under any reading.
+    """
+    overrides = config_module.resolve_attribution_thresholds(config)
+    override = overrides.get(question_class)
+    if override is not None:
+        return float(override)
+    entry = _valid_calibration_entry(question_class)
+    if entry is None:
+        return None
+    return entry.threshold
+
+
+# ---------------------------------------------------------------------------
+# The verdict memo (design §4.3)
+# ---------------------------------------------------------------------------
+
+#: Memo filename, on the contacts (excluded) surface beside the attribution
+#: log and the suspect files (design §4.3).
+ATTRIBUTION_MEMO_FILENAME = "_attribution_memo.jsonl"
+
+#: Row-schema version, mirroring :data:`ATTRIBUTION_LOG_VERSION`.
+ATTRIBUTION_MEMO_VERSION = 1
+
+
+def default_attribution_memo_path(contacts_root: Path) -> Path:
+    """Default memo path: ``<contacts_root>/_attribution_memo.jsonl``."""
+    return Path(contacts_root) / ATTRIBUTION_MEMO_FILENAME
+
+
+def _canonical_source_ref(source_ref: str | dict[str, Any] | None) -> str:
+    """Deterministic string form of a *source_ref* for the memo key.
+
+    ``source_ref`` is loose at this seam (design §4.1): a bare path string,
+    a structured mapping, or ``None``. A canonical JSON dump with sorted
+    keys makes all three deterministic and makes two dicts that differ only
+    in key ORDER hash to the same memo key -- which is the correct answer,
+    since they name the same source. ``default=str`` keeps an exotic value
+    (a :class:`~pathlib.Path` a caller passed inside the mapping) from
+    raising instead of memoising.
+    """
+    return json.dumps(source_ref, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def attribution_memo_key(
+    *,
+    value_key: str,
+    target_uid: str,
+    source_ref: str | dict[str, Any] | None,
+    prompt_sha256: str,
+    model: str,
+) -> str:
+    """The memo key: a stable digest over design §4.3's exact five components.
+
+    ``(value_key, target_uid, source_ref, prompt_sha256, model)`` -- so a
+    repeat of the same question under the same prompt and model is a hit,
+    and a CHANGED prompt sha or model re-asks (both are part of the key, and
+    both are resolvable before the call via
+    :func:`attribution_call_identity`).
+
+    Built from :func:`value_key_for`'s HMAC, never from the raw value, so
+    the key is safe to read, diff and log without the excluded surface --
+    the same property :func:`log_attribution_verdict`'s rows have.
+    """
+    payload = json.dumps(
+        [
+            value_key,
+            target_uid,
+            _canonical_source_ref(source_ref),
+            prompt_sha256,
+            model,
+        ],
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def read_attribution_memo(memo_path: Path) -> dict[str, AttributionJudgement]:
+    """Read the memo at *memo_path* into ``{key: judgement}``.
+
+    Last-write-wins on a duplicate key: the file is append-only, so the LAST
+    row for a key is the current answer. A malformed line (not JSON, not an
+    object, missing its key, or carrying an out-of-vocabulary verdict) is
+    logged at WARNING and SKIPPED -- never fatal. A memo is a cache; a
+    corrupt row must cost one re-ask, not a run.
+
+    Returns an empty mapping when the file does not exist.
+    """
+    resolved = Path(memo_path)
+    if not resolved.exists():
+        return {}
+    entries: dict[str, AttributionJudgement] = {}
+    try:
+        text = resolved.read_text(encoding="utf-8")
+    except OSError as exc:
+        log.warning("pii_attribution: memo at %s unreadable (%s); treating as empty", resolved, exc)
+        return {}
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            row = json.loads(stripped)
+        except ValueError:
+            log.warning("pii_attribution: skipping malformed memo line %d in %s", lineno, resolved)
+            continue
+        if not isinstance(row, dict):
+            log.warning("pii_attribution: skipping non-object memo line %d in %s", lineno, resolved)
+            continue
+        key = row.get("key")
+        verdict = row.get("verdict")
+        if not isinstance(key, str) or not key:
+            log.warning("pii_attribution: skipping keyless memo line %d in %s", lineno, resolved)
+            continue
+        if not isinstance(verdict, str) or verdict not in JUDGEMENT_VERDICTS:
+            log.warning(
+                "pii_attribution: skipping memo line %d in %s (verdict %r not in the vocabulary)",
+                lineno,
+                resolved,
+                verdict,
+            )
+            continue
+        owner_uid = row.get("owner_uid")
+        alias_relation = row.get("alias_relation")
+        quote = row.get("quote")
+        try:
+            score = float(row.get("score", 0.0))
+        except (TypeError, ValueError):
+            score = 0.0
+        entries[key] = AttributionJudgement(
+            verdict=verdict,
+            owner_uid=owner_uid if isinstance(owner_uid, str) and owner_uid else None,
+            alias_relation=(
+                alias_relation
+                if isinstance(alias_relation, str) and alias_relation in ALIAS_RELATIONS
+                else None
+            ),
+            quote=quote if isinstance(quote, str) and quote else None,
+            score=score,
+            model=str(row.get("model") or ""),
+            prompt_sha256=str(row.get("prompt_sha256") or ""),
+        )
+    return entries
+
+
+def memo_lookup(
+    context: AttributionContext,
+    *,
+    value_key: str,
+    target_uid: str,
+    source_ref: str | dict[str, Any] | None,
+    prompt_sha256: str,
+    model: str,
+) -> AttributionJudgement | None:
+    """The memoised judgement for this question, or ``None`` (design §6.1).
+
+    A hit means **no model call at all** -- the lookup happens BEFORE the
+    call, which is why :func:`attribution_call_identity` resolves the model
+    and prompt sha up front.
+    """
+    key = attribution_memo_key(
+        value_key=value_key,
+        target_uid=target_uid,
+        source_ref=source_ref,
+        prompt_sha256=prompt_sha256,
+        model=model,
+    )
+    return read_attribution_memo(default_attribution_memo_path(context.contacts_root)).get(key)
+
+
+def is_memoisable_judgement(judgement: AttributionJudgement) -> bool:
+    """Whether *judgement* is an ANSWER worth memoising (issue athenaeum#2212).
+
+    The memo exists so one question is never re-spent (design §4.3). A
+    fail-closed :data:`JUDGEMENT_UNCLEAR` is not an answer to that question
+    — design §6.3 returns it for an API error, an unparseable response, an
+    out-of-vocabulary verdict and a missing client alike. Memoising one
+    makes a single transient 429 permanent: the pair is suppressed for its
+    whole ``(value_key, target_uid, source_ref, prompt_sha256, model)``
+    identity, the item sits in the human queue with no retry, and
+    re-running the escalation — the design's own way back — can never
+    re-ask. So a fail-closed ``unclear`` is NOT memoised, and the next
+    escalation re-asks.
+
+    Telling a fail-closed ``unclear`` from a model that genuinely answered
+    "unclear": every fail-closed path in
+    :func:`judge_contact_attribution` returns its local ``_unclear()``,
+    which is exactly ``verdict="unclear"`` with the dataclass defaults for
+    everything the response payload would otherwise fill in — ``score 0.0``
+    and no ``owner_uid``/``alias_relation``/``quote``. So ANY of those being
+    set proves the payload parsed, i.e. a real model answer, and that
+    answer is memoised. A genuine ``unclear`` that happens to carry none of
+    them is byte-indistinguishable from a failure, and is treated as a
+    failure: one extra call on the next sweep, versus a permanently parked
+    item that can never be re-asked. ``judge_contact_attribution`` itself is
+    deliberately untouched — the discriminator reads its OUTPUT.
+    """
+    if judgement.verdict != JUDGEMENT_UNCLEAR:
+        return True
+    return bool(
+        judgement.quote
+        or judgement.owner_uid
+        or judgement.alias_relation
+        or judgement.score > 0.0
+    )
+
+
+def record_attribution_memo(
+    context: AttributionContext,
+    judgement: AttributionJudgement,
+    *,
+    value_key: str,
+    target_uid: str,
+    source_ref: str | dict[str, Any] | None,
+) -> str:
+    """Append *judgement* to the memo and return its key (design §4.3).
+
+    Keyed on the judgement's OWN ``model``/``prompt_sha256``, so a row is
+    always retrievable by the identity the call actually ran under.
+
+    The row carries ``value_key``, never the value: the key's whole purpose
+    is that one triple is never re-spent, and an HMAC answers that without
+    the value. ``quote`` IS stored verbatim -- it is the model's own
+    justification span and may echo the address -- which is in policy
+    because this file lives on the excluded surface beside the suspect file,
+    which already holds the value in cleartext (design §4.3). The *key* is
+    still value-free, so the memo stays diffable without the surface.
+    """
+    key = attribution_memo_key(
+        value_key=value_key,
+        target_uid=target_uid,
+        source_ref=source_ref,
+        prompt_sha256=judgement.prompt_sha256,
+        model=judgement.model,
+    )
+    row = {
+        "v": ATTRIBUTION_MEMO_VERSION,
+        "key": key,
+        "value_key": value_key,
+        "target_uid": target_uid,
+        "source_ref": _canonical_source_ref(source_ref),
+        "prompt_sha256": judgement.prompt_sha256,
+        "model": judgement.model,
+        "verdict": judgement.verdict,
+        "owner_uid": judgement.owner_uid,
+        "alias_relation": judgement.alias_relation,
+        "quote": judgement.quote,
+        "score": judgement.score,
+        "at": now_iso(),
+    }
+    append_line_durable(
+        default_attribution_memo_path(context.contacts_root),
+        (json.dumps(row, separators=(",", ":")) + "\n").encode("utf-8"),
+    )
+    return key
+
+
+# ---------------------------------------------------------------------------
+# Recording the judgement on the parked suspect (design §7.1)
+# ---------------------------------------------------------------------------
+
+#: Frontmatter keys :func:`park_suspect` does not itself author but MUST
+#: carry forward across a re-park (issue athenaeum#2212). A judgement
+#: arrives strictly LATER than the park -- from the escalation, often on a
+#: different run -- so without this list a routine observe-mode re-park by
+#: any of the five writers would rebuild ``meta`` from its own inputs and
+#: silently drop it.
+#:
+#: Why a separate :func:`record_suspect_judgement` rather than a
+#: ``judgement=`` kwarg on :func:`park_suspect`: all five parking writers
+#: call that function at the moment they decide NOT to file a value, and
+#: none of them has a judgement to pass. Threading an always-``None``
+#: argument through five call sites to serve one later caller inverts the
+#: dependency. What :func:`park_suspect` genuinely must know is this list of
+#: key NAMES -- not the judgement's shape, which stays this section's
+#: business.
+_SUSPECT_CARRIED_FORWARD_KEYS: tuple[str, ...] = ("judgement",)
+
+#: Discriminator on the attribution-log rows this section appends. A row
+#: WITHOUT a ``kind`` key is a :func:`log_attribution_verdict` row -- the
+#: pre-athenaeum#2212 shape, left byte-identical so an existing reader (the
+#: observe-mode lint, design §9.2) is unaffected.
+ATTRIBUTION_LOG_KIND_ESCALATION = "escalation"
+
+
+def suspect_id_for(value_key: str, target_uid: str) -> str:
+    """The suspect id for one (value, target) pair: ``<value_key>-<target_uid>``.
+
+    The stem of :func:`_suspect_path`'s filename, which is what design §8.1
+    means by "points to the suspect id" and what ``athenaeum attribution
+    show <suspect-id>`` takes.
+    """
+    return f"{value_key}-{target_uid}"
+
+
+#: A suspect id is a filename stem this module itself minted
+#: (:func:`suspect_id_for`), but it arrives from a CLI argument, so it is
+#: validated before it is joined to a path: hex ``value_key``, a ``-``, then
+#: a uid of the ordinary slug/uid shape. Anything else is rejected rather
+#: than resolved, so no ``..`` or absolute spelling can escape the suspects
+#: directory.
+_SUSPECT_ID_RE = re.compile(r"^[0-9a-f]{64}-[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+class SuspectIdError(ValueError):
+    """A suspect id that is not a well-formed ``<value_key>-<target_uid>`` stem."""
+
+
+def suspect_path_for_id(contacts_root: Path, suspect_id: str) -> Path:
+    """The parked-suspect path for *suspect_id*, validated (design §4.3).
+
+    Raises:
+        SuspectIdError: if *suspect_id* is not a well-formed stem
+            (:data:`_SUSPECT_ID_RE`). Validated rather than sanitised: the
+            suspects directory is on the excluded surface, and a traversal
+            attempt is a caller bug worth naming, not something to silently
+            repair.
+    """
+    cleaned = (suspect_id or "").strip()
+    if not _SUSPECT_ID_RE.match(cleaned):
+        raise SuspectIdError(
+            f"{suspect_id!r} is not a suspect id; expected "
+            "<value_key>-<target_uid>, where value_key is the 64-character "
+            "hex digest in the suspect filename"
+        )
+    return Path(contacts_root) / ATTRIBUTION_SUSPECTS_DIRNAME / f"{cleaned}.md"
+
+
+@dataclass(frozen=True)
+class ParkedSuspect:
+    """One parked suspect, read back off the excluded surface (design §4.3).
+
+    ``checks``/``candidates`` are the check IDS and candidate uids the park
+    recorded. The park deliberately stores only check ids, not each check's
+    own uids/labels (:func:`park_suspect`), so a suspect rebuilt from disk
+    carries the fired-check SET and the UNION of candidates rather than the
+    per-check attribution the live verdict had. That is enough for
+    :func:`question_class_for` (which reads ids only) and for the escalation
+    question's candidate list; see :func:`verdict_from_parked_suspect`.
+    """
+
+    suspect_id: str
+    path: Path
+    value: str
+    value_key: str
+    target_uid: str
+    target_name: str | None
+    writer: str
+    source_ref: str | dict[str, Any] | None
+    disposition: str
+    checks: tuple[str, ...]
+    candidates: tuple[str, ...]
+    shadow: bool
+    judgement: dict[str, Any] | None = None
+
+
+def _parked_suspect_from_path(path: Path) -> ParkedSuspect | None:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        log.warning("pii_attribution: suspect at %s unreadable (%s); skipped", path, exc)
+        return None
+    raw_meta, _ = parse_frontmatter(text)
+    if not isinstance(raw_meta, dict):
+        log.warning("pii_attribution: suspect at %s has no frontmatter; skipped", path)
+        return None
+    meta = cast("dict[str, Any]", raw_meta)
+    value = str(meta.get("value") or "")
+    value_key = str(meta.get("value_key") or "")
+    target_uid = str(meta.get("target_uid") or "")
+    if not value or not value_key or not target_uid:
+        log.warning(
+            "pii_attribution: suspect at %s is missing value/value_key/target_uid; skipped",
+            path,
+        )
+        return None
+    target_name_raw = meta.get("target_name")
+    judgement = meta.get("judgement")
+    return ParkedSuspect(
+        suspect_id=path.stem,
+        path=path,
+        value=value,
+        value_key=value_key,
+        target_uid=target_uid,
+        target_name=str(target_name_raw) if isinstance(target_name_raw, str) else None,
+        writer=str(meta.get("writer") or ""),
+        source_ref=meta.get("source"),
+        disposition=str(meta.get("disposition") or ""),
+        checks=tuple(str(c) for c in (meta.get("checks") or [])),
+        candidates=tuple(str(c) for c in (meta.get("candidates") or [])),
+        shadow=bool(meta.get("shadow", True)),
+        judgement=judgement if isinstance(judgement, dict) else None,
+    )
+
+
+def read_suspect(contacts_root: Path, suspect_id: str) -> ParkedSuspect | None:
+    """Read one parked suspect THROUGH the excluded-surface gate.
+
+    The sanctioned read for a suspect, and the only place the raw value is
+    shown (design §8.1: "A human who needs the value reads it through the
+    one way out -- ``read_entity`` or ``athenaeum attribution show
+    <suspect-id>``"). :func:`athenaeum.pii.read_entity` is the wrong seam
+    for it: that reads an ENTITY's page joined to that entity's excluded
+    RECORD, and a suspect is neither -- it is a parked (value, target) pair
+    that may name an entity with no record and no page at all.
+
+    So the gate, not the reader, is what is shared: this calls
+    :func:`athenaeum.pii._require_readable_surface` before it opens
+    anything, so an unreachable or unreadable surface raises
+    :class:`~athenaeum.pii.ExcludedSurfaceUnavailable` instead of reporting
+    a suspect as absent. A false "no such suspect" is exactly the
+    fail-closed case that gate exists for.
+
+    Returns ``None`` only when the surface IS readable and no suspect file
+    with that id exists.
+
+    Raises:
+        SuspectIdError: on a malformed *suspect_id*.
+        athenaeum.pii.ExcludedSurfaceUnavailable: on an unreadable surface.
+    """
+    root = Path(contacts_root)
+    path = suspect_path_for_id(root, suspect_id)
+    pii._require_readable_surface(root, pii.PII_ENTITY_CLASS)
+    if not path.is_file():
+        return None
+    return _parked_suspect_from_path(path)
+
+
+def iter_parked_suspects(
+    contacts_root: Path, *, shadow_only: bool = False
+) -> list[ParkedSuspect]:
+    """Every parked suspect under *contacts_root*, in sorted filename order.
+
+    Goes through the same :func:`athenaeum.pii._require_readable_surface`
+    gate :func:`read_suspect` does, for the same fail-closed reason: an
+    unreadable surface must raise rather than look like an empty backlog.
+    A suspect file that is individually unreadable or malformed is logged
+    and skipped (one bad file is not a run).
+
+    *shadow_only* keeps only entries whose frontmatter says ``shadow:
+    true`` -- design §9.1's observe-mode entries, which are what the
+    shadow-escalation sweep acts on. A non-shadow entry was parked because
+    something was actually ENFORCED (D1-narrow), and escalation has no
+    question to ask about it.
+
+    Returns a list, not a generator: the caller caps and counts, and a
+    directory listing of parked suspects is small relative to the corpus
+    scans this module already performs.
+    """
+    root = Path(contacts_root)
+    pii._require_readable_surface(root, pii.PII_ENTITY_CLASS)
+    suspects_dir = root / ATTRIBUTION_SUSPECTS_DIRNAME
+    if not suspects_dir.is_dir():
+        return []
+    found: list[ParkedSuspect] = []
+    for path in sorted(suspects_dir.glob("*.md")):
+        suspect = _parked_suspect_from_path(path)
+        if suspect is None:
+            continue
+        if shadow_only and not suspect.shadow:
+            continue
+        found.append(suspect)
+    return found
+
+
+def verdict_from_parked_suspect(suspect: ParkedSuspect) -> AttributionVerdict:
+    """Rebuild an :class:`AttributionVerdict` from a parked suspect.
+
+    The park stores check IDS only, so each :class:`CheckEvidence` comes
+    back with no ``uids``/``label`` and the candidate uids come back as the
+    verdict's own ``candidates`` union. Deliberately NOT re-running
+    :func:`check_contact_attribution`: that would append a fresh log row,
+    and a re-check can legitimately answer ``pass`` now (a holder's page was
+    deleted since), which is a different question from the one the park
+    recorded. Escalation runs on the suspect that was parked (design §9.1).
+    """
+    return AttributionVerdict(
+        disposition=suspect.disposition or DISPOSITION_SUSPECT,
+        checks=tuple(CheckEvidence(check_id=c) for c in suspect.checks),
+        candidates=suspect.candidates,
+        value_key=suspect.value_key,
+    )
+
+
+def record_suspect_judgement(
+    context: AttributionContext,
+    *,
+    suspect_id: str,
+    question_class: str,
+    judgement: AttributionJudgement,
+    calibrated_p: float | None,
+    threshold: float | None,
+) -> Path | None:
+    """Stamp *judgement* onto the parked suspect file (design §7.1).
+
+    Design §7.1's ``other-unknown`` row -- "Recorded as a suspect with
+    verdict ``other-unknown``, so a later page for the real owner can claim
+    it" -- is the requirement; recording EVERY verdict is the
+    generalisation, because the suspect file is then the audit record for
+    what was asked and answered about this pair, whatever the answer was.
+
+    Additive by construction: it adds exactly ONE frontmatter key
+    (``judgement``), appended after everything :func:`park_suspect` writes,
+    and that key is on :data:`_SUSPECT_CARRIED_FORWARD_KEYS` so a later
+    re-park preserves it instead of rebuilding ``meta`` without it. Writes
+    only when the rendered bytes change, which keeps
+    :func:`park_suspect`'s idempotency property intact: re-recording the
+    same judgement writes nothing.
+
+    Returns the path written (or already correct), or ``None`` when no
+    suspect file exists for *suspect_id* -- the escalation's own callers may
+    hold a live verdict that was never parked (a direct unit call), and a
+    missing park is not a reason to fail an escalation.
+    """
+    try:
+        path = suspect_path_for_id(context.contacts_root, suspect_id)
+    except SuspectIdError as exc:
+        log.warning("pii_attribution: not recording a judgement (%s)", exc)
+        return None
+    if not path.is_file():
+        return None
+    text = path.read_text(encoding="utf-8")
+    raw_meta, body = parse_frontmatter(text)
+    if not isinstance(raw_meta, dict):
+        return None
+    meta = cast("dict[str, Any]", raw_meta)
+    merged: dict[str, Any] = dict(meta)
+    judgement_entry: dict[str, Any] = {
+        "verdict": judgement.verdict,
+        "owner_uid": judgement.owner_uid,
+        "alias_relation": judgement.alias_relation,
+        "question_class": question_class,
+        "calibrated_p": calibrated_p,
+        "threshold": threshold,
+        "model": judgement.model,
+        "prompt_sha256": judgement.prompt_sha256,
+        "at": now_iso(),
+    }
+    merged["judgement"] = judgement_entry
+    new_text = render_frontmatter(merged) + "\n" + body
+    if new_text == text:
+        return path
+    # Compare on everything except the judgement's own timestamp, so
+    # re-recording an UNCHANGED judgement writes nothing -- the same
+    # idempotency property `park_suspect` has, applied to this key.
+    existing_judgement = meta.get("judgement")
+    if isinstance(existing_judgement, dict):
+        a = {k: v for k, v in existing_judgement.items() if k != "at"}
+        b = {k: v for k, v in judgement_entry.items() if k != "at"}
+        if a == b:
+            return path
+    atomic_write_text(path, new_text)
+    return path
+
+
+def log_attribution_escalation(
+    context: AttributionContext,
+    *,
+    value_key: str,
+    target_uid: str,
+    writer: str,
+    question_class: str,
+    judgement: AttributionJudgement,
+    calibrated_p: float | None,
+    threshold: float | None,
+    above_threshold: bool,
+    memo_hit: bool,
+    placement: "pii.ContactPlacement | None",
+    queued: bool,
+    mode: str = "observe",
+) -> None:
+    """Append one escalation row to the attribution log. Carries no value.
+
+    Design §9.2: observe mode must produce "shadow escalation verdicts and
+    their calibrated probabilities". This is that row. Every field is a key,
+    a uid, a class name, a model id or a number -- never the value, so the
+    log stays safe to read without the excluded surface, exactly like
+    :func:`log_attribution_verdict`'s rows.
+    """
+    row: dict[str, Any] = {
+        "v": ATTRIBUTION_LOG_VERSION,
+        "kind": ATTRIBUTION_LOG_KIND_ESCALATION,
+        "value_key": value_key,
+        "target_uid": target_uid,
+        "writer": writer,
+        "question_class": question_class,
+        "verdict": judgement.verdict,
+        "owner_uid": judgement.owner_uid,
+        "alias_relation": judgement.alias_relation,
+        "score": judgement.score,
+        "calibrated_p": calibrated_p,
+        "threshold": threshold,
+        "above_threshold": above_threshold,
+        "memo_hit": memo_hit,
+        "model": judgement.model,
+        "prompt_sha256": judgement.prompt_sha256,
+        "placement": placement.outcome if placement is not None else None,
+        "placed_uid": placement.placed_uid if placement is not None else None,
+        "placed_field": placement.field if placement is not None else None,
+        "usage_class": placement.usage_class if placement is not None else None,
+        "queued": queued,
+        "mode": mode,
+        "at": now_iso(),
+    }
+    append_line_durable(
+        default_attribution_log_path(context.contacts_root),
+        (json.dumps(row, separators=(",", ":")) + "\n").encode("utf-8"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# The escalation entry point (design §6, §7, §8)
+# ---------------------------------------------------------------------------
+
+#: Checks whose evidence names a HOLDER of the value (design §6.2: "other
+#: uids that hold or name the value (D2, D4, C1)").
+_HOLDER_CHECK_IDS: frozenset[str] = frozenset(
+    {CHECK_D2_HELD_ELSEWHERE, CHECK_D4_FAN_OUT, CHECK_C1_INLINE_ELSEWHERE}
+)
+
+#: Checks whose evidence names a CANDIDATE owner (design §6.2: "uids the
+#: C2/C3 evidence points at").
+_CANDIDATE_CHECK_IDS: frozenset[str] = frozenset(
+    {CHECK_C2_LOCAL_PART_NAMES_OTHER, CHECK_C3_SOURCE_CONTEXT}
+)
+
+
+@dataclass(frozen=True)
+class AttributionMergeProposal:
+    """The same-entity merge intent an L4 caller adapts onto the merge queue.
+
+    Design §7.1: a ``same-entity`` verdict is a dedupe question, not an
+    alias, so it goes to ``pending_merges.write_pending_merge`` and NO
+    contact value is written. ``pending_merges`` is L4, so this module can
+    neither import it nor call it: the caller injects a proposer and this
+    dataclass records, verbatim, the arguments
+    :func:`athenaeum.pii.place_contact_value` passed to it.
+
+    ``rationale`` already carries the MASKED value (the executor builds it
+    with :func:`athenaeum.pii.mask_contact_address`) and is the only field
+    safe to render into ``_pending_merges.md``, which lives in the wiki.
+    ``value`` is the RAW value, carried so an adapter can key the proposal
+    on the excluded surface -- it must never reach the merge block body.
+    """
+
+    target_uid: str
+    owner_uid: str
+    value: str
+    rationale: str
+
+
+@dataclass(frozen=True)
+class EscalationOutcome:
+    """What :func:`escalate_contact_attribution_suspect` did for one suspect.
+
+    ``escalated`` is ``False`` only when the verdict was not ``suspect`` --
+    design §6.1's "a ``pass`` or ``non-personal`` verdict makes no model
+    call". Everything else (including a fail-closed ``unclear``) escalated.
+
+    ``placement`` is the :class:`athenaeum.pii.ContactPlacement` the
+    executor returned, or ``None`` when the executor was never reached (the
+    item went straight to the human queue). In observe mode its ``outcome``
+    is :data:`athenaeum.pii.PLACEMENT_PROPOSED` and it describes the
+    placement the apply path WOULD have made.
+
+    ``merge_proposal`` is populated only when the executor actually called
+    an injected proposer -- that is, apply mode, a ``same-entity`` verdict
+    at or above threshold, and a caller-supplied ``propose_merge``. In
+    observe mode the executor calls nothing and builds no rationale, so it
+    stays ``None`` and the proposed merge is readable from ``placement``
+    (``verdict == "same-entity"``, ``placed_uid`` = the owner).
+    """
+
+    escalated: bool
+    question_class: str | None = None
+    judgement: AttributionJudgement | None = None
+    calibrated_p: float | None = None
+    threshold: float | None = None
+    above_threshold: bool = False
+    memo_hit: bool = False
+    placement: "pii.ContactPlacement | None" = None
+    queue_items: tuple[EscalationItem, ...] = ()
+    merge_proposal: AttributionMergeProposal | None = None
+    suspect_id: str | None = None
+    reason: str = ""
+
+
+def _entity_brief_for_uid(context: AttributionContext, uid: str) -> EntityBrief:
+    """Build an :class:`EntityBrief` for *uid* from the indexes in *context*.
+
+    Falls back to ``name=uid`` when the uid resolves to no wiki page: a
+    holder uid can legitimately have no page (design §10.3's orphaned
+    records), and the judge is better served by a bare uid than by a brief
+    this function refused to build. ``employer_domain_hints`` comes from
+    :func:`_target_own_domains` -- the only deterministic domain signal this
+    module has, for the reason that function's own docstring gives.
+    """
+    name = uid
+    page_type: str | None = None
+    aliases: tuple[str, ...] = ()
+    page_path = (
+        context.entity_index.get_by_uid(uid) if context.entity_index is not None else None
+    )
+    if page_path is not None:
+        meta = pii.read_bounce_record(page_path)
+        raw_name = meta.get("name")
+        if isinstance(raw_name, str) and raw_name.strip():
+            name = raw_name.strip()
+        raw_type = meta.get("type")
+        if isinstance(raw_type, str) and raw_type.strip():
+            page_type = raw_type.strip()
+        aliases = tuple(
+            str(a).strip()
+            for a in (meta.get("aliases") or [])
+            if isinstance(a, str) and a.strip()
+        )
+    return EntityBrief(
+        uid=uid,
+        name=name,
+        type=page_type,
+        aliases=aliases,
+        employer_domain_hints=tuple(sorted(_target_own_domains(context, uid))),
+    )
+
+
+def _source_excerpt_for(
+    context: AttributionContext,
+    value: str,
+    source_ref: str | dict[str, Any] | None,
+) -> str | None:
+    """A window of the cited source around each occurrence of *value* (§6.2).
+
+    Reuses the C3 machinery rather than reimplementing it:
+    :func:`_extract_source_candidate_path` names the path without touching
+    the filesystem, :func:`_resolve_source_text` reads it (``None`` for a
+    source that no longer exists or is not UTF-8 text), and
+    :func:`_value_occurrences` locates every verbatim occurrence through the
+    same token detectors the PII lint uses. The window is
+    :attr:`~AttributionContext.context_window_chars` characters each side
+    (the existing ``librarian.attribution.context_window_chars`` knob);
+    overlapping windows are merged so one span is not emitted twice.
+
+    Returns ``None`` when there is no source, it cannot be read, or the
+    value does not appear in it. The last case is C3's own "the value is
+    absent from it" branch: there is no window around an occurrence that
+    does not exist, and inventing one (the head of the file, say) would
+    hand the judge text with no established relationship to the value.
+
+    **Not fenced here.** :func:`_build_question_user_message` already wraps
+    ``AttributionQuestion.source_excerpt`` in its own
+    :func:`~athenaeum.prompt_safety.fence_untrusted` region with the
+    ``source_excerpt`` tag and :data:`_SOURCE_EXCERPT_MAX_CHARS` budget, so
+    fencing again here would nest delimiters inside a fence and make the
+    boundary harder, not easier, for a model to respect.
+    """
+    path = _extract_source_candidate_path(source_ref)
+    if path is None:
+        return None
+    text = _resolve_source_text(path)
+    if text is None:
+        return None
+    spans = _value_occurrences(text, value)
+    if not spans:
+        return None
+    window = max(1, int(context.context_window_chars))
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(spans):
+        lo = max(0, start - window)
+        hi = min(len(text), end + window)
+        if merged and lo <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], hi))
+        else:
+            merged.append((lo, hi))
+    return "\n...\n".join(text[lo:hi] for lo, hi in merged)
+
+
+def build_attribution_question(
+    context: AttributionContext,
+    value: str,
+    verdict: AttributionVerdict,
+    *,
+    target_uid: str,
+    target_name: str | None,
+    target_type: str | None,
+    source_ref: str | dict[str, Any] | None,
+) -> AttributionQuestion:
+    """Assemble design §6.2's :class:`AttributionQuestion` from a verdict.
+
+    Holders are the uids on D2/D4/C1 evidence; candidates are the uids on
+    C2/C3 evidence. Any uid in :attr:`AttributionVerdict.candidates` that
+    appears on NEITHER (which is every candidate of a verdict rebuilt from a
+    parked suspect, where per-check uids were not stored) is added to the
+    candidates, because the design's candidate list is "uids the evidence
+    points at as possible owners" and a parked union is still exactly that.
+    A uid already named as a holder is never repeated as a candidate.
+    """
+    holder_uids: list[str] = []
+    candidate_uids: list[str] = []
+    for check in verdict.checks:
+        bucket = (
+            holder_uids
+            if check.check_id in _HOLDER_CHECK_IDS
+            else candidate_uids
+            if check.check_id in _CANDIDATE_CHECK_IDS
+            else None
+        )
+        if bucket is None:
+            continue
+        for uid in check.uids:
+            if uid and uid not in holder_uids and uid not in candidate_uids:
+                bucket.append(uid)
+    for uid in verdict.candidates:
+        if uid and uid not in holder_uids and uid not in candidate_uids:
+            candidate_uids.append(uid)
+    return AttributionQuestion(
+        value=value,
+        target=EntityBrief(
+            uid=target_uid,
+            name=target_name or target_uid,
+            type=target_type,
+            employer_domain_hints=tuple(sorted(_target_own_domains(context, target_uid))),
+        ),
+        holders=tuple(_entity_brief_for_uid(context, uid) for uid in holder_uids),
+        candidates=tuple(_entity_brief_for_uid(context, uid) for uid in candidate_uids),
+        checks=verdict.checks,
+        source_excerpt=_source_excerpt_for(context, value, source_ref),
+    )
+
+
+def _format_brief_for_queue(brief: EntityBrief) -> str:
+    return f"{brief.name} (uid={brief.uid})"
+
+
+def _build_queue_item(
+    *,
+    question: AttributionQuestion,
+    value: str,
+    target_uid: str,
+    question_class: str,
+    judgement: AttributionJudgement,
+    calibrated_p: float | None,
+    threshold: float | None,
+    suspect_id: str,
+    source_ref: str | dict[str, Any] | None,
+    origin_writer: str,
+    reason: str,
+) -> EscalationItem:
+    """Render design §8.1's human-queue item for one unsettled suspect.
+
+    ``conflict_type="ambiguous"``, so it reaches a human through the
+    existing ``tiers.tier4_escalate`` path and appears in
+    ``decisions.list_pending_decisions``.
+
+    The value is MASKED (:func:`athenaeum.pii.mask_contact_address`) in both
+    the description and ``entity_name`` -- the same discipline
+    ``librarian._record_correspondent_contact`` already applies, and for the
+    same reason: ``_pending_questions.md`` lives in the wiki, so the raw
+    value must never reach it (design §8.1). The masked form is
+    deliberately NOT a syntactically valid address either, so the rendered
+    block cannot be re-detected as a fresh inline contact token (see
+    :func:`athenaeum.pii.mask_contact_address`'s own docstring).
+    """
+    masked = pii.mask_contact_address(value)
+    holders = ", ".join(_format_brief_for_queue(b) for b in question.holders) or "(none)"
+    candidates = ", ".join(_format_brief_for_queue(b) for b in question.candidates) or "(none)"
+    fired = ", ".join(c.check_id for c in question.checks) or "(none)"
+    probability = "unmeasured" if calibrated_p is None else f"{calibrated_p:.3f}"
+    threshold_text = (
+        "none (no valid calibration for this class)" if threshold is None else f"{threshold:.3f}"
+    )
+    source_text = "(none recorded)" if source_ref is None else str(source_ref)
+    description = (
+        f"Attribution could not be settled for the contact value {masked} "
+        f"headed for {_format_brief_for_queue(question.target)}.\n\n"
+        f"- Reason it needs a human: {reason}\n"
+        f"- Question class: {question_class}\n"
+        f"- Checks that fired: {fired}\n"
+        f"- Other uids holding or naming the value: {holders}\n"
+        f"- Candidate owners the evidence points at: {candidates}\n"
+        f"- Model verdict: {judgement.verdict}"
+        f"{f' (owner {judgement.owner_uid})' if judgement.owner_uid else ''}"
+        f"{f' (relation {judgement.alias_relation})' if judgement.alias_relation else ''}\n"
+        f"- Calibrated probability: {probability} (class threshold: {threshold_text})\n"
+        f"- Raw confidence signal: {judgement.score:.3f} "
+        f"(model {judgement.model or 'unresolved'})\n"
+        f"- Original source: {source_text} (writer: {origin_writer or 'unknown'})\n"
+        f"- Suspect id: {suspect_id}\n\n"
+        f"The value is shown masked because this file lives in the wiki. Read it with "
+        f"`athenaeum attribution show {suspect_id}`, and answer with "
+        f"`athenaeum attribution place {suspect_id} --as own|other:<uid>|"
+        f"alias:<relation>|merge:<uid>`."
+    )
+    return EscalationItem(
+        raw_ref=f"attribution-suspect:{suspect_id}",
+        entity_name=f"{question.target.name} / {masked}",
+        conflict_type="ambiguous",
+        description=description,
+    )
+
+
+def escalate_contact_attribution_suspect(
+    context: AttributionContext,
+    value: str,
+    verdict: AttributionVerdict,
+    *,
+    target_uid: str,
+    target_name: str | None = None,
+    target_type: str | None = None,
+    source_ref: str | dict[str, Any] | None = None,
+    writer: str = WRITER_RE_ATTRIBUTION,
+    client: "LLMBackend | None" = None,
+    config: dict[str, Any] | None = None,
+    usage: TokenUsage | None = None,
+    apply: bool = False,
+    suspect_id: str | None = None,
+    propose_merge: "Callable[..., Any] | None" = None,
+    index: "pii.ExcludedRecordIndex | None" = None,
+) -> EscalationOutcome:
+    """Escalate one ``suspect`` verdict, and file or queue the answer.
+
+    The join between the deterministic seam (:func:`check_contact_attribution`),
+    the measured tier (:func:`judge_contact_attribution`) and the placement
+    executor (:func:`athenaeum.pii.place_contact_value`).
+
+    **Suspect only** (design §6.1): a :data:`DISPOSITION_PASS` or
+    :data:`DISPOSITION_NON_PERSONAL` verdict returns immediately with
+    ``escalated=False`` and makes NO model call -- not even a memo read.
+
+    **Order of operations.** Question class, then the ``(model,
+    prompt_sha256)`` identity, then the memo LOOKUP, and only on a miss the
+    model call. A hit costs no call at all (design §6.1). The answer is
+    memoised only when it IS an answer: a fail-closed ``unclear`` is not
+    recorded, so a transient API failure cannot permanently suppress
+    re-asking this question (issue athenaeum#2212, see
+    :func:`is_memoisable_judgement`).
+
+    **At or above threshold** the judgement goes to the placement executor
+    with ``decided_by="model"``, the design §7.2 re-check bound to this
+    ``context``, and ``apply`` passed straight through. Every caller in
+    issue athenaeum#2212 passes ``apply=False``, so the executor reports the
+    placement it WOULD have made and writes nothing; athenaeum#2220 flips
+    that.
+
+    **Below threshold, or unsettled, it goes to a human** as an
+    :class:`~athenaeum.models.EscalationItem` with
+    ``conflict_type="ambiguous"`` on :attr:`EscalationOutcome.queue_items`,
+    for an L4 caller to pass to ``tiers.tier4_escalate``. The triggers are
+    design §8.1's, plus the two malformed-answer guards below:
+
+    - the calibrated probability is below the class threshold;
+    - the judgement is :data:`JUDGEMENT_UNCLEAR` -- which is also what a
+      failed call, an unparseable answer and a missing client all yield
+      (design §6.3), so "unclear" and "the call failed" are one trigger
+      rather than two;
+    - the class has no valid calibration, so the threshold is ``None``;
+    - the re-check returned ``suspect``
+      (:data:`athenaeum.pii.PLACEMENT_QUEUED`) -- which "goes straight to
+      the human queue and never back to the model" (design §7.2), a
+      guarantee the executor keeps structurally by having no model access;
+    - an ``alias`` verdict carrying no valid ``alias_relation``;
+    - an ``other-known`` or ``same-entity`` verdict carrying no
+      ``owner_uid``.
+
+    The last two are **fail-closed** reads of design §6.3 rather than
+    optional hardening. :func:`judge_contact_attribution` nulls an
+    out-of-vocabulary ``alias_relation``, and
+    :func:`athenaeum.pii.place_contact_value` RAISES ``ValueError`` on an
+    ``alias`` verdict with no relation; routing a malformed answer to the
+    executor would therefore let one bad model response abort a pipeline
+    run. A malformed answer is exactly what a human should see.
+
+    **Never raises.** Any unexpected failure anywhere above is logged and
+    degraded to the human queue with a fail-closed ``unclear`` judgement
+    (design §6.3) -- the whole point of this seam is that nothing is written
+    on an answer the system could not establish.
+
+    Args:
+        apply: ``False`` (the default) is observe/shadow mode. Threaded
+            verbatim into the executor.
+        suspect_id: Defaults to :func:`suspect_id_for`'s
+            ``<value_key>-<target_uid>`` stem, which is the parked file's
+            own name.
+        propose_merge: The L4 adapter onto
+            ``pending_merges.write_pending_merge``. ``None`` (the default)
+            means a ``same-entity`` verdict in apply mode writes nothing at
+            all and reports :data:`athenaeum.pii.PLACEMENT_SKIPPED` --
+            never a contact write instead.
+        index: An already-built :class:`~athenaeum.pii.ExcludedRecordIndex`
+            for the executor's record resolve. Defaults to ``None``
+            (resolve fresh), deliberately NOT to
+            :attr:`AttributionContext.excluded_index`: a placement WRITES,
+            and a run-scoped index built before that write would not see a
+            record a previous placement in the same sweep just minted.
+    """
+    resolved_suspect_id = suspect_id or suspect_id_for(verdict.value_key, target_uid)
+    if verdict.disposition != DISPOSITION_SUSPECT:
+        return EscalationOutcome(
+            escalated=False,
+            suspect_id=resolved_suspect_id,
+            reason=(
+                f"disposition {verdict.disposition!r} is not "
+                f"{DISPOSITION_SUSPECT!r}; no model call (design §6.1)"
+            ),
+        )
+    try:
+        return _escalate_suspect_inner(
+            context,
+            value,
+            verdict,
+            target_uid=target_uid,
+            target_name=target_name,
+            target_type=target_type,
+            source_ref=source_ref,
+            writer=writer,
+            client=client,
+            config=config,
+            usage=usage,
+            apply=apply,
+            suspect_id=resolved_suspect_id,
+            propose_merge=propose_merge,
+            index=index,
+        )
+    except Exception as exc:
+        # Fail closed, never raise (design §6.3): nothing is written on an
+        # answer the system could not establish, and the item goes to a human.
+        log.warning(
+            "pii_attribution: escalation for suspect %s failed (%s); "
+            "sending it to the human queue",
+            resolved_suspect_id,
+            exc,
+            exc_info=True,
+        )
+        question_class = question_class_for(verdict.checks)
+        judgement = AttributionJudgement(verdict=JUDGEMENT_UNCLEAR, score=0.0)
+        question = AttributionQuestion(
+            value=value,
+            target=EntityBrief(uid=target_uid, name=target_name or target_uid, type=target_type),
+            checks=verdict.checks,
+        )
+        item = _build_queue_item(
+            question=question,
+            value=value,
+            target_uid=target_uid,
+            question_class=question_class,
+            judgement=judgement,
+            calibrated_p=None,
+            threshold=None,
+            suspect_id=resolved_suspect_id,
+            source_ref=source_ref,
+            origin_writer=writer,
+            reason=f"the escalation itself failed ({type(exc).__name__}); fail-closed",
+        )
+        return EscalationOutcome(
+            escalated=True,
+            question_class=question_class,
+            judgement=judgement,
+            queue_items=(item,),
+            suspect_id=resolved_suspect_id,
+            reason="escalation raised; fail-closed to the human queue (design §6.3)",
+        )
+
+
+def _escalate_suspect_inner(
+    context: AttributionContext,
+    value: str,
+    verdict: AttributionVerdict,
+    *,
+    target_uid: str,
+    target_name: str | None,
+    target_type: str | None,
+    source_ref: str | dict[str, Any] | None,
+    writer: str,
+    client: "LLMBackend | None",
+    config: dict[str, Any] | None,
+    usage: TokenUsage | None,
+    apply: bool,
+    suspect_id: str,
+    propose_merge: "Callable[..., Any] | None",
+    index: "pii.ExcludedRecordIndex | None",
+) -> EscalationOutcome:
+    """The body of :func:`escalate_contact_attribution_suspect`.
+
+    Split out so the public function is a thin, auditable fail-closed
+    wrapper: the ``try`` block is the WHOLE body, and no later edit can add
+    a step that accidentally sits outside it.
+    """
+    question_class = question_class_for(verdict.checks)
+    model, prompt_sha256 = attribution_call_identity(question_class, config)
+
+    judgement = memo_lookup(
+        context,
+        value_key=verdict.value_key,
+        target_uid=target_uid,
+        source_ref=source_ref,
+        prompt_sha256=prompt_sha256,
+        model=model,
+    )
+    memo_hit = judgement is not None
+    question = build_attribution_question(
+        context,
+        value,
+        verdict,
+        target_uid=target_uid,
+        target_name=target_name,
+        target_type=target_type,
+        source_ref=source_ref,
+    )
+    if judgement is None:
+        judgement = judge_contact_attribution(question, client, config, usage)
+        # Issue athenaeum#2212: a fail-closed `unclear` is NOT an answer, so
+        # it is not memoised -- memoising one makes a single transient 429
+        # permanent for this (value_key, target_uid, source_ref,
+        # prompt_sha256, model) identity. See
+        # :func:`is_memoisable_judgement` for how a failure is told apart
+        # from a model that genuinely answered "unclear".
+        if is_memoisable_judgement(judgement):
+            record_attribution_memo(
+                context,
+                judgement,
+                value_key=verdict.value_key,
+                target_uid=target_uid,
+                source_ref=source_ref,
+            )
+
+    calibrated_p = calibrated_probability_for_class(question_class, judgement.score)
+    threshold = threshold_for_class(question_class, config)
+    above_threshold = threshold is not None and calibrated_p >= threshold
+
+    record_suspect_judgement(
+        context,
+        suspect_id=suspect_id,
+        question_class=question_class,
+        judgement=judgement,
+        calibrated_p=calibrated_p,
+        threshold=threshold,
+    )
+
+    queue_reason: str | None = None
+    if judgement.verdict == JUDGEMENT_UNCLEAR:
+        queue_reason = (
+            "the judgement is unclear, or the call failed or was never made "
+            "(escalation fails closed, design §6.3)"
+        )
+    elif threshold is None:
+        queue_reason = (
+            "this question class has no valid calibration record, so there is "
+            "no threshold to clear (design §8.1)"
+        )
+    elif judgement.verdict == JUDGEMENT_ALIAS and judgement.alias_relation not in ALIAS_RELATIONS:
+        queue_reason = (
+            "the model answered 'alias' with no valid identifier relation; "
+            "filing an alias with no stored relation would lose the only "
+            "record of why the address is there (design §6.3)"
+        )
+    elif (
+        judgement.verdict in (JUDGEMENT_OTHER_KNOWN, JUDGEMENT_SAME_ENTITY)
+        and not judgement.owner_uid
+    ):
+        queue_reason = (
+            f"the model answered {judgement.verdict!r} without naming an "
+            "owner uid, so there is no record to re-attribute to (design §6.3)"
+        )
+    elif not above_threshold:
+        queue_reason = (
+            f"the calibrated probability ({calibrated_p:.3f}) is below this "
+            f"class's threshold ({threshold:.3f}) (design §8.1)"
+        )
+
+    placement: "pii.ContactPlacement | None" = None
+    merge_proposal: AttributionMergeProposal | None = None
+    if queue_reason is None:
+        captured: list[AttributionMergeProposal] = []
+
+        def _recheck(recheck_value: str, **kwargs: Any) -> AttributionVerdict:
+            return check_contact_attribution(recheck_value, context=context, **kwargs)
+
+        def _propose(
+            *, target_uid: str, owner_uid: str, value: str, rationale: str
+        ) -> Any:
+            captured.append(
+                AttributionMergeProposal(
+                    target_uid=target_uid,
+                    owner_uid=owner_uid,
+                    value=value,
+                    rationale=rationale,
+                )
+            )
+            assert propose_merge is not None  # only injected when non-None
+            return propose_merge(
+                target_uid=target_uid,
+                owner_uid=owner_uid,
+                value=value,
+                rationale=rationale,
+            )
+
+        placement = pii.place_contact_value(
+            context.contacts_root,
+            value,
+            verdict=judgement.verdict,
+            target_uid=target_uid,
+            target_name=target_name,
+            owner_uid=judgement.owner_uid,
+            owner_name=(
+                _entity_brief_for_uid(context, judgement.owner_uid).name
+                if judgement.owner_uid
+                else None
+            ),
+            alias_relation=judgement.alias_relation,
+            original_source=source_ref,
+            writer=WRITER_RE_ATTRIBUTION,
+            model=judgement.model,
+            prompt_sha256=judgement.prompt_sha256,
+            calibrated_p=calibrated_p,
+            decided_by="model",
+            observed_at=now_iso(),
+            apply=apply,
+            recheck=_recheck,
+            propose_merge=_propose if propose_merge is not None else None,
+            index=index,
+        )
+        merge_proposal = captured[0] if captured else None
+        if placement.outcome == pii.PLACEMENT_QUEUED:
+            queue_reason = (
+                "the design §7.2 re-check returned 'suspect', so the placement "
+                "would itself create a fresh conflict; it never goes back to a model"
+            )
+
+    queue_items: tuple[EscalationItem, ...] = ()
+    if queue_reason is not None:
+        queue_items = (
+            _build_queue_item(
+                question=question,
+                value=value,
+                target_uid=target_uid,
+                question_class=question_class,
+                judgement=judgement,
+                calibrated_p=calibrated_p,
+                threshold=threshold,
+                suspect_id=suspect_id,
+                source_ref=source_ref,
+                origin_writer=writer,
+                reason=queue_reason,
+            ),
+        )
+
+    log_attribution_escalation(
+        context,
+        value_key=verdict.value_key,
+        target_uid=target_uid,
+        writer=writer,
+        question_class=question_class,
+        judgement=judgement,
+        calibrated_p=calibrated_p,
+        threshold=threshold,
+        above_threshold=above_threshold,
+        memo_hit=memo_hit,
+        placement=placement,
+        queued=bool(queue_items),
+        mode="enforce" if apply else "observe",
+    )
+    return EscalationOutcome(
+        escalated=True,
+        question_class=question_class,
+        judgement=judgement,
+        calibrated_p=calibrated_p,
+        threshold=threshold,
+        above_threshold=above_threshold,
+        memo_hit=memo_hit,
+        placement=placement,
+        queue_items=queue_items,
+        merge_proposal=merge_proposal,
+        suspect_id=suspect_id,
+        reason=queue_reason or "at or above threshold; handed to the placement executor",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Observe-mode pipeline hook (design §9.1, §9.2)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ShadowEscalationSummary:
+    """What one :func:`escalate_shadow_suspects` sweep saw (design §9.2).
+
+    ``proposed`` counts placements the apply path WOULD have made
+    (:data:`athenaeum.pii.PLACEMENT_PROPOSED`); ``queued`` counts suspects
+    that would reach a human. ``placements`` and ``queue_items`` carry the
+    objects themselves so an L4 caller can act on them -- in this issue it
+    only counts and logs them, because observe mode files nothing.
+
+    **The four skip/do counters partition ``considered`` exactly** (issue
+    athenaeum#2212)::
+
+        considered == escalated
+                      + skipped_not_suspect
+                      + skipped_already_answered
+                      + skipped_over_cap
+
+    so an operator can reconcile the row rather than infer a remainder.
+    ``skipped_over_cap`` counts only suspects that still NEED escalating and
+    did not fit the cap, which is the number that must drain to zero as
+    successive sweeps work through a backlog.
+
+    ``memo_hits`` is kept and still counts honestly, but is normally ``0``
+    in a sweep now: a memo hit is exactly what ``skipped_already_answered``
+    filters out BEFORE the cap is spent on it, so the sweep rarely reaches
+    one. It is ``skipped_already_answered`` that carries the "this cost no
+    model call" story for this function; ``memo_hits`` still moves for the
+    direct :func:`escalate_contact_attribution_suspect` callers.
+    """
+
+    considered: int = 0
+    escalated: int = 0
+    proposed: int = 0
+    queued: int = 0
+    memo_hits: int = 0
+    skipped_not_suspect: int = 0
+    skipped_already_answered: int = 0
+    skipped_over_cap: int = 0
+    placements: tuple["pii.ContactPlacement", ...] = ()
+    queue_items: tuple[EscalationItem, ...] = ()
+    outcomes: tuple[EscalationOutcome, ...] = ()
+
+
+def escalate_shadow_suspects(
+    context: AttributionContext,
+    *,
+    client: "LLMBackend | None" = None,
+    config: dict[str, Any] | None = None,
+    usage: TokenUsage | None = None,
+    limit: int | None = None,
+) -> ShadowEscalationSummary:
+    """Escalate the parked SHADOW suspects, filing nothing (design §9.1).
+
+    The observe-mode pipeline hook. Every suspect is escalated with
+    ``apply=False``, so each placement comes back as
+    :data:`athenaeum.pii.PLACEMENT_PROPOSED` and the proposed placement plus
+    its calibrated probability is written to the attribution log
+    (:func:`log_attribution_escalation`) -- design §9.2's "shadow escalation
+    verdicts and their calibrated probabilities". **No contact record is
+    written and no writer's output changes.**
+
+    Costs nothing without a client: ``client=None`` returns an empty summary
+    before reading the suspects directory at all. A clientless escalation
+    would yield ``unclear`` for every suspect (design §6.3) and so flood the
+    human queue on every run -- the one failure mode a default-on observe
+    hook could cause. This is the second of the two guards; the first is
+    ``librarian.attribution.escalate``, which is DEFAULT OFF
+    (:func:`athenaeum.config.resolve_attribution_escalate`).
+
+    *limit* caps how many suspects one sweep escalates
+    (``librarian.attribution.max_escalations_per_run``, default 25, when the
+    caller resolves it). ``None`` means uncapped, and a non-positive value
+    means "do nothing" -- the same escape hatch the librarian's own runtime
+    knob uses. Suspects are taken in sorted filename order, which is stable
+    across runs, so a capped sweep works through a backlog deterministically
+    rather than re-rolling the same arbitrary subset.
+
+    **The cap is applied to what still needs escalating, not to the whole
+    directory** (issue athenaeum#2212). Sorted order alone is only half of
+    "works through a backlog": slicing the full listing re-selects the same
+    first *limit* entries on every run, so with a backlog larger than the
+    cap the tail is never reached and ``skipped_over_cap`` never drains. The
+    memo made the repeat calls free, which is why the stall was silent --
+    it is a progress bug, not a spend bug. So two classes are filtered out
+    BEFORE the slice, keeping sorted order among what remains:
+
+    - a suspect whose question has already been answered under the CURRENT
+      ``(model, prompt_sha256)`` identity, i.e. one the memo already holds a
+      row for. The memo -- not the suspect file's ``judgement`` stamp -- is
+      the oracle here, deliberately: it is keyed on exactly the five
+      components that decide whether a fresh call would ask a NEW question
+      (design §4.3), so a bumped model or an edited judge prompt still
+      re-asks (the property :func:`attribution_memo_key` exists for), and a
+      fail-closed ``unclear`` -- which athenaeum#2212 stopped memoising --
+      correctly stays pending so the retry the design promises can happen.
+      A ``judgement``-stamp filter would silently defeat both.
+    - a suspect whose ``disposition`` is not ``suspect``.
+      :func:`escalate_contact_attribution_suspect` returns ``escalated=
+      False`` for those without a model call (design §6.1), so letting one
+      consume cap budget costs a slot and buys nothing.
+
+    The memo is read ONCE per sweep rather than per suspect. A row appended
+    by this sweep's own escalations is therefore not in that snapshot, which
+    is harmless: those suspects were selected precisely because no row
+    existed, and the next sweep reads a fresh snapshot.
+    """
+    if client is None:
+        return ShadowEscalationSummary()
+    if limit is not None and limit <= 0:
+        return ShadowEscalationSummary()
+    suspects = iter_parked_suspects(context.contacts_root, shadow_only=True)
+    considered = len(suspects)
+    memo = read_attribution_memo(
+        default_attribution_memo_path(context.contacts_root)
+    )
+    pending: list[ParkedSuspect] = []
+    skipped_not_suspect = 0
+    skipped_already_answered = 0
+    for suspect in suspects:
+        parked_verdict = verdict_from_parked_suspect(suspect)
+        if parked_verdict.disposition != DISPOSITION_SUSPECT:
+            skipped_not_suspect += 1
+            continue
+        model, prompt_sha256 = attribution_call_identity(
+            question_class_for(parked_verdict.checks), config
+        )
+        if (
+            attribution_memo_key(
+                value_key=suspect.value_key,
+                target_uid=suspect.target_uid,
+                source_ref=suspect.source_ref,
+                prompt_sha256=prompt_sha256,
+                model=model,
+            )
+            in memo
+        ):
+            skipped_already_answered += 1
+            continue
+        pending.append(suspect)
+    selected = pending if limit is None else pending[:limit]
+    escalated = 0
+    proposed = 0
+    queued = 0
+    memo_hits = 0
+    placements: list["pii.ContactPlacement"] = []
+    queue_items: list[EscalationItem] = []
+    outcomes: list[EscalationOutcome] = []
+    for suspect in selected:
+        outcome = escalate_contact_attribution_suspect(
+            context,
+            suspect.value,
+            verdict_from_parked_suspect(suspect),
+            target_uid=suspect.target_uid,
+            target_name=suspect.target_name,
+            target_type=None,
+            source_ref=suspect.source_ref,
+            writer=suspect.writer or WRITER_RE_ATTRIBUTION,
+            client=client,
+            config=config,
+            usage=usage,
+            apply=False,
+            suspect_id=suspect.suspect_id,
+        )
+        outcomes.append(outcome)
+        if not outcome.escalated:
+            continue
+        escalated += 1
+        if outcome.memo_hit:
+            memo_hits += 1
+        if outcome.placement is not None:
+            placements.append(outcome.placement)
+            if outcome.placement.outcome == pii.PLACEMENT_PROPOSED:
+                proposed += 1
+        if outcome.queue_items:
+            queued += 1
+            queue_items.extend(outcome.queue_items)
+    return ShadowEscalationSummary(
+        considered=considered,
+        escalated=escalated,
+        proposed=proposed,
+        queued=queued,
+        memo_hits=memo_hits,
+        skipped_not_suspect=skipped_not_suspect,
+        skipped_already_answered=skipped_already_answered,
+        skipped_over_cap=max(0, len(pending) - len(selected)),
+        placements=tuple(placements),
+        queue_items=tuple(queue_items),
+        outcomes=tuple(outcomes),
+    )
+
+
+__all__ += [
+    "calibrated_probability",
+    "calibrated_probability_for_class",
+    "threshold_for_class",
+    "attribution_call_identity",
+    "ATTRIBUTION_MEMO_FILENAME",
+    "ATTRIBUTION_MEMO_VERSION",
+    "ATTRIBUTION_LOG_KIND_ESCALATION",
+    "default_attribution_memo_path",
+    "attribution_memo_key",
+    "read_attribution_memo",
+    "memo_lookup",
+    "record_attribution_memo",
+    "is_memoisable_judgement",
+    "SuspectIdError",
+    "ParkedSuspect",
+    "suspect_id_for",
+    "suspect_path_for_id",
+    "read_suspect",
+    "iter_parked_suspects",
+    "verdict_from_parked_suspect",
+    "record_suspect_judgement",
+    "log_attribution_escalation",
+    "AttributionMergeProposal",
+    "EscalationOutcome",
+    "build_attribution_question",
+    "escalate_contact_attribution_suspect",
+    "ShadowEscalationSummary",
+    "escalate_shadow_suspects",
 ]

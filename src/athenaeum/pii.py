@@ -171,7 +171,7 @@ import json
 import logging
 import os
 import re
-from collections.abc import Collection, Iterable, Iterator, Mapping
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
 from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
 from datetime import date, datetime
@@ -2739,6 +2739,34 @@ IDENTIFIER_VALIDITY_FIELD = "identifier_validity"
 #: asserting it of the person.
 CONTACT_CLASSIFICATION_FIELD = "contact_classification"
 
+#: Frontmatter key holding the per-identifier ALIAS RELATION a value carries
+#: on a contact record (issue athenaeum#2212, design §7.1): why this address
+#: is on this person's record when it is not simply theirs — a role inbox they
+#: own, an address shared with someone else, a former-name address, or a
+#: personal alias. Deliberately the same per-identifier list-of-dicts shape as
+#: :data:`IDENTIFIER_VALIDITY_FIELD` and :data:`CONTACT_CLASSIFICATION_FIELD`,
+#: because it answers the same kind of question about one VALUE rather than
+#: about the person — and it joins them in
+#: ``contact_record_fold._PER_IDENTIFIER_FACT_FIELDS`` so a fold carries the
+#: entry with the address it describes.
+IDENTIFIER_RELATION_FIELD = "identifier_relation"
+
+#: The relation vocabulary an :data:`IDENTIFIER_RELATION_FIELD` entry may
+#: carry (design §6.3). The SAME four strings as
+#: ``pii_attribution.ALIAS_RELATIONS``, restated here rather than imported:
+#: ``pii_attribution`` is an L3 sibling that imports THIS module at module
+#: scope, so any edge back — module-scope, function-local, or deferred —
+#: would close a two-node import cycle, and
+#: ``tests/test_import_graph_acyclic.py`` counts function-local imports as
+#: graph edges too. The duplication IS the layering, not an oversight; a test
+#: pins the two tuples equal so they cannot drift.
+IDENTIFIER_RELATIONS: tuple[str, ...] = (
+    "role-inbox",
+    "shared",
+    "former-name",
+    "personal-alias",
+)
+
 #: Usage class: the address was seen in real communication with this person —
 #: they wrote to us from it, or we have corresponded with it before. Evidence
 #: of use, which is what makes outreach to it a continuation rather than an
@@ -4101,6 +4129,189 @@ def record_observed_contact_value(
     would close a 2-node import cycle (``tests/test_import_graph_acyclic.py``
     counts function-local imports as graph edges too).
     """
+    return record_contact_value(
+        contacts_root,
+        identifier,
+        uid=uid,
+        name=name,
+        usage_class=USAGE_CLASS_OBSERVED,
+        field="emails",
+        source=source,
+        observed_at=observed_at,
+        index=index,
+    )
+
+
+#: The frontmatter fields :func:`record_contact_value` may file a value into:
+#: the three fields an address a person is KNOWN BY can live in
+#: (:data:`CONTACT_IDENTIFIER_FIELDS`) plus ``phones``. Deliberately NOT
+#: :data:`CONTACT_DATA_FIELDS` — that is the READ-side union, ordered for
+#: :func:`read_entity`; this is the write-side allowlist. A field outside it
+#: raises at the write, the same posture :func:`classify_contact_value` takes
+#: for an unknown ``usage_class``: a misspelled field would otherwise park the
+#: value in frontmatter no resolver on this surface ever looks at, which reads
+#: back as "the store never got it".
+RECORDABLE_CONTACT_FIELDS: tuple[str, ...] = (*CONTACT_IDENTIFIER_FIELDS, "phones")
+
+
+def _minted_contact_record_body(identifier: str, *, usage_class: str, field: str) -> str:
+    """Default body for a contact record :func:`record_contact_value` mints.
+
+    The ``observed``/``emails`` wording is the issue athenaeum#1948 text
+    :func:`record_observed_contact_value` has always written, kept VERBATIM so
+    that function's delegation to the generalised primitive is byte-identical
+    on a fresh mint. Any other (usage class, field) pair is a newer writer and
+    says so, rather than claiming a provenance it does not have.
+    """
+    if usage_class == USAGE_CLASS_OBSERVED and field == "emails":
+        return (
+            f"Contact record for {identifier!r}, recorded when the entity page was "
+            "created from raw intake naming it (issue athenaeum#1948). This record "
+            "is outside the corpus: not embedded, recalled, or merge-eligible.\n"
+        )
+    return (
+        f"Contact record for {identifier!r}, minted by a {usage_class} write to "
+        f"{field!r} (issue athenaeum#2212). This record is outside the corpus: "
+        "not embedded, recalled, or merge-eligible.\n"
+    )
+
+
+def _ensure_field_lists_identifier(
+    record_path: Path, identifier: str, *, field: str
+) -> None:
+    """Append *identifier* to *field* on *record_path* if it is not listed there.
+
+    The second half of :func:`record_contact_value`'s classify branch. That
+    branch short-circuits because the value is already listed for this uid
+    SOMEWHERE — which settles "do not mint a second record", but not "the
+    requested field holds the value". Without this step a placement into
+    ``alt_emails`` of a value ``emails`` already lists reports
+    ``field=alt_emails`` and a ``filed`` outcome while nothing lands in
+    ``alt_emails``, and :func:`_stamp_placement_provenance` then writes a
+    ``field_sources["alt_emails"]`` entry for a field the record does not
+    carry. Design §7.1's ``alias`` row says the value is "filed on the target
+    in ``alt_emails``", and the ``identifier_relation`` fact plus that listing
+    are the whole content of an alias verdict, so a success that writes
+    neither is a false success with dangling provenance.
+
+    Pure addition: nothing is ever removed from another field.
+    :data:`CONTACT_IDENTIFIER_FIELDS`' own docstring holds that ``emails`` /
+    ``former_emails`` / ``alt_emails`` "hold the same kind of value — an
+    address this person is known by", and the athenaeum#479/#502 migrator
+    folds the latter two INTO ``emails``, so a value listed under two of them
+    is a union this surface already produces, not a contradiction.
+
+    Writes only when the rendered bytes change, so a repeat call is a no-op
+    (and leaves ``st_mtime_ns`` alone).
+    """
+    text = record_path.read_text(encoding="utf-8")
+    meta, body = parse_frontmatter(text)
+    merged: dict[str, Any] = dict(meta) if isinstance(meta, dict) else {}
+    raw = merged.get(field)
+    values = [item for item in raw if isinstance(item, str)] if isinstance(raw, list) else []
+    wanted = normalize_identifier(identifier)
+    if any(normalize_identifier(item) == wanted for item in values):
+        return
+    merged[field] = [*values, identifier]
+    new_text = render_frontmatter(merged) + "\n" + body
+    if new_text != text:
+        atomic_write_text(record_path, new_text)
+
+
+def record_contact_value(
+    contacts_root: Path,
+    identifier: str,
+    *,
+    uid: str,
+    name: str | None = None,
+    usage_class: str,
+    field: str = "emails",
+    source: str | dict[str, Any],
+    observed_at: str,
+    index: "ExcludedRecordIndex | None" = None,
+) -> ObservedContactWrite:
+    """Record *identifier* for *uid* under *usage_class* in *field*, minting if needed.
+
+    :func:`record_observed_contact_value`'s mint-and-classify logic generalised
+    to take a usage class and a target field (design §7.2: "the mint and
+    classify logic of ``record_observed_contact_value``, generalised to take a
+    usage class and a target field"). It is the write primitive
+    :func:`place_contact_value` files an attribution verdict through, and
+    ``record_observed_contact_value`` is now a thin delegation to it with
+    ``usage_class=USAGE_CLASS_OBSERVED, field="emails"``.
+
+    **Every ownership guard is unchanged, and a contested value is still never
+    claimed.** The uid-dedupe walk below is the same one
+    ``corrections._resolve_email_handle`` and
+    ``identity_resolution._walk_email_handle`` perform — deduped by UID, not
+    by record, because several records carrying the SAME uid are one person
+    described twice rather than an ambiguous value. Two cases decline:
+    :data:`OBSERVED_CONTACT_OTHER_ENTITY` (some record listing the value
+    carries a DIFFERENT uid) and
+    :data:`OBSERVED_CONTACT_RECORD_WITHOUT_UID` (a record lists it but names
+    no entity at all). See :func:`record_observed_contact_value` for why the
+    second declines too. This holds for every *field*: an ``alt_emails``
+    placement of a value another uid already holds returns
+    ``other-entity`` without writing, exactly as an ``emails`` one does.
+
+    Idempotent for every *field*: a repeat call merges to byte-identical
+    frontmatter through :func:`_merge_contact_classification` (or compares
+    equal before the mint write) and rewrites nothing.
+
+    Args:
+        usage_class: One of :data:`USAGE_CLASSES`. Enforced by the store, not
+            by the caller — and the no-downgrade ladder in
+            :func:`_merge_contact_classification` still applies, so an
+            ``unclassified`` placement of a value already recorded
+            ``observed`` leaves the stronger entry (and its provenance)
+            standing.
+        field: One of :data:`RECORDABLE_CONTACT_FIELDS`. ``emails`` (the
+            default) keeps :func:`record_observed_contact_value`'s placement
+            convention exactly: a value no record lists is minted at
+            :func:`default_bounce_record_path`, the surface's per-IDENTIFIER
+            path, which is where :func:`resolve_contact_record` will look for
+            it later. For any other field the mint target is instead **the
+            uid's OWN record** (:func:`resolve_contact_record_for_uid`,
+            falling back to :func:`default_uid_record_path`), because an
+            ``alt_emails``/``phones`` value is an alias of a person the store
+            already knows — filing it at a fresh per-identifier path would
+            scatter one person's aliases across records rather than listing
+            them beside the address they are aliases of. Whichever branch
+            runs, **the returned record lists the value in *field*** when the
+            outcome is ``minted`` or ``classified``: the classify branch adds
+            the listing if only another identifier field carried it (see
+            :func:`_ensure_field_lists_identifier`), so a caller can trust the
+            field it asked for.
+        source: Per-claim provenance for the classification entry.
+        observed_at: When the value was observed.
+        index: An already-built :class:`ExcludedRecordIndex` to resolve
+            through, and to KEEP CURRENT — same contract as
+            :func:`mark_bounced`'s: a minted record is
+            :meth:`~ExcludedRecordIndex.register`-ed back before returning.
+
+    Raises:
+        ValueError: if *usage_class* is not in :data:`USAGE_CLASSES`, or
+            *field* is not in :data:`RECORDABLE_CONTACT_FIELDS`. Both fail
+            loudly AT THE WRITE for the reason
+            :func:`classify_contact_value` gives: a misspelled class reads
+            back as ``unclassified`` and quietly strips a permission, and a
+            misspelled field reads back as nothing at all.
+
+    Issue athenaeum#2212: like :func:`record_observed_contact_value`, this
+    function runs the attribution seam in its CALLER, never itself — ``pii``
+    must not import the L3 sibling ``pii_attribution`` in any form. See
+    :func:`place_contact_value`, which takes the re-check as an injected
+    callable for exactly that reason.
+    """
+    if usage_class not in USAGE_CLASSES:
+        raise ValueError(
+            f"unknown usage_class {usage_class!r}; expected one of {list(USAGE_CLASSES)}"
+        )
+    if field not in RECORDABLE_CONTACT_FIELDS:
+        raise ValueError(
+            f"unknown contact field {field!r}; "
+            f"expected one of {list(RECORDABLE_CONTACT_FIELDS)}"
+        )
     if not normalize_identifier(identifier) or not str(uid).strip():
         return ObservedContactWrite(outcome=OBSERVED_CONTACT_SKIPPED)
 
@@ -4124,25 +4335,39 @@ def record_observed_contact_value(
                 uids=tuple(found_uids),
             )
         # Every matching record is already this uid's. Classify onto the
-        # existing record rather than minting a second one.
+        # existing record rather than minting a second one — the value IS
+        # already listed for this person, so there is no second record to
+        # make. That settles the RECORD, not the FIELD: if *field* does not
+        # list the value yet, add the listing there too, or this write would
+        # report a field it did not touch (see
+        # :func:`_ensure_field_lists_identifier`).
         classified = classify_contact_value(
             contacts_root,
             identifier,
-            usage_class=USAGE_CLASS_OBSERVED,
+            usage_class=usage_class,
             source=source,
             observed_at=observed_at,
             index=index,
         )
+        if classified is not None:
+            _ensure_field_lists_identifier(classified, identifier, field=field)
         return ObservedContactWrite(
             outcome=OBSERVED_CONTACT_CLASSIFIED, path=classified
         )
 
-    # No record lists the address: mint one. `default_bounce_record_path` is
-    # the surface's per-identifier placement convention (its docstring is
-    # scoped to the surface, not to bounces) and is exactly where
-    # `resolve_contact_record` will look for it later, so reusing it is what
-    # keeps the mint and the subsequent resolution agreeing.
-    target = default_bounce_record_path(contacts_root, identifier)
+    # No record lists the value: mint one, or append to the uid's own record.
+    # `default_bounce_record_path` is the surface's per-identifier placement
+    # convention (its docstring is scoped to the surface, not to bounces) and
+    # is exactly where `resolve_contact_record` will look for it later, so
+    # reusing it is what keeps the mint and the subsequent resolution
+    # agreeing. See the `field` arg above for why a non-`emails` field targets
+    # the uid's own record instead.
+    if field == "emails":
+        target = default_bounce_record_path(contacts_root, identifier)
+    else:
+        target = resolve_contact_record_for_uid(
+            contacts_root, wanted_uid
+        ) or default_uid_record_path(contacts_root, wanted_uid)
     existing_meta = read_bounce_record(target)
     existing_body = ""
     if target.exists():
@@ -4155,22 +4380,20 @@ def record_observed_contact_value(
         minted.setdefault("name", f"{display} — contact record")
         minted.setdefault("contact_of", display)
     minted[PII_FLAG] = True
-    emails = [item for item in (minted.get("emails") or []) if isinstance(item, str)]
-    if not any(normalize_identifier(item) == normalize_identifier(identifier) for item in emails):
-        emails = [*emails, identifier]
-    minted["emails"] = emails
+    values = [item for item in (minted.get(field) or []) if isinstance(item, str)]
+    if not any(normalize_identifier(item) == normalize_identifier(identifier) for item in values):
+        values = [*values, identifier]
+    minted[field] = values
     merged = _merge_contact_classification(
         minted,
         identifier,
-        usage_class=USAGE_CLASS_OBSERVED,
+        usage_class=usage_class,
         source=source,
         observed_at=observed_at,
     )
 
-    body = existing_body or (
-        f"Contact record for {identifier!r}, recorded when the entity page was "
-        "created from raw intake naming it (issue athenaeum#1948). This record "
-        "is outside the corpus: not embedded, recalled, or merge-eligible.\n"
+    body = existing_body or _minted_contact_record_body(
+        identifier, usage_class=usage_class, field=field
     )
     new_text = render_frontmatter(merged) + "\n" + body
     if target.exists() and target.read_text(encoding="utf-8") == new_text:
@@ -4181,6 +4404,657 @@ def record_observed_contact_value(
         # frontmatter — mirrors `mark_bounced`'s own ordering and reason.
         index.register(target)
     return ObservedContactWrite(outcome=OBSERVED_CONTACT_MINTED, path=target)
+
+
+# ---------------------------------------------------------------------------
+# Attribution placement (issue athenaeum#2212, design §7)
+# ---------------------------------------------------------------------------
+
+#: Outcome tokens for :func:`place_contact_value`, one per row of design
+#: §7.1's table plus the four control outcomes the table implies.
+#:
+#: ``filed`` — an ``own`` / ``other-known`` / ``alias`` verdict wrote a record.
+PLACEMENT_FILED = "filed"
+#: ``parked`` — ``other-unknown``: nothing filed, the verdict is recorded
+#: instead. Design §7.1 calls this "the only outcome that leaves a value
+#: parked after a confident answer, because there is nowhere correct to put it
+#: yet".
+PLACEMENT_PARKED = "parked"
+#: ``merge-proposed`` — ``same-entity``: no contact write at all; a merge
+#: proposal went to the injected proposer.
+PLACEMENT_MERGE_PROPOSED = "merge-proposed"
+#: ``logged`` — ``non-personal``: recorded in the attribution log, not filed.
+PLACEMENT_LOGGED = "logged"
+#: ``queued`` — the design §7.2 re-check did not say ``pass``: either it
+#: returned ``suspect``, or it returned a disposition outside the vocabulary
+#: (:data:`_DISPOSITION_PASS`), which fails CLOSED the same way. Nothing is
+#: written and the CALLER raises the human-queue item (design §8.1); this
+#: function never loops back to a model, and has no model access to loop with.
+PLACEMENT_QUEUED = "queued"
+#: ``proposed`` — observe mode (``apply=False``): nothing written, nothing
+#: called, and the placement the apply path WOULD have made is reported so the
+#: caller can log it. This is what makes issue athenaeum#2212 the shadow-mode
+#: issue and athenaeum#2220 the enforcement one.
+PLACEMENT_PROPOSED = "proposed"
+#: ``declined`` — a write primitive declined (``other-entity`` /
+#: ``record-without-uid`` / ``skipped``). Never a silent success: the
+#: :class:`ObservedContactWrite` token is carried on ``write_outcome``.
+PLACEMENT_DECLINED = "declined"
+#: ``skipped`` — nothing to do: a blank value, a verdict whose required uid
+#: was not supplied, a ``same-entity`` verdict with no proposer injected, or
+#: an unrecognised verdict.
+PLACEMENT_SKIPPED = "skipped"
+
+#: The verdict vocabulary :func:`place_contact_value` dispatches on — the
+#: ``pii_attribution.JUDGEMENT_*`` tokens as plain strings. Restated rather
+#: than imported, for the same layering reason as
+#: :data:`IDENTIFIER_RELATIONS`; a test pins the two tuples equal.
+_VERDICT_OWN = "own"
+_VERDICT_OTHER_KNOWN = "other-known"
+_VERDICT_OTHER_UNKNOWN = "other-unknown"
+_VERDICT_ALIAS = "alias"
+_VERDICT_SAME_ENTITY = "same-entity"
+_VERDICT_NON_PERSONAL = "non-personal"
+_VERDICT_UNCLEAR = "unclear"
+
+PLACEMENT_VERDICTS: tuple[str, ...] = (
+    _VERDICT_OWN,
+    _VERDICT_OTHER_KNOWN,
+    _VERDICT_OTHER_UNKNOWN,
+    _VERDICT_ALIAS,
+    _VERDICT_SAME_ENTITY,
+    _VERDICT_NON_PERSONAL,
+    _VERDICT_UNCLEAR,
+)
+
+#: The ``pii_attribution.DISPOSITION_*`` tokens the re-check result is tested
+#: against, as plain strings — read off the injected callable's result
+#: STRUCTURALLY (``getattr``), so this module needs no import of the verdict
+#: type. Same layering reason as :data:`IDENTIFIER_RELATIONS`; a test pins
+#: all three equal to their ``pii_attribution`` originals.
+#:
+#: :data:`_DISPOSITION_PASS` is the ONLY value that lets a write proceed.
+#: Design §6.3 makes the attribution seam fail CLOSED, so an absent token or
+#: one outside this vocabulary refuses the write and goes to the human queue
+#: rather than falling through to it: a re-check whose answer cannot be read
+#: has not said the placement is safe.
+_DISPOSITION_PASS = "pass"
+_DISPOSITION_SUSPECT = "suspect"
+_DISPOSITION_NON_PERSONAL = "non-personal"
+
+#: **Every** placement files :data:`USAGE_CLASS_UNCLASSIFIED`, and there is no
+#: parameter to override it. Design §3: "A model never grants outreach
+#: eligibility. A value placed by reasoning is filed ``unclassified``. Only
+#: header-verified correspondence earns ``observed``, and that happens in the
+#: existing correspondent path, not here." Every branch of
+#: :func:`place_contact_value` reads THIS constant rather than naming a class
+#: of its own, which makes the invariant structural: the identifier
+#: ``USAGE_CLASS_OBSERVED`` appears nowhere in that function's source, and a
+#: test asserts exactly that by inspection so a future edit reintroducing it
+#: fails loudly instead of quietly granting outreach eligibility.
+_PLACEMENT_USAGE_CLASS = USAGE_CLASS_UNCLASSIFIED
+
+
+@dataclass(frozen=True)
+class ContactPlacement:
+    """What :func:`place_contact_value` did (or would have done) for one value.
+
+    ``outcome`` is one of the ``PLACEMENT_*`` tokens. ``verdict`` echoes the
+    judgement acted on. ``path`` / ``placed_uid`` / ``field`` / ``usage_class``
+    describe the placement — populated on ``filed``, and on ``proposed`` /
+    ``queued`` they describe the placement the apply path WOULD have made.
+    ``write_outcome`` carries the :class:`ObservedContactWrite` token whenever
+    a write primitive ran, so ``declined`` always names its reason.
+    ``recheck_disposition`` / ``recheck_checks`` carry the design §7.2
+    re-check's answer and the ids of the checks it fired.
+    """
+
+    outcome: str
+    verdict: str
+    path: Path | None = None
+    placed_uid: str | None = None
+    field: str | None = None
+    usage_class: str | None = None
+    write_outcome: str | None = None
+    recheck_disposition: str | None = None
+    recheck_checks: tuple[str, ...] = ()
+    detail: str = ""
+
+
+def _merge_field_source_entry(
+    meta: dict[str, Any],
+    field: str,
+    value: str,
+    source: dict[str, Any],
+) -> dict[str, Any]:
+    """Upsert one ``field_sources[field]`` entry for *value* into a copy of *meta*.
+
+    The corrections applier's per-value provenance shape,
+    ``{"value": ..., "source": ...}`` — design §7.2: "The provenance shape is
+    still the corrections applier's list shape, so readers see one format."
+    That is the shape ``corrections._list_field_sources`` reads and
+    ``contact_record_fold._merge_meta`` writes, so a placed value's provenance
+    is indistinguishable in shape from a corrected or folded one.
+
+    In-place update preserving list position, mirroring
+    :func:`_merge_contact_classification`'s discipline: a re-placement of the
+    same value with the same provenance compares byte-identical, and a CHANGED
+    provenance replaces that value's entry rather than appending a second
+    entry for the same address.
+    """
+    merged = dict(meta)
+    raw = merged.get("field_sources")
+    field_sources = dict(raw) if isinstance(raw, dict) else {}
+    entries = [dict(item) for item in (field_sources.get(field) or []) if isinstance(item, dict)]
+    wanted = normalize_identifier(value)
+    entry: dict[str, Any] = {"value": value, "source": source}
+    for position, item in enumerate(entries):
+        if normalize_identifier(str(item.get("value", ""))) == wanted:
+            entries[position] = entry
+            break
+    else:
+        entries.append(entry)
+    field_sources[field] = entries
+    merged["field_sources"] = field_sources
+    return merged
+
+
+def _merge_identifier_relation(
+    meta: dict[str, Any],
+    identifier: str,
+    *,
+    relation: str,
+    source: str | dict[str, Any] | None,
+    decided_by: str,
+) -> dict[str, Any]:
+    """Upsert one :data:`IDENTIFIER_RELATION_FIELD` entry into a copy of *meta*.
+
+    Shaped exactly like :func:`_merge_contact_classification` and
+    :func:`_merge_identifier_validity`: one entry per identifier, updated in
+    place so a re-assertion of the same relation rewrites identical bytes, and
+    a CHANGED relation replaces that identifier's entry rather than appending
+    a second one for the same address.
+
+    Raises:
+        ValueError: if *relation* is not one of :data:`IDENTIFIER_RELATIONS`.
+            Loud at the write, for the reason :func:`classify_contact_value`
+            is loud about an unknown usage class: an out-of-vocabulary
+            relation reads back as no relation at all, silently losing the
+            only stored record of WHY this address is on this person.
+    """
+    if relation not in IDENTIFIER_RELATIONS:
+        raise ValueError(
+            f"unknown identifier relation {relation!r}; "
+            f"expected one of {list(IDENTIFIER_RELATIONS)}"
+        )
+    merged = dict(meta)
+    raw = merged.get(IDENTIFIER_RELATION_FIELD)
+    entries = (
+        [dict(item) for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
+    )
+    wanted = normalize_identifier(identifier)
+    entry: dict[str, Any] = {
+        "identifier": wanted,
+        "relation": relation,
+        "source": source,
+        "decided_by": decided_by,
+    }
+    for position, item in enumerate(entries):
+        if normalize_identifier(str(item.get("identifier", ""))) == wanted:
+            entries[position] = entry
+            break
+    else:
+        entries.append(entry)
+    merged[IDENTIFIER_RELATION_FIELD] = entries
+    merged[PII_FLAG] = True
+    return merged
+
+
+def _attribution_provenance(
+    *,
+    verdict: str,
+    original_source: str | dict[str, Any] | None,
+    original_target: str,
+    writer: str,
+    model: str | None,
+    prompt_sha256: str | None,
+    calibrated_p: float | None,
+    decided_by: str,
+) -> dict[str, Any]:
+    """The design §7.2 provenance mapping stamped on a placed value.
+
+    ``model`` / ``prompt_sha256`` / ``calibrated_p`` are OMITTED when ``None``
+    rather than written as nulls, because design §8.1 requires a human answer
+    to be filed "with ``decided_by: human`` in the provenance and no
+    calibrated probability" — a ``calibrated_p: null`` would read as a
+    measured-and-zero confidence rather than as an unmeasured one.
+    ``original_source`` is likewise omitted when the caller has none.
+    ``type`` / ``original_target`` / ``writer`` / ``verdict`` / ``decided_by``
+    are always present: they are what makes the entry attributable at all.
+    """
+    source: dict[str, Any] = {"type": "attribution"}
+    if original_source is not None:
+        source["original_source"] = original_source
+    source["original_target"] = original_target
+    source["writer"] = writer
+    source["verdict"] = verdict
+    if model is not None:
+        source["model"] = model
+    if prompt_sha256 is not None:
+        source["prompt_sha256"] = prompt_sha256
+    if calibrated_p is not None:
+        source["calibrated_p"] = calibrated_p
+    source["decided_by"] = decided_by
+    return source
+
+
+def _stamp_placement_provenance(
+    record_path: Path,
+    value: str,
+    *,
+    field: str,
+    source: dict[str, Any],
+    relation: str | None,
+    original_source: str | dict[str, Any] | None,
+    decided_by: str,
+) -> None:
+    """Merge a placed value's ``field_sources`` (and alias relation) onto its record.
+
+    Runs after the record primitive has placed the value, as a second
+    read-modify-write on the same file, so the two merges share
+    :func:`_merge_field_source_entry` across the email and alias paths. Writes
+    only when the rendered bytes change, which is what keeps a repeat
+    placement byte-identical.
+    """
+    text = record_path.read_text(encoding="utf-8")
+    meta, body = parse_frontmatter(text)
+    merged = _merge_field_source_entry(
+        meta if isinstance(meta, dict) else {}, field, value, source
+    )
+    if relation is not None:
+        merged = _merge_identifier_relation(
+            merged,
+            value,
+            relation=relation,
+            source=original_source,
+            decided_by=decided_by,
+        )
+    new_text = render_frontmatter(merged) + "\n" + body
+    if new_text != text:
+        atomic_write_text(record_path, new_text)
+
+
+def _is_phone_value(value: str) -> bool:
+    """True when *value* is a phone number rather than an email address.
+
+    This module's standing convention, not a new predicate: an identifier with
+    no ``@`` is a phone number. :func:`mask_contact_address`,
+    :func:`is_service_address` and ``pii_attribution._local_and_domain`` ("a
+    value with no ``@`` (e.g. a phone number)") all discriminate exactly this
+    way, and :func:`find_inline_phones` is a text SCANNER for a corpus body —
+    the wrong tool for typing one already-extracted frontmatter value, since
+    it would reject legitimately stored numbers it treats as corpus false
+    positives (bare digit runs, ISO-date-shaped numbers).
+    """
+    return "@" not in normalize_identifier(value)
+
+
+def place_contact_value(
+    contacts_root: Path,
+    value: str,
+    *,
+    verdict: str,
+    target_uid: str,
+    target_name: str | None = None,
+    owner_uid: str | None = None,
+    owner_name: str | None = None,
+    alias_relation: str | None = None,
+    original_source: str | dict[str, Any] | None = None,
+    writer: str = "re-attribution",
+    model: str | None = None,
+    prompt_sha256: str | None = None,
+    calibrated_p: float | None = None,
+    decided_by: str = "model",
+    observed_at: str,
+    apply: bool = False,
+    recheck: "Callable[..., Any] | None" = None,
+    propose_merge: "Callable[..., Any] | None" = None,
+    index: "ExcludedRecordIndex | None" = None,
+) -> ContactPlacement:
+    """The placement executor design §7.1's outcome table calls for.
+
+    Acts on one attribution *verdict* for one *value*. Filed values are ALWAYS
+    :data:`USAGE_CLASS_UNCLASSIFIED` — see :data:`_PLACEMENT_USAGE_CLASS` for
+    why that is structural rather than a default.
+
+    Per verdict (design §7.1):
+
+    - ``own`` — filed on *target_uid*, in ``emails`` (``phones`` for a phone
+      number), with design §7.2 ``field_sources`` provenance.
+    - ``other-known`` — re-attributed: filed on *owner_uid*'s record, with the
+      provenance naming the original source and target. **Nothing is filed on
+      the original target.**
+    - ``other-unknown`` — nothing filed; :data:`PLACEMENT_PARKED`. Recording
+      the verdict on the suspect file is the caller's job
+      (``pii_attribution.park_suspect``); this returns the outcome so it can.
+    - ``alias`` — filed on *target_uid* in ``alt_emails`` (``phones`` for a
+      phone), plus a per-identifier :data:`IDENTIFIER_RELATION_FIELD` entry
+      carrying *alias_relation*.
+    - ``same-entity`` — **no contact write at all.** One person under two
+      names is a dedupe question, so a merge proposal goes to the injected
+      *propose_merge*.
+    - ``non-personal`` — nothing filed; :data:`PLACEMENT_LOGGED`.
+    - ``unclear``, or any unrecognised verdict — nothing filed;
+      :data:`PLACEMENT_SKIPPED`.
+
+    **Why the re-check and the merge proposal are injected callables, and why
+    the human-queue raise is RETURNED rather than performed.** ``pii`` is L3;
+    ``pii_attribution`` is an L3 sibling that imports it at module scope, and
+    ``pending_merges`` / ``tiers`` are L4. An import of any of the three — at
+    module scope, function-local, or deferred — would close an import cycle or
+    invert the layer direction (``tests/test_import_graph_acyclic.py`` counts
+    function-local imports as graph edges; ``tests/test_layer_boundary.py``
+    enforces the direction). So the caller injects the seam, and this function
+    never raises a tier. The same constraint is what gives the design §7.2
+    no-loop guarantee its teeth: a function with no model access **cannot**
+    loop back to a model, whatever the re-check says.
+
+    Args:
+        verdict: A ``pii_attribution.JUDGEMENT_*`` token as a plain string
+            (:data:`PLACEMENT_VERDICTS`).
+        apply: ``False`` (the default) is OBSERVE mode: no re-check, no write,
+            no injected call, and a :data:`PLACEMENT_PROPOSED` result carrying
+            the ``placed_uid``/``field``/``usage_class`` the apply path would
+            have used, so a caller can log the proposed placement.
+        recheck: The design §7.2 re-check, called BEFORE any write on a
+            verdict that writes. The caller injects a partial of
+            ``pii_attribution.check_contact_attribution`` already bound to its
+            ``context``; it is called as ``recheck(value,
+            target_uid=<the uid about to be written to>, target_name=...,
+            target_type=..., source_ref=original_source, writer=writer)`` and
+            its ``.disposition`` / ``.checks`` are read structurally.
+            **Only ``pass`` writes.** A ``suspect`` disposition writes nothing
+            and returns :data:`PLACEMENT_QUEUED`; a ``non-personal`` one
+            writes nothing and returns :data:`PLACEMENT_LOGGED`, because
+            design §9.1 holds that a D1-narrow value "is never filed on its
+            target, in every mode"; and ANY other value — a token outside
+            :data:`_DISPOSITION_PASS`'s vocabulary, or no readable
+            disposition at all — also writes nothing and returns
+            :data:`PLACEMENT_QUEUED`, because design §6.3 makes this seam fail
+            closed. ``target_type`` is passed as ``None``: a placement has no
+            page metadata to type the target from, and ``None`` makes the
+            seam's D3 check inert rather than asserting a type this function
+            cannot know — D2/D4, the checks that answer "would this placement
+            create a FRESH conflict", need no type. ``recheck=None`` skips the
+            re-check entirely, and only two callers should pass it: one that
+            has already re-checked this exact (value, uid) pair itself, and a
+            test.
+        propose_merge: Called for a ``same-entity`` verdict in apply mode, as
+            ``propose_merge(target_uid=..., owner_uid=..., value=...,
+            rationale=...)``. Deliberately minimal — Lane B adapts it onto
+            ``pending_merges.write_pending_merge``, which is L4. The
+            ``rationale`` is built with a MASKED value
+            (:func:`mask_contact_address`) because ``_pending_merges.md``
+            lives in the wiki and design §3 holds that no contact value enters
+            it; ``value`` is passed unmasked only so the adapter can key or
+            log it on the excluded surface. With ``propose_merge=None`` this
+            returns :data:`PLACEMENT_SKIPPED` and writes nothing — it never
+            falls back to writing the contact value instead.
+
+    Raises:
+        ValueError: on an ``alias`` verdict whose *alias_relation* is not one
+            of :data:`IDENTIFIER_RELATIONS` (including ``None``). The
+            judgement vocabulary guarantees an ``alias`` verdict carries one
+            (design §6.3), so its absence is a caller bug, and filing an
+            alias with no stored relation would lose the only record of why
+            the address is there. Same loud-at-the-write posture as
+            :func:`classify_contact_value`'s unknown ``usage_class``.
+    """
+    normalized = normalize_identifier(value)
+    if not normalized:
+        return ContactPlacement(
+            outcome=PLACEMENT_SKIPPED, verdict=verdict, detail="blank value"
+        )
+    if verdict not in PLACEMENT_VERDICTS:
+        return ContactPlacement(
+            outcome=PLACEMENT_SKIPPED,
+            verdict=verdict,
+            detail=f"unrecognised verdict {verdict!r}",
+        )
+
+    is_phone = _is_phone_value(value)
+    target = str(target_uid or "").strip()
+    owner = str(owner_uid or "").strip()
+
+    # The placement this verdict calls for, and the apply-mode outcome it
+    # leads to. Resolved BEFORE the `apply` branch so observe mode reports
+    # exactly what the apply path would do, and so a missing required uid is
+    # reported identically in both modes.
+    placed_uid: str | None = None
+    placed_name: str | None = None
+    field: str | None = None
+    if verdict == _VERDICT_OWN:
+        placed_uid, placed_name = target, target_name
+        field = "phones" if is_phone else "emails"
+        would = PLACEMENT_FILED
+    elif verdict == _VERDICT_OTHER_KNOWN:
+        placed_uid, placed_name = owner, owner_name
+        field = "phones" if is_phone else "emails"
+        would = PLACEMENT_FILED
+    elif verdict == _VERDICT_ALIAS:
+        if alias_relation not in IDENTIFIER_RELATIONS:
+            raise ValueError(
+                f"alias verdict needs an alias_relation in "
+                f"{list(IDENTIFIER_RELATIONS)}; got {alias_relation!r}"
+            )
+        placed_uid, placed_name = target, target_name
+        field = "phones" if is_phone else "alt_emails"
+        would = PLACEMENT_FILED
+    elif verdict == _VERDICT_SAME_ENTITY:
+        placed_uid = owner
+        would = PLACEMENT_MERGE_PROPOSED
+    elif verdict == _VERDICT_OTHER_UNKNOWN:
+        would = PLACEMENT_PARKED
+    elif verdict == _VERDICT_NON_PERSONAL:
+        would = PLACEMENT_LOGGED
+    else:  # _VERDICT_UNCLEAR
+        would = PLACEMENT_SKIPPED
+
+    if would in (PLACEMENT_FILED, PLACEMENT_MERGE_PROPOSED) and not placed_uid:
+        missing = "target_uid" if verdict in (_VERDICT_OWN, _VERDICT_ALIAS) else "owner_uid"
+        return ContactPlacement(
+            outcome=PLACEMENT_SKIPPED,
+            verdict=verdict,
+            field=field,
+            detail=f"{verdict} verdict with no {missing}",
+        )
+
+    usage_class = _PLACEMENT_USAGE_CLASS if field else None
+
+    if not apply:
+        return ContactPlacement(
+            outcome=PLACEMENT_PROPOSED,
+            verdict=verdict,
+            placed_uid=placed_uid or None,
+            field=field,
+            usage_class=usage_class,
+            detail=f"observe mode: apply would have returned {would!r}",
+        )
+
+    if would == PLACEMENT_SKIPPED:
+        return ContactPlacement(
+            outcome=PLACEMENT_SKIPPED,
+            verdict=verdict,
+            detail="unclear verdict; nothing filed (escalation fails closed, design §6.3)",
+        )
+    if would == PLACEMENT_PARKED:
+        return ContactPlacement(
+            outcome=PLACEMENT_PARKED,
+            verdict=verdict,
+            detail=(
+                "other-unknown: the verdict is recorded and nothing is filed, "
+                "because there is nowhere correct to put the value yet (design §7.1)"
+            ),
+        )
+    if would == PLACEMENT_LOGGED:
+        return ContactPlacement(
+            outcome=PLACEMENT_LOGGED,
+            verdict=verdict,
+            detail="non-personal: recorded in the attribution log, not filed",
+        )
+    if would == PLACEMENT_MERGE_PROPOSED:
+        if propose_merge is None:
+            return ContactPlacement(
+                outcome=PLACEMENT_SKIPPED,
+                verdict=verdict,
+                placed_uid=placed_uid,
+                detail=(
+                    "same-entity verdict with no propose_merge injected; "
+                    "no contact value written"
+                ),
+            )
+        propose_merge(
+            target_uid=target,
+            owner_uid=placed_uid,
+            value=value,
+            rationale=(
+                f"Attribution verdict 'same-entity' for {mask_contact_address(value)}: "
+                f"{target} and {placed_uid} appear to be one person under two names. "
+                "The value follows the merge through the existing fold."
+            ),
+        )
+        return ContactPlacement(
+            outcome=PLACEMENT_MERGE_PROPOSED,
+            verdict=verdict,
+            placed_uid=placed_uid,
+            detail="merge proposed; no contact value written (design §7.1)",
+        )
+
+    # A verdict that WRITES. Re-check first (design §7.2).
+    assert field is not None and placed_uid is not None  # narrowed by `would`
+    disposition: str | None = None
+    checks: tuple[str, ...] = ()
+    if recheck is not None:
+        result = recheck(
+            value,
+            target_uid=placed_uid,
+            target_name=placed_name,
+            target_type=None,
+            source_ref=original_source,
+            writer=writer,
+        )
+        disposition = str(getattr(result, "disposition", "") or "") or None
+        checks = tuple(
+            str(getattr(item, "check_id", item)) for item in (getattr(result, "checks", ()) or ())
+        )
+        if disposition == _DISPOSITION_SUSPECT:
+            return ContactPlacement(
+                outcome=PLACEMENT_QUEUED,
+                verdict=verdict,
+                placed_uid=placed_uid,
+                field=field,
+                usage_class=usage_class,
+                recheck_disposition=disposition,
+                recheck_checks=checks,
+                detail=(
+                    "re-check returned suspect; nothing written. The CALLER raises the "
+                    "human-queue item (design §7.2, §8.1) — this never goes back to a model"
+                ),
+            )
+        if disposition == _DISPOSITION_NON_PERSONAL:
+            return ContactPlacement(
+                outcome=PLACEMENT_LOGGED,
+                verdict=verdict,
+                placed_uid=placed_uid,
+                field=field,
+                usage_class=usage_class,
+                recheck_disposition=disposition,
+                recheck_checks=checks,
+                detail=(
+                    "re-check returned non-personal; not filed on any record "
+                    "(design §9.1: a D1-narrow value is never filed on its target, "
+                    "in every mode)"
+                ),
+            )
+        if disposition != _DISPOSITION_PASS:
+            # Fail CLOSED on a token outside the vocabulary, or on no token at
+            # all (design §6.3). The alternative — falling through to the
+            # write — is fail-OPEN: a re-check that returns a typo, a renamed
+            # disposition, or a result this function cannot read structurally
+            # would silently authorise exactly the write it exists to gate.
+            return ContactPlacement(
+                outcome=PLACEMENT_QUEUED,
+                verdict=verdict,
+                placed_uid=placed_uid,
+                field=field,
+                usage_class=usage_class,
+                recheck_disposition=disposition,
+                recheck_checks=checks,
+                detail=(
+                    f"re-check returned an unrecognised disposition "
+                    f"{disposition!r} (expected one of "
+                    f"{[_DISPOSITION_PASS, _DISPOSITION_NON_PERSONAL, _DISPOSITION_SUSPECT]}); "
+                    "nothing written and the item goes to the human queue "
+                    "(design §6.3: the seam fails closed)"
+                ),
+            )
+
+    provenance = _attribution_provenance(
+        verdict=verdict,
+        original_source=original_source,
+        original_target=target,
+        writer=writer,
+        model=model,
+        prompt_sha256=prompt_sha256,
+        calibrated_p=calibrated_p,
+        decided_by=decided_by,
+    )
+    write = record_contact_value(
+        contacts_root,
+        value,
+        uid=placed_uid,
+        name=placed_name,
+        usage_class=_PLACEMENT_USAGE_CLASS,
+        field=field,
+        source=provenance,
+        observed_at=observed_at,
+        index=index,
+    )
+    if write.path is None or write.outcome not in (
+        OBSERVED_CONTACT_MINTED,
+        OBSERVED_CONTACT_CLASSIFIED,
+    ):
+        return ContactPlacement(
+            outcome=PLACEMENT_DECLINED,
+            verdict=verdict,
+            placed_uid=placed_uid,
+            field=field,
+            usage_class=usage_class,
+            write_outcome=write.outcome,
+            recheck_disposition=disposition,
+            recheck_checks=checks,
+            detail=f"the record write primitive declined ({write.outcome}); nothing filed",
+        )
+    _stamp_placement_provenance(
+        write.path,
+        value,
+        field=field,
+        source=provenance,
+        relation=alias_relation if verdict == _VERDICT_ALIAS else None,
+        original_source=original_source,
+        decided_by=decided_by,
+    )
+    return ContactPlacement(
+        outcome=PLACEMENT_FILED,
+        verdict=verdict,
+        path=write.path,
+        placed_uid=placed_uid,
+        field=field,
+        usage_class=usage_class,
+        write_outcome=write.outcome,
+        recheck_disposition=disposition,
+        recheck_checks=checks,
+    )
 
 
 def _merge_identifier_validity(
@@ -4636,6 +5510,7 @@ EXCLUDED_RECORD_BOOKKEEPING_FIELDS: frozenset[str] = frozenset(
         "identifier",
         IDENTIFIER_VALIDITY_FIELD,
         CONTACT_CLASSIFICATION_FIELD,
+        IDENTIFIER_RELATION_FIELD,
         FOLDED_INTO_FIELD,
         RETIRED_AT_FIELD,
         RETIRED_REASON_FIELD,
@@ -5716,6 +6591,21 @@ __all__ = [
     "classification_for_value",
     "is_outreach_eligible",
     "classify_contact_value",
+    "IDENTIFIER_RELATION_FIELD",
+    "IDENTIFIER_RELATIONS",
+    "RECORDABLE_CONTACT_FIELDS",
+    "record_contact_value",
+    "PLACEMENT_FILED",
+    "PLACEMENT_PARKED",
+    "PLACEMENT_MERGE_PROPOSED",
+    "PLACEMENT_LOGGED",
+    "PLACEMENT_QUEUED",
+    "PLACEMENT_PROPOSED",
+    "PLACEMENT_DECLINED",
+    "PLACEMENT_SKIPPED",
+    "PLACEMENT_VERDICTS",
+    "ContactPlacement",
+    "place_contact_value",
     "DO_NOT_EMAIL_FIELD",
     "DoNotEmailState",
     "do_not_email_state",

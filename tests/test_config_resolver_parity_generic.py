@@ -302,6 +302,18 @@ _SENTINEL_VALUES: tuple[Any, ...] = (
     # exclusion entry: a sentinel only ADDS candidates, so it can never make a
     # resolver that does read its key start failing.
     {"__parity_sentinel_key__": ["__parity_sentinel_item__"]},
+    # A dict whose values are NUMBERS (issue athenaeum#2212). The battery had
+    # dict-of-str, dict-of-dict and dict-of-list, but a resolver keyed
+    # ``<name> -> <number>`` — ``resolve_attribution_thresholds``'s
+    # ``librarian.attribution.thresholds`` is the first — validates its
+    # values as numeric and drops all three as malformed, returning its
+    # empty baseline, which reads identically to "never read the key". Same
+    # shape gap, and closed the same way as the dict-of-list entry directly
+    # above rather than with another exclusion entry: a sentinel only ADDS
+    # candidates, so it can never make a resolver that does read its key
+    # start failing. The value is in ``[0, 1]`` so a probability-typed knob
+    # accepts it.
+    {"__parity_sentinel_key__": 0.987654321},
 )
 
 
