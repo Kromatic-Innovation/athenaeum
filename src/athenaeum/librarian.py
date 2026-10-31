@@ -2489,6 +2489,14 @@ def process_one(
     caller at the moment THIS file started, so the deltas measured here are
     this file's own spend, not the phase's running total.
 
+    Issue athenaeum#2216: an :class:`~athenaeum.pii_attribution.AttributionContext`
+    is built HERE, once per raw file, reusing the ``index``/``excluded_index``
+    this call already has in hand (no second O(corpus) scan), and threaded to
+    :func:`~athenaeum.tiers.tier3_derive_actions` so the prose-compile scrub
+    runs on the synchronous transport too — the same context-build shape
+    :func:`athenaeum.batch.process_batch_run` uses for the batch transport,
+    just at this function's own per-file granularity rather than once per run.
+
     Raises :class:`~athenaeum.sensitivity_routing.SensitivityRoutingError`
     (issue athenaeum#1025, uncaught — the caller's existing generic
     exception handling covers it) when ``sensitivity.routing`` is enabled
@@ -3190,6 +3198,16 @@ def process_one(
     # `calls_before_file` snapshot immediately below), not per-file, so only
     # entries appended from THIS index onward belong to this file's hints.
     _hint_decisions_before = len(usage.person_hint_decisions) if usage is not None else 0
+    # Issue athenaeum#2216: one AttributionContext per raw file, reusing the
+    # EntityIndex/ExcludedRecordIndex this call already has in hand (no
+    # second O(corpus) scan) — the same sharing build_attribution_context's
+    # own docstring documents. Without this, a plain synchronous run never
+    # reaches the prose-compile scrub at all, since tier3_derive_actions
+    # (and tier3_create/tier3_merge below it) only scrub when given a real
+    # context.
+    attribution_context = pii_attribution.build_attribution_context(
+        wiki_root.parent, config, excluded_index=excluded_index, entity_index=index
+    )
     try:
         new_entities, pending_updates, updated_uids, escalations = tier3_derive_actions(
             raw,
@@ -3199,6 +3217,7 @@ def process_one(
             effective_write_client,
             usage=usage,
             config=config,
+            attribution_context=attribution_context,
             max_api_calls_for_file=max_api_calls_for_file,
             max_runtime_for_file=max_runtime_for_file,
             calls_before_file=calls_before_file,

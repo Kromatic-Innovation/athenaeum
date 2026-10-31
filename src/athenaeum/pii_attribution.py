@@ -644,6 +644,11 @@ def scrub_compiled_contact_tokens(
             target_name=target_name,
             writer=WRITER_PROSE_COMPILE,
             source_ref=source_ref,
+            # NOT `shadow=not is_d1_narrow(verdict)` (the other four writers'
+            # convention) — design §10.2 states shadow=True unconditionally
+            # for THIS writer, and prose-compile never files a value onto a
+            # record regardless of disposition, so there is no
+            # enforce-vs-shadow distinction here to encode yet (athenaeum#2216).
             shadow=True,
         )
         scrubbed = scrubbed.replace(token, "")

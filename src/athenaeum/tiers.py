@@ -5750,6 +5750,13 @@ def parse_merge_ops_response(
                 action.name,
                 source_ref,
             )
+            # athenaeum#2216: deliberately NOT run through the prose-compile
+            # scrub — unlike every other branch below, this one introduces no
+            # new model text at all (existing_body plus a footnote only), so
+            # scrubbing it would retroactively strip an address already
+            # sitting in an EXISTING page body, which the issue names
+            # explicitly out of scope ("scrubbing addresses already present
+            # in existing page bodies").
             return _append_source_citation(existing_body, source_ref), None, False
 
         # Fix (b): normalize a non-list ops field (dict-valued, or the alternate
@@ -7199,8 +7206,19 @@ def tier3_derive_actions(
     calls_before_file: int = 0,
     started_at_file: float | None = None,
     audit_hook: "Callable[[str, Path, dict[str, Any], str], object] | None" = None,
+    attribution_context: AttributionContext | None = None,
 ) -> tuple[list[WikiEntity], list[tuple[Path, str]], list[str], list[EscalationItem]]:
     """The LLM-call phase of Tier 3 — makes every call, writes NOTHING.
+
+    ``attribution_context`` (issue athenaeum#2216, keyword-only, ``None`` by
+    default so every existing caller — the ~10 test files that call this
+    function directly — is byte-identical): forwarded to :func:`tier3_create`
+    and :func:`tier3_merge` below, which only run the prose-compile scrub
+    when given a real context. :func:`athenaeum.librarian.process_one`, the
+    one real caller, passes one built from the ``EntityIndex`` it already
+    has in hand (same sharing :func:`athenaeum.batch.process_batch_run` uses
+    for the batch transport) — without that, a plain synchronous run never
+    scrubs at all, which is the gap this parameter closes.
 
     ``audit_hook`` (issue athenaeum#1627): when given, called as
     ``audit_hook(uid, path, meta, body)`` for an ``update`` action's TARGET
@@ -7308,6 +7326,7 @@ def tier3_derive_actions(
                         wiki_root=wiki_root,
                         usage=usage,
                         config=config,
+                        attribution_context=attribution_context,
                     )
                 except PreambleOnlyResponseError:
                     log.warning(
@@ -7384,6 +7403,7 @@ def tier3_derive_actions(
                     usage=usage,
                     config=config,
                     wiki_root=wiki_root,
+                    attribution_context=attribution_context,
                 )
                 if esc:
                     escalations.append(esc)

@@ -1496,6 +1496,97 @@ class TestProcessOnePerKnobClientRouting:
         assert client.messages.create.call_count == 2
 
 
+class TestProcessOneProseCompileScrub:
+    """Issue athenaeum#2216: ``process_one`` is the one real caller of
+    ``tiers.tier3_derive_actions`` on the SYNCHRONOUS transport. This proves
+    the wiring is actually LIVE there — not merely present and exercised
+    only via direct unit tests of the shared helpers — by driving the real
+    entry point with a mocked tier-3 response that leaks a third-party
+    address and checking the written page.
+    """
+
+    def test_create_scrubs_third_party_address_and_parks_it(
+        self, tmp_path: Path
+    ) -> None:
+        import json
+
+        from athenaeum import pii_attribution
+        from athenaeum.librarian import process_one
+
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        raw_path = tmp_path / "raw" / "note.md"
+        raw_path.parent.mkdir(parents=True, exist_ok=True)
+        raw_path.write_text(
+            "Talked with Priya Shah about the new onboarding flow.\n",
+            encoding="utf-8",
+        )
+        raw = RawFile(
+            path=raw_path, source="claude-session", timestamp="", uuid8="deadbeef"
+        )
+
+        classify_client = MagicMock()
+        classify_client.messages.create.return_value = MagicMock(
+            content=[
+                MagicMock(
+                    text=json.dumps(
+                        [
+                            {
+                                "name": "Priya Shah onboarding note",
+                                "entity_type": "reference",
+                                "tags": [],
+                                "access": "internal",
+                                "observations": "Discussed the new onboarding flow.",
+                            }
+                        ]
+                    )
+                )
+            ]
+        )
+        write_client = MagicMock()
+        write_client.messages.create.return_value = MagicMock(
+            content=[
+                MagicMock(
+                    text=(
+                        "# Priya Shah onboarding note\n\nDiscussed the new "
+                        "onboarding flow. Reach Dana at "
+                        "dana.quill@example.org for details.\n"
+                    )
+                )
+            ]
+        )
+
+        result = process_one(
+            raw,
+            EntityIndex(wiki_root),
+            wiki_root,
+            classify_client,
+            valid_types=["reference", "person"],
+            valid_tags=[],
+            valid_access=["open", "internal", "confidential", "personal"],
+            write_client=write_client,
+        )
+
+        assert result.created, "expected a wiki page to be created"
+        entity = result.created[0]
+        assert "dana.quill@example.org" not in entity.body
+
+        # The write actually landed on disk scrubbed too, not just on the
+        # in-memory WikiEntity.
+        written = next((wiki_root).glob("*.md")).read_text(encoding="utf-8")
+        assert "dana.quill@example.org" not in written
+
+        # Nothing is lost (design §10.2): the removed token was parked.
+        # contacts_surface_root needs the knowledge root (wiki_root.parent
+        # here) — resolved the same way build_attribution_context does,
+        # with no config override (default storage mapping).
+        from athenaeum import pii as pii_module
+
+        contacts_root = pii_module.contacts_surface_root(wiki_root.parent, None)
+        suspects_dir = contacts_root / pii_attribution.ATTRIBUTION_SUSPECTS_DIRNAME
+        assert list(suspects_dir.glob("*.md")), "expected the removed token to be parked"
+
+
 # ---------------------------------------------------------------------------
 # run() integration — mocked LLM, real filesystem + git
 # ---------------------------------------------------------------------------
