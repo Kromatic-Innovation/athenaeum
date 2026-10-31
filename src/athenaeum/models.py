@@ -458,6 +458,20 @@ _FM_RE = re.compile(r"^---\s*\r?\n(.*?)\r?\n---\s*\r?\n", re.DOTALL)
 #: has. Correctness never depends on libyaml being present.
 _C_SAFE_LOADER = getattr(yaml, "CSafeLoader", None)
 
+# Issue athenaeum#2178 (option 4): log once, at debug level, whether this
+# process has a libyaml-backed loader at all. This module is imported once
+# per process (Python caches modules), so a single module-level call here
+# already satisfies "once" with no flag/lock -- it cannot become a hot-path
+# cost because it never runs again after import. A silent `None` here would
+# otherwise look identical to a corpus that is merely small or slow for
+# other reasons; confirming this fires on any PARTICULAR deployed host is
+# explicitly out of scope for this issue.
+logging.getLogger(__name__).debug(
+    "athenaeum.models: _C_SAFE_LOADER=%s (libyaml %s)",
+    _C_SAFE_LOADER,
+    "available" if _C_SAFE_LOADER is not None else "NOT available -- pure-Python YAML fallback",
+)
+
 
 def _safe_load_frontmatter(block: str) -> Any:
     """``yaml.safe_load`` *block*, preferring libyaml (issue athenaeum#1194).
@@ -517,6 +531,127 @@ def parse_frontmatter(text: str) -> tuple[dict[str, object], str]:
             if isinstance(_v, int) and not isinstance(_v, bool):
                 meta[_k] = str(_v)
     body = text[m.end() :]
+    return meta, body
+
+
+def _construct_selective_mapping(block: str, wanted: frozenset[str]) -> dict[str, object]:
+    """Compose *block* with ``_C_SAFE_LOADER`` and construct only *wanted* keys.
+
+    Issue athenaeum#2178 option 1: ``CParser`` (the libyaml-backed scanner+parser,
+    athenaeum#1194) already builds the full YAML node graph in C -- that part is
+    cheap. What is expensive is turning EVERY node into a Python object:
+    :class:`~yaml.constructor.SafeConstructor`'s implicit-tag resolution
+    (:meth:`~yaml.resolver.Resolver.resolve`, one regex sweep per scalar) and
+    mapping/sequence/timestamp construction, all pure Python, for every key of
+    every page -- including a long tail (claim lists, provenance blocks,
+    nested ``sources``) a selective caller never reads.
+
+    This walks the TOP-LEVEL mapping node only and calls
+    ``loader.construct_object(value_node, deep=True)`` -- the same method
+    :meth:`~yaml.constructor.BaseConstructor.construct_mapping` uses internally
+    -- for just the value nodes whose key is in *wanted*. Every other
+    top-level value's subtree is never constructed at all: no implicit-tag
+    resolution, no nested construction, for keys the caller didn't ask for.
+
+    ``flatten_mapping`` is called first so a ``<<`` merge key expands exactly
+    as :meth:`SafeConstructor.construct_mapping` would (frontmatter in
+    practice never uses YAML merge keys, but this keeps the two parsers
+    behaviorally identical on the keys they share rather than assuming it).
+
+    Returns ``{}`` for a non-mapping document (a page whose frontmatter block
+    is a bare scalar or list) -- same "nothing to select" shape callers of
+    :func:`parse_frontmatter_selective` already treat as empty.
+    """
+    assert _C_SAFE_LOADER is not None
+    loader = _C_SAFE_LOADER(block)
+    try:
+        node = loader.get_single_node()
+        if node is None or not isinstance(node, yaml.MappingNode):
+            return {}
+        loader.flatten_mapping(node)
+        result: dict[str, object] = {}
+        for key_node, value_node in node.value:
+            key = loader.construct_object(key_node, deep=True)
+            try:
+                selected = key in wanted
+            except TypeError as exc:
+                # An unhashable top-level key (a list or mapping used as a
+                # key, YAML's `? [a, b]` form). SafeConstructor.construct_mapping
+                # raises ConstructorError("found unhashable key") here, which
+                # parse_frontmatter catches and fails open to {} -- but this
+                # function does its own membership test BEFORE constructing the
+                # mapping, so the unhashable value reaches `in wanted` first and
+                # would escape as a bare TypeError. Re-raise as the YAMLError
+                # the caller's fallback already handles, so a malformed page is
+                # skipped exactly as the full parse skips it rather than
+                # crashing a whole index build (Seer review on PR athenaeum#2271).
+                raise yaml.constructor.ConstructorError(
+                    None, None, f"found unhashable key: {exc}", key_node.start_mark
+                ) from exc
+            if selected:
+                result[key] = loader.construct_object(value_node, deep=True)
+        return result
+    finally:
+        loader.dispose()
+
+
+def parse_frontmatter_selective(
+    text: str, keys: "Iterable[str]"
+) -> tuple[dict[str, object], str]:
+    """Like :func:`parse_frontmatter`, but constructs only *keys* (athenaeum#2178).
+
+    Opt-in per caller, NEVER a drop-in replacement for :func:`parse_frontmatter`:
+    the returned dict holds only the requested keys that are actually present
+    on the page -- a key the caller didn't ask for is never in the result,
+    even when the page has it. Per the issue's AC2, that subset counts as
+    "identical" to what :func:`parse_frontmatter` would return, provided the
+    caller requests every key its own logic depends on. In particular:
+
+    - Request ``"metadata"`` too if the caller relies on
+      :func:`resolve_page_type`'s ``metadata.type`` fallback -- requesting
+      only ``"type"`` silently drops that fallback.
+    - The ``uid``/``type``/``name`` int-to-str identity-field coercion
+      :func:`parse_frontmatter` applies is applied here identically, but only
+      to whichever of those three keys the caller actually requested.
+
+    Falls back to a full parse + key-filter when no C loader is available
+    (``_C_SAFE_LOADER is None``) or when the C loader rejects the block (same
+    fallback discipline as :func:`_safe_load_frontmatter`: a block the C
+    scanner rejects re-parses with the pure-Python loader, and only that
+    verdict counts) -- correctness never depends on libyaml, only the speedup
+    does.
+    """
+    m = _FM_RE.match(text)
+    if not m:
+        return {}, text
+    body = text[m.end() :]
+    wanted = frozenset(keys)
+    block = m.group(1)
+
+    def _fallback_full_parse() -> dict[str, object] | None:
+        try:
+            full = yaml.safe_load(block) or {}
+        except yaml.YAMLError:
+            return None
+        if not isinstance(full, dict):
+            return None
+        return {k: v for k, v in full.items() if k in wanted}
+
+    meta: dict[str, object] | None
+    if _C_SAFE_LOADER is None:
+        meta = _fallback_full_parse()
+    else:
+        try:
+            meta = _construct_selective_mapping(block, wanted)
+        except yaml.YAMLError:
+            meta = _fallback_full_parse()
+    if meta is None:
+        return {}, text
+
+    for _k in ("uid", "type", "name"):
+        _v = meta.get(_k)
+        if isinstance(_v, int) and not isinstance(_v, bool):
+            meta[_k] = str(_v)
     return meta, body
 
 
@@ -3436,28 +3571,65 @@ class EntityIndex:
         for fpath in sorted(self.wiki_root.glob("*.md")):
             if fpath.name.startswith("_"):
                 continue
-            parsed = self.read_page_record(fpath)
+            parsed = self.read_page_record(fpath, keys=EntityIndex._INDEX_KEYS)
             if parsed is None:
                 continue
             record, meta = parsed
             self._apply_record(fpath, record, meta)
 
+    #: The frontmatter keys THIS CLASS's own consumers of ``meta`` look at
+    #: (:meth:`pages_of_type`, the sole reader of ``_entities``, plus
+    #: :func:`resolve_page_type`'s ``metadata.type`` fallback). Issue
+    #: athenaeum#2178: this is exactly the reduced shape
+    #: :meth:`PageIndexRecord.meta` already reconstructs for the cached-index
+    #: path -- selecting just these keys at parse time changes nothing
+    #: EntityIndex itself observes, cached or not.
+    #:
+    #: NOT a safe default for :meth:`read_page_record` in general:
+    #: :func:`athenaeum.contact_record_repair._read_wiki_facts` (among other
+    #: direct callers) unpacks the same ``(record, meta)`` return and reads
+    #: ``meta`` keys OUTSIDE this set (``status``/``folded_into``, via
+    #: :func:`is_tombstone`/:func:`tombstone_target`) -- which is why
+    #: :meth:`read_page_record`'s own *keys* parameter defaults to ``None``
+    #: (full parse) rather than to this constant. Only a caller that has
+    #: checked its OWN ``meta`` usage against this set may pass it.
+    _INDEX_KEYS = frozenset({"uid", "name", "type", "metadata", "aliases"})
+
     @staticmethod
-    def read_page_record(fpath: Path) -> "tuple[PageIndexRecord, dict] | None":
+    def read_page_record(
+        fpath: Path, *, keys: "frozenset[str] | None" = None
+    ) -> "tuple[PageIndexRecord, dict] | None":
         """Read one wiki page into the facts this index keeps about it.
 
         Returns ``(record, meta)``, or ``None`` when the page contributes
         nothing to the index (unreadable, no frontmatter, or no ``name:``).
         This is the ONE place the per-page indexing rules live: the full
-        :meth:`_load` scan and the persisted cache in
-        :mod:`athenaeum.entity_index_cache` both call it, so a page is
+        :meth:`_load` scan, the persisted cache in
+        :mod:`athenaeum.entity_index_cache`, AND several other direct callers
+        (:mod:`athenaeum.contact_record_repair`, :mod:`athenaeum.decay_sweep`,
+        :mod:`athenaeum.identity_resolution`) all call it, so a page is
         indexed identically whichever path built the index.
+
+        *keys* (issue athenaeum#2178) is opt-in PER CALLER, never a default
+        this method chooses for you: ``None`` (the default) parses the FULL
+        frontmatter via :func:`parse_frontmatter`, identical to this
+        function's behavior before athenaeum#2178 -- the only safe choice for a
+        caller unpacking ``meta`` for keys not already audited against a
+        selective set. Passing a *keys* frozenset switches to
+        :func:`parse_frontmatter_selective` scoped to exactly those keys,
+        skipping constructor cost for the rest of the page's frontmatter --
+        correct ONLY for a caller that has verified it never reads a ``meta``
+        key outside *keys* (see :data:`_INDEX_KEYS`'s docstring for the
+        caller that got this wrong first).
         """
         try:
             text = fpath.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             return None
-        meta, _ = parse_frontmatter(text)
+        if keys is None:
+            meta, _ = parse_frontmatter(text)
+        else:
+            meta, _ = parse_frontmatter_selective(text, keys)
         if not meta:
             return None
 
