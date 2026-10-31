@@ -30,6 +30,8 @@ from athenaeum import pii, pii_attribution
 from athenaeum._cmd_attribution import _AS_FORMS
 from athenaeum.cli import main
 from athenaeum.models import EntityIndex, parse_frontmatter, render_frontmatter
+from athenaeum.pending_merges import parse_pending_merges, resolve_merge
+from tests.conftest import init_git_repo
 
 _VALUE = "introducer@example.org"
 _TARGET_UID = "uid-target"
@@ -359,6 +361,70 @@ class TestPlaceAsMerge:
         merges = (knowledge / "wiki" / "_pending_merges.md").read_text(encoding="utf-8")
         assert f"{_TARGET_UID}-target-person.md" in merges
         assert f"{_OWNER_UID}-owner-person.md" in merges
+
+
+class TestPlaceAsMergeDoesNotDestroyTheOwnerPage:
+    """Issue athenaeum#2212 — the merge target IS the owner's existing page.
+
+    ``write_pending_merge`` derives ``write_kind`` (athenaeum#748), so a
+    ``merge:<uid>`` proposal is always ``fold-into-existing``, and
+    ``pending_merges._apply_fold_into_existing`` step 1 writes
+    ``draft_merged_body`` straight over the canonical page. The draft must
+    therefore be the owner page's own text: a ``same-entity`` verdict is a
+    dedupe ruling (design §7.1), not a request to blank a person's page.
+    """
+
+    def test_the_proposal_carries_the_owner_pages_whole_text(
+        self, knowledge: Path
+    ) -> None:
+        owner_page = knowledge / "wiki" / f"{_OWNER_UID}-owner-person.md"
+        owner_page.write_text(
+            owner_page.read_text(encoding="utf-8") + "\nOWNER-ONLY PROSE.\n",
+            encoding="utf-8",
+        )
+        owner_text = owner_page.read_text(encoding="utf-8")
+
+        assert _place(knowledge, _suspect_id(knowledge), f"merge:{_OWNER_UID}") == 0
+
+        proposals = parse_pending_merges(knowledge / "wiki" / "_pending_merges.md")
+        assert len(proposals) == 1
+        proposal = proposals[0]
+        assert proposal.write_kind == "fold-into-existing"
+        # Whole PAGE text, frontmatter included (athenaeum#2125): that is what
+        # the fold writes back, so a body-only draft would drop `uid:`.
+        assert proposal.draft_merged_body.strip() == owner_text.strip()
+        assert f"uid: {_OWNER_UID}" in proposal.draft_merged_body
+        assert "OWNER-ONLY PROSE." in proposal.draft_merged_body
+
+    def test_approving_the_proposal_leaves_the_owner_page_intact(
+        self, knowledge: Path
+    ) -> None:
+        """Driven through the REAL fold apply, not the recorded draft alone."""
+        wiki = knowledge / "wiki"
+        owner_page = wiki / f"{_OWNER_UID}-owner-person.md"
+        owner_page.write_text(
+            owner_page.read_text(encoding="utf-8") + "\nOWNER-ONLY PROSE.\n",
+            encoding="utf-8",
+        )
+
+        assert _place(knowledge, _suspect_id(knowledge), f"merge:{_OWNER_UID}") == 0
+
+        merges_path = wiki / "_pending_merges.md"
+        init_git_repo(wiki)
+        pm_id = parse_pending_merges(merges_path)[0].id
+        result = resolve_merge(merges_path, pm_id, "approve", wiki_root=wiki)
+        assert result["ok"] is True, result
+
+        written = owner_page.read_text(encoding="utf-8")
+        assert "OWNER-ONLY PROSE." in written
+        assert f"uid: {_OWNER_UID}" in written
+        # And the fold did the thing a same-entity ruling IS for: the
+        # target's slug is now an alias of the owner's page.
+        meta, _ = parse_frontmatter(written)
+        assert isinstance(meta, dict)
+        assert f"{_TARGET_UID}-target-person" in [
+            str(a) for a in (meta.get("aliases") or [])
+        ]
 
 
 # ---------------------------------------------------------------------------

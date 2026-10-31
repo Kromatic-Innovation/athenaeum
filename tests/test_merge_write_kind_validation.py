@@ -171,6 +171,73 @@ class TestWriteKindDerived:
         assert classify_write_kind("Yep", tmp_path) == "fold-into-existing"
 
 
+class TestEmptyFoldDraftFailsClosed:
+    """Issue athenaeum#2212 — the mirror destructive case.
+
+    athenaeum#748's refusal above protects the SOURCE pages from a
+    misclassified ``fold-into-existing``. An EMPTY ``draft_merged_body`` on a
+    correctly classified fold destroys the other side:
+    ``_apply_fold_into_existing`` step 1 writes the draft straight over the
+    pre-existing canonical page, so approving such a proposal blanks it.
+    Refused at write time, for the same reason and in the same place.
+    """
+
+    @pytest.mark.parametrize(
+        "draft",
+        ["", "   ", "\n\n", "\t\n "],
+        ids=["empty", "spaces", "newlines", "mixed-whitespace"],
+    )
+    def test_empty_draft_for_a_fold_is_refused(self, tmp_path: Path, draft: str) -> None:
+        _write_wiki_page(tmp_path / "canonical.md", name="Canonical", body="KEEP ME\n")
+        merges = tmp_path / "_pending_merges.md"
+        with pytest.raises(ValueError, match="draft_merged_body is empty"):
+            write_pending_merge(
+                merges,
+                merge_target_name="Canonical",
+                sources=[str(tmp_path / "src.md")],
+                rationale="r",
+                draft_merged_body=draft,
+                confidence=0.9,
+                write_kind=None,
+            )
+        # Nothing queued, and the page the approve would have blanked is intact.
+        assert not merges.exists()
+        assert "KEEP ME" in (tmp_path / "canonical.md").read_text(encoding="utf-8")
+
+    def test_create_merged_is_unaffected_by_an_empty_draft(
+        self, tmp_path: Path
+    ) -> None:
+        """There is no existing page to lose, so the guard must not fire —
+        a new guard that reds a legitimate caller is worse than no guard."""
+        merges = tmp_path / "_pending_merges.md"
+        write_pending_merge(
+            merges,
+            merge_target_name="Brand New Target",
+            sources=[str(tmp_path / "a.md"), str(tmp_path / "b.md")],
+            rationale="r",
+            draft_merged_body="",
+            confidence=0.9,
+            write_kind=None,
+        )
+        pm = parse_pending_merges(merges)[0]
+        assert pm.write_kind == "create-merged"
+        assert pm.draft_merged_body == ""
+
+    def test_a_real_draft_for_a_fold_still_passes(self, tmp_path: Path) -> None:
+        _write_wiki_page(tmp_path / "canonical.md", name="Canonical")
+        merges = tmp_path / "_pending_merges.md"
+        write_pending_merge(
+            merges,
+            merge_target_name="Canonical",
+            sources=[str(tmp_path / "src.md")],
+            rationale="r",
+            draft_merged_body="body",
+            confidence=0.9,
+            write_kind=None,
+        )
+        assert parse_pending_merges(merges)[0].write_kind == "fold-into-existing"
+
+
 # ---------------------------------------------------------------------------
 # AC 3 — resolve_merge re-checks target existence before the fold path.
 # ---------------------------------------------------------------------------

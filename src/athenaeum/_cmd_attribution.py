@@ -260,18 +260,48 @@ def _merge_proposer(wiki_root: Path, suspect_id: str, owner_name: str, target_na
 
     ``confidence=1.0`` because this proposal is a human assertion, not a
     model score, matching ``_cmd_merges``'s own hand-filed proposals.
+
+    **The draft is the fold target's current page text, VERBATIM.** The
+    merge target is the OWNER's existing page, so ``write_pending_merge``
+    derives ``write_kind="fold-into-existing"`` (athenaeum#748) and approval
+    runs ``pending_merges._apply_fold_into_existing``, whose step 1 writes
+    ``draft_merged_body`` straight over that page. A ``same-entity`` verdict
+    is a dedupe ruling about two person pages (design §7.1) and "a merge may
+    destroy renderings, never observations" — losing the owner's content is
+    not an outcome this answer asks for. So this mirrors
+    ``_cmd_merges._cmd_propose_fold``'s own no-``--draft-file`` default
+    (which is inline there, not a shared helper): the canonical page's whole
+    PAGE text, frontmatter included, because that is what the fold writes
+    back (athenaeum#2125). Approval then contributes exactly what a
+    ``same-entity`` ruling is for — the alias bookkeeping and the source
+    tombstone — and leaves the body alone.
     """
     from athenaeum.models import EntityIndex
-    from athenaeum.pending_merges import write_pending_merge
+    from athenaeum.pending_merges import resolve_target_page, write_pending_merge
 
     def _propose(*, target_uid: str, owner_uid: str, value: str, rationale: str) -> Any:
         del value  # never enters the wiki (design §3); the rationale is masked
         index = EntityIndex(wiki_root)
+        owner_page = index.get_by_uid(owner_uid)
         sources = [
             str(path)
-            for path in (index.get_by_uid(target_uid), index.get_by_uid(owner_uid))
+            for path in (index.get_by_uid(target_uid), owner_page)
             if path is not None
         ]
+        # ``resolve_target_page`` -- not a second guess at which file the
+        # fold will write -- is the ONE target resolution shared by
+        # proposal-time ``classify_write_kind`` and approve-time
+        # ``resolve_merge`` (athenaeum#1642), so reading the draft from it
+        # cannot disagree with the page the approve actually overwrites. It
+        # answers ``None`` only when no page owns the slug, i.e. the derived
+        # kind is ``create-merged`` and there is nothing to preserve; the
+        # owner's own page is still the right content to carry into the new
+        # canonical, and ``_cmd_place`` has already refused a uid with no
+        # page at all, so the empty fallback is unreachable.
+        fold_target = resolve_target_page(owner_name, wiki_root) or owner_page
+        draft_merged_body = (
+            fold_target.read_text(encoding="utf-8") if fold_target is not None else ""
+        )
         return write_pending_merge(
             wiki_root / "_pending_merges.md",
             merge_target_name=owner_name,
@@ -282,7 +312,7 @@ def _merge_proposer(wiki_root: Path, suspect_id: str, owner_name: str, target_na
                 f"{suspect_id} (`athenaeum attribution place --as merge:{owner_uid}`); "
                 f"the value was headed for {target_name}."
             ),
-            draft_merged_body="",
+            draft_merged_body=draft_merged_body,
             confidence=1.0,
             write_kind=None,  # derived (athenaeum#748) — never taken from the caller
         )
