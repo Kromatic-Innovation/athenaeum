@@ -44,20 +44,26 @@ log = logging.getLogger(__name__)
 
 _DECODER = json.JSONDecoder()
 
-#: Cap on consecutive failed :meth:`json.JSONDecoder.raw_decode` anchor
+#: Cap on the number of failed :meth:`json.JSONDecoder.raw_decode` anchor
 #: attempts within a single :func:`_scan_objects` call (issue athenaeum#2243).
+#: Counted cumulatively over the call, NOT reset by an intervening success.
 #: Each failed attempt can read to the end of ``text`` before raising, so
-#: text containing many unmatched ``{`` (e.g. ``'{"a":' * 20000``) made the
-#: anchor-every-``{`` scan quadratic: 0.11s at depth 2,000 up to 7.62s at
-#: depth 20,000. Empirically, 128 failed attempts cost well under 0.2s
-#: regardless of how large ``text`` is (each attempt is bounded by either
-#: the json module's internal recursion guard or ``text``'s own length, and
-#: capping the attempt *count* bounds the sum) — measured up to depth
-#: 100,000 (500 KB) staying under 0.2s. Legitimate inputs never approach
-#: this many failed anchors, so the cap changes no currently-defined
-#: behavior; it only forecloses the pathological tail, trading "find an
-#: object preceded by >128 stray unmatched braces" (never a documented
-#: guarantee) for bounded worst-case cost.
+#: the anchor-every-``{`` scan was quadratic on text containing many
+#: unmatched ``{``: on ``'{"a":' * depth`` the issue measured 0.11s at depth
+#: 2,000 rising to 7.62s at depth 20,000 (and ~50s in this repo's container).
+#: Capping the attempt *count* bounds the sum, because each attempt is itself
+#: bounded by ``text``'s length or the json module's recursion guard: 128
+#: attempts measured well under 0.2s up to depth 100,000 (500 KB).
+#:
+#: This is the issue's own sanctioned alternative ("cap the number of failed
+#: anchors... before giving up and returning ``None``"), preferred over
+#: brace-depth tracking because that changes WHICH object is returned for a
+#: stray-brace-then-object input. It is not free, though, and the trade is
+#: deliberate: an object preceded by more than this many failed anchors is no
+#: longer found, where it would have been before. The docstring's "tolerates
+#: stray ``{`` before the object" is therefore now bounded by this constant.
+#: 128 is far above anything a real reply produces and far below the point
+#: where the scan costs real time.
 _MAX_FAILED_ANCHORS = 128
 
 #: A markdown code fence: line-leading ``` plus an optional language tag
@@ -88,11 +94,11 @@ def _scan_objects(
     treated as a failed parse, but flagged so callers can log it
     distinctly from "no JSON object present".
 
-    Gives up after :data:`_MAX_FAILED_ANCHORS` consecutive failed attempts
-    (issue athenaeum#2243) — text containing that many unmatched ``{`` has no
-    balanced object left to find within any cost budget worth paying, so
-    further anchoring only buys quadratic runtime for no behavior change on
-    any input the documented contract defines.
+    Gives up after :data:`_MAX_FAILED_ANCHORS` failed attempts, counted
+    cumulatively over the call (issue athenaeum#2243). This bounds the
+    worst case on text full of unmatched ``{``, at the cost of no longer
+    finding an object that sits behind that many failed anchors — see that
+    constant for why the trade is worth taking.
     """
     found: list[dict[str, Any]] = []
     last_err: json.JSONDecodeError | None = None
