@@ -2,7 +2,8 @@
 
 # Note-level corrections — why a CLI pass, not a fast-path record or a decompose-page extension
 
-**Status:** IMPLEMENTED. Issue athenaeum#1976.
+**Status:** IMPLEMENTED. Issue athenaeum#1976; section drop added by issue
+athenaeum#2236.
 
 ## 1. The problem
 
@@ -45,15 +46,30 @@ A deterministic CLI pass, `athenaeum correct-notes`, in the posture
 `decompose-page` already established for the same reason: it is athenaeum
 code acting AS the librarian under the run lock, reading a host-path batch
 file (never `raw/`), resolving every record against one snapshot of the
-page, and writing only when every record resolves. Two actions cover the
-whole problem: `move` a line to the page it is actually about, or `drop`
-it outright. Both cited and uncited lines are eligible for either — the
-pass has no reason to treat a line's provenance as a gate on whether it is
-misfiled.
+page, and writing only when every record resolves. Two record kinds cover
+the whole problem:
 
-A batch is all-or-nothing: an unknown line id or an unresolvable move
-target refuses the whole batch before anything is written, so a partially
-wrong batch can never leave the page in a state nobody authored. Recovery
-from a batch that turns out to have been wrong is the same as every other
-host-write job in this repo — a pre-run tag — rather than a second,
-bespoke undo path.
+* a `bullet_id` record: `move` a Notes line to the page it is actually
+  about, or `drop` it outright. Both cited and uncited lines are eligible
+  for either — the pass has no reason to treat a line's provenance as a
+  gate on whether it is misfiled.
+* a `section_id` record: `drop` a whole `##` heading's span (issue
+  athenaeum#2236 — a whole wrong-person enrichment section has no bullet
+  ids to address it by). The span removed is the heading through, but not
+  including, the next heading of the same or higher level, so a nested
+  `###` subsection goes WITH its dropped `##` parent. There is no section
+  `move` — that case is a separate field-group move tool, out of scope
+  here. `section_id` is a slug of the heading's own text plus a 1-based
+  ordinal among same-text headings, so it stays stable across re-reads of
+  an unchanged page without being a raw position.
+
+A batch is all-or-nothing: an unknown or ambiguous id (a bullet id that no
+longer matches, or a section id two differently-worded headings collide
+on) or an unresolvable move target refuses the whole batch before anything
+is written, so a partially wrong batch can never leave the page in a state
+nobody authored. A dropped section's footnote definitions get the exact
+same reference handling a dropped bullet's do: a definition no longer
+referenced anywhere on the page is removed, one still referenced elsewhere
+is kept. Recovery from a batch that turns out to have been wrong is the
+same as every other host-write job in this repo — a pre-run tag — rather
+than a second, bespoke undo path.
