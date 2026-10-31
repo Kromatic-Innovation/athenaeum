@@ -3741,13 +3741,24 @@ def record_attribution_audit_review(
     Raises:
         AttributionAuditReviewError: *audit_id* is not a pending item with
             ``tier`` :data:`athenaeum.calibration.ATTRIBUTION_TIER_NAME` on
-            *context*'s wiki, or the suspect it names is no longer readable
-            (needed to re-file an overturn).
+            *context*'s wiki (checked BEFORE any write) -- or, on an
+            OVERTURN, the re-file step failed AFTER the calibration signal
+            was already recorded (the suspect is no longer readable, or
+            :func:`athenaeum.pii.place_contact_value` itself raised). In
+            that second case the message names the committed signal
+            explicitly and points at the real recovery path
+            (``athenaeum attribution place <suspect-id> --as ...``) rather
+            than letting a retry of this same call fail opaquely -- see
+            the try/except around the re-file step for why a retry cannot
+            double-record the signal either way.
         ValueError: propagated from
             :func:`athenaeum.calibration.record_audit_review` for an
             unknown or already-reviewed *audit_id* (same vocabulary; the
             lookup above is what turns "unknown" and "not attribution" into
-            the SAME clear error before any write happens).
+            the SAME clear error before any write happens). This is also
+            exactly what a caller sees if it retries this function with an
+            *audit_id* whose review already landed -- by design, never a
+            duplicate write.
     """
     if context.wiki_root is None:
         raise AttributionAuditReviewError(
@@ -3775,40 +3786,72 @@ def record_attribution_audit_review(
     if not review["overturned"]:
         return AttributionAuditReviewOutcome(review=review, placement=None)
 
-    suspect = read_suspect(context.contacts_root, suspect_id)
-    if suspect is None:
-        raise AttributionAuditReviewError(
-            f"cannot re-file overturned audit {audit_id!r}: suspect "
-            f"{suspect_id!r} is no longer readable under {context.contacts_root}"
+    # AC3's own ordering ("records the calibration signal, THEN re-files")
+    # is fixed by design (Seer finding B, PR athenaeum#2269 -- rejected:
+    # do not reorder). The ledger write above is already committed and
+    # permanent by the time we reach here: `calibration.record_audit_review`
+    # allows each audit item to be reviewed AT MOST ONCE (raises
+    # ``ValueError`` on any second call for the same `audit_id`), so a
+    # caller that retries THIS function with the same `audit_id` after a
+    # failure below gets that same ``ValueError`` immediately, before
+    # `place_contact_value` is ever reached again -- the calibration
+    # signal is therefore idempotent by construction and CANNOT be
+    # double-recorded by a retry. But a raw retry also cannot complete the
+    # placement either, and a bare exception from `read_suspect` /
+    # `place_contact_value` would otherwise leak out unwrapped with no
+    # indication that the signal already landed or what to do next. Wrap
+    # both in one `AttributionAuditReviewError` that says so explicitly
+    # and names the real recovery path -- re-filing directly via
+    # `athenaeum attribution place <suspect-id> --as ...`, which the
+    # suspect file (untouched by this failure) still supports.
+    try:
+        suspect = read_suspect(context.contacts_root, suspect_id)
+        if suspect is None:
+            raise AttributionAuditReviewError(
+                f"cannot re-file overturned audit {audit_id!r}: suspect "
+                f"{suspect_id!r} is no longer readable under {context.contacts_root}"
+            )
+
+        def _recheck(recheck_value: str, **kwargs: Any) -> AttributionVerdict:
+            return check_contact_attribution(recheck_value, context=context, **kwargs)
+
+        placement = pii.place_contact_value(
+            context.contacts_root,
+            suspect.value,
+            verdict=human_verdict,
+            target_uid=suspect.target_uid,
+            target_name=suspect.target_name,
+            owner_uid=owner_uid,
+            owner_name=owner_name,
+            alias_relation=alias_relation,
+            original_source=suspect.source_ref,
+            writer=WRITER_RE_ATTRIBUTION,
+            # Design §8.1: a human answer carries no calibrated probability,
+            # model id or prompt sha -- there was no model call to
+            # attribute it to, same as `_cmd_attribution._cmd_place`'s own
+            # human re-filing.
+            model=None,
+            prompt_sha256=None,
+            calibrated_p=None,
+            decided_by="human",
+            observed_at=now_iso(),
+            apply=True,
+            recheck=_recheck,
+            propose_merge=propose_merge,
+            index=index,
         )
-
-    def _recheck(recheck_value: str, **kwargs: Any) -> AttributionVerdict:
-        return check_contact_attribution(recheck_value, context=context, **kwargs)
-
-    placement = pii.place_contact_value(
-        context.contacts_root,
-        suspect.value,
-        verdict=human_verdict,
-        target_uid=suspect.target_uid,
-        target_name=suspect.target_name,
-        owner_uid=owner_uid,
-        owner_name=owner_name,
-        alias_relation=alias_relation,
-        original_source=suspect.source_ref,
-        writer=WRITER_RE_ATTRIBUTION,
-        # Design §8.1: a human answer carries no calibrated probability,
-        # model id or prompt sha -- there was no model call to attribute it
-        # to, same as `_cmd_attribution._cmd_place`'s own human re-filing.
-        model=None,
-        prompt_sha256=None,
-        calibrated_p=None,
-        decided_by="human",
-        observed_at=now_iso(),
-        apply=True,
-        recheck=_recheck,
-        propose_merge=propose_merge,
-        index=index,
-    )
+    except AttributionAuditReviewError:
+        raise
+    except Exception as exc:
+        raise AttributionAuditReviewError(
+            f"the overturn of audit {audit_id!r} (human_verdict={human_verdict!r}) was "
+            "RECORDED, but re-filing the value failed "
+            f"({type(exc).__name__}: {exc}). The calibration signal is already "
+            "permanent -- do not retry this function with the same audit_id, it will "
+            "raise ValueError('audit item already reviewed'). Re-file the value "
+            f"directly instead: `athenaeum attribution place {suspect_id} --as "
+            "own|other:<uid>|alias:<relation>|merge:<uid>`."
+        ) from exc
     return AttributionAuditReviewOutcome(review=review, placement=placement)
 
 

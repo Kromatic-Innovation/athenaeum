@@ -110,6 +110,7 @@ from athenaeum.calibration import (
 )
 from athenaeum.config import (
     resolve_attribution_accuracy_floor,
+    resolve_attribution_thresholds,
     resolve_auto_apply_proposals_disagreement_trigger,
     resolve_auto_apply_proposals_widen_step,
 )
@@ -336,6 +337,19 @@ class AutoApplyProposalRunSummary:
     proposed: int = 0
     skipped_pending: int = 0
     skipped_suppressed: int = 0
+    #: Issue athenaeum#2219 (Seer finding A, PR athenaeum#2269): a question
+    #: class whose threshold is PINNED by explicit
+    #: ``librarian.attribution.thresholds.<class>`` config -- an approved
+    #: proposal for it could never take effect (AC5's own precedence: the
+    #: explicit-config layer always wins over the ledger override), so
+    #: :func:`run_attribution_threshold_proposal_detection` never even drafts
+    #: one. Counted SEPARATELY from ``not_warranted`` (no signal yet) so an
+    #: operator reading this summary can tell "nothing to propose" apart
+    #: from "something to propose, but it would be structurally inert" --
+    #: always ``0`` for the merge-dedupe rail
+    #: (:func:`run_auto_apply_proposal_detection`), which has no
+    #: per-action equivalent of this config layer.
+    skipped_pinned_by_config: int = 0
     #: Issue athenaeum#2219: shared with
     #: :func:`run_attribution_threshold_proposal_detection`, whose drafts are
     #: :class:`AttributionThresholdProposalDraft` rather than
@@ -489,6 +503,31 @@ class AttributionThresholdProposalDraft:
         }
 
 
+def _attribution_threshold_is_pinned_by_config(
+    question_class: str, config: dict[str, Any] | None
+) -> bool:
+    """Whether *question_class* has an explicit
+    ``librarian.attribution.thresholds.<class>`` override set (issue
+    athenaeum#2219, Seer finding A / PR athenaeum#2269).
+
+    That layer wins UNCONDITIONALLY over any ledger override
+    (:func:`athenaeum.pii_attribution.threshold_for_class`'s own
+    precedence, AC5), so an approved attribution-threshold proposal for a
+    PINNED class could never take effect: ``current`` is this same
+    explicit value on every run (the ledger override is never even
+    consulted while it is set), so a later run's draft recomputes the
+    IDENTICAL ``(action, current, proposed)`` triple -- the same id
+    :func:`proposal_item_id` hashes -- as an already-APPROVED one.
+    :func:`run_auto_apply_proposal_detection`'s generic suppression only
+    tracks PENDING and REJECTED ids (:func:`list_pending_auto_apply_threshold_proposals`
+    / ``_kind_ids(..., REJECT_KIND)``), never approved ones, so without
+    this guard the SAME proposal re-drafts (and re-appends to the ledger)
+    on every single run forever -- confirmed empirically by running the
+    real phase twice over one store before this fix landed.
+    """
+    return resolve_attribution_thresholds(config).get(question_class) is not None
+
+
 def draft_attribution_threshold_proposal(
     question_class: str,
     *,
@@ -497,8 +536,14 @@ def draft_attribution_threshold_proposal(
 ) -> AttributionThresholdProposalDraft | None:
     """Draft one widen-or-narrow proposal for *question_class*, or ``None``.
 
-    ``None`` when: the class's overturn rate is unavailable (nothing
-    reviewed yet); the class has no current threshold at all
+    ``None`` when: the class's threshold is PINNED by explicit
+    ``librarian.attribution.thresholds.<class>`` config
+    (:func:`_attribution_threshold_is_pinned_by_config` -- an approved
+    proposal could never take effect there, so drafting one would be pure
+    noise; :func:`run_attribution_threshold_proposal_detection` counts this
+    case SEPARATELY, as ``skipped_pinned_by_config``, rather than folding
+    it into ``not_warranted``); the class's overturn rate is unavailable
+    (nothing reviewed yet); the class has no current threshold at all
     (:func:`athenaeum.pii_attribution.threshold_for_class` returns
     ``None`` — no valid calibration, so there is no floor to move); the
     overturn rate sits exactly AT the target error rate (no change
@@ -514,6 +559,8 @@ def draft_attribution_threshold_proposal(
     second step knob; design §8.3 names only the rate/direction logic, not
     a distinct magnitude.
     """
+    if _attribution_threshold_is_pinned_by_config(question_class, config):
+        return None
     rate = attribution_overturn_rate(wiki_root, question_class)
     if rate is None:
         return None
@@ -576,6 +623,17 @@ def run_attribution_threshold_proposal_detection(
     idempotent-per-id / pending-skip / suppressed-skip logic as
     :func:`run_auto_apply_proposal_detection` — see that function's
     docstring; the only difference is which drafter is called per item.
+
+    **A class PINNED by explicit config is never even handed to the
+    drafter** (issue athenaeum#2219, Seer finding A / PR athenaeum#2269):
+    the generic pending/rejected suppression above tracks nothing for an
+    APPROVED id, so a class whose ``current`` threshold can never move
+    (explicit config always wins — AC5) would otherwise re-draft the
+    identical ``(action, current, proposed)`` triple, and get re-appended
+    to the ledger, on every single run forever — confirmed empirically
+    before this guard existed. Counted as ``skipped_pinned_by_config``,
+    distinct from ``not_warranted`` (which means "no signal yet", not
+    "the signal is structurally unactionable").
     """
     summary = AutoApplyProposalRunSummary()
     wiki_root = Path(wiki_root)
@@ -599,6 +657,10 @@ def run_attribution_threshold_proposal_detection(
     )
 
     for question_class in question_classes:
+        if _attribution_threshold_is_pinned_by_config(question_class, config):
+            summary.skipped_pinned_by_config += 1
+            continue
+
         draft = draft_attribution_threshold_proposal(
             question_class, wiki_root=wiki_root, config=config
         )

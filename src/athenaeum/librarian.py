@@ -7583,19 +7583,24 @@ def _run_auto_apply_proposals_phase(ctx: RunContext) -> None:
         "proposed": attribution_summary.proposed,
         "skipped_pending": attribution_summary.skipped_pending,
         "skipped_suppressed": attribution_summary.skipped_suppressed,
+        # Issue athenaeum#2219 (Seer finding A / PR athenaeum#2269): a class
+        # pinned by explicit `librarian.attribution.thresholds.<class>`
+        # config, so no proposal was even drafted for it.
+        "skipped_pinned_by_config": attribution_summary.skipped_pinned_by_config,
         "dry_run": dry_run,
         "drafted_ids": [d.id for d in attribution_summary.drafts],
     }
     if attribution_summary.proposed or attribution_summary.drafts:
         log.info(
             "attribution-threshold-proposals: %d class(es), %d proposal(s) %s "
-            "(%d not warranted, %d pending, %d suppressed)",
+            "(%d not warranted, %d pending, %d suppressed, %d pinned by config)",
             attribution_summary.actions_seen,
             len(attribution_summary.drafts),
             "listed (dry-run)" if dry_run else "queued",
             attribution_summary.not_warranted,
             attribution_summary.skipped_pending,
             attribution_summary.skipped_suppressed,
+            attribution_summary.skipped_pinned_by_config,
         )
 
 

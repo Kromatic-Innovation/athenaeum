@@ -2781,3 +2781,97 @@ class TestAttributionAuditReview:
             pii_attribution.record_attribution_audit_review(
                 context, audit_id=rec["id"], human_verdict="own"
             )
+
+    def test_a_placement_failure_after_the_ledger_write_is_wrapped_and_the_signal_stands(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Issue athenaeum#2219, Seer finding B (PR athenaeum#2269,
+        REJECTED reorder): AC3 fixes the sequence -- record the
+        calibration signal, THEN re-file. If the re-file step raises
+        AFTER that write, the signal must already be a fact on disk, the
+        caller must get an actionable error (not a bare exception from
+        deep inside the placement executor), and a naive retry must NOT
+        be able to double-record the signal."""
+        from athenaeum.calibration import read_calibration_ledger
+
+        context = _context(tmp_path)
+        outcome = self._sample_a_filed_own(context, monkeypatch)
+        audit_id = self._audit_id_for(context, outcome.suspect_id)
+
+        def _boom(*_a: Any, **_k: Any) -> Any:
+            raise RuntimeError("disk is gone")
+
+        monkeypatch.setattr(pii, "place_contact_value", _boom)
+
+        with pytest.raises(pii_attribution.AttributionAuditReviewError) as excinfo:
+            pii_attribution.record_attribution_audit_review(
+                context,
+                audit_id=audit_id,
+                human_verdict="alias",
+                alias_relation="role-inbox",
+            )
+        message = str(excinfo.value)
+        assert "RECORDED" in message
+        assert "do not retry" in message.lower()
+        assert f"athenaeum attribution place {outcome.suspect_id}" in message
+        assert isinstance(excinfo.value.__cause__, RuntimeError)
+
+        # The calibration signal IS a fact on disk, despite the failed re-file.
+        review = next(
+            r
+            for r in read_calibration_ledger(context.wiki_root)
+            if r.get("kind") == "review" and r.get("id") == audit_id
+        )
+        assert review["overturned"] is True
+        assert review["human_verdict"] == "alias"
+
+        # A naive retry cannot double-record: calibration.record_audit_review's
+        # own "reviewed at most once" guard fires first, as a plain
+        # ValueError (not AttributionAuditReviewError) -- never reaching
+        # `place_contact_value` a second time.
+        with pytest.raises(ValueError, match="already reviewed"):
+            pii_attribution.record_attribution_audit_review(
+                context,
+                audit_id=audit_id,
+                human_verdict="alias",
+                alias_relation="role-inbox",
+            )
+        # Still exactly one review record -- the retry truly wrote nothing.
+        assert len(
+            [
+                r
+                for r in read_calibration_ledger(context.wiki_root)
+                if r.get("kind") == "review" and r.get("id") == audit_id
+            ]
+        ) == 1
+
+    def test_suspect_no_longer_readable_after_the_ledger_write_is_wrapped(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Same contract as the placement-failure test above, for the
+        OTHER post-write failure mode: the suspect file is gone by the
+        time the re-file step tries to read it back."""
+        context = _context(tmp_path)
+        outcome = self._sample_a_filed_own(context, monkeypatch)
+        audit_id = self._audit_id_for(context, outcome.suspect_id)
+
+        monkeypatch.setattr(pii_attribution, "read_suspect", lambda *a, **k: None)
+
+        with pytest.raises(pii_attribution.AttributionAuditReviewError):
+            pii_attribution.record_attribution_audit_review(
+                context,
+                audit_id=audit_id,
+                human_verdict="alias",
+                alias_relation="role-inbox",
+            )
+        # This specific failure is raised directly (not wrapped from an
+        # unrelated exception type), but it is STILL the post-write branch:
+        # the signal already landed.
+        from athenaeum.calibration import read_calibration_ledger
+
+        review = next(
+            r
+            for r in read_calibration_ledger(context.wiki_root)
+            if r.get("kind") == "review" and r.get("id") == audit_id
+        )
+        assert review["overturned"] is True

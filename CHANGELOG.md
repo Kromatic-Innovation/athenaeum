@@ -577,6 +577,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   precedence, same call position, no new knob — drafting over
   `pii_attribution.QUESTION_CLASSES` (the seam's own vocabulary) rather
   than a hand-written list. No model call; synthetic fixtures only.
+  - **Fix (PR review, Seer finding A):** a question class whose threshold
+    is PINNED by explicit `librarian.attribution.thresholds.<class>`
+    config never drafts a proposal at all — an approval for it could
+    never take effect (AC5's own precedence), so without this guard the
+    identical `(action, current, proposed)` id re-drafted, and
+    re-appended to the ledger, on every nightly run forever once
+    approved (confirmed empirically before the fix). Counted separately
+    as `skipped_pinned_by_config`.
+  - **Clarified (PR review, Seer finding B — rejected the proposed
+    reorder; AC3's sequence stands):** if re-filing an overturn fails
+    AFTER the calibration signal is recorded, `pii_attribution.
+    record_attribution_audit_review` now wraps the failure in one
+    `AttributionAuditReviewError` that says the signal already landed,
+    names why a retry of the same call cannot double-record it
+    (`calibration.record_audit_review` reviews each audit item at most
+    once), and points at the real recovery path — re-filing directly via
+    `athenaeum attribution place <suspect-id> --as ...`.
 
 ### Changed
 

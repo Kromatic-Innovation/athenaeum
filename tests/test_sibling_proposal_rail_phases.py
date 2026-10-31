@@ -488,13 +488,47 @@ class TestAttributionThresholdPhaseQuestionClassDerivation:
         assert captured["question_classes"] == sorted(QUESTION_CLASSES)
 
 
+def _patch_calibration_record(monkeypatch, *, question_class: str, threshold: float) -> None:
+    """Patch a single PASSING, synthetic calibration entry for
+    *question_class* (threshold *threshold*), so ``threshold_for_class``
+    resolves a real ``current`` with NO explicit
+    ``librarian.attribution.thresholds.<class>`` config set -- the
+    not-pinned happy path a round trip through approval needs. Copied
+    (not imported) from ``tests/test_attribution_escalation.py``'s own
+    ``_entry``/``_patch_record`` pair, per this file's "copied, not
+    imported" convention."""
+    from athenaeum import pii_attribution
+
+    entry = pii_attribution.CalibrationEntry(
+        question_class=question_class,
+        model="synthetic-attribution-model",
+        prompt_sha256="synthetic-prompt-sha",
+        signal=pii_attribution.SIGNAL_SELF_REPORTED,
+        bins=((0.0, 0.5, 0.20), (0.5, 0.9, 0.70), (0.9, 1.0, 0.98)),
+        threshold=threshold,
+        n_fit=60,
+        n_holdout=40,
+        holdout_accuracy_above=0.98,
+        holdout_wilson_lb=0.95,
+        abstain_share=0.18,
+        dataset_sha256="synthetic-dataset-sha",
+        measured_at="2026-10-31",
+        passes=True,
+        ece=0.03,
+        auroc=0.81,
+    )
+    monkeypatch.setattr(
+        pii_attribution, "load_calibration_record", lambda: {question_class: entry}
+    )
+
+
 class TestAttributionThresholdPhaseRoundTrip:
     """The production round trip the coordinator asked for: real sampler,
     real phase entry point (never the drafter directly), real decisions
     queue, real approval path, real ``threshold_for_class`` read-back."""
 
     def test_full_round_trip_through_the_production_phase_and_decisions_queue(
-        self, tmp_path: Path
+        self, tmp_path: Path, monkeypatch
     ) -> None:
         from athenaeum.auto_apply_proposals import approve_auto_apply_threshold_proposal
         from athenaeum.calibration import attribution_threshold_action_id
@@ -503,7 +537,15 @@ class TestAttributionThresholdPhaseRoundTrip:
 
         wiki_root = tmp_path / "knowledge" / "wiki"
         question_class = "held-elsewhere"
-        config = _attribution_threshold_config(question_class, 0.9)
+        # NOT pinned by explicit config -- `current` comes from a shipped,
+        # PASSING calibration entry instead, the happy path that actually
+        # lets an approval take effect (issue athenaeum#2219 Seer finding
+        # A / PR athenaeum#2269: a class PINNED by explicit config is
+        # covered separately, in TestAttributionThresholdPhasePinnedByConfig
+        # below, specifically BECAUSE an approval there never takes
+        # effect).
+        _patch_calibration_record(monkeypatch, question_class=question_class, threshold=0.9)
+        config = {"librarian": {"signal_mining": {"enabled": True, "dry_run": False}}}
 
         # 0/10 overturned -> 0.0, strictly below the 0.05 target (1 -
         # accuracy_floor) -> the real sampler + the real phase should widen.
@@ -518,6 +560,7 @@ class TestAttributionThresholdPhaseRoundTrip:
         assert summary is not None
         assert summary["dry_run"] is False
         assert summary["proposed"] == 1
+        assert summary["skipped_pinned_by_config"] == 0
         assert len(summary["drafted_ids"]) == 1
         proposal_id = summary["drafted_ids"][0]
 
@@ -532,7 +575,7 @@ class TestAttributionThresholdPhaseRoundTrip:
         assert drafted["payload"]["action"] == action
 
         # Nothing changed yet -- AC5's "no threshold changes without
-        # approval" -- the explicit config threshold still reads back.
+        # approval" -- the shipped entry's own threshold still reads back.
         assert threshold_for_class(
             question_class, config, wiki_root=wiki_root
         ) == pytest.approx(0.9)
@@ -540,19 +583,97 @@ class TestAttributionThresholdPhaseRoundTrip:
         # Approve through the REAL approval path.
         approve_auto_apply_threshold_proposal(wiki_root, proposal_id=proposal_id)
 
-        # The ledger override is honoured BELOW explicit config -- so with
-        # the SAME explicit override still set, the explicit layer still
-        # wins (it must, unconditionally, per threshold_for_class's own
-        # precedence).
-        assert threshold_for_class(
-            question_class, config, wiki_root=wiki_root
-        ) == pytest.approx(0.9)
-
-        # Drop the explicit override and re-read: NOW the approved ledger
-        # override is what the real reader honours.
-        config_without_override = {"librarian": {"signal_mining": {"enabled": True}}}
-        overridden = threshold_for_class(
-            question_class, config_without_override, wiki_root=wiki_root
-        )
+        # NOW the real reader honours the approved ledger override -- no
+        # explicit config exists to outrank it.
+        overridden = threshold_for_class(question_class, config, wiki_root=wiki_root)
         assert overridden == pytest.approx(0.85)  # 0.9 - the default widen step (0.05)
         assert overridden < 0.9
+
+        # An operator's explicit config, even added AFTER approval, still
+        # wins UNCONDITIONALLY (AC5's own precedence).
+        config_with_explicit = _attribution_threshold_config(question_class, 0.9)
+        assert threshold_for_class(
+            question_class, config_with_explicit, wiki_root=wiki_root
+        ) == pytest.approx(0.9)
+
+
+class TestAttributionThresholdPhasePinnedByConfig:
+    """Issue athenaeum#2219, Seer finding A (PR athenaeum#2269): an
+    explicit per-class config threshold wins UNCONDITIONALLY over any
+    ledger override, so an approved proposal for that class can never
+    take effect. Confirmed EMPIRICALLY (not by reading) before this fix
+    existed: running the real phase twice over one store with the SAME
+    pinned config re-drafted and re-appended the IDENTICAL
+    ``(action, current, proposed)`` id on every run, because the generic
+    rail's suppression tracks PENDING and REJECTED ids, never APPROVED
+    ones. The fix: a pinned class is never even handed to the drafter."""
+
+    def test_pinned_class_never_drafts_at_all(self, tmp_path: Path) -> None:
+        wiki_root = tmp_path / "knowledge" / "wiki"
+        question_class = "held-elsewhere"
+        config = _attribution_threshold_config(question_class, 0.9)
+        _seed_attribution_disagreement(
+            wiki_root, question_class=question_class, overturned=0, confirmed=10
+        )
+
+        ctx = _make_ctx(tmp_path, wiki_root=wiki_root, config=config)
+        _run_auto_apply_proposals_phase(ctx)
+
+        summary = ctx.attribution_threshold_proposals_summary
+        assert summary is not None
+        assert summary["proposed"] == 0
+        assert summary["skipped_pinned_by_config"] == 1
+        # The other 4 question classes have no calibration data seeded at
+        # all (rate unavailable) -- "not warranted", a DIFFERENT reason
+        # than "pinned by config", which is exactly why the two counters
+        # are separate.
+        assert summary["not_warranted"] == 4
+        assert summary["drafted_ids"] == []
+
+    def test_a_second_run_never_re_drafts_an_approval_made_before_pinning(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """The exact scenario the coordinator asked to settle empirically:
+        a store carries an APPROVED attribution-threshold proposal (from
+        before an operator pinned an explicit config value for that
+        class), and the explicit config is now ALSO pinned. Running the
+        real phase again must draft nothing new and must not duplicate
+        the ledger entry."""
+        from athenaeum.auto_apply_proposals import (
+            approve_auto_apply_threshold_proposal,
+            read_auto_apply_proposals_ledger,
+        )
+
+        wiki_root = tmp_path / "knowledge" / "wiki"
+        question_class = "held-elsewhere"
+        _seed_attribution_disagreement(
+            wiki_root, question_class=question_class, overturned=0, confirmed=10
+        )
+
+        # Run 1, unpinned: a real draft, which we approve for realism.
+        _patch_calibration_record(monkeypatch, question_class=question_class, threshold=0.9)
+        unpinned_config = {"librarian": {"signal_mining": {"enabled": True, "dry_run": False}}}
+        ctx1 = _make_ctx(tmp_path, wiki_root=wiki_root, config=unpinned_config)
+        _run_auto_apply_proposals_phase(ctx1)
+        summary1 = ctx1.attribution_threshold_proposals_summary
+        assert summary1["proposed"] == 1
+        proposal_id = summary1["drafted_ids"][0]
+        approve_auto_apply_threshold_proposal(wiki_root, proposal_id=proposal_id)
+        ledger_after_approval = read_auto_apply_proposals_ledger(wiki_root)
+        assert len(ledger_after_approval) == 2  # one proposal + one approve
+
+        # The operator now ALSO pins an explicit config value for the
+        # SAME class (a plausible real sequence -- approving a
+        # recommendation, then hard-pinning it for clarity). Re-run the
+        # real phase with that pinned config.
+        pinned_config = _attribution_threshold_config(question_class, 0.9)
+        ctx2 = _make_ctx(tmp_path, wiki_root=wiki_root, config=pinned_config)
+        _run_auto_apply_proposals_phase(ctx2)
+
+        summary2 = ctx2.attribution_threshold_proposals_summary
+        assert summary2["proposed"] == 0
+        assert summary2["skipped_pinned_by_config"] == 1
+        assert summary2["drafted_ids"] == []
+        # The ledger is byte-for-byte unchanged -- no duplicate proposal
+        # record for the already-approved id.
+        assert read_auto_apply_proposals_ledger(wiki_root) == ledger_after_approval

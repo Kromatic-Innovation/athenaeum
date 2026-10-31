@@ -519,6 +519,42 @@ def _attr_config_with_threshold(question_class: str, threshold: float) -> dict:
     }
 
 
+def _patch_calibration_record(monkeypatch, *, question_class: str, threshold: float) -> None:
+    """Patch a single PASSING, synthetic calibration entry for
+    *question_class* (threshold *threshold*) -- so ``threshold_for_class``
+    resolves a real ``current`` with NO explicit
+    ``librarian.attribution.thresholds.<class>`` config set. Issue
+    athenaeum#2219, Seer finding A (PR athenaeum#2269): a PINNED class
+    (``_attr_config_with_threshold``) never drafts at all, so tests that
+    exercise widen/narrow drafting or approval taking effect need this
+    unpinned path instead. Copied (not imported) from
+    ``tests/test_attribution_escalation.py``'s own ``_entry``/
+    ``_patch_record`` pair."""
+    from athenaeum import pii_attribution
+
+    entry = pii_attribution.CalibrationEntry(
+        question_class=question_class,
+        model="synthetic-attribution-model",
+        prompt_sha256="synthetic-prompt-sha",
+        signal=pii_attribution.SIGNAL_SELF_REPORTED,
+        bins=((0.0, 0.5, 0.20), (0.5, 0.9, 0.70), (0.9, 1.0, 0.98)),
+        threshold=threshold,
+        n_fit=60,
+        n_holdout=40,
+        holdout_accuracy_above=0.98,
+        holdout_wilson_lb=0.95,
+        abstain_share=0.18,
+        dataset_sha256="synthetic-dataset-sha",
+        measured_at="2026-10-31",
+        passes=True,
+        ece=0.03,
+        auroc=0.81,
+    )
+    monkeypatch.setattr(
+        pii_attribution, "load_calibration_record", lambda: {question_class: entry}
+    )
+
+
 def _sample_and_review_attribution(
     wiki_root: Path,
     *,
@@ -603,18 +639,17 @@ class TestDraftAttributionThresholdProposal:
         )
         assert draft is None
 
-    def test_unreviewed_class_drafts_nothing(self, tmp_path: Path) -> None:
+    def test_unreviewed_class_drafts_nothing(self, tmp_path: Path, monkeypatch) -> None:
         wiki_root = tmp_path / "wiki"
         wiki_root.mkdir()
+        _patch_calibration_record(monkeypatch, question_class="held-elsewhere", threshold=0.9)
         draft = draft_attribution_threshold_proposal(
-            "held-elsewhere",
-            wiki_root=wiki_root,
-            config=_attr_config_with_threshold("held-elsewhere", 0.9),
+            "held-elsewhere", wiki_root=wiki_root, config=_ATTR_CONFIG
         )
         assert draft is None
 
     def test_overturns_below_target_error_rate_drafts_a_widen(
-        self, tmp_path: Path
+        self, tmp_path: Path, monkeypatch
     ) -> None:
         wiki_root = tmp_path / "wiki"
         wiki_root.mkdir()
@@ -622,9 +657,9 @@ class TestDraftAttributionThresholdProposal:
         _seed_attribution_disagreement(
             wiki_root, question_class="held-elsewhere", overturned=0, confirmed=10
         )
-        config = _attr_config_with_threshold("held-elsewhere", 0.9)
+        _patch_calibration_record(monkeypatch, question_class="held-elsewhere", threshold=0.9)
         draft = draft_attribution_threshold_proposal(
-            "held-elsewhere", wiki_root=wiki_root, config=config
+            "held-elsewhere", wiki_root=wiki_root, config=_ATTR_CONFIG
         )
         assert draft is not None
         assert draft.direction == "widen"
@@ -640,7 +675,7 @@ class TestDraftAttributionThresholdProposal:
         assert draft.overturned == 0
 
     def test_overturns_above_target_error_rate_drafts_a_narrow(
-        self, tmp_path: Path
+        self, tmp_path: Path, monkeypatch
     ) -> None:
         wiki_root = tmp_path / "wiki"
         wiki_root.mkdir()
@@ -648,9 +683,9 @@ class TestDraftAttributionThresholdProposal:
         _seed_attribution_disagreement(
             wiki_root, question_class="held-elsewhere", overturned=3, confirmed=7
         )
-        config = _attr_config_with_threshold("held-elsewhere", 0.9)
+        _patch_calibration_record(monkeypatch, question_class="held-elsewhere", threshold=0.9)
         draft = draft_attribution_threshold_proposal(
-            "held-elsewhere", wiki_root=wiki_root, config=config
+            "held-elsewhere", wiki_root=wiki_root, config=_ATTR_CONFIG
         )
         assert draft is not None
         assert draft.direction == "narrow"
@@ -660,20 +695,20 @@ class TestDraftAttributionThresholdProposal:
         assert draft.overturn_rate_value == pytest.approx(0.3)
         assert draft.overturned == 3
 
-    def test_rate_exactly_at_target_drafts_nothing(self, tmp_path: Path) -> None:
+    def test_rate_exactly_at_target_drafts_nothing(self, tmp_path: Path, monkeypatch) -> None:
         wiki_root = tmp_path / "wiki"
         wiki_root.mkdir()
         # 1/20 overturned = 0.05, exactly the target -> no change either way.
         _seed_attribution_disagreement(
             wiki_root, question_class="held-elsewhere", overturned=1, confirmed=19
         )
-        config = _attr_config_with_threshold("held-elsewhere", 0.9)
+        _patch_calibration_record(monkeypatch, question_class="held-elsewhere", threshold=0.9)
         draft = draft_attribution_threshold_proposal(
-            "held-elsewhere", wiki_root=wiki_root, config=config
+            "held-elsewhere", wiki_root=wiki_root, config=_ATTR_CONFIG
         )
         assert draft is None
 
-    def test_each_question_class_drafts_independently(self, tmp_path: Path) -> None:
+    def test_each_question_class_drafts_independently(self, tmp_path: Path, monkeypatch) -> None:
         wiki_root = tmp_path / "wiki"
         wiki_root.mkdir()
         _seed_attribution_disagreement(
@@ -682,40 +717,97 @@ class TestDraftAttributionThresholdProposal:
         _seed_attribution_disagreement(
             wiki_root, question_class="role-unmatched", overturned=5, confirmed=5
         )
-        config = {
-            "librarian": {
-                "attribution": {
-                    "accuracy_floor": 0.95,
-                    "thresholds": {"held-elsewhere": 0.9, "role-unmatched": 0.9},
-                }
-            }
-        }
+        from athenaeum import pii_attribution
+
+        def _entry(question_class: str) -> pii_attribution.CalibrationEntry:
+            return pii_attribution.CalibrationEntry(
+                question_class=question_class,
+                model="synthetic-attribution-model",
+                prompt_sha256="synthetic-prompt-sha",
+                signal=pii_attribution.SIGNAL_SELF_REPORTED,
+                bins=((0.0, 0.5, 0.20), (0.5, 0.9, 0.70), (0.9, 1.0, 0.98)),
+                threshold=0.9,
+                n_fit=60,
+                n_holdout=40,
+                holdout_accuracy_above=0.98,
+                holdout_wilson_lb=0.95,
+                abstain_share=0.18,
+                dataset_sha256="synthetic-dataset-sha",
+                measured_at="2026-10-31",
+                passes=True,
+                ece=0.03,
+                auroc=0.81,
+            )
+
+        monkeypatch.setattr(
+            pii_attribution,
+            "load_calibration_record",
+            lambda: {
+                "held-elsewhere": _entry("held-elsewhere"),
+                "role-unmatched": _entry("role-unmatched"),
+            },
+        )
+
         widen = draft_attribution_threshold_proposal(
-            "held-elsewhere", wiki_root=wiki_root, config=config
+            "held-elsewhere", wiki_root=wiki_root, config=_ATTR_CONFIG
         )
         narrow = draft_attribution_threshold_proposal(
-            "role-unmatched", wiki_root=wiki_root, config=config
+            "role-unmatched", wiki_root=wiki_root, config=_ATTR_CONFIG
         )
         assert widen is not None and widen.direction == "widen"
         assert narrow is not None and narrow.direction == "narrow"
         assert widen.action != narrow.action
 
 
-class TestAttributionThresholdApprovalIsRequired:
-    """AC5's third case: an unapproved draft changes nothing. The ledger
-    override is what `pii_attribution.threshold_for_class` reads BELOW
-    explicit config (issue athenaeum#2219) -- this pins the override reader
-    itself, independent of whichever config layer a deployment also sets."""
+class TestAttributionThresholdPinnedByConfigNeverDrafts:
+    """Issue athenaeum#2219, Seer finding A (PR athenaeum#2269): a class
+    whose threshold is PINNED by explicit
+    ``librarian.attribution.thresholds.<class>`` config never drafts,
+    because an approval could never take effect for it (AC5's own
+    precedence: explicit config always wins). Confirmed empirically that
+    WITHOUT this guard, the identical ``(action, current, proposed)`` id
+    re-drafts (and re-appends to the ledger) on every single run once
+    approved -- see ``tests/test_sibling_proposal_rail_phases.py::
+    TestAttributionThresholdPhasePinnedByConfig`` for the production-phase
+    round trip that reproduces and then disproves the loop."""
 
-    def test_drafting_alone_writes_no_override(self, tmp_path: Path) -> None:
+    def test_pinned_class_drafts_nothing_even_with_a_strong_signal(
+        self, tmp_path: Path
+    ) -> None:
         wiki_root = tmp_path / "wiki"
         wiki_root.mkdir()
         _seed_attribution_disagreement(
             wiki_root, question_class="held-elsewhere", overturned=0, confirmed=10
         )
-        config = _attr_config_with_threshold("held-elsewhere", 0.9)
+        draft = draft_attribution_threshold_proposal(
+            "held-elsewhere",
+            wiki_root=wiki_root,
+            config=_attr_config_with_threshold("held-elsewhere", 0.9),
+        )
+        assert draft is None
+
+
+class TestAttributionThresholdApprovalIsRequired:
+    """AC5's third case: an unapproved draft changes nothing. The ledger
+    override is what `pii_attribution.threshold_for_class` reads BELOW
+    explicit config (issue athenaeum#2219) -- this pins the override reader
+    itself, independent of whichever config layer a deployment also sets.
+
+    NOT pinned by explicit config (:func:`_patch_calibration_record`
+    instead) -- a PINNED class never even drafts (Seer finding A, PR
+    athenaeum#2269, see ``TestAttributionThresholdPinnedByConfigNeverDrafts``
+    above), so these tests, whose whole point is approval TAKING EFFECT,
+    need the unpinned path."""
+
+    def test_drafting_alone_writes_no_override(self, tmp_path: Path, monkeypatch) -> None:
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir()
+        _seed_attribution_disagreement(
+            wiki_root, question_class="held-elsewhere", overturned=0, confirmed=10
+        )
+        _patch_calibration_record(monkeypatch, question_class="held-elsewhere", threshold=0.9)
         run_attribution_threshold_proposal_detection(
-            ["held-elsewhere"], wiki_root=wiki_root, config=config
+            ["held-elsewhere"], wiki_root=wiki_root, config=_ATTR_CONFIG
         )
         pending = list_pending_auto_apply_threshold_proposals(wiki_root)
         assert len(pending) == 1
@@ -725,16 +817,16 @@ class TestAttributionThresholdApprovalIsRequired:
         )
 
     def test_approval_writes_the_override_the_reader_honours(
-        self, tmp_path: Path
+        self, tmp_path: Path, monkeypatch
     ) -> None:
         wiki_root = tmp_path / "wiki"
         wiki_root.mkdir()
         _seed_attribution_disagreement(
             wiki_root, question_class="held-elsewhere", overturned=0, confirmed=10
         )
-        config = _attr_config_with_threshold("held-elsewhere", 0.9)
+        _patch_calibration_record(monkeypatch, question_class="held-elsewhere", threshold=0.9)
         run_attribution_threshold_proposal_detection(
-            ["held-elsewhere"], wiki_root=wiki_root, config=config
+            ["held-elsewhere"], wiki_root=wiki_root, config=_ATTR_CONFIG
         )
         pending = list_pending_auto_apply_threshold_proposals(wiki_root)
         action = attribution_threshold_action_id("held-elsewhere")
@@ -748,20 +840,25 @@ class TestAttributionThresholdApprovalIsRequired:
         # Idempotent: a second detection pass over the same seed data does
         # not re-draft (same (action, current, proposed) id is pending/
         # resolved either way) -- mirrors run_auto_apply_proposal_detection.
+        # (This is the NOT-pinned case: current moves to the approved
+        # override on the next read, so the next pass's own `current`
+        # differs and would compute a DIFFERENT id even without the
+        # pending-id suppression -- unlike the pinned case, which never
+        # reaches this function at all; see the class above.)
         run_attribution_threshold_proposal_detection(
-            ["held-elsewhere"], wiki_root=wiki_root, config=config
+            ["held-elsewhere"], wiki_root=wiki_root, config=_ATTR_CONFIG
         )
         assert len(read_calibration_ledger(wiki_root)) == 20  # unchanged by the rerun
 
-    def test_rejection_also_writes_no_override(self, tmp_path: Path) -> None:
+    def test_rejection_also_writes_no_override(self, tmp_path: Path, monkeypatch) -> None:
         wiki_root = tmp_path / "wiki"
         wiki_root.mkdir()
         _seed_attribution_disagreement(
             wiki_root, question_class="held-elsewhere", overturned=0, confirmed=10
         )
-        config = _attr_config_with_threshold("held-elsewhere", 0.9)
+        _patch_calibration_record(monkeypatch, question_class="held-elsewhere", threshold=0.9)
         run_attribution_threshold_proposal_detection(
-            ["held-elsewhere"], wiki_root=wiki_root, config=config
+            ["held-elsewhere"], wiki_root=wiki_root, config=_ATTR_CONFIG
         )
         pending = list_pending_auto_apply_threshold_proposals(wiki_root)
         action = attribution_threshold_action_id("held-elsewhere")
@@ -771,11 +868,14 @@ class TestAttributionThresholdApprovalIsRequired:
         )
 
     def test_explicit_config_still_wins_over_an_approved_override(
-        self, tmp_path: Path
+        self, tmp_path: Path, monkeypatch
     ) -> None:
         """threshold_for_class's own precedence: explicit config > ledger
         override > shipped record -- approving a proposal never overrides
-        an operator's hand-set threshold."""
+        an operator's hand-set threshold, even one set AFTER the approval
+        (the plausible real sequence -- see
+        ``tests/test_sibling_proposal_rail_phases.py``'s own version of
+        this same precedence check through the production phase)."""
         from athenaeum.pii_attribution import threshold_for_class
 
         wiki_root = tmp_path / "wiki"
@@ -783,13 +883,14 @@ class TestAttributionThresholdApprovalIsRequired:
         _seed_attribution_disagreement(
             wiki_root, question_class="held-elsewhere", overturned=0, confirmed=10
         )
-        config = _attr_config_with_threshold("held-elsewhere", 0.9)
+        _patch_calibration_record(monkeypatch, question_class="held-elsewhere", threshold=0.9)
         run_attribution_threshold_proposal_detection(
-            ["held-elsewhere"], wiki_root=wiki_root, config=config
+            ["held-elsewhere"], wiki_root=wiki_root, config=_ATTR_CONFIG
         )
         pending = list_pending_auto_apply_threshold_proposals(wiki_root)
         approve_auto_apply_threshold_proposal(wiki_root, proposal_id=pending[0]["id"])
 
+        explicit_config = _attr_config_with_threshold("held-elsewhere", 0.9)
         assert threshold_for_class(
-            "held-elsewhere", config, wiki_root=wiki_root
+            "held-elsewhere", explicit_config, wiki_root=wiki_root
         ) == pytest.approx(0.9)  # the explicit override, NOT the approved 0.85
