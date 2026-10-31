@@ -622,4 +622,103 @@ class TestWriterInventoryGuard:
             pii_attribution.WRITER_CORRECTION_ADD,
             pii_attribution.WRITER_PII_MIGRATION,
             pii_attribution.WRITER_CONTACT_FOLD,
+            pii_attribution.WRITER_PROSE_COMPILE,
         }
+
+
+class TestScrubCompiledContactTokens:
+    """Issue athenaeum#2216: the prose-compile scrub (design §10.2)."""
+
+    def _suspect_path(
+        self,
+        context: pii_attribution.AttributionContext,
+        value: str,
+        target_uid: str,
+    ) -> Path:
+        key = pii_attribution.value_key_for(context, value)
+        return (
+            context.contacts_root
+            / pii_attribution.ATTRIBUTION_SUSPECTS_DIRNAME
+            / f"{key}-{target_uid}.md"
+        )
+
+    def test_byte_identical_when_no_tokens(self, tmp_path: Path) -> None:
+        context = _context(tmp_path)
+        body = "No contact tokens here, just prose about a meeting."
+        scrubbed, removed = pii_attribution.scrub_compiled_contact_tokens(
+            body,
+            subject_uid="uid-subject",
+            source_ref="raw/x.md",
+            context=context,
+        )
+        assert scrubbed == body
+        assert removed == []
+
+    def test_removes_subject_and_third_party_tokens(self, tmp_path: Path) -> None:
+        context = _context(tmp_path)
+        body = (
+            "Reach the subject at subject@example.org, or cc "
+            "third.party@example.com on anything urgent."
+        )
+        scrubbed, removed = pii_attribution.scrub_compiled_contact_tokens(
+            body,
+            subject_uid="uid-subject",
+            target_name="Subject Person",
+            target_type="person",
+            source_ref="raw/x.md",
+            context=context,
+        )
+        assert "subject@example.org" not in scrubbed
+        assert "third.party@example.com" not in scrubbed
+        assert set(removed) == {"subject@example.org", "third.party@example.com"}
+
+    def test_name_field_carve_out_preserves_the_token(self, tmp_path: Path) -> None:
+        """athenaeum#1461: a name-is-an-email target's own token survives the scrub.
+
+        Reuses ``storage_migrate.plan_pii_migration``'s own carve-out rule
+        (via ``pii.name_field_pii_values``) rather than re-deriving it — the
+        heading that echoes ``target_name`` verbatim must not be mangled.
+        """
+        context = _context(tmp_path)
+        body = (
+            "# subject@example.org\n\nAlso mentions third.party@example.com "
+            "in the body."
+        )
+        scrubbed, removed = pii_attribution.scrub_compiled_contact_tokens(
+            body,
+            subject_uid="uid-subject",
+            target_name="subject@example.org",
+            target_type="person",
+            source_ref="raw/x.md",
+            context=context,
+        )
+        assert "subject@example.org" in scrubbed
+        assert "third.party@example.com" not in scrubbed
+        assert removed == ["third.party@example.com"]
+
+    def test_parks_every_removed_token_as_a_shadow_suspect_readable_through_pii(
+        self, tmp_path: Path
+    ) -> None:
+        """Nothing is lost: a removed token is parked, not dropped.
+
+        Reads the parked entry back through ``pii.parse_frontmatter`` — the
+        same reader ``TestExcludedSurfaceStorage``-style tests in this file
+        use for the other four writers' parked suspects.
+        """
+        context = _context(tmp_path)
+        body = "No existing holder, so this is a plain pass: new@example.org."
+        _scrubbed, removed = pii_attribution.scrub_compiled_contact_tokens(
+            body,
+            subject_uid="uid-subject",
+            target_name="Subject Person",
+            target_type="person",
+            source_ref="raw/x.md",
+            context=context,
+        )
+        assert removed == ["new@example.org"]
+        path = self._suspect_path(context, "new@example.org", "uid-subject")
+        assert path.exists()
+        meta, _ = pii.parse_frontmatter(path.read_text(encoding="utf-8"))
+        assert meta["writer"] == pii_attribution.WRITER_PROSE_COMPILE
+        assert meta["target_uid"] == "uid-subject"
+        assert meta["shadow"] is True
