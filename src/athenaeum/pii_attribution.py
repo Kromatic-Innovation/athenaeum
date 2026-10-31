@@ -28,8 +28,30 @@ runs four deterministic checks, cheapest first:
 
 A ``non-personal`` verdict stops the run (no further check is consulted). A
 ``suspect`` verdict does not — every remaining check still runs so later
-escalation (out of scope here: checks C1-C3, athenaeum#2215) sees all the
-evidence.
+escalation sees all the evidence.
+
+**Child C (athenaeum#2215) adds three more checks, run after D1-D4 on every
+value that reaches them:**
+
+- **C1, inline elsewhere** — the value appears as a raw token in another
+  uid's wiki page BODY. An inverted index (``value_key`` to uids) is built
+  once per :class:`AttributionContext`, from the same token detectors the
+  PII lint uses (:func:`athenaeum.pii.find_inline_emails` /
+  :func:`athenaeum.pii.find_inline_phones`), never a per-value search.
+- **C2, local part names someone else** — the local part of an email value
+  matches another known person's full name, or their ``flast``/
+  ``first.last``/``firstlast`` form, and does not ALSO match the target's
+  own name or aliases. A bare first name never fires. Built once per
+  context from :class:`athenaeum.models.EntityIndex` names and aliases.
+- **C3, source context** — when ``source_ref`` resolves to a still-existing
+  raw file or page, fires when the value is absent from it, or sits within
+  a short configurable window of an attribution label or another known
+  person's name. Absence of a source is not evidence (design §17 risk 3):
+  this check simply does not fire.
+
+Only D1-narrow is enforced; C1-C3 are observe-only evidence exactly like
+D1-role/D2-D4 — no writer in this issue's scope changes what it writes
+because of a C-check (design's "Observe mode is preserved").
 
 **What this module does NOT own.** It never writes a contact record — see
 :func:`athenaeum.pii.record_observed_contact_value` and friends for that. It
@@ -66,6 +88,7 @@ import hmac
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -73,7 +96,12 @@ from typing import Any
 from athenaeum import config as config_module
 from athenaeum import pii
 from athenaeum.atomic_io import atomic_write_text
-from athenaeum.models import EntityIndex, parse_frontmatter, render_frontmatter
+from athenaeum.models import (
+    EntityIndex,
+    parse_frontmatter,
+    render_frontmatter,
+    resolve_page_type,
+)
 from athenaeum.store import append_line_durable, now_iso
 
 log = logging.getLogger(__name__)
@@ -119,6 +147,12 @@ CHECK_D2_HELD_ELSEWHERE = "D2"
 CHECK_D3_NOT_A_PERSON = "D3"
 CHECK_D4_FAN_OUT = "D4"
 
+#: Child C (athenaeum#2215) check ids. Unlike D1, none of these has a
+#: sub-tier -- the design table (§5.1) lists each as a single row.
+CHECK_C1_INLINE_ELSEWHERE = "C1"
+CHECK_C2_LOCAL_PART_NAMES_OTHER = "C2"
+CHECK_C3_SOURCE_CONTEXT = "C3"
+
 #: Built-in relay/notification local-part prefixes (the "noreply family"),
 #: extendable through ``librarian.attribution.relay_local_prefixes``
 #: (:func:`athenaeum.config.resolve_relay_local_prefixes`). Matched as a
@@ -144,6 +178,33 @@ BUILTIN_RELAY_LOCAL_PREFIXES: frozenset[str] = frozenset(
 #: Role local parts (design §5.1, D1-narrow's third bullet) — never
 #: operator-extendable in this design; the issue names exactly these five.
 ROLE_LOCAL_PARTS: frozenset[str] = frozenset({"info", "hello", "hi", "team", "contact"})
+
+#: Built-in C3 attribution-label phrases (design §5.1's C3 row), extendable
+#: through ``librarian.attribution.context_labels``
+#: (:func:`athenaeum.config.resolve_attribution_context_labels`). Matched as
+#: a case-insensitive substring of the window of source text around a value
+#: occurrence. ``"from:"`` is deliberately NOT here — see
+#: :data:`QUOTED_BLOCK_LABEL`.
+BUILTIN_CONTEXT_LABELS: frozenset[str] = frozenset(
+    {
+        "referred by",
+        "introduced by",
+        "cc",
+        "via",
+        "on behalf of",
+        "forwarded",
+    }
+)
+
+#: The one C3 label the design singles out as needing EXTRA context (§5.1:
+#: ``"from:"`` in a quoted block): on its own, "from:" is far too common a
+#: prose token to be evidence, so unlike :data:`BUILTIN_CONTEXT_LABELS` it
+#: only counts when the specific occurrence sits on a line that is itself a
+#: quoted-block line (starts with ``>``, the plain-text email quote marker,
+#: after stripping leading whitespace) -- the shape a forwarded/replied
+#: message's quoted headers take. Never operator-extendable, same reasoning
+#: as :data:`ROLE_LOCAL_PARTS`: this is a single named shape, not a list.
+QUOTED_BLOCK_LABEL: str = "from:"
 
 #: Schema version stamped on every attribution-log row, mirroring
 #: :data:`athenaeum.pii.OBSERVATION_LOG_VERSION`'s convention.
@@ -250,6 +311,28 @@ class AttributionContext:
     operator_mailer_domains: frozenset[str]
     relay_domains: frozenset[str]
     value_key_secret: bytes = field(repr=False)
+    #: Child C (athenaeum#2215) fields, appended here per the anchor
+    #: discipline this issue's dispatch brief lays out (siblings editing
+    #: this same module append their own fields after these, never
+    #: reordering what is already here).
+    #:
+    #: :data:`BUILTIN_CONTEXT_LABELS` plus the operator's
+    #: ``librarian.attribution.context_labels`` additions (design §5.2) --
+    #: C3's "beside an attribution label" signal.
+    context_labels: frozenset[str] = frozenset()
+    #: C3's proximity window, in characters each side of a value occurrence
+    #: (:func:`athenaeum.config.resolve_attribution_context_window_chars`).
+    context_window_chars: int = 200
+    #: C1's inverted index: HMAC ``value_key`` (:func:`value_key_for`) to the
+    #: uids whose wiki page BODY carries that value as a raw inline token.
+    #: Built once per context by :func:`_build_child_c_indexes`.
+    inline_elsewhere_index: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    #: C2/C3's person-name index: a name-derived form (a raw "first last"
+    #: string, or one of the ``flast``/``first.last``/``firstlast``
+    #: abbreviations) to the uids of every ``type: person`` page whose name
+    #: or alias produces that form. Built once per context by
+    #: :func:`_build_child_c_indexes`.
+    person_name_index: dict[str, frozenset[str]] = field(default_factory=dict)
 
 
 def _attribution_key_path(contacts_root: Path) -> Path:
@@ -356,6 +439,8 @@ def build_attribution_context(
             cleaned = str(alias).strip().lower()
             if cleaned:
                 owner_name_aliases.add(cleaned)
+    value_key_secret = _load_or_mint_value_key_secret(resolved_contacts_root)
+    inline_elsewhere_index, person_name_index = _build_child_c_indexes(ent_idx, value_key_secret)
     return AttributionContext(
         contacts_root=resolved_contacts_root,
         excluded_index=idx,
@@ -367,7 +452,12 @@ def build_attribution_context(
         | config_module.resolve_relay_local_prefixes(config),
         operator_mailer_domains=config_module.resolve_operator_mailer_domains(config),
         relay_domains=config_module.resolve_relay_domains(config),
-        value_key_secret=_load_or_mint_value_key_secret(resolved_contacts_root),
+        value_key_secret=value_key_secret,
+        context_labels=BUILTIN_CONTEXT_LABELS
+        | config_module.resolve_attribution_context_labels(config),
+        context_window_chars=config_module.resolve_attribution_context_window_chars(config),
+        inline_elsewhere_index=inline_elsewhere_index,
+        person_name_index=person_name_index,
     )
 
 
@@ -467,6 +557,314 @@ def _check_d1(
     return None
 
 
+# ---------------------------------------------------------------------------
+# Context checks C1-C3 (athenaeum#2215)
+# ---------------------------------------------------------------------------
+
+
+def _hmac_value_key(secret: bytes, normalized_value: str) -> str:
+    """The same keyed hash :func:`value_key_for` computes, taking the raw
+    secret directly.
+
+    Duplicated rather than shared because :func:`_build_child_c_indexes`
+    runs DURING :func:`build_attribution_context`, before any
+    :class:`AttributionContext` exists for :func:`value_key_for` to take —
+    there is no context yet to pass it. Both read the same two lines of
+    :mod:`hmac`; kept in sync by inspection, not by a shared call, since
+    neither is expected to change independent of the other.
+    """
+    return hmac.new(secret, normalized_value.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _person_name_forms(name: str) -> frozenset[str]:
+    """Candidate local-part-equivalent forms for *name* (design §5.1, C2).
+
+    Returns the empty set for a single-token name (no first/last split to
+    abbreviate — design: "A local part with no name signal passes", and a
+    single word can never produce ``flast``/``first.last``/``firstlast``).
+    For a multi-token name, the LAST token is the surname and only the
+    FIRST and last tokens feed the abbreviations — a middle name is dropped
+    from ``flast``/``first.last``/``firstlast`` exactly as a real email
+    local part normally would be, but is still part of the raw ``spaced``
+    form so a full ``"first middle last"`` value is still recognized
+    verbatim. All forms are lowercased; none contains the original
+    whitespace-insensitive casing.
+    """
+    tokens = [t for t in re.split(r"\s+", name.strip()) if t]
+    if len(tokens) < 2:
+        return frozenset()
+    first, last = tokens[0], tokens[-1]
+    spaced = " ".join(tokens).lower()
+    collapsed_full = "".join(tokens).lower()
+    flast = (first[0] + last).lower()
+    first_dot_last = f"{first}.{last}".lower()
+    first_last = f"{first}{last}".lower()
+    return frozenset({spaced, collapsed_full, flast, first_dot_last, first_last})
+
+
+def _build_child_c_indexes(
+    entity_index: EntityIndex | None,
+    value_key_secret: bytes,
+) -> tuple[dict[str, tuple[str, ...]], dict[str, frozenset[str]]]:
+    """Build C1's inline-elsewhere index and C2/C3's person-name index.
+
+    ONE combined pass over every uid'd wiki page (design §5.1: "built once
+    per run from the same scan the PII lint performs"), so the two indexes
+    the design calls out for child C share the single O(corpus) read rather
+    than paying it twice. Reads ``entity_index._by_uid`` directly — the same
+    private-attribute access :mod:`athenaeum.mcp_server` already uses to
+    walk every indexed page by uid; :class:`athenaeum.models.EntityIndex`
+    has no public "every (uid, path)" iterator (:meth:`pages_of_type` is
+    type-scoped, :meth:`items` walks name/alias keys with one entry per
+    alias, duplicating uids).
+
+    With no *entity_index* (a bare unit test exercising the D-checks without
+    one, or a knowledge root with no ``wiki/`` dir yet), returns two empty
+    dicts — the same conservative "nothing fires" default
+    :func:`_has_live_page` picks for D2.
+
+    The inline-elsewhere index is keyed by the HMAC ``value_key``
+    (:func:`_hmac_value_key`), never the raw value, so a token this builder
+    reads off a page body never lands in the index as plaintext.
+
+    The person-name index is built ONLY from ``type: person`` pages — a
+    company's name is D3's concern, not C2/C3's "another known PERSON"
+    signal.
+    """
+    inline_index: dict[str, list[str]] = {}
+    name_index: dict[str, set[str]] = {}
+    if entity_index is None:
+        return {}, {}
+
+    for uid, path in entity_index._by_uid.items():
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        meta, body = parse_frontmatter(text)
+
+        # C1: every email/phone-shaped token in the page BODY (never
+        # frontmatter — a page's own declared contact fields are not an
+        # "inline elsewhere" leak).
+        for token in pii.find_inline_emails(body) + pii.find_inline_phones(body):
+            key = _hmac_value_key(value_key_secret, pii.normalize_identifier(token))
+            holders = inline_index.setdefault(key, [])
+            if uid not in holders:
+                holders.append(uid)
+
+        # C2/C3: person-name forms, person pages only.
+        if resolve_page_type(meta) != "person":
+            continue
+        name_raw = meta.get("name") if isinstance(meta, dict) else None
+        display_names = [str(name_raw)] if name_raw else []
+        aliases_raw = meta.get("aliases") if isinstance(meta, dict) else None
+        if isinstance(aliases_raw, list):
+            display_names.extend(str(a) for a in aliases_raw if a)
+        for display_name in display_names:
+            for form in _person_name_forms(display_name):
+                name_index.setdefault(form, set()).add(uid)
+
+    frozen_inline = {key: tuple(uids) for key, uids in inline_index.items()}
+    frozen_names = {form: frozenset(uids) for form, uids in name_index.items()}
+    return frozen_inline, frozen_names
+
+
+def _check_c1(
+    value_key: str,
+    *,
+    target_uid: str,
+    context: AttributionContext,
+) -> CheckEvidence | None:
+    """C1: the value is inline on another uid's page body (design §5.1)."""
+    holders = tuple(
+        u for u in context.inline_elsewhere_index.get(value_key, ()) if u != target_uid
+    )
+    if not holders:
+        return None
+    return CheckEvidence(check_id=CHECK_C1_INLINE_ELSEWHERE, uids=holders)
+
+
+def _check_c2(
+    value: str,
+    *,
+    target_uid: str,
+    context: AttributionContext,
+) -> CheckEvidence | None:
+    """C2: the local part names a different known person (design §5.1).
+
+    Inert for a value with no ``@`` (a phone number): there is no local
+    part to carry a name signal. Checks the local part BOTH as extracted
+    (so ``jane.smith`` matches the ``first.last`` form literally) and with
+    ``.``/``_``/``-`` collapsed out (so it also matches ``flast``/
+    ``firstlast``). A first-name-only local part never matches because
+    :func:`_person_name_forms` never emits a bare-first-name form at all —
+    there is no key for it to hit.
+
+    "Does not match the target's name or aliases" (design) and "a local
+    part matching BOTH the target and someone else passes" (issue AC) are
+    the SAME rule applied to one matched-uid set: if the target's own uid
+    is among the forms matched, this passes outright, regardless of who
+    else also matched.
+    """
+    local, domain = _local_and_domain(value)
+    if not domain:
+        return None  # not email-shaped; no local-part name signal applies
+    local_collapsed = local.replace(".", "").replace("_", "").replace("-", "")
+    if not local_collapsed:
+        return None
+
+    matched: list[str] = []
+    for form in (local, local_collapsed):
+        for uid in context.person_name_index.get(form, ()):
+            if uid not in matched:
+                matched.append(uid)
+    if not matched:
+        return None
+    if target_uid in matched:
+        return None  # matches the target's own name/alias (also matching
+        # someone else does not change that — issue AC: "both match" passes)
+    return CheckEvidence(check_id=CHECK_C2_LOCAL_PART_NAMES_OTHER, uids=tuple(matched))
+
+
+def _resolve_source_text(
+    source_ref: str | dict[str, Any] | None, context: AttributionContext
+) -> str | None:
+    """Best-effort read of the raw file or page *source_ref* names (C3).
+
+    ``source_ref`` is deliberately loose at this seam's call sites (design
+    §4.1): a bare path string (:mod:`athenaeum.storage_migrate`'s
+    ``str(page_path)``), or a structured mapping carrying a ``path``/``ref``
+    key. This resolves EXACTLY that path, as given (absolute, or relative to
+    the process's current directory, same as any other string path this
+    codebase opens directly) -- it does not search ``raw/`` or ``wiki/`` for
+    a same-named file under a different root, because :attr:`context.
+    contacts_root` is, by design, independently operator-configurable
+    (:func:`athenaeum.pii.excluded_surface_root`) and so cannot be walked
+    back to a ``knowledge_root`` this function could trust in general.
+
+    Returns ``None`` for anything that does not resolve to an existing,
+    UTF-8-readable file: no *source_ref*, an unrecognized shape, or a path
+    that no longer exists. This is C3's "source missing" branch (design §17
+    risk 3: "absence of a source is not evidence") — never treated as a hit.
+    """
+    candidate: str | None = None
+    if isinstance(source_ref, dict):
+        for key in ("path", "ref", "file"):
+            raw = source_ref.get(key)
+            if isinstance(raw, str) and raw.strip():
+                candidate = raw.strip()
+                break
+    elif isinstance(source_ref, str):
+        candidate = source_ref.strip()
+    if not candidate:
+        return None
+    path = Path(candidate)
+    try:
+        if not path.is_file():
+            return None
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def _value_occurrences(source_text: str, value: str) -> list[tuple[int, int]]:
+    """Every ``(start, end)`` span where *value* appears in *source_text*.
+
+    Reuses :func:`athenaeum.pii.find_inline_emails` /
+    :func:`athenaeum.pii.find_inline_phones` to decide WHETHER *value*
+    appears at all (the same token detectors the PII lint and C1 use, per
+    the issue body), then locates every verbatim occurrence of each
+    matching token's own exact text for position. An empty result is C3's
+    "value is absent from it" branch.
+    """
+    normalized_value = pii.normalize_identifier(value)
+    tokens = pii.find_inline_emails(source_text) + pii.find_inline_phones(source_text)
+    positions: list[tuple[int, int]] = []
+    for token in tokens:
+        if pii.normalize_identifier(token) != normalized_value:
+            continue
+        for m in re.finditer(re.escape(token), source_text):
+            positions.append((m.start(), m.end()))
+    return positions
+
+
+def _quoted_block_label_hit(source_text: str, window_start: int, window_text: str) -> bool:
+    """True when *window_text* carries :data:`QUOTED_BLOCK_LABEL` on a line
+    that is itself a quoted-block line (starts with ``>`` after stripping
+    leading whitespace) in *source_text* as a whole."""
+    for m in re.finditer(re.escape(QUOTED_BLOCK_LABEL), window_text, re.IGNORECASE):
+        abs_pos = window_start + m.start()
+        line_start = source_text.rfind("\n", 0, abs_pos) + 1
+        line_end = source_text.find("\n", abs_pos)
+        if line_end == -1:
+            line_end = len(source_text)
+        if source_text[line_start:line_end].lstrip().startswith(">"):
+            return True
+    return False
+
+
+def _name_proximity_hit(
+    lowered_window: str, context: AttributionContext, target_uid: str
+) -> str | None:
+    """A non-target person uid whose raw "first [middle] last" name form
+    (the person-name index's only SPACED keys — the abbreviated forms are
+    deliberately excluded here, since ``jsmith`` turning up inside ordinary
+    prose is not the same signal as a full name turning up) appears as a
+    substring of *lowered_window*. ``None`` when no such form appears."""
+    for form, uids in context.person_name_index.items():
+        if " " not in form:
+            continue
+        others = tuple(u for u in uids if u != target_uid)
+        if not others:
+            continue
+        if form in lowered_window:
+            return others[0]
+    return None
+
+
+def _check_c3(
+    value: str,
+    *,
+    target_uid: str,
+    source_ref: str | dict[str, Any] | None,
+    context: AttributionContext,
+) -> CheckEvidence | None:
+    """C3: source context (design §5.1; §17 risk 3 for the missing-source case)."""
+    source_text = _resolve_source_text(source_ref, context)
+    if source_text is None:
+        return None  # absence of a source is not evidence
+
+    occurrences = _value_occurrences(source_text, value)
+    if not occurrences:
+        return CheckEvidence(check_id=CHECK_C3_SOURCE_CONTEXT, label="value-absent")
+
+    window_chars = context.context_window_chars
+    for start, end in occurrences:
+        window_start = max(0, start - window_chars)
+        window_end = min(len(source_text), end + window_chars)
+        window_text = source_text[window_start:window_end]
+        lowered_window = window_text.lower()
+
+        for label in context.context_labels:
+            if label in lowered_window:
+                return CheckEvidence(check_id=CHECK_C3_SOURCE_CONTEXT, label=f"label:{label}")
+
+        if QUOTED_BLOCK_LABEL in lowered_window and _quoted_block_label_hit(
+            source_text, window_start, window_text
+        ):
+            return CheckEvidence(
+                check_id=CHECK_C3_SOURCE_CONTEXT, label=f"label:{QUOTED_BLOCK_LABEL}"
+            )
+
+        other_uid = _name_proximity_hit(lowered_window, context, target_uid)
+        if other_uid is not None:
+            return CheckEvidence(
+                check_id=CHECK_C3_SOURCE_CONTEXT, uids=(other_uid,), label="name-proximity"
+            )
+
+    return None
+
+
 def check_contact_attribution(
     value: str,
     *,
@@ -537,6 +935,33 @@ def check_contact_attribution(
         checks.append(CheckEvidence(check_id=CHECK_D4_FAN_OUT, uids=holders))
         disposition = DISPOSITION_SUSPECT
         for u in holders:
+            if u not in candidates:
+                candidates.append(u)
+
+    # Child C (athenaeum#2215): run after every D-check, on every value that
+    # reaches here — a suspect disposition from D1-role/D2-D4 does not stop
+    # the run, so the evidence stays complete (design §5.1).
+    c1 = _check_c1(key, target_uid=target_uid, context=context)
+    if c1 is not None:
+        checks.append(c1)
+        disposition = DISPOSITION_SUSPECT
+        for u in c1.uids:
+            if u not in candidates:
+                candidates.append(u)
+
+    c2 = _check_c2(value, target_uid=target_uid, context=context)
+    if c2 is not None:
+        checks.append(c2)
+        disposition = DISPOSITION_SUSPECT
+        for u in c2.uids:
+            if u not in candidates:
+                candidates.append(u)
+
+    c3 = _check_c3(value, target_uid=target_uid, source_ref=source_ref, context=context)
+    if c3 is not None:
+        checks.append(c3)
+        disposition = DISPOSITION_SUSPECT
+        for u in c3.uids:
             if u not in candidates:
                 candidates.append(u)
 
@@ -691,8 +1116,13 @@ __all__ = [
     "CHECK_D2_HELD_ELSEWHERE",
     "CHECK_D3_NOT_A_PERSON",
     "CHECK_D4_FAN_OUT",
+    "CHECK_C1_INLINE_ELSEWHERE",
+    "CHECK_C2_LOCAL_PART_NAMES_OTHER",
+    "CHECK_C3_SOURCE_CONTEXT",
     "BUILTIN_RELAY_LOCAL_PREFIXES",
     "ROLE_LOCAL_PARTS",
+    "BUILTIN_CONTEXT_LABELS",
+    "QUOTED_BLOCK_LABEL",
     "ATTRIBUTION_LOG_VERSION",
     "ATTRIBUTION_LOG_FILENAME",
     "CheckEvidence",
