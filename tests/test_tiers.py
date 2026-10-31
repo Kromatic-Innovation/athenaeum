@@ -12,6 +12,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from athenaeum import pii_attribution
 from athenaeum.models import (
     EntityAction,
     EntityIndex,
@@ -60,6 +61,7 @@ from athenaeum.tiers import (
     tier2_request_params,
     tier3_create,
     tier3_derive_actions,
+    tier3_entity_from_response,
     tier3_merge,
     tier3_merge_full,
     tier3_write,
@@ -109,6 +111,19 @@ def _sequenced_client(
         responses.append(resp)
     client.messages.create.side_effect = responses
     return client
+
+
+def _attribution_context(tmp_path: Path) -> pii_attribution.AttributionContext:
+    """A real ``AttributionContext`` rooted under *tmp_path* (issue athenaeum#2216).
+
+    Mirrors ``tests/test_pii_attribution.py``'s own ``_context`` helper —
+    no wiki pages needed for these tests, since the scrub's checks only need
+    SOMEWHERE to park a suspect and mint the value-key secret.
+    """
+    knowledge = tmp_path / "knowledge"
+    return pii_attribution.build_attribution_context(
+        knowledge, {"storage": {"mapping": {"pii": "excluded"}}}
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -939,6 +954,79 @@ class TestTier3Create:
         assert "methodology" in user_msg
         assert "open" in user_msg
 
+    # --- athenaeum#2216: prose-compile scrub, synchronous transport --------
+
+    def test_create_scrubs_third_party_address_from_compiled_body(
+        self, tmp_path: Path
+    ) -> None:
+        """A create response that leaks a third-party address never persists it.
+
+        Synchronous-transport coverage of the design §10.2 convergence
+        point: ``tier3_create`` returns through ``tier3_entity_from_response``,
+        which is where the scrub actually runs.
+        """
+        action = EntityAction(
+            kind="create",
+            name="Alice Zhang",
+            entity_type="person",
+            tags=[],
+            access="internal",
+            existing_uid=None,
+            observations="Runs product at Acme Corp.",
+        )
+        client = _mock_client(
+            "# Alice Zhang\n\nProduct lead at Acme Corp. Reach her colleague "
+            "Dana at dana.quill@example.org about the launch."
+        )
+        context = _attribution_context(tmp_path)
+
+        entity = tier3_create(
+            action, "sessions/raw.md", client, attribution_context=context
+        )
+        assert "dana.quill@example.org" not in entity.body
+        assert "Alice Zhang" in entity.body
+        # Nothing is lost (design §10.2): the removed token is parked, not
+        # dropped, on the excluded surface.
+        suspects_dir = context.contacts_root / pii_attribution.ATTRIBUTION_SUSPECTS_DIRNAME
+        assert list(suspects_dir.glob("*.md"))
+
+    def test_entity_from_response_scrubs_address_on_the_batch_result_path(
+        self, tmp_path: Path
+    ) -> None:
+        """Batch-transport coverage: ``tier3_entity_from_response`` called
+        directly with an already-fetched batch result message, exactly as
+        ``batch.py``'s create loop calls it.
+        """
+        action = EntityAction(
+            kind="create",
+            name="Bob Nolan",
+            entity_type="person",
+            tags=[],
+            access="internal",
+            existing_uid=None,
+            observations="Met at the conference.",
+        )
+        response = MagicMock()
+        response.content = [
+            MagicMock(
+                text=(
+                    "# Bob Nolan\n\nMet at the conference. His assistant "
+                    "third.party@example.com handles scheduling."
+                )
+            )
+        ]
+        context = _attribution_context(tmp_path)
+
+        entity = tier3_entity_from_response(
+            action,
+            response,
+            "sessions/raw.md",
+            "end_turn",
+            attribution_context=context,
+        )
+        assert "third.party@example.com" not in entity.body
+        assert "Bob Nolan" in entity.body
+
 
 # ---------------------------------------------------------------------------
 # Tier 3 — Create planning-preamble guard (issue athenaeum#1171)
@@ -1423,6 +1511,45 @@ class TestTier3Merge:
             client,
         )
         assert body is not None
+        assert esc is None
+
+    # --- athenaeum#2216: prose-compile scrub, synchronous transport --------
+
+    def test_merge_scrubs_third_party_address_via_full_echo_fallback(
+        self, tmp_path: Path
+    ) -> None:
+        """A merge response that leaks a third-party address never persists it.
+
+        The mocked response is plain prose (no ``ops`` JSON), so
+        ``parse_merge_ops_response`` signals ``needs_fallback`` and
+        ``tier3_merge`` retries via ``tier3_merge_full`` — this exercises
+        BOTH design §10.2 convergence points in one call, with the scrub's
+        subject being ``action.existing_uid``.
+        """
+        action = EntityAction(
+            kind="update",
+            name="Acme Corp",
+            entity_type="company",
+            tags=[],
+            access="",
+            existing_uid="a1b2c3d4",
+            observations="Acme raised Series C in Q1 2024.",
+        )
+        client = _mock_client(
+            "# Acme Corp\n\nFintech startup, Series B. Raised Series C in "
+            "Q1 2024, led by Dana at dana.quill@example.org."
+        )
+        context = _attribution_context(tmp_path)
+
+        body, esc = tier3_merge(
+            action,
+            "# Acme Corp\n\nFintech startup, Series B.",
+            "sessions/raw.md",
+            client,
+            attribution_context=context,
+        )
+        assert body is not None
+        assert "dana.quill@example.org" not in body
         assert esc is None
 
 
@@ -3568,6 +3695,60 @@ class TestTier3MergePatchOps:
         assert needs_fallback is False
         assert esc is None
         assert body == "# Acme\n\nOld.\n\nNew.[^2]\n\n[^2]: ref\n"
+
+    def test_parse_scrubs_third_party_address_from_applied_ops(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue athenaeum#2216: batch-result-path coverage for the
+        ops-applied success branch — ``parse_merge_ops_response`` is called
+        directly with already-extracted text, exactly as ``batch.py`` calls
+        it with a batch result message's text.
+        """
+        context = _attribution_context(tmp_path)
+        body, esc, needs_fallback = parse_merge_ops_response(
+            json.dumps(
+                {
+                    "ops": [
+                        {
+                            "op": "append_section",
+                            "text": "Reach Dana at dana.quill@example.org.[^2]",
+                        }
+                    ]
+                }
+            ),
+            self._action(),
+            "ref",
+            "# Acme\n\nOld.",
+            attribution_context=context,
+        )
+        assert needs_fallback is False
+        assert esc is None
+        assert body is not None
+        assert "dana.quill@example.org" not in body
+
+    def test_tier3_merge_full_scrubs_third_party_address_batch_result_path(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue athenaeum#2216: ``tier3_merge_full`` is the third shared
+        convergence point — ``batch.py`` calls it directly (not through
+        ``tier3_merge``) for its own full-echo fallback, so a direct call
+        with a mocked client is this helper's batch-result-path coverage.
+        """
+        context = _attribution_context(tmp_path)
+        client = _mock_client(
+            "# Acme Corp\n\nFintech startup. Reach Dana at "
+            "dana.quill@example.org for intros."
+        )
+        body, esc = tier3_merge_full(
+            self._action(),
+            "# Acme Corp\n\nFintech startup.",
+            "ref",
+            client,
+            attribution_context=context,
+        )
+        assert body is not None
+        assert "dana.quill@example.org" not in body
+        assert esc is None
 
     def test_parse_signals_fallback_on_op_missing_the_op_key(self) -> None:
         # M17 phase 2a (athenaeum#1035): a JSON-valid ops list whose single op is

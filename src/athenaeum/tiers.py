@@ -142,6 +142,7 @@ from athenaeum.page_description import (
     derive_description_from_body,
     split_description_line,
 )
+from athenaeum.pii_attribution import AttributionContext, scrub_compiled_contact_tokens
 from athenaeum.progress import PhaseHeartbeat
 from athenaeum.prompt_safety import (
     UNTRUSTED_DATA_CLAUSE,
@@ -3904,6 +3905,8 @@ def tier3_create(
     wiki_root: Path | None = None,
     usage: TokenUsage | None = None,
     config: dict[str, Any] | None = None,
+    *,
+    attribution_context: AttributionContext | None = None,
 ) -> WikiEntity:
     """Use a capable LLM to create a new entity page.
 
@@ -3914,6 +3917,12 @@ def tier3_create(
     athenaeum#1183 AC4); that guard was withdrawn and removed (athenaeum#1597
     AC1) — a person create goes through the same path as any other entity
     type now.
+
+    *attribution_context* (issue athenaeum#2216, keyword-only, ``None`` by
+    default so every existing caller is byte-identical): threaded straight
+    through to :func:`tier3_entity_from_response`, the shared convergence
+    point both transports' create path returns through — see that
+    function's docstring for the scrub itself.
     """
     params = tier3_create_params(action, source_ref, wiki_root=wiki_root, config=config)
 
@@ -3938,6 +3947,7 @@ def tier3_create(
         reported_stop_reason(response, _capabilities(config)),
         usage=usage,
         config=config,
+        attribution_context=attribution_context,
     )
 
 
@@ -4058,6 +4068,38 @@ def truncated_create_escalation(
     )
 
 
+def _scrub_prose_compile_body(
+    body: str | None,
+    *,
+    subject_uid: str,
+    target_name: str,
+    target_type: str,
+    source_ref: str,
+    attribution_context: AttributionContext | None,
+) -> str | None:
+    """Apply the athenaeum#2216 prose-compile scrub to one compiled body.
+
+    Shared by :func:`tier3_entity_from_response`, :func:`parse_merge_ops_response`
+    and :func:`tier3_merge_full` — the three helpers both the synchronous and
+    batch transports converge on (design §10.2). ``attribution_context=None``
+    (every pre-athenaeum#2216 caller, since the default is ``None``) or
+    ``body=None`` passes straight through unchanged, matching the
+    ``None``-default convention :func:`athenaeum.storage_migrate.plan_pii_migration`
+    and the other athenaeum#2210 writers already use.
+    """
+    if attribution_context is None or body is None:
+        return body
+    scrubbed, _removed = scrub_compiled_contact_tokens(
+        body,
+        subject_uid=subject_uid,
+        source_ref=source_ref,
+        context=attribution_context,
+        target_name=target_name,
+        target_type=target_type,
+    )
+    return scrubbed
+
+
 def tier3_entity_from_response(
     action: EntityAction,
     response: Any,
@@ -4065,6 +4107,8 @@ def tier3_entity_from_response(
     stop_reason: str | None,
     usage: TokenUsage | None = None,
     config: dict[str, Any] | None = None,
+    *,
+    attribution_context: AttributionContext | None = None,
 ) -> WikiEntity:
     """Read a Tier-3 create *response* and build its :class:`WikiEntity`.
 
@@ -4079,6 +4123,15 @@ def tier3_entity_from_response(
     text is passed through to :func:`tier3_entity_from_text` exactly as
     before, since a partial page is this stage's pre-existing behaviour and
     narrowing it is out of scope here.
+
+    *attribution_context* (issue athenaeum#2216, keyword-only, ``None`` by
+    default): when given, the prose-compile scrub
+    (:func:`scrub_compiled_contact_tokens`) runs on the constructed entity's
+    body before it is returned — the entity's own freshly minted ``uid`` is
+    the scrub's subject, since a create has no existing page to target. This
+    is one of the three shared helpers the design (§10.2) names as the
+    convergence point both the synchronous (:func:`tier3_create`) and batch
+    (:mod:`athenaeum.batch`) transports return a create through.
     """
     text = text_or_truncated(response, stop_reason)
     if stop_reason == "max_tokens" and not text.strip():
@@ -4094,7 +4147,18 @@ def tier3_entity_from_response(
             f"tier3 create for {action.name!r} was truncated at max_tokens "
             "before any page content was emitted"
         )
-    return tier3_entity_from_text(action, text, usage=usage, config=config)
+    entity = tier3_entity_from_text(action, text, usage=usage, config=config)
+    scrubbed_body = _scrub_prose_compile_body(
+        entity.body,
+        subject_uid=entity.uid,
+        target_name=entity.name,
+        target_type=entity.type,
+        source_ref=source_ref,
+        attribution_context=attribution_context,
+    )
+    if scrubbed_body is not None:
+        entity.body = scrubbed_body
+    return entity
 
 
 def existing_body_needs_full_echo(existing_body: str) -> bool:
@@ -5498,10 +5562,20 @@ def parse_merge_ops_response(
     stop_reason: str | None = None,
     wiki_root: Path | None = None,
     usage: TokenUsage | None = None,
+    attribution_context: AttributionContext | None = None,
 ) -> tuple[str | None, EscalationItem | None, bool]:
     """Parse a patch-mode merge response and apply it to ``existing_body``.
 
     Issue athenaeum#469. Returns ``(updated_body, escalation_item, needs_fallback)``.
+
+    *attribution_context* (issue athenaeum#2216, keyword-only, ``None`` by
+    default): when given, the prose-compile scrub
+    (:func:`scrub_compiled_contact_tokens`) runs on every non-``None`` body
+    this function returns, with ``action.existing_uid`` as the scrub's
+    subject — this is one of the three shared helpers the design (§10.2)
+    names as the convergence point both the synchronous (:func:`tier3_merge`)
+    and batch (:mod:`athenaeum.batch`) transports return a patch-mode merge
+    through.
 
     Issue athenaeum#1866: checked BEFORE ``adds_new_claim`` (and hence
     before ``ops``) — a bare-boolean ``subject_mismatch: true`` short-circuits
@@ -5579,6 +5653,14 @@ def parse_merge_ops_response(
             description=parts[0].replace("ESCALATE:", "").strip(),
         )
         body = parts[1].strip() if len(parts) > 1 else None
+        body = _scrub_prose_compile_body(
+            body,
+            subject_uid=action.existing_uid or "",
+            target_name=action.name,
+            target_type=action.entity_type,
+            source_ref=source_ref,
+            attribution_context=attribution_context,
+        )
         return body, escalation, False
 
     obj = extract_json_object(stripped)
@@ -5694,7 +5776,15 @@ def parse_merge_ops_response(
                         usage.person_hint_decisions.append(
                             (action.existing_uid, "write_merge", "merged")
                         )
-                return applied, None, False
+                scrubbed_applied = _scrub_prose_compile_body(
+                    applied,
+                    subject_uid=action.existing_uid or "",
+                    target_name=action.name,
+                    target_type=action.entity_type,
+                    source_ref=source_ref,
+                    attribution_context=attribution_context,
+                )
+                return scrubbed_applied, None, False
             except MergeOpsError as exc:
                 log.warning(
                     "%s page=%s source=%s cause=anchor-miss — patch-mode ops "
@@ -5740,6 +5830,7 @@ def tier3_merge(
     *,
     wiki_root: Path | None = None,
     surface: str | None = None,
+    attribution_context: AttributionContext | None = None,
 ) -> tuple[str | None, EscalationItem | None]:
     """Use a capable LLM to merge observations into an existing entity page.
 
@@ -5765,6 +5856,12 @@ def tier3_merge(
     call needs the full-echo fallback, :func:`tier3_merge_full` tags its OWN
     declared surface instead, regardless of what (if anything) was passed
     here — the two are separate declared surfaces even for the same page.
+
+    *attribution_context* (issue athenaeum#2216, keyword-only, ``None`` by
+    default): threaded straight through to :func:`parse_merge_ops_response`
+    and :func:`tier3_merge_full`, the two shared convergence points that
+    actually run the prose-compile scrub — this function's own body is
+    never scrubbed directly, it only forwards the context.
     """
     # Anchor safety (issue athenaeum#562 / audit M20): a body that would break the
     # <existing_page> fence cannot use the patch path — go straight to the
@@ -5789,7 +5886,13 @@ def tier3_merge(
                 )
             return None, None
         return tier3_merge_full(
-            action, existing_body, source_ref, client, usage=usage, config=config
+            action,
+            existing_body,
+            source_ref,
+            client,
+            usage=usage,
+            config=config,
+            attribution_context=attribution_context,
         )
 
     # Issue athenaeum#1180: patch mode is safe to continue on a truncated body — see
@@ -5839,6 +5942,7 @@ def tier3_merge(
         stop_reason=stop_reason,
         wiki_root=wiki_root,
         usage=usage,
+        attribution_context=attribution_context,
     )
     if not needs_fallback:
         return body, escalation
@@ -5861,7 +5965,13 @@ def tier3_merge(
         return None, None
 
     return tier3_merge_full(
-        action, existing_body, source_ref, client, usage=usage, config=config
+        action,
+        existing_body,
+        source_ref,
+        client,
+        usage=usage,
+        config=config,
+        attribution_context=attribution_context,
     )
 
 
@@ -5872,8 +5982,20 @@ def tier3_merge_full(
     client: LLMBackend,
     usage: TokenUsage | None = None,
     config: dict[str, Any] | None = None,
+    *,
+    attribution_context: AttributionContext | None = None,
 ) -> tuple[str | None, EscalationItem | None]:
     """Full-echo merge fallback (issue athenaeum#469).
+
+    *attribution_context* (issue athenaeum#2216, keyword-only, ``None`` by
+    default): when given, the prose-compile scrub
+    (:func:`scrub_compiled_contact_tokens`) runs on whichever body this
+    function returns (the append-mode delta-applied body, or the full-echo
+    replacement), with ``action.existing_uid`` as the scrub's subject. This
+    is one of the three shared helpers the design (§10.2) names as the
+    convergence point both transports call directly — the batch transport's
+    finalize step calls this function the same way :func:`tier3_merge`'s own
+    fallback does.
 
     The pre-patch contract that reproduces the whole merged page. Used when a
     patch-mode response is unparseable, truncated, or any op fails to apply,
@@ -5943,7 +6065,7 @@ def tier3_merge_full(
         append_stop_reason = reported_stop_reason(
             append_response, _capabilities(config)
         )
-        return parse_tier3_merge_append(
+        append_body, append_escalation = parse_tier3_merge_append(
             text_or_truncated(append_response, append_stop_reason),
             action,
             source_ref,
@@ -5951,6 +6073,15 @@ def tier3_merge_full(
             stop_reason=append_stop_reason,
             usage=usage,
         )
+        append_body = _scrub_prose_compile_body(
+            append_body,
+            subject_uid=action.existing_uid or "",
+            target_name=action.name,
+            target_type=action.entity_type,
+            source_ref=source_ref,
+            attribution_context=attribution_context,
+        )
+        return append_body, append_escalation
 
     params = tier3_merge_full_params(action, existing_body, source_ref, config=config)
 
@@ -5990,7 +6121,7 @@ def tier3_merge_full(
     # max_tokens response here raised out of the merge entirely instead of
     # taking parse_tier3_merge's truncation escalation.
     full_stop_reason = reported_stop_reason(response, _capabilities(config))
-    return parse_tier3_merge(
+    full_body, full_escalation = parse_tier3_merge(
         # Issue athenaeum#578: full-echo merge enables adaptive thinking — skip any
         # leading thinking block and read the merged-body answer.
         text_or_truncated(response, full_stop_reason),
@@ -6000,6 +6131,15 @@ def tier3_merge_full(
         stop_reason=full_stop_reason,
         usage=usage,
     )
+    full_body = _scrub_prose_compile_body(
+        full_body,
+        subject_uid=action.existing_uid or "",
+        target_name=action.name,
+        target_type=action.entity_type,
+        source_ref=source_ref,
+        attribution_context=attribution_context,
+    )
+    return full_body, full_escalation
 
 
 #: Stable, greppable log prefix for the sanctioned full-echo no-op channel
