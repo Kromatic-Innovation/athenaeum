@@ -158,3 +158,15 @@ def test_each_pattern_contributes_n_per_pattern_cases() -> None:
         counts[case["pattern"]] = counts.get(case["pattern"], 0) + 1
     for count in counts.values():
         assert count == N_PER_PATTERN
+
+
+def test_no_case_carries_a_usage_class_field() -> None:
+    """Design §12.3's pass-bar condition 4: "No case produces an
+    `observed` usage class." The corpus schema has no `usage_class` key at
+    all, so no generated case can claim one -- see
+    ``tests.test_pii_attribution_judge.TestJudgeNeverTouchesUsageClass``
+    for the runtime half of this (the judge never calls
+    ``athenaeum.pii``, the module that owns that vocabulary)."""
+    cases = _load_cases()
+    for case in cases:
+        assert "usage_class" not in case, case["id"]

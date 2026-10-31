@@ -356,6 +356,32 @@ class TestCalibrationRecordLoader:
         assert entry.passes is True
 
 
+class TestJudgeNeverTouchesUsageClass:
+    def test_judge_never_touches_the_pii_writer_module(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Design §12.3's pass-bar condition 4: "No case produces an
+        `observed` usage class. This is a structural test, not a
+        measurement." ``athenaeum.pii`` is the module that owns
+        ``usage_class``/``USAGE_CLASS_OBSERVED`` and every contact-record
+        writer -- the judge must never reach it at all, since it never
+        files anything (design §6.3: "nothing is written, the item stays
+        parked"). Proven at runtime, not just by reading the source:
+        replace ``pii_attribution``'s own already-bound ``pii`` reference
+        with a sentinel that raises on any attribute access, then
+        exercise the judge end to end.
+        """
+
+        class _Sentinel:
+            def __getattr__(self, name: str) -> object:
+                raise AssertionError(f"judge_contact_attribution touched pii.{name}")
+
+        monkeypatch.setattr(pii_attribution, "pii", _Sentinel())
+        client = FakeLLMClient(text='{"verdict": "own", "score": 0.9}')
+        judgement = pii_attribution.judge_contact_attribution(_question(), client)
+        assert judgement.verdict == "own"
+
+
 def _valid_entry_dict() -> dict[str, object]:
     return {
         "question_class": "held-elsewhere",
