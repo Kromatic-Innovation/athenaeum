@@ -726,15 +726,15 @@ def _check_c2(
     return CheckEvidence(check_id=CHECK_C2_LOCAL_PART_NAMES_OTHER, uids=tuple(matched))
 
 
-def _resolve_source_text(
-    source_ref: str | dict[str, Any] | None, context: AttributionContext
-) -> str | None:
-    """Best-effort read of the raw file or page *source_ref* names (C3).
+def _extract_source_candidate_path(
+    source_ref: str | dict[str, Any] | None,
+) -> Path | None:
+    """Pull the path *source_ref* names, without touching the filesystem.
 
     ``source_ref`` is deliberately loose at this seam's call sites (design
     §4.1): a bare path string (:mod:`athenaeum.storage_migrate`'s
     ``str(page_path)``), or a structured mapping carrying a ``path``/``ref``
-    key. This resolves EXACTLY that path, as given (absolute, or relative to
+    key. This names EXACTLY that path, as given (absolute, or relative to
     the process's current directory, same as any other string path this
     codebase opens directly) -- it does not search ``raw/`` or ``wiki/`` for
     a same-named file under a different root, because :attr:`context.
@@ -742,10 +742,10 @@ def _resolve_source_text(
     (:func:`athenaeum.pii.excluded_surface_root`) and so cannot be walked
     back to a ``knowledge_root`` this function could trust in general.
 
-    Returns ``None`` for anything that does not resolve to an existing,
-    UTF-8-readable file: no *source_ref*, an unrecognized shape, or a path
-    that no longer exists. This is C3's "source missing" branch (design §17
-    risk 3: "absence of a source is not evidence") — never treated as a hit.
+    Returns ``None`` for no *source_ref* or an unrecognized shape. Split out
+    from :func:`_resolve_source_text` (which actually reads the file) so
+    :func:`_check_c3`'s self-citation guard can compare the CANDIDATE path
+    against the target's own page before deciding whether to read anything.
     """
     candidate: str | None = None
     if isinstance(source_ref, dict):
@@ -758,13 +758,42 @@ def _resolve_source_text(
         candidate = source_ref.strip()
     if not candidate:
         return None
-    path = Path(candidate)
+    return Path(candidate)
+
+
+def _resolve_source_text(path: Path) -> str | None:
+    """Best-effort read of *path* (C3).
+
+    Returns ``None`` for anything that does not resolve to an existing,
+    UTF-8-readable file: a path that no longer exists, or one this process
+    cannot read as text. This is C3's "source missing" branch (design §17
+    risk 3: "absence of a source is not evidence") — never treated as a hit.
+    """
     try:
         if not path.is_file():
             return None
         return path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return None
+
+
+def _same_file(a: Path, b: Path) -> bool:
+    """True when *a* and *b* name the same file on disk.
+
+    Compares RESOLVED paths (falling back to ``absolute()`` when a path
+    does not exist, e.g. a still-uncommitted write), not raw strings, so a
+    relative-vs-absolute or symlinked spelling of the same file still
+    counts as the same file (athenaeum#2215 self-citation guard,
+    :func:`_check_c3`).
+    """
+
+    def _norm(p: Path) -> Path:
+        try:
+            return p.resolve()
+        except OSError:  # pragma: no cover - defensive (unresolvable path)
+            return p.absolute()
+
+    return _norm(a) == _norm(b)
 
 
 def _value_occurrences(source_text: str, value: str) -> list[tuple[int, int]]:
@@ -829,8 +858,34 @@ def _check_c3(
     source_ref: str | dict[str, Any] | None,
     context: AttributionContext,
 ) -> CheckEvidence | None:
-    """C3: source context (design §5.1; §17 risk 3 for the missing-source case)."""
-    source_text = _resolve_source_text(source_ref, context)
+    """C3: source context (design §5.1; §17 risk 3 for the missing-source case).
+
+    **Self-citation guard (athenaeum#2215, implementation-time decision —
+    reversible, since the design doc does not state it literally).** Does
+    NOT fire when *source_ref* resolves to the TARGET's own entity page.
+    The reason in one line: a record is not context evidence about itself.
+    Concretely: the ``pii-migration`` writer (:mod:`athenaeum.
+    storage_migrate`) passes the page being migrated as that very value's
+    own ``source_ref``, so without this guard, any OTHER value already on
+    that same short page (the target's own address, the target's own
+    phone number) gets measured against whatever label or name happens to
+    sit elsewhere on that page and gets wrongly flagged -- a false
+    positive by construction, since nothing EXTERNAL to the page was ever
+    consulted. The guard is deliberately narrow: a *source_ref* that
+    resolves to a DIFFERENT uid's page still runs every check below
+    normally -- a value sitting next to an attribution label or a name on
+    someone ELSE's page is exactly the evidence this check exists to find.
+    """
+    candidate_path = _extract_source_candidate_path(source_ref)
+    if candidate_path is None:
+        return None
+
+    if context.entity_index is not None:
+        target_page = context.entity_index.get_by_uid(target_uid)
+        if target_page is not None and _same_file(candidate_path, target_page):
+            return None  # self-citation: not context evidence about itself
+
+    source_text = _resolve_source_text(candidate_path)
     if source_text is None:
         return None  # absence of a source is not evidence
 

@@ -446,6 +446,61 @@ class TestC3SourceContext:
         c3 = [c for c in verdict.checks if c.check_id == pii_attribution.CHECK_C3_SOURCE_CONTEXT]
         assert c3 and c3[0].label == "label:cc"
 
+    def test_self_citation_guard_suppresses_a_hit_on_the_targets_own_page(
+        self, tmp_path: Path
+    ) -> None:
+        """Positive control: a label sits well within range of the value,
+        but *source_ref* is the TARGET's own entity page — C3 must not
+        treat a page as context evidence about itself (athenaeum#2215)."""
+        knowledge = tmp_path / "knowledge"
+        wiki_root = knowledge / "wiki"
+        own_page = _write_page(
+            wiki_root,
+            uid="uid-target",
+            name="Target Person",
+            body="Referred by Alex Example. Reach them at selfcite-c3i@example.org directly.\n",
+        )
+        context = pii_attribution.build_attribution_context(knowledge, EXCLUDED_CONFIG)
+        verdict = pii_attribution.check_contact_attribution(
+            "selfcite-c3i@example.org",
+            target_uid="uid-target",
+            target_name="Target Person",
+            target_type="person",
+            source_ref=str(own_page),
+            writer=pii_attribution.WRITER_OBSERVED_CONTACT,
+            context=context,
+        )
+        assert not any(
+            c.check_id == pii_attribution.CHECK_C3_SOURCE_CONTEXT for c in verdict.checks
+        )
+        assert verdict.disposition == pii_attribution.DISPOSITION_PASS
+
+    def test_guard_is_narrow_a_different_uids_page_still_fires(self, tmp_path: Path) -> None:
+        """Negative control: the SAME shape (a label in range, source_ref a
+        wiki page), but the page belongs to a DIFFERENT uid than the
+        target — this must still fire normally, proving the guard above is
+        not just "C3 never fires on a page" (athenaeum#2215)."""
+        knowledge = tmp_path / "knowledge"
+        wiki_root = knowledge / "wiki"
+        other_page = _write_page(
+            wiki_root,
+            uid="uid-other",
+            name="Other Person",
+            body="Referred by Alex Example. Reach them at othercite-c3j@example.org directly.\n",
+        )
+        context = pii_attribution.build_attribution_context(knowledge, EXCLUDED_CONFIG)
+        verdict = pii_attribution.check_contact_attribution(
+            "othercite-c3j@example.org",
+            target_uid="uid-target",
+            target_name="Target Person",
+            target_type="person",
+            source_ref=str(other_page),
+            writer=pii_attribution.WRITER_OBSERVED_CONTACT,
+            context=context,
+        )
+        c3 = [c for c in verdict.checks if c.check_id == pii_attribution.CHECK_C3_SOURCE_CONTEXT]
+        assert c3 and c3[0].label == "label:referred by"
+
 
 class TestOrderingAndCompleteness:
     def test_c_checks_run_after_d_checks_and_evidence_is_complete(self, tmp_path: Path) -> None:
