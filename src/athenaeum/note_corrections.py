@@ -79,6 +79,26 @@ uses for its own idempotency check. A hit makes the WHOLE batch a no-op:
 every record reports disposition ``noop``, nothing is read from or written
 to any page, and no second ledger line is appended.
 
+**A third record kind: drop a whole ``##`` section (issue athenaeum#2236).**
+A batch record may address a bullet by ``bullet_id`` (``move``/``drop``, as
+above) OR a ``##`` heading by ``section_id`` (``drop`` only — there is no
+section ``move``). ``section_id`` is :func:`section_id`'s own derivation: a
+slug of the heading's text plus a 1-based ordinal among same-text ``##``
+headings, so it is stable across re-reads of an unchanged page without being
+a page-wide position. Dropping a section removes the heading line through,
+but not including, the next heading of the SAME OR HIGHER level (or end of
+body) — a nested ``###`` stays WITH the dropped ``##``, exactly as AC1
+specifies. Resolution, refusal and write-or-nothing all go through the SAME
+machinery bullets already use: :func:`_resolve` builds the section lookup
+from the one body snapshot :func:`apply_batch`/:func:`dry_run_report` already
+read, an id that does not resolve to exactly one section (unknown, or a
+slug+ordinal collision between two differently-worded headings — see
+:func:`section_id`'s own docstring) is refused through the identical
+``unknown id`` bucket a bad ``bullet_id`` hits, and the orphaned-footnote
+cleanup a dropped section's definitions get is the extracted
+:func:`_strip_orphaned_footnote_definitions` helper bullets now share rather
+than a second copy of that arithmetic (AC3).
+
 **No LLM call anywhere in this module.** Every operation here is text
 arithmetic over an already-compiled page plus a JSON batch file — nothing
 here resolves a name, classifies a fact, or drafts prose. See
@@ -95,6 +115,8 @@ below that: :mod:`athenaeum.footnote_markers` (L1), :mod:`athenaeum.models`
 from __future__ import annotations
 
 import json
+import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
@@ -147,15 +169,28 @@ class NoteCorrectionError(Exception):
 
 @dataclass(frozen=True)
 class CorrectionRecord:
-    """One line of a batch: move one bullet to another page, or drop it."""
+    """One line of a batch: move/drop one bullet by ``bullet_id``, or drop
+    one whole ``##`` section by ``section_id`` (issue athenaeum#2236).
 
-    bullet_id: str
+    Exactly one of ``bullet_id``/``section_id`` is set — :func:`load_batch`
+    enforces that before either is returned from parsing.
+    """
+
     action: str
+    bullet_id: str = ""
+    #: A ``##`` heading's :func:`section_id` (issue athenaeum#2236). Section
+    #: records only ever carry ``action="drop"`` — there is no section move.
+    section_id: str = ""
     #: Required for ``move``, forbidden for ``drop`` — see :func:`load_batch`.
     target_uid: str = ""
     #: Free-text operator annotation. Never rendered into page content or
     #: the transport footnote — purely a batch-authoring aid.
     note: str = ""
+
+    @property
+    def record_id(self) -> str:
+        """The id this record addresses, whichever namespace it is in."""
+        return self.bullet_id or self.section_id
 
 
 @dataclass(frozen=True)
@@ -215,17 +250,20 @@ class DryRunReport:
 def load_batch(path: Path) -> BatchEnvelope:
     """Parse and structurally validate a batch file.
 
-    Input shape (issue athenaeum#1976 design): ``{source_uid, batch_id,
-    created_at, records: [{bullet_id, action, target_uid?, note?}]}``. A
-    host-path JSON file — never read from ``raw/`` (that boundary is why
-    this pass exists at all; see the module docstring).
+    Input shape (issue athenaeum#1976 design, extended by issue athenaeum#2236):
+    ``{source_uid, batch_id, created_at, records: [{bullet_id|section_id,
+    action, target_uid?, note?}]}``. A host-path JSON file — never read from
+    ``raw/`` (that boundary is why this pass exists at all; see the module
+    docstring).
 
     Refuses outright, before any page is touched, on: a non-object batch, a
-    missing required key, an ``action`` outside :data:`ACTIONS`, a
-    duplicate ``bullet_id`` within one batch, a ``move`` record with no
-    ``target_uid``, or a ``drop`` record that carries one anyway (a ``drop``
-    naming a target is almost certainly an authoring mistake, not a
-    harmless no-op field).
+    missing required key, a record that carries neither or both of
+    ``bullet_id``/``section_id``, an ``action`` outside :data:`ACTIONS`, a
+    duplicate id within one batch (checked per id namespace), a ``move``
+    record with no ``target_uid``, a ``drop`` record that carries one anyway
+    (a ``drop`` naming a target is almost certainly an authoring mistake, not
+    a harmless no-op field), or a ``section_id`` record whose action is not
+    ``drop`` (there is no section ``move``).
     """
     try:
         raw_text = path.read_text(encoding="utf-8")
@@ -256,28 +294,67 @@ def load_batch(path: Path) -> BatchEnvelope:
         raise NoteCorrectionError("batch 'records' must be a non-empty list")
 
     records: list[CorrectionRecord] = []
-    seen: set[str] = set()
+    seen_bullets: set[str] = set()
+    seen_sections: set[str] = set()
     for i, item in enumerate(raw_records):
         if not isinstance(item, dict):
             raise NoteCorrectionError(f"record {i}: must be a JSON object")
-        rec_id = item.get("bullet_id")
         action = item.get("action")
+        note = item.get("note") or ""
+        if not isinstance(note, str):
+            raise NoteCorrectionError(f"record {i}: 'note' must be a string")
+
+        has_bullet = "bullet_id" in item
+        has_section = "section_id" in item
+        if has_bullet and has_section:
+            raise NoteCorrectionError(
+                f"record {i}: must carry exactly one of 'bullet_id' or 'section_id', "
+                "not both"
+            )
+        if not has_bullet and not has_section:
+            raise NoteCorrectionError(f"record {i}: must carry 'bullet_id' or 'section_id'")
+
+        if has_section:
+            # issue athenaeum#2236: a section-drop record. No 'move' for
+            # sections (out of scope — a field-group move tool is a
+            # separate concern), so this branch never touches target_uid
+            # beyond refusing one.
+            rec_id = item.get("section_id")
+            if not isinstance(rec_id, str) or not rec_id:
+                raise NoteCorrectionError(f"record {i}: 'section_id' must be a non-empty string")
+            if rec_id in seen_sections:
+                raise NoteCorrectionError(f"record {i} ({rec_id}): duplicate section_id in batch")
+            seen_sections.add(rec_id)
+            if action != DROP:
+                raise NoteCorrectionError(
+                    f"record {i} ({rec_id}): a 'section_id' record's 'action' must be "
+                    f"{DROP!r} (section move is not supported), got {action!r}"
+                )
+            target_uid = item.get("target_uid") or ""
+            if not isinstance(target_uid, str):
+                raise NoteCorrectionError(f"record {i} ({rec_id}): 'target_uid' must be a string")
+            if target_uid:
+                raise NoteCorrectionError(
+                    f"record {i} ({rec_id}): a section 'drop' record must not carry "
+                    "'target_uid'"
+                )
+            records.append(CorrectionRecord(section_id=rec_id, action=DROP, note=note))
+            continue
+
+        rec_id = item.get("bullet_id")
         if not isinstance(rec_id, str) or not rec_id:
             raise NoteCorrectionError(f"record {i}: 'bullet_id' must be a non-empty string")
-        if rec_id in seen:
+        if rec_id in seen_bullets:
             raise NoteCorrectionError(f"record {i} ({rec_id}): duplicate bullet_id in batch")
-        seen.add(rec_id)
+        seen_bullets.add(rec_id)
         if action not in ACTIONS:
             raise NoteCorrectionError(
                 f"record {i} ({rec_id}): 'action' must be one of "
                 f"{sorted(ACTIONS)}, got {action!r}"
             )
         target_uid = item.get("target_uid") or ""
-        note = item.get("note") or ""
         if not isinstance(target_uid, str):
             raise NoteCorrectionError(f"record {i} ({rec_id}): 'target_uid' must be a string")
-        if not isinstance(note, str):
-            raise NoteCorrectionError(f"record {i} ({rec_id}): 'note' must be a string")
         if action == MOVE and not target_uid:
             raise NoteCorrectionError(
                 f"record {i} ({rec_id}): action 'move' requires 'target_uid'"
@@ -310,6 +387,107 @@ def load_batch(path: Path) -> BatchEnvelope:
         created_at=created_at,
         records=tuple(records),
     )
+
+
+# --- section parsing (issue athenaeum#2236) ---------------------------------
+
+#: An ATX heading line: 1-6 ``#`` then required whitespace then non-empty
+#: text. Matched against every line of the WHOLE body unconditionally, the
+#: same posture :data:`~athenaeum.page_decompose.BULLET_RE` already takes
+#: for bullets (see this module's own docstring on why: a fenced-code
+#: special case would be a second parsing convention in a module that
+#: otherwise has exactly one). Setext headings are not ATX and are not
+#: matched — the same known, accepted gap :mod:`athenaeum.footnote_markers`
+#: documents for its own heading detector.
+_HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(\S.*?)[ \t]*$")
+
+
+@dataclass(frozen=True)
+class SectionSpan:
+    """One ``##`` heading's removable span (AC1).
+
+    ``start_line``/``end_line`` are 0-based indices into ``body.split("\\n")``;
+    the span removed on a drop is ``body_lines[start_line:end_line]`` — the
+    heading line itself through, but not including, the next heading whose
+    level is <= 2 (or end of body). A ``###`` or deeper nested under the
+    dropped ``##`` therefore stays inside ``[start_line, end_line)`` and goes
+    with it.
+    """
+
+    section_id: str
+    heading_text: str
+    start_line: int
+    end_line: int
+
+
+def section_id(heading_text: str, ordinal: int) -> str:
+    """The stable id for a ``##`` heading: a slug of its own text plus a
+    1-based *ordinal* (issue athenaeum#2236's "heading text plus ordinal, so
+    it is stable across re-reads of an unchanged page").
+
+    *ordinal* is the count of this EXACT heading text's own prior
+    occurrences among the page's ``##`` headings — see :func:`_parse_sections`,
+    which is the only caller and computes it that way. Keying the ordinal on
+    exact text, rather than on the slug or on a page-wide position, is what
+    makes the id stable under either axis of change: a new, differently
+    worded heading added anywhere else on the page never perturbs this
+    heading's own count, and reordering unrelated sections never does either.
+
+    **Why this can still be ambiguous (AC2).** The slug, unlike the exact
+    text, is lossy: ``"Notes (Draft)"`` and ``"Notes [Draft]"`` both reduce to
+    ``notes-draft``. Each tracks its OWN exact-text occurrence count, so if
+    both appear for the first time on the same page, both compute ordinal 1
+    and therefore the identical id ``notes-draft-1`` — two distinct sections
+    this id cannot tell apart. :func:`_parse_sections` is what detects that
+    collision and refuses to resolve either heading through it, rather than
+    silently picking one (routed through the same "unknown id" refusal a bad
+    ``bullet_id`` hits — see that function's docstring).
+    """
+    slug = re.sub(r"[^a-z0-9]+", "-", heading_text.strip().lower()).strip("-")
+    return f"{slug or 'section'}-{ordinal}"
+
+
+def _parse_sections(body: str) -> dict[str, SectionSpan]:
+    """Map every UNAMBIGUOUS ``section_id`` to its :class:`SectionSpan`.
+
+    Only level-2 (``##``) headings are addressable, per AC1. A heading whose
+    computed :func:`section_id` collides with an already-seen one (see that
+    function's docstring) is removed from the map entirely — including the
+    FIRST heading that produced it — so looking either up reads as an
+    unknown id (AC2), never a silent pick of one of the two.
+    """
+    lines = body.split("\n")
+    headings: list[tuple[int, int, str]] = []
+    for i, line in enumerate(lines):
+        match = _HEADING_RE.match(line)
+        if match is not None:
+            headings.append((i, len(match.group(1)), match.group(2)))
+
+    text_occurrences: dict[str, int] = {}
+    spans: dict[str, SectionSpan] = {}
+    ambiguous: set[str] = set()
+    for idx, (line_index, level, text) in enumerate(headings):
+        if level != 2:
+            continue
+        text_occurrences[text] = text_occurrences.get(text, 0) + 1
+        sid = section_id(text, text_occurrences[text])
+
+        end_line = len(lines)
+        for later_line, later_level, _later_text in headings[idx + 1 :]:
+            if later_level <= 2:
+                end_line = later_line
+                break
+
+        if sid in ambiguous:
+            continue
+        if sid in spans:
+            ambiguous.add(sid)
+            del spans[sid]
+            continue
+        spans[sid] = SectionSpan(
+            section_id=sid, heading_text=text, start_line=line_index, end_line=end_line
+        )
+    return spans
 
 
 # --- ledger -----------------------------------------------------------------
@@ -397,31 +575,62 @@ def _bullet_positions(body: str) -> list[int]:
     return [i for i, line in enumerate(body.split("\n")) if BULLET_RE.match(line)]
 
 
-def _strip_bullets(body: str, ordinals: set[int]) -> str:
-    """Remove the bullets at *ordinals* (1-based) and any footnote
-    definition no remaining line references.
+def _strip_orphaned_footnote_definitions(body: str) -> str:
+    """Drop any footnote DEFINITION no inline marker in *body* still cites.
 
-    Structural only — a caller decides move vs. drop; by the time a bullet
-    reaches here it is simply gone, exactly as if the page never carried
-    it. A definition is removed only when NO line anywhere in the
-    resulting body still cites its label (``BULLET_RE`` numbers bullets
-    page-wide, so a label shared outside the batch's own section is not
-    orphaned just because this batch touched other bullets).
+    Extracted from the bullet-drop arithmetic (issue athenaeum#1976) so the
+    section-drop path (issue athenaeum#2236, AC3) gets byte-identical
+    reference handling through a call to this function, not a second copy
+    of the same two-step arithmetic.
     """
-    lines = body.split("\n")
-    positions = _bullet_positions(body)
-    remove_at = {positions[o - 1] for o in ordinals if 1 <= o <= len(positions)}
-    kept = [line for i, line in enumerate(lines) if i not in remove_at]
-    new_body = "\n".join(kept)
-
-    referenced = set(INLINE_MARKER_RE.findall(new_body))
+    referenced = set(INLINE_MARKER_RE.findall(body))
     out: list[str] = []
-    for line in new_body.split("\n"):
+    for line in body.split("\n"):
         match = FOOTNOTE_DEF_RE.match(line)
         if match is not None and match.group(1) not in referenced:
             continue
         out.append(line)
     return "\n".join(out)
+
+
+def _strip_lines(body: str, bullet_ordinals: set[int], sections: Sequence[SectionSpan]) -> str:
+    """Remove the bullets at *bullet_ordinals* (1-based) and the whole line
+    range of every *sections* entry, all against the SAME *body* snapshot,
+    then drop any now-orphaned footnote definition (AC3).
+
+    Both removal sets are resolved to line indices against the ORIGINAL
+    *body* before anything is filtered out — a section's ``start_line``/
+    ``end_line`` and a bullet's position would otherwise disagree about
+    where the other one's removal shifted the remaining lines to. This is
+    the same all-or-nothing, one-snapshot posture :func:`_resolve` already
+    uses for id resolution, applied here to the line arithmetic itself.
+
+    Structural only — a caller decides move vs. drop; by the time a bullet
+    or section reaches here it is simply gone, exactly as if the page never
+    carried it.
+    """
+    lines = body.split("\n")
+    positions = _bullet_positions(body)
+    remove_at = {positions[o - 1] for o in bullet_ordinals if 1 <= o <= len(positions)}
+    for span in sections:
+        remove_at.update(range(span.start_line, span.end_line))
+    kept = [line for i, line in enumerate(lines) if i not in remove_at]
+    return _strip_orphaned_footnote_definitions("\n".join(kept))
+
+
+def _strip_bullets(body: str, ordinals: set[int]) -> str:
+    """Remove the bullets at *ordinals* (1-based) and any footnote
+    definition no remaining line references.
+
+    A thin wrapper over :func:`_strip_lines` with an empty section set — kept
+    as its own name/signature because it reads at every existing call site
+    (and in tests) as "drop these bullets," which is exactly what it does.
+    A definition is removed only when NO line anywhere in the resulting
+    body still cites its label (``BULLET_RE`` numbers bullets page-wide, so
+    a label shared outside the batch's own section is not orphaned just
+    because this batch touched other bullets).
+    """
+    return _strip_lines(body, ordinals, ())
 
 
 def _carry_footnote(raw: str, definitions: dict[str, list[Definition]]) -> tuple[str, str] | None:
@@ -464,6 +673,9 @@ class _Resolution:
     problems: list[str]
     id_to_ordinal: dict[str, int]
     move_targets: dict[str, Path]
+    #: issue athenaeum#2236: every ``section_id`` the batch addresses that
+    #: resolved to exactly one unambiguous span.
+    section_spans: dict[str, SectionSpan]
     unknown_id: int
     unknown_target: int
 
@@ -494,12 +706,26 @@ def _resolve(
     """
     raw_bullets, _definitions = parse_bullets(source_body)
     id_to_ordinal = {bullet_id(ordinal, raw): ordinal for ordinal, raw, _refs in raw_bullets}
+    sections = _parse_sections(source_body)
 
     problems: list[str] = []
     move_targets: dict[str, Path] = {}
+    section_spans: dict[str, SectionSpan] = {}
     unknown_id = 0
     unknown_target = 0
     for rec in envelope.records:
+        if rec.section_id:
+            # issue athenaeum#2236 (AC2): an id with no span (unknown, or a
+            # slug+ordinal collision _parse_sections already resolved to
+            # "ambiguous" by omission) is refused through the IDENTICAL
+            # bucket a bad bullet_id hits below, not a second refusal kind.
+            span = sections.get(rec.section_id)
+            if span is None:
+                problems.append(f"{rec.section_id}: unknown section id")
+                unknown_id += 1
+                continue
+            section_spans[rec.section_id] = span
+            continue
         if rec.bullet_id not in id_to_ordinal:
             problems.append(f"{rec.bullet_id}: unknown bullet id")
             unknown_id += 1
@@ -524,6 +750,7 @@ def _resolve(
         problems=problems,
         id_to_ordinal=id_to_ordinal,
         move_targets=move_targets,
+        section_spans=section_spans,
         unknown_id=unknown_id,
         unknown_target=unknown_target,
     )
@@ -592,8 +819,9 @@ def dry_run_report(
 
     moved = sum(1 for r in envelope.records if r.action == MOVE)
     dropped = sum(1 for r in envelope.records if r.action == DROP)
-    ordinals = {resolution.id_to_ordinal[r.bullet_id] for r in envelope.records}
-    new_body = _strip_bullets(body, ordinals)
+    ordinals = {resolution.id_to_ordinal[r.bullet_id] for r in envelope.records if r.bullet_id}
+    sections = [resolution.section_spans[r.section_id] for r in envelope.records if r.section_id]
+    new_body = _strip_lines(body, ordinals, sections)
 
     # Simulated "after" text, byte-identical to what apply_batch would
     # actually write (same render formula _bump_and_render uses) — but
@@ -652,7 +880,7 @@ def apply_batch(
             batch_id=envelope.batch_id,
             records_total=len(envelope.records),
             results=[
-                RecordResult(bullet_id=r.bullet_id, disposition="noop") for r in envelope.records
+                RecordResult(bullet_id=r.record_id, disposition="noop") for r in envelope.records
             ],
             body_chars_before=body_chars,
             body_chars_after=body_chars,
@@ -672,8 +900,13 @@ def apply_batch(
     raw_bullets, _ = parse_bullets(body)
     raw_by_ordinal = {ordinal: raw for ordinal, raw, _refs in raw_bullets}
 
-    ordinals_to_remove = {resolution.id_to_ordinal[r.bullet_id] for r in envelope.records}
-    new_source_body = _strip_bullets(body, ordinals_to_remove)
+    ordinals_to_remove = {
+        resolution.id_to_ordinal[r.bullet_id] for r in envelope.records if r.bullet_id
+    }
+    sections_to_remove = [
+        resolution.section_spans[r.section_id] for r in envelope.records if r.section_id
+    ]
+    new_source_body = _strip_lines(body, ordinals_to_remove, sections_to_remove)
 
     # Pre-pass: trial-render EVERY page this apply would touch before any
     # write happens, so a pydantic failure mid-run cannot leave a partially
@@ -706,7 +939,11 @@ def apply_batch(
     results: list[RecordResult] = []
     for rec in envelope.records:
         if rec.action == DROP:
-            results.append(RecordResult(bullet_id=rec.bullet_id, disposition="dropped"))
+            # Covers BOTH a bullet drop and a section drop (issue
+            # athenaeum#2236) — the line removal for either already
+            # happened above in new_source_body via _strip_lines, so
+            # there is nothing left to do here but record the id.
+            results.append(RecordResult(bullet_id=rec.record_id, disposition="dropped"))
             continue
         ordinal = resolution.id_to_ordinal[rec.bullet_id]
         raw = raw_by_ordinal[ordinal]
