@@ -732,6 +732,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   previously-misclassified `user-stated` results back to their correct
   channel.
 
+- **A contending reader can no longer see an empty or partially-rewritten
+  lockfile mid-heartbeat (issue athenaeum#2229).** `lease_refresh_heartbeat`
+  used to `ftruncate(fd, 0)` before writing the new holder metadata, so
+  `read_holder` (used to render `LockHeld`'s diagnostic message) could land
+  in that window and see nothing, degrading the message to a bare "another
+  athenaeum process" with no PID/host/heartbeat age. The rewrite now never
+  truncates: a payload shorter than what's on disk is padded with trailing
+  blank lines (inert to `read_holder`'s parser) up to the current size
+  before a single `os.write`, and a longer payload simply extends the file
+  as part of that same write — so the file size never decreases and a
+  reader always sees either the complete old payload or the complete new
+  one, never a mix of the two. The lockfile format, flock semantics and
+  `_heartbeat_write_lock` behaviour are unchanged.
+
 
 ## [0.22.43] - 2026-10-25
 

@@ -264,11 +264,12 @@ class TestRunLockHeartbeatTimerThread:
             deadline = time.monotonic() + interval * 12
             while time.monotonic() < deadline:
                 holder = read_holder(lockfile)
-                # A bare read can transiently land in the microsecond
-                # ftruncate-before-write window a refresh opens (pre-existing
-                # to lease_refresh_heartbeat) and see an empty file; just
-                # retry on the next poll rather than treating that as absence
-                # of a bump.
+                # `lease_refresh_heartbeat` no longer has an
+                # ftruncate-before-write window that could show a bare read
+                # an empty file (athenaeum#2229); this `None` guard is kept
+                # as defensive belt-and-braces (e.g. a read racing the very
+                # first metadata write) rather than something this test
+                # actually expects to hit.
                 if holder is None:
                     time.sleep(interval / 5)
                     continue
@@ -330,11 +331,11 @@ class TestRunLockHeartbeatTimerThread:
                 saw_a_read = False
                 while time.monotonic() < deadline:
                     holder = read_holder(lockfile)
-                    # A bare (non-flock) read can transiently land in the
-                    # microsecond ftruncate-before-write window a refresh
-                    # opens (pre-existing to lease_refresh_heartbeat, not
-                    # introduced here) and see an empty file -- read_holder
-                    # correctly reports that as None. What must NEVER happen,
+                    # `lease_refresh_heartbeat` no longer truncates before
+                    # writing (athenaeum#2229), so a bare (non-flock) read
+                    # should not land on an empty file here either; this
+                    # `None` guard is defensive belt-and-braces, not an
+                    # outcome this test expects. What must NEVER happen,
                     # from either writer racing the other, is a read landing
                     # on a PARTIAL/malformed record (e.g. some but not all of
                     # the four fields) -- every non-None read must be the
@@ -977,6 +978,121 @@ class TestLockHeldMessageDetail:
         # LockHeld.__init__/._render.
         exc = LockHeld(tmp_path / runlock.LOCKFILE_NAME, None)
         assert "another athenaeum process" in str(exc)
+
+
+class TestHeartbeatRewriteNeverExposesAPartialPayload:
+    """Issue athenaeum#2229: a contending reader (`read_holder`, used to
+    render `LockHeld`'s message) takes no lock against a heartbeat rewrite.
+    `lease_refresh_heartbeat` must never truncate the lockfile before (or
+    after) writing the new payload, so a reader landing at any point around
+    the rewrite sees either the complete OLD payload or the complete NEW
+    one -- never empty, and never a mix of the new prefix and a leftover old
+    tail.
+
+    Pins the mechanism directly against `athenaeum.store`'s primitive (not
+    through `RunLock`'s background thread, which would make the timing
+    non-deterministic) by patching `os.write` to read the lockfile
+    immediately before and after the one write call the fixed implementation
+    makes, and patching `os.ftruncate` to fail the test outright if the
+    rewrite calls it at all -- the old code's `ftruncate(fd, 0)` is exactly
+    the athenaeum#2229 bug. Covers both directions the issue calls out: a new
+    payload SHORTER than what's currently on disk (forced via a long-then-
+    short `socket.gethostname()`) and one LONGER (short-then-long).
+    """
+
+    def _rewrite_and_spy(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        old_host: str,
+        new_host: str,
+    ) -> dict[str, object]:
+        from athenaeum import store
+
+        lockfile = tmp_path / "lock-2229"
+        fd = store.lease_open_fd(lockfile)
+        observed: dict[str, object] = {}
+        try:
+            monkeypatch.setattr(store.socket, "gethostname", lambda: old_host)
+            acquired_at = store.lease_write_metadata(fd)
+            old_holder = read_holder(lockfile)
+            old_bytes = lockfile.read_bytes()
+            assert old_holder is not None  # sanity: the setup write landed
+
+            real_write = os.write
+            real_ftruncate = os.ftruncate
+
+            def spy_write(write_fd: int, data: bytes) -> int:
+                if write_fd == fd:
+                    observed["pre_holder"] = read_holder(lockfile)
+                    observed["pre_bytes"] = lockfile.read_bytes()
+                result = real_write(write_fd, data)
+                if write_fd == fd:
+                    observed["post_holder"] = read_holder(lockfile)
+                    observed["post_bytes"] = lockfile.read_bytes()
+                return result
+
+            def spy_ftruncate(trunc_fd: int, length: int) -> None:
+                if trunc_fd == fd:
+                    raise AssertionError(
+                        "lease_refresh_heartbeat must never call ftruncate "
+                        "-- that is the athenaeum#2229 bug"
+                    )
+                real_ftruncate(trunc_fd, length)
+
+            monkeypatch.setattr(os, "write", spy_write)
+            monkeypatch.setattr(os, "ftruncate", spy_ftruncate)
+            monkeypatch.setattr(store.socket, "gethostname", lambda: new_host)
+            store.lease_refresh_heartbeat(fd, acquired_at)
+        finally:
+            os.close(fd)
+
+        observed["old_holder"] = old_holder
+        observed["old_bytes"] = old_bytes
+        return observed
+
+    def test_shorter_new_payload_is_never_observed_mixed_or_empty(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        observed = self._rewrite_and_spy(
+            tmp_path, monkeypatch, old_host="h" * 80, new_host="short"
+        )
+
+        # Immediately before the single write landed: complete OLD payload
+        # -- never empty, never a partial/mixed record.
+        assert observed["pre_holder"] == observed["old_holder"]
+        assert observed["pre_bytes"] == observed["old_bytes"]
+
+        # Immediately after: complete NEW payload. No leftover old tail --
+        # the long old hostname must not appear anywhere in the file.
+        new_holder = observed["post_holder"]
+        assert new_holder is not None
+        assert new_holder["host"] == "short"
+        assert new_holder["pid"] == str(os.getpid())
+        assert ("h" * 80).encode() not in observed["post_bytes"]
+
+        # The file never shrank -- it was padded, not truncated.
+        assert len(observed["post_bytes"]) >= len(observed["old_bytes"])
+
+    def test_longer_new_payload_is_never_observed_mixed_or_empty(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        observed = self._rewrite_and_spy(
+            tmp_path, monkeypatch, old_host="short", new_host="h" * 80
+        )
+
+        # Immediately before the single write landed: complete OLD payload.
+        assert observed["pre_holder"] == observed["old_holder"]
+        assert observed["pre_bytes"] == observed["old_bytes"]
+
+        # Immediately after: complete NEW (longer) payload, extended by the
+        # same write call -- no separate grow/truncate step.
+        new_holder = observed["post_holder"]
+        assert new_holder is not None
+        assert new_holder["host"] == "h" * 80
+        assert new_holder["pid"] == str(os.getpid())
+        assert len(observed["post_bytes"]) > len(observed["old_bytes"])
 
 
 class TestLivenessStrHelper:
