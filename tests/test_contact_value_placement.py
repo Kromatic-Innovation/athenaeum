@@ -40,6 +40,7 @@ not loop" a structural guarantee rather than a promise.
 
 from __future__ import annotations
 
+import ast
 import inspect
 from dataclasses import dataclass
 from pathlib import Path
@@ -707,6 +708,92 @@ class TestNoPlacementGrantsOutreachEligibility:
     def test_there_is_no_parameter_to_override_the_usage_class(self) -> None:
         params = inspect.signature(pii.place_contact_value).parameters
         assert "usage_class" not in params
+
+    @staticmethod
+    def _code_nodes(func: Any) -> list[ast.AST]:
+        """Every AST node in *func*'s body, EXCLUDING its docstring.
+
+        A substring scan of ``inspect.getsource`` cannot do this: these
+        functions' docstrings legitimately discuss the ``observed`` class in
+        prose (``record_contact_value``'s ``usage_class`` arg explains what an
+        ``unclassified`` placement does to a value already recorded
+        ``observed``), so a textual guard over them would red on
+        documentation.
+        """
+        tree = ast.parse(inspect.getsource(func))
+        function = tree.body[0]
+        assert isinstance(function, ast.FunctionDef)
+        body = function.body
+        if (
+            body
+            and isinstance(body[0], ast.Expr)
+            and isinstance(body[0].value, ast.Constant)
+            and isinstance(body[0].value.value, str)
+        ):
+            body = body[1:]
+        return [node for stmt in body for node in ast.walk(stmt)]
+
+    @pytest.mark.parametrize(
+        "name",
+        ["place_contact_value", "record_contact_value", "_stamp_placement_provenance"],
+    )
+    def test_no_executor_code_path_names_the_observed_class(self, name: str) -> None:
+        """Extends the source guard above to the helpers it DELEGATES to.
+
+        ``inspect.getsource(place_contact_value)`` stops at that function, but
+        the write actually lands through ``record_contact_value`` and the
+        provenance through ``_stamp_placement_provenance``. A class
+        substituted in either of those would never be seen by a scan of the
+        executor alone.
+        """
+        for node in self._code_nodes(getattr(pii, name)):
+            if isinstance(node, ast.Name):
+                assert node.id != "USAGE_CLASS_OBSERVED", name
+            elif isinstance(node, ast.Attribute):
+                assert node.attr != "USAGE_CLASS_OBSERVED", name
+            elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+                assert node.value != pii.USAGE_CLASS_OBSERVED, name
+
+    def test_every_usage_class_argument_in_the_executor_is_the_pinned_constant(
+        self,
+    ) -> None:
+        """Not merely "``observed`` is absent": every ``usage_class=`` the
+        executor passes must be the pinned constant or the local derived from
+        it -- never a literal, and never a value a caller supplied.
+
+        The local's own VALUE is pinned behaviourally rather than structurally
+        (``test_no_outcome_ever_writes_observed`` asserts
+        ``placement.usage_class`` for all eleven outcomes), so this does not
+        over-fit to one way of writing the assignment.
+        """
+        allowed = {"_PLACEMENT_USAGE_CLASS", "usage_class"}
+        keywords = [
+            keyword
+            for node in self._code_nodes(pii.place_contact_value)
+            if isinstance(node, ast.Call)
+            for keyword in node.keywords
+            if keyword.arg == "usage_class"
+        ]
+        assert keywords, "the executor passes no usage_class at all; guard is vacuous"
+        for keyword in keywords:
+            assert isinstance(keyword.value, ast.Name), ast.dump(keyword.value)
+            assert keyword.value.id in allowed
+        # And the one that reaches the WRITE is the constant itself, not the
+        # reporting local.
+        write_calls = [
+            node
+            for node in self._code_nodes(pii.place_contact_value)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "record_contact_value"
+        ]
+        assert len(write_calls) == 1
+        passed = {
+            keyword.value.id
+            for keyword in write_calls[0].keywords
+            if keyword.arg == "usage_class" and isinstance(keyword.value, ast.Name)
+        }
+        assert passed == {"_PLACEMENT_USAGE_CLASS"}
 
 
 # ---------------------------------------------------------------------------

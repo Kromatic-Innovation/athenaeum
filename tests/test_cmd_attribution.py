@@ -27,6 +27,7 @@ from typing import Any
 import pytest
 
 from athenaeum import pii, pii_attribution
+from athenaeum._cmd_attribution import _AS_FORMS
 from athenaeum.cli import main
 from athenaeum.models import EntityIndex, parse_frontmatter, render_frontmatter
 
@@ -513,16 +514,47 @@ class TestPlaceRejections:
         assert _record_for(knowledge, _OWNER_UID) == {}
 
     @pytest.mark.parametrize(
-        "answer",
-        ["nonsense", "other", "alias", "merge", "own:uid-x", "other:", "alias:"],
+        ("answer", "expected"),
+        [
+            ("nonsense", "unknown --as form 'nonsense'"),
+            ("own:uid-x", "unknown --as form 'own:uid-x'"),
+            # A bare prefix partitions to an EMPTY argument, so it is the
+            # missing-argument error, not the unknown-form one. The previous
+            # `"--as" in err or "unknown" in err` could not tell them apart
+            # -- and every message contains `--as` anyway, so the first arm
+            # alone made the assertion unconditional.
+            ("other", "--as other: needs a uid"),
+            ("merge", "--as merge: needs a uid"),
+            ("alias", "--as alias: needs a relation"),
+            ("other:", "--as other: needs a uid"),
+            ("alias:", "--as alias: needs a relation"),
+        ],
+        ids=[
+            "nonsense",
+            "own-with-argument",
+            "bare-other",
+            "bare-merge",
+            "bare-alias",
+            "other-empty-argument",
+            "alias-empty-argument",
+        ],
     )
     def test_malformed_as_form_exits_one(
-        self, knowledge: Path, capsys: pytest.CaptureFixture[str], answer: str
+        self,
+        knowledge: Path,
+        capsys: pytest.CaptureFixture[str],
+        answer: str,
+        expected: str,
     ) -> None:
+        """One expected message per form. The previous `"--as" in err or
+        "unknown" in err` passed on EITHER substring, so it could not tell
+        the unknown-form error from the missing-argument one -- and both
+        contain `--as` anyway."""
         rc = _place(knowledge, _suspect_id(knowledge), answer)
         assert rc == 1
         err = capsys.readouterr().err
-        assert "--as" in err or "unknown" in err
+        assert expected in err
+        assert _AS_FORMS in err
         self._nothing_was_written(knowledge)
 
     def test_unknown_relation_exits_one_and_lists_the_vocabulary(
@@ -561,6 +593,7 @@ class TestPlaceRejections:
         rc = _place(knowledge, "not-a-suspect-id", "own")
         assert rc == 1
         assert "is not a suspect id" in capsys.readouterr().err
+        self._nothing_was_written(knowledge)
 
     def test_place_refuses_when_the_run_lock_is_held(
         self, knowledge: Path, capsys: pytest.CaptureFixture[str]
@@ -642,8 +675,11 @@ class TestPlaceProvenance:
     def test_a_human_placement_never_writes_observed(self, knowledge: Path) -> None:
         _place(knowledge, _suspect_id(knowledge), "own")
         meta = _record_for(knowledge, _TARGET_UID)
-        for entry in meta.get(pii.CONTACT_CLASSIFICATION_FIELD) or []:
-            assert entry.get("usage_class") != pii.USAGE_CLASS_OBSERVED
+        entries = meta.get(pii.CONTACT_CLASSIFICATION_FIELD) or []
+        assert entries
+        # The POSITIVE form: a bogus third usage class passes `!= observed`.
+        for entry in entries:
+            assert entry.get("usage_class") == pii.USAGE_CLASS_UNCLASSIFIED
 
     def test_json_mode_reports_the_outcome(
         self, knowledge: Path, capsys: pytest.CaptureFixture[str]

@@ -52,6 +52,12 @@ from typing import Any
 import pytest
 
 from athenaeum import pii, pii_attribution
+from athenaeum.config import (
+    DEFAULT_ATTRIBUTION_MAX_ESCALATIONS_PER_RUN,
+    resolve_attribution_context_window_chars,
+    resolve_attribution_escalate,
+    resolve_attribution_max_escalations_per_run,
+)
 from athenaeum.models import TokenUsage, parse_frontmatter, render_frontmatter
 from athenaeum.tiers import tier4_escalate
 from tests.conftest import FakeLLMClient
@@ -1067,8 +1073,13 @@ class TestSourceExcerpt:
         assert question.source_excerpt is not None
         assert _VALUE in question.source_excerpt
         assert "Referred by" in question.source_excerpt
-        # Bounded: the window is 200 chars each side by default, not the file.
-        assert len(question.source_excerpt) < 700
+        # Bounded by the KNOB, not by a slack magic number: one window is at
+        # most `context_window_chars` each side of the occurrence plus the
+        # value itself. The file is 1000+ chars, so a regression that returned
+        # it whole would have passed a `< 700` bound for the wrong reason.
+        window = resolve_attribution_context_window_chars(None)
+        assert window == 200
+        assert len(question.source_excerpt) <= 2 * window + len(_VALUE)
 
     def test_overlapping_windows_are_merged_once(self, tmp_path: Path) -> None:
         source = tmp_path / "note.md"
@@ -1076,6 +1087,10 @@ class TestSourceExcerpt:
         question = self._question(tmp_path, str(source))
         assert question.source_excerpt is not None
         assert question.source_excerpt.count("\n...\n") == 0
+        # MERGED, not deduplicated: the separator's absence alone would also
+        # pass if the second occurrence were dropped entirely.
+        assert question.source_excerpt.count(_VALUE) == 2
+        assert "and again" in question.source_excerpt
 
     def test_distant_occurrences_are_separate_windows(self, tmp_path: Path) -> None:
         source = tmp_path / "note.md"
@@ -1163,6 +1178,13 @@ class TestRawValueNeverReachesPendingQuestions:
     def test_the_masked_form_is_present(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Weak BY CONSTRUCTION, and kept only as a readable statement of
+        intent: it applies the same ``mask_contact_address`` helper production
+        applies, so it survives any change to the masking rule.
+        ``test_the_block_still_identifies_the_value_to_a_human`` below
+        hardcodes the expected masked form and is the LOAD-BEARING assertion
+        of this property; change that one when the masking changes.
+        """
         text = self._render(tmp_path, monkeypatch)
         assert pii.mask_contact_address(_VALUE) in text
 
@@ -1405,11 +1427,12 @@ class TestNeverGrantsOutreachEligibility:
         meta, _ = parse_frontmatter(outcome.placement.path.read_text(encoding="utf-8"))
         entries = meta.get(pii.CONTACT_CLASSIFICATION_FIELD) or []
         assert entries
+        # The POSITIVE form: a bogus third usage class passes `!= observed`.
         for entry in entries:
-            assert entry.get("usage_class") != pii.USAGE_CLASS_OBSERVED
+            assert entry.get("usage_class") == pii.USAGE_CLASS_UNCLASSIFIED
         assert (
             pii.classification_for_value(meta, _VALUE).usage_class
-            != pii.USAGE_CLASS_OBSERVED
+            == pii.USAGE_CLASS_UNCLASSIFIED
         )
 
     def test_no_file_anywhere_on_the_surface_records_observed(
@@ -1909,6 +1932,109 @@ class TestShadowSweepObserveMode:
             context.contacts_root, shadow_only=True
         )
         assert len(found) == 1
+
+
+class TestEscalationKnobs:
+    """The two resolvers that gate the shadow phase, tested DIRECTLY.
+
+    Neither had a direct test: ``TestLibrarianShadowPhase`` exercises them
+    only through the phase, which cannot see a default at all. The cap's
+    default in particular was pinned nowhere, so a typo to ``0`` would have
+    silently disabled the sweep in every deployment that does not set it --
+    with the phase's own tests still green, because ``limit <= 0`` is a
+    documented no-op.
+    """
+
+    def test_escalate_is_off_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("ATHENAEUM_ATTRIBUTION_ESCALATE", raising=False)
+        assert resolve_attribution_escalate(None) is False
+        assert resolve_attribution_escalate({}) is False
+        assert resolve_attribution_escalate({"librarian": {}}) is False
+        assert resolve_attribution_escalate({"librarian": {"attribution": {}}}) is False
+
+    @pytest.mark.parametrize("raw", [True, False])
+    def test_escalate_reads_the_yaml_bool(
+        self, monkeypatch: pytest.MonkeyPatch, raw: bool
+    ) -> None:
+        monkeypatch.delenv("ATHENAEUM_ATTRIBUTION_ESCALATE", raising=False)
+        config = {"librarian": {"attribution": {"escalate": raw}}}
+        assert resolve_attribution_escalate(config) is raw
+
+    @pytest.mark.parametrize("raw", ["true", 1, "yes", None, [], {}])
+    def test_escalate_falls_through_on_a_non_bool_yaml_value(
+        self, monkeypatch: pytest.MonkeyPatch, raw: Any
+    ) -> None:
+        """Deliberately strict: a stringy ``"true"`` in yaml is a typo, and
+        reading it as on would turn the phase's DEFAULT-OFF guarantee into a
+        quoting accident."""
+        monkeypatch.delenv("ATHENAEUM_ATTRIBUTION_ESCALATE", raising=False)
+        config = {"librarian": {"attribution": {"escalate": raw}}}
+        assert resolve_attribution_escalate(config) is False
+
+    @pytest.mark.parametrize(
+        ("env", "expected"),
+        [
+            ("1", True),
+            ("true", True),
+            ("TRUE", True),
+            ("yes", True),
+            ("on", True),
+            (" on ", True),
+            ("0", False),
+            ("false", False),
+            ("off", False),
+            ("", False),
+            ("maybe", False),
+        ],
+    )
+    def test_escalate_env_wins_over_yaml(
+        self, monkeypatch: pytest.MonkeyPatch, env: str, expected: bool
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_ATTRIBUTION_ESCALATE", env)
+        # Set to the OPPOSITE in yaml, so a pass cannot come from yaml.
+        config = {"librarian": {"attribution": {"escalate": not expected}}}
+        assert resolve_attribution_escalate(config) is expected
+
+    def test_the_cap_default_is_twenty_five(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pinned to the LITERAL as well as the constant: a typo in the
+        constant would otherwise move the default and the test with it."""
+        monkeypatch.delenv("ATHENAEUM_ATTRIBUTION_MAX_ESCALATIONS_PER_RUN", raising=False)
+        assert DEFAULT_ATTRIBUTION_MAX_ESCALATIONS_PER_RUN == 25
+        for config in (None, {}, {"librarian": {}}, {"librarian": {"attribution": {}}}):
+            assert resolve_attribution_max_escalations_per_run(config) == 25
+
+    @pytest.mark.parametrize(("raw", "expected"), [(1, 1), (100, 100), ("7", 7), (0, 0), (-1, -1)])
+    def test_the_cap_reads_the_yaml_value_including_the_disable_hatch(
+        self, monkeypatch: pytest.MonkeyPatch, raw: Any, expected: int
+    ) -> None:
+        monkeypatch.delenv("ATHENAEUM_ATTRIBUTION_MAX_ESCALATIONS_PER_RUN", raising=False)
+        config = {"librarian": {"attribution": {"max_escalations_per_run": raw}}}
+        assert resolve_attribution_max_escalations_per_run(config) == expected
+
+    @pytest.mark.parametrize("raw", [True, False, "lots", None, [], {}])
+    def test_the_cap_falls_through_on_a_malformed_yaml_value(
+        self, monkeypatch: pytest.MonkeyPatch, raw: Any
+    ) -> None:
+        monkeypatch.delenv("ATHENAEUM_ATTRIBUTION_MAX_ESCALATIONS_PER_RUN", raising=False)
+        config = {"librarian": {"attribution": {"max_escalations_per_run": raw}}}
+        assert (
+            resolve_attribution_max_escalations_per_run(config)
+            == DEFAULT_ATTRIBUTION_MAX_ESCALATIONS_PER_RUN
+        )
+
+    def test_the_cap_env_wins_over_yaml(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ATHENAEUM_ATTRIBUTION_MAX_ESCALATIONS_PER_RUN", "3")
+        config = {"librarian": {"attribution": {"max_escalations_per_run": 50}}}
+        assert resolve_attribution_max_escalations_per_run(config) == 3
+
+    def test_a_malformed_cap_env_falls_back_to_yaml(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ATHENAEUM_ATTRIBUTION_MAX_ESCALATIONS_PER_RUN", "lots")
+        config = {"librarian": {"attribution": {"max_escalations_per_run": 50}}}
+        assert resolve_attribution_max_escalations_per_run(config) == 50
 
 
 class TestLibrarianShadowPhase:
