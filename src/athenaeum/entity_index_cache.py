@@ -199,7 +199,11 @@ def load_with_stats(wiki_root: Path, cache_dir: Path) -> tuple[EntityIndex, Load
         if prior is not None and prior[0] == stamp:
             record = prior[1]
         else:
-            parsed = EntityIndex.read_page_record(fpath)
+            # Issue athenaeum#2178: this call site only ever reads
+            # ``parsed[0]`` (the PageIndexRecord) below -- never ``meta`` --
+            # so it is safe to opt into the selective parse EntityIndex's
+            # own ``_load`` uses, unlike callers that unpack ``meta`` too.
+            parsed = EntityIndex.read_page_record(fpath, keys=EntityIndex._INDEX_KEYS)
             record = parsed[0] if parsed is not None else None
             reparsed += 1
         fresh[fpath.name] = (stamp, record)
