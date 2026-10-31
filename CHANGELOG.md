@@ -820,6 +820,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   behavior changed; `_system_local_timezone`'s docstring now also records,
   rather than changes, its existing `$TZ` precedence.
 
+- **Two `test_repair.py` bounce-fold tests no longer depend on the host's
+  live deployment state (issue athenaeum#2183).** `--bounce-fold --apply`
+  took the run lock at `--knowledge-root`, or, if omitted, at
+  `DEFAULT_KNOWLEDGE_ROOT` — the operator's real `~/knowledge`. Both tests
+  omitted `--knowledge-root`, so a real librarian run holding that lock made
+  them fail with exit 75, a result that depended on what else happened to
+  be running on the machine. Both now pass an explicit tmp
+  `--knowledge-root`, and a new regression test reproduces the exact
+  failure mode — a run lock held at the root the default resolves to —
+  entirely against tmp stand-ins. A new session-wide, autouse test guard
+  (`tests/fixtures/default_root_guard.py`) fails any test that opens a path
+  under the real default knowledge root or default cache dir, covering both
+  `DEFAULT_KNOWLEDGE_ROOT` definitions (`config.py`'s call-time
+  `.expanduser()` and `librarian.py`'s copy, frozen at import time).
+
 
 ## [0.22.43] - 2026-10-25
 

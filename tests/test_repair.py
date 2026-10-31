@@ -689,11 +689,27 @@ def test_cli_bounce_fold_dry_run_returns_2_and_does_not_write(tmp_path: Path) ->
 
 def test_cli_bounce_fold_apply_returns_0_and_folds(tmp_path: Path) -> None:
     contacts_root = _write_bounce_fold_store(tmp_path)
+    # athenaeum#2183: --apply takes the run lock at --knowledge-root (or, if
+    # omitted, at DEFAULT_KNOWLEDGE_ROOT -- the operator's live deployment).
+    # An explicit tmp --knowledge-root makes this test's lock acquisition
+    # independent of the host's live state; see
+    # test_cli_bounce_fold_apply_succeeds_while_default_knowledge_root_is_locked
+    # below for the regression proof.
+    knowledge_root = tmp_path / "knowledge"
+    knowledge_root.mkdir()
 
     buf = io.StringIO()
     with redirect_stdout(buf):
         rc = cli.main(
-            ["repair", "--bounce-fold", "--apply", "--contacts-root", str(contacts_root)]
+            [
+                "repair",
+                "--bounce-fold",
+                "--apply",
+                "--contacts-root",
+                str(contacts_root),
+                "--knowledge-root",
+                str(knowledge_root),
+            ]
         )
 
     assert rc == 0
@@ -707,23 +723,79 @@ def test_cli_bounce_fold_apply_returns_0_and_folds(tmp_path: Path) -> None:
 
 
 def test_cli_bounce_fold_idempotent_re_run_reports_zero(tmp_path: Path) -> None:
-    """AC 3: find -> fold -> idempotent re-run reports zero."""
-    contacts_root = _write_bounce_fold_store(tmp_path)
+    """AC 3: find -> fold -> idempotent re-run reports zero.
 
-    first = cli.main(
-        ["repair", "--bounce-fold", "--apply", "--contacts-root", str(contacts_root)]
-    )
+    athenaeum#2183: explicit --knowledge-root, same reasoning as
+    test_cli_bounce_fold_apply_returns_0_and_folds above.
+    """
+    contacts_root = _write_bounce_fold_store(tmp_path)
+    knowledge_root = tmp_path / "knowledge"
+    knowledge_root.mkdir()
+    args = [
+        "repair",
+        "--bounce-fold",
+        "--apply",
+        "--contacts-root",
+        str(contacts_root),
+        "--knowledge-root",
+        str(knowledge_root),
+    ]
+
+    first = cli.main(args)
     assert first == 0
 
     buf = io.StringIO()
     with redirect_stdout(buf):
-        second = cli.main(
-            ["repair", "--bounce-fold", "--apply", "--contacts-root", str(contacts_root)]
-        )
+        second = cli.main(args)
     assert second == 0
     out = buf.getvalue()
     assert "pairs_found: 0" in out
     assert "folded:      0" in out
+    assert "residual:    0" in out
+
+
+def test_cli_bounce_fold_apply_succeeds_while_default_knowledge_root_is_locked(
+    tmp_path: Path,
+    default_knowledge_root_under_lock,
+) -> None:
+    """Regression proof for athenaeum#2183 AC1.
+
+    Reproduces the reported failure mode -- a real run holding the lock at
+    the root ``--knowledge-root``'s default would resolve to -- entirely
+    against a tmp stand-in: ``default_knowledge_root_under_lock`` redirects
+    ``athenaeum._cmd_repair``'s bound ``DEFAULT_KNOWLEDGE_ROOT`` to a fresh
+    tmp dir and holds a real :class:`~athenaeum.runlock.RunLock` there for
+    the duration of this test. The command below still passes an explicit
+    ``--knowledge-root`` elsewhere (the same fix applied to the two tests
+    above), so it must succeed regardless -- proving the fix actually
+    decouples the command from whatever the default resolves to, lock held
+    or not. No test here takes or creates the operator's real run-lock
+    file: both the "default" and the command's own root are tmp_path-based.
+    """
+    contacts_root = _write_bounce_fold_store(tmp_path)
+    knowledge_root = tmp_path / "knowledge"
+    knowledge_root.mkdir()
+
+    default_knowledge_root_under_lock("athenaeum._cmd_repair")
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        rc = cli.main(
+            [
+                "repair",
+                "--bounce-fold",
+                "--apply",
+                "--contacts-root",
+                str(contacts_root),
+                "--knowledge-root",
+                str(knowledge_root),
+            ]
+        )
+
+    assert rc == 0
+    out = buf.getvalue()
+    assert "pairs_found: 1" in out
+    assert "folded:      1" in out
     assert "residual:    0" in out
 
 

@@ -761,3 +761,12 @@ def wiki_dir(tmp_path: Path) -> Path:
     (wiki / "MEMORY.md").write_text("# Memory Index\n")
 
     return wiki
+
+
+# ---------------------------------------------------------------------------
+# athenaeum#2183 -- appended block, deliberately kept separate from the rest
+# of this file (see tests/fixtures/default_root_guard.py's module docstring
+# for why: a sibling lane is concurrently editing the content above for an
+# unrelated hermeticity issue). Do not add anything else below this line
+# that isn't part of that guard.
+pytest_plugins = ["tests.fixtures.default_root_guard"]
