@@ -40,6 +40,13 @@ With no local knowledge tree present the denylist check SKIPS LOUDLY rather
 than passing silently, so an outside contributor's suite still runs while a
 maintainer's still checks. A silent pass would be worse than no check: it
 would report safety it never established.
+
+The three tests that call ``_knowledge_wiki()`` carry
+``@pytest.mark.reads_live_knowledge_tree`` -- the declared opt-in
+``tests/fixtures/default_root_guard.py`` requires before letting any test
+open a path under the real default knowledge root (athenaeum#2183). That
+guard forbids ACCIDENTAL contact with the live deployment; these reads are
+this module's documented, load-bearing purpose, not an accident.
 """
 
 from __future__ import annotations
@@ -338,6 +345,7 @@ def _scan_blobs_for_leaks(
     return hits
 
 
+@pytest.mark.reads_live_knowledge_tree  # declared: denylist needs real frontmatter (athenaeum#2183)
 def test_eval_corpus_contains_no_real_proper_nouns() -> None:
     wiki = _knowledge_wiki()
     if wiki is None:
@@ -406,6 +414,7 @@ def test_denylist_shape_rule_admits_identities_and_rejects_common_words(
     )
 
 
+@pytest.mark.reads_live_knowledge_tree  # declared: needs real frontmatter (athenaeum#2183)
 def test_structurally_central_corpus_names_are_absent_from_the_real_tree() -> None:
     """No name the corpus leans on may exist anywhere in the real tree.
 
@@ -495,6 +504,7 @@ _REAL_BRANDS = frozenset(
 )
 
 
+@pytest.mark.reads_live_knowledge_tree  # declared: needs real frontmatter (athenaeum#2183)
 def test_every_composable_generated_name_is_invented() -> None:
     """Enumerate the WHOLE composable name space, not a sample.
 
