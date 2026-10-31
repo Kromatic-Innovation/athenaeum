@@ -7620,18 +7620,26 @@ def _run_attribution_shadow_phase(ctx: RunContext) -> None:
         "proposed": summary.proposed,
         "would_queue": summary.queued,
         "memo_hits": summary.memo_hits,
+        # Issue athenaeum#2212: these three plus `escalated` partition
+        # `considered` exactly, so the row reconciles instead of leaving an
+        # operator to infer a remainder. `skipped_over_cap` is now the
+        # still-needs-escalating tail, which must drain across runs.
+        "skipped_not_suspect": summary.skipped_not_suspect,
+        "skipped_already_answered": summary.skipped_already_answered,
         "skipped_over_cap": summary.skipped_over_cap,
     }
-    if summary.escalated:
+    if summary.escalated or summary.skipped_already_answered:
         log.info(
             "attribution shadow-escalation: %d/%d suspect(s) escalated, "
             "%d proposed placement(s) logged and NOTHING filed, %d would reach "
-            "a human, %d memo hit(s), %d left for the next run (over cap)",
+            "a human, %d already answered (no call), %d not a suspect, "
+            "%d still to do and left for the next run (over cap)",
             summary.escalated,
             summary.considered,
             summary.proposed,
             summary.queued,
-            summary.memo_hits,
+            summary.skipped_already_answered,
+            summary.skipped_not_suspect,
             summary.skipped_over_cap,
         )
 

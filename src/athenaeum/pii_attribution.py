@@ -3595,6 +3595,26 @@ class ShadowEscalationSummary:
     that would reach a human. ``placements`` and ``queue_items`` carry the
     objects themselves so an L4 caller can act on them -- in this issue it
     only counts and logs them, because observe mode files nothing.
+
+    **The four skip/do counters partition ``considered`` exactly** (issue
+    athenaeum#2212)::
+
+        considered == escalated
+                      + skipped_not_suspect
+                      + skipped_already_answered
+                      + skipped_over_cap
+
+    so an operator can reconcile the row rather than infer a remainder.
+    ``skipped_over_cap`` counts only suspects that still NEED escalating and
+    did not fit the cap, which is the number that must drain to zero as
+    successive sweeps work through a backlog.
+
+    ``memo_hits`` is kept and still counts honestly, but is normally ``0``
+    in a sweep now: a memo hit is exactly what ``skipped_already_answered``
+    filters out BEFORE the cap is spent on it, so the sweep rarely reaches
+    one. It is ``skipped_already_answered`` that carries the "this cost no
+    model call" story for this function; ``memo_hits`` still moves for the
+    direct :func:`escalate_contact_attribution_suspect` callers.
     """
 
     considered: int = 0
@@ -3602,6 +3622,8 @@ class ShadowEscalationSummary:
     proposed: int = 0
     queued: int = 0
     memo_hits: int = 0
+    skipped_not_suspect: int = 0
+    skipped_already_answered: int = 0
     skipped_over_cap: int = 0
     placements: tuple["pii.ContactPlacement", ...] = ()
     queue_items: tuple[EscalationItem, ...] = ()
@@ -3641,6 +3663,35 @@ def escalate_shadow_suspects(
     knob uses. Suspects are taken in sorted filename order, which is stable
     across runs, so a capped sweep works through a backlog deterministically
     rather than re-rolling the same arbitrary subset.
+
+    **The cap is applied to what still needs escalating, not to the whole
+    directory** (issue athenaeum#2212). Sorted order alone is only half of
+    "works through a backlog": slicing the full listing re-selects the same
+    first *limit* entries on every run, so with a backlog larger than the
+    cap the tail is never reached and ``skipped_over_cap`` never drains. The
+    memo made the repeat calls free, which is why the stall was silent --
+    it is a progress bug, not a spend bug. So two classes are filtered out
+    BEFORE the slice, keeping sorted order among what remains:
+
+    - a suspect whose question has already been answered under the CURRENT
+      ``(model, prompt_sha256)`` identity, i.e. one the memo already holds a
+      row for. The memo -- not the suspect file's ``judgement`` stamp -- is
+      the oracle here, deliberately: it is keyed on exactly the five
+      components that decide whether a fresh call would ask a NEW question
+      (design §4.3), so a bumped model or an edited judge prompt still
+      re-asks (the property :func:`attribution_memo_key` exists for), and a
+      fail-closed ``unclear`` -- which athenaeum#2212 stopped memoising --
+      correctly stays pending so the retry the design promises can happen.
+      A ``judgement``-stamp filter would silently defeat both.
+    - a suspect whose ``disposition`` is not ``suspect``.
+      :func:`escalate_contact_attribution_suspect` returns ``escalated=
+      False`` for those without a model call (design §6.1), so letting one
+      consume cap budget costs a slot and buys nothing.
+
+    The memo is read ONCE per sweep rather than per suspect. A row appended
+    by this sweep's own escalations is therefore not in that snapshot, which
+    is harmless: those suspects were selected precisely because no row
+    existed, and the next sweep reads a fresh snapshot.
     """
     if client is None:
         return ShadowEscalationSummary()
@@ -3648,7 +3699,34 @@ def escalate_shadow_suspects(
         return ShadowEscalationSummary()
     suspects = iter_parked_suspects(context.contacts_root, shadow_only=True)
     considered = len(suspects)
-    selected = suspects if limit is None else suspects[:limit]
+    memo = read_attribution_memo(
+        default_attribution_memo_path(context.contacts_root)
+    )
+    pending: list[ParkedSuspect] = []
+    skipped_not_suspect = 0
+    skipped_already_answered = 0
+    for suspect in suspects:
+        parked_verdict = verdict_from_parked_suspect(suspect)
+        if parked_verdict.disposition != DISPOSITION_SUSPECT:
+            skipped_not_suspect += 1
+            continue
+        model, prompt_sha256 = attribution_call_identity(
+            question_class_for(parked_verdict.checks), config
+        )
+        if (
+            attribution_memo_key(
+                value_key=suspect.value_key,
+                target_uid=suspect.target_uid,
+                source_ref=suspect.source_ref,
+                prompt_sha256=prompt_sha256,
+                model=model,
+            )
+            in memo
+        ):
+            skipped_already_answered += 1
+            continue
+        pending.append(suspect)
+    selected = pending if limit is None else pending[:limit]
     escalated = 0
     proposed = 0
     queued = 0
@@ -3691,7 +3769,9 @@ def escalate_shadow_suspects(
         proposed=proposed,
         queued=queued,
         memo_hits=memo_hits,
-        skipped_over_cap=max(0, considered - len(selected)),
+        skipped_not_suspect=skipped_not_suspect,
+        skipped_already_answered=skipped_already_answered,
+        skipped_over_cap=max(0, len(pending) - len(selected)),
         placements=tuple(placements),
         queue_items=tuple(queue_items),
         outcomes=tuple(outcomes),

@@ -1910,6 +1910,42 @@ class TestShadowSweepObserveMode:
         )
         return verdict
 
+    def _park_with_disposition(
+        self,
+        context: pii_attribution.AttributionContext,
+        *,
+        value: str,
+        target_uid: str,
+        disposition: str,
+    ) -> pii_attribution.AttributionVerdict:
+        """A parked suspect whose recorded ``disposition`` is NOT ``suspect``.
+
+        ``park_suspect`` stores the verdict's disposition verbatim, and
+        ``verdict_from_parked_suspect`` reads it back, so this is the shape
+        the sweep must skip without spending a cap slot on it.
+        """
+        verdict = pii_attribution.AttributionVerdict(
+            disposition=disposition,
+            checks=(
+                pii_attribution.CheckEvidence(
+                    check_id=pii_attribution.CHECK_D2_HELD_ELSEWHERE, uids=(_HOLDER_UID,)
+                ),
+            ),
+            candidates=(_HOLDER_UID,),
+            value_key=pii_attribution.value_key_for(context, value),
+        )
+        pii_attribution.park_suspect(
+            context,
+            value,
+            verdict,
+            target_uid=target_uid,
+            target_name=_TARGET_NAME,
+            writer=pii_attribution.WRITER_OBSERVED_CONTACT,
+            source_ref="raw/intake/note.md",
+            shadow=True,
+        )
+        return verdict
+
     def test_logs_a_proposed_placement_and_files_nothing(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -2024,14 +2060,20 @@ class TestShadowSweepObserveMode:
     def test_a_second_sweep_over_the_same_backlog_makes_no_model_call(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The cost-control property of a RUN-LEVEL phase, and the one test
-        that exercises ``memo_hits`` against a non-zero value.
+        """The cost-control property of a RUN-LEVEL phase.
 
         ``TestMemo`` proves the memo short-circuits one escalation. This
         proves the property an operator actually depends on: a nightly run
         over an unchanged backlog adds NO model spend. The second sweep gets
         ``_NoCallClient``, so a regression that re-asks is not merely counted
         -- it raises.
+
+        Issue athenaeum#2212 moved WHERE that is decided: the already-answered
+        suspects are now filtered out before the cap is spent on them, so
+        the second sweep reports them as ``skipped_already_answered`` rather
+        than re-escalating each one into a free ``memo_hit``. The spend
+        property is identical and the cap is no longer consumed by work
+        with no outcome.
         """
         _patch_record(monkeypatch, _entry(threshold=0.98))
         context = _context(tmp_path)
@@ -2044,16 +2086,195 @@ class TestShadowSweepObserveMode:
         )
         assert first.escalated == 3
         assert first.memo_hits == 0
+        assert first.skipped_already_answered == 0
         assert len(client.calls) == 3
+        assert [p.outcome for p in first.placements] == [pii.PLACEMENT_PROPOSED] * 3
 
         second = pii_attribution.escalate_shadow_suspects(
             context, client=_NoCallClient(), config=EXCLUDED_CONFIG, usage=TokenUsage()
         )
-        assert second.escalated == 3
-        assert second.memo_hits == 3
+        assert second.considered == 3
+        assert second.escalated == 0
         # The counter an operator reads must move, not just stay consistent.
-        assert second.memo_hits == second.escalated
-        assert [p.outcome for p in second.placements] == [pii.PLACEMENT_PROPOSED] * 3
+        assert second.skipped_already_answered == 3
+        assert second.skipped_over_cap == 0
+
+    def test_a_bumped_model_still_re_asks_the_whole_backlog(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The already-answered filter keys on the memo, so the memo's own
+        "a CHANGED prompt sha or model re-asks" contract survives it.
+
+        A filter on the suspect file's ``judgement`` stamp would skip these
+        silently -- the stamp records that SOME model answered, not that the
+        current one did.
+        """
+        _patch_record(monkeypatch, _entry(threshold=0.98))
+        context = _context(tmp_path)
+        for n in range(3):
+            self._park(context, value=f"person{n}@example.org", target_uid=f"uid-t{n}")
+
+        monkeypatch.setenv("ATHENAEUM_ATTRIBUTION_MODEL", "model-one")
+        first_client = _judge_client(verdict="own", score=0.95)
+        first = pii_attribution.escalate_shadow_suspects(
+            context, client=first_client, config=EXCLUDED_CONFIG
+        )
+        assert first.escalated == 3
+
+        monkeypatch.setenv("ATHENAEUM_ATTRIBUTION_MODEL", "model-two")
+        second_client = _judge_client(verdict="own", score=0.95)
+        second = pii_attribution.escalate_shadow_suspects(
+            context, client=second_client, config=EXCLUDED_CONFIG
+        )
+        assert second.escalated == 3
+        assert second.skipped_already_answered == 0
+        assert len(second_client.calls) == 3
+
+    def test_a_failed_call_leaves_the_suspect_pending_for_the_next_sweep(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """athenaeum#2212's two fixes have to compose: not memoising a
+        fail-closed ``unclear`` is only a way back if the next sweep still
+        SELECTS the suspect."""
+        _patch_record(monkeypatch, _entry(threshold=0.98))
+        context = _context(tmp_path)
+        self._park(context, value=_VALUE, target_uid=_TARGET_UID)
+
+        first = pii_attribution.escalate_shadow_suspects(
+            context,
+            client=FakeLLMClient(raises=RuntimeError("provider returned 529")),
+            config=EXCLUDED_CONFIG,
+        )
+        assert first.escalated == 1
+        assert first.queued == 1
+
+        second = pii_attribution.escalate_shadow_suspects(
+            context, client=_judge_client(verdict="own", score=0.95), config=EXCLUDED_CONFIG
+        )
+        assert second.skipped_already_answered == 0
+        assert second.escalated == 1
+        assert [p.outcome for p in second.placements] == [pii.PLACEMENT_PROPOSED]
+
+    def test_a_capped_sweep_reaches_every_suspect_across_runs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Issue athenaeum#2212 — the progress property, asserted on WHICH
+        suspects each sweep touched.
+
+        Before the fix the cap sliced the full sorted listing, so every
+        sweep processed the same first ``limit`` entries and the tail was
+        unreachable; the memo made the repeat calls free, which is what kept
+        the stall silent. Counts alone could not see it: ``escalated`` was
+        ``limit`` on every run either way.
+        """
+        _patch_record(monkeypatch, _entry(threshold=0.98))
+        context = _context(tmp_path)
+        for n in range(5):
+            self._park(context, value=f"person{n}@example.org", target_uid=f"uid-t{n}")
+        everyone = [
+            s.suspect_id
+            for s in pii_attribution.iter_parked_suspects(
+                context.contacts_root, shadow_only=True
+            )
+        ]
+        assert len(everyone) == 5
+
+        touched: list[list[str]] = []
+        remaining: list[int] = []
+        for _ in range(3):
+            summary = pii_attribution.escalate_shadow_suspects(
+                context,
+                client=_judge_client(verdict="own", score=0.95),
+                config=EXCLUDED_CONFIG,
+                limit=2,
+            )
+            touched.append([o.suspect_id for o in summary.outcomes])
+            remaining.append(summary.skipped_over_cap)
+
+        # Three disjoint slices, in sorted order, covering everyone exactly
+        # once -- not the same prefix three times.
+        assert touched == [everyone[0:2], everyone[2:4], everyone[4:5]]
+        assert sorted(sum(touched, [])) == sorted(everyone)
+        # The remainder an operator reads drains to zero instead of sticking.
+        assert remaining == [3, 1, 0]
+
+        # A fourth sweep has nothing left to do and makes no call at all.
+        fourth = pii_attribution.escalate_shadow_suspects(
+            context, client=_NoCallClient(), config=EXCLUDED_CONFIG, limit=2
+        )
+        assert fourth.considered == 5
+        assert fourth.escalated == 0
+        assert fourth.skipped_already_answered == 5
+        assert fourth.skipped_over_cap == 0
+
+    def test_a_non_suspect_disposition_does_not_consume_cap_budget(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``pass``/``non-personal`` never escalate (design §6.1), so they
+        must not take a slot a real suspect needs."""
+        _patch_record(monkeypatch, _entry(threshold=0.98))
+        context = _context(tmp_path)
+        settled = self._park_with_disposition(
+            context,
+            value="aaa-sorts-first@example.org",
+            target_uid="uid-settled",
+            disposition=pii_attribution.DISPOSITION_PASS,
+        )
+        real = self._park(context, value=_VALUE, target_uid=_TARGET_UID)
+        del settled, real
+
+        summary = pii_attribution.escalate_shadow_suspects(
+            context,
+            client=_judge_client(verdict="own", score=0.95),
+            config=EXCLUDED_CONFIG,
+            limit=1,
+        )
+        assert summary.considered == 2
+        assert summary.skipped_not_suspect == 1
+        assert summary.escalated == 1
+        assert summary.skipped_over_cap == 0
+        assert [o.suspect_id for o in summary.outcomes] == [
+            pii_attribution.suspect_id_for(
+                pii_attribution.value_key_for(context, _VALUE), _TARGET_UID
+            )
+        ]
+
+    @pytest.mark.parametrize("limit", [None, 1, 2, 10], ids=["uncapped", "1", "2", "10"])
+    def test_the_counters_partition_considered_exactly(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, limit: int | None
+    ) -> None:
+        _patch_record(monkeypatch, _entry(threshold=0.98))
+        context = _context(tmp_path)
+        self._park_with_disposition(
+            context,
+            value="settled@example.org",
+            target_uid="uid-settled",
+            disposition=pii_attribution.DISPOSITION_NON_PERSONAL,
+        )
+        for n in range(3):
+            self._park(context, value=f"person{n}@example.org", target_uid=f"uid-t{n}")
+        # Answer one of them up front so `skipped_already_answered` is non-zero.
+        pii_attribution.escalate_shadow_suspects(
+            context,
+            client=_judge_client(verdict="own", score=0.95),
+            config=EXCLUDED_CONFIG,
+            limit=1,
+        )
+
+        summary = pii_attribution.escalate_shadow_suspects(
+            context,
+            client=_judge_client(verdict="own", score=0.95),
+            config=EXCLUDED_CONFIG,
+            limit=limit,
+        )
+        assert summary.skipped_already_answered == 1
+        assert summary.skipped_not_suspect == 1
+        assert summary.considered == (
+            summary.escalated
+            + summary.skipped_not_suspect
+            + summary.skipped_already_answered
+            + summary.skipped_over_cap
+        )
 
     def test_the_sweep_order_is_stable_across_runs(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2274,6 +2495,8 @@ class TestLibrarianShadowPhase:
             "proposed": 1,
             "would_queue": 0,
             "memo_hits": 0,
+            "skipped_not_suspect": 0,
+            "skipped_already_answered": 0,
             "skipped_over_cap": 0,
         }
         assert record.read_bytes() == before
