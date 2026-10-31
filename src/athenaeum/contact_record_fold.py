@@ -92,9 +92,19 @@ log = logging.getLogger(__name__)
 FOLD_FIELDS: tuple[str, ...] = pii.CONTACT_DATA_FIELDS
 
 #: Per-ADDRESS fact lists that travel with the address they describe.
+#:
+#: issue athenaeum#2212 adds :data:`pii.IDENTIFIER_RELATION_FIELD` (design
+#: §7.1: "``identifier_relation`` joins the per-identifier fact fields, so
+#: folds carry it and athenaeum#2196's orphan rules cover it"). No other
+#: change was needed: the generic machinery below keys every entry on its
+#: ``identifier`` key via :func:`_fact_identifier`, which an
+#: ``identifier_relation`` entry carries, so :func:`_missing_facts`,
+#: :func:`_facts_not_on` and the :func:`_identifier_keys` orphan rule all
+#: cover it unmodified.
 _PER_IDENTIFIER_FACT_FIELDS: tuple[str, ...] = (
     pii.IDENTIFIER_VALIDITY_FIELD,
     pii.CONTACT_CLASSIFICATION_FIELD,
+    pii.IDENTIFIER_RELATION_FIELD,
 )
 
 #: Provenance stamped on a folded value that carried no ``field_sources``
