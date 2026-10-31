@@ -746,6 +746,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one, never a mix of the two. The lockfile format, flock semantics and
   `_heartbeat_write_lock` behaviour are unchanged.
 
+- **Eighteen tests no longer read the caller's environment instead of their
+  own (issue athenaeum#2256).** Each was reproducible by running the real
+  suite in an ordinary shell rather than `env -i`:
+  - `test_deploy_guard.py`'s `_source_and_eval`/`_run` helpers now scrub
+    `ATHENAEUM_GUARD_PYTHON` before applying each test's own `env_extra`
+    (already done in `_source_and_eval_rc`, but missing from the other two),
+    so a caller who exports it no longer overrides the shimmed `PATH` the
+    install-cmd/`_dg_resolve_python` tests build.
+  - `test_retention_policy.py` gains an autouse `_hermetic_git_config`
+    fixture that sets `GIT_CONFIG_GLOBAL=/dev/null` and
+    `GIT_CONFIG_NOSYSTEM=1` and strips the `GIT_CONFIG_COUNT`/`_KEY_`/`_VALUE_`
+    family for every test in the module, so a caller's real global
+    `core.excludesfile` naming `logs/` no longer hides the files the
+    fixture's and the SUT's own git commits stage.
+  - `test_receipt_sealers.py`'s subprocess-env-suppression test now
+    `monkeypatch.delenv`s `OP_LOAD_DESKTOP_APP_SETTINGS`/
+    `OP_BIOMETRIC_UNLOCK_ENABLED` first, so its final "didn't leak into this
+    process" assertion is actually testing the provider rather than echoing
+    whatever the caller's shell happened to export.
+  - `test_spend.py`'s budget-window-omitted test now passes `--path` at a
+    guaranteed-absent `tmp_path` directory, so `cmd_spend` never loads a
+    real `~/knowledge/athenaeum.yaml` spend budget off the caller's `HOME`.
+  - `test_eval_corpus_leakage.py`'s proper-noun denylist (`_real_proper_nouns`)
+    now excludes names with a trailing bare number ("gate 1", "phase 2") as
+    generic numbered labels rather than real identities — the exact shape
+    that flagged the unrelated phrase "Gate 1" in
+    `probe_subject_scope_containment.py`'s own prose. A genuine multi-word
+    capitalised name with no trailing number is still caught (counter-example
+    test alongside the fix).
+
+  All five files were confirmed to fail under the leaking condition
+  (`ATHENAEUM_GUARD_PYTHON`/`OP_LOAD_DESKTOP_APP_SETTINGS` exported, a global
+  gitignore naming `logs/`, a spend budget configured under `HOME`, a local
+  knowledge tree present) before the fix and pass both under that condition
+  and under `env -i` after it. Isolation lives entirely in test fixtures; no
+  CI configuration changed.
+
 
 ## [0.22.43] - 2026-10-25
 
