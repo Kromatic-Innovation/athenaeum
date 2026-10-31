@@ -85,6 +85,57 @@ def _runtime_deps_in_base_interpreter_unmet() -> str | None:
     )
 
 
+def _append_only_protection_enforced_unmet() -> str | None:
+    # promptwitness.ledger._apply_append_only_protection runs `chflags uappnd`
+    # (macOS) / `chattr +a` (Linux) on a ledger partition as a best-effort
+    # tamper guard. On macOS that flag is enforced for an ordinary process; on
+    # Linux it needs CAP_LINUX_IMMUTABLE, which a non-root CI/dev process does
+    # not hold, so `chattr +a` there is silently a no-op (issue athenaeum#2255
+    # cause 1). A counter-example test that proves the flag is "really being
+    # set" by expecting a rewrite to raise can only be a real check where the
+    # OS actually enforces it -- this probe tells the two cases apart instead
+    # of guessing from `sys.platform` alone (a root Linux process DOES enforce
+    # it, same as macOS).
+    import subprocess
+    import tempfile
+
+    if sys.platform == "darwin":
+        set_cmd, clear_cmd = "chflags", "nouappnd"
+        set_args = ["chflags", "uappnd"]
+    elif sys.platform.startswith("linux"):
+        set_cmd, clear_cmd = "chattr", "-a"
+        set_args = ["chattr", "+a"]
+    else:
+        return f"no append-only mechanism is defined for {sys.platform!r}"
+    with tempfile.TemporaryDirectory() as tmp:
+        probe = Path(tmp) / "probe.txt"
+        probe.write_bytes(b"x")
+        try:
+            subprocess.run(set_args + [str(probe)], capture_output=True, timeout=5, check=False)
+        except (OSError, subprocess.SubprocessError):
+            return f"the `{set_cmd}` binary is not available on this host"
+        enforced = False
+        try:
+            probe.write_bytes(b"y")
+        except PermissionError:
+            enforced = True
+        finally:
+            subprocess.run(
+                [set_cmd, clear_cmd, str(probe)],
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+        if not enforced:
+            return (
+                f"`{set_cmd}` ran but the OS did not actually enforce the "
+                "append-only flag against a rewrite -- likely a non-root "
+                "process without the needed capability (true for CI and most "
+                "contributor shells on Linux; see issue athenaeum#2255)"
+            )
+    return None
+
+
 #: name -> (one-line description for the docs, probe returning the unmet reason)
 PROPERTIES: dict[str, tuple[str, Callable[[], str | None]]] = {
     "vector_backend": (
@@ -95,6 +146,13 @@ PROPERTIES: dict[str, tuple[str, Callable[[], str | None]]] = {
         "athenaeum's runtime dependencies live in the base interpreter's "
         "site-packages, so a `--system-site-packages` child venv can import them.",
         _runtime_deps_in_base_interpreter_unmet,
+    ),
+    "append_only_protection_enforced": (
+        "the host OS actually enforces the append-only flag "
+        "`promptwitness.ledger._apply_append_only_protection` applies "
+        "(`chflags uappnd` on macOS; `chattr +a` on Linux, which needs a "
+        "capability a non-root process does not have).",
+        _append_only_protection_enforced_unmet,
     ),
 }
 

@@ -281,13 +281,22 @@ class TestOnePasswordProvider:
         assert _files_containing(home, bytes(key.private_bytes_raw())) == []
 
     def test_op_subprocess_gets_non_interactive_suppression_flags(
-        self, tmp_path: Path
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """athenaeum#2193 AC10: every ``op`` subprocess this provider spawns
         runs with ``OP_LOAD_DESKTOP_APP_SETTINGS=false`` and
         ``OP_BIOMETRIC_UNLOCK_ENABLED=false`` -- overlaid onto the
         subprocess's own env only, never onto this test process's.
+
+        A caller shell that already exports OP_LOAD_DESKTOP_APP_SETTINGS (a
+        real 1Password desktop-app setting) must not fail the final
+        not-leaked assertion below -- scrub both vars from this test
+        process's own baseline first (athenaeum#2256), so the assertion
+        proves what it claims (the provider didn't mutate os.environ)
+        instead of just echoing whatever the caller happened to export.
         """
+        monkeypatch.delenv("OP_LOAD_DESKTOP_APP_SETTINGS", raising=False)
+        monkeypatch.delenv("OP_BIOMETRIC_UNLOCK_ENABLED", raising=False)
         key = Ed25519PrivateKey.generate()
         bin_dir = tmp_path / "fixture-bin"
         home = tmp_path / "home"

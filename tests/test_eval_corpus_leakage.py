@@ -84,6 +84,16 @@ from tests.evals.rollout import materialize_native_memory
 # the class of short surname most likely to collide.
 _MIN_NAME_LEN = 4
 
+#: A trailing bare number ("gate 1", "phase 2", "step 3") names a generic,
+#: numbered label -- not a person or an org -- so it is excluded from the
+#: multi-word denylist below even though it passes the length/space shape
+#: rule (athenaeum#2256: a real wiki page titled "Gate 1" made the denylist
+#: check flag the unrelated phrase "Gate 1" in
+#: tests/evals/data/probe_subject_scope_containment.py's own prose as a
+#: leaked real name). Scoped narrowly to a TRAILING digit group so a genuine
+#: multi-word capitalised name with no number is untouched.
+_TRAILING_NUMBER = re.compile(r"\s\d+$")
+
 #: Common English words that appear as real page titles but identify nobody.
 #: Not an exception list to append to per failure -- if a new false positive
 #: is an ordinary English word it belongs here; if it is not, it is a leak.
@@ -242,6 +252,10 @@ def _real_proper_nouns(wiki: Path) -> set[str]:
                 # identities are covered by the structural check below, which
                 # only fires on names the corpus actually leans on.
                 continue
+            if _TRAILING_NUMBER.search(cleaned):
+                # "gate 1", "phase 2" -- a generic numbered label, not a real
+                # identity (athenaeum#2256). See _TRAILING_NUMBER's docstring.
+                continue
             names.add(cleaned)
     return names
 
@@ -372,6 +386,7 @@ def test_denylist_shape_rule_admits_identities_and_rejects_common_words(
         ("a", "Retention"),  # common word -> not an identity
         ("b", "Marisol Quenwick"),  # multi-word -> identity
         ("c", "zenodotus"),  # single lowercase token, not common -> identity
+        ("d", "Gate 1"),  # multi-word + trailing number -> generic label, not an identity
     ]:
         # `type: person` matters: only entity-typed pages are read, because a
         # page titled "analytics" or "here" is a topic note, not an identity.
@@ -387,6 +402,15 @@ def test_denylist_shape_rule_admits_identities_and_rejects_common_words(
         "single tokens are deliberately NOT in this denylist -- they are "
         "covered by test_structurally_central_corpus_names_are_absent_from_"
         "the_real_tree, which fires only on names the corpus leans on"
+    )
+    assert "gate 1" not in found, (
+        "athenaeum#2256: a trailing bare number names a generic numbered "
+        "label ('gate 1', 'phase 2'), not a real identity -- the exact "
+        "false positive that flagged tests/evals/data/"
+        "probe_subject_scope_containment.py's unrelated prose as a leak. "
+        "The 'marisol quenwick' assertion above is the counter-example: a "
+        "genuine multi-word capitalised name with no trailing number must "
+        "still be caught."
     )
 
 

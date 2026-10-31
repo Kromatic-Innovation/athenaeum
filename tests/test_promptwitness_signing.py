@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from promptwitness import canon, ledger, signing
+from promptwitness import canon, cli, ledger, signing
 
 # ---------------------------------------------------------------------------
 # Protocol shape
@@ -184,6 +184,12 @@ class TestSoftwareFileRoundTrip:
         raw = partition.read_text(encoding="utf-8")
         tampered = raw.replace('"resumed":false', '"resumed":true')
         assert tampered != raw, "the fixture did not actually change anything"
+        # Clear whatever append-only protection `ledger.append_line` applied
+        # to this partition before rewriting it, mirroring
+        # `cli._clear_append_only_best_effort` -- without this, the rewrite
+        # below raises PermissionError on a host that enforces the flag
+        # (stock macOS; see athenaeum#2255 cause 1).
+        cli._clear_append_only_best_effort(ledger_dir)
         partition.write_text(tampered, encoding="utf-8")
 
         verification = ledger.verify_chain(
@@ -495,6 +501,9 @@ class TestVerifyChainSignatureStatus:
         first = _json.loads(lines[0])
         first["prompt_chars"] = 999999
         lines[0] = _json.dumps(first, sort_keys=True, separators=(",", ":"))
+        # Clear append-only protection before the rewrite -- see the comment
+        # at the other rewrite site in this file (athenaeum#2255 cause 1).
+        cli._clear_append_only_best_effort(tmp_path)
         partition.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
         v = ledger.verify_chain(tmp_path, public_keys={provider.key_id(): provider.public_key()})

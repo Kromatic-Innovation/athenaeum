@@ -117,6 +117,16 @@ The properties enforced mechanically, by name, are:
   the base interpreter — true for CI (which `pip install`s straight into the
   runner's Python), false for the virtualenv this page tells you to create. The
   test skips in a virtualenv and runs in CI.
+- **`append_only_protection_enforced`** — the host OS actually enforces the
+  append-only flag `promptwitness.ledger._apply_append_only_protection`
+  applies to a ledger partition (`chflags uappnd` on macOS; `chattr +a` on
+  Linux). macOS enforces it for an ordinary process; Linux needs
+  `CAP_LINUX_IMMUTABLE`, which a non-root CI/dev process does not hold, so
+  `chattr +a` there is a silent no-op. A counter-example test in
+  `tests/test_promptwitness_ledger.py` that proves the flag is "really being
+  set" by expecting an unguarded rewrite to raise `PermissionError` can only
+  be a real check where this property holds; it skips naming this property
+  otherwise (see athenaeum#2255).
 
 ### The clean-venv CI job
 
