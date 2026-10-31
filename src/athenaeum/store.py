@@ -485,7 +485,41 @@ def lease_write_metadata(fd: int) -> str:
 
 def lease_refresh_heartbeat(fd: int, acquired_at: str) -> None:
     """Rewrite only the ``heartbeat:`` line on *fd*, keeping ``pid``/``timestamp``/
-    ``host`` (``timestamp`` pinned to *acquired_at*, the original acquire time)."""
+    ``host`` (``timestamp`` pinned to *acquired_at*, the original acquire time).
+
+    **Never shrinks the file, and never calls ``ftruncate`` (issue
+    athenaeum#2229).** The previous implementation did ``ftruncate(fd, 0)``
+    then ``write(payload)``, which opens a window where a contending reader
+    with no flock (:func:`read_holder`, used to render a ``LockHeld``
+    message) can land between the truncate and the write and see an empty
+    file. Writing the new payload before any size change closes that
+    specific window, but is not sufficient on its own: the ISO-8601
+    ``heartbeat`` timestamp occasionally drops its fractional-second suffix
+    when the microsecond happens to be exactly 0, so a later payload can be a
+    few bytes SHORTER than what is already on disk. Overwriting in place
+    with a shorter buffer leaves the old tail (bytes beyond the new
+    payload's length) on disk until something truncates it off, so a
+    truncate-after-write reopens the identical kind of window, just for the
+    tail: a reader could land in it and see ``new_prefix + old_tail``, which
+    is exactly as malformed as the all-empty case.
+
+    So instead of ever truncating, a payload shorter than the file's
+    CURRENT on-disk size is padded with trailing blank lines up to that
+    size before the single ``os.write`` call. ``read_holder``'s line parser
+    only treats a line with a ``:`` as a key/value pair, so trailing blank
+    lines are inert and the lockfile format (the ``key: value`` lines
+    themselves) is unaffected. A payload longer than the current size needs
+    no special handling: ``os.write`` past the current end-of-file extends
+    the file as part of the same call. Either way there is exactly one
+    ``os.write`` and the file's size never decreases, so a reader's
+    ``read_text()`` always lands either entirely before it (complete OLD
+    payload, possibly with OLD padding) or entirely after it (complete NEW
+    payload, possibly with NEW padding) — never a mix. This relies on a
+    single small (well under one page) ``os.write`` being atomic with
+    respect to a concurrent whole-file read on a local filesystem, the same
+    assumption the issue's own suggested fix ("write the new content first")
+    already makes.
+    """
     now_iso = datetime.now(timezone.utc).isoformat()
     payload = (
         f"pid: {os.getpid()}\n"
@@ -493,9 +527,21 @@ def lease_refresh_heartbeat(fd: int, acquired_at: str) -> None:
         f"host: {socket.gethostname()}\n"
         f"heartbeat: {now_iso}\n"
     )
+    data = payload.encode("utf-8")
     os.lseek(fd, 0, os.SEEK_SET)
-    os.ftruncate(fd, 0)
-    os.write(fd, payload.encode("utf-8"))
+    current_size = os.fstat(fd).st_size
+    if len(data) < current_size:
+        data += b"\n" * (current_size - len(data))
+    written = os.write(fd, data)
+    if written != len(data):
+        # A SHORT write (ENOSPC is the realistic cause) would leave exactly the
+        # `new_prefix + old_tail` state the single-write design exists to make
+        # impossible, so it must be loud rather than silently persisted. Not
+        # retried: a second write would itself be a second window.
+        raise OSError(
+            f"partial heartbeat write: {written} of {len(data)} bytes "
+            "reached the lockfile"
+        )
     os.fsync(fd)
 
 
