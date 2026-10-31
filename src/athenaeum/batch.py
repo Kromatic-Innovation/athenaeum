@@ -1566,13 +1566,19 @@ def process_batch_run(
         # ExcludedRecordIndex is in scope on this transport (correctness
         # first: excluded_index=None lets resolve_handle_query build its own
         # per address, at the cost of the O(corpus) scan being repaid per
-        # address rather than shared across the run).
+        # address rather than shared across the run). entity_index=index
+        # (athenaeum#2180) IS shared across this transport's whole run,
+        # mirroring the sync transport and this module's own existing
+        # entity_index=index threading (e.g. pii_attribution.
+        # build_attribution_context above) — see
+        # docs/design/librarian-email-gate-index-coherence.md.
         address_outcome = resolve_address_named_classifications(
             classified,
             knowledge_root=wiki_root.parent,
             wiki_root=wiki_root,
             config=config,
             excluded_index=None,
+            entity_index=index,
         )
         classified = address_outcome.kept
         for _address, _uid, _display_name in address_outcome.resolved:
