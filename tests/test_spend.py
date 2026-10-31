@@ -1298,9 +1298,26 @@ class TestSpendCommand:
         assert "Budget window" in out
 
     def test_human_output_omits_budget_window_when_unconfigured(
-        self, ledger: Path, capsys: pytest.CaptureFixture[str]
+        self, ledger: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        rc = main(["spend", "--since", "30d", "--ledger", str(ledger)])
+        # athenaeum#2256: cmd_spend's ``--path`` defaults to ``~/knowledge``
+        # (DEFAULT_KNOWLEDGE_ROOT) and, when that directory exists, loads
+        # whatever spend config lives there -- so a caller whose REAL
+        # ~/knowledge declares a spend budget would make this "unconfigured"
+        # case configured and fail. Point ``--path`` at a tmp_path directory
+        # that is guaranteed not to exist, so `load_config` is skipped and
+        # `config` is `None` regardless of the caller's own machine.
+        rc = main(
+            [
+                "spend",
+                "--since",
+                "30d",
+                "--ledger",
+                str(ledger),
+                "--path",
+                str(tmp_path / "no-such-knowledge-root"),
+            ]
+        )
         assert rc == 0
         out = capsys.readouterr().out
         assert "Budget window" not in out

@@ -28,6 +28,7 @@ Acceptance covered:
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -65,6 +66,32 @@ def _git_init(root: Path) -> None:
     _git(root, "config", "user.name", "Retention Policy Test")
     _git(root, "add", "-A")
     _git(root, "commit", "-m", "initial: seed knowledge root")
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_git_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """athenaeum#2256: every test in this module shells out to real git --
+    both this module's own ``_git_init`` above AND the retention-policy
+    module under test (``athenaeum.retention_policy._git``, which truncation
+    uses to stage its ledger/provenance commits). Both inherit this process's
+    environment at call time with no override, so a caller's real global git
+    config leaks straight through -- notably a ``core.excludesfile`` naming
+    ``logs/``, which hides the only files these fixtures seed/write and makes
+    both the fixture's initial commit AND the SUT's truncation commit see
+    nothing staged.
+
+    ``GIT_CONFIG_GLOBAL=/dev/null`` + ``GIT_CONFIG_NOSYSTEM=1`` drop both the
+    global and system config files; the ``GIT_CONFIG_COUNT``/``_KEY_``/``_VALUE_``
+    family (an alternate way to inject config via env) is stripped too. Local
+    identity still works because ``_git_init``'s plain ``git config
+    user.email`` call (no ``--global``) always writes the per-repo
+    ``.git/config``, which none of this touches.
+    """
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    for key in list(os.environ):
+        if key == "GIT_CONFIG_COUNT" or key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")):
+            monkeypatch.delenv(key, raising=False)
 
 
 @pytest.fixture
