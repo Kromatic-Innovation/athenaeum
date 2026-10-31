@@ -220,6 +220,7 @@ from athenaeum.models import (
     load_schema_list,
     parse_access,
     parse_frontmatter,
+    parse_frontmatter_selective,
     render_frontmatter,
 )
 from athenaeum.name_structure import collect_create_name_variant_candidates
@@ -650,7 +651,11 @@ def rebuild_index(wiki_root: Path) -> None:
             text = fpath.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
-        meta, _ = parse_frontmatter(text)
+        # Issue athenaeum#2178: only uid/name/type feed this scan (unlike
+        # EntityIndex, this reads meta["type"] directly rather than through
+        # resolve_page_type, so "metadata" is deliberately not requested) --
+        # a selective parse skips constructing every other frontmatter key.
+        meta, _ = parse_frontmatter_selective(text, {"uid", "name", "type"})
         if not meta or not meta.get("name"):
             continue
         etype = str(meta.get("type", "unknown"))
