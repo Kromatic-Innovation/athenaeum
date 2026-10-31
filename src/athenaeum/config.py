@@ -4003,6 +4003,19 @@ def _system_local_timezone() -> tzinfo:
     Never raises: an unresolvable local zone falls all the way through to
     UTC, matching this module's "never crash a run over a config/environment
     quirk" contract for every other spend knob.
+
+    ``$TZ`` precedence (athenaeum#2255 cause 4, recorded rather than changed --
+    see that issue's "Out of scope" note; changing this is a product decision
+    this fix does not have the authority to make): this function does NOT
+    treat ``$TZ`` as a first-class input. The PRIMARY path above reads
+    ``/etc/localtime`` via :func:`os.path.realpath` unconditionally, so
+    ``TZ=America/New_York`` has no effect at all while ``/etc/localtime``
+    resolves to a different zone (true on every stock Linux/macOS host).
+    ``$TZ`` only gets a chance to matter in the FALLBACK branch below,
+    because ``datetime.now().astimezone()`` asks the platform C library for
+    the local offset, and that library's own ``localtime()`` call consults
+    ``$TZ`` before ``/etc/localtime`` -- so the two reads can disagree on a
+    host where ``$TZ`` is exported to something other than the system zone.
     """
     try:
         link = os.path.realpath("/etc/localtime")

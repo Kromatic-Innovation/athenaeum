@@ -750,6 +750,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   previously-misclassified `user-stated` results back to their correct
   channel.
 
+- **A contending reader can no longer see an empty or partially-rewritten
+  lockfile mid-heartbeat (issue athenaeum#2229).** `lease_refresh_heartbeat`
+  used to `ftruncate(fd, 0)` before writing the new holder metadata, so
+  `read_holder` (used to render `LockHeld`'s diagnostic message) could land
+  in that window and see nothing, degrading the message to a bare "another
+  athenaeum process" with no PID/host/heartbeat age. The rewrite now never
+  truncates: a payload shorter than what's on disk is padded with trailing
+  blank lines (inert to `read_holder`'s parser) up to the current size
+  before a single `os.write`, and a longer payload simply extends the file
+  as part of that same write — so the file size never decreases and a
+  reader always sees either the complete old payload or the complete new
+  one, never a mix of the two. The lockfile format, flock semantics and
+  `_heartbeat_write_lock` behaviour are unchanged.
+
+- **Eighteen tests no longer read the caller's environment instead of their
+  own (issue athenaeum#2256).** Each was reproducible by running the real
+  suite in an ordinary shell rather than `env -i`:
+  - `test_deploy_guard.py`'s `_source_and_eval`/`_run` helpers now scrub
+    `ATHENAEUM_GUARD_PYTHON` before applying each test's own `env_extra`
+    (already done in `_source_and_eval_rc`, but missing from the other two),
+    so a caller who exports it no longer overrides the shimmed `PATH` the
+    install-cmd/`_dg_resolve_python` tests build.
+  - `test_retention_policy.py` gains an autouse `_hermetic_git_config`
+    fixture that sets `GIT_CONFIG_GLOBAL=/dev/null` and
+    `GIT_CONFIG_NOSYSTEM=1` and strips the `GIT_CONFIG_COUNT`/`_KEY_`/`_VALUE_`
+    family for every test in the module, so a caller's real global
+    `core.excludesfile` naming `logs/` no longer hides the files the
+    fixture's and the SUT's own git commits stage.
+  - `test_receipt_sealers.py`'s subprocess-env-suppression test now
+    `monkeypatch.delenv`s `OP_LOAD_DESKTOP_APP_SETTINGS`/
+    `OP_BIOMETRIC_UNLOCK_ENABLED` first, so its final "didn't leak into this
+    process" assertion is actually testing the provider rather than echoing
+    whatever the caller's shell happened to export.
+  - `test_spend.py`'s budget-window-omitted test now passes `--path` at a
+    guaranteed-absent `tmp_path` directory, so `cmd_spend` never loads a
+    real `~/knowledge/athenaeum.yaml` spend budget off the caller's `HOME`.
+  - `test_eval_corpus_leakage.py`'s proper-noun denylist (`_real_proper_nouns`)
+    now excludes names with a trailing bare number ("gate 1", "phase 2") as
+    generic numbered labels rather than real identities — the exact shape
+    that flagged the unrelated phrase "Gate 1" in
+    `probe_subject_scope_containment.py`'s own prose. A genuine multi-word
+    capitalised name with no trailing number is still caught (counter-example
+    test alongside the fix).
+
+  All five files were confirmed to fail under the leaking condition
+  (`ATHENAEUM_GUARD_PYTHON`/`OP_LOAD_DESKTOP_APP_SETTINGS` exported, a global
+  gitignore naming `logs/`, a spend budget configured under `HOME`, a local
+  knowledge tree present) before the fix and pass both under that condition
+  and under `env -i` after it. Isolation lives entirely in test fixtures; no
+  CI configuration changed.
+
+- **16 tests no longer fail on a stock macOS checkout (issue athenaeum#2255).**
+  All five causes were test-side assumptions that happened to hold on the
+  Linux CI runner: tests rewriting a `promptwitness` ledger partition without
+  first clearing the append-only flag `ledger._apply_append_only_protection`
+  applies (now cleared via `cli._clear_append_only_best_effort`, with a
+  counter-example test gated on a new `append_only_protection_enforced`
+  environment-contract property); a decay-bucket test fixture deriving its
+  scope name directly from `tmp_path`, which collided with the default
+  ephemeral-scope globs on macOS's `/private/var/folders/...` layout (now
+  hashed); an `AF_UNIX` socket placed under `tmp_path`, which macOS's default
+  `TMPDIR` can push past the 104-byte `sun_path` limit (now a short
+  `/tmp`-rooted scratch dir); a timezone test that assumed the host runs UTC
+  (now compares against the host's real `/etc/localtime` resolution); and a
+  macOS-only stdlib version-probe open that an import-I/O tracker test did
+  not tolerate (now tolerated by exact path, with a positive control proving
+  the tracker still catches an unrelated unexpected open). No product
+  behavior changed; `_system_local_timezone`'s docstring now also records,
+  rather than changes, its existing `$TZ` precedence.
+
 
 ## [0.22.43] - 2026-10-25
 

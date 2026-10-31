@@ -22,7 +22,8 @@ from unittest import mock
 
 import pytest
 
-from promptwitness import canon, ledger
+from promptwitness import canon, cli, ledger
+from tests.env_contract import require
 
 # ---------------------------------------------------------------------------
 # resolve_ledger_dir
@@ -178,6 +179,17 @@ def _read_partition_lines(path: Path) -> list[bytes]:
 
 
 def _write_partition_lines(path: Path, lines: list[bytes]) -> None:
+    """Rewrite a ledger partition file to simulate tampering.
+
+    Clears whatever append-only protection ``ledger.append_line`` applied to
+    *path*'s first partition (`chflags uappnd` on macOS; `chattr +a` on
+    Linux) BEFORE the rewrite, reusing ``cli._clear_append_only_best_effort``
+    rather than a second implementation of the same clear. Without this,
+    ``path.write_bytes`` raises ``PermissionError`` on a host that actually
+    enforces the flag (stock macOS -- see athenaeum#2255 cause 1), and the
+    tmp dir pytest tries to clean up afterward is left undeletable.
+    """
+    cli._clear_append_only_best_effort(path.parent)
     path.write_bytes(b"\n".join(lines) + b"\n")
 
 
@@ -237,6 +249,37 @@ class TestChainRoundTrip:
         # seq 3 now appears BEFORE seq 2 in file order, and is the first line
         # whose prev no longer matches what physically precedes it.
         assert v.first_break_seq == 3
+
+
+class TestAppendOnlyCounterExample:
+    """Counter-example for the clear-before-rewrite fix above (athenaeum#2255
+    cause 1 AC): proves ``_apply_append_only_protection`` really sets
+    something, rather than ``_write_partition_lines``'s clear making every
+    one of these tests vacuously green regardless of whether the flag ever
+    did anything. Only meaningful where the OS actually enforces the flag
+    against a non-root process -- this container's Linux `chattr +a` is a
+    silent no-op there, so it is an honest named skip here, never a false
+    pass (see ``tests/env_contract.py``'s ``append_only_protection_enforced``).
+    """
+
+    def test_rewrite_without_clearing_the_flag_still_fails_when_enforced(
+        self, tmp_path: Path
+    ) -> None:
+        require("append_only_protection_enforced")
+        _append_turn(tmp_path, prompt_id="p0", turn=0)
+        partition = _single_partition(tmp_path)
+        lines = _read_partition_lines(partition)
+        obj = json.loads(lines[0])
+        obj["prompt_chars"] = 999999
+        lines[0] = canon.canonical_json(obj)
+        try:
+            with pytest.raises(PermissionError):
+                partition.write_bytes(b"\n".join(lines) + b"\n")  # no clear first -- the point
+        finally:
+            # Proven the flag blocks an unguarded rewrite; clear it now so
+            # pytest's own tmp_path cleanup doesn't inherit the same
+            # undeletable-directory problem the fixed tests above avoid.
+            cli._clear_append_only_best_effort(partition.parent)
 
 
 # ---------------------------------------------------------------------------

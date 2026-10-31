@@ -36,13 +36,16 @@ Covers :mod:`athenaeum.decay_bucket` (a structural mirror of
 from __future__ import annotations
 
 import ast
+import hashlib
 import logging
+from fnmatch import fnmatch
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
+from athenaeum.config import _DEFAULT_EPHEMERAL_SCOPES
 from athenaeum.decay_bucket import (
     DECAY_BUCKET_SYSTEM,
     classify_decay_bucket,
@@ -135,11 +138,28 @@ def _scope_dir(auto_root: Path, tmp_path: Path) -> Path:
     """A scope directory whose name is DERIVED from ``tmp_path``.
 
     Production scope names are path-hash identifiers (``-Users-alice-Code-x``).
-    Deriving one from ``tmp_path`` reproduces that shape without embedding a
-    synthetic absolute-path literal anywhere in the repo — ``public-safe-lint.sh``
-    rejects those, test fixtures included.
+    A plain ``tmp_path.as_posix().replace("/", "-")`` reproduced that SHAPE but
+    not the HASHING: on macOS, pytest's default base temp dir resolves to
+    ``/private/var/folders/...`` or ``/private/tmp/...``, so the literal,
+    un-hashed name contains ``var-folders``/``private-tmp`` and collides with
+    ``_DEFAULT_EPHEMERAL_SCOPES``' own globs for those exact substrings --
+    the fixture gets silently classified ephemeral and dropped, which is the
+    athenaeum#2255 cause-2 bug (production filtering is correct; the fixture
+    was not portable). Hashing derives a name from ``tmp_path`` the same way
+    production derives one from a real absolute path, while making an
+    accidental substring collision with any configured glob astronomically
+    unlikely on macOS OR Linux -- pinned by
+    ``test_scope_name_never_matches_a_default_ephemeral_glob`` below.
     """
-    return auto_root / tmp_path.as_posix().replace("/", "-")
+    digest = hashlib.sha256(tmp_path.as_posix().encode("utf-8")).hexdigest()[:16]
+    return auto_root / f"-testscope-{digest}"
+
+
+def test_scope_name_never_matches_a_default_ephemeral_glob(tmp_path: Path) -> None:
+    """Unit-assertion pin for the AC above: the fixture's own scope name must
+    never match any default ephemeral-scope glob, on macOS OR Linux."""
+    scope = _scope_dir(tmp_path / "auto", tmp_path).name
+    assert not any(fnmatch(scope, g) for g in _DEFAULT_EPHEMERAL_SCOPES)
 
 
 def _write_auto_memory_file(

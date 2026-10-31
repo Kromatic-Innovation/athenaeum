@@ -104,15 +104,34 @@ class TestResolveSpendAccountingTimezone:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Neither env nor yaml set: falls through to the HOST's local
-        timezone (never a hardcoded UTC) — this container runs UTC, so the
-        resolved zone's UTC offset must be 0, but it must NOT be the literal
-        ``timezone.utc`` singleton reached by the invalid-name fallback path
-        (a real system-local resolution, not the error path, even though
-        both happen to read as UTC here)."""
+        timezone (never a hardcoded UTC).
+
+        Comparing against a hardcoded UTC offset only happens to pass on a
+        host that runs UTC (true for most CI containers, false for a
+        contributor's real local machine — exactly the athenaeum#2255 cause-4
+        failure). The independent ground truth below reads ``/etc/localtime``
+        directly — the same PRIMARY signal
+        :func:`athenaeum.config._system_local_timezone` reads — rather than
+        ``datetime.astimezone()`` with no argument, which also consults
+        ``$TZ`` and would disagree with the resolver on a host where ``$TZ``
+        names a zone other than the system one: the resolver deliberately
+        does NOT honor ``$TZ`` (see that function's docstring), so this stays
+        true on any host zone without being fooled by a stray ``$TZ`` export.
+        """
+        import os
+
         monkeypatch.delenv("ATHENAEUM_SPEND_ACCOUNTING_TIMEZONE", raising=False)
         tz = resolve_spend_accounting_timezone(None)
         now = datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc)
-        assert now.astimezone(tz).utcoffset() == now.utcoffset()
+
+        link = os.path.realpath("/etc/localtime")
+        marker = "zoneinfo/"
+        idx = link.find(marker)
+        if idx != -1:
+            expected_offset = now.astimezone(ZoneInfo(link[idx + len(marker) :])).utcoffset()
+        else:
+            expected_offset = now.astimezone().utcoffset()
+        assert now.astimezone(tz).utcoffset() == expected_offset
 
     def test_invalid_zone_name_falls_back_to_utc_and_warns(
         self,

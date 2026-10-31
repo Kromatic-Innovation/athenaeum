@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from promptwitness import canon, ledger, verify
+from promptwitness import canon, cli, ledger, verify
 
 _KEY_SUFFIX = 0
 
@@ -167,6 +167,12 @@ def _rewrite_only_partition(tmp_path: Path, mutate: Callable[[list[dict]], None]
         json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line
     ]
     mutate(raw_lines)
+    # Clear whatever append-only protection `ledger.append_line` applied to
+    # this partition before rewriting it (mirrors
+    # `cli._clear_append_only_best_effort`) -- without this, the rewrite
+    # below raises PermissionError on a host that enforces the flag (stock
+    # macOS; see athenaeum#2255 cause 1).
+    cli._clear_append_only_best_effort(tmp_path)
     path.write_text(
         "\n".join(json.dumps(obj, sort_keys=True) for obj in raw_lines) + "\n",
         encoding="utf-8",
