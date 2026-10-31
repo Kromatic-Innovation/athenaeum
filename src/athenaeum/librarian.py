@@ -5428,6 +5428,13 @@ class RunContext:
     # gate -- is off, same "disabled phase never touches this field"
     # contract as its siblings above).
     auto_apply_proposals_summary: dict[str, Any] | None = None
+    # Issue athenaeum#2219: run-summary counts from the SAME
+    # ``_run_auto_apply_proposals_phase``'s attribution-threshold drafting
+    # pass (``None`` until that phase runs; same gate, same "disabled phase
+    # never touches this field" contract as ``auto_apply_proposals_summary``
+    # above, which it sits beside rather than replaces -- two drafters, one
+    # phase, one gate).
+    attribution_threshold_proposals_summary: dict[str, Any] | None = None
     # Issue athenaeum#2212: run-summary counts from
     # ``_run_attribution_shadow_phase`` (``None`` until that phase runs,
     # including when its gate -- ``athenaeum.config.
@@ -7487,19 +7494,40 @@ def _run_auto_apply_proposals_phase(ctx: RunContext) -> None:
     OR'd with :func:`~athenaeum.config.resolve_signal_mining_dry_run`).
 
     Deterministic -- no LLM, no client -- same as the two phases above.
+
+    **A second drafter, same phase, same gate** (issue athenaeum#2219,
+    design §8.3): right after the merge-dedupe widen pass above,
+    :func:`athenaeum.auto_apply_proposals.run_attribution_threshold_proposal_detection`
+    runs over :data:`athenaeum.pii_attribution.QUESTION_CLASSES` -- the
+    seam's OWN question-class vocabulary, not a hand-written list, so a
+    newly-added class is covered automatically the next time this phase
+    runs, mirroring the merge-dedupe pass's own "no second edit required
+    here" design intent. No new config knob and no new gate: it shares
+    ``resolve_signal_mining_enabled`` and the SAME dry-run precedence, and
+    runs at the SAME call position, which already satisfies the "must run
+    AFTER `_run_audit_nightly_drain_phase`" ordering constraint this rail
+    needs for the identical reason the merge-dedupe one does (both read
+    :func:`athenaeum.calibration.calibration_summary`, which the nightly
+    drain's audit sampling may have just written this same run). A SEPARATE
+    ``try``/``except`` so a failure in one drafter never suppresses the
+    other's result. Safe to run unconditionally once the master key is on:
+    a draft changes no threshold until a human approves it (issue
+    athenaeum#2219 AC5).
     """
     if not resolve_signal_mining_enabled(ctx.config):
         return
     if ctx.deadline_tripped or ctx.deadline_exceeded():
         ctx.auto_apply_proposals_summary = {"skipped_deadline_tripped": True}
+        ctx.attribution_threshold_proposals_summary = {"skipped_deadline_tripped": True}
         return
+
+    dry_run = bool(ctx.dry_run) or resolve_signal_mining_dry_run(ctx.config)
 
     try:
         from athenaeum.auto_apply_proposals import run_auto_apply_proposal_detection
         from athenaeum.resolutions import DEFAULT_AUTO_APPLY_THRESHOLD_PER_ACTION
 
         actions = sorted(DEFAULT_AUTO_APPLY_THRESHOLD_PER_ACTION)
-        dry_run = bool(ctx.dry_run) or resolve_signal_mining_dry_run(ctx.config)
         summary = run_auto_apply_proposal_detection(
             actions,
             wiki_root=ctx.wiki_root,
@@ -7510,27 +7538,69 @@ def _run_auto_apply_proposals_phase(ctx: RunContext) -> None:
     except Exception:
         log.exception("auto-apply-proposals phase failed; continuing run")
         ctx.auto_apply_proposals_summary = {"skipped_failed": True}
+    else:
+        ctx.auto_apply_proposals_summary = {
+            "actions_seen": summary.actions_seen,
+            "not_warranted": summary.not_warranted,
+            "proposed": summary.proposed,
+            "skipped_pending": summary.skipped_pending,
+            "skipped_suppressed": summary.skipped_suppressed,
+            "dry_run": dry_run,
+            "drafted_ids": [d.id for d in summary.drafts],
+        }
+        if summary.proposed or summary.drafts:
+            log.info(
+                "auto-apply-proposals: %d action(s), %d proposal(s) %s "
+                "(%d not warranted, %d pending, %d suppressed)",
+                summary.actions_seen,
+                len(summary.drafts),
+                "listed (dry-run)" if dry_run else "queued",
+                summary.not_warranted,
+                summary.skipped_pending,
+                summary.skipped_suppressed,
+            )
+
+    try:
+        from athenaeum.auto_apply_proposals import run_attribution_threshold_proposal_detection
+        from athenaeum.pii_attribution import QUESTION_CLASSES
+
+        question_classes = sorted(QUESTION_CLASSES)
+        attribution_summary = run_attribution_threshold_proposal_detection(
+            question_classes,
+            wiki_root=ctx.wiki_root,
+            config=ctx.config,
+            dry_run=dry_run,
+            now=ctx.now,
+        )
+    except Exception:
+        log.exception("attribution-threshold-proposals phase failed; continuing run")
+        ctx.attribution_threshold_proposals_summary = {"skipped_failed": True}
         return
 
-    ctx.auto_apply_proposals_summary = {
-        "actions_seen": summary.actions_seen,
-        "not_warranted": summary.not_warranted,
-        "proposed": summary.proposed,
-        "skipped_pending": summary.skipped_pending,
-        "skipped_suppressed": summary.skipped_suppressed,
+    ctx.attribution_threshold_proposals_summary = {
+        "actions_seen": attribution_summary.actions_seen,
+        "not_warranted": attribution_summary.not_warranted,
+        "proposed": attribution_summary.proposed,
+        "skipped_pending": attribution_summary.skipped_pending,
+        "skipped_suppressed": attribution_summary.skipped_suppressed,
+        # Issue athenaeum#2219 (Seer finding A / PR athenaeum#2269): a class
+        # pinned by explicit `librarian.attribution.thresholds.<class>`
+        # config, so no proposal was even drafted for it.
+        "skipped_pinned_by_config": attribution_summary.skipped_pinned_by_config,
         "dry_run": dry_run,
-        "drafted_ids": [d.id for d in summary.drafts],
+        "drafted_ids": [d.id for d in attribution_summary.drafts],
     }
-    if summary.proposed or summary.drafts:
+    if attribution_summary.proposed or attribution_summary.drafts:
         log.info(
-            "auto-apply-proposals: %d action(s), %d proposal(s) %s "
-            "(%d not warranted, %d pending, %d suppressed)",
-            summary.actions_seen,
-            len(summary.drafts),
+            "attribution-threshold-proposals: %d class(es), %d proposal(s) %s "
+            "(%d not warranted, %d pending, %d suppressed, %d pinned by config)",
+            attribution_summary.actions_seen,
+            len(attribution_summary.drafts),
             "listed (dry-run)" if dry_run else "queued",
-            summary.not_warranted,
-            summary.skipped_pending,
-            summary.skipped_suppressed,
+            attribution_summary.not_warranted,
+            attribution_summary.skipped_pending,
+            attribution_summary.skipped_suppressed,
+            attribution_summary.skipped_pinned_by_config,
         )
 
 
@@ -11632,9 +11702,12 @@ def run(
     _run_signal_mining_phase(ctx)
 
     # Phase: sibling self-tuning-loop drafters (issues athenaeum#2019 /
-    # athenaeum#2018) -- same master key as `_run_signal_mining_phase`
-    # directly above, run right after it for the identical reason (both
-    # opt-in, zero-cost-until-enabled, LAST in the run).
+    # athenaeum#2018, plus athenaeum#2219's attribution-threshold drafter
+    # inside `_run_auto_apply_proposals_phase` itself -- same gate, same
+    # call position, no second phase) -- same master key as
+    # `_run_signal_mining_phase` directly above, run right after it for the
+    # identical reason (both opt-in, zero-cost-until-enabled, LAST in the
+    # run).
     _run_tier_movement_proposals_phase(ctx)
     _run_auto_apply_proposals_phase(ctx)
 

@@ -1612,6 +1612,28 @@ def resolve_audit_sample_rate_t1_rejects(config: dict[str, Any] | None) -> float
     )
 
 
+def resolve_audit_sample_rate_attribution(config: dict[str, Any] | None) -> float:
+    """Resolve the share of above-threshold ATTRIBUTION placements sampled
+    for human audit (issue athenaeum#2219, design
+    ``docs/design/attribution-verification.md`` §8.3).
+
+    A third calibration-sampling channel alongside the T1/T2 ones above,
+    watching :func:`athenaeum.pii.place_contact_value`'s ``own`` /
+    ``other-known`` / ``alias`` verdicts (:data:`athenaeum.calibration.
+    ATTRIBUTION_TIER_NAME`) through the SAME :func:`athenaeum.calibration.
+    sample_tier_decision` / ``should_sample`` primitives, not a new
+    mechanism. Env ``ATHENAEUM_AUDIT_SAMPLE_RATE_ATTRIBUTION`` > yaml
+    ``librarian.audit_sample_rate_attribution`` > default ``0.1`` (10%, the
+    design's own stated default). Clamped to ``[0.0, 1.0]``.
+    """
+    return _resolve_sample_rate(
+        config,
+        env_var="ATHENAEUM_AUDIT_SAMPLE_RATE_ATTRIBUTION",
+        key="audit_sample_rate_attribution",
+        default=0.1,
+    )
+
+
 def resolve_default_acceptance_audit_sample_rate(config: dict[str, Any] | None) -> float:
     """Resolve the share of human DEFAULT-ACCEPTANCES sampled for second
     review (issue athenaeum#1996 ratchet guard 2).

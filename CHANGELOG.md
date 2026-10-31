@@ -553,6 +553,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     changes. Flagged to the epic owner as a digest-contract defect, not
     resolved here — see `src/athenaeum/witness_attestation.py`'s "Known
     deviation" docstring note.
+- **Attribution calibration over time: audit-sampling and threshold
+  proposals (issue athenaeum#2219, design §8.3).** `calibration.
+  sample_tier_decision` gains tier `attribution`, watching the `own` /
+  `other-known` / `alias` verdicts `pii.place_contact_value` FILES (never
+  observe-mode's merely-proposed outcome), at a new rate knob
+  `librarian.audit_sample_rate_attribution` (default 0.10). A sampled item
+  surfaces in `decisions.list_pending_decisions` as `type: "audit"` with
+  masked values only, exactly like the existing T1/T2 audits. A new
+  `pii_attribution.record_attribution_audit_review` confirms or overturns
+  it; an overturn records the calibration signal and re-files the human's
+  answer through the SAME placement executor with `decided_by: human`. A
+  new `calibration_summary["attribution"]["by_class"]` breaks the tier out
+  per question class. `auto_apply_proposals` gains a second drafter,
+  `draft_attribution_threshold_proposal`, with its own action id per
+  question class on the SAME ledger/approve/reject rail — it drafts in
+  EITHER direction (widen below the class's target error rate, narrow
+  above it, per `librarian.attribution.accuracy_floor`), and an approval
+  writes a ledger override `pii_attribution.threshold_for_class` reads
+  BELOW explicit config. Wired into the SAME nightly
+  `librarian._run_auto_apply_proposals_phase` as the existing merge-dedupe
+  widen rail — same `librarian.signal_mining.enabled` gate, same dry-run
+  precedence, same call position, no new knob — drafting over
+  `pii_attribution.QUESTION_CLASSES` (the seam's own vocabulary) rather
+  than a hand-written list. No model call; synthetic fixtures only.
+  - **Fix (PR review, Seer finding A):** a question class whose threshold
+    is PINNED by explicit `librarian.attribution.thresholds.<class>`
+    config never drafts a proposal at all — an approval for it could
+    never take effect (AC5's own precedence), so without this guard the
+    identical `(action, current, proposed)` id re-drafted, and
+    re-appended to the ledger, on every nightly run forever once
+    approved (confirmed empirically before the fix). Counted separately
+    as `skipped_pinned_by_config`.
+  - **Clarified (PR review, Seer finding B — rejected the proposed
+    reorder; AC3's sequence stands):** if re-filing an overturn fails
+    AFTER the calibration signal is recorded, `pii_attribution.
+    record_attribution_audit_review` now wraps the failure in one
+    `AttributionAuditReviewError` that says the signal already landed,
+    names why a retry of the same call cannot double-record it
+    (`calibration.record_audit_review` reviews each audit item at most
+    once), and points at the real recovery path — re-filing directly via
+    `athenaeum attribution place <suspect-id> --as ...`.
 
 ### Changed
 

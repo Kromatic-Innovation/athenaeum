@@ -593,6 +593,27 @@ the conservative choice until the confirmed-wrong rate
 (`athenaeum.calibration.triage_confirmed_wrong_threshold_breached`)
 says otherwise). Clamped to ``[0.0, 1.0]``.
 
+### `resolve_audit_sample_rate_attribution`
+
+- **YAML path:** `librarian.audit_sample_rate_attribution`
+- **Environment variable:** `ATHENAEUM_AUDIT_SAMPLE_RATE_ATTRIBUTION`
+- **CLI flag:** —
+- **Default:** `0.1`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the share of above-threshold ATTRIBUTION placements sampled
+for human audit (design
+``docs/design/attribution-verification.md`` §8.3).
+
+A third calibration-sampling channel alongside the T1/T2 ones above,
+watching `athenaeum.pii.place_contact_value`'s ``own`` /
+``other-known`` / ``alias`` verdicts (`athenaeum.calibration.
+ATTRIBUTION_TIER_NAME`) through the SAME `athenaeum.calibration.
+sample_tier_decision` / ``should_sample`` primitives, not a new
+mechanism. Env ``ATHENAEUM_AUDIT_SAMPLE_RATE_ATTRIBUTION`` > yaml
+``librarian.audit_sample_rate_attribution`` > default ``0.1`` (10%, the
+design's own stated default). Clamped to ``[0.0, 1.0]``.
+
 ### `resolve_audit_sample_rate_t1_rejects`
 
 - **YAML path:** `librarian.audit_sample_rate_t1_rejects`

@@ -69,7 +69,10 @@ does that.
 
 Layering: L3. Imports :mod:`athenaeum.pii` (L3 sibling — no cycle: ``pii``
 only reaches this module through a function-local import at its own writer
-call site), :mod:`athenaeum.config` (L2), :mod:`athenaeum.models` (L1), and
+call site), :mod:`athenaeum.calibration` (L3 sibling, issue athenaeum#2219 —
+the audit sampler + the threshold ledger-override reader's action-id
+helper; no cycle either, ``calibration.py`` never imports this module),
+:mod:`athenaeum.config` (L2), :mod:`athenaeum.models` (L1), and
 :mod:`athenaeum.atomic_io` / :mod:`athenaeum.store` (L0) at module scope.
 Never imported by :mod:`athenaeum.pii` at module scope, which is the whole
 reason this is a separate module rather than growing inside ``pii.py``: the
@@ -102,6 +105,14 @@ from athenaeum import config as config_module
 from athenaeum import pii
 from athenaeum._retry import with_retry
 from athenaeum.atomic_io import atomic_write_text
+from athenaeum.calibration import (
+    ATTRIBUTION_TIER_NAME,
+    attribution_threshold_action_id,
+    read_calibration_ledger,
+    record_audit_review,
+    sample_tier_decision,
+)
+from athenaeum.calibration import AUDIT_KIND as _CALIBRATION_AUDIT_KIND
 from athenaeum.json_utils import extract_json_object
 from athenaeum.models import (
     EntityIndex,
@@ -368,6 +379,18 @@ class AttributionContext:
     #: or alias produces that form. Built once per context by
     #: :func:`_build_child_c_indexes`.
     person_name_index: dict[str, frozenset[str]] = field(default_factory=dict)
+    #: Issue athenaeum#2219 (design §8.3): ``knowledge_root / "wiki"``,
+    #: unconditionally (unlike :attr:`entity_index`, which is only built
+    #: when that directory already exists) -- the calibration ledger and
+    #: the attribution-threshold LEDGER OVERRIDE both live there, and both
+    #: tolerate a not-yet-existing path (the sampler call site below checks
+    #: ``.is_dir()`` itself; the ledger-override reader already returns
+    #: ``None`` for a missing file). ``None`` only when a caller builds an
+    #: :class:`AttributionContext` with no ``knowledge_root`` at all, which
+    #: no current constructor path does -- kept optional for forward
+    #: compatibility rather than widening :func:`build_attribution_context`'s
+    #: own required arguments.
+    wiki_root: Path | None = None
 
 
 def _attribution_key_path(contacts_root: Path) -> Path:
@@ -460,11 +483,11 @@ def build_attribution_context(
         if excluded_index is not None
         else pii.ExcludedRecordIndex(resolved_contacts_root)
     )
+    resolved_wiki_root = root / "wiki"
     ent_idx = entity_index
     if ent_idx is None:
-        wiki_root = root / "wiki"
-        if wiki_root.is_dir():
-            ent_idx = EntityIndex(wiki_root)
+        if resolved_wiki_root.is_dir():
+            ent_idx = EntityIndex(resolved_wiki_root)
     resolved_owner = owner if owner is not None else config_module.resolve_owner(config)
     owner_uid = str((resolved_owner or {}).get("uid") or "")
     owner_addrs = frozenset(config_module.owner_addresses(resolved_owner))
@@ -493,6 +516,7 @@ def build_attribution_context(
         context_window_chars=config_module.resolve_attribution_context_window_chars(config),
         inline_elsewhere_index=inline_elsewhere_index,
         person_name_index=person_name_index,
+        wiki_root=resolved_wiki_root,
     )
 
 
@@ -2277,19 +2301,39 @@ def calibrated_probability_for_class(question_class: str, score: float) -> float
 
 
 def threshold_for_class(
-    question_class: str, config: dict[str, Any] | None = None
+    question_class: str,
+    config: dict[str, Any] | None = None,
+    *,
+    wiki_root: Path | None = None,
+    as_of: str | None = None,
 ) -> float | None:
     """The calibrated-probability threshold for *question_class* (design §8.2).
 
     Precedence: the operator's ``librarian.attribution.thresholds.<class>``
     override (:func:`athenaeum.config.resolve_attribution_thresholds`) >
-    the shipped calibration entry's own
-    :attr:`~CalibrationEntry.threshold` > ``None``.
+    an APPROVED attribution-threshold proposal's ledger override (issue
+    athenaeum#2219, design §8.3 — :func:`athenaeum.config.
+    auto_apply_threshold_ledger_override_for`, keyed by
+    :func:`athenaeum.calibration.attribution_threshold_action_id`) > the
+    shipped calibration entry's own :attr:`~CalibrationEntry.threshold` >
+    ``None``.
 
-    The override wins UNCONDITIONALLY, including over a missing or
-    non-passing calibration entry: design §8.2 gives a deployment the
-    override precisely so one that has run its own eval is not held to the
-    shipped record, and setting it is an explicit operator act.
+    The explicit-config override wins UNCONDITIONALLY, including over a
+    missing or non-passing calibration entry: design §8.2 gives a
+    deployment the override precisely so one that has run its own eval is
+    not held to the shipped record, and setting it is an explicit operator
+    act. The LEDGER override sits BELOW that (issue athenaeum#2219 AC5: "a
+    ledger override that the threshold reader honours, BELOW explicit
+    config") — a human APPROVING a drafted proposal is a real act too, just
+    a lower-precedence one than hand-editing ``athenaeum.yaml``.
+
+    *wiki_root* (default ``None``, meaning "consult no ledger override" —
+    every pre-existing caller that omits it keeps today's two-layer
+    behavior byte-for-byte) and *as_of* are threaded straight through to
+    :func:`athenaeum.config.auto_apply_threshold_ledger_override_for`,
+    whose own docstring carries the full ``as_of``-fences-in-flight-work
+    contract (an approval dated after the item was already escalated never
+    retroactively widens or narrows the floor that gated it).
 
     An override does NOT substitute for a calibration record. The threshold
     is compared against :func:`calibrated_probability_for_class`, which
@@ -2312,6 +2356,15 @@ def threshold_for_class(
     override = overrides.get(question_class)
     if override is not None:
         return float(override)
+    if wiki_root is not None:
+        ledger_override = config_module.auto_apply_threshold_ledger_override_for(
+            attribution_threshold_action_id(question_class),
+            wiki_root=wiki_root,
+            config=config,
+            as_of=as_of,
+        )
+        if ledger_override is not None:
+            return ledger_override
     entry = _valid_calibration_entry(question_class)
     if entry is None:
         return None
@@ -3430,7 +3483,7 @@ def _escalate_suspect_inner(
             )
 
     calibrated_p = calibrated_probability_for_class(question_class, judgement.score)
-    threshold = threshold_for_class(question_class, config)
+    threshold = threshold_for_class(question_class, config, wiki_root=context.wiki_root)
     above_threshold = threshold is not None and calibrated_p >= threshold
 
     record_suspect_judgement(
@@ -3531,6 +3584,43 @@ def _escalate_suspect_inner(
                 "the design §7.2 re-check returned 'suspect', so the placement "
                 "would itself create a fresh conflict; it never goes back to a model"
             )
+        elif apply and context.wiki_root is not None and context.wiki_root.is_dir():
+            # Issue athenaeum#2219, design §8.3: audit-sample this
+            # above-threshold placement into the calibration ledger. Called
+            # unconditionally on every verdict that reached the executor
+            # (not just the three watched ones) -- sample_tier_decision's
+            # own `_WATCHED_VERDICT` gate is what filters `other-unknown` /
+            # `same-entity` / `non-personal` out, exactly mirroring how T1's
+            # single call site trusts that same gate rather than
+            # pre-filtering by verdict itself.
+            #
+            # ``apply``-gated (issue athenaeum#2212's shadow/observe mode is
+            # NOT sampled): the issue's own motivation is calibration
+            # against "the live decisions the system actually makes", and
+            # in observe mode nothing is actually made -- every current
+            # caller passes ``apply=False`` (athenaeum#2220 flips that), so
+            # this sampler is correctly inert in production until then,
+            # same as `escalate_shadow_suspects`'s own "files nothing,
+            # changes nothing" contract already asserts
+            # (`tests/test_attribution_escalation.py::
+            # TestShadowSweepObserveMode`). *reason* never carries the raw
+            # value (design §8.1's masking discipline, extended to this
+            # ledger too) -- only the masked address and the measured
+            # numbers a human reviewing the item needs.
+            sample_tier_decision(
+                context.wiki_root,
+                tier=ATTRIBUTION_TIER_NAME,
+                verdict=judgement.verdict,
+                proposal_id=suspect_id,
+                reason=(
+                    f"{question_class} placement of {pii.mask_contact_address(value)} "
+                    f"-> {placement.verdict!r} on {placement.placed_uid or target_uid} "
+                    f"(calibrated_p={calibrated_p:.3f}, threshold={threshold:.3f})"
+                ),
+                config=config,
+                applied=placement.outcome == pii.PLACEMENT_FILED,
+                question_class=question_class,
+            )
 
     queue_items: tuple[EscalationItem, ...] = ()
     if queue_reason is not None:
@@ -3579,6 +3669,190 @@ def _escalate_suspect_inner(
         suspect_id=suspect_id,
         reason=queue_reason or "at or above threshold; handed to the placement executor",
     )
+
+
+# ---------------------------------------------------------------------------
+# Attribution audit review (issue athenaeum#2219, design §8.3)
+# ---------------------------------------------------------------------------
+
+
+class AttributionAuditReviewError(ValueError):
+    """*audit_id* names no pending ATTRIBUTION audit item."""
+
+
+@dataclass(frozen=True)
+class AttributionAuditReviewOutcome:
+    """What one :func:`record_attribution_audit_review` call did.
+
+    ``review`` is always :func:`athenaeum.calibration.record_audit_review`'s
+    own return value -- the calibration signal is recorded either way.
+    ``placement`` is ``None`` on a CONFIRM (human_verdict matches the
+    sampled verdict; nothing else happens) and the
+    :class:`athenaeum.pii.ContactPlacement` the re-file produced on an
+    OVERTURN.
+    """
+
+    review: dict[str, Any]
+    placement: "pii.ContactPlacement | None"
+
+    @property
+    def overturned(self) -> bool:
+        return bool(self.review.get("overturned"))
+
+
+def record_attribution_audit_review(
+    context: AttributionContext,
+    *,
+    audit_id: str,
+    human_verdict: str,
+    owner_uid: str | None = None,
+    owner_name: str | None = None,
+    alias_relation: str | None = None,
+    note: str = "",
+    propose_merge: "Callable[..., Any] | None" = None,
+    index: "pii.ExcludedRecordIndex | None" = None,
+) -> AttributionAuditReviewOutcome:
+    """Record a human's confirm/overturn of a sampled ATTRIBUTION audit item
+    (issue athenaeum#2219, design §8.3).
+
+    **Confirm** (*human_verdict* equals the sampled item's own ``verdict``):
+    records the review via :func:`athenaeum.calibration.record_audit_review`
+    and does nothing else -- the SAME "a confirm changes nothing" contract
+    T1/T2 audits already have.
+
+    **Overturn** (*human_verdict* differs): records the SAME calibration
+    signal first, THEN re-files the value through the placement executor
+    (:func:`athenaeum.pii.place_contact_value`) with the human's answer,
+    ``decided_by="human"`` and ``apply=True`` -- mirroring
+    :mod:`athenaeum._cmd_attribution`'s own ``place`` command, which is the
+    SAME shape for the SAME reason: the audit record's ``proposal_id`` IS
+    the parked suspect's id (see the sampler's call site in
+    :func:`_escalate_suspect_inner`), so the raw value is read back through
+    the one documented way out (:func:`read_suspect`) rather than ever
+    having been stored in the calibration ledger, which lives in the wiki
+    (design §8.1's masking discipline).
+
+    *owner_uid* / *owner_name* / *alias_relation* are required exactly when
+    *human_verdict* needs them (``other-known``/``same-entity`` need
+    ``owner_uid``; ``alias`` needs ``alias_relation``) -- unsupplied, they
+    reach :func:`athenaeum.pii.place_contact_value` as ``None`` and that
+    function's own existing validation (skip / raise) applies unchanged.
+
+    Raises:
+        AttributionAuditReviewError: *audit_id* is not a pending item with
+            ``tier`` :data:`athenaeum.calibration.ATTRIBUTION_TIER_NAME` on
+            *context*'s wiki (checked BEFORE any write) -- or, on an
+            OVERTURN, the re-file step failed AFTER the calibration signal
+            was already recorded (the suspect is no longer readable, or
+            :func:`athenaeum.pii.place_contact_value` itself raised). In
+            that second case the message names the committed signal
+            explicitly and points at the real recovery path
+            (``athenaeum attribution place <suspect-id> --as ...``) rather
+            than letting a retry of this same call fail opaquely -- see
+            the try/except around the re-file step for why a retry cannot
+            double-record the signal either way.
+        ValueError: propagated from
+            :func:`athenaeum.calibration.record_audit_review` for an
+            unknown or already-reviewed *audit_id* (same vocabulary; the
+            lookup above is what turns "unknown" and "not attribution" into
+            the SAME clear error before any write happens). This is also
+            exactly what a caller sees if it retries this function with an
+            *audit_id* whose review already landed -- by design, never a
+            duplicate write.
+    """
+    if context.wiki_root is None:
+        raise AttributionAuditReviewError(
+            "this AttributionContext has no wiki_root; there is no calibration "
+            "ledger to read or write"
+        )
+    records = read_calibration_ledger(context.wiki_root)
+    audit = next(
+        (
+            r
+            for r in records
+            if r.get("kind") == _CALIBRATION_AUDIT_KIND and str(r.get("id")) == audit_id
+        ),
+        None,
+    )
+    if audit is None or audit.get("tier") != ATTRIBUTION_TIER_NAME:
+        raise AttributionAuditReviewError(
+            f"not a pending attribution audit item: {audit_id!r}"
+        )
+    suspect_id = str(audit.get("proposal_id") or "")
+
+    review = record_audit_review(
+        context.wiki_root, audit_id=audit_id, human_verdict=human_verdict, note=note
+    )
+    if not review["overturned"]:
+        return AttributionAuditReviewOutcome(review=review, placement=None)
+
+    # AC3's own ordering ("records the calibration signal, THEN re-files")
+    # is fixed by design (Seer finding B, PR athenaeum#2269 -- rejected:
+    # do not reorder). The ledger write above is already committed and
+    # permanent by the time we reach here: `calibration.record_audit_review`
+    # allows each audit item to be reviewed AT MOST ONCE (raises
+    # ``ValueError`` on any second call for the same `audit_id`), so a
+    # caller that retries THIS function with the same `audit_id` after a
+    # failure below gets that same ``ValueError`` immediately, before
+    # `place_contact_value` is ever reached again -- the calibration
+    # signal is therefore idempotent by construction and CANNOT be
+    # double-recorded by a retry. But a raw retry also cannot complete the
+    # placement either, and a bare exception from `read_suspect` /
+    # `place_contact_value` would otherwise leak out unwrapped with no
+    # indication that the signal already landed or what to do next. Wrap
+    # both in one `AttributionAuditReviewError` that says so explicitly
+    # and names the real recovery path -- re-filing directly via
+    # `athenaeum attribution place <suspect-id> --as ...`, which the
+    # suspect file (untouched by this failure) still supports.
+    try:
+        suspect = read_suspect(context.contacts_root, suspect_id)
+        if suspect is None:
+            raise AttributionAuditReviewError(
+                f"cannot re-file overturned audit {audit_id!r}: suspect "
+                f"{suspect_id!r} is no longer readable under {context.contacts_root}"
+            )
+
+        def _recheck(recheck_value: str, **kwargs: Any) -> AttributionVerdict:
+            return check_contact_attribution(recheck_value, context=context, **kwargs)
+
+        placement = pii.place_contact_value(
+            context.contacts_root,
+            suspect.value,
+            verdict=human_verdict,
+            target_uid=suspect.target_uid,
+            target_name=suspect.target_name,
+            owner_uid=owner_uid,
+            owner_name=owner_name,
+            alias_relation=alias_relation,
+            original_source=suspect.source_ref,
+            writer=WRITER_RE_ATTRIBUTION,
+            # Design §8.1: a human answer carries no calibrated probability,
+            # model id or prompt sha -- there was no model call to
+            # attribute it to, same as `_cmd_attribution._cmd_place`'s own
+            # human re-filing.
+            model=None,
+            prompt_sha256=None,
+            calibrated_p=None,
+            decided_by="human",
+            observed_at=now_iso(),
+            apply=True,
+            recheck=_recheck,
+            propose_merge=propose_merge,
+            index=index,
+        )
+    except AttributionAuditReviewError:
+        raise
+    except Exception as exc:
+        raise AttributionAuditReviewError(
+            f"the overturn of audit {audit_id!r} (human_verdict={human_verdict!r}) was "
+            "RECORDED, but re-filing the value failed "
+            f"({type(exc).__name__}: {exc}). The calibration signal is already "
+            "permanent -- do not retry this function with the same audit_id, it will "
+            "raise ValueError('audit item already reviewed'). Re-file the value "
+            f"directly instead: `athenaeum attribution place {suspect_id} --as "
+            "own|other:<uid>|alias:<relation>|merge:<uid>`."
+        ) from exc
+    return AttributionAuditReviewOutcome(review=review, placement=placement)
 
 
 # ---------------------------------------------------------------------------
@@ -3805,6 +4079,9 @@ __all__ += [
     "EscalationOutcome",
     "build_attribution_question",
     "escalate_contact_attribution_suspect",
+    "AttributionAuditReviewError",
+    "AttributionAuditReviewOutcome",
+    "record_attribution_audit_review",
     "ShadowEscalationSummary",
     "escalate_shadow_suspects",
 ]
