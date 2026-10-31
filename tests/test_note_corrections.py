@@ -861,6 +861,45 @@ class TestDropSection:
         assert "[^1]: **Source:** `drive/d001-jamie-switch.md`" in text
 
 
+class TestDropLastSection:
+    """Regression: the LAST ``##`` heading's span has no following heading
+    to bound it, so a naive end-of-body boundary would swallow the
+    page-bottom footnote-definitions block outright -- deleting every
+    definition regardless of whether something EARLIER on the page still
+    cites it, bypassing the orphan check entirely rather than failing it.
+    """
+
+    def test_dropping_the_last_section_keeps_a_footnote_cited_earlier(
+        self, tmp_path: Path
+    ) -> None:
+        root = tmp_path / "knowledge"
+        wiki = root / "wiki"
+        wiki.mkdir(parents=True)
+        body = (
+            "## Notes\n\n"
+            "- Jamie switched teams at Acme in March.[^1]\n\n"
+            "## Enrichment (wrong person)\n\n"
+            "This whole section is about a different Jamie.[^2]\n\n"
+            "[^1]: **Source:** `drive/d001-jamie-switch.md`\n"
+            "[^2]: **Source:** `drive/d002-wrong-jamie.md`\n"
+        )
+        _write_page(wiki / f"{SOURCE_UID}-jamie.md", uid=SOURCE_UID, name="Jamie", body=body)
+        last_section_id = section_id("Enrichment (wrong person)", 1)
+
+        batch_path = _write_batch(
+            root, "b-last-section", [{"section_id": last_section_id, "action": "drop"}]
+        )
+        apply_batch(wiki, load_batch(batch_path))
+        text = (wiki / f"{SOURCE_UID}-jamie.md").read_text(encoding="utf-8")
+        assert "Enrichment" not in text
+        assert "Jamie switched teams" in text
+        # The bug this guards: the dropped LAST section's naive end-of-body
+        # boundary must not have swallowed [^1]'s definition even though
+        # nothing in the dropped section cites it.
+        assert "[^1]: **Source:** `drive/d001-jamie-switch.md`" in text
+        assert "[^2]: **Source:** `drive/d002-wrong-jamie.md`" not in text
+
+
 class TestSectionRefusal:
     """AC2: an unknown or ambiguous section_id refuses the WHOLE batch,
     through the same bucket an unknown bullet_id already hits."""

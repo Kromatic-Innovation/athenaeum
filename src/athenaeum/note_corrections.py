@@ -478,6 +478,34 @@ def _parse_sections(body: str) -> dict[str, SectionSpan]:
                 end_line = later_line
                 break
 
+        # Footnote definitions are a page-level trailing block, never
+        # section-scoped content -- every definition on a page sits after
+        # ALL headings, not nested under whichever one happens to be last
+        # (the same convention _strip_orphaned_footnote_definitions already
+        # assumes). Without this clip, the LAST ## heading's span would run
+        # to end-of-body and swallow that whole block directly, deleting
+        # every definition regardless of whether something earlier on the
+        # page still cites it -- bypassing the orphan check entirely rather
+        # than failing it (caught by Seer review on athenaeum#2236's PR).
+        # Walk the tail backward over blank lines and footnote-definition
+        # lines in any mix; only commit the clip if a footnote-definition
+        # line was actually part of that run, so an ordinary trailing blank
+        # line with no footnote block below it is left untouched.
+        clip = end_line
+        saw_footnote = False
+        while clip > line_index + 1:
+            candidate = lines[clip - 1]
+            if FOOTNOTE_DEF_RE.match(candidate):
+                saw_footnote = True
+                clip -= 1
+                continue
+            if candidate.strip() == "":
+                clip -= 1
+                continue
+            break
+        if saw_footnote:
+            end_line = clip
+
         if sid in ambiguous:
             continue
         if sid in spans:
