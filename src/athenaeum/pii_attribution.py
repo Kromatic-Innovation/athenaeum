@@ -63,18 +63,39 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import importlib.resources
 import json
 import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
+
+import yaml
 
 from athenaeum import config as config_module
 from athenaeum import pii
+from athenaeum._retry import with_retry
 from athenaeum.atomic_io import atomic_write_text
-from athenaeum.models import EntityIndex, parse_frontmatter, render_frontmatter
+from athenaeum.json_utils import extract_json_object
+from athenaeum.models import (
+    EntityIndex,
+    TokenUsage,
+    cache_usage_counts,
+    parse_frontmatter,
+    render_frontmatter,
+)
+from athenaeum.prompt_safety import fence_untrusted
+from athenaeum.provider import (
+    LLMBackend,
+    resolve_max_tokens,
+    resolve_thinking,
+    response_text,
+)
 from athenaeum.store import append_line_durable, now_iso
+
+if TYPE_CHECKING:
+    from anthropic.types import MessageParam, ThinkingConfigParam
 
 log = logging.getLogger(__name__)
 
@@ -705,4 +726,667 @@ __all__ = [
     "log_attribution_verdict",
     "park_suspect",
     "value_key_for",
+]
+
+
+# ---------------------------------------------------------------------------
+# Escalation: the judge function and the calibration record (athenaeum#2211)
+# ---------------------------------------------------------------------------
+#
+# Child D of epic athenaeum#2192, designed in
+# ``docs/design/attribution-verification.md`` §6 ("Escalation contract") and
+# §12 ("The calibration eval"). Appended at the very end of the module
+# (after :func:`park_suspect` and the module's original ``__all__``) rather
+# than interleaved with the checks above: two sibling lanes (issues
+# athenaeum#2215, athenaeum#2216) edit this same file concurrently, in the
+# regions between :func:`_check_d1` and :func:`check_contact_attribution`,
+# and between :func:`check_contact_attribution` and
+# :func:`default_attribution_log_path`, respectively. This section never
+# touches either region, and the module's new public names are exported via
+# a SECOND ``__all__ +=`` below rather than editing the original list.
+#
+# **EntityBrief** (design §6.2) is not defined anywhere else in the tree:
+# issue athenaeum#2210 (child B) only carries bare uid strings in
+# :class:`AttributionVerdict.candidates`, and the design cites
+# ``EntityBrief`` only in §6.2's ``AttributionQuestion`` shape, with no
+# separate section defining its fields beyond the inline comment ("uid,
+# name, type, aliases, employer/domain hints"). Issue athenaeum#2215's own
+# C1-C3 checks are the other plausible owner (its candidates feed
+# ``AttributionQuestion.candidates``), but neither this issue's brief nor
+# the design assigns it there explicitly, so it is defined HERE, next to
+# its only other consumer in this codebase today. If athenaeum#2215 also
+# defines an ``EntityBrief``, the two definitions need reconciling at merge
+# time — flagged in this lane's report to the orchestrator.
+
+
+@dataclass(frozen=True)
+class EntityBrief:
+    """A lightweight entity reference carried on an escalation question.
+
+    Design §6.2's field list for ``AttributionQuestion.target`` /
+    ``.holders`` / ``.candidates``: "uid, name, type, aliases, employer/
+    domain hints". Deliberately minimal — just enough identity for the judge
+    prompt to reason about ownership, never a full :class:`EntityIndex`
+    lookup result.
+    """
+
+    uid: str
+    name: str
+    type: str | None = None
+    aliases: tuple[str, ...] = ()
+    employer_domain_hints: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class AttributionQuestion:
+    """The escalation's input for one (value, target) pair (design §6.2).
+
+    Built by a caller from a :class:`AttributionVerdict`'s evidence once the
+    seam (:func:`check_contact_attribution`) has returned ``suspect`` — the
+    escalation itself only ever runs on a ``suspect`` verdict (design §6.1).
+    """
+
+    value: str
+    target: EntityBrief
+    holders: tuple[EntityBrief, ...] = ()
+    candidates: tuple[EntityBrief, ...] = ()
+    checks: tuple[CheckEvidence, ...] = ()
+    source_excerpt: str | None = None
+
+
+#: Verdict vocabulary (design §6.3). ``unclear`` is the fail-closed verdict:
+#: no client, an API error, unparseable output, or an out-of-vocabulary
+#: verdict from the model all yield this with ``score=0``.
+JUDGEMENT_OWN = "own"
+JUDGEMENT_OTHER_KNOWN = "other-known"
+JUDGEMENT_OTHER_UNKNOWN = "other-unknown"
+JUDGEMENT_ALIAS = "alias"
+JUDGEMENT_SAME_ENTITY = "same-entity"
+JUDGEMENT_NON_PERSONAL = "non-personal"
+JUDGEMENT_UNCLEAR = "unclear"
+
+JUDGEMENT_VERDICTS: tuple[str, ...] = (
+    JUDGEMENT_OWN,
+    JUDGEMENT_OTHER_KNOWN,
+    JUDGEMENT_OTHER_UNKNOWN,
+    JUDGEMENT_ALIAS,
+    JUDGEMENT_SAME_ENTITY,
+    JUDGEMENT_NON_PERSONAL,
+    JUDGEMENT_UNCLEAR,
+)
+
+#: ``alias_relation`` vocabulary for a :data:`JUDGEMENT_ALIAS` verdict
+#: (design §6.3).
+ALIAS_RELATION_ROLE_INBOX = "role-inbox"
+ALIAS_RELATION_SHARED = "shared"
+ALIAS_RELATION_FORMER_NAME = "former-name"
+ALIAS_RELATION_PERSONAL_ALIAS = "personal-alias"
+
+ALIAS_RELATIONS: tuple[str, ...] = (
+    ALIAS_RELATION_ROLE_INBOX,
+    ALIAS_RELATION_SHARED,
+    ALIAS_RELATION_FORMER_NAME,
+    ALIAS_RELATION_PERSONAL_ALIAS,
+)
+
+
+@dataclass(frozen=True)
+class AttributionJudgement:
+    """The escalation's answer for one :class:`AttributionQuestion` (design §6.3).
+
+    ``owner_uid`` is set for :data:`JUDGEMENT_OTHER_KNOWN` and
+    :data:`JUDGEMENT_SAME_ENTITY`. ``alias_relation`` is set for
+    :data:`JUDGEMENT_ALIAS`. ``score`` is the raw confidence signal (design
+    §6.5) — ``0.0`` on every fail-closed path. ``model``/``prompt_sha256``
+    are always populated, even on a fail-closed answer, so a caller can log
+    which model/prompt an ``unclear`` verdict came from.
+    """
+
+    verdict: str
+    owner_uid: str | None = None
+    alias_relation: str | None = None
+    quote: str | None = None
+    score: float = 0.0
+    model: str = ""
+    prompt_sha256: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Question classes (design §6.6)
+# ---------------------------------------------------------------------------
+
+QUESTION_CLASS_HELD_ELSEWHERE = "held-elsewhere"
+QUESTION_CLASS_NAMES_OTHER = "names-other"
+QUESTION_CLASS_SOURCE_CONTEXT = "source-context"
+QUESTION_CLASS_NON_PERSON_TARGET = "non-person-target"
+QUESTION_CLASS_ROLE_UNMATCHED = "role-unmatched"
+
+QUESTION_CLASSES: tuple[str, ...] = (
+    QUESTION_CLASS_HELD_ELSEWHERE,
+    QUESTION_CLASS_NAMES_OTHER,
+    QUESTION_CLASS_SOURCE_CONTEXT,
+    QUESTION_CLASS_NON_PERSON_TARGET,
+    QUESTION_CLASS_ROLE_UNMATCHED,
+)
+
+#: Design §6.6's table, in order (strongest ownership evidence first — the
+#: order IS the tie-break when several classes' checks fired). The C1-C3
+#: check-id strings are issue athenaeum#2215's (that issue's own C1-C3
+#: checks, landing in this same module's ``_check_d1``-to-
+#: ``check_contact_attribution`` region) — referenced here as the literal
+#: strings design §5's naming convention predicts ("C1", "C2", "C3"), not as
+#: imported constants, because athenaeum#2215 may not have landed yet in
+#: this checkout. This function needs no edit once it does, only the check
+#: ids a :class:`CheckEvidence` actually carries need to match.
+_QUESTION_CLASS_TRIGGERS: tuple[tuple[str, frozenset[str]], ...] = (
+    (QUESTION_CLASS_HELD_ELSEWHERE, frozenset({CHECK_D2_HELD_ELSEWHERE, CHECK_D4_FAN_OUT, "C1"})),
+    (QUESTION_CLASS_NAMES_OTHER, frozenset({"C2"})),
+    (QUESTION_CLASS_SOURCE_CONTEXT, frozenset({"C3"})),
+    (QUESTION_CLASS_NON_PERSON_TARGET, frozenset({CHECK_D3_NOT_A_PERSON})),
+    (QUESTION_CLASS_ROLE_UNMATCHED, frozenset({CHECK_D1_ROLE})),
+)
+
+
+def question_class_for(checks: tuple[CheckEvidence, ...]) -> str:
+    """The question class *checks* belongs to (design §6.6).
+
+    Table order is the tie-break: when several classes' checks fired, the
+    first one in :data:`_QUESTION_CLASS_TRIGGERS`'s order wins. Falls back
+    to :data:`QUESTION_CLASS_ROLE_UNMATCHED` — the weakest-evidence class —
+    when nothing in the table matches, rather than raising, so a judge call
+    always resolves to some class.
+    """
+    fired = {c.check_id for c in checks}
+    for question_class, trigger_ids in _QUESTION_CLASS_TRIGGERS:
+        if fired & trigger_ids:
+            return question_class
+    return QUESTION_CLASS_ROLE_UNMATCHED
+
+
+# ---------------------------------------------------------------------------
+# The calibration record (design §12.4)
+# ---------------------------------------------------------------------------
+
+#: Signal vocabulary (design §6.5).
+SIGNAL_SELF_REPORTED = "self-reported"
+SIGNAL_AGREEMENT_K3 = "agreement-k3"
+SIGNAL_CLASS_LEVEL = "class-level"
+
+SIGNALS: tuple[str, ...] = (SIGNAL_SELF_REPORTED, SIGNAL_AGREEMENT_K3, SIGNAL_CLASS_LEVEL)
+
+#: Packaged location of the shipped calibration record (design §12.4):
+#: ``importlib.resources``-loaded, like
+#: :func:`athenaeum.erasure.available_retention_packs`'s packaged packs —
+#: never a bare :class:`~pathlib.Path` literal, so the loader works
+#: identically from an editable install and from the built wheel.
+CALIBRATION_RECORD_PACKAGE = "athenaeum.calibration_data"
+CALIBRATION_RECORD_FILENAME = "contact_attribution.yaml"
+
+_CALIBRATION_ENTRY_REQUIRED_FIELDS: tuple[str, ...] = (
+    "question_class",
+    "model",
+    "prompt_sha256",
+    "signal",
+    "bins",
+    "threshold",
+    "n_fit",
+    "n_holdout",
+    "holdout_accuracy_above",
+    "holdout_wilson_lb",
+    "abstain_share",
+    "dataset_sha256",
+    "measured_at",
+    "passes",
+)
+
+
+class CalibrationRecordError(ValueError):
+    """The shipped calibration record failed schema validation.
+
+    Raised at LOAD time, never half-swallowed: a corrupt record must fail
+    loudly rather than silently degrade a tier decision (design §12.4).
+    """
+
+
+@dataclass(frozen=True)
+class CalibrationEntry:
+    """One question class's calibration row (design §12.4's YAML shape).
+
+    ``ece``/``auroc`` are ``None`` for a :data:`SIGNAL_CLASS_LEVEL` entry —
+    design §12.3: "Signal 3 has no ECE", and by the same reasoning no AUROC
+    either, since there is no scalar score to rank.
+    """
+
+    question_class: str
+    model: str
+    prompt_sha256: str
+    signal: str
+    bins: tuple[tuple[float, float, float], ...]
+    threshold: float
+    n_fit: int
+    n_holdout: int
+    holdout_accuracy_above: float
+    holdout_wilson_lb: float
+    abstain_share: float
+    dataset_sha256: str
+    measured_at: str
+    passes: bool
+    ece: float | None = None
+    auroc: float | None = None
+
+
+def _calibration_entry_from_dict(raw: dict[str, Any]) -> CalibrationEntry:
+    missing = [f for f in _CALIBRATION_ENTRY_REQUIRED_FIELDS if f not in raw]
+    if missing:
+        raise CalibrationRecordError(
+            f"calibration entry missing required field(s): {missing}"
+        )
+    question_class = str(raw["question_class"])
+    if question_class not in QUESTION_CLASSES:
+        raise CalibrationRecordError(f"unknown question_class {question_class!r}")
+    signal = str(raw["signal"])
+    if signal not in SIGNALS:
+        raise CalibrationRecordError(
+            f"unknown signal {signal!r} for class {question_class!r}"
+        )
+    bins_raw = raw.get("bins") or []
+    try:
+        bins = tuple((float(b[0]), float(b[1]), float(b[2])) for b in bins_raw)
+    except (TypeError, ValueError, IndexError) as exc:
+        raise CalibrationRecordError(
+            f"malformed bins for class {question_class!r}: {bins_raw!r}"
+        ) from exc
+    try:
+        return CalibrationEntry(
+            question_class=question_class,
+            model=str(raw["model"]),
+            prompt_sha256=str(raw["prompt_sha256"]),
+            signal=signal,
+            bins=bins,
+            threshold=float(raw["threshold"]),
+            n_fit=int(raw["n_fit"]),
+            n_holdout=int(raw["n_holdout"]),
+            holdout_accuracy_above=float(raw["holdout_accuracy_above"]),
+            holdout_wilson_lb=float(raw["holdout_wilson_lb"]),
+            ece=float(raw["ece"]) if raw.get("ece") is not None else None,
+            auroc=float(raw["auroc"]) if raw.get("auroc") is not None else None,
+            abstain_share=float(raw["abstain_share"]),
+            dataset_sha256=str(raw["dataset_sha256"]),
+            measured_at=str(raw["measured_at"]),
+            passes=bool(raw["passes"]),
+        )
+    except (TypeError, ValueError) as exc:
+        raise CalibrationRecordError(
+            f"malformed calibration entry for class {question_class!r}: {exc}"
+        ) from exc
+
+
+def load_calibration_record() -> dict[str, CalibrationEntry]:
+    """Load the shipped contact-attribution calibration record, by class.
+
+    Raises :class:`CalibrationRecordError` on any schema violation
+    (duplicate class, unknown class/signal, missing/malformed field) —
+    never returns a partial record.
+    """
+    resource = importlib.resources.files(CALIBRATION_RECORD_PACKAGE).joinpath(
+        CALIBRATION_RECORD_FILENAME
+    )
+    raw_text = resource.read_text(encoding="utf-8")
+    loaded = yaml.safe_load(raw_text) or []
+    if not isinstance(loaded, list):
+        raise CalibrationRecordError(
+            f"{CALIBRATION_RECORD_FILENAME} must parse to a list of entries, "
+            f"got {type(loaded).__name__}"
+        )
+    by_class: dict[str, CalibrationEntry] = {}
+    for row in loaded:
+        if not isinstance(row, dict):
+            raise CalibrationRecordError(f"calibration entry is not a mapping: {row!r}")
+        entry = _calibration_entry_from_dict(row)
+        if entry.question_class in by_class:
+            raise CalibrationRecordError(
+                f"duplicate calibration entry for class {entry.question_class!r}"
+            )
+        by_class[entry.question_class] = entry
+    return by_class
+
+
+def recommended_model_for_class(question_class: str) -> str | None:
+    """The calibration record's recommended model for *question_class*.
+
+    ``None`` when the record cannot be loaded, carries no entry for this
+    class, or that entry does not :attr:`~CalibrationEntry.passes` — design
+    §12.4: "If no tier passes, the class has no recommended tier." Never
+    raises: a corrupt or missing shipped record degrades to "no
+    recommendation", which is exactly today's shipped state (every entry
+    ships ``passes: false`` until a live eval run records real numbers).
+    """
+    try:
+        record = load_calibration_record()
+    except (CalibrationRecordError, OSError, FileNotFoundError):
+        return None
+    entry = record.get(question_class)
+    if entry is None or not entry.passes:
+        return None
+    return entry.model
+
+
+# ---------------------------------------------------------------------------
+# Model resolution (design §6.4)
+# ---------------------------------------------------------------------------
+
+
+def _get_attribution_model(
+    question_class: str,
+    config: dict[str, Any] | None,
+    *,
+    calibration_model: str | None = None,
+) -> str:
+    """Resolve the judge model for *question_class* (design §6.4).
+
+    Precedence: env ``ATHENAEUM_ATTRIBUTION_MODEL`` > yaml
+    ``models.attribution_<question_class>`` > yaml ``models.attribution`` >
+    *calibration_model* (:func:`recommended_model_for_class`'s result for
+    this class) > :data:`athenaeum.config.DEFAULT_CLASSIFY_MODEL`. No path
+    here ever escalates to a MORE expensive model on its own initiative —
+    if the class's measured tier is not confident enough, the item goes to
+    a human (design §8), never to a bigger model.
+    """
+    env = os.environ.get("ATHENAEUM_ATTRIBUTION_MODEL")
+    if env:
+        return env
+    if isinstance(config, dict):
+        models_cfg = config.get("models")
+        if isinstance(models_cfg, dict):
+            raw = models_cfg.get(f"attribution_{question_class}")
+            if isinstance(raw, str) and raw.strip():
+                return raw.strip()
+            raw = models_cfg.get("attribution")
+            if isinstance(raw, str) and raw.strip():
+                return raw.strip()
+    if calibration_model:
+        return calibration_model
+    return config_module.DEFAULT_CLASSIFY_MODEL
+
+
+# ---------------------------------------------------------------------------
+# The prompt (design §6.4)
+# ---------------------------------------------------------------------------
+
+
+def _load_contact_attribution_judge_prompt() -> str:
+    """Read the judge's system prompt from its packaged file (design §6.4).
+
+    Loaded with :mod:`importlib.resources`, the same convention
+    :func:`athenaeum.pii_hazard_classifier.load_pii_hazard_question` and
+    :mod:`athenaeum.tiers`'s ``_load_name_resolution_confirm_prompt`` already
+    established — prompt text is content, not code
+    (``policies/prompt-text-is-content.md``).
+    """
+    resource = importlib.resources.files("athenaeum.prompts").joinpath(
+        "contact_attribution_judge.md"
+    )
+    return resource.read_text(encoding="utf-8")
+
+
+#: Registered in ``prompt_registry.PROMPT_META`` (design §6.4) as a
+#: module-level constant so ``prompt_registry._resolve`` can ``getattr`` it
+#: — even though the TEXT lives in the packaged ``.md`` file above and is
+#: loaded once at import time, never inlined as a literal here.
+CONTACT_ATTRIBUTION_JUDGE_SYSTEM: str = _load_contact_attribution_judge_prompt()
+
+#: Output budget: design §13 measures "about 250 output tokens" for one
+#: escalation call. 512 gives 2x headroom over that measurement for the
+#: quote + reasoning fields, resolved through the same
+#: :func:`athenaeum.provider.resolve_max_tokens` seam every other stage uses
+#: (so an operator can still override it).
+_CONTACT_ATTRIBUTION_JUDGE_MAX_TOKENS = 512
+
+#: Window around the cited value (design §6.2: "a window of at most a few
+#: hundred tokens").
+_SOURCE_EXCERPT_MAX_CHARS = 1200
+
+
+def _format_entity_brief(brief: EntityBrief, *, label: str) -> str:
+    lines = [f"{label}: {brief.name} (uid={brief.uid})"]
+    if brief.type:
+        lines.append(f"  type: {brief.type}")
+    if brief.aliases:
+        lines.append(f"  aliases: {', '.join(brief.aliases)}")
+    if brief.employer_domain_hints:
+        lines.append(
+            f"  employer/domain hints: {', '.join(brief.employer_domain_hints)}"
+        )
+    return "\n".join(lines)
+
+
+def _format_checks(checks: tuple[CheckEvidence, ...]) -> str:
+    if not checks:
+        return "  (none)"
+    lines = []
+    for check in checks:
+        parts = [check.check_id]
+        if check.label:
+            parts.append(f"label={check.label}")
+        if check.uids:
+            parts.append(f"uids={','.join(check.uids)}")
+        lines.append("  - " + " ".join(parts))
+    return "\n".join(lines)
+
+
+def _build_question_user_message(question: AttributionQuestion) -> str:
+    """Render *question* into the judge call's user message.
+
+    The source excerpt is untrusted content from the raw corpus (the same
+    egress the compile already performs on it, design §6.2) — fenced with
+    :func:`athenaeum.prompt_safety.fence_untrusted` rather than embedded
+    bare.
+    """
+    sections = [
+        f"Contact value under question: {question.value}",
+        "",
+        _format_entity_brief(question.target, label="Target"),
+    ]
+    if question.holders:
+        sections.append("")
+        sections.append("Other uids that already hold or name this value:")
+        for holder in question.holders:
+            sections.append(_format_entity_brief(holder, label="Holder"))
+    if question.candidates:
+        sections.append("")
+        sections.append("Candidate owners the evidence points at:")
+        for candidate in question.candidates:
+            sections.append(_format_entity_brief(candidate, label="Candidate"))
+    sections.append("")
+    sections.append("Checks that fired:")
+    sections.append(_format_checks(question.checks))
+    sections.append("")
+    if question.source_excerpt:
+        sections.append(
+            fence_untrusted(
+                question.source_excerpt,
+                tag="source_excerpt",
+                max_chars=_SOURCE_EXCERPT_MAX_CHARS,
+            )
+        )
+    else:
+        sections.append("No source excerpt was available.")
+    return "\n".join(sections)
+
+
+# ---------------------------------------------------------------------------
+# The judge (design §6.4)
+# ---------------------------------------------------------------------------
+
+
+def judge_contact_attribution(
+    question: AttributionQuestion,
+    client: "LLMBackend | None",
+    config: dict[str, Any] | None = None,
+    usage: TokenUsage | None = None,
+) -> AttributionJudgement:
+    """Ask the model to attribute *question*'s contact value (design §6.4).
+
+    Follows the ``claim_kind.classify_claim_kind`` call pattern: the model
+    comes from :func:`_get_attribution_model`, the call is wrapped in
+    :func:`athenaeum._retry.with_retry`, and the output is strict JSON
+    parsed with :func:`athenaeum.json_utils.extract_json_object`. Unlike
+    that pattern, this one FAILS CLOSED (design §6.3): no client, an API
+    error, unparseable output, or an out-of-vocabulary verdict all yield
+    ``verdict="unclear"``/``score=0`` — never falls back to treating the
+    value as settled. Never raises.
+    """
+    question_class = question_class_for(question.checks)
+    calibration_model = recommended_model_for_class(question_class)
+    model = _get_attribution_model(
+        question_class, config, calibration_model=calibration_model
+    )
+    prompt_sha256 = hashlib.sha256(
+        CONTACT_ATTRIBUTION_JUDGE_SYSTEM.encode("utf-8")
+    ).hexdigest()
+
+    def _unclear() -> AttributionJudgement:
+        return AttributionJudgement(
+            verdict=JUDGEMENT_UNCLEAR,
+            score=0.0,
+            model=model,
+            prompt_sha256=prompt_sha256,
+        )
+
+    if client is None:
+        return _unclear()
+
+    user_msg = _build_question_user_message(question)
+    try:
+        response = with_retry(
+            lambda: client.messages.create(
+                model=model,
+                max_tokens=resolve_max_tokens(
+                    "attribution",
+                    "ATHENAEUM_ATTRIBUTION_MAX_TOKENS",
+                    _CONTACT_ATTRIBUTION_JUDGE_MAX_TOKENS,
+                    config,
+                ),
+                thinking=cast(
+                    "ThinkingConfigParam",
+                    resolve_thinking(
+                        "attribution",
+                        "ATHENAEUM_ATTRIBUTION_THINKING",
+                        "disabled",
+                        config,
+                    ),
+                ),
+                system=CONTACT_ATTRIBUTION_JUDGE_SYSTEM,
+                messages=cast(
+                    "list[MessageParam]", [{"role": "user", "content": user_msg}]
+                ),
+            ),
+            description="contact_attribution_judge",
+        )
+    except Exception as exc:  # noqa: BLE001 -- fail closed, never raise (design §6.3)
+        log.warning("pii_attribution: judge call failed (%s); unclear", exc)
+        return _unclear()
+
+    if usage is not None and hasattr(response, "usage"):
+        input_toks, output_toks, cache_creation, cache_read = cache_usage_counts(
+            response
+        )
+        usage.add(
+            input_toks,
+            output_toks,
+            cache_creation,
+            cache_read,
+            model=model,
+            knob="attribution",
+        )
+
+    try:
+        raw_text = response_text(response)
+    except (AttributeError, IndexError, ValueError):
+        log.warning("pii_attribution: malformed judge response; unclear")
+        return _unclear()
+
+    payload = extract_json_object(raw_text)
+    if not isinstance(payload, dict):
+        log.warning("pii_attribution: no JSON object in judge response; unclear")
+        return _unclear()
+
+    verdict = payload.get("verdict")
+    if not isinstance(verdict, str) or verdict not in JUDGEMENT_VERDICTS:
+        log.warning(
+            "pii_attribution: judge returned %r (not a valid verdict); unclear",
+            verdict,
+        )
+        return _unclear()
+
+    owner_uid_raw = payload.get("owner_uid")
+    owner_uid = (
+        str(owner_uid_raw)
+        if isinstance(owner_uid_raw, str) and owner_uid_raw.strip()
+        else None
+    )
+
+    alias_relation_raw = payload.get("alias_relation")
+    alias_relation = (
+        alias_relation_raw
+        if isinstance(alias_relation_raw, str) and alias_relation_raw in ALIAS_RELATIONS
+        else None
+    )
+
+    quote_raw = payload.get("quote")
+    quote = str(quote_raw) if isinstance(quote_raw, str) and quote_raw.strip() else None
+
+    try:
+        score = float(payload.get("score", 0.0))
+    except (TypeError, ValueError):
+        score = 0.0
+    score = min(1.0, max(0.0, score))
+
+    return AttributionJudgement(
+        verdict=verdict,
+        owner_uid=owner_uid,
+        alias_relation=alias_relation,
+        quote=quote,
+        score=score,
+        model=model,
+        prompt_sha256=prompt_sha256,
+    )
+
+
+__all__ += [
+    "EntityBrief",
+    "AttributionQuestion",
+    "AttributionJudgement",
+    "JUDGEMENT_OWN",
+    "JUDGEMENT_OTHER_KNOWN",
+    "JUDGEMENT_OTHER_UNKNOWN",
+    "JUDGEMENT_ALIAS",
+    "JUDGEMENT_SAME_ENTITY",
+    "JUDGEMENT_NON_PERSONAL",
+    "JUDGEMENT_UNCLEAR",
+    "JUDGEMENT_VERDICTS",
+    "ALIAS_RELATION_ROLE_INBOX",
+    "ALIAS_RELATION_SHARED",
+    "ALIAS_RELATION_FORMER_NAME",
+    "ALIAS_RELATION_PERSONAL_ALIAS",
+    "ALIAS_RELATIONS",
+    "QUESTION_CLASS_HELD_ELSEWHERE",
+    "QUESTION_CLASS_NAMES_OTHER",
+    "QUESTION_CLASS_SOURCE_CONTEXT",
+    "QUESTION_CLASS_NON_PERSON_TARGET",
+    "QUESTION_CLASS_ROLE_UNMATCHED",
+    "QUESTION_CLASSES",
+    "question_class_for",
+    "SIGNAL_SELF_REPORTED",
+    "SIGNAL_AGREEMENT_K3",
+    "SIGNAL_CLASS_LEVEL",
+    "SIGNALS",
+    "CALIBRATION_RECORD_PACKAGE",
+    "CALIBRATION_RECORD_FILENAME",
+    "CalibrationRecordError",
+    "CalibrationEntry",
+    "load_calibration_record",
+    "recommended_model_for_class",
+    "CONTACT_ATTRIBUTION_JUDGE_SYSTEM",
+    "judge_contact_attribution",
 ]

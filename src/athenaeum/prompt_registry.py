@@ -158,6 +158,20 @@ _META_ROWS: list[tuple[str, str, str, int, bool]] = [
     # a new knob. No cache_control breakpoint at the call site.
     ("audit.audit_system", "AUDIT_SYSTEM", "classify", 1024, False),
     ("audit.audit_user_template", "AUDIT_USER_TEMPLATE", "classify", 1024, False),
+    # athenaeum#2211: the contact-attribution escalation judge. Text lives in
+    # src/athenaeum/prompts/contact_attribution_judge.md, loaded via
+    # importlib.resources into the CONTACT_ATTRIBUTION_JUDGE_SYSTEM constant
+    # (same convention pii_hazard_classifier uses for its own file-loaded
+    # question, generalized here so this ONE also registers in the prompt
+    # registry per design §6.4). knob "attribution",
+    # max_tokens 512 (design §13: ~250 measured output tokens, 2x headroom).
+    (
+        "pii_attribution.contact_attribution_judge_system",
+        "CONTACT_ATTRIBUTION_JUDGE_SYSTEM",
+        "attribution",
+        512,
+        False,
+    ),
 ]
 
 PROMPT_META: dict[str, PromptMeta] = {

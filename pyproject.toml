@@ -221,6 +221,11 @@ include = [
     # importlib.resources by athenaeum.tiers, same rationale as the two entries
     # above.
     "src/athenaeum/prompts/**/*.md",
+    # Shipped contact-attribution calibration record (issue athenaeum#2211) --
+    # loaded via importlib.resources by
+    # athenaeum.pii_attribution.load_calibration_record, same packaged-data
+    # rationale as retention_packs/ above.
+    "src/athenaeum/calibration_data/**/*.yaml",
 ]
 
 # Ship the bundled skills/ directory (adapter-authoring, issue athenaeum#419) INSIDE the

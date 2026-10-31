@@ -63,6 +63,7 @@ src/athenaeum/memory_class_backfill.py::classify_residual
 src/athenaeum/page_description.py::describe_pages
 src/athenaeum/paste_cleanup.py::propose_page
 src/athenaeum/paste_cleanup.py::verify_page
+src/athenaeum/pii_attribution.py::judge_contact_attribution
 src/athenaeum/provider.py::_AnthropicMessagesBoundary.create
 src/athenaeum/query_topics.py::extract_topics
 src/athenaeum/reasoning_tiers.py::run_t1_tier
@@ -87,6 +88,7 @@ src/athenaeum/contradictions.py::_DETECT_SYSTEM
 src/athenaeum/decay_bucket.py::DECAY_BUCKET_SYSTEM
 src/athenaeum/page_description.py::_DESCRIBE_SYSTEM
 src/athenaeum/page_description.py::_DESCRIBE_USER_TEMPLATE
+src/athenaeum/pii_attribution.py::CONTACT_ATTRIBUTION_JUDGE_SYSTEM
 src/athenaeum/query_topics.py::_SYSTEM_PROMPT
 src/athenaeum/query_topics.py::_USER_TEMPLATE
 src/athenaeum/reasoning_tiers.py::T1_SYSTEM_PROMPT
@@ -115,6 +117,7 @@ src/athenaeum/config.py::resolve_model
 src/athenaeum/contradictions.py::DEFAULT_CONTRADICTION_MODEL
 src/athenaeum/contradictions.py::_get_model
 src/athenaeum/decay_bucket.py::_get_classify_model
+src/athenaeum/pii_attribution.py::_get_attribution_model
 src/athenaeum/prompt_registry.py::_META_ROWS
 src/athenaeum/provider.py::resolve_max_tokens
 src/athenaeum/provider.py::resolve_thinking

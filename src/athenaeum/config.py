@@ -455,6 +455,52 @@ def resolve_relay_domains(config: dict[str, Any] | None) -> frozenset[str]:
     return frozenset()
 
 
+#: Default for :func:`resolve_attribution_accuracy_floor` (issue athenaeum#2211,
+#: design §12.3): the Wilson-lower-bound accuracy a question class's held-out
+#: split must clear, at or above its calibrated threshold, to recommend a
+#: tier at all. One floor for every outcome -- confirming a value as the
+#: target's own and re-attributing it to someone else are held to the same
+#: bar (design §17, decision 2).
+DEFAULT_ATTRIBUTION_ACCURACY_FLOOR = 0.95
+
+
+def resolve_attribution_accuracy_floor(config: dict[str, Any] | None) -> float:
+    """Resolve the contact-attribution calibration's accuracy floor (athenaeum#2211).
+
+    Read from ``librarian.attribution.accuracy_floor``. DEFAULT 0.95 (design
+    §12.3). Env ``ATHENAEUM_ATTRIBUTION_ACCURACY_FLOOR`` > yaml
+    ``librarian.attribution.accuracy_floor`` > this default. A parsed env
+    value is authoritative over yaml (mirroring
+    :func:`resolve_min_merge_confidence`'s M1 precedent); a malformed env
+    value logs a WARNING (via :func:`_env_number`) and falls back to yaml. A
+    ``bool``/non-numeric/out-of-``[0, 1]`` yaml value falls through to the
+    default — an accuracy floor outside ``[0, 1]`` is never a usable bar.
+    """
+    value = _env_number("ATHENAEUM_ATTRIBUTION_ACCURACY_FLOOR", float)
+    if value is not None:
+        if 0.0 <= value <= 1.0:
+            return value
+        logger.warning(
+            "Ignoring out-of-range ATHENAEUM_ATTRIBUTION_ACCURACY_FLOOR=%r "
+            "(expected a value in [0, 1]); falling back to yaml/default.",
+            value,
+        )
+    if isinstance(config, dict):
+        librarian_cfg = config.get("librarian")
+        if isinstance(librarian_cfg, dict):
+            attribution_cfg = librarian_cfg.get("attribution")
+            if isinstance(attribution_cfg, dict):
+                raw = attribution_cfg.get("accuracy_floor")
+                if raw is not None and not isinstance(raw, bool):
+                    try:
+                        parsed = float(raw)
+                    except (TypeError, ValueError):
+                        return DEFAULT_ATTRIBUTION_ACCURACY_FLOOR
+                    if 0.0 <= parsed <= 1.0:
+                        return parsed
+    return DEFAULT_ATTRIBUTION_ACCURACY_FLOOR
+
+
 def _normalize_audience_roles(values: Any) -> set[str]:
     """Case-fold, trim, and drop empties from an iterable of role ids (athenaeum#312)."""
     if not isinstance(values, (list, tuple, set)):
