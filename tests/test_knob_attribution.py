@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Cross-module coverage for per-knob spend attribution (issue athenaeum#781).
 
-The seven model knobs (``classify`` / ``write`` / ``resolve`` / ``topic`` /
-``reasoning_t1`` / ``reasoning_t2`` / ``rule_proposals``) are defined once in
+The eight model knobs (``classify`` / ``write`` / ``resolve`` / ``topic`` /
+``reasoning_t1`` / ``reasoning_t2`` / ``rule_proposals`` / ``attribution``,
+the last added by issue athenaeum#2211) are defined once in
 ``prompt_registry._META_ROWS`` (:data:`athenaeum.prompt_registry.KNOBS`). This
 file exercises the REAL call site for each knob -- not just
 ``TokenUsage.add(knob=...)`` directly (that's covered in ``test_models.py``)
@@ -210,6 +211,30 @@ class TestReasoningT2Knob:
 
 
 # ---------------------------------------------------------------------------
+# attribution -- judge_contact_attribution (src/athenaeum/pii_attribution.py)
+# ---------------------------------------------------------------------------
+
+
+class TestAttributionKnob:
+    def test_judge_contact_attribution_tags_attribution_knob(self) -> None:
+        from athenaeum.pii_attribution import (
+            AttributionQuestion,
+            EntityBrief,
+            judge_contact_attribution,
+        )
+
+        question = AttributionQuestion(
+            value="alex@example.org",
+            target=EntityBrief(uid="p-1", name="Alex Example"),
+        )
+        client = _mock_client('{"verdict": "own", "score": 0.9}')
+        usage = TokenUsage()
+        judge_contact_attribution(question, client, usage=usage)
+        assert usage.per_knob["attribution"]["input_tokens"] == 111
+        assert usage.per_knob["attribution"]["output_tokens"] == 22
+
+
+# ---------------------------------------------------------------------------
 # Drift guard -- the knobs exercised above (plus the two noted elsewhere)
 # must equal prompt_registry's derived set (issue athenaeum#781:
 # prompt_registry._META_ROWS is the single source of truth; this test fails
@@ -233,5 +258,6 @@ def test_all_registry_knobs_are_exercised_above() -> None:
         # tests/test_librarian_run_phases.py::TestRunRuleProposalPhase::
         # test_records_usage_and_knob_attribution
         "rule_proposals",
+        "attribution",
     }
     assert exercised == set(KNOBS)
