@@ -44,6 +44,22 @@ log = logging.getLogger(__name__)
 
 _DECODER = json.JSONDecoder()
 
+#: Cap on consecutive failed :meth:`json.JSONDecoder.raw_decode` anchor
+#: attempts within a single :func:`_scan_objects` call (issue athenaeum#2243).
+#: Each failed attempt can read to the end of ``text`` before raising, so
+#: text containing many unmatched ``{`` (e.g. ``'{"a":' * 20000``) made the
+#: anchor-every-``{`` scan quadratic: 0.11s at depth 2,000 up to 7.62s at
+#: depth 20,000. Empirically, 128 failed attempts cost well under 0.2s
+#: regardless of how large ``text`` is (each attempt is bounded by either
+#: the json module's internal recursion guard or ``text``'s own length, and
+#: capping the attempt *count* bounds the sum) — measured up to depth
+#: 100,000 (500 KB) staying under 0.2s. Legitimate inputs never approach
+#: this many failed anchors, so the cap changes no currently-defined
+#: behavior; it only forecloses the pathological tail, trading "find an
+#: object preceded by >128 stray unmatched braces" (never a documented
+#: guarantee) for bounded worst-case cost.
+_MAX_FAILED_ANCHORS = 128
+
 #: A markdown code fence: line-leading ``` plus an optional language tag
 #: (any case, e.g. ``json``/``JSON``), then everything up to a closing
 #: line-leading ```. Both delimiters must start a line (issue athenaeum#222) — an
@@ -71,20 +87,33 @@ def _scan_objects(
     ``RecursionError`` — pathologically deep nesting is contained and
     treated as a failed parse, but flagged so callers can log it
     distinctly from "no JSON object present".
+
+    Gives up after :data:`_MAX_FAILED_ANCHORS` consecutive failed attempts
+    (issue athenaeum#2243) — text containing that many unmatched ``{`` has no
+    balanced object left to find within any cost budget worth paying, so
+    further anchoring only buys quadratic runtime for no behavior change on
+    any input the documented contract defines.
     """
     found: list[dict[str, Any]] = []
     last_err: json.JSONDecodeError | None = None
     hit_recursion = False
+    failed_anchors = 0
     idx = text.find("{")
     while idx != -1 and len(found) < limit:
         try:
             obj, end = _DECODER.raw_decode(text, idx)
         except json.JSONDecodeError as err:
             last_err = err
+            failed_anchors += 1
+            if failed_anchors >= _MAX_FAILED_ANCHORS:
+                break
             idx = text.find("{", idx + 1)
             continue
         except RecursionError:
             hit_recursion = True
+            failed_anchors += 1
+            if failed_anchors >= _MAX_FAILED_ANCHORS:
+                break
             idx = text.find("{", idx + 1)
             continue
         if isinstance(obj, dict):

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import sys
+from typing import Any
 
 import pytest
 
@@ -247,6 +248,79 @@ def test_pathologically_deep_nesting_returns_none() -> None:
     """``RecursionError`` inside ``raw_decode`` is contained — the
     helper's returns-``None`` contract holds instead of raising."""
     assert extract_json_object('{"a":' * _recursion_busting_depth()) is None
+
+
+# --- athenaeum#2243: quadratic scan on many unmatched '{' --------------------------
+
+
+def test_pathological_unmatched_braces_scan_is_not_quadratic(
+    monkeypatch,  # type: ignore[no-untyped-def]
+) -> None:
+    """``_scan_objects`` anchors on every ``{`` and retries
+    ``raw_decode`` from each one; every failed attempt can read to the
+    end of ``text``, so text with many unmatched ``{`` (e.g.
+    ``'{"a":' * depth``) made the scan quadratic (0.11s at depth 2,000
+    up to 7.62s at depth 20,000, pre-fix).
+
+    This pins the fix deterministically via call-counting rather than a
+    wall-clock ratio: the fix caps the number of *failed* anchor
+    attempts, so the number of ``raw_decode`` calls made for a larger
+    pathological input must NOT grow with input size, where the old
+    quadratic scan would have made one attempt per ``{`` (2,000 vs
+    8,000 — a 4x growth the ratio form would also have caught, but a
+    wall-clock assertion is a flake risk in a suite run under
+    concurrent pytest-xdist workers; call-counting has no such
+    variance).
+    """
+    import athenaeum.json_utils as json_utils
+
+    real_raw_decode = json_utils._DECODER.raw_decode
+    calls = {"n": 0}
+
+    def counting_raw_decode(s: str, idx: int = 0) -> Any:
+        calls["n"] += 1
+        return real_raw_decode(s, idx)
+
+    monkeypatch.setattr(json_utils._DECODER, "raw_decode", counting_raw_decode)
+
+    calls["n"] = 0
+    assert extract_json_object('{"a":' * 2000) is None  # ~10 KB
+    small_calls = calls["n"]
+
+    calls["n"] = 0
+    assert extract_json_object('{"a":' * 8000) is None  # ~40 KB
+    large_calls = calls["n"]
+
+    # Bounded by the implementation's failed-anchor cap, independent of
+    # input size -- the pre-fix scan would have made ~2000 and ~8000
+    # attempts respectively (one per unmatched '{').
+    assert small_calls <= 200
+    assert large_calls <= 200
+    assert large_calls <= small_calls + 50
+
+
+def test_escaped_quote_and_brace_in_string_still_extracted_under_cap() -> None:
+    """athenaeum#2243 correctness pin: the failed-anchor cap must never change
+    which object is returned for text the contract already defines.
+    Escaped quotes and a brace *inside* a string value must still parse
+    correctly (the cap only bounds consecutive FAILED anchors; it never
+    alters how a successful ``raw_decode`` reads string content)."""
+    text = (
+        '{"note": "she said \\"use a { brace } here\\" in the doc", "ok": true}'
+    )
+    assert extract_json_object(text) == {
+        "note": 'she said "use a { brace } here" in the doc',
+        "ok": True,
+    }
+
+
+def test_stray_unmatched_braces_before_real_object_still_extracted() -> None:
+    """athenaeum#2243 correctness pin: a SMALL number of stray unmatched
+    ``{`` before the real object (well under the failed-anchor cap) must
+    still be recovered -- the cap forecloses the pathological case
+    (hundreds+ of unmatched anchors), not this ordinary one."""
+    text = "{ { { stray braces\n" + '{"detected": true}'
+    assert extract_json_object(text) == {"detected": True}
 
 
 def test_malformed_json_logs_debug(caplog) -> None:  # type: ignore[no-untyped-def]
