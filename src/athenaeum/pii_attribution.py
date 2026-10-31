@@ -679,16 +679,25 @@ def _build_child_c_indexes(
 #: built, so reusing the cached scan is safe; a caller that builds a FRESH
 #: ``EntityIndex`` gets a fresh scan, because the corpus genuinely may have
 #: changed, and a stale C1 index would produce a silently missed or
-#: spurious suspect -- far worse than the scan it would have saved. Every
-#: caller in this codebase resolves ``value_key_secret`` from the SAME
-#: ``contacts_root`` as the ``entity_index`` it hands in (both ultimately
-#: come from one ``knowledge_root``), so identity on the index implies the
-#: same secret too; this cache does not separately key on the secret.
+#: spurious suspect -- far worse than the scan it would have saved.
+#:
+#: Every caller in this codebase resolves ``value_key_secret`` from the
+#: SAME ``contacts_root`` as the ``entity_index`` it hands in, so identity
+#: on the index implies the same secret TODAY -- but that is a convention,
+#: not something this cache can take on faith: a violation would silently
+#: hand back an index whose ``value_key``s were hashed under a DIFFERENT
+#: HMAC key, which no caller could ever detect from the result shape alone
+#: (issue athenaeum#2258 PR review, second round). So the secret rides
+#: alongside the cached pair and is checked on every hit
+#: (:func:`_cached_child_c_indexes`) -- a mismatch is treated as a cache
+#: miss and rebuilt, never raised, turning a silent-wrong-answer failure
+#: mode into a self-correcting one for the cost of one ``bytes`` comparison.
+#:
 #: A :class:`weakref.WeakKeyDictionary`, not a plain module-level dict, so
 #: this never pins (leaks) an ``EntityIndex`` the rest of the process has
 #: already let go of across a long-running process.
 _ChildCIndexes = tuple[dict[str, tuple[str, ...]], dict[str, frozenset[str]]]
-_CHILD_C_INDEX_CACHE: "weakref.WeakKeyDictionary[EntityIndex, _ChildCIndexes]" = (
+_CHILD_C_INDEX_CACHE: "weakref.WeakKeyDictionary[EntityIndex, tuple[bytes, _ChildCIndexes]]" = (
     weakref.WeakKeyDictionary()
 )
 
@@ -710,14 +719,25 @@ def _cached_child_c_indexes(
     no *entity_index* at all, there is nothing to key a cache on and this
     is simply :func:`_build_child_c_indexes`'s own already-cheap empty-dict
     path -- no cache lookup is attempted.
+
+    A cache hit whose stored *value_key_secret* does not match the one this
+    call resolved is treated exactly like a cache miss: rebuilt, and the
+    cache entry replaced. The index this seam built the C1 index's keys
+    under was wrong under the NEW secret, so returning it would mean a
+    hashed value this call can never match, or a hashed value that
+    collides with a different plaintext under the new key — either way a
+    silently wrong C1 answer. See :data:`_CHILD_C_INDEX_CACHE` for why this
+    is checked rather than merely documented as an invariant.
     """
     if entity_index is None:
         return _build_child_c_indexes(entity_index, value_key_secret)
     cached = _CHILD_C_INDEX_CACHE.get(entity_index)
     if cached is not None:
-        return cached
+        cached_secret, cached_indexes = cached
+        if cached_secret == value_key_secret:
+            return cached_indexes
     built = _build_child_c_indexes(entity_index, value_key_secret)
-    _CHILD_C_INDEX_CACHE[entity_index] = built
+    _CHILD_C_INDEX_CACHE[entity_index] = (value_key_secret, built)
     return built
 
 

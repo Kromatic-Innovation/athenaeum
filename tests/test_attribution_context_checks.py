@@ -209,6 +209,46 @@ class TestC1InlineElsewhere:
         )
         assert len(calls) == 2
 
+    def test_secret_mismatch_on_a_cache_hit_rebuilds_rather_than_going_stale(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """PR review finding, second round (athenaeum#2258): the memo's
+        identity key does not by itself cover the HMAC secret a cached pair
+        was built under -- every caller resolves the secret from the same
+        contacts_root as the entity_index TODAY, but that is a convention,
+        not something the cache can take on faith. Hands the SAME
+        EntityIndex object to _cached_child_c_indexes twice with DIFFERENT
+        secrets and asserts the real builder ran for BOTH: a secret
+        mismatch on what would otherwise be a cache hit must rebuild,
+        never silently return the first secret's (now mismatched) index."""
+        from athenaeum.models import EntityIndex
+
+        knowledge = tmp_path / "knowledge"
+        wiki_root = knowledge / "wiki"
+        _write_page(wiki_root, uid="uid-holder", name="Other Holder", body="x4@example.org\n")
+        index = EntityIndex(wiki_root)
+
+        calls: list[bytes] = []
+        real_builder = pii_attribution._build_child_c_indexes
+
+        def counting_builder(entity_index: object, secret: bytes) -> object:
+            calls.append(secret)
+            return real_builder(entity_index, secret)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(pii_attribution, "_build_child_c_indexes", counting_builder)
+
+        pii_attribution._cached_child_c_indexes(index, b"secret-one")
+        assert len(calls) == 1
+
+        # Same object, SAME secret -> cache hit, no second real build.
+        pii_attribution._cached_child_c_indexes(index, b"secret-one")
+        assert len(calls) == 1
+
+        # Same object, a DIFFERENT secret -> treated as a cache miss.
+        pii_attribution._cached_child_c_indexes(index, b"secret-two")
+        assert len(calls) == 2
+        assert calls == [b"secret-one", b"secret-two"]
+
 
 class TestC2LocalPartNamesSomeoneElse:
     @pytest.mark.parametrize(
