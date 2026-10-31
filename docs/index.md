@@ -106,6 +106,9 @@ does not answer.
 - [Auto-resolve](design/auto-resolve.md)
 - [Merge inflow restoration](design/merge-inflow-restoration.md)
 - [Recall architecture](design/recall-architecture.md)
+- [Librarian email-gate index coherence](design/librarian-email-gate-index-coherence.md) — why the
+  email-named-candidate gate reuses the compile run's own entity index rather than a
+  persisted one, and what stays true across mid-run page writes.
 - [Native-memory baseline](design/native-memory-baseline.md) — the comparison against the
   host agent's own memory that decides whether the project continues.
 - [Prompts](design/prompts.md)

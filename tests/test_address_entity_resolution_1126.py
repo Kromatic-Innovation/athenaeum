@@ -49,6 +49,7 @@ from athenaeum.models import (
     RawFile,
     RawFileOverBudgetError,
     TokenUsage,
+    WikiEntity,
 )
 from athenaeum.tiers import DEFAULT_CLASSIFY_MODEL, resolve_address_named_classifications
 from tests.conftest import FakeLLMClient
@@ -805,3 +806,198 @@ class TestBatchTransportParity:
             "alex.md",
         ]
         assert not raw.path.exists()
+
+
+# ---------------------------------------------------------------------------
+# athenaeum#2180 — entity_index threading must not change the gate's answer
+# under the write shapes a real compile run performs mid-run, and must cost
+# at most one full EntityIndex build per compile run regardless of how many
+# email-named candidates it resolves. See
+# docs/design/librarian-email-gate-index-coherence.md for the full
+# coherence analysis this test suite backs.
+# ---------------------------------------------------------------------------
+
+
+class TestEntityIndexCoherence2180:
+    """AC1/AC2 (athenaeum#2180).
+
+    ``test_create_edit_and_demote_mid_run_give_identical_results`` is AC1's
+    fixture: a page is CREATED (mirroring ``tier3_create``'s own
+    ``index.register()`` call), an unrelated page is EDITED in place (same
+    uid/path), and a third is DEMOTED out of ``wiki/`` entirely (the
+    oversize-page-gate's ``log_demote`` shape — the closest real analogue to
+    a page going away mid-run while its uid is still live on the run's own
+    index) — all within what simulates one compile run, all before a later
+    candidate's lookup. The gate's answer for each of the three uids is
+    asserted identical whether ``entity_index`` is threaded (the fix) or
+    left ``None`` (the pre-athenaeum#2180 full-scan-per-candidate path).
+
+    ``test_n_candidates_cause_at_most_one_full_index_build`` is AC2: N
+    email-named candidates resolved through the real ``process_one``
+    transport, sharing one run-scoped index, must not trigger more than the
+    one full ``EntityIndex`` build the run already pays for at compile
+    start.
+    """
+
+    def test_create_edit_and_demote_mid_run_give_identical_results(
+        self, tmp_path: Path
+    ) -> None:
+        knowledge = tmp_path / "knowledge"
+        wiki = knowledge / "wiki"
+        contacts_root = pii.contacts_surface_root(knowledge, EXCLUDED_CONFIG)
+
+        carol_path = _write_page(wiki, "carol", name="Carol Calibration")
+        dave_path = _write_page(wiki, "dave", name="Dave Demoted")
+        _write_record(
+            contacts_root,
+            "carol-contact.md",
+            uid="carol",
+            fields="emails:\n  - carol@example.org\n",
+        )
+        _write_record(
+            contacts_root,
+            "dave-contact.md",
+            uid="dave",
+            fields="emails:\n  - dave@example.org\n",
+        )
+
+        # The run's own starting index: exactly what `librarian.process_one`
+        # / `batch.process_batch_run` hold as `index` at compile start.
+        run_index = EntityIndex(wiki)
+        excluded_index = pii.ExcludedRecordIndex(contacts_root)
+
+        def _answer(address: str, *, entity_index: EntityIndex | None) -> tuple[str, str]:
+            outcome = resolve_address_named_classifications(
+                [_classified(address)],
+                knowledge_root=knowledge,
+                wiki_root=wiki,
+                config=EXCLUDED_CONFIG,
+                excluded_index=excluded_index,
+                entity_index=entity_index,
+            )
+            if outcome.resolved:
+                _addr, uid, _display = outcome.resolved[0]
+                return ("resolved", uid)
+            _ref, reason = outcome.declined[0]
+            return ("declined", reason)
+
+        # Before any mid-run writes: threaded vs. fresh-scan already agree.
+        assert _answer("carol@example.org", entity_index=run_index) == _answer(
+            "carol@example.org", entity_index=None
+        )
+
+        # Mid-run event 1 — CREATE: the exact pair of calls `tier3_create`
+        # makes (write the page, then `index.register(entity)`), so a page
+        # created by an earlier candidate is visible to a later one.
+        erin = WikiEntity(uid="erin", type="person", name="Erin Newcomer")
+        (wiki / erin.filename).write_text(erin.render(), encoding="utf-8")
+        run_index.register(erin)
+        _write_record(
+            contacts_root, "erin-contact.md", uid="erin", fields="emails:\n  - erin@example.org\n"
+        )
+        # excluded_index is rebuilt at this boundary, same as a real run must
+        # do per resolve_handle_query's own athenaeum#850 staleness note —
+        # orthogonal to this issue's entity_index question.
+        excluded_index = pii.ExcludedRecordIndex(contacts_root)
+
+        # Mid-run event 2 — EDIT an existing page in place: same uid, same
+        # path, new content. No index update is needed or made for this —
+        # _finish re-reads frontmatter fresh from disk regardless of which
+        # index located the path.
+        carol_path.write_text(
+            "---\nuid: carol\nname: Carol Calibration\ntype: person\n---\n\n"
+            "Edited mid-run.\n",
+            encoding="utf-8",
+        )
+
+        # Mid-run event 3 — DEMOTE: dave's page is removed from wiki/
+        # entirely (the oversize-page-gate's log_demote shape). No
+        # register()-equivalent call exists for this disposition, so
+        # run_index's `_by_uid["dave"]` now points at a path that no longer
+        # exists — the stale-pointer case the coherence analysis's "which
+        # answer wins" section covers.
+        dave_path.unlink()
+
+        for address in ("erin@example.org", "dave@example.org", "carol@example.org"):
+            with_index = _answer(address, entity_index=run_index)
+            without_index = _answer(address, entity_index=None)
+            assert with_index == without_index, address
+
+        # Erin (created mid-run) resolves; Dave (demoted mid-run) declines —
+        # pin the actual outcomes, not just that they agree with each other.
+        assert _answer("erin@example.org", entity_index=run_index) == ("resolved", "erin")
+        assert _answer("dave@example.org", entity_index=run_index)[0] == "declined"
+
+    def test_n_candidates_cause_at_most_one_full_index_build(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        knowledge = tmp_path / "knowledge"
+        wiki = knowledge / "wiki"
+        contacts_root = pii.contacts_surface_root(knowledge, EXCLUDED_CONFIG)
+
+        n = 5
+        for i in range(n):
+            _write_page(wiki, f"p{i}", name=f"Person {i}")
+            _write_record(
+                contacts_root,
+                f"p{i}-contact.md",
+                uid=f"p{i}",
+                fields=f"emails:\n  - p{i}@example.org\n",
+            )
+
+        build_calls: list[int] = []
+        original_load = EntityIndex._load
+
+        def _counting_load(self: EntityIndex) -> None:
+            build_calls.append(1)
+            original_load(self)
+
+        monkeypatch.setattr(EntityIndex, "_load", _counting_load)
+
+        # The one full index build a compile run pays for, at compile start.
+        run_index = EntityIndex(wiki)
+        excluded_index = pii.ExcludedRecordIndex(contacts_root)
+        assert len(build_calls) == 1
+
+        write_client = FakeLLMClient(
+            text=json.dumps(
+                {"ops": [{"op": "append_section", "text": "Seen in a note."}]}
+            )
+        )
+
+        for i in range(n):
+
+            def _fake_tier2_classify(
+                *_args: Any, _addr: str = f"p{i}@example.org", **_kwargs: Any
+            ) -> list[ClassifiedEntity]:
+                return [_classified(_addr)]
+
+            monkeypatch.setattr("athenaeum.librarian.tier2_classify", _fake_tier2_classify)
+
+            raw = _raw(
+                knowledge / "raw" / "producer",
+                f"Saw p{i}@example.org today.\n",
+                filename=f"note{i}.md",
+            )
+            classify_client = MagicMock()
+            classify_client.messages.create.side_effect = AssertionError(
+                "tier2_classify is monkeypatched"
+            )
+
+            result = process_one(
+                raw,
+                run_index,
+                wiki,
+                classify_client,
+                valid_types=VALID_TYPES,
+                valid_tags=[],
+                valid_access=VALID_ACCESS,
+                config=EXCLUDED_CONFIG,
+                excluded_index=excluded_index,
+                write_client=write_client,
+            )
+            assert result.updated == [f"p{i}"]
+
+        # N email-named candidates, sharing the run's own index: zero
+        # additional full builds — AC2's "at most one full index build".
+        assert len(build_calls) == 1

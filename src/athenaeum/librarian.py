@@ -3021,13 +3021,19 @@ def process_one(
         # or decline it loudly rather than mint an orphan address-named page.
         # excluded_index is the run's shared ExcludedRecordIndex
         # (athenaeum#883, athenaeum#1124) so the O(corpus) contacts scan is paid
-        # once, not per address.
+        # once, not per address. entity_index=index (athenaeum#2180) is this
+        # run's own EntityIndex — already kept coherent with every create via
+        # `index.register()` below and already threaded to the sibling
+        # pii_attribution calls in this same scope — so a candidate's
+        # uid->page lookup reuses it instead of a fresh full scan per
+        # candidate. See docs/design/librarian-email-gate-index-coherence.md.
         address_outcome = resolve_address_named_classifications(
             classified,
             knowledge_root=wiki_root.parent,
             wiki_root=wiki_root,
             config=config,
             excluded_index=excluded_index,
+            entity_index=index,
         )
         classified = address_outcome.kept
         for _address, _uid, _display_name in address_outcome.resolved:
