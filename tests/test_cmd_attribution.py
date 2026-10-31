@@ -28,14 +28,17 @@ import pytest
 
 from athenaeum import pii, pii_attribution
 from athenaeum.cli import main
-from athenaeum.models import parse_frontmatter, render_frontmatter
+from athenaeum.models import EntityIndex, parse_frontmatter, render_frontmatter
 
 _VALUE = "introducer@example.org"
 _TARGET_UID = "uid-target"
 _TARGET_NAME = "Target Person"
 _OWNER_UID = "uid-owner"
 _OWNER_NAME = "Owner Person"
+_THIRD_UID = "uid-third"
+_THIRD_NAME = "Third Person"
 _EXCLUDED_CONFIG = "storage:\n  mapping:\n    pii: excluded\n"
+_CONFIG: dict[str, Any] = {"storage": {"mapping": {"pii": "excluded"}}}
 
 
 def _write_page(wiki_root: Path, *, uid: str, name: str) -> Path:
@@ -82,6 +85,30 @@ def knowledge(tmp_path: Path) -> Path:
         shadow=True,
     )
     return root
+
+
+@pytest.fixture
+def contested(knowledge: Path) -> Path:
+    """``knowledge``, plus a third person's page naming the value inline.
+
+    This is what makes the design §7.2 re-check return ``suspect`` -- which
+    the base ``knowledge`` fixture never does: ``check_contact_attribution``
+    returns ``pass`` there for both ``uid-target`` and ``uid-owner``, so no
+    CLI test exercised the one case §7.2 and §8.1 are about.
+
+    C1 (``inline-elsewhere``) rather than D2 (``held-elsewhere``),
+    deliberately. D2 needs a contact RECORD holding the value under another
+    uid, and ``record_contact_value``'s own ownership guard would then
+    decline the write anyway -- so a D2 fixture cannot tell a re-check
+    REFUSAL apart from an ownership DECLINE. No contact record holds the
+    value here, so the re-check is the only thing that can stop a write.
+    """
+    page = _write_page(knowledge / "wiki", uid=_THIRD_UID, name=_THIRD_NAME)
+    page.write_text(
+        page.read_text(encoding="utf-8") + f"\nIntroduced us over {_VALUE}.\n",
+        encoding="utf-8",
+    )
+    return knowledge
 
 
 def _suspect_id(knowledge_root: Path) -> str:
@@ -331,6 +358,148 @@ class TestPlaceAsMerge:
         merges = (knowledge / "wiki" / "_pending_merges.md").read_text(encoding="utf-8")
         assert f"{_TARGET_UID}-target-person.md" in merges
         assert f"{_OWNER_UID}-owner-person.md" in merges
+
+
+# ---------------------------------------------------------------------------
+# place -- the design §7.2 re-check, and which forms it gates
+# ---------------------------------------------------------------------------
+
+
+class TestSuspectReCheck:
+    """The branch §7.2 and §8.1 actually name: a ``suspect`` re-check.
+
+    Split by ``--as`` form, because the forms are NOT symmetric: ``own`` and
+    ``alias`` file onto the target the value was withheld from and design
+    §9.4 asserts that is always recoverable, so their re-check is reported
+    and bypassed; ``other:`` lands on a third party's record, where §7.2's
+    "stops a placement that would itself create a fresh conflict" applies, so
+    its re-check is injected and refuses.
+    """
+
+    def _verdict(self, knowledge_root: Path, uid: str) -> Any:
+        context = pii_attribution.build_attribution_context(
+            knowledge_root,
+            _CONFIG,
+            entity_index=EntityIndex(knowledge_root / "wiki"),
+        )
+        return pii_attribution.check_contact_attribution(
+            _VALUE,
+            target_uid=uid,
+            target_name=None,
+            target_type=None,
+            source_ref=None,
+            writer=pii_attribution.WRITER_RE_ATTRIBUTION,
+            context=context,
+        )
+
+    @pytest.mark.parametrize("uid", [_TARGET_UID, _OWNER_UID])
+    def test_the_fixture_really_produces_a_suspect_recheck(
+        self, contested: Path, uid: str
+    ) -> None:
+        """The positive control: without this, every test below is vacuous."""
+        verdict = self._verdict(contested, uid)
+        assert verdict.disposition == pii_attribution.DISPOSITION_SUSPECT
+        assert pii_attribution.CHECK_C1_INLINE_ELSEWHERE in [
+            check.check_id for check in verdict.checks
+        ]
+        assert _THIRD_UID in verdict.candidates
+
+    @pytest.mark.parametrize("uid", [_TARGET_UID, _OWNER_UID])
+    def test_the_base_fixture_does_not(self, knowledge: Path, uid: str) -> None:
+        """And the negative control for the control."""
+        assert (
+            self._verdict(knowledge, uid).disposition
+            == pii_attribution.DISPOSITION_PASS
+        )
+
+    def test_own_still_files_it_and_says_so(
+        self, contested: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Design §9.4: ``--as own`` files it on the target it was withheld
+        from, and that holds for a ``suspect`` re-check, not just the
+        ``non-personal`` one the D1-narrow rollback test covers."""
+        rc = _place(contested, _suspect_id(contested), "own")
+        captured = capsys.readouterr()
+        assert rc == 0
+        assert f"own -> {pii.PLACEMENT_FILED}" in captured.out
+        assert "still say 'suspect'" in captured.err
+        assert pii_attribution.CHECK_C1_INLINE_ELSEWHERE in captured.err
+        assert _VALUE in _record_for(contested, _TARGET_UID)["emails"]
+
+    @pytest.mark.parametrize("relation", ["role-inbox", "personal-alias"])
+    def test_alias_still_files_it(self, contested: Path, relation: str) -> None:
+        """``alias`` files onto the same withheld-from target, so §9.4's
+        rationale covers it identically."""
+        rc = _place(contested, _suspect_id(contested), f"alias:{relation}")
+        assert rc == 0
+        assert _VALUE in _record_for(contested, _TARGET_UID)["alt_emails"]
+
+    def test_other_refuses_rather_than_creating_a_fresh_conflict(
+        self, contested: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Design §7.2: the re-check "stops a placement that would itself
+        create a fresh conflict". ``other:<uid>`` lands on a THIRD party's
+        record, which §9.4's rollback rationale says nothing about, so the
+        real check is injected and this must not write."""
+        rc = _place(contested, _suspect_id(contested), f"other:{_OWNER_UID}")
+        captured = capsys.readouterr()
+        assert rc == 1
+        assert f"other-known -> {pii.PLACEMENT_QUEUED}" in captured.out
+        assert "fresh conflict" in captured.err
+        assert "'suspect'" in captured.err
+        assert pii_attribution.CHECK_C1_INLINE_ELSEWHERE in captured.err
+        # Nothing landed on the owner, the target, or anyone else.
+        assert _record_for(contested, _OWNER_UID) == {}
+        assert _record_for(contested, _TARGET_UID) == {}
+        assert pii.resolve_contact_records(_contacts_root(contested), _VALUE) == []
+
+    def test_the_refusal_names_the_two_things_the_human_can_do(
+        self, contested: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Re-running the same command cannot work; the message must not
+        leave the human guessing."""
+        suspect_id = _suspect_id(contested)
+        _place(contested, suspect_id, f"other:{_OWNER_UID}")
+        err = capsys.readouterr().err
+        assert f"attribution place {suspect_id} --as own" in err
+        assert f"attribution show {suspect_id}" in err
+
+    def test_merge_is_unaffected_because_it_writes_no_contact_value(
+        self, contested: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """``merge:`` gets the re-check injected too, but ``place_contact_value``
+        consults it only for a verdict that WRITES, and ``same-entity`` writes
+        no contact value at all -- so the injection is inert here.
+
+        Pinned rather than left implicit, because the alternative (refusing a
+        merge on a ``suspect`` re-check) would break the COMMON correct case:
+        the checks fire naming ``uid-Y``, and ``merge:uid-Y`` is then exactly
+        the right answer.
+        """
+        rc = _place(contested, _suspect_id(contested), f"merge:{_OWNER_UID}")
+        assert rc == 0
+        assert pii.PLACEMENT_MERGE_PROPOSED in capsys.readouterr().out
+        assert _OWNER_NAME in (
+            (contested / "wiki" / "_pending_merges.md").read_text(encoding="utf-8")
+        )
+        assert pii.resolve_contact_records(_contacts_root(contested), _VALUE) == []
+
+    def test_a_passing_recheck_still_files_an_other_known_answer(
+        self, knowledge: Path
+    ) -> None:
+        """The injection must not block the uncontested case."""
+        rc = _place(knowledge, _suspect_id(knowledge), f"other:{_OWNER_UID}")
+        assert rc == 0
+        assert _VALUE in _record_for(knowledge, _OWNER_UID)["emails"]
+
+    def test_the_bypass_vocabulary_is_exactly_the_two_withheld_from_forms(
+        self,
+    ) -> None:
+        """Structural, so a future "simplification" back to bypassing every
+        form fails loudly instead of quietly re-opening the write path."""
+        from athenaeum._cmd_attribution import _RECHECK_BYPASS_VERDICTS
+
+        assert _RECHECK_BYPASS_VERDICTS == ("own", "alias")
 
 
 # ---------------------------------------------------------------------------

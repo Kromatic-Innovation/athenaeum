@@ -16,6 +16,37 @@ two commands:
   ``decided_by: human`` and -- per §8.1 -- no calibrated probability, model
   id or prompt sha in the provenance.
 
+**The design §7.2 re-check is injected for some ``--as`` forms and only
+REPORTED for others.** The asymmetry is deliberate; do not simplify it away.
+
+- ``own`` and ``alias`` file onto the target the value was WITHHELD from, and
+  design §9.4 does not merely name ``place --as own`` as the rollback for a
+  parked value, it asserts the outcome: "it is reversible exactly like any
+  other parked value -- ``place <suspect-id> --as own`` files it on the
+  target it was withheld from". D1-narrow is enforced in every mode, so an
+  injected re-check would re-withhold exactly the value §9.4 promises is
+  recoverable and make that sentence false. §7.2's "never back to the model"
+  names the purpose too: it prevents a MODEL loop, and routing a human's own
+  answer into the human queue terminates nowhere. So for these two forms the
+  checks are run and REPORTED on stderr, and the placement proceeds with
+  ``recheck=None`` -- the "a caller that has already re-checked this exact
+  (value, uid) pair itself" case :func:`athenaeum.pii.place_contact_value`
+  sanctions.
+- ``other:<uid>`` and ``merge:<uid>`` land on a THIRD PARTY's record, which
+  §9.4's rollback rationale says nothing about, and where §7.2's stated
+  purpose does land: it "stops a placement that would itself create a fresh
+  conflict". A human re-attributing to ``uid-X`` while ``uid-Y`` already
+  holds the value creates exactly that conflict, so for these forms the real
+  re-check is INJECTED. A ``suspect`` answer writes nothing and this command
+  exits non-zero, naming what the human can do instead.
+
+  (For ``merge:`` the injection is inert today and deliberately so:
+  ``place_contact_value`` re-checks only a verdict that WRITES, and
+  ``same-entity`` writes no contact value at all. Passing the re-check anyway
+  keeps the bypass decision at the §9.4 line rather than at an incidental
+  property of the executor, and is already correct if a later issue makes
+  that verdict write.)
+
 **Neither command opens the surface itself.** Both go through
 :func:`athenaeum.pii_attribution.read_suspect`, which applies ``pii``'s
 fail-closed readable-surface gate first, so an unreachable surface raises
@@ -42,6 +73,7 @@ Layering: L5.
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import sys
 from pathlib import Path
@@ -59,6 +91,13 @@ if TYPE_CHECKING:
 #: ``non-personal`` is a disposition the deterministic checks own, and
 #: ``unclear`` is not an answer.
 _AS_FORMS = "own | other:<uid> | alias:<relation> | merge:<uid>"
+
+#: The verdicts whose design §7.2 re-check is REPORTED but not injected --
+#: the two forms that file onto the target the value was withheld from, which
+#: is the outcome design §9.4 asserts is always recoverable. Every other
+#: form gets the real re-check injected. See the module docstring for the
+#: §9.4-versus-§7.2 reasoning; this is not a simplification candidate.
+_RECHECK_BYPASS_VERDICTS: tuple[str, ...] = ("own", "alias")
 
 
 class _AsFormError(ValueError):
@@ -295,35 +334,39 @@ def _cmd_place(args: argparse.Namespace) -> int:
         knowledge_root, config, entity_index=index, contacts_root=contacts_root
     )
 
-    # Design §7.2's re-check, run HERE rather than injected. A `suspect` or
-    # `non-personal` re-check must not block a human answer: the human IS
-    # the authority the deterministic checks escalated to (design §8.1), and
-    # design §9.4 names `place --as own` as the rollback for a value those
-    # same checks withheld — which an injected re-check would simply
-    # re-withhold, making the documented rollback impossible. So the checks
-    # are run and REPORTED, and the placement proceeds with `recheck=None`,
-    # which is exactly the "a caller that has already re-checked this exact
-    # (value, uid) pair itself" case `place_contact_value` sanctions.
-    recheck_uid = (
-        owner_uid if verdict == "other-known" and owner_uid else suspect.target_uid
-    )
-    recheck = pii_attribution.check_contact_attribution(
-        suspect.value,
-        target_uid=recheck_uid,
-        target_name=owner_name if verdict == "other-known" else suspect.target_name,
-        target_type=None,
-        source_ref=suspect.source_ref,
-        writer=pii_attribution.WRITER_RE_ATTRIBUTION,
-        context=context,
-    )
-    if recheck.disposition != pii_attribution.DISPOSITION_PASS:
-        print(
-            f"note: the deterministic checks still say "
-            f"{recheck.disposition!r} for this value on {recheck_uid} "
-            f"({', '.join(c.check_id for c in recheck.checks) or 'no checks'}); "
-            "filing anyway, because a human answer is the authority those "
-            "checks escalate to.",
-            file=sys.stderr,
+    # Design §7.2's re-check. For the two forms design §9.4's rollback covers
+    # (`own`, `alias`) it is run HERE and only REPORTED, because the human IS
+    # the authority the deterministic checks escalated to (design §8.1) and
+    # an injected re-check would re-withhold exactly the value §9.4 promises
+    # is recoverable. For `other:` / `merge:`, which land on a third party's
+    # record, the real check is INJECTED instead: §7.2's "stops a placement
+    # that would itself create a fresh conflict" is precisely about that
+    # case. The module docstring carries the full reasoning.
+    injected_recheck: Any | None = None
+    if verdict in _RECHECK_BYPASS_VERDICTS:
+        recheck = pii_attribution.check_contact_attribution(
+            suspect.value,
+            target_uid=suspect.target_uid,
+            target_name=suspect.target_name,
+            target_type=None,
+            source_ref=suspect.source_ref,
+            writer=pii_attribution.WRITER_RE_ATTRIBUTION,
+            context=context,
+        )
+        if recheck.disposition != pii_attribution.DISPOSITION_PASS:
+            print(
+                f"note: the deterministic checks still say "
+                f"{recheck.disposition!r} for this value on "
+                f"{suspect.target_uid} "
+                f"({', '.join(c.check_id for c in recheck.checks) or 'no checks'}); "
+                "filing anyway, because a human answer is the authority those "
+                "checks escalate to, and design §9.4 makes this the documented "
+                "rollback for a withheld value.",
+                file=sys.stderr,
+            )
+    else:
+        injected_recheck = functools.partial(
+            pii_attribution.check_contact_attribution, context=context
         )
 
     lock: "RunLock | int" = _acquire_or_exit(knowledge_root, args, config)
@@ -351,7 +394,7 @@ def _cmd_place(args: argparse.Namespace) -> int:
             decided_by="human",
             observed_at=now_iso(),
             apply=True,
-            recheck=None,
+            recheck=injected_recheck,
             propose_merge=(
                 _merge_proposer(
                     wiki_root,
@@ -398,6 +441,25 @@ def _cmd_place(args: argparse.Namespace) -> int:
         pii.PLACEMENT_LOGGED,
     ):
         return 0
+    if placement.outcome == pii.PLACEMENT_QUEUED:
+        # The injected re-check refused (design §7.2). Say what the human can
+        # do about it, because the obvious next move -- re-running the same
+        # command -- cannot work, while the §9.4 rollback always can.
+        fired = ", ".join(placement.recheck_checks) or "no checks"
+        print(
+            f"error: not filed. Filing this value on {placement.placed_uid} would "
+            f"itself create a fresh conflict there: the deterministic checks say "
+            f"{placement.recheck_disposition!r} for it on that record ({fired}). "
+            f"Design §7.2 sends such a placement to the human queue rather than "
+            f"writing it, and re-running this command will refuse again. Either "
+            f"file it on the original target instead "
+            f"(`athenaeum attribution place {suspect.suspect_id} --as own`, which "
+            f"design §9.4 makes the always-available rollback), or settle the "
+            f"competing holder first -- `athenaeum attribution show "
+            f"{suspect.suspect_id}` names the candidates.",
+            file=sys.stderr,
+        )
+        return 1
     print(
         f"error: the answer was not filed ({placement.outcome}): {placement.detail}",
         file=sys.stderr,
