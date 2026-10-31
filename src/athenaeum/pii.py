@@ -4176,6 +4176,48 @@ def _minted_contact_record_body(identifier: str, *, usage_class: str, field: str
     )
 
 
+def _ensure_field_lists_identifier(
+    record_path: Path, identifier: str, *, field: str
+) -> None:
+    """Append *identifier* to *field* on *record_path* if it is not listed there.
+
+    The second half of :func:`record_contact_value`'s classify branch. That
+    branch short-circuits because the value is already listed for this uid
+    SOMEWHERE — which settles "do not mint a second record", but not "the
+    requested field holds the value". Without this step a placement into
+    ``alt_emails`` of a value ``emails`` already lists reports
+    ``field=alt_emails`` and a ``filed`` outcome while nothing lands in
+    ``alt_emails``, and :func:`_stamp_placement_provenance` then writes a
+    ``field_sources["alt_emails"]`` entry for a field the record does not
+    carry. Design §7.1's ``alias`` row says the value is "filed on the target
+    in ``alt_emails``", and the ``identifier_relation`` fact plus that listing
+    are the whole content of an alias verdict, so a success that writes
+    neither is a false success with dangling provenance.
+
+    Pure addition: nothing is ever removed from another field.
+    :data:`CONTACT_IDENTIFIER_FIELDS`' own docstring holds that ``emails`` /
+    ``former_emails`` / ``alt_emails`` "hold the same kind of value — an
+    address this person is known by", and the athenaeum#479/#502 migrator
+    folds the latter two INTO ``emails``, so a value listed under two of them
+    is a union this surface already produces, not a contradiction.
+
+    Writes only when the rendered bytes change, so a repeat call is a no-op
+    (and leaves ``st_mtime_ns`` alone).
+    """
+    text = record_path.read_text(encoding="utf-8")
+    meta, body = parse_frontmatter(text)
+    merged: dict[str, Any] = dict(meta) if isinstance(meta, dict) else {}
+    raw = merged.get(field)
+    values = [item for item in raw if isinstance(item, str)] if isinstance(raw, list) else []
+    wanted = normalize_identifier(identifier)
+    if any(normalize_identifier(item) == wanted for item in values):
+        return
+    merged[field] = [*values, identifier]
+    new_text = render_frontmatter(merged) + "\n" + body
+    if new_text != text:
+        atomic_write_text(record_path, new_text)
+
+
 def record_contact_value(
     contacts_root: Path,
     identifier: str,
@@ -4234,7 +4276,12 @@ def record_contact_value(
             ``alt_emails``/``phones`` value is an alias of a person the store
             already knows — filing it at a fresh per-identifier path would
             scatter one person's aliases across records rather than listing
-            them beside the address they are aliases of.
+            them beside the address they are aliases of. Whichever branch
+            runs, **the returned record lists the value in *field*** when the
+            outcome is ``minted`` or ``classified``: the classify branch adds
+            the listing if only another identifier field carried it (see
+            :func:`_ensure_field_lists_identifier`), so a caller can trust the
+            field it asked for.
         source: Per-claim provenance for the classification entry.
         observed_at: When the value was observed.
         index: An already-built :class:`ExcludedRecordIndex` to resolve
@@ -4288,9 +4335,12 @@ def record_contact_value(
                 uids=tuple(found_uids),
             )
         # Every matching record is already this uid's. Classify onto the
-        # existing record rather than minting a second one — whatever *field*
-        # was asked for, the value IS already listed for this person, so
-        # appending it again under a second field would duplicate the listing.
+        # existing record rather than minting a second one — the value IS
+        # already listed for this person, so there is no second record to
+        # make. That settles the RECORD, not the FIELD: if *field* does not
+        # list the value yet, add the listing there too, or this write would
+        # report a field it did not touch (see
+        # :func:`_ensure_field_lists_identifier`).
         classified = classify_contact_value(
             contacts_root,
             identifier,
@@ -4299,6 +4349,8 @@ def record_contact_value(
             observed_at=observed_at,
             index=index,
         )
+        if classified is not None:
+            _ensure_field_lists_identifier(classified, identifier, field=field)
         return ObservedContactWrite(
             outcome=OBSERVED_CONTACT_CLASSIFIED, path=classified
         )

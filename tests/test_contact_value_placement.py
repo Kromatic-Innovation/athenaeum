@@ -244,6 +244,54 @@ class TestRecordContactValue:
         assert write.path == seeded
         assert len(_snapshot(contacts)) == 1
 
+    def test_the_short_circuit_still_lists_the_value_in_the_requested_field(
+        self, tmp_path: Path
+    ) -> None:
+        """The short-circuit settles the RECORD, not the FIELD.
+
+        ``emails`` already lists the value for this uid, so no second record
+        is minted — but the caller asked for ``alt_emails``, and a write that
+        reports a field it did not touch is a false success. Design §7.1's
+        ``alias`` row files the value in ``alt_emails``.
+        """
+        contacts = _contacts(tmp_path)
+        seeded = _seed_record(contacts, "target.md", uid=_TARGET_UID, emails=[_VALUE])
+        write = pii.record_contact_value(
+            contacts,
+            _VALUE,
+            uid=_TARGET_UID,
+            usage_class=pii.USAGE_CLASS_UNCLASSIFIED,
+            field="alt_emails",
+            source="raw/x.md",
+            observed_at=_OBSERVED_AT,
+        )
+        assert write.outcome == pii.OBSERVED_CONTACT_CLASSIFIED
+        assert write.path == seeded
+        meta = _meta(seeded)
+        assert meta["alt_emails"] == [_VALUE]
+        # Nothing was taken away, and no second record appeared.
+        assert meta["emails"] == [_VALUE]
+        assert len(_snapshot(contacts)) == 1
+
+    def test_the_short_circuit_is_a_no_op_when_the_field_already_lists_it(
+        self, tmp_path: Path
+    ) -> None:
+        """And it does not rewrite the file — mtime included."""
+        contacts = _contacts(tmp_path)
+        seeded = _seed_record(contacts, "target.md", uid=_TARGET_UID, emails=[_VALUE])
+        kwargs: dict[str, Any] = {
+            "uid": _TARGET_UID,
+            "usage_class": pii.USAGE_CLASS_UNCLASSIFIED,
+            "source": "raw/x.md",
+            "observed_at": _OBSERVED_AT,
+        }
+        pii.record_contact_value(contacts, _VALUE, **kwargs)
+        before = _snapshot(contacts)
+        mtime = seeded.stat().st_mtime_ns
+        pii.record_contact_value(contacts, _VALUE, **kwargs)
+        assert _snapshot(contacts) == before
+        assert seeded.stat().st_mtime_ns == mtime
+
     def test_declines_a_record_that_names_no_entity(self, tmp_path: Path) -> None:
         contacts = _contacts(tmp_path)
         _seed_record(contacts, "nameless.md", uid=None, emails=[_VALUE])
@@ -896,6 +944,46 @@ class TestAlias:
         entries = _meta(own)[pii.IDENTIFIER_RELATION_FIELD]
         assert len(entries) == 1
         assert entries[0]["relation"] == "former-name"
+
+    @pytest.mark.parametrize(
+        ("first", "second", "second_field"),
+        [("own", "alias", "alt_emails"), ("alias", "own", "emails")],
+        ids=["alias-after-own", "own-after-alias"],
+    )
+    def test_a_second_placement_writes_the_field_it_reports(
+        self, tmp_path: Path, first: str, second: str, second_field: str
+    ) -> None:
+        """Composes the short-circuit with the alias path — nothing else does.
+
+        ``TestRecordContactValue.
+        test_classifies_onto_a_record_this_uid_already_owns`` covers the
+        short-circuit in isolation and the tests above cover the alias path in
+        isolation, so the reachable case (design §7.1's ``alias`` filing onto
+        a target whose ``emails`` already lists the value, after a
+        ``place --as own`` or after the correspondent path filed it) fell
+        between them: the placement reported ``filed`` with
+        ``field=alt_emails``, wrote a ``field_sources["alt_emails"]`` entry,
+        and left ``alt_emails`` absent.
+
+        A reported field must be a written field, in both orders.
+        """
+        contacts = _contacts(tmp_path)
+        relations = {"alias": "role-inbox"}
+        _place(contacts, verdict=first, alias_relation=relations.get(first))
+        placement = _place(contacts, verdict=second, alias_relation=relations.get(second))
+
+        assert placement.outcome == pii.PLACEMENT_FILED
+        assert placement.field == second_field
+        assert placement.path is not None
+        meta = _meta(placement.path)
+        assert meta[second_field] == [_VALUE]
+        # Provenance is stamped for a field the record actually carries.
+        for field in meta["field_sources"]:
+            assert _VALUE in meta[field], field
+        # And the first placement's listing was not taken away.
+        first_field = "alt_emails" if first == "alias" else "emails"
+        assert meta[first_field] == [_VALUE]
+        assert len(_snapshot(contacts)) == 1
 
     def test_the_relation_vocabulary_is_validated_at_the_merge(self) -> None:
         with pytest.raises(ValueError, match="unknown identifier relation"):
