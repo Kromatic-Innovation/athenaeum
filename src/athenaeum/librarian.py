@@ -6217,6 +6217,7 @@ def _knob_model_getters() -> dict[str, Callable[[dict[str, Any] | None], str]]:
     instead of repeating the athenaeum#1174 defect this function's derivation
     exists to prevent.
     """
+    from athenaeum.pii_attribution import _get_attribution_model_for_preflight
     from athenaeum.query_topics import _get_topic_model
     from athenaeum.reasoning_tiers import get_t1_model, get_t2_model
     from athenaeum.resolutions import _get_model as _get_resolve_model
@@ -6231,6 +6232,7 @@ def _knob_model_getters() -> dict[str, Callable[[dict[str, Any] | None], str]]:
         "reasoning_t1": get_t1_model,
         "reasoning_t2": get_t2_model,
         "rule_proposals": _get_rule_proposals_model,
+        "attribution": _get_attribution_model_for_preflight,
     }
 
 
@@ -6279,13 +6281,20 @@ def _resolve_run_models(config: dict[str, Any] | None) -> list[tuple[str, str]]:
 #:   ``_run_rule_proposal_phase`` builds its own client lazily, only when
 #:   the phase is enabled, rather than unconditionally at
 #:   ``_arm_run_deadline`` time for a phase most runs never use.
+#: * ``attribution`` (issue athenaeum#2211) — the contact-attribution
+#:   escalation judge (:func:`athenaeum.pii_attribution.
+#:   judge_contact_attribution`) runs only on a ``suspect`` verdict (design
+#:   ``docs/design/attribution-verification.md`` §6.1), called by a WRITER
+#:   at escalation time (out of scope here; issue athenaeum#2212), never by
+#:   this module's bulk entity/merge pipeline — mirroring ``rule_proposals``,
+#:   not a routed knob every run serves.
 #:
 #: Naively setting ``_LIBRARIAN_ROUTED_KNOBS = prompt_registry.KNOBS`` would
-#: silently fold both of these into the client-cache pipeline — a behaviour
-#: change neither knob's own issue asked for (in ``rule_proposals``'s case,
-#: it would also mean building a real LLM client at startup for a phase that
-#: is off by default).
-_LIBRARIAN_INDEPENDENTLY_ROUTED_KNOBS = frozenset({"topic", "rule_proposals"})
+#: silently fold all three into the client-cache pipeline — a behaviour
+#: change none of these knobs' own issues asked for (in ``rule_proposals``'s
+#: case, it would also mean building a real LLM client at startup for a
+#: phase that is off by default).
+_LIBRARIAN_INDEPENDENTLY_ROUTED_KNOBS = frozenset({"topic", "rule_proposals", "attribution"})
 
 #: The knobs the librarian's entity/merge pipeline serves, each through its
 #: OWN per-knob client (issue athenaeum#841 — see ``_arm_run_deadline``,

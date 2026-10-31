@@ -1109,6 +1109,24 @@ def _get_attribution_model(
     return config_module.DEFAULT_CLASSIFY_MODEL
 
 
+def _get_attribution_model_for_preflight(config: dict[str, Any] | None) -> str:
+    """Single-string ``attribution`` knob resolution, for
+    :func:`athenaeum.librarian._knob_model_getters`'s preflight (issue
+    athenaeum#783/#1174: every ``prompt_registry.KNOBS`` member needs a
+    ``Callable[[dict | None], str]`` getter there, to check the resolved
+    model is priced before a real run starts).
+
+    The judge itself resolves PER QUESTION CLASS via
+    :func:`_get_attribution_model` (design §6.4) — preflight needs only one
+    representative model per knob, so this calls that same resolver with
+    an empty question class, which never matches a
+    ``models.attribution_<class>`` override and falls straight through to
+    the knob-wide ``models.attribution`` / default chain every question
+    class shares before its own override.
+    """
+    return _get_attribution_model("", config)
+
+
 # ---------------------------------------------------------------------------
 # The prompt (design §6.4)
 # ---------------------------------------------------------------------------
