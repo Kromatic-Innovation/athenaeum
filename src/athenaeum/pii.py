@@ -2908,8 +2908,8 @@ def _log_collision_summary(
         return
     level = logging.WARNING if uid_collisions > 0 else logging.INFO
     hint = (
-        "run `athenaeum repair --contact-records` (dry-run) / `contact-surface-lint` "
-        "(per-key detail at DEBUG)"
+        "run `athenaeum repair --contact-records` (dry-run) / "
+        "`athenaeum contact-surface-lint` (per-key detail at DEBUG)"
     )
     if address_collisions is None:
         log.log(
