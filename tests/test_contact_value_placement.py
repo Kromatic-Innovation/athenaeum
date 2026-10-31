@@ -510,35 +510,91 @@ class TestReAttributionLeavesTheTargetAlone:
 # ---------------------------------------------------------------------------
 
 
-def _filing_cases() -> list[dict[str, Any]]:
+def _filing_cases() -> list[Any]:
+    """Every ``place_contact_value`` case that FILES, one ``pytest.param`` each.
+
+    **Ids are explicit, and every case value is a plain token.** Two reasons,
+    and the second is load-bearing:
+
+    - The sweeps below are only legible in a failure report if each case
+      names itself; ``[('alias_relation', 'shared'), ('verdict', 'alias')]``
+      is not a name.
+    - A pytest-derived id must be STABLE ACROSS PROCESSES. A parametrize
+      value whose type has the default ``repr`` renders its MEMORY ADDRESS
+      into the node id, so two ``pytest-xdist`` workers collect different
+      id sets and xdist aborts the whole shard at collection — a failure a
+      single-process local run cannot see. That is why no case here carries
+      an object: the re-check case passes the plain disposition token and the
+      check ids, and the test body builds the :class:`_RecheckStub` from them.
+    """
     return [
-        {"verdict": "own"},
-        {"verdict": "own", "value": _PHONE},
-        {"verdict": "other-known", "owner_uid": _OWNER_UID, "owner_name": _OWNER_NAME},
-        {"verdict": "alias", "alias_relation": "shared"},
-        {"verdict": "alias", "alias_relation": "shared", "value": _PHONE},
+        pytest.param({"verdict": "own"}, id="own-email"),
+        pytest.param({"verdict": "own", "value": _PHONE}, id="own-phone"),
+        pytest.param(
+            {
+                "verdict": "other-known",
+                "owner_uid": _OWNER_UID,
+                "owner_name": _OWNER_NAME,
+            },
+            id="other-known-email",
+        ),
+        pytest.param(
+            {"verdict": "alias", "alias_relation": "shared"}, id="alias-email"
+        ),
+        pytest.param(
+            {"verdict": "alias", "alias_relation": "shared", "value": _PHONE},
+            id="alias-phone",
+        ),
     ]
 
 
-def _every_case() -> list[dict[str, Any]]:
+def _every_case() -> list[Any]:
+    """:func:`_filing_cases` plus every outcome that files nothing.
+
+    Same id and plain-token discipline — see :func:`_filing_cases`.
+    """
     return [
         *_filing_cases(),
-        {"verdict": "other-unknown"},
-        {"verdict": "non-personal"},
-        {"verdict": "unclear"},
-        {"verdict": "same-entity", "owner_uid": _OWNER_UID},
-        {"verdict": "own", "apply": False},
-        {"verdict": "own", "recheck": _RecheckStub("suspect", ("D2",))},
+        pytest.param({"verdict": "other-unknown"}, id="other-unknown"),
+        pytest.param({"verdict": "non-personal"}, id="non-personal"),
+        pytest.param({"verdict": "unclear"}, id="unclear"),
+        pytest.param(
+            {"verdict": "same-entity", "owner_uid": _OWNER_UID}, id="same-entity"
+        ),
+        pytest.param({"verdict": "own", "apply": False}, id="own-observe-mode"),
+        pytest.param(
+            {
+                "verdict": "own",
+                "recheck_disposition": "suspect",
+                "recheck_checks": ("D2",),
+            },
+            id="own-suspect-recheck",
+        ),
     ]
+
+
+def _case_kwargs(case: dict[str, Any]) -> dict[str, Any]:
+    """Expand a :func:`_every_case` case into ``_place`` kwargs.
+
+    The injected doubles are built HERE rather than carried in the
+    parametrize list, so no node id can depend on an object's identity — see
+    :func:`_filing_cases`.
+    """
+    kwargs = dict(case)
+    checks = kwargs.pop("recheck_checks", ())
+    disposition = kwargs.pop("recheck_disposition", None)
+    if disposition is not None:
+        kwargs["recheck"] = _RecheckStub(disposition, checks)
+    if kwargs.get("verdict") == "same-entity":
+        kwargs["propose_merge"] = _ProposerStub()
+    return kwargs
 
 
 class TestNoPlacementGrantsOutreachEligibility:
-    @pytest.mark.parametrize("case", _every_case(), ids=lambda c: repr(sorted(c.items())))
+    @pytest.mark.parametrize("case", _every_case())
     def test_no_outcome_ever_writes_observed(self, tmp_path: Path, case: dict[str, Any]) -> None:
         contacts = _contacts(tmp_path)
-        kwargs = dict(case)
-        if kwargs.get("verdict") == "same-entity":
-            kwargs["propose_merge"] = _ProposerStub()
+        kwargs = _case_kwargs(case)
         value = kwargs.get("value", _VALUE)
 
         placement = _place(contacts, **kwargs)
@@ -927,17 +983,18 @@ class TestProvenanceShape:
 
 
 class TestIdempotency:
-    @pytest.mark.parametrize("case", _filing_cases(), ids=lambda c: repr(sorted(c.items())))
+    @pytest.mark.parametrize("case", _filing_cases())
     def test_a_repeat_placement_rewrites_nothing(
         self, tmp_path: Path, case: dict[str, Any]
     ) -> None:
         contacts = _contacts(tmp_path)
         _seed_record(contacts, "target.md", uid=_TARGET_UID, emails=["target@example.org"])
-        first = _place(contacts, **case)
+        kwargs = _case_kwargs(case)
+        first = _place(contacts, **kwargs)
         assert first.outcome == pii.PLACEMENT_FILED
         before = _snapshot(contacts)
 
-        second = _place(contacts, **case)
+        second = _place(contacts, **_case_kwargs(case))
 
         assert second.outcome == pii.PLACEMENT_FILED
         assert _snapshot(contacts) == before
