@@ -314,6 +314,25 @@ at pack-build time, with the pack name in the message.
 
 ## `librarian`
 
+### `resolve_attribution_accuracy_floor`
+
+- **YAML path:** `librarian.attribution.accuracy_floor`
+- **Environment variable:** `ATHENAEUM_ATTRIBUTION_ACCURACY_FLOOR`
+- **CLI flag:** —
+- **Default:** `0.95`
+- **Precedence:** environment variable > `athenaeum.yaml` > code default
+
+Resolve the contact-attribution calibration's accuracy floor.
+
+Read from ``librarian.attribution.accuracy_floor``. DEFAULT 0.95 (design
+§12.3). Env ``ATHENAEUM_ATTRIBUTION_ACCURACY_FLOOR`` > yaml
+``librarian.attribution.accuracy_floor`` > this default. A parsed env
+value is authoritative over yaml (mirroring
+`resolve_min_merge_confidence`'s M1 precedent); a malformed env
+value logs a WARNING (via `_env_number`) and falls back to yaml. A
+``bool``/non-numeric/out-of-``[0, 1]`` yaml value falls through to the
+default — an accuracy floor outside ``[0, 1]`` is never a usable bar.
+
 ### `resolve_attribution_context_labels`
 
 - **YAML path:** `librarian.attribution.context_labels`
@@ -5055,6 +5074,9 @@ auto-applying tier from the one loop meant to catch it being wrong.
 
 | Env var | Referenced in |
 |---|---|
+| `ATHENAEUM_ATTRIBUTION_MAX_TOKENS` | `src/athenaeum/pii_attribution.py` |
+| `ATHENAEUM_ATTRIBUTION_MODEL` | `src/athenaeum/pii_attribution.py` |
+| `ATHENAEUM_ATTRIBUTION_THINKING` | `src/athenaeum/pii_attribution.py` |
 | `ATHENAEUM_BATCH_MODE` | `src/athenaeum/_cmd_run.py`, `src/athenaeum/batch.py`, `src/athenaeum/config.py`, `src/athenaeum/librarian.py`, `src/athenaeum/provider.py` |
 | `ATHENAEUM_CLAIM_KIND_MAX_TOKENS` | `src/athenaeum/claim_kind.py` |
 | `ATHENAEUM_CLAIM_KIND_THINKING` | `src/athenaeum/claim_kind.py` |

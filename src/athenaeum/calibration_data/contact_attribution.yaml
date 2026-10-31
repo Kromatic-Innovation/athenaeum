@@ -1,0 +1,99 @@
+# Shipped calibration record for contact-value attribution (athenaeum#2211).
+#
+# Design docs/design/attribution-verification.md §12.4. This record was
+# generated with the harness's offline dataset/metrics wiring but WITHOUT
+# any live model call -- a build lane has no authority to dispatch
+# evals.yml or spend tokens (see this issue's own "Out of scope" / Blocks
+# on section). Every entry below therefore ships `passes: false`, with
+# `signal: class-level` and zero-valued measured fields as an explicit
+# "not yet measured" marker, not a real result. `model`,
+# `n_fit`/`n_holdout`, `dataset_sha256` and `prompt_sha256` ARE real: they
+# describe this record's fallback model, the actual fit/held-out split
+# sizes in the committed corpus, and the actual sha256 of that corpus and
+# of the shipped judge prompt, respectively.
+#
+# In `auto` mode (design §9), every class with `passes: false` stays
+# `observe` -- no class here is recommended for any tier until a live run
+# (`pytest tests/evals/test_attribution_eval.py -m eval`, dispatched by an
+# operator or CI's evals.yml workflow_dispatch) records real numbers and
+# this file is regenerated.
+- question_class: held-elsewhere
+  model: claude-haiku-4-5-20251001
+  prompt_sha256: 334d2d8dce0ef8c4c341213f4d080b1531db5aa023c40d675231bc30dfa4a668
+  signal: class-level
+  bins: []
+  threshold: 0.0
+  n_fit: 36
+  n_holdout: 24
+  holdout_accuracy_above: 0.0
+  holdout_wilson_lb: 0.0
+  ece: null
+  auroc: null
+  abstain_share: 0.0
+  dataset_sha256: 96142ffe7bcd17f7e511d655854e007bc80d749068ebc502707ab4623e855ebd
+  measured_at: unmeasured
+  passes: false
+- question_class: names-other
+  model: claude-haiku-4-5-20251001
+  prompt_sha256: 334d2d8dce0ef8c4c341213f4d080b1531db5aa023c40d675231bc30dfa4a668
+  signal: class-level
+  bins: []
+  threshold: 0.0
+  n_fit: 54
+  n_holdout: 36
+  holdout_accuracy_above: 0.0
+  holdout_wilson_lb: 0.0
+  ece: null
+  auroc: null
+  abstain_share: 0.0
+  dataset_sha256: 96142ffe7bcd17f7e511d655854e007bc80d749068ebc502707ab4623e855ebd
+  measured_at: unmeasured
+  passes: false
+- question_class: source-context
+  model: claude-haiku-4-5-20251001
+  prompt_sha256: 334d2d8dce0ef8c4c341213f4d080b1531db5aa023c40d675231bc30dfa4a668
+  signal: class-level
+  bins: []
+  threshold: 0.0
+  n_fit: 54
+  n_holdout: 36
+  holdout_accuracy_above: 0.0
+  holdout_wilson_lb: 0.0
+  ece: null
+  auroc: null
+  abstain_share: 0.0
+  dataset_sha256: 96142ffe7bcd17f7e511d655854e007bc80d749068ebc502707ab4623e855ebd
+  measured_at: unmeasured
+  passes: false
+- question_class: non-person-target
+  model: claude-haiku-4-5-20251001
+  prompt_sha256: 334d2d8dce0ef8c4c341213f4d080b1531db5aa023c40d675231bc30dfa4a668
+  signal: class-level
+  bins: []
+  threshold: 0.0
+  n_fit: 36
+  n_holdout: 24
+  holdout_accuracy_above: 0.0
+  holdout_wilson_lb: 0.0
+  ece: null
+  auroc: null
+  abstain_share: 0.0
+  dataset_sha256: 96142ffe7bcd17f7e511d655854e007bc80d749068ebc502707ab4623e855ebd
+  measured_at: unmeasured
+  passes: false
+- question_class: role-unmatched
+  model: claude-haiku-4-5-20251001
+  prompt_sha256: 334d2d8dce0ef8c4c341213f4d080b1531db5aa023c40d675231bc30dfa4a668
+  signal: class-level
+  bins: []
+  threshold: 0.0
+  n_fit: 72
+  n_holdout: 48
+  holdout_accuracy_above: 0.0
+  holdout_wilson_lb: 0.0
+  ece: null
+  auroc: null
+  abstain_share: 0.0
+  dataset_sha256: 96142ffe7bcd17f7e511d655854e007bc80d749068ebc502707ab4623e855ebd
+  measured_at: unmeasured
+  passes: false

@@ -99,6 +99,13 @@ LAYER_PERSON_HINT = "person_hint"
 # cannot show the model actually follows the rule -- a live 50-page dry run
 # against that shipped prompt flagged 7 of 7 bare name-only person stubs.
 LAYER_AUDIT_RETIREMENT = "audit_retirement"
+# Issue athenaeum#2211: the contact-attribution calibration eval layer.
+# Unlike LAYER_WRITE_TIER_COMPARE's two fixed candidates, this one compares
+# the classify/write/verify knob DEFAULTS (tests/evals/attribution_eval.py's
+# CANDIDATE_MODELS), per question class, and additionally runs K=3
+# permuted-candidate-order agreement scoring for classes where self-reported
+# confidence fails the AUROC bar (design docs/design/attribution-verification.md §12.2).
+LAYER_ATTRIBUTION = "attribution"
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EVAL_DATA_ROOT = REPO_ROOT / "tests" / "evals" / "data"
@@ -625,6 +632,7 @@ class EvalSession:
                         LAYER_ATTACHMENT,
                         LAYER_DECOMPOSITION,
                         LAYER_AUDIT_RETIREMENT,
+                        LAYER_ATTRIBUTION,
                     )
                 )
                 if total
