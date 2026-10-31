@@ -781,6 +781,189 @@ class TestMemo:
             assert "value" not in row
 
 
+class TestFailClosedUnclearIsNotMemoised:
+    """Issue athenaeum#2212 — a transient failure must not be permanent.
+
+    ``unclear`` is the fail-closed verdict for an API error, an unparseable
+    response, an out-of-vocabulary verdict and a missing client (design
+    §6.3). Memoising one suppressed re-asking that whole ``(value_key,
+    target_uid, source_ref, prompt_sha256, model)`` identity forever, so a
+    single 429 parked the item with a human and no retry could ever reach
+    it.
+    """
+
+    def _memo_rows(self, context: pii_attribution.AttributionContext) -> list[dict]:
+        path = pii_attribution.default_attribution_memo_path(context.contacts_root)
+        if not path.is_file():
+            return []
+        return [
+            json.loads(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+
+    def test_a_failed_call_records_no_memo_row(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _patch_record(monkeypatch, _entry())
+        context = _context(tmp_path)
+        outcome = _escalate(
+            context,
+            _suspect_verdict(context),
+            client=FakeLLMClient(raises=RuntimeError("provider returned 529")),
+        )
+        assert outcome.judgement is not None
+        assert outcome.judgement.verdict == pii_attribution.JUDGEMENT_UNCLEAR
+        assert self._memo_rows(context) == []
+
+    def test_a_transient_failure_then_a_success_re_asks_and_records(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The whole point: the way back exists.
+
+        The first call raises (the judge's own ``except Exception`` turns it
+        into the fail-closed ``unclear`` -- a retried 429/529 arrives at the
+        identical handler after ``with_retry`` gives up). The second must
+        re-ask the SAME question and record the real verdict; the third must
+        then cost nothing.
+        """
+        _patch_record(monkeypatch, _entry())
+        context = _context(tmp_path)
+        verdict = _suspect_verdict(context)
+        attempts: list[int] = []
+
+        def _responder(**_kwargs: Any) -> str:
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise RuntimeError("provider returned 529")
+            return json.dumps(
+                {"verdict": "other-known", "owner_uid": _HOLDER_UID, "score": 0.95}
+            )
+
+        client = FakeLLMClient(responder=_responder)
+
+        first = _escalate(context, verdict, client=client)
+        assert first.memo_hit is False
+        assert first.judgement is not None
+        assert first.judgement.verdict == pii_attribution.JUDGEMENT_UNCLEAR
+        assert self._memo_rows(context) == []
+
+        second = _escalate(context, verdict, client=client)
+        assert second.memo_hit is False  # re-asked, not suppressed
+        assert second.judgement is not None
+        assert second.judgement.verdict == pii_attribution.JUDGEMENT_OTHER_KNOWN
+        assert second.judgement.owner_uid == _HOLDER_UID
+        assert len(attempts) == 2
+        assert [r["verdict"] for r in self._memo_rows(context)] == ["other-known"]
+
+        # The real verdict IS memoised: a third ask makes no call at all.
+        third = _escalate(context, verdict, client=_NoCallClient())
+        assert third.memo_hit is True
+        assert third.judgement is not None
+        assert third.judgement.verdict == pii_attribution.JUDGEMENT_OTHER_KNOWN
+
+    def test_a_real_verdict_is_still_memoised_and_makes_no_second_call(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _patch_record(monkeypatch, _entry())
+        context = _context(tmp_path)
+        verdict = _suspect_verdict(context)
+        client = _judge_client(verdict="own", score=0.95)
+        _escalate(context, verdict, client=client)
+        assert [r["verdict"] for r in self._memo_rows(context)] == ["own"]
+        second = _escalate(context, verdict, client=_NoCallClient())
+        assert second.memo_hit is True
+        assert len(client.calls) == 1
+
+    def test_an_unclear_the_model_evidenced_is_memoised(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A genuine model ``unclear`` is distinguishable when it carries any
+        payload-derived field -- ``judge_contact_attribution``'s fail-closed
+        path cannot produce one."""
+        _patch_record(monkeypatch, _entry())
+        context = _context(tmp_path)
+        verdict = _suspect_verdict(context)
+        client = _judge_client(
+            verdict="unclear", score=0.0, quote="could be either of them"
+        )
+        first = _escalate(context, verdict, client=client)
+        assert first.judgement is not None
+        assert first.judgement.verdict == pii_attribution.JUDGEMENT_UNCLEAR
+        assert [r["verdict"] for r in self._memo_rows(context)] == ["unclear"]
+        second = _escalate(context, verdict, client=_NoCallClient())
+        assert second.memo_hit is True
+
+    def test_a_bare_unclear_is_treated_as_a_failure_and_re_asked(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Byte-indistinguishable from ``_unclear()``, so it re-asks: one
+        extra call beats a permanently unreachable parked item."""
+        _patch_record(monkeypatch, _entry())
+        context = _context(tmp_path)
+        verdict = _suspect_verdict(context)
+        client = _judge_client(verdict="unclear", score=0.0)
+        _escalate(context, verdict, client=client)
+        assert self._memo_rows(context) == []
+        second = _escalate(context, verdict, client=client)
+        assert second.memo_hit is False
+        assert len(client.calls) == 2
+
+    @pytest.mark.parametrize(
+        ("kwargs", "expected"),
+        [
+            ({"verdict": "own", "score": 0.0}, True),
+            ({"verdict": "other-unknown", "score": 0.0}, True),
+            ({"verdict": "unclear", "score": 0.0}, False),
+            ({"verdict": "unclear", "score": 0.4}, True),
+            ({"verdict": "unclear", "quote": "an excerpt"}, True),
+            ({"verdict": "unclear", "owner_uid": _HOLDER_UID}, True),
+            ({"verdict": "unclear", "alias_relation": "shared"}, True),
+        ],
+        ids=[
+            "own-is-an-answer",
+            "other-unknown-is-an-answer",
+            "bare-unclear-is-a-failure",
+            "unclear-with-score",
+            "unclear-with-quote",
+            "unclear-with-owner-uid",
+            "unclear-with-alias-relation",
+        ],
+    )
+    def test_the_discriminator(self, kwargs: dict, expected: bool) -> None:
+        judgement = pii_attribution.AttributionJudgement(**kwargs)
+        assert pii_attribution.is_memoisable_judgement(judgement) is expected
+
+    def test_the_fail_closed_shape_is_exactly_what_the_judge_returns(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pins the discriminator to the judge's OWN fail-closed output rather
+        than to a transcription of it, for all four design §6.3 paths."""
+        _patch_record(monkeypatch, _entry())
+        context = _context(tmp_path)
+        question = pii_attribution.build_attribution_question(
+            context,
+            _VALUE,
+            _suspect_verdict(context),
+            target_uid=_TARGET_UID,
+            target_name=_TARGET_NAME,
+            target_type="person",
+            source_ref="raw/intake/note.md",
+        )
+        clients: list[Any] = [
+            None,  # no client
+            FakeLLMClient(raises=RuntimeError("api error")),
+            FakeLLMClient(text="not json at all"),
+            FakeLLMClient(text=json.dumps({"verdict": "obliterate"})),
+        ]
+        for client in clients:
+            judgement = pii_attribution.judge_contact_attribution(
+                question, client, EXCLUDED_CONFIG
+            )
+            assert judgement.verdict == pii_attribution.JUDGEMENT_UNCLEAR
+            assert pii_attribution.is_memoisable_judgement(judgement) is False
+
+
 # ---------------------------------------------------------------------------
 # B3 -- the human queue
 # ---------------------------------------------------------------------------

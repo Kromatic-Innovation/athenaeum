@@ -2475,6 +2475,43 @@ def memo_lookup(
     return read_attribution_memo(default_attribution_memo_path(context.contacts_root)).get(key)
 
 
+def is_memoisable_judgement(judgement: AttributionJudgement) -> bool:
+    """Whether *judgement* is an ANSWER worth memoising (issue athenaeum#2212).
+
+    The memo exists so one question is never re-spent (design §4.3). A
+    fail-closed :data:`JUDGEMENT_UNCLEAR` is not an answer to that question
+    — design §6.3 returns it for an API error, an unparseable response, an
+    out-of-vocabulary verdict and a missing client alike. Memoising one
+    makes a single transient 429 permanent: the pair is suppressed for its
+    whole ``(value_key, target_uid, source_ref, prompt_sha256, model)``
+    identity, the item sits in the human queue with no retry, and
+    re-running the escalation — the design's own way back — can never
+    re-ask. So a fail-closed ``unclear`` is NOT memoised, and the next
+    escalation re-asks.
+
+    Telling a fail-closed ``unclear`` from a model that genuinely answered
+    "unclear": every fail-closed path in
+    :func:`judge_contact_attribution` returns its local ``_unclear()``,
+    which is exactly ``verdict="unclear"`` with the dataclass defaults for
+    everything the response payload would otherwise fill in — ``score 0.0``
+    and no ``owner_uid``/``alias_relation``/``quote``. So ANY of those being
+    set proves the payload parsed, i.e. a real model answer, and that
+    answer is memoised. A genuine ``unclear`` that happens to carry none of
+    them is byte-indistinguishable from a failure, and is treated as a
+    failure: one extra call on the next sweep, versus a permanently parked
+    item that can never be re-asked. ``judge_contact_attribution`` itself is
+    deliberately untouched — the discriminator reads its OUTPUT.
+    """
+    if judgement.verdict != JUDGEMENT_UNCLEAR:
+        return True
+    return bool(
+        judgement.quote
+        or judgement.owner_uid
+        or judgement.alias_relation
+        or judgement.score > 0.0
+    )
+
+
 def record_attribution_memo(
     context: AttributionContext,
     judgement: AttributionJudgement,
@@ -3198,7 +3235,11 @@ def escalate_contact_attribution_suspect(
 
     **Order of operations.** Question class, then the ``(model,
     prompt_sha256)`` identity, then the memo LOOKUP, and only on a miss the
-    model call. A hit costs no call at all (design §6.1).
+    model call. A hit costs no call at all (design §6.1). The answer is
+    memoised only when it IS an answer: a fail-closed ``unclear`` is not
+    recorded, so a transient API failure cannot permanently suppress
+    re-asking this question (issue athenaeum#2212, see
+    :func:`is_memoisable_judgement`).
 
     **At or above threshold** the judgement goes to the placement executor
     with ``decided_by="model"``, the design §7.2 re-check bound to this
@@ -3373,13 +3414,20 @@ def _escalate_suspect_inner(
     )
     if judgement is None:
         judgement = judge_contact_attribution(question, client, config, usage)
-        record_attribution_memo(
-            context,
-            judgement,
-            value_key=verdict.value_key,
-            target_uid=target_uid,
-            source_ref=source_ref,
-        )
+        # Issue athenaeum#2212: a fail-closed `unclear` is NOT an answer, so
+        # it is not memoised -- memoising one makes a single transient 429
+        # permanent for this (value_key, target_uid, source_ref,
+        # prompt_sha256, model) identity. See
+        # :func:`is_memoisable_judgement` for how a failure is told apart
+        # from a model that genuinely answered "unclear".
+        if is_memoisable_judgement(judgement):
+            record_attribution_memo(
+                context,
+                judgement,
+                value_key=verdict.value_key,
+                target_uid=target_uid,
+                source_ref=source_ref,
+            )
 
     calibrated_p = calibrated_probability_for_class(question_class, judgement.score)
     threshold = threshold_for_class(question_class, config)
@@ -3663,6 +3711,7 @@ __all__ += [
     "read_attribution_memo",
     "memo_lookup",
     "record_attribution_memo",
+    "is_memoisable_judgement",
     "SuspectIdError",
     "ParkedSuspect",
     "suspect_id_for",
