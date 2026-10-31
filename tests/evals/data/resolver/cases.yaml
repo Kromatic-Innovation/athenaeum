@@ -261,7 +261,7 @@
         source_ref: "session-2026-05-12"
         updated: "2026-05-12"
 
-# Added in issue athenaeum#2231 to give RESOLVER_FLOOR one case of real slack
+# Added in issue athenaeum#2231 to give RESOLVER_FLOOR one case of real margin
 # (see test_resolver_eval.py's floor-derivation comment) — a second
 # keep_pick_winner-via-source-precedence pair, same proven-reliable shape as
 # precedence_user_over_unsourced_contact above: one inferred claim, one
