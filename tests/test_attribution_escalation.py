@@ -10,7 +10,10 @@ Every model call is mocked and every fixture is synthetic
 load:
 
 - ``_NoCallClient`` raises on ``.messages.create``, so "makes no model call"
-  is asserted by construction rather than by counting.
+  is asserted by construction rather than by counting. What it raises is a
+  ``BaseException`` (:class:`_UnexpectedModelCall`), because the two
+  fail-closed ``except Exception`` handlers between a test and the client
+  would otherwise swallow it and report ``unclear``.
 - ``_entry`` / ``_patch_record`` install a SYNTHETIC passing calibration
   record. The shipped one ships ``passes: false`` with ``bins: []`` for
   every class (by design, until a live eval runs), so no above-threshold
@@ -68,20 +71,42 @@ _MODEL = "synthetic-attribution-model"
 # ---------------------------------------------------------------------------
 
 
+class _UnexpectedModelCall(BaseException):
+    """Raised by :class:`_NoCallClient` when a model call is attempted.
+
+    **Derived from ``BaseException``, not ``Exception``, and that is the
+    whole point.** Both layers between a test and the client swallow
+    ``Exception`` by design: ``judge_contact_attribution`` wraps the call in
+    ``except Exception`` (``# noqa: BLE001 -- fail closed, never raise``,
+    design §6.3) and ``escalate_contact_attribution_suspect`` wraps its whole
+    body the same way. An ``AssertionError`` raised from inside the client
+    is an ``Exception``, so it was caught, logged as "judge call failed", and
+    turned into an ``unclear`` judgement — the double reported nothing and
+    the test only failed later, on a downstream assertion, if at all.
+    ``BaseException`` passes through both fail-closed handlers untouched, so
+    the failure is attributed to the unexpected call itself.
+    """
+
+
 class _NoCallClient:
     """Raises if any model call is attempted.
 
     Shaped like the anthropic client slice ``judge_contact_attribution``
     uses (``client.messages.create``). Asserting "no call" with a double
     that cannot be called is stronger than asserting a call count: a future
-    edit that adds a second call site fails here immediately.
+    edit that adds a second call site fails here immediately — but only
+    because what it raises is a :class:`_UnexpectedModelCall`
+    (``BaseException``). See that class for why an ``AssertionError`` here
+    was silently swallowed by the fail-closed handlers and bought nothing.
     """
 
     def __init__(self) -> None:
         self.messages = self
 
     def create(self, **_kwargs: Any) -> Any:
-        raise AssertionError("a model call was made where none was expected")
+        raise _UnexpectedModelCall(
+            "a model call was made where none was expected"
+        )
 
 
 def _judge_client(**payload: Any) -> FakeLLMClient:
