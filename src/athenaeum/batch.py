@@ -102,6 +102,7 @@ from athenaeum.models import (
     render_frontmatter,
     resolve_page_type,
 )
+from athenaeum.pii_attribution import build_attribution_context
 from athenaeum.provider import (
     AnthropicBatchClientBackend,
     response_text,
@@ -1933,6 +1934,17 @@ def process_batch_run(
     # Same-page synchronous merges execute here, serialized in intake
     # order, re-reading the page fresh so each sees the previous write.
     resolved_config = config if config is not None else load_config(wiki_root.parent)
+    # Issue athenaeum#2216: one AttributionContext for the whole finalize pass,
+    # reusing the EntityIndex this run already built (`index`) rather than
+    # paying a second O(corpus) scan — the same sharing
+    # `pii_attribution.build_attribution_context`'s own docstring documents
+    # for the librarian compile loop. Threaded into every one of this
+    # function's five tier-3 call sites below so the prose-compile scrub
+    # (design `attribution-verification.md` §10.2) runs on this transport's
+    # output exactly as it does on the synchronous one.
+    attribution_context = build_attribution_context(
+        wiki_root.parent, resolved_config, entity_index=index
+    )
     deferred_now: list[str] = []
     sync_merges_started = False
     for st in states:
@@ -2031,6 +2043,7 @@ def process_batch_run(
                         getattr(msg, "stop_reason", None),
                         usage=usage,
                         config=config,
+                        attribution_context=attribution_context,
                     )
                 except PreambleOnlyResponseError:
                     log.warning(
@@ -2066,6 +2079,12 @@ def process_batch_run(
                 # try/except with the shared helper so the rule lives in
                 # exactly one place.
                 merge_text = text_or_truncated(msg, merge_stop_reason)
+                # Issue athenaeum#2216: the scrub's real target type, resolved
+                # from the TARGET page's own frontmatter (already in `meta`)
+                # — never `action.entity_type`, which is always "" for a
+                # merge action. `or None` turns resolve_page_type's own ""
+                # (genuinely no `type:` set) into the "unknown" sentinel too.
+                merge_target_type = resolve_page_type(meta) or None
                 updated_body, esc, needs_fallback = parse_merge_ops_response(
                     merge_text,
                     action,
@@ -2078,6 +2097,8 @@ def process_batch_run(
                     # citation_only_merges/full_merges identically on both
                     # transports (see TokenUsage's own docstring).
                     usage=usage,
+                    attribution_context=attribution_context,
+                    target_type=merge_target_type,
                 )
                 if needs_fallback:
                     updated_body, esc = tier3_merge_full(
@@ -2087,6 +2108,8 @@ def process_batch_run(
                         AnthropicBatchClientBackend(effective_write_client),
                         usage=usage,
                         config=config,
+                        attribution_context=attribution_context,
+                        target_type=merge_target_type,
                     )
                 if esc:
                     escalations.append(esc)
@@ -2113,6 +2136,7 @@ def process_batch_run(
                         wiki_root=wiki_root,
                         usage=usage,
                         config=config,
+                        attribution_context=attribution_context,
                     )
                 except PreambleOnlyResponseError:
                     log.warning(
@@ -2195,6 +2219,11 @@ def process_batch_run(
                     surface=(
                         SURFACE_SAME_PAGE_MULTI_MERGE if batch_write else None
                     ),
+                    attribution_context=attribution_context,
+                    # Issue athenaeum#2216: resolved from `meta` (already
+                    # read above), never `action.entity_type` — see the
+                    # batched-merge loop's own comment above for why.
+                    target_type=resolve_page_type(meta) or None,
                 )
                 if esc:
                     escalations.append(esc)

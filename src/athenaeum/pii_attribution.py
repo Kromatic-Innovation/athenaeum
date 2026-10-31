@@ -135,14 +135,19 @@ WRITER_OBSERVED_CONTACT = "observed-contact"
 WRITER_CORRECTION_ADD = "correction-add"
 WRITER_PII_MIGRATION = "pii-migration"
 WRITER_CONTACT_FOLD = "contact-fold"
+#: issue athenaeum#2216 (prose-compile scrub): the tier-3 create/merge
+#: convergence helpers' writer id — see "Prose-compile scrub" below.
+WRITER_PROSE_COMPILE = "prose-compile"
 
-#: The four writers this issue wires. Membership, not count, is what the
-#: writer-inventory guard test asserts (future children extend this set).
+#: The four writers issue athenaeum#2210 wires, plus athenaeum#2216's
+#: prose-compile scrub. Membership, not count, is what the writer-inventory
+#: guard test asserts (future children extend this set further).
 WRITER_IDS: tuple[str, ...] = (
     WRITER_OBSERVED_CONTACT,
     WRITER_CORRECTION_ADD,
     WRITER_PII_MIGRATION,
     WRITER_CONTACT_FOLD,
+    WRITER_PROSE_COMPILE,
 )
 
 # ---------------------------------------------------------------------------
@@ -1120,6 +1125,108 @@ def check_contact_attribution(
 
 
 # ---------------------------------------------------------------------------
+# Prose-compile scrub (athenaeum#2216)
+# ---------------------------------------------------------------------------
+
+
+def scrub_compiled_contact_tokens(
+    body: str,
+    *,
+    subject_uid: str,
+    source_ref: str | dict[str, Any] | None,
+    context: AttributionContext,
+    target_name: str | None = None,
+    target_type: str | None = None,
+) -> tuple[str, list[str]]:
+    """Remove every contact token from tier-3 compiled output (design §10.2).
+
+    Child G of epic athenaeum#2192. The tier-3 create and merge prompts can
+    write an address or phone number mentioned in a note into the body of
+    whichever page they compile — this is the one place that is undone
+    before the body reaches disk, on EVERY caller that converges on
+    :func:`athenaeum.tiers.tier3_entity_from_response`,
+    :func:`athenaeum.tiers.parse_merge_ops_response` or
+    :func:`athenaeum.tiers.tier3_merge_full` (both the synchronous and the
+    batch transport). Returns ``(scrubbed_body, removed_tokens)``; a body
+    with no email/phone-shaped token comes back byte-identical (same
+    string), and ``removed_tokens`` is empty.
+
+    Finds tokens with the existing detectors
+    (:func:`athenaeum.pii.find_inline_emails` /
+    :func:`athenaeum.pii.find_inline_phones`) and removes every occurrence of
+    each one, replacing it with nothing (design §10.2's first option — a
+    neutral marker is the design's other sanctioned option, not needed here
+    since nothing downstream re-parses the body for sentence structure).
+
+    **The athenaeum#1461 name-field carve-out.** A token that IS *target_name*'s
+    own email/phone-shaped value (the athenaeum#502 "name is a raw contact
+    address" population) is a durable identifier, most visibly echoed back
+    verbatim in a page's own heading — exactly the token
+    :func:`athenaeum.storage_migrate.plan_pii_migration` preserves rather
+    than redacts. Reused here via
+    :func:`athenaeum.pii.name_field_pii_values` rather than re-derived, so
+    the two call sites can never drift apart on what counts as the carve-out.
+
+    **Nothing is lost.** Every removed token (the carve-out above means a
+    name-field token is never a removal candidate in the first place) is
+    sent through :func:`check_contact_attribution` with
+    ``writer="prose-compile"``, *source_ref* as the source and *subject_uid*
+    as the target, regardless of the verdict's disposition (unlike the other
+    four writers, which only park a non-``pass`` verdict, this writer has no
+    "file it on the record" path at all in observe mode, so a ``pass`` token
+    would otherwise vanish with no trace). It is then parked via
+    :func:`park_suspect` as a **shadow** suspect (design §10.2: "In observe
+    mode, every token is parked as a shadow entry" — unlike the other
+    writers' ``shadow=not is_d1_narrow(verdict)``, this writer removes the
+    token from the body unconditionally regardless of disposition, so there
+    is no enforce-vs-observe distinction for the shadow flag to encode until
+    the enforce child (athenaeum#2220) adds the "file a pass on the
+    subject's record" path design §10.2 describes).
+    """
+    tokens = pii.find_inline_emails(body) + pii.find_inline_phones(body)
+    if not tokens:
+        return body, []
+
+    name_pii_values = (
+        set(pii.name_field_pii_values({"name": target_name})) if target_name else set()
+    )
+
+    scrubbed = body
+    removed: list[str] = []
+    for token in tokens:
+        if token in name_pii_values:
+            continue
+        verdict = check_contact_attribution(
+            token,
+            target_uid=subject_uid,
+            target_name=target_name,
+            target_type=target_type,
+            source_ref=source_ref,
+            writer=WRITER_PROSE_COMPILE,
+            context=context,
+        )
+        park_suspect(
+            context,
+            token,
+            verdict,
+            target_uid=subject_uid,
+            target_name=target_name,
+            writer=WRITER_PROSE_COMPILE,
+            source_ref=source_ref,
+            # NOT `shadow=not is_d1_narrow(verdict)` (the other four writers'
+            # convention) — design §10.2 states shadow=True unconditionally
+            # for THIS writer, and prose-compile never files a value onto a
+            # record regardless of disposition, so there is no
+            # enforce-vs-shadow distinction here to encode yet (athenaeum#2216).
+            shadow=True,
+        )
+        scrubbed = scrubbed.replace(token, "")
+        removed.append(token)
+
+    return scrubbed, removed
+
+
+# ---------------------------------------------------------------------------
 # Excluded-surface storage: the attribution log and the suspect park file
 # ---------------------------------------------------------------------------
 
@@ -1250,6 +1357,7 @@ __all__ = [
     "WRITER_CORRECTION_ADD",
     "WRITER_PII_MIGRATION",
     "WRITER_CONTACT_FOLD",
+    "WRITER_PROSE_COMPILE",
     "WRITER_IDS",
     "DISPOSITION_PASS",
     "DISPOSITION_NON_PERSONAL",
@@ -1275,6 +1383,7 @@ __all__ = [
     "is_d1_narrow",
     "build_attribution_context",
     "check_contact_attribution",
+    "scrub_compiled_contact_tokens",
     "default_attribution_log_path",
     "log_attribution_verdict",
     "park_suspect",

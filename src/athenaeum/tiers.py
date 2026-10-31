@@ -136,12 +136,14 @@ from athenaeum.models import (
     generate_uid,
     parse_frontmatter,
     render_frontmatter,
+    resolve_page_type,
 )
 from athenaeum.outbound_pii import redact_outbound_text
 from athenaeum.page_description import (
     derive_description_from_body,
     split_description_line,
 )
+from athenaeum.pii_attribution import AttributionContext, scrub_compiled_contact_tokens
 from athenaeum.progress import PhaseHeartbeat
 from athenaeum.prompt_safety import (
     UNTRUSTED_DATA_CLAUSE,
@@ -3904,6 +3906,8 @@ def tier3_create(
     wiki_root: Path | None = None,
     usage: TokenUsage | None = None,
     config: dict[str, Any] | None = None,
+    *,
+    attribution_context: AttributionContext | None = None,
 ) -> WikiEntity:
     """Use a capable LLM to create a new entity page.
 
@@ -3914,6 +3918,12 @@ def tier3_create(
     athenaeum#1183 AC4); that guard was withdrawn and removed (athenaeum#1597
     AC1) — a person create goes through the same path as any other entity
     type now.
+
+    *attribution_context* (issue athenaeum#2216, keyword-only, ``None`` by
+    default so every existing caller is byte-identical): threaded straight
+    through to :func:`tier3_entity_from_response`, the shared convergence
+    point both transports' create path returns through — see that
+    function's docstring for the scrub itself.
     """
     params = tier3_create_params(action, source_ref, wiki_root=wiki_root, config=config)
 
@@ -3938,6 +3948,7 @@ def tier3_create(
         reported_stop_reason(response, _capabilities(config)),
         usage=usage,
         config=config,
+        attribution_context=attribution_context,
     )
 
 
@@ -4058,6 +4069,51 @@ def truncated_create_escalation(
     )
 
 
+def _scrub_prose_compile_body(
+    body: str | None,
+    *,
+    subject_uid: str,
+    target_name: str,
+    target_type: str | None,
+    source_ref: str,
+    attribution_context: AttributionContext | None,
+) -> str | None:
+    """Apply the athenaeum#2216 prose-compile scrub to one compiled body.
+
+    Shared by :func:`tier3_entity_from_response`, :func:`parse_merge_ops_response`
+    and :func:`tier3_merge_full` — the three helpers both the synchronous and
+    batch transports converge on (design §10.2). ``attribution_context=None``
+    (every pre-athenaeum#2216 caller, since the default is ``None``) or
+    ``body=None`` passes straight through unchanged, matching the
+    ``None``-default convention :func:`athenaeum.storage_migrate.plan_pii_migration`
+    and the other athenaeum#2210 writers already use.
+
+    *target_type* MUST be ``None`` (unknown — D3 passes) rather than ``""``
+    when the real type cannot be resolved, never the other way around.
+    ``check_contact_attribution``'s D3 check (and D1-role) test
+    ``target_type is not None`` rather than truthiness, so an empty string
+    reads as "definitely not a person" and wrongly flags D3 on every
+    token — this is exactly the merge-path bug athenaeum#2216 fixed by
+    threading the real resolved type instead of ``action.entity_type``
+    (always ``""`` on every merge action — see the callers below). The
+    ``is not None``-vs-truthiness asymmetry itself is deliberately NOT
+    touched here — that is athenaeum#2210's seam code, and changing its
+    semantics could move dispositions in athenaeum#2210's own tests; it is
+    tracked as a separate finding, not fixed in this issue.
+    """
+    if attribution_context is None or body is None:
+        return body
+    scrubbed, _removed = scrub_compiled_contact_tokens(
+        body,
+        subject_uid=subject_uid,
+        source_ref=source_ref,
+        context=attribution_context,
+        target_name=target_name,
+        target_type=target_type,
+    )
+    return scrubbed
+
+
 def tier3_entity_from_response(
     action: EntityAction,
     response: Any,
@@ -4065,6 +4121,8 @@ def tier3_entity_from_response(
     stop_reason: str | None,
     usage: TokenUsage | None = None,
     config: dict[str, Any] | None = None,
+    *,
+    attribution_context: AttributionContext | None = None,
 ) -> WikiEntity:
     """Read a Tier-3 create *response* and build its :class:`WikiEntity`.
 
@@ -4079,6 +4137,15 @@ def tier3_entity_from_response(
     text is passed through to :func:`tier3_entity_from_text` exactly as
     before, since a partial page is this stage's pre-existing behaviour and
     narrowing it is out of scope here.
+
+    *attribution_context* (issue athenaeum#2216, keyword-only, ``None`` by
+    default): when given, the prose-compile scrub
+    (:func:`scrub_compiled_contact_tokens`) runs on the constructed entity's
+    body before it is returned — the entity's own freshly minted ``uid`` is
+    the scrub's subject, since a create has no existing page to target. This
+    is one of the three shared helpers the design (§10.2) names as the
+    convergence point both the synchronous (:func:`tier3_create`) and batch
+    (:mod:`athenaeum.batch`) transports return a create through.
     """
     text = text_or_truncated(response, stop_reason)
     if stop_reason == "max_tokens" and not text.strip():
@@ -4094,7 +4161,18 @@ def tier3_entity_from_response(
             f"tier3 create for {action.name!r} was truncated at max_tokens "
             "before any page content was emitted"
         )
-    return tier3_entity_from_text(action, text, usage=usage, config=config)
+    entity = tier3_entity_from_text(action, text, usage=usage, config=config)
+    scrubbed_body = _scrub_prose_compile_body(
+        entity.body,
+        subject_uid=entity.uid,
+        target_name=entity.name,
+        target_type=entity.type,
+        source_ref=source_ref,
+        attribution_context=attribution_context,
+    )
+    if scrubbed_body is not None:
+        entity.body = scrubbed_body
+    return entity
 
 
 def existing_body_needs_full_echo(existing_body: str) -> bool:
@@ -5498,10 +5576,30 @@ def parse_merge_ops_response(
     stop_reason: str | None = None,
     wiki_root: Path | None = None,
     usage: TokenUsage | None = None,
+    attribution_context: AttributionContext | None = None,
+    target_type: str | None = None,
 ) -> tuple[str | None, EscalationItem | None, bool]:
     """Parse a patch-mode merge response and apply it to ``existing_body``.
 
     Issue athenaeum#469. Returns ``(updated_body, escalation_item, needs_fallback)``.
+
+    *attribution_context* (issue athenaeum#2216, keyword-only, ``None`` by
+    default): when given, the prose-compile scrub
+    (:func:`scrub_compiled_contact_tokens`) runs on every non-``None`` body
+    this function returns, with ``action.existing_uid`` as the scrub's
+    subject — this is one of the three shared helpers the design (§10.2)
+    names as the convergence point both the synchronous (:func:`tier3_merge`)
+    and batch (:mod:`athenaeum.batch`) transports return a patch-mode merge
+    through. *target_type* (issue athenaeum#2216, keyword-only, ``None`` by
+    default — NEVER ``""``) is the scrub's resolved target type: the caller
+    must resolve it from the target page's OWN frontmatter
+    (``resolve_page_type(meta)``, matching the idiom at this module's own
+    ``_perform_oversize_page_split``) rather than pass ``action.entity_type``,
+    which is always ``""`` on every merge action in this codebase (every
+    ``kind="update"`` construction site in ``librarian.py`` sets it that
+    way) — ``""`` is not ``None``, so it was wrongly tripping D3 ("target is
+    not a person") on every merge-path token (Seer finding, 2026-10-31).
+    ``None`` is the correct "unknown" value and passes D3.
 
     Issue athenaeum#1866: checked BEFORE ``adds_new_claim`` (and hence
     before ``ops``) — a bare-boolean ``subject_mismatch: true`` short-circuits
@@ -5579,6 +5677,14 @@ def parse_merge_ops_response(
             description=parts[0].replace("ESCALATE:", "").strip(),
         )
         body = parts[1].strip() if len(parts) > 1 else None
+        body = _scrub_prose_compile_body(
+            body,
+            subject_uid=action.existing_uid or "",
+            target_name=action.name,
+            target_type=target_type,
+            source_ref=source_ref,
+            attribution_context=attribution_context,
+        )
         return body, escalation, False
 
     obj = extract_json_object(stripped)
@@ -5668,6 +5774,15 @@ def parse_merge_ops_response(
                 action.name,
                 source_ref,
             )
+            # athenaeum#2216: deliberately NOT run through the prose-compile
+            # scrub. The rule is AUTHORSHIP, not new-vs-echoed content: this
+            # branch's body is zero-percent model-authored (existing_body
+            # plus a Python-concatenated footnote, because adds_new_claim:
+            # false short-circuits before the model is ever asked to
+            # reproduce anything) — unlike tier3_merge_full's full echo,
+            # which IS scrubbed in full because its entire output is
+            # model-generated by the full-echo contract, even where it
+            # matches the prior body byte for byte.
             return _append_source_citation(existing_body, source_ref), None, False
 
         # Fix (b): normalize a non-list ops field (dict-valued, or the alternate
@@ -5694,7 +5809,15 @@ def parse_merge_ops_response(
                         usage.person_hint_decisions.append(
                             (action.existing_uid, "write_merge", "merged")
                         )
-                return applied, None, False
+                scrubbed_applied = _scrub_prose_compile_body(
+                    applied,
+                    subject_uid=action.existing_uid or "",
+                    target_name=action.name,
+                    target_type=target_type,
+                    source_ref=source_ref,
+                    attribution_context=attribution_context,
+                )
+                return scrubbed_applied, None, False
             except MergeOpsError as exc:
                 log.warning(
                     "%s page=%s source=%s cause=anchor-miss — patch-mode ops "
@@ -5740,6 +5863,8 @@ def tier3_merge(
     *,
     wiki_root: Path | None = None,
     surface: str | None = None,
+    attribution_context: AttributionContext | None = None,
+    target_type: str | None = None,
 ) -> tuple[str | None, EscalationItem | None]:
     """Use a capable LLM to merge observations into an existing entity page.
 
@@ -5765,6 +5890,18 @@ def tier3_merge(
     call needs the full-echo fallback, :func:`tier3_merge_full` tags its OWN
     declared surface instead, regardless of what (if anything) was passed
     here — the two are separate declared surfaces even for the same page.
+
+    *attribution_context* (issue athenaeum#2216, keyword-only, ``None`` by
+    default): threaded straight through to :func:`parse_merge_ops_response`
+    and :func:`tier3_merge_full`, the two shared convergence points that
+    actually run the prose-compile scrub — this function's own body is
+    never scrubbed directly, it only forwards the context. *target_type*
+    (keyword-only, ``None`` by default — NEVER ``""``) is forwarded
+    alongside it: the CALLER must resolve the merge target's real type from
+    its own frontmatter (``resolve_page_type(meta)``) and pass it here —
+    never ``action.entity_type``, which is always ``""`` on every merge
+    action, and ``""`` (unlike ``None``) wrongly trips the scrub's D3 check
+    on every token.
     """
     # Anchor safety (issue athenaeum#562 / audit M20): a body that would break the
     # <existing_page> fence cannot use the patch path — go straight to the
@@ -5789,7 +5926,14 @@ def tier3_merge(
                 )
             return None, None
         return tier3_merge_full(
-            action, existing_body, source_ref, client, usage=usage, config=config
+            action,
+            existing_body,
+            source_ref,
+            client,
+            usage=usage,
+            config=config,
+            attribution_context=attribution_context,
+            target_type=target_type,
         )
 
     # Issue athenaeum#1180: patch mode is safe to continue on a truncated body — see
@@ -5839,6 +5983,8 @@ def tier3_merge(
         stop_reason=stop_reason,
         wiki_root=wiki_root,
         usage=usage,
+        attribution_context=attribution_context,
+        target_type=target_type,
     )
     if not needs_fallback:
         return body, escalation
@@ -5861,7 +6007,14 @@ def tier3_merge(
         return None, None
 
     return tier3_merge_full(
-        action, existing_body, source_ref, client, usage=usage, config=config
+        action,
+        existing_body,
+        source_ref,
+        client,
+        usage=usage,
+        config=config,
+        attribution_context=attribution_context,
+        target_type=target_type,
     )
 
 
@@ -5872,8 +6025,24 @@ def tier3_merge_full(
     client: LLMBackend,
     usage: TokenUsage | None = None,
     config: dict[str, Any] | None = None,
+    *,
+    attribution_context: AttributionContext | None = None,
+    target_type: str | None = None,
 ) -> tuple[str | None, EscalationItem | None]:
     """Full-echo merge fallback (issue athenaeum#469).
+
+    *attribution_context* (issue athenaeum#2216, keyword-only, ``None`` by
+    default): when given, the prose-compile scrub
+    (:func:`scrub_compiled_contact_tokens`) runs on whichever body this
+    function returns (the append-mode delta-applied body, or the full-echo
+    replacement), with ``action.existing_uid`` as the scrub's subject. This
+    is one of the three shared helpers the design (§10.2) names as the
+    convergence point both transports call directly — the batch transport's
+    finalize step calls this function the same way :func:`tier3_merge`'s own
+    fallback does. *target_type* (keyword-only, ``None`` by default — NEVER
+    ``""``) is the scrub's resolved target type — see
+    :func:`parse_merge_ops_response`'s docstring for why it must come from
+    the target page's own frontmatter, not ``action.entity_type``.
 
     The pre-patch contract that reproduces the whole merged page. Used when a
     patch-mode response is unparseable, truncated, or any op fails to apply,
@@ -5943,7 +6112,7 @@ def tier3_merge_full(
         append_stop_reason = reported_stop_reason(
             append_response, _capabilities(config)
         )
-        return parse_tier3_merge_append(
+        append_body, append_escalation = parse_tier3_merge_append(
             text_or_truncated(append_response, append_stop_reason),
             action,
             source_ref,
@@ -5951,6 +6120,15 @@ def tier3_merge_full(
             stop_reason=append_stop_reason,
             usage=usage,
         )
+        append_body = _scrub_prose_compile_body(
+            append_body,
+            subject_uid=action.existing_uid or "",
+            target_name=action.name,
+            target_type=target_type,
+            source_ref=source_ref,
+            attribution_context=attribution_context,
+        )
+        return append_body, append_escalation
 
     params = tier3_merge_full_params(action, existing_body, source_ref, config=config)
 
@@ -5990,7 +6168,7 @@ def tier3_merge_full(
     # max_tokens response here raised out of the merge entirely instead of
     # taking parse_tier3_merge's truncation escalation.
     full_stop_reason = reported_stop_reason(response, _capabilities(config))
-    return parse_tier3_merge(
+    full_body, full_escalation = parse_tier3_merge(
         # Issue athenaeum#578: full-echo merge enables adaptive thinking — skip any
         # leading thinking block and read the merged-body answer.
         text_or_truncated(response, full_stop_reason),
@@ -6000,6 +6178,15 @@ def tier3_merge_full(
         stop_reason=full_stop_reason,
         usage=usage,
     )
+    full_body = _scrub_prose_compile_body(
+        full_body,
+        subject_uid=action.existing_uid or "",
+        target_name=action.name,
+        target_type=target_type,
+        source_ref=source_ref,
+        attribution_context=attribution_context,
+    )
+    return full_body, full_escalation
 
 
 #: Stable, greppable log prefix for the sanctioned full-echo no-op channel
@@ -7059,8 +7246,19 @@ def tier3_derive_actions(
     calls_before_file: int = 0,
     started_at_file: float | None = None,
     audit_hook: "Callable[[str, Path, dict[str, Any], str], object] | None" = None,
+    attribution_context: AttributionContext | None = None,
 ) -> tuple[list[WikiEntity], list[tuple[Path, str]], list[str], list[EscalationItem]]:
     """The LLM-call phase of Tier 3 — makes every call, writes NOTHING.
+
+    ``attribution_context`` (issue athenaeum#2216, keyword-only, ``None`` by
+    default so every existing caller — the ~10 test files that call this
+    function directly — is byte-identical): forwarded to :func:`tier3_create`
+    and :func:`tier3_merge` below, which only run the prose-compile scrub
+    when given a real context. :func:`athenaeum.librarian.process_one`, the
+    one real caller, passes one built from the ``EntityIndex`` it already
+    has in hand (same sharing :func:`athenaeum.batch.process_batch_run` uses
+    for the batch transport) — without that, a plain synchronous run never
+    scrubs at all, which is the gap this parameter closes.
 
     ``audit_hook`` (issue athenaeum#1627): when given, called as
     ``audit_hook(uid, path, meta, body)`` for an ``update`` action's TARGET
@@ -7168,6 +7366,7 @@ def tier3_derive_actions(
                         wiki_root=wiki_root,
                         usage=usage,
                         config=config,
+                        attribution_context=attribution_context,
                     )
                 except PreambleOnlyResponseError:
                     log.warning(
@@ -7244,6 +7443,14 @@ def tier3_derive_actions(
                     usage=usage,
                     config=config,
                     wiki_root=wiki_root,
+                    attribution_context=attribution_context,
+                    # Issue athenaeum#2216: the scrub's real target type,
+                    # resolved from the TARGET page's own frontmatter — never
+                    # `action.entity_type`, which is always "" on every merge
+                    # action. `or None` turns resolve_page_type's own ""
+                    # (genuinely no `type:` set) into the "unknown" sentinel
+                    # too, since "" (unlike None) wrongly trips D3.
+                    target_type=resolve_page_type(meta) or None,
                 )
                 if esc:
                     escalations.append(esc)

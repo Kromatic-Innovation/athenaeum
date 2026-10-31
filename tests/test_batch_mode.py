@@ -1003,6 +1003,71 @@ class TestBatchSyncEquivalence:
 
 
 # ---------------------------------------------------------------------------
+# Prose-compile scrub (athenaeum#2216) — end-to-end on the batch transport
+# ---------------------------------------------------------------------------
+
+
+def _address_leaking_create_responder(params: dict[str, Any]) -> str:
+    """Like ``_scripted_responder``, but the create response leaks a
+    third-party address — the fixture for proving ``process_batch_run``'s
+    OWN wiring (not just the shared helpers it calls) scrubs it before the
+    page lands on disk.
+    """
+    user_msg = params["messages"][0]["content"]
+    if params["model"] == DEFAULT_CLASSIFY_MODEL:
+        return json.dumps(
+            [
+                {
+                    "name": "WidgetLeaky",
+                    "entity_type": "concept",
+                    "tags": [],
+                    "access": "internal",
+                    "observations": "Facts about WidgetLeaky.",
+                }
+            ]
+        )
+    if "## Entity to create" in user_msg:
+        return (
+            "# WidgetLeaky\n\nFacts about WidgetLeaky. Reach Dana at "
+            "dana.quill@example.org for details.\n\n[^1]: src"
+        )
+    raise AssertionError(f"unrecognized request: {user_msg[:120]}")
+
+
+class TestBatchResultPathScrub:
+    """Issue athenaeum#2216: the scrub fires through ``process_batch_run``'s
+    own wiring, not merely when the shared helpers are called directly.
+    """
+
+    def test_create_scrubs_third_party_address_from_batch_result(
+        self, tmp_path: Path
+    ) -> None:
+        contents = ["Standalone fact about WidgetLeaky gadget.\n"]
+        root = _seed_root(tmp_path, "k", contents)
+        raw_files = discover_raw_files(root / "raw")
+        index = EntityIndex(root / "wiki")
+        client = _FakeClient(_address_leaking_create_responder, allow_sync=False)
+
+        result = process_batch_run(
+            raw_files,
+            index,
+            root / "wiki",
+            client,
+            FALLBACK_TYPES,
+            FALLBACK_TAGS,
+            FALLBACK_ACCESS,
+            usage=TokenUsage(),
+            config=None,
+            max_api_calls=100,
+        )
+        assert result.created == 1
+        pages = _wiki_snapshot(root)
+        assert pages, "expected the new WidgetLeaky page to be written"
+        for text in pages.values():
+            assert "dana.quill@example.org" not in text
+
+
+# ---------------------------------------------------------------------------
 # Budget semantics (athenaeum#220) at batch-assembly time
 # ---------------------------------------------------------------------------
 
