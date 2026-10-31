@@ -41,6 +41,20 @@ appended at that module's end, rather than inlined there, per this issue's
 lane-brief anchor-discipline note: a sibling lane (athenaeum#2256) is
 concurrently editing ``conftest.py`` for unrelated environment-variable
 hermeticity work, and a new module keeps both diffs trivially mergeable.
+
+**Declared opt-in (athenaeum#2183 follow-up, Seer finding on PR athenaeum#2264).**
+``tests/test_eval_corpus_leakage.py`` has three tests whose entire purpose
+is reading the real knowledge tree -- its denylist-of-real-proper-nouns
+check needs real frontmatter to compare the eval corpus against, and skips
+loudly (never passes silently) when no local tree is present. That read is
+not an accident the guard above should catch; it is the test's documented
+job. Blanket-exempting an env var would reopen exactly the "missed
+override fails loudly" hole AC 2 closes, so the opt-in is instead the
+``reads_live_knowledge_tree`` pytest marker (registered in
+``pyproject.toml``'s ``markers``) -- declared, per-test, visible at the
+test's own definition, and checked by the autouse
+``_reads_live_knowledge_tree_opt_in`` fixture below. Every OTHER test is
+unaffected: an undeclared open under either forbidden root still raises.
 """
 
 from __future__ import annotations
@@ -65,6 +79,49 @@ REAL_DEFAULT_CACHE_DIR = Path(os.path.expanduser("~/.cache/athenaeum"))
 
 _FORBIDDEN_ROOTS = (REAL_DEFAULT_KNOWLEDGE_ROOT, REAL_DEFAULT_CACHE_DIR)
 
+#: Marker name for the declared opt-in (registered in ``pyproject.toml``'s
+#: ``markers`` list). A test carrying ``@pytest.mark.reads_live_knowledge_tree``
+#: declares, at its own definition, that it deliberately reads the real
+#: default knowledge root or cache dir -- see the module docstring's
+#: "Declared opt-in" section. Not an env var: an env var is a blanket
+#: switch nothing names at the call site, which is exactly the "missed
+#: override" shape AC 2 forbids.
+READS_LIVE_KNOWLEDGE_TREE_MARKER = "reads_live_knowledge_tree"
+
+# Depth counter, not a bool: an opted-in test's own fixtures could in
+# principle nest (a parametrized fixture re-entering another marked
+# context), and a bare bool would let an inner teardown turn the guard back
+# on while the outer test body is still running. Mutated only by
+# `_reads_live_knowledge_tree_opt_in` below, which pytest runs on the main
+# thread for one test at a time -- no lock needed (this suite does not run
+# under xdist; see tests/conftest.py's CI-shard comment, which shards by
+# process, not by in-process worker thread).
+_opt_in_depth = 0
+
+
+def _opt_in_active() -> bool:
+    return _opt_in_depth > 0
+
+
+@pytest.fixture(autouse=True)
+def _reads_live_knowledge_tree_opt_in(request: pytest.FixtureRequest) -> Iterator[None]:
+    """Autouse: lifts the guard for exactly the duration of a test carrying
+    ``@pytest.mark.reads_live_knowledge_tree`` (athenaeum#2183 follow-up).
+
+    Runs for every test (autouse), but only ever MUTATES the shared opt-in
+    state for a marked one -- an unmarked test's open()s are still
+    evaluated by :func:`_fail_on_forbidden_open` exactly as before.
+    """
+    global _opt_in_depth
+    marked = request.node.get_closest_marker(READS_LIVE_KNOWLEDGE_TREE_MARKER) is not None
+    if marked:
+        _opt_in_depth += 1
+    try:
+        yield
+    finally:
+        if marked:
+            _opt_in_depth -= 1
+
 
 def _is_under(candidate: Path, root: Path) -> bool:
     try:
@@ -76,7 +133,9 @@ def _is_under(candidate: Path, root: Path) -> bool:
 
 def _fail_on_forbidden_open(event: str, args: tuple[Any, ...]) -> None:
     """``sys.addaudithook`` callback: raise if *event* opens a path under
-    either real default root.
+    either real default root -- UNLESS the currently-running test declared
+    the ``reads_live_knowledge_tree`` opt-in (see
+    :func:`_reads_live_knowledge_tree_opt_in`).
 
     ``args[0]`` is the path for the ``"open"`` audit event; it may be a
     ``str``, ``bytes``, ``os.PathLike``, or (when the caller already holds
@@ -84,6 +143,8 @@ def _fail_on_forbidden_open(event: str, args: tuple[Any, ...]) -> None:
     open under a forbidden root, so it is ignored rather than coerced.
     """
     if event != "open":
+        return
+    if _opt_in_active():
         return
     raw_path = args[0]
     if not isinstance(raw_path, (str, bytes, os.PathLike)):
