@@ -11,6 +11,12 @@
   answers exactly what the uncached call answers, locates a page by filename
   without any full index build, falls back when the filename does not carry
   the uid, and scans the contact surface once per call.
+- ``TestSingleUidReadersFastPath`` (issue athenaeum#2181): the same
+  cache_dir/no-cache_dir equivalence and no-full-build guarantee, now for the
+  three readers that moved onto the shared
+  :mod:`athenaeum.entity_index_cache` mechanism —
+  :func:`athenaeum.mcp_server.entity_read`, :func:`athenaeum.pii.read_entity`,
+  :func:`athenaeum.pii.read_identifier_facts`.
 """
 
 from __future__ import annotations
@@ -26,7 +32,7 @@ import pytest
 
 import athenaeum
 from athenaeum import entity_index_cache as eic
-from athenaeum import identity_resolution, pii
+from athenaeum import identity_resolution, mcp_server, pii
 from athenaeum.models import EntityIndex
 
 EXCLUDED_CONFIG: dict[str, object] = {"storage": {"mapping": {"pii": "excluded"}}}
@@ -405,7 +411,7 @@ class TestHandleResolutionFastPath:
     ) -> None:
         wiki = knowledge / "wiki"
         _page(wiki, "aaaa1111-ada-quill-copy.md", "uid: aaaa1111\nname: Ada Copy\ntype: person\n")
-        assert identity_resolution._page_by_uid_filename(wiki, "aaaa1111") is None
+        assert eic.page_by_uid_filename(wiki, "aaaa1111") is None
         uncached = identity_resolution.resolve_handle_query(
             knowledge, wiki, "ada@example.org", config=EXCLUDED_CONFIG
         )
@@ -416,7 +422,7 @@ class TestHandleResolutionFastPath:
 
     @pytest.mark.parametrize("uid", ["../aaaa1111", "aaaa*", "a/b", "", "[a]"])
     def test_unsafe_uid_skips_the_filename_glob(self, knowledge: Path, uid: str) -> None:
-        assert identity_resolution._page_by_uid_filename(knowledge / "wiki", uid) is None
+        assert eic.page_by_uid_filename(knowledge / "wiki", uid) is None
 
     def test_contact_surface_scanned_once_per_call(
         self, knowledge: Path, cache_dir: Path, monkeypatch: pytest.MonkeyPatch
@@ -435,3 +441,151 @@ class TestHandleResolutionFastPath:
         )
         assert result is not None and result.contact_values
         assert calls == 1
+
+
+@pytest.fixture
+def single_uid_knowledge(tmp_path: Path) -> Path:
+    """Issue athenaeum#2181's AC1 fixture: a uid-prefixed page, an unprefixed
+    page, a uid with no page at all, and two pages claiming the same uid.
+    """
+    knowledge = tmp_path / "single-uid-knowledge"
+    wiki = knowledge / "wiki"
+    contacts = pii.contacts_surface_root(knowledge, EXCLUDED_CONFIG)
+    # uid-prefixed page: the filename fast path's intended hit.
+    _page(wiki, "aaaa1111-ada-quill.md", "uid: aaaa1111\nname: Ada Quill\ntype: person\n")
+    _record(contacts, "aaaa1111-ada.md", "aaaa1111", "ada@example.org")
+    # Unprefixed page: the filename fast path must fall back.
+    _page(wiki, "bram-quill.md", "uid: bbbb2222\nname: Bram Quill\ntype: person\n")
+    _record(contacts, "bbbb2222-bram.md", "bbbb2222", "bram@example.org")
+    # A uid with a contact record but no wiki page at all.
+    _record(contacts, "cccc3333-orphan.md", "cccc3333", "orphan@example.org")
+    # Two pages claiming the SAME uid: the fast path must decline (>1 match)
+    # and fall back to the same last-write-wins resolution a full scan uses.
+    _page(wiki, "dddd4444-first.md", "uid: dddd4444\nname: Cleo First\ntype: person\n")
+    _page(wiki, "dddd4444-second.md", "uid: dddd4444\nname: Cleo Second\ntype: person\n")
+    _record(contacts, "dddd4444-cleo.md", "dddd4444", "cleo@example.org")
+    return knowledge
+
+
+#: uid -> whether a wiki page should ultimately be found (AC1's four cases).
+SINGLE_UID_CASES = [
+    ("aaaa1111", True),  # uid-prefixed page
+    ("bbbb2222", True),  # unprefixed page
+    ("cccc3333", False),  # missing uid (no wiki page)
+    ("dddd4444", True),  # two pages claiming the uid -> deterministic fallback
+    ("zzzz9999", False),  # not even a contact record
+]
+
+
+class TestSingleUidReadersFastPath:
+    """AC1 (identical with/without ``cache_dir``) and AC2 (no full
+    ``EntityIndex`` build on a fast-path hit) for the three readers issue
+    athenaeum#2181 moved onto :mod:`athenaeum.entity_index_cache`'s shared
+    mechanism.
+    """
+
+    @pytest.mark.parametrize("uid,found", SINGLE_UID_CASES)
+    def test_entity_read_identical_with_and_without_cache(
+        self, single_uid_knowledge: Path, cache_dir: Path, uid: str, found: bool
+    ) -> None:
+        uncached = mcp_server.entity_read(
+            single_uid_knowledge, uid, page_class="person", config=EXCLUDED_CONFIG
+        )
+        cached = mcp_server.entity_read(
+            single_uid_knowledge,
+            uid,
+            page_class="person",
+            config=EXCLUDED_CONFIG,
+            cache_dir=cache_dir,
+        )
+        assert cached == uncached
+        assert (json.loads(uncached).get("ok") is not False) == found
+
+    def test_entity_read_fast_path_builds_no_index(
+        self, single_uid_knowledge: Path, cache_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _explode(*args: object, **kwargs: object) -> None:
+            raise AssertionError("full index built on the fast path")
+
+        monkeypatch.setattr(EntityIndex, "_load", _explode)
+        monkeypatch.setattr(eic, "load_with_stats", _explode)
+        result = mcp_server.entity_read(
+            single_uid_knowledge,
+            "aaaa1111",
+            page_class="person",
+            config=EXCLUDED_CONFIG,
+            cache_dir=cache_dir,
+        )
+        assert json.loads(result)["uid"] == "aaaa1111"
+
+    @pytest.mark.parametrize("uid,found", SINGLE_UID_CASES)
+    def test_pii_read_entity_identical_with_and_without_cache(
+        self, single_uid_knowledge: Path, cache_dir: Path, uid: str, found: bool
+    ) -> None:
+        uncached = pii.read_entity(
+            single_uid_knowledge, EXCLUDED_CONFIG, uid, surface_class="pii"
+        )
+        cached = pii.read_entity(
+            single_uid_knowledge, EXCLUDED_CONFIG, uid, surface_class="pii", cache_dir=cache_dir
+        )
+        assert (uncached is None) == (cached is None) == (not found)
+        if uncached is not None and cached is not None:
+            assert uncached.to_dict() == cached.to_dict()
+
+    def test_pii_read_entity_fast_path_builds_no_index(
+        self, single_uid_knowledge: Path, cache_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _explode(*args: object, **kwargs: object) -> None:
+            raise AssertionError("full index built on the fast path")
+
+        monkeypatch.setattr(EntityIndex, "_load", _explode)
+        monkeypatch.setattr(eic, "load_with_stats", _explode)
+        result = pii.read_entity(
+            single_uid_knowledge,
+            EXCLUDED_CONFIG,
+            "aaaa1111",
+            surface_class="pii",
+            cache_dir=cache_dir,
+        )
+        assert result is not None and result.uid == "aaaa1111"
+
+    def test_read_identifier_facts_identical_with_and_without_cache(
+        self, single_uid_knowledge: Path, cache_dir: Path
+    ) -> None:
+        identifiers = [
+            "ada@example.org",
+            "bram@example.org",
+            "orphan@example.org",
+            "cleo@example.org",
+            "nobody@example.org",
+        ]
+        uncached = {
+            k: v.to_dict()
+            for k, v in pii.read_identifier_facts(
+                single_uid_knowledge, EXCLUDED_CONFIG, identifiers
+            )
+        }
+        cached = {
+            k: v.to_dict()
+            for k, v in pii.read_identifier_facts(
+                single_uid_knowledge, EXCLUDED_CONFIG, identifiers, cache_dir=cache_dir
+            )
+        }
+        assert cached == uncached
+        assert uncached["ada@example.org"]["uid"] == "aaaa1111"
+        assert uncached["orphan@example.org"]["uid"] == "cccc3333"
+        assert uncached["nobody@example.org"]["known"] is False
+
+    def test_read_identifier_facts_fast_path_builds_no_index(
+        self, single_uid_knowledge: Path, cache_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _explode(*args: object, **kwargs: object) -> None:
+            raise AssertionError("full index built on the fast path")
+
+        monkeypatch.setattr(EntityIndex, "_load", _explode)
+        monkeypatch.setattr(eic, "load_with_stats", _explode)
+        (identifier, facts), = pii.read_identifier_facts(
+            single_uid_knowledge, EXCLUDED_CONFIG, ["ada@example.org"], cache_dir=cache_dir
+        )
+        assert identifier == "ada@example.org"
+        assert facts.uid == "aaaa1111"
