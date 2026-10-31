@@ -139,15 +139,25 @@ WRITER_CONTACT_FOLD = "contact-fold"
 #: convergence helpers' writer id — see "Prose-compile scrub" below.
 WRITER_PROSE_COMPILE = "prose-compile"
 
+#: issue athenaeum#2212 (model escalation / re-attribution): the placement
+#: executor's own writer id. Design §7.2 — "every filing goes back through
+#: :func:`check_contact_attribution` with ``writer="re-attribution"`` before
+#: it writes" — so the re-check a placement performs is attributable to the
+#: placement itself rather than to whichever writer originally proposed the
+#: value.
+WRITER_RE_ATTRIBUTION = "re-attribution"
+
 #: The four writers issue athenaeum#2210 wires, plus athenaeum#2216's
-#: prose-compile scrub. Membership, not count, is what the writer-inventory
-#: guard test asserts (future children extend this set further).
+#: prose-compile scrub and athenaeum#2212's re-attribution placement.
+#: Membership, not count, is what the writer-inventory guard test asserts
+#: (future children extend this set further).
 WRITER_IDS: tuple[str, ...] = (
     WRITER_OBSERVED_CONTACT,
     WRITER_CORRECTION_ADD,
     WRITER_PII_MIGRATION,
     WRITER_CONTACT_FOLD,
     WRITER_PROSE_COMPILE,
+    WRITER_RE_ATTRIBUTION,
 )
 
 # ---------------------------------------------------------------------------
@@ -1358,6 +1368,7 @@ __all__ = [
     "WRITER_PII_MIGRATION",
     "WRITER_CONTACT_FOLD",
     "WRITER_PROSE_COMPILE",
+    "WRITER_RE_ATTRIBUTION",
     "WRITER_IDS",
     "DISPOSITION_PASS",
     "DISPOSITION_NON_PERSONAL",
