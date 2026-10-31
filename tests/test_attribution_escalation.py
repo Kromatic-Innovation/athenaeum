@@ -1423,8 +1423,29 @@ class TestNeverGrantsOutreachEligibility:
             client=_judge_client(verdict="own", score=0.95),
             apply=True,
         )
+        # PARSED, not a substring of rendered YAML: a quoting or flow-style
+        # change would void a `"usage_class: observed" not in text` check
+        # silently, and this is a security invariant. Asserted in the
+        # POSITIVE form (every entry IS `unclassified`) for the same reason
+        # the placement-file twin is -- a bogus third class passes a `!=`.
+        seen = 0
         for path in sorted(context.contacts_root.rglob("*.md")):
-            assert "usage_class: observed" not in path.read_text(encoding="utf-8")
+            meta, _ = parse_frontmatter(path.read_text(encoding="utf-8"))
+            for entry in pii.contact_classification_entries(
+                meta if isinstance(meta, dict) else {}
+            ):
+                seen += 1
+                assert entry.get("usage_class") == pii.USAGE_CLASS_UNCLASSIFIED
+            for identifier in pii.identifiers_on_record(
+                meta if isinstance(meta, dict) else {}
+            ):
+                assert (
+                    pii.is_outreach_eligible(
+                        meta if isinstance(meta, dict) else {}, identifier
+                    )
+                    is False
+                )
+        assert seen, "no classification entry was examined; the sweep was vacuous"
 
 
 # ---------------------------------------------------------------------------
@@ -1521,29 +1542,46 @@ class TestSuspectJudgementRecord:
     def test_re_recording_the_same_judgement_writes_nothing(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """The compare-EXCLUDING-``at`` branch, with two different ``at``s.
+
+        ``store.now_iso`` is second-precision, so two back-to-back calls
+        render identical bytes and the earlier ``if new_text == text``
+        short-circuit fires -- which left
+        ``record_suspect_judgement``'s own idempotency logic (the comparison
+        that drops the judgement's timestamp before comparing) never
+        executed. The clock is stepped here so the rendered bytes genuinely
+        differ and that branch is what has to hold the property.
+        """
         _patch_record(monkeypatch, _entry(threshold=0.99))
         context, verdict, path = self._parked(tmp_path)
         judgement = pii_attribution.AttributionJudgement(
             verdict=pii_attribution.JUDGEMENT_OWN, score=0.6, model="m", prompt_sha256="s"
         )
-        pii_attribution.record_suspect_judgement(
-            context,
-            suspect_id=path.stem,
-            question_class=pii_attribution.QUESTION_CLASS_HELD_ELSEWHERE,
-            judgement=judgement,
-            calibrated_p=0.7,
-            threshold=0.99,
-        )
+        stamps = iter(["2026-10-31T09:00:00Z", "2026-10-31T09:00:01Z"])
+        monkeypatch.setattr(pii_attribution, "now_iso", lambda: next(stamps))
+
+        def _record() -> Path | None:
+            return pii_attribution.record_suspect_judgement(
+                context,
+                suspect_id=path.stem,
+                question_class=pii_attribution.QUESTION_CLASS_HELD_ELSEWHERE,
+                judgement=judgement,
+                calibrated_p=0.7,
+                threshold=0.99,
+            )
+
+        _record()
         before = path.read_bytes()
-        pii_attribution.record_suspect_judgement(
-            context,
-            suspect_id=path.stem,
-            question_class=pii_attribution.QUESTION_CLASS_HELD_ELSEWHERE,
-            judgement=judgement,
-            calibrated_p=0.7,
-            threshold=0.99,
-        )
+        mtime = path.stat().st_mtime_ns
+        assert b"2026-10-31T09:00:00Z" in before  # the first `at` landed
+
+        _record()
+
+        # The second call rendered DIFFERENT bytes (a later `at`), so the
+        # byte-equality short-circuit cannot be what spared the file.
         assert path.read_bytes() == before
+        assert path.stat().st_mtime_ns == mtime
+        assert b"2026-10-31T09:00:01Z" not in path.read_bytes()
 
     def test_an_absent_suspect_file_is_not_an_error(
         self, tmp_path: Path
@@ -1776,6 +1814,40 @@ class TestShadowSweepObserveMode:
             context, client=_NoCallClient(), config=EXCLUDED_CONFIG, limit=0
         )
         assert summary == pii_attribution.ShadowEscalationSummary()
+
+    def test_a_second_sweep_over_the_same_backlog_makes_no_model_call(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The cost-control property of a RUN-LEVEL phase, and the one test
+        that exercises ``memo_hits`` against a non-zero value.
+
+        ``TestMemo`` proves the memo short-circuits one escalation. This
+        proves the property an operator actually depends on: a nightly run
+        over an unchanged backlog adds NO model spend. The second sweep gets
+        ``_NoCallClient``, so a regression that re-asks is not merely counted
+        -- it raises.
+        """
+        _patch_record(monkeypatch, _entry(threshold=0.98))
+        context = _context(tmp_path)
+        for n in range(3):
+            self._park(context, value=f"person{n}@example.org", target_uid=f"uid-t{n}")
+
+        client = _judge_client(verdict="own", score=0.95)
+        first = pii_attribution.escalate_shadow_suspects(
+            context, client=client, config=EXCLUDED_CONFIG, usage=TokenUsage()
+        )
+        assert first.escalated == 3
+        assert first.memo_hits == 0
+        assert len(client.calls) == 3
+
+        second = pii_attribution.escalate_shadow_suspects(
+            context, client=_NoCallClient(), config=EXCLUDED_CONFIG, usage=TokenUsage()
+        )
+        assert second.escalated == 3
+        assert second.memo_hits == 3
+        # The counter an operator reads must move, not just stay consistent.
+        assert second.memo_hits == second.escalated
+        assert [p.outcome for p in second.placements] == [pii.PLACEMENT_PROPOSED] * 3
 
     def test_the_sweep_order_is_stable_across_runs(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

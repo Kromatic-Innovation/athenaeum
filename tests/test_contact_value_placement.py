@@ -109,6 +109,23 @@ def _snapshot(contacts_root: Path) -> dict[str, bytes]:
     }
 
 
+def _mtimes(contacts_root: Path) -> dict[str, int]:
+    """``st_mtime_ns`` per file, the companion to :func:`_snapshot`.
+
+    A byte snapshot alone cannot see a rewrite of IDENTICAL content, so it
+    passes a regression that drops a ``if new_text != text`` guard. mtime is
+    load-bearing on this surface -- intake and reindex key off it -- so a
+    no-op that touches the file is not a no-op to them.
+    ``pii_attribution.park_suspect``'s own idempotency test checks
+    ``st_mtime_ns`` for the same reason.
+    """
+    return {
+        str(p.relative_to(contacts_root)): p.stat().st_mtime_ns
+        for p in sorted(contacts_root.rglob("*"))
+        if p.is_file()
+    }
+
+
 @dataclass(frozen=True)
 class _StubCheck:
     check_id: str
@@ -389,10 +406,16 @@ class TestRecordContactValue:
             "source": {"type": "attribution", "writer": "re-attribution"},
             "observed_at": _OBSERVED_AT,
         }
-        pii.record_contact_value(contacts, value, **kwargs)
+        first = pii.record_contact_value(contacts, value, **kwargs)
         before = _snapshot(contacts)
+        mtimes = _mtimes(contacts)
         pii.record_contact_value(contacts, value, **kwargs)
         assert _snapshot(contacts) == before
+        # Bytes alone would pass a regression that dropped the
+        # `if new_text != text` guard and rewrote identical content.
+        # `park_suspect`'s own test checks `st_mtime_ns`; so does this.
+        assert _mtimes(contacts) == mtimes
+        assert first.path is not None
 
     def test_the_observed_writer_still_writes_observed(self, tmp_path: Path) -> None:
         """The delegation did not change what the pre-existing writer does."""
@@ -843,6 +866,21 @@ class TestObserveMode:
             ),
             ({"verdict": "other-unknown"}, None, None),
             ({"verdict": "non-personal"}, None, None),
+            # `same-entity` is the ONLY verdict that ever calls
+            # `propose_merge`, so without it the `proposer.calls == []`
+            # assertion below never discriminates. A regression where observe
+            # mode proposed a merge would write a block to `_pending_merges.md`
+            # IN THE WIKI with nothing catching it, and athenaeum#2220 adds
+            # the caller.
+            ({"verdict": "same-entity", "owner_uid": _OWNER_UID}, _OWNER_UID, None),
+        ],
+        ids=[
+            "own",
+            "other-known",
+            "alias",
+            "other-unknown",
+            "non-personal",
+            "same-entity",
         ],
     )
     def test_apply_false_writes_nothing_and_reports_the_proposal(
@@ -1124,11 +1162,16 @@ class TestIdempotency:
         first = _place(contacts, **kwargs)
         assert first.outcome == pii.PLACEMENT_FILED
         before = _snapshot(contacts)
+        mtimes = _mtimes(contacts)
 
         second = _place(contacts, **_case_kwargs(case))
 
         assert second.outcome == pii.PLACEMENT_FILED
         assert _snapshot(contacts) == before
+        # Bytes alone would pass a regression that rewrote identical content.
+        # mtime is load-bearing on this surface: intake and reindex key off
+        # it, so a no-op that touches the file is not a no-op to them.
+        assert _mtimes(contacts) == mtimes
 
 
 # ---------------------------------------------------------------------------
