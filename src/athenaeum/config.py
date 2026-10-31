@@ -455,6 +455,70 @@ def resolve_relay_domains(config: dict[str, Any] | None) -> frozenset[str]:
     return frozenset()
 
 
+def resolve_attribution_context_labels(config: dict[str, Any] | None) -> frozenset[str]:
+    """Operator-extended C3 attribution-label phrases (issue athenaeum#2215).
+
+    Read from ``librarian.attribution.context_labels``. Layered onto
+    :data:`athenaeum.pii_attribution.BUILTIN_CONTEXT_LABELS` by
+    :func:`athenaeum.pii_attribution.build_attribution_context` -- this
+    resolver returns only the operator's additions, matching every other
+    ``resolve_*`` knob's DEFAULT-EMPTY convention (issue athenaeum#231); the
+    built-in list is that module's business to merge, not config's. See
+    :func:`resolve_relay_local_prefixes` for why this inlines its own
+    ``librarian.attribution.*`` chain rather than sharing a helper.
+    """
+    if isinstance(config, dict):
+        librarian_cfg = config.get("librarian")
+        if isinstance(librarian_cfg, dict):
+            attribution_cfg = librarian_cfg.get("attribution")
+            if isinstance(attribution_cfg, dict):
+                raw = attribution_cfg.get("context_labels")
+                if isinstance(raw, list):
+                    return frozenset(
+                        s.strip().lower() for s in raw if isinstance(s, str) and s.strip()
+                    )
+    return frozenset()
+
+
+def resolve_attribution_context_window_chars(config: dict[str, Any] | None) -> int:
+    """C3's source-context proximity window, in characters each side of a
+    value occurrence (issue athenaeum#2215).
+
+    Read from ``librarian.attribution.context_window_chars``. Design
+    ``docs/design/attribution-verification.md`` §5.1 (C3) calls for "a short
+    window" around a value's occurrence in its cited source but states no
+    number -- tuning the figure against a real store is explicitly out of
+    scope for this issue (the issue's own "Out of scope" section: deployment
+    calibration is operator-side). ``200`` is this issue's chosen starting
+    default: wide enough to catch a same-paragraph "Referred by ..." / "cc
+    ..." line near a signature block, narrow enough to stay a SHORT window
+    rather than scanning the whole source. An operator who finds it too wide
+    or too narrow for their store tunes it here with no code change. See
+    :func:`resolve_relay_local_prefixes` for why this inlines its own
+    ``librarian.attribution.*`` chain rather than sharing a helper (the
+    nested path also rules out :func:`_resolve_positive_int_knob`, which only
+    reads one level, ``librarian.<key>``).
+
+    Malformed (non-int, bool, or ``<= 0``) yaml values fall through to the
+    default rather than silently disabling or widening the window
+    unexpectedly.
+    """
+    if isinstance(config, dict):
+        librarian_cfg = config.get("librarian")
+        if isinstance(librarian_cfg, dict):
+            attribution_cfg = librarian_cfg.get("attribution")
+            if isinstance(attribution_cfg, dict):
+                raw = attribution_cfg.get("context_window_chars")
+                if raw is not None and not isinstance(raw, bool):
+                    try:
+                        value = int(raw)
+                    except (TypeError, ValueError):
+                        value = None
+                    if value is not None and value > 0:
+                        return value
+    return 200
+
+
 def _normalize_audience_roles(values: Any) -> set[str]:
     """Case-fold, trim, and drop empties from an iterable of role ids (athenaeum#312)."""
     if not isinstance(values, (list, tuple, set)):

@@ -314,6 +314,55 @@ at pack-build time, with the pack name in the message.
 
 ## `librarian`
 
+### `resolve_attribution_context_labels`
+
+- **YAML path:** `librarian.attribution.context_labels`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `frozenset()`
+- **Precedence:** `athenaeum.yaml` > code default
+
+Operator-extended C3 attribution-label phrases.
+
+Read from ``librarian.attribution.context_labels``. Layered onto
+`athenaeum.pii_attribution.BUILTIN_CONTEXT_LABELS` by
+`athenaeum.pii_attribution.build_attribution_context` -- this
+resolver returns only the operator's additions, matching every other
+``resolve_*`` knob's DEFAULT-EMPTY convention; the
+built-in list is that module's business to merge, not config's. See
+`resolve_relay_local_prefixes` for why this inlines its own
+``librarian.attribution.*`` chain rather than sharing a helper.
+
+### `resolve_attribution_context_window_chars`
+
+- **YAML path:** `librarian.attribution.context_window_chars`
+- **Environment variable:** —
+- **CLI flag:** —
+- **Default:** `200`
+- **Precedence:** `athenaeum.yaml` > code default
+
+C3's source-context proximity window, in characters each side of a
+value occurrence.
+
+Read from ``librarian.attribution.context_window_chars``. Design
+``docs/design/attribution-verification.md`` §5.1 (C3) calls for "a short
+window" around a value's occurrence in its cited source but states no
+number -- tuning the figure against a real store is explicitly out of
+scope for this issue (the issue's own "Out of scope" section: deployment
+calibration is operator-side). ``200`` is this issue's chosen starting
+default: wide enough to catch a same-paragraph "Referred by..." / "cc
+..." line near a signature block, narrow enough to stay a SHORT window
+rather than scanning the whole source. An operator who finds it too wide
+or too narrow for their store tunes it here with no code change. See
+`resolve_relay_local_prefixes` for why this inlines its own
+``librarian.attribution.*`` chain rather than sharing a helper (the
+nested path also rules out `_resolve_positive_int_knob`, which only
+reads one level, ``librarian.<key>``).
+
+Malformed (non-int, bool, or ``<= 0``) yaml values fall through to the
+default rather than silently disabling or widening the window
+unexpectedly.
+
 ### `resolve_operator_mailer_domains`
 
 - **YAML path:** `librarian.attribution.operator_mailer_domains`

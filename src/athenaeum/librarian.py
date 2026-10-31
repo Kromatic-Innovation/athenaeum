@@ -1918,9 +1918,12 @@ def _record_correspondent_contact(
         # `pii_attribution` in any form (that module already imports `pii`
         # at module scope; a reverse edge, even function-local/deferred,
         # would close a 2-node import cycle — see pii.py's own note on
-        # `record_observed_contact_value`). Built from the indexes this pass
-        # already has in hand (no second O(corpus) scan) — the target of
-        # this write is always a freshly created PERSON page
+        # `record_observed_contact_value`). Passes the `EntityIndex` this
+        # pass already has in hand; the child-C indexes (athenaeum#2215)
+        # are memoized against that SAME index object's identity
+        # (`pii_attribution._cached_child_c_indexes`), so passing it here
+        # still costs no second O(corpus) scan per correspondent. The
+        # target of this write is always a freshly created PERSON page
         # (`created_people`/`_pick_correspondent_entity` only ever select
         # from person pages this compile just made), so `target_type` is
         # hardcoded rather than threaded through from a page read.
