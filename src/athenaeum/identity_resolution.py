@@ -528,37 +528,6 @@ def _orphan_uid(handle: str, *, with_pii: bool) -> HandleResolution:
     return _unresolved(handle, _Walk(kind="unresolvable", reason="orphan-uid"), with_pii=with_pii)
 
 
-#: A uid safe to splice into a filename glob: no path separator, no glob
-#: metacharacter. Anything else skips the filename fast path.
-_FILENAME_SAFE_UID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
-
-
-def _page_by_uid_filename(wiki_root: Path, uid: str) -> Path | None:
-    """The one page named ``<uid>-*.md`` / ``<uid>.md`` whose frontmatter carries *uid*.
-
-    Returns a path only when EXACTLY one such page exists and it indexes as an
-    entity page (readable, a ``name:``, and a frontmatter ``uid:`` equal to
-    *uid*: what :meth:`EntityIndex.has_entity_format` guarantees). Zero hits
-    (a page whose filename does not carry its uid) or several hits return
-    ``None`` so the caller falls back to a full index. Reads only the
-    candidate pages.
-    """
-    from athenaeum.models import EntityIndex as _EntityIndex
-
-    if not _FILENAME_SAFE_UID.fullmatch(uid):
-        return None
-    candidates = sorted(wiki_root.glob(f"{uid}-*.md"))
-    exact = wiki_root / f"{uid}.md"
-    if exact.is_file():
-        candidates.append(exact)
-    verified: list[Path] = []
-    for fpath in candidates:
-        parsed = _EntityIndex.read_page_record(fpath)
-        if parsed is not None and parsed[0].uid == uid:
-            verified.append(fpath)
-    return verified[0] if len(verified) == 1 else None
-
-
 def _locate_page(
     wiki_root: Path,
     uid: str,
@@ -568,25 +537,14 @@ def _locate_page(
 ) -> Path | None:
     """Resolve a known *uid* to its entity page, or ``None`` (orphan).
 
-    - *entity_index* given: that index decides, exactly as before.
-    - *cache_dir* given: the filename fast path, then the persisted index in
-      :mod:`athenaeum.entity_index_cache` when the fast path is not conclusive.
-    - neither: a fresh full :class:`EntityIndex`, the pre-cache behaviour.
+    Thin wrapper over :func:`athenaeum.entity_index_cache.locate_entity_page`
+    (issue athenaeum#2181 moved the mechanism there — the one-time filename fast
+    path plus the persisted-cache fallback — so this module, :mod:`athenaeum.pii`
+    and :mod:`athenaeum.mcp_server` share ONE implementation rather than three).
     """
-    from athenaeum.models import EntityIndex as _EntityIndex
+    from athenaeum.entity_index_cache import locate_entity_page
 
-    if entity_index is None and cache_dir is not None:
-        fast = _page_by_uid_filename(wiki_root, uid)
-        if fast is not None:
-            return fast
-        from athenaeum.entity_index_cache import load_entity_index
-
-        entity_index = load_entity_index(wiki_root, cache_dir)
-    index = entity_index if entity_index is not None else _EntityIndex(wiki_root)
-    page_path = index.get_by_uid(uid)
-    if page_path is None or not page_path.exists() or not index.has_entity_format(page_path):
-        return None
-    return page_path
+    return locate_entity_page(wiki_root, uid, entity_index=entity_index, cache_dir=cache_dir)
 
 
 def _finish(
