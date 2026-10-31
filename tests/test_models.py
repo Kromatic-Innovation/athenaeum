@@ -1843,7 +1843,11 @@ class TestEntityIndexSelectiveParseEquivalence:
         assert full["aliases"] == ["Bobby", "B. Example"]
         assert resolve_page_type(full) == "person"
 
-        parsed = EntityIndex.read_page_record(fpath)
+        # EntityIndex._load opts in explicitly via `keys=_INDEX_KEYS` -- the
+        # default (no `keys=`) is a full parse, kept that way for every
+        # OTHER direct caller of this method (see the regression test
+        # below), so exercise the same opted-in call `_load` makes.
+        parsed = EntityIndex.read_page_record(fpath, keys=EntityIndex._INDEX_KEYS)
         assert parsed is not None
         record, meta = parsed
         assert record.uid == "42"
@@ -1878,3 +1882,69 @@ class TestEntityIndexSelectiveParseEquivalence:
         assert index.lookup("b").type == "project"
         assert index.lookup("skip") is None
         assert list(index.pages_of_type("project"))[0][1] == "B"
+
+    def test_read_page_record_default_keeps_full_meta_for_direct_callers(
+        self, tmp_path: Path
+    ) -> None:
+        """Regression test: ``read_page_record``'s *keys* parameter must
+        default to a FULL parse, not the index's own reduced key set.
+
+        athenaeum#2178 initially made ``read_page_record`` itself always call
+        the selective parser scoped to ``EntityIndex``'s own needs. That
+        broke every OTHER direct caller that unpacks the same
+        ``(record, meta)`` return and reads a ``meta`` key outside that set
+        -- concretely, ``contact_record_repair._read_wiki_facts`` reads
+        ``status``/``folded_into`` (via :func:`is_tombstone` /
+        :func:`tombstone_target`) to detect a folded tombstone page, and a
+        selective-by-default ``read_page_record`` silently made every
+        tombstone invisible to it. Calling ``read_page_record(fpath)`` with
+        NO *keys* argument -- exactly how
+        ``contact_record_repair``/``decay_sweep``/``identity_resolution``
+        call it -- must keep returning the keys those callers need.
+        """
+        text = (
+            "---\n"
+            'uid: "77"\n'
+            "name: Folded Page\n"
+            "type: person\n"
+            "status: folded\n"
+            "folded_into: real-page\n"
+            "---\n"
+            "Body.\n"
+        )
+        fpath = tmp_path / "folded-page.md"
+        fpath.write_text(text, encoding="utf-8")
+
+        parsed = EntityIndex.read_page_record(fpath)  # no `keys=` -> full parse
+        assert parsed is not None
+        _record, meta = parsed
+        assert is_tombstone(meta) is True
+        assert tombstone_target(meta) == "real-page"
+        assert meta[FOLDED_INTO_FIELD] == "real-page"
+
+    def test_read_page_record_opted_in_keys_omit_tombstone_fields(
+        self, tmp_path: Path
+    ) -> None:
+        """The flip side of the regression test above: EntityIndex's OWN
+        opt-in call (``keys=EntityIndex._INDEX_KEYS``) deliberately does NOT
+        carry ``status``/``folded_into`` -- ``_entities``' only reader
+        (``pages_of_type``) never looks at them, so this is the documented,
+        audited tradeoff, not an oversight repeated at a different layer.
+        """
+        text = (
+            "---\n"
+            'uid: "77"\n'
+            "name: Folded Page\n"
+            "status: folded\n"
+            "folded_into: real-page\n"
+            "---\n"
+            "Body.\n"
+        )
+        fpath = tmp_path / "folded-page.md"
+        fpath.write_text(text, encoding="utf-8")
+
+        parsed = EntityIndex.read_page_record(fpath, keys=EntityIndex._INDEX_KEYS)
+        assert parsed is not None
+        _record, meta = parsed
+        assert "status" not in meta
+        assert FOLDED_INTO_FIELD not in meta

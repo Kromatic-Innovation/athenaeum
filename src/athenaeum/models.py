@@ -3555,44 +3555,65 @@ class EntityIndex:
         for fpath in sorted(self.wiki_root.glob("*.md")):
             if fpath.name.startswith("_"):
                 continue
-            parsed = self.read_page_record(fpath)
+            parsed = self.read_page_record(fpath, keys=EntityIndex._INDEX_KEYS)
             if parsed is None:
                 continue
             record, meta = parsed
             self._apply_record(fpath, record, meta)
 
-    #: The only frontmatter keys :meth:`read_page_record` looks at (directly,
-    #: or via :func:`resolve_page_type`'s ``metadata.type`` fallback). Issue
+    #: The frontmatter keys THIS CLASS's own consumers of ``meta`` look at
+    #: (:meth:`pages_of_type`, the sole reader of ``_entities``, plus
+    #: :func:`resolve_page_type`'s ``metadata.type`` fallback). Issue
     #: athenaeum#2178: this is exactly the reduced shape
     #: :meth:`PageIndexRecord.meta` already reconstructs for the cached-index
-    #: path, and the ONLY shape :meth:`pages_of_type` (the sole reader of
-    #: ``_entities``) reads back out -- so selecting just these keys at parse
-    #: time changes nothing any caller observes, cached or not.
+    #: path -- selecting just these keys at parse time changes nothing
+    #: EntityIndex itself observes, cached or not.
+    #:
+    #: NOT a safe default for :meth:`read_page_record` in general:
+    #: :func:`athenaeum.contact_record_repair._read_wiki_facts` (among other
+    #: direct callers) unpacks the same ``(record, meta)`` return and reads
+    #: ``meta`` keys OUTSIDE this set (``status``/``folded_into``, via
+    #: :func:`is_tombstone`/:func:`tombstone_target`) -- which is why
+    #: :meth:`read_page_record`'s own *keys* parameter defaults to ``None``
+    #: (full parse) rather than to this constant. Only a caller that has
+    #: checked its OWN ``meta`` usage against this set may pass it.
     _INDEX_KEYS = frozenset({"uid", "name", "type", "metadata", "aliases"})
 
     @staticmethod
-    def read_page_record(fpath: Path) -> "tuple[PageIndexRecord, dict] | None":
+    def read_page_record(
+        fpath: Path, *, keys: "frozenset[str] | None" = None
+    ) -> "tuple[PageIndexRecord, dict] | None":
         """Read one wiki page into the facts this index keeps about it.
 
         Returns ``(record, meta)``, or ``None`` when the page contributes
         nothing to the index (unreadable, no frontmatter, or no ``name:``).
         This is the ONE place the per-page indexing rules live: the full
-        :meth:`_load` scan and the persisted cache in
-        :mod:`athenaeum.entity_index_cache` both call it, so a page is
+        :meth:`_load` scan, the persisted cache in
+        :mod:`athenaeum.entity_index_cache`, AND several other direct callers
+        (:mod:`athenaeum.contact_record_repair`, :mod:`athenaeum.decay_sweep`,
+        :mod:`athenaeum.identity_resolution`) all call it, so a page is
         indexed identically whichever path built the index.
 
-        Issue athenaeum#2178: uses :func:`parse_frontmatter_selective` rather
-        than the full :func:`parse_frontmatter` -- this method and its only
-        downstream reader (:meth:`pages_of_type`, via ``_entities``) never
-        look at any key outside :data:`_INDEX_KEYS`, so the long tail of a
-        page's frontmatter (claim lists, provenance blocks, nested
-        ``sources``) is never constructed for an index-build scan.
+        *keys* (issue athenaeum#2178) is opt-in PER CALLER, never a default
+        this method chooses for you: ``None`` (the default) parses the FULL
+        frontmatter via :func:`parse_frontmatter`, identical to this
+        function's behavior before athenaeum#2178 -- the only safe choice for a
+        caller unpacking ``meta`` for keys not already audited against a
+        selective set. Passing a *keys* frozenset switches to
+        :func:`parse_frontmatter_selective` scoped to exactly those keys,
+        skipping constructor cost for the rest of the page's frontmatter --
+        correct ONLY for a caller that has verified it never reads a ``meta``
+        key outside *keys* (see :data:`_INDEX_KEYS`'s docstring for the
+        caller that got this wrong first).
         """
         try:
             text = fpath.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             return None
-        meta, _ = parse_frontmatter_selective(text, EntityIndex._INDEX_KEYS)
+        if keys is None:
+            meta, _ = parse_frontmatter(text)
+        else:
+            meta, _ = parse_frontmatter_selective(text, keys)
         if not meta:
             return None
 
