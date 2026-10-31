@@ -178,7 +178,13 @@ class SurfaceLintReport:
 
 @dataclass(frozen=True)
 class AttributionSweepReport:
-    """What one ``--attribution`` report-mode sweep found (design §10.4's second bullet)."""
+    """What one ``--attribution`` report-mode sweep found (design §10.4's second bullet).
+
+    Deliberately carries no separate pageless-uid tally: see
+    :func:`run_attribution_sweep`'s own docstring ("measured, not
+    assumed") for why a pageless target's dispositions are not a second
+    finding hiding under a different name here.
+    """
 
     pairs_considered: int = 0
     by_disposition: dict[str, int] = field(default_factory=dict)
@@ -277,6 +283,13 @@ def scan_contact_surface(
     value_to_uids: dict[str, list[str]] = {}
     value_to_source_types: dict[str, dict[str, str]] = {}
     mismatches: list[ObservedMismatchEntry] = []
+    # (normalized_value, uid) pairs already contributed a mismatch entry.
+    # Two record FILES sharing one uid (a store defect ExcludedRecordIndex
+    # itself warns about -- `_warn_collisions`) can both list the same
+    # identifier; without this, the SAME (value, uid) pair would be
+    # double-counted here exactly as PR review caught it being
+    # double-counted in `run_attribution_sweep` below.
+    mismatch_pairs_seen: set[tuple[str, str]] = set()
     records_scanned = 0
     uids = idx.uids()
     for uid in uids:
@@ -294,12 +307,16 @@ def scan_contact_surface(
                     meta, identifier
                 )
 
+                pair = (key, uid)
+                if pair in mismatch_pairs_seen:
+                    continue
                 classification = pii.classification_for_value(meta, identifier)
                 if classification.usage_class == pii.USAGE_CLASS_OBSERVED:
                     presence = pii_attribution.resolve_source_value_presence(
                         classification.source, identifier
                     )
                     if presence is False:
+                        mismatch_pairs_seen.add(pair)
                         mismatches.append(
                             ObservedMismatchEntry(
                                 value_key=pii_attribution.value_key_for(context, identifier),
@@ -338,6 +355,41 @@ def run_attribution_sweep(
     behaviour, ``writer=`` :data:`athenaeum.pii_attribution.WRITER_LINT`).
     Never parks a suspect: this module is not a writer deciding how to act
     on a verdict (design §4.1) -- it only counts.
+
+    **One pair, one verdict, one log row (PR review finding).** A uid with
+    two record FILES that both list the same identifier -- a store defect
+    :class:`athenaeum.pii.ExcludedRecordIndex` itself warns about via
+    ``_warn_collisions`` -- would otherwise run the seam twice for the SAME
+    (value, uid) pair, double-counting it in every tally below and writing
+    two attribution-log rows for one logical pair. The issue's own AC says
+    "over every (value, uid) pair on the surface", and a pair visited twice
+    is still ONE pair, so a per-uid ``seen`` set of normalized values
+    (:func:`athenaeum.pii.normalize_identifier` -- the one normaliser this
+    seam already uses everywhere else, not a second one) keeps each pair to
+    exactly one verdict, first-record-wins (the same "first match in scan
+    order wins" convention :class:`~athenaeum.pii.ExcludedRecordIndex`
+    itself follows).
+
+    **Pageless uids are deliberately NOT excluded** (PR review, Seer finding
+    rejected on adjudication): design §10.4 says "every (value, uid) pair
+    on the surface", and a value filed before the seam existed whose uid has
+    since lost its page is exactly the kind of value this backfill report
+    exists to surface, not the kind to hide.
+
+    **Measured, not assumed: a pageless target's ``(None, None)``
+    name/type does NOT skew its values toward ``suspect``.** D3 (not a
+    person) is the only check gated on ``target_name``/``target_type`` at
+    all, and BOTH of its branches require one of them to be truthy to fire
+    -- so a pageless uid (which has neither) can never trigger D3, making
+    it if anything LESS likely to read ``suspect`` than a live-page target,
+    never more. Verified directly: an isolated value with no other
+    evidence returns ``pass`` identically for a live-page target and a
+    pageless one, and a value that triggers D3 for an explicit
+    ``target_type="company"`` or a name-matched company page does NOT
+    trigger anything for a pageless target with no name/type to match.
+    Every other check (D1, D2, D4, C1-C3) is independent of the CURRENT
+    target's own name/type. So there is no second finding hiding under a
+    different name here, and no separate tally is added.
     """
     idx = context.excluded_index
     by_disposition: dict[str, int] = {}
@@ -346,9 +398,14 @@ def run_attribution_sweep(
     pairs_considered = 0
     for uid in idx.uids():
         target_name, target_type = _target_name_type(context, uid)
+        seen_values: set[str] = set()
         for path in idx.all_by_uid(uid):
             meta = pii.read_bounce_record(path)
             for identifier in _record_identifiers(meta):
+                normalized = pii.normalize_identifier(identifier)
+                if not normalized or normalized in seen_values:
+                    continue
+                seen_values.add(normalized)
                 classification = pii.classification_for_value(meta, identifier)
                 verdict = pii_attribution.check_contact_attribution(
                     identifier,

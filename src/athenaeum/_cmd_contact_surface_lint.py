@@ -212,6 +212,15 @@ def cmd_contact_surface_lint(args: argparse.Namespace) -> int:
             print("error: --escalate requires --attribution", file=sys.stderr)
             return EXIT_ERROR
         client = build_llm_client(config, knob="attribution")
+        if client is None:
+            print(
+                "error: --escalate requires an LLM client for the `attribution` "
+                "knob, and none is configured (no ANTHROPIC_API_KEY for the "
+                "`api` backend, or no equivalent provider configured). "
+                "Refusing to run --escalate silently with zero calls.",
+                file=sys.stderr,
+            )
+            return EXIT_ERROR
         usage = TokenUsage()
         escalate_limit = (
             args.max_escalations

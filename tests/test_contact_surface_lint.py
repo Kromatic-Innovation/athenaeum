@@ -250,6 +250,36 @@ class TestAttributionReportMode:
         for value in (_SHARED_VALUE, _OBSERVED_VALUE, _PLAIN_VALUE):
             assert value not in out
 
+    def test_duplicate_record_for_one_uid_counts_the_pair_once(
+        self, tmp_path: Path
+    ) -> None:
+        """PR review finding 1 (first half): one logical (value, uid) pair,
+        even when the SAME uid has two record FILES listing it."""
+        root = tmp_path / "knowledge"
+        wiki = root / "wiki"
+        wiki.mkdir(parents=True)
+        (root / "athenaeum.yaml").write_text(_EXCLUDED_CONFIG_YAML, encoding="utf-8")
+        _write_page(wiki, uid=_PAGE_ONE_UID, name="Page One")
+        contacts_root = root / "excluded"
+        dup_value = "dup@example.org"
+        _write_record(
+            contacts_root, "dup-a.md", uid=_PAGE_ONE_UID, emails=[dup_value]
+        )
+        _write_record(
+            contacts_root, "dup-b.md", uid=_PAGE_ONE_UID, emails=[dup_value]
+        )
+
+        code = _run("--path", str(root), "--attribution")
+        assert code in (0, 1)
+
+        log_path = pii_attribution.default_attribution_log_path(contacts_root)
+        rows = [
+            json.loads(line)
+            for line in log_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        assert len(rows) == 1
+
 
 class TestPersistedObserveReport:
     """AC3: one observe-report record per run, never a value."""
@@ -323,6 +353,30 @@ class TestEscalate:
         err = capsys.readouterr().err
         assert code == 2
         assert "--attribution" in err
+
+    def test_escalate_with_no_configured_client_errors_without_side_effects(
+        self,
+        _knowledge: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """PR review finding 2: a `None` client must not silently no-op."""
+        monkeypatch.setattr(
+            "athenaeum._cmd_contact_surface_lint.build_llm_client",
+            lambda *a, **k: None,
+        )
+        contacts_root = _knowledge / "excluded"
+        log_path = pii_attribution.default_attribution_log_path(contacts_root)
+        report_path = pii_attribution.default_attribution_observe_report_path(contacts_root)
+
+        code = _run("--path", str(_knowledge), "--attribution", "--escalate")
+        err = capsys.readouterr().err
+
+        assert code == 2
+        assert "ANTHROPIC_API_KEY" in err or "LLM client" in err
+        # No attribution sweep ran at all: no log, no observe report.
+        assert not log_path.exists()
+        assert not report_path.exists()
 
     def test_second_run_makes_zero_calls(
         self,
