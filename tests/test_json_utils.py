@@ -545,3 +545,29 @@ def test_array_nested_array_not_counted_separately() -> None:
     # A nested array inside the top-level array is part of it, not a second
     # top-level candidate — so this is exactly one array, returned whole.
     assert extract_json_array('[["a", "b"], ["c"]]') == [["a", "b"], ["c"]]
+
+
+def test_truncated_scan_refuses_rather_than_returning_an_ambiguous_object() -> None:
+    """A capped scan must not turn an ambiguous reply into a confident wrong answer.
+
+    Clause 4 refuses when a whole-text scan finds more than one balanced
+    top-level object — "a prose example object preceding the real answer" is
+    its named case. The failed-anchor cap made the scan stop before reaching
+    the second object, so `extract_json_object` saw exactly one and returned
+    it: the EXAMPLE, not the answer. Unbounded develop returns None here.
+
+    The cap may legitimately narrow "found" to "not found"; it must never
+    widen "ambiguous" to a specific object. Pinned against the real helper,
+    with controls either side so the filler is provably the discriminator
+    (Seer review on PR athenaeum#2273).
+    """
+    filler = '{"a":' * 400
+    assert (
+        extract_json_object('prose {"first": 1} ' + filler + ' tail {"second": 2} end')
+        is None
+    )
+    # Controls: the two-object shape alone is already None, and a single
+    # object is still returned — so the assertion above is about truncation,
+    # not about either of those.
+    assert extract_json_object('x {"first": 1} y {"second": 2} z') is None
+    assert extract_json_object('x {"only": 1} y') == {"only": 1}

@@ -82,7 +82,7 @@ _FENCE_RE = re.compile(
 def _scan_objects(
     text: str,
     limit: int,
-) -> tuple[list[dict[str, Any]], json.JSONDecodeError | None, bool]:
+) -> tuple[list[dict[str, Any]], json.JSONDecodeError | None, bool, bool]:
     """Collect up to ``limit`` balanced top-level JSON objects in ``text``.
 
     Anchors on each ``{`` and attempts :meth:`json.JSONDecoder.raw_decode`.
@@ -99,6 +99,15 @@ def _scan_objects(
     worst case on text full of unmatched ``{``, at the cost of no longer
     finding an object that sits behind that many failed anchors — see that
     constant for why the trade is worth taking.
+
+    The FOURTH return value says whether the scan stopped at that cap rather
+    than running to the end of *text*. A truncated scan has seen only a
+    prefix, so it cannot establish how many balanced objects the text holds:
+    a caller applying the exactly-one rule MUST treat a truncated scan as
+    undetermined and refuse, never as proof that what it found is all there
+    is. Omitting that check let a 400-stray-brace reply return its prose
+    EXAMPLE object where the unbounded scan correctly refused as ambiguous
+    (Seer review on PR athenaeum#2273).
     """
     found: list[dict[str, Any]] = []
     last_err: json.JSONDecodeError | None = None
@@ -127,7 +136,7 @@ def _scan_objects(
             idx = text.find("{", end)
         else:
             idx = text.find("{", idx + 1)
-    return found, last_err, hit_recursion
+    return found, last_err, hit_recursion, failed_anchors >= _MAX_FAILED_ANCHORS
 
 
 def extract_json_object(text: str) -> dict[str, Any] | None:
@@ -173,7 +182,12 @@ def extract_json_object(text: str) -> dict[str, Any] | None:
         fence_err: json.JSONDecodeError | None = None
         fence_recursion = False
         for block in fenced_blocks:
-            found, err, rec = _scan_objects(block, limit=1)
+            # `_truncated` is deliberately ignored here: clause 1 is
+            # first-balanced-object-wins within a fence, and the scan runs
+            # left to right, so an object found before the cap IS the first
+            # one. Only the exactly-one rule below can be invalidated by a
+            # truncated scan.
+            found, err, rec, _truncated = _scan_objects(block, limit=1)
             if found:
                 return found[0]
             if err is not None:
@@ -197,7 +211,21 @@ def extract_json_object(text: str) -> dict[str, Any] | None:
                 "falling back to whole-text scan"
             )
 
-    found, last_err, hit_recursion = _scan_objects(text, limit=2)
+    found, last_err, hit_recursion, truncated = _scan_objects(text, limit=2)
+    if truncated:
+        # The scan stopped at the failed-anchor cap, so it saw only a prefix
+        # and `len(found)` is a floor, not a count. Clauses 3-4 turn on the
+        # exact count, so refuse rather than guess -- the same direction the
+        # ambiguity rule already chooses. (With limit=2 a truncated scan has
+        # found at most one object: two found exits the loop by limit.)
+        log.debug(
+            "json_utils: whole-text scan hit the failed-anchor cap (%d) with "
+            "%d object(s) found; cannot establish the exactly-one rule, "
+            "returning None",
+            _MAX_FAILED_ANCHORS,
+            len(found),
+        )
+        return None
     if len(found) == 1:
         return found[0]
     if len(found) > 1:
@@ -234,7 +262,7 @@ def scan_json_objects(text: str, limit: int = 8) -> list[dict[str, Any]]:
     here; the whole text is scanned. Nested objects are not counted
     separately. Returns ``[]`` when no parseable object exists.
     """
-    found, _last_err, _hit_recursion = _scan_objects(text, limit=limit)
+    found, _last_err, _hit_recursion, _truncated = _scan_objects(text, limit=limit)
     return found
 
 
