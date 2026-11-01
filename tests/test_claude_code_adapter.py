@@ -1482,7 +1482,7 @@ class TestHookBudgetSharing:
     def test_timeout_inside_context_llm_leg_reaches_the_outer_handler(
         self, imported_adapter, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Sentry finding on PR #2278, against the REAL guarded block: the
+        """Sentry finding on PR athenaeum#2278, against the REAL guarded block: the
         alarm fires while ``athenaeum.context._extract_terms`` is inside its
         own ``except Exception:  # LLM path is best-effort`` try. The
         timeout must propagate out of context.py to the caller, not be

@@ -299,7 +299,7 @@ class TestHookStatus:
         (cache_dir / "hook_degradation.jsonl").write_text(json.dumps(line) + "\n", encoding="utf-8")
 
     def test_maybe_session_notice_ignores_a_stale_degradation(self, tmp_path: Path) -> None:
-        """Sentry finding on PR #2278: a degradation that was resolved long
+        """Sentry finding on PR athenaeum#2278: a degradation that was resolved long
         ago (index since built, key since cached) must not be injected into
         every later session forever. The log keeps it as history; only the
         notice gate ages it out."""
