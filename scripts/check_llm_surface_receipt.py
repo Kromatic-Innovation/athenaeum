@@ -86,6 +86,13 @@ from pathlib import Path
 #: The workflow this gate's receipt must point at (evals.yml's `name:`).
 EVALS_WORKFLOW_NAME = "Evals"
 
+#: The evals.yml job that runs the default `-m eval` suite (its `name:`).
+#: athenaeum#2287: a `suite=calibration` dispatch SKIPS this job and runs only
+#: the calibration sweep, yet the run as a whole still concludes `success` --
+#: so the run conclusion alone cannot prove the default suite passed. The
+#: receipt also requires THIS job's own conclusion to be `success`.
+EVALS_DEFAULT_JOB_NAME = "Live-API eval suite"
+
 #: The dispatch rule (design `docs/design/eval-trigger-surface.md` §7), in one
 #: sentence, because THIS is the text a dispatching agent reads at decision
 #: time. The full rule — and the reasoning — lives in `tests/evals/README.md`;
@@ -232,15 +239,19 @@ def intersect_surface(changed_files: list[str], surface: list[str]) -> list[str]
 
 
 def gh_run_lookup(repo: str, run_id: str) -> dict[str, str]:
-    """Default `run_lookup`: `gh run view --json headSha,event,workflowName,conclusion`.
+    """Default `run_lookup`: `gh run view --json headSha,event,workflowName,conclusion,jobs`.
 
     Local `gh` read against the default `GITHUB_TOKEN` — no Anthropic key,
     no network beyond the GitHub API `gh` already talks to.
+
+    Also returns ``evalJobConclusion``: the conclusion of the
+    :data:`EVALS_DEFAULT_JOB_NAME` job, or ``"missing"`` when the run has no
+    such job (athenaeum#2287).
     """
     result = subprocess.run(
         [
             "gh", "run", "view", run_id, "--repo", repo,
-            "--json", "headSha,event,workflowName,conclusion",
+            "--json", "headSha,event,workflowName,conclusion,jobs",
         ],
         capture_output=True,
         text=True,
@@ -256,6 +267,14 @@ def gh_run_lookup(repo: str, run_id: str) -> dict[str, str]:
         "event": data["event"],
         "workflowName": data["workflowName"],
         "conclusion": data["conclusion"],
+        "evalJobConclusion": next(
+            (
+                str(job.get("conclusion") or "")
+                for job in data.get("jobs") or []
+                if job.get("name") == EVALS_DEFAULT_JOB_NAME
+            ),
+            "missing",
+        ),
     }
 
 
@@ -903,6 +922,18 @@ def check_receipt(
             False,
             f"run {run_id} concluded {run.get('conclusion')!r}, not `success` "
             "— a failed or cancelled eval run is not a receipt.",
+        )
+    # athenaeum#2287: a `suite=calibration` dispatch skips the default eval
+    # job and still concludes `success`. A lookup that reports the job's own
+    # conclusion (the default `gh_run_lookup` always does) must show it ran
+    # and passed.
+    if "evalJobConclusion" in run and run["evalJobConclusion"] != "success":
+        return ReceiptCheck(
+            False,
+            f"run {run_id}'s {EVALS_DEFAULT_JOB_NAME!r} job concluded "
+            f"{run['evalJobConclusion']!r}, not `success` — a run that did not "
+            "run the default eval suite (e.g. a `suite=calibration` dispatch) "
+            "is not a receipt.",
         )
     if receipt_sha != head_sha:
         return ReceiptCheck(

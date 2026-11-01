@@ -82,7 +82,7 @@ Point the `UserPromptSubmit` hook in `~/.claude/settings.json` at it:
         {
           "type": "command",
           "command": "athenaeum-claude-hook 2>/dev/null || true",
-          "timeout": 5
+          "timeout": 15
         }
       ]
     }

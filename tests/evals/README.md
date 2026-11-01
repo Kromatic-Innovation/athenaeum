@@ -297,6 +297,50 @@ Under the `claude-cli` provider (issue athenaeum#330) a local run costs $0 meter
 against your Claude Code subscription. The `api` backend meters at Anthropic
 list rates — expect single-digit cents per full run.
 
+`-m eval` does not include the calibration sweep below; see the next section.
+
+### The calibration sweep (`pytest -m calibration`, issue athenaeum#2287)
+
+`tests/evals/test_attribution_eval.py` (issue athenaeum#2211) is an
+**operator-run calibration sweep**, not a regression eval. It runs the
+420-case synthetic attribution corpus against every candidate model, adds
+3-sample agreement reruns for any class under the AUROC bar, and writes the
+recommended tier per class to
+`src/athenaeum/calibration_data/contact_attribution.yaml`. One full sweep
+spent **3,686,060 tokens** (eval run 41325591218), over fourteen times
+`EVAL_TOKEN_CEILING` (250,000).
+
+It therefore carries `pytest.mark.calibration` **instead of** `eval`:
+
+- `pytest -m eval` (locally, and the default `evals.yml` dispatch) never
+  selects it, and the default `pytest tests/` selection deselects it via
+  `addopts`.
+- Its usage accumulates into the separate `calibration_session` fixture,
+  guarded by its own `CALIBRATION_TOKEN_CEILING` (`tests/evals/harness.py`,
+  sized to the measured sweep). `EVAL_TOKEN_CEILING` is not raised for it.
+- `tests/evals/test_containment_ci_wiring.py` fails if it re-enters the
+  default or `-m eval` selection.
+
+The sanctioned way to run it in CI is a dispatch with `suite=calibration`.
+That runs ONLY the `calibration` job and skips the default `eval` job:
+
+```bash
+gh workflow run evals.yml --repo Kromatic-Innovation/athenaeum --ref <branch> -f suite=calibration
+```
+
+The job uploads a `calibration-results` artifact: `calibration-summary.json`
+plus the regenerated `contact_attribution.yaml`. Download it and commit the
+record in a follow-up PR.
+
+Locally: `pytest -m calibration tests/evals/ -v` (with a live key).
+
+**A calibration run is not an `Evals:` receipt.** It does not run the default
+suite, so do not cite one on a PR. A PR's receipt is a `suite=default`
+dispatch. The gate enforces this: besides the run's own `success`
+conclusion, `scripts/check_llm_surface_receipt.py` requires the run's
+`Live-API eval suite` job to have concluded `success`, and a calibration
+dispatch skips that job.
+
 ## Layer 2 — recorded-response fixtures (regular CI)
 
 `tests/fixtures/recorded/<layer>/<case_id>.json` stores the raw response

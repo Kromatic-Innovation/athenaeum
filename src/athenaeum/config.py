@@ -3569,6 +3569,56 @@ def resolve_recall_cap_ceiling(config: dict[str, Any] | None) -> int:
     return RECALL_CAP_CEILING_DEFAULT
 
 
+# Issue athenaeum#2204: the SHARED foreground time budget (whole seconds) for
+# every shipped Claude Code hook that still does synchronous work in its own
+# critical path -- today that is `session-start-recall.sh`'s cheap residual
+# foreground steps (config read, FTS5 build, stopword/overflow-template
+# caching) and the packaged `athenaeum-claude-hook` adapter's single
+# `build_context_for_turn` call. ONE shared default, not a per-hook table:
+# the formerly-slow, formerly-foreground work each hook used to do in its own
+# critical path -- the `op read` credential fetch and the vector index
+# rebuild -- is now a detached background job behind a lock (see
+# `session-start-recall.sh`'s "Background build" section), so the foreground
+# work remaining in EITHER hook is uniformly cheap and a single number serves
+# both without per-hook tuning. 10s leaves real headroom under the shipped
+# `settings-snippet.json` SessionStart timeout (60, matching this script's
+# own header recommendation -- AC5) and the UserPromptSubmit timeout (see
+# that file) -- the budget exists to bound the *residual* foreground work,
+# not to schedule the slow work itself.
+HOOK_BUDGET_SECONDS_DEFAULT = 10
+
+
+def resolve_hook_budget_seconds(config: dict[str, Any] | None) -> int:
+    """Resolve the shared foreground time budget for a shipped Claude Code
+    hook, in whole seconds (issue athenaeum#2204).
+
+    Precedence: ``ATHENAEUM_HOOK_BUDGET_SECONDS`` env >
+    :data:`HOOK_BUDGET_SECONDS_DEFAULT`. Env-only -- no yaml key (see
+    ``resolve_hook_budget_seconds`` in ``scripts/gen_config_reference.py``'s
+    ``_YAML_PATH_DECLARED``, ``None`` = genuinely no yaml key) -- because the
+    value must be readable from a bare shell hook with no guaranteed
+    python/yaml-parse path (``session-start-recall.sh`` already falls back to
+    a yaml-less bash parser when the python config read fails), the same
+    reasoning :func:`resolve_reasoning_tier_any_screen_enabled` documents for
+    its own env-only knob. A malformed or non-positive env value WARNs (see
+    :func:`_env_number`) and falls back to the default.
+
+    ``session-start-recall.sh`` mirrors this exact precedence in bash (its
+    own ``HOOK_BUDGET_SECONDS`` local, with the identical fallback literal)
+    so the shell hook never needs a python call just to learn its own
+    budget; ``tests/test_hook_budget_2204.py`` pins the two literals equal.
+    The packaged ``athenaeum-claude-hook`` adapter
+    (:mod:`athenaeum.claude_code_adapter`) calls this resolver directly
+    (it already imports :mod:`athenaeum.config`) -- one variable, one
+    resolver, read by both paths, per this issue's explicit ruling that two
+    independently-tuned budgets would be a second thing to keep in sync.
+    """
+    value = _env_number("ATHENAEUM_HOOK_BUDGET_SECONDS", int)
+    if value is not None and value > 0:
+        return value
+    return HOOK_BUDGET_SECONDS_DEFAULT
+
+
 # Issue athenaeum#1492 -- kept as a tight, self-contained block (this dispatch's
 # other lane, athenaeum#1418, is the primary editor of the rest of this module):
 # the relevance-floor MECHANISM only. Selecting a production threshold is

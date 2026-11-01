@@ -126,7 +126,8 @@ pages or the index hasn't been built — check `~/.cache/athenaeum/`.
 | `ATHENAEUM_OP_JEV_KEY_PATH` | `op://Agent Tools/Jev Athenaeum Key/credential` | 1Password item for `JEV_API_KEY`, used only if you opt into the `op` fetch |
 | `ATHENAEUM_OP_INTERACTIVE` | unset           | Set to `1` to opt into 1Password's interactive desktop-app integration: `op` may then run without `OP_SERVICE_ACCOUNT_TOKEN`, and the non-interactive suppression flags below are NOT set (athenaeum#2193) |
 | `ATHENAEUM_OP_REFRESH`   | unset                              | Set to `1` to re-fetch a credential from `op` even when a cached line already exists (athenaeum#2193) |
-| `ATHENAEUM_OP_TIMEOUT_SECONDS` | `10`                          | Bound, in whole seconds, on a single `op read`; a non-positive-integer value (fractional, non-numeric, empty, or zero) silently falls back to `10` (athenaeum#2193) |
+| `ATHENAEUM_OP_TIMEOUT_SECONDS` | `10`                          | Bound, in whole seconds, on a single `op read`, inside the detached background job (athenaeum#2193, athenaeum#2204); a non-positive-integer value (fractional, non-numeric, empty, or zero) silently falls back to `10` |
+| `ATHENAEUM_HOOK_BUDGET_SECONDS` | `10`                        | Shared foreground time budget for `session-start-recall.sh` and the packaged `athenaeum-claude-hook` adapter; each still-foreground step is bound by whatever's left of it, not by its own fixed timeout (athenaeum#2204) |
 | `ATHENAEUM_FORCE_REBUILD` | `0`                              | Set to `1` to force a vector-index rebuild even if the existing one is fresher than the wiki |
 | `ATHENAEUM_INJECT_SKIP_WORDS` | `Code|Users|home|workspace|src|lib|app|var|tmp|usr` | Pipe-separated cwd path segments to ignore in `wiki-context-inject.sh` |
 | `ATHENAEUM_INJECT_MAX_RESULTS` | `3`                          | Max wiki pages to surface from `wiki-context-inject.sh`         |
@@ -282,53 +283,71 @@ command.
 With no key, the default provider and no `claude-cli`:
 
 - **Per-turn recall still works, with less topic awareness.** The topic
-  extractor quietly falls back to a regex and stopword extractor. That
-  per-turn fallback logs nothing.
-- **The only warning is printed at session start, and you won't see it.**
-  `session-start-recall.sh` prints
+  extractor quietly falls back to a regex and stopword extractor.
+- **The degradation is durably recorded and surfaced.** Every time a shipped
+  hook ends a run with no key cached, it writes a `no_api_key` event to a
+  status file under `~/.cache/athenaeum`. `athenaeum status` reports the
+  latest one (see "Degraded-session visibility" below), and you also see a
+  one-line notice injected into the model's context — at most once per
+  session — from whichever hook runs first against it. That notice is on
+  the hook's own context channel, not stderr, so it survives the shipped
+  `settings-snippet.json`'s `2>/dev/null || true` on every hook command.
+  `session-start-recall.sh` additionally still prints
   `[Knowledge] No ANTHROPIC_API_KEY cached — LLM topic extraction will fall back to regex-only extraction …`
-  to stderr. The shipped `settings-snippet.json` ends every hook command
-  with `2>/dev/null || true`, which throws that line away. Under
-  `llm.provider: claude-cli` the line still prints and can be ignored.
+  to stderr for anyone running it by hand; that line is thrown away by the
+  shipped snippet exactly as before, but it is no longer the only signal.
 - **`athenaeum run` refuses to start.** It exits `1` with
   `ANTHROPIC_API_KEY not set`, unless you pass `--dry-run` or use
   `llm.provider: claude-cli`.
 
-To check which state you are in:
+To check which state you are in, run `athenaeum status` — or, by hand,
+`grep -c '^ANTHROPIC_API_KEY=.' ~/.cache/athenaeum/config.env` (`0` means
+nothing is cached yet).
 
-- run the hook by hand, `bash ~/.claude/hooks/athenaeum/session-start-recall.sh`,
-  and look for the `No ANTHROPIC_API_KEY cached` line;
-- run `grep -c '^ANTHROPIC_API_KEY=.' ~/.cache/athenaeum/config.env`. `0`
-  means nothing is cached.
+### Degraded-session visibility
 
-athenaeum#2204 tracks making this degraded state visible without running
-anything by hand.
+`athenaeum status` reports the most recently recorded degradation event
+from any shipped hook — a missing credential (`no_api_key`), a search
+backend index that has never finished building (`index_not_ready`), or a
+foreground step that ran out of its budget and was skipped
+(`step_timeout`). The record lives under `~/.cache/athenaeum` alongside
+`config.env`. No separate command: extending `status` was the natural
+place (there is no `doctor` command), and a dedicated hook also injects a
+one-line notice into the model's context the first time it sees a
+degradation in a given session — see "What happens with no key" above for
+the channel it uses.
 
 ### Hook timeouts
 
-The shipped `settings-snippet.json` gives the SessionStart hook a 15-second
-timeout. The header of `session-start-recall.sh` suggests 60 seconds. The
-two disagree. If the hook outlives the timeout, Claude Code stops it.
+Every shipped hook that can do variable-cost work — `session-start-recall.sh`
+and the packaged `athenaeum-claude-hook` adapter (`user-prompt-recall.sh`'s
+target) — shares ONE foreground time budget,
+`ATHENAEUM_HOOK_BUDGET_SECONDS` (default 10 seconds). The shipped
+`settings-snippet.json` gives both of them a timeout comfortably above that
+budget (60 seconds for SessionStart, matching this script's own header
+recommendation; 15 for UserPromptSubmit, covering process-startup overhead
+the in-process budget itself doesn't bound) — if the two ever disagree
+again, `tests/test_hook_budget_2204.py` fails CI.
 
-Worst-case foreground work in that hook:
+The budget bounds the hook's OWN remaining foreground work, not the slow
+work that used to dominate it. The two historically expensive steps —
+credential refresh (`op read`, up to `ATHENAEUM_OP_TIMEOUT_SECONDS` each)
+and a vector index rebuild (about 45 s on ~3,000 pages) — now run as a
+single DETACHED background job behind a lock, kicked off by
+`session-start-recall.sh` and never awaited by it or by any later turn. A
+turn that starts while that job is still running (or before it has ever
+run) uses whatever index is currently on disk — immediately, never
+blocking — which is also when `index_not_ready` gets recorded (see
+"Degraded-session visibility" above). The FTS5 index stays synchronous
+(it's cheap, about 1 s per ~3,000 pages) and is itself bound by the same
+remaining budget rather than an unbounded call.
 
-| Step | When it runs | Cost |
-|---|---|---|
-| Up to two `op read` calls | Only when the `op` gate above opens | Up to 10 s each |
-| FTS5 index build | Every session | About 1 s per ~3,000 pages |
-| Vector index rebuild | When the vector backend is on and the index is older than the newest wiki page | About 45 s on ~3,000 pages |
+Two concurrent sessions never start two background builds: both attempt
+the same lock `rebuild-index.sh` already uses, so only one proceeds.
 
-So a vector rebuild alone can exceed 15 seconds. If the hook is stopped
-before the index is built, the next session pays the same cost again.
-
-What you can do today:
-
-- raise the SessionStart `timeout` in your own settings;
-- wire `rebuild-index.sh` as a `SessionEnd` hook, so the rebuild happens
-  after the session instead of at its start.
-
-athenaeum#2204 tracks budgeting the hook so it finishes inside the host's
-timeout.
+If recall feels weaker than expected, check `athenaeum status` first (see
+"Degraded-session visibility") before reading any script header — it names
+exactly which of the three degradation kinds is in effect, and when.
 
 ## Auto-memory integration
 

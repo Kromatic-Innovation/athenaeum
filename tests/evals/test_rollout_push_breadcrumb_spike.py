@@ -61,7 +61,9 @@ from tests.evals.rollout import (
     HOOK_QUERY_TIMEOUT_SECONDS,
     SESSION_START_HOOK,
     SHELL_USER_PROMPT_HOOK,
+    build_hook_index,
     build_push_breadcrumb_context,
+    query_hook,
 )
 
 
@@ -107,6 +109,36 @@ def _hand_built_hook_env(knowledge_root: Path, home: Path) -> dict[str, str]:
         "ATHENAEUM_SRC": str(athenaeum_src),
         "ATHENAEUM_PYTHON": sys.executable,
         "ATHENAEUM_CLI": str(home / "no-such-athenaeum-binary"),
+        # Issue athenaeum#2204: the default foreground budget (10s) is
+        # sized for a WARM production interpreter; this harness's cold
+        # venv -- first-ever `athenaeum.search` import, on a shared CI box
+        # under concurrent load -- can occasionally exceed it on the
+        # FTS5-build step alone, which would then be skipped (graceful by
+        # design) and leave this AC comparing two empty strings. This
+        # harness has no interactive host timeout to respect at all, so a
+        # generous budget costs nothing here; matches the SessionStart
+        # timeout `settings-snippet.json` ships.
+        "ATHENAEUM_HOOK_BUDGET_SECONDS": "60",
+        # Issue athenaeum#2204: a key-less SessionStart now records a
+        # `no_api_key` degradation every run (the `[ -z ... ]` check this
+        # mirrors treats an EMPTY value the same as absent), which the
+        # per-turn adapter surfaces as a once-per-session notice on the
+        # first turn of a fresh session id. Deliberately the SAME empty
+        # string `tests/evals/rollout.py`'s own `_hook_env` uses for this
+        # exact variable (never a live-looking key: see that module's
+        # comment on why a fake key must never reach `query_topics`'s real
+        # network call) -- matching it here keeps BOTH sides of this
+        # byte-equivalence check ending every run on the identical
+        # `no_api_key` degradation, rather than one side showing it and
+        # the other not.
+        "ANTHROPIC_API_KEY": "",
+        # Issue athenaeum#2204: the vector rebuild (and credential refresh)
+        # now run in a DETACHED background job, not synchronously inside
+        # session-start-recall.sh -- suppress the real fork here so
+        # `_build_hook_index_directly` below can drive that build itself,
+        # synchronously, and know for certain the index is complete before
+        # the query half runs.
+        "ATHENAEUM_TEST_NO_AUTOFORK": "1",
     }
 
 
@@ -138,6 +170,24 @@ def _build_hook_index_directly(knowledge_root: Path, home: Path) -> None:
     )
     assert start.returncode == 0, f"session-start-recall.sh failed: {start.stderr}"
 
+    # Issue athenaeum#2204: the vector build the comment above measures is
+    # now a DETACHED background job (the real fork is suppressed by
+    # `_hand_built_hook_env`'s `ATHENAEUM_TEST_NO_AUTOFORK`) -- drive it
+    # directly and synchronously here, sharing the SAME budget the
+    # foreground call above shares, so the query half below always runs
+    # against a COMPLETE index rather than racing the old synchronous
+    # build this helper used to get for free.
+    background = subprocess.run(
+        ["bash", str(SESSION_START_HOOK), "--run-background-build"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=HOOK_INDEX_BUILD_TIMEOUT_SECONDS,
+    )
+    assert background.returncode == 0, (
+        f"session-start-recall.sh --run-background-build failed: {background.stderr}"
+    )
+
 
 def _query_hook_directly(knowledge_root: Path, home: Path, query: str, session_id: str) -> str:
     """Hand-rolled ``user-prompt-recall.sh`` run against an index
@@ -160,12 +210,41 @@ def _query_hook_directly(knowledge_root: Path, home: Path, query: str, session_i
     return str(payload["hookSpecificOutput"]["additionalContext"])
 
 
+def _consume_notice_slot(home: Path, session_id: str) -> None:
+    """Pre-claim the issue athenaeum#2204 AC9 once-per-session notice slot
+    for *session_id* under *home*'s cache dir, WITHOUT running a real
+    recall query against it.
+
+    A cold build always ends on at least one degradation (``no_api_key``
+    is unconditional with this module's key-less env; a vector rebuild
+    adds ``index_not_ready`` too), and the per-turn adapter's
+    ``hook_status.maybe_session_notice`` would attach a one-line notice to
+    the FIRST turn of any session id that has never consumed it -- a
+    per-SESSION concern, orthogonal to the ranking/clamp/budget byte
+    equivalence this module's tests check, and ``build_push_breadcrumb_
+    context`` (the "actual" side) never attaches one at all.
+
+    Deliberately NOT a throwaway query with the same session id: this
+    module's own docstring already explains why reusing a session id
+    across two real hook calls biases the SECOND one through the hook's
+    session-dedup bookkeeping -- a second call would silently come back
+    empty, exactly the bug this helper avoids by calling
+    :mod:`athenaeum.hook_status` directly instead. That module has no
+    awareness of recall/dedup state at all, so calling it standalone burns
+    ONLY the notice slot.
+    """
+    from athenaeum.hook_status import maybe_session_notice
+
+    maybe_session_notice(home / ".cache" / "athenaeum", session_id)
+
+
 def _run_hook_directly(knowledge_root: Path, home: Path, query: str, session_id: str) -> str:
     """Hand-rolled hook invocation: run ``session-start-recall.sh`` then
     ``user-prompt-recall.sh`` directly via ``subprocess``, exactly the
     two-step shape ``tests/test_shell_hooks.py::TestUserPromptRecall``
     uses, and return ``hookSpecificOutput.additionalContext`` verbatim."""
     _build_hook_index_directly(knowledge_root, home)
+    _consume_notice_slot(home, session_id)
     return _query_hook_directly(knowledge_root, home, query, session_id)
 
 
@@ -200,11 +279,22 @@ def test_push_breadcrumb_arm_is_byte_equivalent_to_the_real_hook(
         probe.query,
         session_id=f"expected-{uuid.uuid4().hex}",
     )
-    actual = build_push_breadcrumb_context(
-        knowledge_root,
-        tmp_path / "implementation_home",
-        probe.query,
-        session_id=f"actual-{uuid.uuid4().hex}",
+    # Issue athenaeum#2204: same reasoning as `_run_hook_directly`'s own
+    # `_consume_notice_slot` call -- a cold build always ends on a
+    # `no_api_key` degradation (`rollout.py`'s own key-less hook env), and
+    # the first turn in a fresh session id would otherwise surface a
+    # once-per-session notice that `build_push_breadcrumb_context`'s
+    # "expected" counterpart does not carry. Split the single-call
+    # convenience wrapper into its two halves (same two calls it makes
+    # internally) so the notice slot can be burned in between, WITHOUT a
+    # throwaway query that would bias the real one through session-dedup
+    # (see this module's own top-of-file docstring on exactly that trap).
+    actual_session_id = f"actual-{uuid.uuid4().hex}"
+    actual_home = tmp_path / "implementation_home"
+    build_hook_index(knowledge_root, actual_home)
+    _consume_notice_slot(actual_home, actual_session_id)
+    actual = query_hook(
+        knowledge_root, actual_home, probe.query, session_id=actual_session_id
     )
 
     # Sanity: the corpus/query combination must actually produce a

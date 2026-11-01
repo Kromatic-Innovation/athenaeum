@@ -28,6 +28,14 @@ name: Evals
 #     Its report is its own file beside the fts5 report, never merged into
 #     it -- see docs/design/native-memory-baseline.md §4's vector-backend
 #     caveat.
+#   * workflow_dispatch with `suite=calibration` -- issue athenaeum#2287:
+#     runs ONLY the operator-run calibration sweep (`pytest -m calibration`,
+#     tests/evals/test_attribution_eval.py, ~3.7M tokens) in the
+#     `calibration` job, under its own CALIBRATION_TOKEN_CEILING, and skips
+#     the default `eval` job. The sweep is never marked `eval`, so the
+#     default dispatch (`suite=default`) can never select it. A calibration
+#     run is NOT an eval receipt for a PR: it does not run the default
+#     suite. See tests/evals/README.md.
 #
 # Regular CI (ci.yml) is on `develop` only, so this workflow does NOT
 # collide with it: they trigger on distinct refs.
@@ -52,6 +60,14 @@ name: Evals
 on:
   workflow_dispatch:
     inputs:
+      suite:
+        description: "Which token-spending suite to run: 'default' (the -m eval regression suite, the PR eval receipt) or 'calibration' (ONLY the -m calibration sweep, ~3.7M tokens, issue athenaeum#2287)"
+        required: false
+        default: "default"
+        type: choice
+        options:
+          - "default"
+          - "calibration"
       record:
         description: "Persist responses to tests/fixtures/recorded/ (uploads a recorded-fixtures artifact to download and commit)"
         required: false
@@ -171,7 +187,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Set up Python 3.13
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.13"
 
@@ -187,7 +203,9 @@ jobs:
     name: Live-API eval suite
     # Manual dispatch only — a push to `main` runs `embedding-suite` above
     # and nothing that spends tokens (operator decision 2026-09-16).
-    if: github.event_name == 'workflow_dispatch'
+    # Skipped on `suite=calibration` (athenaeum#2287): that dispatch runs the
+    # `calibration` job below instead, never both.
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.suite != 'calibration'
     # Spend guard (athenaeum#1918): an accidental double-dispatch collapses to
     # one in-flight run per ref rather than billing twice. Job-scoped, never
     # workflow-scoped, so it cannot reach the token-free `embedding-suite`.
@@ -199,7 +217,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Set up Python 3.13
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.13"
 
@@ -237,7 +255,7 @@ jobs:
 
       - name: Upload eval summary
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: eval-summary
           path: eval-summary.json
@@ -246,9 +264,89 @@ jobs:
 
       - name: Upload recorded fixtures (record mode only)
         if: ${{ always() && github.event.inputs.record == 'true' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: recorded-fixtures
+          path: tests/fixtures/recorded/
+          if-no-files-found: warn
+          retention-days: 30
+
+  calibration:
+    name: Calibration sweep
+    # Issue athenaeum#2287: the operator-run calibration sweep
+    # (`pytest.mark.calibration`, tests/evals/test_attribution_eval.py). It
+    # spends ~3.7M tokens per run (eval run 41325591218 measured 3,686,060),
+    # over fourteen times the default suite's EVAL_TOKEN_CEILING, so it is
+    # never marked `eval` and never runs on a default dispatch. Only an
+    # explicit `suite=calibration` dispatch reaches it, and its usage is
+    # guarded by its own CALIBRATION_TOKEN_CEILING (tests/evals/harness.py)
+    # via the `calibration_session` fixture -- EVAL_TOKEN_CEILING is untouched.
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.suite == 'calibration'
+    # Spend guard (athenaeum#1918), its own group so it never cancels -- or
+    # is cancelled by -- an `eval` or `north-star` dispatch.
+    concurrency:
+      group: evals-calibration-${{ github.ref }}
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    # The default `eval` job, sweep included, ran 77 minutes in run
+    # 41325591218; the sweep is the bulk of that. 180 minutes leaves room for
+    # agreement reruns on more classes without nearing GitHub's 360-minute cap.
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,vector]"
+          pip install pyyaml
+
+      - name: Load Anthropic API key from 1Password
+        # Same no-op-until-provisioned discipline as the `eval` job above.
+        id: op-key
+        continue-on-error: true
+        uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2  # v5.0.1
+        with:
+          export-env: true
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          ANTHROPIC_API_KEY: op://Infrastructure/anthropic-api-key/credential
+
+      - name: Run calibration sweep
+        env:
+          ATHENAEUM_EVAL_RECORD: ${{ github.event.inputs.record == 'true' && '1' || '0' }}
+        run: |
+          if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+            echo "::warning::ANTHROPIC_API_KEY not set (op item not provisioned) — calibration sweep will skip"
+          fi
+          pytest tests/evals/ -m calibration -v --tb=short \
+            --calibration-summary=calibration-summary.json
+
+      - name: Upload calibration summary and record
+        # The sweep writes its recommended tiers to
+        # src/athenaeum/calibration_data/contact_attribution.yaml on the
+        # runner; without this upload the result is lost with the runner.
+        # Download it and commit it in a follow-up PR.
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: calibration-results
+          path: |
+            calibration-summary.json
+            src/athenaeum/calibration_data/contact_attribution.yaml
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload recorded fixtures (record mode only)
+        if: ${{ always() && github.event.inputs.record == 'true' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: calibration-recorded-fixtures
           path: tests/fixtures/recorded/
           if-no-files-found: warn
           retention-days: 30
@@ -279,7 +377,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Set up Python 3.13
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.13"
 
@@ -457,7 +555,7 @@ jobs:
         # never empty-but-missing since it is only ever referenced when
         # `--phase2` actually ran.
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: north-star-report
           # Issue athenaeum#1787: globbed with a `*` between `store` and
@@ -498,7 +596,7 @@ jobs:
         # is deliberate so that ordinary read-only-grid dispatch is not a
         # failing job.
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: north-star-phase2-artifacts
           path: |

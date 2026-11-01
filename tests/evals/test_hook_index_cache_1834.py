@@ -65,20 +65,31 @@ def _fake_subprocess_run(calls: list[list[str]]):
     SESSION_START_HOOK invocation writes the marker file the real hook's
     FTS5 build leaves under ``env["HOME"]/.cache/athenaeum/wiki-index.db``
     (see :func:`tests.evals.rollout._hook_index_present`) so the cache's
-    self-healing check treats this fake build as a real one."""
+    self-healing check treats this fake build as a real one.
+
+    Issue athenaeum#2204: :func:`~tests.evals.rollout.build_hook_index` now
+    makes TWO ``SESSION_START_HOOK`` calls per real build -- the plain
+    foreground one (``argv[-1] == str(SESSION_START_HOOK)``) and an
+    explicit ``--run-background-build`` one driving the step that moved
+    into a detached job (``argv[-1] == "--run-background-build"`` with
+    ``str(SESSION_START_HOOK)`` earlier in argv) -- so the discriminator
+    below recognises both shapes instead of only the LAST-element one.
+    """
 
     def _run(argv: list[str], *, env: dict[str, str], **kwargs: Any) -> subprocess.CompletedProcess:
         calls.append(list(argv))
-        # Issue athenaeum#1887: USER_PROMPT_HOOK's default argv is now
-        # ``[adapter_path]`` (no ``bash`` prefix, no fixed argv[1]), so the
-        # discriminator below matches on the LAST argv element -- correct
-        # for both the two-element ``["bash", path]`` shell shape and the
-        # one-element adapter shape.
         if argv[-1] == str(SESSION_START_HOOK):
             cache_dir = Path(env["HOME"]) / ".cache" / "athenaeum"
             cache_dir.mkdir(parents=True, exist_ok=True)
             (cache_dir / "wiki-index.db").write_text("fake fts5 index", encoding="utf-8")
             return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        if argv[-1] == "--run-background-build" and str(SESSION_START_HOOK) in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        # Issue athenaeum#1887: USER_PROMPT_HOOK's default argv is now
+        # ``[adapter_path]`` (no ``bash`` prefix, no fixed argv[1]), so this
+        # fallback discriminator matches on the LAST argv element -- correct
+        # for both the two-element ``["bash", path]`` shell shape and the
+        # one-element adapter shape.
         assert argv[-1] == str(USER_PROMPT_HOOK)
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 

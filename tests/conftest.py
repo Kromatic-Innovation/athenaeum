@@ -257,8 +257,10 @@ def _git_identity(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _default_selection(request: pytest.FixtureRequest) -> bool:
-    """True unless the test is marked ``eval``, ``live``, or ``embedding``
-    (issue athenaeum#1091).
+    """True unless the test is marked ``eval``, ``live``, ``embedding`` or
+    ``calibration`` (issue athenaeum#1091; ``calibration`` athenaeum#2287 -- the
+    live calibration sweep that was split off ``eval`` and still needs the
+    real network).
 
     Both fixtures below only engage for the default (non-eval/live/embedding)
     pytest selection — an ``eval``/``live`` test opted into the real network,
@@ -274,6 +276,7 @@ def _default_selection(request: pytest.FixtureRequest) -> bool:
         node.get_closest_marker("eval")
         or node.get_closest_marker("live")
         or node.get_closest_marker("embedding")
+        or node.get_closest_marker("calibration")
     )
 
 
@@ -490,8 +493,8 @@ def _block_non_local_network(
     immediately-diagnosable error instead of hanging or silently succeeding
     against a real network. AF_UNIX and loopback (``127.0.0.0/8``, ``::1``,
     ``localhost``) are allowed. Disabled for tests marked ``eval``, ``live``,
-    or ``embedding`` — all three opted into the real network (see
-    ``_default_selection`` above).
+    ``embedding`` or ``calibration`` — all four opted into the real network
+    (see ``_default_selection`` above).
 
     See ``tests/test_network_guard.py`` for the test that proves this
     fixture actually blocks (and that it allows loopback) — required so the

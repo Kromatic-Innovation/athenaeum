@@ -159,6 +159,7 @@ MODULE_LAYER: dict[str, int] = {
     # pii/erasure -- its module docstring states "Layering: L3, peer to
     # athenaeum.pii and athenaeum.erasure").
     "contact_index_cache": 3,
+    "hook_status": 3,
     "prompt_registry": 3,
     "prompt_safety": 3,
     "provider": 3,

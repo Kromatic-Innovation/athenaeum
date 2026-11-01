@@ -6,7 +6,8 @@ Covers ``AttributionQuestion``/``AttributionJudgement``/``EntityBrief``,
 verdict and every failure path), ``_get_attribution_model``'s precedence,
 and the calibration-record loader's schema validation. No live model call
 anywhere in this file — the live-API calibration eval itself lives in
-``tests/evals/test_attribution_eval.py`` (``pytest.mark.eval``).
+``tests/evals/test_attribution_eval.py`` (``pytest.mark.calibration``,
+athenaeum#2287).
 
 A separate file from ``tests/test_pii_attribution.py`` (child B's seam
 tests) deliberately: two sibling lanes (athenaeum#2215, athenaeum#2216) add

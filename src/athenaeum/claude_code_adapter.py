@@ -157,13 +157,18 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from athenaeum.config import RECALL_CAP_CEILING_DEFAULT, resolve_cache_dir
+from athenaeum.config import (
+    RECALL_CAP_CEILING_DEFAULT,
+    resolve_cache_dir,
+    resolve_hook_budget_seconds,
+)
 
 #: Default periodic in-session anchor interval, in minutes (issue
 #: athenaeum#2156), read hook-time via ``ATHENAEUM_WITNESS_ANCHOR_INTERVAL_MINUTES``
@@ -450,6 +455,93 @@ def witness_session_end_anchor(cache_dir: Path, wiki_root: Path) -> None:
         _log_witness_error(cache_dir, exc)
 
 
+class _HookTimeoutExceeded(BaseException):
+    """Raised by :func:`_run_within_timeout`'s alarm handler. Private --
+    callers see it only inside their own ``try``/``except``.
+
+    Deliberately ``BaseException``, not ``Exception`` (Seer finding on
+    this issue's own PR): the SIGALRM handler can fire while execution is
+    anywhere inside :func:`~athenaeum.context.build_context_for_turn`,
+    including beneath one of its own broad, best-effort
+    ``except Exception`` blocks (the vector leg, the LLM topic-extraction
+    leg). A plain ``Exception`` subclass would be swallowed right there --
+    no `step_timeout` recorded, and worse, the alarm is one-shot, so
+    whatever ran AFTER the swallowed exception would then execute with no
+    time bound left at all. Subclassing ``BaseException`` instead is the
+    same reason ``KeyboardInterrupt``/``SystemExit`` do: a bare
+    ``except Exception`` cannot catch it, so it always reaches this
+    module's own ``except _HookTimeoutExceeded`` in :func:`main`,
+    regardless of which inner frame it was raised from.
+    """
+
+
+def _run_within_timeout(timeout_seconds: int, fn: Any, *args: Any, **kwargs: Any) -> Any:
+    """Run *fn* bound by *timeout_seconds* (issue athenaeum#2204 AC1: this
+    adapter SHARES the one foreground budget
+    :func:`athenaeum.config.resolve_hook_budget_seconds` resolves, the same
+    value ``session-start-recall.sh`` reads).
+
+    Deliberately an OS-level ``signal.alarm`` timer, NOT a Python-side
+    deadline/remaining-time computation: this module's own AC2 guard
+    (``tests/test_claude_code_adapter.py::TestAC2NoRetrievalLogic``) forbids
+    any arithmetic expression in this module's source wholesale, and
+    ``signal.alarm(seconds)`` takes an absolute second count directly, so
+    bounding a call this way needs no arithmetic at all here (the
+    arithmetic, if any, lives inside the resolver this module only calls).
+
+    POSIX-only (``signal.alarm`` doesn't exist on Windows, a declared
+    non-goal for this issue) -- falls back to an unbounded call when
+    unavailable, matching this module's existing fail-open posture rather
+    than refusing to run at all.
+    """
+    if not hasattr(signal, "alarm"):
+        return fn(*args, **kwargs)
+
+    def _on_alarm(signum: int, frame: Any) -> None:
+        raise _HookTimeoutExceeded()
+
+    previous_handler = signal.signal(signal.SIGALRM, _on_alarm)
+    signal.alarm(timeout_seconds)
+    try:
+        return fn(*args, **kwargs)
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous_handler)
+
+
+def _safe_session_notice(cache_dir: Path, session_id: str) -> str | None:
+    """:func:`athenaeum.hook_status.maybe_session_notice`, isolated (issue
+    athenaeum#2204 AC9).
+
+    Function-local import, matching this module's existing deferral of
+    :mod:`athenaeum.context`/``promptwitness`` -- keeps a plain
+    ``import athenaeum.claude_code_adapter`` from paying for
+    :mod:`athenaeum.hook_status` (``tests/test_import_budget.py``'s pinned
+    set for this module). Wrapped in its own ``try``/``except``, same
+    isolation shape as :func:`_witness_turn`: a failure here (corrupt
+    status file, read-only cache dir) must never take down the recall call
+    that follows it.
+    """
+    try:
+        from athenaeum.hook_status import maybe_session_notice
+
+        return maybe_session_notice(cache_dir, session_id)
+    except Exception:  # noqa: BLE001 - a notice-check failure must never block a prompt
+        return None
+
+
+def _safe_record_degradation(cache_dir: Path, hook: str, event: str, detail: str) -> None:
+    """:func:`athenaeum.hook_status.record_degradation`, isolated the same
+    way as :func:`_safe_session_notice` -- recording a degradation must
+    never itself become a second failure."""
+    try:
+        from athenaeum.hook_status import record_degradation
+
+        record_degradation(cache_dir, hook, event, detail)  # type: ignore[arg-type]
+    except Exception:  # noqa: BLE001 - recording a degradation must never itself degrade
+        pass
+
+
 def _hook_output(additional_context: str) -> str:
     """Wrap rendered text in Claude Code's hook-output envelope.
 
@@ -485,26 +577,57 @@ def main(argv: list[str] | None = None) -> int:
         raw = sys.stdin.read()
         _witness_turn(cache_dir, raw)
 
+        # Issue athenaeum#2204 AC9: parsed here, before the AUTO_RECALL and
+        # length gates below, so a degradation notice still surfaces on a
+        # turn the recall path itself is about to skip — the notice is
+        # about the HOOK's health, not about this particular prompt.
+        prompt, session_id = _read_hook_input(raw)
+        notice = _safe_session_notice(cache_dir, session_id)
+
         if not _auto_recall_enabled():
+            if notice:
+                print(_hook_output(notice))
             return 0
 
-        prompt, session_id = _read_hook_input(raw)
         if len(prompt) < 8:
+            if notice:
+                print(_hook_output(notice))
             return 0
 
         from athenaeum.context import build_context_for_turn
 
-        envelope = build_context_for_turn(
-            prompt,
-            session_id,
-            cache_dir=cache_dir,
-            search_backend=os.environ.get("SEARCH_BACKEND", "vector"),
-            n=_resolve_recall_cap_ceiling(),
-        )
-        text = envelope["render"]["text"]
-        if text:
+        # Issue athenaeum#2204 AC1: this adapter shares the ONE foreground
+        # budget `session-start-recall.sh` reads, via the same resolver —
+        # see `_run_within_timeout`'s docstring for why this is an
+        # OS-level alarm rather than a Python-side deadline computation.
+        timeout_seconds = resolve_hook_budget_seconds(None)
+        text = ""
+        preamble = ""
+        try:
+            envelope = _run_within_timeout(
+                timeout_seconds,
+                build_context_for_turn,
+                prompt,
+                session_id,
+                cache_dir=cache_dir,
+                search_backend=os.environ.get("SEARCH_BACKEND", "vector"),
+                n=_resolve_recall_cap_ceiling(),
+            )
+            text = envelope["render"]["text"]
             preamble = envelope["render"]["preamble"]
-            print(_hook_output(f"{preamble}\n{text}"))
+        except _HookTimeoutExceeded:
+            _safe_record_degradation(
+                cache_dir,
+                "user-prompt",
+                "step_timeout",
+                f"build_context_for_turn exceeded the foreground hook budget ({timeout_seconds}s)",
+            )
+
+        if text:
+            body = f"{preamble}\n{text}"
+            print(_hook_output(f"{notice}\n{body}" if notice else body))
+        elif notice:
+            print(_hook_output(notice))
     except Exception:  # noqa: BLE001 — a recall failure must never block a prompt (AC3)
         pass
     return 0

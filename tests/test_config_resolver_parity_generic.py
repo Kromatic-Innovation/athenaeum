@@ -157,7 +157,20 @@ _RESOLVER_NAMES = sorted(name for name, _ in _ALL_RESOLVERS)
 # potentially-drifting copy of either key/env-var pair — and this test's
 # AST walk only follows PRIVATE ``_resolve*`` helpers, not calls to other
 # public ``resolve_*`` functions, so it cannot see through the delegation.
-_NO_YAML_KEY = frozenset({"resolve_cache_dir", "resolve_reasoning_tier_any_screen_enabled"})
+#
+# ``resolve_hook_budget_seconds`` (issue athenaeum#2204): env-only by design
+# -- the value must be readable from a bare shell hook with no guaranteed
+# python/yaml-parse path (``session-start-recall.sh`` falls back to a
+# yaml-less bash parser when the python config read itself fails), so there
+# is deliberately no yaml key for this knob at all, same reasoning as
+# ``resolve_reasoning_tier_any_screen_enabled`` above.
+_NO_YAML_KEY = frozenset(
+    {
+        "resolve_cache_dir",
+        "resolve_reasoning_tier_any_screen_enabled",
+        "resolve_hook_budget_seconds",
+    }
+)
 _GENERIC_HELPER_SIGNATURE = frozenset(
     {
         "resolve_model",

@@ -1,6 +1,6 @@
 {
   "_comment": "Add these hook entries to ~/.claude/settings.json for transparent athenaeum integration.",
-  "_architecture": "SessionStart builds a SQLite FTS5 index once. UserPromptSubmit queries it per turn in <50ms.",
+  "_architecture": "SessionStart builds the cheap FTS5 index synchronously and backgrounds the expensive vector rebuild + credential refresh behind a lock (issue athenaeum#2204). UserPromptSubmit queries whatever index is ready, in <50ms, and never waits on that background job.",
   "hooks": {
     "SessionStart": [
       {
@@ -8,7 +8,7 @@
           {
             "type": "command",
             "command": "/path/to/session-start-recall.sh 2>/dev/null || true",
-            "timeout": 15,
+            "timeout": 60,
             "statusMessage": "Building knowledge index..."
           },
           {
@@ -30,7 +30,7 @@
           {
             "type": "command",
             "command": "/path/to/user-prompt-recall.sh 2>/dev/null || true",
-            "timeout": 5
+            "timeout": 15
           }
         ]
       }
