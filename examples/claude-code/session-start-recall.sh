@@ -4,13 +4,27 @@
 #
 # 1. Reads athenaeum.yaml for config (auto_recall, search_backend)
 # 2. Writes a shell-readable cache at ~/.cache/athenaeum/config.env
-# 3. If `op` (1Password CLI) is signed in and ANTHROPIC_API_KEY isn't
-#    already exported, fetches it and caches it in config.env. This is
-#    required for the optional LLM topic extractor — Claude Code's own
-#    CLAUDE_CODE_OAUTH_TOKEN is scoped to its inference endpoint and the
-#    general Messages API rejects it with "401 OAuth authentication is
-#    currently not supported".
-# 4. Builds the configured search index (FTS5 and/or vector).
+# 3. Builds the FTS5 index synchronously (cheap, ~1s/3k pages).
+# 4. Decides whether the EXPENSIVE work -- a vector index (re)build and/or
+#    an `op` credential fetch -- is needed, and if so forks it as a
+#    DETACHED background job behind a lock (issue athenaeum#2204 AC3). This
+#    hook's own foreground path never runs either of them and never waits
+#    on the background job (AC4): the next turn, or the next session, uses
+#    whatever index is already on disk.
+#
+# Issue athenaeum#2204: every foreground step below is bound by WHATEVER'S
+# LEFT of `ATHENAEUM_HOOK_BUDGET_SECONDS` (AC1/AC2) rather than an
+# independent fixed timeout -- see the "Foreground budget" section. That is
+# also why the credential fetch and the vector rebuild moved out of the
+# foreground entirely rather than merely being clamped: two `op read` calls
+# at up to `ATHENAEUM_OP_TIMEOUT_SECONDS` each, plus a ~45s vector rebuild,
+# is precisely the arithmetic that used to exceed a 15s host timeout
+# (`settings-snippet.json` shipped `"timeout": 15` while this header
+# recommended 60 -- AC5 fixed that disagreement by raising the snippet to
+# 60, matching the recommendation below). Removing those two from the timed
+# path is a strict superset of clamping them: nothing that remains in the
+# foreground section can blow the budget, by construction, not merely by a
+# tighter bound.
 #
 # Issue athenaeum#1120 (AC2 — checked, unaffected): this hook writes
 # stderr diagnostics only and emits no `hookSpecificOutput`/
@@ -18,7 +32,16 @@
 # no `hot`-tier gap and no push-budget gap to route. It IS the writer for
 # the FTS5 index (`athenaeum.search.build_fts5_index`) and for
 # `PUSH_TOKEN_BUDGET` in config.env, both of which
-# `user-prompt-recall.sh` (the actual unprompted-push hook) reads.
+# `user-prompt-recall.sh` (the actual unprompted-push hook) reads. The
+# AC9 once-per-session degradation notice (issue athenaeum#2204) is the
+# one exception to "no hookSpecificOutput": that notice is surfaced by
+# whichever hook calls `athenaeum.hook_status.maybe_session_notice` FIRST
+# for a session, and in practice that is almost always the packaged
+# `athenaeum-claude-hook` adapter (`user-prompt-recall.sh`'s target), which
+# fires on the very first user turn -- this script never reads stdin and
+# so never attempts the notice itself, by design (see that module's
+# docstring for why a single shared gate across hooks still satisfies
+# "at most once per session" either way).
 #
 # Configure in ~/.claude/settings.json:
 #   "hooks": {
@@ -36,6 +59,14 @@
 #   KNOWLEDGE_WIKI_PATH  Path to wiki directory (default: $KNOWLEDGE_ROOT/wiki)
 #   ATHENAEUM_PYTHON     Python interpreter with athenaeum deps
 #   ATHENAEUM_SRC        Path to athenaeum source checkout (optional)
+#   ATHENAEUM_HOOK_BUDGET_SECONDS  Whole-second foreground budget shared by
+#                                 every step below (default: 10, issue
+#                                 athenaeum#2204). Each step is bound by
+#                                 whatever's left of this budget, not by its
+#                                 own fixed timeout; a step that would start
+#                                 after the budget is already spent is
+#                                 skipped and recorded as a `step_timeout`
+#                                 degradation (see "athenaeum status").
 #   ATHENAEUM_OP_KEY_PATH  1Password path (default: op://Agent Tools/Anthropic API Key/credential)
 #   ATHENAEUM_OP_JEV_KEY_PATH  1Password path for JEV_API_KEY (default: op://Agent Tools/Jev Athenaeum Key/credential)
 #   ATHENAEUM_OP_INTERACTIVE      1 = opt into 1Password's interactive desktop-app
@@ -50,6 +81,12 @@
 #                                 positive integer -- a fractional, non-numeric,
 #                                 empty, or zero value silently falls back to
 #                                 the default rather than failing the fetch.
+#                                 Applies inside the DETACHED background job
+#                                 (issue athenaeum#2204) -- it no longer
+#                                 bounds anything in this script's own
+#                                 foreground path.
+#   ATHENAEUM_FORCE_REBUILD       1 = force a vector-index rebuild even if the
+#                                 existing one is fresher than the wiki.
 
 set -euo pipefail
 
@@ -92,35 +129,127 @@ mkdir -p "$CACHE_DIR"
 chmod 700 "$CACHE_DIR"
 umask 077
 
-# ── Preserve cached credentials across the rewrite below ───────────────────
-# Issue athenaeum#1886: both config.env writers below (the python path and
-# the bash fallback) truncate the file from scratch and neither carries a
-# credential forward -- only a *fresh* `op read`, later in this script,
-# re-adds it. Any run where that fetch fails or is skipped (expired `op`
-# session, no `op` on PATH, a non-interactive spawn, or the variable already
-# being exported so the fetch branch never runs) was silently dropping the
-# key. Capture whatever is cached on disk now, before either writer runs, so
-# each one can be restored unless a fresh fetch supersedes it.
-#
-# Issue athenaeum#2056 generalises this from a single ANTHROPIC_API_KEY
-# special case to a small table of (ENV_NAME, default op path, override env)
-# entries, so a credential appended to config.env by something other than
-# this hook's own ANTHROPIC fetch (e.g. JEV_API_KEY, cached by athenaeum#1997
-# / athenaeum#2054's Jev decision provider) survives the rewrite too.
-# Parallel indexed arrays, not an associative array: stock macOS ships bash
-# 3.2.57, which has no `declare -A`.
-_CRED_ENV_NAMES=(ANTHROPIC_API_KEY JEV_API_KEY)
-_CRED_DEFAULT_PATHS=("op://Agent Tools/Anthropic API Key/credential" "op://Agent Tools/Jev Athenaeum Key/credential")
-_CRED_OVERRIDE_VARS=(ATHENAEUM_OP_KEY_PATH ATHENAEUM_OP_JEV_KEY_PATH)
-# No warn-on-missing entry here: the no-key warning at the end of this
-# script stays hardcoded to ANTHROPIC_API_KEY only (Jev is optional,
-# athenaeum#2056 AC) -- see the comment on that block below.
+# ── Background-build lock + log (issue athenaeum#2204 AC3) ─────────────────
+# The SAME lockfile `rebuild-index.sh` already uses: a session-start
+# background build and a SessionEnd `rebuild-index.sh` run mutually exclude
+# each other too, not just two session-start invocations racing each other.
+LOCK_DIR="${CACHE_DIR}/rebuild.lock"
+REBUILD_LOG="${CACHE_DIR}/rebuild.log"
+
+# ── Foreground budget (issue athenaeum#2204 AC1/AC2) ────────────────────────
+# ONE shared budget for every step this script still runs synchronously.
+# Mirrors `athenaeum.config.resolve_hook_budget_seconds`'s exact precedence
+# and fallback literal (env > default 10) -- kept as a bash-native parse
+# rather than a python call so this script never pays a python startup just
+# to learn its own budget; `tests/test_hook_budget_2204.py` pins the two
+# literals equal.
+HOOK_BUDGET_SECONDS="${ATHENAEUM_HOOK_BUDGET_SECONDS:-10}"
+case "$HOOK_BUDGET_SECONDS" in
+  ''|*[!0-9]*|0) HOOK_BUDGET_SECONDS=10 ;;
+esac
+_athenaeum_deadline_epoch=$(( $(date +%s) + HOOK_BUDGET_SECONDS ))
+# Test-only seam (issue athenaeum#2204): deterministically exhaust the
+# foreground budget without a real multi-second wait, by backdating the
+# deadline into the past -- `0` is not usable for this (it means "use the
+# default" per the normalize guard just above, matching the python
+# resolver's own `> 0` guard). Never documented as a public knob; read
+# nowhere else in this script.
+if [ -n "${ATHENAEUM_TEST_BUDGET_ALREADY_SPENT:-}" ]; then
+  _athenaeum_deadline_epoch=0
+fi
+
+# _athenaeum_remaining_seconds: whole seconds left before the foreground
+# budget expires, floored at 0 -- never negative, since a `timeout 0`
+# argument means "no timeout at all" to GNU coreutils, the opposite of what
+# is wanted once the budget is spent.
+_athenaeum_remaining_seconds() {
+  local _now _remaining
+  _now=$(date +%s)
+  _remaining=$(( _athenaeum_deadline_epoch - _now ))
+  if [ "$_remaining" -lt 1 ]; then
+    echo 0
+  else
+    echo "$_remaining"
+  fi
+}
+
+# ── Resolve a timeout runner once (not once per step): prefer GNU/BSD
+# `timeout`, then macOS's `gtimeout` (coreutils via Homebrew). When neither
+# is on PATH, `_athenaeum_run_budgeted` below falls back to running the step
+# unbounded (best effort, same posture `_athenaeum_op_read`'s own portable
+# fallback documents for the one case it still needs to handle itself).
+_athenaeum_op_timeout_bin=""
+if command -v timeout >/dev/null 2>&1; then
+  _athenaeum_op_timeout_bin="timeout"
+elif command -v gtimeout >/dev/null 2>&1; then
+  _athenaeum_op_timeout_bin="gtimeout"
+fi
+
+# _athenaeum_record_degradation <event> <detail>
+# Shells out to `athenaeum.hook_status.record_degradation` -- this script's
+# only way to reach that module. Best-effort: a status-file write must
+# never fail this hook, matching every other fail-open contract here.
+_athenaeum_record_degradation() {
+  local _event="$1" _detail="$2"
+  "$PYTHON" -c "
+import sys, os
+src = os.environ.get('ATHENAEUM_SRC', '')
+if src:
+    sys.path.insert(0, os.path.join(src, 'src'))
+from pathlib import Path
+from athenaeum.hook_status import record_degradation
+record_degradation(Path(sys.argv[1]), 'session-start', sys.argv[2], sys.argv[3])
+" "$CACHE_DIR" "$_event" "$_detail" 2>/dev/null || true
+}
+
+# _athenaeum_run_budgeted <step-name> <cmd...>
+# Runs <cmd...> bound by WHATEVER'S LEFT of the foreground budget (issue
+# athenaeum#2204 AC2) -- never an independent fixed timeout for this one
+# step, which is exactly the shape that let two separate `ATHENAEUM_OP_
+# TIMEOUT_SECONDS`-bounded `op read` calls sum past a 15s host timeout
+# before this issue. Records a `step_timeout` degradation and returns the
+# sentinel 75 (EX_TEMPFAIL -- deliberately NOT 1, so a caller can tell "the
+# budget was already spent, nothing ran" apart from <cmd...>'s own normal
+# exit code 1) without running anything once the budget is already
+# exhausted. If <cmd...> itself overruns the remaining time, this also
+# records a `step_timeout` degradation and returns the timeout runner's own
+# 124 -- both sentinels (75, 124) are the "tolerate and continue" codes the
+# FTS5-build call site below checks for; any OTHER non-zero is <cmd...>'s
+# genuine own failure and is returned completely unchanged (issue
+# athenaeum#1826 AC1: a genuine build failure must still be loud).
+_athenaeum_run_budgeted() {
+  local _step="$1"; shift
+  local _remaining
+  _remaining=$(_athenaeum_remaining_seconds)
+  if [ "$_remaining" -eq 0 ]; then
+    _athenaeum_record_degradation step_timeout "${_step}: skipped, foreground budget exhausted"
+    return 75
+  fi
+  local _status
+  if [ -n "$_athenaeum_op_timeout_bin" ]; then
+    "$_athenaeum_op_timeout_bin" "$_remaining" "$@"
+    _status=$?
+  else
+    "$@"
+    _status=$?
+  fi
+  if [ "$_status" -eq 124 ]; then
+    _athenaeum_record_degradation step_timeout "${_step}: exceeded the remaining foreground budget (${_remaining}s)"
+  fi
+  return "$_status"
+}
 
 # ── Non-interactive, bounded `op read` (athenaeum#2193) ─────────────────────
 # `op` probes the 1Password desktop app's group container on every call
 # unless OP_LOAD_DESKTOP_APP_SETTINGS=false; on macOS that is the App Data
-# TCC service and the probe can block indefinitely, turning a background
-# SessionStart hook into a stuck OS permission prompt.
+# TCC service and the probe can block indefinitely. Issue athenaeum#2204
+# moved every caller of this function into the DETACHED background job
+# (see `_athenaeum_run_background_build` below) -- a hung `op` can no
+# longer turn an interactive SessionStart hook into a stuck OS permission
+# prompt, because nothing in the host-timed foreground path calls it
+# anymore. `ATHENAEUM_OP_TIMEOUT_SECONDS` still bounds a single `op read`
+# exactly as before; it is simply no longer part of this script's own
+# budget arithmetic.
 # OP_BIOMETRIC_UNLOCK_ENABLED=false suppresses the matching biometric-unlock
 # prompt. Both flags are scoped to the single `op` subprocess via `env`,
 # NEVER `export`ed process-wide -- everything else this hook spawns (the
@@ -129,17 +258,6 @@ _CRED_OVERRIDE_VARS=(ATHENAEUM_OP_KEY_PATH ATHENAEUM_OP_JEV_KEY_PATH)
 # interactive desktop-app integration, where these flags would be
 # counterproductive.
 #
-# Resolve a timeout runner once (not once per credential): prefer GNU/BSD
-# `timeout`, then macOS's `gtimeout` (coreutils via Homebrew), else a
-# portable background+poll+kill fallback that works on stock macOS bash
-# 3.2.57 (no `declare -A`, no `wait -n`).
-_athenaeum_op_timeout_bin=""
-if command -v timeout >/dev/null 2>&1; then
-  _athenaeum_op_timeout_bin="timeout"
-elif command -v gtimeout >/dev/null 2>&1; then
-  _athenaeum_op_timeout_bin="gtimeout"
-fi
-
 # _athenaeum_op_read <op-path>
 # Writes the fetched value to stdout, nothing else; returns non-zero on any
 # failure or timeout. No stderr output of its own -- the caller's existing
@@ -217,10 +335,195 @@ _athenaeum_op_read() {
   return 1
 }
 
+# _athenaeum_vector_stale: exit 0 (true/stale) if the vector index is
+# MISSING, older than the newest wiki page, or ATHENAEUM_FORCE_REBUILD=1;
+# exit 1 (false/fresh) otherwise. Shared by the foreground "is a background
+# build worth starting at all" decision and the background job's own
+# "actually spend the ~45s" gate, so the two can never disagree.
+_athenaeum_vector_stale() {
+  local _vector_dir="${CACHE_DIR}/wiki-vectors"
+  if [ "${ATHENAEUM_FORCE_REBUILD:-0}" = "1" ]; then
+    return 0
+  fi
+  if [ ! -d "$_vector_dir" ]; then
+    return 0
+  fi
+  # Portable mtime: GNU coreutils takes `stat -c %Y`, BSD/macOS takes
+  # `stat -f %m`. GNU reads `-f` as --file-system, so the BSD form alone
+  # never yields a number on Linux and the index always looks stale.
+  local _stat_mtime
+  if stat -c %Y / >/dev/null 2>&1; then
+    _stat_mtime=(stat -c %Y)
+  else
+    _stat_mtime=(stat -f %m)
+  fi
+  local _idx_mtime _wiki_mtime
+  _idx_mtime=$(find "$_vector_dir" -type f -print0 2>/dev/null \
+    | xargs -0 "${_stat_mtime[@]}" 2>/dev/null \
+    | sort -n | tail -1 || echo 0)
+  _wiki_mtime=$(find "$WIKI_ROOT" -type f -name '*.md' -print0 2>/dev/null \
+    | xargs -0 "${_stat_mtime[@]}" 2>/dev/null \
+    | sort -n | tail -1 || echo 0)
+  _idx_mtime="${_idx_mtime:-0}"
+  _wiki_mtime="${_wiki_mtime:-0}"
+  if [ "$_idx_mtime" -gt "$_wiki_mtime" ] && [ "$_idx_mtime" -gt 0 ]; then
+    return 1
+  fi
+  return 0
+}
+
+# _athenaeum_run_background_build: the DETACHED worker (issue athenaeum#2204
+# AC3/AC4), invoked only via `"$0" --run-background-build` (see the dispatch
+# check below) and only ever forked, never awaited, by the foreground
+# section further down. This function -- not its caller -- owns the lock:
+# the foreground section just forks it and moves on, so a session/turn that
+# starts while a build is in flight never blocks on anything here (AC4). Two
+# concurrent sessions can each fork this function; only one of those two
+# invocations wins the `mkdir` below, and the loser returns immediately
+# having done nothing (AC3) -- exactly `rebuild-index.sh`'s existing,
+# already-tested lock contract, reused rather than reinvented, against the
+# SAME lockfile so the two entry points exclude each other too.
+_athenaeum_run_background_build() {
+  if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    local _lock_age=0
+    local _ctime
+    if _ctime="$(stat -f %c "$LOCK_DIR" 2>/dev/null)"; then
+      _lock_age=$(( $(date +%s) - _ctime ))
+    elif _ctime="$(stat -c %Y "$LOCK_DIR" 2>/dev/null)"; then
+      _lock_age=$(( $(date +%s) - _ctime ))
+    fi
+    if [ "$_lock_age" -gt 3600 ]; then
+      echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] background-build: stale lock (${_lock_age}s old), reclaiming" >> "$REBUILD_LOG"
+      rm -rf "$LOCK_DIR"
+      if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] background-build: lost the race reclaiming a stale lock, skipping" >> "$REBUILD_LOG"
+        return 0
+      fi
+    else
+      echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] background-build: another build in progress (lock ${_lock_age}s old), skipping" >> "$REBUILD_LOG"
+      return 0
+    fi
+  fi
+  trap 'rm -rf "$LOCK_DIR"' EXIT
+
+  # Re-derive what the foreground invocation already resolved and cached to
+  # config.env -- this is a fresh process (`"$0" --run-background-build`),
+  # so nothing survives except the real environment.
+  if [ -f "$CONFIG_ENV" ]; then
+    # shellcheck disable=SC1090
+    source "$CONFIG_ENV"
+  fi
+
+  {
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] background-build: start backend=${SEARCH_BACKEND:-vector}"
+
+    # -- credential refresh (issue athenaeum#2056's table, moved here by
+    # issue athenaeum#2204) ------------------------------------------------
+    if [ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ] || [ "${ATHENAEUM_OP_INTERACTIVE:-}" = "1" ]; then
+      if command -v op >/dev/null 2>&1; then
+        local _i=0
+        while [ "$_i" -lt "$_cred_count" ]; do
+          local _name="${_CRED_ENV_NAMES[$_i]}"
+          local _default_path="${_CRED_DEFAULT_PATHS[$_i]}"
+          local _override_var="${_CRED_OVERRIDE_VARS[$_i]}"
+          local _override_val="${!_override_var:-}"
+          local _key_path="${_override_val:-$_default_path}"
+          local _existing_line=""
+          if [ -f "$CONFIG_ENV" ]; then
+            _existing_line="$(grep "^${_name}=" "$CONFIG_ENV" 2>/dev/null | tail -n 1 || true)"
+          fi
+          local _needs_fetch=false
+          case "$_existing_line" in
+            "${_name}="?*) [ "${ATHENAEUM_OP_REFRESH:-}" = "1" ] && _needs_fetch=true ;;
+            *) _needs_fetch=true ;;
+          esac
+          if [ "$_needs_fetch" = true ]; then
+            local _fetched_key
+            if _fetched_key="$(_athenaeum_op_read "$_key_path" 2>/dev/null)" && [ -n "$_fetched_key" ]; then
+              local _tmp_env
+              _tmp_env=$(mktemp "${CACHE_DIR}/config.env.XXXXXX")
+              chmod 600 "$_tmp_env"
+              grep -v "^${_name}=" "$CONFIG_ENV" > "$_tmp_env" 2>/dev/null || true
+              printf '%s=%s\n' "$_name" "$_fetched_key" >> "$_tmp_env"
+              mv "$_tmp_env" "$CONFIG_ENV"
+              echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] background-build: refreshed ${_name}"
+            else
+              echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] background-build: ${_name} fetch failed or empty"
+            fi
+          fi
+          _i=$((_i + 1))
+        done
+      fi
+    fi
+
+    # -- vector index build ------------------------------------------------
+    if [ "${SEARCH_BACKEND:-vector}" = "vector" ] && _athenaeum_vector_stale; then
+      # Test-only seam (issue athenaeum#2204): lets a test hold this lock
+      # for a short, controlled duration to exercise the AC3/AC4
+      # concurrency properties without a real ~45s vector build. Never
+      # documented as a public knob; read nowhere else in this script.
+      if [ -n "${ATHENAEUM_TEST_SLOW_BUILD_SECONDS:-}" ]; then
+        sleep "$ATHENAEUM_TEST_SLOW_BUILD_SECONDS"
+      fi
+      "$PYTHON" -c "
+import sys, os
+src = os.environ.get('ATHENAEUM_SRC', '')
+if src:
+    sys.path.insert(0, os.path.join(src, 'src'))
+from athenaeum.search import build_vector_index
+try:
+    count = build_vector_index(sys.argv[1], sys.argv[2])
+    print(f'vector index: {count} wiki pages')
+except ImportError as e:
+    print(f'vector backend unavailable: {e}', file=sys.stderr)
+" "$WIKI_ROOT" "$CACHE_DIR" || true
+    fi
+
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] background-build: done"
+  } >> "$REBUILD_LOG" 2>&1
+}
+
+# ── Credential table (issue athenaeum#2056) ─────────────────────────────────
+# (ENV_NAME, default op path, override env) entries. Used both by the
+# foreground preserve/restore logic below and by the background fetch loop
+# above. Parallel indexed arrays, not an associative array: stock macOS
+# ships bash 3.2.57, which has no `declare -A`.
+_CRED_ENV_NAMES=(ANTHROPIC_API_KEY JEV_API_KEY)
+_CRED_DEFAULT_PATHS=("op://Agent Tools/Anthropic API Key/credential" "op://Agent Tools/Jev Athenaeum Key/credential")
+_CRED_OVERRIDE_VARS=(ATHENAEUM_OP_KEY_PATH ATHENAEUM_OP_JEV_KEY_PATH)
+_cred_count=${#_CRED_ENV_NAMES[@]}
+# No warn-on-missing entry here: the no-key warning further down stays
+# hardcoded to ANTHROPIC_API_KEY only (Jev is optional, athenaeum#2056 AC).
+
+# ── Background-worker dispatch ──────────────────────────────────────────────
+# Must come after every function/data definition above (this is the SAME
+# script, re-invoked with one extra argument) and before anything in the
+# normal foreground flow below, which this invocation must NOT also run.
+if [ "${1:-}" = "--run-background-build" ]; then
+  _athenaeum_run_background_build
+  exit $?
+fi
+
+# ══════════════════════════════════════════════════════════════════════════
+# Normal foreground flow (host-timed; everything below is bound by
+# $HOOK_BUDGET_SECONDS, directly or by virtue of doing no slow work at all)
+# ══════════════════════════════════════════════════════════════════════════
+
+# ── Preserve cached credentials across the rewrite below ───────────────────
+# Issue athenaeum#1886: both config.env writers below (the python path and
+# the bash fallback) truncate the file from scratch and neither carries a
+# credential forward -- only a *fresh* `op read` (now background-only, issue
+# athenaeum#2204) re-adds it. Capture whatever is cached on disk now, before
+# either writer runs, so each one can be restored unless a fresh fetch
+# supersedes it.
+#
+# Issue athenaeum#2056 generalises this from a single ANTHROPIC_API_KEY
+# special case to the credential table above, so a credential appended to
+# config.env by something other than this hook's own fetch (e.g. JEV_API_KEY)
+# survives the rewrite too.
 _cached_cred_lines=()
 _had_live_cred=()
 _live_cred_values=()
-_cred_count=${#_CRED_ENV_NAMES[@]}
 _i=0
 while [ "$_i" -lt "$_cred_count" ]; do
   _name="${_CRED_ENV_NAMES[$_i]}"
@@ -231,13 +534,7 @@ while [ "$_i" -lt "$_cred_count" ]; do
   fi
   # Seer finding on athenaeum#2193: discard a matched line whose VALUE is
   # empty (e.g. a hand-edited `ANTHROPIC_API_KEY=` -- README option 2
-  # explicitly invites editing this file by hand). A non-empty line with
-  # an empty value reads as "already cached" to the end-of-script gate
-  # below, so a fetch never runs again -- permanently, with no
-  # ATHENAEUM_OP_REFRESH escape, since the gate tests this same captured
-  # line. Checked at capture time, not the gate, because this array has a
-  # second consumer: the restore loop that writes it back into a freshly
-  # truncated config.env, where an empty-valued line is equally useless.
+  # explicitly invites editing this file by hand).
   case "$_line" in
     "${_name}="?*) _cached_cred_lines[_i]="$_line" ;;
     *) _cached_cred_lines[_i]="" ;;
@@ -246,8 +543,7 @@ while [ "$_i" -lt "$_cred_count" ]; do
   # Same issue, plan step 2: if the caller's own process already exported
   # this credential, that value is scoped to this process, not to the
   # cache -- remember it so it can be restored after `source "$CONFIG_ENV"`
-  # below, which would otherwise silently overwrite it with whatever the
-  # cached line above says (stale, or empty).
+  # below.
   _live_val="${!_name:-}"
   if [ -n "$_live_val" ]; then
     _had_live_cred[_i]=true
@@ -259,10 +555,10 @@ while [ "$_i" -lt "$_cred_count" ]; do
   _i=$((_i + 1))
 done
 
-# ── Read config ────────────────────────────────────────────────────────────
+# ── Read config (budget-wrapped, issue athenaeum#2204 AC2) ─────────────────
 _read_config_ok=false
 
-if "$PYTHON" -c "
+if _athenaeum_run_budgeted "config-read" "$PYTHON" -c "
 import sys, os, importlib.util
 src = os.environ.get('ATHENAEUM_SRC', '')
 cfg_path = os.path.join(src, 'src/athenaeum/config.py') if src else ''
@@ -423,11 +719,10 @@ if [ "$_read_config_ok" = false ]; then
 fi
 
 # Restore each cached credential both writers above just truncated away. A
-# fresh `op read` below supersedes a given line by rewriting it; if that
-# fetch fails or is skipped, this cached line is what stops the hook from
-# silently dropping the credential (athenaeum#1886, generalised by
-# athenaeum#2056 to every entry in the table above, not just
-# ANTHROPIC_API_KEY).
+# fresh `op read` in the BACKGROUND job (issue athenaeum#2204) supersedes a
+# given line by rewriting it; until that completes, this cached line is
+# what stops the hook from silently dropping the credential (athenaeum#1886,
+# generalised by athenaeum#2056 to every entry in the table above).
 _i=0
 while [ "$_i" -lt "$_cred_count" ]; do
   _line="${_cached_cred_lines[$_i]}"
@@ -463,113 +758,19 @@ while [ "$_i" -lt "$_cred_count" ]; do
   _i=$((_i + 1))
 done
 
-# ── Optional: bootstrap each credential from 1Password ─────────────────────
-# Claude Code authenticates with CLAUDE_CODE_OAUTH_TOKEN, which the
-# general Messages API rejects (401). The LLM topic extractor in
-# user-prompt-recall.sh needs a real console key, and the Jev decision
-# provider (athenaeum#1997, athenaeum#2054) needs its own. For each
-# credential in the table above: when `op` is signed in and the variable
-# isn't already exported, fetch + cache it. Override path via the entry's
-# own override env (ATHENAEUM_OP_KEY_PATH / ATHENAEUM_OP_JEV_KEY_PATH).
-# Silent on any failure -- when the variable is already exported (fetch
-# branch skipped, athenaeum#1886 plan step 2) or `op` is missing/fails or
-# the 1Password item does not exist, the cached line restored above is left
-# as-is; that cached value belongs to the file, not to this process's
-# already-exported one. A missing Jev item in particular must produce no
-# line and no warning (athenaeum#2056 AC) -- this silent-failure shape
-# already delivers that for free, since the warning block below only ever
-# checks ANTHROPIC_API_KEY.
-#
-# Gates on `_had_live_cred[$_i]` (captured before config.env was even read),
-# NOT on the live variable here -- the cache-restore above just sourced a
-# cached/preserved line into that same variable, so testing it directly
-# would make a run that ever cached a key skip every future fetch forever,
-# permanently defeating "a fresh `op read` still replaces the cached value"
-# (athenaeum#1886 AC2).
-#
-# athenaeum#2193 deliberately NARROWS that athenaeum#1886 AC2 guarantee:
-# instead of an unconditional per-session re-read, a fresh fetch now only
-# happens when nothing is cached yet (`_cached_cred_lines[$_i]` -- captured
-# BEFORE either writer above truncated config.env, not a re-read of the
-# file and not the live variable, same reasoning as the paragraph above) OR
-# the operator explicitly asks for one via ATHENAEUM_OP_REFRESH=1. An
-# unconditional per-session `op read` is exactly what turns a one-time OS
-# permission grant into a recurring prompt -- so the "always re-read"
-# behaviour AC2 established is now opt-in, not the default. Likewise, the
-# fetch as a whole is only attempted when a non-interactive credential is
-# available (OP_SERVICE_ACCOUNT_TOKEN) or the operator opted into
-# interactive 1Password via ATHENAEUM_OP_INTERACTIVE=1 -- a whole-loop
-# invariant (same for every credential), so hoisted out of the loop below
-# as `_op_allowed` rather than recomputed per entry.
-if [ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ] || [ "${ATHENAEUM_OP_INTERACTIVE:-}" = "1" ]; then
-  _op_allowed=true
-else
-  _op_allowed=false
-fi
-
-_i=0
-while [ "$_i" -lt "$_cred_count" ]; do
-  _name="${_CRED_ENV_NAMES[$_i]}"
-  _default_path="${_CRED_DEFAULT_PATHS[$_i]}"
-  _override_var="${_CRED_OVERRIDE_VARS[$_i]}"
-  _override_val="${!_override_var:-}"
-  if [ -n "$_override_val" ]; then
-    _key_path="$_override_val"
-  else
-    _key_path="$_default_path"
-  fi
-
-  if [ "${_had_live_cred[$_i]}" = false ] && command -v op >/dev/null 2>&1 \
-    && [ "$_op_allowed" = true ] \
-    && { [ -z "${_cached_cred_lines[$_i]}" ] || [ "${ATHENAEUM_OP_REFRESH:-}" = "1" ]; }; then
-    if _fetched_key="$(_athenaeum_op_read "$_key_path" 2>/dev/null)" && [ -n "$_fetched_key" ]; then
-      # mktemp inside the (already-restricted) cache dir — gives us an
-      # unpredictable path mode 600 atomically, closing the window where
-      # `${CONFIG_ENV}.tmp` could have been pre-created as a symlink or
-      # read in the gap between open() and chmod().
-      tmp_env=$(mktemp "${CACHE_DIR}/config.env.XXXXXX")
-      # Belt-and-suspenders: mktemp's mkstemp() already creates the file at
-      # 0600, but assert it explicitly rather than relying on that being
-      # true on every mktemp implementation this hook might run under.
-      chmod 600 "$tmp_env"
-      grep -v "^${_name}=" "$CONFIG_ENV" > "$tmp_env" 2>/dev/null || true
-      printf '%s=%s\n' "$_name" "$_fetched_key" >> "$tmp_env"
-      mv "$tmp_env" "$CONFIG_ENV"
-    fi
-  fi
-
-  _i=$((_i + 1))
-done
-
-# Issue athenaeum#1886 (plan step 3): make the degrade visible. Every
-# recall hook that wants the LLM topic extractor reads this cache, not the
-# live fetch, so a run that ends with no key here is a silent quality drop
-# everywhere else until someone notices "generic-looking recall names".
-# Exactly one line, and only in the no-key case -- a run that ends with a
-# key (cached, restored, or freshly fetched) prints nothing new.
-#
-# athenaeum#2193 AC6: a caller that supplies ANTHROPIC_API_KEY LIVE (so
-# `_had_live_cred[0]` was true and the fetch branch above never ran at
-# all) never gets a line written into config.env -- checking the file
-# alone would warn even though a perfectly usable key is sitting in this
-# process's own `$ANTHROPIC_API_KEY` right now (restored earlier in this
-# script). Check that live variable too, so "a key is live-supplied, no
-# `op` is even on PATH" stays silent, matching every other "ends with a
-# key" case this comment already promises.
-_final_api_key_line="$(grep '^ANTHROPIC_API_KEY=' "$CONFIG_ENV" 2>/dev/null | tail -n 1 || true)"
-case "$_final_api_key_line" in
-  ANTHROPIC_API_KEY=?*) ;;
-  *)
-    if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
-      echo "[Knowledge] No ANTHROPIC_API_KEY cached — LLM topic extraction will fall back to regex-only extraction until a fetch succeeds." >&2
-    fi
-    ;;
-esac
-
-# ── Build search index ─────────────────────────────────────────────────────
+# ── Build FTS5 index (budget-wrapped, issue athenaeum#2204 AC2) ────────────
 # Always build FTS5 — it's cheap (~1s for 3k pages) and rescues short-query
-# recall even when the vector backend is the primary. See docs/design/recall-architecture.md.
-"$PYTHON" -c "
+# recall even when the vector backend is the primary. See
+# docs/design/recall-architecture.md. A budget-exhaustion skip (sentinel 75)
+# or the timeout runner's own 124 is tolerated (recorded as a degradation,
+# already done inside `_athenaeum_run_budgeted`); any OTHER non-zero is a
+# GENUINE build failure and must still exit this hook non-zero with the
+# traceback on stderr, exactly as before this issue (athenaeum#1826 AC1) --
+# `set +e`/`set -e` bracket the call so `$?` can be inspected instead of
+# `set -e` aborting on the spot, before this script gets to decide which of
+# those two cases it is.
+set +e
+_athenaeum_run_budgeted "fts5-build" "$PYTHON" -c "
 import sys, os
 src = os.environ.get('ATHENAEUM_SRC', '')
 if src:
@@ -578,14 +779,21 @@ from athenaeum.search import build_fts5_index
 count = build_fts5_index(sys.argv[1], sys.argv[2])
 print(f'[Knowledge] FTS5 index: {count} wiki pages', file=sys.stderr)
 " "$WIKI_ROOT" "$CACHE_DIR"
+_athenaeum_fts5_status=$?
+set -e
+if [ "$_athenaeum_fts5_status" -ne 0 ] \
+  && [ "$_athenaeum_fts5_status" -ne 75 ] \
+  && [ "$_athenaeum_fts5_status" -ne 124 ]; then
+  exit "$_athenaeum_fts5_status"
+fi
 
-# Cache the canonical stopword list once per session. The per-turn
-# recall hook reads this file instead of hard-coding its own copy,
+# Cache the canonical stopword list once per session (budget-wrapped). The
+# per-turn recall hook reads this file instead of hard-coding its own copy,
 # which keeps it in sync with the Python FTS5 filter (issue athenaeum#46).
 # mktemp+mv keeps the write atomic so a concurrent read never sees
 # a partial file.
 _stopwords_tmp=$(mktemp "${CACHE_DIR}/stopwords.txt.XXXXXX")
-if "$PYTHON" -c "
+if _athenaeum_run_budgeted "stopwords-cache" "$PYTHON" -c "
 import sys, os
 src = os.environ.get('ATHENAEUM_SRC', '')
 if src:
@@ -598,18 +806,18 @@ else
   rm -f "$_stopwords_tmp"
 fi
 
-# Cache the overflow-breadcrumb template once per session (issue athenaeum#1783),
-# same "cache once here, read the cached copy per turn" shape the stopword
-# list above established -- the per-turn hook reads this cached file
-# directly rather than paying an `importlib.resources` lookup on the hot
-# per-turn path. Prompt text is content, not code
+# Cache the overflow-breadcrumb template once per session (issue athenaeum#1783,
+# budget-wrapped), same "cache once here, read the cached copy per turn"
+# shape the stopword list above established -- the per-turn hook reads this
+# cached file directly rather than paying an `importlib.resources` lookup on
+# the hot per-turn path. Prompt text is content, not code
 # (`policies/prompt-text-is-content.md`): the wording lives in
 # `src/athenaeum/prompts/recall_overflow_breadcrumb.md`, never inlined into
 # this script or into the hook's awk. AC: "If the cache copy is missing,
 # the hook emits no overflow line and still succeeds" -- so a failure here
 # is silent, exactly like the stopwords copy above.
 _overflow_tmp=$(mktemp "${CACHE_DIR}/recall_overflow_breadcrumb.md.XXXXXX")
-if "$PYTHON" -c "
+if _athenaeum_run_budgeted "overflow-template-cache" "$PYTHON" -c "
 import sys, os
 src = os.environ.get('ATHENAEUM_SRC', '')
 if src:
@@ -623,47 +831,82 @@ else
   rm -f "$_overflow_tmp"
 fi
 
-if [ "${SEARCH_BACKEND:-vector}" = "vector" ]; then
-  # Vector rebuild is expensive (~45s on a ~3k-page wiki) so skip when the
-  # existing index is newer than the newest wiki page. FTS5 above is cheap
-  # enough to always rebuild. Override with ATHENAEUM_FORCE_REBUILD=1.
-  VECTOR_DIR="${CACHE_DIR}/wiki-vectors"
-  _vector_fresh=false
-  if [ -d "$VECTOR_DIR" ] && [ "${ATHENAEUM_FORCE_REBUILD:-0}" != "1" ]; then
-    # Portable mtime: GNU coreutils takes `stat -c %Y`, BSD/macOS takes
-    # `stat -f %m`. GNU reads `-f` as --file-system, so the BSD form alone
-    # never yields a number on Linux and the index always looks stale.
-    if stat -c %Y / >/dev/null 2>&1; then
-      _stat_mtime=(stat -c %Y)
-    else
-      _stat_mtime=(stat -f %m)
-    fi
-    _idx_mtime=$(find "$VECTOR_DIR" -type f -print0 2>/dev/null \
-      | xargs -0 "${_stat_mtime[@]}" 2>/dev/null \
-      | sort -n | tail -1 || echo 0)
-    _wiki_mtime=$(find "$WIKI_ROOT" -type f -name '*.md' -print0 2>/dev/null \
-      | xargs -0 "${_stat_mtime[@]}" 2>/dev/null \
-      | sort -n | tail -1 || echo 0)
-    _idx_mtime="${_idx_mtime:-0}"
-    _wiki_mtime="${_wiki_mtime:-0}"
-    if [ "$_idx_mtime" -gt "$_wiki_mtime" ] && [ "$_idx_mtime" -gt 0 ]; then
-      _vector_fresh=true
-      echo "[Knowledge] Vector index fresh — skipping rebuild." >&2
-    fi
-  fi
+# ── Decide whether background work is needed, and kick it off ─────────────
+# Issue athenaeum#2204 AC3/AC4: credential refresh and the (expensive, ~45s)
+# vector index rebuild are the two foreground costs that used to be able to
+# exceed the host's SessionStart timeout. Neither runs here any more --
+# this section only DECIDES whether either is worth doing and, if so, forks
+# `_athenaeum_run_background_build` into a detached process. This script
+# never waits on it and never touches the lock itself (see that function's
+# own docstring for why): a turn or session that starts while a build is in
+# flight always proceeds immediately on whatever index is currently on
+# disk, never blocking on this fork.
+_athenaeum_need_background=false
 
-  if [ "$_vector_fresh" = false ]; then
-    "$PYTHON" -c "
-import sys, os
-src = os.environ.get('ATHENAEUM_SRC', '')
-if src:
-    sys.path.insert(0, os.path.join(src, 'src'))
-from athenaeum.search import build_vector_index
-try:
-    count = build_vector_index(sys.argv[1], sys.argv[2])
-    print(f'[Knowledge] Vector index: {count} wiki pages', file=sys.stderr)
-except ImportError as e:
-    print(f'[Knowledge] Vector backend unavailable: {e}', file=sys.stderr)
-" "$WIKI_ROOT" "$CACHE_DIR" || true
+if [ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ] || [ "${ATHENAEUM_OP_INTERACTIVE:-}" = "1" ]; then
+  if command -v op >/dev/null 2>&1; then
+    _i=0
+    while [ "$_i" -lt "$_cred_count" ]; do
+      if [ "${_had_live_cred[$_i]}" = false ] \
+        && { [ -z "${_cached_cred_lines[$_i]}" ] || [ "${ATHENAEUM_OP_REFRESH:-}" = "1" ]; }; then
+        _athenaeum_need_background=true
+      fi
+      _i=$((_i + 1))
+    done
   fi
 fi
+
+_athenaeum_vector_ever_built=true
+if [ "${SEARCH_BACKEND:-vector}" = "vector" ]; then
+  if [ ! -d "${CACHE_DIR}/wiki-vectors" ]; then
+    _athenaeum_vector_ever_built=false
+  fi
+  if _athenaeum_vector_stale; then
+    _athenaeum_need_background=true
+  else
+    echo "[Knowledge] Vector index fresh — skipping rebuild." >&2
+  fi
+fi
+
+# ATHENAEUM_TEST_NO_AUTOFORK is a test-only seam (issue athenaeum#2204):
+# lets a test drive `--run-background-build` itself, synchronously and
+# deterministically, instead of racing this script's own real detached
+# fork. Never documented as a public knob; read nowhere else in this
+# script. Production installs never set it, so the fork below always runs.
+if [ "$_athenaeum_need_background" = true ] && [ "${ATHENAEUM_TEST_NO_AUTOFORK:-}" != "1" ]; then
+  nohup "$0" --run-background-build >>"$REBUILD_LOG" 2>&1 &
+  disown 2>/dev/null || true
+fi
+
+if [ "$_athenaeum_vector_ever_built" = false ]; then
+  _athenaeum_record_degradation index_not_ready "no vector index has been built yet for ${WIKI_ROOT} -- recall this session is served from FTS5 only until the background build (or a later session) finishes"
+fi
+
+# Issue athenaeum#1886 (plan step 3): make the degrade visible. Every
+# recall hook that wants the LLM topic extractor reads this cache, not the
+# live fetch, so a run that ends with no key here is a silent quality drop
+# everywhere else until someone notices "generic-looking recall names".
+# Exactly one line, and only in the no-key case -- a run that ends with a
+# key (cached, restored, or freshly fetched by a PRIOR session's background
+# job) prints nothing new. Issue athenaeum#2204 adds the durable
+# `record_degradation` call alongside the pre-existing stderr line: stderr
+# is exactly the channel the shipped `settings-snippet.json` discards
+# (`2>/dev/null || true`), so the status-file write is now the signal that
+# actually survives a default install; the stderr line stays for the
+# "run the hook by hand" debugging flow the README documents.
+#
+# athenaeum#2193 AC6: a caller that supplies ANTHROPIC_API_KEY LIVE (so
+# `_had_live_cred[0]` was true) never gets a line written into config.env
+# -- checking the file alone would warn even though a perfectly usable key
+# is sitting in this process's own `$ANTHROPIC_API_KEY` right now (restored
+# earlier in this script). Check that live variable too.
+_final_api_key_line="$(grep '^ANTHROPIC_API_KEY=' "$CONFIG_ENV" 2>/dev/null | tail -n 1 || true)"
+case "$_final_api_key_line" in
+  ANTHROPIC_API_KEY=?*) ;;
+  *)
+    if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+      echo "[Knowledge] No ANTHROPIC_API_KEY cached — LLM topic extraction will fall back to regex-only extraction until a fetch succeeds." >&2
+      _athenaeum_record_degradation no_api_key "no ANTHROPIC_API_KEY cached or exported; LLM topic extraction falls back to regex-only until a fetch succeeds"
+    fi
+    ;;
+esac

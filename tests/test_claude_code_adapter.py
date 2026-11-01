@@ -16,6 +16,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -1433,3 +1434,157 @@ class TestPeriodicAnchorSpawn:
         rc = adapter.main()
         assert rc == 0
         assert not (tmp_path / "witness_hook_errors.jsonl").exists()
+
+
+class TestHookBudgetSharing:
+    """Issue athenaeum#2204 AC1/AC2: this adapter shares the ONE
+    foreground budget ``session-start-recall.sh`` reads
+    (``resolve_hook_budget_seconds``), enforced via ``_run_within_timeout``'s
+    OS-level ``signal.alarm`` -- deliberately not a Python-side deadline
+    computation, which this module's own AC2 guard above forbids as
+    arithmetic.
+    """
+
+    def test_returns_fn_result_when_fast_enough(self, imported_adapter) -> None:
+        adapter, _ = imported_adapter
+        assert adapter._run_within_timeout(5, lambda: 42) == 42
+
+    def test_raises_hook_timeout_exceeded_when_fn_overruns(self, imported_adapter) -> None:
+        adapter, _ = imported_adapter
+        with pytest.raises(adapter._HookTimeoutExceeded):
+            adapter._run_within_timeout(1, time.sleep, 5)
+
+    def test_hook_timeout_exceeded_is_not_swallowed_by_an_inner_except_exception(
+        self, imported_adapter
+    ) -> None:
+        """Seer finding on this issue's own PR: ``_HookTimeoutExceeded``
+        must survive a broad ``except Exception`` in whatever frame the
+        alarm fires in -- exactly the shape :mod:`athenaeum.context`'s own
+        best-effort vector/LLM legs use (``except Exception:  # vector leg
+        is best-effort, never fatal``). A plain ``Exception`` subclass
+        would be swallowed right there, and -- because the alarm is
+        one-shot -- anything that ran afterward would then execute with no
+        time bound left at all. Pins the fix (``BaseException``, not
+        ``Exception``) directly rather than via a live chromadb/LLM
+        integration test."""
+        adapter, _ = imported_adapter
+
+        def _slow_with_inner_catch() -> str:
+            try:
+                time.sleep(5)
+                return "finished without timing out"
+            except Exception:  # noqa: BLE001 -- mirrors context.py's own best-effort legs
+                return "swallowed"
+
+        with pytest.raises(adapter._HookTimeoutExceeded):
+            adapter._run_within_timeout(1, _slow_with_inner_catch)
+
+    def test_timeout_inside_context_llm_leg_reaches_the_outer_handler(
+        self, imported_adapter, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Sentry finding on PR athenaeum#2278, against the REAL guarded block: the
+        alarm fires while ``athenaeum.context._extract_terms`` is inside its
+        own ``except Exception:  # LLM path is best-effort`` try. The
+        timeout must propagate out of context.py to the caller, not be
+        swallowed into the regex fallback."""
+        adapter, context_mod = imported_adapter
+        import athenaeum.query_topics as query_topics
+
+        monkeypatch.setattr(query_topics, "extract_topics", lambda *a, **k: time.sleep(5))
+        with pytest.raises(adapter._HookTimeoutExceeded):
+            adapter._run_within_timeout(
+                1,
+                context_mod._extract_terms,
+                "a prompt long enough to extract terms from",
+                timeout=3.0,
+                stopwords=frozenset(),
+                config=None,
+                use_llm=True,
+            )
+
+    def test_timeout_inside_context_vector_leg_reaches_the_outer_handler(
+        self, imported_adapter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Same, for ``_query_vector``'s ``except Exception:  # vector leg
+        is best-effort`` block."""
+        adapter, context_mod = imported_adapter
+        import athenaeum.search as search_mod
+
+        (tmp_path / "wiki-vectors").mkdir()
+        monkeypatch.setattr(search_mod, "query_vector_index", lambda *a, **k: time.sleep(5))
+        with pytest.raises(adapter._HookTimeoutExceeded):
+            adapter._run_within_timeout(
+                1,
+                context_mod._query_vector,
+                tmp_path,
+                "query",
+                n=3,
+                exclude=frozenset(),
+                conn=None,
+                schema=None,
+            )
+
+    def test_timeout_inside_context_guarded_leg_records_step_timeout_via_main(
+        self, imported_adapter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End to end: the REAL ``build_context_for_turn`` runs, the alarm
+        fires inside context.py's guarded LLM leg, and ``main()``'s
+        ``except _HookTimeoutExceeded`` still records ``step_timeout``."""
+        adapter, _ = imported_adapter
+        import athenaeum.query_topics as query_topics
+
+        cache_dir = tmp_path / "cache"
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(cache_dir))
+        monkeypatch.setenv("ATHENAEUM_HOOK_BUDGET_SECONDS", "1")
+        monkeypatch.setenv("SEARCH_BACKEND", "fts5")
+        monkeypatch.setattr(query_topics, "extract_topics", lambda *a, **k: time.sleep(5))
+        stdin_payload = json.dumps(
+            {"prompt": "a prompt long enough to pass the length gate", "session_id": "s"}
+        )
+        monkeypatch.setattr(sys, "stdin", io.StringIO(stdin_payload))
+
+        assert adapter.main() == 0
+
+        from athenaeum.hook_status import read_latest_degradation
+
+        latest = read_latest_degradation(cache_dir)
+        assert latest is not None
+        assert latest["event"] == "step_timeout"
+        assert latest["hook"] == "user-prompt"
+
+    def test_alarm_is_cancelled_after_a_successful_call(self, imported_adapter) -> None:
+        """A prior call's alarm must never fire against unrelated LATER
+        code -- ``_run_within_timeout``'s ``finally: signal.alarm(0)``
+        must run even when *fn* finishes well before the deadline."""
+        adapter, _ = imported_adapter
+        assert adapter._run_within_timeout(1, lambda: "fast") == "fast"
+        # If the alarm wasn't cancelled, this sleep would itself be
+        # interrupted by a stale SIGALRM from the call above.
+        time.sleep(1.2)
+
+    def test_timeout_records_step_timeout_degradation(
+        self, imported_adapter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End to end through ``main()``: a ``build_context_for_turn`` that
+        overruns the budget records a ``step_timeout`` degradation and
+        still returns 0 -- the fail-safe axis (AC3) extends to this new
+        failure mode too."""
+        adapter, context_mod = imported_adapter
+        cache_dir = tmp_path / "cache"
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(cache_dir))
+        monkeypatch.setenv("ATHENAEUM_HOOK_BUDGET_SECONDS", "1")
+        monkeypatch.setattr(context_mod, "build_context_for_turn", lambda *a, **k: time.sleep(5))
+        stdin_payload = json.dumps(
+            {"prompt": "a prompt long enough to pass the length gate", "session_id": "s"}
+        )
+        monkeypatch.setattr(sys, "stdin", io.StringIO(stdin_payload))
+
+        rc = adapter.main()
+        assert rc == 0
+
+        from athenaeum.hook_status import read_latest_degradation
+
+        latest = read_latest_degradation(cache_dir)
+        assert latest is not None
+        assert latest["event"] == "step_timeout"
+        assert latest["hook"] == "user-prompt"

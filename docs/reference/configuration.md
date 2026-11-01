@@ -5164,6 +5164,38 @@ Returns an ``expanduser``-ed path (``~`` expanded); callers that need a
 fully-resolved absolute path call ``.resolve`` on the result. This is the
 one place ``~/.cache/athenaeum`` is defaulted and the env override applied.
 
+### `resolve_hook_budget_seconds`
+
+- **YAML path:** —
+- **Environment variable:** `ATHENAEUM_HOOK_BUDGET_SECONDS`
+- **CLI flag:** —
+- **Default:** `10`
+- **Precedence:** environment variable > code default
+
+Resolve the shared foreground time budget for a shipped Claude Code
+hook, in whole seconds.
+
+Precedence: ``ATHENAEUM_HOOK_BUDGET_SECONDS`` env >
+`HOOK_BUDGET_SECONDS_DEFAULT`. Env-only -- no yaml key (see
+``resolve_hook_budget_seconds`` in ``scripts/gen_config_reference.py``'s
+``_YAML_PATH_DECLARED``, ``None`` = genuinely no yaml key) -- because the
+value must be readable from a bare shell hook with no guaranteed
+python/yaml-parse path (``session-start-recall.sh`` already falls back to
+a yaml-less bash parser when the python config read fails), the same
+reasoning `resolve_reasoning_tier_any_screen_enabled` documents for
+its own env-only knob. A malformed or non-positive env value WARNs (see
+`_env_number`) and falls back to the default.
+
+``session-start-recall.sh`` mirrors this exact precedence in bash (its
+own ``HOOK_BUDGET_SECONDS`` local, with the identical fallback literal)
+so the shell hook never needs a python call just to learn its own
+budget; ``tests/test_hook_budget_2204.py`` pins the two literals equal.
+The packaged ``athenaeum-claude-hook`` adapter
+(`athenaeum.claude_code_adapter`) calls this resolver directly
+(it already imports `athenaeum.config`) -- one variable, one
+resolver, read by both paths, per this issue's explicit ruling that two
+independently-tuned budgets would be a second thing to keep in sync.
+
 ### `resolve_reasoning_tier_any_screen_enabled`
 
 - **YAML path:** —

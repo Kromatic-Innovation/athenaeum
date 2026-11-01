@@ -783,6 +783,12 @@ class TestSessionStartRecall:
         env = dict(hook_env)
         env["OP_SERVICE_ACCOUNT_TOKEN"] = "synthetic-service-account-token"
         env["ATHENAEUM_OP_REFRESH"] = "1"
+        # Issue athenaeum#2204: the credential fetch now runs in a detached
+        # background job (AC3), not inline in this foreground call. Suppress
+        # the real fork so the explicit `--run-background-build` call below
+        # is the ONLY thing that does the fetch -- otherwise this test would
+        # race its own nohup'd child non-deterministically.
+        env["ATHENAEUM_TEST_NO_AUTOFORK"] = "1"
         fake_op_dir = _write_fake_op(tmp_path, "synthetic-fresh-key-from-op")
         env["PATH"] = f"{fake_op_dir}{os.pathsep}{env['PATH']}"
         assert shutil.which("op", path=env["PATH"]) == str(fake_op_dir / "op")
@@ -795,11 +801,23 @@ class TestSessionStartRecall:
             timeout=30,
         )
         assert result.returncode == 0, f"stderr: {result.stderr}"
+        # The pre-existing stale cached line is restored by the foreground
+        # path itself (unchanged by athenaeum#2204), so the no-key warning
+        # must not fire here even before the background refresh runs.
+        assert "No ANTHROPIC_API_KEY cached" not in result.stderr
+
+        bg_result = subprocess.run(
+            ["bash", str(SESSION_START), "--run-background-build"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert bg_result.returncode == 0, f"stderr: {bg_result.stderr}"
 
         body = (cache_dir / "config.env").read_text()
         key_lines = [line for line in body.splitlines() if line.startswith("ANTHROPIC_API_KEY=")]
         assert key_lines == ["ANTHROPIC_API_KEY=synthetic-fresh-key-from-op"]
-        assert "No ANTHROPIC_API_KEY cached" not in result.stderr
 
     def test_no_cached_key_and_op_failing_warns_once_on_stderr(
         self, hook_env: dict[str, str], tmp_path: Path
@@ -847,6 +865,9 @@ class TestSessionStartRecall:
 
         env = dict(hook_env)
         env["OP_SERVICE_ACCOUNT_TOKEN"] = "synthetic-service-account-token"
+        # Issue athenaeum#2204: drive the (now background-only, AC3) fetch
+        # deterministically instead of racing this call's own real fork.
+        env["ATHENAEUM_TEST_NO_AUTOFORK"] = "1"
         fake_op_dir = _write_fake_op_table(tmp_path, jev_present=True)
         env["PATH"] = f"{fake_op_dir}{os.pathsep}{env['PATH']}"
         assert shutil.which("op", path=env["PATH"]) == str(fake_op_dir / "op")
@@ -860,12 +881,34 @@ class TestSessionStartRecall:
         )
         assert result.returncode == 0, f"stderr: {result.stderr}"
 
+        bg_result = subprocess.run(
+            ["bash", str(SESSION_START), "--run-background-build"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert bg_result.returncode == 0, f"stderr: {bg_result.stderr}"
+
         cache_dir = tmp_path / ".cache" / "athenaeum"
         body = (cache_dir / "config.env").read_text()
         lines = body.splitlines()
         assert lines.count("ANTHROPIC_API_KEY=synthetic-anthropic-key-from-op") == 1
         assert lines.count("JEV_API_KEY=synthetic-jev-key-from-op") == 1
-        assert "No ANTHROPIC_API_KEY cached" not in result.stderr
+
+        # A LATER session now finds both keys already cached (issue
+        # athenaeum#2204: the first session's own stderr legitimately warns
+        # before the background fetch completes -- that is no longer this
+        # test's concern; see `TestHookDegradationNotice` for that behavior).
+        result2 = subprocess.run(
+            ["bash", str(SESSION_START)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result2.returncode == 0, f"stderr: {result2.stderr}"
+        assert "No ANTHROPIC_API_KEY cached" not in result2.stderr
 
     def test_cached_jev_key_preserved_when_op_fetch_fails(
         self, hook_env: dict[str, str], tmp_path: Path
@@ -925,6 +968,9 @@ class TestSessionStartRecall:
 
         env = dict(hook_env)
         env["OP_SERVICE_ACCOUNT_TOKEN"] = "synthetic-service-account-token"
+        # Issue athenaeum#2204: drive the (now background-only, AC3) fetch
+        # deterministically instead of racing this call's own real fork.
+        env["ATHENAEUM_TEST_NO_AUTOFORK"] = "1"
         fake_op_dir = _write_fake_op_table(tmp_path, jev_present=False)
         env["PATH"] = f"{fake_op_dir}{os.pathsep}{env['PATH']}"
         assert shutil.which("op", path=env["PATH"]) == str(fake_op_dir / "op")
@@ -938,12 +984,356 @@ class TestSessionStartRecall:
         )
         assert result.returncode == 0, f"stderr: {result.stderr}"
 
+        bg_result = subprocess.run(
+            ["bash", str(SESSION_START), "--run-background-build"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert bg_result.returncode == 0, f"stderr: {bg_result.stderr}"
+        assert "JEV" not in bg_result.stderr
+
         cache_dir = tmp_path / ".cache" / "athenaeum"
         body = (cache_dir / "config.env").read_text()
         assert "JEV_API_KEY=" not in body
         assert "ANTHROPIC_API_KEY=synthetic-anthropic-key-from-op" in body.splitlines()
-        assert "JEV" not in result.stderr
-        assert "No ANTHROPIC_API_KEY cached" not in result.stderr
+
+        # A LATER session now finds the fetched ANTHROPIC key already
+        # cached, so the no-key warning no longer fires (issue athenaeum#2204:
+        # the FIRST session's own stderr legitimately warns before the
+        # background fetch completes -- not this test's concern).
+        result2 = subprocess.run(
+            ["bash", str(SESSION_START)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result2.returncode == 0, f"stderr: {result2.stderr}"
+        assert "No ANTHROPIC_API_KEY cached" not in result2.stderr
+
+
+class TestSessionStartBudgetAndBackgroundBuild:
+    """Issue athenaeum#2204 AC2/AC3/AC4/AC7: the foreground budget, the
+    detached background-build lock, and the degradation events
+    `session-start-recall.sh` records. `tests/test_hook_budget_2204.py`
+    covers the pure-python side (the resolver, the snippet-vs-budget
+    guard, `athenaeum.hook_status` itself); this class covers the real
+    shell hook's behaviour end to end.
+    """
+
+    def test_exhausted_budget_skips_every_remaining_step_and_records_it(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """AC2: an already-exhausted budget means every foreground step
+        this script still runs synchronously (config-read, FTS5 build,
+        stopwords cache, overflow-template cache) is skipped and recorded
+        as `step_timeout`, not run with its own independent timeout. A
+        live key and an fts5-only backend isolate this from the
+        `no_api_key` / `index_not_ready` events this same run would
+        otherwise also record (covered by their own dedicated tests
+        below). Uses the deterministic test-only seam
+        (`ATHENAEUM_TEST_BUDGET_ALREADY_SPENT`) rather than a real
+        multi-second wait, or `ATHENAEUM_HOOK_BUDGET_SECONDS=0` -- `0` is
+        reinterpreted as "use the default" by the same normalize guard
+        the python resolver applies, same as `ATHENAEUM_OP_TIMEOUT_SECONDS`
+        already does."""
+        _require("bash")
+
+        knowledge_yaml = Path(hook_env["KNOWLEDGE_ROOT"]) / "athenaeum.yaml"
+        knowledge_yaml.write_text("auto_recall: true\nsearch_backend: fts5\n")
+
+        env = dict(hook_env)
+        env["ANTHROPIC_API_KEY"] = "sk-test-synthetic-not-a-real-key"
+        env["ATHENAEUM_TEST_BUDGET_ALREADY_SPENT"] = "1"
+
+        start = time.monotonic()
+        result = subprocess.run(
+            ["bash", str(SESSION_START)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        elapsed = time.monotonic() - start
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert elapsed < 5, f"an exhausted budget should skip fast, took {elapsed:.1f}s"
+
+        cache_dir = Path(hook_env["ATHENAEUM_CACHE_DIR"])
+        # FTS5 build never ran -- the step was skipped, not merely fast.
+        assert not (cache_dir / "wiki-index.db").is_file()
+        # The bash yaml-fallback writer is NOT budget-wrapped (it is a
+        # pure in-process parse, not a slow step), so config.env still
+        # gets written even though the python config-read was skipped.
+        assert "SEARCH_BACKEND=fts5" in (cache_dir / "config.env").read_text()
+
+        degradation_log = (cache_dir / "hook_degradation.jsonl").read_text()
+        assert "no_api_key" not in degradation_log
+        assert "index_not_ready" not in degradation_log
+        events = [json.loads(line) for line in degradation_log.splitlines() if line.strip()]
+        assert events, "expected at least one recorded degradation"
+        assert all(e["event"] == "step_timeout" for e in events)
+        assert all(e["hook"] == "session-start" for e in events)
+        step_names = {e["detail"].split(":")[0] for e in events}
+        assert "fts5-build" in step_names
+
+    def test_vector_never_built_records_index_not_ready(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """AC7: a vector backend whose index has never been built records
+        an `index_not_ready` degradation, even though the background job
+        itself is suppressed here (`ATHENAEUM_TEST_NO_AUTOFORK`) so this
+        test only exercises the FOREGROUND recording, deterministically."""
+        _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        knowledge_yaml = Path(hook_env["KNOWLEDGE_ROOT"]) / "athenaeum.yaml"
+        knowledge_yaml.write_text("auto_recall: true\nsearch_backend: vector\n")
+
+        env = dict(hook_env)
+        env["ANTHROPIC_API_KEY"] = "sk-test-synthetic-not-a-real-key"
+        env["ATHENAEUM_TEST_NO_AUTOFORK"] = "1"
+
+        result = subprocess.run(
+            ["bash", str(SESSION_START)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+
+        from athenaeum.hook_status import read_latest_degradation
+
+        cache_dir = Path(hook_env["ATHENAEUM_CACHE_DIR"])
+        latest = read_latest_degradation(cache_dir)
+        assert latest is not None
+        assert latest["event"] == "index_not_ready"
+        assert latest["hook"] == "session-start"
+
+    def test_no_key_records_no_api_key_degradation(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """AC7: the pre-existing stderr-only no-key warning now ALSO
+        writes a durable `no_api_key` status-file event (AC10: the
+        status file is the signal that survives the shipped snippet's
+        `2>/dev/null || true`, which the stderr line alone did not)."""
+        _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        env = dict(hook_env)
+        _assert_op_is_sentinel(env, tmp_path)
+
+        result = subprocess.run(
+            ["bash", str(SESSION_START)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+
+        from athenaeum.hook_status import read_latest_degradation
+
+        cache_dir = Path(hook_env["ATHENAEUM_CACHE_DIR"])
+        latest = read_latest_degradation(cache_dir)
+        assert latest is not None
+        assert latest["event"] == "no_api_key"
+        assert latest["hook"] == "session-start"
+
+    def test_concurrent_background_builds_only_one_proceeds(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """AC3: two concurrent `--run-background-build` invocations
+        against the same cache dir -- the same shape two SessionStart
+        hooks firing at once would produce -- race the SAME lockfile
+        `rebuild-index.sh` already uses, and only one of them actually
+        starts a build; the other returns immediately having done
+        nothing. `ATHENAEUM_TEST_SLOW_BUILD_SECONDS` is the test-only
+        seam that turns a ~45s real vector build into a short, controlled
+        window to race against, without a real vector backend or a real
+        45-second wait."""
+        _require("bash")
+
+        knowledge_yaml = Path(hook_env["KNOWLEDGE_ROOT"]) / "athenaeum.yaml"
+        knowledge_yaml.write_text("auto_recall: true\nsearch_backend: vector\n")
+
+        env = dict(hook_env)
+        env["ATHENAEUM_TEST_SLOW_BUILD_SECONDS"] = "2"
+
+        def _spawn() -> subprocess.Popen:
+            return subprocess.Popen(
+                ["bash", str(SESSION_START), "--run-background-build"],
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+        first = _spawn()
+        time.sleep(0.3)  # let `first` win the `mkdir` race deterministically
+        second = _spawn()
+
+        assert first.wait(timeout=15) == 0
+        assert second.wait(timeout=15) == 0
+
+        cache_dir = Path(hook_env["ATHENAEUM_CACHE_DIR"])
+        log = (cache_dir / "rebuild.log").read_text()
+        assert log.count("background-build: start") == 1, log
+        assert "another build in progress" in log, log
+
+    def test_turn_and_new_session_do_not_wait_on_an_in_flight_build(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """AC4: a turn (or a new session) that starts while a background
+        build is in flight proceeds immediately -- it never attempts the
+        lock itself, so it cannot block on it. Proven by holding the lock
+        for several real seconds (via the same test-only slow-build seam
+        as the test above) and asserting both a fresh SessionStart call
+        and a per-turn hook call return in a small fraction of that time.
+
+        Deliberately NO `ANTHROPIC_API_KEY` anywhere in this test (live or
+        cached): even an obviously-synthetic one still reaches
+        `query_topics`'s real network call before it fails auth, which
+        costs several real seconds of round-trip time on its own --
+        indistinguishable from a lock-wait by elapsed time alone, and
+        irrelevant to what AC4 actually claims. A genuinely absent key
+        takes the fast regex-fallback path with no network attempt at
+        all (see `examples/claude-code/README.md`'s "What happens with
+        no key")."""
+        _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        knowledge_yaml = Path(hook_env["KNOWLEDGE_ROOT"]) / "athenaeum.yaml"
+        knowledge_yaml.write_text("auto_recall: true\nsearch_backend: vector\n")
+
+        env = dict(hook_env)
+
+        # A generous hold (12s) and a generous "must be well under that"
+        # threshold (6s) below: this container runs several lanes'
+        # test suites concurrently, and plain process-startup jitter alone
+        # has been observed up to ~5s here under load. The margin still
+        # cleanly separates "didn't wait" from "waited for the lock".
+        slow_env = dict(env)
+        slow_env["ATHENAEUM_TEST_SLOW_BUILD_SECONDS"] = "12"
+        holder = subprocess.Popen(
+            ["bash", str(SESSION_START), "--run-background-build"],
+            env=slow_env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            time.sleep(0.5)  # let `holder` win the lock before racing it
+
+            start = time.monotonic()
+            result = subprocess.run(
+                ["bash", str(SESSION_START)],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            elapsed = time.monotonic() - start
+            assert result.returncode == 0, f"stderr: {result.stderr}"
+            assert elapsed < 6, (
+                f"a fresh SessionStart call blocked on the in-flight build "
+                f"({elapsed:.1f}s)"
+            )
+
+            stdin_payload = json.dumps(
+                {
+                    "prompt": "tell me about anything relevant to this test",
+                    "session_id": f"test-{uuid.uuid4().hex}",
+                }
+            )
+            # fts5, not vector, for THIS call only: a cold-process chromadb
+            # import costs several real seconds on its own (measured ~3.7s
+            # in this environment), which would otherwise be indistinguishable
+            # from "blocked on the lock" by elapsed time alone. AC4 is about
+            # the lock specifically -- fts5 isolates that from unrelated
+            # vector-backend import cost while still exercising the same
+            # "a turn starts while a background build is in flight" shape.
+            turn_env = dict(env)
+            turn_env["SEARCH_BACKEND"] = "fts5"
+            start2 = time.monotonic()
+            turn_result = subprocess.run(
+                ["bash", str(USER_PROMPT)],
+                input=stdin_payload,
+                env=turn_env,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            elapsed2 = time.monotonic() - start2
+            assert turn_result.returncode == 0, f"stderr: {turn_result.stderr}"
+            assert elapsed2 < 6, (
+                f"a per-turn hook call blocked on the in-flight build "
+                f"({elapsed2:.1f}s)"
+            )
+        finally:
+            holder.wait(timeout=30)
+
+
+class TestHookDegradationNotice:
+    """Issue athenaeum#2204 AC9: the once-per-session notice actually
+    reaching a hook's own additionalContext channel, driven by a REAL
+    degradation `session-start-recall.sh` recorded (not a synthetic
+    `hook_status.record_degradation` call -- see
+    `tests/test_hook_budget_2204.py::TestHookStatus` for that unit-level
+    coverage)."""
+
+    def test_first_turn_in_a_degraded_session_shows_the_notice_once(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        env = dict(hook_env)
+        _assert_op_is_sentinel(env, tmp_path)
+
+        seed = subprocess.run(
+            ["bash", str(SESSION_START)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert seed.returncode == 0, f"stderr: {seed.stderr}"
+        assert "No ANTHROPIC_API_KEY cached" in seed.stderr
+
+        session_id = f"test-{uuid.uuid4().hex}"
+        stdin_payload = json.dumps(
+            {
+                "prompt": "zzznonmatchingzzz query with no candidates at all",
+                "session_id": session_id,
+            }
+        )
+
+        first = subprocess.run(
+            ["bash", str(USER_PROMPT)],
+            input=stdin_payload,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert first.returncode == 0, f"stderr: {first.stderr}"
+        assert first.stdout, "expected the degradation notice on stdout"
+        payload = json.loads(first.stdout)
+        notice = payload["hookSpecificOutput"]["additionalContext"]
+        assert "ANTHROPIC_API_KEY" in notice
+        assert "athenaeum status" in notice
+
+        second = subprocess.run(
+            ["bash", str(USER_PROMPT)],
+            input=stdin_payload,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert second.returncode == 0, f"stderr: {second.stderr}"
+        assert second.stdout == "", f"notice repeated: {second.stdout!r}"
 
 
 class TestOpOptionalGate2193:
@@ -1072,12 +1462,17 @@ class TestOpOptionalGate2193:
     ) -> None:
         """athenaeum#2193 AC3(i): OP_SERVICE_ACCOUNT_TOKEN set, nothing
         cached yet -> the fetch is attempted and the working fake `op`'s
-        value is cached, exactly as today."""
+        value is cached, exactly as today. Issue athenaeum#2204: the fetch
+        itself now happens in the detached background job, so this test
+        drives it deterministically via `--run-background-build`
+        (`ATHENAEUM_TEST_NO_AUTOFORK` suppresses the real fork) rather than
+        racing it."""
         _require("bash")
         _require_hook_python(hook_env, "athenaeum.search")
 
         env = dict(hook_env)
         env["OP_SERVICE_ACCOUNT_TOKEN"] = "synthetic-service-account-token"
+        env["ATHENAEUM_TEST_NO_AUTOFORK"] = "1"
         fake_op_dir = _write_fake_op(tmp_path, "synthetic-fetched-via-token")
         env["PATH"] = f"{fake_op_dir}{os.pathsep}{env['PATH']}"
 
@@ -1090,6 +1485,15 @@ class TestOpOptionalGate2193:
         )
         assert result.returncode == 0, f"stderr: {result.stderr}"
 
+        bg_result = subprocess.run(
+            ["bash", str(SESSION_START), "--run-background-build"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert bg_result.returncode == 0, f"stderr: {bg_result.stderr}"
+
         cache_dir = tmp_path / ".cache" / "athenaeum"
         body = (cache_dir / "config.env").read_text()
         assert "ANTHROPIC_API_KEY=synthetic-fetched-via-token" in body.splitlines()
@@ -1098,12 +1502,15 @@ class TestOpOptionalGate2193:
         self, hook_env: dict[str, str], tmp_path: Path
     ) -> None:
         """athenaeum#2193 AC3(ii): ATHENAEUM_OP_INTERACTIVE=1 and NO token
-        -> the fetch is still attempted and cached, same as AC3(i)."""
+        -> the fetch is still attempted and cached, same as AC3(i). Issue
+        athenaeum#2204: drives the (now background-only) fetch
+        deterministically, same as the sibling AC3(i) test above."""
         _require("bash")
         _require_hook_python(hook_env, "athenaeum.search")
 
         env = dict(hook_env)
         env["ATHENAEUM_OP_INTERACTIVE"] = "1"
+        env["ATHENAEUM_TEST_NO_AUTOFORK"] = "1"
         fake_op_dir = _write_fake_op(tmp_path, "synthetic-fetched-via-interactive")
         env["PATH"] = f"{fake_op_dir}{os.pathsep}{env['PATH']}"
 
@@ -1116,6 +1523,15 @@ class TestOpOptionalGate2193:
         )
         assert result.returncode == 0, f"stderr: {result.stderr}"
 
+        bg_result = subprocess.run(
+            ["bash", str(SESSION_START), "--run-background-build"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert bg_result.returncode == 0, f"stderr: {bg_result.stderr}"
+
         cache_dir = tmp_path / ".cache" / "athenaeum"
         body = (cache_dir / "config.env").read_text()
         assert "ANTHROPIC_API_KEY=synthetic-fetched-via-interactive" in body.splitlines()
@@ -1124,11 +1540,16 @@ class TestOpOptionalGate2193:
         self, hook_env: dict[str, str], tmp_path: Path
     ) -> None:
         """athenaeum#2193 AC4: a fake `op` that sleeps well past the
-        configured budget must not stall the hook. The run must finish
-        well inside budget + 20s (a generous margin over the rest of the
-        hook's own work, chiefly the index build -- NOT a tight bound on
-        `_athenaeum_op_read` alone), the cached line must survive
-        untouched, and no new stderr warning must appear."""
+        configured budget must not stall the hook. Issue athenaeum#2204:
+        the credential fetch itself now runs inside the detached
+        background job, so the timing claim moves there too -- the
+        FOREGROUND call (asserted separately, below) returns near-instantly
+        by construction now, which would make timing it prove nothing.
+        `--run-background-build` must finish well inside budget + 20s (a
+        generous margin over the rest of its own work, chiefly the index
+        build -- NOT a tight bound on `_athenaeum_op_read` alone), the
+        cached line must survive untouched, and no new stderr warning must
+        appear anywhere."""
         _require("bash")
         _require_hook_python(hook_env, "athenaeum.search")
 
@@ -1145,14 +1566,24 @@ class TestOpOptionalGate2193:
         env["ATHENAEUM_OP_TIMEOUT_SECONDS"] = str(op_budget)
         env["OP_SERVICE_ACCOUNT_TOKEN"] = "synthetic-service-account-token"
         env["ATHENAEUM_OP_REFRESH"] = "1"
+        env["ATHENAEUM_TEST_NO_AUTOFORK"] = "1"
 
         bin_dir = _write_sleeping_op(tmp_path)
         env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
 
+        foreground = subprocess.run(
+            ["bash", str(SESSION_START)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert foreground.returncode == 0, f"stderr: {foreground.stderr}"
+
         margin_seconds = 20
         started = time.monotonic()
         result = subprocess.run(
-            ["bash", str(SESSION_START)],
+            ["bash", str(SESSION_START), "--run-background-build"],
             env=env,
             capture_output=True,
             text=True,
@@ -1162,7 +1593,7 @@ class TestOpOptionalGate2193:
 
         assert result.returncode == 0, f"stderr: {result.stderr}"
         assert elapsed < op_budget + margin_seconds, (
-            f"hook took {elapsed:.1f}s, expected well under "
+            f"background build took {elapsed:.1f}s, expected well under "
             f"{op_budget + margin_seconds}s (budget {op_budget}s + margin)"
         )
 
@@ -1171,6 +1602,7 @@ class TestOpOptionalGate2193:
             "ANTHROPIC_API_KEY=synthetic-cached-key-survives-timeout"
         ) == 1
         assert "should-never-be-read" not in body
+        assert "No ANTHROPIC_API_KEY cached" not in foreground.stderr
         assert "No ANTHROPIC_API_KEY cached" not in result.stderr
 
     def test_ac4_portable_fallback_is_bounded_when_no_timeout_binary_exists(
@@ -1203,6 +1635,11 @@ class TestOpOptionalGate2193:
         env["ATHENAEUM_OP_TIMEOUT_SECONDS"] = str(op_budget)
         env["OP_SERVICE_ACCOUNT_TOKEN"] = "synthetic-service-account-token"
         env["ATHENAEUM_OP_REFRESH"] = "1"
+        # Issue athenaeum#2204: the fetch moved into the detached background
+        # job -- suppress the real fork and drive it explicitly below so
+        # this test can time THAT call instead of the now-near-instant
+        # foreground one.
+        env["ATHENAEUM_TEST_NO_AUTOFORK"] = "1"
 
         # Build a restricted PATH that has everything the hook needs EXCEPT
         # `timeout`/`gtimeout` -- a symlink farm, not a directory-stripped
@@ -1243,6 +1680,15 @@ class TestOpOptionalGate2193:
             f"sleeping stub at {sleeping_op_dir / 'op'} (got {resolved_op!r})"
         )
 
+        foreground = subprocess.run(
+            ["bash", str(SESSION_START)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert foreground.returncode == 0, f"stderr: {foreground.stderr}"
+
         # Two credentials (ANTHROPIC_API_KEY, JEV_API_KEY) and
         # ATHENAEUM_OP_REFRESH=1 together mean BOTH attempt a fetch here,
         # sequentially -- so the floor for this branch is ~2x the budget,
@@ -1252,7 +1698,7 @@ class TestOpOptionalGate2193:
         margin_seconds = 20
         started = time.monotonic()
         result = subprocess.run(
-            ["bash", str(SESSION_START)],
+            ["bash", str(SESSION_START), "--run-background-build"],
             env=env,
             capture_output=True,
             text=True,
@@ -1262,7 +1708,7 @@ class TestOpOptionalGate2193:
 
         assert result.returncode == 0, f"stderr: {result.stderr}"
         assert elapsed < (2 * op_budget) + margin_seconds, (
-            f"hook took {elapsed:.1f}s, expected well under "
+            f"background build took {elapsed:.1f}s, expected well under "
             f"{(2 * op_budget) + margin_seconds}s (2 credentials x "
             f"{op_budget}s budget + margin)"
         )
@@ -1272,6 +1718,7 @@ class TestOpOptionalGate2193:
             "ANTHROPIC_API_KEY=synthetic-cached-key-survives-portable-timeout"
         ) == 1
         assert "should-never-be-read" not in body
+        assert "No ANTHROPIC_API_KEY cached" not in foreground.stderr
         assert "No ANTHROPIC_API_KEY cached" not in result.stderr
 
         # The fallback mktemp's a credential temp file into $CACHE_DIR;
@@ -1319,6 +1766,9 @@ class TestOpOptionalGate2193:
         env["ATHENAEUM_OP_TIMEOUT_SECONDS"] = "0.5"
         env["OP_SERVICE_ACCOUNT_TOKEN"] = "synthetic-service-account-token"
         env["ATHENAEUM_OP_REFRESH"] = "1"
+        # Issue athenaeum#2204: the fetch moved into the detached background
+        # job -- suppress the real fork and drive it explicitly below.
+        env["ATHENAEUM_TEST_NO_AUTOFORK"] = "1"
 
         # Same restricted-PATH construction as the sibling AC4 portable-
         # fallback test: a symlink farm with everything the hook needs
@@ -1357,6 +1807,15 @@ class TestOpOptionalGate2193:
             f"sleeping stub at {sleeping_op_dir / 'op'} (got {resolved_op!r})"
         )
 
+        foreground = subprocess.run(
+            ["bash", str(SESSION_START)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert foreground.returncode == 0, f"stderr: {foreground.stderr}"
+
         # A malformed budget falls back to the documented default of 10,
         # not to the literal `0.5` -- so the floor here is 2 credentials
         # (ANTHROPIC_API_KEY, JEV_API_KEY; ATHENAEUM_OP_REFRESH=1 means
@@ -1367,7 +1826,7 @@ class TestOpOptionalGate2193:
         margin_seconds = 20
         started = time.monotonic()
         result = subprocess.run(
-            ["bash", str(SESSION_START)],
+            ["bash", str(SESSION_START), "--run-background-build"],
             env=env,
             capture_output=True,
             text=True,
@@ -1377,7 +1836,7 @@ class TestOpOptionalGate2193:
 
         assert result.returncode == 0, f"stderr: {result.stderr}"
         assert elapsed < (2 * default_budget) + margin_seconds, (
-            f"hook took {elapsed:.1f}s, expected well under "
+            f"background build took {elapsed:.1f}s, expected well under "
             f"{(2 * default_budget) + margin_seconds}s (2 credentials x "
             f"{default_budget}s default budget + margin)"
         )
@@ -1576,6 +2035,10 @@ class TestOpOptionalGate2193:
         env = dict(hook_env)
         env["OP_SERVICE_ACCOUNT_TOKEN"] = "synthetic-service-account-token"
         env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+        # Issue athenaeum#2204: the `op` subprocess this test inspects now
+        # runs inside the detached background job -- suppress the real
+        # fork and drive it explicitly below.
+        env["ATHENAEUM_TEST_NO_AUTOFORK"] = "1"
 
         result = subprocess.run(
             ["bash", str(SESSION_START)],
@@ -1585,6 +2048,15 @@ class TestOpOptionalGate2193:
             timeout=30,
         )
         assert result.returncode == 0, f"stderr: {result.stderr}"
+
+        bg_result = subprocess.run(
+            ["bash", str(SESSION_START), "--run-background-build"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert bg_result.returncode == 0, f"stderr: {bg_result.stderr}"
         assert capture.read_text(encoding="utf-8").splitlines() == [
             "LOAD=false",
             "BIOMETRIC=false",
@@ -1617,6 +2089,10 @@ class TestOpOptionalGate2193:
         env = dict(hook_env)
         env["ATHENAEUM_OP_INTERACTIVE"] = "1"
         env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+        # Issue athenaeum#2204: same reasoning as the sibling AC10 test
+        # above -- drive the (now background-only) `op` subprocess
+        # explicitly and deterministically.
+        env["ATHENAEUM_TEST_NO_AUTOFORK"] = "1"
 
         result = subprocess.run(
             ["bash", str(SESSION_START)],
@@ -1626,6 +2102,15 @@ class TestOpOptionalGate2193:
             timeout=30,
         )
         assert result.returncode == 0, f"stderr: {result.stderr}"
+
+        bg_result = subprocess.run(
+            ["bash", str(SESSION_START), "--run-background-build"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert bg_result.returncode == 0, f"stderr: {bg_result.stderr}"
         assert capture.read_text(encoding="utf-8").splitlines() == [
             "LOAD=UNSET",
             "BIOMETRIC=UNSET",
@@ -1659,6 +2144,9 @@ class TestOpOptionalGate2193:
 
         env = dict(hook_env)
         env["OP_SERVICE_ACCOUNT_TOKEN"] = "synthetic-service-account-token"
+        # Issue athenaeum#2204: drive the (now background-only) fetch
+        # deterministically instead of racing this call's own real fork.
+        env["ATHENAEUM_TEST_NO_AUTOFORK"] = "1"
         fake_op_dir = _write_fake_op(tmp_path, "synthetic-fetched-despite-empty-cache")
         env["PATH"] = f"{fake_op_dir}{os.pathsep}{env['PATH']}"
         assert "ATHENAEUM_OP_REFRESH" not in env
@@ -1671,6 +2159,15 @@ class TestOpOptionalGate2193:
             timeout=30,
         )
         assert result.returncode == 0, f"stderr: {result.stderr}"
+
+        bg_result = subprocess.run(
+            ["bash", str(SESSION_START), "--run-background-build"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert bg_result.returncode == 0, f"stderr: {bg_result.stderr}"
 
         body = (cache_dir / "config.env").read_text()
         key_lines = [line for line in body.splitlines() if line.startswith("ANTHROPIC_API_KEY=")]
@@ -1714,9 +2211,20 @@ class TestOpOptionalGate2193:
 
 class TestUserPromptRecall:
     def _seed_index(self, hook_env: dict[str, str]) -> None:
+        env = dict(hook_env)
+        # Issue athenaeum#2204: a key-less SessionStart now records a
+        # `no_api_key` degradation, and the per-turn adapter surfaces a
+        # once-per-session notice on its own additionalContext channel
+        # (AC9) the FIRST time it runs against that degradation -- a
+        # concern orthogonal to what this fixture exists for (seeding an
+        # index), which would otherwise leak into every caller's stdout
+        # assertion below. A live (synthetic, never a real key)
+        # ANTHROPIC_API_KEY suppresses it; `TestHookDegradationNotice`
+        # exercises the notice path itself.
+        env.setdefault("ANTHROPIC_API_KEY", "sk-test-synthetic-not-a-real-key")
         subprocess.run(
             ["bash", str(SESSION_START)],
-            env=hook_env,
+            env=env,
             capture_output=True,
             text=True,
             timeout=30,

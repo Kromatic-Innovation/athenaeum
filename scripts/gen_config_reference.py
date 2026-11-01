@@ -630,6 +630,7 @@ _YAML_PATH_DECLARED: dict[str, str | None] = {
     "resolve_pull_before_run": "librarian.pull_before_run",
     "resolve_min_cluster_cohesion_scopes": "librarian.min_cluster_cohesion_scopes",
     "resolve_reasoning_tier_any_screen_enabled": None,  # env-only
+    "resolve_hook_budget_seconds": None,  # env-only (issue athenaeum#2204)
     "resolve_search_backend": "search_backend",
     "resolve_model_rates": "pricing",
     "resolve_dimensions": "dimensions",

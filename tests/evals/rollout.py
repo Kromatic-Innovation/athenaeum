@@ -983,6 +983,21 @@ def build_breadcrumb_hook_env(
         # `claude` subprocess instead.
         "ANTHROPIC_API_KEY": "",
         "ATHENAEUM_LLM_PROVIDER": "api",
+        # Issue athenaeum#2204: session-start-recall.sh now backgrounds the
+        # vector rebuild + credential refresh behind a detached, unawaited
+        # fork -- `build_hook_index` below drives that step SYNCHRONOUSLY
+        # itself (via `--run-background-build`) to preserve this module's
+        # own "the index is ready by the time build_hook_index returns"
+        # contract, so the real fork here is suppressed to avoid a second,
+        # racing attempt at the same build.
+        "ATHENAEUM_TEST_NO_AUTOFORK": "1",
+        # The default foreground budget (10s) is sized for a warm
+        # production interpreter; this harness's cold venv can exceed it
+        # on the FTS5-build step alone under load, same reasoning
+        # `tests/evals/test_rollout_push_breadcrumb_spike.py`'s own hand-
+        # built hook env documents. No interactive host timeout exists
+        # here to respect, so a generous budget costs nothing.
+        "ATHENAEUM_HOOK_BUDGET_SECONDS": "60",
     }
 
 
@@ -1105,17 +1120,29 @@ def build_hook_index(
     athenaeum_src: Path | None = None,
     timeout: float = HOOK_INDEX_BUILD_TIMEOUT_SECONDS,
 ) -> None:
-    """Run :data:`SESSION_START_HOOK` once to build the breadcrumb hook's
-    own search index from *knowledge_root* under *hook_home* as a throwaway
-    ``HOME`` -- the ``build_hook_index`` half of what
-    ``build_push_breadcrumb_context`` used to do in one call (issue
-    athenaeum#1834). Memoized per ``str(knowledge_root.resolve())`` in
-    :data:`_HOOK_INDEX_CACHE`: a second call for the SAME *knowledge_root*
-    is a no-op (or, on a cache hit for a previously-failed build, an
-    immediate :class:`HookIndexBuildError` re-raise -- see that cache's own
+    """Run :data:`SESSION_START_HOOK` (then its background-build half --
+    see below) to build the breadcrumb hook's own search index from
+    *knowledge_root* under *hook_home* as a throwaway ``HOME`` -- the
+    ``build_hook_index`` half of what ``build_push_breadcrumb_context``
+    used to do in one call (issue athenaeum#1834). Memoized per
+    ``str(knowledge_root.resolve())`` in :data:`_HOOK_INDEX_CACHE`: a
+    second call for the SAME *knowledge_root* is a no-op (or, on a cache
+    hit for a previously-failed build, an immediate
+    :class:`HookIndexBuildError` re-raise -- see that cache's own
     docstring) rather than a second subprocess spawn. Thread-safe: multiple
     grid workers may race to build the same scale's index and only the
     first actually spawns the subprocess.
+
+    Issue athenaeum#2204: ``session-start-recall.sh``'s foreground run
+    only decides whether a vector rebuild / credential refresh is needed
+    and forks it as a detached background job -- it no longer blocks on
+    either. This function's own contract ("the index is ready by the time
+    this call returns") still needs to hold for every caller of
+    :func:`build_push_breadcrumb_context` / :func:`query_hook`, so
+    :func:`build_breadcrumb_hook_env` suppresses that real fork
+    (``ATHENAEUM_TEST_NO_AUTOFORK``) and this function drives the SAME
+    build synchronously itself, via ``--run-background-build``, sharing
+    *timeout* and this function's own error-handling contract.
 
     Raises :class:`HookIndexBuildError` (never a bare
     ``subprocess.TimeoutExpired``/``CalledProcessError``) so every caller
@@ -1151,6 +1178,20 @@ def build_hook_index(
         try:
             subprocess.run(
                 ["bash", str(SESSION_START_HOOK)],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=True,
+            )
+            # Issue athenaeum#2204: the half of the build that used to be
+            # synchronous (vector rebuild, credential refresh) is now a
+            # detached job the call above only decided to fork (and, via
+            # ATHENAEUM_TEST_NO_AUTOFORK above, did NOT fork for real) --
+            # drive it directly so the index is genuinely complete before
+            # this function returns.
+            subprocess.run(
+                ["bash", str(SESSION_START_HOOK), "--run-background-build"],
                 env=env,
                 capture_output=True,
                 text=True,
