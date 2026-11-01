@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Internal
+
+- The attribution calibration sweep (`tests/evals/test_attribution_eval.py`)
+  no longer runs on every default eval dispatch. It spent 3,686,060 tokens
+  against the default suite's 250,000-token ceiling, which made every
+  default dispatch fail. It now carries its own `calibration` pytest marker
+  instead of `eval`, so neither `pytest -m eval` nor the default selection
+  picks it up. It runs only through the new `suite=calibration` input on
+  `evals.yml`, under its own `CALIBRATION_TOKEN_CEILING` (4,500,000);
+  `EVAL_TOKEN_CEILING` is unchanged. That job uploads the regenerated
+  calibration record as an artifact. A CI-wiring test keeps the marker out of
+  the default selections. (#2287)
+
 ## [0.23.0] - 2026-10-31
 
 First release since 0.22.43 (2026-10-25). The intermediate `0.22.44`–`0.22.58`

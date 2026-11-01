@@ -13,14 +13,23 @@ for a (class, model) whose self-reported AUROC fails
 
 Extends the existing harness (:mod:`tests.evals.harness`) exactly the way
 ``test_write_tier_compare.py`` does for the write-knob comparison: credential
-gating (:func:`tests.evals.harness.live_ready`), record/replay
-(:class:`tests.evals.harness.RecordingClient`), and the session token
-guard are inherited rather than reimplemented.
+gating (:func:`tests.evals.harness.live_ready`) and record/replay
+(:class:`tests.evals.harness.RecordingClient`) are inherited rather than
+reimplemented.
+
+**Marked ``calibration``, not ``eval`` (issue athenaeum#2287).** A full sweep
+spends ~3.7M tokens (eval run 41325591218: 3,686,060), over fourteen times
+the default suite's ``EVAL_TOKEN_CEILING``. While it carried ``eval``,
+every default ``evals.yml`` dispatch selected it and failed on that
+ceiling. It now runs only via ``evals.yml``'s ``suite=calibration``
+dispatch input (or a local ``pytest -m calibration tests/evals/``), and
+its usage accumulates into the separate ``calibration_session`` fixture,
+guarded by :data:`tests.evals.harness.CALIBRATION_TOKEN_CEILING`.
 
 **No build lane may run this test.** Token spend from a live model call is
 an irreversible external action outside a build lane's authority — this
 eval runs only via an operator's own local invocation, or CI's
-``evals.yml`` ``workflow_dispatch`` job. Skips cleanly (:func:`live_ready`)
+``evals.yml`` ``workflow_dispatch`` with ``suite=calibration``. Skips cleanly (:func:`live_ready`)
 when no LLM credential is configured, which is the only path this file has
 ever actually taken in a build lane.
 """
@@ -57,7 +66,7 @@ from tests.evals.attribution_eval import (
 from tests.evals.harness import LAYER_ATTRIBUTION, RecordingClient, build_live_client, live_ready
 from tests.evals.metrics import auroc as _auroc
 
-pytestmark = pytest.mark.eval
+pytestmark = pytest.mark.calibration
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CALIBRATION_RECORD_PATH = (
@@ -82,7 +91,7 @@ def _cases() -> list[dict[str, Any]]:
 def test_attribution_calibration_eval(
     _cases: list[dict[str, Any]],
     eval_record: bool,
-    eval_session: Any,
+    calibration_session: Any,
     _live_ready: None,
 ) -> None:
     """Run the full corpus against every candidate model; write the record."""
@@ -107,7 +116,7 @@ def test_attribution_calibration_eval(
 
             def _create(_orig: Any = original_create, **params: Any) -> Any:
                 response = _orig(**params)
-                eval_session.observe_response(str(params.get("model", "")), response)
+                calibration_session.observe_response(str(params.get("model", "")), response)
                 return response
 
             client.messages.create = _create  # type: ignore[method-assign]
@@ -124,7 +133,7 @@ def test_attribution_calibration_eval(
                 client.end_case()
 
             for run in self_fit + self_holdout:
-                eval_session.record_case(
+                calibration_session.record_case(
                     LAYER_ATTRIBUTION,
                     f"{model}::{run.case_id}",
                     expected=run.gold_verdict,

@@ -41,6 +41,17 @@ from athenaeum.provider import response_text as provider_response_text
 # above expected steady-state so the guard does not fight noise.
 EVAL_TOKEN_CEILING = 250_000
 
+# Issue athenaeum#2287: the operator-run calibration SWEEP's own ceiling,
+# asserted by the separate ``calibration_session`` fixture
+# (tests/evals/conftest.py) -- never folded into EVAL_TOKEN_CEILING, which
+# stays sized for the default ``-m eval`` regression suite. Sized from the
+# measured full sweep: eval run 41325591218 spent 3,686,060 tokens
+# (420-case attribution corpus x 2 candidate models, plus 3-sample
+# agreement reruns for any class under the AUROC bar), with headroom for a
+# corpus or candidate-set change. A sweep that outgrows this fails loudly;
+# raise it deliberately, with a new measurement, never to make a run pass.
+CALIBRATION_TOKEN_CEILING = 4_500_000
+
 # Layer directory names — used to look up fixtures and to slice the
 # eval-summary JSON.
 LAYER_DETECTOR = "detector"
