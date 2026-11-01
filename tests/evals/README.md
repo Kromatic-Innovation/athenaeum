@@ -138,28 +138,101 @@ one. The decision logic lives in
 `tests/test_llm_surface_receipt.py`; `.github/llm-surface.txt`'s own rot
 check is `tests/test_llm_surface.py`.
 
-Layers exercised end-to-end against a real Claude API call:
+Layers exercised end-to-end against a real Claude API call. This table was
+found stale by issue athenaeum#2231's research (wrong Resolver/Recall rows, three
+missing layers) and is corrected here against the tree as it stands,
+file:line cited per row:
 
-| Layer     | Model                              | Golden set size | Floor  |
-| --------- | ---------------------------------- | --------------- | ------ |
-| Detector  | Haiku (`ATHENAEUM_CLASSIFY_MODEL`) | 10 clusters     | ≥ 8/10 |
-| Resolver  | Opus (`ATHENAEUM_RESOLVE_MODEL`)   | 5 flagged pairs | ≥ 4/5  |
-| Recall    | Haiku (`ATHENAEUM_TOPIC_MODEL`)    | 6 prompts       | ≥ 5/6  |
-| Classify  | Haiku (`ATHENAEUM_CLASSIFY_MODEL`) | 6 raw intakes   | ≥ 4/6  |
-| Merge     | Sonnet (`ATHENAEUM_WRITE_MODEL`)   | 4 merge cases   | ≥ 3/4  |
-| Attachment | the whole chain (Haiku + Sonnet)  | 5 routing cases | ≥ 4/5 **(expected RED)** |
-| Person-hint | the whole chain (Haiku + Sonnet), person registry ON | 5 person-mention cases | ≥ 4/5 **(expected RED)** |
-| Backfill  | deferred until athenaeum#328                | —               | —      |
+| Layer | Model | Golden set size | Floor | File:line |
+| --- | --- | --- | --- | --- |
+| Detector | Haiku (`ATHENAEUM_CLASSIFY_MODEL`) | 10 clusters | ≥ 8/10 | `test_detector_eval.py:36` |
+| Resolver | Opus (`ATHENAEUM_RESOLVE_MODEL`) | 9 flagged pairs | ≥ 6/9 | `test_resolver_eval.py:86` |
+| Classify | Haiku (`ATHENAEUM_CLASSIFY_MODEL`) | 7 raw intakes | ≥ 4/7 | `test_classify_eval.py:95` |
+| Audit retirement | Haiku (`DEFAULT_CLASSIFY_MODEL`) | 6 retirement scenarios | ≥ 4/6 | `test_audit_retirement_eval.py:131` |
+| Merge | Sonnet (`ATHENAEUM_WRITE_MODEL`) | 4 merge cases | ≥ 3/4 | `test_merge_eval.py:63` |
+| Underdetermined | Sonnet (`ATHENAEUM_WRITE_MODEL`) | 4 underdetermined cases | ≥ 3/4 | `test_underdetermined_eval.py:64` |
+| Decomposition | Haiku (`DEFAULT_CLASSIFY_MODEL`) | 1 case | 1 | `test_decomposition_eval.py:61` |
+| Recall | Haiku (`ATHENAEUM_TOPIC_MODEL`) | 48 probes, 12 probe_class × 2 backends = 24 cells | per-cell 0–3, see `_FLOOR_BY_BACKEND_AND_CLASS` | `test_recall_eval.py:240` |
+| Attachment | the whole chain (Haiku + Sonnet) | 5 routing cases | ≥ 4/5 **(expected RED)** | `test_attachment_eval.py:156` |
+| Person-hint | the whole chain (Haiku + Sonnet), person registry ON | 5 person-mention cases | ≥ 4/5 **(expected RED)** | `test_person_hint_eval.py:99` |
+| Backfill | deferred until athenaeum#328 | — | — | — |
 
-Attachment (issue athenaeum#1580) and Person-hint (issue athenaeum#1867) are
-the two layers whose floors are **aspirational rather than descriptive**. Every
-other floor above describes what the shipped librarian already scores; these
-two describe what a CORRECT librarian would score, and both are red today by
-design — see their module docstrings, issue athenaeum#1580 AC3 and issue
-athenaeum#1867. Tuning either down to observed behaviour would make it a rubber
-stamp. They are also the only layers that run the WHOLE tier chain
+Three corrections from the pre-athenaeum#2231 version of this table, each also
+fixed in the row above: **Resolver** shipped `RESOLVER_FLOOR = 6` over an
+n=8 (now n=9, athenaeum#2231) golden set, not "5 flagged pairs, ≥ 4/5" (a
+pre-athenaeum#345 figure the table was never updated for); **Recall** ships the
+24-cell per-(backend, probe_class) structure over 48 probes described
+above, not "6 prompts, ≥ 5/6"; and **Audit retirement**, **Decomposition**,
+and **Underdetermined** did not appear in this table at all despite being
+live `*_aggregate_floor` gates.
+
+### How a floor is derived (issue athenaeum#2231)
+
+**floor = the number of cases that pass DETERMINISTICALLY, never `n − 1`.**
+Count the cases a suite scores correctly essentially every time; set the
+floor at that count. A known-permanent miss (a case the model gets wrong
+every single run) and a genuinely stochastic case must sit OUTSIDE the
+required count, not be silently absorbed by it.
+
+This matters because "floor = n − 1" quietly degenerates into a 1-trial
+gate the moment a golden set contains one permanent miss: that miss
+consumes the one nominal slot of slack, so the aggregate score becomes
+mathematically equal to whichever remaining case is stochastic — every
+run, regardless of n. That is exactly what happened to
+`AUDIT_RETIREMENT_FLOOR` before athenaeum#2231 (5 of 6, with
+`name_only_person_stub` a 0/23 permanent miss): 5 reds in 23 live
+dispatches, all on code the stochastic case alone decided. `CLASSIFY_FLOOR`
+already followed the correct rule (floor 4 of 6, one notch below the
+four-case deterministic ceiling, with the suite's own permanent miss and
+weak case both excluded from the required count) and never went red in
+those same 23 runs — it is the pattern every suite in the table above now
+follows. See each suite's own `*_FLOOR` derivation comment for its
+per-case history, false-red rate, and an honest statement of what
+regression it can and cannot catch (exact binomial, not a normal
+approximation).
+
+**Growing the golden set is for adding real SLACK, never for raising the
+floor-to-n RATIO.** Holding a floor ratio fixed at or above a suite's true
+accuracy and adding more cases makes the false-red rate *rise* toward 1.0,
+not fall — more samples let the aggregate converge on the true (lower)
+mean more reliably. A case added under this issue (`classify`'s
+`single_project_entity`, `resolver`'s
+`precedence_user_over_unsourced_deadline`) always widens the gap between
+the floor and the deterministic-pass count; it never moves the floor
+itself unless a genuinely new deterministic case changes that count.
+
+**What these gates are, honestly.** At n this small (4–9 live cases per
+suite), even a floor set correctly by the rule above is a **collapse
+detector**, not a fine-grained regression detector: it reliably catches a
+multi-case regression and, per suite, has measurably limited power
+against a single-case one (see each suite's derivation comment for the
+exact figure — it ranges from ~22% to 0% depending on how much slack that
+suite's floor carries). Distinguishing an 85% model from a 95% model at
+n=6–9 is not something a k-of-n floor can do at any k (issue athenaeum#2231's
+research-findings comment §8); that would need on the order of 25–80
+trials per suite, well past the ~2x cost cap in this issue's acceptance
+criteria. The honest framing this repo adopts is: these floors catch
+collapse cheaply; they do not measure fine-grained quality, and no
+re-floor changes that.
+
+**Carved out — do not apply this rule to Attachment or Person-hint.**
+Their floors are **aspirational rather than descriptive** by a ratified
+operator decision (issue athenaeum#1580 AC3, issue athenaeum#1867) — they
+describe what a CORRECT librarian would score, not what the shipped one
+does, and both are **red today by design**. Re-deriving either from
+observed behaviour via the rule above would reverse that ratified
+decision and turn an intentionally-red gate into a rubber stamp. athenaeum#2231
+leaves both exactly as shipped, including Attachment's existing
+`xfail(strict=False)` marker (`test_attachment_eval.py:405-411`,
+issue athenaeum#1686) — that marker's own false-green hazard (a
+non-strict xfail neither fails on a regression nor reports on a fix) is a
+real, separate finding, flagged as a follow-up rather than decided here.
+Person-hint is additionally at 80/80 (100%) across every dispatch since
+the issue athenaeum#2043 fix, so on the evidence it currently needs nothing.
+
+They are also the only layers that run the WHOLE tier chain
 (`librarian.process_one`) against a materialized wiki rather than one tier in
-isolation, which is why neither has a single model in the table.
+isolation, which is why neither has a single model in the main table.
 
 The two are not variants of each other. Attachment passes **no**
 `person_registry=`, so tier 0's person-registry consult never engages and that

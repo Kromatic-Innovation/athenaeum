@@ -178,9 +178,12 @@ class TestLoadParityCases:
             assert c.outcome_class in ("pass", "contradict", "escalate")
             assert len(c.members) >= 1
 
-    def test_resolver_corpus_has_eight_cases_all_declared_detector(self) -> None:
+    def test_resolver_corpus_has_nine_cases_all_declared_detector(self) -> None:
+        """n=8 -> 9: athenaeum#2231 added ``precedence_user_over_unsourced_deadline``
+        for RESOLVER_FLOOR slack (see test_resolver_eval.py's floor-derivation
+        comment); this list and count follow the golden set."""
         cases = load_parity_cases(EVAL_DATA_ROOT / "resolver" / "cases.yaml")
-        assert len(cases) == 8
+        assert len(cases) == 9
         expected_ids = [
             "refinement_editor_general_and_csv",
             "restatement_pto_days",
@@ -189,6 +192,7 @@ class TestLoadParityCases:
             "undated_budget_approver",
             "sequential_snapshot_headcount",
             "precedence_user_over_unsourced_contact",
+            "precedence_user_over_unsourced_deadline",
             "propose_merge_ticketing_general_and_exception",
         ]
         assert [c.case_id for c in cases] == expected_ids

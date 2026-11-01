@@ -36,9 +36,10 @@ do it.
   `compare_hierarchy` (e.g. CONTAINS misread as EQUAL, or the direction of
   `specific_side` flipped) fails this test, not just a looser one.
 - :class:`TestProbeGate1RelationTable` -- runs the label-blind probe rule
-  from `tests/evals/data/probe_subject_scope_containment.py` over all 18
-  committed cases and pins the actual Gate-1 relations found (see that
-  module's docstring for the rule, and
+  from `tests/evals/data/probe_subject_scope_containment.py` over all 19
+  committed cases (18 at authoring time; athenaeum#2231 added a 9th resolver
+  case) and pins the actual Gate-1 relations found (see that module's
+  docstring for the rule, and
   `measurements/comparator-merge-class-scope-2026-09-15.md` for the finding
   this table feeds).
 """
@@ -272,15 +273,17 @@ class TestProbeRuleIsLabelBlind:
 
 
 class TestProbeGate1RelationTable:
-    """athenaeum#1664 Plan step 2: tabulate Gate-1 relations for all 18 cases
-    under the probe rule, zero LLM calls, and check whether any `contradict`
-    case is falsely CONTAINS (the comparator-defect signal named by the
-    issue). See `measurements/comparator-merge-class-scope-2026-09-15.md`
-    for the finding this table feeds and the recorded verdict."""
+    """athenaeum#1664 Plan step 2: tabulate Gate-1 relations for all 19 cases
+    (18 at authoring time; athenaeum#2231 added a 9th resolver case for
+    RESOLVER_FLOOR margin) under the probe rule, zero LLM calls, and check
+    whether any `contradict` case is falsely CONTAINS (the comparator-defect
+    signal named by the issue). See
+    `measurements/comparator-merge-class-scope-2026-09-15.md` for the
+    finding this table feeds and the recorded verdict."""
 
-    def test_covers_all_eighteen_committed_cases(self) -> None:
+    def test_covers_all_nineteen_committed_cases(self) -> None:
         rows = compute_probe_table()
-        assert len(rows) == 18
+        assert len(rows) == 19
         assert {r.outcome_class for r in rows} == {"pass", "contradict", "escalate", "merge"}
 
     def test_both_merge_cases_reach_contains_under_the_probe_rule(self) -> None:
@@ -293,16 +296,23 @@ class TestProbeGate1RelationTable:
         for row in merge_rows.values():
             assert row.scope == "contains"
 
-    def test_all_five_contradict_cases_are_also_falsely_contains(self) -> None:
+    def test_all_six_contradict_cases_are_also_falsely_contains(self) -> None:
         """The probe-rule finding this issue turns on: a purely name-derived,
         label-blind containment rule cannot separate `merge` from
         `contradict` -- EVERY `contradict` case with a real shared name stem
         also reads `scope: contains`, exactly like the two `merge` cases.
         This is pinned as a regression check: if a future change to
         `compare_hierarchy` or the probe rule changes this set, the
-        athenaeum#1664 finding needs re-evaluating, not silent staleness."""
+        athenaeum#1664 finding needs re-evaluating, not silent staleness.
+
+        5 -> 6: athenaeum#2231's added resolver case
+        (`precedence_user_over_unsourced_deadline`) shares the same
+        keep_pick_winner-via-precedence shape (and the same clean shared
+        stem) as `precedence_user_over_unsourced_contact`, so it joins the
+        falsely-contains set too -- verified against the real probe table,
+        not assumed."""
         rows = compute_probe_table()
         contradict_rows = {r.case_id: r for r in rows if r.outcome_class == "contradict"}
-        assert len(contradict_rows) == 5
+        assert len(contradict_rows) == 6
         falsely_contains = {cid for cid, r in contradict_rows.items() if r.scope == "contains"}
         assert falsely_contains == set(contradict_rows)
