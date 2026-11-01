@@ -73,7 +73,7 @@ vector = [
 # installs it. Upper-bounded like every other third-party dep this project caps
 # explicitly (see the top-of-file `dependencies` comment).
 maya-eval = [
-    "transformers>=4.40,<5.0",
+    "transformers>=4.40,<6.0",
     "torch>=2.2,<3.0",
 ]
 # Issue athenaeum#2039: Ed25519 signing for transcript receipts. An OPT-IN
