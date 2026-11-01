@@ -72,6 +72,7 @@ from athenaeum.config import (
     resolve_recall_relevance_floor,
     resolve_scope_aware_recall_enabled,
 )
+from athenaeum.entity_index_cache import entity_index_for_uid
 from athenaeum.entity_schema import (
     QUERYABLE_FIELDS,
     declared_entity_classes,
@@ -85,7 +86,6 @@ from athenaeum.killswitch import is_disabled
 from athenaeum.models import (
     DEFAULT_SOURCE_TYPE,
     SOURCE_TYPES,
-    EntityIndex,
     coerce_bucket,
     is_page_authorized,
     parse_bucket,
@@ -654,6 +654,7 @@ def entity_read(
     caller_audience: set[str] | None = None,
     config: dict[str, Any] | None = None,
     not_found_label: str = "entity",
+    cache_dir: Path | None = None,
 ) -> str:
     """Read one entity's page by uid, with excluded-field inclusion gated by a flag.
 
@@ -692,6 +693,14 @@ def entity_read(
             :func:`person_read` keeps its exact existing wording
             (``person not found: uid=...``) while the generic tool says
             ``entity``. Presentation only — never a behavioural difference.
+        cache_dir: The athenaeum cache dir (issue athenaeum#2181). Given, *uid* is
+            located via :func:`athenaeum.entity_index_cache.entity_index_for_uid`
+            — the filename fast path, then the persisted index, instead of a
+            full :class:`~athenaeum.models.EntityIndex` scan. ``None`` (the
+            default) keeps the full scan every pre-existing caller gets.
+            Gating (the audience check below) is unaffected either way: it
+            re-parses frontmatter fresh from disk regardless of how *uid* was
+            located.
 
     Returns:
         A JSON string: the module's fail-closed refusal shape
@@ -702,7 +711,7 @@ def entity_read(
     from athenaeum import pii
 
     wiki_root = knowledge_root / "wiki"
-    entity_index = EntityIndex(wiki_root)
+    entity_index = entity_index_for_uid(wiki_root, uid, cache_dir=cache_dir)
     page_path = entity_index.get_by_uid(uid)
     if page_path is None:
         # athenaeum#1394: EntityIndex only scans `wiki_root`, so a `type:
@@ -3651,6 +3660,7 @@ def create_server(
             usage_classes=usage_classes,
             caller_audience=caller_audience,
             config=config,
+            cache_dir=cache_dir,
         )
 
     read_entity.__doc__ = read_entity_tool_docstring()

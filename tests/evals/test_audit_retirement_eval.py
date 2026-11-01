@@ -73,19 +73,63 @@ from tests.evals.harness import (
 
 pytestmark = pytest.mark.eval
 
-# Floor derivation: N=6 cases, one per athenaeum#1869 acceptance-criteria
-# scenario (2 not-a-candidate exclusions, 1 pipeline-metadata trigger, 1
-# dated-outcome exclusion, 1 spurious-entity trigger, 1 light-source-summary
-# exclusion). Each case has an unambiguous, invented ground truth — there is
-# no subjective shape judgment the way CLASSIFY_FLOOR's entity-extraction
-# cases have — so a one-case slack over an all-pass expectation (matching
-# MERGE_FLOOR / UNDERDETERMINED_FLOOR's ~75% ratio) absorbs ordinary Haiku
-# nondeterminism without hiding a systemic miss. The floor has already
-# earned its keep: athenaeum#1877 measured the ``audit-v4`` rewrite of
-# section 2 at 2/6 and 3/6 against this set, versus 5/6 twice for the
-# ``audit-v3`` wording it replaced, which is why ``audit-v5`` restores
-# that wording.
-AUDIT_RETIREMENT_FLOOR = 5  # >= 5/6
+# Floor derivation (issue athenaeum#2231 — see tests/evals/README.md's "How a
+# floor is derived" section for the general rule this applies):
+# floor = the number of cases that pass DETERMINISTICALLY, never n-1.
+#
+# Per-case live history across the 23 October 2026 workflow_dispatch runs
+# (read from each run's eval-summary.json artifact):
+#   name_only_person_stub            —  0/23 (0%)   — permanent miss, athenaeum#1871/#1877
+#   name_plus_one_affiliation_line   — 18/23 (78.3%) — the one stochastic case
+#   pipeline_metadata_only           — 23/23 (100%)
+#   dated_engagement_with_pipeline_metadata — 23/23 (100%)
+#   self_declared_filename_artifact  — 23/23 (100%)
+#   light_source_summary             — 23/23 (100%)
+#
+# The previous floor of 5 was NOT a 1-case slack over 6 cases: the permanent
+# miss above consumes the one nominal slot a "floor = n-1" scheme grants,
+# leaving the aggregate score mathematically equal to the stochastic case's
+# own outcome every run — a 6-case floor acting as a 1-trial gate. That
+# produced 5 reds in 23 runs (21.7%) on code the stochastic case alone
+# decided, not a systemic regression (full reproduction in athenaeum#2231's
+# research-findings comment).
+#
+# Re-floored to 4 = the count of cases observed to pass every single time.
+# The permanent miss and the stochastic case now sit OUTSIDE the required
+# count rather than silently eating its slack: the floor goes red only when
+# at least one of the four always-passing cases ALSO fails in the same run
+# as the stochastic case (or when two+ of the four regress together,
+# regardless of the other two). Replayed against the exact per-case history
+# above, floor=4 scores 0 reds across the same 23 runs — every historical
+# red was solely the stochastic case missing while the permanent miss
+# consumed the other slot, and floor=4 has a free slot for exactly that.
+#
+# False-red rate. A simple (and deliberately pessimistic) exact-binomial
+# bound, treating all 6 cases as iid at the suite's pooled historical
+# accuracy (110/138 = 79.7%): P(X < 4) for X ~ Binomial(6, 0.797) ≈ 10.2%,
+# versus ≈35.2% at the old floor of 5 under the same pooled model. The
+# TRUE rate is lower still, because the pooled accuracy understates the four
+# always-passing cases' real reliability (0 misses in 92 trials) and
+# overstates the permanent miss's (0 passes in 23) — see the per-case
+# replay above for the structurally honest number (0/23).
+#
+# False-green / what this floor cannot catch. Floor=4 tolerates exactly one
+# failure among {4 always-passing cases, the stochastic case} per run (the
+# permanent miss already accounts for the other). A genuine regression that
+# turns ONE always-passing case into an always-failing one is caught only
+# when the stochastic case ALSO misses that run — at the stochastic case's
+# historical 21.7% miss rate, that is only ~22% power against a single-case
+# collapse. A regression spanning TWO or more of the always-passing cases
+# is always caught (both counted failures exceed the one free slot,
+# independent of the stochastic case). In short: this floor is a reliable
+# collapse detector for a multi-case regression and a weak one for a
+# single-case regression — it cannot, at n=6, distinguish a healthy model
+# from one that has silently broken exactly one of the four easy cases.
+# See test_two_case_collapse_reds_the_new_floor and
+# test_single_case_regression_can_slip_through_when_stochastic_case_passes
+# in test_audit_retirement_eval_stub.py (offline, unmarked) for synthetic
+# proof of both the catch and the honest miss.
+AUDIT_RETIREMENT_FLOOR = 4  # >= 4/6
 
 
 def _load_cases() -> list[dict[str, Any]]:
@@ -179,7 +223,11 @@ def test_audit_retirement_case(
 
 
 def test_audit_retirement_aggregate_floor(eval_session: Any, _live_ready: None) -> None:
-    """Assert the audit-retirement layer meets the aggregate floor."""
+    """Assert the audit-retirement layer meets the aggregate floor.
+
+    See the derivation + false-red/false-green analysis in the comment
+    above :data:`AUDIT_RETIREMENT_FLOOR` (issue athenaeum#2231).
+    """
     passed, total = eval_session.layer_score(LAYER_AUDIT_RETIREMENT)
     assert total > 0, "audit_retirement eval collected no cases"
     assert passed >= AUDIT_RETIREMENT_FLOOR, (

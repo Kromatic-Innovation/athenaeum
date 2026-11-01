@@ -218,9 +218,10 @@ already uses.
   concurrent change to `s2` is not re-evaluated. Every merge to `develop` already
   carries that risk.
 
-athenaeum#2206's `receipt_covers_head` keeps its signature and injectable
-lookup; only its predicate body changes. Hence the integration child is
-blocked on athenaeum#2206.
+athenaeum#2206's `receipt_covers_head` keeps its name, its call site in
+`check_receipt`, and its `(covered, stale_names)` return shape, and it keeps
+injecting every git read; its parameters may change (athenaeum#2225). Hence
+the integration child is blocked on athenaeum#2206.
 
 ### 5.5 Structured exemptions
 
@@ -243,11 +244,12 @@ Evals: not needed — <category>: <symbol>[, <symbol>...]
   An unknown category fails.
 - **Exact set.** The named symbols must equal the set FIRE found changed — no
   missing names, no extras. The gate prints the difference when they disagree.
-- **Machine-checked where cheap.** `rename-only` re-hashes with local names
-  alpha-normalised; `log-or-error-text` re-hashes with string arguments of
-  `logging`/`warnings` calls and `raise` expressions blanked. The category is
-  rejected if the re-hash still differs. `dead-code`, `refactor-equivalent` and
-  `gate-plumbing` are reviewer-checked.
+- **Reviewer-checked, not machine-checked.** The gate checks only the category
+  name against the closed vocabulary and the exact symbol set; all five
+  categories — including `rename-only` and `log-or-error-text` — are verified
+  by the reviewer against the before/after diffs in §5.6, not re-hashed. A
+  `rename-only` or `log-or-error-text` re-hash check is deferred until misuse
+  is observed (operator ruling 2026-10-30, athenaeum#2226).
 - **The legacy free-text form stops passing** once this lands. Under FIRE it is
   needed rarely enough that a structured line costs little.
 
@@ -255,7 +257,7 @@ Evals: not needed — <category>: <symbol>[, <symbol>...]
 
 | Escape | Defence | Verifier cost |
 | --- | --- | --- |
-| Wrong category on a real change | exact-set check; machine re-hash for two categories | none for machine categories |
+| Wrong category on a real change | exact-set check; the category claim itself is reviewer-checked for all five categories (machine re-hash for `rename-only`/`log-or-error-text` deferred until misuse is observed, athenaeum#2226) | reading the before/after diff |
 | Unverifiable category (`refactor-equivalent`) used to dodge | gate writes each changed symbol's normalised before/after (`ast.unparse`) to `$GITHUB_STEP_SUMMARY`; the merger (author ≠ merger, enforced by `gh-orch-pr-merge.sh`) reads only those symbols | reading N function diffs, not N files |
 | Drop or rename a designation | union rule (§5.4); D5 stale-pointer check | none |
 | Move logic into an undesignated helper | the call site's AST changes, so the move fires | one review |
@@ -293,8 +295,10 @@ change it.
 Never re-dispatch:
 
 - because of a `develop` merge or rebase — COVERS handles it;
-- for a head that already has a run in flight or completed — at most one retry
-  of a red run, then treat red as a finding;
+- for a head that already has a run in flight or completed — there is no
+  automatic retry: a red run is a finding (operator ruling 2026-10-30).
+  Small-sample flakiness is addressed at its source by athenaeum#2231, not by
+  retrying;
 - per push while iterating on a red eval, unless the push changes a designated
   symbol.
 
@@ -317,19 +321,24 @@ Classifying the 23 runs from §2 against what each mechanism would have removed:
 | Mechanism | Runs removed | Which |
 | --- | --- | --- |
 | athenaeum#2206 (content-based receipt) | about 8 | athenaeum#2187: 5 develop merges + 1 tests-only push; athenaeum#2043 branch: 2 heads with zero surface delta from a passing head |
-| §7 dispatch rule | about 3 | athenaeum#2043 branch: the third red run on one head (one retry is allowed) and the second green run on another; athenaeum#2078 branch: pre-review dispatch |
+| §7 dispatch rule | about 4 | athenaeum#2043 branch: the second and third red runs on one head (no automatic retry, §2's "dispatched three times, all red") and the second green run on another; athenaeum#2078 branch: pre-review dispatch |
 | COVERS clause 2 | 1 | athenaeum#2043 branch: rebase onto another PR's surface change |
 | Symbol-level FIRE | about 0 removed, 2–5 added | every paid PR genuinely changed prompts or call sites; some free-text exemptions would now fire (audited in the designation child's ACs) |
 
-**Net: about 23 down to roughly 13–16 a month (≈ 30–45%): 12 removed, 2–5
-added, most of the removal from athenaeum#2206 and the dispatch rule.** The symbol-level surface buys a different thing: about 60 of
-66 monthly free-text claims become mechanical non-fires needing no line at all,
-and the handful that remain are structured and checked. Two baseline
-dispatches on `develop` are left as they are.
+**Net: about 23 down to roughly 12–15 a month (≈ 35–48%): 13 removed, 2–5
+added, most of the removal from athenaeum#2206 and the dispatch rule.** (Restated
+from §2's evidence: with no automatic retry, both extra dispatches on the
+thrice-dispatched head are removed, not only the third, which moves the §7 row
+from 3 to 4 and the total removed from 12 to 13.) The symbol-level surface buys
+a different thing: about 60 of 66 monthly free-text claims become mechanical
+non-fires needing no line at all, and the handful that remain are structured
+and checked. Two baseline dispatches on `develop` are left as they are.
 
 One more observation for the operator: three runs went red on heads that had
 no reasoning delta from a green head, so the suite appears to have a flake
-rate. A retry policy should be decided deliberately (§11).
+rate. That is settled, not open: there is no automatic retry (operator ruling
+2026-10-30, §11), and the flakiness itself is addressed at its source by
+athenaeum#2231, not by retrying.
 
 ## 9. Failure classes the design must survive
 
@@ -380,15 +389,17 @@ changed", strictly coarser than today's path match minus comment-only edits.
 
 ### Open operator questions
 
-1. **Flake retries.** Allow one automatic retry of a red run on the same
-   head, or treat every red as a finding?
+1. **Flake retries — resolved 2026-10-30.** No automatic retry: a red run is
+   a finding, not a flake to re-roll. Small-sample flakiness is addressed at
+   its source by athenaeum#2231, not by retrying.
 2. **Promotion-time backstop.** Should the promotion lane dispatch one run on
    `develop` before `develop → main`, to catch anything a non-transitive
    designation missed? About 1 run per promotion; it is still a dispatch,
    consistent with the 2026-09-16 decision.
-3. **Machine-checked categories.** Ship `rename-only` and `log-or-error-text`
-   re-hashing in the first exemption child, or start with exact-set checking
-   only?
+3. **Machine-checked categories — resolved 2026-10-30.** Symbol-match (exact
+   set) only. The `rename-only` and `log-or-error-text` re-hash checks are
+   deferred until misuse is observed (athenaeum#2226); all five categories are
+   reviewer-checked for now.
 
 ## 12. Children
 

@@ -110,3 +110,23 @@
     min_entities: 1
     max_entities: 2
     must_include_name_substrings: ["expense"]
+
+# Added in issue athenaeum#2231 to give CLASSIFY_FLOOR one case of real margin
+# (see test_classify_eval.py's floor-derivation comment) — a clean,
+# single-project extraction with no ambiguity, structurally the same shape
+# as single_person_entity/multiple_entities_project_and_person above.
+- id: single_project_entity
+  outcome_class: extract_single
+  content: |
+    Status update: the Harrowdene Audit workstream for Thornhollow Advisory
+    wrapped its first phase this week -- a full inventory of legacy vendor
+    contracts. The workstream kicked off in April, and the second phase
+    (contract renegotiation) is scheduled to begin next month.
+  matched_names: []
+  valid_types: ["person", "project", "reference", "concept"]
+  valid_tags: ["active", "client", "internal"]
+  valid_access: ["internal", "open"]
+  expected:
+    min_entities: 1
+    max_entities: 2
+    must_include_name_substrings: ["Harrowdene"]

@@ -996,6 +996,7 @@ def resolve_address_named_classifications(
     wiki_root: Path,
     config: dict[str, Any] | None = None,
     excluded_index: "ExcludedRecordIndex | None" = None,
+    entity_index: EntityIndex | None = None,
 ) -> AddressResolutionOutcome:
     """Stop tier-2 from minting a NEW entity named after a bare email address (athenaeum#1126).
 
@@ -1075,6 +1076,20 @@ def resolve_address_named_classifications(
             O(corpus) contacts scan is paid once, not once per address.
             ``None`` (the default) lets :func:`resolve_handle_query` build one
             per call, exactly as its own default does.
+        entity_index: The run's own :class:`~athenaeum.models.EntityIndex`
+            (issue athenaeum#2180), threaded straight through to
+            :func:`resolve_handle_query` so a candidate's uid->page lookup
+            reuses it instead of building a fresh full index per candidate.
+            Both call sites (``librarian.process_one`` /
+            ``batch.process_batch_run``) already hold exactly this object as
+            their own ``index`` parameter and already thread it to sibling
+            calls in the same scope (e.g. ``pii_attribution.
+            build_attribution_context``) — this keeps the gate on that same
+            pattern rather than opening a second, parallel coherence story.
+            See ``docs/design/librarian-email-gate-index-coherence.md`` for
+            the write-path analysis this choice rests on. ``None`` (the
+            default) keeps the pre-athenaeum#2180 full-scan-per-candidate
+            behaviour.
 
     Returns:
         :class:`AddressResolutionOutcome` — ``kept`` (this file's
@@ -1126,6 +1141,7 @@ def resolve_address_named_classifications(
             with_pii=False,
             config=config,
             excluded_index=excluded_index,
+            entity_index=entity_index,
         )
         if resolution is None:
             # Not handle-shaped per the sanctioned detector — defensive; should

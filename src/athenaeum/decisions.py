@@ -522,19 +522,32 @@ def audit_to_decision(rec: dict) -> dict:
     """Convert a sampled tier-audit item to a unified decision dict (issue athenaeum#438).
 
     A ``type: "audit"`` item — distinguishable from an ordinary escalation —
-    surfaces a randomly-sampled T1 reject or T2 approval for human
+    surfaces a randomly-sampled T1 reject, T2 approval, or (issue
+    athenaeum#2219) above-threshold ATTRIBUTION placement for human
     calibration review. Confirming it leaves the tier's original decision
-    untouched; overturning it records a calibration signal (it does not
-    re-execute the merge). ``confidence`` is ``None``.
+    untouched; overturning it records a calibration signal (and, for the
+    attribution tier only, re-files the value through the placement
+    executor — see
+    :func:`athenaeum.pii_attribution.record_attribution_audit_review`; this
+    function never does that itself). ``confidence`` is ``None``.
+
+    **Masked values only (design §8.1).** *rec* is a raw calibration-ledger
+    record — for the attribution tier, :func:`athenaeum.pii_attribution.
+    _escalate_suspect_inner`'s sampler call site already masks ``reason``
+    before it is ever written (:func:`athenaeum.pii.mask_contact_address`),
+    so there is no raw contact value for this function to leak; it reads
+    every field through verbatim, the same as it always has for T1/T2.
     """
     tier = rec.get("tier", "")
     verdict = rec.get("verdict", "")
     proposal_id = rec.get("proposal_id", "")
     reason = rec.get("reason", "")
+    question_class = rec.get("question_class")
     reason_tail = f" (tier reason: {_one_line(reason)})" if reason else ""
+    class_tail = f" [{question_class}]" if question_class else ""
     summary = (
-        f"Calibration audit: tier {tier} returned {verdict!r} on proposal "
-        f"{proposal_id} — confirm the verdict or overturn it.{reason_tail}"
+        f"Calibration audit: tier {tier}{class_tail} returned {verdict!r} on "
+        f"proposal {proposal_id} — confirm the verdict or overturn it.{reason_tail}"
     )
     return {
         "type": "audit",
@@ -548,6 +561,7 @@ def audit_to_decision(rec: dict) -> dict:
             "proposal_id": proposal_id,
             "reason": reason,
             "sample_rate": rec.get("sample_rate"),
+            "question_class": question_class,
         },
     }
 
@@ -811,18 +825,34 @@ def auto_apply_threshold_proposal_to_decision(rec: dict) -> dict:
     deterministically derived. Approving this item only widens a
     config-resolved floor (see that module's own docstring) -- it never
     bypasses a decision already in flight.
+
+    Issue athenaeum#2219 extends this SAME renderer to the ATTRIBUTION
+    rail's own proposals, drafted onto the SAME ledger/decision type with
+    their own ``action`` ids (:func:`athenaeum.calibration.
+    attribution_threshold_action_id`). Those records carry ``direction``
+    (``"widen"`` or ``"narrow"`` -- narrowing is new to this rail, design
+    §8.3) and ``question_class``/``overturn_rate``/``target_error_rate`` in
+    place of the merge-dedupe rail's ``disagreement_rate``/``trigger``; both
+    shapes render through the same fields read defensively (``.get`` with a
+    fallback), so one function covers both populations rather than forking
+    the decision type.
     """
     action = rec.get("action", "")
     current = rec.get("current_threshold")
     proposed = rec.get("proposed_threshold")
-    rate = rec.get("disagreement_rate")
+    direction = rec.get("direction", "widen")
+    verb = "narrowing (raising)" if direction == "narrow" else "widening (lowering)"
+    rate = rec.get("disagreement_rate", rec.get("overturn_rate"))
+    rate_str = f"{rate:.0%}" if isinstance(rate, (int, float)) else "n/a"
     reviewed = rec.get("reviewed", 0)
     overturned = rec.get("overturned", 0)
+    question_class = rec.get("question_class")
+    class_tail = f" [{question_class}]" if question_class else ""
     summary = (
         f'The self-tuning loop found {overturned} of {reviewed} reviewed '
-        f'"{rec.get("tier", "T1")}" audits overturned ({rate:.0%} '
-        f"disagreement) and proposes widening the \"{action}\" auto-apply "
-        f"floor from {current} to {proposed} -- approve to widen it, or "
+        f'"{rec.get("tier", "T1")}"{class_tail} audits overturned ({rate_str} '
+        f'disagreement) and proposes {verb} the "{action}" auto-apply '
+        f"floor from {current} to {proposed} -- approve to apply it, or "
         f"reject to keep the current floor."
     )
     return {
@@ -834,11 +864,15 @@ def auto_apply_threshold_proposal_to_decision(rec: dict) -> dict:
         "payload": {
             "action": action,
             "tier": rec.get("tier"),
+            "direction": direction,
             "current_threshold": current,
             "proposed_threshold": proposed,
             "step": rec.get("step"),
-            "disagreement_rate": rate,
+            "disagreement_rate": rec.get("disagreement_rate"),
+            "overturn_rate": rec.get("overturn_rate"),
             "trigger": rec.get("trigger"),
+            "target_error_rate": rec.get("target_error_rate"),
+            "question_class": question_class,
             "sampled": rec.get("sampled", 0),
             "reviewed": reviewed,
             "overturned": overturned,

@@ -7,107 +7,156 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`athenaeum contact-surface-lint` — read-only contact-surface report,
+  with an `--attribution` backfill report mode (child I of epic
+  athenaeum#2192, design `docs/design/attribution-verification.md` §10.4).**
+  New `src/athenaeum/contact_surface_lint.py` (L4) reports page-less
+  records (reusing athenaeum#2217's own detection), values shared by two or
+  more uids broken down by `field_sources` provenance type, and `observed`
+  values whose cited source still exists and no longer contains them —
+  counts and uids only, never a value. `--attribution` runs
+  `pii_attribution.check_contact_attribution` in report mode over every
+  (value, uid) pair on the surface (new `WRITER_LINT`), writing only
+  attribution-log rows and one persisted observe-report record per run
+  (new `pii_attribution.append_attribution_observe_report`) — per-class
+  shadow counts plus the model/prompt sha in effect, the contract
+  athenaeum#2220's `auto` preflight depends on. `--attribution --escalate`
+  additionally runs athenaeum#2212's shadow escalation over already-parked
+  suspects, capped by `librarian_max_api_calls`. `pii._log_collision_summary`'s
+  hint now names the real command. Does not take the run lock (never
+  writes a contact record; see the CLI module's own docstring for why).
+
+## [0.23.0] - 2026-10-31
+
+First release since 0.22.43 (2026-10-25). The intermediate `0.22.44`–`0.22.58`
+versions were per-merge build numbers on `develop` that were never tagged or
+published; this section covers the whole span. This is a MINOR release
+because it adds public surface: a second top-level package with its own
+console script, a new `athenaeum receipts` command group, and three new
+optional extras. Nothing was removed. Detailed entries follow the summary,
+grouped by merge, so `### Added` / `### Changed` / `### Fixed` repeat; changes
+that only affect this project's own CI and contributor tooling are collected
+at the end under `### Internal`.
+
+**Upgrading from 0.22.43**
+
+Every new capability below is opt-in. A deployment that changes no
+configuration keeps its 0.22.43 behaviour, except for the points marked
+"behaviour change".
+
+- **New optional extras.** None is needed for a plain install.
+  - `signing`: Ed25519 sealing of athenaeum's own transcript receipts
+    (`pip install 'athenaeum[signing]'`).
+  - `witness-sign`: Ed25519 signing for the promptwitness ledger.
+  - `witness-anchor`: OpenTimestamps anchoring for the promptwitness ledger.
+- **New commands.**
+  - `athenaeum receipts seal | verify | anchor | attest-readout`.
+  - A new `promptwitness` console script (`status`, `keygen`, `hook`,
+    `anchor`, `verify`, `demo`).
+  - `athenaeum repair --contact-records`, dry-run by default.
+- **New top-level import name.** The wheel now installs a `promptwitness`
+  package next to `athenaeum`. It is standard-library-only at import time and
+  never imports `athenaeum`. If your environment already has an unrelated
+  module named `promptwitness`, the two will collide.
+- **New configuration keys, all off by default:**
+  `librarian.receipt_sealer` (and `librarian.receipt_signing.*`),
+  `librarian.witness_ledger_enabled`, `librarian.witness_attestation_enabled`,
+  and, for the Claude Code hook, `ATHENAEUM_WITNESS_LEDGER_ENABLED` and
+  `ATHENAEUM_WITNESS_ANCHOR_INTERVAL_MINUTES`. An unrecognised
+  `receipt_sealer` or `key_provider` value now raises instead of silently
+  not sealing.
+- **Behaviour change: merges fold contact records.** `dedupe persons --apply`
+  and an approved `fold-into-existing` now also fold the absorbed person's
+  contact record into the surviving one and retire the absorbed copy (it is
+  renamed and logged, never deleted). If you merged person pages before
+  upgrading, run `athenaeum repair --contact-records` to see what earlier
+  merges left behind, then re-run it with `--apply` to fold those records.
+  Divergent or ambiguous records are reported and left for you.
+- **Behaviour change: quieter contact-surface logging.** Each load now logs
+  one summary line instead of one WARNING per collided uid or address; the
+  per-key lines moved to DEBUG.
+- **Behaviour change: new frontmatter keys on `remember`.** A memory saved
+  through the MCP `remember` tool with the default `claude:inferred` source
+  now also records `model` and `originSessionId`. The `source` value itself
+  is unchanged.
+- **Deprecation timeline.** `athenaeum merges` and `athenaeum questions`
+  still work, and their warnings now name `0.24.0` as the removal release.
+  Move to `athenaeum decisions` before then.
+- **Behaviour change: some contact values are no longer recorded.** Every
+  contact-record writer now runs an attribution check first. Most verdicts
+  are only logged (observe mode), but three narrow non-personal shapes are
+  enforced: addresses with a relay or no-reply local-part prefix, your own
+  addresses on someone else's page, and addresses at domains listed in
+  `librarian.attribution.operator_mailer_domains`. These are no longer added
+  to a person's contact record. Tune the relay lists with
+  `librarian.attribution.relay_local_prefixes` and
+  `librarian.attribution.relay_domains`.
+- **Behaviour change: compiled pages drop mentioned contact tokens.** When
+  the librarian compiles a page, email addresses and phone numbers that a
+  source note merely mentions are no longer written into that page's body.
+  Existing page bodies are not rewritten.
+- **Attribution audits in the decision queue.** A sample
+  (`librarian.audit_sample_rate_attribution`, default 0.10) of attribution
+  placements that are actually filed shows up in `athenaeum decisions` as
+  `type: audit`. Model escalation itself stays off unless you set
+  `librarian.attribution.escalate: true`.
+- **New cache files.** `recall <email>` and the MCP entity reads keep
+  persisted, stat-validated index caches under the cache directory. The
+  contact-index cache stores only keyed digests of addresses and is removed
+  by the erasure cascade.
+- **New commands, continued:** `athenaeum attribution show | place`, and a
+  `section_id` / `action: drop` record kind for `athenaeum correct-notes`.
+
+**Highlights**
+
+- **promptwitness (new package).** A harness-agnostic, hash-chained ledger
+  that records that a human typed each prompt, without storing any prompt
+  text. It ships a chain verifier, optional Ed25519 signing (file or OS
+  keystore keys), optional external anchoring (OpenTimestamps, and RFC 3161
+  when you configure a timestamp authority), a Claude Code hook adapter, and
+  `promptwitness verify` / `promptwitness demo` for checking a transcript
+  against the ledger turn by turn.
+- **Receipt sealing and witness attestation.** Transcript receipts can be
+  signed with a key held outside the nightly process, verified with only the
+  public key, and anchored nightly, with anchor records mirrored into the
+  knowledge repo so that a deleted ledger is still detectable. Intake can
+  attest `user-stated` memories against the witness ledger, and
+  witness-corroborated claims rank in source-precedence tier 1 alongside
+  `user:` (no existing rank moved). `athenaeum receipts attest-readout`
+  reports witnessed hits and every provenance miss.
+- **Contact-record fold and repair.** Merges no longer leave an absorbed
+  person's contact record behind, and `athenaeum repair --contact-records`
+  cleans up records that earlier merges, or duplicate copies of the same
+  record, left claiming one uid. `recall <email>` is much faster on large
+  stores, because it no longer rebuilds the whole entity index for a
+  single-address lookup. Every contact-record writer now runs an
+  attribution check before writing, logging its verdict and refusing only
+  clearly non-personal values. Deeper checks, a calibration eval and model
+  escalation ship in observe (shadow) mode, and compiled pages no longer
+  pick up contact tokens that a note merely mentions.
+- **CI and evaluation gate rework (contributors only).** The eval-receipt
+  gate now judges a pull request by the base branch's copy of its own rules,
+  identifies the LLM surface by symbol rather than by file, and accepts a
+  receipt across rebases when nothing an eval reads has changed. A new
+  `clean-venv` CI job installs the documented `pip install -e ".[dev]"` path
+  without the lock file. None of this changes the installed package.
+
 ### Changed
 
-- **The eval-receipt gate is judged by the BASE commit's copy of itself
-  (issue athenaeum#2227).** `.github/workflows/eval-receipt-check.yml` ran
-  `python scripts/check_llm_surface_receipt.py` out of the `pull_request`
-  checkout, so a PR's own copy of the script decided that PR — and since the
-  merge wrapper treats any failed check as blocking, a one-line edit to the
-  script in the same PR would have bypassed it. The script, and every
-  repo-local file it imports, is now materialised from
-  `pull_request.base.sha` with `git show` into `$RUNNER_TEMP` and run from
-  there; the merge base's copy of the surface list is passed alongside the
-  head's, so the union rule still applies. A base commit that predates the
-  script falls back to the head copy with a `::warning::`.
-  `tests/test_eval_receipt_gate_from_base.py` extracts the workflow's own
-  shell bodies and runs them against throwaway repos — including the case
-  that matters, a PR that weakens the gate and is failed by the base version
-  anyway — so the recipe is tested rather than described. `ci.yml` is
-  untouched and nothing new is installed.
-
-- **The eval gate's `not needed` escape is structured and checked (issue
-  athenaeum#2226).** The free-text form no longer passes when the reasoning
-  surface changed; the replacement is
-  `Evals: not needed — <category>: <symbol>[, <symbol>...]` with a category
-  from a closed vocabulary (`rename-only`, `log-or-error-text`, `dead-code`,
-  `refactor-equivalent`, `gate-plumbing`). The named symbol set must EQUAL the
-  set the gate found changed — the failure prints both sets and the
-  difference. That is all the gate checks (operator ruling 2026-10-30:
-  symbol-match only). All five categories are reviewer-checked: the gate
-  publishes each changed symbol's docstring-stripped `ast.unparse` before and
-  after to `$GITHUB_STEP_SUMMARY`, so a reviewer reads function bodies rather
-  than files. Machine re-hash checks for `rename-only` and
-  `log-or-error-text` are deferred until misuse is observed. When nothing designated changed, no line is required at all.
-  Vocabulary documented in `tests/evals/README.md`.
-
-- **An eval receipt now survives a `develop` merge or a rebase (issue
-  athenaeum#2225).** `receipt_covers_head` keeps its name, its call site and
-  its `(covered, stale)` shape, and gains the symbol-fingerprint COVERS rule:
-  a passing run at commit X satisfies head H when, for every designated
-  symbol, either X and H agree structurally, or the PR changed that symbol at
-  neither point — in which case the difference arrived from `develop`, where
-  it was evaluated under its own PR. athenaeum#2206 compared the two trees on
-  surface paths, so a rebase that brought in another PR's `tiers.py` change
-  invalidated a perfectly good receipt and cost a re-dispatch. Fails closed:
-  an unreadable receipt commit (fetched by sha first) or an unresolvable merge
-  base is not covered, and the failure text now names the symbols that made
-  the receipt stale rather than the files. `pyproject.toml` is still not
-  designated, so the merge wrapper's version bump is still covered.
-
-- **The LLM surface is designated by SYMBOL, and the designation is derived
-  rather than transcribed (issue athenaeum#2224).** `.github/llm-surface.txt`
-  moves from whole-file entries to `path::symbol` ones: `config.py` (8k
-  lines), `librarian.py` (12k), `tiers.py` (9k), `models.py` and `search.py`
-  are no longer listed whole, so an edit to an undesignated function in one of
-  them no longer demands a paid eval dispatch. `tests/test_llm_surface.py`
-  gains five derivations, each a membership check with a counter-example test:
-  **D1** every function or method that calls the Anthropic SDK directly,
-  **D2** every `PROMPT_META` row as `path::CONSTANT`, **D3** the model-routing
-  seam by AST name pattern, **D4** every `LLMBackend` importer (loosened to
-  "at least one entry of any form"), and **D5** no entry naming a symbol that
-  no longer resolves. D1 closes the gap the old substring oracle had:
-  `paste_cleanup.py` and `memory_class_backfill.py` call
-  `client.messages.create` without naming `LLMBackend`, so neither was on the
-  surface at all. `docs/design/prompts.md` is dropped (generated, and
-  byte-pinned by `tests/test_prompt_goldens.py`). Measured by replaying the
-  predicate over every PR merged to `develop` in the 30 days to 2026-10-30
-  (`scripts/replay_fire_over_merged_prs.py`,
-  `docs/measurements/eval-fire-replay-2026-10-30.md`): of the 68 PRs that
-  tripped the old gate, 34 would not trip the new one at all.
-
-- **"Dispatch once, at the final reviewed head" is now written down, and the
-  eval gate says it (issue athenaeum#2228).** `tests/evals/README.md` gains
-  the canonical statement of the rule — dispatch only when review is
-  complete, the gate reports a changed reasoning surface, and no passing run
-  already covers the head; never for a `develop` merge, a rebase, or a head
-  that already has a run. There is no automatic retry: a red run is a finding
-  to investigate (operator ruling 2026-10-30; small-sample flakiness is fixed
-  at source by athenaeum#2231). The gate's own
-  failure text carries a one-sentence version, because that is what a
-  dispatching agent reads at decision time: it no longer says "the dispatch
-  is stale, re-run it", which was the most likely driver of the measured
-  churn (19 of 23 paid runs in 30 days went to three PR branches, five of
-  them following a `Merge develop` with no surface delta at all). The
-  README's receipt section keeps athenaeum#2206's content-based coverage and
-  reconciles its "re-dispatch after the last surface change" wording with the
-  new rule.
-
-- **The eval-receipt gate decides on structure, not on touched paths (issue
-  athenaeum#2223).** `.github/llm-surface.txt` gains a `path::symbol` form —
-  a top-level `def`/`class`, a `Class.method`, or a module-level constant —
-  and `scripts/check_llm_surface_receipt.py` now asks whether a designated
-  symbol's docstring-stripped AST differs between the merge base and the
-  head (`fire`), instead of whether its file appears in the changed-path
-  list. A comment, a docstring or a reformat inside a designated function no
-  longer demands a paid eval dispatch; a one-literal change inside one still
-  does, and an edit to an undesignated function in the same file does not.
-  The decision uses the UNION of the designations at both ends, so a PR
-  cannot delete its own entry to hide a change, and missing, renamed or
-  unparseable symbols count as changed (fail closed). The whole-file and
-  `dir/` prefix forms keep their exact meaning, so the list itself is
-  unchanged by this release and a rollback to whole-file entries needs no
-  code change. Stdlib only — no install is added to the gate's workflow.
+- **Faster lookups on large stores (issues athenaeum#2180, athenaeum#2181,
+  athenaeum#2178, athenaeum#2243).** The librarian's email-named-candidate
+  gate reuses the run's entity index instead of rebuilding it for every
+  candidate. `read_entity` / `person_read` (MCP), `pii.read_entity` and
+  `pii.read_identifier_facts` locate a single uid's page through the
+  filename fast path and the persisted entity-index cache. Callers that need
+  only a few frontmatter keys can opt in to a field-selective parse
+  (`models.parse_frontmatter_selective`). `json_utils.extract_json_object`
+  gives up after 128 failed anchors, so a pathological model reply full of
+  unmatched `{` costs well under a second instead of tens of seconds; an
+  object sitting behind more than 128 stray braces is no longer found.
+  Answers are otherwise unchanged.
 
 - **North star: filing is verification, tiers are measured, schema is data
   (`docs/north-star.md`, amended 2026-10-30).** New §2.12 makes the librarian
@@ -123,6 +172,88 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no behaviour changes in this release.
 
 ### Added
+
+- **Contact-value attribution check, in observe mode, at every contact-record
+  writer (issue athenaeum#2210).** A new seam,
+  `pii.check_contact_attribution` (implemented in `athenaeum.pii_attribution`),
+  runs four deterministic checks before a value is written: D1 non-personal,
+  D2 held elsewhere, D3 not a person and D4 fan-out. The observed-contact,
+  correction-add, PII-migration and contact-fold writers all call it,
+  including the fold that `dedupe persons --apply` runs. Each verdict is
+  logged to an attribution log on the excluded contacts surface (the log row
+  never carries the value itself), and suspects are parked in an idempotent
+  suspect store. The writers otherwise behave as before, with one exception:
+  the narrow non-personal shapes (relay local-part prefixes, the owner's own
+  addresses on another page, configured mailer domains) are enforced and not
+  written. Nothing is checked under `--dry-run`, and no model is called. New
+  configuration: `librarian.attribution.relay_local_prefixes`,
+  `librarian.attribution.relay_domains` and
+  `librarian.attribution.operator_mailer_domains`.
+
+- **Persisted, HMAC-keyed `ExcludedRecordIndex` cache, in the erasure
+  cascade's delete set (issue athenaeum#2182).** athenaeum#2179 deliberately
+  left `pii.ExcludedRecordIndex` in-memory-only: "a cache of it would be a
+  copy of excluded PII that the erasure cascade does not reach." The new
+  `athenaeum.contact_index_cache` module persists it anyway, by changing
+  what hits disk — only the HMAC-SHA256 digest of each address (keyed under
+  the same per-corpus `_erasure_hmac_key` `athenaeum.erasure` already
+  mints/purges) plus each record's opaque uid, never a raw address.
+  Invalidation copies `athenaeum.entity_index_cache`'s discipline exactly:
+  every record `stat`-ed on every load, only changed records re-parsed,
+  atomic 0600-inside-0700 writes, a corrupt/wrong-version/wrong-root/
+  wrong-key-fingerprint cache rebuilt wholesale. `erase_contact_record`
+  deletes a record file and drops its cache entry in one call, and — handed
+  the caller's live index — unregisters it from memory too, so an erased
+  address is unresolvable immediately, with no reload (the new
+  `ExcludedRecordIndex.unregister`, the counterpart to `register`).
+  `identity_resolution.resolve_handle_query`'s email-handle branch uses the
+  cache when `cache_dir` is given, exactly as it already does for
+  `entity_index_cache`; the librarian's compile-time caller is untouched.
+  See `docs/design/contact-index-writer-coherence.md` for why
+  `pii.mark_bounced`'s existing one-shot-load-plus-`register` discipline
+  stays correct underneath a persisted initial load, and
+  `scripts/bench_contact_index_cache.py` for the before/after timing
+  methodology against a synthetic ~13k-record fixture corpus.
+
+- **`correct-notes` can drop a whole `##` section (issue athenaeum#2236).**
+  A third record kind in the same `correct-notes` batch, validation and
+  ledger machinery the bullet `move` / `drop` records use: address a heading
+  by a stable `section_id` with `action: drop`. The id is a slug of the
+  heading text plus a 1-based ordinal counting earlier `##` headings with
+  that exact text (the second `## Notes` on a page is `notes-2`), computed by
+  `athenaeum.note_corrections.section_id`. Two different headings that
+  slugify to the same id are treated as ambiguous and refused like an
+  unknown id. Trailing footnotes are not counted as part of a section's span.
+
+- **Attribution verification, continued: context checks, a calibration
+  eval, shadow-mode escalation and placement, and contact-token scrubbing in
+  compiled pages (issues athenaeum#2215, athenaeum#2211, athenaeum#2212,
+  athenaeum#2216).**
+  - **Context checks C1-C3** add evidence to the attribution verdict: the
+    value appears inline on another person's page (C1), the local part names
+    someone else (C2), or the cited source does not support the attribution
+    (C3). They change no writer's output. New knobs:
+    `librarian.attribution.context_labels` and
+    `librarian.attribution.context_window_chars`.
+  - **A calibration eval** (`tests/evals/test_attribution_eval.py`, opt-in
+    and deselected by default) with a generated 420-case dataset, plus the
+    shipped calibration record `calibration_data/contact_attribution.yaml`.
+    Every question class ships unmeasured (`passes: false`), so every class
+    stays in observe mode.
+  - **Escalation and placement, in shadow mode.** With
+    `librarian.attribution.escalate: true` (default `false`, capped by
+    `librarian.attribution.max_escalations_per_run`, default 25), suspects
+    are sent to the model tier chosen for their question class. The proposed
+    placement (re-attribution, alias, merge proposal, confirmation, or the
+    human queue) is logged, and nothing is filed. A model-placed value is
+    always recorded as `unclassified` and never grants outreach eligibility.
+    New `athenaeum attribution show | place` commands read one parked
+    suspect and file a human answer for it.
+  - **Tier-3 compiled output no longer carries contact tokens.** Email
+    addresses and phone numbers that a source note only mentions are removed
+    from the page body the compile writes, on both the batch and synchronous
+    paths, and parked for attribution. Values in name fields are kept, and
+    addresses already in an existing page body are not touched.
 
 - **`witnessed` joins source-precedence tier 1, and the rewrite is persisted
   onto the memory (issue athenaeum#2159).** A `witnessed` receipt
@@ -179,7 +310,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   question class, with re-attribution to the real owner, structured aliases and
   same-entity merge proposals; a human queue only below calibrated confidence;
   observe mode before enforce; and the calibration eval that sets tiers and
-  thresholds. Docs only; no behaviour changes in this release.
+  thresholds. The design document itself changes no behaviour; its first
+  slice, the observe-mode attribution check, is listed above (athenaeum#2210).
 
 - **A merge now folds the absorbed uid's contact record, and `athenaeum
   repair --contact-records` cleans up the ones earlier merges left (issue
@@ -553,24 +685,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     changes. Flagged to the epic owner as a digest-contract defect, not
     resolved here — see `src/athenaeum/witness_attestation.py`'s "Known
     deviation" docstring note.
-- **`athenaeum contact-surface-lint` — read-only contact-surface report,
-  with an `--attribution` backfill report mode (child I of epic
-  athenaeum#2192, design `docs/design/attribution-verification.md` §10.4).**
-  New `src/athenaeum/contact_surface_lint.py` (L4) reports page-less
-  records (reusing athenaeum#2217's own detection), values shared by two or
-  more uids broken down by `field_sources` provenance type, and `observed`
-  values whose cited source still exists and no longer contains them —
-  counts and uids only, never a value. `--attribution` runs
-  `pii_attribution.check_contact_attribution` in report mode over every
-  (value, uid) pair on the surface (new `WRITER_LINT`), writing only
-  attribution-log rows and one persisted observe-report record per run
-  (new `pii_attribution.append_attribution_observe_report`) — per-class
-  shadow counts plus the model/prompt sha in effect, the contract
-  athenaeum#2220's `auto` preflight depends on. `--attribution --escalate`
-  additionally runs athenaeum#2212's shadow escalation over already-parked
-  suspects, capped by `librarian_max_api_calls`. `pii._log_collision_summary`'s
-  hint now names the real command. Does not take the run lock (never
-  writes a contact record; see the CLI module's own docstring for why).
+- **Attribution calibration over time: audit-sampling and threshold
+  proposals (issue athenaeum#2219, design §8.3).** `calibration.
+  sample_tier_decision` gains tier `attribution`, watching the `own` /
+  `other-known` / `alias` verdicts `pii.place_contact_value` FILES (never
+  observe-mode's merely-proposed outcome), at a new rate knob
+  `librarian.audit_sample_rate_attribution` (default 0.10). A sampled item
+  surfaces in `decisions.list_pending_decisions` as `type: "audit"` with
+  masked values only, exactly like the existing T1/T2 audits. A new
+  `pii_attribution.record_attribution_audit_review` confirms or overturns
+  it; an overturn records the calibration signal and re-files the human's
+  answer through the SAME placement executor with `decided_by: human`. A
+  new `calibration_summary["attribution"]["by_class"]` breaks the tier out
+  per question class. `auto_apply_proposals` gains a second drafter,
+  `draft_attribution_threshold_proposal`, with its own action id per
+  question class on the SAME ledger/approve/reject rail — it drafts in
+  EITHER direction (widen below the class's target error rate, narrow
+  above it, per `librarian.attribution.accuracy_floor`), and an approval
+  writes a ledger override `pii_attribution.threshold_for_class` reads
+  BELOW explicit config. Wired into the SAME nightly
+  `librarian._run_auto_apply_proposals_phase` as the existing merge-dedupe
+  widen rail — same `librarian.signal_mining.enabled` gate, same dry-run
+  precedence, same call position, no new knob — drafting over
+  `pii_attribution.QUESTION_CLASSES` (the seam's own vocabulary) rather
+  than a hand-written list. No model call; synthetic fixtures only.
+  - **Fix (PR review, Seer finding A):** a question class whose threshold
+    is PINNED by explicit `librarian.attribution.thresholds.<class>`
+    config never drafts a proposal at all — an approval for it could
+    never take effect (AC5's own precedence), so without this guard the
+    identical `(action, current, proposed)` id re-drafted, and
+    re-appended to the ledger, on every nightly run forever once
+    approved (confirmed empirically before the fix). Counted separately
+    as `skipped_pinned_by_config`.
+  - **Clarified (PR review, Seer finding B — rejected the proposed
+    reorder; AC3's sequence stands):** if re-filing an overturn fails
+    AFTER the calibration signal is recorded, `pii_attribution.
+    record_attribution_audit_review` now wraps the failure in one
+    `AttributionAuditReviewError` that says the signal already landed,
+    names why a retry of the same call cannot double-record it
+    (`calibration.record_audit_review` reviews each audit item at most
+    once), and points at the real recovery path — re-filing directly via
+    `athenaeum attribution place <suspect-id> --as ...`.
 
 ### Changed
 
@@ -834,6 +989,112 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   under the real default knowledge root or default cache dir, covering both
   `DEFAULT_KNOWLEDGE_ROOT` definitions (`config.py`'s call-time
   `.expanduser()` and `librarian.py`'s copy, frozen at import time).
+
+
+### Internal
+
+- **`docs/design/eval-trigger-surface.md` matches the current eval-gate
+  rules (issue athenaeum#2237).** Docs only.
+
+- **The eval-receipt gate is judged by the BASE commit's copy of itself
+  (issue athenaeum#2227).** `.github/workflows/eval-receipt-check.yml` ran
+  `python scripts/check_llm_surface_receipt.py` out of the `pull_request`
+  checkout, so a PR's own copy of the script decided that PR — and since the
+  merge wrapper treats any failed check as blocking, a one-line edit to the
+  script in the same PR would have bypassed it. The script, and every
+  repo-local file it imports, is now materialised from
+  `pull_request.base.sha` with `git show` into `$RUNNER_TEMP` and run from
+  there; the merge base's copy of the surface list is passed alongside the
+  head's, so the union rule still applies. A base commit that predates the
+  script falls back to the head copy with a `::warning::`.
+  `tests/test_eval_receipt_gate_from_base.py` extracts the workflow's own
+  shell bodies and runs them against throwaway repos — including the case
+  that matters, a PR that weakens the gate and is failed by the base version
+  anyway — so the recipe is tested rather than described. `ci.yml` is
+  untouched and nothing new is installed.
+
+- **The eval gate's `not needed` escape is structured and checked (issue
+  athenaeum#2226).** The free-text form no longer passes when the reasoning
+  surface changed; the replacement is
+  `Evals: not needed — <category>: <symbol>[, <symbol>...]` with a category
+  from a closed vocabulary (`rename-only`, `log-or-error-text`, `dead-code`,
+  `refactor-equivalent`, `gate-plumbing`). The named symbol set must EQUAL the
+  set the gate found changed — the failure prints both sets and the
+  difference. That is all the gate checks (operator ruling 2026-10-30:
+  symbol-match only). All five categories are reviewer-checked: the gate
+  publishes each changed symbol's docstring-stripped `ast.unparse` before and
+  after to `$GITHUB_STEP_SUMMARY`, so a reviewer reads function bodies rather
+  than files. Machine re-hash checks for `rename-only` and
+  `log-or-error-text` are deferred until misuse is observed. When nothing designated changed, no line is required at all.
+  Vocabulary documented in `tests/evals/README.md`.
+
+- **An eval receipt now survives a `develop` merge or a rebase (issue
+  athenaeum#2225).** `receipt_covers_head` keeps its name, its call site and
+  its `(covered, stale)` shape, and gains the symbol-fingerprint COVERS rule:
+  a passing run at commit X satisfies head H when, for every designated
+  symbol, either X and H agree structurally, or the PR changed that symbol at
+  neither point — in which case the difference arrived from `develop`, where
+  it was evaluated under its own PR. athenaeum#2206 compared the two trees on
+  surface paths, so a rebase that brought in another PR's `tiers.py` change
+  invalidated a perfectly good receipt and cost a re-dispatch. Fails closed:
+  an unreadable receipt commit (fetched by sha first) or an unresolvable merge
+  base is not covered, and the failure text now names the symbols that made
+  the receipt stale rather than the files. `pyproject.toml` is still not
+  designated, so the merge wrapper's version bump is still covered.
+
+- **The LLM surface is designated by SYMBOL, and the designation is derived
+  rather than transcribed (issue athenaeum#2224).** `.github/llm-surface.txt`
+  moves from whole-file entries to `path::symbol` ones: `config.py` (8k
+  lines), `librarian.py` (12k), `tiers.py` (9k), `models.py` and `search.py`
+  are no longer listed whole, so an edit to an undesignated function in one of
+  them no longer demands a paid eval dispatch. `tests/test_llm_surface.py`
+  gains five derivations, each a membership check with a counter-example test:
+  **D1** every function or method that calls the Anthropic SDK directly,
+  **D2** every `PROMPT_META` row as `path::CONSTANT`, **D3** the model-routing
+  seam by AST name pattern, **D4** every `LLMBackend` importer (loosened to
+  "at least one entry of any form"), and **D5** no entry naming a symbol that
+  no longer resolves. D1 closes the gap the old substring oracle had:
+  `paste_cleanup.py` and `memory_class_backfill.py` call
+  `client.messages.create` without naming `LLMBackend`, so neither was on the
+  surface at all. `docs/design/prompts.md` is dropped (generated, and
+  byte-pinned by `tests/test_prompt_goldens.py`). Measured by replaying the
+  predicate over every PR merged to `develop` in the 30 days to 2026-10-30
+  (`scripts/replay_fire_over_merged_prs.py`,
+  `docs/measurements/eval-fire-replay-2026-10-30.md`): of the 68 PRs that
+  tripped the old gate, 34 would not trip the new one at all.
+
+- **"Dispatch once, at the final reviewed head" is now written down, and the
+  eval gate says it (issue athenaeum#2228).** `tests/evals/README.md` gains
+  the canonical statement of the rule — dispatch only when review is
+  complete, the gate reports a changed reasoning surface, and no passing run
+  already covers the head; never for a `develop` merge, a rebase, or a head
+  that already has a run. There is no automatic retry: a red run is a finding
+  to investigate (operator ruling 2026-10-30; small-sample flakiness is fixed
+  at source by athenaeum#2231). The gate's own
+  failure text carries a one-sentence version, because that is what a
+  dispatching agent reads at decision time: it no longer says "the dispatch
+  is stale, re-run it", which was the most likely driver of the measured
+  churn (19 of 23 paid runs in 30 days went to three PR branches, five of
+  them following a `Merge develop` with no surface delta at all). The
+  README's receipt section keeps athenaeum#2206's content-based coverage and
+  reconciles its "re-dispatch after the last surface change" wording with the
+  new rule.
+
+- **The eval-receipt gate decides on structure, not on touched paths (issue
+  athenaeum#2223).** `.github/llm-surface.txt` gains a `path::symbol` form —
+  a top-level `def`/`class`, a `Class.method`, or a module-level constant —
+  and `scripts/check_llm_surface_receipt.py` now asks whether a designated
+  symbol's docstring-stripped AST differs between the merge base and the
+  head (`fire`), instead of whether its file appears in the changed-path
+  list. A comment, a docstring or a reformat inside a designated function no
+  longer demands a paid eval dispatch; a one-literal change inside one still
+  does, and an edit to an undesignated function in the same file does not.
+  The decision uses the UNION of the designations at both ends, so a PR
+  cannot delete its own entry to hide a change, and missing, renamed or
+  unparseable symbols count as changed (fail closed). The whole-file and
+  `dir/` prefix forms keep their exact meaning, so the list itself is
+  unchanged by this release and a rollback to whole-file entries needs no
+  code change. Stdlib only — no install is added to the gate's workflow.
 
 
 ## [0.22.43] - 2026-10-25

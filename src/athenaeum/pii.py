@@ -3143,6 +3143,28 @@ class ExcludedRecordIndex:
         self._ensure_loaded()
         self._index_record(Path(path))
 
+    def unregister(self, path: Path) -> None:
+        """Remove *path* from both maps — the erasure-cascade counterpart to :meth:`register`.
+
+        Added for issue athenaeum#2182: a caller that deletes a contact
+        record (an erasure) must also drop it from any already-loaded index
+        so a lookup made immediately afterward, in the SAME process, does
+        not resolve through a now-stale in-memory entry — "no later load
+        needed to heal it". Idempotent: removing a path that was never
+        indexed, or removing it twice, is a no-op. Purely in-memory, exactly
+        like :meth:`register` — this never touches disk.
+        """
+        self._ensure_loaded()
+        target = Path(path)
+        for mapping in (self._by_uid, self._by_identifier):
+            for key in list(mapping):
+                if target in mapping[key]:
+                    kept = [p for p in mapping[key] if p != target]
+                    if kept:
+                        mapping[key] = kept
+                    else:
+                        del mapping[key]
+
 
 def resolve_contact_record(
     contacts_root: Path,
@@ -6066,6 +6088,7 @@ def read_entity(
     usage_classes: Collection[str] | None = None,
     excluded_index: "ExcludedRecordIndex | None" = None,
     entity_index: EntityIndex | None = None,
+    cache_dir: Path | None = None,
 ) -> EntityRead | None:
     """Read one entity's wiki page, with excluded data gated by *include_excluded*.
 
@@ -6141,6 +6164,12 @@ def read_entity(
             them) that cannot restructure itself into a single
             :func:`read_entities` call but can still hold one pair of
             indexes across those calls.
+        cache_dir: The athenaeum cache dir (issue athenaeum#2181). Used ONLY
+            when *entity_index* is not supplied: *uid* is then located via
+            :func:`athenaeum.entity_index_cache.entity_index_for_uid` — the
+            filename fast path, then the persisted cache — instead of a full
+            :class:`~athenaeum.models.EntityIndex` scan. ``None`` (the
+            default, and every pre-athenaeum#2181 caller) keeps the full scan.
 
     Returns:
         An :class:`EntityRead`, or ``None`` when *uid* resolves to no wiki
@@ -6167,13 +6196,15 @@ def read_entity(
         # warning would be noise in a one-uid read.
         record_path = resolve_contact_record_for_uid(contacts_root, uid)
     contact_records = {} if record_path is None else {str(uid).strip(): record_path}
+    if entity_index is None:
+        from athenaeum.entity_index_cache import entity_index_for_uid
+
+        entity_index = entity_index_for_uid(
+            knowledge_root / "wiki", uid, cache_dir=cache_dir
+        )
     return _entity_read_from_indexes(
         uid,
-        entity_index=(
-            entity_index
-            if entity_index is not None
-            else EntityIndex(knowledge_root / "wiki")
-        ),
+        entity_index=entity_index,
         contact_records=contact_records,
         include_excluded=include_excluded,
         wanted_classes=frozenset(usage_classes) if usage_classes is not None else None,
@@ -6259,6 +6290,39 @@ class IdentifierFacts:
         }
 
 
+class _UidPageLocator:
+    """Per-uid page lookup for a batch read (:func:`read_identifier_facts`, issue athenaeum#2181).
+
+    Different identifiers in the same batch can resolve to different uids, so
+    (unlike the single-uid readers) this cannot hand back one fixed index —
+    it tries the filename fast path on every uid, and builds at most ONE
+    fallback :class:`~athenaeum.models.EntityIndex` for the whole batch, the
+    first time a uid's fast path is not conclusive, reused for every later
+    uid exactly as the pre-athenaeum#2181 per-batch index was. With
+    *cache_dir* ``None`` this never calls the fast path at all and behaves
+    exactly like holding a single eagerly-built :class:`EntityIndex`.
+    """
+
+    def __init__(self, wiki_root: Path, cache_dir: Path | None) -> None:
+        self._wiki_root = wiki_root
+        self._cache_dir = cache_dir
+        self._entity_index: EntityIndex | None = None
+
+    def locate(self, uid: str) -> Path | None:
+        if self._entity_index is not None:
+            return self._entity_index.get_by_uid(uid)
+        from athenaeum.entity_index_cache import load_entity_index, page_by_uid_filename
+
+        if self._cache_dir is not None:
+            fast = page_by_uid_filename(self._wiki_root, uid)
+            if fast is not None:
+                return fast
+            self._entity_index = load_entity_index(self._wiki_root, self._cache_dir)
+        else:
+            self._entity_index = EntityIndex(self._wiki_root)
+        return self._entity_index.get_by_uid(uid)
+
+
 def read_identifier_facts(
     knowledge_root: Path,
     config: dict[str, Any] | None,
@@ -6267,6 +6331,7 @@ def read_identifier_facts(
     surface_class: str = PII_ENTITY_CLASS,
     as_of: date | None = None,
     index: "ExcludedRecordIndex | None" = None,
+    cache_dir: Path | None = None,
 ) -> Iterator[tuple[str, IdentifierFacts]]:
     """Read the excluded surface's facts for MANY addresses, on ONE corpus scan.
 
@@ -6311,6 +6376,13 @@ def read_identifier_facts(
             through — for a caller interleaving reads with
             :func:`mark_bounced` writes on the same batch, so both see one
             index and one scan.
+        cache_dir: The athenaeum cache dir (issue athenaeum#2181). Given, each
+            resolved uid's wiki page is located via the filename fast path
+            first, falling back to at most one persisted-cache
+            :class:`~athenaeum.models.EntityIndex` for the whole batch
+            (:class:`_UidPageLocator`) instead of one eagerly-built full
+            scan. ``None`` (the default, and every pre-athenaeum#2181 caller)
+            keeps the eager full scan, byte-identical to before.
 
     Each yielded fact's ``do_not_email`` reads BOTH surfaces (issue
     athenaeum#960): the excluded record AND, when the record carries a
@@ -6335,7 +6407,9 @@ def read_identifier_facts(
             swallowed, never downgraded to an empty answer.
     """
     resolved_index = index
+    wiki_root = knowledge_root / "wiki"
     entity_index: EntityIndex | None = None
+    locator: _UidPageLocator | None = None
     for identifier in identifiers:
         if resolved_index is None:
             # Built on the FIRST identifier, not at call time, exactly as
@@ -6347,17 +6421,23 @@ def read_identifier_facts(
             contacts_root = excluded_surface_root(surface_class, knowledge_root, config)
             _require_readable_surface(contacts_root, surface_class)
             resolved_index = ExcludedRecordIndex(contacts_root)
-        if entity_index is None:
-            # Same lazy-on-first-use posture as `resolved_index` above, and
-            # the same index `read_entities` builds once per batch — never
-            # rebuilt per identifier (issue athenaeum#883's cost note on
-            # `EntityIndex` construction applies here too).
-            entity_index = EntityIndex(knowledge_root / "wiki")
+        if cache_dir is None:
+            # Unchanged from before athenaeum#2181: eagerly built on the first
+            # iteration (same lazy-on-first-use posture as `resolved_index`
+            # above, and the same index `read_entities` builds once per
+            # batch — never rebuilt per identifier).
+            if entity_index is None:
+                entity_index = EntityIndex(wiki_root)
+            locate = entity_index.get_by_uid
+        else:
+            # Opted in: per-uid filename fast path first, falling back to at
+            # most one shared cache-backed index for the rest of the batch.
+            if locator is None:
+                locator = _UidPageLocator(wiki_root, cache_dir)
+            locate = locator.locate
         yield (
             identifier,
-            _facts_for_identifier(
-                identifier, resolved_index, as_of, entity_index=entity_index
-            ),
+            _facts_for_identifier(identifier, resolved_index, as_of, locate=locate),
         )
 
 
@@ -6394,7 +6474,7 @@ def _facts_for_identifier(
     index: "ExcludedRecordIndex",
     as_of: date | None,
     *,
-    entity_index: EntityIndex | None = None,
+    locate: "Callable[[str], Path | None] | None" = None,
 ) -> IdentifierFacts:
     """Assemble one :class:`IdentifierFacts` from an ALREADY-BUILT index.
 
@@ -6403,11 +6483,13 @@ def _facts_for_identifier(
     O(1)-per-key part of the read, and keeping it separate makes the one-scan
     property visible rather than buried in a loop.
 
-    *entity_index*, when supplied, resolves the matched record's ``uid`` back
-    to its wiki page (issue athenaeum#960) so ``do_not_email`` can read that
-    surface too — ``None`` (the default, and every pre-existing caller) skips
-    the resolution and reads only the excluded-record surface, exactly as
-    issue athenaeum#851 shipped.
+    *locate*, when supplied, resolves the matched record's ``uid`` back to its
+    wiki page (issue athenaeum#960) so ``do_not_email`` can read that surface
+    too — ``None`` (the default, and every pre-existing caller) skips the
+    resolution and reads only the excluded-record surface, exactly as issue
+    athenaeum#851 shipped. A plain callable (:meth:`EntityIndex.get_by_uid` or
+    :meth:`_UidPageLocator.locate`, issue athenaeum#2181) rather than an index
+    object, since the caller may be resolving each uid through either one.
     """
     matches = index.all_by_identifier(identifier)
     if not matches:
@@ -6418,8 +6500,8 @@ def _facts_for_identifier(
     meta = read_bounce_record(record_path)
     uid = str(meta.get("uid", "")).strip() or None
     page_frontmatter: dict[str, Any] | None = None
-    if uid is not None and entity_index is not None:
-        page_path = entity_index.get_by_uid(uid)
+    if uid is not None and locate is not None:
+        page_path = locate(uid)
         if page_path is not None:
             page_frontmatter = read_bounce_record(page_path)
     return IdentifierFacts(

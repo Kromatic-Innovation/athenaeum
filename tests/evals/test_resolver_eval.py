@@ -17,7 +17,8 @@ Action-class taxonomy (per the issue):
       that reads more cleanly as one consolidated memory — the resolver system
       prompt directs this pattern to ``propose_merge``)
 
-Aggregate floor: ≥ 6/8 (see ``RESOLVER_FLOOR`` derivation below).
+Aggregate floor: ≥ 6/9 (see ``RESOLVER_FLOOR`` derivation below; athenaeum#2231
+added the 9th case for real slack — the floor value itself is unchanged).
 """
 
 from __future__ import annotations
@@ -47,14 +48,42 @@ from tests.evals.harness import (
 pytestmark = pytest.mark.eval
 
 
-# Floor derivation (issue athenaeum#345, WS3): the golden set holds N=8 cases, two per
-# action class (not_a_conflict, keep_pick_winner, disambiguation,
-# propose_merge). All 8 pass reliably on the default Opus resolver (verified
-# across repeated live runs while calibrating this issue). A floor of 6 leaves
-# >= 2-case slack, so a single hard case (or one non-JSON response, now guarded
-# by the WS2 repair retry) no longer sinks the whole layer — the small-sample
-# hostage problem the pre-athenaeum#345 5-case / floor-4 set had.
-RESOLVER_FLOOR = 6  # >= 6/8; 2-case slack over an all-pass expectation
+# Floor derivation (issue athenaeum#345, WS3, re-examined by athenaeum#2231): the
+# golden set originally held N=8 cases, two per action class (not_a_conflict,
+# keep_pick_winner, disambiguation, propose_merge), with a floor of 6 pitched
+# as ">= 2-case slack over an all-pass expectation." That framing undercounted
+# the real margin: ``decision_conflict_hosting_migration`` (one of the two
+# keep_pick_winner cases) is a PERMANENT miss (0/23 across the 23 October
+# workflow_dispatch runs, pinned per athenaeum#737/#760 — see the strict xfail
+# in tests/test_recorded_fixtures.py), so it always consumes one of the two
+# nominal slack slots. The real margin over the 7 non-permanent-miss cases
+# was 1 failure in 7 (85.7%), not 2 in 8 — and the research-findings comment
+# on athenaeum#2231 found the layer ran at EXACTLY 6/8 (i.e. used that one
+# allowance in full) on 2026-10-29.
+#
+# ``precedence_user_over_unsourced_deadline`` (added by athenaeum#2231) is a
+# second case of the SAME proven-reliable keep_pick_winner-via-precedence
+# shape as ``precedence_user_over_unsourced_contact``, giving real slack:
+# n=9, floor unchanged at 6, so the margin over the 8 non-permanent-miss
+# cases becomes 2 failures in 8 — not a floor bump, a genuine widening.
+#
+# False-red rate. Pessimistic iid exact-binomial bound at the pooled
+# historical accuracy (160/184 = 87.0%, issue athenaeum#2231's inventory):
+# P(X < 6) for X ~ Binomial(9, 0.870) ≈ 2.1%, down from ≈7.5% at the
+# pre-athenaeum#2231 n=8 floor under the same pooled model. As with the other
+# two suites re-floored by athenaeum#2231, this pooled figure is a conservative
+# bound, not the structural truth: it averages in the permanent miss's 0%,
+# so it understates the live cases' real reliability.
+#
+# False-green / what this floor cannot catch: with the permanent miss always
+# failing, floor=6 over n=9 tolerates up to 2 failures among the remaining 8
+# live cases (previously 1 of 7). A regression confined to a single live
+# case is very likely absorbed by that 2-failure allowance; a regression
+# spanning 3+ live cases always reds. This is, like the other two suites,
+# a collapse detector at this sample size rather than a fine-grained
+# regression detector. See test_resolver_eval_stub.py (offline, unmarked)
+# for a synthetic proof exercising the real propose_resolution() call.
+RESOLVER_FLOOR = 6  # >= 6/9
 
 
 def _load_cases() -> list[dict[str, Any]]:
@@ -173,7 +202,13 @@ def test_resolver_case(
 
 
 def test_resolver_aggregate_floor(eval_session: Any, _live_ready: None) -> None:
-    """Assert the resolver layer meets the ≥ 4/5 aggregate floor."""
+    """Assert the resolver layer meets the aggregate floor.
+
+    Stale pre-athenaeum#345 docstring ("≥ 4/5") corrected by athenaeum#2231 — the
+    golden set has held N=8 (now N=9) cases with ``RESOLVER_FLOOR = 6``
+    since athenaeum#345; see that constant's derivation comment above for the
+    false-red/false-green analysis.
+    """
     passed, total = eval_session.layer_score(LAYER_RESOLVER)
     assert total > 0, "resolver eval collected no cases"
     assert passed >= RESOLVER_FLOOR, (

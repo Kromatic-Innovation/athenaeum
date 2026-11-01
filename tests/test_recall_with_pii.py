@@ -134,8 +134,12 @@ class TestJoinReusesTheAssemblySeam:
         def _explode(*args: object, **kwargs: object) -> None:
             raise AssertionError("the with_pii join must not build an EntityIndex")
 
+        # athenaeum#2181 removed mcp_server's only `EntityIndex` reference
+        # (entity_read's build moved to entity_index_cache.entity_index_for_uid),
+        # so `mcp_server.EntityIndex` no longer exists to patch -- `pii.EntityIndex`
+        # alone still covers this module's own join path (recall_search /
+        # _recall_via_backend), which is what this test actually exercises.
         monkeypatch.setattr(pii, "EntityIndex", _explode)
-        monkeypatch.setattr(mcp_server, "EntityIndex", _explode)
 
         result = recall_search(
             corpus / "wiki", "widget", config=EXCLUDED_CONFIG, with_pii=True

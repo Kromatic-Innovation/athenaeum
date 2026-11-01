@@ -106,6 +106,9 @@ does not answer.
 - [Auto-resolve](design/auto-resolve.md)
 - [Merge inflow restoration](design/merge-inflow-restoration.md)
 - [Recall architecture](design/recall-architecture.md)
+- [Librarian email-gate index coherence](design/librarian-email-gate-index-coherence.md) — why the
+  email-named-candidate gate reuses the compile run's own entity index rather than a
+  persisted one, and what stays true across mid-run page writes.
 - [Native-memory baseline](design/native-memory-baseline.md) — the comparison against the
   host agent's own memory that decides whether the project continues.
 - [Prompts](design/prompts.md)
@@ -113,6 +116,9 @@ does not answer.
 - [Sensitivity value routing](design/sensitivity-value-routing.md)
 - [Security posture](design/security-posture.md)
 - [Bounce surface convergence](design/bounce-surface-convergence.md)
+- [Contact-index writer coherence](design/contact-index-writer-coherence.md) — how a
+  persisted contact-record index stays correct across compile-loop writes, and why an
+  erasure must reach it.
 - [Deprecated email tracking](design/deprecated-email-tracking.md)
 - [Attribution verification](design/attribution-verification.md) — checking whose contact
   value it is before filing it: the verification seam every writer calls, the deterministic
@@ -144,6 +150,8 @@ Evidence, kept out of the reading path.
   Choice-question classifier measured against the five-verdict comparator's recorded
   verdicts for the same source pairs.
 - [Transcript-receipts writer: ledger scans and transcript reads](measurements/transcript-receipts-writer-2026-10.md) — synthetic before/after for the nightly receipts phase.
+- [Frontmatter parse cost](measurements/frontmatter-parse-cost-2026-10-31.md) — full vs.
+  field-selective frontmatter parsing over a generated 26k-page corpus.
 - [Memory-model measurements](measurements/memory-model-measurements.md)
 - [Reasoning-tier measurements](measurements/reasoning-tier-measurements.md)
 - [Retrieval entry-point measurements](measurements/retrieval-entry-point-measurements.md)

@@ -186,15 +186,20 @@ def _case_scoped_comparator_client(cases: list[ParityCase], workdir: Path) -> Ma
 
 
 class TestShadowParityRecast:
-    def test_all_18_cases_recast_end_to_end_via_run_shadow_parity(
+    def test_all_19_cases_recast_end_to_end_via_run_shadow_parity(
         self, tmp_path: Path
     ) -> None:
+        """n=18 -> 19: athenaeum#2231 added one resolver case
+        (``precedence_user_over_unsourced_deadline``) for RESOLVER_FLOOR
+        slack. Its outcome_class (``contradict``) is already covered by
+        :data:`_CONTENT_RELATION_BY_OUTCOME_CLASS`, so no new scripted
+        branch is needed here."""
         cases = _all_cases()
-        assert len(cases) == 18
+        assert len(cases) == 19
         detector_suite_cases = [c for c in cases if c.declared_detector is None]
         resolver_suite_cases = [c for c in cases if c.declared_detector is not None]
         assert len(detector_suite_cases) == 10
-        assert len(resolver_suite_cases) == 8
+        assert len(resolver_suite_cases) == 9
 
         detector_client = _ordered_detector_client(cases)
         comparator_client = _case_scoped_comparator_client(cases, tmp_path)
@@ -206,13 +211,13 @@ class TestShadowParityRecast:
             workdir=tmp_path,
         )
 
-        assert len(report.items) == 18
+        assert len(report.items) == 19
         assert {item.case_id for item in report.items} == {c.case_id for c in cases}
 
         detector_items = [item for item in report.items if item.source == "detector"]
         resolver_items = [item for item in report.items if item.source == "resolver"]
         assert len(detector_items) == 10
-        assert len(resolver_items) == 8
+        assert len(resolver_items) == 9
 
         for item in report.items:
             assert item.source in ("detector", "resolver")
@@ -221,7 +226,7 @@ class TestShadowParityRecast:
             # 3-tuple also rejects an accidental falsy-but-wrong sentinel).
             assert item.comparator_correct in (True, False, None)
 
-        assert report.matrix.total == 18
+        assert report.matrix.total == 19
 
         # Resolver-suite items took the declared-detector branch: zero
         # detector calls. Detector-suite items (all >= 2 members) cost
