@@ -190,6 +190,33 @@ class TestBaseReport:
         assert code == 0
         assert "OK" in out
 
+    def test_pageless_uid_is_not_a_shared_values_holder(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """PR review finding 1 (second half): a value held by one live uid and
+        one pageless uid is NOT a shared value -- seam D2's "no live page does
+        not count" rule. The pageless uid is still reported, once, under
+        ``pageless_records``."""
+        root = tmp_path / "knowledge"
+        wiki = root / "wiki"
+        wiki.mkdir(parents=True)
+        (root / "athenaeum.yaml").write_text(_EXCLUDED_CONFIG_YAML, encoding="utf-8")
+        _write_page(wiki, uid=_PAGE_ONE_UID, name="Page One")
+        contacts_root = root / "excluded"
+        _write_record(
+            contacts_root,
+            f"{_PAGE_ONE_UID}-page-one.md",
+            uid=_PAGE_ONE_UID,
+            emails=[_SHARED_VALUE],
+        )
+        _write_record(contacts_root, "orphan.md", uid=_ORPHAN_UID, emails=[_SHARED_VALUE])
+
+        code = _run("--path", str(root), "--json")
+        payload = json.loads(capsys.readouterr().out)
+        assert code == 1  # the pageless record is still a finding
+        assert payload["counts"]["pageless_records"] == 1
+        assert payload["counts"]["shared_values"] == 0
+
     def test_unmapped_pii_class_is_an_error(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:

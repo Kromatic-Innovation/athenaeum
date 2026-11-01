@@ -31,7 +31,9 @@ corpus/surface scans once:
   ``pageless_records`` field (a uid with no live page AND no merge record),
   rather than re-deriving "does this uid have a page" a second time.
 - **shared_values** -- values :func:`athenaeum.pii.identifiers_on_record`
-  finds on two or more uids, broken down by each (value, uid) pair's
+  finds on two or more uids with a live page (seam D2's own holder rule --
+  a pageless uid is reported under ``pageless_records`` instead), broken
+  down by each (value, uid) pair's
   ``field_sources`` provenance ``type`` (or ``"unsourced"`` when no
   ``field_sources`` entry names that value). Deliberately the SAME
   identifier universe :mod:`athenaeum.pii_attribution`'s own D2/D4 checks
@@ -293,6 +295,17 @@ def scan_contact_surface(
     records_scanned = 0
     uids = idx.uids()
     for uid in uids:
+        # Only a uid with a live page counts as a `shared_values` holder --
+        # the same rule seam D2 applies ("a record whose uid has no live wiki
+        # page does not count"; `pii_attribution._has_live_page`, including
+        # its "no EntityIndex means live" default). A pageless uid is already
+        # reported under `pageless_records`, or -- when a merge absorbed it --
+        # is `repair --contact-records`' fold work; counting it here too
+        # would report one defect twice (PR review finding).
+        holder_counts = (
+            context.entity_index is None
+            or context.entity_index.get_by_uid(uid) is not None
+        )
         for path in idx.all_by_uid(uid):
             records_scanned += 1
             meta = pii.read_bounce_record(path)
@@ -300,12 +313,13 @@ def scan_contact_surface(
                 key = pii.normalize_identifier(identifier)
                 if not key:
                     continue
-                holders = value_to_uids.setdefault(key, [])
-                if uid not in holders:
-                    holders.append(uid)
-                value_to_source_types.setdefault(key, {})[uid] = _field_source_type_for(
-                    meta, identifier
-                )
+                if holder_counts:
+                    holders = value_to_uids.setdefault(key, [])
+                    if uid not in holders:
+                        holders.append(uid)
+                    value_to_source_types.setdefault(key, {})[uid] = (
+                        _field_source_type_for(meta, identifier)
+                    )
 
                 pair = (key, uid)
                 if pair in mismatch_pairs_seen:
