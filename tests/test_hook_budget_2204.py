@@ -290,3 +290,69 @@ class TestHookStatus:
             assert marker.is_file()
             assert ".." not in marker.name
             assert "/" not in marker.name
+
+    @staticmethod
+    def _write_event(cache_dir: Path, event: str, ts: object) -> None:
+        line = {"hook": "session-start", "event": event, "detail": "x"}
+        if ts is not None:
+            line["ts"] = ts
+        (cache_dir / "hook_degradation.jsonl").write_text(json.dumps(line) + "\n", encoding="utf-8")
+
+    def test_maybe_session_notice_ignores_a_stale_degradation(self, tmp_path: Path) -> None:
+        """Sentry finding on PR #2278: a degradation that was resolved long
+        ago (index since built, key since cached) must not be injected into
+        every later session forever. The log keeps it as history; only the
+        notice gate ages it out."""
+        from datetime import datetime, timezone
+
+        from athenaeum.hook_status import (
+            NOTICE_MAX_AGE,
+            maybe_session_notice,
+            read_latest_degradation,
+        )
+
+        old = datetime.now(timezone.utc) - NOTICE_MAX_AGE * 2
+        self._write_event(tmp_path, "index_not_ready", old.isoformat())
+
+        assert maybe_session_notice(tmp_path, "session-a") is None
+        # No marker claimed for a stale event, so a fresh degradation later in
+        # the same session can still surface.
+        assert not (tmp_path / "hook_notice_shown" / "session-a").exists()
+        # History is untouched: `athenaeum status` still reports it.
+        latest = read_latest_degradation(tmp_path)
+        assert latest is not None and latest["event"] == "index_not_ready"
+
+    def test_maybe_session_notice_shows_a_fresh_degradation_after_a_stale_one(
+        self, tmp_path: Path
+    ) -> None:
+        from datetime import datetime, timezone
+
+        from athenaeum.hook_status import NOTICE_MAX_AGE, maybe_session_notice, record_degradation
+
+        old = datetime.now(timezone.utc) - NOTICE_MAX_AGE * 2
+        self._write_event(tmp_path, "index_not_ready", old.isoformat())
+        assert maybe_session_notice(tmp_path, "session-a") is None
+
+        record_degradation(tmp_path, "user-prompt", "step_timeout", "fresh")
+        assert maybe_session_notice(tmp_path, "session-a") is not None
+
+    def test_maybe_session_notice_shows_a_degradation_just_inside_the_window(
+        self, tmp_path: Path
+    ) -> None:
+        from datetime import datetime, timedelta, timezone
+
+        from athenaeum.hook_status import NOTICE_MAX_AGE, maybe_session_notice
+
+        recent = datetime.now(timezone.utc) - NOTICE_MAX_AGE + timedelta(minutes=5)
+        self._write_event(tmp_path, "no_api_key", recent.isoformat())
+        assert maybe_session_notice(tmp_path, "session-a") is not None
+
+    def test_maybe_session_notice_fails_open_on_a_missing_or_malformed_ts(
+        self, tmp_path: Path
+    ) -> None:
+        from athenaeum.hook_status import maybe_session_notice
+
+        self._write_event(tmp_path, "no_api_key", None)
+        assert maybe_session_notice(tmp_path, "session-a") is not None
+        self._write_event(tmp_path, "no_api_key", "not-a-timestamp")
+        assert maybe_session_notice(tmp_path, "session-b") is not None

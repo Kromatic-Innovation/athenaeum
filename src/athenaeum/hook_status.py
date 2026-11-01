@@ -60,7 +60,7 @@ scope; nothing else.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 
@@ -76,6 +76,20 @@ DegradationEvent = Literal["no_api_key", "index_not_ready", "step_timeout"]
 
 _DEGRADATION_FILENAME = "hook_degradation.jsonl"
 _NOTICE_SHOWN_DIRNAME = "hook_notice_shown"
+
+#: How recent a degradation must be for :func:`maybe_session_notice` to
+#: surface it to a NEW session. The JSONL log itself is history and is never
+#: cleared (``athenaeum status`` still reports the latest event with its
+#: timestamp); this window only stops a long-resolved event -- an
+#: ``index_not_ready`` from before the index was built, a one-off
+#: ``step_timeout`` -- from being injected into every later session. It
+#: does not hide a degradation that is still live: every event kind is
+#: re-recorded on each hook run while its condition persists
+#: (``session-start-recall.sh`` re-checks the key and the index at every
+#: session start), so a live condition always carries a fresh timestamp.
+#: The window only has to span the gap between a session's start and its
+#: first prompt, which is where the notice is claimed.
+NOTICE_MAX_AGE = timedelta(hours=1)
 
 _NOTICE_TEXT: dict[str, str] = {
     "no_api_key": (
@@ -170,6 +184,27 @@ def notice_text(latest: dict[str, object]) -> str:
     return _NOTICE_TEXT.get(str(event), _DEFAULT_NOTICE_TEXT)
 
 
+def _is_stale(latest: dict[str, object], now: datetime) -> bool:
+    """True when *latest*'s ``ts`` is older than :data:`NOTICE_MAX_AGE`.
+
+    A missing or unparseable ``ts`` counts as fresh (fail-open, matching
+    :func:`maybe_session_notice`'s own "a rare duplicate beats a notice that
+    never fires" stance). :func:`record_degradation` always writes an
+    ISO-8601 UTC ``ts``, so this only matters for a hand-edited or corrupt
+    line.
+    """
+    raw = latest.get("ts")
+    if not isinstance(raw, str):
+        return False
+    try:
+        ts = datetime.fromisoformat(raw)
+    except ValueError:
+        return False
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return now - ts > NOTICE_MAX_AGE
+
+
 def _sanitize_session_id(session_id: str) -> str:
     """A session id reaches this module from untrusted hook stdin JSON; never
     use it as a bare path component. Claude Code session ids are UUIDs in
@@ -194,9 +229,13 @@ def maybe_session_notice(cache_dir: Path, session_id: str) -> str | None:
     both failure modes. Unbounded growth over long-term use is a known,
     accepted cost (cheap, ephemeral cache-dir files, not VCS) -- cleanup is
     out of this issue's scope.
+
+    Only a degradation recorded within :data:`NOTICE_MAX_AGE` counts; an
+    older one is treated as "nothing degraded" and no marker is claimed, so
+    a later, fresh degradation in the same session can still surface.
     """
     latest = read_latest_degradation(cache_dir)
-    if latest is None:
+    if latest is None or _is_stale(latest, datetime.now(timezone.utc)):
         return None
     marker_dir = Path(cache_dir) / _NOTICE_SHOWN_DIRNAME
     marker = marker_dir / _sanitize_session_id(session_id)
