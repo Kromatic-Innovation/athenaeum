@@ -33,6 +33,7 @@ python scripts/gen_cli_reference.py
 - [`athenaeum claims`](#athenaeum-claims) (command) — Detect claims restated across distinct wiki entities (read-only). Default --find prints a YAML report.
 - [`athenaeum codex-context`](#athenaeum-codex-context) (command) — Write a periodic Athenaeum knowledge snapshot for OpenAI Codex (Tier-2 static context file)
 - [`athenaeum compile`](#athenaeum-compile) (command) — : recompile a historical wiki snapshot as-of a past date into a scratch --out dir (compile-as-of). Distinct from the read-time `recall/reindex --as-of` filter — this re-runs the C3 blend so members expired now but valid then are re-included. Deterministic (no LLM); never mutates the live wiki or raw tree.
+- [`athenaeum contact-surface-lint`](#athenaeum-contact-surface-lint) (command) — Read-only contact-surface report: page-less records, shared values, and observed-source mismatches. --attribution adds a report-mode attribution backfill; --attribution --escalate adds the shadow escalation sweep. Prints counts and uids only, never a value.
 - [`athenaeum context`](#athenaeum-context) (command) — Build one sidecar context envelope (ranked candidates + rendered text) for a prompt — the agent-neutral core,
 - [`athenaeum convergence`](#athenaeum-convergence) (command) — Quarterly self-tuning-loop convergence report: supply (dimension-proposal approvals) vs. demand (unregistered-dimension signal), labelled convergence/abandonment/cyc_failure_mode/insufficient_data.
 - [`athenaeum correct-notes`](#athenaeum-correct-notes) (command) — Move or drop individual Notes lines on a person/company page, e.g. lines misfiled onto a first-name match-magnet page, or drop a whole ## section by its section_id. Default is APPLY: every bullet/section id and move target in --batch is resolved against one snapshot of the page, and the whole batch is written only when every record resolves. --dry-run reports counts only and changes nothing. Makes no LLM call.
@@ -411,6 +412,19 @@ Write a periodic Athenaeum knowledge snapshot for OpenAI Codex (Tier-2 static co
 | `--as-of` | — | — | Historical date to recompile as of (inclusive). Members whose validity window had closed on this date (or that carry a tombstone) are excluded; members expired now but valid then are re-included. Rewind is valid-time, not transaction-time (see docs §8.7). |
 | `--out` | — | — | Scratch directory to write the recompiled wiki into. MUST NOT be the live wiki/ directory. |
 | `--path`, `--knowledge-root` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge). |
+
+## `athenaeum contact-surface-lint`
+
+Read-only contact-surface report: page-less records, shared values, and observed-source mismatches. --attribution adds a report-mode attribution backfill; --attribution --escalate adds the shadow escalation sweep. Prints counts and uids only, never a value.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--attribution` | `False` | — | Run the attribution seam in report mode over every (value, uid) pair on the surface; writes attribution-log rows (writer=lint) and one observe-report record. |
+| `--contacts-root` | — | — | Override the resolved excluded contacts surface root. |
+| `--escalate` | `False` | — | With --attribution: also run the shadow escalation sweep over already-parked suspects. Opt-in; makes model calls. |
+| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--max-escalations` | — | — | Override the --escalate call cap (default: librarian_max_api_calls). |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 
 ## `athenaeum context`
 

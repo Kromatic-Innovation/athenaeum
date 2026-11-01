@@ -156,6 +156,9 @@ src/athenaeum/comparator.py::compare_pages
 src/athenaeum/comparator.py::record_comparison
 # decides which siblings are offered to a model
 src/athenaeum/comparator_instruments.py::run_sibling_widening
+# re-runs the existing shadow escalation sweep (unchanged prompt/model
+# selection) over suspects already parked on the surface
+src/athenaeum/contact_surface_lint.py::run_contact_surface_lint
 # acts on the decay classifier's verdict
 src/athenaeum/decay_bucket.py::stamp_decay_bucket
 # the orchestration decision: which tier calls are made for a file, and when a model call is skipped entirely (the R5 class the Attachment and Person-hint eval layers exercise end to end)

@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`athenaeum contact-surface-lint` — read-only contact-surface report,
+  with an `--attribution` backfill report mode (child I of epic
+  athenaeum#2192, design `docs/design/attribution-verification.md` §10.4).**
+  New `src/athenaeum/contact_surface_lint.py` (L4) reports page-less
+  records (reusing athenaeum#2217's own detection), values shared by two or
+  more uids broken down by `field_sources` provenance type, and `observed`
+  values whose cited source still exists and no longer contains them —
+  counts and uids only, never a value. `--attribution` runs
+  `pii_attribution.check_contact_attribution` in report mode over every
+  (value, uid) pair on the surface (new `WRITER_LINT`), writing only
+  attribution-log rows and one persisted observe-report record per run
+  (new `pii_attribution.append_attribution_observe_report`) — per-class
+  shadow counts plus the model/prompt sha in effect, the contract
+  athenaeum#2220's `auto` preflight depends on. `--attribution --escalate`
+  additionally runs athenaeum#2212's shadow escalation over already-parked
+  suspects, capped by `librarian_max_api_calls`. `pii._log_collision_summary`'s
+  hint now names the real command. Does not take the run lock (never
+  writes a contact record; see the CLI module's own docstring for why).
+
 ### Internal
 
 - The attribution calibration sweep (`tests/evals/test_attribution_eval.py`)

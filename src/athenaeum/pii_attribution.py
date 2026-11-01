@@ -93,6 +93,7 @@ import json
 import logging
 import os
 import re
+import uuid
 import weakref
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -160,8 +161,19 @@ WRITER_PROSE_COMPILE = "prose-compile"
 #: value.
 WRITER_RE_ATTRIBUTION = "re-attribution"
 
+#: issue athenaeum#2218 (``athenaeum contact-surface-lint --attribution``): the
+#: read-only backfill report's own writer id. Design §10.4 — the lint runs
+#: :func:`check_contact_attribution` in REPORT mode over every (value, uid)
+#: pair on the surface, and "writes nothing except attribution-log rows
+#: marked ``writer="lint"``" (the issue's AC2). It never parks a suspect
+#: (only a real writer decides how to act on a verdict for its own mode —
+#: design §4.1), so it never needs the enforce-vs-shadow distinction the
+#: other writers' ``park_suspect`` calls encode.
+WRITER_LINT = "lint"
+
 #: The four writers issue athenaeum#2210 wires, plus athenaeum#2216's
-#: prose-compile scrub and athenaeum#2212's re-attribution placement.
+#: prose-compile scrub, athenaeum#2212's re-attribution placement, and
+#: athenaeum#2218's read-only lint report.
 #: Membership, not count, is what the writer-inventory guard test asserts
 #: (future children extend this set further).
 WRITER_IDS: tuple[str, ...] = (
@@ -171,6 +183,7 @@ WRITER_IDS: tuple[str, ...] = (
     WRITER_CONTACT_FOLD,
     WRITER_PROSE_COMPILE,
     WRITER_RE_ATTRIBUTION,
+    WRITER_LINT,
 )
 
 # ---------------------------------------------------------------------------
@@ -1048,6 +1061,34 @@ def _check_c3(
             )
 
     return None
+
+
+def resolve_source_value_presence(
+    source_ref: str | dict[str, Any] | None, value: str
+) -> bool | None:
+    """Whether *value* occurs in the raw text *source_ref* names (issue athenaeum#2218).
+
+    ``None`` when *source_ref* names no readable path — "absence of a
+    source is not evidence" (design §17 risk 3), the same posture
+    :func:`_check_c3` takes for its own "value-absent" branch. Otherwise
+    ``True``/``False`` for whether the normalized *value* occurs in that
+    text, computed via the exact same :func:`_extract_source_candidate_path`
+    / :func:`_resolve_source_text` / :func:`_value_occurrences` C3 already
+    uses, so "does this source contain the value" is answered identically
+    everywhere it is asked rather than re-derived. This is the public
+    half of that machinery: :mod:`athenaeum.contact_surface_lint`'s
+    ``observed_source_mismatch`` report (design §10.4 — "``observed``
+    values whose cited source still exists and does not contain the
+    value") is the second caller, and it has no verdict/target/context to
+    run the full seam over just to ask this one question.
+    """
+    path = _extract_source_candidate_path(source_ref)
+    if path is None:
+        return None
+    text = _resolve_source_text(path)
+    if text is None:
+        return None
+    return bool(_value_occurrences(text, value))
 
 
 def check_contact_attribution(
@@ -4084,4 +4125,193 @@ __all__ += [
     "record_attribution_audit_review",
     "ShadowEscalationSummary",
     "escalate_shadow_suspects",
+]
+
+
+# ---------------------------------------------------------------------------
+# The persisted observe report (design §9.2/§9.3, issue athenaeum#2218)
+# ---------------------------------------------------------------------------
+#
+# `athenaeum contact-surface-lint --attribution` (:mod:`athenaeum.
+# contact_surface_lint`) writes one of these every time it runs. It is the
+# record design §9.3 calls "an observe report": "the record
+# `contact-surface-lint --attribution` persists on the excluded surface:
+# per-class shadow counts and the model and prompt sha it ran under, never a
+# value." athenaeum#2220's `auto` preflight reads this ledger to decide
+# whether a class has an operator-acknowledged clean observe report before
+# it will enforce for that class (§9.1, §9.3) -- so this shape is a
+# contract for that sibling issue, not merely this one's own output.
+#
+# Deliberately the SAME shape (append-only JSONL, one row per record,
+# ``v``-versioned, a `default_*_path` beside the log/memo) as
+# :func:`athenaeum.pii.append_observation` / :func:`append_attribution_memo`
+# above -- a third ledger on this surface following a fourth convention
+# would cost a reader nothing except having to notice it is different for
+# no reason.
+
+#: Observe-report ledger filename, on the contacts (excluded) surface beside
+#: the attribution log and the memo (design §4.3's sibling files).
+ATTRIBUTION_OBSERVE_REPORT_FILENAME = "_attribution_observe_reports.jsonl"
+
+#: Row-schema version, mirroring :data:`ATTRIBUTION_LOG_VERSION`.
+ATTRIBUTION_OBSERVE_REPORT_VERSION = 1
+
+
+def default_attribution_observe_report_path(contacts_root: Path) -> Path:
+    """Default observe-report ledger path:
+    ``<contacts_root>/_attribution_observe_reports.jsonl``."""
+    return Path(contacts_root) / ATTRIBUTION_OBSERVE_REPORT_FILENAME
+
+
+@dataclass(frozen=True)
+class ObserveReport:
+    """One persisted observe report (design §9.3).
+
+    ``per_class_shadow_counts`` is ``{question_class: suspect_count}`` from
+    the sweep that produced this report -- "shadow" because every suspect an
+    observe-mode writer parks is a shadow entry (design §9.1), and this
+    report summarises exactly that population for the run it covers.
+    ``model_by_class`` / ``prompt_sha256_by_class`` are
+    ``{question_class: value}``, the ``(model, prompt_sha256)`` pair
+    :func:`attribution_call_identity` resolved for that class AT REPORT TIME
+    -- "the model and prompt sha in effect" (design §9.3), independent of
+    whether any suspect in that class was actually escalated this run. Never
+    a value, by construction: every field here is a count, an id, or a model
+    name.
+    """
+
+    report_id: str
+    ts: str
+    per_class_shadow_counts: dict[str, int] = field(default_factory=dict)
+    model_by_class: dict[str, str] = field(default_factory=dict)
+    prompt_sha256_by_class: dict[str, str] = field(default_factory=dict)
+
+
+def build_attribution_observe_report_record(
+    *,
+    report_id: str,
+    ts: str,
+    per_class_shadow_counts: dict[str, int],
+    model_by_class: dict[str, str],
+    prompt_sha256_by_class: dict[str, str],
+) -> dict[str, Any]:
+    """Build one observe-report record dict (the on-disk JSONL shape)."""
+    return {
+        "v": ATTRIBUTION_OBSERVE_REPORT_VERSION,
+        "report_id": report_id,
+        "ts": ts,
+        "per_class_shadow_counts": dict(per_class_shadow_counts),
+        "model_by_class": dict(model_by_class),
+        "prompt_sha256_by_class": dict(prompt_sha256_by_class),
+    }
+
+
+def append_attribution_observe_report(
+    contacts_root: Path,
+    *,
+    per_class_shadow_counts: dict[str, int],
+    model_by_class: dict[str, str],
+    prompt_sha256_by_class: dict[str, str],
+    report_id: str | None = None,
+    ts: str | None = None,
+    log_path: Path | None = None,
+) -> ObserveReport:
+    """Append one observe report. Raises on a write failure (not best-effort).
+
+    Mirrors :func:`athenaeum.pii.append_observation`'s discipline: the append
+    IS the entire side effect, so a failure surfaces to the caller rather
+    than being silently dropped. *report_id* defaults to a fresh
+    :func:`uuid.uuid4` hex string when not given; *ts* defaults to
+    :func:`athenaeum.store.now_iso`.
+    """
+    rid = report_id if report_id is not None else uuid.uuid4().hex
+    timestamp = ts if ts is not None else now_iso()
+    record = build_attribution_observe_report_record(
+        report_id=rid,
+        ts=timestamp,
+        per_class_shadow_counts=per_class_shadow_counts,
+        model_by_class=model_by_class,
+        prompt_sha256_by_class=prompt_sha256_by_class,
+    )
+    target = (
+        log_path
+        if log_path is not None
+        else default_attribution_observe_report_path(contacts_root)
+    )
+    append_line_durable(target, (json.dumps(record, separators=(",", ":")) + "\n").encode("utf-8"))
+    return ObserveReport(
+        report_id=rid,
+        ts=timestamp,
+        per_class_shadow_counts=dict(per_class_shadow_counts),
+        model_by_class=dict(model_by_class),
+        prompt_sha256_by_class=dict(prompt_sha256_by_class),
+    )
+
+
+def read_attribution_observe_reports(contacts_root: Path) -> list[ObserveReport]:
+    """Read every well-formed observe-report row at the default path.
+
+    Tolerant, mirroring :func:`read_attribution_memo`: an unreadable file or
+    a malformed line is skipped (logged at WARNING), never fatal -- a ledger
+    reader degrades to "no reports yet", not a crash. Returns reports in file
+    order (oldest first).
+    """
+    path = default_attribution_observe_report_path(contacts_root)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    reports: list[ObserveReport] = []
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            raw = json.loads(stripped)
+        except json.JSONDecodeError:
+            log.warning(
+                "pii_attribution: skipping malformed observe-report line %d in %s",
+                lineno,
+                path,
+            )
+            continue
+        if not isinstance(raw, dict) or not raw.get("report_id"):
+            log.warning(
+                "pii_attribution: skipping keyless observe-report line %d in %s",
+                lineno,
+                path,
+            )
+            continue
+        reports.append(
+            ObserveReport(
+                report_id=str(raw["report_id"]),
+                ts=str(raw.get("ts", "")),
+                per_class_shadow_counts={
+                    str(k): int(v)
+                    for k, v in (raw.get("per_class_shadow_counts") or {}).items()
+                    if isinstance(v, int | float)
+                },
+                model_by_class={
+                    str(k): str(v)
+                    for k, v in (raw.get("model_by_class") or {}).items()
+                },
+                prompt_sha256_by_class={
+                    str(k): str(v)
+                    for k, v in (raw.get("prompt_sha256_by_class") or {}).items()
+                },
+            )
+        )
+    return reports
+
+
+__all__ += [
+    "resolve_source_value_presence",
+    "WRITER_LINT",
+    "ATTRIBUTION_OBSERVE_REPORT_FILENAME",
+    "ATTRIBUTION_OBSERVE_REPORT_VERSION",
+    "default_attribution_observe_report_path",
+    "ObserveReport",
+    "build_attribution_observe_report_record",
+    "append_attribution_observe_report",
+    "read_attribution_observe_reports",
 ]

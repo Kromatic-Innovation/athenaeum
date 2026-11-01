@@ -194,6 +194,10 @@ _SUBCOMMAND_LOADERS: dict[str, tuple[str, str]] = {
         "add_subject_population_subparser",
     ),
     "triage": ("athenaeum._cmd_triage", "add_triage_subparser"),
+    "contact-surface-lint": (
+        "athenaeum._cmd_contact_surface_lint",
+        "add_contact_surface_lint_subparser",
+    ),
 }
 
 
@@ -212,6 +216,7 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_bounce_contract import add_bounce_contract_subparser
     from athenaeum._cmd_calibration import add_calibration_subparser
     from athenaeum._cmd_codex_context import add_codex_context_subparser
+    from athenaeum._cmd_contact_surface_lint import add_contact_surface_lint_subparser
     from athenaeum._cmd_context import add_context_subparser
     from athenaeum._cmd_convergence import add_convergence_subparser
     from athenaeum._cmd_correct_notes import add_correct_notes_subparser
@@ -334,6 +339,8 @@ def build_parser() -> argparse.ArgumentParser:
     add_triage_subparser(subparsers)  # triage run|report (issue athenaeum#1995)
     # attribution show|place (issue athenaeum#2212)
     add_attribution_subparser(subparsers)
+    # contact-surface-lint (issue athenaeum#2218)
+    add_contact_surface_lint_subparser(subparsers)
 
     return parser
 
