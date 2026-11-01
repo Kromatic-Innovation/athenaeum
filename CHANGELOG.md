@@ -18,7 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `evals.yml`, under its own `CALIBRATION_TOKEN_CEILING` (4,500,000);
   `EVAL_TOKEN_CEILING` is unchanged. That job uploads the regenerated
   calibration record as an artifact. A CI-wiring test keeps the marker out of
-  the default selections (athenaeum#2287).
+  the default selections. The eval-receipt gate now also requires the run's
+  `Live-API eval suite` job to have succeeded, so a calibration-only dispatch
+  (which skips that job but still concludes `success`) is not accepted as a
+  receipt (athenaeum#2287).
 
 ## [0.23.0] - 2026-10-31
 

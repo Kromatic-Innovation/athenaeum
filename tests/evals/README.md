@@ -336,7 +336,10 @@ Locally: `pytest -m calibration tests/evals/ -v` (with a live key).
 
 **A calibration run is not an `Evals:` receipt.** It does not run the default
 suite, so do not cite one on a PR. A PR's receipt is a `suite=default`
-dispatch.
+dispatch. The gate enforces this: besides the run's own `success`
+conclusion, `scripts/check_llm_surface_receipt.py` requires the run's
+`Live-API eval suite` job to have concluded `success`, and a calibration
+dispatch skips that job.
 
 ## Layer 2 — recorded-response fixtures (regular CI)
 
