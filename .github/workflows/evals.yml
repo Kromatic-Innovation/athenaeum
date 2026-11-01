@@ -237,7 +237,7 @@ jobs:
 
       - name: Upload eval summary
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: eval-summary
           path: eval-summary.json
@@ -246,7 +246,7 @@ jobs:
 
       - name: Upload recorded fixtures (record mode only)
         if: ${{ always() && github.event.inputs.record == 'true' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: recorded-fixtures
           path: tests/fixtures/recorded/
@@ -457,7 +457,7 @@ jobs:
         # never empty-but-missing since it is only ever referenced when
         # `--phase2` actually ran.
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: north-star-report
           # Issue athenaeum#1787: globbed with a `*` between `store` and
@@ -498,7 +498,7 @@ jobs:
         # is deliberate so that ordinary read-only-grid dispatch is not a
         # failing job.
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: north-star-phase2-artifacts
           path: |
