@@ -1479,6 +1479,79 @@ class TestHookBudgetSharing:
         with pytest.raises(adapter._HookTimeoutExceeded):
             adapter._run_within_timeout(1, _slow_with_inner_catch)
 
+    def test_timeout_inside_context_llm_leg_reaches_the_outer_handler(
+        self, imported_adapter, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Sentry finding on PR #2278, against the REAL guarded block: the
+        alarm fires while ``athenaeum.context._extract_terms`` is inside its
+        own ``except Exception:  # LLM path is best-effort`` try. The
+        timeout must propagate out of context.py to the caller, not be
+        swallowed into the regex fallback."""
+        adapter, context_mod = imported_adapter
+        import athenaeum.query_topics as query_topics
+
+        monkeypatch.setattr(query_topics, "extract_topics", lambda *a, **k: time.sleep(5))
+        with pytest.raises(adapter._HookTimeoutExceeded):
+            adapter._run_within_timeout(
+                1,
+                context_mod._extract_terms,
+                "a prompt long enough to extract terms from",
+                timeout=3.0,
+                stopwords=frozenset(),
+                config=None,
+                use_llm=True,
+            )
+
+    def test_timeout_inside_context_vector_leg_reaches_the_outer_handler(
+        self, imported_adapter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Same, for ``_query_vector``'s ``except Exception:  # vector leg
+        is best-effort`` block."""
+        adapter, context_mod = imported_adapter
+        import athenaeum.search as search_mod
+
+        (tmp_path / "wiki-vectors").mkdir()
+        monkeypatch.setattr(search_mod, "query_vector_index", lambda *a, **k: time.sleep(5))
+        with pytest.raises(adapter._HookTimeoutExceeded):
+            adapter._run_within_timeout(
+                1,
+                context_mod._query_vector,
+                tmp_path,
+                "query",
+                n=3,
+                exclude=frozenset(),
+                conn=None,
+                schema=None,
+            )
+
+    def test_timeout_inside_context_guarded_leg_records_step_timeout_via_main(
+        self, imported_adapter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End to end: the REAL ``build_context_for_turn`` runs, the alarm
+        fires inside context.py's guarded LLM leg, and ``main()``'s
+        ``except _HookTimeoutExceeded`` still records ``step_timeout``."""
+        adapter, _ = imported_adapter
+        import athenaeum.query_topics as query_topics
+
+        cache_dir = tmp_path / "cache"
+        monkeypatch.setenv("ATHENAEUM_CACHE_DIR", str(cache_dir))
+        monkeypatch.setenv("ATHENAEUM_HOOK_BUDGET_SECONDS", "1")
+        monkeypatch.setenv("SEARCH_BACKEND", "fts5")
+        monkeypatch.setattr(query_topics, "extract_topics", lambda *a, **k: time.sleep(5))
+        stdin_payload = json.dumps(
+            {"prompt": "a prompt long enough to pass the length gate", "session_id": "s"}
+        )
+        monkeypatch.setattr(sys, "stdin", io.StringIO(stdin_payload))
+
+        assert adapter.main() == 0
+
+        from athenaeum.hook_status import read_latest_degradation
+
+        latest = read_latest_degradation(cache_dir)
+        assert latest is not None
+        assert latest["event"] == "step_timeout"
+        assert latest["hook"] == "user-prompt"
+
     def test_alarm_is_cancelled_after_a_successful_call(self, imported_adapter) -> None:
         """A prior call's alarm must never fire against unrelated LATER
         code -- ``_run_within_timeout``'s ``finally: signal.alarm(0)``
