@@ -93,7 +93,8 @@ _EVALS_DIR = REPO_ROOT / "tests" / "evals"
 # helper deliberately does not chase -- the module-level mark already governs
 # whether the file is reachable by default).
 _MODULE_MARKER_RE = re.compile(
-    r"^pytestmark\s*=\s*pytest\.mark\.(eval|embedding|rollout|nightly)\s*$", re.MULTILINE
+    r"^pytestmark\s*=\s*pytest\.mark\.(eval|embedding|rollout|nightly|calibration)\s*$",
+    re.MULTILINE,
 )
 
 # Textual proof a test file genuinely spends tokens or spawns the real
@@ -223,3 +224,112 @@ def test_no_test_is_both_nightly_and_rollout() -> None:
         if "pytest.mark.nightly" in source and re.search(r"pytest\.mark\.rollout\b", source):
             offenders.append(str(path.relative_to(REPO_ROOT)))
     assert not offenders, offenders
+
+
+# ---------------------------------------------------------------------------
+# The `calibration` tier (athenaeum#2287): the operator-run calibration SWEEP.
+# It spends millions of tokens (eval run 41325591218: 3,686,060 against
+# EVAL_TOKEN_CEILING's 250,000), so it must stay out of BOTH the default
+# selection and the `-m eval` selection -- locally and in evals.yml -- and
+# run only from the suite-gated `calibration` job under its own ceiling.
+# ---------------------------------------------------------------------------
+
+_EVALS_YML = REPO_ROOT / ".github" / "workflows" / "evals.yml"
+_CALIBRATION_MODULES = ("test_attribution_eval.py",)
+
+
+def _evals_yml_jobs() -> dict[str, str]:
+    """Split evals.yml into ``{job_id: job_text}`` on its two-space job keys.
+
+    Text-level on purpose, like every check in this module -- no YAML
+    dependency, and the workflow's own two-space indentation is stable.
+    """
+    text = _EVALS_YML.read_text(encoding="utf-8")
+    body = text.split("\njobs:\n", 1)[1]
+    jobs: dict[str, str] = {}
+    for chunk in re.split(r"\n(?=  [A-Za-z0-9_-]+:\s*\n)", "\n" + body):
+        match = re.match(r"\n?  ([A-Za-z0-9_-]+):", chunk)
+        if match:
+            jobs[match.group(1)] = chunk
+    return jobs
+
+
+def _pytest_run_lines(job_text: str) -> list[str]:
+    return [line for line in job_text.splitlines() if re.search(r"\bpytest\s", line)]
+
+
+def test_calibration_marker_is_registered_and_deselected_by_default() -> None:
+    options = _pytest_ini_options()
+    assert any(str(m).startswith("calibration:") for m in options["markers"])  # type: ignore[union-attr]
+    assert "not calibration" in str(options["addopts"])
+
+
+def test_calibration_modules_carry_calibration_not_eval() -> None:
+    """The sweep is marked `calibration` INSTEAD of `eval`, never as well --
+    that is what keeps a local `pytest -m eval tests/evals/` (which replaces
+    addopts' `-m` entirely) from selecting it."""
+    for name in _CALIBRATION_MODULES:
+        source = (_EVALS_DIR / name).read_text(encoding="utf-8")
+        match = _MODULE_MARKER_RE.search(source)
+        assert match is not None and match.group(1) == "calibration", name
+        assert not re.search(r"pytest\.mark\.eval\b", source), name
+
+
+def test_no_test_is_both_calibration_and_eval() -> None:
+    offenders = []
+    for path in sorted((REPO_ROOT / "tests").rglob("test_*.py")):
+        if path.resolve() == Path(__file__).resolve():
+            continue  # this guard names both markers in its own source
+        source = path.read_text(encoding="utf-8")
+        if re.search(r"pytest\.mark\.calibration\b", source) and re.search(
+            r"pytest\.mark\.eval\b", source
+        ):
+            offenders.append(str(path.relative_to(REPO_ROOT)))
+    assert not offenders, offenders
+
+
+def test_calibration_sweep_uses_its_own_session_not_eval_session() -> None:
+    """Its usage must accumulate into `calibration_session` (guarded by
+    CALIBRATION_TOKEN_CEILING), never `eval_session` (EVAL_TOKEN_CEILING)."""
+    for name in _CALIBRATION_MODULES:
+        source = (_EVALS_DIR / name).read_text(encoding="utf-8")
+        assert "calibration_session" in source, name
+        assert "eval_session" not in source, name
+
+
+def test_eval_token_ceiling_is_not_raised_for_calibration() -> None:
+    from tests.evals.harness import CALIBRATION_TOKEN_CEILING, EVAL_TOKEN_CEILING
+
+    assert EVAL_TOKEN_CEILING == 250_000
+    # Sized to the measured 3,686,060-token sweep -- strictly above it.
+    assert CALIBRATION_TOKEN_CEILING > 3_686_060
+
+
+def test_evals_yml_default_eval_job_never_selects_calibration() -> None:
+    jobs = _evals_yml_jobs()
+    eval_job = jobs["eval"]
+    lines = _pytest_run_lines(eval_job)
+    assert lines, "evals.yml's eval job must run pytest"
+    for line in lines:
+        assert "-m eval" in line, line
+        assert "calibration" not in line, line
+    assert "github.event.inputs.suite != 'calibration'" in eval_job
+
+
+def test_evals_yml_calibration_job_selects_only_calibration_and_is_suite_gated() -> None:
+    jobs = _evals_yml_jobs()
+    assert "calibration" in jobs, "evals.yml must have a `calibration` job"
+    job = jobs["calibration"]
+    assert "github.event_name == 'workflow_dispatch'" in job
+    assert "github.event.inputs.suite == 'calibration'" in job
+    lines = _pytest_run_lines(job)
+    assert lines, "evals.yml's calibration job must run pytest"
+    for line in lines:
+        assert "-m calibration" in line, line
+        assert "-m eval" not in line, line
+    # And no OTHER job selects the marker.
+    for job_id, text in jobs.items():
+        if job_id == "calibration":
+            continue
+        for line in _pytest_run_lines(text):
+            assert "calibration" not in line, (job_id, line)
