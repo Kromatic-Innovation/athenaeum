@@ -28,6 +28,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hint now names the real command. Does not take the run lock (never
   writes a contact record; see the CLI module's own docstring for why).
 
+### Changed
+
+- **Hooks have one foreground time budget, and the slow work moves to the
+  background (issue athenaeum#2204).** Every shipped recall hook that does
+  variable-cost work, the `session-start-recall.sh` shell hook and the
+  packaged `athenaeum-claude-hook` adapter, now shares one budget,
+  `ATHENAEUM_HOOK_BUDGET_SECONDS` (default 10 seconds), so a hook finishes
+  inside the host's own timeout. Credential refresh and the vector-index
+  rebuild no longer run inline: they run as a detached background job behind
+  the same lock `rebuild-index.sh` uses, so two concurrent sessions never
+  start two builds and a turn never waits on one. When a step is skipped or
+  degraded (`no_api_key`, `index_not_ready`, `step_timeout`) the hook records
+  it to a durable `hook_degradation.jsonl` in the cache directory;
+  `athenaeum status` reports it, and a once-per-session notice is delivered on
+  the hook's own `additionalContext` channel rather than a discarded stderr.
+  The shipped `settings-snippet.json` timeouts now agree with the script's
+  recommendation (SessionStart was 15 seconds against a recommended 60), and
+  `examples/claude-code/README.md` documents the budget and the timeouts.
+
 ### Internal
 
 - The attribution calibration sweep (`tests/evals/test_attribution_eval.py`)
@@ -43,6 +62,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Live-API eval suite` job to have succeeded, so a calibration-only dispatch
   (which skips that job but still concludes `success`) is not accepted as a
   receipt (athenaeum#2287).
+
+- **Live-eval aggregate gates no longer go red on tiny samples (issue
+  athenaeum#2231).** `AUDIT_RETIREMENT_FLOOR` sat at `n-1` with a
+  permanent miss already consuming the slack, a one-trial gate wearing a
+  six-case floor, so one stochastic miss failed the suite. It is re-floored
+  from 5 to 4. The classify and resolver suites each gain one golden case
+  (floors unchanged) and carry corrected sample counts. Three new offline
+  tests prove each changed floor still reds on a synthetic degraded model, and
+  `tests/evals/README.md` gains a "How a floor is derived" section with a
+  corrected floor table.
+- **Dependency bumps (dependabot): GitHub Actions `actions/upload-artifact`
+  7.0.2, `actions/download-artifact` 8.0.2, `actions/setup-python` 7.1.0,
+  `pypa/gh-action-pypi-publish` 1.14.3 and `ossf/scorecard-action` 2.5.0
+  (athenaeum#2279, athenaeum#2280, athenaeum#2281, athenaeum#2282,
+  athenaeum#2283); and the `anthropic` requirement widened to `<3.0` and the
+  dev-only `transformers` requirement to `<6.0` (athenaeum#2285,
+  athenaeum#2286).**
 
 ## [0.23.0] - 2026-10-31
 
@@ -794,6 +830,32 @@ configuration keeps its 0.22.43 behaviour, except for the points marked
   assert reaches the user-facing warning and is a MINOR rather than a PATCH.
   Behavior is otherwise unchanged — both surfaces still work.
 
+- **`op` is an optional credential source in the recall hooks, and no hook
+  re-reads 1Password on every session start (issue athenaeum#2193).**
+  `session-start-recall.sh` now calls `op` for a credential only when `op` is
+  on `PATH`, the caller has not already exported that credential, either
+  `OP_SERVICE_ACCOUNT_TOKEN` is set or `ATHENAEUM_OP_INTERACTIVE=1` opts into
+  the desktop-app integration, and nothing is cached yet (or
+  `ATHENAEUM_OP_REFRESH=1` forces a refresh). Each `op read` is bounded by
+  `ATHENAEUM_OP_TIMEOUT_SECONDS` (default 10), through `timeout`, `gtimeout`
+  or a portable fallback that works on stock macOS bash. Every `op`
+  subprocess athenaeum spawns, the hook's and the receipt signing key
+  provider's alike, now runs with `OP_LOAD_DESKTOP_APP_SETTINGS=false` and
+  `OP_BIOMETRIC_UNLOCK_ENABLED=false`, scoped to that subprocess only; this is
+  what stops the recurring "access data from other apps" prompt. The test
+  suite can no longer reach a real `op` by accident: a recording stub is
+  prepended to `PATH` by default.
+- **Docs: credentials without 1Password, other clients and platforms, and
+  hook timeouts (issues athenaeum#2195, athenaeum#2199, athenaeum#2203,
+  athenaeum#2204, athenaeum#2205).** `examples/claude-code/README.md` now says
+  which commands need an API key and that 1Password is not required, states
+  the real lookup order (an exported key, then `config.env`, then `op` only if
+  opted in), lists which commands read `config.env`, adds "Using your own
+  secret manager" recipes and a "What happens with no key" section, and
+  documents the hook timeouts. A new `docs/guides/clients.md` covers Claude
+  Desktop, Cursor and other stdio MCP clients, and states plainly which
+  clients and platforms are not supported today.
+
 ### Fixed
 
 - **The eval-receipt check matches a receipt on content, not on the exact
@@ -1006,6 +1068,51 @@ configuration keeps its 0.22.43 behaviour, except for the points marked
   `DEFAULT_KNOWLEDGE_ROOT` definitions (`config.py`'s call-time
   `.expanduser()` and `librarian.py`'s copy, frozen at import time).
 
+- **Receipt signing accepts the v2 PKCS8 PEM that `op read` returns (issue
+  athenaeum#2142).** With the shipped defaults, `receipt_sealer: signing`
+  failed on the first `athenaeum receipts seal` with an "extra data" parse
+  error, because the 1Password SSH Key `private key` field is an RFC 5958 v2
+  `OneAsymmetricKey` (private key plus the optional public key) and
+  `cryptography` rejects that encoding. The key loader now falls back, only
+  after the ordinary parse has failed, to reading the 32-byte Ed25519 seed out
+  of the v2 structure; anything that is not an Ed25519 v2 key still surfaces
+  `cryptography`'s own error.
+- **The SessionStart hook's vector-index freshness check works on Linux
+  (athenaeum#2207).** It called BSD-only `stat -f %m`, which GNU coreutils
+  reads as `--file-system`, so the comparison never produced a number and the
+  hook rebuilt the vector index on every start. It now probes for GNU
+  `stat -c %Y` and falls back to the BSD form.
+- **Removing a page no longer leaves its contact records live (issue
+  athenaeum#2217).** Page removal through `retire-pages`, the decay sweep or
+  the oversize-log demotion left the removed uid's record on the contacts
+  surface with nothing pointing at it, inflating the shared-address count and
+  making the observed-value ownership guard decline correct writes. Each path
+  now folds the record into a successor when one exists, or retires it (renamed
+  out of every read and logged, never deleted) when none does, and never fails
+  the removal it follows. `athenaeum repair --contact-records` also reports
+  `pageless_records` and, with `--retire-pageless`, retires them. Dry run stays
+  the default and output is counts and uids, never values.
+- **The contact-record fold no longer carries per-address entries for
+  addresses a record does not list (issue athenaeum#2196).** A stale usage
+  class could land on a record with no address to attach to and, as an
+  `observed` mark, read as outreach-eligible once the address was later
+  written. `correct-notes` removal of an address field now drops that
+  identifier's classification and validity entries too; the fold drops entries
+  whose identifier is not in the merged record; the classification readers
+  ignore orphans; and `repair --contact-records` counts `orphan_fact_entries`
+  and prunes them under `--apply`. Bounce marks are deliberately still read
+  unfiltered, since hiding one could cause a send to a dead address.
+- **The correspondent shortcut no longer files the sender's address on the
+  wrong person (issue athenaeum#2209).** For an introduction email the one page
+  a compile created was the introducee's, so the introducer's address was
+  recorded on them as `observed`. The shortcut now first resolves the address
+  to an existing page (if one exists, nothing is recorded and nothing is
+  escalated), then requires the created page to match the sender's name even
+  when only one page was created, and with no name requires the address's local
+  part to match the page's full name, `flast`, `first.last` or `firstlast`.
+  Every escalation it raises now shows the address masked (`a***@example.org`)
+  in both its description and its title, so a raw address no longer lands in
+  `_pending_questions.md`.
 
 ### Internal
 
@@ -1112,6 +1219,26 @@ configuration keeps its 0.22.43 behaviour, except for the points marked
   unchanged by this release and a rollback to whole-file entries needs no
   code change. Stdlib only — no install is added to the gate's workflow.
 
+- **PR CI is parallel and sharded (athenaeum#2230, athenaeum#2241).** The test
+  job runs under `pytest-xdist` with `--dist loadfile` and a pip cache, then is
+  split across two runner shards by a deterministic, weight-balanced partition
+  (`--ci-shard INDEX/TOTAL`). A new `Coverage (combined shards)` job verifies
+  that every shard reported and that every collected test ran in exactly one
+  shard, then combines coverage and enforces the 75% floor. `CI Required` and
+  `publish_attestation` depend on it. A plain local `pytest` is unchanged and
+  stays serial. PR CI fell from 20 to 32 minutes to roughly 8 to 10.
+- **A token-free nightly test tier (athenaeum#2242).** A new `nightly` marker,
+  deselected by default, and `nightly.yml` (daily, and on dispatch, with no
+  model credential) now carry the printed measurement tables, the 48-probe
+  hook-equivalence sweep and the historical overflow-breadcrumb module. The
+  default suite keeps a one-assertion replacement for each, including a
+  three-probe launcher-versus-adapter byte smoke test.
+- **`docs/design/attribution-verification.md` records the operator decisions
+  and matches the corrected child issues (athenaeum#2221, athenaeum#2253,
+  issues athenaeum#2192, athenaeum#2234).** Docs only: `auto` enforcement
+  needs both the synthetic calibration and an acknowledged clean observe report,
+  one 0.95 Wilson-lower-bound floor applies to every outcome, and narrow
+  non-personal shapes enforce from child B.
 
 ## [0.22.43] - 2026-10-25
 
