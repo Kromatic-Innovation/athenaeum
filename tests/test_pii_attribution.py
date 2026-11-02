@@ -624,6 +624,7 @@ class TestWriterInventoryGuard:
             pii_attribution.WRITER_CONTACT_FOLD,
             pii_attribution.WRITER_PROSE_COMPILE,
             pii_attribution.WRITER_RE_ATTRIBUTION,
+            pii_attribution.WRITER_LINT,
         }
 
 

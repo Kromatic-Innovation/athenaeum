@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`athenaeum contact-surface-lint` — read-only contact-surface report,
+  with an `--attribution` backfill report mode (child I of epic
+  athenaeum#2192, design `docs/design/attribution-verification.md` §10.4).**
+  New `src/athenaeum/contact_surface_lint.py` (L4) reports page-less
+  records (reusing athenaeum#2217's own detection), values shared by two or
+  more uids broken down by `field_sources` provenance type, and `observed`
+  values whose cited source still exists and no longer contains them —
+  counts and uids only, never a value. `--attribution` runs
+  `pii_attribution.check_contact_attribution` in report mode over every
+  (value, uid) pair on the surface (new `WRITER_LINT`), writing only
+  attribution-log rows and one persisted observe-report record per run
+  (new `pii_attribution.append_attribution_observe_report`) — per-class
+  shadow counts plus the model/prompt sha in effect, the contract
+  athenaeum#2220's `auto` preflight depends on. `--attribution --escalate`
+  additionally runs athenaeum#2212's shadow escalation over already-parked
+  suspects, capped by `librarian_max_api_calls`. `pii._log_collision_summary`'s
+  hint now names the real command. Does not take the run lock (never
+  writes a contact record; see the CLI module's own docstring for why).
+
+### Internal
+
+- The attribution calibration sweep (`tests/evals/test_attribution_eval.py`)
+  no longer runs on every default eval dispatch. It spent 3,686,060 tokens
+  against the default suite's 250,000-token ceiling, which made every
+  default dispatch fail. It now carries its own `calibration` pytest marker
+  instead of `eval`, so neither `pytest -m eval` nor the default selection
+  picks it up. It runs only through the new `suite=calibration` input on
+  `evals.yml`, under its own `CALIBRATION_TOKEN_CEILING` (4,500,000);
+  `EVAL_TOKEN_CEILING` is unchanged. That job uploads the regenerated
+  calibration record as an artifact. A CI-wiring test keeps the marker out of
+  the default selections. The eval-receipt gate now also requires the run's
+  `Live-API eval suite` job to have succeeded, so a calibration-only dispatch
+  (which skips that job but still concludes `success`) is not accepted as a
+  receipt (athenaeum#2287).
+
 ## [0.23.0] - 2026-10-31
 
 First release since 0.22.43 (2026-10-25). The intermediate `0.22.44`–`0.22.58`

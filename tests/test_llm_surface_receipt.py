@@ -255,6 +255,84 @@ def test_receipt_with_failed_conclusion_fails() -> None:
     assert "failure" in result.message
 
 
+def _calibration_only_lookup(repo: str, run_id: str) -> dict[str, str]:
+    """A `suite=calibration` dispatch: run succeeds, default eval job skipped."""
+    return {
+        "headSha": HEAD_SHA,
+        "event": "workflow_dispatch",
+        "workflowName": "Evals",
+        "conclusion": "success",
+        "evalJobConclusion": "skipped",
+    }
+
+
+def _default_suite_lookup(repo: str, run_id: str) -> dict[str, str]:
+    return {**_calibration_only_lookup(repo, run_id), "evalJobConclusion": "success"}
+
+
+def test_receipt_from_calibration_only_dispatch_fails() -> None:
+    """athenaeum#2287: a run that skipped the default eval job is not a receipt,
+    even though the run as a whole concluded `success`."""
+    result = evaluate(
+        changed_files=["src/athenaeum/tiers.py"],
+        surface=SURFACE,
+        pr_body=f"Evals: {RUN_URL}",
+        head_sha=HEAD_SHA,
+        this_repo=REPO,
+        run_lookup=_calibration_only_lookup,
+    )
+    assert not result.ok
+    assert "skipped" in result.message
+    assert check_llm_surface_receipt.EVALS_DEFAULT_JOB_NAME in result.message
+
+
+def test_receipt_with_default_eval_job_success_passes() -> None:
+    result = evaluate(
+        changed_files=["src/athenaeum/tiers.py"],
+        surface=SURFACE,
+        pr_body=f"Evals: {RUN_URL}",
+        head_sha=HEAD_SHA,
+        this_repo=REPO,
+        run_lookup=_default_suite_lookup,
+    )
+    assert result.ok, result.message
+
+
+def test_gh_run_lookup_reports_default_eval_job_conclusion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json
+
+    payload = {
+        "headSha": HEAD_SHA,
+        "event": "workflow_dispatch",
+        "workflowName": "Evals",
+        "conclusion": "success",
+        "jobs": [
+            {"name": "MiniLM-dependent suite", "conclusion": "success"},
+            {"name": check_llm_surface_receipt.EVALS_DEFAULT_JOB_NAME, "conclusion": "skipped"},
+            {"name": "Calibration sweep", "conclusion": "success"},
+        ],
+    }
+
+    def _fake_run(*_a: object, **_kw: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess([], 0, stdout=json.dumps(payload), stderr="")
+
+    monkeypatch.setattr(check_llm_surface_receipt.subprocess, "run", _fake_run)
+    assert check_llm_surface_receipt.gh_run_lookup(REPO, "1")["evalJobConclusion"] == "skipped"
+    payload["jobs"] = []
+    assert check_llm_surface_receipt.gh_run_lookup(REPO, "1")["evalJobConclusion"] == "missing"
+
+
+def test_default_eval_job_name_matches_evals_yml() -> None:
+    evals_yml = (
+        Path(__file__).resolve().parents[1] / ".github" / "workflows" / "evals.yml"
+    ).read_text(encoding="utf-8")
+    assert (
+        f"  eval:\n    name: {check_llm_surface_receipt.EVALS_DEFAULT_JOB_NAME}\n" in evals_yml
+    )
+
+
 def test_intersect_surface_directory_prefix_matches() -> None:
     surface = ["tests/evals/"]
     hits = intersect_surface(["tests/evals/data/foo.json", "tests/test_search.py"], surface)

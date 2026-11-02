@@ -28,6 +28,13 @@ agent-rollout token usage, which must never accumulate into the
 :class:`EvalSession` instance, guarded at teardown by its own
 ``ROLLOUT_TOKEN_CEILING``, and is the fixture a future ``pytest.mark.rollout``
 eval would depend on instead of ``eval_session``.
+
+And a third, ``calibration_session`` (issue athenaeum#2287), for the
+operator-run ``pytest.mark.calibration`` sweep: same shape again, its own
+summary (``--calibration-summary``, default ``calibration-summary.json``)
+and its own :data:`tests.evals.harness.CALIBRATION_TOKEN_CEILING`, so a
+multi-million-token sweep never trips -- or forces a raise of --
+``EVAL_TOKEN_CEILING``.
 """
 
 from __future__ import annotations
@@ -39,6 +46,7 @@ from typing import Any
 import pytest
 
 from tests.evals.harness import (
+    CALIBRATION_TOKEN_CEILING,
     EVAL_TOKEN_CEILING,
     REPO_ROOT,
     EvalSession,
@@ -73,6 +81,15 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help=(
             "Override the rollout-session JSON summary output path "
             "(default: rollout-summary.json at repo root)."
+        ),
+    )
+    group.addoption(
+        "--calibration-summary",
+        action="store",
+        default=None,
+        help=(
+            "Override the calibration-session JSON summary output path "
+            "(default: calibration-summary.json at repo root)."
         ),
     )
 
@@ -136,3 +153,32 @@ def rollout_session(request: pytest.FixtureRequest) -> Any:
     )
     session.emit_summary(summary_path)
     assert_rollout_ceiling(session)
+
+
+@pytest.fixture(scope="session")
+def calibration_session(request: pytest.FixtureRequest) -> Any:
+    """Session-scoped accumulator for the calibration sweep (athenaeum#2287).
+
+    A SEPARATE :class:`EvalSession` from ``eval_session`` -- the
+    ``pytest.mark.calibration`` sweep spends ~3.7M tokens per run, so its
+    usage must never land in ``EVAL_TOKEN_CEILING``'s teardown assert. Emits
+    its own summary (default ``calibration-summary.json`` at repo root,
+    overridable via ``--calibration-summary``) BEFORE asserting its own
+    :data:`CALIBRATION_TOKEN_CEILING`, so a run over budget still leaves
+    its per-case results on disk.
+    """
+    session = EvalSession()
+    yield session
+    summary_path_opt = request.config.getoption("--calibration-summary")
+    summary_path = (
+        Path(summary_path_opt)
+        if summary_path_opt
+        else REPO_ROOT / "calibration-summary.json"
+    )
+    session.emit_summary(summary_path)
+    total_tokens = session.input_tokens + session.output_tokens
+    assert total_tokens <= CALIBRATION_TOKEN_CEILING, (
+        f"calibration sweep exceeded its token ceiling "
+        f"({total_tokens} > {CALIBRATION_TOKEN_CEILING}) -- re-measure and "
+        "raise CALIBRATION_TOKEN_CEILING deliberately (never EVAL_TOKEN_CEILING)"
+    )

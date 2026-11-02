@@ -3,8 +3,8 @@
 
 Offline, no model call: this only reads the committed
 ``tests/evals/data/attribution/cases.yaml`` and the generator that produced
-it. Deselected-by-default ``pytest.mark.eval`` tests
-(``test_attribution_eval.py``) are the ones that actually CALL a model;
+it. The deselected-by-default ``pytest.mark.calibration`` sweep
+(``test_attribution_eval.py``, athenaeum#2287) is what actually CALLS a model;
 this file is a structural guard over the static corpus, so it runs in the
 default suite.
 """
