@@ -295,6 +295,9 @@ MODULE_LAYER: dict[str, int] = {
     "wiki_dedupe": 4,
     # issue athenaeum#1995: "Layering: L4 domain/pipeline module" (own docstring).
     "triage": 4,
+    # issue athenaeum#2298: "athenaeum doctor"'s checks -- own docstring states
+    # "Layering: L4 domain/pipeline".
+    "doctor": 4,
     # issue athenaeum#2156: SessionEnd anchor-step orchestration (budget/deadline
     # arithmetic, receipt-partition digesting via receipt_sealers.py L2, and
     # promptwitness anchoring) -- kept OUT of claude_code_adapter.py (L5)
@@ -324,6 +327,7 @@ MODULE_LAYER: dict[str, int] = {
     "_cmd_decisions": 5,
     "_cmd_demo": 5,
     "_cmd_dimensions": 5,
+    "_cmd_doctor": 5,  # issue athenaeum#2298
     "_cmd_drain": 5,
     "_cmd_enumerate": 5,
     "_cmd_explain_routing": 5,

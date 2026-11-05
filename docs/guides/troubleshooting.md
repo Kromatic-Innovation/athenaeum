@@ -4,6 +4,16 @@
 
 A symptom-first index. Find what you're seeing, then follow the link.
 
+**Start here:** `athenaeum doctor` checks the install end to end — package
+version against the latest release (skipped offline), interpreter version,
+MCP server registration, hook presence (including whether a registered
+hook's target script actually exists on disk), which mode LLM calls run in
+(API key, Claude Code login, or the regex fallback), whether the search
+index has been built, and the last compile time. It is read-only and makes
+no writes; a failed check prints what is wrong and the command or doc that
+fixes it, and exits non-zero. Run it before working through the tables
+below.
+
 ## Recall and the sidecar
 
 | Symptom | Check |
