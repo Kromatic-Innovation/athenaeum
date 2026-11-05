@@ -217,12 +217,29 @@ def test_cli_tool_loop_shape_and_tokens_match_the_api_loop(monkeypatch: pytest.M
         ]
     )
     assert cli_turn_count == api_turn_count == 2
+    # cache_creation_input_tokens/cache_read_input_tokens (issue athenaeum#2305,
+    # additive) are explicitly 0 -- never the default None -- on both sides:
+    # both the canned cli stream events above and _usage()'s SimpleNamespace
+    # set the two cache keys to a real 0, so both loops actually capture a
+    # measured "no cache activity" value, not an uncaptured one.
     assert (
         cli_turn_tokens
         == api_turn_tokens
         == [
-            TurnTokenUsage(turn=1, input_tokens=40, output_tokens=12),
-            TurnTokenUsage(turn=2, input_tokens=60, output_tokens=8),
+            TurnTokenUsage(
+                turn=1,
+                input_tokens=40,
+                output_tokens=12,
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+            ),
+            TurnTokenUsage(
+                turn=2,
+                input_tokens=60,
+                output_tokens=8,
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+            ),
         ]
     )
     assert cli_transcript == api_transcript

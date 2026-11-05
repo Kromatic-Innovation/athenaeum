@@ -188,8 +188,12 @@ def _cost(probe_class: str, scale: str, arm: str, cost: float | None) -> CostPer
         write_tokens_raw=None,
         write_tokens_native_share_amortized=None,
         write_tokens_native_share_raw=None,
+        # Issue athenaeum#2305 (additive): no row backs this synthetic cell,
+        # so no cache/bytes data was ever captured for it either.
+        cache_weighted_tokens=None,
         cost_per_correct=cost,
         undefined_reason=None if cost is not None else "zero correct answers in this cell",
+        injected_bytes_total=None,
     )
 
 

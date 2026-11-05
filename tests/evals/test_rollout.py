@@ -36,6 +36,7 @@ from tests.evals.rollout import (
     build_pull_mcp_config,
     materialize_native_memory,
     parse_pull_stream,
+    parse_stream,
     run_none,
     run_oracle,
     run_probe_all_arms,
@@ -239,6 +240,171 @@ def test_parse_pull_stream_skips_blank_lines_and_non_assistant_events() -> None:
     assert parsed.turn_count == 0
     assert parsed.mcp_connected is False
     assert parsed.recall_tool_available is False
+
+
+# ---------------------------------------------------------------------------
+# Parallel tool use: two `assistant` events sharing one message.id must
+# merge into ONE turn, not double-count (Seer review of PR athenaeum#2338,
+# issue athenaeum#2305). Shape confirmed empirically against this repo's own
+# tests/evals/test_cli_tool_passthrough_rollout.py::_canned_cli_events(): two
+# real `claude -p` events for one `msg_1` carry input_tokens=40 on BOTH
+# (unchanged) but output_tokens 4 then 12 (grew) -- a cumulative per-message
+# snapshot, never a byte-identical repeat and never an independent
+# increment. The fixtures below reproduce exactly that shape.
+# ---------------------------------------------------------------------------
+
+
+def _parallel_tool_use_events(
+    *,
+    first_cache_creation: int | None,
+    first_cache_read: int | None,
+    second_cache_creation: int | None,
+    second_cache_read: int | None,
+) -> list[str]:
+    def _usage(
+        input_tokens: int,
+        output_tokens: int,
+        cache_creation: int | None,
+        cache_read: int | None,
+    ) -> dict[str, int]:
+        usage: dict[str, int] = {"input_tokens": input_tokens, "output_tokens": output_tokens}
+        if cache_creation is not None:
+            usage["cache_creation_input_tokens"] = cache_creation
+        if cache_read is not None:
+            usage["cache_read_input_tokens"] = cache_read
+        return usage
+
+    return [
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "id": "msg_1",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_1",
+                            "name": RECALL_TOOL_NAME,
+                            "input": {"query": "a"},
+                        }
+                    ],
+                    "usage": _usage(40, 4, first_cache_creation, first_cache_read),
+                },
+            }
+        ),
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "id": "msg_1",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_2",
+                            "name": RECALL_TOOL_NAME,
+                            "input": {"query": "b"},
+                        }
+                    ],
+                    "usage": _usage(40, 12, second_cache_creation, second_cache_read),
+                },
+            }
+        ),
+    ]
+
+
+def test_parse_stream_merges_parallel_tool_use_events_sharing_a_message_id() -> None:
+    """Two events for ONE message.id -> ONE turn, taking the MAX of each
+    counter (input_tokens stays 40, never summed to 80; output_tokens
+    takes the later, fuller 12, never summed to 16) -- not a second turn,
+    and not the cache fields either."""
+    lines = _parallel_tool_use_events(
+        first_cache_creation=1000,
+        first_cache_read=0,
+        second_cache_creation=0,
+        second_cache_read=500,
+    )
+    parsed = parse_stream(lines, tool_names=None)
+
+    assert parsed.turn_count == 1
+    assert len(parsed.turn_tokens) == 1
+    turn = parsed.turn_tokens[0]
+    assert turn.input_tokens == 40  # NOT 80 -- summing would double-count
+    assert turn.output_tokens == 12  # NOT 16 -- the later snapshot is fuller, not additive
+    assert turn.cache_creation_input_tokens == 1000  # max(1000, 0)
+    assert turn.cache_read_input_tokens == 500  # max(0, 500)
+    # Both tool_use blocks are still captured -- merging the USAGE snapshot
+    # must not drop the content each event carried.
+    assert len(parsed.tool_calls) == 2
+
+
+def test_parse_stream_merged_cache_fields_stay_undefined_when_neither_event_reports_them() -> (
+    None
+):
+    """Neither event in the pair reports a cache field at all -> the
+    merged turn's cache fields stay None (undefined), never a fabricated
+    0 manufactured by merging two absences."""
+    lines = _parallel_tool_use_events(
+        first_cache_creation=None,
+        first_cache_read=None,
+        second_cache_creation=None,
+        second_cache_read=None,
+    )
+    parsed = parse_stream(lines, tool_names=None)
+
+    assert parsed.turn_count == 1
+    turn = parsed.turn_tokens[0]
+    assert turn.cache_creation_input_tokens is None
+    assert turn.cache_read_input_tokens is None
+
+
+def test_parse_stream_merged_cache_field_survives_when_only_one_event_reports_it() -> None:
+    """Only the SECOND event of the pair reports cache_read_input_tokens;
+    the merge must surface that real value, not fall back to None just
+    because the first event never mentioned the field."""
+    lines = _parallel_tool_use_events(
+        first_cache_creation=None,
+        first_cache_read=None,
+        second_cache_creation=None,
+        second_cache_read=777,
+    )
+    parsed = parse_stream(lines, tool_names=None)
+
+    turn = parsed.turn_tokens[0]
+    assert turn.cache_creation_input_tokens is None
+    assert turn.cache_read_input_tokens == 777
+
+
+def test_parse_stream_does_not_merge_events_with_no_message_id() -> None:
+    """Absent message.id (every pre-athenaeum#1733 fixture, including
+    pull_stream_spike.jsonl/follow_through_stream_spike.jsonl above) must
+    NOT be treated as a shared id -- each event stays its own turn exactly
+    as before this issue, since there is no id to prove two id-less events
+    are the same message rather than two separate ones."""
+    lines = [
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [{"type": "text", "text": "first"}],
+                    "usage": {"input_tokens": 10, "output_tokens": 2},
+                },
+            }
+        ),
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [{"type": "text", "text": "second"}],
+                    "usage": {"input_tokens": 20, "output_tokens": 3},
+                },
+            }
+        ),
+    ]
+    parsed = parse_stream(lines, tool_names=None)
+
+    assert parsed.turn_count == 2
+    assert [t.input_tokens for t in parsed.turn_tokens] == [10, 20]
+    assert [t.output_tokens for t in parsed.turn_tokens] == [2, 3]
 
 
 # ---------------------------------------------------------------------------
