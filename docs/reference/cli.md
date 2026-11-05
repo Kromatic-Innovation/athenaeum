@@ -1255,6 +1255,7 @@ Score the `used` heuristic (push_metrics.determine_references) against a human-l
 | `--labels` | — | — | REQUIRED. Path to a fully-labelled JSONL file (one {session_id, push_id, relevant, changed_work} object per line). Label files live OUTSIDE this repo — there is no default. |
 | `--output` | — | — | Report output file. Defaults under the cache dir (athenaeum.push_used_scoring.default_score_output_path) — never inside this repo's working tree. |
 | `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+| `--projects-root` | — | — | Claude Code `~/.claude/projects` root to read transcripts from when calling determine_references (default: athenaeum.transcript_verify.default_projects_root — the real live root; override for a test/repro run against a scratch tree). |
 
 ## `athenaeum push-metrics tail`
 

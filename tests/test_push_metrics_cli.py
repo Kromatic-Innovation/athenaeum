@@ -1149,7 +1149,15 @@ def test_parser_tree_binds_func_for_push_metrics_subcommands() -> None:
         for a in push_metrics_parser._actions
         if isinstance(a, argparse._SubParsersAction)
     )
-    assert set(inner.choices) == {"baseline", "coverage-audit", "liveness", "record", "tail"}
+    assert set(inner.choices) == {
+        "baseline",
+        "coverage-audit",
+        "liveness",
+        "record",
+        "tail",
+        "sample-for-labelling",
+        "score-used",
+    }
     for name, sub in inner.choices.items():
         assert (
             sub.get_default("func") is not None

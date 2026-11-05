@@ -478,6 +478,7 @@ def _cmd_push_metrics_score_used(args: argparse.Namespace) -> int:
     report = push_used_scoring.score_against_heuristic(
         labels,
         cache_dir=args.cache_dir,
+        projects_root=args.projects_root,
         wiki_root=_resolve_wiki_root(args),
         confidence=args.confidence,
     )
@@ -794,6 +795,15 @@ def add_push_metrics_subparser(subparsers: argparse._SubParsersAction) -> None:
         help="REQUIRED. Path to a fully-labelled JSONL file (one "
         "{session_id, push_id, relevant, changed_work} object per line). "
         "Label files live OUTSIDE this repo — there is no default.",
+    )
+    score_p.add_argument(
+        "--projects-root",
+        type=Path,
+        default=None,
+        help="Claude Code `~/.claude/projects` root to read transcripts "
+        "from when calling determine_references (default: "
+        "athenaeum.transcript_verify.default_projects_root — the real "
+        "live root; override for a test/repro run against a scratch tree).",
     )
     score_p.add_argument(
         "--confidence",
