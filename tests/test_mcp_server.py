@@ -1600,6 +1600,245 @@ class TestRecallSearchExtraRoots:
 
 
 # ---------------------------------------------------------------------------
+# Uncompiled raw notes in recall, no LLM call before first compile
+# (issue athenaeum#2313)
+# ---------------------------------------------------------------------------
+
+
+class TestRecallUncompiledClaudeSessionNotes:
+    """``remember``-saved notes (``raw/claude-session``) surface in `recall`
+    before any compile has run, labelled ``[uncompiled]`` and ranked below
+    the compiled wiki -- AC3-AC8.
+    """
+
+    def _init_knowledge(self, tmp_path: Path) -> tuple[Path, Path, Path, Path]:
+        from athenaeum.init import init_knowledge_dir
+
+        knowledge = tmp_path / "knowledge"
+        init_knowledge_dir(knowledge)
+        return knowledge, knowledge / "wiki", knowledge / "raw", tmp_path / "cache"
+
+    @pytest.mark.parametrize("search_backend", ["fts5", "vector"])
+    def test_remember_then_recall_same_session_no_model_call(
+        self, tmp_path: Path, search_backend: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC2/AC4: a fact saved via ``remember`` is returned by `recall` for
+        a matching query in the SAME session, on an empty ``wiki/``, with no
+        LLM credentials in the environment and no model call -- holds for
+        both indexed backends once ``remember`` refreshes their index
+        (:func:`athenaeum.mcp_server._refresh_extra_root_index`).
+        """
+        from athenaeum.config import resolve_extra_intake_roots
+        from athenaeum.mcp_server import _refresh_extra_root_index
+
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+        knowledge, wiki, raw, cache = self._init_knowledge(tmp_path)
+        result = remember_write(
+            raw,
+            "The launch code for Project Zephyr is ZX-9942.",
+            sources="user-stated:test",
+        )
+        assert result.startswith("Saved to")
+
+        _refresh_extra_root_index(
+            search_backend, wiki_root=wiki, cache_dir=cache, config=None
+        )
+        extra_roots = resolve_extra_intake_roots(knowledge)
+        out = recall_search(
+            wiki,
+            "Zephyr launch code",
+            top_k=5,
+            search_backend=search_backend,
+            cache_dir=cache,
+            extra_roots=extra_roots,
+        )
+        assert "ZX-9942" in out
+        assert "[uncompiled]" in out
+
+    def test_keyword_backend_cannot_see_extra_roots_preexisting_gap(
+        self, tmp_path: Path
+    ) -> None:
+        """AC2: the keyword backend's ``query()`` has no ``extra_roots``
+        parameter and never scans them (``src/athenaeum/search.py``'s
+        ``KeywordBackend``) -- a PRE-EXISTING gap (``raw/auto-memory`` has
+        never been reachable via ``keyword`` either), not something this
+        issue introduces or is asked to fix. Documented here rather than
+        silently assumed.
+        """
+        from athenaeum.config import resolve_extra_intake_roots
+
+        knowledge, wiki, raw, _cache = self._init_knowledge(tmp_path)
+        remember_write(raw, "Zephyr status note.", sources="user-stated:test")
+        extra_roots = resolve_extra_intake_roots(knowledge)
+        out = recall_search(
+            wiki,
+            "Zephyr status",
+            top_k=5,
+            search_backend="keyword",
+            extra_roots=extra_roots,
+        )
+        assert "No wiki pages matched" in out
+
+    def test_labelled_and_ranked_below_wiki_even_when_more_relevant(
+        self, tmp_path: Path
+    ) -> None:
+        """AC5: a raw/claude-session hit that would OUTSCORE a wiki page on
+        pure relevance still ranks below it, and carries the ``[uncompiled]``
+        marker -- proves the demotion actually fires rather than passing
+        vacuously because the wiki page already won on relevance.
+        """
+        from athenaeum.config import resolve_extra_intake_roots
+        from athenaeum.mcp_server import _refresh_extra_root_index
+        from athenaeum.search import FTS5Backend
+
+        knowledge, wiki, raw, cache = self._init_knowledge(tmp_path)
+        filler = " ".join(["lorem ipsum filler text about unrelated topics"] * 40)
+        (wiki / "project-page.md").write_text(
+            f"---\nname: Project Overview\n---\n\n{filler} Somewhere in here the "
+            "zephyr launch code is mentioned once.\n"
+        )
+        remember_write(
+            raw,
+            "zephyr launch code zephyr launch code. zephyr launch code confirmed.",
+            sources="user-stated:test",
+        )
+        _refresh_extra_root_index("fts5", wiki_root=wiki, cache_dir=cache, config=None)
+        extra_roots = resolve_extra_intake_roots(knowledge)
+
+        # Confirm the raw note really does outscore the wiki page on pure
+        # relevance, so the demotion asserted below is proven, not vacuous.
+        raw_hits = FTS5Backend().query(
+            "zephyr launch code", cache, n=5, wiki_root=wiki, caller_audience=None
+        )
+        assert raw_hits[0][1] != "Project Overview"
+
+        out = recall_search(
+            wiki,
+            "zephyr launch code",
+            top_k=5,
+            search_backend="fts5",
+            cache_dir=cache,
+            extra_roots=extra_roots,
+        )
+        assert "[uncompiled]" in out
+        assert out.index("Project Overview") < out.index("[uncompiled]")
+
+    def test_compiled_note_cannot_reappear_as_uncompiled(self, tmp_path: Path) -> None:
+        """AC6: once a raw/claude-session note is compiled (the raw file
+        deleted and a wiki page written in its place -- the same
+        ``raw.path.unlink()`` the librarian's entity-write tier performs on
+        every compiled raw file, ``src/athenaeum/librarian.py``), a
+        subsequent `recall` surfaces only the compiled wiki page, never the
+        stale uncompiled hit.
+        """
+        from athenaeum.config import resolve_extra_intake_roots
+        from athenaeum.mcp_server import _refresh_extra_root_index
+        from athenaeum.search import FTS5Backend
+
+        knowledge, wiki, raw, cache = self._init_knowledge(tmp_path)
+        result = remember_write(
+            raw, "Zilch widget approved for launch.", sources="user-stated:test"
+        )
+        raw_path = Path(result.split("Saved to ")[1])
+
+        _refresh_extra_root_index("fts5", wiki_root=wiki, cache_dir=cache, config=None)
+        extra_roots = resolve_extra_intake_roots(knowledge)
+        before = recall_search(
+            wiki,
+            "Zilch widget launch",
+            top_k=5,
+            search_backend="fts5",
+            cache_dir=cache,
+            extra_roots=extra_roots,
+        )
+        assert "[uncompiled]" in before
+
+        # Simulate compile.
+        raw_path.unlink()
+        (wiki / "zilch-widget.md").write_text(
+            "---\nname: Zilch Widget\n---\n\nZilch widget approved for launch.\n"
+        )
+        FTS5Backend().build_index(wiki, cache, extra_roots=extra_roots, incremental=True)
+
+        after = recall_search(
+            wiki,
+            "Zilch widget launch",
+            top_k=5,
+            search_backend="fts5",
+            cache_dir=cache,
+            extra_roots=extra_roots,
+        )
+        assert "[uncompiled]" not in after
+        assert "Zilch Widget" in after
+
+    def test_extra_intake_roots_empty_behaves_as_today(self, tmp_path: Path) -> None:
+        """AC7: with ``extra_intake_roots: []``, a raw/claude-session note
+        (even one that exists on disk and matches the query) never appears
+        -- recall behaves exactly as it did before this issue.
+        """
+        from athenaeum.search import FTS5Backend
+
+        knowledge, wiki, raw, cache = self._init_knowledge(tmp_path)
+        (wiki / "page.md").write_text("---\nname: Page\n---\n\nzephyr content\n")
+        remember_write(raw, "zephyr raw note", sources="user-stated:test")
+
+        FTS5Backend().build_index(wiki, cache, extra_roots=[])
+        out = recall_search(
+            wiki,
+            "zephyr",
+            top_k=5,
+            search_backend="fts5",
+            cache_dir=cache,
+            extra_roots=[],
+        )
+        assert "Page" in out
+        assert "[uncompiled]" not in out
+        assert "claude-session" not in out
+
+    def test_restricted_caller_gets_no_raw_results(self, tmp_path: Path) -> None:
+        """AC8: a restricted (non-owner) caller receives ZERO raw results,
+        even querying text VERBATIM present in the raw note -- raw notes
+        carry no audience/sensitivity tags, so the SAME fail-closed audience
+        predicate that already gates compiled wiki pages (issue
+        athenaeum#312/#538) withholds them too. Negative control: the owner
+        (``caller_audience=None``) sees the hit; a restricted caller does
+        not.
+        """
+        from athenaeum.config import resolve_extra_intake_roots
+        from athenaeum.mcp_server import _refresh_extra_root_index
+
+        knowledge, wiki, raw, cache = self._init_knowledge(tmp_path)
+        remember_write(raw, "The secret launch code is ZX-9942.", sources="user-stated:test")
+        _refresh_extra_root_index("fts5", wiki_root=wiki, cache_dir=cache, config=None)
+        extra_roots = resolve_extra_intake_roots(knowledge)
+
+        owner_out = recall_search(
+            wiki,
+            "secret launch code ZX-9942",
+            top_k=5,
+            search_backend="fts5",
+            cache_dir=cache,
+            extra_roots=extra_roots,
+        )
+        assert "ZX-9942" in owner_out
+
+        restricted_out = recall_search(
+            wiki,
+            "secret launch code ZX-9942",
+            top_k=5,
+            search_backend="fts5",
+            cache_dir=cache,
+            extra_roots=extra_roots,
+            caller_audience={"secondary"},
+        )
+        # Not a naive content-absence check: the query text itself (echoed
+        # back verbatim in the "no match" message) also contains
+        # "ZX-9942" -- assert the no-match shape instead.
+        assert restricted_out.startswith("No wiki pages matched")
+
+
+# ---------------------------------------------------------------------------
 # Push-metrics instrumentation on the recall path (issue athenaeum#711)
 # ---------------------------------------------------------------------------
 

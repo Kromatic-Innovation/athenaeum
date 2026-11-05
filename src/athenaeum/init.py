@@ -79,6 +79,13 @@ _SUBDIRS = [
     # `athenaeum run` on a fresh root doesn't warn
     # "extra_intake_root not found".
     "raw/auto-memory",
+    # Issue athenaeum#2313: the `remember` MCP tool's own write target
+    # (default `source="claude-session"`). Also a `recall.extra_intake_roots`
+    # default entry — created up front, same rationale as `raw/auto-memory`
+    # above, so a long-running `athenaeum serve` process resolves it into
+    # its extra-roots list from first start rather than only after the
+    # directory happens to be created by a later `remember` call.
+    "raw/claude-session",
     "wiki",
     "wiki/_schema",
 ]

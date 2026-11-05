@@ -221,3 +221,35 @@ def test_fresh_init_creates_auto_memory_intake_root(
     assert not [
         r for r in caplog.records if "extra_intake_root not found" in r.getMessage()
     ]
+
+
+def test_fresh_init_creates_claude_session_intake_root(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """init creates raw/claude-session so the first run doesn't warn (issue
+    athenaeum#2313).
+
+    Same rationale as ``test_fresh_init_creates_auto_memory_intake_root``
+    above: the default config now also points at ``raw/claude-session`` (the
+    ``remember`` MCP tool's write target), so a freshly-inited knowledge dir
+    must not warn "extra_intake_root not found" for it, and a long-running
+    ``athenaeum serve`` process started right after ``init`` resolves it into
+    its extra-roots list from the first call rather than only after the
+    directory happens to be created by a later ``remember`` call.
+    """
+    import logging
+
+    from athenaeum.config import resolve_extra_intake_roots
+
+    target = tmp_path / "knowledge"
+    init_knowledge_dir(target)
+
+    claude_session = target / "raw" / "claude-session"
+    assert claude_session.is_dir()
+
+    with caplog.at_level(logging.WARNING):
+        roots = resolve_extra_intake_roots(target)
+    assert claude_session.resolve() in roots
+    assert not [
+        r for r in caplog.records if "extra_intake_root not found" in r.getMessage()
+    ]
