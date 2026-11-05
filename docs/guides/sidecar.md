@@ -109,7 +109,7 @@ it is ever needed again.
 
 ## I want to understand why `remember` didn't make something recallable
 
-Athenaeum has two phases, and the hooks only handle one of them:
+Athenaeum has two phases:
 
 1. **Intake (immediate, hook-driven).** When Claude calls `remember`, an
    observation lands in `~/knowledge/raw/claude-session/` as a timestamped
@@ -118,11 +118,28 @@ Athenaeum has two phases, and the hooks only handle one of them:
    on-demand `athenaeum ingest` / `athenaeum session-end`, see [Daily
    operation](daily-operation.md)) reads pending `raw/` files, passes them
    through the tiered librarian, and writes compiled entity pages to
-   `wiki/`. The hooks and `recall` only search `wiki/`.
+   `wiki/`.
 
-There is no automatic bridge between the two. If you `remember` five
-things and then `recall` returns nothing, the observations are safe on
-disk — they just haven't been compiled yet.
+`recall.extra_intake_roots` (default `raw/auto-memory` and
+`raw/claude-session`) is what bridges the gap between the two phases without
+waiting for a compile: `recall` returns a matching note from either raw
+intake root immediately, with no model call, labelled `[uncompiled]` and
+ranked below every compiled wiki page. **That note is returned VERBATIM —
+whatever text was saved — and it stays returnable from ANY session reading
+the same knowledge base, not just the one that saved it, until it is
+compiled** (after which the raw file is normally removed, so the compiled
+wiki page is what a later `recall` returns instead). The per-turn hook can
+surface the same uncompiled content too, since it queries the identical
+index `recall` does — but the hook's own rendering does not add the
+`[uncompiled]` marker or the below-wiki ranking, so treat anything it
+injects as potentially uncompiled as well. Setting
+`recall.extra_intake_roots` to `[]` restricts both to the compiled wiki only,
+restoring the pre-compile "recall returns nothing" behavior.
+
+Compiling (`athenaeum run` / `ingest` / `session-end`) is still how a note
+becomes a durable, citable wiki entity rather than a raw file that can be
+edited or superseded by the next matching `remember` call — `recall`
+surfacing it early does not substitute for that.
 
 ## I want the actual round-trip verified without a live session
 

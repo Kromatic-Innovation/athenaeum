@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`recall` now returns raw notes saved via `remember` before the first
+  compile has run, with no LLM call (issue athenaeum#2313).**
+  `recall.extra_intake_roots`'s default gains `raw/claude-session` alongside
+  the existing `raw/auto-memory` — one more root on the existing extra-roots
+  read path, not a new scanner. Every hit from an extra-intake root is
+  labelled `[uncompiled]` and ranked below every compiled wiki page,
+  regardless of its raw relevance score, so it is never mistaken for a
+  compiled entity. `remember` also incrementally refreshes the configured
+  `fts5`/`vector` index after a successful write, so a note saved and then
+  recalled in the SAME session — on a brand-new install, before any compile —
+  is found. A restricted (non-owner) caller continues to receive zero raw
+  results, fail-closed, because raw notes carry no audience/sensitivity
+  tags. Setting `recall.extra_intake_roots: []` restores exactly today's
+  wiki-only behavior. The `keyword` backend is unaffected — it has never
+  scanned extra intake roots from its own query, a pre-existing, separate
+  gap this change does not take on.
+
 ### Fixed
 
 - **Four Claude Code setup-doc errors, each of which pointed a reader at the
