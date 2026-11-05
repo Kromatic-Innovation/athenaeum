@@ -77,13 +77,42 @@ def _settings_with_hook(script_path: Path) -> dict:
     }
 
 
+def _pin_llm_provider_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every test that resolves ``check_key_mode``'s provider must pin this
+    (issue athenaeum#2298 CI finding): ``resolve_provider``'s env > yaml >
+    default chain means an AMBIENT ``ATHENAEUM_LLM_PROVIDER`` (or the
+    per-knob ``ATHENAEUM_TOPIC_LLM_PROVIDER``) silently overrides whatever a
+    test wrote to ``athenaeum.yaml``, or silently substitutes for the plain
+    "neither is set" default this module's healthy fixture otherwise relies
+    on. This is a pre-existing, documented hazard in this exact codebase —
+    see ``tests/test_2112_text_or_truncated_sites.py``'s ``_pin_api_backend``
+    fixture docstring and ``tests/test_tiers.py``'s
+    ``test_thinking_only_none_stop_reason_still_raises`` comment, both of
+    which name "a CI env exporting ATHENAEUM_LLM_PROVIDER=api" by exactly
+    that description. Locally this container has neither env var set, so a
+    test relying on the yaml value (or the bare default) alone passes here
+    and can still flip on a CI runner that does export one — delete both,
+    unconditionally, rather than assume either environment's ambient state.
+    """
+    monkeypatch.delenv("ATHENAEUM_LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("ATHENAEUM_TOPIC_LLM_PROVIDER", raising=False)
+
+
 @pytest.fixture
 def healthy_install(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """A fully healthy install: knowledge root, cache dir with an fts5
     index, Claude config dir with the MCP server registered and one
     athenaeum hook whose target script exists, and an API key in the
     process env. Returns the four resolved paths as a dict.
+
+    Pins the LLM-provider env (see :func:`_pin_llm_provider_env`) as a
+    baseline for every test built on this fixture — a per-test override
+    (several ``key_mode`` tests below also call it explicitly, after
+    writing their own ``llm.provider`` into ``athenaeum.yaml``) re-pins the
+    SAME two vars, which is harmless and documents the dependency at the
+    call site that actually cares about it.
     """
+    _pin_llm_provider_env(monkeypatch)
     knowledge_root = tmp_path / "knowledge"
     (knowledge_root / "wiki").mkdir(parents=True)
     (knowledge_root / "athenaeum.yaml").write_text(
@@ -303,6 +332,7 @@ def test_settings_json_present_but_unparseable_fails_hooks(
 def test_no_api_key_fails_key_mode_and_names_fix(
     healthy_install: dict, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    _pin_llm_provider_env(monkeypatch)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     results = _run_healthy(healthy_install)
     assert doctor.exit_code(results) == 1
@@ -318,6 +348,7 @@ def test_cached_config_env_key_satisfies_key_mode(
     """The key need not be in the process env — a cached
     ``<cache_dir>/config.env`` (what the shipped hooks themselves cache
     into) is equally valid."""
+    _pin_llm_provider_env(monkeypatch)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     (healthy_install["cache_dir"] / "config.env").write_text(
         "ANTHROPIC_API_KEY=sk-cached-not-real\n", encoding="utf-8"
@@ -333,6 +364,7 @@ def test_claude_cli_provider_with_missing_binary_fails_key_mode(
     (healthy_install["knowledge_root"] / "athenaeum.yaml").write_text(
         "search_backend: fts5\nllm:\n  provider: claude-cli\n", encoding="utf-8"
     )
+    _pin_llm_provider_env(monkeypatch)
     monkeypatch.setattr("shutil.which", lambda _name: None)
     monkeypatch.delenv("ATHENAEUM_CLAUDE_CLI_BIN", raising=False)
     results = _run_healthy(healthy_install)
@@ -341,11 +373,14 @@ def test_claude_cli_provider_with_missing_binary_fails_key_mode(
     assert doctor.exit_code(results) == 1
 
 
-def test_invalid_llm_provider_fails_key_mode(healthy_install: dict) -> None:
+def test_invalid_llm_provider_fails_key_mode(
+    healthy_install: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
     (healthy_install["knowledge_root"] / "athenaeum.yaml").write_text(
         "search_backend: fts5\nllm:\n  provider: not-a-real-provider\n",
         encoding="utf-8",
     )
+    _pin_llm_provider_env(monkeypatch)
     results = _run_healthy(healthy_install)
     key_mode = next(r for r in results if r.name == "key_mode")
     assert key_mode.status == "fail"
@@ -359,6 +394,7 @@ def test_claude_cli_provider_with_binary_present_ok(
     (healthy_install["knowledge_root"] / "athenaeum.yaml").write_text(
         "search_backend: fts5\nllm:\n  provider: claude-cli\n", encoding="utf-8"
     )
+    _pin_llm_provider_env(monkeypatch)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.setattr("shutil.which", lambda _name: "/usr/bin/claude")
     results = _run_healthy(healthy_install)
