@@ -1,0 +1,14 @@
+# Positive control (athenaeum#2324 AC3): the same exact-pinned `ruff` as the
+# `mismatch` fixture, but requirements-ci.lock carries no duplicate of it --
+# the fixed shape this issue's check enforces.
+[project]
+name = "demo"
+dependencies = [
+    "pyyaml>=6.0,<7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff==0.17.3",
+]
