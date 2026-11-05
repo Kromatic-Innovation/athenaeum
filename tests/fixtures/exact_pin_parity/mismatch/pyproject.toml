@@ -1,0 +1,16 @@
+# Counter-example fixture (athenaeum#2324 AC3): pyproject.toml exact-pins
+# `ruff` to a NEWER version than requirements-ci.lock's stale duplicate --
+# the exact shape of the athenaeum#1922/athenaeum#2284 incidents. This pair
+# must make check_parity() report exactly one violation, naming `ruff` and
+# both versions.
+[project]
+name = "demo"
+dependencies = [
+    "pyyaml>=6.0,<7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff==0.17.3",
+]

@@ -407,6 +407,30 @@ jobs:
       - name: Run public-safe-lint scan
         run: bash public-safe-lint.sh .
 
+  # athenaeum#2324 — catch a pyproject.toml / requirements-ci.lock exact-pin
+  # duplicate BY NAME before any other job pays for `pip install`. Twice
+  # (athenaeum#1922, athenaeum#2284) a Dependabot PR bumped `ruff`'s `==` pin
+  # in pyproject.toml without touching a stale duplicate in
+  # requirements-ci.lock (applied as a constraints file), so every install
+  # step died with `ResolutionImpossible` and the failure `CI Required`
+  # actually reported was a downstream skipped `Coverage` job, never naming
+  # the real cause. The fix is structural (see requirements-ci.lock's header
+  # and docs/design/security-posture.md §3.1): an exact-pinned direct
+  # dependency is no longer duplicated into the lock at all, so it cannot
+  # desync. This job is the backstop that fails loudly, by name, if a
+  # duplicate is ever reintroduced and goes stale — pure stdlib
+  # (`scripts/check_exact_pin_parity.py`), so it needs no install step and
+  # runs before `test`/`types`/`clean-venv` even start theirs.
+  pin-parity:
+    name: Pin parity (pyproject vs lock)
+    needs: [check_duplicate]
+    if: needs.check_duplicate.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Check pyproject.toml / requirements-ci.lock exact-pin parity
+        run: python3 scripts/check_exact_pin_parity.py
+
   # athenaeum#2297 — prove the documented uv install path actually clears the
   # "pip silently resolves backwards on an old interpreter" trap that
   # README.md and docs/guides/install.md warn about, on exactly the
@@ -518,14 +542,15 @@ jobs:
   # failure here must cost a future CI saving, never a merge.
   publish_attestation:
     name: Publish CI attestation
-    needs: [check_duplicate, test, coverage, types, public-safe-lint, clean-venv]
+    needs: [check_duplicate, test, coverage, types, public-safe-lint, clean-venv, pin-parity]
     if: >-
       needs.check_duplicate.result == 'success' &&
       needs.test.result == 'success' &&
       needs.coverage.result == 'success' &&
       needs.types.result == 'success' &&
       needs.public-safe-lint.result == 'success' &&
-      needs.clean-venv.result == 'success'
+      needs.clean-venv.result == 'success' &&
+      needs.pin-parity.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -569,7 +594,7 @@ jobs:
   # not-yet-tested PR head).
   ci-required:
     name: CI Required
-    needs: [check_duplicate, test, coverage, types, public-safe-lint, clean-venv]
+    needs: [check_duplicate, test, coverage, types, public-safe-lint, clean-venv, pin-parity]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -581,8 +606,9 @@ jobs:
           TYPES_RESULT: ${{ needs.types.result }}
           PUBLIC_SAFE_LINT_RESULT: ${{ needs.public-safe-lint.result }}
           CLEAN_VENV_RESULT: ${{ needs.clean-venv.result }}
+          PIN_PARITY_RESULT: ${{ needs.pin-parity.result }}
         run: |
-          echo "check_duplicate=$DUP_RESULT test=$TEST_RESULT coverage=$COVERAGE_RESULT types=$TYPES_RESULT public-safe-lint=$PUBLIC_SAFE_LINT_RESULT clean-venv=$CLEAN_VENV_RESULT"
+          echo "check_duplicate=$DUP_RESULT test=$TEST_RESULT coverage=$COVERAGE_RESULT types=$TYPES_RESULT public-safe-lint=$PUBLIC_SAFE_LINT_RESULT clean-venv=$CLEAN_VENV_RESULT pin-parity=$PIN_PARITY_RESULT"
           # The duplicate detector must itself have succeeded; otherwise we
           # cannot trust its skip decision and must fail closed.
           if [ "$DUP_RESULT" != "success" ]; then
@@ -601,7 +627,7 @@ jobs:
           # `skipped`  → check_duplicate verified this push's tree was already
           #              tested green on the PR head; nothing new to prove.
           # anything else (failure/cancelled) → fail the gate.
-          for pair in "test:$TEST_RESULT" "coverage:$COVERAGE_RESULT" "types:$TYPES_RESULT" "public-safe-lint:$PUBLIC_SAFE_LINT_RESULT" "clean-venv:$CLEAN_VENV_RESULT"; do
+          for pair in "test:$TEST_RESULT" "coverage:$COVERAGE_RESULT" "types:$TYPES_RESULT" "public-safe-lint:$PUBLIC_SAFE_LINT_RESULT" "clean-venv:$CLEAN_VENV_RESULT" "pin-parity:$PIN_PARITY_RESULT"; do
             name="${pair%%:*}"
             result="${pair#*:}"
             case "$result" in
