@@ -1837,6 +1837,118 @@ class TestRecallUncompiledClaudeSessionNotes:
         # "ZX-9942" -- assert the no-match shape instead.
         assert restricted_out.startswith("No wiki pages matched")
 
+    def test_remember_refresh_does_not_trigger_periodic_full_rehash(
+        self, tmp_path: Path
+    ) -> None:
+        """PR #2321 review finding 2: `remember`'s index refresh must stay a
+        one-file incremental cost even when the manifest's periodic
+        full-rehash backstop (issue athenaeum#373, `_full_rehash_due`) is
+        overdue -- otherwise an interactive `remember` call would
+        periodically inherit a synchronous full-corpus re-hash inside the
+        MCP tool call.
+
+        Pins the fix via the manifest's own ``last_full_rehash_at`` stamp:
+        on a build that takes the real incremental path, the prior
+        ``last_full_rehash_at`` value is PRESERVED unchanged
+        (``FTS5Backend.build_index``'s ``rehash_at = ... else last_rehash``);
+        a build that escalates to a full re-hash stamps a FRESH one. If
+        ``_refresh_extra_root_index`` let the default (7-day) backstop apply
+        to an already-30-days-stale manifest, this stamp would move forward
+        -- it must not.
+        """
+        import json
+
+        from athenaeum.mcp_server import _refresh_extra_root_index
+        from athenaeum.search import FTS5Backend
+
+        knowledge, wiki, raw, cache = self._init_knowledge(tmp_path)
+        (wiki / "page.md").write_text("---\nname: Page\n---\n\nsome content\n")
+        FTS5Backend().build_index(wiki, cache, extra_roots=[raw / "claude-session"])
+
+        manifest_path = cache / "fts5-manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        stale_timestamp = manifest["last_full_rehash_at"] - 30 * 86400.0
+        manifest["last_full_rehash_at"] = stale_timestamp
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        remember_write(raw, "A new note.", sources="user-stated:test")
+        _refresh_extra_root_index("fts5", wiki_root=wiki, cache_dir=cache, config=None)
+
+        after = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert after["last_full_rehash_at"] == stale_timestamp, (
+            "refresh escalated to a full periodic re-hash instead of staying "
+            "incremental -- it must preserve the stale timestamp, not bump it"
+        )
+        # The new note must still have been picked up by the incremental delta.
+        assert any(name.startswith("claude-session/") for name in after["hashes"])
+
+    def _get_fn(self, server, name: str):
+        import asyncio
+
+        async def _run():
+            tool = await server.get_tool(name)
+            return tool.fn
+
+        return asyncio.run(_run())
+
+    def test_preexisting_install_upgrade_same_session_remember_then_recall(
+        self, tmp_path: Path
+    ) -> None:
+        """PR #2321 review finding 1: a PRE-EXISTING install upgrading to
+        this version -- one whose `raw/claude-session` directory does not
+        exist yet, because it was `athenaeum init`'d before this version's
+        `init.py` change -- must NOT need a server restart between its
+        first `remember` and the `recall` that follows it in the SAME
+        session.
+
+        Deliberately does NOT use `init_knowledge_dir` (that already covers
+        the FRESH-install case via the `init.py` change). Instead this
+        mirrors `athenaeum._cmd_serve`'s real startup sequence by hand: call
+        `resolve_extra_intake_roots` BEFORE `raw/claude-session` exists (as
+        a pre-upgrade install's `athenaeum serve` would), pass that
+        stale/missing-claude-session list into `create_server` exactly as
+        `_cmd_serve.py` does, then drive the REAL registered `remember` and
+        `recall` tool functions (not `recall_search` directly, since the
+        bug lives in how the `recall` tool closure uses its
+        server-startup-resolved `extra_roots`).
+        """
+        from athenaeum.config import resolve_extra_intake_roots
+
+        pytest.importorskip("fastmcp")
+        from athenaeum.mcp_server import create_server
+
+        knowledge = tmp_path / "knowledge"
+        wiki = knowledge / "wiki"
+        raw = knowledge / "raw"
+        wiki.mkdir(parents=True)
+        raw.mkdir(parents=True)
+        cache = tmp_path / "cache"
+
+        # Startup-time resolution, BEFORE raw/claude-session exists -- same
+        # call `_cmd_serve.py` makes before `create_server`.
+        startup_extra_roots = resolve_extra_intake_roots(knowledge)
+        assert not any(r.name == "claude-session" for r in startup_extra_roots), (
+            "test setup bug: raw/claude-session must not exist yet"
+        )
+
+        server = create_server(
+            raw_root=raw,
+            wiki_root=wiki,
+            search_backend="fts5",
+            cache_dir=cache,
+            extra_roots=startup_extra_roots,
+            config=None,
+        )
+        remember_fn = self._get_fn(server, "remember")
+        recall_fn = self._get_fn(server, "recall")
+
+        result = remember_fn("The pre-existing install note is XQ-7781.")
+        assert result.startswith("Saved to")
+
+        out = recall_fn("pre-existing install note XQ-7781")
+        assert "XQ-7781" in out
+        assert "[uncompiled]" in out
+
 
 # ---------------------------------------------------------------------------
 # Push-metrics instrumentation on the recall path (issue athenaeum#711)

@@ -2353,6 +2353,27 @@ def _refresh_extra_root_index(
     against the stored manifest), so it costs one file read/hash, not a
     corpus rescan.
 
+    **`full_rehash_max_age_days=math.inf` (PR #2321 review finding 2).**
+    ``build_index(incremental=True)`` is not UNCONDITIONALLY one-file-cheap:
+    ``athenaeum.search``'s issue athenaeum#373 self-healing backstop
+    (``_full_rehash_due``) forces a full re-read-and-rehash of every file,
+    inside an otherwise-incremental build, once the manifest's
+    ``last_full_rehash_at`` is older than ``full_rehash_max_age_days`` (7 by
+    default). Left at the default, an interactive `remember` call would
+    periodically inherit that full-corpus cost synchronously inside the MCP
+    tool call — a latency cliff on a large store, and squarely NOT what "one
+    file read/hash" promises. Passing ``math.inf`` here makes the age check
+    (`(now - last_rehash) > (full_rehash_max_age_days * 86400.0)`) always
+    false, so THIS call can only ever take the real one-file incremental
+    path; it still forces a full build on a schema mismatch or a genuinely
+    absent manifest (the necessary first-ever build, cheap on the small
+    corpus that scenario implies) — ``_full_rehash_due`` treats either as
+    unconditionally stale regardless of the age bound passed in, and this
+    call does not try to suppress that. The periodic age-based rehash itself
+    is NOT skipped globally — it still runs on an explicit `athenaeum
+    reindex` / compile, which keeps the DEFAULT ``full_rehash_max_age_days``
+    and is where that cost belongs.
+
     Re-resolves ``recall.extra_intake_roots`` FRESH from *config* rather than
     trusting a caller's possibly server-startup-resolved list
     (``athenaeum._cmd_serve`` resolves it once per long-running process) —
@@ -2371,6 +2392,8 @@ def _refresh_extra_root_index(
     if search_backend not in ("fts5", "vector"):
         return
     try:
+        import math
+
         from athenaeum.config import resolve_extra_intake_roots
         from athenaeum.search import get_backend
 
@@ -2380,6 +2403,7 @@ def _refresh_extra_root_index(
             cache_dir,
             extra_roots=extra_roots,
             incremental=True,
+            full_rehash_max_age_days=math.inf,
             config=config,
         )
     except Exception:  # a refresh failure must not fail `remember`
@@ -3063,13 +3087,35 @@ def create_server(
         history: bool = False,
         type: str | None = None,
     ) -> str:
+        # Issue athenaeum#2313 (PR #2321 review finding 1): re-resolve
+        # `recall.extra_intake_roots` FRESH from *config* on every call,
+        # the same way `_refresh_extra_root_index` already does for
+        # `remember`'s write side -- rather than trusting this closure's
+        # `extra_roots`, resolved ONCE at server startup
+        # (`athenaeum._cmd_serve` calls `resolve_extra_intake_roots` before
+        # `create_server`). A PRE-EXISTING install upgrading to this version
+        # has no `raw/claude-session` directory until its first `remember`
+        # call creates one; if that happens after this server already
+        # started, the startup-resolved list permanently excludes it for
+        # the rest of this server's life. Without this, a hit from that
+        # root would come back from the (correctly, freshly refreshed)
+        # index but fail `_resolve_hit_path`'s root-name match here, so it
+        # would render with an empty body instead of the note's real
+        # content -- the first-remember-then-recall confusion this issue
+        # exists to remove, just displaced from new to pre-existing
+        # installs. Cheap: a `stat` per configured root, never a corpus
+        # scan — `resolve_extra_intake_roots` reads the already-loaded
+        # *config* dict, not the YAML file again.
+        from athenaeum.config import resolve_extra_intake_roots
+
+        live_extra_roots = resolve_extra_intake_roots(wiki_root.parent, config)
         return recall_search(
             wiki_root,
             query,
             top_k,
             search_backend=search_backend,
             cache_dir=cache_dir,
-            extra_roots=extra_roots,
+            extra_roots=live_extra_roots,
             caller_audience=caller_audience,
             config=config,
             with_pii=with_pii,
