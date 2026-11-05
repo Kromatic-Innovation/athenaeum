@@ -304,8 +304,24 @@ _athenaeum_run_budgeted() {
 # a non-zero return (or empty stdout) as "leave the cached line alone", and
 # that silent-failure shape is itself part of the athenaeum#2056 contract
 # ("missing Jev item produces no line and no warning").
+#
+# ATHENAEUM_TEST_OP_DEFAULT_TIMEOUT_SECONDS is a test-only seam (athenaeum#2233):
+# overrides the documented default (10) that a malformed/unset
+# ATHENAEUM_OP_TIMEOUT_SECONDS normalises to, so a test can prove the
+# portable fallback's full kill/cleanup cycle at a small bound instead of
+# waiting out the real 10s default twice. Never documented as a public
+# knob; read nowhere else in this script. Production installs never set
+# it, so the real default (10) always applies.
+#
+# ATHENAEUM_TEST_OP_BUDGET_TRACE_FILE is a second test-only seam: when set,
+# the resolved (post-normalisation) budget is appended to it, one line per
+# call, BEFORE `op` is spawned -- lets a test observe that normalisation
+# happened correctly without waiting for the fetch/fallback to finish at
+# all. Never documented, never read elsewhere; still no stdout/stderr
+# output of this function's own (athenaeum#2056 contract unchanged).
 _athenaeum_op_read() {
   local _op_path="$1"
+  local _op_default_budget="${ATHENAEUM_TEST_OP_DEFAULT_TIMEOUT_SECONDS:-10}"
   # Normalise the budget BEFORE either branch below spawns `op` (Seer
   # finding on athenaeum#2193): a non-integer value (fractional,
   # non-numeric, or empty-but-set) used to survive past this point because
@@ -320,10 +336,13 @@ _athenaeum_op_read() {
   # that isn't a positive integer silently falls back to the documented
   # default of 10 -- no stderr here, this hook's contract in this area is
   # silence (athenaeum#2056).
-  local _op_budget="${ATHENAEUM_OP_TIMEOUT_SECONDS:-10}"
+  local _op_budget="${ATHENAEUM_OP_TIMEOUT_SECONDS:-$_op_default_budget}"
   case "$_op_budget" in
-    ''|*[!0-9]*|0) _op_budget=10 ;;
+    ''|*[!0-9]*|0) _op_budget="$_op_default_budget" ;;
   esac
+  if [ -n "${ATHENAEUM_TEST_OP_BUDGET_TRACE_FILE:-}" ]; then
+    printf '%s\n' "$_op_budget" >> "$ATHENAEUM_TEST_OP_BUDGET_TRACE_FILE"
+  fi
   local _op_cmd
 
   if [ "${ATHENAEUM_OP_INTERACTIVE:-}" = "1" ]; then

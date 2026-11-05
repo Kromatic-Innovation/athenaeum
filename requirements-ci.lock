@@ -37,7 +37,23 @@
 #
 # Dependabot proposes bumps against pyproject.toml's ranges (see
 # .github/workflows/dependabot-auto-merge.yml and docs/design/security-posture.md
-# §3.1); regenerate this lock when a dependency bump lands so CI tracks it.
+# §3.1); regenerate this lock when a TRANSITIVE dependency bump lands so CI
+# tracks it.
+#
+# EXACT-PINNED DIRECT DEPS ARE DELIBERATELY NOT DUPLICATED HERE (athenaeum#2324):
+# pyproject.toml exact-pins a couple of dev/type-check tools with `==` (`ruff`
+# today) so lint/type results are deterministic run-to-run. A `pip freeze`
+# regen used to also capture that same pin below, and twice (athenaeum#1922,
+# athenaeum#2284) a Dependabot PR bumped the pyproject.toml pin without
+# touching this file's stale copy, so the two `==` constraints contradicted
+# each other and every CI install died with `ResolutionImpossible` before a
+# single test ran. The fix is structural, not a promise to remember: for any
+# package pyproject.toml exact-pins, DO NOT add (or re-add) a line for it
+# below -- there is nothing to keep in sync when there is only one pin.
+# `scripts/check_exact_pin_parity.py` (wired into `ci.yml`'s `pin-parity` job,
+# which runs before any `pip install`) fails the build by name if a duplicate
+# ever comes back out of step. See docs/design/security-posture.md §3.1 for
+# the full rationale and the alternatives this was chosen over.
 aiofile==3.11.1
 aiohappyeyeballs==2.7.1
 aiohttp==3.14.3
@@ -152,7 +168,6 @@ requests==2.34.2
 rich-rst==2.1.0
 rich==15.0.0
 rpds-py==2026.6.3
-ruff==0.17.3
 SecretStorage==3.5.0
 shellingham==1.5.4
 six==1.17.0

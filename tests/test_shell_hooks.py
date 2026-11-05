@@ -38,11 +38,13 @@ developer's real ``~/.cache/athenaeum`` or ``~/knowledge``.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -198,6 +200,32 @@ def _write_sleeping_op(tmp_path: Path, *, marker: Path | None = None) -> Path:
     )
     op_stub.chmod(0o755)
     return bin_dir
+
+
+def _restricted_path_without_timeout(tmp_path: Path, path: str) -> Path:
+    """A symlink farm covering every directory on *path* except `timeout`/
+    `gtimeout` -- the PATH shape needed to reach `_athenaeum_op_read`'s
+    portable (no-`timeout`-binary) fallback branch specifically (athenaeum#2193
+    AC4), rather than the `timeout`-present branch GNU/Linux CI runners
+    resolve by default."""
+    no_timeout_bin = tmp_path / "no-timeout-bin"
+    no_timeout_bin.mkdir(exist_ok=True)
+    for directory in (d for d in path.split(os.pathsep) if d):
+        try:
+            names = os.listdir(directory)
+        except (OSError, PermissionError):
+            continue
+        for name in names:
+            if name in ("timeout", "gtimeout"):
+                continue
+            link = no_timeout_bin / name
+            if link.exists() or link.is_symlink():
+                continue  # first-on-PATH wins, same as real PATH lookup
+            try:
+                link.symlink_to(os.path.join(directory, name))
+            except (OSError, PermissionError):
+                continue
+    return no_timeout_bin
 
 
 def _write_shadow_athenaeum_package(tmp_path: Path) -> Path:
@@ -1291,7 +1319,19 @@ class TestSessionStartBudgetAndBackgroundBuild:
                 f"({elapsed2:.1f}s)"
             )
         finally:
-            holder.wait(timeout=30)
+            # Both assertions above already observed the lock being held
+            # (that is the whole point of the 12s artificial hold) -- there
+            # is nothing left to learn from letting `holder` run out its
+            # remaining sleep naturally. `rebuild-index.sh`'s `trap ... EXIT`
+            # releases the lock on SIGTERM same as a clean exit, so
+            # terminating early is exactly as clean as waiting it out, just
+            # without the remaining ~10s of dead time (athenaeum#2233).
+            holder.terminate()
+            try:
+                holder.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                holder.kill()
+                holder.wait(timeout=5)
 
 
 class TestHookDegradationNotice:
@@ -1750,27 +1790,28 @@ class TestOpOptionalGate2193:
         # (the marker) must be absent.
         assert not marker.exists()
 
-    def test_ac4_non_integer_timeout_falls_back_to_the_default_bound(
+    def test_ac4_non_integer_timeout_normalises_to_the_documented_default(
         self, hook_env: dict[str, str], tmp_path: Path
     ) -> None:
         """Seer finding on athenaeum#2193 (review of athenaeum#2194): a non-integer
-        ATHENAEUM_OP_TIMEOUT_SECONDS (here `0.5`) must not reach either
-        branch's `op` spawn unnormalised. Pre-fix, the portable fallback's
-        pure-integer arithmetic (`_op_budget * 10`) broke AFTER `op` was
-        already backgrounded -- either the subshell aborted and orphaned
-        it (leaking its mode-600 temp file, since the `rm -f` never ran),
-        or `_op_budget_ds` ended up empty and the bounded-wait loop's
-        `-ge` test errored every iteration, read as false, and never
-        timed out. The fix normalises any non-positive-integer budget to
-        the documented default of 10 before `op` is spawned in either
-        branch.
+        ATHENAEUM_OP_TIMEOUT_SECONDS (here `0.5`) must not reach `op`'s
+        spawn unnormalised -- it must resolve to the documented default of
+        10, not to the literal `0.5` (which would break the portable
+        fallback's pure-integer arithmetic downstream).
 
-        Reuses the restricted-PATH setup from
-        test_ac4_portable_fallback_is_bounded_when_no_timeout_binary_exists
-        above (same four precondition assertions) so the FALLBACK branch
-        -- where this bug lives -- is the one under test, not the
-        `timeout`-present branch where GNU `timeout` happens to accept
-        `0.5` today."""
+        Observes the RESOLVED budget directly via the
+        ``ATHENAEUM_TEST_OP_BUDGET_TRACE_FILE`` test seam
+        (`_athenaeum_op_read` writes it BEFORE `op` is even spawned)
+        instead of waiting out the fallback's full ~20s (2 credentials x
+        the real 10s default) kill cycle to infer the same fact from
+        elapsed time. One observed call is a complete proof of the
+        normalisation logic -- the second credential's call runs the
+        identical bash code with the identical inputs. The full kill
+        cycle (leak prevention, actually-killed-not-orphaned) is pinned
+        separately and still cheaply by
+        ``test_ac4_non_integer_timeout_falls_back_and_cleans_up`` below, at
+        an injected small default rather than the real 10s (athenaeum#2233).
+        """
         _require("bash")
         _require_hook_python(hook_env, "athenaeum.search")
 
@@ -1789,28 +1830,121 @@ class TestOpOptionalGate2193:
         # Issue athenaeum#2204: the fetch moved into the detached background
         # job -- suppress the real fork and drive it explicitly below.
         env["ATHENAEUM_TEST_NO_AUTOFORK"] = "1"
+        trace_file = tmp_path / "op-budget-trace"
+        env["ATHENAEUM_TEST_OP_BUDGET_TRACE_FILE"] = str(trace_file)
 
-        # Same restricted-PATH construction as the sibling AC4 portable-
-        # fallback test: a symlink farm with everything the hook needs
-        # EXCEPT `timeout`/`gtimeout`.
-        no_timeout_bin = tmp_path / "no-timeout-bin"
-        no_timeout_bin.mkdir()
-        for directory in (d for d in env["PATH"].split(os.pathsep) if d):
+        no_timeout_bin = _restricted_path_without_timeout(tmp_path, env["PATH"])
+        sleeping_op_dir = _write_sleeping_op(tmp_path)
+        env["PATH"] = f"{sleeping_op_dir}{os.pathsep}{no_timeout_bin}"
+
+        # Precondition: this PATH can genuinely never reach `timeout` or
+        # `gtimeout`, still has `bash`, and resolves `op` to the sleeping
+        # stub above -- so the FALLBACK branch (where the pre-fix bug
+        # lived) is the one under test, not the `timeout`-present branch
+        # where GNU `timeout` happens to accept `0.5` today.
+        assert shutil.which("timeout", path=env["PATH"]) is None
+        assert shutil.which("gtimeout", path=env["PATH"]) is None
+        assert shutil.which("bash", path=env["PATH"]) is not None
+        resolved_op = shutil.which("op", path=env["PATH"])
+        assert resolved_op == str(sleeping_op_dir / "op"), (
+            "test setup bug: `op` did not resolve to this test's own "
+            f"sleeping stub at {sleeping_op_dir / 'op'} (got {resolved_op!r})"
+        )
+
+        foreground = subprocess.run(
+            ["bash", str(SESSION_START)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert foreground.returncode == 0, f"stderr: {foreground.stderr}"
+
+        proc = subprocess.Popen(
+            ["bash", str(SESSION_START), "--run-background-build"],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        try:
+            deadline = time.monotonic() + 10
+            resolved = ""
+            while time.monotonic() < deadline:
+                if trace_file.exists():
+                    content = trace_file.read_text().strip()
+                    if content:
+                        resolved = content.splitlines()[0]
+                        break
+                time.sleep(0.02)
+            assert resolved, (
+                "ATHENAEUM_TEST_OP_BUDGET_TRACE_FILE never received a line "
+                "within 10s -- _athenaeum_op_read did not run, or the trace "
+                "seam regressed"
+            )
+            assert resolved == "10", (
+                f"malformed ATHENAEUM_OP_TIMEOUT_SECONDS=0.5 resolved to "
+                f"{resolved!r}, expected the documented default '10'"
+            )
+        finally:
+            # Kill the whole process group -- the bash script backgrounds
+            # the sleeping `op` stub with a bare `&`, which would otherwise
+            # survive as an orphan for its full 30s sleep.
             try:
-                names = os.listdir(directory)
-            except (OSError, PermissionError):
-                continue
-            for name in names:
-                if name in ("timeout", "gtimeout"):
-                    continue
-                link = no_timeout_bin / name
-                if link.exists() or link.is_symlink():
-                    continue  # first-on-PATH wins, same as real PATH lookup
-                try:
-                    link.symlink_to(os.path.join(directory, name))
-                except (OSError, PermissionError):
-                    continue
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.wait(timeout=5)
 
+    def test_ac4_non_integer_timeout_falls_back_and_cleans_up(
+        self, hook_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """Seer finding on athenaeum#2193 (review of athenaeum#2194): pre-fix, the
+        portable fallback's pure-integer arithmetic (`_op_budget * 10`)
+        broke AFTER `op` was already backgrounded -- either the subshell
+        aborted and orphaned it (leaking its mode-600 temp file, since the
+        `rm -f` never ran), or `_op_budget_ds` ended up empty and the
+        bounded-wait loop's `-ge` test errored every iteration, read as
+        false, and never timed out. This pins that the fallback's kill
+        cycle actually runs to completion (no leaked temp file, `op`
+        actually killed not merely orphaned, cached key survives) when the
+        configured budget is malformed.
+
+        Uses the ``ATHENAEUM_TEST_OP_DEFAULT_TIMEOUT_SECONDS`` test seam to
+        inject a small (1s) default in place of the real 10s one -- this
+        test's claim is "the fallback's cleanup machinery works when the
+        budget comes from the fallback default", which holds at any
+        default value; it does not need the real default's own value to be
+        10, which ``test_ac4_non_integer_timeout_normalises_to_the_documented_default``
+        above pins directly and far more cheaply (athenaeum#2233). Reuses the
+        restricted-PATH setup from
+        test_ac4_portable_fallback_is_bounded_when_no_timeout_binary_exists
+        above (same four precondition assertions) so the FALLBACK branch
+        is the one under test, not the `timeout`-present branch."""
+        _require("bash")
+        _require_hook_python(hook_env, "athenaeum.search")
+
+        cache_dir = tmp_path / ".cache" / "athenaeum"
+        cache_dir.mkdir(parents=True)
+        (cache_dir / "config.env").write_text(
+            "AUTO_RECALL=true\n"
+            "SEARCH_BACKEND=fts5\n"
+            "ANTHROPIC_API_KEY=synthetic-cached-key-survives-bad-timeout\n"
+        )
+
+        env = dict(hook_env)
+        env["ATHENAEUM_OP_TIMEOUT_SECONDS"] = "0.5"
+        env["OP_SERVICE_ACCOUNT_TOKEN"] = "synthetic-service-account-token"
+        env["ATHENAEUM_OP_REFRESH"] = "1"
+        # Issue athenaeum#2204: the fetch moved into the detached background
+        # job -- suppress the real fork and drive it explicitly below.
+        env["ATHENAEUM_TEST_NO_AUTOFORK"] = "1"
+        injected_default = 1
+        env["ATHENAEUM_TEST_OP_DEFAULT_TIMEOUT_SECONDS"] = str(injected_default)
+
+        no_timeout_bin = _restricted_path_without_timeout(tmp_path, env["PATH"])
         marker = tmp_path / "op-completed-marker"
         sleeping_op_dir = _write_sleeping_op(tmp_path, marker=marker)
         env["PATH"] = f"{sleeping_op_dir}{os.pathsep}{no_timeout_bin}"
@@ -1836,13 +1970,11 @@ class TestOpOptionalGate2193:
         )
         assert foreground.returncode == 0, f"stderr: {foreground.stderr}"
 
-        # A malformed budget falls back to the documented default of 10,
-        # not to the literal `0.5` -- so the floor here is 2 credentials
-        # (ANTHROPIC_API_KEY, JEV_API_KEY; ATHENAEUM_OP_REFRESH=1 means
-        # both attempt a fetch) x the DEFAULT budget, not x0.5s. Same
-        # generous 20s margin as the sibling AC4 tests, sized against 2x
-        # the default budget.
-        default_budget = 10
+        # A malformed budget falls back to the (here, injected) default --
+        # so the floor is 2 credentials (ANTHROPIC_API_KEY, JEV_API_KEY;
+        # ATHENAEUM_OP_REFRESH=1 means both attempt a fetch) x the injected
+        # default, not x0.5s. Same generous 20s margin as the sibling AC4
+        # tests, sized against 2x the injected default rather than 2x10.
         margin_seconds = 20
         started = time.monotonic()
         result = subprocess.run(
@@ -1850,15 +1982,15 @@ class TestOpOptionalGate2193:
             env=env,
             capture_output=True,
             text=True,
-            timeout=(2 * default_budget) + margin_seconds + 30,
+            timeout=(2 * injected_default) + margin_seconds + 30,
         )
         elapsed = time.monotonic() - started
 
         assert result.returncode == 0, f"stderr: {result.stderr}"
-        assert elapsed < (2 * default_budget) + margin_seconds, (
+        assert elapsed < (2 * injected_default) + margin_seconds, (
             f"background build took {elapsed:.1f}s, expected well under "
-            f"{(2 * default_budget) + margin_seconds}s (2 credentials x "
-            f"{default_budget}s default budget + margin)"
+            f"{(2 * injected_default) + margin_seconds}s (2 credentials x "
+            f"{injected_default}s injected default budget + margin)"
         )
 
         body = (cache_dir / "config.env").read_text()
