@@ -930,11 +930,12 @@ _VECTOR_XFAIL: frozenset[tuple[str, str]] = frozenset(
         # cadence. `core` scale has no distractor/ballast tier -- every
         # core page competes directly -- so this reads as the 27 added
         # pages diluting the vector index generally, not one page crowding
-        # out `project-portal-refresh` specifically. Tracking issue: TBD --
-        # file a dedicated follow-up issue distinct from athenaeum#1770's
-        # umbrella and substitute it here; citing athenaeum#2303 (this
-        # corpus-growth PR) in the meantime since that is the real, already
-        # -filed cause.
+        # out `project-portal-refresh` specifically. Cited against
+        # athenaeum#2303, which is the real and already-filed cause; a
+        # dedicated follow-up distinct from athenaeum#1770's umbrella is
+        # reported through the lane-filed-findings channel rather than
+        # opened from inside a build lane, so substitute its number here
+        # once it exists.
         ("core", "portal_design_reviewer"),
     }
 )
