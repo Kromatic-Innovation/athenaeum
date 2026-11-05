@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
-"""``athenaeum push-metrics
-{baseline,coverage-audit,liveness,record,tail,follow-through}``
-— v6 MVP (a), issue athenaeum#711; ``liveness`` added by issue
-athenaeum#1422, ``record`` by issue athenaeum#1478, ``tail`` by issue
-athenaeum#1479, ``follow-through`` by issue athenaeum#2301.
+"""``athenaeum push-metrics {baseline,coverage-audit,liveness,record,tail,
+follow-through,sample-for-labelling,score-used}`` — v6 MVP (a), issue
+athenaeum#711; ``liveness`` added by issue athenaeum#1422, ``record`` by
+issue athenaeum#1478, ``tail`` by issue athenaeum#1479, ``follow-through``
+by issue athenaeum#2301, and ``sample-for-labelling``/``score-used`` by
+issue athenaeum#2302.
 
-Six subcommands over :mod:`athenaeum.push_metrics` /
-:mod:`athenaeum.follow_through`:
+Eight subcommands: the first five over :mod:`athenaeum.push_metrics`,
+``follow-through`` over :mod:`athenaeum.follow_through`, and the last two
+over :mod:`athenaeum.push_used_scoring`:
 
 - ``baseline``       compute precision + coverage over a stated window and
                        write/append a dated snapshot into
@@ -66,12 +68,31 @@ Six subcommands over :mod:`athenaeum.push_metrics` /
                        calls. Thin argv parsing + output shaping over
                        :func:`athenaeum.follow_through.build_follow_through_report`
                        — all the ledger/transcript join logic lives there.
+- ``sample-for-labelling``  stratified sample of pushed pages, by session-
+                       length bucket and population, written as a
+                       labelling-ready JSONL worksheet (issue athenaeum#2302,
+                       part of the athenaeum#2295 epic — this is TOOLING
+                       only; it samples and writes empty label slots, it
+                       never fills them in). Thin argv parsing over
+                       :func:`athenaeum.push_used_scoring.stratified_sample_pushed_pages`.
+                       Default ``--output`` is under the cache dir, never
+                       inside this repo's working tree.
+- ``score-used``       score the `used` heuristic
+                       (:func:`athenaeum.push_metrics.determine_references`)
+                       against a human-labelled file and report precision,
+                       recall, and the relevant/irrelevant breakdown of
+                       unused pushes, all with Wilson confidence intervals
+                       (issue athenaeum#2302). ``--labels`` is REQUIRED —
+                       label files live outside this repo and this
+                       subcommand has no default for one. Thin argv parsing
+                       over :func:`athenaeum.push_used_scoring.score_against_heuristic`.
 
 Factoring rule (L5 presentation): a self-contained CLI subcommand lives in
 its own ``_cmd_<name>.py`` and registers via ``add_<name>_subparser`` —
 mirrors :mod:`athenaeum._cmd_calibration`'s shape. ``record`` (issue
-athenaeum#1478), ``tail`` (issue athenaeum#1479), and ``follow-through``
-(issue athenaeum#2301) are all added here rather than a new module because
+athenaeum#1478), ``tail`` (issue athenaeum#1479), ``follow-through`` (issue
+athenaeum#2301), and ``sample-for-labelling``/``score-used`` (issue
+athenaeum#2302) are all added here rather than a new module because
 ``push-metrics`` already has this one file — keeps ``push-metrics``'s
 subcommands cohesive and localised in one place.
 """
@@ -87,22 +108,25 @@ from typing import Any
 from athenaeum._cli_shared import _resolve_wiki_root
 from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT
 
+_SUBCOMMANDS = (
+    "baseline",
+    "coverage-audit",
+    "liveness",
+    "record",
+    "tail",
+    "follow-through",
+    "sample-for-labelling",
+    "score-used",
+)
+
 
 def cmd_push_metrics(args: argparse.Namespace) -> int:
-    """Dispatch ``athenaeum push-metrics
-    {baseline,coverage-audit,liveness,record,tail,follow-through}``."""
+    """Dispatch ``athenaeum push-metrics {baseline,coverage-audit,liveness,
+    record,tail,follow-through,sample-for-labelling,score-used}``."""
     sub = getattr(args, "push_metrics_target", None)
-    if sub not in (
-        "baseline",
-        "coverage-audit",
-        "liveness",
-        "record",
-        "tail",
-        "follow-through",
-    ):
+    if sub not in _SUBCOMMANDS:
         print(
-            "usage: athenaeum push-metrics "
-            "{baseline,coverage-audit,liveness,record,tail,follow-through} [...]",
+            f"usage: athenaeum push-metrics {{{','.join(_SUBCOMMANDS)}}} [...]",
             file=sys.stderr,
         )
         return 2
@@ -115,6 +139,12 @@ def cmd_push_metrics(args: argparse.Namespace) -> int:
 
     if sub == "follow-through":
         return _cmd_push_metrics_follow_through(args)
+
+    if sub == "sample-for-labelling":
+        return _cmd_push_metrics_sample_for_labelling(args)
+
+    if sub == "score-used":
+        return _cmd_push_metrics_score_used(args)
 
     from athenaeum import push_metrics
 
@@ -404,6 +434,117 @@ def _cmd_push_metrics_tail(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_push_metrics_sample_for_labelling(args: argparse.Namespace) -> int:
+    """``athenaeum push-metrics sample-for-labelling`` (issue athenaeum#2302).
+
+    Thin argv parsing over
+    :func:`athenaeum.push_used_scoring.stratified_sample_pushed_pages` — all
+    the stratification logic lives there. Writes the sampled pages as a
+    labelling-ready JSONL worksheet; never fills in ``relevant``/
+    ``changed_work`` itself (that is a separate, human workflow — issue
+    athenaeum#2311).
+    """
+    from athenaeum import push_used_scoring
+
+    try:
+        pages = push_used_scoring.stratified_sample_pushed_pages(
+            cache_dir=args.cache_dir,
+            n_per_stratum=args.n_per_stratum,
+            wiki_root=_resolve_wiki_root(args),
+            short_max=args.short_max,
+            medium_max=args.medium_max,
+            seed=args.seed,
+            exclude_sessions=getattr(args, "exclude_session", None),
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    output_path = (
+        args.output.expanduser().resolve()
+        if args.output is not None
+        else push_used_scoring.default_sample_output_path(args.cache_dir)
+    )
+    push_used_scoring.write_sample_worksheet(pages, output_path=output_path)
+
+    if args.json:
+        sys.stdout.write(
+            json.dumps({"sampled_count": len(pages), "output_path": str(output_path)}) + "\n"
+        )
+    else:
+        print(f"sampled {len(pages)} pushed page(s) -> {output_path}")
+    return 0
+
+
+def _cmd_push_metrics_score_used(args: argparse.Namespace) -> int:
+    """``athenaeum push-metrics score-used`` (issue athenaeum#2302).
+
+    Thin argv parsing over
+    :func:`athenaeum.push_used_scoring.load_labels` and
+    :func:`athenaeum.push_used_scoring.score_against_heuristic` — all the
+    scoring logic lives there. ``--labels`` is REQUIRED: label files live
+    outside this repo, at a path this subcommand never defaults.
+    """
+    from athenaeum import push_used_scoring
+
+    # Seer finding on athenaeum#2302 PR review: a bad --labels path (the
+    # single most likely user error, since label files live outside this
+    # repo at a caller-supplied path) raised OSError uncaught; an
+    # unsupported --confidence raised ValueError uncaught from the scoring
+    # call below. Both are now named CLI errors, matching this file's own
+    # `baseline`/`coverage-audit` convention (`except ValueError as exc:
+    # print(f"error: {exc}", ...); return 1`) rather than a traceback.
+    try:
+        labels = push_used_scoring.load_labels(args.labels)
+    except (ValueError, OSError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if not labels:
+        print("error: --labels file contains zero fully-labelled rows", file=sys.stderr)
+        return 1
+
+    try:
+        report = push_used_scoring.score_against_heuristic(
+            labels,
+            cache_dir=args.cache_dir,
+            projects_root=args.projects_root,
+            wiki_root=_resolve_wiki_root(args),
+            confidence=args.confidence,
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    output_path = (
+        args.output.expanduser().resolve()
+        if args.output is not None
+        else push_used_scoring.default_score_output_path(args.cache_dir)
+    )
+    push_used_scoring.write_score_report(report, output_path=output_path)
+
+    if args.json:
+        sys.stdout.write(json.dumps(report.to_dict()) + "\n")
+    else:
+        precision = report.precision
+        recall = report.recall
+        breakdown = report.unused_breakdown
+        print(
+            f"sample_size: {report.sample_size}\n"
+            f"confusion: tp={report.confusion.tp} fp={report.confusion.fp} "
+            f"fn={report.confusion.fn} tn={report.confusion.tn}\n"
+            f"precision: {precision.rate} "
+            f"(n={precision.n}, ci=[{precision.ci_low}, {precision.ci_high}])\n"
+            f"recall: {recall.rate} (n={recall.n}, ci=[{recall.ci_low}, {recall.ci_high}])\n"
+            f"unused pushes: {breakdown.unused_total}\n"
+            f"  relevant but not opened: {breakdown.relevant_but_not_opened.rate} "
+            f"(n={breakdown.relevant_but_not_opened.n})\n"
+            f"  irrelevant: {breakdown.irrelevant.rate} (n={breakdown.irrelevant.n})\n"
+            f"undetermined: {report.undetermined_labels} label(s) across "
+            f"{report.undetermined_sessions} session(s) (excluded from the "
+            f"figures above, not folded into a heuristic negative)\n"
+            f"report written to: {output_path}"
+        )
+    return 0
+
+
 def _print_follow_through_report(report: Any) -> None:
     """Plain-text rendering of :meth:`athenaeum.follow_through.FollowThroughReport.to_dict`
     — ``--json`` is the documented, stable machine-readable shape."""
@@ -457,9 +598,10 @@ def add_push_metrics_subparser(subparsers: argparse._SubParsersAction) -> None:
             "Push-precision + coverage baseline: compute/record the "
             "precision snapshot, sample sessions for a human-reviewed "
             "coverage-audit worksheet (issue athenaeum#711), record a "
-            "single hook-path push (issue athenaeum#1478), and stream the "
+            "single hook-path push (issue athenaeum#1478), stream the "
             "documented NDJSON tail contract over the ledgers (issue "
-            "athenaeum#1479)."
+            "athenaeum#1479), and sample/score the `used` heuristic "
+            "against human labels (issue athenaeum#2302)."
         ),
     )
     p_parser.set_defaults(func=cmd_push_metrics)
@@ -664,6 +806,99 @@ def add_push_metrics_subparser(subparsers: argparse._SubParsersAction) -> None:
         "(7d/24h/30m/2w) or absolute ISO-8601. Default: the whole ledger.",
     )
 
+    sample_p = p_sub.add_parser(
+        "sample-for-labelling",
+        help="Stratified sample of pushed pages, by session-length bucket "
+        "and population, written as a labelling-ready JSONL worksheet "
+        "(athenaeum#2302). Tooling only — never fills in the relevant/"
+        "changed_work judgments itself.",
+    )
+    _add_common(sample_p)
+    sample_p.add_argument(
+        "--n-per-stratum",
+        type=int,
+        default=10,
+        help="Max pushed pages to sample from EACH (length, population) "
+        "stratum (default: 10).",
+    )
+    sample_p.add_argument(
+        "--short-max",
+        type=int,
+        default=3,
+        help="Push-record count at/below which a session is bucketed "
+        "'short' (default: 3).",
+    )
+    sample_p.add_argument(
+        "--medium-max",
+        type=int,
+        default=10,
+        help="Push-record count at/below which a session is bucketed "
+        "'medium' (above 'short'); anything higher is 'long' (default: 10).",
+    )
+    sample_p.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Optional deterministic sample seed (test/repro seam).",
+    )
+    sample_p.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="Worksheet output file. Defaults under the cache dir "
+        "(athenaeum.push_used_scoring.default_sample_output_path) — "
+        "never inside this repo's working tree.",
+    )
+    sample_p.add_argument(
+        "--exclude-session",
+        action="append",
+        default=None,
+        metavar="SESSION_ID",
+        help="Exclude a KNOWN-synthetic session id from the sampling pool "
+        "(same semantics as `coverage-audit --exclude-session`). Repeatable.",
+    )
+
+    score_p = p_sub.add_parser(
+        "score-used",
+        help="Score the `used` heuristic (push_metrics.determine_references) "
+        "against a human-labelled file: precision, recall, and the "
+        "relevant/irrelevant breakdown of unused pushes, with Wilson "
+        "confidence intervals (athenaeum#2302).",
+    )
+    _add_common(score_p)
+    score_p.add_argument(
+        "--labels",
+        type=Path,
+        required=True,
+        metavar="LABELS_PATH",
+        help="REQUIRED. Path to a fully-labelled JSONL file (one "
+        "{session_id, push_id, relevant, changed_work} object per line). "
+        "Label files live OUTSIDE this repo — there is no default.",
+    )
+    score_p.add_argument(
+        "--projects-root",
+        type=Path,
+        default=None,
+        help="Claude Code `~/.claude/projects` root to read transcripts "
+        "from when calling determine_references (default: "
+        "athenaeum.transcript_verify.default_projects_root — the real "
+        "live root; override for a test/repro run against a scratch tree).",
+    )
+    score_p.add_argument(
+        "--confidence",
+        type=float,
+        default=0.95,
+        help="Confidence level for the Wilson score interval: one of "
+        "0.80, 0.90, 0.95, 0.98, 0.99 (default: 0.95).",
+    )
+    score_p.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="Report output file. Defaults under the cache dir "
+        "(athenaeum.push_used_scoring.default_score_output_path) — never "
+        "inside this repo's working tree.",
+    )
     follow_through_p = p_sub.add_parser(
         "follow-through",
         help="Per-pushed-page classification (issue athenaeum#2301): joins "

@@ -186,6 +186,9 @@ MODULE_LAYER: dict[str, int] = {
     # librarian can both call the same summary.
     "witness_readout": 3,
     # L4 -- domain/pipeline modules.
+    # athenaeum#2302: "Layering: L4 domain/pipeline module" (own docstring) --
+    # imports push_metrics (L3), config (L2), store (L1); never imported back.
+    "push_used_scoring": 4,
     "answers": 4,
     "audit": 4,
     "audit_on_touch": 4,
