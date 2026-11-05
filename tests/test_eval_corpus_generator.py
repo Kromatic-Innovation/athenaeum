@@ -1833,7 +1833,23 @@ def test_xlarge_scale_is_pinned() -> None:
     # name/alias/tags are weighted, so neither page ranked in
     # `test_recall_covers_grep.py`'s top 5 at all -- same fix Keelbridge and
     # Driftgate's own page names already apply).
-    assert corpus.fingerprint() == "72f8e70a26792709"
+    # athenaeum#2303: 13-unprompted-push.yaml grew the `unprompted_push`
+    # class from three task-context/decision/decoy triples to twelve (nine
+    # new triples, 27 new core pages) and `probes.yaml` gained nine new
+    # `unprompted_push` probes -- new pages in `core/*.yaml` always shift
+    # `Corpus.fingerprint()` since it hashes every page's rendered markdown,
+    # same class of expected change as every entry in this comment above.
+    # GENERATOR_VERSION did NOT move: this is a pure core-page/probe
+    # addition with no probes.yaml-only grading field change of the kind
+    # athenaeum#1831/#1843 bumped the version for, matching the
+    # no-version-bump precedent athenaeum#1778/#1779/#1780/#1781/#1839 each
+    # already set for the same shape of change. `SCALES["small"]`'s
+    # `total_pages` floor also moved 300 -> 400 in the same change (core +
+    # distractor pages at `small` now total 306, leaving no ballast
+    # headroom at the old floor) -- re-derived by running
+    # `build_corpus(scale="xlarge").fingerprint()` in two separate
+    # processes on this branch, both yielding the literal below.
+    assert corpus.fingerprint() == "5f62e562fb376929"
 
 
 def test_long_tier_tag_is_outside_the_recall_snippet() -> None:
