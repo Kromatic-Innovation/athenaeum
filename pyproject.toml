@@ -130,7 +130,7 @@ dev = [
     # on ci.yml's `Run tests` step). Deliberately NOT in `addopts`: a plain
     # local `pytest` stays serial unless the contributor passes `-n`.
     "pytest-xdist>=3.5,<4",
-    "ruff==0.16.9",
+    "ruff==0.17.3",
     # athenaeum#1954: kept identical to the `mcp` extra above -- see that
     # block for why `mcp` stays declared and why its bound is a 2.0 floor.
     "fastmcp>=2.0.0,<5.0",
@@ -157,7 +157,7 @@ types = [
     # pinned like ruff so results are deterministic run-to-run. mypy IS now a
     # required check — see the ci.yml `types` job (wired into `CI Required`)
     # and [tool.mypy]. The backlog athenaeum#550 sized has been cleared.
-    "mypy==2.3.1",
+    "mypy==2.4.1",
 ]
 bench = [
     # Optional: pytest-benchmark is only needed to run tests/benchmarks/
