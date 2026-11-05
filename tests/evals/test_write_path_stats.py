@@ -578,10 +578,19 @@ def test_corpus_fingerprint_is_unchanged_and_generator_version_does_not_bump() -
     fix described in
     `tests/test_eval_corpus_generator.py::test_xlarge_scale_is_pinned`'s own
     provenance comment.
+
+    Re-pinned under athenaeum#2303: `13-unprompted-push.yaml` grew the
+    `unprompted_push` class from three task-context/decision/decoy triples
+    to twelve (nine new, 27 new core pages), shifting `Corpus.fingerprint()`
+    the same way every prior core-page addition has. `GENERATOR_VERSION`
+    did not move (still 4) -- same no-version-bump reasoning as this pin's
+    provenance comment in `tests/test_eval_corpus_generator.py`. Re-derived
+    by running `build_corpus(scale="core", seed=20260908).fingerprint()` in
+    two separate processes on this branch, both yielding the literal below.
     """
     corpus = build_corpus(scale="core", seed=20260908)
 
-    assert corpus.fingerprint() == "edcd8dd3286d0135"
+    assert corpus.fingerprint() == "3c5ea876688b089e"
     assert GENERATOR_VERSION == 4
 
 

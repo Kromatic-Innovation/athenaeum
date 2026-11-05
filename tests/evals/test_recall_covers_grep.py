@@ -912,6 +912,55 @@ _VECTOR_XFAIL: frozenset[tuple[str, str]] = frozenset(
         # produced a different ranking for this cell. Measured via
         # `pytest -rA`, not inferred.
         ("medium", "regional_office_onboarding_lesson"),
+        # Displaced by the athenaeum#2303 corpus growth (CI run 42112082139,
+        # PR athenaeum#2345): both of this multi_hop probe's expected pages
+        # (`project-portal-refresh`, `person-hana-lindqvist`) dropped out of
+        # vector recall's top 5 at `core` scale after 13-unprompted-push.yaml
+        # grew from 9 to 36 core pages. Ruled out a lexical collision from
+        # one of the 27 new pages before adding this entry, per this
+        # module's own convention that a colliding new page gets REWORDED,
+        # not xfailed: grepped 13-unprompted-push.yaml for this probe's
+        # grep/distractor terms (`client`, `facing`, `portal`, `project`,
+        # `launch`) and its query's design/reviewer vocabulary
+        # (`design`, `reviewer`, `surface`) -- zero hits. The only
+        # incidental overlaps are generic English words ("client", "ship",
+        # "review") used in unrelated prose on unrelated pages (cache
+        # tenant isolation, a rate-limit decision, a TLS-pin decision), none
+        # of which are thematically close to a client-facing design-review
+        # cadence. `core` scale has no distractor/ballast tier -- every
+        # core page competes directly -- so this reads as the 27 added
+        # pages diluting the vector index generally, not one page crowding
+        # out `project-portal-refresh` specifically. Cited against
+        # athenaeum#2303, which is the real and already-filed cause; a
+        # dedicated follow-up distinct from athenaeum#1770's umbrella is
+        # reported through the lane-filed-findings channel rather than
+        # opened from inside a build lane, so substitute its number here
+        # once it exists.
+        ("core", "portal_design_reviewer"),
+    }
+)
+
+#: Non-strict subset of :data:`_VECTOR_XFAIL` (issue athenaeum#2303
+#: follow-up): entries measured as an XPASS after the athenaeum#2303
+#: corpus growth, but close enough to the top-5 boundary that a future
+#: index-build nondeterminism (see `VectorBackend._HNSW_SEARCH_EF`'s own
+#: exact-search fix above -- exact search removed the NONDETERMINISTIC
+#: case, not variance near a cutoff) could flip the measurement again
+#: without warning. A `strict=True` xfail that flips run to run is worse
+#: than either terminal state, so these stay marked non-strict until a
+#: repeat measurement confirms the pass is stable, rather than removed
+#: from `_VECTOR_XFAIL` outright.
+_VECTOR_XFAIL_NONSTRICT: frozenset[tuple[str, str]] = frozenset(
+    {
+        # CI run 42112082139 (PR athenaeum#2345): athenaeum#1770's `medium`/vector
+        # miss for this probe no longer reproduces as a hard failure after
+        # the athenaeum#2303 corpus growth -- measured
+        # recall_ranks={"notice-invoicing-api-batch-fetch": 4}, rank 4 of
+        # the 5-wide top-k window. Within the window, but one slot from
+        # the edge, so this is downgraded to non-strict rather than
+        # removed outright; promote to a clean removal once a second,
+        # independent measurement confirms the rank holds.
+        ("medium", "invoicing_api_pagination_workaround"),
     }
 )
 
@@ -974,9 +1023,10 @@ def test_recall_covers_grep_reachable_expected_pages_vector(
     fts5, so both are worth pinning independently."""
     fx = scale_fixture
     if (fx.corpus.scale, probe_id) in _VECTOR_XFAIL:
+        cell = (fx.corpus.scale, probe_id)
         request.node.add_marker(
             pytest.mark.xfail(
-                strict=True,
+                strict=cell not in _VECTOR_XFAIL_NONSTRICT,
                 reason=(
                     f"athenaeum#1770: measured retrieval-side miss "
                     f"(vector, {fx.corpus.scale}, {probe_id})"
