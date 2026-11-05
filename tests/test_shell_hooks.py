@@ -1319,7 +1319,19 @@ class TestSessionStartBudgetAndBackgroundBuild:
                 f"({elapsed2:.1f}s)"
             )
         finally:
-            holder.wait(timeout=30)
+            # Both assertions above already observed the lock being held
+            # (that is the whole point of the 12s artificial hold) -- there
+            # is nothing left to learn from letting `holder` run out its
+            # remaining sleep naturally. `rebuild-index.sh`'s `trap ... EXIT`
+            # releases the lock on SIGTERM same as a clean exit, so
+            # terminating early is exactly as clean as waiting it out, just
+            # without the remaining ~10s of dead time (athenaeum#2233).
+            holder.terminate()
+            try:
+                holder.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                holder.kill()
+                holder.wait(timeout=5)
 
 
 class TestHookDegradationNotice:
