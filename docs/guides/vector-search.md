@@ -10,9 +10,8 @@ other has.
 
 ## I want semantic recall in addition to keyword search
 
-```bash
-pip install 'athenaeum[vector]'
-```
+Install the vector extra — see [Install](install.md#i-want-semantic-vector-recall-not-just-keyword-search)
+for the command.
 
 Enable it in `athenaeum.yaml`:
 

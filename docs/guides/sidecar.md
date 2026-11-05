@@ -12,21 +12,39 @@ config) own.
 
 ## I want auto-recall and auto-remember on every turn
 
-1. Copy the example hooks from `examples/claude-code/` to your scripts
-   directory:
+1. Locate the example hooks, then copy them to your scripts directory.
+   A `pip`/`uv tool` install has no `examples/` directory in your working
+   directory — the kit ships *inside* the installed package, at
+   `athenaeum/examples/claude-code/` relative to wherever `athenaeum` was
+   installed. Don't `dirname` the `athenaeum` command's own path to find
+   its interpreter — `uv tool install` (the install this project
+   documents first) and `pipx` both symlink *only* the entry point into
+   `~/.local/bin`, so that directory never contains a `python3` of its
+   own. Read the interpreter straight off the entry point's shebang line
+   instead; opening it follows the symlink automatically, and it names
+   the real interpreter regardless of how many symlinks sit in between:
 
    ```bash
+   PY="$(head -1 "$(command -v athenaeum)")"; PY="${PY#\#!}"
+   EXAMPLES="$("$PY" -c \
+     "import importlib.resources as r; print(r.files('athenaeum') / 'examples' / 'claude-code')")"
+
    mkdir -p ~/.claude/hooks/athenaeum
-   cp examples/claude-code/*.sh ~/.claude/hooks/athenaeum/
+   cp "$EXAMPLES"/*.sh ~/.claude/hooks/athenaeum/
    chmod +x ~/.claude/hooks/athenaeum/*.sh
    ```
 
-2. Merge `examples/claude-code/settings-snippet.json` into
-   `~/.claude/settings.json`, replacing `/path/to/` with the directory
-   from step 1.
+   From a source checkout installed with `pip install -e .`, this
+   resolves under `src/athenaeum/` instead, which doesn't exist — an
+   editable install skips packaging entirely, so the force-included
+   `examples/` never lands there. Use the repo's own
+   `examples/claude-code/` directly in that case.
+
+2. Merge `$EXAMPLES/settings-snippet.json` into `~/.claude/settings.json`,
+   replacing `/path/to/` with the directory from step 1.
 
 3. Add CLAUDE.md instructions for proactive memory — see
-   `examples/claude-code/CLAUDE.md.example`.
+   `$EXAMPLES/CLAUDE.md.example`.
 
 4. Restart Claude Code. The session-start message should say
    `[Knowledge] FTS5 index: N wiki pages`.
@@ -64,11 +82,11 @@ for a venv whose `bin/` directory is not on the `PATH` Claude Code's hook
 subprocess inherits. Naming the console script directly in
 `settings.json` skips that extra process hop.
 
-Installing the Python package puts it on the `PATH` as a console script
-(no extra copy/chmod step, unlike the shell hooks above):
+Installing the Python package (see [Install](install.md)) puts it on the
+`PATH` as a console script (no extra copy/chmod step, unlike the shell
+hooks above) — or, from a source checkout: `pip install -e .`.
 
 ```bash
-pip install athenaeum   # or: pip install -e . from a source checkout
 which athenaeum-claude-hook
 ```
 

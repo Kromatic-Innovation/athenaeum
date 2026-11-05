@@ -51,20 +51,10 @@ memory tool, RAG, and the existing agent-memory libraries, is in
 
 ## Quick start
 
-**Requires Python 3.13+.** The fastest way to get that, regardless of what
-your system's default Python is, is [uv](https://docs.astral.sh/uv/getting-started/installation/):
-
-```bash
-uv tool install --python 3.13 'athenaeum[mcp]'
-athenaeum --version                                    # compare with the PyPI badge above
-```
-
-`uv tool install` puts the `athenaeum` entry point in `~/.local/bin`. It does
-**not** add that directory to your `PATH` for you — it only warns if it's
-missing. If you hit `command not found`, run `uv tool update-shell` (or add
-`~/.local/bin` to your shell profile yourself) once; after that, every
-command below — including the `claude mcp add` line — works from a plain
-shell with no virtual environment active.
+**Requires Python 3.13+.** See [Install](docs/guides/install.md) for the
+uv/pip commands, the `PATH` setup `uv tool install` needs, and the
+wrong-interpreter warning to check against if `athenaeum --version` ever
+looks stale.
 
 ```bash
 # Create a knowledge directory (default: ~/knowledge)
@@ -73,32 +63,6 @@ athenaeum init
 # Wire it into Claude Code — it auto-starts with every session
 claude mcp add --scope user athenaeum -- athenaeum serve --path ~/knowledge
 ```
-
-### Installing with pip instead
-
-**Check what you actually got.** `pip` will not fail on an older interpreter.
-Because releases before 0.17.1 declared `>=3.11`, pip silently resolves
-*backwards* past a dozen releases and installs a year-old version instead of
-erroring. Nothing in the output tells you this happened, and the CLI will
-appear to work.
-
-```bash
-python3.13 -m venv .venv && source .venv/bin/activate  # 3.13+, explicitly
-pip install 'athenaeum[mcp]'
-athenaeum --version                                    # compare with the PyPI badge above
-```
-
-Older releases are **not** yanked (see the CHANGELOG for why), so they stay
-installable. Compare what `--version` prints against the live
-[PyPI version badge](https://pypi.org/project/athenaeum/) at the top of this
-README rather than a number written out here: the PATCH digit moves on every
-merge to `develop` (see
-[Versioning and releases](CONTRIBUTING.md#versioning-and-releases)), so any
-floor pinned in this paragraph by hand would be stale within days. If
-`--version` reports anything below **0.17.1** — the first release to raise the
-declared floor to 3.13, so anything older is a version pip could only have
-chosen for an older interpreter — you are on the wrong interpreter, not looking
-at a broken install.
 
 Want to confirm it works before wiring anything up or spending API budget?
 
