@@ -16,18 +16,29 @@ config) own.
    A `pip`/`uv tool` install has no `examples/` directory in your working
    directory — the kit ships *inside* the installed package, at
    `athenaeum/examples/claude-code/` relative to wherever `athenaeum` was
-   installed. Ask the same interpreter that installed it where that landed
-   (this also works from a source checkout, where it resolves to the
-   repo's own `examples/claude-code/`):
+   installed. Don't `dirname` the `athenaeum` command's own path to find
+   its interpreter — `uv tool install` (the install this project
+   documents first) and `pipx` both symlink *only* the entry point into
+   `~/.local/bin`, so that directory never contains a `python3` of its
+   own. Read the interpreter straight off the entry point's shebang line
+   instead; opening it follows the symlink automatically, and it names
+   the real interpreter regardless of how many symlinks sit in between:
 
    ```bash
-   EXAMPLES="$("$(dirname "$(command -v athenaeum)")/python3" -c \
+   PY="$(head -1 "$(command -v athenaeum)")"; PY="${PY#\#!}"
+   EXAMPLES="$("$PY" -c \
      "import importlib.resources as r; print(r.files('athenaeum') / 'examples' / 'claude-code')")"
 
    mkdir -p ~/.claude/hooks/athenaeum
    cp "$EXAMPLES"/*.sh ~/.claude/hooks/athenaeum/
    chmod +x ~/.claude/hooks/athenaeum/*.sh
    ```
+
+   From a source checkout installed with `pip install -e .`, this
+   resolves under `src/athenaeum/` instead, which doesn't exist — an
+   editable install skips packaging entirely, so the force-included
+   `examples/` never lands there. Use the repo's own
+   `examples/claude-code/` directly in that case.
 
 2. Merge `$EXAMPLES/settings-snippet.json` into `~/.claude/settings.json`,
    replacing `/path/to/` with the directory from step 1.
