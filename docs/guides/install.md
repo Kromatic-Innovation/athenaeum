@@ -194,6 +194,75 @@ to build against the last released revision from source:
 git checkout "$(git describe --tags --abbrev=0)"
 ```
 
+## What runs unattended after install
+
+Installing the package and registering the MCP server does not, by itself,
+put anything on a timer. Two different things can run without you present —
+a sidecar reacting to a live Claude Code session, and a compile step you
+schedule yourself — and they write and spend very differently.
+
+| What | When it fires | What it writes | What it can spend |
+|---|---|---|---|
+| SessionStart hooks (`session-start-recall.sh`, `wiki-context-inject.sh`, `pending-questions-surface.sh`) | Every Claude Code session start, only if wired per the example `settings-snippet.json` | `<cache_dir>/config.env`, `stopwords.txt`, and `recall_overflow_breadcrumb.md`; the FTS5 index, built synchronously; and, only when a vector rebuild or credential fetch is actually due, a detached background job that writes the vector index, a rebuild log, and a durable degradation-status file under the same cache dir | No LLM call in the foreground. The backgrounded vector rebuild runs a local embedding model on CPU — no API spend — and a configured credential fetch (a 1Password reference or an operator-supplied shell command) returns a secret, not tokens |
+| UserPromptSubmit hook (`user-prompt-recall.sh`, via the packaged Claude Code adapter) | Every user turn, only if wired | One row per rendered recall hit, appended to a push-record ledger under the cache dir | Up to one small-model LLM call per turn for topic extraction, bounded by a short timeout — skipped entirely (falls back to a regex extractor, $0) with no cached API key, and never metered at all under the Claude-subscription provider |
+| PreCompact hook (`pre-compact-save.sh`) | Before Claude Code compacts context, only if wired | Nothing on disk — emits one reminder for the model to call `remember` | None |
+| `remember` (MCP tool) | Whenever an agent calls it, in any session | One markdown file per observation under `<knowledge_root>/raw/claude-session/` | None — a plain file write |
+| The librarian compile (`athenaeum run`) | **Only if you schedule it.** Neither `athenaeum init` nor the hook install above puts this on a timer — see "Nothing compiles itself" below | Compiled entity pages under `<knowledge_root>/wiki/`, one git commit per run (the knowledge root is a git repository), and a lockfile held for the run's duration | Up to the run's API-call budget (800 calls by default, `--max-api-calls` to override) under the metered API provider; $0 under the Claude-subscription provider; always bounded by a wall-clock deadline regardless of provider |
+| SessionEnd index rebuild (`rebuild-index.sh`) | Every session end — **this is wired by the example `settings-snippet.json` itself** (a live `"SessionEnd"` block, detached with `nohup`), not an opt-in the operator adds | The same index files as the SessionStart background job, plus its own rebuild log | Same as that background job: local embedding compute only, no API spend |
+| Stop-hook validator (`stop-hook-validate.sh`) | Session stop — **opt-in**; there is no `"Stop"` entry in the example settings snippet, so this one the operator must wire themselves | Nothing — prints warnings to stderr only | None; exits `2` only under `VALIDATE_MODE=block` |
+
+**Nothing compiles itself.** The hooks above only ever populate
+`<knowledge_root>/raw/`. Turning that into searchable wiki pages needs
+`athenaeum run`, and nothing on this page schedules it — the three ways to
+do that (manual, cron, launchd) are in
+[the Claude Code integration README, "Install" step 6](../../examples/claude-code/README.md#install).
+A `remember` call with no scheduled (or manual) `run` afterward looks like
+it worked and produces no `recall` hit; `athenaeum status` reports the
+growing raw backlog either way.
+
+## What happens when a prerequisite is missing
+
+Each of these degrades or fails in a different, specific way — none of them
+hang silently forever.
+
+**`uv` or the Python interpreter.** The quick start above leads with `uv
+tool install` and documents pip as a second option. If `uv` isn't on your
+PATH, the shell says so immediately (`command not found`) — nothing subtle.
+If you use the pip path instead on an interpreter older than 3.13, pip will
+not fail: as the quick start's own warning explains, releases before 0.17.1
+declared a floor of 3.11, so pip silently resolves backwards past a dozen
+releases and installs a year-old version — nothing in the output names this,
+and comparing `athenaeum --version` against the PyPI badge is how you find
+out.
+
+**API key.** With no `ANTHROPIC_API_KEY` cached and no `llm.provider:
+claude-cli`, the per-turn sidecar does not fail — topic extraction quietly
+falls back to a regex-and-stopword extractor, so recall still works with
+less topic awareness. The shipped `session-start-recall.sh` does print a
+warning for this (`No ANTHROPIC_API_KEY cached — LLM topic extraction will
+fall back to regex-only extraction …`), but the example `settings-snippet.json`
+wires every hook command with `2>/dev/null`, so that line is thrown away in a
+default install. The degradation is still durably recorded under the cache
+dir and surfaced once per session on the model's own context channel rather
+than stderr, and `athenaeum status` reports the latest one — see
+[Claude Code integration](claude-code.md) and
+[Troubleshooting](troubleshooting.md) for both. `athenaeum run`, by
+contrast, refuses outright: it exits `1` with `ANTHROPIC_API_KEY not set`
+unless you pass `--dry-run` or configure `llm.provider: claude-cli`.
+
+**Git identity.** `athenaeum init` creates a git repository for the new
+knowledge directory and commits its scaffold. If git has no `user.name` or
+`user.email` configured, `init` does not surface a raw git error — it exits
+with a direct message naming the two `git config --global` commands to run
+and telling you to retry `athenaeum init`.
+
+**Scheduler.** Nothing is scheduled by default. If you never set up cron,
+launchd, or a recurring manual run, `remember` keeps appending to
+`<knowledge_root>/raw/` indefinitely and `recall` never surfaces anything
+newer than your last manual `athenaeum run`. There is no error for this —
+the only way to find out is to notice that recall feels stale, or to run
+`athenaeum status` and see the raw backlog count grow instead of shrink.
+
 ## See also
 
 - Modules — [librarian](../modules/librarian.md) · [mcp](../modules/mcp.md)

@@ -104,6 +104,7 @@ _SUBCOMMAND_LOADERS: dict[str, tuple[str, str]] = {
     "spend": ("athenaeum._cmd_lifecycle", "add_lifecycle_subparsers"),
     "serve": ("athenaeum._cmd_serve", "add_serve_subparser"),
     "run": ("athenaeum._cmd_run", "add_run_subparser"),
+    "doctor": ("athenaeum._cmd_doctor", "add_doctor_subparser"),
     "test-mcp": ("athenaeum._cmd_query", "add_query_subparsers"),
     "entity": ("athenaeum._cmd_query", "add_query_subparsers"),
     "query-topics": ("athenaeum._cmd_query", "add_query_subparsers"),
@@ -227,6 +228,7 @@ def build_parser() -> argparse.ArgumentParser:
     from athenaeum._cmd_demo import add_demo_subparser
     from athenaeum._cmd_description import add_description_subparser
     from athenaeum._cmd_dimensions import add_dimensions_subparser
+    from athenaeum._cmd_doctor import add_doctor_subparser
     from athenaeum._cmd_drain import add_drain_subparser
     from athenaeum._cmd_enumerate import add_enumerate_subparser
     from athenaeum._cmd_explain_routing import add_explain_routing_subparser
@@ -276,6 +278,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_serve_subparser(subparsers)  # serve
     add_run_subparser(subparsers)  # run
     add_query_subparsers(subparsers)  # test-mcp, entity, query-topics, stopwords, recall
+    add_doctor_subparser(subparsers)  # doctor (issue athenaeum#2298)
     add_enumerate_subparser(subparsers)  # enumerate (issue athenaeum#965)
     add_explain_routing_subparser(subparsers)  # explain-routing (issue athenaeum#1176)
     # ingest-answers, ingest-merges, reresolve-questions, dedup-oversize-escalations
