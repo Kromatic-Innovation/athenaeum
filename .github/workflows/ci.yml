@@ -407,6 +407,106 @@ jobs:
       - name: Run public-safe-lint scan
         run: bash public-safe-lint.sh .
 
+  # athenaeum#2297 — prove the documented uv install path actually clears the
+  # "pip silently resolves backwards on an old interpreter" trap that
+  # README.md and docs/guides/install.md warn about, on exactly the
+  # interpreter pip gets this wrong on: ubuntu-latest's own default `python3`
+  # (3.12 as of this writing — predates the 3.13 floor). The first step below
+  # fails loudly, not silently, the day that stops being true.
+  #
+  # Deliberately its own job, NOT added to `ci-required`'s `needs:` below: it
+  # depends on live PyPI (`uv tool install`) and uv's own installer download,
+  # and a transient network blip there must never block a merge or main
+  # promotion. A real regression still shows up as a visible red check.
+  docs-uv-install-path:
+    name: Docs install path (uv, pre-3.13 default interpreter)
+    needs: [check_duplicate]
+    if: needs.check_duplicate.outputs.skip != 'true'
+    # Pinned, not `-latest` (athenaeum#2297): this job's whole premise is a
+    # default python3 that predates 3.13, and `ubuntu-latest` started
+    # migrating to Ubuntu 26 (default python3 3.13+) on 2026-10-19 — which is
+    # exactly what tripped the assertion step below. `ubuntu-24.04`'s default
+    # is still 3.12. When THIS label eventually floats too, the assertion
+    # step is what is supposed to catch it loudly rather than let the job
+    # pass green while testing nothing — do not remove it when bumping this.
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Assert this runner's default python3 predates 3.13
+        run: |
+          python3 -c '
+          import sys
+          v = sys.version_info[:2]
+          print(f"Default python3 on this runner: {v[0]}.{v[1]}")
+          if v >= (3, 13):
+              print(
+                  "::error::ubuntu-latest default python3 is now >= 3.13 - "
+                  "this job no longer exercises the pre-3.13 scenario it is "
+                  "named for. Update or retire it rather than letting it "
+                  "pass silently."
+              )
+              raise SystemExit(1)
+          '
+
+      # AC4 counter-example: pip, run under this same pre-3.13 default
+      # interpreter, resolving the documented `athenaeum[mcp]` extra.
+      # Informational only — this step never fails the job either way (see
+      # the printed message for why): what must fail the job is the *uv*
+      # path below resolving below the floor, not pip's live behaviour,
+      # which can legitimately change out from under this job as old
+      # releases age further past PyPI's resolver window.
+      - name: "Control: pip under the default interpreter"
+        run: |
+          set -euo pipefail
+          python3 -m venv /tmp/pip-control-venv
+          /tmp/pip-control-venv/bin/python -m pip install --quiet --upgrade pip
+          /tmp/pip-control-venv/bin/python -m pip install --quiet packaging
+          /tmp/pip-control-venv/bin/python -m pip install --quiet 'athenaeum[mcp]'
+          RESOLVED="$(/tmp/pip-control-venv/bin/athenaeum --version | awk '{print $NF}')"
+          echo "pip resolved under $(python3 --version): $RESOLVED"
+          /tmp/pip-control-venv/bin/python -c "
+          from packaging.version import Version
+          resolved = Version('$RESOLVED')
+          floor = Version('0.17.1')
+          if resolved < floor:
+              print(f'pip still resolves below the documented floor ({resolved} < {floor}) - the wrong-interpreter bug this issue documents still reproduces under pip.')
+          else:
+              print(f'pip now resolves at/above the documented floor ({resolved} >= {floor}) - pip behaviour under this interpreter has changed since this job was written; the warning in README.md / docs/guides/install.md stays documented regardless.')
+          "
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # The AC3 command itself, verbatim from README.md / docs/guides/install.md.
+      - name: Run the documented uv install command
+        run: uv tool install --python 3.13 'athenaeum[mcp]'
+
+      # "a shell with no venv active": no venv is created or activated in
+      # this job; `athenaeum` reaches PATH only via the shim directory `uv
+      # tool install` wrote to and the step above added to PATH — exactly
+      # like a fresh machine following the docs.
+      - name: Assert the uv-installed version meets the documented floor
+        run: |
+          set -euo pipefail
+          RESOLVED="$(athenaeum --version | awk '{print $NF}')"
+          echo "uv tool install resolved: $RESOLVED"
+          uv run --no-project --with packaging -- python3 -c "
+          from packaging.version import Version
+          resolved = Version('$RESOLVED')
+          floor = Version('0.17.1')
+          if resolved < floor:
+              raise SystemExit(
+                  f'uv tool install resolved {resolved}, below the documented '
+                  f'floor {floor} - the uv path has regressed to the same '
+                  'wrong-interpreter behaviour pip has.'
+              )
+          print(f'OK: uv tool install resolved {resolved} >= floor {floor}')
+          "
+
+      - name: Run athenaeum test-mcp with no venv active
+        run: athenaeum test-mcp
+
   # athenaeum#1160 — publish the green-CI attestation for the tree that was
   # just tested, so the next commit carrying an identical tree (a squash
   # merge, a rebase, a develop push whose tree a PR already tested) can reuse

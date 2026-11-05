@@ -51,22 +51,41 @@ memory tool, RAG, and the existing agent-memory libraries, is in
 
 ## Quick start
 
-**Requires Python 3.13+ — and check what you actually got.** `pip` will not fail
-on an older interpreter. Because releases before 0.17.1 declared `>=3.11`, pip
-silently resolves *backwards* past a dozen releases and installs a year-old
-version instead of erroring. Nothing in the output tells you this happened, and
-the CLI will appear to work.
+**Requires Python 3.13+.** The fastest way to get that, regardless of what
+your system's default Python is, is [uv](https://docs.astral.sh/uv/getting-started/installation/):
 
 ```bash
-python3.13 -m venv .venv && source .venv/bin/activate  # 3.13+, explicitly
-pip install 'athenaeum[mcp]'
+uv tool install --python 3.13 'athenaeum[mcp]'
 athenaeum --version                                    # compare with the PyPI badge above
+```
 
+`uv tool install` puts the `athenaeum` entry point in `~/.local/bin`. It does
+**not** add that directory to your `PATH` for you — it only warns if it's
+missing. If you hit `command not found`, run `uv tool update-shell` (or add
+`~/.local/bin` to your shell profile yourself) once; after that, every
+command below — including the `claude mcp add` line — works from a plain
+shell with no virtual environment active.
+
+```bash
 # Create a knowledge directory (default: ~/knowledge)
 athenaeum init
 
 # Wire it into Claude Code — it auto-starts with every session
 claude mcp add --scope user athenaeum -- athenaeum serve --path ~/knowledge
+```
+
+### Installing with pip instead
+
+**Check what you actually got.** `pip` will not fail on an older interpreter.
+Because releases before 0.17.1 declared `>=3.11`, pip silently resolves
+*backwards* past a dozen releases and installs a year-old version instead of
+erroring. Nothing in the output tells you this happened, and the CLI will
+appear to work.
+
+```bash
+python3.13 -m venv .venv && source .venv/bin/activate  # 3.13+, explicitly
+pip install 'athenaeum[mcp]'
+athenaeum --version                                    # compare with the PyPI badge above
 ```
 
 Older releases are **not** yanked (see the CHANGELOG for why), so they stay
