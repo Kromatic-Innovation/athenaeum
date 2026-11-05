@@ -2093,7 +2093,12 @@ class CostPerCorrect:
     ``correct_n == 0``; ``undefined_reason`` names why. Phase 2 fields
     (``write_tokens_amortized``/``write_tokens_raw``) are ``None`` when no
     :class:`WriteCost` was supplied for this group's ``(system,
-    corpus_scale)``, which is the Phase-1-only case (AC3).
+    corpus_scale)``, which is the Phase-1-only case (AC3). This rule is
+    unchanged by athenaeum#2305: a zero-correct cell is STILL the only
+    reason ``cost_per_correct`` itself reads ``None`` -- see
+    ``cache_weighted_tokens``/``injected_bytes_total`` below for the
+    SEPARATE "no cache/bytes data captured for this cell" ``None``, which
+    never forces ``cost_per_correct`` undefined on its own.
 
     Shared-write accounting (athenaeum#1870, ruling athenaeum#1830): the
     librarian is not a fact writer, it files what Claude's native memory
@@ -2149,8 +2154,46 @@ class CostPerCorrect:
     # captured for this arm's Athenaeum charge" -- see the class docstring.
     write_tokens_native_share_amortized: float | None
     write_tokens_native_share_raw: int | None
+    # Issue athenaeum#2305 (additive): the group's cache activity, weighted
+    # at the SAME multipliers athenaeum#239 already bills (cache write =
+    # 1.25x a plain input token, cache read = 0.10x -- so a cached turn and
+    # an uncached turn of the same raw size price differently, never the
+    # same), folded into `cost_per_correct`'s numerator alongside
+    # read_input_tokens/read_output_tokens/write_tokens_amortized. This is
+    # the fix for "a per-turn tokens-only view favors content": the
+    # provider's own `input_tokens` for a later turn EXCLUDES content
+    # served from cache, so counting plain turn_tokens alone priced a
+    # PUSH/ORACLE arm's injected context at zero on every turn after the
+    # one that first wrote it. `None` -- never `0.0` -- when NOT ONE turn in
+    # this cell's rows recorded cache usage (every row predates this issue);
+    # in that case it contributes nothing to `cost_per_correct`'s numerator
+    # either, which is what keeps a legacy-only cell's `cost_per_correct`
+    # numerically unchanged from before this issue.
+    cache_weighted_tokens: float | None
     cost_per_correct: float | None
     undefined_reason: str | None
+    # Issue athenaeum#2305 (additive): the group's summed
+    # `RolloutRecord.injected_context_bytes` -- a size figure reported
+    # ALONGSIDE cost, per this issue's own acceptance criterion, and never
+    # folded into `cost_per_correct`'s arithmetic (bytes and tokens are
+    # different units). `None` -- never `0` -- when no row in this cell
+    # recorded it.
+    injected_bytes_total: int | None
+
+
+#: Cache-activity weights for :func:`compute_cost_per_correct` (issue
+#: athenaeum#2305), mirroring the multipliers ``athenaeum.models.CostEstimate``
+#: already bills real cache activity at (athenaeum#239): a cache WRITE costs
+#: MORE than a plain input token (the provider has to persist it), a cache
+#: READ costs LESS (the discount prompt caching exists to offer). Defined
+#: HERE rather than imported from ``athenaeum.models`` -- this module's
+#: "cost" unit is raw TOKENS, never USD (see this section's own docstring),
+#: and ``CostEstimate._cost_for`` is a private, dollar-denominated helper;
+#: importing it would conflate the two units this module deliberately keeps
+#: apart. Bump both constants in the SAME commit as any change to
+#: athenaeum#239's billed multipliers, so the two never silently diverge.
+_CACHE_WRITE_TOKEN_WEIGHT = 1.25
+_CACHE_READ_TOKEN_WEIGHT = 0.10
 
 
 def compute_cost_per_correct(
@@ -2181,6 +2224,26 @@ def compute_cost_per_correct(
     worth stating, not hiding behind a fabricated number (issue
     athenaeum#1734 AC2).
 
+    **Cache activity (issue athenaeum#2305).** ``read_tokens`` above is
+    folded together with a THIRD term, the group's cache-weighted tokens
+    (:attr:`CostPerCorrect.cache_weighted_tokens`): every turn's
+    ``cache_creation_input_tokens``/``cache_read_input_tokens`` (see
+    :class:`~tests.evals.rollout.TurnTokenUsage`), weighted at
+    :data:`_CACHE_WRITE_TOKEN_WEIGHT`/:data:`_CACHE_READ_TOKEN_WEIGHT`. This
+    is what makes ``cost_per_correct`` count a PUSH/ORACLE arm's injected
+    context on every LATER turn it stays resident in the model's context,
+    not only the turn that first delivered it: a provider's own
+    ``input_tokens`` for a cached turn excludes the cached prefix, so
+    counting plain ``turn_tokens`` alone (the pre-athenaeum#2305 formula)
+    silently priced every one of those later turns' re-use of the SAME
+    content at zero. A turn whose cache fields are ``None`` (not captured)
+    contributes nothing to this term -- never a fabricated zero that would
+    be indistinguishable from a cell that measured a real zero -- and when
+    NOT ONE row's turn in the whole group ever captured cache usage,
+    ``cache_weighted_tokens`` itself is ``None``, and ``cost_per_correct``'s
+    numerator is numerically identical to the pre-athenaeum#2305 formula
+    (so a legacy-rows-only report renders byte-for-byte unchanged).
+
     *write_costs* maps a ``(system, corpus_scale)`` pair to its spend via
     :func:`_system_for_arm`. ``native_index``/``native_grep`` draw on the
     ``"native"`` entry alone, unchanged. Every other arm draws on the
@@ -2202,14 +2265,38 @@ def compute_cost_per_correct(
         read_input = 0
         read_output = 0
         correct_n = 0
+        cache_weighted = 0.0
+        cache_observed = False
+        injected_bytes_sum = 0
+        injected_bytes_observed = False
         for row in group:
             record = row.record
             read_input += sum(t.input_tokens for t in record.turn_tokens)
             read_output += sum(t.output_tokens for t in record.turn_tokens)
+            for turn in record.turn_tokens:
+                # Recurring injected context (issue athenaeum#2305): a
+                # cache write/read is counted on EVERY turn it appears on,
+                # not only the first -- that recurrence is exactly what
+                # prices a PUSH/ORACLE arm's resident context correctly
+                # across a multi-turn rollout. None means this turn's
+                # cache usage was never captured, contributing nothing
+                # rather than a fabricated zero.
+                if turn.cache_creation_input_tokens is not None:
+                    cache_weighted += turn.cache_creation_input_tokens * _CACHE_WRITE_TOKEN_WEIGHT
+                    cache_observed = True
+                if turn.cache_read_input_tokens is not None:
+                    cache_weighted += turn.cache_read_input_tokens * _CACHE_READ_TOKEN_WEIGHT
+                    cache_observed = True
+            if record.injected_context_bytes is not None:
+                injected_bytes_sum += record.injected_context_bytes
+                injected_bytes_observed = True
             probe = _probe_for_row(row)
             corpus = _corpus_for_scale(corpus_scale)
             if grade_correctness(record, probe, corpus):
                 correct_n += 1
+
+        cache_weighted_tokens = cache_weighted if cache_observed else None
+        injected_bytes_total = injected_bytes_sum if injected_bytes_observed else None
 
         system = _system_for_arm(arm)
         write_cost = write_by_key.get((system, corpus_scale))
@@ -2246,7 +2333,9 @@ def compute_cost_per_correct(
                     ) * len(group)
                     write_amortized += native_share_amortized
 
-        total_tokens = read_input + read_output + (write_amortized or 0.0)
+        total_tokens = (
+            read_input + read_output + (write_amortized or 0.0) + (cache_weighted_tokens or 0.0)
+        )
         if correct_n == 0:
             cost_per_correct = None
             undefined_reason = "zero correct answers in this cell"
@@ -2267,8 +2356,10 @@ def compute_cost_per_correct(
                 write_tokens_raw=write_raw,
                 write_tokens_native_share_amortized=native_share_amortized,
                 write_tokens_native_share_raw=native_share_raw,
+                cache_weighted_tokens=cache_weighted_tokens,
                 cost_per_correct=cost_per_correct,
                 undefined_reason=undefined_reason,
+                injected_bytes_total=injected_bytes_total,
             )
         )
     return results
@@ -2858,6 +2949,35 @@ def render_cost_per_correct_table(costs: Sequence[CostPerCorrect]) -> list[str]:
     )
     lines.append("")
     has_write = any(c.write_tokens_raw is not None for c in costs)
+    # Issue athenaeum#2305: both new columns are conditional on the SAME
+    # "at least one cell actually carries the data" test the write columns
+    # above use, and both are appended AFTER the write-cost prose rather
+    # than inserted into it -- a report built from rows that carry neither
+    # field (every row shaped the way every row was shaped before this
+    # issue) must render this whole section byte-for-byte as it did before
+    # this issue existed.
+    has_cache = any(c.cache_weighted_tokens is not None for c in costs)
+    has_bytes = any(c.injected_bytes_total is not None for c in costs)
+    if has_cache:
+        lines.append(
+            "`cache_weighted_tokens` (athenaeum#2305) folds cache activity into "
+            "`cost_per_correct`'s numerator at the same multipliers athenaeum#239 already "
+            "bills real cache activity at (a cache write = 1.25x a plain input token, a "
+            "cache read = 0.10x) -- counting a PUSH/ORACLE arm's injected context on EVERY "
+            "later turn it stays resident in the model's context, which a plain "
+            "input+output-tokens view would otherwise price at zero past the first turn. "
+            "`n/a` means no row in this group ever recorded cache usage (a pre-athenaeum#2305 "
+            "row), never a measured zero."
+        )
+        lines.append("")
+    if has_bytes:
+        lines.append(
+            "`injected_bytes` (athenaeum#2305) is the summed UTF-8 byte length of the content "
+            "actually injected for this cell's rows (PUSH/ORACLE arms only) -- reported "
+            "alongside cost, never folded into `cost_per_correct`'s arithmetic. `n/a` means no "
+            "row in this group recorded it."
+        )
+        lines.append("")
     header = "| probe_class | corpus_scale | arm | n | correct_n | read_tokens |"
     sep = "| --- | --- | --- | --- | --- | --- |"
     if has_write:
@@ -2866,8 +2986,14 @@ def render_cost_per_correct_table(costs: Sequence[CostPerCorrect]) -> list[str]:
             "| write_tokens_amortized | write_tokens_raw |"
         )
         sep += " --- | --- | --- | --- |"
+    if has_cache:
+        header += " cache_weighted_tokens |"
+        sep += " --- |"
     header += " cost_per_correct |"
     sep += " --- |"
+    if has_bytes:
+        header += " injected_bytes |"
+        sep += " --- |"
     lines.append(header)
     lines.append(sep)
     for c in sorted(costs, key=lambda c: (c.probe_class, c.corpus_scale, c.arm)):
@@ -2901,8 +3027,16 @@ def render_cost_per_correct_table(costs: Sequence[CostPerCorrect]) -> list[str]:
                 filing_amortized = c.write_tokens_amortized - c.write_tokens_native_share_amortized
                 filing_share = f"{filing_amortized:.1f}"
             row += f" {native_share} | {filing_share} | {amortized} | {raw} |"
+        if has_cache:
+            cache_cell = (
+                "n/a" if c.cache_weighted_tokens is None else f"{c.cache_weighted_tokens:.1f}"
+            )
+            row += f" {cache_cell} |"
         cost = "undefined" if c.cost_per_correct is None else f"{c.cost_per_correct:.1f}"
         row += f" {cost} |"
+        if has_bytes:
+            bytes_cell = "n/a" if c.injected_bytes_total is None else str(c.injected_bytes_total)
+            row += f" {bytes_cell} |"
         lines.append(row)
     lines.append("")
     return lines

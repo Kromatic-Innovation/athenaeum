@@ -49,8 +49,12 @@ from pathlib import Path
 from tests.evals.containment import GridCell
 from tests.evals.corpus import build_corpus
 from tests.evals.north_star_report import (
+    _CACHE_READ_TOKEN_WEIGHT,
+    _CACHE_WRITE_TOKEN_WEIGHT,
     RolloutRow,
     build_report,
+    compute_cost_per_correct,
+    render_cost_per_correct_table,
     render_report,
 )
 from tests.evals.rollout import Arm, RolloutRecord, TurnTokenUsage
@@ -139,3 +143,197 @@ def test_cost_per_correct_section_byte_identical_for_legacy_rows() -> None:
     section = _cost_section(text)
     golden = _LEGACY_GOLDEN_PATH.read_text(encoding="utf-8")
     assert section == golden
+
+
+# ---------------------------------------------------------------------------
+# Multi-turn recurring injected context + cache-weighted pricing
+# ---------------------------------------------------------------------------
+
+#: An ORACLE record with its planted marker said correctly, so every cell
+#: built from it has correct_n == 1 and a DEFINED cost_per_correct -- the
+#: denominator every assertion below divides by.
+_CORRECT_ANSWER = f"The PTO allowance is {ANSWER_MARKER}."
+
+
+def _oracle_row(turn_tokens: list[TurnTokenUsage], **kwargs: object) -> RolloutRow:
+    record = RolloutRecord(
+        arm=Arm.ORACLE,
+        probe_id=PROBE_ID,
+        probe_class=PROBE_CLASS,
+        corpus_scale=CORPUS_SCALE,
+        answer=_CORRECT_ANSWER,
+        turn_tokens=turn_tokens,
+        turn_count=len(turn_tokens),
+        transcript=[],
+        **kwargs,  # type: ignore[arg-type]
+    )
+    return _row(record)
+
+
+def test_multi_turn_injected_context_recurs_in_cache_weighted_cost() -> None:
+    """athenaeum#2305 AC: a multi-turn rollout where the SAME injected
+    content stays cached across later turns must have its cache charge
+    counted on EVERY turn it recurs on, not only the turn that first wrote
+    it to cache -- this is the literal fix for "a per-turn view favors
+    content".
+
+    Turn 1 writes 1000 tokens of injected content to cache
+    (``cache_creation_input_tokens``); turns 2 and 3 re-read the SAME 1000
+    tokens from cache (``cache_read_input_tokens``) rather than re-paying
+    the write price -- the shape a multi-turn PUSH/ORACLE rollout takes
+    once the provider caches the injected context.
+    """
+    rows = [
+        _oracle_row(
+            [
+                TurnTokenUsage(
+                    turn=1, input_tokens=0, output_tokens=0, cache_creation_input_tokens=1000
+                ),
+                TurnTokenUsage(
+                    turn=2, input_tokens=0, output_tokens=0, cache_read_input_tokens=1000
+                ),
+                TurnTokenUsage(
+                    turn=3, input_tokens=0, output_tokens=0, cache_read_input_tokens=1000
+                ),
+            ]
+        )
+    ]
+    costs = compute_cost_per_correct(rows)
+    assert len(costs) == 1
+    cell = costs[0]
+    assert cell.correct_n == 1
+
+    first_turn_only = 1000 * _CACHE_WRITE_TOKEN_WEIGHT
+    every_turn = 1000 * _CACHE_WRITE_TOKEN_WEIGHT + 2 * (1000 * _CACHE_READ_TOKEN_WEIGHT)
+
+    # Property 1: the recurring charge is counted -- summing all three
+    # turns gives a LARGER total than counting only the first turn's
+    # cache-creation charge would.
+    assert cell.cache_weighted_tokens == every_turn
+    assert cell.cache_weighted_tokens > first_turn_only
+    assert cell.cost_per_correct == every_turn  # correct_n == 1, no other tokens
+
+
+def test_cached_and_uncached_turns_price_differently() -> None:
+    """athenaeum#2305 AC: a cached turn and an uncached turn carrying the
+    SAME raw token count must price differently -- the whole point of
+    folding cache usage in at athenaeum#239's multipliers rather than
+    counting it 1:1 with a plain input token."""
+    uncached_rows = [
+        _oracle_row([TurnTokenUsage(turn=1, input_tokens=1000, output_tokens=0)])
+    ]
+    cached_rows = [
+        _oracle_row(
+            [
+                TurnTokenUsage(
+                    turn=1, input_tokens=0, output_tokens=0, cache_read_input_tokens=1000
+                )
+            ]
+        )
+    ]
+    uncached_cost = compute_cost_per_correct(uncached_rows)[0]
+    cached_cost = compute_cost_per_correct(cached_rows)[0]
+
+    assert uncached_cost.correct_n == cached_cost.correct_n == 1
+    # Property 2: same raw count (1000), different price -- a cache READ is
+    # weighted at 0.10x a plain input token, strictly cheaper.
+    assert cached_cost.cost_per_correct == 1000 * _CACHE_READ_TOKEN_WEIGHT
+    assert uncached_cost.cost_per_correct == 1000
+    assert cached_cost.cost_per_correct < uncached_cost.cost_per_correct
+
+
+def test_cache_weighted_tokens_undefined_not_zero_when_uncaptured() -> None:
+    """A cell whose rows never captured cache usage (every
+    ``TurnTokenUsage`` leaves both cache fields at their ``None`` default)
+    reports ``cache_weighted_tokens is None`` -- undefined, never a
+    fabricated zero -- and `cost_per_correct` is unaffected, matching the
+    pre-athenaeum#2305 formula exactly."""
+    rows = [_oracle_row([TurnTokenUsage(turn=1, input_tokens=80, output_tokens=20)])]
+    cell = compute_cost_per_correct(rows)[0]
+    assert cell.cache_weighted_tokens is None
+    assert cell.cost_per_correct == 100.0
+
+
+def test_zero_correct_cell_stays_undefined_even_with_cache_data_present() -> None:
+    """The existing "no correct answers -> no defined cost" handling
+    (issue athenaeum#1734 AC2) must be unchanged by athenaeum#2305: cache
+    activity being present does not manufacture a defined cost_per_correct
+    out of a cell with zero correct answers."""
+    record = RolloutRecord(
+        arm=Arm.ORACLE,
+        probe_id=PROBE_ID,
+        probe_class=PROBE_CLASS,
+        corpus_scale=CORPUS_SCALE,
+        answer="wrong answer, no marker",
+        turn_tokens=[
+            TurnTokenUsage(
+                turn=1, input_tokens=0, output_tokens=0, cache_creation_input_tokens=500
+            )
+        ],
+        turn_count=1,
+        transcript=[],
+    )
+    cell = compute_cost_per_correct([_row(record)])[0]
+    assert cell.correct_n == 0
+    assert cell.cost_per_correct is None
+    assert cell.undefined_reason == "zero correct answers in this cell"
+    # The cache contribution is still computed and reported -- only
+    # cost_per_correct itself stays undefined.
+    assert cell.cache_weighted_tokens == 500 * _CACHE_WRITE_TOKEN_WEIGHT
+
+
+# ---------------------------------------------------------------------------
+# injected_bytes per arm, alongside cost
+# ---------------------------------------------------------------------------
+
+
+def test_injected_bytes_total_summed_per_cell() -> None:
+    rows = [
+        _oracle_row(
+            [TurnTokenUsage(turn=1, input_tokens=80, output_tokens=20)],
+            injected_context_bytes=300,
+        ),
+        _oracle_row(
+            [TurnTokenUsage(turn=1, input_tokens=80, output_tokens=20)],
+            injected_context_bytes=200,
+        ),
+    ]
+    cell = compute_cost_per_correct(rows)[0]
+    assert cell.injected_bytes_total == 500
+
+
+def test_injected_bytes_total_undefined_not_zero_when_uncaptured() -> None:
+    rows = [_oracle_row([TurnTokenUsage(turn=1, input_tokens=80, output_tokens=20)])]
+    cell = compute_cost_per_correct(rows)[0]
+    assert cell.injected_bytes_total is None
+
+
+def test_render_cost_per_correct_table_shows_cache_and_bytes_columns_when_present() -> None:
+    rows = [
+        _oracle_row(
+            [
+                TurnTokenUsage(
+                    turn=1, input_tokens=0, output_tokens=0, cache_creation_input_tokens=1000
+                )
+            ],
+            injected_context_bytes=4096,
+        )
+    ]
+    costs = compute_cost_per_correct(rows)
+    rendered = "\n".join(render_cost_per_correct_table(costs))
+    assert "cache_weighted_tokens" in rendered
+    assert "injected_bytes" in rendered
+    assert f"{1000 * _CACHE_WRITE_TOKEN_WEIGHT:.1f}" in rendered
+    assert "4096" in rendered
+
+
+def test_render_cost_per_correct_table_omits_cache_and_bytes_columns_when_absent() -> None:
+    """Mirrors ``test_north_star_verdicts.py``'s own
+    ``test_render_cost_per_correct_table_omits_write_columns_when_phase1_only``
+    for the two new columns: absent input data means absent columns, never
+    a column full of ``n/a``."""
+    rows = [_oracle_row([TurnTokenUsage(turn=1, input_tokens=80, output_tokens=20)])]
+    costs = compute_cost_per_correct(rows)
+    rendered = "\n".join(render_cost_per_correct_table(costs))
+    assert "cache_weighted_tokens" not in rendered
+    assert "injected_bytes" not in rendered
