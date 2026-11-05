@@ -60,6 +60,7 @@ python scripts/gen_cli_reference.py
 - [`athenaeum dimensions compare`](#athenaeum-dimensions-compare) (command) — Compare two wiki pages' coordinates axis-by-axis, one relation per dimension.
 - [`athenaeum dimensions show`](#athenaeum-dimensions-show) (command) — Show one wiki page's coordinates across every registered dimension.
 - [`athenaeum disable`](#athenaeum-disable) (command) — Turn athenaeum's background work off (compile, detectors, recall, notifications). Reversible with 'athenaeum enable'.
+- [`athenaeum doctor`](#athenaeum-doctor) (command) — Read-only health check of an athenaeum install — package version, interpreter, MCP registration, hooks, LLM key mode, search index, last compile time. Exits non-zero on any failed check.
 - [`athenaeum drain`](#athenaeum-drain) (command) — Supervised API+batch drain of the raw-intake backlog (cost-guarded)
 - [`athenaeum enable`](#athenaeum-enable) (command) — Undo 'athenaeum disable' — restore all background work.
 - [`athenaeum entity`](#athenaeum-entity) (command) — One-call read of a SINGLE entity's page by uid, for any entity class, with an explicit --include-excluded flag (default off). The generic form of `person`; prints the same JSON object shape.
@@ -753,6 +754,16 @@ Turn athenaeum's background work off (compile, detectors, recall, notifications)
 | `--cache-dir` | — | — | Cache directory for the state file (default: ~/.cache/athenaeum). |
 | `--compile` | `False` | — | Granular: stop only the expensive compile/detect pass (session-end contradiction detection); leave recall on. |
 | `--reason` | — | — | Optional note recorded in the state file and shown by 'athenaeum status'. |
+
+## `athenaeum doctor`
+
+Read-only health check of an athenaeum install — package version, interpreter, MCP registration, hooks, LLM key mode, search index, last compile time. Exits non-zero on any failed check.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--cache-dir` | — | — | Cache directory (default: ATHENAEUM_CACHE_DIR env, else ~/.cache/athenaeum) |
+| `--claude-config-dir` | — | — | Claude Code config directory holding settings.json/.claude.json (default: CLAUDE_CONFIG_DIR env, else ~/.claude) |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 
 ## `athenaeum drain`
 
