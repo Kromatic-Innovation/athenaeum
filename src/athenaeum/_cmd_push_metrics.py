@@ -430,15 +430,19 @@ def _cmd_push_metrics_sample_for_labelling(args: argparse.Namespace) -> int:
     """
     from athenaeum import push_used_scoring
 
-    pages = push_used_scoring.stratified_sample_pushed_pages(
-        cache_dir=args.cache_dir,
-        n_per_stratum=args.n_per_stratum,
-        wiki_root=_resolve_wiki_root(args),
-        short_max=args.short_max,
-        medium_max=args.medium_max,
-        seed=args.seed,
-        exclude_sessions=getattr(args, "exclude_session", None),
-    )
+    try:
+        pages = push_used_scoring.stratified_sample_pushed_pages(
+            cache_dir=args.cache_dir,
+            n_per_stratum=args.n_per_stratum,
+            wiki_root=_resolve_wiki_root(args),
+            short_max=args.short_max,
+            medium_max=args.medium_max,
+            seed=args.seed,
+            exclude_sessions=getattr(args, "exclude_session", None),
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     output_path = (
         args.output.expanduser().resolve()
         if args.output is not None
@@ -466,22 +470,33 @@ def _cmd_push_metrics_score_used(args: argparse.Namespace) -> int:
     """
     from athenaeum import push_used_scoring
 
+    # Seer finding on athenaeum#2302 PR review: a bad --labels path (the
+    # single most likely user error, since label files live outside this
+    # repo at a caller-supplied path) raised OSError uncaught; an
+    # unsupported --confidence raised ValueError uncaught from the scoring
+    # call below. Both are now named CLI errors, matching this file's own
+    # `baseline`/`coverage-audit` convention (`except ValueError as exc:
+    # print(f"error: {exc}", ...); return 1`) rather than a traceback.
     try:
         labels = push_used_scoring.load_labels(args.labels)
-    except ValueError as exc:
+    except (ValueError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     if not labels:
         print("error: --labels file contains zero fully-labelled rows", file=sys.stderr)
         return 1
 
-    report = push_used_scoring.score_against_heuristic(
-        labels,
-        cache_dir=args.cache_dir,
-        projects_root=args.projects_root,
-        wiki_root=_resolve_wiki_root(args),
-        confidence=args.confidence,
-    )
+    try:
+        report = push_used_scoring.score_against_heuristic(
+            labels,
+            cache_dir=args.cache_dir,
+            projects_root=args.projects_root,
+            wiki_root=_resolve_wiki_root(args),
+            confidence=args.confidence,
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     output_path = (
         args.output.expanduser().resolve()
         if args.output is not None
@@ -506,6 +521,9 @@ def _cmd_push_metrics_score_used(args: argparse.Namespace) -> int:
             f"  relevant but not opened: {breakdown.relevant_but_not_opened.rate} "
             f"(n={breakdown.relevant_but_not_opened.n})\n"
             f"  irrelevant: {breakdown.irrelevant.rate} (n={breakdown.irrelevant.n})\n"
+            f"undetermined: {report.undetermined_labels} label(s) across "
+            f"{report.undetermined_sessions} session(s) (excluded from the "
+            f"figures above, not folded into a heuristic negative)\n"
             f"report written to: {output_path}"
         )
     return 0

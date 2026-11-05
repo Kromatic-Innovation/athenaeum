@@ -302,17 +302,33 @@ def stratified_sample_pushed_pages(
 
     Deterministic when *seed* is given (test seam); otherwise a fresh random
     draw per stratum each call. ``exclude_sessions`` matches
-    :func:`athenaeum.push_metrics.sample_sessions`'s semantics: excluded
-    session ids are removed from the pool before stratification, never
-    merely from the final sample.
+    :func:`athenaeum.push_metrics.build_coverage_worksheet`'s
+    ``--exclude-session`` semantics exactly (PR review finding on
+    athenaeum#2302: an earlier version matched *exclude_sessions* by exact
+    string only, so a session-id PREFIX or typo matched nothing and
+    exited/returned clean with NO filtering applied — a contaminated sample
+    that looked fine, the precise athenaeum#987 failure shape
+    :func:`athenaeum.push_metrics._resolve_exclude_sessions` exists to
+    forbid). Each requested value must resolve to exactly one session id
+    actually present in the ledger — the full id, or an unambiguous
+    prefix — else this raises ``ValueError`` naming the ambiguous/unmatched
+    value; it never silently excludes nothing. Resolved exclusions are
+    removed from the pool before stratification, never merely from the
+    final sample.
 
     Returns pages sorted by ``(length_bucket, population, session_id,
     push_id)`` for a deterministic, diffable worksheet.
     """
     from athenaeum import push_metrics
 
-    exclude_set = {s for s in (exclude_sessions or ()) if s}
     records = push_metrics.read_push_records(cache_dir, wiki_root=wiki_root)
+    known_session_ids = {
+        sid for r in records if isinstance(sid := r.get("session_id"), str) and sid
+    }
+    # Calls push_metrics' own private helper directly (same cross-module
+    # reuse precedent as athenaeum.context calling push_metrics._query_hash)
+    # rather than re-deriving the athenaeum#987 prefix-resolution rule here.
+    exclude_set = push_metrics._resolve_exclude_sessions(exclude_sessions or (), known_session_ids)
     population_map = session_population or {}
 
     pushes_per_session: dict[str, int] = {}
@@ -545,6 +561,14 @@ class ScoreReport:
     """The scorer's full output: rates and counts only — no session id, push
     id, page text, or query text anywhere in :meth:`to_dict` (see
     ``tests/test_push_used_scoring.py::test_score_report_contains_no_identifiers``).
+
+    ``undetermined_labels``/``undetermined_sessions`` (PR review finding on
+    athenaeum#2302): count of labelled pages / distinct sessions the `used`
+    heuristic could not determine a verdict for at all (see
+    :func:`score_labels`'s docstring) and which were therefore EXCLUDED from
+    ``confusion``/``precision``/``recall``/``unused_breakdown`` rather than
+    silently counted as a heuristic negative. ``confusion.total +
+    undetermined_labels == sample_size`` always holds.
     """
 
     v: int
@@ -555,6 +579,8 @@ class ScoreReport:
     precision: RateEstimate
     recall: RateEstimate
     unused_breakdown: UnusedBreakdown
+    undetermined_labels: int
+    undetermined_sessions: int
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -566,25 +592,46 @@ class ScoreReport:
             "precision": self.precision.to_dict(),
             "recall": self.recall.to_dict(),
             "unused_breakdown": self.unused_breakdown.to_dict(),
+            "undetermined_labels": self.undetermined_labels,
+            "undetermined_sessions": self.undetermined_sessions,
         }
 
 
 def score_labels(
     labels: Sequence[PushPageLabel],
-    heuristic_used: Mapping[tuple[str, str], bool],
+    heuristic_used: Mapping[tuple[str, str], bool | None],
     *,
     confidence: float = DEFAULT_CONFIDENCE_LEVEL,
 ) -> ScoreReport:
     """Pure scorer: compare already-computed *heuristic_used* verdicts
     against *labels*.
 
-    *heuristic_used* maps ``(session_id, push_id) -> bool`` — the `used`
-    heuristic's own verdict for that pushed page, as already decided by
-    :func:`athenaeum.push_metrics.determine_references` (or, for a known-
-    confusion-matrix test, hand-constructed directly). A ``(session_id,
-    push_id)`` pair absent from *heuristic_used* is treated as ``not used``
-    (the heuristic never marked it), not as an error — a page the heuristic
-    never saw IS a heuristic negative.
+    *heuristic_used* maps ``(session_id, push_id) -> bool | None`` — the
+    `used` heuristic's own verdict for that pushed page, as already decided
+    by :func:`athenaeum.push_metrics.determine_references` (or, for a known-
+    confusion-matrix test, hand-constructed directly):
+
+    - ``True``/``False`` — the heuristic DETERMINED the page was/was not
+      referenced. Classified into the confusion matrix as normal.
+    - ``None`` — the heuristic could not determine an answer at all (the
+      session's transcript rolled off disk, was never found, or carried no
+      push records — see :func:`compute_heuristic_verdicts`). This is
+      excluded from the confusion matrix entirely rather than folded into
+      ``False``: a prior version of this scorer collapsed "undetermined"
+      into "the heuristic said no" (PR review finding on athenaeum#2302),
+      which silently biased the headline numbers — a ``changed_work=True``
+      label would count as a false negative (deflating recall) purely
+      because its transcript was unreadable, not because the heuristic
+      actually looked and found nothing. That is exactly the kind of
+      fixture-shaped, not-reality-shaped number this tool exists to retire
+      (see this module's docstring). Every excluded label is still counted,
+      in :attr:`ScoreReport.undetermined_labels` /
+      :attr:`ScoreReport.undetermined_sessions` — an excluded sample that is
+      not itself reported would just move the silent bias one level up.
+    - absent entirely — treated as ``False`` (not used), not as an error: a
+      page the heuristic never saw IS a heuristic negative. This is the
+      seam the known-confusion-matrix test uses to hand-build inputs without
+      an undetermined case in the loop.
 
     This function never calls any production ledger or transcript code — see
     :func:`score_against_heuristic` for the wrapper that drives the real
@@ -596,8 +643,14 @@ def score_labels(
     relevant_not_opened = 0
     irrelevant_unused = 0
     unused_total = 0
+    undetermined_labels = 0
+    undetermined_sessions: set[str] = set()
     for label in labels:
         used = heuristic_used.get((label.session_id, label.push_id), False)
+        if used is None:
+            undetermined_labels += 1
+            undetermined_sessions.add(label.session_id)
+            continue
         if label.changed_work:
             if used:
                 tp += 1
@@ -633,6 +686,8 @@ def score_labels(
         precision=precision,
         recall=recall,
         unused_breakdown=breakdown,
+        undetermined_labels=undetermined_labels,
+        undetermined_sessions=len(undetermined_sessions),
     )
 
 
@@ -642,29 +697,38 @@ def compute_heuristic_verdicts(
     cache_dir: Path | None = None,
     projects_root: Path | None = None,
     wiki_root: Path | None = None,
-) -> dict[tuple[str, str], bool]:
+) -> dict[tuple[str, str], bool | None]:
     """Compute the `used` heuristic's verdict for every labelled page by
     calling the REAL :func:`athenaeum.push_metrics.determine_references` —
     exactly once per distinct session among *labels*, never reimplementing
     the rule.
 
-    Returns ``(session_id, push_id) -> bool``, suitable as the
-    *heuristic_used* argument to :func:`score_labels`.
+    Returns ``(session_id, push_id) -> bool | None``: ``True``/``False`` is
+    the heuristic's DETERMINED verdict; ``None`` means
+    :func:`~athenaeum.push_metrics.determine_references` itself returned
+    ``None`` for that session (no push records, no pushed ids, or the
+    transcript could not be located/read — an honest "cannot determine",
+    never a fabricated 0 or 1, per that function's own docstring). Collapsing
+    ``None`` into "not referenced" here would silently turn "undetermined"
+    into a heuristic negative — see :func:`score_labels`'s docstring for why
+    that is a real bias this scorer must not reproduce, not a simplification.
     """
     from athenaeum import push_metrics
 
     sessions = sorted({label.session_id for label in labels})
-    referenced_by_session: dict[str, set[str]] = {}
+    referenced_by_session: dict[str, set[str] | None] = {}
     for session_id in sessions:
         result = push_metrics.determine_references(
             session_id, cache_dir=cache_dir, projects_root=projects_root, wiki_root=wiki_root
         )
-        referenced_by_session[session_id] = set(result.referenced_ids) if result else set()
-    return {
-        (label.session_id, label.push_id): label.push_id
-        in referenced_by_session.get(label.session_id, set())
-        for label in labels
-    }
+        referenced_by_session[session_id] = set(result.referenced_ids) if result else None
+
+    verdicts: dict[tuple[str, str], bool | None] = {}
+    for label in labels:
+        referenced = referenced_by_session.get(label.session_id)
+        key = (label.session_id, label.push_id)
+        verdicts[key] = None if referenced is None else label.push_id in referenced
+    return verdicts
 
 
 def score_against_heuristic(

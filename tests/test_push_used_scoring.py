@@ -246,6 +246,8 @@ class TestScoreReportIdentifierFree:
             "precision",
             "recall",
             "unused_breakdown",
+            "undetermined_labels",
+            "undetermined_sessions",
         }
         assert set(payload["confusion"]) == {"tp", "fp", "fn", "tn", "total"}
         assert set(payload["precision"]) == {
@@ -347,6 +349,125 @@ class TestScoreAgainstHeuristicDrivesTheRealFunction:
         assert sorted(calls) == ["sess-a", "sess-b"]
 
 
+class TestUndeterminedSessionsAreExcludedNotNegated:
+    """Regression for the PR review finding on athenaeum#2302: a session
+    determine_references cannot determine (no push records at all, here --
+    the same None outcome a rolled-off/missing transcript produces) must be
+    EXCLUDED from the confusion matrix, never folded into a heuristic
+    negative. A prior version counted it as a negative, which deflated
+    recall for a changed_work=True label and inflated the true-negative
+    count for a changed_work=False one -- exactly the fixture-shaped bias
+    this tool exists to retire.
+    """
+
+    def test_compute_heuristic_verdicts_returns_none_not_false(self, tmp_path: Path) -> None:
+        # No push record seeded at all for "sess-undetermined" -- the ledger
+        # has nothing for this session, so determine_references returns
+        # None (REFERENCE_REASON_NO_PUSH_RECORDS), not an empty verdict.
+        labels = [
+            pus.PushPageLabel(
+                session_id="sess-undetermined", push_id="p1", relevant=True, changed_work=True
+            )
+        ]
+        verdicts = pus.compute_heuristic_verdicts(
+            labels, cache_dir=tmp_path / "cache", projects_root=tmp_path / "projects"
+        )
+        assert verdicts[("sess-undetermined", "p1")] is None
+
+    def test_changed_work_true_undetermined_is_not_a_false_negative(self) -> None:
+        labels = [
+            pus.PushPageLabel(
+                session_id="s", push_id="p", relevant=True, changed_work=True
+            )
+        ]
+        report = pus.score_labels(labels, {("s", "p"): None})
+        assert report.confusion == pus.ConfusionCounts(tp=0, fp=0, fn=0, tn=0)
+        assert report.undetermined_labels == 1
+        assert report.undetermined_sessions == 1
+        # Recall's denominator (tp + fn) is 0, not 1 -- an undetermined
+        # changed_work=True label must not count as a miss.
+        assert report.recall.n == 0
+        assert report.recall.rate is None
+
+    def test_changed_work_false_undetermined_is_not_a_true_negative(self) -> None:
+        labels = [
+            pus.PushPageLabel(
+                session_id="s", push_id="p", relevant=False, changed_work=False
+            )
+        ]
+        report = pus.score_labels(labels, {("s", "p"): None})
+        assert report.confusion == pus.ConfusionCounts(tp=0, fp=0, fn=0, tn=0)
+        assert report.undetermined_labels == 1
+        # The unused breakdown must not silently absorb it either.
+        assert report.unused_breakdown.unused_total == 0
+
+    def test_undetermined_count_is_visible_alongside_a_determined_mix(self) -> None:
+        """One determined TP, one undetermined changed_work=True label:
+        sample_size must still account for both, and confusion.total +
+        undetermined_labels == sample_size always holds."""
+        labels = [
+            pus.PushPageLabel(session_id="s1", push_id="p1", relevant=True, changed_work=True),
+            pus.PushPageLabel(session_id="s2", push_id="p2", relevant=True, changed_work=True),
+        ]
+        heuristic_used = {("s1", "p1"): True, ("s2", "p2"): None}
+        report = pus.score_labels(labels, heuristic_used)
+        assert report.sample_size == 2
+        assert report.confusion == pus.ConfusionCounts(tp=1, fp=0, fn=0, tn=0)
+        assert report.undetermined_labels == 1
+        assert report.undetermined_sessions == 1
+        assert report.confusion.total + report.undetermined_labels == report.sample_size
+        # The determined label's recall must not be diluted by the
+        # undetermined one: recall is 1/1 (the one DETERMINED positive was
+        # found), not 1/2.
+        assert report.recall.rate == pytest.approx(1.0)
+        assert report.recall.n == 1
+
+    def test_known_confusion_matrix_test_is_unaffected_by_the_undetermined_path(self) -> None:
+        """No None values appear in a hand-built heuristic_used map, so the
+        existing known-confusion-matrix precision/recall figures (AC) must
+        be byte-for-byte identical to before this fix."""
+        labels = [
+            pus.PushPageLabel(session_id="s1", push_id="p1", relevant=True, changed_work=True),
+            pus.PushPageLabel(session_id="s2", push_id="p2", relevant=False, changed_work=False),
+        ]
+        report = pus.score_labels(labels, {("s1", "p1"): True, ("s2", "p2"): False})
+        assert report.undetermined_labels == 0
+        assert report.undetermined_sessions == 0
+        assert report.confusion == pus.ConfusionCounts(tp=1, fp=0, fn=0, tn=1)
+        assert report.precision.rate == pytest.approx(1.0)
+        assert report.recall.rate == pytest.approx(1.0)
+
+    def test_score_against_heuristic_end_to_end_with_a_missing_transcript(
+        self, tmp_path: Path
+    ) -> None:
+        """End-to-end (through score_against_heuristic, not the pure
+        score_labels seam): a session WITH push records but no locatable
+        transcript (REFERENCE_REASON_TRANSCRIPT_NOT_FOUND) must also land in
+        undetermined, not in the confusion matrix."""
+        cache = tmp_path / "cache"
+        push_metrics.record_push(
+            push_metrics.build_push_record(
+                session_id="sess-no-transcript",
+                query="q",
+                backend="fts5",
+                hits=[("f.md", {"uid": "p1"}, push_metrics.estimate_tokens("b"))],
+            ),
+            cache_dir=cache,
+        )
+        # No transcript written under this projects_root at all.
+        labels = [
+            pus.PushPageLabel(
+                session_id="sess-no-transcript", push_id="p1", relevant=True, changed_work=True
+            )
+        ]
+        report = pus.score_against_heuristic(
+            labels, cache_dir=cache, projects_root=tmp_path / "projects"
+        )
+        assert report.confusion == pus.ConfusionCounts(tp=0, fp=0, fn=0, tn=0)
+        assert report.undetermined_labels == 1
+        assert report.undetermined_sessions == 1
+
+
 # ---------------------------------------------------------------------------
 # Stratified sampler
 # ---------------------------------------------------------------------------
@@ -430,6 +551,42 @@ class TestStratifiedSamplePushedPages:
         )
         assert all(p.session_id != "sess-excl" for p in pages)
         assert any(p.session_id == "sess-keep" for p in pages)
+
+    def test_exclude_sessions_resolves_an_unambiguous_prefix(self, tmp_path: Path) -> None:
+        """Regression for the PR review finding on athenaeum#2302: a prior
+        version matched exclude_sessions by EXACT string only, so a prefix
+        (the CLI help text's own claimed `coverage-audit` parity) matched
+        nothing and silently excluded no one. The real session id here is
+        long and specific on purpose, to prove a short prefix resolves it
+        rather than merely happening to equal it."""
+        cache = tmp_path / "cache"
+        self._seed(cache, "sess-keep", 1, ["p1"])
+        self._seed(cache, "sess-excl-abcdef123456", 1, ["p2"])
+        pages = pus.stratified_sample_pushed_pages(
+            cache_dir=cache, n_per_stratum=10, exclude_sessions=["sess-excl-abc"]
+        )
+        assert all(p.session_id != "sess-excl-abcdef123456" for p in pages)
+        assert any(p.session_id == "sess-keep" for p in pages)
+
+    def test_exclude_sessions_unmatched_value_raises(self, tmp_path: Path) -> None:
+        """Regression: an exclude value matching ZERO known session ids
+        must raise, never silently exclude nothing and return a
+        looks-clean-but-contaminated sample."""
+        cache = tmp_path / "cache"
+        self._seed(cache, "sess-keep", 1, ["p1"])
+        with pytest.raises(ValueError, match="matches no known session id"):
+            pus.stratified_sample_pushed_pages(
+                cache_dir=cache, n_per_stratum=10, exclude_sessions=["sess-typo-does-not-exist"]
+            )
+
+    def test_exclude_sessions_ambiguous_prefix_raises(self, tmp_path: Path) -> None:
+        cache = tmp_path / "cache"
+        self._seed(cache, "sess-dup-aaa", 1, ["p1"])
+        self._seed(cache, "sess-dup-bbb", 1, ["p2"])
+        with pytest.raises(ValueError, match="matches"):
+            pus.stratified_sample_pushed_pages(
+                cache_dir=cache, n_per_stratum=10, exclude_sessions=["sess-dup"]
+            )
 
     def test_session_length_bucket_boundaries(self) -> None:
         assert pus.session_length_bucket(1) == pus.LENGTH_SHORT

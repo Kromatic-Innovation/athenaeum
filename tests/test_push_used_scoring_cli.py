@@ -111,6 +111,32 @@ class TestSampleForLabelling:
         assert written_path == (cache_dir / "push_used_scoring" / "sample-for-labelling.jsonl")
         assert written_path.exists()
 
+    def test_bad_exclude_session_value_is_a_named_error_not_a_silent_noop(
+        self, tmp_path: Path
+    ) -> None:
+        """Regression for the PR review finding on athenaeum#2302: the CLI
+        help text claims --exclude-session has the same semantics as
+        `coverage-audit --exclude-session` (prefix resolution, raise on an
+        unmatched/ambiguous value). A value matching no known session id
+        must exit 1 with a named error -- never exit 0 having silently
+        excluded nothing from a sample that then looks clean."""
+        cache_dir = tmp_path / "cache"
+        _seed_one_push(cache_dir, "sess-1", "page-1")
+
+        rc, _out, err = _run_capture_stderr(
+            [
+                "push-metrics",
+                "sample-for-labelling",
+                "--cache-dir",
+                str(cache_dir),
+                "--exclude-session",
+                "sess-typo-does-not-exist",
+            ]
+        )
+        assert rc == 1
+        assert "error:" in err
+        assert "matches no known session id" in err
+
 
 class TestScoreUsed:
     def test_labels_is_required(self) -> None:
@@ -215,7 +241,15 @@ class TestScoreUsed:
         written_path = cache_dir / "push_used_scoring" / "score-report.json"
         assert repo_root not in written_path.parents
         assert written_path.exists()
-        assert payload["confusion"]["tn"] == 1
+        # No push record was ever seeded for sess-1/page-1, so
+        # determine_references returns None (no push records for that
+        # session) -- UNDETERMINED, not a determined "not used". PR review
+        # finding on athenaeum#2302: an earlier version collapsed that None
+        # into a heuristic negative (TN here); the fix excludes it from the
+        # confusion matrix entirely and reports it as undetermined instead.
+        assert payload["confusion"] == {"tp": 0, "fp": 0, "fn": 0, "tn": 0, "total": 0}
+        assert payload["undetermined_labels"] == 1
+        assert payload["undetermined_sessions"] == 1
 
     def test_empty_labels_file_is_an_error(self, tmp_path: Path) -> None:
         cache_dir = tmp_path / "cache"
@@ -250,3 +284,83 @@ class TestScoreUsed:
         )
         assert rc == 1
         assert "invalid JSON" in err
+
+    def test_missing_labels_file_reports_a_named_error_not_a_traceback(
+        self, tmp_path: Path
+    ) -> None:
+        """Regression for the PR review finding on athenaeum#2302: a
+        nonexistent --labels path raised an uncaught OSError (FileNotFoundError)
+        all the way out of cli_main. A bad path is the single most likely
+        user error here (labels live outside this repo, at a caller-typed
+        path), so this must be a one-line `error: ...` + exit 1, not a
+        traceback."""
+        cache_dir = tmp_path / "cache"
+        rc, _out, err = _run_capture_stderr(
+            [
+                "push-metrics",
+                "score-used",
+                "--cache-dir",
+                str(cache_dir),
+                "--labels",
+                str(tmp_path / "does-not-exist" / "labels.jsonl"),
+            ]
+        )
+        assert rc == 1
+        assert err.startswith("error:")
+        assert "Traceback" not in err
+
+    def test_unsupported_confidence_reports_a_named_error_not_a_traceback(
+        self, tmp_path: Path
+    ) -> None:
+        """Regression: --confidence outside the supported Wilson z-score
+        table raised an uncaught ValueError out of score_against_heuristic,
+        past the --labels try/except (which only wrapped load_labels).
+
+        A DETERMINED verdict is required for this to actually reach the
+        Wilson calculation: an all-undetermined sample has n=0 for every
+        rate (precision/recall/breakdown all short-circuit before calling
+        wilson_score_interval at all -- see _rate_estimate), which would
+        make this test pass for the wrong reason. So this seeds a real push
+        record plus a locatable (but non-referencing) transcript, which
+        determine_references resolves to a definite "not used" -- a TN,
+        giving the unused-breakdown's rate calculation a nonzero n.
+        """
+        cache_dir = tmp_path / "cache"
+        projects_root = tmp_path / "projects"
+        _seed_one_push(cache_dir, "s", "p")
+        scope_dir = projects_root / "-scope-hash"
+        scope_dir.mkdir(parents=True)
+        (scope_dir / "s.jsonl").write_text(
+            json.dumps({"type": "user", "message": {"role": "user", "content": "unrelated"}})
+            + "\n"
+        )
+        labels_path = tmp_path / "labels.jsonl"
+        labels_path.write_text(
+            json.dumps(
+                {
+                    "session_id": "s",
+                    "push_id": "p",
+                    "relevant": False,
+                    "changed_work": False,
+                }
+            )
+            + "\n"
+        )
+        rc, _out, err = _run_capture_stderr(
+            [
+                "push-metrics",
+                "score-used",
+                "--cache-dir",
+                str(cache_dir),
+                "--projects-root",
+                str(projects_root),
+                "--labels",
+                str(labels_path),
+                "--confidence",
+                "0.5",
+            ]
+        )
+        assert rc == 1
+        assert err.startswith("error:")
+        assert "unsupported confidence" in err
+        assert "Traceback" not in err
