@@ -5284,3 +5284,111 @@ class TestCredentialSources2205:
         lines = self._config_env(env).read_text().splitlines()
         assert lines.count("ANTHROPIC_API_KEY=synthetic-key-line") == 1
         assert "notes about the item" not in "\n".join(lines)
+
+
+class TestShippedLaunchAgentExample2232:
+    """`examples/claude-code/` ships the plist its README points at.
+
+    Issue athenaeum#2232 item 2: the README's "Option C: launchd plist on
+    macOS" told the reader to "see docs/ for a template" and no such
+    template existed. The fix ships one; these tests are what stops it from
+    silently rotting into another dangling pointer.
+    """
+
+    PLIST = HOOKS_DIR / "com.athenaeum.run.plist"
+
+    def test_the_readme_option_c_link_resolves(self) -> None:
+        body = (HOOKS_DIR / "README.md").read_text()
+        assert "see docs/ for a template" not in body, (
+            "the Option C pointer is back, and `docs/` still has no template"
+        )
+        assert "(com.athenaeum.run.plist)" in body
+        assert self.PLIST.is_file()
+
+    def test_the_plist_is_well_formed(self) -> None:
+        """Parsed, not merely present.
+
+        `examples/codex/com.athenaeum.codex-context.plist` is the reason
+        this is asserted rather than assumed: a `--flag` written inside an
+        XML comment makes a plist unparseable (`--` is not legal in an XML
+        comment), which no presence check would catch.
+        """
+        import plistlib
+
+        with self.PLIST.open("rb") as handle:
+            parsed = plistlib.load(handle)
+        assert parsed["Label"] == "com.athenaeum.run"
+        assert parsed["ProgramArguments"][1] == "run"
+        assert "StartCalendarInterval" in parsed
+
+    def test_the_plist_carries_the_environment_the_job_needs(self) -> None:
+        """`athenaeum run` does not read `config.env`, so the key has to be
+        in the job's own environment or the compile exits 1. The two `OP_*`
+        suppression flags are required alongside it because a background
+        launchd job cannot answer a 1Password prompt."""
+        import plistlib
+
+        with self.PLIST.open("rb") as handle:
+            env = plistlib.load(handle)["EnvironmentVariables"]
+        assert "ANTHROPIC_API_KEY" in env
+        assert env["OP_LOAD_DESKTOP_APP_SETTINGS"] == "false"
+        assert env["OP_BIOMETRIC_UNLOCK_ENABLED"] == "false"
+
+    def test_the_plist_holds_no_real_value(self) -> None:
+        """Every operator-specific field is a REPLACE_ME placeholder.
+
+        The same discipline the Codex example uses, and the reason the
+        shipped file can carry an `ANTHROPIC_API_KEY` key at all.
+        """
+        import plistlib
+
+        with self.PLIST.open("rb") as handle:
+            parsed = plistlib.load(handle)
+        assert parsed["EnvironmentVariables"]["ANTHROPIC_API_KEY"] == "REPLACE_ME"
+        for argument in parsed["ProgramArguments"]:
+            if argument.startswith("/"):
+                assert "REPLACE_ME" in argument, argument
+
+
+class TestSearchBackendDefaultIsStatedPerEntryPoint2232:
+    """The documented `SEARCH_BACKEND` default matches the code.
+
+    Issue athenaeum#2232 item 1: the hooks default to `vector` and the docs
+    said `fts5`, which is the CLI flags' default. Asserted against the live
+    defaults so the docs cannot drift back, and so a future change to
+    either default fails here rather than in a reader's install.
+    """
+
+    def test_the_hooks_and_the_yaml_resolver_default_to_vector(self) -> None:
+        from athenaeum.config import _DEFAULTS
+
+        assert _DEFAULTS["search_backend"] == "vector"
+        for hook in (SESSION_START, REBUILD_INDEX):
+            assert "${SEARCH_BACKEND:-vector}" in hook.read_text() or (
+                'SEARCH_BACKEND="${SEARCH_BACKEND:-vector}"' in hook.read_text()
+            ), f"{hook.name} no longer defaults SEARCH_BACKEND to vector"
+
+    def test_the_two_cli_flags_default_to_fts5(self) -> None:
+        from athenaeum.cli import build_parser
+
+        parser = build_parser()
+        defaults: dict[str, str] = {}
+        for action in parser._actions:  # noqa: SLF001 - argparse has no public walk
+            if getattr(action, "choices", None) and action.dest == "command":
+                for name, subparser in action.choices.items():
+                    for sub_action in subparser._actions:  # noqa: SLF001
+                        if sub_action.dest == "backend":
+                            defaults[name] = sub_action.default
+        assert defaults.get("context") == "fts5", defaults
+        assert defaults.get("codex-context") == "fts5", defaults
+
+    def test_neither_doc_still_claims_a_single_fts5_default(self) -> None:
+        readme = (HOOKS_DIR / "README.md").read_text()
+        environment = (
+            Path(__file__).parent.parent / "docs" / "reference" / "environment.md"
+        ).read_text()
+        assert "from `athenaeum.yaml` (`fts5`)" not in readme
+        assert "`fts5` (default) or `vector`" not in readme
+        # The per-entry-point table is what replaced the single claim.
+        assert "differs by entry point" in environment
+        assert "`athenaeum context --backend`" in environment

@@ -83,7 +83,8 @@ rewritten, or refused on this number.
 ## What it reads
 
 - The compiled wiki (`wiki/*.md`) and its search index — FTS5's SQLite database or the
-  vector store, selected by `search_backend` (yaml) / `--backend` (CLI), default `fts5`.
+  vector store, selected by `search_backend` (yaml, default `vector`) / `--backend`
+  (`athenaeum context` and `codex-context`, default `fts5`).
 - `recall.extra_intake_roots` — additional roots folded into the search surface beyond the
   compiled wiki (default `["raw/auto-memory"]`; `[]` restricts recall to the wiki alone).
 - The audience pinned at process start, applied as a predicate *inside* the query's `WHERE`

@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  EXAMPLE ONLY. Nothing in the repo installs or loads this. It is "Option C"
+  in this directory's README: the launchd equivalent of the daily cron entry
+  that compiles raw/ into wiki/ overnight.
+
+  Edit every REPLACE_ME, copy to the LaunchAgents directory in your Library
+  folder, then load it yourself.
+
+  EnvironmentVariables is the load-bearing part. `athenaeum run` does NOT
+  read ~/.cache/athenaeum/config.env (see the README's "Who reads
+  config.env, and who doesn't"), so a launchd job gets the key here, in its
+  own environment, or not at all. Without it the compile exits 1 with
+  `ANTHROPIC_API_KEY not set`, unless you set `llm.provider: claude-cli`.
+
+  Do NOT put the key in ProgramArguments: argv is world-readable through
+  `ps`. EnvironmentVariables is not, though the plist file itself is, so
+  chmod 600 it. Prefer a wrapper script that reads your secret manager if
+  you would rather the key not sit on disk at all.
+
+  The two OP_* flags matter only if what you run shells out to `op` (for
+  example such a wrapper script). They stop 1Password's macOS App Data
+  probe and its biometric-unlock prompt, neither of which a background
+  launchd job can answer; an unanswered prompt is how an overnight compile
+  hangs instead of failing. They are harmless when nothing runs `op`.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.athenaeum.run</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/REPLACE_ME/path/to/venv/bin/athenaeum</string>
+    <string>run</string>
+    <string>--path</string>
+    <string>/REPLACE_ME/home/knowledge</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>ANTHROPIC_API_KEY</key>
+    <string>REPLACE_ME</string>
+    <key>OP_LOAD_DESKTOP_APP_SETTINGS</key>
+    <string>false</string>
+    <key>OP_BIOMETRIC_UNLOCK_ENABLED</key>
+    <string>false</string>
+  </dict>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>3</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/REPLACE_ME/home/Library/Logs/athenaeum-run.log</string>
+  <key>StandardErrorPath</key>
+  <string>/REPLACE_ME/home/Library/Logs/athenaeum-run.log</string>
+</dict>
+</plist>

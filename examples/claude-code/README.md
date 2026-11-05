@@ -61,7 +61,10 @@ timer, or at session end. See "Compile raw → wiki" below.
    claude mcp add --scope user athenaeum -- athenaeum serve --path ~/knowledge
    ```
 
-   Or edit `~/.claude/settings.json` directly:
+   To hand-edit instead, the file is `~/.claude.json` — **not**
+   `~/.claude/settings.json`, which holds hooks and settings and is not
+   where Claude Code reads MCP servers from. Add the server under a
+   top-level `mcpServers` key, which is where `--scope user` writes it:
 
    ```json
    {
@@ -73,6 +76,13 @@ timer, or at session end. See "Compile raw → wiki" below.
      }
    }
    ```
+
+   To share the server with a project instead of your whole user account,
+   put the same block in a `.mcp.json` at the project root (`claude mcp add
+   --scope project`) and commit it; Claude Code asks you to approve a
+   project-scoped server the first time it sees it. `--scope local` (the
+   default) also lands in `~/.claude.json`, but under that one project's
+   entry rather than at the top level.
 
 5. Restart Claude Code. The session-start message should say
    `[Knowledge] FTS5 index: N wiki pages`.
@@ -89,8 +99,20 @@ timer, or at session end. See "Compile raw → wiki" below.
    echo "0 3 * * * /usr/local/bin/athenaeum run --path $HOME/knowledge" \
      | crontab -
 
-   # Option C: launchd plist on macOS — see docs/ for a template
+   # Option C: launchd plist on macOS — copy, edit, and load the example:
+   #   cp examples/claude-code/com.athenaeum.run.plist \
+   #     ~/Library/LaunchAgents/com.athenaeum.run.plist
+   #   # edit every REPLACE_ME, then:
+   #   launchctl load ~/Library/LaunchAgents/com.athenaeum.run.plist
    ```
+
+   [`com.athenaeum.run.plist`](com.athenaeum.run.plist) is Option C's
+   template. Read its own header before loading it: `athenaeum run` does not
+   read `config.env` (see "Who reads `config.env`, and who doesn't" below),
+   so the plist's `EnvironmentVariables` is where a launchd job gets
+   `ANTHROPIC_API_KEY` — and it sets `OP_LOAD_DESKTOP_APP_SETTINGS=false`
+   and `OP_BIOMETRIC_UNLOCK_ENABLED=false` because a background job cannot
+   answer 1Password's prompts.
 
    A `remember` call without a subsequent `run` will appear to "work" but
    produce no `recall` hit. Check `~/knowledge/raw/` for pending files if
@@ -137,7 +159,7 @@ pages or the index hasn't been built — check `~/.cache/athenaeum/`.
 | `ATHENAEUM_INJECT_MAX_RESULTS` | `3`                          | Max wiki pages to surface from `wiki-context-inject.sh`         |
 | `ATHENAEUM_PQ_SNOOZE_HOURS` | `24`                          | Snooze TTL for `pending-questions-surface.sh` (consumed by the `resolve-questions` skill when writing the snooze file) |
 | `ATHENAEUM_PQ_HOOK_DEBUG` | `0`                              | Set to `1` to log `pending-questions-surface.sh` diagnostics to stderr |
-| `SEARCH_BACKEND`         | from `athenaeum.yaml` (`fts5`)    | `fts5` (default) or `vector`                                   |
+| `SEARCH_BACKEND`         | from `athenaeum.yaml`, else `vector` | `fts5` or `vector`. **These hooks default to `vector`** — the `fts5` default belongs to `athenaeum context --backend` / `codex-context --backend`, not here. See [`../../docs/reference/environment.md`](../../docs/reference/environment.md) for the per-entry-point table |
 | `AUTO_RECALL`            | from `athenaeum.yaml` (`true`)    | Set to `false` to disable per-turn recall                      |
 
 ## Hybrid recall: why both backends
@@ -529,7 +551,7 @@ request as a result.
 | `pre-compact-save.sh`, `pending-questions-surface.sh`, `wiki-context-inject.sh`, `rebuild-index.sh`, `stop-hook-validate.sh` | Various (compaction, SessionStart, optional) | No `op`, no 1Password, no Keychain in any of these five scripts | Files & Folders for the knowledge root where applicable; nothing `op`- or Keychain-related |
 | `athenaeum serve` (the MCP server) | Long-running, launched once | No `op` | None beyond the knowledge root |
 | The SessionEnd librarian (`athenaeum run`) | SessionEnd / cron / launchd, once per invocation | Reaches 1Password only through `receipt_sealers.OnePasswordServiceAccountKeyProvider`, which requires `OP_SERVICE_ACCOUNT_TOKEN` to even construct a subprocess call (no token ⇒ no `op` process at all), and now forces both suppression flags unconditionally | None beyond the knowledge root |
-| Shipped LaunchAgent/cron examples | Every 15 minutes when loaded (`StartInterval` 900s — the Codex example only; `examples/claude-code/` ships none) | `examples/claude-code/` itself ships none. `examples/codex/com.athenaeum.codex-context.plist` ships a LaunchAgent example for the separate Codex integration, invoking `athenaeum codex-context` directly — unrelated to this audit beyond being the one shipped launchd example in the repo | None — it invokes `athenaeum codex-context` directly, with no `op` and no 1Password path |
+| Shipped LaunchAgent/cron examples | Whatever you schedule: `com.athenaeum.run.plist` is daily at 03:00 (`StartCalendarInterval`), the Codex example is every 15 minutes when loaded (`StartInterval` 900s) | `examples/claude-code/com.athenaeum.run.plist` is this directory's Option C: a daily `athenaeum run` compile. `examples/codex/com.athenaeum.codex-context.plist` is the separate Codex integration's `athenaeum codex-context` job — unrelated to this audit beyond being another shipped launchd example | Neither invokes `op`. `com.athenaeum.run.plist` takes `ANTHROPIC_API_KEY` from its own `EnvironmentVariables` and sets the two `OP_*` suppression flags for the case where what it runs is a wrapper that shells out to `op`; the Codex example invokes `athenaeum codex-context` directly with no `op` and no 1Password reference |
 
 **Invariant:** no athenaeum path requests an OS permission per recall or
 per session once a key is cached or supplied via env/`config.env`; at
