@@ -56,10 +56,14 @@ enable/disable accessor) and :mod:`athenaeum.transcript_verify` (read-only
 transcript access) at L2/L3. Consumed by :mod:`athenaeum.mcp_server` (write
 side, push records), :mod:`athenaeum.librarian` (``session_end``, reference
 determination), :mod:`athenaeum.context` (the sidecar adapter's push path,
-issue athenaeum#1362), and :mod:`athenaeum._cmd_push_metrics` (the CLI
+issue athenaeum#1362), :mod:`athenaeum._cmd_push_metrics` (the CLI
 ``baseline`` + ``coverage-audit`` + ``record`` commands, the last of which is
-the hook-path reporting entry point, issue athenaeum#1478). Never imports
-either back.
+the hook-path reporting entry point, issue athenaeum#1478), and
+:mod:`athenaeum.follow_through` (the follow-through analyzer, issue
+athenaeum#2301, which reuses this module's transcript-reading/id helpers —
+``determine_references``, ``_find_session_transcript``, ``_parse_ts``,
+``_appears_as_whole_token``, ``opaque_push_id_from_filename`` — rather than
+re-parsing). Never imports either back.
 """
 
 from __future__ import annotations
@@ -1789,6 +1793,79 @@ def _find_session_transcript(session_id: str, projects_root: Path) -> tuple[Path
     return None
 
 
+def split_transcript_text_by_provenance(
+    transcript_records: Sequence[object],
+) -> tuple[str, str, str]:
+    """Split one session's parsed transcript records into
+    ``(author_blob, assistant_blob, echo_blob)`` by PROVENANCE (issue
+    athenaeum#1585).
+
+    - ``author_blob``: every user- or assistant-AUTHORED block (text the
+      session itself wrote), never a ``tool_result``/``toolUseResult`` echo.
+    - ``assistant_blob``: the assistant-authored subset of ``author_blob``.
+    - ``echo_blob``: every ``tool_result``/``toolUseResult`` block — a tool's
+      own output quoted back at the model (``recall``'s rendered hit block,
+      a file read, a command's stdout), never authored by the session.
+
+    Extracted out of :func:`_determine_references_with_reason` (issue
+    athenaeum#2301) so a second caller needing the SAME split —
+    :mod:`athenaeum.follow_through`, which must tell a genuine citation
+    apart from an echo of the push's own delivery, see that module's
+    docstring — does not re-derive it with a second transcript-scanning
+    loop. :func:`_determine_references_with_reason` is unchanged in
+    behavior: this is a pure extraction, not a new rule.
+    """
+    author_parts: list[str] = []
+    assistant_parts: list[str] = []
+    echo_parts: list[str] = []
+
+    def _emit(text: object, *, role: str, echo: bool) -> None:
+        if not isinstance(text, str) or not text:
+            return
+        if echo:
+            echo_parts.append(text)
+            return
+        author_parts.append(text)
+        if role == "assistant":
+            assistant_parts.append(text)
+
+    for trec in transcript_records:
+        if not isinstance(trec, dict):
+            continue
+        message = trec.get("message")
+        role = ""
+        if isinstance(message, dict) and isinstance(message.get("role"), str):
+            role = str(message["role"])
+        elif isinstance(trec.get("type"), str):
+            role = str(trec["type"])
+        content = message.get("content") if isinstance(message, dict) else trec.get("content")
+        if isinstance(content, str):
+            _emit(content, role=role, echo=False)
+        elif isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict):
+                    # A tool_result block is the model's INPUT, not its
+                    # output: recall's own rendering, uid included, quoted
+                    # back at it.
+                    is_echo = block.get("type") == "tool_result"
+                    _emit(block.get("text") or block.get("content"), role=role, echo=is_echo)
+                    inner = block.get("content")
+                    if isinstance(inner, list):
+                        for sub in inner:
+                            if isinstance(sub, dict):
+                                _emit(sub.get("text"), role=role, echo=is_echo)
+                elif isinstance(block, str):
+                    _emit(block, role=role, echo=False)
+        tur = trec.get("toolUseResult")
+        if isinstance(tur, str):
+            _emit(tur, role=role, echo=True)
+        elif isinstance(tur, dict):
+            for key in ("stdout", "text", "content"):
+                _emit(tur.get(key), role=role, echo=True)
+
+    return "\n".join(author_parts), "\n".join(assistant_parts), "\n".join(echo_parts)
+
+
 def determine_references(
     session_id: str,
     *,
@@ -1899,58 +1976,13 @@ def _determine_references_with_reason(
     # tool result is an echo of recall's own output, which the old single-blob
     # rule could not tell apart. The assistant's own text is additionally kept
     # on its own, because that — not a tool result echoing the page back — is
-    # where evidence of having DRAWN ON the page's content lives.
-    author_parts: list[str] = []
-    assistant_parts: list[str] = []
-    echo_parts: list[str] = []
-
-    def _emit(text: object, *, role: str, echo: bool) -> None:
-        if not isinstance(text, str) or not text:
-            return
-        if echo:
-            echo_parts.append(text)
-            return
-        author_parts.append(text)
-        if role == "assistant":
-            assistant_parts.append(text)
-
-    for trec in transcript_records:
-        if not isinstance(trec, dict):
-            continue
-        message = trec.get("message")
-        role = ""
-        if isinstance(message, dict) and isinstance(message.get("role"), str):
-            role = str(message["role"])
-        elif isinstance(trec.get("type"), str):
-            role = str(trec["type"])
-        content = message.get("content") if isinstance(message, dict) else trec.get("content")
-        if isinstance(content, str):
-            _emit(content, role=role, echo=False)
-        elif isinstance(content, list):
-            for block in content:
-                if isinstance(block, dict):
-                    # A tool_result block is the model's INPUT, not its
-                    # output: recall's own rendering, uid included, quoted
-                    # back at it.
-                    is_echo = block.get("type") == "tool_result"
-                    _emit(block.get("text") or block.get("content"), role=role, echo=is_echo)
-                    inner = block.get("content")
-                    if isinstance(inner, list):
-                        for sub in inner:
-                            if isinstance(sub, dict):
-                                _emit(sub.get("text"), role=role, echo=is_echo)
-                elif isinstance(block, str):
-                    _emit(block, role=role, echo=False)
-        tur = trec.get("toolUseResult")
-        if isinstance(tur, str):
-            _emit(tur, role=role, echo=True)
-        elif isinstance(tur, dict):
-            for key in ("stdout", "text", "content"):
-                _emit(tur.get(key), role=role, echo=True)
-
-    author_blob = "\n".join(author_parts)
-    assistant_blob = "\n".join(assistant_parts)
-    echo_blob = "\n".join(echo_parts)
+    # where evidence of having DRAWN ON the page's content lives. Issue
+    # athenaeum#2301 extracted the split itself into
+    # :func:`split_transcript_text_by_provenance` so a second caller needing
+    # the identical split does not re-derive it.
+    author_blob, assistant_blob, echo_blob = split_transcript_text_by_provenance(
+        transcript_records
+    )
     page_texts = _pushed_page_texts(wiki_root, pushed_ids)
 
     referenced: list[str] = []

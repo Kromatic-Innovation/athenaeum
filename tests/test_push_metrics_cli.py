@@ -1149,7 +1149,16 @@ def test_parser_tree_binds_func_for_push_metrics_subcommands() -> None:
         for a in push_metrics_parser._actions
         if isinstance(a, argparse._SubParsersAction)
     )
-    assert set(inner.choices) == {"baseline", "coverage-audit", "liveness", "record", "tail"}
+    assert set(inner.choices) == {
+        "baseline",
+        "coverage-audit",
+        "liveness",
+        "record",
+        "tail",
+        "follow-through",
+        "sample-for-labelling",
+        "score-used",
+    }
     for name, sub in inner.choices.items():
         assert (
             sub.get_default("func") is not None
@@ -1324,3 +1333,105 @@ def test_tail_follow_flag_forwards_to_tail_records(tmp_path: Path, monkeypatch) 
     )
     assert rc == 0
     assert captured["follow"] is True
+
+
+def test_follow_through_empty_ledger_reports_zero_counts(tmp_path: Path) -> None:
+    """issue athenaeum#2301: `follow-through` over an empty ledger is a
+    clean, honest zero — never a crash, never a fabricated rate."""
+    cache_dir = tmp_path / "cache"
+    projects_root = tmp_path / "projects"
+    rc, out = _run(
+        [
+            "push-metrics",
+            "follow-through",
+            "--json",
+            "--cache-dir",
+            str(cache_dir),
+            "--projects-root",
+            str(projects_root),
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(out)
+    assert payload["sessions_considered"] == 0
+    assert payload["pushed_page_total"] == 0
+    assert payload["class_counts"] == {
+        "opened_after_push": 0,
+        "cited_without_opening": 0,
+        "neither": 0,
+    }
+    assert all(rate is None for rate in payload["class_rates"].values())
+
+
+def test_follow_through_joins_ledger_and_transcript(tmp_path: Path) -> None:
+    """Dispatch-level wiring test: the CLI --cache-dir/--projects-root flags
+    reach `follow_through.build_follow_through_report` and its result comes
+    back through --json unchanged. Full classification coverage lives in
+    `tests/test_follow_through.py`."""
+    cache_dir = tmp_path / "cache"
+    projects_root = tmp_path / "projects"
+    rec = push_metrics.build_push_record(
+        session_id="sess-cli",
+        query="q",
+        backend="fts5",
+        hits=[("f.md", {"uid": "cliuid001"}, push_metrics.estimate_tokens("b"))],
+    )
+    rec.ts = "2026-01-01T00:00:00Z"
+    push_metrics.record_push(rec, cache_dir=cache_dir)
+
+    scope_dir = projects_root / "-scope-hash"
+    scope_dir.mkdir(parents=True)
+    (scope_dir / "sess-cli.jsonl").write_text(
+        json.dumps(
+            {
+                "type": "assistant",
+                "sessionId": "sess-cli",
+                "timestamp": "2026-01-01T00:05:00Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "tu1",
+                            "name": "mcp__athenaeum__read_entity",
+                            "input": {"uid": "cliuid001", "entity_class": "project"},
+                        }
+                    ],
+                },
+            }
+        )
+        + "\n"
+    )
+
+    rc, out = _run(
+        [
+            "push-metrics",
+            "follow-through",
+            "--json",
+            "--cache-dir",
+            str(cache_dir),
+            "--projects-root",
+            str(projects_root),
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(out)
+    assert payload["pushed_page_total"] == 1
+    assert payload["class_counts"]["opened_after_push"] == 1
+
+
+def test_follow_through_plain_text_mode_does_not_crash(tmp_path: Path) -> None:
+    cache_dir = tmp_path / "cache"
+    projects_root = tmp_path / "projects"
+    rc, out = _run(
+        [
+            "push-metrics",
+            "follow-through",
+            "--cache-dir",
+            str(cache_dir),
+            "--projects-root",
+            str(projects_root),
+        ]
+    )
+    assert rc == 0
+    assert "sessions_considered: 0" in out

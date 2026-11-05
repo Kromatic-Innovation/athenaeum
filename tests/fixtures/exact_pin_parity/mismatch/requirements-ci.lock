@@ -1,0 +1,5 @@
+# Counter-example lock (athenaeum#2324 AC3): a stale duplicate of
+# pyproject.toml's `ruff` pin, one version behind.
+pyyaml==6.0.1
+pytest==8.4.2
+ruff==0.16.9

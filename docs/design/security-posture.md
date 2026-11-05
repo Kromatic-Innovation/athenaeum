@@ -380,6 +380,67 @@ Auto-merge is wired in `.github/workflows/dependabot-auto-merge.yml`. The policy
   - `chromadb` — minor bumps have migrated SQLite schemas (data loss on downgrade).
 - **Major updates** never auto-merge — and most would exceed the pyproject.toml upper bounds anyway, so Dependabot can't propose them within current caps.
 
+#### 3.1.1 Why an exact-pinned tool bump can't desync `requirements-ci.lock` (athenaeum#2324)
+
+`pyproject.toml` exact-pins a couple of dev/type-check tools with `==`
+(`ruff` today) so lint/type results are deterministic run-to-run.
+`requirements-ci.lock` (see its own header) is a separate, full freeze of the
+transitive dependency tree, applied to CI installs as a **constraints**
+file. Twice — athenaeum#1922 (hand-fixed in athenaeum#1929) and
+athenaeum#2284 — a Dependabot PR bumped the `pyproject.toml` pin without
+touching the lock's own stale copy of the same pin, so the two `==`
+constraints contradicted each other and every install step in CI died with
+`ResolutionImpossible` before a single test ran. Worse, the check that
+actually reported this (`CI Required`) never named the real cause — it just
+saw a downstream `Coverage` job skipped because `test` never got past
+install.
+
+Three designs were weighed to close this:
+
+- **(A) Single source of truth — chosen.** A direct dependency
+  `pyproject.toml` already exact-pins has nothing to gain from a duplicate
+  entry in `requirements-ci.lock`; the duplicate is the defect, not the fix.
+  `requirements-ci.lock` no longer carries a `ruff` line at all — see its
+  header. A `ruff` bump then cannot desync *by construction*: there is
+  nothing left to fall out of step with, which satisfies both "a bump either
+  gets the lock updated automatically, or never ships out of step" and "a
+  later rebase/recreate of that PR does not reintroduce the mismatch" for
+  free, with no new runtime mechanism to keep working. `scripts/
+  check_exact_pin_parity.py`, wired into `.github/workflows/ci.yml`'s
+  `pin-parity` job (runs before `test`/`types`/`clean-venv` even start
+  installing, since it is pure stdlib with no install step of its own),
+  fails the build by name if a duplicate pin is ever reintroduced and goes
+  stale — the counter-example this issue asked for.
+- **(B) Auto-update the lock on Dependabot PRs — rejected as the primary
+  mechanism, though empirically viable here.** `dependabot-auto-merge.yml`'s
+  `pull_request`-triggered runs for this repo DO get a writable
+  `GITHUB_TOKEN` (`actions/permissions` reports
+  `default_workflow_permissions: write`; concretely, that workflow's "Enable
+  auto-merge" step actually called `gh pr merge --auto` and succeeded on
+  athenaeum#2284 itself, which later merged) — so a design that pushed a
+  regenerated lock back onto the PR branch was not ruled out by a read-only
+  token the way it would be on a repo without that opt-in. It was rejected
+  anyway: regenerating the **whole** transitive closure on every single-
+  package bump reintroduces exactly the drift this lock exists to prevent
+  (an unrelated transitive package could shift versions on a PR that only
+  touched `ruff`), and this repo's own precedent (athenaeum#1929's PR
+  description) already rejected full regeneration in favor of a targeted,
+  single-line edit for this same reason. A bot that pushes commits back onto
+  Dependabot's branch is also one more moving part needing its own
+  re-run-on-`synchronize` handling to survive AC2 (rebase/recreate) — (A)
+  needs none of that.
+- **(C) A fail-fast named check only — insufficient alone.** Reporting the
+  mismatch by name early is necessary (it is what actually diagnoses the
+  failure line in athenaeum#1922/#2284) but not sufficient by itself: a
+  check that only reports does not stop the mismatch from being mergeable
+  in the first place, or from recurring on every future bump. (C) is kept as
+  part of (A) — `pin-parity` — rather than treated as a standalone fix.
+
+Locking `mypy` is out of scope here (it is currently unpinned by
+`requirements-ci.lock` and stays that way); the rule above generalizes to it
+automatically if that ever changes — `scripts/check_exact_pin_parity.py`
+scans every exact `==` pin anywhere in `pyproject.toml`, not just `ruff`.
+
 ### 3.2 Major version bumps + cap bumps
 
 A "major bump" here is sometimes Dependabot proposing to raise the upper-bound cap in `pyproject.toml` (rather than the dep itself). Disposition:

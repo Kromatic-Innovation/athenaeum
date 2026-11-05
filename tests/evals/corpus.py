@@ -748,6 +748,34 @@ def _load_yaml(path: Path) -> Any:
     return yaml.safe_load(path.read_text(encoding="utf-8")) or []
 
 
+#: athenaeum#2233: process-local memo for :func:`load_core_pages` -- re-parsing
+#: the same 16 hand-authored yaml files on every call (``build_corpus`` does
+#: this once per group/cell across the eval harness) measured as the single
+#: largest non-subprocess cost in ``tests/evals/test_north_star_preflight.py``
+#: (~15s of a ~60s test, pure-python ``yaml.safe_load``). Safe to cache
+#: unconditionally: ``CORE_DIR`` is a fixed module constant no test ever
+#: monkeypatches or writes into, every ``Page`` it returns is
+#: ``@dataclass(frozen=True)``, and no caller in the tree mutates the
+#: returned LIST in place -- every one either reads it, or copies it first
+#: (``build_corpus``'s own ``pages = list(core)``) before extending.
+_core_pages_cache: list["Page"] | None = None
+
+
+def load_core_pages() -> list[Page]:
+    """Load every hand-authored page from ``data/corpus/core/*.yaml``.
+
+    Files are read in sorted order so the corpus is stable regardless of
+    filesystem enumeration order -- a generated tree that varies by platform
+    would break the fingerprint contract.
+    """
+    global _core_pages_cache
+    if _core_pages_cache is not None:
+        return _core_pages_cache
+    pages = _load_core_pages_uncached()
+    _core_pages_cache = pages
+    return pages
+
+
 def _parse_related(raw: dict, path: Path) -> tuple[RelatedEdge, ...]:
     """Build one page's edge tuple from ``related:`` and/or ``links:``.
 
@@ -787,8 +815,9 @@ def _parse_related(raw: dict, path: Path) -> tuple[RelatedEdge, ...]:
     return tuple(edges)
 
 
-def load_core_pages() -> list[Page]:
-    """Load every hand-authored page from ``data/corpus/core/*.yaml``.
+def _load_core_pages_uncached() -> list[Page]:
+    """The real parse, bypassing :data:`_core_pages_cache` -- called exactly
+    once per process by :func:`load_core_pages`.
 
     Files are read in sorted order so the corpus is stable regardless of
     filesystem enumeration order -- a generated tree that varies by platform
@@ -831,8 +860,29 @@ def load_core_pages() -> list[Page]:
     return pages
 
 
+#: athenaeum#2233: process-local memo for :func:`load_probes`, keyed by the
+#: CURRENT value of :data:`PROBES_PATH` (not a bare no-arg cache) because
+#: two tests (``test_eval_corpus_generator.py``'s
+#: ``test_load_probes_*``) monkeypatch ``corpus_module.PROBES_PATH`` to a
+#: tmp-dir probes.yaml and expect ``load_probes()`` to read THAT file -- a
+#: cache keyed only by call site would serve the real probes.yaml's stale
+#: result to those tests instead. Each distinct path -- the real one, or a
+#: given test's own tmp path -- is parsed at most once per process.
+_probes_cache: dict[Path, list[Probe]] = {}
+
+
 def load_probes() -> list[Probe]:
     """Load the probe set with its ground truth."""
+    cached = _probes_cache.get(PROBES_PATH)
+    if cached is not None:
+        return cached
+    probes = _load_probes_uncached()
+    _probes_cache[PROBES_PATH] = probes
+    return probes
+
+
+def _load_probes_uncached() -> list[Probe]:
+    """The real parse, bypassing :data:`_probes_cache`."""
     return [
         Probe(
             id=raw["id"],
