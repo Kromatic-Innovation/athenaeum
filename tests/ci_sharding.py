@@ -36,18 +36,30 @@ SPLIT_BY_LEADING_PARAM = frozenset({"tests/evals/test_recall_covers_grep.py"})
 #: 4-vCPU runner (per-worker timelines of athenaeum#2242's PR runs, after the
 #: nightly tier took the print tables and hook sweeps out of the default
 #: selection). Units missing here weigh DEFAULT_SECONDS_PER_TEST per test.
+#:
+#: athenaeum#2233 re-measured the five heaviest entries from a live develop CI
+#: run (run 42089871339) BEFORE this issue's changes, then re-estimated each
+#: one the issue touched by applying this lane's own local before/after
+#: ratio to that CI baseline (local absolute numbers are noisy in this
+#: container -- see the PR body for the raw before/after pairs). Entries
+#: below NOT touched by athenaeum#2233 (json_utils, declared_imports,
+#: eval_corpus_leakage, rollout_mode_labelling, rollout_push_breadcrumb_spike)
+#: are left exactly as they were -- no new measurement exists for them.
+#: ``test_hook_byte_equivalence_1912.py`` was already fixed by athenaeum#2242
+#: (its 48-probe sweep moved to the nightly tier); its weight below was
+#: simply stale and is corrected to the re-measured default-suite cost.
 UNIT_WEIGHT_SECONDS: dict[str, float] = {
-    "tests/evals/test_recall_covers_grep.py[core]": 200.0,
-    "tests/evals/test_north_star_preflight.py": 190.0,
-    "tests/test_shell_hooks.py": 130.0,
-    "tests/test_eval_corpus_generator.py": 115.0,
-    "tests/evals/test_recall_covers_grep.py[medium]": 90.0,
+    "tests/evals/test_north_star_preflight.py": 160.0,
+    "tests/test_shell_hooks.py": 142.0,
+    "tests/test_eval_corpus_generator.py": 56.0,
+    "tests/evals/test_recall_covers_grep.py[medium]": 22.0,
+    "tests/evals/test_recall_covers_grep.py[core]": 20.0,
     "tests/test_json_utils.py": 50.0,
     "tests/test_declared_imports.py": 47.0,
     "tests/test_eval_corpus_leakage.py": 40.0,
-    "tests/evals/test_hook_byte_equivalence_1912.py": 40.0,
     "tests/evals/test_rollout_mode_labelling.py": 37.0,
     "tests/evals/test_rollout_push_breadcrumb_spike.py": 31.0,
+    "tests/evals/test_hook_byte_equivalence_1912.py": 6.3,
 }
 
 DEFAULT_SECONDS_PER_TEST = 0.1

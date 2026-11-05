@@ -1,0 +1,6 @@
+# Positive control (athenaeum#2324 AC3): proves the `mismatch` fixture's
+# failure is about the deliberate duplicate, not about the checker always
+# failing. No `ruff` line here -- `pytest`'s range pin is free to be frozen
+# since it is a range, not an exact pin.
+pyyaml==6.0.1
+pytest==8.4.2

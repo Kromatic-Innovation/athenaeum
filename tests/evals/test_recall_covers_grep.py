@@ -343,16 +343,30 @@ def _hook_ranked_uids(
     name_to_uid: dict[str, str],
     wiki_root: Path,
     fts5_cache_dir: Path,
+    cache: dict[str, tuple[list[str], bool]] | None = None,
 ) -> tuple[list[str], bool]:
     """The hook's top-3 uids, and whether this was a REAL hook run (``True``)
-    or the FTS5 ``n=3`` fallback (``False``)."""
+    or the FTS5 ``n=3`` fallback (``False``).
+
+    *cache* (athenaeum#2233), when given, is keyed by *query* alone: the
+    answer depends only on the already-built *hook_home*/*knowledge_root*
+    and *query*, never on which backend the CALLER is checking, so the
+    fts5 and vector reachability tests share one entry per probe instead
+    of each spawning an identical hook subprocess for the same query.
+    """
+    if cache is not None and query in cache:
+        return cache[query]
     if hook_ready:
         names = _hook_breadcrumb_names(knowledge_root, hook_home, query)
         uids = [name_to_uid[name] for name in names if name in name_to_uid]
-        return uids, True
-    hits = get_backend("fts5").query(query, fts5_cache_dir, n=_HOOK_TOP_K, wiki_root=wiki_root)
-    uids = [fname[:-3] if fname.endswith(".md") else fname for fname, _n, _s in hits]
-    return uids, False
+        result = (uids, True)
+    else:
+        hits = get_backend("fts5").query(query, fts5_cache_dir, n=_HOOK_TOP_K, wiki_root=wiki_root)
+        uids = [fname[:-3] if fname.endswith(".md") else fname for fname, _n, _s in hits]
+        result = (uids, False)
+    if cache is not None:
+        cache[query] = result
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -423,6 +437,7 @@ def _measure(
     hook_home: Path,
     hook_ready: bool,
     name_to_uid: dict[str, str],
+    hook_cache: dict[str, tuple[list[str], bool]] | None = None,
 ) -> _ProbeMeasurement:
     grep_hits = _grep_hits(corpus, probe.query)
     recall_ranked = _recall_ranked_uids(
@@ -439,6 +454,7 @@ def _measure(
         name_to_uid=name_to_uid,
         wiki_root=wiki_root,
         fts5_cache_dir=cache_dir if backend == "fts5" else cache_dir,
+        cache=hook_cache,
     )
     return _ProbeMeasurement(
         scale=scale,
@@ -506,6 +522,15 @@ class _ScaleFixture:
     #: templating). 0/0 at core, where every page name is unique.
     name_collision_names: int = 0
     name_collision_pages: int = 0
+    #: athenaeum#2233: memo for :func:`_hook_ranked_uids`, keyed by probe
+    #: query. The hook's own breadcrumb answer for a given query depends
+    #: only on this fixture's already-built ``hook_home``/``knowledge_root``
+    #: -- never on which backend (fts5/vector) the CALLING test is
+    #: checking -- so the fts5 and vector reachability tests would
+    #: otherwise each spawn an identical hook subprocess per probe for the
+    #: exact same answer. Lives on the fixture instance (module-scoped, one
+    #: per scale per xdist worker), so it needs no cross-worker locking.
+    hook_cache: dict[str, tuple[list[str], bool]] = field(default_factory=dict)
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -927,6 +952,7 @@ def test_recall_covers_grep_reachable_expected_pages_fts5(
         hook_home=fx.hook_home,
         hook_ready=fx.hook_ready,
         name_to_uid=fx.name_to_uid,
+        hook_cache=fx.hook_cache,
     )
     _print_probe_table_row(measurement)
     missing = measurement.grep_reachable_expected - set(measurement.recall_ranked)
@@ -970,6 +996,7 @@ def test_recall_covers_grep_reachable_expected_pages_vector(
         hook_home=fx.hook_home,
         hook_ready=fx.hook_ready,
         name_to_uid=fx.name_to_uid,
+        hook_cache=fx.hook_cache,
     )
     _print_probe_table_row(measurement)
     missing = measurement.grep_reachable_expected - set(measurement.recall_ranked)
@@ -1120,6 +1147,7 @@ def test_print_per_probe_class_summary(scale_fixture: _ScaleFixture) -> None:
             hook_home=fx.hook_home,
             hook_ready=fx.hook_ready,
             name_to_uid=fx.name_to_uid,
+            hook_cache=fx.hook_cache,
         )
         by_class.setdefault(probe.probe_class, []).append(measurement)
 
