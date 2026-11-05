@@ -91,11 +91,13 @@ python scripts/gen_cli_reference.py
 - [`athenaeum outbound-lint`](#athenaeum-outbound-lint) (command) — Scan outbound-destined text for PII (emails/phones) before it ships; flag findings (default) or --redact them. Offline, deterministic.
 - [`athenaeum paste-cleanup`](#athenaeum-paste-cleanup) (command) — Tier-0 attributed-paste cleanup pass over person pages' ## Notes bullets: a cheap-model proposer classifies keep/rewrite/remove, a stronger model verifies a sample. A proposal whose proposer OR verifier call errors (raises, or returns unparseable output) resolves to hold, never the unverified proposer verdict. Dry-run by default; --apply writes.
 - [`athenaeum pii-restore`](#athenaeum-pii-restore) (command) — Anchored PII-restore: recover non-PII tokens a [contact redacted -> excluded surface] marker replaced, via rename-following and retro-filename history lookup. Default is dry-run; pass --apply to write fixes.
-- [`athenaeum push-metrics`](#athenaeum-push-metrics) (group) — Push-precision + coverage baseline: compute/record the precision snapshot, sample sessions for a human-reviewed coverage-audit worksheet, record a single hook-path push, and stream the documented NDJSON tail contract over the ledgers.
+- [`athenaeum push-metrics`](#athenaeum-push-metrics) (group) — Push-precision + coverage baseline: compute/record the precision snapshot, sample sessions for a human-reviewed coverage-audit worksheet, record a single hook-path push, stream the documented NDJSON tail contract over the ledgers, and sample/score the `used` heuristic against human labels.
 - [`athenaeum push-metrics baseline`](#athenaeum-push-metrics-baseline) (command) — Compute precision + coverage over a window; write the dated snapshot to docs/measurements/memory-model-measurements.md. Refuses to write (exit 1) when the window has zero reference-determination records. See --dry-run to inspect without writing.
 - [`athenaeum push-metrics coverage-audit`](#athenaeum-push-metrics-coverage-audit) (command) — Sample N sessions' push records into a worksheet of the structural facts hash-only records support (candidate-pool size, tier/scope concentration, filter removal, policy-set bounds) — never a per-candidate marking or a measured miss rate.
 - [`athenaeum push-metrics liveness`](#athenaeum-push-metrics-liveness) (command) — Read-only assertion: PASS if any of the most recent --window rows is sidecar-tagged, FAIL (exit 1) if --window rows exist and none is, INCONCLUSIVE (exit 0) if fewer than --window rows are recorded (including an absent ledger).
 - [`athenaeum push-metrics record`](#athenaeum-push-metrics-record) (command) — Record one hook-path push: the fire-and-forget entry point the per-turn UserPromptSubmit recall hook calls with the session id and the ids it actually injected. Writes a push record tagged source=hook, distinct from an explicit MCP `recall` push (no source key) and the `athenaeum context` sidecar adapter (source=sidecar). Always exits 0 — see this subcommand's own docstring.
+- [`athenaeum push-metrics sample-for-labelling`](#athenaeum-push-metrics-sample-for-labelling) (command) — Stratified sample of pushed pages, by session-length bucket and population, written as a labelling-ready JSONL worksheet. Tooling only — never fills in the relevant/changed_work judgments itself.
+- [`athenaeum push-metrics score-used`](#athenaeum-push-metrics-score-used) (command) — Score the `used` heuristic (push_metrics.determine_references) against a human-labelled file: precision, recall, and the relevant/irrelevant breakdown of unused pushes, with Wilson confidence intervals.
 - [`athenaeum push-metrics tail`](#athenaeum-push-metrics-tail) (command) — Stream NDJSON — one object per push record and per reference-determination record, newest-last. Read-only; never mutates the ledgers. See docs/reference/configuration.md ('push-metrics tail — the public NDJSON contract') for the documented --json record shape, schema version, and compatibility note.
 - [`athenaeum quarantine`](#athenaeum-quarantine) (command) — Quarantine maintenance. 'requeue' releases legacy one-shot quarantine entries (LLM-call / wall-clock bound, no attempt history) back into raw/ so they run under the retry schedule. Dry-run unless --apply.
 - [`athenaeum query-topics`](#athenaeum-query-topics) (command) — Extract substantive search topics from a prompt (Haiku). Used by the UserPromptSubmit hook to rewrite queries before FTS5/vector search. Prints one topic per line to stdout; empty output means fall back to the caller's built-in extractor.
@@ -1159,7 +1161,7 @@ Anchored PII-restore: recover non-PII tokens a [contact redacted -> excluded sur
 
 ## `athenaeum push-metrics`
 
-Push-precision + coverage baseline: compute/record the precision snapshot, sample sessions for a human-reviewed coverage-audit worksheet, record a single hook-path push, and stream the documented NDJSON tail contract over the ledgers.
+Push-precision + coverage baseline: compute/record the precision snapshot, sample sessions for a human-reviewed coverage-audit worksheet, record a single hook-path push, stream the documented NDJSON tail contract over the ledgers, and sample/score the `used` heuristic against human labels.
 
 Subcommands:
 
@@ -1167,6 +1169,8 @@ Subcommands:
 - `athenaeum push-metrics coverage-audit` — Sample N sessions' push records into a worksheet of the structural facts hash-only records support (candidate-pool size, tier/scope concentration, filter removal, policy-set bounds) — never a per-candidate marking or a measured miss rate.
 - `athenaeum push-metrics liveness` — Read-only assertion: PASS if any of the most recent --window rows is sidecar-tagged, FAIL (exit 1) if --window rows exist and none is, INCONCLUSIVE (exit 0) if fewer than --window rows are recorded (including an absent ledger).
 - `athenaeum push-metrics record` — Record one hook-path push: the fire-and-forget entry point the per-turn UserPromptSubmit recall hook calls with the session id and the ids it actually injected. Writes a push record tagged source=hook, distinct from an explicit MCP `recall` push (no source key) and the `athenaeum context` sidecar adapter (source=sidecar). Always exits 0 — see this subcommand's own docstring.
+- `athenaeum push-metrics sample-for-labelling` — Stratified sample of pushed pages, by session-length bucket and population, written as a labelling-ready JSONL worksheet. Tooling only — never fills in the relevant/changed_work judgments itself.
+- `athenaeum push-metrics score-used` — Score the `used` heuristic (push_metrics.determine_references) against a human-labelled file: precision, recall, and the relevant/irrelevant breakdown of unused pushes, with Wilson confidence intervals.
 - `athenaeum push-metrics tail` — Stream NDJSON — one object per push record and per reference-determination record, newest-last. Read-only; never mutates the ledgers. See docs/reference/configuration.md ('push-metrics tail — the public NDJSON contract') for the documented --json record shape, schema version, and compatibility note.
 
 ## `athenaeum push-metrics baseline`
@@ -1222,6 +1226,35 @@ Record one hook-path push: the fire-and-forget entry point the per-turn UserProm
 | `--query` | — | — | Optional raw query text for this push — only its hash is ever retained. |
 | `--session-id` | — | — | Consuming session id. Falls back to CLAUDE_CODE_SESSION_ID / CLAUDE_SESSION_ID (push_metrics.resolve_session_id) when omitted and --stdin-json was not passed, or its payload carried none. |
 | `--stdin-json` | `False` | — | Read {"session_id":..., "ids": [...], "query":..., "backend":...} from stdin (hook-input shape, mirrors `athenaeum context --stdin-json`). |
+
+## `athenaeum push-metrics sample-for-labelling`
+
+Stratified sample of pushed pages, by session-length bucket and population, written as a labelling-ready JSONL worksheet. Tooling only — never fills in the relevant/changed_work judgments itself.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--cache-dir` | — | — | Cache directory holding the push-metrics ledgers (default: ATHENAEUM_CACHE_DIR env or ~/.cache/athenaeum) |
+| `--exclude-session` | — | — | Exclude a KNOWN-synthetic session id from the sampling pool (same semantics as `coverage-audit --exclude-session`). Repeatable. |
+| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--medium-max` | `10` | — | Push-record count at/below which a session is bucketed 'medium' (above 'short'); anything higher is 'long' (default: 10). |
+| `--n-per-stratum` | `10` | — | Max pushed pages to sample from EACH (length, population) stratum (default: 10). |
+| `--output` | — | — | Worksheet output file. Defaults under the cache dir (athenaeum.push_used_scoring.default_sample_output_path) — never inside this repo's working tree. |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
+| `--seed` | — | — | Optional deterministic sample seed (test/repro seam). |
+| `--short-max` | `3` | — | Push-record count at/below which a session is bucketed 'short' (default: 3). |
+
+## `athenaeum push-metrics score-used`
+
+Score the `used` heuristic (push_metrics.determine_references) against a human-labelled file: precision, recall, and the relevant/irrelevant breakdown of unused pushes, with Wilson confidence intervals.
+
+| Flag | Default | Choices | Help |
+|---|---|---|---|
+| `--cache-dir` | — | — | Cache directory holding the push-metrics ledgers (default: ATHENAEUM_CACHE_DIR env or ~/.cache/athenaeum) |
+| `--confidence` | `0.95` | — | Confidence level for the Wilson score interval: one of 0.80, 0.90, 0.95, 0.98, 0.99 (default: 0.95). |
+| `--json` | `False` | — | Emit machine-readable JSON instead of plain text. |
+| `--labels` | — | — | REQUIRED. Path to a fully-labelled JSONL file (one {session_id, push_id, relevant, changed_work} object per line). Label files live OUTSIDE this repo — there is no default. |
+| `--output` | — | — | Report output file. Defaults under the cache dir (athenaeum.push_used_scoring.default_score_output_path) — never inside this repo's working tree. |
+| `--path` | `~/knowledge` | — | Knowledge directory (default: ~/knowledge) |
 
 ## `athenaeum push-metrics tail`
 
