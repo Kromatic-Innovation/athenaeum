@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-"""``athenaeum push-metrics {baseline,coverage-audit,liveness,record,tail}``
+"""``athenaeum push-metrics
+{baseline,coverage-audit,liveness,record,tail,follow-through}``
 — v6 MVP (a), issue athenaeum#711; ``liveness`` added by issue
 athenaeum#1422, ``record`` by issue athenaeum#1478, ``tail`` by issue
-athenaeum#1479.
+athenaeum#1479, ``follow-through`` by issue athenaeum#2301.
 
-Five subcommands over :mod:`athenaeum.push_metrics`:
+Six subcommands over :mod:`athenaeum.push_metrics` /
+:mod:`athenaeum.follow_through`:
 
 - ``baseline``       compute precision + coverage over a stated window and
                        write/append a dated snapshot into
@@ -55,13 +57,23 @@ Five subcommands over :mod:`athenaeum.push_metrics`:
                        argv parsing + output shaping over
                        :func:`athenaeum.push_metrics.tail_records` — all the
                        draining/filtering/follow logic lives there.
+- ``follow-through``   per-pushed-page classification (issue athenaeum#2301):
+                       did the pushing session later OPEN the page (via
+                       ``recall``/``read_entity``/a file read), AFTER the
+                       push — as opposed to ``used``'s citation/content
+                       signal, which cannot tell an ignored pointer apart
+                       from a page read and silently applied. No model
+                       calls. Thin argv parsing + output shaping over
+                       :func:`athenaeum.follow_through.build_follow_through_report`
+                       — all the ledger/transcript join logic lives there.
 
 Factoring rule (L5 presentation): a self-contained CLI subcommand lives in
 its own ``_cmd_<name>.py`` and registers via ``add_<name>_subparser`` —
 mirrors :mod:`athenaeum._cmd_calibration`'s shape. ``record`` (issue
-athenaeum#1478) and ``tail`` (issue athenaeum#1479) are both added here
-rather than a new module because ``push-metrics`` already has this one file
-— keeps ``push-metrics``'s subcommands cohesive and localised in one place.
+athenaeum#1478), ``tail`` (issue athenaeum#1479), and ``follow-through``
+(issue athenaeum#2301) are all added here rather than a new module because
+``push-metrics`` already has this one file — keeps ``push-metrics``'s
+subcommands cohesive and localised in one place.
 """
 
 from __future__ import annotations
@@ -70,18 +82,27 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 from athenaeum._cli_shared import _resolve_wiki_root
 from athenaeum.config import DEFAULT_KNOWLEDGE_ROOT
 
 
 def cmd_push_metrics(args: argparse.Namespace) -> int:
-    """Dispatch ``athenaeum push-metrics {baseline,coverage-audit,liveness,record,tail}``."""
+    """Dispatch ``athenaeum push-metrics
+    {baseline,coverage-audit,liveness,record,tail,follow-through}``."""
     sub = getattr(args, "push_metrics_target", None)
-    if sub not in ("baseline", "coverage-audit", "liveness", "record", "tail"):
+    if sub not in (
+        "baseline",
+        "coverage-audit",
+        "liveness",
+        "record",
+        "tail",
+        "follow-through",
+    ):
         print(
             "usage: athenaeum push-metrics "
-            "{baseline,coverage-audit,liveness,record,tail} [...]",
+            "{baseline,coverage-audit,liveness,record,tail,follow-through} [...]",
             file=sys.stderr,
         )
         return 2
@@ -91,6 +112,9 @@ def cmd_push_metrics(args: argparse.Namespace) -> int:
 
     if sub == "tail":
         return _cmd_push_metrics_tail(args)
+
+    if sub == "follow-through":
+        return _cmd_push_metrics_follow_through(args)
 
     from athenaeum import push_metrics
 
@@ -380,6 +404,51 @@ def _cmd_push_metrics_tail(args: argparse.Namespace) -> int:
     return 0
 
 
+def _print_follow_through_report(report: Any) -> None:
+    """Plain-text rendering of :meth:`athenaeum.follow_through.FollowThroughReport.to_dict`
+    — ``--json`` is the documented, stable machine-readable shape."""
+    print(
+        f"sessions_considered: {report['sessions_considered']}\n"
+        f"sessions_skipped_no_transcript: {report['sessions_skipped_no_transcript']}\n"
+        f"pushed_page_total: {report['pushed_page_total']}\n"
+        f"opened_without_push_count: {report['opened_without_push_count']}\n"
+        f"channel_note: {report['channel_note']}"
+    )
+    for cls, count in report["class_counts"].items():
+        rate = report["class_rates"].get(cls)
+        rate_str = f"{rate:.4f}" if rate is not None else "n/a"
+        print(f"  {cls}: {count} (rate {rate_str})")
+    for seg in report["segments"]:
+        print(
+            f"segment length={seg['length_bucket']} channel={seg['channel_bucket']} "
+            f"pushed_page_total={seg['pushed_page_total']} "
+            f"opened_without_push_count={seg['opened_without_push_count']}"
+        )
+
+
+def _cmd_push_metrics_follow_through(args: argparse.Namespace) -> int:
+    """``athenaeum push-metrics follow-through`` — per-pushed-page
+    classification (issue athenaeum#2301).
+
+    Read-only, thin argv parsing + output shaping over
+    :func:`athenaeum.follow_through.build_follow_through_report` — all the
+    ledger/transcript join logic lives there. Takes no run lock: this is a
+    read-only analyzer, never a writer.
+    """
+    from athenaeum import follow_through
+
+    report = follow_through.build_follow_through_report(
+        cache_dir=args.cache_dir,
+        projects_root=args.projects_root,
+    )
+    payload = report.to_dict()
+    if args.json:
+        sys.stdout.write(json.dumps(payload, separators=(",", ":")) + "\n")
+    else:
+        _print_follow_through_report(payload)
+    return 0
+
+
 def add_push_metrics_subparser(subparsers: argparse._SubParsersAction) -> None:
     """Register ``athenaeum push-metrics`` and its three modes on ``subparsers``."""
     p_parser = subparsers.add_parser(
@@ -593,4 +662,39 @@ def add_push_metrics_subparser(subparsers: argparse._SubParsersAction) -> None:
         default=None,
         help="Only emit records timestamped at/after this bound: relative "
         "(7d/24h/30m/2w) or absolute ISO-8601. Default: the whole ledger.",
+    )
+
+    follow_through_p = p_sub.add_parser(
+        "follow-through",
+        help="Per-pushed-page classification (issue athenaeum#2301): joins "
+        "the push ledger to the pushing sessions' own transcripts and "
+        "reports, in counts and rates only (no session ids, page ids, page "
+        "text or query text), whether each pushed page was opened "
+        "afterward (via recall/read_entity/a file read), cited without "
+        "opening, neither, or opened in a session that never pushed it. "
+        "Only an open AFTER the push counts as following it. No model "
+        "calls. Segmented by session length and (when derivable) "
+        "interactive-vs-headless — currently always 'unknown', since "
+        "neither the ledger nor the transcript carries that field (see "
+        "athenaeum.follow_through's module docstring).",
+    )
+    follow_through_p.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=None,
+        help="Cache directory holding the push-metrics ledger "
+        "(default: ATHENAEUM_CACHE_DIR env or ~/.cache/athenaeum).",
+    )
+    follow_through_p.add_argument(
+        "--projects-root",
+        type=Path,
+        default=None,
+        help="Claude Code transcript root, holding "
+        "<root>/<scope>/<session_id>.jsonl (default: CLAUDE_CONFIG_DIR "
+        "env's `projects` dir, else ~/.claude/projects).",
+    )
+    follow_through_p.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON instead of plain text.",
     )
