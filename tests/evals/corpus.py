@@ -1964,19 +1964,19 @@ SCALES: dict[str, Scale] = {
     # Core only -- no generation. The offline default: fast, fully
     # hand-authored, and what unit/e2e tests run against.
     "core": Scale("core", total_pages=0, distractors_per_probe=0),
-    # 300, repinned from 200 (athenaeum#1780, then again by athenaeum#1781
-    # item G / Quine review): the hand-authored core has grown across both
-    # issues (athenaeum#1780's 14 new pages, this PR's 12 contradiction/
-    # negative_knowledge pages, plus each issue's own new distractor pages
-    # at 2-per-probe) to the point that core+distractor alone at this scale
-    # is 231 pages (measured against the final merged corpus), already
-    # exceeding the original 200-page floor and leaving zero ballast --
+    # 400, repinned from 300 (athenaeum#1780, then athenaeum#1781 item G,
+    # then athenaeum#2303): the hand-authored core has grown again --
+    # athenaeum#2303 added 9 new `unprompted_push` triples (27 core pages:
+    # task-context/decision/decoy per probe) plus their own distractor
+    # pages at 2-per-probe -- to the point that core+distractor alone at
+    # this scale is 306 pages (measured against the merged corpus),
+    # already exceeding the 300-page floor and leaving zero ballast --
     # quietly collapsing `small` into a non-distinct point on the size axis
     # (`test_page_floors_leave_room_for_ballast`) -- the same failure mode
-    # this floor's own docstring warns about. 300 restores 69 pages of
+    # this floor's own docstring warns about. 400 restores 94 pages of
     # ballast headroom for the merged corpus; re-derive again if a future
     # PR's core/probe growth closes it.
-    "small": Scale("small", total_pages=300, distractors_per_probe=2),
+    "small": Scale("small", total_pages=400, distractors_per_probe=2),
     "medium": Scale("medium", total_pages=1_000, distractors_per_probe=2),
     "large": Scale("large", total_pages=10_000, distractors_per_probe=2),
     # A real single-operator deployment is already past 20,000 pages
