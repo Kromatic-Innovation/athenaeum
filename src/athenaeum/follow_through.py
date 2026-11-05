@@ -18,14 +18,37 @@ to the pushing session's own transcript:
 
 - ``opened_after_push``    — opened (recall / read_entity / file read) after
                               the push.
-- ``cited_without_opening`` — not opened, but
-                              ``push_metrics.determine_references`` marked it
-                              referenced (citation or content reproduction).
-- ``neither``               — pushed, never opened, never referenced.
+- ``cited_without_opening`` — not opened, but the id appears as a whole
+                              token in the session's own AUTHORED text (user
+                              or assistant) — never in a tool result.
+- ``neither``               — pushed, never opened, never cited.
 - ``opened_without_push``  — opened in a session that never received a push
                               for that id (a different id than the one being
                               scored above; reported separately since its
                               denominator is "opens", not "pushes").
+
+**Deliberately NOT ``push_metrics.determine_references``'s ``referenced_ids``
+(a Seer finding on this issue's own PR, confirmed real — see below).** That
+function's echo fallback — "an id present only in a tool result, with no page
+text to judge it against, keeps the historical 'referenced' verdict rather
+than a confident 'not used'" — is the right call for ``used``'s own purpose
+(never reverse-converting an indeterminate signal into a confident negative),
+but it is the WRONG default here: every MCP-pushed page's own delivery IS a
+``tool_result`` containing the literal rendered line ``**Uid:** <uid>``
+(:func:`athenaeum.mcp_server._recall_via_backend`'s hit-rendering format), so
+scanning for that uid in ``echo_blob`` with no page text available (this
+module never passes ``wiki_root``) finds it on EVERY push, whether or not the
+session ever did anything with it afterward. Calling ``determine_references``
+unmodified would therefore report nearly every un-reopened MCP push as
+``cited_without_opening`` instead of ``neither`` — exactly the headline-metric
+defect this epic exists to avoid. This module instead calls
+:func:`athenaeum.push_metrics.split_transcript_text_by_provenance` (the
+author/assistant/echo split ``determine_references`` is itself built from,
+extracted so this is reuse, not a second parser) and checks ONLY
+``author_blob`` — genuine citation, never an echo of the push's own
+rendering. The content-reproduction signal (``distinctive_ngram_overlap``
+against real page text) is out of scope here regardless, since it needs
+``wiki_root``, which this module never passes.
 
 **No model calls.** Every signal is a structural match over ids, tool names
 and timestamps already present in the ledger/transcript — the same
@@ -33,7 +56,8 @@ free, judge-free posture ``determine_references`` itself documents.
 
 **Reuse, not a second parser (issue athenaeum#2301's own instruction).** This
 module calls :func:`athenaeum.push_metrics.read_push_records`,
-:func:`athenaeum.push_metrics.determine_references`,
+:func:`athenaeum.push_metrics.split_transcript_text_by_provenance` (extracted
+from ``determine_references`` for this module, see above),
 :func:`athenaeum.push_metrics._find_session_transcript`,
 :func:`athenaeum.push_metrics._parse_ts`,
 :func:`athenaeum.push_metrics._appears_as_whole_token`,
@@ -41,11 +65,31 @@ module calls :func:`athenaeum.push_metrics.read_push_records`,
 :func:`athenaeum.transcript_verify._iter_session_records` — the exact
 primitives ``determine_references`` itself is built from — rather than
 writing a second transcript reader. It never passes a ``wiki_root``, so it
-never resolves or reads real page CONTENT (only ids/filenames/timestamps),
-which is also why its own "cited" signal can only ever reflect
-``determine_references``'s citation + echo-fallback branches, never its
-content-overlap branch (that one needs page text this module deliberately
-never fetches).
+never resolves or reads real page CONTENT (only ids/filenames/timestamps).
+
+**File-read opens are shape-filtered (a second Seer finding, confirmed
+real).** A ``Read`` tool call naming an ORDINARY file — ``main.py``,
+``README.md``, a config file read for an unrelated reason — is not a page
+open: :func:`athenaeum.push_metrics.opaque_push_id_from_filename` returns any
+non-matching filename UNCHANGED (by design, for its own caller), so without a
+shape check every such read would mint a non-empty "opened id" and inflate
+``opened_without_push``. :func:`_looks_like_wiki_page_filename` admits only
+the two filename shapes this corpus actually writes — a compiled entity
+(:data:`athenaeum.push_metrics._UID_PREFIX_RE` + ``.md``) or a raw auto-memory
+intake file (:data:`athenaeum.intake.RAW_FILE_RE`) — before a file read is
+ever treated as an open.
+
+**Opened-after-push is compared at SECOND resolution (a third Seer finding,
+confirmed real).** :func:`athenaeum.store.now_iso` stamps every push ``ts``
+at second precision (no fractional seconds), but a real transcript
+``timestamp`` commonly carries milliseconds — so the very ``recall``
+tool_use/tool_result pair that DELIVERED a push can parse as a few hundred
+milliseconds "after" that push's own truncated ``ts``, even though it is the
+SAME event, producing a false ``opened_after_push`` on the push's own
+delivery. :func:`_opened_strictly_after` truncates both sides to whole
+seconds before comparing, so a same-second event — including the push's own
+originating call — never counts as following itself; a genuinely later open
+(a different second) is unaffected.
 
 **Segmentation.** Issue athenaeum#2301 asks for two axes:
 
@@ -99,6 +143,7 @@ from pathlib import Path
 from typing import Any
 
 from athenaeum import push_metrics, transcript_verify
+from athenaeum.intake import RAW_FILE_RE
 
 #: Per-page classes that partition every PUSHED id (mutually exclusive, one
 #: per (session, id) pair).
@@ -201,6 +246,48 @@ def _tool_result_block_text(block: dict[str, Any]) -> str:
     return ""
 
 
+def _looks_like_wiki_page_filename(name: str) -> bool:
+    """True when *name* matches one of the two page-filename shapes this
+    corpus actually writes (Seer finding on issue athenaeum#2301's own PR,
+    confirmed real): a compiled entity (``push_metrics._UID_PREFIX_RE``'s
+    ``<8-hex>-`` prefix, plus a ``.md`` suffix) or a raw auto-memory intake
+    file (:data:`athenaeum.intake.RAW_FILE_RE`,
+    ``<YYYYMMDDTHHMMSSZ>-<8-hex>.md``/``.jsonl``).
+
+    Without this check, an ordinary file a session reads for an unrelated
+    reason — ``main.py``, ``README.md``, a config file — would still mint a
+    non-empty "opened id" via
+    :func:`athenaeum.push_metrics.opaque_push_id_from_filename` (which
+    returns any non-matching filename UNCHANGED, by design, for its own
+    caller) and inflate :data:`CLASS_OPENED_WITHOUT_PUSH`. A file read is
+    only ever a page-open SIGNAL for a filename this corpus could plausibly
+    have produced.
+    """
+    if RAW_FILE_RE.match(name):
+        return True
+    return bool(push_metrics._UID_PREFIX_RE.match(name)) and name.lower().endswith(".md")
+
+
+def _opened_strictly_after(open_ts: datetime, push_ts: datetime) -> bool:
+    """True iff *open_ts* is strictly after *push_ts*, compared at SECOND
+    resolution (Seer finding on issue athenaeum#2301's own PR, confirmed
+    real).
+
+    :func:`athenaeum.store.now_iso` stamps every push ``ts`` at second
+    precision (no fractional seconds) by design, but a real transcript
+    ``timestamp`` commonly carries milliseconds. The ``recall``
+    tool_use/tool_result pair that DELIVERED a push can therefore parse as a
+    few hundred milliseconds "after" that same push's own second-truncated
+    ``ts``, even though it is the identical event — a false
+    ``opened_after_push`` on the push's own delivery. Truncating both sides
+    to whole seconds before comparing removes that artifact; a genuinely
+    later open (landing in a different second) is unaffected. A tie (same
+    second) is scored like no open at all, matching this module's existing
+    "ties/precedes never count as following" discipline.
+    """
+    return open_ts.replace(microsecond=0) > push_ts.replace(microsecond=0)
+
+
 def _pushed_ids_by_session(
     push_records: Iterable[dict[str, Any]],
 ) -> dict[str, dict[str, datetime]]:
@@ -246,8 +333,11 @@ def _collect_open_events(
     Three signals, in transcript order:
 
     - ``read_entity`` tool_use -> its ``uid`` input IS the opened id.
-    - a file-read tool_use (:data:`_FILE_READ_TOOL_NAMES`) -> the opened id
-      is derived from the read path's filename via
+    - a file-read tool_use (:data:`_FILE_READ_TOOL_NAMES`) -> IF the read
+      path's filename matches a real page shape
+      (:func:`_looks_like_wiki_page_filename` — an ordinary source/config
+      file is excluded here, never minted into a fake id), the opened id is
+      derived from it via
       :func:`athenaeum.push_metrics.opaque_push_id_from_filename` — the
       SAME derivation the sidecar push path already uses, so a push id and
       an opened-file id can never diverge in how they're computed.
@@ -299,10 +389,12 @@ def _collect_open_events(
                         None,
                     )
                     if isinstance(path_val, str) and path_val:
-                        pid = push_metrics.opaque_push_id_from_filename(Path(path_val).name)
-                        if pid:
-                            events.append((ts, pid))
-                            known.add(pid)
+                        read_name = Path(path_val).name
+                        if _looks_like_wiki_page_filename(read_name):
+                            pid = push_metrics.opaque_push_id_from_filename(read_name)
+                            if pid:
+                                events.append((ts, pid))
+                                known.add(pid)
                 elif bare == _TOOL_RECALL:
                     tool_use_id = block.get("id")
                     if isinstance(tool_use_id, str) and tool_use_id:
@@ -444,10 +536,18 @@ def build_follow_through_report(
             continue
         sessions_considered += 1
 
-        ref_result = push_metrics.determine_references(
-            session_id, cache_dir=cache_dir, projects_root=root
+        # Issue athenaeum#2301 Seer finding (confirmed real): do NOT call
+        # `determine_references` here. Its echo fallback marks a pushed id
+        # "referenced" whenever it appears ANYWHERE in a tool result and no
+        # page text is available to judge it against — and this module never
+        # supplies page text — which means every MCP push's OWN delivery
+        # (literally `**Uid:** <uid>` in the push's own tool_result) would
+        # satisfy that fallback regardless of real engagement. Citation here
+        # is computed directly against `author_blob` only — genuine
+        # user/assistant text, never an echo of the push's own rendering.
+        author_blob, _assistant_blob, _echo_blob = push_metrics.split_transcript_text_by_provenance(
+            records
         )
-        referenced_ids = set(ref_result.referenced_ids) if ref_result is not None else set()
 
         length_bucket = _session_length_bucket(len(records))
         channel_bucket = _session_channel_bucket(records)
@@ -462,10 +562,12 @@ def build_follow_through_report(
         for pid, push_ts in pushed_at.items():
             pushed_page_total += 1
             segment_pushed_total[seg_key] += 1
-            opened_after = any(ts > push_ts for ts in opens_by_id.get(pid, ()))
+            opened_after = any(
+                _opened_strictly_after(ts, push_ts) for ts in opens_by_id.get(pid, ())
+            )
             if opened_after:
                 cls = CLASS_OPENED_AFTER_PUSH
-            elif pid in referenced_ids:
+            elif push_metrics._appears_as_whole_token(pid, author_blob):
                 cls = CLASS_CITED_WITHOUT_OPENING
             else:
                 cls = CLASS_NEITHER

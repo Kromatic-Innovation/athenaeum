@@ -426,3 +426,300 @@ class TestScopeIsPushLedgerSessionsOnly:
         assert report.sessions_considered == 0
         assert report.sessions_skipped_no_transcript == 1
         assert report.pushed_page_total == 0
+
+
+class TestOrdinaryFileReadIsNotAPageOpen:
+    """athenaeum#2301 Seer review finding 1 (confirmed real): an ordinary file read
+    (``main.py``) was minting a non-empty opened-id via
+    ``opaque_push_id_from_filename``'s unchanged-passthrough for a
+    non-matching filename, inflating ``opened_without_push_count``."""
+
+    def test_reading_an_ordinary_source_file_does_not_count_as_an_open(
+        self, tmp_path: Path
+    ) -> None:
+        cache = tmp_path / "cache"
+        projects = tmp_path / "projects"
+        _seed_push(
+            cache, session_id="sess-ordinary-file", pushed_id="aaa11111", ts="2026-01-01T00:00:00Z"
+        )
+        _write_transcript(
+            projects,
+            "sess-ordinary-file",
+            [
+                {
+                    "type": "assistant",
+                    "sessionId": "sess-ordinary-file",
+                    "timestamp": "2026-01-01T00:05:00Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [_read_file_block("tu1", "/repo/src/main.py")],
+                    },
+                },
+            ],
+        )
+
+        report = follow_through.build_follow_through_report(
+            cache_dir=cache, projects_root=projects
+        )
+        assert report.opened_without_push_count == 0
+        assert report.class_counts[follow_through.CLASS_NEITHER] == 1
+        assert report.class_counts[follow_through.CLASS_OPENED_AFTER_PUSH] == 0
+
+    def test_reading_a_readme_does_not_count_as_an_open(self, tmp_path: Path) -> None:
+        cache = tmp_path / "cache"
+        projects = tmp_path / "projects"
+        _seed_push(
+            cache, session_id="sess-readme", pushed_id="bbb22222", ts="2026-01-01T00:00:00Z"
+        )
+        _write_transcript(
+            projects,
+            "sess-readme",
+            [
+                {
+                    "type": "assistant",
+                    "sessionId": "sess-readme",
+                    "timestamp": "2026-01-01T00:05:00Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [_read_file_block("tu1", "/repo/README.md")],
+                    },
+                },
+            ],
+        )
+
+        report = follow_through.build_follow_through_report(
+            cache_dir=cache, projects_root=projects
+        )
+        assert report.opened_without_push_count == 0
+
+    def test_raw_intake_shaped_filename_still_counts_as_an_open(self, tmp_path: Path) -> None:
+        """Sanity check: the shape filter admits the OTHER legitimate page
+        shape (raw auto-memory intake), not just compiled entities."""
+        cache = tmp_path / "cache"
+        projects = tmp_path / "projects"
+        # Raw-intake ids ARE recorded as the full filename, extension
+        # included (opaque_push_id/opaque_push_id_from_filename's own
+        # no-uid fallback: "the indexed filename is used instead").
+        _seed_push(
+            cache,
+            session_id="sess-raw-intake",
+            pushed_id="20260802T023311Z-3f0ea402.md",
+            ts="2026-01-01T00:00:00Z",
+        )
+        _write_transcript(
+            projects,
+            "sess-raw-intake",
+            [
+                {
+                    "type": "assistant",
+                    "sessionId": "sess-raw-intake",
+                    "timestamp": "2026-01-01T00:05:00Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            _read_file_block(
+                                "tu1",
+                                "/knowledge/raw/auto-memory/20260802T023311Z-3f0ea402.md",
+                            )
+                        ],
+                    },
+                },
+            ],
+        )
+
+        report = follow_through.build_follow_through_report(
+            cache_dir=cache, projects_root=projects
+        )
+        assert report.class_counts[follow_through.CLASS_OPENED_AFTER_PUSH] == 1
+
+
+class TestCitationExcludesPushEcho:
+    """athenaeum#2301 Seer review finding 2 (confirmed real, and the one that matters
+    most): every MCP-pushed page's OWN delivery renders
+    ``**Uid:** <uid>`` inside a ``tool_result`` -- the push ledger's `ts`
+    and that tool_result share the same session transcript. Calling
+    ``push_metrics.determine_references`` with no ``wiki_root`` (this
+    module never passes one) hits its echo fallback and marks EVERY such
+    page 'referenced' whether or not the session ever did anything with it
+    afterward. This class pins the fix: citation here comes only from
+    `author_blob` (`split_transcript_text_by_provenance`), never from the
+    push's own tool_result echo."""
+
+    def test_unreopened_mcp_push_is_neither_not_cited(self, tmp_path: Path) -> None:
+        cache = tmp_path / "cache"
+        projects = tmp_path / "projects"
+        _seed_push(
+            cache, session_id="sess-echo-only", pushed_id="ddd44444", ts="2026-01-01T00:00:00Z"
+        )
+        _write_transcript(
+            projects,
+            "sess-echo-only",
+            [
+                {
+                    "type": "assistant",
+                    "sessionId": "sess-echo-only",
+                    "timestamp": "2026-01-01T00:00:00Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [_recall_use_block("tu-push")],
+                    },
+                },
+                {
+                    "type": "user",
+                    "sessionId": "sess-echo-only",
+                    "timestamp": "2026-01-01T00:00:00Z",
+                    "message": {
+                        "role": "user",
+                        "content": [
+                            _recall_result_block(
+                                "tu-push",
+                                "Some Page (score: 1.0)\n**Uid:** ddd44444\n\nsnippet\n",
+                            )
+                        ],
+                    },
+                },
+                {
+                    "type": "assistant",
+                    "sessionId": "sess-echo-only",
+                    "timestamp": "2026-01-01T00:10:00Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "Totally unrelated follow-up."}],
+                    },
+                },
+            ],
+        )
+
+        report = follow_through.build_follow_through_report(
+            cache_dir=cache, projects_root=projects
+        )
+        assert report.class_counts[follow_through.CLASS_NEITHER] == 1
+        assert report.class_counts[follow_through.CLASS_CITED_WITHOUT_OPENING] == 0
+        assert report.class_counts[follow_through.CLASS_OPENED_AFTER_PUSH] == 0
+
+    def test_genuine_citation_in_author_text_still_counts(self, tmp_path: Path) -> None:
+        """The fix must not throw out the baby with the bathwater: a real
+        citation in the session's OWN (non-echo) text must still land as
+        cited_without_opening."""
+        cache = tmp_path / "cache"
+        projects = tmp_path / "projects"
+        _seed_push(
+            cache, session_id="sess-genuine-cite", pushed_id="eee55555", ts="2026-01-01T00:00:00Z"
+        )
+        _write_transcript(
+            projects,
+            "sess-genuine-cite",
+            [
+                {
+                    "type": "assistant",
+                    "sessionId": "sess-genuine-cite",
+                    "timestamp": "2026-01-01T00:05:00Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "Per eee55555, this is settled."}],
+                    },
+                },
+            ],
+        )
+
+        report = follow_through.build_follow_through_report(
+            cache_dir=cache, projects_root=projects
+        )
+        assert report.class_counts[follow_through.CLASS_CITED_WITHOUT_OPENING] == 1
+
+
+class TestOpenedAfterPushRequiresADifferentSecond:
+    """athenaeum#2301 Seer review finding 3 (confirmed real): push `ts` is second-
+    precision (`store.now_iso`), but a real transcript `timestamp` commonly
+    carries milliseconds -- so the ORIGINATING recall call that delivered a
+    push could parse as strictly after that push's own truncated `ts`,
+    registering a false opened_after_push on the push's own delivery."""
+
+    def test_same_second_millisecond_skew_does_not_count_as_opened_after(
+        self, tmp_path: Path
+    ) -> None:
+        cache = tmp_path / "cache"
+        projects = tmp_path / "projects"
+        _seed_push(
+            cache, session_id="sess-same-second", pushed_id="fff66666", ts="2026-01-01T00:00:00Z"
+        )
+        _write_transcript(
+            projects,
+            "sess-same-second",
+            [
+                {
+                    "type": "assistant",
+                    "sessionId": "sess-same-second",
+                    "timestamp": "2026-01-01T00:00:00.450Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [_recall_use_block("tu-push")],
+                    },
+                },
+                {
+                    "type": "user",
+                    "sessionId": "sess-same-second",
+                    "timestamp": "2026-01-01T00:00:00.500Z",
+                    "message": {
+                        "role": "user",
+                        "content": [
+                            _recall_result_block(
+                                "tu-push",
+                                "Some Page (score: 1.0)\n**Uid:** fff66666\n\nsnippet\n",
+                            )
+                        ],
+                    },
+                },
+            ],
+        )
+
+        report = follow_through.build_follow_through_report(
+            cache_dir=cache, projects_root=projects
+        )
+        assert report.class_counts[follow_through.CLASS_OPENED_AFTER_PUSH] == 0
+        assert report.class_counts[follow_through.CLASS_NEITHER] == 1
+
+    def test_a_genuinely_later_second_still_counts_as_opened_after(
+        self, tmp_path: Path
+    ) -> None:
+        """Sanity check: the second-resolution truncation must not swallow
+        a real later open."""
+        cache = tmp_path / "cache"
+        projects = tmp_path / "projects"
+        _seed_push(
+            cache, session_id="sess-later-second", pushed_id="ggg77777", ts="2026-01-01T00:00:00Z"
+        )
+        _write_transcript(
+            projects,
+            "sess-later-second",
+            [
+                {
+                    "type": "assistant",
+                    "sessionId": "sess-later-second",
+                    "timestamp": "2026-01-01T00:00:01.000Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [_recall_use_block("tu-later")],
+                    },
+                },
+                {
+                    "type": "user",
+                    "sessionId": "sess-later-second",
+                    "timestamp": "2026-01-01T00:00:01.050Z",
+                    "message": {
+                        "role": "user",
+                        "content": [
+                            _recall_result_block(
+                                "tu-later",
+                                "Some Page (score: 1.0)\n**Uid:** ggg77777\n\nsnippet\n",
+                            )
+                        ],
+                    },
+                },
+            ],
+        )
+
+        report = follow_through.build_follow_through_report(
+            cache_dir=cache, projects_root=projects
+        )
+        assert report.class_counts[follow_through.CLASS_OPENED_AFTER_PUSH] == 1
